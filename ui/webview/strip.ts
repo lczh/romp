@@ -664,8 +664,13 @@ function initNetPopover(button: HTMLButtonElement, post?: (m: Record<string, unk
       // so (the user 2026-08-11, devbox). Say it where the build word sits, matching the web popover.
       const unversioned = t.status === "up" && !t.outOfDate && !t.kernelSha && !t.kernelVer;
       if (unversioned) ver = " · unversioned copy";
+      // the far kernel answers but refused its session list (a listing build failing there): it runs, so this is no
+      // "kernel not answering" and no Start; its own words ride the hover
+      const noList = t.status === "up" && !!t.listingError;
+      if (noList) ver += " · sessions unavailable";
       nm.textContent = `${t.host} — ${LBL[t.status] || t.status}` + ver;
       nm.title = (TIP[t.status] || "")
+        + (noList ? `\n\nIts kernel answered, but its session list is unavailable: ${t.listingError}` : "")
         + (t.outOfDate ? `\n\nRunning ${t.kernelSha || "?"}${t.kernelDate ? " from " + t.kernelDate : ""}; this machine is at ${t.localSha || "?"}.` : "")
         + (!t.outOfDate && t.restartPending ? `\n\nIts checkout is at ${t.checkoutSha || t.localSha || "?"}, the same as this machine, but its kernel still runs ${t.kernelSha || "?"}: a restart brings it onto the code it holds.` : "")
         + (unversioned ? `\n\n${t.host} is running romp from a plain file copy — not a git checkout — so it cannot name its release or commit, and how far it is from this machine cannot be measured: it may be far behind and never say so. Reinstall it as a git clone to restore the build name and updates.` : "")

@@ -9296,9 +9296,17 @@ def _leaf_retired(sid, leaf):
         return str(leaf) in _LEAF_RETIRED.get(sid, ())
 
 
-_lastsid_memo = {}   # sid -> (sdk-registry mtime, diverged lastSid or None) — the registry is rewritten
+_lastsid_memo = {}   # sid -> (the registration's stamp, diverged lastSid or None) — the registry is rewritten
                      # constantly while a session works (ctx%, queue mirror), but lastSid flips only on a
-                     # /clear-style fork, so an mtime memo keeps the fingerprint's per-push reads cheap
+                     # /clear-style fork, so a stat memo keeps the fingerprint's per-push reads cheap
+
+
+def _reg_stamp(st):
+    """A registration file's identity for the two memos below: (mtime_ns, size, inode, ctime_ns), the key the kernel's
+    _thread_reg_read reads it under. Keyed on the float mtime alone, two writes inside one timestamp tick (a clock that
+    ticks every few milliseconds) kept one key, and the second write's lastSid never reached the /sessions row the
+    kernel rebuilt for it (2026-10-07); write_reg publishes each write as a new file, so its inode and ctime move."""
+    return (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
 
 
 def _sdk_last_sid(sid):
@@ -9309,7 +9317,7 @@ def _sdk_last_sid(sid):
     transcript never carries a title)."""
     p = SDKDIR / (sid + ".json")
     try:
-        mt = p.stat().st_mtime
+        mt = _reg_stamp(p.stat())
     except OSError:
         _lastsid_memo.pop(sid, None)
         return None
@@ -9325,7 +9333,7 @@ def _sdk_last_sid(sid):
     return ls
 
 
-_recpath_memo = {}   # sid -> (sdk-registry mtime, transcriptPath or None) — the _lastsid_memo idiom
+_recpath_memo = {}   # sid -> (the registration's stamp, transcriptPath or None) — the _lastsid_memo idiom
 
 
 def _sdk_transcript_path(sid):
@@ -9338,7 +9346,7 @@ def _sdk_transcript_path(sid):
     from kernel.py's same-named helper, which derives the LAUNCH-dir path this record overrides.)"""
     p = SDKDIR / (sid + ".json")
     try:
-        mt = p.stat().st_mtime
+        mt = _reg_stamp(p.stat())
     except OSError:
         _recpath_memo.pop(sid, None)
         return None

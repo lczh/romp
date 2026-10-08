@@ -28,7 +28,7 @@ import { intentOp, ReloadHold } from "./pipe-intent";
 import { ViewDeltas } from "./view-deltas";
 import { routeViewMessage } from "./view-routing";
 import { deriveStatus, freshNeedsYou, renderStatusBar, statusTooltipLines, FleetStatus } from "./fleet-status";
-import { citeText, sessionsForWorkspace, SessionInfo } from "./workspace-sessions";
+import { citeText, sessionsAnswer, sessionsForWorkspace, SessionInfo, SessionsAnswer, sessionsWarning } from "./workspace-sessions";
 import { parsePorcelain } from "./session-diff";
 import { buildMenu, usageSummary } from "./romp-menu";
 import { resolveOpenPath, needsSessionDir } from "./open-path";   // a clicked path, resolved the way the kernel resolves it (2026-09-21)
@@ -820,7 +820,9 @@ function onStatusFrame(m: any) {
   const key = JSON.stringify([m.working || [], (m.asks || []).map((a: any) => a.itemId)]);
   if (key !== statusCompKey) {
     statusCompKey = key;
-    void fetchSessions().then((s) => { sessionDirs = s; paintStatus(); });
+    void fetchSessions().then((a) => {   // a refused or silent answer keeps the map it had: never read as "no sessions"
+      if (a.answered && !a.error) { sessionDirs = a.sessions; paintStatus(); }
+    });
   }
 }
 
@@ -1034,11 +1036,20 @@ function fetchJson(path: string): Promise<any | null> {
 
 // ---- workspace integration: sessions ↔ the folders this window has open ----
 
-// The kernel's /sessions endpoint — the authoritative unified session list
-// (id, name, dir per session). Empty on any failure; callers surface that.
-function fetchSessions(): Promise<SessionInfo[]> {
-  return fetchJson("/sessions").then((j) =>
-    Array.isArray(j) ? j.map((s: any) => ({ id: String(s.id), name: String(s.name), dir: String(s.dir || "") })) : []);
+// The kernel's /sessions endpoint — the authoritative unified session list (id, name, dir per session) — read as the
+// three answers it gives (sessionsAnswer): the rows, the kernel's own words when its list is unavailable (a 503 while a
+// listing build fails there), or no answer. Callers surface the last two as what they are.
+function fetchSessions(): Promise<SessionsAnswer> {
+  return new Promise((resolve) => {
+    const req = http.get({ host: HOST, port: kernelPort(), path: "/sessions", timeout: 2500,
+                           headers: { "X-Romp-Token": serveToken() } }, (res) => {
+      let body = "";
+      res.on("data", (d) => (body += d));
+      res.on("end", () => resolve(sessionsAnswer(res.statusCode ?? 0, body)));
+    });
+    req.on("timeout", () => { req.destroy(); resolve(sessionsAnswer(null, "")); });
+    req.on("error", () => resolve(sessionsAnswer(null, "")));
+  });
 }
 
 function workspaceFolderPaths(): string[] {
@@ -1055,9 +1066,10 @@ function gitIn(dir: string, args: string[]): Promise<string> {
 }
 
 async function pickKernelSession(placeHolder: string): Promise<SessionInfo | undefined> {
-  const sessions = await fetchSessions();
+  const a = await fetchSessions();
+  const sessions = a.sessions;
   if (!sessions.length) {
-    vscode.window.showWarningMessage("romp: no sessions (is the kernel running? `romp up`).");
+    vscode.window.showWarningMessage(sessionsWarning(a));
     return undefined;
   }
   const folders = workspaceFolderPaths();
@@ -1146,7 +1158,7 @@ async function diffSessionChanges() {
 async function openFileResolved(raw: string, line?: number, sid?: string): Promise<void> {
   let file = resolveOpenPath(raw, os.homedir());
   if (needsSessionDir(file) && sid) {
-    const s = (await fetchSessions()).find((x) => x.id === sid);
+    const s = (await fetchSessions()).sessions.find((x) => x.id === sid);
     file = resolveOpenPath(file, os.homedir(), s ? s.dir : null);
   }
   openFileInEditor(file, line, raw);

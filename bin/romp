@@ -197,6 +197,26 @@ _romp_token_cfg() {
     printf 'header = "X-Romp-Token: %s"\n' "$_e"
 }
 
+# GET the kernel's /sessions for command $1 and print the body; on any other answer say what the kernel answered and
+# return 1. The HTTP status rides the reply's last line (-w), so a refusal is reported AS ITSELF (the `romp api-health`
+# precedent): a 503 is the kernel answering that its session listing cannot be served (a listing build failing, in its
+# own words), not a kernel that is down; only a reply that never came is "not reachable".
+_romp_sessions_get() {
+    local _cmd="$1" _kport="${ROMP_KERNEL_PORT:-29855}" _raw _code _body _why
+    _raw="$(_romp_token_cfg | curl -s -m 10 --config - -w '\n%{http_code}' "http://127.0.0.1:$_kport/sessions")" \
+        || { echo "$_cmd: kernel not reachable on :$_kport (is romp running?)" >&2; return 1; }
+    _code="${_raw##*$'\n'}"
+    _body="${_raw%$'\n'*}"; _body="${_body%$'\n'}"
+    case "$_code" in
+        2??) printf '%s' "$_body"; return 0 ;;
+        503) _why="$(printf '%s' "$_body" | python3 -c 'import json, sys; print(json.load(sys.stdin)["error"])' 2>/dev/null)" \
+                 || _why="$_body"
+             echo "$_cmd: the kernel answered, but its session listing is unavailable: $_why" >&2; return 1 ;;
+        401|403) echo "$_cmd: the kernel refused the serve token (HTTP $_code): a stale ROMP_SERVE_TOKEN, or a state dir that is not this kernel's" >&2; return 1 ;;
+        *)   echo "$_cmd: the kernel answered HTTP $_code on :$_kport" >&2; return 1 ;;
+    esac
+}
+
 # The romp state root: the marker `romp down` leaves lives here (down-by-romp: {t, cmd}), read by
 # `romp status` and `romp up`, by romp-service status, and by romp-manager's ensure and up.
 _romp_state_dir() { printf '%s' "${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}"; }
@@ -310,9 +330,7 @@ if [[ "${1:-}" == "sessions" ]]; then
         "")     ;;
         *)      echo "usage: romp sessions [--json]" >&2; exit 2 ;;
     esac
-    _kport="${ROMP_KERNEL_PORT:-29855}"
-    _resp="$(_romp_token_cfg | curl -sf -m 10 --config - "http://127.0.0.1:$_kport/sessions")" \
-        || { echo "romp sessions: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+    _resp="$(_romp_sessions_get "romp sessions")" || exit 1
     if $_json; then
         printf '%s\n' "$_resp"
         exit 0
@@ -1001,8 +1019,7 @@ if [[ "${1:-}" == "color" ]]; then
         exit 1
     fi
     if [[ $# -eq 1 ]]; then
-        _resp="$(_romp_token_cfg | curl -sf -m 10 --config - "http://127.0.0.1:$_kport/sessions")" \
-            || { echo "romp color: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+        _resp="$(_romp_sessions_get "romp color")" || exit 1
         _pair="$(printf '%s' "$_resp" | python3 -c '
 import json, sys
 rows = json.load(sys.stdin)

@@ -364,7 +364,8 @@ class GlyphSaysTheFleetState(unittest.TestCase):
                       "one attached host colours BOTH nodes — its state is the fleet's")
 
     def test_connected_and_in_sync_is_accent_drift_is_red(self):
-        self.assertIn("if(t.status==='up')return t.outOfDate?'warn':'ok';", self.js)
+        # drift, or a kernel that answers but cannot list its sessions (listingError, 2026-10-07): either needs you
+        self.assertIn("if(t.status==='up')return (t.outOfDate||t.listingError)?'warn':'ok';", self.js)
 
     def test_a_fresh_drop_is_grey_but_a_persistent_one_needs_you(self):
         # romp is retrying either way; the difference is whether it is still plausibly a blip

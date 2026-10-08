@@ -266,3 +266,11 @@ test("the Files pane command is listed only while its control shows: a `when` pr
   assert.match(MAIN, /when: key === "files" \? \(\) => !document\.body\.classList\.contains\("no-files-control"\)\s*\n\s*: optional\.has\(key\)/);
   assert.match(PALETTE, /filter\(\(c\) => !c\.hidden && \(!c\.when \|\| c\.when\(\)\)\)/, "the list filters on it beside `hidden`");
 });
+
+test("the jump switcher says what the kernel answered when its session list is unavailable, never an empty list", () => {
+  // the kernel answers GET /sessions with a 503 and {ok:false, error} while a listing build fails there: the body is an
+  // object, not null, so the switcher read it as "no local sessions" and opened an empty list (2026-10-07)
+  assert.match(MAIN, /if \(!r\.ok\) return r\.json\(\)\.catch\(\(\) => null\)\.then\(\(b\) => \(\{ rows: null, refused: \(b && typeof b\.error === "string" && b\.error\) \|\| `HTTP \$\{r\.status\}` \}\)\);/);
+  assert.match(MAIN, /Couldn't load sessions — the kernel answered: \$\{refused\}/);
+  assert.match(MAIN, /Some sessions may be missing — the kernel's session list is unavailable: \$\{refused\}/);
+});

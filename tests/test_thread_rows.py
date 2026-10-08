@@ -421,8 +421,8 @@ class SessionByFsidRoute(unittest.TestCase):
         self.root = km.jd.STATE
         self.be = self.sb.SdkBackend(self.root, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
         self.asked = []                                   # the sids whose transcript records were read (the cycle's claims)
-        real = self.be.recorded_fsids
-        self.be.recorded_fsids = lambda sid: (self.asked.append(sid), real(sid))[1]
+        real = self.be.fsid_ledgers
+        self.be.fsid_ledgers = lambda sid: (self.asked.append(sid), real(sid))[1]
         names = self.names = {WEB: ("web", "/tmp/notes-api", "#112233", "#ffffff"),
                               API: ("api", "/tmp/notes-api", "#445566", "#ffffff")}
         self.live = {WEB: {"state": "idle", "backend": "sdk"}, API: {"state": "working", "backend": "sdk"}}
@@ -456,11 +456,17 @@ class SessionByFsidRoute(unittest.TestCase):
                 f.unlink()
 
     def _module_reads(self):
-        """Count the backend module's ledger reads by sid — the parse the memo exists to skip, and the only place a record is
-        read. Returns (the list, restore)."""
-        reads, real = [], self.sb.read_fsid_ledger
-        self.sb.read_fsid_ledger = lambda path, pick, start=0: (reads.append(Path(path).stem), real(path, pick, start))[1]
-        return reads, lambda: setattr(self.sb, "read_fsid_ledger", real)
+        """The sessions whose ledgers had bytes read off disk, through the shared reader the backend folds them with
+        (event_model's per-read counter): the read the fold's cursor exists to skip. Returns (the set, restore)."""
+        reads, em = set(), self.sb._em
+        real = em._count_read
+
+        def count(path, n):
+            if n and Path(path).parent.name in ("episodes", "states"):
+                reads.add(Path(path).stem)
+            return real(path, n)
+        em._count_read = count
+        return reads, lambda: setattr(em, "_count_read", real)
 
     def _cycle(self):
         """The pusher's listing job, as it runs after any write: the route serves what the last one built."""
@@ -631,41 +637,50 @@ class SessionByFsidRoute(unittest.TestCase):
         reads, restore = self._module_reads()
         try:
             self.assertEqual(self._by(OLD_FSID)[1]["id"], WEB)
-            self.assertEqual(reads, [WEB], "the first cycle reads the one ledger there is, web's episode log")
-            del reads[:]
+            self.assertEqual(reads, {WEB}, "the first cycle reads the one ledger there is, web's episode log")
+            reads.clear()
             for _ in range(3):
                 self.assertEqual(self._by(OLD_FSID)[1]["id"], WEB)
-            self.assertEqual(reads, [], "unchanged records: no ledger is read again")
+            self.assertEqual(reads, set(), "unchanged records: no ledger is read again")
             self.assertEqual(self._by(UNKNOWN_FSID)[0], 404)
-            self.assertEqual(reads, [], "a miss over the same records reads nothing either")
+            self.assertEqual(reads, set(), "a miss over the same records reads nothing either")
             km.jd.append_episode(WEB, "head-3", "aaaaaaaa-2222-3333-4444-555555555504", 3)
             self.assertEqual(self._by(OLD_FSID, cycle=False)[1]["id"], WEB)
-            self.assertEqual(reads, [], "an ask between the write and the cycle reads nothing")
+            self.assertEqual(reads, set(), "an ask between the write and the cycle reads nothing")
             self.assertEqual(self._by("aaaaaaaa-2222-3333-4444-555555555504")[1]["id"], WEB)
-            self.assertEqual(reads, [WEB], "web's episode log grew: web alone is re-read")
-            del reads[:]
+            self.assertEqual(reads, {WEB}, "web's episode log grew: web alone is re-read")
+            reads.clear()
             self.sb.append_resume_fork(self.root, API, UNKNOWN_FSID, FORK_FSID, 4)
             self.assertEqual(self._by(FORK_FSID)[1]["id"], API)
-            self.assertEqual(reads, [API], "api's states ledger appeared: api alone is read")
-            del reads[:]
+            self.assertEqual(reads, {API}, "api's states ledger appeared: api alone is read")
+            reads.clear()
             self.assertEqual(self._by(API)[1]["id"], API)
-            self.assertEqual(reads, [], "nothing moved since: nothing is read")
+            self.assertEqual(reads, set(), "nothing moved since: nothing is read")
         finally:
             restore()
 
     def test_a_record_that_would_not_read_is_answered_but_never_latched(self):
         # a ledger that is THERE but cannot be read (a directory where states/<sid>.jsonl goes stands in for
         # EACCES/EIO/EMFILE: the stat succeeds, the read raises) must not memoize the partial set: the next cycle
-        # re-reads that session, while an unaffected session's memo stands
+        # tries that session again, while an unaffected session's fold stands
         (self.root / "states").mkdir(exist_ok=True)
         (self.root / "states" / (API + ".jsonl")).mkdir()
+        import io
+        import sys
+        tried = []
+        real_fold = km._fold_records
+        km._fold_records = lambda cache, path, *a, **k: (tried.append(Path(str(path)).stem), real_fold(cache, path, *a, **k))[1]
         reads, restore = self._module_reads()
+        err = io.StringIO()
         try:
-            for _ in range(2):
-                self.assertEqual(self._by(OLD_FSID)[1]["id"], WEB, "the route still answers off the readable records")
-            self.assertEqual(reads.count(API), 2, "the faulted ledger is read again by the next cycle, not latched")
-            self.assertEqual(reads.count(WEB), 1, "the clean one is memoized")
+            with mock.patch.object(sys, "stderr", err):
+                for _ in range(2):
+                    self.assertEqual(self._by(OLD_FSID)[1]["id"], WEB, "the route still answers off the readable records")
+            self.assertEqual(tried.count(API), 4, "both of api's ledgers are folded each cycle: the faulted one is not latched")
+            self.assertEqual(err.getvalue().count("would not read"), 1, "said once for the episode, not per cycle")
+            self.assertEqual(reads, {WEB}, "the clean one is read once")
         finally:
+            km._fold_records = real_fold
             restore()
 
 

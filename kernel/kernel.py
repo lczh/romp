@@ -19920,10 +19920,31 @@ def _thread_reg_read(tsid):
         state, d = ("ok", d) if isinstance(d, dict) else ("unreadable", {})
     except (OSError, ValueError):
         state, d = "unreadable", {}
-    if len(_thread_reg_memo) > 512:
-        _thread_reg_memo.pop(next(iter(_thread_reg_memo)))
+    if tsid not in _thread_reg_memo and len(_thread_reg_memo) >= _thread_reg_memo_bound[0]:
+        _thread_reg_memo_sweep()
     _thread_reg_memo[tsid] = (key, state, d)
     return state, d
+
+
+_thread_reg_memo_bound = [256]   # the memo's size that triggers a sweep (_thread_reg_memo_sweep): twice the registrations the last
+#                                  sweep found, so a sweep runs once per doubling, never a fixed cap
+
+
+def _thread_reg_memo_sweep():
+    """Bound _thread_reg_memo by the registrations that exist, not by a constant (2026-10-07): an entry is kept while its file
+    is in the registry, and one whose file is gone is dropped (a read of a missing record drops its own entry; this catches
+    the ones never read again). Its cap of 512 with first-in eviction was below a long-lived host's registration count (one
+    per session it ever ran, 312 and climbing on one host): past it each entry was evicted before its next use, and every
+    lookup in every cycle read its file again. The next sweep waits for twice what this one found."""
+    try:
+        with os.scandir(jd.STATE / "sdk") as it:
+            have = {e.name[:-len(".json")] for e in it if e.name.endswith(".json")}
+    except OSError:
+        have = None                                    # an unreadable registry: drop nothing, look again a doubling later
+    if have is not None:
+        for k in [k for k in list(_thread_reg_memo) if k not in have]:
+            _thread_reg_memo.pop(k, None)
+    _thread_reg_memo_bound[0] = max(256, 2 * len(have if have is not None else _thread_reg_memo))
 
 
 def _thread_reg(tsid):
@@ -26246,6 +26267,9 @@ def _remote_public(r):
             "checkinPeer": bool(r.get("checkin_peer")),  # this host checked in to US (no ssh of ours)
             "hasToken": bool(r.get("token")), "status": r.get("status") or "down",
             "detail": r.get("detail") or "", "sids": list(r.get("sids") or []),
+            # the far kernel answered its last poll with its listing's refusal (a build failing there): it runs, and its
+            # session list is unavailable, in its own words; "" otherwise. The row says so rather than "no kernel"
+            "listingError": (r.get("listing_error") or "") if (r.get("status") or "down") == "up" else "",
             "trust": r.get("trust") or "directed",   # per-host federation trust: trusted|directed|isolated
             "kernelSha": r.get("kernel_sha") or "", "localSha": (_local_head(short=True) or _kernel_sha() or ""),
             # The RELEASE each side descends from (the user 2026-07-30): a sha alone says nothing without
@@ -26789,6 +26813,14 @@ def _poll_remote_sessions(r):
         resp = c.getresponse()
         data = resp.read()
         c.close()
+        refused = _listing_refusal(resp.status, data)
+        if refused is not None:
+            # the far kernel ANSWERED and said its listing cannot be served (a build failing there, _listing_refused): a
+            # running kernel, not a missing one, so the row stays up, keeps the ids and names it had, and says why
+            # (listingError) instead of reading "no kernel answering" and offering a Start of a host that is running
+            r["_probe"], r["listing_error"] = "listing-unavailable", refused
+            return None
+        r.pop("listing_error", None)
         if resp.status != 200:
             r["_probe"] = "http-%d" % resp.status         # it ANSWERED — the tunnel carries traffic
             return None
@@ -26797,17 +26829,42 @@ def _poll_remote_sessions(r):
         return [x for x in rows if isinstance(x, dict) and x.get("id")]
     except (socket.timeout, TimeoutError):
         r["_probe"] = "timeout"
+        r.pop("listing_error", None)
         return None
     except (ConnectionResetError, ConnectionRefusedError, ConnectionAbortedError, BrokenPipeError):
         r["_probe"] = "refused"
+        r.pop("listing_error", None)
         return None
     except OSError as e:
         r["_probe"] = "refused" if e.errno in (errno.ECONNRESET, errno.ECONNREFUSED) else "error"
+        r.pop("listing_error", None)
         return None
     except Exception:
         # a malformed body still proves the far side spoke, so this is never a dead transport
         r["_probe"] = "refused"
+        r.pop("listing_error", None)
         return None
+
+
+def _listing_refusal(status, data):
+    """The error a kernel's GET /sessions refusal carries (its 503 when a listing build failed there, _listing_refused), or
+    None for any other answer. A reader that tells a kernel that answered from one that did not keys on this, never on
+    the status alone."""
+    if status != 503:
+        return None
+    try:
+        body = json.loads(data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else data)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if isinstance(body, dict) and body.get("ok") is False and isinstance(body.get("error"), str):
+        return body["error"]
+    return None
+
+
+def _remote_answered(r, sids):
+    """Did the far kernel answer this pass's /sessions poll: with its rows, or with its listing's refusal (it runs; its
+    listing is unavailable, which the row says through listingError)."""
+    return sids is not None or r.get("_probe") == "listing-unavailable"
 
 
 def _poll_remote_sids(r):
@@ -31722,12 +31779,12 @@ def _tunnel_supervisor():
                     if r.get("checkin_peer"):
                         # the reverse forward IS the liveness: answering → up; port open but silent →
                         # no-kernel; closed → down (the mobile left; its next handshake heals the row)
-                        st = "up" if (up and sids is not None) else ("no-kernel" if up else "down")
+                        st = "up" if (up and _remote_answered(r, sids)) else ("no-kernel" if up else "down")
                         # same run bookkeeping (no teardown — this side owns no ssh to tear down), so a
                         # checked-in peer still reaches "established" and clears its ladder
                         _note_poll(r, st == "up")
                     else:
-                        st = _tunnel_status(_tunnel_proc_alive(r), up, sids is not None)
+                        st = _tunnel_status(_tunnel_proc_alive(r), up, _remote_answered(r, sids))
                         st = _expected_restart_status(r, st, rsha, now)   # our own p2p restart is not a
                         #                                                    dead far kernel (T238)
                         # A LIVE ssh is not proof of a live tunnel (the user 2026-07-29). ssh answers the
@@ -31964,10 +32021,13 @@ _LISTING_PRODUCTS = {"rows": ("json", "fault"), "thread rows": ("threads", "thre
 
 
 def _reg_rev():
-    """The SDK registry's ROWS revision (kernel/sdk_backend.py REG_ROWS_REV: moved by a write that changes one of the fields
-    the rows read through it, lastSid, threadOf or alive, never by the per-cycle writes of other fields), read through the
-    module the backend was loaded as; 0 before the backend module is loaded (nothing has been written). Not every field a
-    row reads rides it: the row's launchError is read from the session's backend per cycle (_launch_error_scoped: the SDK
+    """The SDK registry's ROWS revision (kernel/sdk_backend.py REG_ROWS_REV), the /sessions rows key's registry input: write_reg
+    moves it when a registration's lastSid, threadOf or alive changes, or when a registration file is first written in this
+    process, and never on the per-cycle writes of other fields. It counts THIS process's writes alone: a lastSid the outgoing
+    kernel wrote during a handover reaches the rows when another key input moves. Read through the module the kernel loads
+    the backend as (romp_sdk_backend); 0 before that module is loaded (nothing has been written). The comment-thread rows
+    and the by-fsid lineage do not read it: they follow the registry directory, which every writer moves
+    (SdkBackend._rows_table). Not every field a row reads rides it: the row's launchError is read from the session's backend per cycle (_launch_error_scoped: the SDK
     registry file for an SDK session, the Codex backend's own record for a Codex session, and only the Codex record ever
     carries a compaction's end notice) and is a key input of its own, by text and stamp (_launch_error_key), outside this
     revision (2026-09-21). Keyed on every write (REG_REV) the listing rebuilt each cycle (the deploy read of 2026-09-15: built
@@ -32132,27 +32192,36 @@ def _listing_refresh(live_map, names):
     """One build of the listing: the rows, then the comment-thread rows, then the by-fsid claims (which read the two), each
     kept when its key stands, and ONE publish of the view they make, so a request never reads one product from this build
     beside another from the last. A part that raises marks its product faulted in the view (the routes then refuse it,
-    loudly, until a build of it lands: _listing_refused) and the parts after it still run; the first raise is re-raised
-    after the publish, so the job's own line names the listing, and each later one is written here."""
+    loudly, until a build of it lands: _listing_refused) and the parts after it still run. A fault is said once per
+    episode, with its traceback, when it starts, and once more when the product builds again: the cycle runs twice a
+    second or more, and a fault that persisted wrote its traceback every cycle (2026-10-07)."""
     L = _SESSIONS_LISTING
     view = dict(L["view"] or _LISTING_VIEW_EMPTY)
-    errs = []
-    for part in (_listing_rows_part, _listing_threads_part, _listing_claims_part):
+    for name, part in (("rows", _listing_rows_part), ("thread rows", _listing_threads_part),
+                       ("transcript claims", _listing_claims_part)):
+        slot = _LISTING_PRODUCTS[name][1]
+        was = view.get(slot)
         try:
-            part(view, live_map, names)
+            part(view, live_map, names)               # a part that lands clears its own fault slot
         except Exception as e:
-            errs.append(e)
+            view[slot] = _listing_fault(e, was)
+            if was is None:
+                sys.stderr.write("sessions-listing: the %s could not be built, so they are refused until a build lands "
+                                 "(said again then, not per cycle): %s" % (name, traceback.format_exc()))
+            continue
+        if was is not None:
+            sys.stderr.write("sessions-listing: the %s build again, after %d failed build%s since %s (the last: %s)\n"
+                             % (name, was["failures"], "" if was["failures"] == 1 else "s",
+                                time.strftime("%H:%M:%S", time.localtime(was["t"])), was["error"]))
     L["view"] = view
     L["attempted"] = True
-    for e in errs[1:]:
-        sys.stderr.write("sessions-listing: %s" % "".join(traceback.format_exception(type(e), e, e.__traceback__)))
-    if errs:
-        raise errs[0]
 
 
-def _listing_fault(e):
-    """A product's fault in the view: when its build failed and why, the refusal's words (_listing_refused)."""
-    return {"t": time.time(), "error": "%s: %s" % (type(e).__name__, e)}
+def _listing_fault(e, was=None):
+    """A product's fault in the view: when its episode began, how many builds have failed in it, and the last error, the
+    refusal's words (_listing_refused). `was`: the episode's fault so far, None when this build begins one."""
+    return {"t": was["t"] if was else time.time(), "failures": (was["failures"] + 1) if was else 1,
+            "error": "%s: %s" % (type(e).__name__, e)}
 
 
 def _listing_rows_part(view, live_map, names):
@@ -32167,9 +32236,6 @@ def _listing_rows_part(view, live_map, names):
         why = _sessions_listing_miss(L["key"], key)
         rows = _session_rows_from(live_map)
         body = json.dumps(rows)
-    except Exception as e:                                # the key or the build: the kept rows may be stale from here, so
-        view["fault"] = _listing_fault(e)                 #  they are refused until a build lands; the job's line has the
-        raise                                             #  traceback
     finally:
         _live_scope.listing_pairs = None
     view.update({"json": body, "rows": rows, "byId": {r.get("id"): r for r in rows}, "fault": None})
@@ -32180,22 +32246,19 @@ def _listing_rows_part(view, live_map, names):
 
 def _listing_threads_part(view, live_map, names):
     """The comment-thread rows (?threads=1, rule 3), from the backend's thread table as this cycle reads it
-    (SdkBackend.thread_sessions: the thread set from the registry's rows table, re-read only when the rows revision moved,
-    and each running thread's state, read alone), under their own exact key (_thread_rows_key), built when it moved."""
+    (SdkBackend.thread_sessions: the thread set from the registry's rows table, scanned again only when the registry
+    directory moved, and each running thread's state, read alone), under their own exact key (_thread_rows_key), built
+    when it moved."""
     L = _SESSIONS_LISTING
-    try:
-        be = _sdk()
-        table = be.thread_sessions() if be and hasattr(be, "thread_sessions") else {}
-        key = _thread_rows_key(table)
-        if L["threadsKey"] == key and view["threads"] is not None:
-            view["threadsFault"] = None
-            return
-        why = _thread_rows_miss(L["threadsKey"], key)
-        rows = _thread_rows(table)
-        body = json.dumps(rows)
-    except Exception as e:
-        view["threadsFault"] = _listing_fault(e)
-        raise
+    be = _sdk()
+    table = be.thread_sessions() if be and hasattr(be, "thread_sessions") else {}
+    key = _thread_rows_key(table)
+    if L["threadsKey"] == key and view["threads"] is not None:
+        view["threadsFault"] = None
+        return
+    why = _thread_rows_miss(L["threadsKey"], key)
+    rows = _thread_rows(table)
+    body = json.dumps(rows)
     view.update({"threads": body, "threadRows": rows, "threadsById": {r.get("id"): r for r in rows}, "threadsFault": None})
     L["threadsKey"] = key
     L["threadsBuilt"] += 1
@@ -32205,46 +32268,83 @@ def _listing_threads_part(view, live_map, names):
 def _listing_claims_part(view, live_map, names):
     """GET /sessions/by-fsid's claims, kept beside the rows they answer with: transcript id -> the live sessions and comment
     threads whose records hold it, after the lineage rule (_session_by_fsid says why each piece exists). Each owner is a row
-    of this view: its sid, its lastSid, and for an SDK one the ids its two ledgers record (SdkBackend.recorded_fsids, each
-    ledger read once and then only what was appended); a fork or a thread yields an id its parent's records hold (the
+    of this view: its sid, its lastSid, and for an SDK one the ids its two ledgers record (_recorded_fsids, each ledger
+    folded through the shared incremental reader); a fork or a thread yields an id its parent's records hold (the
     parent's sid, its lastSid and its ledgers, whether or not it still runs; the parent from the thread row, or the fork
     lineage on the registry's rows table, SdkBackend.fork_parents). The key is those sets themselves, read here each
     cycle (two stats per SDK owner and per parent), so the map is rebuilt exactly when one of them moved."""
     L = _SESSIONS_LISTING
-    try:
-        be = _sdk()
-        recorded = getattr(be, "recorded_fsids", None) if be else None
-        forks = (be.fork_parents() if be and hasattr(be, "fork_parents") else None) or {}
-        owners = [(str(r.get("id")), str(r.get("lastSid") or r.get("id")), r.get("backend") == "sdk", forks.get(str(r.get("id")), ""))
-                  for r in (view["rows"] or [])]
-        listed = {o[0] for o in owners}
-        owners += [(str(r.get("id")), str(r.get("lastSid") or r.get("id")), True, str(r.get("parent") or ""))
-                   for r in (view["threadRows"] or []) if str(r.get("id")) not in listed]
+    be = _sdk()
+    recorded = (lambda sid: _recorded_fsids(be, sid)) if be and hasattr(be, "fsid_ledgers") else None
+    forks = (be.fork_parents() if be and hasattr(be, "fork_parents") else None) or {}
+    owners = [(str(r.get("id")), str(r.get("lastSid") or r.get("id")), r.get("backend") == "sdk", forks.get(str(r.get("id")), ""))
+              for r in (view["rows"] or [])]
+    listed = {o[0] for o in owners}
+    owners += [(str(r.get("id")), str(r.get("lastSid") or r.get("id")), True, str(r.get("parent") or ""))
+               for r in (view["threadRows"] or []) if str(r.get("id")) not in listed]
 
-        def ids(sid, last, sdk):
-            return frozenset((sid, last)) | (recorded(sid) if sdk and recorded else frozenset())
+    def ids(sid, last, sdk):
+        return frozenset((sid, last)) | (recorded(sid) if sdk and recorded else frozenset())
 
-        own = {sid: ids(sid, last, sdk) for sid, last, sdk, _p in owners}
-        sdk_owner = {sid for sid, _l, sdk, _p in owners if sdk}
-        held = {}
-        for sid, _l, _s, parent in owners:
-            if parent and parent != sid and parent not in held:   # a live SDK parent's set is its own; an ended one is read
-                held[parent] = own[parent] if parent in sdk_owner else ids(parent, jd._sdk_last_sid(parent) or parent, True)
-        key = tuple((sid, own[sid], parent, held.get(parent)) for sid, _l, _s, parent in owners)
-        if L["claimsKey"] == key and view["claims"] is not None:
-            view["claimsFault"] = None
-            return
-        claims = {}
-        for sid, _l, _s, parent in owners:
-            lineage = held.get(parent) if parent and parent != sid else None
-            for fsid in own[sid] - (lineage or frozenset()):
-                claims.setdefault(fsid, []).append(sid)
-    except Exception as e:
-        view["claimsFault"] = _listing_fault(e)
-        raise
+    own = {sid: ids(sid, last, sdk) for sid, last, sdk, _p in owners}
+    sdk_owner = {sid for sid, _l, sdk, _p in owners if sdk}
+    held = {}
+    for sid, _l, _s, parent in owners:
+        if parent and parent != sid and parent not in held:   # a live SDK parent's set is its own; an ended one is read
+            held[parent] = own[parent] if parent in sdk_owner else ids(parent, jd._sdk_last_sid(parent) or parent, True)
+    key = tuple((sid, own[sid], parent, held.get(parent)) for sid, _l, _s, parent in owners)
+    if L["claimsKey"] == key and view["claims"] is not None:
+        view["claimsFault"] = None
+        return
+    claims = {}
+    for sid, _l, _s, parent in owners:
+        lineage = held.get(parent) if parent and parent != sid else None
+        for fsid in own[sid] - (lineage or frozenset()):
+            claims.setdefault(fsid, []).append(sid)
     view.update({"claims": claims, "claimsFault": None})
     L["claimsKey"] = key
     L["claimsBuilt"] += 1
+
+
+_fsid_folds = {}            # ledger path -> fold_records cursor of the transcript ids it records (_recorded_fsids)
+_fsid_fold_faulted = set()  # ledger paths whose last fold failed: said once per episode
+
+
+def _fsid_step(state, r, pick):
+    """One ledger row folded into the transcript ids it records: a row of a shape `pick` cannot read is skipped, as the
+    reader skips one that does not decode."""
+    if not isinstance(r, dict):
+        return state
+    try:
+        got = frozenset(str(v) for v in pick(r) if v)
+    except (AttributeError, TypeError):
+        return state
+    return state | got if got - state else state
+
+
+def _recorded_fsids(be, sid):
+    """The transcript ids `sid`'s two ledgers record (the paths and the per-row picks SdkBackend.fsid_ledgers names), each
+    folded through the shared incremental reader (event_model.fold_records), which the kernel's own folds of the same
+    states ledger already use: an unchanged ledger costs a stat, a grown one its appended rows, and a rewrite (a shrink, a
+    same-size-new-mtime, a changed prefix under the reader's guard) is read again from its start. Read here, on the
+    pusher under its stage mark, never in the backend, whose threads reach no reader of the event model. A ledger that is
+    there but would not read (EACCES, EIO, EMFILE, a directory in its place) is answered without and not memoized
+    (fold_records' "fail"), by owns()'s rule (review find on #933): latching the partial set would 404 the session's own
+    prior transcript until the ledger next changed. That is said once per episode, not per cycle."""
+    out = frozenset()
+    for path, pick in be.fsid_ledgers(sid):
+        kinds = []
+        out |= _fold_records(_fsid_folds, path, frozenset, lambda st, r, _pick=pick: _fsid_step(st, r, _pick),
+                             on=kinds.append)
+        if "fail" in kinds:
+            if path not in _fsid_fold_faulted:
+                _fsid_fold_faulted.add(path)
+                sys.stderr.write("sessions-listing: the transcript-id ledger %s is there but would not read; the by-fsid "
+                                 "claims answer without it until it does\n" % path)
+        elif path in _fsid_fold_faulted:
+            _fsid_fold_faulted.discard(path)
+            sys.stderr.write("sessions-listing: the transcript-id ledger %s reads again\n" % path)
+    return out
 
 
 _SESSIONS_LISTING_FLIGHT = threading.Lock()   # rule 1's one build before the first cycle (_listing_ready), taken by the cycle's
@@ -32305,7 +32405,8 @@ def _listing_refused(view, wants):
         if f is None and view.get(product) is not None:
             continue
         _SESSIONS_LISTING["refused"] += 1
-        why = ("its build failed at %s (%s), so the kept copy may be stale" % (time.strftime("%H:%M:%S", time.localtime(f["t"])), f["error"])
+        why = ("its build has failed since %s (%d build%s; the last: %s), so the kept copy may be stale"
+               % (time.strftime("%H:%M:%S", time.localtime(f["t"])), f["failures"], "" if f["failures"] == 1 else "s", f["error"])
                if f is not None else "it has not been built")
         return {"ok": False, "error": "the session listing's %s cannot be served: %s; the kernel log has the traceback" % (name, why)}
     return None
@@ -32450,7 +32551,7 @@ def _session_by_fsid(fsid):
     """(HTTP status, JSON body) for GET /sessions/by-fsid?fsid=<id>: the ONE live session's /sessions row
     whose transcript ids include `fsid` — the sid itself, its current transcript (the row's lastSid), each
     /clear episode head the boundary tick recorded and both ends of every resume fork
-    (SdkBackend.recorded_fsids; a Codex session's only transcript ids are its sid and its lastSid; the tick
+    (_recorded_fsids over SdkBackend.fsid_ledgers; a Codex session's only transcript ids are its sid and its lastSid; the tick
     walks the discovered, tabbed sessions, so a comment thread's /clear heads leave no row and a thread is on
     record here through its reg and its resume forks). A session born as a fork also carries its PARENT's
     fork-time transcript in its records, which never makes it an owner (lineage, below). The postal bus
@@ -32531,12 +32632,20 @@ def _thread_rows(table=None):
         nm = names[parent].get(tsid, "")
         out.append({"id": tsid, "name": nm or tsid[:8], "state": meta.get("state", ""),
                     "dir": _cwd_of(tsid), "thread": True, "parent": parent,
-                    "lastSid": jd._sdk_last_sid(tsid) or tsid,
+                    "lastSid": _thread_last_sid(tsid),   # the record _thread_rows_key read, never a second memo of the file
                     "working": "", "backend": "sdk",
                     # a thread's mail is off until the user breaks it out (T356): the row says so and why, so a listing
                     # consumer never has to derive it; both fields from one derivation (_mail_off_fields)
                     **_mail_off_fields(tsid)})
     return out
+
+
+def _thread_last_sid(tsid):
+    """A comment thread's current transcript id for its row: the registration's lastSid as _thread_reg_read holds it, the
+    record the thread rows' key read (by mtime_ns, size, inode and ctime), so a key that moved never builds a row from an
+    older read; the thread's own sid when the record names none (a fresh thread, or one whose record will not read)."""
+    ls = _thread_reg_read(str(tsid))[1].get("lastSid")
+    return ls if isinstance(ls, str) and ls else str(tsid)
 
 
 def _thread_names():
@@ -74656,7 +74765,7 @@ function mnet(){return document.querySelector('#mtabs .mact[data-act=net]');}
 // warn > wait > ok — the two bottom nodes show the two WORST, so one sick host can never hide behind a
 // healthy one, and a single attached host colours both (its state IS the fleet's).
 function hostSev(t){
-if(t.status==='up')return t.outOfDate?'warn':'ok';
+if(t.status==='up')return (t.outOfDate||t.listingError)?'warn':'ok';   // a kernel that answers but cannot list its sessions needs you
 if(t.status==='no-kernel'||t.status==='error')return 'warn';
 if((t.fails||0)>=12)return 'warn';   // past the long-backoff step: not a blip any more, it needs you
 return 'wait';}
@@ -74716,7 +74825,7 @@ var _head=!ts.length?'':(_bad?(_bad+' host'+(_bad===1?'':'s')+' need'+(_bad===1?
 icon.title=ts.length?('Remote kernels \\u00b7 '+_head+'\\n'+ts.map(function(t){var n=(t.sids&&t.sids.length)||0;
 var ap=t.autoPush?('\\n    auto-update: '+(t.autoPush.detail||t.autoPush.phase)):'';
 var dw=t.outOfDate?(' \\u00b7 '+(t.status==='up'?'':'last known ')+driftWord(t)):(t.restartPending?' \\u00b7 running older code':'');
-return '\\u2022 '+t.host+': '+(LBL[t.status]||t.status)+' ('+n+' session'+(n===1?'':'s')+')'+dw+(t.hasToken?'':' \\u00b7 no token')+ap;}).join('\\n')):'Remote kernels \\u2014 none attached (click to connect)';
+return '\\u2022 '+t.host+': '+(LBL[t.status]||t.status)+(t.status==='up'&&t.listingError?' \\u00b7 sessions unavailable':'')+' ('+n+' session'+(n===1?'':'s')+')'+dw+(t.hasToken?'':' \\u00b7 no token')+ap;}).join('\\n')):'Remote kernels \\u2014 none attached (click to connect)';
 _lastArgs=[ts,(d&&d.known)||[],pmode,(d&&d.viaReach)||[],(d&&d.remoteHolds)||[],(d&&d.peerTiers)||{}];
 _lastUp=ts.filter(function(t){return t.status==='up';}).length;
 if(!back.hidden){render.apply(null,_lastArgs);refreshPairs();}   // pmode is refresh-local — render must be GIVEN it (it rides _lastArgs)
@@ -74914,7 +75023,7 @@ row.innerHTML='<span class=rnet-dot style=\"'+dot+'\" title=\"'+(TIP[t.status]||
 // A host mid-attach gets the romp loader inline (the user 2026-07-29): the swirl glyph spinning beside
 // the status word, so "connecting" reads as something HAPPENING rather than a label that might be stuck.
 // The repo's loading rule spelled small: same glyph, same reverse spin as the composer's slash spinner.
-'<span class=nm><b>'+th+'</b>'+pinMark(t,th)+' <span class=st title=\"'+(TIP[t.status]||'')+'\">'+(busyStatus(t.status)?spin():'')+(LBL[t.status]||esc(t.status))+((t.status==='up'&&pendingIn(t.host))?' \\u00b7 <span class=rnet-pend title=\"The tunnel is up; this dashboard is still loading '+th+'\\u2019s sessions. They appear the moment its first payload lands.\">'+spin()+'loading sessions\\u2026</span>':'')+(t.checkinPeer?' \\u00b7 checked in here':'')+(t.hasToken?'':' \\u00b7 no token')+(again?' \\u00b7 '+again:'')+ver+'</span></span>'+
+'<span class=nm><b>'+th+'</b>'+pinMark(t,th)+' <span class=st title=\"'+(TIP[t.status]||'')+'\">'+(busyStatus(t.status)?spin():'')+(LBL[t.status]||esc(t.status))+((t.status==='up'&&t.listingError)?' \\u00b7 <span class=\"rnet-old\" title=\"'+esc('its kernel answered, but its session list is unavailable: '+t.listingError)+'\">sessions unavailable</span>':'')+((t.status==='up'&&pendingIn(t.host))?' \\u00b7 <span class=rnet-pend title=\"The tunnel is up; this dashboard is still loading '+th+'\\u2019s sessions. They appear the moment its first payload lands.\">'+spin()+'loading sessions\\u2026</span>':'')+(t.checkinPeer?' \\u00b7 checked in here':'')+(t.hasToken?'':' \\u00b7 no token')+(again?' \\u00b7 '+again:'')+ver+'</span></span>'+
 retry+pull+ask+upd+strt+'<button data-h=\"'+th+'\" title=\"Close the ssh tunnel to '+th+'. It stays in this list as a previously-attached host, keeping its trust level, so you can re-attach in one click.\">Detach</button>'+
 // ITS CONNECTIONS toggle — the keyed expand (progressive disclosure): compact row by default,
 // that machine's own attached list one click deeper, fetched on the click, never the poll.
