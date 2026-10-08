@@ -38,7 +38,7 @@ import { createRequire } from "node:module";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  APPS, DELTA_SEP, INIT_SCRIPT, REPO, STRIPPED_ENV, STRIPPED_KEY_ENV, STRIPPED_KEY_ENV_PREFIXES, WHOLE_STATE_KINDS, aggregateProfile, assertTmpPath, attributeDeliveries, barsKeys, benchRoot, browserAvailability,
+  APPS, DELTA_SEP, HANDLER_ENV_KEEP, HANDLER_ENV_KEEP_PREFIXES, INIT_SCRIPT, REPO, WHOLE_STATE_KINDS, aggregateProfile, assertTmpPath, attributeDeliveries, barsKeys, benchRoot, browserAvailability,
   buildReport, classifyFrame, compareReports, deliveredKind, feedKeys, frameKey, launchBrowser, loadFrames, mergeAggregates, mergeWindows, parseArgs, percentile,
   rankProfile, recordFrames, refineAlignment, renderCompare, renderProfile, renderReport, replay, sourceLocator, startFront, startPageServer, streamSummary,
   stripProfileQueries, summarize, sweepDeadRuns, synthesizeFrames, writeFrames,
@@ -1120,37 +1120,39 @@ test("ROMP_UI_BENCH_REQUIRE turns the browser skip into a failure that names the
 
 // ── the Handler subprocess ───────────────────────────────────────────────────────────────────────
 
-test("startPageServer hands the Handler an isolated environment: a minted token, a dead manager port, no key source or credential conftest pops, no CLI scope, no postal peers", { timeout: 30_000 }, async () => {
+test("startPageServer hands the Handler an isolated environment: an allowlist of this process's, a minted token, a dead manager port, no CLI scope, no postal peers", { timeout: 30_000 }, async () => {
   // A stub interpreter stands in for python3: it echoes its environment, announces a port, and blocks on
-  // stdin the way the Handler's watcher thread does. So this needs neither python nor the kernel.
+  // stdin the way the Handler's watcher thread does. So this needs neither python nor the kernel. Its output path is
+  // written into the stub itself, since no variable of this process's crosses the allowlist to tell it.
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "romp-ui-bench-env-"));
   try {
-    const stub = writeStub(tmp, "python-stub", `env > "$UI_BENCH_STUB_ENV_OUT"\nprintf 'ARGS %s\\n' "$#" >> "$UI_BENCH_STUB_ENV_OUT"\nprintf 'TMPARG %s\\n' "$4" >> "$UI_BENCH_STUB_ENV_OUT"\n`);
-    const dist = fakeDist(tmp);
     const envOut = path.join(tmp, "env.txt");
-    // The variables the Handler must never inherit, named here so a shrinking export cannot shrink the check:
-    // the manager's, the live kernel's ports and state root, the perf switch and a terminal's TMUX.
+    const stub = writeStub(tmp, "python-stub", `env > '${envOut}'\nprintf 'ARGS %s\\n' "$#" >> '${envOut}'\nprintf 'TMPARG %s\\n' "$4" >> '${envOut}'\n`);
+    const dist = fakeDist(tmp);
+    // The allowlist (2026-10-08, the review of #173): what a process needs to run and where Claude Code keeps its config.
+    assert.deepEqual([...HANDLER_ENV_KEEP].sort(), ["CLAUDE_CONFIG_DIR", "HOME", "LANG", "LOGNAME", "PATH", "SHELL", "TERM", "TMPDIR", "TZ", "USER"]);
+    assert.deepEqual([...HANDLER_ENV_KEEP_PREFIXES], ["LC_"]);
+    // Planted: the manager's variables, the live kernel's ports and state root, the perf switch and a terminal's TMUX;
+    // every key-source and credential name tests/conftest.py pops; a live session's identity (its romp id and name,
+    // the Claude Code session id the postal tools read, its messaging socket, the user bus); and a name nobody has
+    // invented yet, which a list of names to strip would have let through.
     const NEVER = ["ROMP_MANAGER_PORT", "ROMP_MANAGER_PID", "ROMP_SUPERVISED", "ROMP_STATE_DIR", "ROMP_SERVE_PORT", "ROMP_KERNEL_PORT", "ROMP_PERF", "TMUX"];
-    assert.deepEqual([...STRIPPED_ENV].sort(), [...NEVER].sort(), "the tool's list is exactly this one");
-    // Every key-source and credential name tests/conftest.py pops before any test (its KEY_SOURCE_ENV_NAMES and
-    // KEY_SOURCE_ENV_PREFIXES, plus the ANTHROPIC_ prefix): a replay run from inside a romp session inherits all
-    // of them from the manager. The first form of this test planted ANTHROPIC_* and the key reference only, so a
-    // Handler holding the key command, the OAuth token and 1Password's names passed it (review find, 2026-09-08).
     const NEVER_KEYS = ["ANTHROPIC_API_KEY", "ROMP_API_KEY_REF", "ROMP_API_KEY_CMD", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ROMP_EXPECTED_AUTH",
-      "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_HOST", "OP_CONNECT_TOKEN", "OP_ACCOUNT"];
-    assert.deepEqual([...STRIPPED_KEY_ENV].sort(), [...NEVER_KEYS].sort(), "the tool's key-source list is exactly conftest's");
-    assert.deepEqual([...STRIPPED_KEY_ENV_PREFIXES].sort(), ["ANTHROPIC_", "OP_SESSION_"]);
-    const plantedKeys = { ...Object.fromEntries(NEVER_KEYS.map((k) => [k, `planted-${k.toLowerCase()}`])), OP_SESSION_testaccount: "planted-op-session", ANTHROPIC_PROBE_FOR_THE_TEST: "must-not-cross" };
-    const planted = { UI_BENCH_STUB_ENV_OUT: envOut, ...plantedKeys, ROMP_CLAUDE_BIN: "/nonexistent/claude", ROMP_POSTAL_PEERS: "1",
-      ROMP_SERVICE_ENV_FILE: path.join(tmp, "planted-service.env"), ROMP_MODEL_CATALOG: "on", ROMP_CLI_SCOPE: "1",
-      ...Object.fromEntries(NEVER.map((k) => [k, k === "TMUX" ? "/tmp/tmux-0/default,1,0" : k === "ROMP_STATE_DIR" ? path.join(tmp, "planted-state") : k === "ROMP_MANAGER_PORT" ? "7432" : "1"])) };
+      "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_HOST", "OP_CONNECT_TOKEN", "OP_ACCOUNT", "OP_SESSION_testaccount", "ANTHROPIC_PROBE_FOR_THE_TEST"];
+    const IDENTITY = ["ROMP_SID", "ROMP_SESSION_NAME", "ROMP_STATE_TAG", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDECODE",
+      "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "ROMP_ZZ_IDENTITY_NOT_INVENTED_YET"];
+    const SET_BY_THE_TOOL = { ROMP_CLAUDE_BIN: "/bin/false", ROMP_POSTAL_PEERS: "0", ROMP_MODEL_CATALOG: "off", ROMP_CLI_SCOPE: "0", ROMP_MANAGER_PORT: "1" };
+    const planted = { ...Object.fromEntries([...NEVER, ...NEVER_KEYS, ...IDENTITY].map((k) => [k, `planted-${k.toLowerCase()}`])),
+      ROMP_STATE_DIR: path.join(tmp, "planted-state"), ROMP_MANAGER_PORT: "7432", ROMP_CLAUDE_BIN: "/nonexistent/claude", ROMP_POSTAL_PEERS: "1",
+      ROMP_SERVICE_ENV_FILE: path.join(tmp, "planted-service.env"), ROMP_MODEL_CATALOG: "on", ROMP_CLI_SCOPE: "1", UI_BENCH_UNRELATED: "planted" };
     const srv = await withEnv(planted, () => startPageServer({ dist, python: stub }));
     try {
       assert.equal(srv.port, 1);
       assert.match(srv.token, /^[A-Za-z0-9_-]{24}$/, "a per-run token, 18 random bytes as base64url");
       assert.ok(srv.pid > 0);
       assert.ok(fs.existsSync(srv.tmp));
-      const env = Object.fromEntries(fs.readFileSync(envOut, "utf8").trim().split("\n").map((l) => { const i = l.indexOf("="); return i < 0 ? [l, ""] : [l.slice(0, i), l.slice(i + 1)]; }));
+      const env = Object.fromEntries(fs.readFileSync(envOut, "utf8").trim().split("\n").filter((l) => !/^(ARGS|TMPARG) /.test(l))
+        .map((l) => { const i = l.indexOf("="); return i < 0 ? [l, ""] : [l.slice(0, i), l.slice(i + 1)]; }));
       assert.equal(env.ROMP_SERVE_TOKEN, srv.token);
       assert.equal(env.ROMP_POSTAL_PEERS, "0", "the Handler never asks the live postal bus for its peers");
       assert.equal(env.ROMP_KERNEL_NO_OPEN, "1");
@@ -1160,7 +1162,18 @@ test("startPageServer hands the Handler an isolated environment: a minted token,
       assert.equal(env.ROMP_MODEL_CATALOG, "off", "no boot fetch of the Models API");
       assert.equal(env.ROMP_CLAUDE_BIN, "/bin/false", "a binary that runs nothing; removing the variable would resolve the real CLI");
       assert.equal(env.ROMP_CLI_SCOPE, "0", "no route that constructs the SDK backend probes systemd-run");
-      for (const k of Object.keys(plantedKeys)) assert.equal(env[k], undefined, `${k} was planted and must not reach the Handler (a key source or credential conftest pops)`);
+      // conftest's form of the manager floor: a DEAD port, never an absent variable (one kernel consumer maps an
+      // absent port to the default, live, one), so the planted 7432 comes out as 1, not as nothing.
+      assert.equal(env.ROMP_MANAGER_PORT, "1", "the manager port is a dead one, not absent");
+      for (const [k, v] of Object.entries(planted)) {
+        if (k in SET_BY_THE_TOOL) assert.equal(env[k], SET_BY_THE_TOOL[k], `${k} is the tool's own value, never the planted one`);
+        else if (k !== "ROMP_SERVICE_ENV_FILE") assert.equal(env[k], undefined, `${k} was planted and must not reach the Handler (${v})`);
+      }
+      for (const k of Object.keys(env)) {
+        assert.ok(!k.startsWith("ANTHROPIC_") && !k.startsWith("OP_"), `${k} must not reach the Handler`);
+        assert.ok(HANDLER_ENV_KEEP.includes(k) || k.startsWith("LC_") || k.startsWith("ROMP_") || k === "XDG_STATE_HOME" || ["PWD", "SHLVL", "_", "OLDPWD"].includes(k),
+                  `${k} is neither allowlisted nor the tool's own`);
+      }
       assert.equal(path.dirname(srv.tmp), srv.root, "the run directory sits under the per-user parent");
       assert.equal(path.basename(srv.root), `romp-ui-bench-${UID}`);
       assert.equal(fs.readFileSync(path.join(srv.tmp, "owner.pid"), "utf8").trim(), String(process.pid), "the run records its owner for the dead-owner sweep");
@@ -1168,12 +1181,7 @@ test("startPageServer hands the Handler an isolated environment: a minted token,
       assert.equal(env.ROMP_DIST_DIR, dist);
       assert.ok(env.XDG_STATE_HOME.startsWith(srv.tmp + path.sep), "a private state root");
       assert.ok(fs.readFileSync(envOut, "utf8").includes(`\nTMPARG ${srv.tmp}\n`), "the subprocess is told its directory so it can remove it");
-      for (const k of Object.keys(env)) assert.ok(!k.startsWith("ANTHROPIC_") && !k.startsWith("OP_SESSION_"), `${k} must not reach the Handler`);
-      for (const k of NEVER) if (k !== "ROMP_MANAGER_PORT") assert.equal(env[k], undefined, `${k} was planted and must not reach the Handler`);
-      // conftest's form of the manager floor: a DEAD port, never an absent variable (one kernel consumer maps an
-      // absent port to the default, live, one), so the planted 7432 comes out as 1, not as nothing.
-      assert.equal(env.ROMP_MANAGER_PORT, "1", "the manager port is a dead one, not absent");
-      assert.equal(env.UI_BENCH_STUB_ENV_OUT, envOut, "unrelated variables pass through");
+      assert.equal(env.PATH, process.env.PATH, "PATH crosses the allowlist");
       // a second run mints its own token: the Handler is the kernel's whole route surface on a loopback port
       const other = await startPageServer({ dist, python: stub });
       try { assert.notEqual(other.token, srv.token, "a token minted per run, never a constant"); }

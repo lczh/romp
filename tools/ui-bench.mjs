@@ -39,10 +39,11 @@
 //
 //      Serving design: the REAL kernel HTTP Handler runs in a python3 subprocess under an isolated
 //      environment, the pattern of tests/test_color_route.py with the floors tests/conftest.py applies:
-//      a private XDG_STATE_HOME; the manager variables removed (the manager port set to a
-//      dead one, as conftest does) and every key-source name conftest pops removed too (the API keys,
-//      the key reference and command, the token credentials, the auth declaration and 1Password's
-//      names; STRIPPED_KEY_ENV below); the manager's key FILE and the boot model-catalog fetch pointed away (the
+//      an ALLOWLIST of this process's environment (HANDLER_ENV_KEEP below: what a process needs to run and
+//      where Claude Code keeps its config), so nothing a live session's shell carries reaches it (the
+//      session's identity, the manager's and the live kernel's variables, every key source and credential);
+//      a private XDG_STATE_HOME; the manager port set to a dead one, as conftest does; the manager's key FILE
+//      and the boot model-catalog fetch pointed away (the
 //      kernel would otherwise read ~/.config/romp/service.env and carry its key to the Models API); the
 //      Claude binary floored to /bin/false; the CLI scope off (ROMP_CLI_SCOPE=0, so nothing probes
 //      systemd-run); the postal peer bus off; ROMP_KERNEL_NO_OPEN=1; a serve token minted for the run.
@@ -604,22 +605,16 @@ sys.stdout.write("PORT %d\\n" % srv.server_address[1]); sys.stdout.flush()
 srv.serve_forever()
 `;
 
-/** The variables the Handler subprocess must not inherit: the manager's (so the kernel module never
- *  believes it is the supervised live kernel), the live kernel's ports and state root, and the API keys
- *  and Claude binary a spawned session would run with (nothing the bench needs reads them). */
-export const STRIPPED_ENV = ["ROMP_MANAGER_PORT", "ROMP_MANAGER_PID", "ROMP_SUPERVISED", "ROMP_STATE_DIR", "ROMP_SERVE_PORT", "ROMP_KERNEL_PORT", "ROMP_PERF", "TMUX"];
-
-/** The key-source names tests/conftest.py pops before any test runs (its KEY_SOURCE_ENV_NAMES and
- *  KEY_SOURCE_ENV_PREFIXES: credentials.FLOOR_ENV_NAMES, which is the retired provider names, the login
- *  tokens, the auth declaration and 1Password's names, plus sdk_backend.AUTH_ENV_NAMES), stripped here
- *  for the same reason: every shell under a romp-managed session inherits the manager's credentials, a
- *  retired provider name in the kernel's environment is a boot failure (credentials.check_boot_environment)
- *  and the login tokens would be claimed for a launch, so a replay run from inside a session would
- *  otherwise start a kernel Handler holding the operator's OAuth token and op token, or refuse to start.
- *  The first form of this list stripped ANTHROPIC_* and the key reference only (review find, 2026-09-08). */
-export const STRIPPED_KEY_ENV = ["ANTHROPIC_API_KEY", "ROMP_API_KEY_REF", "ROMP_API_KEY_CMD", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
-  "ROMP_EXPECTED_AUTH", "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_HOST", "OP_CONNECT_TOKEN", "OP_ACCOUNT"];
-export const STRIPPED_KEY_ENV_PREFIXES = ["ANTHROPIC_", "OP_SESSION_"];
+/** The only names of this process's environment the Handler subprocess is handed (an allowlist, 2026-10-08): what a
+ *  process needs to run (PATH, HOME, the user, locale, terminal, temp dir) and where Claude Code keeps its config. A
+ *  replay run from inside a romp session would otherwise hand the Handler that session's identity (ROMP_SID, the
+ *  Claude Code session id the postal tools read, its messaging socket), the manager's variables and the live kernel's
+ *  ports, and the manager's credentials (a retired provider name is a boot failure, credentials.check_boot_environment,
+ *  and the login tokens would be claimed for a launch). The list of names to strip that stood here missed every name
+ *  nobody had thought of, the session's identity among them (the review of #173). Everything romp-shaped the
+ *  Handler needs, startPageServer sets itself. */
+export const HANDLER_ENV_KEEP = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TERM", "TZ", "TMPDIR", "CLAUDE_CONFIG_DIR"];
+export const HANDLER_ENV_KEEP_PREFIXES = ["LC_"];
 
 /** The parent every run of this tool on this machine keeps its state under: <tmp>/romp-ui-bench-<uid>,
  *  private to the user and refused when something else holds the name. Each run gets a subdirectory
@@ -673,8 +668,8 @@ export async function startPageServer({ dist, python = "python3", log = () => {}
   const tmp = fs.mkdtempSync(path.join(root, "run-"));
   fs.writeFileSync(path.join(tmp, "owner.pid"), `${process.pid}\n`);
   const token = crypto.randomBytes(18).toString("base64url");
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) if (STRIPPED_KEY_ENV_PREFIXES.some((p) => k.startsWith(p)) || STRIPPED_ENV.includes(k) || STRIPPED_KEY_ENV.includes(k)) delete env[k];
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) if (HANDLER_ENV_KEEP.includes(k) || HANDLER_ENV_KEEP_PREFIXES.some((p) => k.startsWith(p))) env[k] = v;
   // conftest's form of the manager-port floor, not a bare removal: one kernel consumer maps an ABSENT port
   // to the default, live, one, so a dead value is the state that is safe against every consumer.
   env.ROMP_MANAGER_PORT = "1";
@@ -692,7 +687,7 @@ export async function startPageServer({ dist, python = "python3", log = () => {}
   env.ROMP_CLAUDE_BIN = "/bin/false";
   // One more of conftest's floors: a route that constructs the SDK backend decides whether to wrap CLIs in
   // systemd-run scopes (on by default under a supervised kernel, probing the user manager). The retired
-  // key reference and command names the boot check refuses went with STRIPPED_KEY_ENV above.
+  // key reference and command names the boot check refuses never cross the allowlist above.
   env.ROMP_CLI_SCOPE = "0";
   env.ROMP_SERVE_TOKEN = token;
   env.ROMP_DIST_DIR = distDir;
