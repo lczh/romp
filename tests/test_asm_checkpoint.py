@@ -815,6 +815,9 @@ class ConvergeAssembly(Harness):
         self.km._ASM_CONVERGE_DONE.clear(); self.km._ASM_CONVERGE_BLIP.clear(); self.km._ASM_CONVERGE_NOENTRY.clear()
         for name, val in (("CKPT_CONVERGE_MS", 150.0), ("CKPT_CONVERGE_BYTES", em._CKPT_CYCLE_CAP_DEFAULT), ("ASM_CONVERGE", True)):
             saved = getattr(self.km, name); setattr(self.km, name, val); self.addCleanup(setattr, self.km, name, saved)
+        self.live = {}                                             # the live map the pass reads a session's turn from: none running
+        saved = self.km._live_map; self.km._live_map = lambda: self.live
+        self.addCleanup(setattr, self.km, "_live_map", saved)
 
     def idle_leaf(self, name="idle", scenario="compaction_atom", age=600, records=None):
         """A leaf idle past the reader's quiescence window, with no assembly document, parsed once by this process (the boot's
@@ -1047,16 +1050,64 @@ class ConvergeAssembly(Harness):
         self.assertFalse(em._asm_ckpt_file(path).exists())
         self.assertEqual((cv["candidates"], cv["skipped"].get("noCut"), cv["writes"]), (1, 1, 0), "no cut, no document, said once: %s" % cv)
 
-    def test_off_writes_nothing_and_a_live_leaf_is_left_to_the_settle(self):
+    def test_off_writes_nothing(self):
         path = self.idle_leaf("off")
         self.km.ASM_CONVERGE = False
         self.cycle(NOW + 600)
         self.assertFalse(em._asm_ckpt_file(path).exists()); self.assertEqual(em.asm_checkpoint_stats()["converge"]["candidates"], 0)
-        self.km.ASM_CONVERGE = True
-        live = self.idle_leaf("live", age=0)                       # fresh: the settle's writer covers it
-        self.cycle(NOW + 601)
-        self.assertFalse(em._asm_ckpt_file(live).exists()); self.assertEqual(em.asm_checkpoint_stats()["converge"]["candidates"], 0)
         self.assertIn("converge", self.km._PERF_STATS.snapshot()["asmCheckpoint"], "the counters ride /perf")
+
+    # ── 2026-10-08: the leaf's turn, not its age, says whether the settle will write it ─────────────────────────────────────
+    def test_a_leaf_whose_session_is_mid_turn_is_left_to_the_settle_however_long_it_has_been_quiet(self):
+        """The step left a leaf to the settle while it had changed in the last two minutes, a stand-in for the event: a turn
+        running, whose end is the settle write's own trigger. A leaf ten minutes quiet whose session is mid-turn (a long tool
+        call, a compaction, a permission prompt the user has not answered) was taken as idle and written beside the turn; it
+        is now left to the settle in every state the backend reports for an open turn, and written once the turn has ended.
+        At the base the first cycle wrote it."""
+        path = self.idle_leaf("midturn", age=600)
+        for k, state in enumerate(("working", "compacting", "retrying", "permission", "picker")):
+            self.live = {SID: {"state": state}}
+            self.cycle(NOW + 600 + k)
+            self.assertFalse(em._asm_ckpt_file(path).exists(), "a turn is open (%s): the settle's to write" % state)
+        self.assertEqual(em.asm_checkpoint_stats()["converge"]["candidates"], 0)
+        self.live = {SID: {"state": "waiting"}}                    # the turn ended; no settle reached this leaf (the boot's read)
+        self.cycle(NOW + 610)
+        self.assertTrue(em._asm_ckpt_file(path).exists(), "no turn open: written from the boot's parse")
+        self.assertEqual(em.asm_checkpoint_stats()["converge"]["writes"], 1)
+
+    def test_a_leaf_with_no_turn_running_is_written_at_once_however_fresh(self):
+        """The other side: a leaf its CLI appended to seconds ago, with no turn running now (the session idle on the user's next
+        message, dormant, or with no live row because its CLI is gone), has no turn end coming to write its document, so the
+        pass writes it at once rather than two minutes after the last append. At the base a fresh leaf was skipped until it
+        had gone two minutes unchanged."""
+        for name, live in (("waiting", {SID: {"state": "waiting"}}), ("idle", {SID: {"state": "idle"}}), ("gone", {})):
+            with self.subTest(name):
+                path = self.idle_leaf("fresh-" + name, age=0)
+                self.km._ASM_CONVERGE_DONE.clear()
+                self.live = live
+                self.cycle(NOW + 600)
+                self.assertTrue(em._asm_ckpt_file(path).exists(), "no turn running (%s): written now" % name)
+
+    def test_the_pushers_cycle_writes_no_document_and_the_jobs_threads_write_phase_does(self):
+        """2026-10-08: the converge pass ran near the end of every pusher cycle, and its first candidate always went, so an idle
+        session's assembly document was written inside the cycle that builds every frame (9.9 s of one cycle over a 38 MB
+        session in a lab; 0.6 to 2.5 s for a 4 MB one on a live box). The real pusher jobs over an idle leaf the boot parsed,
+        with no document and no turn running, the frame jobs quiet: the cycle writes nothing. The jobs thread's write phase,
+        the process's document writer, writes it. At the base the pusher's cycle wrote it."""
+        path = self.idle_leaf("pusher", age=600)
+        km = self.km
+        quiet = {nm: (lambda *a, **k: None) for nm in ("_sessions_listing_refresh", "_apply_pending_ops", "_artifacts_signal",
+                                                       "_turn_notify_tick", "_boot_row_backstop", "_kernel_sample_tick",
+                                                       "_api_health_frame", "_api_health_push")}
+        with mock.patch.multiple(km, **quiet):
+            km._pusher_cycle_jobs(NOW + 600, {}, False)
+            km._pusher_cycle_jobs(NOW + 601, {}, False)
+        self.assertFalse(em._asm_ckpt_file(path).exists(), "the pusher's cycle wrote a document: %s" % em.asm_checkpoint_stats()["converge"])
+        self.assertEqual(em.asm_checkpoint_stats()["converge"]["candidates"], 0, "nor looked for one")
+        with em.document_writer():
+            km._jobs_write_phase(NOW + 602)
+        self.assertTrue(em._asm_ckpt_file(path).exists(), "written at the jobs thread's write phase")
+        self.assertEqual(em.asm_checkpoint_stats()["converge"]["writes"], 1)
 
 
 

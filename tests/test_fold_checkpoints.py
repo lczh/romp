@@ -1513,9 +1513,101 @@ class KernelFolds(Base):
             self.assertIsNone(em._JSONL_CACHE.get(self.agent), "the deleted file's entry released by the payment (round two, low 2)")
         self.assertEqual(list(em._DROP_OWED), [], "paid, and the deleted file's path forgotten")
         import inspect
-        src = inspect.getsource(km._pusher_cycle_jobs)
-        self.assertLess(src.index("_begin_checkpoint_cycle()"), src.index("_push_all("), "the cycle's budget begins before its builds")
+        src = inspect.getsource(km._jobs_write_phase)
+        self.assertLess(src.index("_begin_checkpoint_cycle()"), src.index("_converge_checkpoints("),
+                        "the cycle's budget begins at the write phase, before the pass that shares it")
+        self.assertNotIn("_begin_checkpoint_cycle", inspect.getsource(km._pusher_cycle_jobs), "the pusher's cycle writes no document")
         self.assertNotIn("checkpoint_cycle_begin", inspect.getsource(km._converge_checkpoints), "the pass shares the cycle, it does not begin it")
+
+    # ── the document writer (2026-10-08): a drop another thread meets is the jobs thread's to write ─────────────────────────
+    def _writer(self):
+        """The document writer's hold, on this thread (the kernel's jobs loop holds it for its life). The base had none, where
+        every thread wrote its own drops: the stand-in there is a no-op, so a test below reds on what was written, not on a
+        missing name."""
+        return getattr(em, "document_writer", contextlib.nullcontext)()
+
+    def _off_the_writer(self, fn):
+        """Run `fn` on another thread (the pusher's build, a request handler) and wait for it."""
+        out, err = [], []
+
+        def run():
+            try:
+                out.append(fn())
+            except BaseException as e:                         # carried to the test's thread
+                err.append(e)
+        th = threading.Thread(target=run, name="pusher-probe")
+        th.start(); th.join(30)
+        self.assertFalse(th.is_alive())
+        self.assertEqual(err, [])
+        return out[0] if out else None
+
+    def test_a_drop_met_off_the_document_writer_is_handed_to_it_and_done_at_its_write_phase(self):
+        """The idle leaf of the drop write above, its document lacking the pairing and the launch state, read whole by the
+        boot's judges' pass. The leaf's quiescent-drop fold then runs on ANOTHER thread, a build on the pusher, while this thread
+        holds the document writer: no document is written there (a fold document is seconds of encoding for a long leaf, and
+        every frame waited on it) and the entry stays, handed over; this thread's write phase writes the document from that
+        same read, with no read of its own, and pops the entry, as the drop would have. At the base the fold's own thread
+        wrote it."""
+        self._converge_world({"bgJudge": "missing", "agentLaunches": "missing"}, quiescent=True)
+        jd._bg_scan(self.leaf)                                        # the boot's whole read: the path dirty, the entry whole
+        seq = self.doc(self.leaf)["seq"]
+        with self._writer():
+            self._off_the_writer(lambda: km._agent_launch_state(self.leaf))
+            self.assertEqual(self.doc(self.leaf)["seq"], seq, "no document written off the writer: %s" % sorted(self.doc(self.leaf)["folds"]))
+            with em._JSONL_CACHE_LOCK:
+                self.assertIsNotNone(em._JSONL_CACHE.get(self.leaf), "the entry stays for the writer to write from")
+            cv = em.checkpoint_stats()["converge"]
+            self.assertEqual((cv["dropHandedOff"], cv["dropWrites"], cv["dropDeferred"]), (1, 0, 0), "handed over, counted: %s" % cv)
+            read0 = em.read_bytes_report().get(self.leaf, 0)
+            km._begin_checkpoint_cycle()                              # the writer's write phase opens with the cycle
+        d = self.doc(self.leaf)
+        self.assertEqual(sorted(d["folds"]), ["agentLaunches", "bgAll", "bgJudge", "bgRunning", "sessionMeta"], "written from the read in hand")
+        self.assertTrue(all("state" in f for f in d["folds"].values()))
+        self.assertLess(em.read_bytes_report().get(self.leaf, 0) - read0, 512, "no read of records of the writer's own: a guard's bytes")
+        with em._JSONL_CACHE_LOCK:
+            self.assertIsNone(em._JSONL_CACHE.get(self.leaf), "then the entry left memory, as the drop would have let it")
+        self.assertEqual(em.checkpoint_stats()["converge"]["dropWrites"], 1)
+        self.assertEqual(em._DROP_HANDOFF, {}, "nothing left handed")
+
+    def test_a_release_off_the_writer_is_done_at_its_write_phase_with_no_wait_for_the_files_quiet(self):
+        """A release (a dead lane's leaf, a leaf a /clear retired) is the event that the file's use ended, so it writes and drops
+        with no two-minute wait. Met off the writer it is handed over like a quiet drop and done as the release would have
+        done it: the leaf here is fresh, and the writer's write phase still writes its document and pops its entry. A hand-off
+        paid through the quiet drop's road would have held it for the file's quiet. At the base the release's own thread wrote."""
+        self._converge_world({"bgJudge": "missing"})                  # fresh: no quiet drop would take it
+        jd._bg_scan(self.leaf)
+        seq = self.doc(self.leaf)["seq"]
+        with self._writer():
+            self.assertEqual(self._off_the_writer(lambda: em.release_records([self.leaf])), 0, "nothing dropped off the writer")
+            self.assertEqual(self.doc(self.leaf)["seq"], seq, "and nothing written there")
+            km._begin_checkpoint_cycle()
+        self.assertIn("state", self.doc(self.leaf)["folds"]["bgJudge"], "written at the write phase")
+        with em._JSONL_CACHE_LOCK:
+            self.assertIsNone(em._JSONL_CACHE.get(self.leaf), "and released, though the file is fresh")
+        self.assertEqual(list(em._DROP_OWED), [], "never owed to the file's quiet")
+
+    def test_past_the_stop_no_thread_writes_at_a_drop_and_the_writer_pays_nothing(self):
+        """The kernel's exit stand-down reaches the event model (set_document_stop): once it is set no thread starts a document
+        write at a drop, the writer's own included, and the writer's write phase pays nothing, so a write never begins beside
+        the exit's own checkpoint writes. What was handed stays handed (the process is leaving; the next kernel reads the file
+        afresh)."""
+        self._converge_world({"bgJudge": "missing", "agentLaunches": "missing"}, quiescent=True)
+        jd._bg_scan(self.leaf)
+        seq = self.doc(self.leaf)["seq"]
+        leaving = [False]
+        prev = em._DOC_STOP[0]
+        em.set_document_stop(lambda: leaving[0])
+        self.addCleanup(em.set_document_stop, prev)
+        with self._writer():
+            self._off_the_writer(lambda: km._agent_launch_state(self.leaf))   # handed over while the kernel runs
+            leaving[0] = True
+            km._agent_launch_state(self.leaf)                         # and met again on the writer itself, past the stop
+            km._begin_checkpoint_cycle()
+            self.assertEqual(self.doc(self.leaf)["seq"], seq, "no document written past the stop")
+            self.assertIn(self.leaf, em._DROP_HANDOFF, "the hand-off stands")
+            leaving[0] = False                                        # (a test's undo: a kernel never comes back)
+            km._begin_checkpoint_cycle()
+        self.assertIn("state", self.doc(self.leaf)["folds"]["bgJudge"])
 
     def test_the_owed_tables_overflow_pops_the_oldest_owed_entry(self):
         """Round two, low 1: over the bound the table was cleared, leaving those entries neither paid nor popped. The oldest owed
