@@ -519,12 +519,23 @@ class RunningTools(_BuildCase):
         evs = [e for e in self._events({"state": "working"}) if e.get("kind") == "tool"]
         self.assertEqual([e.get("running") for e in evs], [True, True])
 
+    def test_a_message_landing_mid_turn_does_not_end_the_call_it_arrived_during(self):
+        # the CLI takes a message sent mid-turn into the turn it is running: the parse opens a new turn for it, but nothing
+        # stopped, and the call it arrived during still gets its result
+        self._write(self._recs() + [_urec(NOW - 80, "u3", "also check the lint", "a2")])
+        self._states((NOW - 100, "working"))
+        waiting = [e for e in self._events({"state": "working"}) if e.get("kind") == "tool"][-1]
+        self.assertIs(waiting["running"], True)
+
     def test_the_stamp_is_pure_over_its_inputs(self):
-        tail = [{"kind": "tool", "turn": 3}, {"kind": "tool", "turn": 3, "resultUuid": "u"},
-                {"kind": "tool", "turn": 3, "isError": True}, {"kind": "tool", "turn": 3, "agentRunning": True},
-                {"kind": "tool", "turn": 2}, {"kind": "assistant", "turn": 3}]
-        km._stamp_running_tools(tail, 3, True)
+        stop = km.iso(NOW - 50)
+        tail = [{"kind": "tool", "ts": km.iso(NOW - 40)}, {"kind": "tool", "ts": km.iso(NOW - 40), "resultUuid": "u"},
+                {"kind": "tool", "ts": km.iso(NOW - 40), "isError": True}, {"kind": "tool", "ts": km.iso(NOW - 40), "agentRunning": True},
+                {"kind": "tool", "ts": km.iso(NOW - 60)}, {"kind": "assistant", "ts": km.iso(NOW - 40)}]
+        km._stamp_running_tools(tail, stop, True)
         self.assertEqual([e.get("running") for e in tail], [True, None, None, None, False, None])
+        km._stamp_running_tools(tail, stop, False)
+        self.assertEqual(tail[0]["running"], False, "a turn that is not open runs nothing")
 
 
 if __name__ == "__main__":

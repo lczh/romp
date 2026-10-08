@@ -4725,6 +4725,15 @@ function retryingTick(): void {
 // a thinking stretch, and each running subagent's progress. Every piece is painted IN PLACE (the transcript's foot line,
 // the tab's dot, an agent row's progress span) and ticked by the 1 s timer, so none of it costs a chat build or a strip
 // rebuild; each surface that rebuilds (renderTabs, renderTool) reads the same map when it does.
+// A live text's in-place write: the existing text node's data when there is one, so a clock ticking inside a row painted
+// long ago changes characters, never nodes (a textContent write replaces the node, a childList removal inside a row the
+// page has not repainted, which the transcript's mutation watchers read as that row being rebuilt).
+function setLiveText(n: HTMLElement, t: string): void {
+  const f = n.firstChild;
+  if (f && f.nodeType === 3 && !f.nextSibling) { if ((f as Text).data !== t) (f as Text).data = t; }
+  else if (n.textContent !== t) n.textContent = t;
+}
+
 function dropLiveStatus(hosts: string[] | null): void {
   for (const id of Array.from(liveStatus.keys())) {
     if (hosts && !hosts.some((h) => typeof h === "string" && id.startsWith(h + ":"))) continue;
@@ -4792,7 +4801,7 @@ function paintLiveThinking(): void {
   line.classList.toggle("quiet", !!th.quiet);
   const t = line.querySelector(".live-thinking-text") as HTMLElement;
   const txt = thinkingText(th, now);
-  if (t.textContent !== txt) t.textContent = txt;
+  setLiveText(t, txt);
   line.title = thinkingTip(th, now);
 }
 
@@ -4825,7 +4834,7 @@ function paintTaskProgress(id: string): void {
   const tasks = liveStatus.get(id)?.tasks || {};
   for (const n of Array.from(v.el.querySelectorAll<HTMLElement>(".agent-live[data-tu]"))) {
     const t = taskProgressText(tasks[n.dataset.tu || ""], n.dataset.brief === "1");
-    if (n.textContent !== t) n.textContent = t;
+    setLiveText(n, t);
   }
 }
 
@@ -4839,7 +4848,7 @@ function liveStatusTick(): void {
     const since = Number(n.dataset.since);
     if (!(since > 0)) continue;
     const t = durLabel(now - since);
-    if (n.textContent !== t) n.textContent = t;
+    setLiveText(n, t);
   }
 }
 

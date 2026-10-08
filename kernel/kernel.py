@@ -36370,32 +36370,54 @@ def _thought_tokens(msg, seen):
     return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
 
 
-def _stamp_running_tools(tail, last_turn, turn_live):
+def _last_stop_iso(turns):
+    """When the session last STOPPED, as iso() writes it ("" for never): the latest of a turn's own end (its last assistant
+    message's end_turn, the turn's `ended`) and a stop record's start (an idle span: a result's "waiting", an interrupt's
+    "idle"). Scanned from the newest turn back to the first that holds one, so a long transcript costs its last turns."""
+    for t in reversed(turns or ()):
+        best = 0
+        atoms = t.get("atoms") or ()
+        for a in atoms:
+            if a.get("type") == "idle":
+                best = max(best, a.get("t") or 0)
+        if t.get("ended"):
+            best = max(best, max((a.get("t") or 0 for a in atoms if a.get("type") != "idle"), default=0))
+        if best:
+            return iso(best)
+    return ""
+
+
+def _stamp_running_tools(tail, stop_iso, turn_open):
     """Post-pass over one build's TAIL events (2026-10-08): every tool event still waiting for its result (no
     tool_result paired, no error, not a background agent the bg pass already called running) is stamped `running`:
-    True when it sits in the session's last turn while that turn is OPEN, False otherwise. "Open" is the event model's
-    own answer (_session_working over the parse: no result's "waiting" and no interrupt's "idle" at the turn's tail, the
-    signal every working dot reads), never the backend row's state: a session parked on a permission prompt reports the
-    prompt as its state while its turn, and the call's pending result, go on (the second review of #171, 2026-10-08),
-    and a dormant row reads "waiting" for a few seconds after a kernel restart until the session re-attaches to the CLI
-    still running the call. A call whose turn truly ended (its result, an interrupt, a CLI that exited idle) can no longer
-    get a result and reads False. The client draws a running tool with the working dot and its elapsed time from the
-    call's own stamp, and only then; an unstamped event (an older kernel) keeps the old look. Its inputs are the parse
-    (a result or a state record landing is a transcript, live-tail or states change), every one a chat-build key
-    component, so the flag moves only with a build that runs anyway. The sealed prefix is never written: an ended turn
-    is never the last one, so a sealed tool was stamped False the build it sealed in."""
+    True when the session's turn is OPEN now and the call came after the session last stopped, False otherwise.
+    "Open" is the event model's own answer (_session_working over the parse, the signal every working dot reads), and
+    "stopped" its stop records (_last_stop_iso: a turn's end_turn, a result's "waiting", an interrupt's "idle"), never
+    the backend row's state: a session parked on a permission prompt reports the prompt as its state while its turn,
+    and the call's pending result, go on, and a dormant row reads "waiting" for a few seconds after a kernel restart
+    until the session re-attaches to the CLI still running the call (the second review of #171, 2026-10-08). A message
+    that lands mid-turn opens a new turn in the parse without stopping the CLI, so the turn a call sits in is not the
+    test: a stop after it is. A call the session stopped after can no longer get a result and reads False. The client
+    draws a running tool with the working dot and its elapsed time from the call's own stamp, and only then; an
+    unstamped event (an older kernel) keeps the old look. Its inputs are the parse (a result or a state record landing
+    is a transcript, live-tail or states change), every one a chat-build key component, so the flag moves only with a
+    build that runs anyway; iso()'s fixed format compares in time order. The sealed prefix is never written, and never
+    holds a running tool: the fold keeps a running call's turn in the tail (_chat_agent_open_at) until it settles."""
     for ev in tail:
         if ev.get("kind") != "tool" or ev.get("resultUuid") or ev.get("isError") or ev.get("agentRunning"):
             continue
-        ev["running"] = bool(turn_live and last_turn >= 0 and ev.get("turn") == last_turn)
+        ev["running"] = bool(turn_open and (ev.get("ts") or "") > stop_iso)
 
 
 def _chat_agent_open_at(events, lo):
     """Index of the first RUNNING Agent card at/after `lo` — a launch turn the chat fold must not seal
     while the agent runs (its preview and eventual report are rebuilt live in the tail). None when every
-    agent in range has settled. The undecided-seam rule's twin (see _chat_seam_open_at)."""
+    agent in range has settled. The undecided-seam rule's twin (see _chat_seam_open_at). …and the first tool
+    still RUNNING (`running`, _stamp_running_tools; 2026-10-08): a call a message landed during sits in a turn
+    the parse closed for that message while the CLI still runs it, and a sealed copy would keep its working dot
+    after the session stopped; held in the tail, the stamp is re-read every build until the call settles."""
     for i in range(lo, len(events)):
-        if events[i].get("kind") == "tool" and events[i].get("agentRunning"):
+        if events[i].get("kind") == "tool" and (events[i].get("agentRunning") or events[i].get("running")):
             return i
     return None
 
@@ -45780,8 +45802,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             # the lossy output-string scrape is all there is. The attach loop's authoritative fill
             # (askAnswerFilled) already handled every record that has one — never run both.
             _ask_fill_chosen(ev["askAnswer"], ev.get("output") or "")
-    _stamp_running_tools(events, (_parse_ix[-1] if _parse_ix else len(_turns) - 1) if _turns else -1,
-                         _session_working(_turns))
+    _real_turns = [_t for _t in (_turns or ()) if not _t.get("echoTurn")]   # a placed stale echo is no turn the CLI runs (_place_stale_echoes)
+    _stamp_running_tools(events, _last_stop_iso(_real_turns), _session_working(_real_turns))
     events = _prefix + events                           # the sealed prefix (same dicts) + this build's tail
     _pref_ids = {id(_e) for _e in _prefix}              # the sealed dicts: read by the uuid pass below, never written
     # STREAMED events (2026-09-23): an event built from a stream atom the transcript has not recorded yet (the live tail's

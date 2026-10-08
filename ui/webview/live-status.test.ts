@@ -100,6 +100,13 @@ test("render.ts: the foot line and the tab ring show only while the session work
   assert.match(RENDER, /function applyTabThinking\(tab: HTMLElement, id: string\): void \{[\s\S]{0,200}const th = thinkingShown\(id\);/);
 });
 
+test("render.ts: the clocks write characters into the existing text node, never replace nodes in rows painted earlier", () => {
+  assert.match(RENDER, /function setLiveText\(n: HTMLElement, t: string\): void \{\s*\n\s*const f = n\.firstChild;\s*\n\s*if \(f && f\.nodeType === 3 && !f\.nextSibling\) \{ if \(\(f as Text\)\.data !== t\) \(f as Text\)\.data = t; \}/);
+  const tick = RENDER.slice(RENDER.indexOf("function liveStatusTick("), RENDER.indexOf("function liveStatusTick(") + 900);
+  assert.match(tick, /setLiveText\(n, t\);/);
+  assert.doesNotMatch(tick, /n\.textContent = t/);
+});
+
 test("render.ts + styles.css: the tab's cue is a static ring that cannot move the strip", () => {
   assert.match(CSS, /\.tab-dot\.thinking \{ outline: 1\.5px solid color-mix\(in srgb, var\(--st-working-bg\) 55%, transparent\); outline-offset: 1\.5px; \}\n/);
   assert.match(CSS, /\.tab-dot\.await \{ background: var\(--st-awaitbg-bg\); \}   \/\* awaiting-bg: the dot matches the await-green chip/, "the await rule keeps its own comment");
