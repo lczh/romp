@@ -2766,8 +2766,11 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
 
 // The gist strings a notice and its compact-mode group head share (noticeBrief), so a fold never says
 // something its members would not.
-function interruptGist(cause?: string): string {
-  return cause === "restart" ? "interrupted — kernel restart" : cause === "crash" ? "interrupted — process died" : "interrupted";
+// `spend`: the figures the spend guard's message printed (kernel interruptSpend, the user 2026-10-08), so its stop reads
+// as the guard's and never as the user's own
+function interruptGist(cause?: string, spend?: { rate?: string; ceiling?: string }): string {
+  return cause === "spend" && spend ? `stopped by the spend guard at $${spend.rate} an hour`
+    : cause === "restart" ? "interrupted — kernel restart" : cause === "crash" ? "interrupted — process died" : "interrupted";
 }
 const SETTLE_GIST = "turn settled with no response";
 function retriedGist(n: number): string { return `recovered after ${n} ${n === 1 ? "retry" : "retries"}`; }
@@ -3786,8 +3789,11 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
       // "you stopped this turn" tip blamed them for every deploy (the user 2026-07-09). A slim SESSION
       // notice with the stop square as its glyph — cause tied to effect, no italic (the audit's row 12).
       const cause = (ev as any).interruptCause;
-      return notice({ src: "session", glyph: "session", gist: interruptGist(cause), cls: "turn-interrupt",
-                      tip: cause === "restart" ? "a romp kernel restart cut this turn; the session was resumed automatically"
+      const spend = (ev as any).interruptSpend as { rate?: string; ceiling?: string } | undefined;
+      return notice({ src: "session", glyph: "session", gist: interruptGist(cause, spend), cls: "turn-interrupt",
+                      sev: cause === "spend" ? "warn" : undefined,
+                      tip: cause === "spend" && spend ? `romp's spend guard stopped this turn: the session was spending about $${spend.rate} an hour, over the $${spend.ceiling} an hour ceiling`
+                        : cause === "restart" ? "a romp kernel restart cut this turn; the session was resumed automatically"
                         : cause === "crash" ? "this session's claude process died mid-turn; the session was resumed automatically"
                         : "you stopped this turn here (the stop button / Ctrl+C)" });
     }
@@ -14063,7 +14069,7 @@ function noticeBrief(ev: ChatEvent): { src: string; glyph: NoticeGlyphKind; gist
   if (ev.kind === "reconnecting") return { src: "session", glyph: "power", gist: reconnectingGist(ev.effort, ev.waits) };
   if (ev.kind === "assistant") return { src: "session", glyph: "session", gist: SETTLE_GIST };
   if (ev.kind === "user") {
-    if ((ev as any).interruptMarker) return { src: "session", glyph: "session", gist: interruptGist((ev as any).interruptCause) };
+    if ((ev as any).interruptMarker) return { src: "session", glyph: "session", gist: interruptGist((ev as any).interruptCause, (ev as any).interruptSpend) };
     if ((ev as any).rompSystem) {
       const text = (ev.md || "").replace(/<!--[\s\S]*?-->/g, "").replace(/^\s*\[romp\]\s*/i, "").trim();
       return { src: "romp", glyph: "romp", gist: ev.gist ? String(ev.gist) : gistOf(text) };

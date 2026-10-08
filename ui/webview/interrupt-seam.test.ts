@@ -32,6 +32,15 @@ test("the interrupt marker names the cause when the kernel stamped one", () => {
   assert.match(R, /you stopped this turn here \(the stop button \/ Ctrl\+C\)/);
 });
 
+test("a stop the spend guard made names the guard and its rate, never the user (the user 2026-10-08)", () => {
+  // the kernel stamps interruptCause "spend" + interruptSpend from the guard's own message
+  // (tests/test_spend_guard_chat.py); the seam and its compact-mode brief read the same gist
+  assert.match(R, /cause === "spend" && spend \? `stopped by the spend guard at \$\$\{spend\.rate\} an hour`/);
+  assert.match(R, /gist: interruptGist\(cause, spend\), cls: "turn-interrupt",\s*sev: cause === "spend" \? "warn" : undefined,/);
+  assert.match(R, /gist: interruptGist\(\(ev as any\)\.interruptCause, \(ev as any\)\.interruptSpend\)/);
+  assert.match(R, /romp's spend guard stopped this turn: the session was spending about \$\$\{spend\.rate\} an hour, over the \$\$\{spend\.ceiling\} an hour ceiling/);
+});
+
 test("a card anchored at a DROPPED settle's uuid lands on the seam that replaced it", () => {
   // A machine-cut turn's settle event is dropped server-side (tests/test_interrupt_settle_machine_cut.py),
   // but that settle atom is the cut turn's LAST assistant atom — exactly where verdicts/cards get
