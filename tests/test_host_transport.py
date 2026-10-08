@@ -1039,7 +1039,8 @@ class BackendHostRules(unittest.TestCase):
         sb.append_state(Path(d), SID, "working")
         self._unreadable_lease(d)
         started = []
-        with mock.patch.object(sb.SdkSession, "start", lambda self: started.append(self.sid)):
+        with mock.patch.object(sb.SdkSession, "start", lambda self: started.append(self.sid)), \
+             mock.patch.object(be, "_lease_watch_start", lambda: None):   # the deferral watch is driven by hand below
             be._boot_reconcile([dict(reg)])
         after = sb.read_reg(Path(d), SID) or {}
         self.assertEqual(after.get("queue") or [], [], "no restart notice for a turn a host may still be running")
@@ -1159,6 +1160,176 @@ class BackendHostRules(unittest.TestCase):
         self._unreadable_lease(d)
         self.assertIsNone(be._session_cli_pid(types.SimpleNamespace(sid=SID, name="web")))
         self._said_once(be)
+
+    # ── a damaged lease nobody rewrites is a stale lease (the review of #150): the heartbeat rule, read off the file ──
+    def _age(self, d, seconds, sid=SID):
+        """Set the lease file's mtime `seconds` into the past: the beat a holder would have rewritten it with, absent."""
+        p = sb.lease_path(d, sid)
+        t = time.time() - seconds
+        os.utime(p, (t, t))
+
+    def test_a_damaged_lease_nobody_rewrites_heals_on_the_next_connect(self):
+        """#150 refused every connect on a lease it could not read, so a damaged file with no host behind it stranded its
+        session: the refusal on every Retry, and nothing ever replaced the file (the launch's write had, before #150). A
+        live holder rewrites its lease every LEASE_HEARTBEAT_S; one that has gone LEASE_TTL_S without a rewrite has none,
+        so it takes a stale lease's road: with no host directory a kernel's ('none'), the launch that replaces the file."""
+        for setting in ("off", "on"):
+            with self.subTest(setting=setting):
+                d, be = self._be()
+                Path(d, "session-hosts").write_text(setting)
+                sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID})
+                self._unreadable_lease(d)
+                self._age(d, sb.LEASE_TTL_S + 5)
+                s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False,
+                                          _seed_for_dead_cli=lambda cli: None)
+                self.assertFalse(be._lease_survives(SID, if_unreadable=True), "a stale lease holds no host")
+                class Spawned(Exception):
+                    pass
+                def spawn_spec(*a, **k):
+                    raise Spawned()
+                with mock.patch.object(ht, "spawn_spec", spawn_spec):
+                    if setting == "off":
+                        self.assertIsNone(asyncio.run(be._host_transport_for(s, types.SimpleNamespace(), (None, None, None))),
+                                          "the kernel child's road, whose lease write replaces the file")
+                    else:
+                        with self.assertRaises(Spawned, msg="a fresh host is spawned, and its lease replaces the file"):
+                            asyncio.run(be._host_transport_for(s, types.SimpleNamespace(), (None, None, None)))
+                said = [m for m in be._test_logs if "cannot read the session host's lease" in m]
+                self.assertEqual(len(said), 1, be._test_logs[-6:])
+                self.assertIn("has not been rewritten for", said[0])
+                self.assertIn(str(sb.lease_path(d, SID)), said[0], "the row names the file")
+                self.assertEqual([r.get("key") for r in be.problems()], [("lease-stale", SID)], "said once, as a problem")
+
+    def test_a_stale_damaged_lease_of_a_host_walks_the_orphan_road_and_waits_for_its_cli(self):
+        """With the session's host directory there a host held the lease, so its stale road is the orphan road: the
+        journal's tail replayed, the lease and the directory cleared. The lease names no CLI to wait for, so the CLI this
+        kernel acknowledged from that very host's hello (hostAck, when it names the host identity.json names) is waited
+        for: never a second CLI beside one still finishing its turn."""
+        d, be = self._be()
+        Path(d, "session-hosts").write_text("off")
+        hd = ht.host_dir(d, SID)
+        hd.mkdir(parents=True)
+        (hd / "identity.json").write_text(json.dumps({"pid": 999999996, "start": "2"}))
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID,
+                                    "hostAck": {"host": "999999996:2", "cli": "999999997:1", "offset": -1}})
+        self._unreadable_lease(d)
+        self._age(d, sb.LEASE_TTL_S + 5)
+        alive = {999999997: "1"}
+        sleeps = []
+        async def sleep(t):
+            sleeps.append(t)
+            if len(sleeps) == 2:
+                alive.clear()                                  # the dead host's CLI finishes its turn and exits
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False,
+                                  _seed_for_dead_cli=lambda cli: None)
+        self.assertTrue(be._host_lease_applies(s))
+        with mock.patch.object(sb, "proc_start", lambda p, run=None: alive.get(p)), mock.patch.object(sb.asyncio, "sleep", sleep):
+            out = asyncio.run(be._host_transport_for(s, types.SimpleNamespace(), (None, None, None)))
+        self.assertIsNone(out)
+        self.assertEqual(len(sleeps), 2, "waited for the acknowledged CLI's exit")
+        self.assertFalse(sb.lease_path(d, SID).exists(), "the damaged lease is cleared")
+        self.assertFalse(hd.exists(), "and the dead host's directory")
+        self.assertIn("host.died", self._kinds(d))
+
+    def test_a_fresh_damaged_lease_still_refuses_and_says_where_and_what_to_do(self):
+        """While the file was rewritten within LEASE_TTL_S a live host may hold the CLI: #150's refusal stands, and its card
+        names the file and the remedy (a retry once nobody has rewritten it for LEASE_TTL_S; ending the session when
+        something keeps rewriting it)."""
+        d, be = self._be()
+        Path(d, "session-hosts").write_text("off")
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "alive": True, "lastSid": SID})
+        self._unreadable_lease(d)
+        s = types.SimpleNamespace(sid=SID, name="web", _host_intent=True, _host=None, _host_is_attach=False,
+                                  _seed_for_dead_cli=lambda cli: None)
+        with self.assertRaises(sb.CLIConnectionErrorLike) as cm:
+            asyncio.run(be._host_transport_for(s, types.SimpleNamespace(), (None, None, None)))
+        text = str(cm.exception)
+        self.assertIn(str(sb.lease_path(d, SID)), text)
+        self.assertIn("treated as stale", text)
+        self.assertIn("ending the session stops the host", text)
+        row = [m for m in be._test_logs if "cannot read the session host's lease" in m]
+        self.assertEqual(len(row), 1)
+        self.assertIn(str(sb.lease_path(d, SID)), row[0])
+        self.assertIn("ending the session stops the host", row[0])
+
+    def test_the_episode_says_a_fresh_lease_once_and_its_turning_stale_once(self):
+        """The fresh row says what turns it stale; the turn itself is a plain line, once; reading again ends the episode."""
+        d, be = self._be()
+        self._unreadable_lease(d)
+        for _ in range(3):
+            self.assertEqual(be._host_lease(SID, if_unreadable="unreadable")[1], "unreadable")
+        self._age(d, sb.LEASE_TTL_S + 5)
+        for _ in range(3):
+            self.assertEqual(be._host_lease(SID, if_unreadable="unreadable")[1], "none", "stale, and no host directory")
+        self.assertEqual(be._end_host_by_lease(SID), False, "no end sent into a socket nobody serves")
+        logs = be._test_logs
+        self.assertEqual(sum("cannot read the session host's lease" in m for m in logs), 1, logs)
+        self.assertEqual(sum("treated as a stale lease, which the session's next start replaces" in m for m in logs), 1, logs)
+        self.assertEqual([r.get("key") for r in be.problems()], [("lease-unreadable", SID)], "one problem row for the file")
+        self._host_lease(d)
+        be._host_lease(SID, if_unreadable="unreadable")
+        self.assertEqual(sum("lease reads again" in m for m in logs), 1)
+
+    # ── a boot decision a lease could not settle is taken again when it settles (the review of #150, item 3) ──
+    def _deferred_boot(self, d, be, state="working"):
+        reg = {"sid": SID, "name": "web", "cwd": d, "alive": True, "lastSid": SID, "queue": []}
+        sb.write_reg(Path(d), SID, reg)
+        sb.append_state(Path(d), SID, state)
+        self._unreadable_lease(d)
+        watch = []
+        with mock.patch.object(sb.SdkSession, "start", lambda self: None), \
+             mock.patch.object(be, "_lease_watch_start", lambda: watch.append(1)):
+            be._boot_reconcile([dict(reg)])
+        self.assertIn(SID, be._lease_deferred, "left down, deferred on its lease")
+        self.assertEqual(watch, [1], "the boot starts the deferral watch (driven by hand here)")
+
+    def test_a_lease_that_reads_again_after_the_boot_attaches_its_live_host(self):
+        """A lease that failed to read for a moment at the boot left a live host's session down, and nothing attached it
+        when the lease read again a beat later. The deferral watch reads it again and takes the boot's decision: an attach."""
+        d, be = self._be()
+        Path(d, "session-hosts").write_text("off")
+        self._deferred_boot(d, be)
+        ensured = []
+        with mock.patch.object(be, "_ensure", lambda sid, **k: ensured.append(sid)):
+            self.assertEqual(be._lease_deferral_once(), 1, "still unreadable and fresh: still deferred")
+            self.assertEqual(ensured, [])
+            self._host_lease(d)                                      # the host's next beat rewrites it, readable
+            with mock.patch.object(sb, "proc_start", lambda p, run=None: {999999997: "1", 999999996: "2"}.get(p)):
+                self.assertEqual(be._lease_deferral_once(), 0)
+        self.assertEqual(ensured, [SID], "attached")
+        self.assertIn(SID, be._boot_attach_sids, "as the boot's own re-attach")
+        self.assertEqual((sb.read_reg(Path(d), SID) or {}).get("queue") or [], [], "no restart notice: the host kept the turn")
+        slept = []
+        be._lease_deferral_loop(sleep=slept.append)                    # nothing deferred: one pass, and the watch exits
+        self.assertEqual(slept, [sb.LEASE_HEARTBEAT_S])
+
+    def test_the_deferral_watch_starts_once_and_only_with_something_deferred(self):
+        import threading
+        d, be = self._be()
+        gate, runs = threading.Event(), []
+        with mock.patch.object(be, "_lease_deferral_loop", lambda: (runs.append(1), gate.wait(5))):
+            be._lease_watch_start()
+            self.assertIsNone(be._lease_watch_thread, "nothing deferred: no watch")
+            be._lease_defer(SID, {SID: {}}, 0, None, [])
+            be._lease_watch_start()
+            be._lease_watch_start()                                  # one watch while one runs
+            gate.set()
+            be._lease_watch_thread.join(5)
+        self.assertEqual(runs, [1])
+
+    def test_a_lease_that_goes_stale_after_the_boot_resumes_the_cut_turn(self):
+        """No host rewrites the lease, so after LEASE_TTL_S it is stale and the boot's decision is the stale road's: the cut
+        turn resumes with its notice and its machine-cut stamp."""
+        d, be = self._be()
+        Path(d, "session-hosts").write_text("off")
+        self._deferred_boot(d, be)
+        self._age(d, sb.LEASE_TTL_S + 5)
+        ensured = []
+        with mock.patch.object(be, "_ensure", lambda sid, **k: ensured.append(sid)):
+            self.assertEqual(be._lease_deferral_once(), 0)
+        self.assertEqual(ensured, [SID])
+        self.assertEqual((sb.read_reg(Path(d), SID) or {}).get("queue"), [sb.BOOT_RESUME_NUDGE], "the restart notice")
+        self.assertIn("machineCut", (Path(d) / "states" / (SID + ".jsonl")).read_text())
 
     def test_two_automatic_messages_with_the_same_words_are_both_queued(self):
         # the fourth item: a by-text dedupe dropped a legitimately repeated notice and reported it accepted
