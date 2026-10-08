@@ -227,6 +227,7 @@ function liftPatch(): (hooks: FootHooks) => Patch {
     const eventEpoch = (ev) => (ev.t == null ? null : ev.t);
     const itemFirstEvent = (it) => (it.kind === "toolgroup" || it.kind === "retrygroup" ? it.indices[0] : it.index);
     const elapsedFooter = (secs) => { const f = new H.FakeEl("div", "turn-elapsed"); f.textContent = String(secs); return f; };
+    const turnThoughtTokens = () => null;                  // the footer's thinking total (live-status.ts), executed in its own test
     const openFolds = H.open || new Set();                 // the expanded runs, by key
     const toolGroupKey = (first) => "tg:" + first.t;
     const noticeGroupKey = (first) => "ng:" + first.t;

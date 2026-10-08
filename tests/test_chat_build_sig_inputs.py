@@ -173,6 +173,8 @@ CENSUS = {
     "_split_reminders": ("pure", "over a text"),
     "_stamp_agents": ("sig", "taskout", "the sidecar directory and each agent transcript it reads are taskout deps (stat'd before the read, re-stat'd per cycle); the task scan is over the transcript, the liveness gate over the row and the spawn epoch (row, reg, gone)"),
     "_stamp_interrupt_causes": ("pure", "over the events"),
+    "_thought_tokens": ("pure", "over one record's message (its id and usage) and the build's own set of credited ids"),
+    "_stamp_running_tools": ("pure", "over the tail events, the last turn's index and whether the row reads working (the parse and the row, both components)"),
     "_stat_key": ("sig", "cleared", "cleared.jsonl's identity, the ledger memo's key beside the set _cleared_ids reads"),
     "_strip_hook_notices": ("pure", "over a text"),
     "_strip_fork_opener": ("pure", "over a text"),
@@ -392,7 +394,11 @@ def _unkeyed_field_permits():
     key = (span(km._chat_sig_deps)[1], span(km._chat_build_sig)[1])
     gate = next(((i, i + 1) for i, l in enumerate(text.split("\n"), 1) if l.startswith("_JOBS_GATE_ROW_FIELDS = (")), None)
     ctx = (key, span(km._compact_suggest_tick), span(km.Sessions.live)) + ((gate,) if gate else ())
-    return text, {"lastTool": (key,), "ctxTokens": ctx}
+    # the live-status fields (2026-10-08): read by the liveStatus frame's builder, which is no chat build (the page paints
+    # it without one), and thinkingLive written by the merge
+    live = span(km._live_status_frame)
+    return text, {"lastTool": (key, live), "ctxTokens": ctx, "thinkingLive": (key, live, span(km.Sessions.live)),
+                  "agentProgress": (key, live)}
 
 
 class Census(unittest.TestCase):
@@ -463,14 +469,14 @@ class Census(unittest.TestCase):
         reader, a tick, not a build), in Sessions.live (the merge that writes it) or on the line of the jobs pass's
         gate's row fields (which observe that tick's input on the jobs thread). _interrupting reads snapT and
         interrupting by design and is folded under clock; it is deliberately not among the readers."""
-        self.assertEqual(km._CHAT_ROW_UNKEYED, {"snapT", "interrupting", "ctxTokens"})
-        self.assertEqual(km._CHAT_TASK_ROW_UNKEYED, {"lastTool"})
+        self.assertEqual(km._CHAT_ROW_UNKEYED, {"snapT", "interrupting", "ctxTokens", "thinkingLive"})
+        self.assertEqual(km._CHAT_TASK_ROW_UNKEYED, {"lastTool", "agentProgress"})
         readers = (km.build_session, km._light_status, km._session_chip, km._bg_live_norm, km._bg_tasks,
                    km._agent_alive, km._awaiting_live_rows, km._session_background_items, km._model_pending_now,
                    km._compacting, km._session_backend, km._session_retrying)
         for f in readers:
             own = ast.parse(textwrap.dedent(inspect.getsource(f)))
-            for k in ("ctxTokens", "lastTool"):
+            for k in ("ctxTokens", "lastTool", "thinkingLive", "agentProgress"):
                 self.assertFalse(_key_reads(own, k),
                                  "%s is dropped from the row component, so no chat reader may name it as a key; %s does"
                                  % (k, f.__name__))
@@ -486,6 +492,10 @@ class Census(unittest.TestCase):
         self.assertEqual(sorted(_reads_outside(tree, "ctxTokens", permits["ctxTokens"])), [],
                          "ctxTokens is named as a key beyond the projection, the key, the compaction tick, the merge writing it "
                          "and the gate's row fields")
+        for k in ("thinkingLive", "agentProgress"):
+            self.assertEqual(sorted(_reads_outside(tree, k, permits[k])), [],
+                             "%s is named as a key beyond the projection, the key, the liveStatus frame's builder and the merge: "
+                             "a chat reader there would serve a stale payload under an unchanged key" % k)
 
     def test_the_read_census_counts_reads_not_mentions(self):
         """The census behind the previous test tells a read from prose (2026-09-21). A synthetic body first: the helper

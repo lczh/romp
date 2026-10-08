@@ -35,6 +35,9 @@ export function installDomHelpers(proto: any): void {
 // one of the panel's (so callers can ignore the rest of the host chatter).
 export function dispatchFrame(panel: any, m: any): boolean {
   if (!m || !panel) return false;
+  // a new socket (a kernel restart) or a remote host's return drops the live status the old one carried: no return, so a
+  // wsup still reaches refreshModels below (the kernel's inline boot carries the same line, the pinned pair)
+  if ((m.type === "wsup" || m.type === "hostUp") && panel.liveStatusReset) panel.liveStatusReset(m.type === "hostUp" ? (m.hosts || []) : null);
   if (m.type === "data") { panel.update(m.data); return true; }
   if (m.type === "bars" && panel.applyBars) { panel.applyBars(m); return true; }
   if (m.type === "activeChat" && panel.setActiveChat) { panel.setActiveChat(m.activeChat); return true; }
@@ -63,6 +66,9 @@ export function dispatchFrame(panel: any, m: any): boolean {
   // kernel's answer to an op it does not know — a refusal of that write, and the cap is withdrawn
   if (m.type === "caps" && panel.setCaps) { panel.setCaps(m); return true; }
   if (m.type === "unknownOp" && panel.unknownOp) { panel.unknownOp(m); return true; }
+  // what a session is doing this second (kernel _live_status_frame, 2026-10-08): a thinking stretch makes its lane's
+  // working chip read "Thinking · 14s", counted by the view itself
+  if (m.type === "liveStatus" && panel.liveStatus) { panel.liveStatus(m); return true; }
   // the viewer's ARRANGEMENT and FOLDS the kernel keeps (2026-09-23), the two halves of the viewOrder frame, each read
   // only when the frame carries it. The arrangement: heard here, which is what lets a lane drag in this webview be
   // published at all (view-order.ts hearSharedOrder: a drag made before it lands over the kernel's list, and the

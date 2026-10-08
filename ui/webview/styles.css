@@ -659,7 +659,10 @@ body.tabbar-resizing { cursor: ns-resize; user-select: none; }
 .tab.ring-waiting-on-you { outline: 2px dashed var(--st-needs-bg); outline-offset: -2px; }
 /* WORKING: a small yellow dot left of the name (replaces the old yellow outline). */
 .tab-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--st-working-bg); }   /* solid — dot oscillation was distracting (the user 2026-06-16) */
-.tab-dot.await { background: var(--st-awaitbg-bg); }   /* awaiting-bg: the dot matches the await-green chip (the user 2026-07-13) */
+.tab-dot.await { background: var(--st-awaitbg-bg); }
+/* thinking (the liveStatus frame): the working dot wears a thin ring of its own gold, a static SHAPE cue (the dot's
+   oscillation was dropped as distracting, 2026-06-16); an outline, so the tab's width never moves (2026-10-08) */
+.tab-dot.thinking { outline: 1.5px solid color-mix(in srgb, var(--st-working-bg) 55%, transparent); outline-offset: 1.5px; }   /* a soft ring: borders stay at ~55% of their colour (the UI taste rule) */   /* awaiting-bg: the dot matches the await-green chip (the user 2026-07-13) */
 /* CONCEDED (recorded, not fixed): TWO same-shape dot pairs cannot clear the categorical floors and have no shape apart
    (both filled discs), both PRE-EXISTING misses kept on the user's decision. Dark working GOLD vs awaiting GREEN: 18.4
    full colour, 4.2 under the protan deficiency (below the floor 8). Light working GOLD vs opening ACCENT: 12.7 full, 2.4
@@ -2655,6 +2658,8 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 
 /* ---------- thinking ---------- */
 .thinking { color: var(--dim); font-style: italic; }
+/* "Thought · 2.5k tokens" over a thinking row: the exact per-message figure, upright beside the italic thought (2026-10-08) */
+.think-tokens { color: var(--dim); font-size: 0.86em; margin-bottom: 1px; }
 .thinking.encrypted { opacity: 0.65; }
 .thinking:not(.encrypted) { white-space: pre-wrap; overflow-wrap: anywhere; }
 
@@ -2736,6 +2741,12 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
    flows at the BOTTOM of the chat, scrolling WITH the history — no fixed region, no separate scrollbar, so a
    tall picker never hides the context above it. The .ask-live card centers itself in the chat column. */
 #live-ask { padding-bottom: 6px; }
+/* the transcript's foot line (2026-10-08): "Thinking · 14s" where the reply will appear. A FIXED height whether or not it
+   shows anything, so a stretch starting or ending moves nothing on screen (render.ts liveStatusEl); laid out like a
+   thread, the line's text on the turns' text column (.turn padding-left 24px) */
+#live-status { max-width: var(--chat-col); margin: 0 auto; padding: 0 24px 0 56px; height: 18px; position: relative; }
+.live-thinking { padding-left: 24px; display: flex; align-items: center; gap: 7px; height: 18px; color: var(--dim); font-size: 0.86em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; }
+.live-thinking.quiet .meta-dots i { animation: none; opacity: 0.35; }   /* silent stream: still dots, never a spinner past what the frames proved */
 .ask-live {
   max-width: var(--chat-col); margin: 8px auto 6px; padding: 10px 13px;
   border-color: var(--st-awaiting-bg);
@@ -2890,6 +2901,10 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
    it stays right-justified past this. */
 /* a persistent DOTTED underline marks the clickable "12 lines" / "+5 −0" / "prompt" expander as a
    link (the user 2026-06-15: make what's clickable obvious); it goes solid on hover. */
+/* a running tool's elapsed time and a running subagent's progress, the head's dim secondary text (2026-10-08) */
+.tool-elapsed { flex: 0 0 auto; color: var(--dim); font-size: 0.86em; font-variant-numeric: tabular-nums; }
+.agent-live { color: var(--dim); font-size: 0.86em; }
+.agent-live:empty { display: none; }
 .tool-fold-toggle { flex: 0 0 auto; cursor: pointer; color: var(--dim); font-size: 0.86em; user-select: none; text-decoration: underline dotted; text-underline-offset: 2px; }
 .tool-fold-toggle:hover { color: var(--fg); text-decoration: underline; }
 .turn-tool .tool-fold-body { display: none; }

@@ -77,6 +77,25 @@ test("dispatchFrame routes kernel frames to the panel", () => {
     "both acks land on the one panel door; caps and unknownOp on their own");
 });
 
+test("dispatchFrame routes a liveStatus frame to the panel, and both boots carry the arm (2026-10-08)", () => {
+  const got: any[] = [];
+  assert.equal(dispatchFrame({ update() {}, liveStatus: (m: any) => got.push(m.id) }, { type: "liveStatus", id: "api", thinking: { t: 1 } }), true);
+  assert.deepEqual(got, ["api"]);
+  assert.equal(dispatchFrame({ update() {} }, { type: "liveStatus", id: "api" }), false, "an older view without the method is skipped");
+  const bootStart = KERNEL.indexOf("_TIMELINE_BOOT = ");
+  const boot = KERNEL.slice(bootStart, KERNEL.indexOf('"""', bootStart + 60));
+  assert.match(boot, /else if\(m\.type==="liveStatus"&&panel\.liveStatus\)panel\.liveStatus\(m\);/, "the browser's inline twin");
+  // a new socket or a returning host drops what the old one showed, ahead of the chain so wsup still re-reads the models
+  const resets: any[] = [], models: any[] = [];
+  const panel = { update() {}, liveStatusReset: (h: any) => resets.push(h), refreshModels: () => models.push(1) };
+  assert.equal(dispatchFrame(panel, { type: "wsup" }), true);
+  dispatchFrame(panel, { type: "hostUp", hosts: ["far"] });
+  assert.deepEqual(resets, [null, ["far"]]);
+  assert.equal(models.length, 1, "the reconnect frame still re-reads the model list");
+  assert.match(boot, /if\(\(m\.type==="wsup"\|\|m\.type==="hostUp"\)&&panel\.liveStatusReset\)panel\.liveStatusReset\(m\.type==="hostUp"\?\(m\.hosts\|\|\[\]\):null\);\nif\(m\.type==="data"\)/,
+    "the browser's inline twin, ahead of its chain");
+});
+
 test("dispatchFrame tolerates a panel without the optional methods", () => {
   const panel = { update: () => {} };
   assert.equal(dispatchFrame(panel, { type: "bars" }), false);

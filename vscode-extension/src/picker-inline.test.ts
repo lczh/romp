@@ -19,7 +19,9 @@ test("#live-ask lives INSIDE #content in the skeleton (both the VS Code body and
 });
 
 test("new threads insert BEFORE the picker so it stays the last child of #content", () => {
-  assert.match(SRC, /content\?\.insertBefore\(elv, document\.getElementById\("live-ask"\)\)/);
+  // …and before the live-status foot line when it exists (2026-10-08), which itself sits just above the picker
+  assert.match(SRC, /content\?\.insertBefore\(elv, document\.getElementById\("live-status"\) \|\| document\.getElementById\("live-ask"\)\)/);
+  assert.match(SRC, /content\.insertBefore\(n, document\.getElementById\("live-ask"\)\);/);
 });
 
 test("renderLiveAsk keeps the picker last and reveals it when the user is parked at the bottom", () => {

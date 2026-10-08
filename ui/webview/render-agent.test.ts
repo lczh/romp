@@ -87,6 +87,9 @@ test("a still-running agent (dispatched, no report yet) reads as RUNNING — amb
   // mirrors the TUI's clearer running/done split: an Agent/Task with no output yet is still going, so it gets
   // a solid amber working dot instead of the green success dot.
   assert.match(RENDER, /const agentRunning = \(ev\.name === "Task" \|\| ev\.name === "Agent"\) && !ev\.output && !ev\.isError;/);
-  assert.match(RENDER, /dot\(ev\.isError \? "ring" : agentRunning \? "working" : "green"\)/);
+  // since 2026-10-08 the kernel's `running` stamp (a waiting tool in the live turn, any tool) decides first, and the
+  // agent rule is the fallback for an unstamped event from an older kernel
+  assert.match(RENDER, /const running = ev\.running \?\? agentRunning;/);
+  assert.match(RENDER, /dot\(ev\.isError \? "ring" : \(running \|\| ev\.agentRunning\) \? "working" : noResult \? "ring" : "green"\)/);
   assert.match(CSS, /\.dot\.working \{ background: var\(--st-working-bg\)/);
 });

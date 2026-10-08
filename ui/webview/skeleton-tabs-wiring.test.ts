@@ -344,6 +344,7 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
     const setTip = () => {}, countTip = () => "", jumpCommand = (m) => "chat." + m;
     const jcButtons = { prevMine: {}, nextMine: {}, prevComment: {}, nextComment: {}, prevUnread: {}, nextUnread: {} };
     const placeReviveLoader = () => {}, notifyActive = () => {}, renderLedger = () => {}, renderLiveAsk = () => {}, renderBgTasks = () => {}, renderNotices = () => {}, renderSubHead = () => {}, updateStatusline = () => {};
+    const paintLiveThinking = () => {};   // the transcript's foot line (live-status.ts): a fixed-height box, no chip reads it
     // the unfocused body's painter and the box's name overlay (T357): inert here, the strip test is about the chips
     const paintEmptyState = () => {}, syncComposerPh = () => {}, order = [];
     // the section-at-a-glance view, inert: no section shows (snapView null), so showActive's branch is not taken

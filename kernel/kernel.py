@@ -24497,6 +24497,9 @@ class Sessions:
                                 "relaunchCuts": st.get("relaunchCuts") or "",   # …and what Apply now would end to push it through ("" when nothing)
                                 "color": (st.get("color") or None), "mode": st.get("mode", ""), "backend": "sdk",
                                 "subagents": st.get("subagents") or [],   # live Task subagents (SDK only) → lane pill
+                                # a thinking stretch streaming now ({"t", "quiet"?}, sdk_backend _thinking_row) → the
+                                # liveStatus frame's "Thinking · 14s" label only; no build reads it (_CHAT_ROW_UNKEYED)
+                                "thinkingLive": st.get("thinkingLive") or None,
                                 # live BACKGROUND TASKS (the CLI's task lifecycle stream) — the awaiting
                                 # source 0.5, the #bg-tasks live gate, and the nudge gate all read this off
                                 # the merged map. Omitting it here was the 2026-07-11 nimbus bug: the
@@ -36225,6 +36228,38 @@ def _stamp_agents(by_tool, scan_path, tm, spawned_at, meta_path=None):
     return out
 
 
+def _thought_tokens(msg, seen):
+    """The exact thinking tokens of the API message `msg` belongs to (its usage.output_tokens_details.thinking_tokens,
+    the figure the CLI writes on every record of the message), for the FIRST thinking row of that message only: `seen`
+    holds the message ids already credited, so a message whose thinking came as two blocks is counted once. 0 when the
+    record carries no id (a live stream atom, ahead of its record; an older transcript) or no positive figure: the row
+    then says nothing rather than a guess (the stream's own thinking_tokens frames are estimates, up to 2x off)."""
+    mid = msg.get("id") if isinstance(msg, dict) else None
+    if not isinstance(mid, str) or not mid or mid in seen:
+        return 0
+    seen.add(mid)
+    det = ((msg.get("usage") or {}).get("output_tokens_details") or {}) if isinstance(msg.get("usage"), dict) else {}
+    n = det.get("thinking_tokens") if isinstance(det, dict) else None
+    return n if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
+
+
+def _stamp_running_tools(tail, last_turn, turn_live):
+    """Post-pass over one build's TAIL events (2026-10-08): every tool event still waiting for its result (no
+    tool_result paired, no error, not a background agent the bg pass already called running) is stamped `running`:
+    True when it sits in the session's last turn while that turn is live (the backend's row reads working: the CLI is
+    in the turn now), False otherwise: a tool whose result can no longer come (its CLI died, the kernel cut the turn) or
+    whose turn is parked on the person (a permission prompt) is not running, whatever it waits for. The client draws a
+    running tool with the working dot and its elapsed time from the tool call's own stamp, and only then; an unstamped
+    event (an older kernel) keeps the old look. Its inputs are the parse (a result landing is a transcript or live-tail
+    change) and the row's state, both already chat-build key components, so the flag moves only with a build that runs
+    anyway. The sealed prefix is never written: an ended turn is never the last one, so a sealed tool was stamped False
+    the build it sealed in."""
+    for ev in tail:
+        if ev.get("kind") != "tool" or ev.get("resultUuid") or ev.get("isError") or ev.get("agentRunning"):
+            continue
+        ev["running"] = bool(turn_live and last_turn >= 0 and ev.get("turn") == last_turn)
+
+
 def _chat_agent_open_at(events, lo):
     """Index of the first RUNNING Agent card at/after `lo` — a launch turn the chat fold must not seal
     while the agent runs (its preview and eventual report are rebuilt live in the tail). None when every
@@ -39363,9 +39398,13 @@ def _chat_sig_deps(sid, deps):
 # since). A field the build READS is never listed here: an unread field left in costs one byte-identical rebuild per
 # cycle it moved in, which /perf's builds.chat.bg_miss.row shows; a read field dropped would serve a stale payload
 # silently (the memo rule in _chat_build_sig's docstring). tests/test_chat_build_sig_inputs.py pins both sets and that
-# the kernel reads neither dropped field.
-_CHAT_ROW_UNKEYED = frozenset(("snapT", "interrupting", "ctxTokens"))
-_CHAT_TASK_ROW_UNKEYED = frozenset(("lastTool",))
+# the kernel reads neither dropped field. Since 2026-10-08 the live-status fields join them, each read by the liveStatus
+# frame alone (_live_status_frame, which the page paints without a chat build): the row's thinkingLive (a thinking
+# stretch's start and quiet stamps, which move at its start, its silence and its end) and, per task row, agentProgress
+# beside lastTool (the subagent's tool-call and token counts from task_progress usage, the CLI's one-line summary), which
+# moves with every progress frame.
+_CHAT_ROW_UNKEYED = frozenset(("snapT", "interrupting", "ctxTokens", "thinkingLive"))
+_CHAT_TASK_ROW_UNKEYED = frozenset(("lastTool", "agentProgress"))
 
 
 def _chat_row_sig(tm):
@@ -44771,6 +44810,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                       _compacting(sid, (tm0 or {}).get("state", ""), parsed, now, (tm0 or {}).get("since")))
     session = parsed if path_override else _merge_live_atoms(parsed, sid, shown_texts=queued, live=_live_snap)
     events, by_tool = [], {}                  # by_tool: tool_use_id → its tool event (fill output later)
+    _thought_mids = set()                     # API message ids whose thinking tokens a row already carries (_thought_tokens)
     uuid2seg, seg_anchors = {}, {}            # atom uuid → seg id; seg id → (promptId, workId) for the dot/bar split
     seg_trig, seg_work = {}, {}               # goal-node DEEP-LINK anchors: prompt = the segment's trigger
     _bs_store, _bs_fault = jd.load_goals_shared_or_fault(sid)   # seam-aware seg ids (mirror the judge's split):
@@ -45365,9 +45405,13 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                         # no text. A block with a signature AND text is a summary (the SDK's display
                         # "summarized", requested when the thinking-summaries toggle is on) and renders
                         # its text; the old signature-only rule hid every summary (2026-09-01).
-                        events.append({"kind": "thinking", "text": b.get("thinking", ""),
-                                       "encrypted": bool(b.get("signature")) and not (b.get("thinking") or "").strip(),
-                                       "uuid": a.get("uuid"), "ts": ts})
+                        _tev = {"kind": "thinking", "text": b.get("thinking", ""),
+                                "encrypted": bool(b.get("signature")) and not (b.get("thinking") or "").strip(),
+                                "uuid": a.get("uuid"), "ts": ts}
+                        _tk = _thought_tokens(msg, _thought_mids)
+                        if _tk:
+                            _tev["thinkTokens"] = _tk
+                        events.append(_tev)
                     elif b.get("type") == "text" and b.get("text", "").strip():
                         txt = b["text"]
                         if a.get("command"):             # a slash command's OUTPUT (command:True on the synthetic
@@ -45531,6 +45575,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             # the lossy output-string scrape is all there is. The attach loop's authoritative fill
             # (askAnswerFilled) already handled every record that has one — never run both.
             _ask_fill_chosen(ev["askAnswer"], ev.get("output") or "")
+    _stamp_running_tools(events, (_parse_ix[-1] if _parse_ix else len(_turns) - 1) if _turns else -1,
+                         (tm0 or {}).get("state") == "working")
     events = _prefix + events                           # the sealed prefix (same dicts) + this build's tail
     _pref_ids = {id(_e) for _e in _prefix}              # the sealed dicts: read by the uuid pass below, never written
     # STREAMED events (2026-09-23): an event built from a stream atom the transcript has not recorded yet (the live tail's
@@ -58900,7 +58946,9 @@ def _client_reset_chat_base(client):
         # timeline-app clients, not chat. Only the feed page's ("feed",) and ("timelinebars",) slots ride _send_slot_delta
         # (its _DELTA_SLOTS), which pops and reads `sent` for its rebase dedup, so clearing the whole map would break that;
         # the ("timeline",) data frames are plain sends to timeline-app clients. Those are left as they are.
-        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder", "activeChat", "comments", "glossary", "working", "globalRetryPaused", "asklive")]:
+        # …and the ("liveStatus", sid) slots (2026-10-08): a renderer that just evaluated shows no live status either, so a
+        # thinking stretch already under way is sent again at the connect push instead of waiting for its next change.
+        for k in [k for k in snt if isinstance(k, tuple) and k and k[0] in ("chat", "status", "taborder", "activeChat", "comments", "glossary", "working", "globalRetryPaused", "asklive", "liveStatus")]:
             snt.pop(k, None)
 
 
@@ -59240,6 +59288,48 @@ def _send_tab_order(c, tab_order, tab_meta, live):
                 sk.discard(gone)                       #  order lacked, and the client's prefetch asked for a session
                 c.get("sent", {}).pop(("status", gone), None)   #  the kernel could never send)
         _send_client(c, ("taborder",), _tab_order_frame(tab_order, tab_meta, live, c))
+
+
+def _live_status_frame(sid, tm):
+    """One session's LIVE STATUS frame (2026-10-08): what is happening in it this second that no transcript record says
+    yet, read from its liveness row and nothing else, so a page paints it without a chat build. `thinking`: the thinking
+    stretch streaming now ({"t": its first frame, "quiet": its last frame once the stream has gone silent}, the row's
+    thinkingLive from sdk_backend _thinking_row) or None; the page counts the seconds itself. `tasks`: per running
+    subagent, keyed by the tool-use id of the call that spawned it, its last tool and its tool-call and token counts as the
+    CLI's task_progress reported them (the task row's lastTool and agentProgress). Both fields are dropped from the
+    chat-build key (_CHAT_ROW_UNKEYED, _CHAT_TASK_ROW_UNKEYED), so their churn costs this frame and no rebuild."""
+    tm = tm or {}
+    th = tm.get("thinkingLive")
+    tasks = {}
+    for t in tm.get("bgTasks") or ():
+        if not isinstance(t, dict) or not t.get("toolUseId"):
+            continue
+        p = t.get("agentProgress") if isinstance(t.get("agentProgress"), dict) else {}
+        row = {k: p[k] for k in ("calls", "tokens", "summary") if p.get(k) not in (None, "")}
+        if t.get("lastTool"):
+            row["tool"] = str(t.get("lastTool"))
+        if row:
+            tasks[str(t["toolUseId"])] = row
+    return {"type": "liveStatus", "id": sid, "thinking": dict(th) if isinstance(th, dict) else None, "tasks": tasks}
+
+
+def _send_live_status(c, sids, live_map):
+    """The liveStatus frame of each of `sids` to one client, each on its own ("liveStatus", sid) slot, deduped like every
+    slot, so an unchanged status costs a comparison and a moving one costs ~100 bytes and no build. A session with nothing
+    live is sent only to a client that was shown something for it (the frame that clears it); one never shown anything is
+    sent nothing, so a board of idle sessions puts no frame on the wire."""
+    with _client_lock(c):                                  # the dedup dict is shared with the handler thread
+        held = [k[1] for k in (c.get("sent") or {}) if isinstance(k, tuple) and len(k) == 2 and k[0] == "liveStatus"]
+    shown = set(held)
+    for sid in dict.fromkeys(list(sids) + held):   # …and every session this client was shown something for, so a session
+        #                                             that left the map (its CLI gone) still gets the frame that clears it
+        f = _live_status_frame(sid, live_map.get(sid))
+        if f["thinking"] is not None or f["tasks"]:
+            _send_client(c, ("liveStatus", sid), f)
+        elif sid in shown:
+            _send_client(c, ("liveStatus", sid), f)        # the frame that clears what the page shows…
+            with _client_lock(c):
+                c.get("sent", {}).pop(("liveStatus", sid), None)   # …and then nothing more until there is something
 
 
 def _note_needfull_status(c, sid):
@@ -64270,6 +64360,7 @@ def _push(targets, connect=False, live_map=None):
                                                          "reason": _retry_pause_reason()})   # "spend" → the card says 'raise your cap', no countdown
                 redialed = _resolve_reconnect(c, chat_list)   # a redialing page: fix its skeleton set BEFORE any strip
                 _send_tab_order(c, tab_order, tab_meta, live_map)
+                _send_live_status(c, tab_order, live_map)   # what each tab is doing this second (thinking, its subagents' progress): no build
                 if redialed:                             # the redial's first strip stands in for the ready it never posts:
                     _consume_pending_reveal(c, why="the pane's redial")   # a reveal parked for its window lands behind the strip
             active = {c.get("active") for c in chat_clients if c.get("active")}
@@ -64868,6 +64959,8 @@ def _push(targets, connect=False, live_map=None):
         tl_warming = False
         if want_tl:
             tl_clients = [c for c in targets if c["app"] == "timeline"]
+            for c in tl_clients:   # each lane's live status (a thinking stretch → its chip's "Thinking · 14s"): no build
+                _send_live_status(c, live_map, live_map)
             live_first = connect and _built_timeline[1] is None     # cold start, nothing warmed yet → live only
             if live_first:
                 # Outside any lock (round two, medium 2): the pane's FIRST frame, the live lanes skeleton, which parses nothing.
@@ -73213,6 +73306,8 @@ var s=window.__rompLocalSend;if(typeof s==="function")s(m);else api.postMessage(
 // (ui/webview/perf-telemetry.ts, published on window.__rompPerf by federation.js, which loads before this boot),
 // so each frame's handling is timed by type; without a collector the plain listener
 var onFrame=function(ev){var m=ev.data;if(!m||!panel)return;
+// a new socket (a kernel restart) or a remote host's return drops the live status the old one carried (timeline-boot.ts's dispatchFrame, the pinned pair)
+if((m.type==="wsup"||m.type==="hostUp")&&panel.liveStatusReset)panel.liveStatusReset(m.type==="hostUp"?(m.hosts||[]):null);
 if(m.type==="data")panel.update(m.data);
 else if(m.type==="bars"&&panel.applyBars)panel.applyBars(m);
 else if(m.type==="activeChat"&&panel.setActiveChat)panel.setActiveChat(m.activeChat);
@@ -73226,6 +73321,7 @@ else if(m.type==="settingRefused"&&panel.settingRefused)panel.settingRefused(m);
 else if((m.type==="tagEditAck"||m.type==="viewsAck")&&panel.viewsAck)panel.viewsAck(m);
 else if(m.type==="caps"&&panel.setCaps)panel.setCaps(m);
 else if(m.type==="unknownOp"&&panel.unknownOp)panel.unknownOp(m);
+else if(m.type==="liveStatus"&&panel.liveStatus)panel.liveStatus(m);   // a thinking stretch → the lane's "Thinking · 14s" (timeline-boot.ts's dispatchFrame, the pinned pair)
 else if(m.type==="tagEditFailed"&&panel.tagEditFailed)panel.tagEditFailed(m);
 else if(m.type==="openViewsDialog"&&panel._openViewsDialog)panel._openViewsDialog(null);};
 var frameListener=(window.__rompPerf&&window.__rompPerf.wrapFrameHandler)?window.__rompPerf.wrapFrameHandler(onFrame):onFrame;

@@ -49,8 +49,8 @@ test("the next-try countdown TICKS every second — it is not frozen at render t
   assert.match(RENDER, /function retryingTick\(\): void \{/);
   assert.match(RENDER, /querySelectorAll\("\.retrying-countdown"\)/);
   assert.match(RENDER, /cd\.textContent = retryingCountdownText\(at\)/);
-  // ONE 1s timer drives both countdowns — no second scheduler
-  assert.match(RENDER, /setInterval\(\(\) => \{ apiRetryTick\(\); retryingTick\(\); \}, 1000\)/);
+  // ONE 1s timer drives both countdowns — no second scheduler (the live-status clocks ride it too since 2026-10-08)
+  assert.match(RENDER, /setInterval\(\(\) => \{ apiRetryTick\(\); retryingTick\(\); liveStatusTick\(\); \}, 1000\)/);
   assert.doesNotMatch(RENDER, /next try in ~\$\{waitS\}s/, "the frozen render-time countdown is gone");
 });
 
