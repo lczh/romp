@@ -194,7 +194,7 @@ class RollbackAndPendingCut(unittest.TestCase):
         i_pop = BACKEND_SRC.index("dropped = self._q_pop(0)[0] if self._pending else None", i_bare)   # T252c: the queue pops through its helper
         seg = BACKEND_SRC[i_bare:i_pop]
         self.assertIn("if not bare:", seg)
-        self.assertIn("the rollback failed (the session's CLI refused it)", BACKEND_SRC)
+        self.assertIn('"the rollback failed (%s) — the conversation is unchanged" % why if bare', BACKEND_SRC)
 
     def test_settle_consume_clears_the_bare_flag_too(self):
         i = BACKEND_SRC.index("the flag is CONSUMED")
@@ -482,3 +482,71 @@ class DeleteWhileBusy(unittest.TestCase):
         self.assertIn('if getattr(self, "_rewind_wait", False):\n            try:\n'
                       '                self.backend._complete_rewind_wait(self)', BACKEND_SRC)
         self.assertIn('if self._rewind_to and getattr(self, "_rewind_wait", False):', BACKEND_SRC)
+
+
+class AFailedRewindConnectNamesItsFailure(unittest.TestCase):
+    """_rewind_failed runs for ANY connect that fails while a rewind is armed, and told the user "the session's CLI refused
+    it" whatever the failure was: a host lease that could not be read (no CLI ran at all) read as the CLI refusing the
+    rewind. It names what the connect reported, as the could-not-start card words it (launch_failure_text): the CLI's own
+    stderr when the exception defers to it (the SDK's exit error carries only a placeholder), the exception's own text
+    otherwise, never an earlier CLI's stderr for a connect that started none. EXECUTED on the real method."""
+
+    class _Backend:
+        def __init__(self):
+            self.notes, self.logs, self.resolved = [], [], []
+
+        def _update_reg(self, sid, **k):
+            pass
+
+        def _log(self, m, *a, **k):
+            self.logs.append(m)
+
+        def _notify(self, kind, payload):
+            self.notes.append(payload)
+
+        def _rewind_resolved(self, sid, how):
+            self.resolved.append(how)
+
+        def _poke(self):
+            pass
+
+    class ExitError(Exception):
+        """The SDK's ProcessError as its transport raises it when the CLI exits non-zero: the reason is on stderr."""
+        def __init__(self, code):
+            self.exit_code, self.stderr = code, sb.SDK_STDERR_PLACEHOLDER
+            super().__init__("Command failed with exit code %d (exit code: %d)\nError output: %s" % (code, code, self.stderr))
+
+    def _fail(self, exc, tail, bare):
+        import threading
+        from collections import deque
+        s = sb.SdkSession.__new__(sb.SdkSession)                # the real methods over the attrs they read
+        s.sid, s.name, s.backend = SID, "web", self._Backend()
+        s._lock = threading.Lock()
+        s._pending, s._pending_meta = ([] if bare else ["the edited message"]), ([] if bare else [None])
+        s._persist_queue = lambda: None
+        s._stderr_tail = deque(tail)
+        s._rewind_to, s._rewind_leaf, s._rewind_bare = "t1", "l1", bare
+        s._rewind_armed, s._rewind_wait = True, False
+        s._rewind_failed(exc)
+        self.assertEqual(s.backend.resolved, ["failed"])
+        self.assertFalse(s._rewind_armed or s._rewind_to, "the flag is dropped either way")
+        return s.backend.notes[0]["text"], s.backend.logs
+
+    def test_a_cli_that_exits_on_the_rewind_is_named_by_its_own_stderr(self):
+        for bare in (False, True):
+            with self.subTest(bare=bare):
+                toast, logs = self._fail(self.ExitError(1), ["No message found with message.uuid of: t1"], bare)
+                self.assertIn("No message found with message.uuid of: t1", toast)
+                self.assertIn("No message found with message.uuid of: t1", logs[-1])
+                self.assertIn("NOT sent: the edited message" if not bare else "the conversation is unchanged", toast)
+
+    def test_a_connect_that_failed_before_any_cli_ran_says_what_failed_and_not_that_the_cli_refused(self):
+        exc = sb.CLIConnectionErrorLike("cannot read the session host's lease /synthetic/leases/web.json")
+        for bare in (False, True):
+            with self.subTest(bare=bare):
+                toast, logs = self._fail(exc, ["a line an earlier CLI wrote"], bare)
+                self.assertIn("cannot read the session host's lease /synthetic/leases/web.json", toast)
+                self.assertNotIn("refused", toast)
+                self.assertNotIn("an earlier CLI", toast, "never an earlier CLI's stderr for a connect that started none")
+                self.assertIn("cannot read the session host's lease", logs[-1])
+                self.assertNotIn("refused", logs[-1])

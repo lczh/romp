@@ -8817,12 +8817,23 @@ class SdkSession:
         except Exception as e:
             self.backend._log("host (%s): stand-down state write failed: %s" % (self.name, e))
 
+    def _connect_failure_text(self, exc) -> str:
+        """What a failed connect reported, worded as the could-not-start card words it (launch_failure_text): the CLI's own
+        stderr when the exception defers to it (the SDK's exit error carries only SDK_STDERR_PLACEHOLDER, and the CLI said
+        why on stderr before it exited), the exception's own text otherwise. A connect that failed before any CLI ran (a
+        host lease that cannot be read, a missing binary) is never worded from the stderr an earlier CLI left behind."""
+        defers = SDK_STDERR_PLACEHOLDER in str(getattr(exc, "stderr", "") or "")
+        return launch_failure_text(exc, self.stderr_tail() if defers else "")
+
     def _rewind_failed(self, exc):
-        """The CLI refused a rewind connect. Drop the one-shot flag (never re-offer a target the CLI just
-        refused), pull the held edit turn off the queue, and surface both a warn toast (with the message
-        text, so nothing is silently lost) and a kernel-log line. The session then reconnects plainly.
-        A BARE rollback (delete) enqueued nothing — the queue's head, if any, is an unrelated held
-        message (postal etc.) that must survive and ride the un-rewound branch."""
+        """A rewind connect failed: the CLI refused the target, or the connect failed before any CLI ran (a host lease
+        that cannot be read, say). Drop the one-shot flag (never re-offer a target the CLI just refused, nor apply it
+        unasked on a later connect), pull the held edit turn off the queue, and surface both a warn toast (with the
+        message text, so nothing is silently lost) and a kernel-log line, each naming what the connect reported
+        (_connect_failure_text; "the CLI refused it" for any failure blamed the CLI for a lease it never saw). The
+        session then reconnects plainly. A BARE rollback (delete) enqueued nothing — the queue's head, if any, is an
+        unrelated held message (postal etc.) that must survive and ride the un-rewound branch."""
+        why = self._connect_failure_text(exc)
         bare = self._rewind_bare
         self._rewind_to = self._rewind_leaf = ""
         self._rewind_bare = False
@@ -8838,14 +8849,13 @@ class SdkSession:
                                      rewindWait=False)
         except Exception as e:
             self.backend._log("rewind (%s): registry clear failed: %s" % (self.name, e))
-        self.backend._log("rewind (%s): the CLI refused --resume-session-at (%s: %s) — flag dropped, "
-                          "%s" % (self.name, type(exc).__name__, exc,
-                                  "the rollback did not happen" if bare else "edited message returned to the user"))
+        self.backend._log("rewind (%s): the connect with --resume-session-at failed (%s) — flag dropped, %s"
+                          % (self.name, why, "the rollback did not happen" if bare else "edited message returned to the user"))
         try:
             self.backend._notify("chat", {"type": "warn", "text":
-                ("the rollback failed (the session's CLI refused it) — the conversation is unchanged" if bare else
-                 "the rewind failed (the session's CLI refused it) — your edited message was NOT sent%s"
-                 % ((": " + dropped) if dropped else ""))})
+                ("the rollback failed (%s) — the conversation is unchanged" % why if bare else
+                 "the rewind failed (%s) — your edited message was NOT sent%s"
+                 % (why, (": " + dropped) if dropped else ""))})
         except Exception as e:
             self.backend._log("rewind (%s): could not tell the chat the rewind failed: %s" % (self.name, e))
         # the conversation is unchanged → the kernel RESTORES the cards its gesture-time hold hid
