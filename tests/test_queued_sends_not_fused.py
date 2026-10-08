@@ -666,7 +666,8 @@ class OneFedTextAtATime(unittest.TestCase):
         c.phase = "after-result-1"
         self._result_frame(c)
         self._wait(lambda: s.inflight == 0 and s._untaken and s._untaken.get("settled"), "B's turn settled")
-        self.assertEqual(s.fed_texts(), [], "the settle cleared the twin")
+        self.assertEqual(s.fed_texts(), ["B mid-turn"], "the settle cleared the twin, and the held text is still owed: "
+                         "the CLI holds it (2026-10-08: read as owed by nothing, it was flagged never delivered)")
         c.phase = "turn-2"
         self._init(c)                                   # the drain: B's own turn begins
         self._wait(lambda: s._untaken is None and s.inflight == 1, "the drain released B's hold AND counted its turn")
@@ -1719,6 +1720,217 @@ class OneFedTextAtATime(unittest.TestCase):
             alive = [th.name for th in threading.enumerate() if th in workers]
             self.assertEqual(alive, [], "a control channel's worker is still parked after tearDown")
         self.addCleanup(no_worker_outlives_the_test)
+
+
+class LifecycleTakes(unittest.TestCase):
+    """The feed hold keyed on the CLI's OWN record of taking a text (2026-10-08): every fed text goes out under a uuid romp
+    mints, and a CLI that declares msg_lifecycle_v1 writes `command_lifecycle` frames under it; `started` is the take. What
+    went wrong without it (a session whose streaming background command queued one notification per output line): the
+    hold released at the next turn's first frame, but that turn was a notification's, queued ahead of the text; the next
+    text was fed, and the next, one per notification turn, while all of them sat in the CLI's queue. The settle cleared the
+    fed-turn twin at every result, and the CLI logs romp's sends (content blocks) without text, so once one of the person's
+    earlier messages landed as a turn of its own, every text still in the CLI's queue was owed by nothing romp could name
+    and settle_echoes flagged eight of them never delivered; they landed a minute later.
+
+    The same real inputs()/_on_message harness as OneFedTextAtATime, with a client whose raw stream (the SDK's
+    `_query.receive_messages`, which _frames reads) carries the lifecycle frames, and a stand-in for the SDK's parser."""
+
+    class _Client(OneFedTextAtATime._Client):
+        instances = []
+
+        def __init__(self, options=None, transport=None):
+            super().__init__(options, transport)
+            self.uuids = []                  # the uuid each fed text went out under
+            outer = self
+
+            class _Raw:
+                async def receive_messages(self):
+                    while True:
+                        f = await outer.frames.get()
+                        if f is _EOF:
+                            return
+                        yield f
+            self._query = _Raw()
+
+        async def query(self, prompt, session_id="default"):
+            async for turn in prompt:
+                self.writes.append((turn["message"]["content"][0]["text"], self.phase))
+                self.uuids.append(turn.get("uuid"))
+
+    _Options = OneFedTextAtATime._Options
+    for _n in ("_wait", "_settle", "_push", "_uid", "_assistant", "_result_frame", "_transcript", "_append", "_user_record",
+               "_user_frame"):
+        locals()[_n] = getattr(OneFedTextAtATime, _n)
+    del _n
+    CAPS = ["interrupt_receipt_v1", "msg_lifecycle_v1"]   # what CLI 2.1.263 and later name in every init
+
+    def setUp(self):
+        OneFedTextAtATime.setUp(self)
+        parser = types.ModuleType("claude_agent_sdk._internal.message_parser")
+        parser.parse_message = lambda data: data            # the stand-in stream carries the message doubles themselves
+        internal = types.ModuleType("claude_agent_sdk._internal")
+        internal.message_parser = parser
+        sys.modules["claude_agent_sdk"]._internal = internal
+        self._saved_parser = {k: sys.modules.get(k) for k in ("claude_agent_sdk._internal", "claude_agent_sdk._internal.message_parser")}
+        sys.modules["claude_agent_sdk._internal"], sys.modules["claude_agent_sdk._internal.message_parser"] = internal, parser
+
+    def tearDown(self):
+        OneFedTextAtATime.tearDown(self)
+        for k, v in self._saved_parser.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+    def _init(self, client, caps=CAPS):
+        data = {"model": "claude-x", "permissionMode": "acceptEdits", "session_id": FSID}
+        if caps is not None:
+            data["capabilities"] = list(caps)
+        self._push(client, _SystemMessage("init", data, uuid=self._uid()))
+
+    def _life(self, client, cu, state):
+        self._push(client, {"type": "command_lifecycle", "command_uuid": cu, "state": state, "uuid": self._uid(), "session_id": FSID})
+
+    def _first_turn(self):
+        """Connect and run a first turn the way the CLI does: the text is queued and started under its uuid, then the
+        turn's init (naming the capability) and a reply stream."""
+        s = self.s
+        s.start()
+        self._wait(lambda: s.client is not None, "the first connect")
+        c = self._Client.instances[0]
+        c.phase = "turn-1"
+        s.enqueue("first turn")
+        self._wait(lambda: len(c.writes) == 1, "the first turn fed")
+        cu = c.uuids[0]
+        self._life(c, cu, "queued")
+        self._life(c, cu, "started")
+        self._init(c)
+        self._assistant(c)
+        self._wait(lambda: getattr(s, "_untaken", None) is None and s.resume_sid == FSID, "taken on its start")
+        self._append(self._user_record("first turn"))
+        return c
+
+    def test_every_fed_text_goes_out_under_a_uuid_of_its_own_which_its_hold_names(self):
+        s = self.s
+        s.start()
+        self._wait(lambda: s.client is not None, "the first connect")
+        c = self._Client.instances[0]
+        s.enqueue("first turn")
+        self._wait(lambda: len(c.writes) == 1, "fed")
+        self.assertTrue(c.uuids[0] and c.uuids[0] == (s._untaken or {}).get("cu"), "the hold names the uuid the text went out under")
+        self._life(c, c.uuids[0], "started")
+        self._init(c)
+        self._wait(lambda: s._untaken is None and s._lifecycle is True, "taken on its start; the CLI writes lifecycle frames")
+        s.enqueue("second")
+        self._wait(lambda: len(c.writes) == 2, "fed")
+        self.assertTrue(c.uuids[1] and c.uuids[1] != c.uuids[0], "a fresh uuid per feed")
+
+    def test_a_notification_turn_starting_does_not_take_a_held_text_only_its_own_start_does(self):
+        s, c = self.s, self._first_turn()
+        self._result_frame(c)                                       # turn 1 ends
+        self._wait(lambda: s.inflight == 0, "turn 1 settled")
+        c.phase = "notif-1"
+        self._init(c)                                               # a notification's turn: the CLI opened it itself
+        self._assistant(c, "noted the tick")
+        self._wait(lambda: s.inflight == 1, "the CLI's own turn is counted")
+        s.enqueue("A sent while the ticks run")
+        s.enqueue("B behind it")
+        self._wait(lambda: len(c.writes) == 2, "A forwarded mid-turn")
+        ua = c.uuids[1]
+        self._life(c, ua, "queued")                                 # the CLI queued A behind the remaining notifications
+        self._result_frame(c)
+        self._wait(lambda: s.inflight == 0 and s._untaken and s._untaken.get("settled"), "notification 1 ended, A still held")
+        c.phase = "notif-2"
+        self._init(c)                                               # the NEXT notification's turn, not A's
+        self._assistant(c, "noted the next tick")
+        self._settle()
+        self.assertEqual(len(c.writes), 2, "a turn starting is not A's take: B is not fed into the CLI's queue behind it "
+                                           "(the base fed it here, and the next text at every notification turn after)")
+        self.assertEqual(s.pending(), ["B behind it"], "B waits in romp's queue, recallable")
+        self.assertEqual(s._untaken["cu"], ua)
+        self.assertEqual(s.fed_texts(), ["A sent while the ticks run"], "A is owed: the CLI holds it")
+        self._result_frame(c)
+        self._wait(lambda: s.inflight == 0, "notification 2 ended")
+        self.assertEqual(s.fed_texts(), ["A sent while the ticks run"], "still owed")
+        c.phase = "turn-A"
+        self._life(c, ua, "started")                                # the CLI takes A, into a turn of its own
+        self._wait(lambda: len(c.writes) == 3, "B fed once A was taken")
+        self.assertEqual(c.writes[2], ("B behind it", "turn-A"))
+        self.assertNotEqual(c.uuids[2], ua, "each text its own uuid")
+        self.assertIn("A sent while the ticks run", s.fed_texts(), "A joined the turn it started")
+
+    def test_a_held_text_is_never_flagged_never_delivered_while_the_cli_still_holds_it(self):
+        """settle_echoes reads a send as lost once a genuine-human turn stamped later than it lands while nothing owes it.
+        A text fed into a turn that ended before the CLI took it was owed by nothing: the twin was cleared at the result
+        and the CLI's queue log names none of romp's sends. Now the hold names it until the CLI's `started`."""
+        s, c = self.s, self._first_turn()
+        self.assertTrue(self.be.send(SID, "A, typed during the turn"))
+        self._wait(lambda: len(c.writes) == 2, "A forwarded mid-turn")
+        self._life(c, c.uuids[1], "queued")
+        self._result_frame(c)                                       # the turn ends before the CLI takes A
+        self._wait(lambda: s.inflight == 0 and s._untaken and s._untaken.get("settled"), "settled, A held")
+        floor = time.time() + 5                                     # an earlier message landing as its own turn, later than A's send
+        self.be.settle_echoes(SID, floor, still_queued=())
+        echo = next(a for a in self.be.live_atoms(SID) if a.get("_echo_text") == "A, typed during the turn")
+        self.assertFalse(echo.get("dropped"), "the CLI still holds A: waiting, not lost (the base flagged it here)")
+        self._life(c, c.uuids[1], "started")
+        self._wait(lambda: s._untaken is None, "A taken")
+        self.be.settle_echoes(SID, floor, still_queued=())
+        self.assertFalse(echo.get("dropped"), "in the running turn A is owed by the twin until its record lands")
+
+    def test_a_text_folded_into_the_running_turn_is_taken_at_its_start_and_the_next_follows_it(self):
+        s, c = self.s, self._first_turn()
+        s.enqueue("one more thing")
+        s.enqueue("and another")
+        self._wait(lambda: len(c.writes) == 2, "the first forwarded mid-turn")
+        self._life(c, c.uuids[1], "queued")
+        self._assistant(c, "still at it")
+        self._settle()
+        self.assertEqual(len(c.writes), 2, "queued is not taken, and a frame of the running turn proves nothing")
+        self._life(c, c.uuids[1], "started")                        # folded in at a tool boundary
+        self._wait(lambda: len(c.writes) == 3, "the next text follows it into the same turn")
+        self.assertEqual(c.writes[2], ("and another", "turn-1"))
+
+    def test_only_the_held_texts_own_uuid_releases_it(self):
+        s, c = self.s, self._first_turn()
+        s.enqueue("held")
+        s.enqueue("behind")
+        self._wait(lambda: len(c.writes) == 2, "forwarded")
+        for cu, state in ((c.uuids[0], "completed"), ("11111111-2222-4333-8444-00000000dead", "started"), (c.uuids[1], "queued")):
+            self._life(c, cu, state)
+        self._settle()
+        self.assertEqual(len(c.writes), 2, "an earlier text's terminal state, another uuid's start, and a queued: none is the take")
+        self._life(c, c.uuids[1], "refused")                        # the CLI will not run it: the hold goes all the same
+        self._wait(lambda: len(c.writes) == 3, "the next text goes in")
+        self.assertTrue(any("without running it" in l for l in self.lines), "and the log says why")
+
+    def test_a_cli_without_the_capability_keeps_the_turn_boundary_road_and_says_so_once(self):
+        s = self.s
+        s.start()
+        self._wait(lambda: s.client is not None, "the first connect")
+        c = self._Client.instances[0]
+        c.phase = "turn-1"
+        s.enqueue("first turn")
+        self._wait(lambda: len(c.writes) == 1, "fed")
+        self._init(c, caps=None)                                   # an older Claude Code: no capabilities in its init
+        self._wait(lambda: s._untaken is None and s._lifecycle is False, "the turn's first frame took it, as before")
+        self._init(c, caps=None)
+        self._settle()
+        said = [l for l in self.lines if l.startswith("lifecycle (") and "does not write them" in l]
+        self.assertEqual(len(said), 1, "said once per session")
+
+    def test_an_sdk_that_hides_the_frames_keeps_the_turn_boundary_road_and_says_so(self):
+        sys.modules.pop("claude_agent_sdk._internal.message_parser", None)   # the parser is not where it was
+        sys.modules["claude_agent_sdk"]._internal = None
+        s = self.s
+        s.start()
+        self._wait(lambda: s.client is not None, "the first connect")
+        c = self._Client.instances[0]
+        s.enqueue("first turn")
+        self._wait(lambda: len(c.writes) == 1, "fed")
+        self._init(c)                                               # the CLI declares the capability; the frames cannot be read
+        self._wait(lambda: s._untaken is None and s._lifecycle is False and s._raw_frames is False, "the turn-boundary road")
+        self.assertTrue(any(l.startswith("lifecycle (") and "SDK" in l for l in self.lines))
 
 
 if __name__ == "__main__":

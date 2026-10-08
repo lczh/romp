@@ -5932,6 +5932,36 @@ _RESTAMPS: dict = {}   # {sid: (previous spawnedAt, new)} where this process mov
 #                        seeded here, at the stamp, because at a boot the reg moves before the first build (2026-09-14)
 
 
+# The CLI's capability for `command_lifecycle` frames, named in every turn's init (`capabilities`): a user message that carries a
+# client-supplied `uuid` gets frames under that uuid as `command_uuid`, `queued` when it enters the CLI's prompt queue,
+# `started` when the CLI takes it into a turn (a turn of its own, or folded into the running one at a tool boundary), then one
+# terminal state (`completed`, `cancelled`, `discarded`, `refused`). Verified on CLI 2.1.263, 2.1.280 and 2.1.282 (2026-10-08).
+CLI_LIFECYCLE_CAP = "msg_lifecycle_v1"
+_LIFECYCLE_TAKEN = frozenset({"started", "completed", "cancelled", "discarded", "refused"})
+
+
+class CommandLifecycle:
+    """One `command_lifecycle` frame off the CLI's stdout: the CLI's own record of what happened to the queued command whose
+    uuid romp supplied (CLI_LIFECYCLE_CAP). The SDK's parser skips frame types it does not know, so SdkSession._frames reads
+    the raw stream and hands this to _on_message beside the SDK's own message classes."""
+    __slots__ = ("command_uuid", "state", "data")
+
+    def __init__(self, data: dict):
+        self.data = data
+        self.command_uuid = str(data.get("command_uuid") or "")
+        self.state = str(data.get("state") or "")
+
+
+def _sdk_parse_message():
+    """The SDK's own frame parser (what ClaudeSDKClient.receive_messages applies to each raw frame), or None when this SDK
+    does not have it where it used to be."""
+    try:
+        from claude_agent_sdk._internal.message_parser import parse_message
+        return parse_message
+    except Exception:
+        return None
+
+
 class SdkSession:
     """One long-lived SDK client running in its own thread + asyncio loop."""
 
@@ -6402,15 +6432,24 @@ class SdkSession:
         # (the pre-turn window above) or when a running turn ends, so two texts fed into it before that drain
         # reach the agent fused: one message, the first text then the second, which the chat showed as one
         # bubble wearing both (2026-09-08: a composer message and a reply sent during one open turn).
-        # inputs() therefore feeds ONE text and holds the rest until the CLI demonstrably TOOK it (the exact
-        # events are _untaken_taken's), so every queued text lands as its own record, in queue order.
+        # inputs() therefore feeds ONE text and holds the rest until the CLI demonstrably TOOK it: the CLI's
+        # `command_lifecycle` frame for THAT text (_on_command_lifecycle, keyed on the uuid romp sent with it),
+        # or, from a CLI that does not write those frames, the turn-boundary events of _untaken_taken. Every
+        # queued text so lands as its own record, in queue order.
         # RUNTIME-ONLY: a reconnect defers while a hold is live (the CLI still owes the drain;
         # _do_request_reconnect), the loop top hands any hold that reached it to the stranded reconcile, and
         # a restart re-delivers the persisted queue. None, or {"text", "item" (the queue entry itself),
-        # "fresh" (fed from idle), "settled" (the turn it was fed into has since ended), "fault" (the landing
-        # scan raised: logged once, the hold escapes on the next turn frame), "t", "off", "fsid" (the
-        # transcript mark the landing scan starts at, _transcript_mark), plus the scan's own cursor keys}.
+        # "cu" (the uuid the text was sent under, which the CLI's lifecycle frames name), "fresh" (fed from
+        # idle), "settled" (the turn it was fed into has since ended), "fault" (the landing scan raised:
+        # logged once, the hold escapes on the next turn frame), "t", "off", "fsid" (the transcript mark the
+        # landing scan starts at, _transcript_mark), plus the scan's own cursor keys}.
         self._untaken = None
+        # Does THIS connection's CLI write command_lifecycle frames romp can read? None until it says: True at its first
+        # lifecycle frame (which precedes the init of the turn it starts) or an init naming CLI_LIFECYCLE_CAP; False at an
+        # init without it, or when the SDK hides the frames (_frames). Reset per connection (the connect loop's top).
+        self._lifecycle = None
+        self._raw_frames = None            # _frames reads the raw stream (True) or only the SDK's parsed messages (False)
+        self._lifecycle_said = False       # the legacy road is reported once per session
         # A RESTORED /compact must light the compacting bracket too (the user 2026-07-22). send() sets
         # _compacting when it enqueues a compact command, but a persisted queue lands here INSTEAD of
         # going through send() — any /compact still queued when the kernel died arrives this way. Without
@@ -6642,14 +6681,24 @@ class SdkSession:
 
     def fed_texts(self) -> list[str]:
         """The texts FED to the current client whose ResultMessage has not landed (`_inflight_texts`,
-        oldest first); thread-safe. A mid-turn send lives here from the inputs() pop until the turn
-        settles: the CLI holds it, queued behind the running turn, to splice at the next tool boundary.
+        oldest first), and the held text the CLI has not yet taken (_untaken) once its turn has ended;
+        thread-safe. A mid-turn send lives here from the inputs() pop until the turn settles, or until
+        the CLI takes it when that comes later: the CLI holds it, queued behind the running turn, to
+        splice at the next tool boundary or run as a turn of its own.
         The observable twin of `inflight`, for diagnostics and tests, and since 2026-09-11 one of the
         settle's "still owed" reads (SdkBackend.settle_echoes): an echo whose text is fed and unsettled is
         waiting on the CLI, never a loss, however the transcript's floor has moved (prune_live itself still
         floors no echo — its docstring)."""
         with self._lock:
-            return list(self._inflight_texts)
+            out = list(self._inflight_texts)
+            u = getattr(self, "_untaken", None)
+            if u is not None and u.get("settled"):
+                # the held text whose turn ended before the CLI took it: still in the CLI's queue, so still owed
+                # (2026-10-08). The settle cleared the twin at that turn's result, and the CLI's own queue log names
+                # none of romp's sends (content blocks are logged without text), so nothing else named it and the
+                # settle flagged it never delivered while the CLI still held it
+                out.append(u.get("item", u["text"]))
+            return out
 
     def _busy_under_lock(self) -> bool:
         """SdkBackend.busy's reading, for a caller already holding self._lock: a turn in flight, a text
@@ -8468,8 +8517,9 @@ class SdkSession:
                     # ONE FED TEXT AT A TIME: the last fed text is still in the CLI's queue, and the CLI drains
                     # every queued prompt into one message when it next reads that queue, so a second feed now
                     # would reach the agent fused with the first (2026-09-08). Hold until the CLI demonstrably
-                    # took it (_untaken_taken); mid-turn forwards still flow, one per take, so a message sent
-                    # mid-turn still reaches the running turn at its next step.
+                    # took it (its lifecycle `started`, _on_command_lifecycle; from an older CLI, _untaken_taken);
+                    # mid-turn forwards still flow, one per take, so a message sent mid-turn still reaches the
+                    # running turn at its next step.
                     blocked = blocked or self._untaken is not None
                     # a MOVE is in flight: move() armed _move_settle_expected under this lock and the CLI is
                     # relocating for its set_cwd. The CLI relocates FIRST and replies after, then emits an init
@@ -8516,6 +8566,7 @@ class SdkSession:
                         # at or after the file's size now (_transcript_mark's argument).
                         self._untaken = {"text": str(item), "item": item, "fresh": fresh, "settled": False,
                                          "qid": (_meta or {}).get("qid"),   # the copy's id, for the /clear-echo retire at the TAKE
+                                         "cu": str(uuid.uuid4()),          # the uuid it is sent under: the CLI's lifecycle frames name it
                                          "t": int(time.time()), "off": None, "fsid": None}
                 if item is None:
                     await self._input_wake.wait()   # idle, or holding behind a wedged turn → wait for a change
@@ -8545,8 +8596,15 @@ class SdkSession:
                 # to the ONE cycle (which the poke above has already woken) so it is built and flushed first, and no
                 # second list of this session exists to be ordered.
                 self.backend._push_soon(self.sid)
-                yield {"type": "user",
+                # sent under a uuid romp mints per feed: the CLI files its lifecycle frames under it (CLI_LIFECYCLE_CAP), and
+                # the transcript record it writes for the text wears it (the user record's uuid, or the queued_command
+                # attachment's source_uuid when the text folds into a running turn)
+                msg = {"type": "user",
                        "message": {"role": "user", "content": [{"type": "text", "text": item}]}}
+                cu = (self._untaken or {}).get("cu")
+                if cu:
+                    msg["uuid"] = cu
+                yield msg
 
         # Feed turns and receive messages CONCURRENTLY: query() with a streaming input iterable BLOCKS
         # until the iterable ends (it writes each turn to stdin), and our input generator never ends —
@@ -8588,6 +8646,7 @@ class SdkSession:
                 with self._lock:
                     self._inflight_texts.append(u.get("item", u["text"]))
                     self.inflight = max(self.inflight, 1)
+            self._lifecycle = None                   # the next client's CLI says for itself whether it writes lifecycle frames
             # the abandoned client's live subagents and background tasks died with it — retire them on
             # the teardown event itself (and tell the session what it lost, as a CLI death does). NOT when the next
             # connect re-attaches to the same CLI (a host re-exec at a turn's end, an attach retry): that CLI and its
@@ -9520,10 +9579,34 @@ class SdkSession:
         exiting, a transport fault the SDK re-raises, our own `ended` — never a message the kernel
         mishandled. (_amain drains this concurrently with the input feeder: query() with a streaming
         input blocks until the iterable ends, and ours never does.)"""
-        async for msg in client.receive_messages():
+        async for msg in self._frames(client):
             if self.ended:
                 break
             self._handle_stream_message(msg, AssistantMessage, ResultMessage, SystemMessage)
+
+    async def _frames(self, client):
+        """The client's messages as ClaudeSDKClient.receive_messages yields them (the SDK's parser over the raw stream, a
+        frame it does not know skipped), plus the CLI's `command_lifecycle` frames as CommandLifecycle: the parser skips that
+        type, and it is the CLI's own record that it took a fed text (_on_command_lifecycle). Read off the client's raw
+        stream (`_query.receive_messages`, the stream receive_messages itself parses). A client without it (a test double,
+        or an SDK that moved it) yields its parsed messages only, `_raw_frames` False, and the feed hold then cannot see a
+        lifecycle frame: _learn_lifecycle reports that and keeps the turn-boundary road."""
+        q = getattr(client, "_query", None)
+        raw = getattr(q, "receive_messages", None) if q is not None else None
+        parse = _sdk_parse_message() if callable(raw) else None
+        if not (callable(raw) and parse):
+            self._raw_frames = False
+            async for msg in client.receive_messages():
+                yield msg
+            return
+        self._raw_frames = True
+        async for data in raw():
+            if isinstance(data, dict) and data.get("type") == "command_lifecycle":
+                yield CommandLifecycle(data)
+                continue
+            msg = parse(data)
+            if msg is not None:
+                yield msg
 
     def _handle_stream_message(self, msg, AssistantMessage, ResultMessage, SystemMessage) -> bool:
         """_on_message, with its failures contained to the message that caused them. Until 2026-09-06
@@ -9713,8 +9796,11 @@ class SdkSession:
 
     def _untaken_taken(self, msg, AssistantMessage, ResultMessage, SystemMessage) -> bool:
         """Has the CLI TAKEN the last fed text (self._untaken), so the next queued text may be fed
-        without the two fusing into one message? `msg` is the frame just streamed. Three exact events,
-        each proving the text left the CLI's queue:
+        without the two fusing into one message? `msg` is the frame just streamed. For a CLI that writes
+        lifecycle frames (self._lifecycle) the answer is never a turn frame's: the CLI's `started` for the
+        text's own uuid is the take (_on_command_lifecycle). For one that does not (an older CLI, or an SDK
+        that hides the frames: _learn_lifecycle says so), three turn-boundary events, each read as proving
+        the text left the CLI's queue:
           * fed from IDLE (`fresh`): any turn frame after the feed. The only prompt the CLI held was
             this one, so the turn now streaming is its turn, the rename ping's rule (_ping_feeding).
             `fresh` means inflight was 0 at the feed, and inflight counts the CLI's own turns too
@@ -9739,6 +9825,12 @@ class SdkSession:
         u = self._untaken
         if u is None or not self._turn_frame(msg, AssistantMessage, ResultMessage, SystemMessage):
             return False
+        if getattr(self, "_lifecycle", None):
+            # the CLI writes a lifecycle frame for the text itself (_on_command_lifecycle): a turn boundary is not the take.
+            # The turn now starting may be a background notification's, queued ahead of the text, and releasing on it fed
+            # the next text while this one still sat in the CLI's queue: the texts were then owed by nothing romp could
+            # name, and the settle flagged the user's messages as never delivered while the CLI still held them (2026-10-08)
+            return False
         if u.get("fresh") or u.get("settled") or u.get("fault"):
             return True
         seen = self.backend._text_landed(self.sid, u["text"], u.get("t"), u.get("off"), u.get("fsid"),
@@ -9752,7 +9844,72 @@ class SdkSession:
             return isinstance(msg, ResultMessage)
         return seen is True
 
+    def _release_untaken(self) -> None:
+        """The CLI took the held text (_untaken): drop the hold and wake the feeder, so the next queued text goes in as its
+        own message. A /clear the CLI has now TAKEN records its echo's identity, so it retires on THIS copy's own boundary
+        (the flip it causes, or its own turn's settle), never by text and never before the CLI takes it (a still-queued or
+        fed-but-untaken /clear is left owed, so an unplanned death flags it)."""
+        _took = self._untaken
+        self._untaken = None
+        if _took and _took.get("qid") and _is_clear_cmd(_took.get("text") or ""):
+            self._taken_clear_qids.append(_took["qid"])
+            del self._taken_clear_qids[:-16]           # bounded: a /clear resolves within a turn
+            if _took.get("fresh"):
+                self._own_turn_clear_qid = _took["qid"]   # taken from idle → its OWN turn (the no-flip backstop)
+            self.backend._persist_echoes(self.sid)     # mirror the take (reg['clearingTaken']) so a restart before its flip, on a host-kept CLI, restores it
+        if self._input_wake is not None:
+            self._input_wake.set()
+
+    def _on_command_lifecycle(self, cl) -> None:
+        """A `command_lifecycle` frame: the CLI's own record of what became of a command it queued under the uuid romp sent
+        (CLI_LIFECYCLE_CAP). For the held text (_untaken, matched by that uuid and nothing else) `started` is the TAKE: the
+        CLI moved THAT text into a turn, its own or the running one at a tool boundary, so the next text can go in without
+        fusing with it. A text whose turn had already ended when it was taken (a settled hold) joins the fed-turn twin here,
+        since the turn it is in is the one starting now. A terminal state without a start (cancelled, discarded, refused)
+        means the CLI will not run it: the hold goes all the same, said in the log. `queued` releases nothing, nor does any
+        frame for another uuid (an earlier text's, or one a previous kernel sent)."""
+        if getattr(self, "_raw_frames", None) is not False:
+            self._lifecycle = True
+        u = getattr(self, "_untaken", None)
+        if u is None or not cl.command_uuid or cl.command_uuid != u.get("cu") or cl.state not in _LIFECYCLE_TAKEN:
+            return
+        if cl.state == "started":
+            if u.get("settled") and getattr(self, "_inflight_texts", None) is not None:
+                with self._lock:
+                    self._inflight_texts.append(u.get("item", u["text"]))
+        else:
+            self.backend._log("feed hold (%s): the CLI reports the held text %s without running it; the next queued text "
+                              "goes in" % (self.name, cl.state))
+        self._release_untaken()
+
+    def _learn_lifecycle(self, d: dict) -> None:
+        """An init frame says what this CLI can do (`capabilities`): whether it writes the lifecycle frames the feed hold
+        keys on (CLI_LIFECYCLE_CAP). Read before the hold is, so a turn frame is never judged before the answer. A CLI that
+        does not write them (an older Claude Code, whose init has no such entry), or an SDK that hides them (_frames), takes
+        the turn-boundary road, where a background notification's turn starting can release the hold early; said once per
+        session, to the problem ring, since updating Claude Code (or romp's SDK) is the remedy."""
+        if getattr(self, "_lifecycle", None):
+            return
+        caps = d.get("capabilities")
+        says = isinstance(caps, list) and CLI_LIFECYCLE_CAP in caps
+        if says and getattr(self, "_raw_frames", None) is not False:
+            self._lifecycle = True
+            return
+        self._lifecycle = False
+        if not getattr(self, "_lifecycle_said", False):
+            self._lifecycle_said = True
+            why = ("the SDK in use does not pass them through" if says else
+                   "this Claude Code does not write them (update it)")
+            self.backend._log("lifecycle (%s): the CLI's record of taking each queued message cannot be read (%s); queued "
+                              "messages are released at turn boundaries instead, where a background notification's turn can "
+                              "release one early" % (self.name, why), problem=True, key=("feed-hold-lifecycle", why))
+
     def _on_message(self, msg, AssistantMessage, ResultMessage, SystemMessage):
+        if isinstance(msg, CommandLifecycle):
+            self._on_command_lifecycle(msg)
+            return
+        if isinstance(msg, SystemMessage) and getattr(msg, "subtype", None) == "init":
+            self._learn_lifecycle(msg.data if isinstance(getattr(msg, "data", None), dict) else {})   # before the hold is read
         if getattr(self, "inflight", None) == 0 and getattr(self, "_lock", None) is not None \
                 and not getattr(self, "_move_settle_expected", False) \
                 and self._turn_frame(msg, AssistantMessage, ResultMessage, SystemMessage):
@@ -9781,7 +9938,10 @@ class SdkSession:
                     self._intr_level = 0
                     self._first_out_t = None
                     u = getattr(self, "_untaken", None)
-                    if u is not None and u.get("settled") and getattr(self, "_inflight_texts", None) is not None:
+                    if u is not None and u.get("settled") and getattr(self, "_inflight_texts", None) is not None \
+                            and not getattr(self, "_lifecycle", None):
+                        # (a CLI that writes lifecycle frames says when the text joins a turn: _on_command_lifecycle;
+                        # the turn starting here may be a notification's, queued ahead of it)
                         self._inflight_texts.append(u.get("item", u["text"]))
         if getattr(self, "_ping_feeding", False):   # getattr: __new__-built test doubles skip __init__
             # the ping's turn is streaming — the CLI demonstrably started it, so a message fed from
@@ -9798,22 +9958,10 @@ class SdkSession:
             self._result_tag = self._spend_result_tag()
         if getattr(self, "_untaken", None) is not None \
                 and self._untaken_taken(msg, AssistantMessage, ResultMessage, SystemMessage):
-            # the CLI took the last fed text (an exact event: _untaken_taken): the next queued text can go
+            # the CLI took the last fed text (_untaken_taken, the turn-boundary road): the next queued text can go
             # in as its own message now. Checked BEFORE the result settle below marks the turn ended, so a
             # result frame is read against the state the text was fed into.
-            _took = self._untaken
-            self._untaken = None
-            # a /clear the CLI has now TAKEN: record its echo's identity so it retires on THIS copy's own
-            # boundary (the flip it causes, or its own turn's settle), never by text and never before the CLI
-            # takes it (a still-queued or fed-but-untaken /clear is left owed, so an unplanned death flags it).
-            if _took and _took.get("qid") and _is_clear_cmd(_took.get("text") or ""):
-                self._taken_clear_qids.append(_took["qid"])
-                del self._taken_clear_qids[:-16]           # bounded: a /clear resolves within a turn
-                if _took.get("fresh"):
-                    self._own_turn_clear_qid = _took["qid"]   # taken from idle → its OWN turn (the no-flip backstop)
-                self.backend._persist_echoes(self.sid)     # mirror the take (reg['clearingTaken']) so a restart before its flip, on a host-kept CLI, restores it
-            if self._input_wake is not None:
-                self._input_wake.set()
+            self._release_untaken()
         if isinstance(msg, SystemMessage) and msg.subtype == "init":
             self._fire_boot_settled()   # the CLI is up and streaming — its transcript catch-up burst
             #                             is over, so the boot-stagger slot (if any) frees NOW
@@ -10341,8 +10489,10 @@ class SdkSession:
                 self._refusal_this_turn = False        # the turn's refusal frame, if any, has been read into the cause
                 if getattr(self, "_untaken", None) is not None:
                     # a text fed MID-turn is still in the CLI's queue at this result: the CLI drains it
-                    # into the NEXT turn, whose first frame is the take (_untaken_taken). Not cleared
-                    # here: a feed right after this result would land in the same drain (the fuse).
+                    # into a later turn, and its lifecycle `started` is the take (_on_command_lifecycle; an
+                    # older CLI's take is the next turn's first frame, _untaken_taken). Not cleared here: a
+                    # feed right after this result would land in the same drain (the fuse). It stays owed
+                    # (fed_texts) until taken.
                     # An INTERRUPTED turn's result is no exception: the CLI keeps its queue across the
                     # interrupt control request and drains it the same way (verified on the installed
                     # CLI, 2026-09-08; _release_hold_at_exit names the one event that does lose it).
