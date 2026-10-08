@@ -8293,10 +8293,14 @@ class SdkSession:
 
     def _sub_std_main_lost_fast(self) -> bool:
         """The CLI says the main loop cannot run fast for a reason it does not name, while fast mode is wanted, the
-        connection carries the opt-in, and no relaunch is already on its way (see _sub_std_settle)."""
+        connection carries the opt-in, the session still qualifies for the recipe the CLI runs, and no relaunch is
+        already on its way (see _sub_std_settle). The qualification is the switch and its preconditions, as
+        _sub_std_pending reads it, never the version canary: a hold on a newer version governs the next launch, and the
+        CLI judged here runs the recipe it launched with (the review of #188)."""
+        target = bool(getattr(self, "subagent_standard", False)) and not self.subagent_standard_refusal()
         return (getattr(self, "fast", "") == "off" and not getattr(self, "fast_reason", "")
                 and bool(getattr(self, "_fast_unlocked", False)) and self.fast_effective()
-                and self.subagent_standard_carried() and not self._sub_std_pending())
+                and target and not self._sub_std_pending())
 
     def _sub_std_canonical(self, msg) -> str:
         """The catalog entry Claude Code prices the recipe key's calls as: the result's own word (modelUsage[key]

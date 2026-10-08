@@ -373,6 +373,20 @@ class SpeedCheck(_TranscriptBase):
         self.assertEqual(sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeed"]["verdict"], "main-slow")
         self.assertEqual(len(_problems(self.be, "main loop")), 1)
 
+    def test_a_canary_hold_on_a_newer_version_does_not_silence_the_main_loop_alarm(self):
+        # the running CLI was launched with the recipe; the binary changed after the version check and the new version's
+        # probe failed, which holds the switch off for the NEXT launch: this CLI still runs the recipe, and a main loop it
+        # stops from running fast is still said (the review of #188)
+        self.s._sub_std_begin({"subagentStandard": True}, True)
+        Path(self.be.state_dir, sb.SUBAGENT_STANDARD_CANARY_STORE).write_text(
+            json.dumps({"2.1.282": {"verdict": "fail", "why": "a subagent call ran in fast mode"}}))
+        self.assertTrue(self.s.subagent_standard_hold(), "the canary holds the next launch")
+        self._fast_off_without_reason()
+        self._append(self.main, _rec("msg_m1", "claude-opus-5-5", "standard", _iso(time.time())))
+        self.s._sub_std_settle()
+        self.assertEqual(sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeed"]["verdict"], "main-slow")
+        self.assertEqual(len(_problems(self.be, "main loop")), 1)
+
     def test_a_standard_main_call_is_not_judged_where_the_cli_explains_it(self):
         # a cooldown, a refusal with its reason, the user's own Slow, a state of "on" (a standard call there is the
         # cooldown's fallback), a connection made without the opt-in: none of these is the recipe's breakage
