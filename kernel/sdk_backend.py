@@ -33,6 +33,8 @@ import tempfile
 import threading
 import time
 import traceback
+import types
+import datetime as _dt
 import uuid
 from collections import deque
 from pathlib import Path
@@ -85,6 +87,10 @@ _cred = sys.modules.get("romp_credentials") or load_source("romp_credentials", _
 # of labels and organisations under STATE/logins, the pick vocabulary "login" | "key" | "login:<id>", and the
 # held token store. Loaded the same way, one copy for the kernel and the backend.
 _logins = sys.modules.get("romp_logins") or load_source("romp_logins", _HERE / "logins.py")
+# Claude Code's own per-call prices (cli_prices.py, the one table that prices tokens): the Subagents at standard speed
+# repricing (SdkSession._sub_std_settle) prices a subagent call from its transcript usage at the rates the CLI charged and
+# at Opus 5.5's own. The kernel's copy when it is loaded (the _cred idiom).
+_cpr = sys.modules.get("romp_cli_prices") or load_source("romp_cli_prices", _HERE / "cli_prices.py")
 
 
 class CLIConnectionErrorLike(RuntimeError):
@@ -1728,12 +1734,23 @@ def append_effort_applied(state_dir: Path, sid: str, effort: str, t: int | None 
 # spawn writes into its spec and the host echoes in every hello (cli.launch). Each pick names the launch values it
 # decides; the env is compared by digest, never by value.
 PICK_LAUNCH_KEYS = {"effort": ("effort",), "billing": ("auth", "authLogin"), "fast": ("fast",), "mode": ("mode",),
-                    "env": ("env",)}
+                    "env": ("env",), "subagentStandard": ("subagentStandard",)}
+# What a launch record written before a key existed carried for it: a host spawned by an older kernel echoes a record
+# without the Subagents at standard speed key (2026-10-08), and that CLI was launched without the recipe.
+LAUNCH_KEY_DEFAULTS = {"subagentStandard": False}
+
+
+def launch_value(launch: dict, key: str):
+    """`key` of a launch record, its LAUNCH_KEY_DEFAULTS value when the record predates the key."""
+    return launch.get(key, LAUNCH_KEY_DEFAULTS.get(key))
+
+
 # The reasons a standing relaunch ask (_switch_wanted) gives when a PICK asked for it: everything such a relaunch would carry
 # is in the launch record (PICK_LAUNCH_KEYS), so once the serving CLI's record carries every pick the ask has nothing left to
 # apply (SdkSession._drop_carried_ask). Any other reason (Always fast, a retry after a downgrade, the fast-mode cure, a
 # billing fall) asks for something no record shows, so it is never dropped that way, and a pick's ask never overwrites it.
-PICK_RELAUNCH_WHYS = frozenset({"effort", "billing", "billing default", "session env", "bypass mode", "a settings change"})
+PICK_RELAUNCH_WHYS = frozenset({"effort", "billing", "billing default", "session env", "bypass mode", "a settings change",
+                                "subagent speed"})
 
 
 def env_digest(env) -> str:
@@ -5298,12 +5315,13 @@ def env_request_error(env, auth: str = "") -> str:
 
 
 def flag_settings_path(state_dir, sid: str, *, ultracode: bool = False, fast: bool = False,
-                       env: dict | None = None, no_helper: bool = False, log=None) -> str:
+                       env: dict | None = None, no_helper: bool = False, model_overrides: dict | None = None,
+                       log=None) -> str:
     """The settings file handed to the CLI (options.settings — the flag-settings layer, the CLI's
     documented per-session hook for keys the SDK has no typed field for). Returns "" when a session
     needs none, which is the common case.
 
-    Four keys ride here, all per-session:
+    Five keys ride here, all per-session:
     - `apiKeyHelper: ""` (2026-09-08, `no_helper`): a LOGIN-billed launch disables the box's apiKeyHelper for
       this one process, the machine's own login and a STORED login alike (T346; the stored login's token rides
       the launch's environment since 2026-09-14, docs/reference.md "Several Claude logins", where a helper
@@ -5330,6 +5348,8 @@ def flag_settings_path(state_dir, sid: str, *, ultracode: bool = False, fast: bo
       is NOT verified here; nothing in this repo's recorded behavior pins it, so don't rely on
       per-session values overriding a directory-set var of the same name until someone verifies it
       live. Distinct names — the toggle case this slice exists for — need no ranking at all.
+    - `modelOverrides` (2026-10-08, `model_overrides`): the Subagents at standard speed switch's map (see
+      SUBAGENT_STANDARD_OVERRIDES), here and in no directory-wide settings file, so it reaches this one CLI.
 
     One file PER SESSION (not the single shared file the ultracode key used to get): the content now
     varies by session, so a shared file would hand one session's fast mode to every other one. Rewritten
@@ -5344,6 +5364,8 @@ def flag_settings_path(state_dir, sid: str, *, ultracode: bool = False, fast: bo
         keys["env"] = dict(env)
     if no_helper:
         keys["apiKeyHelper"] = ""
+    if model_overrides:
+        keys["modelOverrides"] = dict(model_overrides)
     if not keys:
         return ""
     d = os.path.join(str(state_dir), FLAG_SETTINGS_DIR)
@@ -5366,6 +5388,66 @@ def flag_settings_path(state_dir, sid: str, *, ultracode: bool = False, fast: bo
                 % (sid, p, e, ", ".join(sorted(keys))), problem=True)
         return ""
     return p
+
+
+# SUBAGENTS AT STANDARD SPEED (experimental, the user 2026-10-08): one session's main loop in fast mode while the subagents
+# it spawns run Opus 5.5 at standard speed. Claude Code has no per-agent speed (2.1.282): the code that builds a subagent's
+# options copies the parent's per-turn fast-mode flag (`fastMode:n.options.fastMode`), and a request sends `speed: "fast"`
+# when that flag is on and the request's model is fast-capable, a capability looked up on the model's CANONICAL id (every
+# spelling containing claude-opus-5-5 is claude-opus-5-5; the API knows no other id for Opus 5.5). The only per-subagent
+# input is that lookup, so the recipe gives the subagents a model whose canonical id is not fast-capable and which is
+# still Opus 5.5 on the wire:
+#   * every subagent runs `claude-opus-5-5[1m]` (CLAUDE_CODE_SUBAGENT_MODEL, and _FORCE so no agent definition and no
+#     per-call `model` parameter picks another); the [1m] suffix is a no-op on the wire, Opus 5.5 being natively 1M;
+#   * `modelOverrides` maps the catalog's claude-opus-5 to that exact string, so the CLI's canonical lookup of it answers
+#     claude-opus-5 (an override value is matched exactly, so the main loop's plain claude-opus-5-5 is untouched);
+#   * CLAUDE_CODE_MODEL_CAPABILITIES takes `fast_mode` off claude-opus-5 and gives it Opus 5.5's prompt capabilities;
+#   * CLAUDE_CODE_MAX_OUTPUT_TOKENS keeps the subagents' output cap at Opus 5.5's 128000 (Opus 5's default is 64000).
+# Verified on 2.1.282 through a logging proxy (main requests `speed: "fast"` with the fast-mode beta, subagent requests no
+# speed and no beta, both `model: claude-opus-5-5`) and through romp's own launch path. The side effects and the
+# fragility are in docs/reference.md, "Subagents at standard speed (experimental)". Two preconditions: the session's model
+# is exactly claude-opus-5-5 (opus[1m] or claude-opus-5-5[1m] would be re-canonicalized too and the main loop would lose
+# fast mode; another model makes the forced Opus 5.5 subagents a model change), and fast mode is on (without it the
+# subagents already run at standard speed and the side effects buy nothing).
+SUBAGENT_STANDARD_MODEL = "claude-opus-5-5"
+SUBAGENT_STANDARD_SUBAGENT_MODEL = "claude-opus-5-5[1m]"
+SUBAGENT_STANDARD_OVERRIDES = {"claude-opus-5": SUBAGENT_STANDARD_SUBAGENT_MODEL}
+SUBAGENT_STANDARD_ENV = {
+    "CLAUDE_CODE_MODEL_CAPABILITIES": ("claude-opus-5=-fast_mode,-opus_5_prompt_bundle,opus_5_5_prompt_bundle,"
+                                       "-thinking_disabled_effort_cap,rejects_disabled_thinking,per_turn_effort,"
+                                       "per_turn_timing"),
+    "CLAUDE_CODE_SUBAGENT_MODEL": SUBAGENT_STANDARD_SUBAGENT_MODEL,
+    "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
+}
+# the rates Claude Code charges a recipe subagent call at: the canonical id the override gives it (cli_prices)
+SUBAGENT_STANDARD_CLI_PRICED_AS = "claude-opus-5"
+
+
+def subagent_standard_refusal(model, fast) -> str:
+    """Why the Subagents at standard speed switch cannot apply to a session whose model pick is `model` and whose fast
+    mode is `fast` (on at its next launch); "" when it can. Said to the user as is, by the setter and at a launch."""
+    m = str(model or "")
+    if m != SUBAGENT_STANDARD_MODEL:
+        return ("it needs the session's model to be exactly %s (pick Opus 5.5 by its version); this session's is %s"
+                % (SUBAGENT_STANDARD_MODEL, ("'%s'" % m) if m else "the account default"))
+    if not fast:
+        return "it needs fast mode on for this session: without it the subagents already run at standard speed"
+    return ""
+
+
+def subagent_speed_line(on, refusal: str, check, pending: bool = False) -> str:
+    """The Subagents at standard speed row's sub-line: "" while the switch is off; the precondition that holds it back;
+    "applies at the next relaunch" while the serving CLI was launched without it (`pending`); else the speed check's own
+    line (SdkSession._sub_std_settle)."""
+    if not on:
+        return ""
+    if refusal:
+        return "not applied: " + refusal
+    line = check.get("line") if isinstance(check, dict) else ""
+    if pending or not line:
+        return "applies at the next relaunch" if pending else "no call checked yet"
+    return str(line)
 
 
 THINKING_SUMMARIES_FILE = "thinking-summaries.json"   # written by the kernel's gear toggle (_set_thinking_summaries)
@@ -6108,6 +6190,8 @@ class SdkSession:
         #                                instructions payload (parent_tool_use_id link) as a skillMd atom
         self.since = 0
         self._first_out_t = None   # the turn's first streamed WORK atom (turns.jsonl firstOutT; reset per fresh feed)
+        self._turn_reprice = None  # (the CLI's dollars, the Subagents at standard speed repricing) for the turn in flight
+        self._sub_std_carry = 0.0  # repricing a turn could not absorb (it would have gone below zero): the next turn's
         self._turn_spend = None    # (delta usd, turn usage) the spend fold recorded for the turn in flight, read by the
         #                            turn ledger row at the settle and spent with it
         self._fed_t = None         # the fresh feed's pop at millisecond resolution (turns.jsonl fedT; `since` stays whole
@@ -6212,6 +6296,21 @@ class SdkSession:
         #   The CLI refuses /fast to a non-interactive client unless the connect carried the `fastMode`
         #   flag-settings opt-in, so this drives that key in _options at every connect. Per-session on
         #   purpose: fast mode draws credits at a higher rate, so it is never a remembered default.
+        self.subagent_standard = bool(reg.get("subagentStandard"))   # the Subagents at standard speed switch (the reg's
+        #   `subagentStandard`, 2026-10-08): the launch carries the recipe while it is on and its preconditions hold
+        #   (subagent_standard_carried). Connect-time, like fast_opt; set_subagent_standard writes it.
+        self._sub_std_launched = False   # whether the CLI serving this session was LAUNCHED with the recipe (its launch
+        #   record's word, _sub_std_begin): what the speed check and the repricing key on, never today's switch
+        self._sub_std_inert_said = ""    # the precondition last said to hold the switch back at a launch (once per episode)
+        self._sub_std_offsets = {}       # transcript path → bytes already read by the speed check (this launch)
+        self._sub_std_seen = deque(maxlen=4096)   # message ids already counted, newest last: a call is counted once
+        self._sub_std_since = 0.0        # the launch's wall time: an older record (a fork's copied history) is not its call
+        self._sub_std_mark = 0.0         # the stamp of the newest call counted (the attach's resume point)
+        self._sub_std_resume_mark = 0.0  # …as the registry held it at an attach, for the transcripts read whole then
+        self._sub_std_rescan = set()     # the transcripts an attach reads whole (written since the last counted call)
+        self._sub_std_counts = {}        # this launch's tallies (mainFast, mainStandard, subFast, subStandard, repricedUsd)
+        self._sub_std_said = set()       # the verdicts already said for this launch ("subagent-fast", "main-slow")
+        self._sub_std_check = reg.get("subagentSpeed") if isinstance(reg.get("subagentSpeed"), dict) else None
         self.fast_off = bool(reg.get("fastOff"))   # the user put THIS session on Slow explicitly (set_fast "off", the
         #   reg's `fastOff`, 2026-09-17): the machine's Always fast switch (fast_effective) leaves such a session at normal
         #   speed until its next "on" — a Slow pick that flipped back at the next reconnect would be a switch nobody asked for.
@@ -7739,7 +7838,211 @@ class SdkSession:
         auth, login = self.billing_launch()
         return {"effort": getattr(self, "effort", "") or DEFAULT_EFFORT, "auth": auth,
                 "authLogin": login, "fast": bool(self.fast_effective()),
-                "mode": getattr(self, "mode", "") or "", "env": env_digest(getattr(self, "env_vars", None))}
+                "mode": getattr(self, "mode", "") or "", "env": env_digest(getattr(self, "env_vars", None)),
+                "subagentStandard": self.subagent_standard_carried()}
+
+    def subagent_standard_refusal(self) -> str:
+        """Why the Subagents at standard speed switch would not apply at a launch now ("" when it would): the session's
+        model pick and the fast-mode flag the launch would carry (subagent_standard_refusal)."""
+        return subagent_standard_refusal(getattr(self, "chosen_model", ""), self.fast_effective())
+
+    def subagent_standard_carried(self) -> bool:
+        """Whether a launch from this session's state now carries the Subagents at standard speed recipe: the switch is
+        on and its preconditions hold. The launch record says so (launch_values), so a pick the serving CLI was not
+        launched with relaunches like any other."""
+        return bool(getattr(self, "subagent_standard", False)) and not self.subagent_standard_refusal()
+
+    # ---- Subagents at standard speed: the speed check and the repricing (SUBAGENT_STANDARD_ENV) ----
+    _SUB_STD_PROBLEMS = {
+        "subagent-fast": ("a subagent call ran in fast mode although Subagents at standard speed is on: this Claude Code "
+                          "no longer honours the workaround (an update?), so subagents bill at the fast rate. Turn the "
+                          "switch off in the fast-mode menu, or see docs/reference.md"),
+        "main-slow": ("the main loop has not run in fast mode since this launch although fast mode is on: the Subagents "
+                      "at standard speed workaround may be what stops it (a Claude Code update?). Turn the switch off in "
+                      "the fast-mode menu, or see docs/reference.md"),
+    }
+
+    def _sub_std_paths(self):
+        """(main transcript, its subagents' transcripts) of the conversation the CLI writes now."""
+        main = Path(transcript_path(self.cwd, getattr(self, "resume_sid", None) or self.sid))
+        sd = main.with_suffix("") / "subagents"
+        try:
+            subs = sorted(sd.glob("agent-*.jsonl")) if sd.is_dir() else []
+        except OSError:
+            subs = []
+        return main, subs
+
+    def _sub_std_begin(self, launch, launched_here: bool) -> None:
+        """At every connect, after the reconcile: whether the CLI serving this session was LAUNCHED with the Subagents at
+        standard speed recipe (its launch record: this connect's own, or a host's echo for an attach, LAUNCH_KEY_DEFAULTS
+        for a record older than the key), and a fresh episode for the speed check: tallies at zero, nothing said yet. The
+        check reads only what this CLI writes from now: each transcript from its present end, a new one (a subagent's)
+        from its start, and no record stamped before the launch (a fork's copied history). An ATTACH to a CLI the
+        previous kernel already checked resumes that kernel's episode from the registry (`subagentSpeedScan`): its
+        tallies, what it said, and every subagent transcript written since its last counted call, so a call made while
+        no kernel watched is repriced once; the main transcript resumes from its end (the verdict, not the dollars, is
+        all it feeds). Loop thread."""
+        on = bool(isinstance(launch, dict) and launch_value(launch, "subagentStandard"))
+        self._sub_std_launched = on
+        self._sub_std_said = set()
+        self._sub_std_counts = {"mainFast": 0, "mainStandard": 0, "subFast": 0, "subStandard": 0, "repricedUsd": 0.0}
+        self._sub_std_seen.clear()
+        self._sub_std_offsets = {}
+        self._sub_std_mark = 0.0
+        self._sub_std_resume_mark = 0.0
+        self._sub_std_rescan = set()
+        self._sub_std_since = time.time() - 2.0   # the transcript's stamps are this machine's clock, to the millisecond
+        if not on:
+            if getattr(self, "subagent_standard", False):
+                why = self.subagent_standard_refusal()
+                self._sub_std_record({"verdict": "inert" if why else "pending",
+                                      "line": ("not applied: " + why) if why else "applies at the next relaunch"})
+            return
+        main, subs = self._sub_std_paths()
+        scan = (read_reg(self.backend.state_dir, self.sid) or {}).get("subagentSpeedScan")
+        resumed = not launched_here and isinstance(scan, dict) and isinstance(scan.get("counts"), dict)
+        if resumed:
+            self._sub_std_since = float(scan.get("since") or self._sub_std_since)
+            self._sub_std_mark = self._sub_std_resume_mark = float(scan.get("mark") or 0.0)
+            self._sub_std_counts.update({k: v for k, v in scan["counts"].items() if isinstance(v, (int, float))})
+            self._sub_std_said = set(x for x in (scan.get("said") or []) if isinstance(x, str))
+            self._sub_std_seen.extend(str(x) for x in (scan.get("seen") or []))
+        for p in [main] + subs:
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if resumed and p != main and st.st_mtime >= self._sub_std_mark - 1.0:
+                self._sub_std_offsets[str(p)] = 0   # written since the last counted call: read whole, stamps decide
+                self._sub_std_rescan.add(str(p))
+            else:
+                self._sub_std_offsets[str(p)] = st.st_size
+        if not resumed:
+            self._sub_std_record(dict({"verdict": "waiting", "line": "no call checked yet"}, **self._sub_std_counts))
+
+    def _sub_std_read(self, path: Path):
+        """The final records of API calls appended to `path` since the last read: [(message id, model, usage, stamp)],
+        one per call (its last final record in the batch). A record is FINAL when its message names a stop reason; a
+        call streamed in pieces writes earlier records without one (and without `speed`), so a call whose final record
+        has not landed yet is read at the next settle. Only complete lines are read; the offset stops at the last
+        newline."""
+        key = str(path)
+        off = self._sub_std_offsets.get(key, 0)
+        try:
+            with open(path, "rb") as f:
+                f.seek(off)
+                data = f.read()
+        except OSError:
+            return []
+        end = data.rfind(b"\n")
+        if end < 0:
+            return []
+        self._sub_std_offsets[key] = off + end + 1
+        calls = {}
+        for ln in data[:end].split(b"\n"):
+            if b'"assistant"' not in ln or b'"usage"' not in ln:
+                continue
+            try:
+                d = json.loads(ln)
+            except ValueError:
+                continue
+            m = d.get("message") if isinstance(d, dict) and d.get("type") == "assistant" else None
+            if not isinstance(m, dict) or not m.get("id") or m.get("model") == "<synthetic>" or not m.get("stop_reason"):
+                continue
+            u = m.get("usage")
+            if not isinstance(u, dict):
+                continue
+            try:
+                ts = _dt.datetime.fromisoformat(str(d.get("timestamp") or "").replace("Z", "+00:00")).timestamp()
+            except (ValueError, OverflowError):
+                continue
+            calls[str(m["id"])] = (str(m["id"]), str(m.get("model") or ""), u, ts)
+        return list(calls.values())
+
+    def _sub_std_settle(self) -> float:
+        """At a result settle: read what the CLI wrote since the last one, tally each new call's `usage.speed` (the main
+        loop's and the subagents', Opus 5.5 calls only), judge the episode, and return the repricing for the subagent
+        calls: Claude Code charged a recipe subagent call at the rates of the canonical id the override gives it
+        (SUBAGENT_STANDARD_CLI_PRICED_AS), and the call costs Opus 5.5's own; the difference, priced from the call's own
+        usage by cli_prices (1-hour cache writes, geography and web searches included), is negative. A FAST subagent
+        call is left as the CLI priced it: it was not priced as that id's standard call, and the check says so. Zero
+        and nothing read when the serving CLI was not launched with the recipe.
+
+        The verdict, said ONCE PER LAUNCH (a relaunch starts a new episode) as a problem row and kept as the session's
+        speed line: a subagent call that ran fast ("subagent-fast"), or a main loop that has run only at standard
+        speed since the launch ("main-slow": a fast-mode cooldown starts after fast calls, the recipe's breakage
+        before any, and a cooldown the CLI reports is not judged). Recorded in the registry (`subagentSpeed`, the
+        episode's resume point in `subagentSpeedScan`) whenever a call was counted."""
+        if not getattr(self, "_sub_std_launched", False):
+            return 0.0
+        main, subs = self._sub_std_paths()
+        c = self._sub_std_counts
+        corr, counted = 0.0, False
+        for path in [main] + subs:
+            sub = path != main
+            for mid, model, u, ts in self._sub_std_read(path):
+                if ts < self._sub_std_since or mid in self._sub_std_seen:
+                    continue
+                if str(path) in self._sub_std_rescan and ts < self._sub_std_resume_mark:
+                    continue   # read whole on an attach: a call stamped before the last one counted was counted then
+                self._sub_std_seen.append(mid)
+                self._sub_std_mark = max(self._sub_std_mark, ts)
+                if _cpr.model_id(model) != SUBAGENT_STANDARD_MODEL:
+                    continue
+                counted = True
+                fast = u.get("speed") == "fast"
+                if not sub:
+                    c["mainFast" if fast else "mainStandard"] += 1
+                    continue
+                c["subFast" if fast else "subStandard"] += 1
+                if not fast:
+                    real = _cpr.call_cost(SUBAGENT_STANDARD_MODEL, u)
+                    charged = _cpr.call_cost(SUBAGENT_STANDARD_CLI_PRICED_AS, u)
+                    if real is not None and charged is not None:
+                        corr += real - charged
+        if not counted:
+            return 0.0
+        c["repricedUsd"] = round(float(c.get("repricedUsd") or 0.0) + corr, 6)
+        if c["subFast"]:
+            verdict = "subagent-fast"
+        elif c["mainStandard"] and not c["mainFast"] and getattr(self, "fast", "") != "cooldown":
+            verdict = "main-slow"
+        else:
+            verdict = "ok"
+        if verdict in self._SUB_STD_PROBLEMS and verdict not in self._sub_std_said:
+            self._sub_std_said.add(verdict)
+            self.backend._log("subagent speed (%s): %s" % (self.name, self._SUB_STD_PROBLEMS[verdict]), problem=True)
+        n = c["subStandard"]
+        line = {"subagent-fast": "a subagent call ran fast: the workaround stopped working",
+                "main-slow": "the main loop is not running fast",
+                "ok": "main loop %s · %s" % ("fast" if c["mainFast"] else "not checked yet",
+                                            ("%d subagent call%s at standard speed" % (n, "" if n == 1 else "s"))
+                                            if n else "no subagent call yet")}[verdict]
+        self._sub_std_record(dict({"verdict": verdict, "line": line}, **{k: c[k] for k in c}),
+                             scan={"since": self._sub_std_since, "mark": self._sub_std_mark, "counts": dict(c),
+                                   "said": sorted(self._sub_std_said), "seen": list(self._sub_std_seen)[-64:]})
+        return corr
+
+    def _sub_std_record(self, check: dict, scan: dict | None = None) -> None:
+        """Keep the speed check's outcome (the session's speed line) in memory and in the registry."""
+        check = dict(check, t=int(time.time()))
+        self._sub_std_check = check
+        fields = {"subagentSpeed": check}
+        if scan is not None:
+            fields["subagentSpeedScan"] = scan
+        try:
+            self.backend._update_reg(self.sid, **fields)
+        except Exception as e:
+            self.backend._log("subagent speed (%s): registry write failed: %s" % (self.name, e), problem=True)
+
+    def subagent_speed_line(self) -> str:
+        """The session's Subagents at standard speed line, in the user's words ("" while the switch is off, without a
+        look at the preconditions: the snapshot runs per push)."""
+        if not getattr(self, "subagent_standard", False):
+            return ""
+        return subagent_speed_line(True, self.subagent_standard_refusal(),
+                                   getattr(self, "_sub_std_check", None),
+                                   pending=not getattr(self, "_sub_std_launched", False))
 
     def billing_launch(self) -> tuple:
         """(side, stored login id) this session is set to bill, as its launch record carries it: its own pick, else the
@@ -7793,7 +8096,7 @@ class SdkSession:
         if not billing_waited:
             picks.append("billing")              # compared whether or not anything waited (the docstring's last paragraph)
         want = self.launch_values()
-        left = [p for p in picks if not known or any(launch.get(k) != want.get(k) for k in PICK_LAUNCH_KEYS[p])]
+        left = [p for p in picks if not known or any(launch_value(launch, k) != want.get(k) for k in PICK_LAUNCH_KEYS[p])]
         done = [p for p in picks if p not in left]
         effort_applied = self._effort_pending or (want["effort"] if "effort" in recorded else "")
         still = {p: recorded.get(p) for p in left if p in recorded}
@@ -7999,7 +8302,7 @@ class SdkSession:
         if not why or why not in PICK_RELAUNCH_WHYS or not isinstance(have, dict):
             return
         want = self.launch_values()
-        if any(have.get(k) != want.get(k) for keys in PICK_LAUNCH_KEYS.values() for k in keys):
+        if any(launch_value(have, k) != want.get(k) for keys in PICK_LAUNCH_KEYS.values() for k in keys):
             return
         self._switch_wanted = self._switch_wait_said = ""
         if self._launch_slots() is not None:
@@ -8787,6 +9090,10 @@ class SdkSession:
                     else:
                         launch, launched_here = self._launch_record, True
                     self._reconcile_waiting_picks(launch, launched_here, spawned_at=self._hello_spawned_at)
+                    try:
+                        self._sub_std_begin(launch, launched_here)   # the speed check's episode: whether THIS CLI carries the recipe
+                    except Exception as e:
+                        self.backend._log("subagent speed (%s): %s" % (self.name, e), problem=True)
                     # PRE-TURN PUBLISH (the user 2026-06-27): pull the live model + context % the INSTANT we
                     # connect — before any turn — so a freshly-created SDK session shows its model and context on
                     # OPEN, like a tmux session does on launch. The old path keyed model/ctx resolution off the
@@ -9325,6 +9632,10 @@ class SdkSession:
         cum = getattr(self, "_turn_cumulative", None)     # the CLI's own cumulative total_cost_usd at this result (T354):
         if isinstance(cum, (int, float)) and not isinstance(cum, bool):   # the repair and the audits read the staircase off it
             row["cumulativeUsd"] = round(float(cum), 6)
+        rp = getattr(self, "_turn_reprice", None)          # Subagents at standard speed: (the CLI's own dollars, the repricing)
+        if isinstance(rp, tuple) and len(rp) == 2:
+            row["cliUsd"] = round(float(rp[0]), 6)
+            row["subagentRepriceUsd"] = round(float(rp[1]), 6)
         if getattr(self, "_turn_redelivered", False):
             row["redelivered"] = True                      # a replayed result the ledger already held: folded nothing (T354)
         jo = getattr(self, "_turn_journal_offset", None)
@@ -10440,6 +10751,26 @@ class SdkSession:
                         #   map folds whole: the map is the only cumulative count a result carries, so no line here can do
                         #   better; the dollar watermark is right either way. Noted in the fix's second round)
                         turn_u = {k: 0 for k in (turn_u or {})} if isinstance(turn_u, dict) else turn_u
+                    # SUBAGENTS AT STANDARD SPEED (experimental): Claude Code priced the subagent calls of a launch that
+                    # carried the recipe at Opus 5 rates (the canonical id the override gives them), so its total_cost_usd
+                    # overstates them; _sub_std_settle prices each such call from its own transcript usage at Opus 5.5's
+                    # standard rates and returns the difference, which the turn records instead. The scan runs on every
+                    # result (a replayed or unknown one too, so its calls are not repriced against a later turn) and the
+                    # difference applies only to a delta this result folds. What a turn cannot absorb (a call whose cost an
+                    # earlier turn recorded, read now) carries to the next. The row keeps the CLI's own figure (cliUsd).
+                    try:
+                        corr = self._sub_std_settle()
+                    except Exception as e:
+                        corr = 0.0
+                        self.backend._log("subagent speed (%s): the speed check failed: %s" % (self.name, e), problem=True)
+                    self._turn_reprice = None
+                    if (corr or getattr(self, "_sub_std_carry", 0.0)) and not (unknown or duplicate):
+                        adj = corr + getattr(self, "_sub_std_carry", 0.0)
+                        cli_delta, delta = delta, delta + adj
+                        self._sub_std_carry = 0.0
+                        if delta < 0:
+                            self._sub_std_carry, delta = delta, 0.0
+                        self._turn_reprice = (cli_delta, delta - cli_delta)
                     self._turn_cumulative = float(total)          # the turn row carries the CLI's own cumulative (T354)
                     self._turn_baseline = baseline if first else None
                     self._turn_redelivered = duplicate            # the turn row says so (a flag the repair can trust)
@@ -10491,6 +10822,7 @@ class SdkSession:
                 except Exception as e:
                     self.backend._log("turn ledger (%s): %s" % (self.name, e), problem=False)
                 self._turn_spend = None          # spent with the row, like the feed stamps below
+                self._turn_reprice = None
                 self._turn_cumulative = None
                 self._turn_baseline = None
                 self._turn_redelivered = False
@@ -11836,6 +12168,12 @@ class SdkSession:
                 #   key at all, so they read ready.
                 "fast": self.fast,   # fast-mode state from init ("on"/"off"/"cooldown"; "" = unknown → no badge)
                 "fastPending": bool(getattr(self, "_fast_pending", "")),   # the opt-in waits for its relaunch → the fast badge's dots
+                # Subagents at standard speed (experimental): the switch, whether the fast menu offers it (on, or the model
+                # it needs), and its line (the speed check's outcome, or what holds it back)
+                "subagentStandard": bool(getattr(self, "subagent_standard", False)),
+                "subagentStandardOffered": bool(getattr(self, "subagent_standard", False))
+                                           or (getattr(self, "chosen_model", "") or "") == SUBAGENT_STANDARD_MODEL,
+                "subagentSpeed": self.subagent_speed_line(),
                 "modelFallback": model_fallback_row(self.chosen_model, getattr(self, "_served_model", "") or self.model, getattr(self, "_fallback_cause", ""),
                                                     getattr(self, "_upgrade_retry", None),
                                                     retry_upgrade_on(self.backend.state_dir) if retry_on is None else bool(retry_on),
@@ -12342,6 +12680,7 @@ class SdkBackend:
         self._drain_wake_timer = None
         self.login_ok = lambda: True              # the kernel wires its credential-store probe (T124); permissive unwired
         self.last_auth_refusal = ""               # why the last set_auth refused (auth_unavailable_why) → the kernel's toast names it
+        self.last_subagent_standard_refusal = ""  # why the last set_subagent_standard refused → the kernel's toast names it
         self._usage_all_keyed = False             # refresh_usage's one-shot: the last refresh found only
         #                                           keyed candidates (already logged); reset when a
         #                                           pollable session exists again, so the 60s rail timer
@@ -15880,9 +16219,25 @@ class SdkBackend:
                          "API key" if side == "key" else ("machine's own login" if auth_login else "login")),
                       problem=True)
         login = side == "login"
+        # Subagents at standard speed (experimental, SUBAGENT_STANDARD_ENV): the recipe rides THIS session's settings file,
+        # its env beside the session's own (a same-named var of the session's gives way: the recipe is all or nothing) and
+        # its modelOverrides as a key of the file. A switch whose precondition no longer holds (the model changed, fast mode
+        # went off) launches plainly, and says so once per episode: the recipe would break the main loop's fast mode or
+        # force a model change on the subagents.
+        overrides = None
+        if getattr(sess, "subagent_standard", False):
+            why = sess.subagent_standard_refusal()
+            if not why:
+                env_vars = dict(env_vars, **SUBAGENT_STANDARD_ENV)
+                overrides = SUBAGENT_STANDARD_OVERRIDES
+                sess._sub_std_inert_said = ""
+            elif sess._sub_std_inert_said != why:
+                sess._sub_std_inert_said = why
+                self._log("subagent speed (%s): Subagents at standard speed is on but this launch leaves it out: %s"
+                          % (sess.name, why), problem=True)
         fs = flag_settings_path(self.state_dir, sess.sid,
                                 ultracode=(sess.effort or "") == "ultracode", fast=sess.fast_effective(),
-                                env=env_vars, no_helper=login, log=self._log)
+                                env=env_vars, no_helper=login, model_overrides=overrides, log=self._log)
         if fs:
             kw["settings"] = fs
         # What the launch MEANT, for _note_auth_source's per-init check: keyed when the box's helper will
@@ -18761,6 +19116,71 @@ class SdkBackend:
             self._wake_push()
         return True
 
+    def set_subagent_standard(self, sid: str, value: str) -> bool:
+        """Turn this session's Subagents at standard speed switch 'on' or 'off' (experimental, SUBAGENT_STANDARD_ENV): its
+        main loop keeps fast mode while every subagent runs Opus 5.5 at standard speed. 'on' is refused, with the reason
+        in last_subagent_standard_refusal and the Log, unless the session's model pick is exactly claude-opus-5-5 and its
+        next launch carries fast mode (subagent_standard_refusal): there the recipe would break the main loop's fast mode
+        or change the subagents' model, or buy nothing. 'off' is always taken. Persisted in the registry
+        (`subagentStandard`) and connect-time like the per-session env: a change relaunches the CLI once nothing would be
+        cut (request_reconnect), and the launch record says whether the recipe rode it, so a kernel attaching to a CLI
+        launched before the change relaunches it too. An unchanged ask relaunches nothing."""
+        if value not in ("on", "off"):
+            return False
+        reg = read_reg(self.state_dir, sid)
+        if not reg:
+            return False
+        on = value == "on"
+        s = self.sessions.get(sid)
+        live = s if (s is not None and getattr(s, "thread", None) is not None and s.thread.is_alive()) else None
+        if on:
+            why = live.subagent_standard_refusal() if live is not None else subagent_standard_refusal(
+                reg.get("model") or "", self._reg_fast_effective(reg))
+            if why:
+                self.last_subagent_standard_refusal = why
+                self._log("subagent speed (%s): Subagents at standard speed cannot go on: %s"
+                          % (reg.get("name") or sid[:8], why), problem=True)
+                return False
+        self.last_subagent_standard_refusal = ""
+        if bool(reg.get("subagentStandard")) == on:
+            return True
+        self._update_reg(sid, subagentStandard=on)
+        if s is not None:
+            s.subagent_standard = on
+            s._sub_std_inert_said = ""
+        if live is not None:
+            self._note_pick_waits(live, "subagentStandard", "subagent speed")
+            live.request_reconnect(why="subagent speed")
+            self._wake_push()
+        else:
+            # no connection here, but a session host may keep a CLI launched before the change: recorded as waiting, so
+            # the connect that attaches to it compares the pick with that CLI's launch record and relaunches it once
+            # quiet (_reconcile_waiting_picks); a fresh launch carries it and clears the record
+            try:
+                with self._reg_lock:
+                    cur = read_reg(self.state_dir, sid) or {}
+                    wait = cur.get("relaunchWait") if isinstance(cur.get("relaunchWait"), dict) else {}
+                    picks = dict(wait.get("picks") or {}) if isinstance(wait.get("picks"), dict) else {}
+                    picks["subagentStandard"] = {"subagentStandard": on}
+                    self._update_reg_held(sid, relaunchWait={"why": wait.get("why") or "subagent speed",
+                                                             "t": wait.get("t") or int(time.time()), "picks": picks})
+            except Exception as e:
+                self._log("subagent speed (%s): could not record the waiting pick: %s" % (reg.get("name") or sid[:8], e),
+                          problem=True)
+        self._log("subagent speed (%s): Subagents at standard speed %s%s"
+                  % (reg.get("name") or sid[:8], "on" if on else "off",
+                     " — relaunching to apply" if live is not None else ", from the next launch"))
+        return True
+
+    def _reg_fast_effective(self, reg: dict) -> bool:
+        """SdkSession.fast_effective for a session that has no live object: the same rule over its registry row."""
+        ns = types.SimpleNamespace(
+            fast_opt=bool(reg.get("fast")), fast_off=bool(reg.get("fastOff")),
+            fast_reason=reg.get("liveFastReason") or "", fast_rule_refused=reg.get("fastRuleRefused") or "",
+            fast_refusal_checked=bool(reg.get("fastRefusalChecked")), backend=self,
+            chosen_model=reg.get("model") or "", _model_id=reg.get("liveModelId") or "", model=reg.get("liveModel") or "")
+        return bool(SdkSession.fast_effective(ns))
+
     def set_auth(self, sid: str, value: str) -> bool:
         """Set which account this session bills: its own pick, 'login' (the machine's Claude login), 'login:<id>' (a
         stored login, T346) or 'key' (the key behind Claude Code's apiKeyHelper), or "default", which clears the
@@ -19430,6 +19850,13 @@ class SdkBackend:
                     # survives idle/restart instead of vanishing until the next turn
                     "fast": reg.get("liveFast", ""),
                     "fastReason": reg.get("liveFastReason", ""),
+                    "subagentStandard": bool(reg.get("subagentStandard")),   # same as snapshot()
+                    "subagentStandardOffered": bool(reg.get("subagentStandard"))
+                                               or (reg.get("model") or "") == SUBAGENT_STANDARD_MODEL,
+                    "subagentSpeed": subagent_speed_line(
+                        bool(reg.get("subagentStandard")),
+                        subagent_standard_refusal(reg.get("model") or "", self._reg_fast_effective(reg))
+                        if reg.get("subagentStandard") else "", reg.get("subagentSpeed")),
                     "ctx": lc if isinstance(lc, (int, float)) else "",
                     "ctxOver": bool(reg.get("liveCtxOver")),   # persisted beside liveCtx — same survival
                     "ctxTokens": (int(reg["liveCtxTokens"])

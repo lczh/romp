@@ -380,6 +380,63 @@ the control never silently disappears. The first time a session is turned on,
 the flag rides a relaunch of its CLI, which waits for a quiet session; until
 then the badge shows switching-dots rather than **Fast**.
 
+### Subagents at standard speed (experimental)
+
+Claude Code has no speed setting per agent: every subagent a session starts runs at the session's speed, so a fast
+session's subagents bill at the fast rate too ($8/$40 per million tokens on Opus 5.5 against $4/$20). This switch keeps
+one session's main loop in fast mode while every subagent it starts runs Opus 5.5 at standard speed. It is a workaround
+built on undocumented Claude Code behaviour, verified on Claude Code 2.1.282, and labelled experimental for that reason.
+
+**Turning it on.** On an Opus 5.5 session the fast badge's menu has a row **Subagents at standard speed
+(experimental)** under Fast and Slow; the ✓ says it is on and the line under it says what the last check read. The
+websocket op is `{"type": "setSubagentStandard", "id": <sid>, "value": "on" | "off"}`. It is refused, with the reason,
+unless the session's model is exactly `claude-opus-5-5` (pick Opus 5.5 by its version; `opus`, `opus[1m]` and
+`claude-opus-5-5[1m]` are refused, because the recipe would take the main loop's fast mode with it or change the
+subagents' model) and fast mode is on for the session (without it the subagents already run at standard speed). Off is
+always accepted. The switch is stored on the session's registry entry (`subagentStandard`) and, like the per-session
+env, applies at the session's next relaunch, which waits until nothing would be cut; turning it off restores the
+normal launch at that relaunch. If the model or fast mode changes while it is on, the next launch leaves it out and the
+error center says why once.
+
+**What a launch carries.** In the session's own per-session settings file (never a settings file shared by a
+directory): `modelOverrides: {"claude-opus-5": "claude-opus-5-5[1m]"}`, plus four variables beside the session's own
+env: `CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-5-5[1m]` and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` (every subagent runs that
+model string, which is Opus 5.5 on the wire, Opus 5.5 being natively 1M), `CLAUDE_CODE_MODEL_CAPABILITIES` (takes fast
+mode off `claude-opus-5`, the catalog entry the override maps that string to, and gives it Opus 5.5's prompt
+capabilities) and `CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000` (Opus 5's default output cap is half Opus 5.5's). The main
+loop's plain `claude-opus-5-5` is matched by no override, so it keeps fast mode. The launch record says whether the
+recipe rode the launch, so a kernel that attaches to a CLI launched before a change relaunches it like any other pick.
+
+**The speed check.** After a launch that carried the recipe, the kernel reads each Opus 5.5 call's `usage.speed` from
+the main transcript and the subagents' transcripts at every result: the main loop should read `fast`, every subagent
+`standard`. The menu row's line reports it ("main loop fast · 12 subagent calls at standard speed"). A subagent call
+that ran fast (Claude Code stopped honouring the workaround), or a main loop that has run only at standard speed since
+the launch (a fast-mode cooldown starts after fast calls, so it is not mistaken for this), is said once per launch in
+the error center and on the row's line. The outcome is kept on the registry entry (`subagentSpeed`); an attach to a
+surviving CLI resumes the launch's check from it (`subagentSpeedScan`).
+
+**Spend.** Claude Code prices a recipe subagent call at the rates of the catalog entry the override maps its model to,
+Opus 5's ($5/$25, cache reads $0.50 against Opus 5.5's $0.20), so its `total_cost_usd` overstates those calls by a
+quarter, more for cache reads. romp's ledger records each turn at Opus 5.5's standard rates instead: at every result it
+prices each new standard-speed subagent call from the call's own transcript usage with kernel/cli_prices.py, once at
+Opus 5's rates and once at Opus 5.5's, and records the turn's `total_cost_usd` delta plus the difference. The turn row
+keeps both figures (`cliUsd`, the CLI's, and `subagentRepriceUsd`, the difference); `cumulativeUsd` stays the CLI's own.
+A fast subagent call is left as the CLI priced it, and a difference a turn cannot absorb (a call an earlier turn paid
+for, read now) carries to the next turn. Claude Code's own cost readouts still show Opus 5 rates.
+
+**Side effects, and why it is experimental.**
+
+- The subagents' environment line names the wrong model: "Opus 5 (1M context) … claude-opus-5-5[1m] … knowledge cutoff
+  May 2026", where a normal subagent reads Opus 5.5 and June 2026. The calls are Opus 5.5.
+- Anything in the session that asks for `claude-opus-5` is redirected to Opus 5.5 by the override, Claude Code's own
+  refusal fallback among them (it falls back to Opus 5 for some refusal categories), so that fallback cannot leave
+  Opus 5.5.
+- The FORCE variable applies to every subagent type, Explore, workflow agents and teammates included, and hides the
+  Agent tool's `model` parameter, so a session with the switch on cannot send a subagent to another model.
+- It rests on undocumented behaviour: `CLAUDE_CODE_MODEL_CAPABILITIES` and how `modelOverrides` values decide a model's
+  capabilities. A Claude Code update can change either without notice; the speed check is the backstop, and the switch
+  should be turned off when it reports a fast subagent call or a slow main loop.
+
 ### Always fast, and retrying an upgrade after a downgrade
 
 Two switches under **Settings**, **Automation**, **Model**, both off by default, both
