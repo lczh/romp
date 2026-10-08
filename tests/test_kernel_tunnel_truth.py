@@ -353,7 +353,9 @@ class SourcePins(unittest.TestCase):
         self.src = open(os.path.join(BIN, "romp-kernel")).read()
 
     def test_supervisor_derives_status_from_the_poll(self):
-        self.assertIn("_tunnel_status(_tunnel_proc_alive(r), up, sids is not None)", self.src)
+        # answered = rows came back, or the listing's own refusal did (ListingRefusalIsAnAnswer): both prove a far kernel
+        self.assertIn("_tunnel_status(_tunnel_proc_alive(r), up, _remote_answered(r, sids))", self.src)
+        self.assertIn('st = "up" if (up and _remote_answered(r, sids)) else ("no-kernel" if up else "down")', self.src)
 
     def test_no_kernel_carries_the_next_step_detail(self):
         self.assertIn("no kernel answering through the tunnel", self.src)
@@ -431,3 +433,51 @@ class SupervisorPassWhileInTransition(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ListingRefusalIsAnAnswer(unittest.TestCase):
+    """A far kernel whose session listing cannot be served answers GET /sessions with a 503 and {ok:false, error} (a
+    listing build failing there, 2026-10-07). It is running: the hub's row must stay up, keep the ids and names it had,
+    and say why (listingError), never read "kernel not answering" and offer a Start of a running host. Any other non-200
+    keeps its old reading. Driven against a loopback stand-in for the far kernel."""
+
+    def _serve(self, status, body):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                data = body.encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(lambda: (srv.shutdown(), srv.server_close()))
+        return srv.server_address[1]
+
+    def test_the_listings_refusal_reads_as_a_running_kernel_whose_list_is_unavailable(self):
+        why = "the session listing's rows cannot be served: it has not been built; the kernel log has the traceback"
+        r = {"host": "TESTHOST", "local_port": self._serve(503, json.dumps({"ok": False, "error": why})),
+             "status": "up", "sids": ["11111111-2222-3333-4444-555555555555"]}
+        self.assertIsNone(km._poll_remote_sessions(r), "no rows to take: the ids and names it had stand")
+        self.assertEqual((r["_probe"], r["listing_error"]), ("listing-unavailable", why))
+        self.assertTrue(km._remote_answered(r, None), "the far kernel answered")
+        self.assertEqual(km._tunnel_status(True, True, km._remote_answered(r, None)), "up", "not no-kernel: it runs")
+        r["kernel_port"] = 29855
+        self.assertEqual(km._remote_public(r)["listingError"], why, "the row says why, in the far kernel's words")
+
+    def test_any_other_refusal_keeps_its_reading_and_a_listing_clears_the_error(self):
+        r = {"host": "TESTHOST", "local_port": self._serve(503, "Service Unavailable"), "listing_error": "stale"}
+        self.assertIsNone(km._poll_remote_sessions(r))
+        self.assertEqual(r["_probe"], "http-503")
+        self.assertNotIn("listing_error", r, "a refusal that is not the listing's carries no listing error")
+        self.assertFalse(km._remote_answered(r, None))
+        r2 = {"host": "TESTHOST", "local_port": self._serve(200, "[]"), "listing_error": "stale"}
+        self.assertEqual(km._poll_remote_sessions(r2), [])
+        self.assertNotIn("listing_error", r2, "a listing that answers clears it")

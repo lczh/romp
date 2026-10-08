@@ -36,12 +36,19 @@ JSON
     # Record argv AND stdin: the serve token travels on stdin now (curl --config -), so a mock that
     # only watched argv could not tell a working auth header from no header at all. Read stdin
     # BEFORE writing the response, or the config never lands.
+    # It honours -w the way curl does (the format after the body, the status filled in), so the script's status split
+    # runs for real. CURL_FAIL: no reply at all (connection refused, curl's exit 7). CURL_CODE + CURL_BODY: a reply with
+    # that status and body.
     cat > "$MOCK/curl" <<'MOCK'
 #!/usr/bin/env bash
 echo "$*" >> "$CURL_LOG"
 cat >> "$CURL_STDIN" 2>/dev/null
-[ -n "${CURL_FAIL:-}" ] && exit 22
-cat "$FLEET_JSON"
+[ -n "${CURL_FAIL:-}" ] && exit 7
+_w=""
+while [ $# -gt 0 ]; do [ "$1" = "-w" ] && _w="$2"; shift; done
+if [ -n "${CURL_CODE:-}" ]; then printf '%s' "${CURL_BODY:-}"; else cat "$FLEET_JSON"; fi
+if [ -n "$_w" ]; then printf '%b' "$(printf '%s' "$_w" | sed "s/%{http_code}/${CURL_CODE:-200}/")"; fi
+exit 0
 MOCK
     chmod +x "$MOCK/curl"
     export PATH="$MOCK:$PATH"
@@ -87,6 +94,41 @@ teardown() { rm -rf "$TEST_DIR"; }
 @test "romp sessions: a dead kernel fails LOUDLY, never an empty list read as no sessions" {
     CURL_FAIL=1 run "$ROMP_SCRIPT" sessions
     [ "$status" -ne 0 ]
+    [[ "$output" == *"kernel not reachable"* ]]
+}
+
+@test "romp sessions: a kernel that answers its listing is unavailable says so, in the kernel's words, never not reachable" {
+    # the kernel answers 503 while a build of its kept listing fails: it is running, and a consumer told "not reachable"
+    # would go restart a healthy kernel
+    CURL_CODE=503 CURL_BODY='{"ok": false, "error": "the session listing'"'"'s rows cannot be served: its build has failed since 10:00:00 (3 builds; the last: RuntimeError: the build failed), so the kept copy may be stale; the kernel log has the traceback"}' \
+        run "$ROMP_SCRIPT" sessions
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"the kernel answered, but its session listing is unavailable"* ]]
+    [[ "$output" == *"RuntimeError: the build failed"* ]]
+    [[ "$output" != *"not reachable"* ]]
+}
+
+@test "romp sessions: a refused token and an unexpected status are reported as what the kernel answered" {
+    CURL_CODE=403 CURL_BODY='{"ok": false}' run "$ROMP_SCRIPT" sessions
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"refused the serve token"* ]]
+    CURL_CODE=500 CURL_BODY='oops' run "$ROMP_SCRIPT" sessions --json
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"the kernel answered HTTP 500"* ]]
+}
+
+@test "romp color <session>: reads the colours off the listing, and a listing refusal is reported as the kernel's answer" {
+    export ROMP_SERVE_TOKEN=TESTTOKEN123
+    run "$ROMP_SCRIPT" color web
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"#1EA1EB"* ]]
+    CURL_CODE=503 CURL_BODY='{"ok": false, "error": "the session listing'"'"'s rows cannot be served: it has not been built; the kernel log has the traceback"}' \
+        run "$ROMP_SCRIPT" color web
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp color: the kernel answered, but its session listing is unavailable"* ]]
+    [[ "$output" != *"not reachable"* ]]
+    CURL_FAIL=1 run "$ROMP_SCRIPT" color web
+    [ "$status" -eq 1 ]
     [[ "$output" == *"kernel not reachable"* ]]
 }
 

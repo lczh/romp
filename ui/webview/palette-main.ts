@@ -113,16 +113,24 @@ installMenuEcho();
     });
   }
   function openSessionSwitcher(): void {
-    fetch("/sessions").then((r) => r.json()).catch(() => null).then((locals) => {
-      const items = sessionItems(Array.isArray(locals) ? (locals as SessionRow[]) : null);
-      // fail loudly, not with a silently empty list: nothing from the chat pane AND no answer
-      // from the kernel means the kernel is the story, not "you have no sessions"
-      palette.openPick({
-        placeholder: "Jump to a session…",
-        items: items.length || locals !== null ? items
-          : [{ title: "Couldn't load sessions — the kernel didn't answer", run: () => {} }],
-        altEnter: { label: "new session…", run: openNewSessionPicker },
-      });
+    // three answers, each read as itself: the rows; the kernel answering that its session list is unavailable (its 503
+    // and {ok:false, error} while a listing build fails there, an object, not a list); and no answer at all
+    fetch("/sessions").then((r): Promise<{ rows: unknown; refused: string | null }> => {
+      if (!r.ok) return r.json().catch(() => null).then((b) => ({ rows: null, refused: (b && typeof b.error === "string" && b.error) || `HTTP ${r.status}` }));
+      return r.json().then((rows) => ({ rows, refused: null }));
+    }).catch(() => ({ rows: null, refused: null })).then(({ rows, refused }) => {
+      const locals = Array.isArray(rows) ? (rows as SessionRow[]) : null;
+      let items = sessionItems(locals);
+      // fail loudly, not with a silently empty or silently partial list: the kernel's own words when it refused, and
+      // "didn't answer" only when nothing came back
+      if (refused !== null) {
+        items = items.length
+          ? items.concat([{ title: `Some sessions may be missing — the kernel's session list is unavailable: ${refused}`, run: () => {} }])
+          : [{ title: `Couldn't load sessions — the kernel answered: ${refused}`, run: () => {} }];
+      } else if (!items.length && locals === null) {
+        items = [{ title: "Couldn't load sessions — the kernel didn't answer", run: () => {} }];
+      }
+      palette.openPick({ placeholder: "Jump to a session…", items, altEnter: { label: "new session…", run: openNewSessionPicker } });
     });
   }
 

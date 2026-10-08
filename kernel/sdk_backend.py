@@ -907,30 +907,20 @@ def canon_dir(raw: str) -> tuple[str, str]:
 _FSID_LEDGERS = (("episodes", lambda r: [r.get("fsid")]),   # each /clear episode head (the boundary tick, the fork seed)
                  ("states", lambda r: [(r.get("resumeFork") or {}).get(k) for k in ("from", "to")]))   # both ends of a resume fork
 #                the two append-only ledgers that record a session's transcript ids beyond its sid and its current lastSid, and
-#                what each row contributes: known_fsids reads them whole, SdkBackend.recorded_fsids once and then what was appended
+#                what each row contributes: known_fsids reads them whole, SdkBackend.recorded_fsids folds them through the shared
+#                incremental reader (_fsid_step)
 
 
-def read_fsid_ledger(path, pick, start: int = 0) -> tuple:
-    """(ids, end) from the append-only ledger at `path`, read from byte `start` to its end: the transcript ids `pick` takes
-    from each row, and the offset just past the last complete line. A row still being written (no newline yet) is left for
-    the next read to take whole from `end`; one that already decodes is taken now as well, and the same ids again then.
-    A row that does not decode, or decodes to a shape `pick` cannot read, is skipped. Raises OSError when the file cannot
-    be read (SdkBackend.recorded_fsids, its one caller, does not latch that)."""
-    with open(path, "rb") as f:
-        if start:
-            f.seek(start)
-        data = f.read()
-    ids = set()
-    for raw in data.split(b"\n"):
-        if not raw.strip():
-            continue
-        try:
-            r = json.loads(raw)
-            if isinstance(r, dict):
-                ids.update(str(v) for v in pick(r) if v)
-        except (ValueError, AttributeError, TypeError):
-            continue
-    return ids, start + data.rfind(b"\n") + 1
+def _fsid_step(state: frozenset, r, pick) -> frozenset:
+    """One ledger row folded into the transcript ids it records (SdkBackend.recorded_fsids, through event_model.fold_records):
+    a row of a shape `pick` cannot read is skipped, as the reader skips one that does not decode."""
+    if not isinstance(r, dict):
+        return state
+    try:
+        got = frozenset(str(v) for v in pick(r) if v)
+    except (AttributeError, TypeError):
+        return state
+    return state | got if got - state else state
 
 
 def known_fsids(state_dir: Path, sid: str, reg: dict | None = None, faults: list | None = None) -> set[str]:
@@ -3352,11 +3342,27 @@ def reg_rev() -> int:
     return REG_REV[0]
 
 
-REG_ROWS_FIELDS = ("lastSid", "threadOf", "alive", "forkedFrom")   # the registration fields the kernel's /sessions rows read THROUGH
-#                                                       THIS REVISION: lastSid on every row (jd._sdk_last_sid), a comment thread's threadOf
-#                                                       and alive (thread_sessions, whose thread set is the rows table this revision keys,
-#                                                       SdkBackend._rows_table), and forkedFrom, the lineage GET /sessions/by-fsid reads
-#                                                       through the same table (fork_parents). Not every registration field the rows read: the row's
+_FS_CLOCK = getattr(time, "CLOCK_REALTIME_COARSE", None)   # the clock Linux takes file timestamps from (current_time())
+
+
+def _fs_clock_ns() -> int:
+    """Now, on the clock a file's mtime is stamped from: Linux stamps it from the coarse realtime clock, which ticks every
+    few milliseconds, so a file written twice inside one tick keeps one mtime; elsewhere the realtime clock. Read by
+    SdkBackend._rows_table to tell a scan the registry directory's timestamp can vouch for from one taken inside the tick
+    of the directory's last write."""
+    if _FS_CLOCK is not None:
+        try:
+            return time.clock_gettime_ns(_FS_CLOCK)
+        except OSError:
+            pass
+    return time.time_ns()
+
+
+REG_ROWS_FIELDS = ("lastSid", "threadOf", "alive")   # the registration fields the kernel's /sessions rows key reads THROUGH THIS
+#                                                       REVISION: lastSid on every row, and threadOf and alive, which move a session into
+#                                                       or out of the listing. The comment-thread set and the fork lineage are NOT read
+#                                                       through it: they follow the registry directory, which every writer moves
+#                                                       (SdkBackend._rows_table). Not every registration field the rows read: the row's
 #                                                       launchError is read from this registry too (launch_error below), but the
 #                                                       kernel's listing reads it per cycle and keys on the record itself, its text
 #                                                       and stamp, outside this revision, so it is not in the tuple (adding it would
@@ -4967,13 +4973,16 @@ _REG_CACHE = {}   # path -> ((mtime_ns, size, ino), parsed reg)
 _REG_SERVE_WARNED = set()      # paths currently being served from cache — one loud line per incident
 
 
-def list_regs(state_dir: Path) -> list[dict]:
+def list_regs(state_dir: Path, faults: list | None = None) -> list[dict]:
     """COMPLETENESS is this scan's contract (the user 2026-08-31, closing the listing-blink class):
     absence from the returned rows reads as SESSION DEATH downstream — the postal bus refuses sends
     on it — so a reg this scan has ever seen may drop out only by being GENUINELY GONE (unlinked).
     A transient stat/read/parse failure serves the reg's LAST GOOD row from the cache instead,
     loudly; silence was how a live 'working' session got ruled dead while eight sibling sends in
-    the same tick succeeded (specimens 2026-08-31 01:01 and 18:30)."""
+    the same tick succeeded (specimens 2026-08-31 01:01 and 18:30). `faults`, when the caller passes a
+    list, gets the path of every registration this scan could not read as it stands (served from its last
+    good copy, or dropped when it has none) and of the directory when the scan itself failed, so a caller
+    that keeps the scan's answer (SdkBackend._rows_table) can tell a clean scan from one to take again."""
     d = Path(state_dir) / "sdk"
     out = []
     try:
@@ -4987,6 +4996,8 @@ def list_regs(state_dir: Path) -> list[dict]:
         # is gone took its regs with it, so the honest answer is [].
         return out
     except OSError:
+        if faults is not None:
+            faults.append(str(d))
         # the WHOLE-LISTING twin of the per-entry contract (review find 2026-09-01): a transient
         # enumeration failure blanked every row at once — the loudest possible false-death signal
         # under this very docstring. Serve every reg's last good row instead — of THIS ROOT ONLY:
@@ -5018,6 +5029,8 @@ def list_regs(state_dir: Path) -> list[dict]:
             # (review find). A genuinely unlinked reg stops being LISTED by the next scandir, so
             # serving the cached row costs at most one stale scan; a transient stat error costs
             # a dropped live session, the very failure this contract closes.
+            if faults is not None:
+                faults.append(de.path)
             if hit is not None:
                 if de.path not in _REG_SERVE_WARNED:
                     _REG_SERVE_WARNED.add(de.path)
@@ -5033,6 +5046,8 @@ def list_regs(state_dir: Path) -> list[dict]:
         try:
             r = json.loads(Path(de.path).read_text())
         except (OSError, ValueError) as e:
+            if faults is not None:
+                faults.append(de.path)
             if de.path not in _REG_SERVE_WARNED:   # once per incident, not per scan (scans run
                 _REG_SERVE_WARNED.add(de.path)     # several times a second — review find)
                 sys.stderr.write("list_regs: read failed for %s (%s) — %s\n"
@@ -11778,8 +11793,8 @@ class SdkBackend:
         self._notify = notify              # notify(app, msg) -> push to clients (kernel._send_to_app)
         self._poke_cb = poke               # wake the kernel's producer/judges (optional)
         self._owns_memo: dict = {}         # sid -> ((reg mtime_ns, size), owns?) — see owns()
-        self._fsid_ledger_memo: dict = {}  # (ledger, sid) -> ((ino, mtime_ns, size), offset read to, frozenset) — recorded_fsids()
-        self._rows_table_memo = None       # (REG_ROWS_REV, {"threads", "forkParents"}) — _rows_table()
+        self._fsid_folds: dict = {}        # ledger path -> fold_records cursor of its transcript ids — recorded_fsids()
+        self._rows_table_memo = None       # (registry directory stamp, {"threads", "forkParents", "forkChildren"}) — _rows_table()
         self._push_cb = push               # wake the kernel's PUSHER → immediate chat push (live tail)
         self._push_session_cb = push_session   # targeted ONE-session push (kernel _push_session_now) for
         #   per-session chip events (the connect handshake): a wake alone leaves the flip riding the next
@@ -11836,7 +11851,6 @@ class SdkBackend:
         #                                           keyed candidates (already logged); reset when a
         #                                           pollable session exists again, so the 60s rail timer
         #                                           logs the condition once per episode, not per call
-        self._fork_children_memo = None           # (sdk/ dir mtime_ns, {parent sid: [child lineage]}) — fork_children()
         startup_auth_env()                        # the login tokens leave this process's environment: the
         #   transport merges options.env over it, so a token left there would ride every launch, a
         #   key-billed one included. romp holds no API key (credentials.py, 2026-09-08).
@@ -16697,9 +16711,8 @@ class SdkBackend:
         tab). Served only to callers that ask (kernel /sessions?threads=1 → the postal bus), so a
         thread can mail its PARENT under its own name (the user 2026-08-22) without ever gaining a
         tab, a lane, or a feed card. The kernel's pusher reads it once per cycle for the listing it keeps
-        (plans/sessions-route-from-the-cycle.md), so it costs no registry scan unless the thread set can have
-        moved: the set is the rows table (_rows_table, re-read when the rows revision moves, as a thread's
-        start, end and promotion each write alive or threadOf), and each state is read now (thread_state)."""
+        (plans/sessions-route-from-the-cycle.md): the set is the registry's rows table (_rows_table, scanned again only
+        when the registry directory moved), and each state is read now (thread_state)."""
         return {sid: {"state": self.thread_state(sid), "threadOf": parent}
                 for sid, parent in self._rows_table()["threads"].items()}
 
@@ -16719,26 +16732,48 @@ class SdkBackend:
 
     def fork_parents(self) -> dict:
         """{sid: the session it was forked from} for every registration carrying a durable forkedFrom, comment threads aside
-        (a thread's parent is its threadOf, and thread_sessions carries it): fork_children's map read the other way, kept
-        on the rows table (forkedFrom is one of the rows revision's fields) so the kernel's per-cycle read of the lineage
-        GET /sessions/by-fsid applies costs no registry scan while the revision stands. Read-only: the table's own dict."""
+        (a thread's parent is its threadOf, and thread_sessions carries it): the lineage GET /sessions/by-fsid applies,
+        fork_children's map read the other way, from the same scan (_rows_table). Read-only: the table's own dict."""
         return self._rows_table()["forkParents"]
 
+    def fork_children(self) -> dict:
+        """{parent sid: [{sid, name, cut, t}, …]} for every session carrying a durable forkedFrom, oldest first —
+        the parent chat's branch chips. Comment threads are skipped (their anchor is the comment
+        highlight; a PROMOTED thread has threadOf cleared, so it joins here). From the registry's rows table
+        (_rows_table), the scan fork_parents and thread_sessions read too, so the chips, the lineage and the
+        thread set never disagree; the steady state costs a directory stat per call, not a registry sweep per
+        session build. Read-only: the table's own dict."""
+        return self._rows_table()["forkChildren"]
+
     def _rows_table(self) -> dict:
-        """{"threads": {thread sid: parent sid} for every alive comment thread, "forkParents": {sid: parent sid}}: the two
-        registry views the kernel's listing reads each cycle, from ONE registry scan per move of the rows revision
-        (REG_ROWS_REV: write_reg moves it when a registration's lastSid, threadOf, alive or forkedFrom changes, and on its
-        first write in this process; the census in tests/test_sessions_listing.py pins write_reg as the registry's one
-        writer). The revision is read BEFORE the scan, so a write landing during it is read on the next call. It counts
-        this process's writes, the bound the listing's own key already carries: a registration another process wrote (the
-        outgoing kernel during a handover) is read when this process next moves the revision. Every caller reads the
-        memo's own dicts, so none may write to them."""
-        rev = REG_ROWS_REV[0]
+        """The three registry views the kernel reads each cycle and each chat build, from ONE scan of the registry:
+        "threads" {thread sid: parent sid} for every alive comment thread, "forkParents" {sid: parent sid} and
+        "forkChildren" {parent sid: [{sid, name, cut, t}, …]} for every registration carrying a forkedFrom.
+
+        Kept until the registry directory moves, the one key every writer moves: a registration is published by renaming a
+        temp file into the directory (write_reg, in this process or in the outgoing kernel during a handover), which moves
+        the directory's mtime. Two bounds make that key exact. The directory's timestamp is coarse (Linux stamps it from a
+        clock that ticks every few milliseconds), so a write landing after a scan but inside the same tick would leave it
+        unchanged: a scan is kept only when the clock those timestamps come from (_fs_clock_ns) had already passed the
+        directory's own when the scan began, the racy-index rule, and is otherwise taken again on the next call. And a
+        scan that met a registration it could not read (list_regs' faults: one served from its last good copy, or dropped
+        because it had none) is used for this call and never kept, so a thread whose registration faulted on the scan is
+        listed, and an ended one leaves, as soon as the read heals. This process's own write count (REG_REV) rides the key
+        too, so its writes need no clock at all. A scan of 312 registrations costs about 3 ms; between writes a call costs a
+        directory stat. Every caller reads the table's own dicts, so none may write to them."""
+        d = os.path.join(str(self.state_dir), "sdk")
+        try:
+            st = os.stat(d)
+            stamp = (st.st_ino, st.st_mtime_ns, REG_REV[0])
+        except OSError:
+            stamp = None                                  # no registry yet, or one that will not stat: list_regs answers
         memo = getattr(self, "_rows_table_memo", None)
-        if memo is not None and memo[0] == rev:
+        if stamp is not None and memo is not None and memo[0] == stamp:
             return memo[1]
-        threads, parents = {}, {}
-        for reg in list_regs(self.state_dir):
+        settled = stamp is not None and _fs_clock_ns() > stamp[1]   # read BEFORE the scan: a later write stamps later
+        faults: list = []
+        threads, parents, children = {}, {}, {}
+        for reg in list_regs(self.state_dir, faults=faults):
             sid = reg.get("sid")
             if not sid:
                 continue
@@ -16749,36 +16784,13 @@ class SdkBackend:
             ff = reg.get("forkedFrom")
             if isinstance(ff, dict) and ff.get("sid"):
                 parents[str(sid)] = str(ff["sid"])
-        table = {"threads": threads, "forkParents": parents}
-        self._rows_table_memo = (rev, table)
-        return table
-
-    def fork_children(self) -> dict:
-        """{parent sid: [{sid, name, cut, t}, …]} for every session carrying a durable forkedFrom —
-        the parent chat's branch chips. Comment threads are skipped (their anchor is the comment
-        highlight; a PROMOTED thread has threadOf cleared, so it joins here). Memoized on the sdk/
-        dir's mtime: every reg write publishes via os.replace into that dir, bumping it, so the
-        steady state costs one stat instead of a full registry sweep per session build."""
-        d = Path(self.state_dir) / "sdk"
-        try:
-            mt = d.stat().st_mtime_ns
-        except OSError:
-            return {}
-        memo = self._fork_children_memo
-        if memo and memo[0] == mt:
-            return memo[1]
-        out: dict = {}
-        for reg in list_regs(self.state_dir):
-            ff = reg.get("forkedFrom")
-            if not isinstance(ff, dict) or not ff.get("sid") or reg.get("threadOf"):
-                continue
-            out.setdefault(str(ff["sid"]), []).append(
-                {"sid": reg["sid"], "name": reg.get("name", ""),
-                 "cut": ff.get("cut") or "", "t": ff.get("t") or 0})
-        for kids in out.values():
+                children.setdefault(str(ff["sid"]), []).append(
+                    {"sid": sid, "name": reg.get("name", ""), "cut": ff.get("cut") or "", "t": ff.get("t") or 0})
+        for kids in children.values():
             kids.sort(key=lambda k: k["t"])
-        self._fork_children_memo = (mt, out)
-        return out
+        table = {"threads": threads, "forkParents": parents, "forkChildren": children}
+        self._rows_table_memo = ((stamp if settled and not faults else None), table)   # a racy or faulted scan: taken again
+        return table
 
     def session_state(self, sid: str) -> str:
         """Live state ('working'/'waiting'/…) for ONE sid, comment threads included — live_sessions
@@ -18123,47 +18135,26 @@ class SdkBackend:
         MCP server is a child started with the CLI and keeps the CLAUDE_CODE_SESSION_ID of that moment for its whole
         life, a /clear mints a new transcript id under the same sid, and these records are the authority on which session
         the prior id belonged to (2026-09-15: every message a post-/clear session sent through its tools arrived
-        unattributed). So each ledger is read once and then only what was appended (read_fsid_ledger from the offset the
-        last read ended at): a ledger is stat'ed per call, and a states ledger grows by a row per state change. A new
-        inode, a smaller file, or a rewrite in place (same size, a new mtime) is read again from its start. A ledger that
-        is there but would not read (EACCES, EIO, EMFILE, a directory in its place) is answered without and not
-        memoized, by owns()'s rule (review find on #933): latching the partial set would 404 the session's own prior
-        transcript until the ledger next changed. The line that says so is keyed per sid in the problem ring, so a
-        ledger that stays unreadable counts on one entry instead of appending one per cycle."""
-        memo = getattr(self, "_fsid_ledger_memo", None)
-        if memo is None:
-            memo = self._fsid_ledger_memo = {}
+        unattributed). Each ledger is folded through the shared incremental reader (event_model.fold_records), which the
+        kernel's own folds of the same states ledger already use: an unchanged ledger costs a stat, a grown one its
+        appended rows, and a rewrite (a shrink, a same-size-new-mtime, a changed prefix under the reader's guard) is read
+        again from its start. A ledger that is there but would not read (EACCES, EIO, EMFILE, a directory in its place)
+        is answered without and not memoized, by owns()'s rule (review find on #933): latching the partial set would 404
+        the session's own prior transcript until the ledger next changed. The line that says so is keyed per sid in the
+        problem ring, so a ledger that stays unreadable counts on one entry instead of appending one per cycle."""
+        folds = getattr(self, "_fsid_folds", None)
+        if folds is None:
+            folds = self._fsid_folds = {}
         sid = str(sid)
-        root = str(self.state_dir)
         out = frozenset()
         for sub, pick in _FSID_LEDGERS:
-            p = os.path.join(root, sub, sid + ".jsonl")        # a string, not a Path: this runs per live session per cycle
-            k = (sub, sid)
-            try:
-                st = os.stat(p)
-            except OSError as e:
-                memo.pop(k, None)
-                if e.errno not in (errno.ENOENT, errno.ENOTDIR):
-                    self._log("recorded_fsids(%s): the %s ledger would not stat (%s) — answered without it, not cached"
-                              % (sid[:8], sub, e), problem=True, key=("recorded_fsids", sid))
-                continue
-            stamp = (st.st_ino, st.st_mtime_ns, st.st_size)
-            hit = memo.get(k)
-            if hit is not None and hit[0] == stamp:
-                out |= hit[2]
-                continue
-            grown = hit is not None and hit[0][0] == st.st_ino and st.st_size > hit[0][2]
-            start, have = (hit[1], hit[2]) if grown else (0, frozenset())
-            try:
-                ids, end = read_fsid_ledger(p, pick, start)
-            except OSError as e:
-                memo.pop(k, None)
-                self._log("recorded_fsids(%s): the %s ledger the stat found would not read (%s) — answered without it, "
-                          "not cached" % (sid[:8], sub, e), problem=True, key=("recorded_fsids", sid))
-                continue
-            ids = frozenset(have | ids)
-            memo[k] = (stamp, end, ids)
-            out |= ids
+            failed = []
+            out |= _em.fold_records(folds, os.path.join(str(self.state_dir), sub, sid + ".jsonl"), frozenset,
+                                    lambda st, r, _pick=pick: _fsid_step(st, r, _pick),
+                                    on=lambda kind: failed.append(kind) if kind == "fail" else None)
+            if failed:
+                self._log("recorded_fsids(%s): the %s ledger is there but would not read — answered without it, not cached"
+                          % (sid[:8], sub), problem=True, key=("recorded_fsids", sid))
         return out
 
     def ensure_scheduled(self) -> int:

@@ -133,3 +133,28 @@ test("diffSessionChanges asks git for the -z shape parsePorcelain reads, through
   assert.match(SRC, /parsePorcelain\(await gitIn\(s\.dir, \["status", "--porcelain=v1", "-z"\]\)\)/);
   assert.match(SRC, /execFile\("git", \["-C", dir, \.\.\.args\]/);
 });
+
+// GET /sessions answers three ways, and each reads differently (2026-10-07): the rows; the kernel answering that its
+// session list is unavailable (its 503 while a listing build fails there), in its own words; and no answer at all. A
+// refusal shown as "no sessions (is the kernel running?)" sent people to restart a kernel that was running.
+test("the /sessions answer: rows, the kernel's refusal in its own words, or no answer", async () => {
+  const { sessionsAnswer, sessionsWarning } = await import("./workspace-sessions");
+  const rows = sessionsAnswer(200, JSON.stringify([{ id: "11111111-2222-3333-4444-555555555555", name: "web", dir: "/tmp/notes-api" }]));
+  assert.deepEqual(rows, { sessions: [{ id: "11111111-2222-3333-4444-555555555555", name: "web", dir: "/tmp/notes-api" }], answered: true, error: "" });
+  const refused = sessionsAnswer(503, JSON.stringify({ ok: false, error: "the session listing's rows cannot be served: it has not been built" }));
+  assert.deepEqual(refused, { sessions: [], answered: true, error: "the session listing's rows cannot be served: it has not been built" });
+  assert.equal(sessionsAnswer(500, "oops").error, "HTTP 500", "an answer with no words still says what came back");
+  assert.deepEqual(sessionsAnswer(null, ""), { sessions: [], answered: false, error: "" });
+  assert.match(sessionsWarning(refused), /^romp: the kernel answered, but its session list is unavailable: the session listing's rows/);
+  assert.doesNotMatch(sessionsWarning(refused), /is the kernel running/);
+  assert.match(sessionsWarning(sessionsAnswer(null, "")), /the kernel did not answer/);
+  assert.equal(sessionsWarning(sessionsAnswer(200, "[]")), "romp: no sessions.");
+});
+
+test("the extension reads /sessions through that answer: the picker warns in its words, the tooltip keeps what it had", () => {
+  const EXT = fs.readFileSync(path.join(process.cwd(), "src", "extension.ts"), "utf8");
+  assert.match(EXT, /function fetchSessions\(\): Promise<SessionsAnswer>/);
+  assert.match(EXT, /vscode\.window\.showWarningMessage\(sessionsWarning\(a\)\)/);
+  assert.match(EXT, /if \(a\.answered && !a\.error\) \{ sessionDirs = a\.sessions; paintStatus\(\); \}/);   // a refusal keeps the old map
+  assert.doesNotMatch(EXT, /no sessions \(is the kernel running\?/);
+});

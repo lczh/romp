@@ -6,6 +6,7 @@ cycle keeps that build under its key; the ?threads=1 rows and GET /sessions/by-f
 own key, and no request reads a session, a thread or a record. The postal bus reads this route for its roster (list_agents, the
 send's liveness check), so a session's start, rename and death reach the roster within one cycle, and the rows keep the
 fields the bus reads. Hermetic: a temp state root, two synthetic sessions on disk, the live map stubbed."""
+import errno
 import http.client
 import inspect
 from unittest import mock
@@ -685,18 +686,41 @@ class _Threads(_Listing):
 
         def wrap(obj, name, instance=False):
             real = getattr(obj, name, None)
-            if real is None:
-                return
+            self.assertIsNotNone(real, "the seam %s names something that exists: a missing one would count nothing" % name)
             setattr(obj, name, lambda *a, **k: (walks.append(name), real(*a, **k))[1])
             self.addCleanup((lambda: obj.__dict__.pop(name, None)) if instance else (lambda: setattr(obj, name, real)))
 
-        for name in ("thread_sessions", "known_fsids", "recorded_fsids", "fork_parents", "fork_children"):
+        for name in ("thread_sessions", "recorded_fsids", "fork_parents", "fork_children"):
             wrap(self.be, name, instance=True)
-        for name in ("_thread_rows", "_session_rows_from", "_session_rows"):
+        for name in ("_thread_rows", "_session_rows_from", "_session_rows", "_thread_reg_read"):
             wrap(km, name)
-        for name in ("list_regs", "known_fsids", "read_fsid_ledger"):
+        for name in ("list_regs", "known_fsids"):
             wrap(sb, name)
+        wrap(sb._em, "fold_records")                                        # the shared reader the ledgers are folded through
         return walks
+
+    def _foreign_write(self, sid, reg):
+        """A registration published the way write_reg publishes one (a temp file renamed over it), by ANOTHER process: the
+        outgoing kernel during a handover. This process's registry revisions do not move."""
+        p = self.root / "sdk" / (sid + ".json")
+        tmp = p.with_name(p.name + ".9999.foreign.tmp")
+        tmp.write_text(json.dumps(reg))
+        os.replace(tmp, p)
+
+    def _faulting_reads(self, *sids):
+        """Reads of these registrations raise EIO while the returned list holds True (the EMFILE/EIO a loaded host returns)."""
+        armed = [True]
+        targets = {str(self.root / "sdk" / (sid + ".json")) for sid in sids}
+        real = Path.read_text
+
+        def read_text(path, *a, **k):
+            if armed[0] and str(path) in targets:
+                raise OSError(errno.EIO, "Input/output error", str(path))
+            return real(path, *a, **k)
+        patcher = mock.patch.object(Path, "read_text", read_text)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return armed
 
     def _count_thread_builds(self):
         builds = []
@@ -790,19 +814,25 @@ class ThreadRowsFromTheCycle(_Threads):
             finally:
                 os.chmod(reg, 0o644)
 
-    def test_a_registry_write_no_thread_row_reads_rescans_nothing(self):
-        """The thread set is the registry's rows table: re-read when the rows revision moves (a thread's start, end and
-        promotion each write alive or threadOf), never on the per-cycle writes of fields no row reads."""
+    def test_the_registry_is_scanned_once_per_move_of_its_directory_and_never_on_a_quiet_cycle(self):
+        """The thread set is the registry's rows table, kept until the registry directory moves (every writer's publish
+        moves it), so a quiet cycle scans nothing and a write is read by one scan, however many readers ask that cycle (the
+        listing's thread set and lineage, and every chat build's branch chips)."""
         self._cycle()
         walks = self._count_walks()
-        for i in range(3):
-            sb.write_reg(self.root, T1, {"sid": T1, "cwd": str(self.cdir), "alive": True, "threadOf": SID, "lastSid": T1,
-                                         "ctxTokens": 100 + i})
+        for _ in range(3):
             self._cycle()
-        self.assertEqual(walks.count("list_regs"), 0, "three writes of a field no row reads: the registry is not scanned again")
+            self.be.fork_children()
+        self.assertEqual(walks.count("list_regs"), 0, "quiet cycles: the registry is not scanned")
+        sb.write_reg(self.root, T1, {"sid": T1, "cwd": str(self.cdir), "alive": True, "threadOf": SID, "lastSid": T1,
+                                     "ctxTokens": 100})
+        self._cycle()
+        self.be.fork_children()
+        self.be.fork_parents()
+        self.assertEqual(walks.count("list_regs"), 1, "a write: one scan, shared by every reader")
         self._thread(T3, "web-comment-3")
         self._cycle()
-        self.assertEqual(walks.count("list_regs"), 1, "a thread starting re-reads it once")
+        self.assertEqual(walks.count("list_regs"), 2)
         self.assertIn(T3, {r["id"] for r in self._rows()})
 
     def test_by_fsid_answers_from_the_cycle_with_the_listings_row_and_reads_no_record(self):
@@ -829,36 +859,107 @@ class ThreadRowsFromTheCycle(_Threads):
         self.assertEqual(json.loads(self._get("/sessions/by-fsid?fsid=" + UNKNOWN)[1])["id"], SID2)
 
     def test_a_growing_ledger_is_read_from_where_the_last_read_ended(self):
-        """A session's states ledger grows by a row per state change, so the cycle's claims read only what was appended; a row
-        still being written is read whole next time."""
+        """A session's states ledger grows by a row per state change, so the cycle's claims fold each ledger through the
+        shared incremental reader (event_model.fold_records): only what was appended is read, a row still being written is
+        read whole next time, and a rewrite that leaves the file larger is caught by the reader's guard and read again
+        from its start (a reader trusting the size alone would splice the new bytes onto the old rows)."""
         self._cycle()
-        reads = []
-        real = sb.read_fsid_ledger
-        sb.read_fsid_ledger = lambda path, pick, start=0: (reads.append((Path(path).parent.name, Path(path).stem, start)),
-                                                           real(path, pick, start))[1]
-        self.addCleanup(setattr, sb, "read_fsid_ledger", real)
-        self._cycle()
-        self.assertEqual(reads, [], "nothing appended: no ledger read")
         p = self.root / "states" / (SID2 + ".jsonl")
+        read = lambda: sb._em._READ_BYTES.get(str(p), 0)
         sb.append_state(self.root, SID2, "working")
-        size = p.stat().st_size
         self._cycle()
-        self.assertEqual(reads, [("states", SID2, 0)], "api's states ledger appeared: read once, from its start")
-        del reads[:]
+        before = read()
+        self.assertGreater(before, 0, "api's states ledger appeared: read")
+        self._cycle()
+        self.assertEqual(read(), before, "nothing appended: nothing read")
+        row = json.dumps({"t": 3, "resumeFork": {"from": OLD_WEB, "to": UNKNOWN}}) + "\n"
         with open(p, "a") as f:
-            f.write(json.dumps({"t": 3, "resumeFork": {"from": OLD_WEB, "to": UNKNOWN}}))   # no newline yet: mid-write
+            f.write(row)
         self._cycle()
-        self.assertEqual(reads, [("states", SID2, size)], "only the appended bytes are read")
-        self.assertEqual(json.loads(self._get("/sessions/by-fsid?fsid=" + UNKNOWN)[1])["id"], SID2,
-                         "a row that already decodes is taken")
-        del reads[:]
-        with open(p, "a") as f:
-            f.write("\n")
+        self.assertLess(read() - before, 2 * len(row) + 200, "only the appended bytes (and the reader's guard) are read")
+        self.assertEqual(json.loads(self._get("/sessions/by-fsid?fsid=" + UNKNOWN)[1])["id"], SID2)
+        with open(p, "w") as f:                                             # rewritten in place, larger, with other rows
+            f.write(json.dumps({"t": 9, "resumeFork": {"from": "aaaaaaaa-2222-3333-4444-5555555555e1",
+                                                       "to": "aaaaaaaa-2222-3333-4444-5555555555e2"}}) + "\n" + "\n" * 300)
         self._cycle()
-        self.assertEqual(reads, [("states", SID2, size)], "the row being written is read again from its start, whole")
-        del reads[:]
+        self.assertEqual(self._get("/sessions/by-fsid?fsid=" + UNKNOWN)[0], 404, "the rewrite dropped the row: read again whole")
+        self.assertEqual(json.loads(self._get("/sessions/by-fsid?fsid=aaaaaaaa-2222-3333-4444-5555555555e2")[1])["id"], SID2)
+
+    def test_a_faulted_registry_scan_is_never_kept(self):
+        """A registration that will not read on the scan (EIO, EMFILE on a loaded host) is dropped from it when it was never
+        read, and served from its last good copy when it was: a scan with a fault is used for that cycle and scanned again
+        on the next, so a new thread is listed and an ended one leaves the moment the read heals."""
         self._cycle()
-        self.assertEqual(reads, [])
+        armed = self._faulting_reads(T3, T2)
+        self._thread(T3, "web-comment-3")                                   # a new thread, its registration unreadable
+        sb.write_reg(self.root, T2, {"sid": T2, "alive": False, "threadOf": SID, "lastSid": T2})   # T2 ends, unreadable too
+        self._cycle()
+        ids = {r["id"] for r in self._rows()}
+        self.assertNotIn(T3, ids, "never read: not listed while the read faults")
+        self.assertIn(T2, ids, "read before: its last good copy stands while the read faults")
+        armed[0] = False
+        self._cycle()
+        ids = {r["id"] for r in self._rows()}
+        self.assertIn(T3, ids, "the read healed: the next cycle scans again and lists it")
+        self.assertNotIn(T2, ids, "and the ended thread leaves")
+
+    def test_another_processs_registry_write_is_seen_by_the_next_cycle(self):
+        """The thread set and the fork lineage follow the registry directory, which every writer moves (each publish renames
+        a temp file into it), not a revision only this process's writes move: a thread another process registered, an end it
+        wrote, and a fork it recorded are each read by the next cycle."""
+        self._cycle()
+        self._foreign_write(T3, {"sid": T3, "cwd": str(self.cdir), "alive": True, "threadOf": SID, "lastSid": T3})
+        self.comments.append({"tid": T3, "sid": T3, "name": "web-comment-3", "status": "open"})
+        self._write_comments()
+        self._cycle()
+        self.assertEqual(self._row(T3)["name"], "web-comment-3", "another process's new thread is listed")
+        self._foreign_write(T2, {"sid": T2, "cwd": str(self.cdir), "alive": False, "threadOf": SID, "lastSid": T2})
+        self._cycle()
+        self.assertIsNone(self._row(T2), "and its end is read")
+        self._foreign_write(SID2, {"sid": SID2, "cwd": str(self.cdir), "alive": True, "lastSid": SID2,
+                                   "forkedFrom": {"sid": SID, "name": "web", "cut": "c1", "t": 5}})
+        self.assertEqual(self.be.fork_parents().get(SID2), SID, "a fork it recorded is in the lineage")
+        self.assertEqual([k["sid"] for k in self.be.fork_children().get(SID, [])], [SID2], "the branch chips read the same")
+
+    def test_a_scan_in_the_same_timestamp_tick_as_the_last_write_is_scanned_again(self):
+        """The directory's timestamp is coarse: a write landing after a scan but in the same tick leaves it unchanged. A scan
+        taken while the clock the timestamps come from had not yet passed the directory's own is not trusted, and the next
+        call scans again (the racy-index rule)."""
+        d = self.root / "sdk"
+        self.be.thread_sessions()
+        st = d.stat()
+        with mock.patch.object(sb, "_fs_clock_ns", lambda: st.st_mtime_ns):   # the scan below lands inside the write's tick
+            self.be._rows_table_memo = None
+            self.be.thread_sessions()
+        self._foreign_write(T3, {"sid": T3, "alive": True, "threadOf": SID, "lastSid": T3})
+        os.utime(d, ns=(st.st_atime_ns, st.st_mtime_ns))                    # …and the write lands in that same tick
+        self.assertIn(T3, self.be.thread_sessions(), "the racy scan is not kept: the next call scans and sees the write")
+
+    def test_the_thread_rows_lastsid_is_the_registration_the_key_read(self):
+        """Two writes of a registration inside one timestamp tick: the key reads it by inode and ctime and moves, and the row
+        must read the same record, never a memo keyed on the timestamp alone, which served the first write's lastSid."""
+        self._cycle()
+        reg = self.root / "sdk" / (T1 + ".json")
+        sb.write_reg(self.root, T1, {"sid": T1, "cwd": str(self.cdir), "alive": True, "threadOf": SID, "lastSid": NEW_T1})
+        self._cycle()
+        self.assertEqual(self._row(T1)["lastSid"], NEW_T1)
+        st = reg.stat()
+        sb.write_reg(self.root, T1, {"sid": T1, "cwd": str(self.cdir), "alive": True, "threadOf": SID, "lastSid": OLD_T1})
+        os.utime(reg, ns=(st.st_atime_ns, st.st_mtime_ns))                  # the second write in the first one's tick
+        self._cycle()
+        self.assertEqual(self._row(T1)["lastSid"], OLD_T1, "the row carries the record the key read")
+
+    def test_a_sessions_lastsid_written_twice_in_one_tick_reaches_its_row_and_its_claims(self):
+        self._cycle()
+        reg = self.root / "sdk" / (SID2 + ".json")
+        sb.write_reg(self.root, SID2, {"sid": SID2, "cwd": str(self.cdir), "alive": True, "lastSid": NEW_T1})
+        self._cycle()
+        st = reg.stat()
+        sb.write_reg(self.root, SID2, {"sid": SID2, "cwd": str(self.cdir), "alive": True, "lastSid": OLD_T1})
+        os.utime(reg, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self._cycle()
+        self.assertEqual(self._row(SID2)["lastSid"], OLD_T1, "the main row's lastSid is the record, not a tick-keyed memo")
+        self.assertEqual(json.loads(self._get("/sessions/by-fsid?fsid=" + OLD_T1)[1])["id"], SID2, "and so are the claims")
 
 
 class ListingFaultAndFirstBuild(_Threads):
@@ -957,12 +1058,93 @@ class ListingFaultAndFirstBuild(_Threads):
 
 
 class ThreadStateReadAlone(unittest.TestCase):
-    def test_the_snapshots_state_is_the_state_half_the_listing_reads(self):
-        """SdkSession.snapshot() takes its state from live_state(), the read the listing makes of every running comment
-        thread each cycle, so the two cannot disagree."""
-        src = inspect.getsource(sb.SdkSession.snapshot)
-        self.assertIn("self.live_state(", src)
-        self.assertIn("thread_state", inspect.getsource(sb.SdkBackend.thread_sessions))
+    """SdkSession.live_state() is the state half of snapshot(), and what the listing reads of every running comment thread
+    each cycle: driven through each of its branches on a real session, the two agree, and the backend's thread_state reads
+    the same answer without taking a snapshot."""
+
+    def test_every_branch_of_the_state_half_agrees_with_the_snapshot(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "session-hosts").write_text("off\n")
+        be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
+        reg = {"sid": T1, "name": "web-comment-1", "cwd": "/tmp/notes-api", "alive": True, "threadOf": SID, "lastSid": T1}
+        sb.write_reg(root, T1, reg)
+        s = sb.SdkSession(be, reg)
+        s.thread = type("Alive", (), {"is_alive": lambda self: True})()
+        be.sessions[T1] = s
+        snaps = []
+        real_snapshot = s.snapshot
+        s.snapshot = lambda *a, **k: (snaps.append(1), real_snapshot(*a, **k))[1]
+        sb.append_state(root, T1, "permission")                             # the log's last state, for the at-rest branch
+
+        def at(**f):                                                        # the session's fields set to one case alone
+            s.inflight, s.retrying, s._interrupted = 0, False, False
+            for k, v in f.items():
+                setattr(s, k, v)
+        for what, fields, want in (("the log's last state", {}, "permission"),
+                                   ("a turn in flight", {"inflight": 1}, "working"),
+                                   ("an API retry", {"inflight": 1, "retrying": True}, "retrying"),
+                                   ("an interrupt settling", {"inflight": 1, "_interrupted": True}, "waiting")):
+            at(**fields)
+            del snaps[:]
+            self.assertEqual(be.thread_state(T1), want, what)
+            self.assertEqual(snaps, [], "%s: the thread's state is read without a snapshot" % what)
+            self.assertEqual(real_snapshot()["state"], want, "%s: the snapshot says the same" % what)
+        at()
+        with s._sub_lock:
+            s._subagents["agent-1"] = {"type": "general", "since": 7}
+        self.assertEqual((be.thread_state(T1), real_snapshot()["state"]), ("working", "working"),
+                         "a background subagent outliving the turn: working, both ways")
+
+
+class ThreadRegMemoBound(unittest.TestCase):
+    def test_past_five_hundred_and_twelve_registrations_a_second_pass_reads_no_file(self):
+        """_thread_reg_read's memo is bounded by the registrations that exist, not by a constant: with more of them than the
+        old cap of 512 (a long-lived host keeps one per session it ever ran) a FIFO past the cap evicted each entry before its
+        next use, and every lookup in every cycle read its file again."""
+        root = Path(tempfile.mkdtemp())
+        saved = jd.STATE
+        jd.STATE = root
+        self.addCleanup(setattr, jd, "STATE", saved)
+        km._thread_reg_memo.clear()
+        self.addCleanup(km._thread_reg_memo.clear)
+        sids = ["11111111-2222-3333-4444-%012d" % i for i in range(600)]
+        for sid in sids:
+            sb.write_reg(root, sid, {"sid": sid, "alive": False})
+        for sid in sids:
+            km._thread_reg_read(sid)
+        reads = []
+        real = Path.read_text
+        with mock.patch.object(Path, "read_text", lambda p, *a, **k: (reads.append(str(p)), real(p, *a, **k))[1]):
+            for sid in sids:
+                self.assertEqual(km._thread_reg_read(sid)[0], "ok")
+        self.assertEqual(reads, [], "every registration is remembered: the second pass reads none of them")
+        (root / "sdk" / (sids[0] + ".json")).unlink()
+        self.assertEqual(km._thread_reg_read(sids[0])[0], "missing")
+        self.assertNotIn(sids[0], km._thread_reg_memo, "a registration that is gone leaves the memo")
+
+
+class ListingFaultSaidOncePerEpisode(_Threads):
+    def test_a_fault_is_said_once_when_it_starts_and_once_when_it_heals(self):
+        """The cycle runs twice a second or more: a fault that persists wrote its traceback every cycle. It is said once
+        when it starts (with the traceback), once when it heals, and again if it comes back."""
+        import io
+        self._cycle()
+        real = km._session_rows_from
+        km._session_rows_from = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("the build failed"))
+        self.addCleanup(setattr, km, "_session_rows_from", real)
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            for i in range(4):
+                self.row[SID]["state"] = "working" if i % 2 else "waiting-%d" % i   # the key keeps moving: each cycle builds
+                self._cycle()
+            self.assertEqual(err.getvalue().count("Traceback (most recent call last)"), 1, err.getvalue()[-600:])
+            km._session_rows_from = real
+            self._cycle()
+            self.assertEqual(err.getvalue().count("sessions-listing: the rows build again"), 1, err.getvalue()[-600:])
+            km._session_rows_from = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("the build failed"))
+            self.row[SID]["state"] = "idle"
+            self._cycle()
+            self.assertEqual(err.getvalue().count("Traceback (most recent call last)"), 2, "a new episode is said again")
 
 
 if __name__ == "__main__":

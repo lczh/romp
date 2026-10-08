@@ -310,6 +310,7 @@ OFF_FEED = (
     "_thread_mail_off",            # the mail-off gate: threadOf
     "_thread_names",               # name claims and the sid resolve: name
     "_thread_owes_first_reply",    # comment threads: forkOf
+    "_thread_last_sid",            # the /sessions?threads=1 row's lastSid, the record its key read: lastSid
     "_thread_rows_key",            # the /sessions?threads=1 rows' key (the pusher's listing job): threadOf, lastSid
     "_thread_transcript_path",     # comment threads' transcript resolve (a `reg` parameter; _sdk_sess's path too, FOLDED_BY):
     #                                cwd, lastSid, transcriptPath

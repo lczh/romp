@@ -42,7 +42,7 @@ test("the openFile handler resolves before it opens, looks the session's dir up 
   assert.match(SRC, /import \{ resolveOpenPath, needsSessionDir \} from "\.\/open-path";/);
   assert.match(SRC, /if \(m\.type === "openFile" && m\.path\) \{ void openFileResolved\(String\(m\.path\), m\.line, typeof m\.id === "string" \? m\.id : undefined\); return; \}/);
   assert.match(SRC, /let file = resolveOpenPath\(raw, os\.homedir\(\)\);/, "the remote home: the extension host runs on the machine the files are on");
-  assert.match(SRC, /if \(needsSessionDir\(file\) && sid\) \{\n\s*const s = \(await fetchSessions\(\)\)\.find\(\(x\) => x\.id === sid\);\n\s*file = resolveOpenPath\(file, os\.homedir\(\), s \? s\.dir : null\);/, "one /sessions read, only when a relative path needs it");
+  assert.match(SRC, /if \(needsSessionDir\(file\) && sid\) \{\n\s*const s = \(await fetchSessions\(\)\)\.sessions\.find\(\(x\) => x\.id === sid\);\n\s*file = resolveOpenPath\(file, os\.homedir\(\), s \? s\.dir : null\);/, "one /sessions read, only when a relative path needs it");
   assert.match(SRC, /openFileInEditor\(file, line, raw\);/);
   assert.match(SRC, /vscode\.window\.showWarningMessage\(`romp: couldn't open \$\{file\}\$\{raw && raw !== file \? ` \(from \$\{raw\}\)` : ""\}`\);/, "the warning names what was tried, and what was written when that differs");
 });

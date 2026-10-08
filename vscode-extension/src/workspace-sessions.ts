@@ -25,6 +25,30 @@ export function sessionMatchesFolders(dir: string, folders: string[]): boolean {
   });
 }
 
+// What the kernel's GET /sessions answer says (extension.ts owns the fetch): the rows when it answered 200; the kernel's own
+// words when it answered that its session list is unavailable (its 503 while a listing build fails there); and no answer
+// at all (statusCode null: refused, timed out). Each reads differently: an empty list is "no sessions", a refusal is the
+// kernel's message, and only silence asks whether the kernel is running.
+export type SessionsAnswer = { sessions: SessionInfo[]; answered: boolean; error: string };
+
+export function sessionsAnswer(statusCode: number | null, body: string): SessionsAnswer {
+  if (statusCode === null) return { sessions: [], answered: false, error: "" };
+  let j: any = null;
+  try { j = JSON.parse(body); } catch { j = null; }
+  if (statusCode === 200 && Array.isArray(j)) {
+    return { sessions: j.map((s: any) => ({ id: String(s.id), name: String(s.name), dir: String(s.dir || "") })), answered: true, error: "" };
+  }
+  const why = j && typeof j === "object" && typeof j.error === "string" && j.error ? j.error : `HTTP ${statusCode}`;
+  return { sessions: [], answered: true, error: why };
+}
+
+// The warning a picker shows when the answer carries no sessions to pick from.
+export function sessionsWarning(a: SessionsAnswer): string {
+  if (!a.answered) return "romp: the kernel did not answer (is it running? `romp up`).";
+  if (a.error) return `romp: the kernel answered, but its session list is unavailable: ${a.error}`;
+  return "romp: no sessions.";
+}
+
 export function sessionsForWorkspace(sessions: SessionInfo[], folders: string[]): SessionInfo[] {
   return (sessions || []).filter((s) => s && s.dir && sessionMatchesFolders(s.dir, folders));
 }
