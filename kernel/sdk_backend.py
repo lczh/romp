@@ -5456,6 +5456,13 @@ SUBAGENT_STANDARD_ENV = {
 }
 # the rates Claude Code charges a recipe subagent call at when its result names no canonical model: the borrowed entry
 SUBAGENT_STANDARD_CLI_PRICED_AS = SUBAGENT_STANDARD_BORROWED
+# The subagents' environment line names the borrowed entry ("Opus 4.7 (1M context) … January 2026"), and nothing a launch
+# can set reaches it. One line appended to every subagent's system prompt (Claude Code's --append-subagent-system-prompt,
+# subagents only, never the main loop) names the model they run on. Verified on 2.1.282: asked which model it is and its
+# cutoff, a recipe subagent answered Opus 5.5, claude-opus-5-5, June 2026. It is text romp puts into the session, so it
+# speaks plainly and names no machinery (CLAUDE.md, "Messages we inject into a session"; tests/test_injected_voice.py).
+SUBAGENT_STANDARD_IDENTITY_NOTE = ("Claude Opus 5.5 (model ID claude-opus-5-5, knowledge cutoff June 2026) is the model you "
+                                   "run on. If your environment details name another model or cutoff, they are out of date.")
 SUBAGENT_STANDARD_SHELL_DIR = "sdk-shell-env"   # per-session CLAUDE_ENV_FILE scripts (subagent_standard_shell_script)
 
 
@@ -16826,6 +16833,7 @@ class SdkBackend:
                 if shell:
                     env_vars["CLAUDE_ENV_FILE"] = shell   # the four variables stay with the CLI, not its shell commands
                 overrides = SUBAGENT_STANDARD_OVERRIDES
+                kw.setdefault("extra_args", {})["append-subagent-system-prompt"] = SUBAGENT_STANDARD_IDENTITY_NOTE
                 sess._sub_std_inert_said = ""
             elif sess._sub_std_inert_said != why:
                 sess._sub_std_inert_said = why

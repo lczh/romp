@@ -482,10 +482,13 @@ the launch) is probed then, with the session's own speed check as the backstop m
 **Side effects, and why it is experimental.**
 
 - The subagents' environment line names the borrowed entry: "Opus 4.7 (1M context) … claude-opus-5-5[1m] … knowledge
-  cutoff January 2026", where a normal subagent reads Opus 5.5 and June 2026. The calls are Opus 5.5. Claude Code builds
-  that line from the model's catalog entry, and in 2.1.282 nothing a launch can set reaches it: the catalog is compiled
-  in, and the model-catalog URL setting names a signed model-picker list (which models the picker offers), not the
-  catalog, and is switched off by a server flag for this account.
+  cutoff January 2026", where a normal subagent reads Opus 5.5 and June 2026. Claude Code builds that line from the
+  model's catalog entry, and in 2.1.282 nothing a launch can set reaches it: the catalog is compiled in, and the
+  model-catalog URL setting names a signed model-picker list (which models the picker offers), not the catalog, and is
+  switched off by a server flag for this account. So the launch appends one line to every subagent's system prompt
+  (Claude Code's `--append-subagent-system-prompt`, never the main loop's): "Claude Opus 5.5 (model ID claude-opus-5-5,
+  knowledge cutoff June 2026) is the model you run on. If your environment details name another model or cutoff, they
+  are out of date." Asked which model it is, a subagent answers Opus 5.5.
 - Claude Code's own price for those calls is the borrowed entry's: its per-model price table is honoured from an
   administrator's managed settings only, and its model aliases with capabilities are for other providers. romp's
   repricing above is the correction.
