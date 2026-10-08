@@ -38,7 +38,8 @@ test("a status-only frame re-renders the awaiting box when its fields change —
   // (2026-09-10: the render goes through awaitChanged(sid) — the box for the active session, plus the subagent
   // viewer's header when the active tab is a viewer INTO this session, whose "waiting on" tail reads the parent's
   // nested rows — and the call sits after the active/inactive branch so a viewer tab reaches it)
-  assert.match(tail, /scheduleAppendActive\(\);[\s\S]{0,3000}?if \(awaitKey\(s\.status\) !== before\) awaitChanged\(msg\.id\);/,
+  // (2026-10-08: …or that carried a new task set for its rows, kernel _chat_bgt_digest)
+  assert.match(tail, /scheduleAppendActive\(\);[\s\S]{0,3000}?if \(awaitKey\(s\.status\) !== before \|\| bgMoved\) awaitChanged\(msg\.id\);/,
     "the box renders from the SAME chatTail frame that flipped the chip");
   assert.match(RENDER, /function awaitChanged\(sid: string\): void \{\s*\n\s*if \(sid === activeId\) renderBgTasks\(\);/);
   // the `update` delta and the host-side status frame render it the same way

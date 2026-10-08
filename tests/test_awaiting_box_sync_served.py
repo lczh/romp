@@ -59,7 +59,8 @@ class SourcePins(unittest.TestCase):
             # since 2026-09-10 the box render goes through awaitChanged(sid), which also re-renders the subagent
             # viewer's header when the active tab is a viewer into this session (its "waiting on" tail reads the
             # parent's nested rows) — the call sits after the active/inactive branch so a viewer tab reaches it
-            self.assertIn("if (awaitKey(s.status) !== before) awaitChanged(msg.id);", body, fn)
+            # (chatTail's own also fires on a new task set for the rows, 2026-10-08: kernel _chat_bgt_digest)
+            self.assertRegex(body, r"if \(awaitKey\(s\.status\) !== before( \|\| bgMoved)?\) awaitChanged\(msg\.id\);", fn)
         self.assertIn("function awaitChanged(sid: string): void {\n  if (sid === activeId) renderBgTasks();", RENDER)
 
     def test_the_chip_and_the_gist_agree_in_number_from_one_count(self):
