@@ -30,9 +30,12 @@ SID_HOST = "11111111-2222-3333-4444-0000000e0d01"
 SID_REUSED = "11111111-2222-3333-4444-0000000e0d02"
 SID_KERNEL = "11111111-2222-3333-4444-0000000e0d03"
 
-os.environ.setdefault("XDG_STATE_HOME", tempfile.mkdtemp())
-sys.path.insert(0, str(ROOT / "kernel"))
-from loadsource import load_source  # noqa: E402
+from romp_load import load_source  # noqa: E402  (above the state preamble: the direct run's temp-root floor lands here)
+
+# Hermetic state BEFORE the loads — they resolve their state root at import time, and only
+# pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 
 sb = load_source("romp_sdk_backend_end_hosts", ROOT / "kernel" / "sdk_backend.py")
 ht = load_source("romp_host_transport_end_hosts", ROOT / "kernel" / "host_transport.py")
