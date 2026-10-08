@@ -42,3 +42,12 @@ test("a switch change waiting for its relaunch shows outside the menu: the fast 
   assert.match(RENDER, /const waitingPick: WaitingPick \| null = kind === "effort" \? "effort" : kind === "fast" \? "fast" : null;/);
   assert.match(SDK, /"subagentStandardOffered": self\.subagent_standard_offered\(\)/);   // not offered on Slow unless on
 });
+
+test("a failed or unfinished check of the workaround offers Check again, which re-runs it without turning the switch off", () => {
+  assert.match(RENDER, /subagentStandardRetry\?: boolean;/);
+  assert.match(RENDER, /if \(on && s\.status\.subagentStandardRetry\)/);
+  assert.match(RENDER, /ahead\.textContent = "Check again";/);
+  assert.match(RENDER, /postMessage\(\{ type: "setSubagentStandard", id: opSid, value: "on" \}\)/);
+  assert.match(KERNEL, /"subagentStandardRetry": bool\(tm\.get\("subagentStandardRetry"\)\)/);
+  assert.match(SDK, /"subagentStandardRetry": self\.subagent_standard_retry\(\)/);
+});

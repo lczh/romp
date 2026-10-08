@@ -7,8 +7,12 @@ recipe rides any session's launch on that version. Isolation from every live ses
     no lease, no host and no ledger with the kernel's, and its CLI is a child that dies with this process;
   * a fresh session id (uuid4) in a scratch directory: its transcripts land in a project directory of their own, which
     this script deletes with the state root and the directory when it is done, whatever the outcome;
-  * no MCP servers (no peer messaging), no hooks of the kernel's, no kernel at all: only the backend's launch path, the
-    same one sessions use, so the probe tests what a session would run.
+  * no MCP servers of romp's (no peer messaging) and no kernel at all: only the backend's launch path, the same one
+    sessions use, so the probe tests what a session would run. Its CLI does load the user's Claude Code settings, the
+    login and romp's own postal and wake hooks among them; the kernel runs it with ROMP_SUMMARIZING set, as the judges'
+    nested calls are, so those hooks stand down and nothing reaches the live mail service (sdk_backend.subagent_canary_env);
+  * each temp directory carries the probe's pid (SUBAGENT_CANARY_PID_FILE) from its first instant, so a probe killed
+    before its cleanup is swept at the next probe's start or the kernel's boot, and a running one never is.
 What it shares with the machine is the Claude login, used the way any session uses it (the machine's own credential
 store, or the token the kernel was given, passed in its environment). One fast Opus 5.5 turn whose main loop starts one
 subagent: a few cents.
@@ -36,7 +40,9 @@ def main(argv=None) -> int:
     ap.add_argument("--kernel-dir", required=True)
     a = ap.parse_args(argv)
     root = tempfile.mkdtemp(prefix="romp-subagent-canary-")
+    Path(root, "canary.pid").write_text(str(os.getpid()))          # SUBAGENT_CANARY_PID_FILE: kept from the sweep while alive
     work = tempfile.mkdtemp(prefix="romp-subagent-canary-work-")
+    Path(work, "canary.pid").write_text(str(os.getpid()))
     os.environ["XDG_STATE_HOME"] = root
     os.environ.pop("ROMP_STATE_DIR", None)
     state = os.path.join(root, "romp")

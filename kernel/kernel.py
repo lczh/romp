@@ -24573,6 +24573,7 @@ class Sessions:
                                 # Subagents at standard speed (experimental): the switch, whether the fast menu offers it, its line
                                 "subagentStandard": bool(st.get("subagentStandard")),
                                 "subagentStandardOffered": bool(st.get("subagentStandardOffered")),
+                                "subagentStandardRetry": bool(st.get("subagentStandardRetry")),   # the fast menu's Check again
                                 "subagentSpeed": st.get("subagentSpeed", ""),
                                 "modelFallback": st.get("modelFallback"),   # the picker's requested-model mark while the live model sits below the pick (2026-09-17)
                                 "fastReason": st.get("fastReason", ""),   # init's disabled_reason — non-empty hides the chat toggle
@@ -46434,6 +46435,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   # offered) and its sub-line, the speed check's outcome read off the transcripts' usage.speed
                   "subagentStandard": bool(tm.get("subagentStandard")),
                   "subagentStandardOffered": bool(tm.get("subagentStandardOffered")),
+                  "subagentStandardRetry": bool(tm.get("subagentStandardRetry")),   # Check again: the version canary failed or could not finish
                   "subagentSpeed": tm.get("subagentSpeed", ""),
                   "modelFallback": tm.get("modelFallback"),   # the picker's yellow tick beside the requested model, with why and the retry cadence (2026-09-17)
                   # which account this session bills ('login'|'key') — ALWAYS reported when the backend
