@@ -6066,6 +6066,33 @@ journaled and the next run folds them first. A standing correction of a day's
 first cumulative row is kept as it was made, so the day's later rows never
 rewrite it.
 
+`romp spend-repair --restored-cost-state [--apply]` corrects a second fault
+across the whole turn ledger: until the resume seed read the transcript's last
+`cost-state` record wherever it sat (it read only the last 8 MB), a CLI that
+resumed a long transcript, or a comment thread forked from one, restored a
+record the seed did not see, and the first result recorded that record's
+history as the turn. A `spendBaseline: "fresh"` row is corrected when the
+transcript the CLI loaded (the session's own conversation, or for a session
+born as a fork its parent's, the split copies in the state's repair backups
+included) holds a record whose token counts the row's cover and whose
+`totalCostUSD` equals the row's dollars less the turn's own API calls, read
+from the transcripts' per-call `usage` (subagents included) at Claude Code's
+own per-call prices, within a quarter plus 1% of those calls (the CLI bills a
+few side calls it writes to no transcript). The record's dollars and its four
+token columns come out of the row's day and hour buckets (the hour where the
+ledger still keeps it), its `bySid` entry under the session the kernel billed
+and its `byLogin` entry under its stored login, both read off the buckets
+because a turn row names neither; the `key` split and the turn counts stay.
+The row keeps the kernel's figures as `usdRecorded` and `tokRecorded`, carries
+the record taken out as `restoredCostUsd` and is stamped `repairRule` 6, so a
+second run finds nothing. A row a record could explain but the per-call
+evidence does not confirm is listed and left as recorded. The dry run prints
+the subtractions per day and the ledger's month totals before and after;
+`--apply` keeps the same order and backups as the staircase repair, with a
+journal of its own (`spend-repair-restored.jsonl`). `--claude-dir` names the
+Claude Code directory whose `projects/` holds the transcripts (default
+`$CLAUDE_CONFIG_DIR`, else `~/.claude`).
+
 ## The Task tracking switch
 
 Task tracking has one master switch, at the top of Settings, Task tracking, on by default. It is a kernel-side,
