@@ -300,6 +300,33 @@ class Gates(_Fold):
         self.assertGreater(n1, n0, "a side-store row inside the prefix must demote")
         self.assertTrue(any(ev.get("kind") == "retried" for ev in inc["events"]))
 
+    def test_a_spend_cut_record_landing_after_the_seal_names_the_sealed_stop(self):
+        # the spend guard appends its cut record right after its press lands, and the CLI writes the stop record it caused
+        # on its own clock: a build between the two can seal the stop unnamed. A cut timed inside the prefix demotes
+        # (g:spend-cut), and the full build names the stop (the #169 review)
+        s = self.s
+        s.append(s.turn(0))
+        u = s.uid(); s.append([uline(s.tick(), "step 1: widen the notes-api search", u, s.last)])
+        a = s.uid(); s.append([aline(s.tick(), "Working on it.", a, u, tools=("Edit",), stop="tool_use")])
+        pressed = s.tick() + 0.25
+        m = s.uid(); s.append([uline(s.tick(), "[Request interrupted by user for tool use]", m, a)])
+        s.last = m
+        for i in (2, 3):
+            s.append(s.turn(i))
+            self.equiv("turn %d" % i)
+        sealed = next(ev for ev in km._chat_fold_get(SID)["events"] if ev.get("interruptMarker"))
+        self.assertNotIn("interruptCause", sealed, "sealed before any cut record existed")
+        self.assert_folding()
+        st = jd.STATE / "states"; st.mkdir(exist_ok=True)
+        with open(st / (SID + ".jsonl"), "a") as f:
+            f.write(json.dumps({"t": pressed, "spendCut": {"rate": "1,240", "ceiling": "1,000"}}) + "\n")
+        n0 = km._CHAT_FOLD_STATS.get("g:spend-cut", 0)
+        inc = self.equiv("cut record after the seal")
+        self.assertGreater(km._CHAT_FOLD_STATS.get("g:spend-cut", 0), n0, "a cut inside the prefix must demote")
+        marker = next(ev for ev in inc["events"] if ev.get("interruptMarker"))
+        self.assertEqual((marker.get("interruptCause"), marker.get("interruptSpend")), ("spend", {"rate": "1,240", "ceiling": "1,000"}))
+        self.assert_folding()
+
     def test_a_seam_change_demotes(self):
         # a seam that really splits a sealed segment (its t strictly inside the segment's span, its segs
         # naming the segment): the tail past the seam gets new seg ids, so old events' tlIds move and the

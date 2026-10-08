@@ -7,7 +7,7 @@
 //
 // Pure: the fraction and the words. render.ts owns the state machine (revealProgressTick) and the DOM.
 import { markerLabel } from "./time-marker";
-import { isFoldableNoticeShape } from "./compact";
+import { isNoticeShape } from "./compact";
 
 export const REVEAL_LABEL = "Loading older messages…";
 
@@ -62,12 +62,12 @@ export function revealPercentWords(fraction: number): string {
 
 /** How many of the events are messages: the turns and postal cards a reader counts as messages, not the tool atoms and
  *  thinking blocks between them, and not the injected notices (system reminders, romp notices, interrupt markers and
- *  their settles) that ride user and assistant rows: compact mode's own reading of a notice (isFoldableNoticeShape). */
+ *  their settles, the spend guard's stop and message) that ride user and assistant rows (compact.ts isNoticeShape). */
 export function messageCount<E extends { kind?: string }>(events: readonly E[]): number {
   let n = 0;
   for (const e of events) {
     if (!(e.kind === "user" || e.kind === "assistant" || e.kind === "postal-service")) continue;
-    if (isFoldableNoticeShape(e as { kind: string })) continue;
+    if (isNoticeShape(e as { kind: string })) continue;
     n++;
   }
   return n;

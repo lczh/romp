@@ -151,7 +151,7 @@ class BuildSessionWiring(unittest.TestCase):
     def test_causes_are_stamped_after_hydration(self):
         import inspect
         src = inspect.getsource(km.build_session)
-        self.assertIn("_stamp_interrupt_causes(events)", src)
+        self.assertIn("_stamp_interrupt_causes(events, _cuts)", src)   # + the spend guard's cut records (#169 review)
 
 
 if __name__ == "__main__":

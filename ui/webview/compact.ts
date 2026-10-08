@@ -26,6 +26,13 @@ export function isFoldableNoticeShape(ev: { kind: string; interruptMarker?: unkn
   return false;
 }
 
+/** An injected notice rather than a message, for the reveal progress count (reveal-progress.ts messageCount): every
+ *  notice compact mode folds, plus the spend guard's stop and its message, which are notices that never fold. */
+export function isNoticeShape(ev: Parameters<typeof isFoldableNoticeShape>[0]): boolean {
+  if (ev.kind === "user" && (ev.spendGuard || ev.interruptCause === "spend")) return true;
+  return isFoldableNoticeShape(ev);
+}
+
 export type DisplayItem =
   | { kind: "event"; index: number }            // a pass-through event, by its index in the source array
   | { kind: "toolgroup"; indices: number[] }    // a collapsed run of ≥2 consecutive tool uses (a lone tool is an "event")

@@ -169,6 +169,7 @@ CENSUS = {
     "_sessions": ("sig", "names", "the cycle's discovery rows: the transcript path (transcript), the display name (names), and the 48 h discovery window (clock: a session that ages out leaves the roster and the tab list, so no signature is taken for it)"),
     "_space_paths": ("memo", "the first resolution of a message's spaced spans latches for the process's life"),
     "_spend_ceiling_parse": ("pure", "over a message's text (the spend guard's own sentence)"),
+    "_spend_cuts": ("sig", "states", "the spend guard's cut records, a fold of its own over the same file"),
     "_split_followup": ("pure", "over a text"),
     "_split_reminders": ("pure", "over a text"),
     "_stamp_agents": ("sig", "taskout", "the sidecar directory and each agent transcript it reads are taskout deps (stat'd before the read, re-stat'd per cycle); the task scan is over the transcript, the liveness gate over the row and the spawn epoch (row, reg, gone)"),
