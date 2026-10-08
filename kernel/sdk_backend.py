@@ -1736,6 +1736,11 @@ def append_effort_applied(state_dir: Path, sid: str, effort: str, t: int | None 
 # decides; the env is compared by digest, never by value.
 PICK_LAUNCH_KEYS = {"effort": ("effort",), "billing": ("auth", "authLogin"), "fast": ("fast",), "mode": ("mode",),
                     "env": ("env",)}
+# The reasons a standing relaunch ask (_switch_wanted) gives when a PICK asked for it: everything such a relaunch would carry
+# is in the launch record (PICK_LAUNCH_KEYS), so once the serving CLI's record carries every pick the ask has nothing left to
+# apply (SdkSession._drop_carried_ask). Any other reason (Always fast, a retry after a downgrade, the fast-mode cure, a
+# billing fall) asks for something no record shows, so it is never dropped that way, and a pick's ask never overwrites it.
+PICK_RELAUNCH_WHYS = frozenset({"effort", "billing", "billing default", "session env", "bypass mode", "a settings change"})
 
 
 def env_digest(env) -> str:
@@ -3524,6 +3529,60 @@ BOOT_RESUME_CONCURRENCY = max(1, int(os.environ.get("ROMP_BOOT_RESUME_CONCURRENC
 # Backstop ONLY (never the mechanism): a CLI that wedges before init would otherwise hold its slot
 # forever and trap the whole sweep — after this long the sweep proceeds anyway, loudly.
 BOOT_RESUME_SLOT_S = float(os.environ.get("ROMP_BOOT_RESUME_SLOT_S", "180"))
+
+
+class _LaunchSlots:
+    """The ONE machine-wide budget of CLI launches in flight (BOOT_RESUME_CONCURRENCY): boot's resume sweep, the idle-queue
+    drive and the scheduled-session sweep take a slot BLOCKING, as a semaphore (acquire with a backstop timeout, release
+    on the event that ends the launch's burst), and since 2026-10-07 so does every relaunch a standing ask makes (a pick,
+    a change of the machine default, a Model switch, an attach whose CLI runs other billing). Those go through take():
+    never blocking (the session's own loop thread asks, and the old CLI keeps serving while it waits), registering the
+    session in a FIFO when no slot is free. A release offers the freed slot to the first waiter (its loop asks again,
+    SdkSession._slot_offered), so a waiting relaunch moves on the release, never a poll: one change of default that
+    re-targets three hundred sessions relaunches them BOOT_RESUME_CONCURRENCY at a time, as a boot does."""
+
+    def __init__(self, n: int):
+        self._sem = threading.Semaphore(n)
+        self._lock = threading.Lock()
+        self._waiters: "dict[str, object]" = {}   # sid -> session, in arrival order (dicts keep insertion order)
+
+    def acquire(self, blocking: bool = True, timeout=None) -> bool:
+        return self._sem.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._sem.release()
+        self.hand_over()
+
+    def take(self, sess) -> bool:
+        """A slot for `sess`'s relaunch now, or False with `sess` queued for the next freed one."""
+        if self._sem.acquire(blocking=False):
+            self.unwait(sess)
+            return True
+        with self._lock:
+            self._waiters.setdefault(sess.sid, sess)
+        return False
+
+    def unwait(self, sess) -> None:
+        with self._lock:
+            if self._waiters.get(sess.sid) is sess:
+                del self._waiters[sess.sid]
+
+    def waiting(self, sess) -> bool:
+        with self._lock:
+            return self._waiters.get(sess.sid) is sess
+
+    def hand_over(self) -> None:
+        """Offer a freed slot to the first waiting relaunch whose loop still runs (a session that ended, or whose loop
+        closed, is passed over)."""
+        while True:
+            with self._lock:
+                if not self._waiters:
+                    return
+                sid = next(iter(self._waiters))
+                sess = self._waiters.pop(sid)
+            if getattr(sess, "ended", False) or not sess._schedule_on_loop(sess._slot_offered):
+                continue
+            return
 # The re-delivery AGE LINE (2026-09-12). The boot and dead-spawn re-delivery arm (_mark_dropped_echoes) re-feeds
 # a human send whose text the transcript scan cannot find. That scan is only as good as its reading of the
 # transcript, and a landing it cannot see is re-fed at EVERY restart, forever: a kernel whose scan read only
@@ -6094,6 +6153,10 @@ class SdkSession:
         self._launch_record = None   # what the last launch from _options carried (launch_values at that moment)
         self._hello_launch = None    # the connected host's echo of its spawn's launch record (cli.launch), this connect only
         self._cwd_request_open = False   # move()'s set_cwd round trip is in flight: quiet() holds a relaunch back for it
+        self._launch_slot = False    # this session's relaunch holds a launch slot (_LaunchSlots), from its take to its CLI up
+        self._served_billing = None  # (side, login) the most recent CLI serving this session was launched to bill (its launch
+        #   record's), None until a connect this life read one; unlike _cli_launch it outlives the teardown, so the next
+        #   connect can tell whether its CLI bills something else than the one it replaced (the landing)
         self._cli_launch = None      # the launch record of the CLI serving this session (the reconcile's, at each connect);
         #   None while none is connected or none vouches: a pick or a change of default is compared with it
         self._hello_spawned_at = None   # …and that CLI's spawn time (cli.spawnedAt), for an effort marker it vouches for
@@ -6509,34 +6572,55 @@ class SdkSession:
         and move() lowers the arm from the kernel thread after a claim the CLI's exit can outrun. There is
         no feeder left to wake then, and a raise here would leave move()'s exit half done (a RuntimeError
         in place of the SDK's named error, cwdPending kept). Lowering the arm is the point: wake only an
-        open loop, and never raise."""
+        open loop, and never raise (_schedule_on_loop)."""
         self._move_settle_expected = False
-        loop, wake = getattr(self, "loop", None), getattr(self, "_input_wake", None)
-        if loop is None or wake is None:
-            return
+        wake = getattr(self, "_input_wake", None)
+        if wake is not None:
+            self._schedule_on_loop(wake.set)
+
+    def _schedule_on_loop(self, fn) -> bool:
+        """Schedule `fn` on this session's loop from any thread; False when there is no loop to run it (not started, or
+        closed: asyncio.run closed it when the thread ended, and self.loop is never nulled). Never raises."""
+        loop = getattr(self, "loop", None)
+        if loop is None:
+            return False
         closed = getattr(loop, "is_closed", None)
         if callable(closed) and closed():
-            return
+            return False
         try:
-            loop.call_soon_threadsafe(wake.set)
+            loop.call_soon_threadsafe(fn)
         except RuntimeError:     # closed between the check and the call
-            pass
+            return False
+        return True
 
     def _end_cwd_request(self) -> None:
         """move()'s set_cwd round trip is over, however it ended (quiet() held a relaunch back for it): a standing relaunch
-        ask that waited for it is carried now, on the loop, when the session is otherwise quiet. Kernel thread; never raises,
-        and a loop the session's thread has closed takes nothing (the next connect carries every setting anyway)."""
+        ask that waited for it is carried now, on the loop, when the session is otherwise quiet. Kernel thread; a loop the
+        session's thread has closed takes nothing (the next connect carries every setting anyway)."""
         self._cwd_request_open = False
-        loop = getattr(self, "loop", None)
-        if loop is None or not getattr(self, "_switch_wanted", ""):
-            return
-        closed = getattr(loop, "is_closed", None)
-        if callable(closed) and closed():
-            return
-        try:
-            loop.call_soon_threadsafe(self._try_switch_reconnect)
-        except RuntimeError:     # closed between the check and the call
-            pass
+        if getattr(self, "_switch_wanted", ""):
+            self._schedule_on_loop(self._try_switch_reconnect)
+
+    def _slot_offered(self) -> None:
+        """A launch slot was freed and this session was first in line for one (_LaunchSlots.hand_over; loop thread): its
+        standing relaunch asks again. When it neither takes the slot nor queues for the next one (the session went busy, its
+        ask was carried or dropped meanwhile), the slot is offered on, so a freed slot never sits idle while others wait."""
+        self._try_switch_reconnect()
+        slots = self._launch_slots()
+        if slots is not None and not getattr(self, "_launch_slot", False) and not slots.waiting(self):
+            slots.hand_over()
+
+    def _launch_slots(self):
+        """The backend's machine-wide launch budget (_LaunchSlots), or None for a backend that keeps none (a test double)."""
+        slots = getattr(self.backend, "_spawn_sem", None)
+        return slots if hasattr(slots, "take") else None
+
+    def _release_launch_slot(self) -> None:
+        """Give back the launch slot this session's relaunch holds (_try_switch_reconnect took it): the relaunched CLI is up
+        (its connect's handshake), the relaunch stood down before the teardown, the connect failed, or the thread ended."""
+        if getattr(self, "_launch_slot", False):
+            self._launch_slot = False
+            self._launch_slots().release()
 
     def unqueue(self, idx: int, expect: str | None = None, qid: str | None = None) -> str | None:
         """Remove the queued turn at position `idx` (the chat's queued list is this same _pending order)
@@ -6827,6 +6911,7 @@ class SdkSession:
         self._switch_ask_pending = ""
         if why and not getattr(self, "_switch_wanted", ""):
             self._switch_wanted = why
+        self._release_launch_slot()   # nothing launches now: the slot goes to the next relaunch waiting for one
 
     def _release_hold_at_exit(self):
         """THE CLI'S EXIT is the one event on which the CLI loses its prompt queue, and so the one event
@@ -7523,13 +7608,17 @@ class SdkSession:
             reg = {}
         known = isinstance(launch, dict)
         self._cli_launch = dict(launch) if known else None
+        replaced = getattr(self, "_served_billing", None)   # the billing of the CLI this one replaced, None if not known
+        served = ((launch.get("auth") or "", launch.get("authLogin") or "") if known else None)
+        if served is not None:
+            self._served_billing = served
         wait = reg.get("relaunchWait") if isinstance(reg.get("relaunchWait"), dict) else {}
         recorded = wait.get("picks") if isinstance(wait.get("picks"), dict) else {}
         picks = [p for p in recorded if p in PICK_LAUNCH_KEYS]
         for name, mark in (("effort", "_effort_pending"), ("billing", "_auth_pending"), ("fast", "_fast_pending")):
             if getattr(self, mark, "") and name not in picks:
                 picks.append(name)               # a pending mark the record lacks (a pick made before the record existed)
-        billing_waited = "billing" in picks      # a switch was waiting: carried below, it LANDS at this connect
+        billing_waited = "billing" in picks      # a switch was waiting (the landing's evidence when `replaced` is unknown)
         if not billing_waited:
             picks.append("billing")              # compared whether or not anything waited (the docstring's last paragraph)
         want = self.launch_values()
@@ -7549,21 +7638,23 @@ class SdkSession:
                 still["billing"] = {k: want.get(k) for k in PICK_LAUNCH_KEYS["billing"]}
             if not reg.get("authPending"):
                 fields["authPending"] = True
-        if "billing" in done and billing_waited:
-            # THE SWITCH LANDS (2026-10-07): the CLI this connect reached was launched on the billing the session waited
-            # for. Stamped now for a launch made here, at that CLI's own spawn for one an earlier kernel made (its kernel
-            # died before this record): the moment the old account's CLI stopped serving the session. The kernel's spend
-            # hold reads it, so a cap record the old account wrote no longer holds the session's input; a cap error the
-            # new account answers with is newer, and holds again. A fresh launch's CLI has reported nothing yet, so the
-            # report the old one left (authLive, apiKeyAuth) goes with it and the side reads this launch's intent until
-            # the new CLI's init confirms it (_note_auth_source).
+        # THE SWITCH LANDS (2026-10-07) when the CLI this connect reached bills something else than the CLI it replaced:
+        # the moment the old account's CLI stopped serving the session. Known from the two launch records when this life
+        # read the replaced one's (a relaunch, a re-attach); on the first connect of a session object (a boot, a new
+        # thread) the replaced CLI's record is gone, and a billing switch that waited and is carried here is the evidence.
+        # A pick back to what ran before lands nothing. Stamped now for a launch made here, at that CLI's own spawn for one
+        # an earlier kernel made (its kernel died before this record). The kernel's spend hold reads it, so a cap record
+        # the old account wrote no longer holds the session's input; a cap error the new account answers with is newer,
+        # and holds again. The report the old CLI left (authLive, apiKeyAuth) goes at EVERY landing: it describes a CLI
+        # that no longer serves (an attach replays no init, so the attached one's word is not on hand either), and the
+        # side reads this launch's intent until the new CLI's init confirms it (_note_auth_source).
+        if served is not None and (served != replaced if replaced is not None else (billing_waited and "billing" in done)):
             landed = time.time() if launched_here else float(spawned_at or 0)
             if landed:
                 fields["authSwitchedAt"] = landed
                 self.auth_switched_at = landed
-            if launched_here:
-                fields["apiKeyAuth"] = None
-                self.auth_live = ""
+            fields["apiKeyAuth"] = None
+            self.auth_live = ""
         why = wait.get("why") or ("billing" if left == ["billing"] else "a settings change")
         try:                                    # the record first: a death before the marker below never writes it twice
             if still:
@@ -7679,7 +7770,9 @@ class SdkSession:
         neither may cut anything. Any thread."""
         if getattr(self, "ended", False):
             return
-        self._switch_wanted = why
+        cur = getattr(self, "_switch_wanted", "")
+        if not (why in PICK_RELAUNCH_WHYS and cur and cur not in PICK_RELAUNCH_WHYS):
+            self._switch_wanted = why   # a pick's reason never hides another one (PICK_RELAUNCH_WHYS)
         loop = getattr(self, "loop", None)
         if loop is not None:
             loop.call_soon_threadsafe(self._try_switch_reconnect)
@@ -7703,6 +7796,19 @@ class SdkSession:
                 self.backend._log("%s (%s): waiting for the session to go quiet before the reconnect — %s running; "
                                   "nothing is cut" % (why, self.name, self._busy_words()))
             return False
+        # A relaunch is a CLI launch, so it draws on the machine-wide launch budget every spawn draws on (2026-10-07: one
+        # change of the machine default made every follower's ask at once, and the 30 s tick carries every standing ask
+        # together). Never blocking: the old CLI keeps serving while the session waits, and the first freed slot asks
+        # again (_slot_offered). A loop that is not running yet launches nothing here (the connect carries every setting).
+        slots = self._launch_slots()
+        if getattr(self, "loop", None) is not None and slots is not None and not getattr(self, "_launch_slot", False):
+            if not slots.take(self):
+                if self._switch_wait_said != "slot:" + why:
+                    self._switch_wait_said = "slot:" + why
+                    self.backend._log("%s (%s): the session is quiet; waiting for a launch slot (%d CLIs launch at a "
+                                      "time across the machine)" % (why, self.name, BOOT_RESUME_CONCURRENCY))
+                return False
+            self._launch_slot = True
         self._switch_wanted = self._switch_wait_said = ""
         self._switch_ask_pending = why
         arm = getattr(self, "_upgrade_retry", None)
@@ -7711,6 +7817,23 @@ class SdkSession:
         self.backend._log("%s (%s): the session is quiet — reconnecting now" % (why, self.name))
         self.request_reconnect(defer=False)   # the loop-side re-check stands: work that registered meanwhile drops it,
         return True                           #   and the next event or tick asks again (the ask is re-raised below)
+
+    def _drop_carried_ask(self) -> None:
+        """A pick went back to what the serving CLI runs (SdkBackend._retarget_billing; loop thread): when the standing
+        relaunch ask was made by picks alone (PICK_RELAUNCH_WHYS) and that CLI's launch record already carries every pick,
+        the relaunch would apply nothing, so the ask is dropped, with its place in line for a launch slot. An ask with any
+        other reason, an ask already handed to a relaunch (_switch_ask_pending), or a CLI no record vouches for stands."""
+        why = getattr(self, "_switch_wanted", "")
+        have = getattr(self, "_cli_launch", None)
+        if not why or why not in PICK_RELAUNCH_WHYS or not isinstance(have, dict):
+            return
+        want = self.launch_values()
+        if any(have.get(k) != want.get(k) for keys in PICK_LAUNCH_KEYS.values() for k in keys):
+            return
+        self._switch_wanted = self._switch_wait_said = ""
+        if self._launch_slots() is not None:
+            self._launch_slots().unwait(self)
+        self.backend._log("%s (%s): the running CLI already carries every pick; no relaunch needed" % (why, self.name))
 
     def _switch_teardown_check(self) -> bool:
         """The waker's LAST look before a Model switch's reconnect tears the client down (the host's `end` closes the CLI's
@@ -7735,6 +7858,7 @@ class SdkSession:
         self._reconnect_switch_why = ""
         self._switch_wanted = why
         self._switch_wait_said = why   # the line below says it; no second 'waiting' line for the same ask
+        self._release_launch_slot()    # nothing launches now: the slot goes to the next relaunch waiting for one
         self.backend._log("%s (%s): the CLI started work between the ask and the reconnect — %s; the reconnect stands "
                           "down and the ask waits for the next quiet moment; nothing is cut" % (why, self.name, self._busy_words()))
         return True
@@ -8181,6 +8305,9 @@ class SdkSession:
         finally:
             self._fire_boot_settled()   # a dead thread must free its boot-stagger slot (first, so
             #                             a raising _on_session_gone can never leak the slot)
+            self._release_launch_slot()   # …and a relaunch's launch slot, and its place in line for one
+            if self._launch_slots() is not None:
+                self._launch_slots().unwait(self)
             try:
                 self._release_hold_at_exit()   # the CLI's queue died with it: a held text goes back to the queue
                 #                                (unless a host kept the CLI: a detached session or a live lease stands down)
@@ -8427,6 +8554,7 @@ class SdkSession:
                     # the names before every tab, so the flip waits at most the one tab in flight.
                     self.backend._push_soon(self.sid)
                     self._connected.set()   # the control channel exists from here (move() waits on this)
+                    self._release_launch_slot()   # a relaunch's CLI is up: its launch slot goes to the next one waiting
                     if self._host is None:
                         self.backend._lease_open(self, client)   # ownership by lease (T305): pid + start time, heartbeat
                     #   (under a host the HOST holds the lease)
@@ -8506,6 +8634,7 @@ class SdkSession:
                         self.client = None
                         self._connected.clear()
             except Exception as e:
+                self._release_launch_slot()   # the connect is over, failed: a relaunch's slot never outlives it
                 # A REWIND-armed connect the CLI refused (a bad --resume-session-at target exits 1 with
                 # "No message found" BEFORE the handshake) must not crash-loop: the flag would re-apply on
                 # every heal (the leaf never moved — nothing was written) and brick the session. Fail LOUDLY
@@ -11973,12 +12102,13 @@ class SdkBackend:
         self._boot_attach_unsettled = set()      # their sids, for the boot row when the backstop writes it
         self._boot_attach_lock = threading.Lock()
         self._attach_sem = threading.Semaphore(BOOT_ATTACH_CONCURRENCY)   # boot re-attaches: socket connects, not launches
-        self._spawn_sem = threading.Semaphore(BOOT_RESUME_CONCURRENCY)   # the ONE machine-wide spawn-stagger
+        self._spawn_sem = _LaunchSlots(BOOT_RESUME_CONCURRENCY)   # the ONE machine-wide spawn-stagger
         #                                           budget: boot reconcile's resume sweep AND the idle-queue
         #                                           drive's dormant spawns draw slots from this same semaphore
         #                                           (as two same-sized budgets they burst to 2x the cap after
         #                                           a restart — 2026-08-18 review); a spawn holds its slot
-        #                                           until the CLI proves up or its thread dies
+        #                                           until the CLI proves up or its thread dies; a relaunch a
+        #                                           standing ask makes holds one too (2026-10-07: _LaunchSlots)
         # Kernel-restart heal: an alive session still reading awaiting:true whose CLI died with the previous kernel
         # is stale — its background tasks (and the Stop hook that clears the overlay) died too. Left uncleared it
         # reads working/awaiting forever, climbing a ghost work-timer (reorder_bug 2026-06-24). Under session hosts
@@ -17831,9 +17961,11 @@ class SdkBackend:
         # the session's landing on it (authSwitchedAt, the spend hold's floor: a cap record the old account wrote no
         # longer describes any CLI this session will run on), and the CLI's persisted report (apiKeyAuth) goes, since
         # no init has landed for the launch to come (both readers guard with isinstance(..., bool), so None reads as
-        # absent). A session a CLI serves keeps that report until the switch lands (_reconcile_waiting_picks).
+        # absent). A session a CLI serves keeps that report until the switch lands (_reconcile_waiting_picks), and a CLI
+        # still serves it while a session host holds one, whether or not this kernel has attached to it (_serving).
+        serving = self._serving(sid, s)
         fields = {}
-        if not self._serving(s) and before != after:
+        if not serving and before != after:
             fields.update(apiKeyAuth=None, authSwitchedAt=time.time())
         if side:
             # authLogin: the stored login a login pick names, "" for the machine's own (written as "" so a plain pick
@@ -17849,18 +17981,19 @@ class SdkBackend:
                 s.auth_live = ""                   # nothing serves it: the next launch's init reports afresh
                 s.auth_switched_at = float(fields["authSwitchedAt"])
             self._retarget_billing(s)
-        elif reg.get("authPending"):
-            self._update_reg(sid, authPending=False)   # no live object: its next launch carries the billing it reads
+        elif reg.get("authPending") and not serving:
+            self._update_reg(sid, authPending=False)   # nothing serves it: its next launch carries the billing it reads
         self._log("auth (%s): %s" % (reg.get("name") or sid[:8],
                                      "follows the machine default again" if follow else
                                      "bills %s from now on" % (self.login_display(login_id) or side)))
         return True
 
-    @staticmethod
-    def _serving(s) -> bool:
-        """Whether a CLI serves this session object right now: its thread runs (connected, or launching one)."""
+    def _serving(self, sid: str, s=None) -> bool:
+        """Whether a CLI serves this session right now: its session object's thread runs (connected, or launching one), or
+        a live session host holds its CLI, which it does whether or not this kernel has attached to it (an unattached
+        comment thread, an attach that stood down: the host's lease is the authority, _lease_survives)."""
         th = getattr(s, "thread", None) if s is not None else None
-        return th is not None and th.is_alive()
+        return (th is not None and th.is_alive()) or self._lease_survives(sid)
 
     def _retarget_billing(self, s, why: str = "billing") -> None:
         """Bring a live session's CLI onto the billing it is set to (its own pick, else the machine default; launch_values):
@@ -17868,22 +18001,26 @@ class SdkBackend:
         "applies after …") and the CLI relaunches at the next moment nothing would be cut (request_reconnect waits for
         quiet()); when that CLI already carries it, any pending mark for billing comes down (a pick back to what runs).
         The comparison is with the serving CLI's launch record (_cli_launch: this kernel's own launch, or the host's echo
-        of its spawn), the authoritative source; with none on record nothing can vouch, and it relaunches. A session no
-        CLI serves keeps no mark: its next launch carries the billing. The connect's reconcile compares again whatever
-        happens here (_reconcile_waiting_picks), so a decision raced by a relaunch already under way is corrected there.
-        The pick that matches the serving CLI leaves a standing relaunch ask alone: other picks may share it, and a
-        relaunch carries every setting, so the most it costs is one relaunch onto what is already running."""
+        of its spawn), the authoritative source. With none on hand (between a teardown and the next connect, during an
+        attach, while a connect keeps failing, or a CLI no record vouches for) nothing is decided here: the next connect's
+        reconcile compares billing whatever happens (_reconcile_waiting_picks), and a relaunch already asked for carries
+        the latest pick (2026-10-07: read as a mismatch, a pick that changed nothing relaunched the session). A session no
+        CLI serves keeps no mark: its next launch carries the billing. A pick back to what the serving CLI runs drops a
+        standing relaunch ask whose every reason is a pick that CLI now carries (_drop_carried_ask)."""
         want = s.billing_launch()
-        if not self._serving(s):
+        if not self._serving(s.sid, s):
             s._auth_pending = ""
             self._drop_pick_wait(s, "billing", authPending=False)
             return
         have = getattr(s, "_cli_launch", None)
-        if isinstance(have, dict) and (have.get("auth") or "", have.get("authLogin") or "") == want:
+        if not isinstance(have, dict):
+            return
+        if (have.get("auth") or "", have.get("authLogin") or "") == want:
             if s._auth_pending or (read_reg(self.state_dir, s.sid) or {}).get("authPending"):
                 s._auth_pending = ""
                 self._drop_pick_wait(s, "billing", authPending=False)
                 self._wake_push()
+            s._schedule_on_loop(s._drop_carried_ask)
             return
         s._auth_pending = want[0] or s.effective_auth()
         self._update_reg(s.sid, authPending=True)
@@ -19208,6 +19345,9 @@ class SdkBackend:
                 self.sessions.pop(sess.sid, None)
         if popped:
             _note_ended(sess)                      # #1735: register the ended session; the controller measures cyclicity at the idle tick
+        if not sess.detached and not self._lease_survives(sess.sid):
+            self._land_at_cli_end(sess)   # its CLI ended (a detach's host keeps it): a waiting billing switch lands, before
+            #                               anything below starts the session again (the crash heal, the task-death notice)
         if not sess.ended and not sess.detached:
             if sess.inflight > 0 and not sess._interrupted:
                 # ABNORMAL death mid-turn (killed / crashed — not a user interrupt, not a clean
@@ -19257,6 +19397,30 @@ class SdkBackend:
             except Exception:
                 self._log("bg-task death notice (%s): %s" % (sess.name, traceback.format_exc()))
         self._poke()
+
+    def _land_at_cli_end(self, sess: SdkSession) -> None:
+        """The CLI serving a session ENDED with a billing switch still waiting for its relaunch (a crash, a conserve close, a
+        host that died, an End; never a detach, whose host keeps the CLI): nothing serves the session now and its next
+        launch carries the billing it is set to, so the switch has landed for that launch, the rule set_auth applies to a
+        session no CLI serves (2026-10-07). Its pending mark and its waiting record go, and when the billing differs from
+        the one the ended CLI ran (or that one is not known) the landing is stamped and that CLI's report (apiKeyAuth)
+        goes with it. Left as it was, the dormant row read the dead CLI's side with authPending up and no landing, so a
+        spend pause on that side held the session's input and nothing revived a held session to launch the switch."""
+        try:
+            reg = read_reg(self.state_dir, sess.sid) or {}
+            wait = reg.get("relaunchWait") if isinstance(reg.get("relaunchWait"), dict) else {}
+            if not (sess._auth_pending or reg.get("authPending") or "billing" in (wait.get("picks") or {})):
+                return
+            fields = {"authPending": False}
+            ran = getattr(sess, "_served_billing", None)
+            if ran is None or ran != sess.billing_launch():
+                fields.update(apiKeyAuth=None, authSwitchedAt=time.time())
+                sess.auth_live = ""
+                sess.auth_switched_at = fields["authSwitchedAt"]
+            sess._auth_pending = ""
+            self._drop_pick_wait(sess, "billing", **fields)
+        except Exception as e:
+            self._log("session gone (%s): the waiting billing switch could not land: %s" % (sess.name, e), problem=True)
 
     def _heal_cut_session(self, sess: SdkSession):
         """A session's claude process died ABNORMALLY mid-turn while the kernel stayed up (killed by

@@ -70,6 +70,18 @@ The tab menu's Billing row says where the session's billing comes from: `Machine
 - Parked auth ops migrate on load, the latest per session, the rest of the queue intact.
 - Spawn and fork mint no override; the picker sends no billing unless clicked.
 
+## Follow-up after review (2026-10-08)
+
+An independent review of #144 and #146 found these, fixed in one `fix` pull request:
+
+1. **Relaunches share the launch budget.** A relaunch a standing ask makes takes one of the machine-wide launch slots boot's resumes and the other spawns take (`_LaunchSlots`, `BOOT_RESUME_CONCURRENCY`), never blocking: the session's loop asks, the old CLI keeps serving while it waits in a FIFO, and a release offers the slot to the first waiter (one that went busy passes it on). A change of default that re-targets every follower, or the 30 s tick carrying every no-record attach, relaunches three at a time. The slot is held from the take to the relaunched CLI's handshake, and given back when the relaunch stands down, the connect fails or the thread ends. A gesture that asks for its own relaunch (Restart, Apply now, a rewind) is not throttled.
+2. **Unknown is not a mismatch.** With no launch record on hand (between a teardown and the next connect, an attach in progress, a connect failing) a pick decides nothing; the next connect's reconcile compares billing whatever happens.
+3. **A CLI that ends lands the waiting switch.** When the CLI serving a session ends with a switch waiting (never a detach, whose host keeps it), the pending mark and waiting record go, and the landing is stamped with the dead CLI's report cleared: the session's next launch carries the billing, so the dormant row no longer reads the dead CLI's side as pending under a spend pause.
+4. **Every landing clears the replaced CLI's report**, an attach's included.
+5. **The landing is ordered exactly**: the record's millisecond stamp (`tExact`) against the landing's sub-second clock; `liftedAt` stays in the CLI's whole seconds against `t`, as its evidence is stamped.
+6. **Serving is the host lease's word**, not only the kernel's session object: a pick on a session a live host still serves lands nothing before the attach compares.
+7. The landing is decided from the replaced CLI's billing (`_served_billing`, which outlives the teardown), so a pick back to what ran lands nothing; a pick back to what runs drops a standing relaunch that picks alone asked for (`PICK_RELAUNCH_WHYS`; a pick's reason never overwrites another), and `_limit_hold` reads the live row at most once.
+
 ## Roads not taken
 
 - **Keep the park, and let the hold release a parked pick.** A second road for one pick, with its own ordering and its own chip; the recorded road already waits correctly since #67.

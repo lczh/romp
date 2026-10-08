@@ -537,6 +537,49 @@ class FakeSystemMessage:
     pass
 
 
+class AMoveHoldsARelaunchBackForItsRoundTrip(MoveBase):
+    """A relaunch (a billing pick's, a Model switch's) waits for a quiet session, and move() sends set_cwd with no turn open:
+    so the round trip itself reads as not quiet, and its end carries a relaunch that waited for it (2026-10-07, when a
+    billing pick stopped being parked behind a move in the kernel's queue)."""
+
+    def _probe(self, s, answer):
+        seen = []
+
+        class _Probe:
+            async def _send_control_request(_self, req):
+                seen.append(s.quiet())
+                if isinstance(answer, BaseException):
+                    raise answer
+                return answer
+        s.client = _Client(_Probe())
+        return seen
+
+    def _carried(self, s):
+        asked = threading.Event()
+        s._switch_wanted = "billing"
+        s._try_switch_reconnect = asked.set              # observed on the session's loop, where the end schedules it
+        return asked
+
+    def test_the_round_trip_is_not_quiet_and_its_end_carries_the_standing_relaunch(self):
+        s = self._wire([])
+        seen = self._probe(s, _ok(self.new))
+        asked = self._carried(s)
+        self.assertTrue(s.quiet())
+        self.assertEqual(self.be.move(SID, self.new), "")
+        self.assertEqual(seen, [False], "set_cwd in flight: a relaunch now would end the CLI inside the relocation")
+        self.assertTrue(asked.wait(5), "the round trip's end asks the standing relaunch again")
+        self.assertTrue(s.quiet(), "and nothing holds it any more (the settle arm alone never does)")
+
+    def test_a_round_trip_that_fails_lowers_the_hold_too(self):
+        s = self._wire([])
+        seen = self._probe(s, RuntimeError("the control channel closed"))
+        asked = self._carried(s)
+        self.assertNotEqual(self.be.move(SID, self.new), "")
+        self.assertEqual(seen, [False])
+        self.assertTrue(asked.wait(5))
+        self.assertTrue(s.quiet())
+
+
 class SpuriousSettle(unittest.TestCase):
     """The accepted move's turn-less ResultMessage(num_turns=0) must not run the turn-settle side effects."""
 

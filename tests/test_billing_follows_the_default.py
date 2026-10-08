@@ -23,7 +23,6 @@ The rules pinned here:
 The real _amain runs against the stand-in SDK client and scripted host of tests/test_pick_survives_restart.py, whose
 harness is reused here. Every id is synthetic, every text invented; every state root writes session-hosts off.
 """
-import inspect
 import json
 import os
 import sys
@@ -210,9 +209,20 @@ class _Unit(unittest.TestCase):
         s = sb.SdkSession(self.be, sb.read_reg(self.d, sid))
         s.thread = types.SimpleNamespace(is_alive=lambda: True, ident=None)
         s._cli_launch = s.launch_values()
+        s._served_billing = (s._cli_launch["auth"], s._cli_launch["authLogin"])   # a connect this life read its record
         s.asked = []
         s.request_reconnect = lambda *a, **k: s.asked.append(k.get("why"))
         self.be.sessions[sid] = s
+        return s
+
+    def _quiet(self, sid, name, relaunched, **reg):
+        """A live, quiet session on the real relaunch road (want_switch_reconnect → _try_switch_reconnect → the launch
+        budget), its loop running what is scheduled at once; the relaunch itself (the teardown and the connect) is recorded
+        instead of run, so the slot it took stays held until the test says its CLI came up (_release_launch_slot)."""
+        s = self._live(sid, name, **reg)
+        del s.request_reconnect                                    # the real road
+        s.loop = types.SimpleNamespace(is_closed=lambda: False, call_soon_threadsafe=lambda fn, *a: fn(*a))
+        s._do_request_reconnect = lambda defer=True: relaunched.append(s.sid)
         return s
 
 
@@ -284,10 +294,141 @@ class AMoveInFlightIsWork(_Unit):
         s._move_settle_expected = True
         self.assertTrue(s.quiet())
 
-    def test_move_raises_the_gate_around_its_request_and_lowers_it_however_the_request_ends(self):
-        body = inspect.getsource(sb.SdkBackend.move)
-        self.assertIn("s._cwd_request_open = True", body)
-        self.assertIn("finally:\n            s._end_cwd_request()", body)
+
+
+SIDS = ["11111111-2222-3333-4444-5555cccc%04d" % i for i in range(6)]
+
+
+class RelaunchesShareTheLaunchBudget(_Unit):
+    """A relaunch is a CLI launch: it takes a slot of the machine-wide budget every spawn takes (BOOT_RESUME_CONCURRENCY),
+    without blocking, and the next freed slot asks again. One change of default used to relaunch every follower at once."""
+
+    def test_a_change_of_default_relaunches_its_followers_a_budget_at_a_time(self):
+        relaunched = []
+        ss = [self._quiet(sid, "s%d" % i, relaunched) for i, sid in enumerate(SIDS)]
+        self.assertTrue(self.be.set_auth_default("login"))
+        self.assertEqual(len(relaunched), sb.BOOT_RESUME_CONCURRENCY, "only as many as the budget launch at once")
+        self.assertTrue(all(s._auth_pending for s in ss), "every follower shows its switch pending meanwhile")
+        waiting = [s for s in ss if s.sid not in relaunched]
+        self.assertTrue(all(s._switch_wanted for s in waiting), "the rest keep their ask, in line for a slot")
+        first = next(s for s in ss if s.sid in relaunched)
+        first._release_launch_slot()                     # its relaunched CLI is up: the slot is offered to the next in line
+        self.assertEqual(relaunched[sb.BOOT_RESUME_CONCURRENCY:], [waiting[0].sid], "the first waiter, on the release")
+
+    def test_a_waiter_that_went_busy_passes_the_slot_on(self):
+        relaunched = []
+        ss = [self._quiet(sid, "s%d" % i, relaunched) for i, sid in enumerate(SIDS[:sb.BOOT_RESUME_CONCURRENCY + 2])]
+        self.assertTrue(self.be.set_auth_default("login"))
+        a, b = [s for s in ss if s.sid not in relaunched]
+        a.inflight = 1                                   # a turn started while it waited
+        next(s for s in ss if s.sid in relaunched)._release_launch_slot()
+        self.assertEqual(relaunched[-1], b.sid, "the busy one keeps its ask for its own quiet moment; the slot goes on")
+        self.assertTrue(a._switch_wanted)
+
+    def test_the_tick_carries_standing_asks_through_the_same_budget(self):
+        relaunched = []
+        ss = [self._quiet(sid, "s%d" % i, relaunched) for i, sid in enumerate(SIDS)]
+        for s in ss:
+            s._switch_wanted = "billing"
+        self.be.retry_model_upgrades(time.time())
+        self.assertEqual(len(relaunched), sb.BOOT_RESUME_CONCURRENCY)
+
+
+class AnUnknownLaunchRecordDecidesNothing(_Unit):
+    """With no launch record on hand (between a teardown and the next connect, during an attach, while a connect keeps
+    failing) a pick is recorded and the next connect's reconcile decides; it used to read as a mismatch."""
+
+    def test_following_the_default_it_already_runs_relaunches_nothing(self):
+        s = self._live(SID, "web")                       # follows Automatic, its last CLI launched on it
+        s._cli_launch = None                             # between a teardown and the next connect
+        self.assertTrue(self.be.set_auth(SID, "default"))
+        self.assertEqual((s._auth_pending, s.asked), ("", []), "nothing to apply, nothing decided before the record")
+        self.assertFalse(sb.read_reg(self.d, SID).get("authPending"))
+        s._reconcile_waiting_picks(s.launch_values(), True)
+        self.assertFalse(sb.read_reg(self.d, SID).get("authSwitchedAt"), "the same billing again lands nothing")
+        self.assertFalse(s._switch_wanted)
+
+    def test_a_real_change_is_decided_at_the_connect(self):
+        s = self._live(SID, "web")
+        s._cli_launch = None
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self.assertEqual(s.asked, [])
+        before = time.time()
+        s._reconcile_waiting_picks(s.launch_values(), True)          # the CLI that came up carries the pick
+        self.assertGreaterEqual(float(sb.read_reg(self.d, SID).get("authSwitchedAt") or 0), before, "the switch landed")
+        s2 = self._live(OTHER, "api")
+        s2._cli_launch = None
+        self.assertTrue(self.be.set_auth(OTHER, "key"))
+        s2._reconcile_waiting_picks(dict(s2.launch_values(), auth=""), True)   # launched before the pick
+        self.assertTrue(s2._auth_pending and s2._switch_wanted, "carried by nothing yet: pending, and a relaunch asked for")
+
+
+class APickBackToWhatRunsDropsItsRelaunch(_Unit):
+    def test_the_relaunch_a_billing_pick_asked_for_goes_when_the_pick_goes_back(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, auth="login")
+        s.inflight = 1                                   # busy: the ask stands
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self.assertEqual(s._switch_wanted, "billing")
+        self.assertTrue(self.be.set_auth(SID, "login"))
+        self.assertEqual((s._switch_wanted, s._auth_pending), ("", ""), "nothing left to apply")
+        s.inflight = 0
+        s._try_switch_reconnect()
+        self.assertEqual(relaunched, [])
+
+    def test_an_ask_with_another_reason_stands(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, auth="login")
+        s.inflight = 1
+        s.want_switch_reconnect("retry upgrade")         # a reason no launch record shows
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self.assertEqual(s._switch_wanted, "retry upgrade", "a pick's reason never hides it")
+        self.assertTrue(self.be.set_auth(SID, "login"))
+        self.assertEqual(s._switch_wanted, "retry upgrade")
+
+
+class ACliThatEndsLandsTheWaitingSwitch(_Unit):
+    """When the CLI serving a session ends with a switch waiting (a crash, a close, a host that died), its next launch
+    carries the billing, so the switch has landed: the dormant row stops reading the dead CLI's side as pending."""
+
+    def _pending_switch(self):
+        s = self._live(SID, "web", auth="login", apiKeyAuth=False)
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self.assertTrue(sb.read_reg(self.d, SID).get("authPending"))
+        s.inflight = 0
+        return s
+
+    def test_the_switch_lands_and_the_dead_clis_report_goes(self):
+        s = self._pending_switch()
+        before = time.time()
+        self.be._on_session_gone(s)
+        reg = sb.read_reg(self.d, SID)
+        self.assertFalse(reg.get("authPending"))
+        self.assertNotIn("billing", (reg.get("relaunchWait") or {}).get("picks") or {})
+        self.assertNotIsInstance(reg.get("apiKeyAuth"), bool, "the ended CLI's report describes nothing now")
+        self.assertGreaterEqual(float(reg.get("authSwitchedAt") or 0), before)
+        row = self.be.live_sessions()[SID]
+        self.assertEqual((row["authLive"], row["authPending"], row["auth"]), ("", False, "key"))
+
+    def test_a_detach_lands_nothing_its_host_keeps_the_cli(self):
+        s = self._pending_switch()
+        s.detached = True
+        self.be._on_session_gone(s)
+        reg = sb.read_reg(self.d, SID)
+        self.assertTrue(reg.get("authPending"))
+        self.assertIs(reg.get("apiKeyAuth"), False)
+        self.assertFalse(reg.get("authSwitchedAt"))
+
+
+class ALiveHostStillServes(_Unit):
+    def test_a_pick_on_a_session_whose_host_still_runs_its_cli_lands_nothing_before_the_attach(self):
+        sb.write_reg(self.d, SID, {"sid": SID, "name": "web", "cwd": self.d, "alive": True, "auth": "login",
+                                   "apiKeyAuth": False})
+        self.be._lease_survives = lambda sid: True       # an unattached comment thread, an attach that stood down
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        reg = sb.read_reg(self.d, SID)
+        self.assertFalse(reg.get("authSwitchedAt"), "the old account's CLI still serves it")
+        self.assertIs(reg.get("apiKeyAuth"), False, "…and its report stands until the attach compares")
 
 
 class TheAttachComparesBilling(psr._Harness):

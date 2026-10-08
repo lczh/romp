@@ -22,7 +22,6 @@ The rules pinned here:
 
 SYNTHETIC fixtures only: placeholder sids, invented texts; every state root this module mints writes session-hosts off.
 """
-import inspect
 import json
 import os
 import tempfile
@@ -102,8 +101,11 @@ class _Kernel(unittest.TestCase):
         jd.STATE = self.saved_state
         self.td.cleanup()
 
-    def _capped(self, sid, t):
-        self.records[sid] = {"text": CAP, "spendLimit": True, "t": t, "uuid": "11111111-2222-3333-4444-%012d" % t}
+    def _capped(self, sid, t, exact=None):
+        """A cap record as _api_error reads one: `t` in the CLI's whole seconds, `tExact` to its millisecond (mid-second
+        unless given)."""
+        self.records[sid] = {"text": CAP, "spendLimit": True, "t": int(t), "tExact": float(t) + 0.5 if exact is None else exact,
+                             "uuid": "11111111-2222-3333-4444-%012d" % int(t)}
 
     def _pause(self, bills=""):
         self.assertTrue(km._set_retry_paused(True, reason="spend", bills=bills))
@@ -177,10 +179,83 @@ class TheGlobalPauseHoldsItsOwnBillingSide(_Kernel):
         self.assertEqual((km._limit_hold(SID) or {}).get("reason"), "spend")
 
     def test_the_lift_and_the_hold_read_one_billing_rule(self):
-        self.assertIn("_on_paused_billing(", inspect.getsource(km._auto_resume_retry))
-        self.assertIn("_on_paused_billing(", inspect.getsource(km._limit_hold))
-        self.assertIn("_spend_record_stands(", inspect.getsource(km._spend_capped_session))
-        self.assertIn("_spend_record_stands(", inspect.getsource(km._limit_hold))
+        """The pause's two readers agree because they ask one rule: a session the hold lets through is one whose output
+        cannot lift the pause, and the other way round, whatever that rule says."""
+        self._pause(bills="login")
+        self.rows[SID] = {"authLive": "key", "auth": "key"}
+        self.rows[OTHER] = {"authLive": "login", "auth": "login"}
+        asked = []
+        real = km._on_paused_billing
+        km._on_paused_billing = lambda tm, bills: (asked.append((tm or {}).get("auth")), real(tm, bills))[1]
+        saved = (km._alive_sessions, km._api_last_output_t)
+        km._alive_sessions = lambda now, live: [{"sid": SID, "path": "/synthetic/k"}, {"sid": OTHER, "path": "/synthetic/l"}]
+        km._api_last_output_t = lambda path: time.time() + 60   # both sessions answered after the pause began
+        try:
+            self.assertIsNone(km._limit_hold(SID))
+            self.assertIsNotNone(km._limit_hold(OTHER))
+            self.assertEqual(asked, ["key", "login"], "the hold asked the rule for each session")
+            asked.clear()
+            km._auto_resume_retry(time.time(), self.rows)
+            self.assertEqual(asked, ["key", "login"], "…and so did the lift: the key session's output was passed over")
+            self.assertFalse(km._retry_paused_on(), "the login session's output lifted it")
+        finally:
+            km._on_paused_billing = real
+            km._alive_sessions, km._api_last_output_t = saved
+
+    def test_the_engage_and_the_hold_read_one_record_rule(self):
+        self._capped(SID, 1000)
+        self.rows[SID] = {"authLive": "", "auth": "key", "authSwitchedAt": 1500.0}
+        asked = []
+        real = km._spend_record_stands
+        km._spend_record_stands = lambda e, tm, lifted=0: (asked.append(e["t"]), real(e, tm, lifted))[1]
+        saved = km._alive_sessions
+        km._alive_sessions = lambda now, live: [{"sid": SID, "path": "/synthetic/%s.jsonl" % SID}]
+        try:
+            self.assertIsNone(km._limit_hold(SID))
+            self.assertIsNone(km._spend_capped_session(time.time(), self.rows))
+            self.assertEqual(asked, [1000, 1000], "the hold and the engage each asked the one rule about the record")
+        finally:
+            km._spend_record_stands = real
+            km._alive_sessions = saved
+
+
+class TheLandingIsOrderedExactly(_Kernel):
+    """The landing is stamped by this kernel's clock to the sub-second; a cap record's `t` is the CLI's whole second, so a
+    record in the landing's own second read as older. Each floor is now compared in its own precision."""
+
+    def test_a_cap_error_in_the_landings_second_is_ordered_to_the_millisecond(self):
+        self.rows[SID] = {"authLive": "key", "auth": "key", "authSwitchedAt": 1500.4}
+        self._capped(SID, 1500, exact=1500.6)            # the new account's CLI capped 200 ms after the landing
+        self.assertEqual((km._limit_hold(SID) or {}).get("reason"), "spend", "newer than the landing: it holds")
+        self._capped(SID, 1500, exact=1500.2)            # the old account's last word, 200 ms before it
+        self.assertIsNone(km._limit_hold(SID))
+
+    def test_the_lift_stays_in_the_clis_whole_seconds(self):
+        self._pause(bills="login")
+        self._lift(1500)                                 # the lifting output's own stamp: whole seconds
+        self.rows[SID] = {"authLive": "login", "auth": "login"}
+        self._capped(SID, 1500, exact=1500.2)
+        self.assertEqual((km._limit_hold(SID) or {}).get("reason"), "spend", "a record of the lift's second reads as new")
+
+    def test_a_transcripts_cap_record_carries_its_millisecond_stamp(self):
+        path = jd.STATE / "web.jsonl"
+        path.write_text(json.dumps({"type": "assistant", "isApiErrorMessage": True, "uuid": "11111111-2222-3333-4444-000000000001",
+                                    "timestamp": "2026-10-07T12:00:00.600Z",
+                                    "message": {"content": [{"type": "text", "text": CAP}]}}) + "\n")
+        e = self._saved["_api_error"](str(path))
+        self.assertTrue(e["spendLimit"])
+        self.assertAlmostEqual(e["tExact"] - e["t"], 0.6, places=3)
+
+
+class TheHoldReadsTheRowOnce(_Kernel):
+    def test_a_pause_and_a_cap_record_together_cost_one_liveness_read(self):
+        self._pause(bills="key")                          # not this session's side: the hold goes on to its own record
+        self._capped(SID, 1000)
+        self.rows[SID] = {"authLive": "login", "auth": "login"}
+        reads = []
+        km._live_map = lambda: (reads.append(1), self.rows)[1]
+        self.assertEqual((km._limit_hold(SID) or {}).get("reason"), "spend")
+        self.assertEqual(len(reads), 1, "outside a cycle each read is every backend's rows")
 
 
 class AHeldQueueDrains(_Kernel):
@@ -259,6 +334,8 @@ class _Backend(unittest.TestCase):
         s = sb.SdkSession(self.be, dict(self._reg()))
         if serving:
             s.thread = types.SimpleNamespace(is_alive=lambda: True, ident=None)   # a CLI runs (the loop is never started)
+            s._cli_launch = s.launch_values()                                     # …launched as the session stands now
+            s._served_billing = (s._cli_launch["auth"], s._cli_launch["authLogin"])
         self.be.sessions[SID] = s
         return s
 
@@ -311,7 +388,8 @@ class TheReconcileStampsTheLanding(_Backend):
         s = self._waiting()
         s._reconcile_waiting_picks(s.launch_values(), False, spawned_at=1700000200)
         self.assertEqual(float(self._reg().get("authSwitchedAt") or 0), 1700000200.0)
-        self.assertEqual(s.auth_live, "login", "an attach replays no init: the report the reg restored stands")
+        self.assertEqual(s.auth_live, "", "the report the reg restored is the replaced CLI's: it goes at every landing")
+        self.assertNotIsInstance(self._reg().get("apiKeyAuth"), bool)
 
     def test_a_cli_that_does_not_carry_the_pick_lands_nothing(self):
         s = self._waiting()

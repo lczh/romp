@@ -552,7 +552,13 @@ session: until then the row's sub-line reads "applying…", or "applies after 2
 background tasks" when work the relaunch would end is still running, and
 messages sent meanwhile go out on the account the running CLI bills. A newer
 pick replaces one not yet applied, and one relaunch carries the latest; a pick
-back to what the running CLI already bills clears the pending mark. While a
+back to what the running CLI already bills clears the pending mark and, when
+picks alone asked for the relaunch, the relaunch with it. A pick made while no
+launch record is on hand (the session between two CLIs, an attach in progress)
+decides nothing until the next CLI's record says what it bills. When the CLI
+serving a session ends with a switch still waiting (a crash, a close, a host
+that died), the switch has landed for the session's next launch: the pending
+mark goes, as it does for a pick on a session with no CLI running. While a
 switch waits, the flyout carries **Apply now** under the choices, behind a rule,
 its sub-line naming what it ends ("ends 2 background tasks"). Nothing is
 written into the chat for a pick.
@@ -1573,7 +1579,12 @@ and monitors inside that CLI would end with it, so the relaunch waits until the
 session is quiet: no turn running or queued, no subagent, no background task and
 no question waiting on you. It happens at the event that ends the last of that
 work, never on a timer, and the setting's pending mark stays up meanwhile,
-saying what it waits for. Restart session and editing or deleting an earlier
+saying what it waits for. A relaunch is a CLI launch, so it waits as well for
+one of the machine-wide launch slots a boot's resumes and the other spawns
+share (three unless `ROMP_BOOT_RESUME_CONCURRENCY` says otherwise): a change of
+the machine default that re-targets hundreds of sessions relaunches them three
+at a time, each slot passed on as the CLI it launched comes up, and the old
+CLI keeps serving its session meanwhile. Restart session and editing or deleting an earlier
 message relaunch without waiting, and a setting still waiting to apply rides
 that relaunch; the session is then told which background tasks were cut off,
 with a request to check whether each is still running before relaunching it.
@@ -5344,10 +5355,15 @@ signal, from two things the kernel owns directly:
   is a spend-limit error waits as well, until that record is older than
   `liftedAt` or older than the moment the session's CLI came up on a new
   billing (`authSwitchedAt` on its registry row, stamped when a billing
-  switch lands, or at the pick for a session with no CLI running); a
+  switch lands: at the connect whose CLI bills something else than the one
+  it replaced, when the CLI serving a waiting switch ends, or at the pick for
+  a session no CLI serves, a session host's included); a
   spend-limit error after either holds again, and the spend engage reads
-  records by the same rule. Until a switch lands, a session counts as being
-  on the billing its running CLI reported.
+  records by the same rule. The landing is this kernel's clock to the
+  sub-second and is read against the record's own millisecond stamp, while
+  `liftedAt` is read in the CLI's whole seconds, as its evidence is stamped.
+  Until a switch lands, a session counts as being on the billing its running
+  CLI reported.
 
 The kernel pushes the cell's frame to shell clients only when it changed, and
 again to a shell that sends `ready`:
