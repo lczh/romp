@@ -720,7 +720,8 @@ class PsArgv(unittest.TestCase):
         with open(sb.__file__) as f:
             src = f.read()
         self.assertNotIn('"-axo"', src, "every ps scan goes through PS_ARGV (-ww)")
-        self.assertEqual(src.count("subprocess.run(PS_ARGV"), 2, "the reaper and the escalation")
+        self.assertEqual(src.count("subprocess.run(PS_ARGV"), 3,
+                         "the reaper, its re-take for the CLIs it spared on a lease that later settled, and the escalation")
 
 
 class BootReconcile(unittest.TestCase):

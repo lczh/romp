@@ -21,6 +21,7 @@ has session hosts off. What the tests do read or run on the machine includes thi
 lease (a live host needs a live holder), three short-lived children the environment-tag test reads, and the kernel's
 sweep of dead test roots in the temporary directory, which each boot starts.
 """
+import contextlib
 import hashlib
 import itertools
 import json
@@ -114,18 +115,33 @@ class Boot:
             out = "\n".join(self.hosts) + "\n"
         return mock.Mock(stdout=out, stderr="", returncode=0)
 
+    def _machine(self):
+        return [
+            mock.patch.object(sb.subprocess, "run", side_effect=self.run),
+            mock.patch.object(sb.os, "kill", side_effect=lambda p, s: self.killed.append((p, s))),
+            mock.patch.object(sb.os, "killpg", side_effect=lambda p, s: self.killed.append((p, s))),
+            mock.patch.object(sb, "proc_start", lambda p, run=None: self.starts.get(p)),
+            mock.patch.object(sb, "proc_state_tag", lambda p, **k: self.tags.get(p), create=True),
+            mock.patch.object(sb.SdkBackend, "_pid_alive", lambda self_, p: False),
+            mock.patch.object(sb.SdkBackend, "_ensure", lambda self_, sid, **k: self.started.append(sid)),
+            # the deferral watch (a boot decision an unreadable lease could not settle) is driven by hand: retake()
+            mock.patch.object(sb.SdkBackend, "_lease_watch_start", lambda self_: None)]
+
     def go(self):
         be = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None)
         be._log = lambda m, *a, **k: self.said.append(m)
-        with mock.patch.object(sb.subprocess, "run", side_effect=self.run), \
-             mock.patch.object(sb.os, "kill", side_effect=lambda p, s: self.killed.append((p, s))), \
-             mock.patch.object(sb.os, "killpg", side_effect=lambda p, s: self.killed.append((p, s))), \
-             mock.patch.object(sb, "proc_start", lambda p, run=None: self.starts.get(p)), \
-             mock.patch.object(sb, "proc_state_tag", lambda p, **k: self.tags.get(p), create=True), \
-             mock.patch.object(sb.SdkBackend, "_pid_alive", lambda self_, p: False), \
-             mock.patch.object(sb.SdkBackend, "_ensure", lambda self_, sid, **k: self.started.append(sid)):
+        with contextlib.ExitStack() as stack:
+            for pt in self._machine():
+                stack.enter_context(pt)
             be._boot_reconcile([sb.read_reg(Path(self.d), s) for s in self.sids])
         return be
+
+    def retake(self, be):
+        """One pass of the deferral watch over `be` (SdkBackend._lease_deferral_once), against the same scripted machine."""
+        with contextlib.ExitStack() as stack:
+            for pt in self._machine():
+                stack.enter_context(pt)
+            return be._lease_deferral_once()
 
     def stops(self):
         return [a[-1] for a in self.runs if a[:3] == ["systemctl", "--user", "stop"]]
@@ -219,6 +235,106 @@ class AnUnreadableLeaseIsNoEvidence(unittest.TestCase):
         self.assertEqual(len(said), 2, boot.said)                            # the CLI's line, and the host scope's
         self.assertIn("claude pid %d" % CLI_A, said[0] + said[1])
         self.assertIn(host, said[0] + said[1])
+
+
+class AnUnreadableLeaseIsJudgedByItsAge(unittest.TestCase):
+    """The review of #150. A lease every holder rewrites each LEASE_HEARTBEAT_S that has gone LEASE_TTL_S without a rewrite
+    has no holder behind it, readable or not: a damaged one that old is stale and spares nothing, as a stale lease spares
+    nothing. One rewritten within LEASE_TTL_S may still be a live host's, and what it spares is said for what it is, with
+    a problem row naming the file, and judged again when the lease reads or goes stale (never left for the next boot)."""
+
+    def _setup(self, age=None):
+        d = _root()
+        sb.write_reg(Path(d), SID, {"sid": SID, "name": "api", "cwd": "/tmp", "alive": True, "lastSid": SID})
+        sb.append_state(Path(d), SID, "working")
+        lp = sb.lease_path(d, SID)
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        lp.write_text('{"sid": "a lease cut short')                        # not a lease record: write_lease is atomic
+        if age is not None:
+            t = time.time() - age
+            os.utime(lp, (t, t))
+        ps = ["  %d 1 /usr/lib/systemd/systemd --user" % MANAGER,
+              "  %d %d /usr/bin/python3 /x/romp/bin/romp-session-host /x/state/hosts/%s/spawn.json" % (HOST_A, MANAGER, SID),
+              _cli(CLI_A, HOST_A)]
+        host = "romp-host-%s-1757374800000.scope" % SID[:8]
+        boot = Boot(d, ps, [], [_scope_line(host, "romp session host %s romp-state=%s" % (SID, _tag(d)))],
+                    tags={CLI_A: _tag(d)}, starts={CLI_A: "1000", HOST_A: "500"})
+        return d, lp, host, boot
+
+    def _go(self, boot):
+        with mock.patch.object(sb, "proc_session_id", lambda p, **k: {CLI_A: SID}.get(p)):
+            return boot.go()
+
+    @staticmethod
+    def _rows(be, boot):
+        """Every saying of the lease's episode row: the backend's constructor meets the lease first (its awaiting heal
+        reads every alive session's lease, through the log the boot's harness has not replaced yet), the boot after it."""
+        return ([r["text"] for r in be.problems() if "cannot read the session host's lease" in r.get("text", "")]
+                + [m for m in boot.said if "cannot read the session host's lease" in m])
+
+    def test_a_cli_spared_for_its_lease_holds_its_session_down_with_the_true_reason_and_a_problem_row(self):
+        """#150 spared the CLI and then held its session down with the tag rule's line, 'a claude process this kernel did
+        not start', false of a CLI carrying this kernel's tag, and before the session's own lease read: no problem row
+        said the lease could not be read, and the left-alone line gave no remedy."""
+        d, lp, host, boot = self._setup()
+        be = self._go(boot)
+        self.assertEqual(boot.signaled(), [])
+        self.assertEqual(boot.started, [])
+        self.assertFalse(any("did not start" in m for m in boot.said), boot.said)
+        self.assertTrue(any("stays down: the host lease of %s cannot be read" % SID[:8] in m for m in boot.said), boot.said)
+        rows = self._rows(be, boot)
+        self.assertEqual(len(rows), 1, "said once for the episode, however many readers met it: %r" % rows)
+        self.assertIn(str(lp), rows[0], "the row names the file")
+        left = [m for m in boot.said if "left alone" in m and "host lease cannot be read" in m]
+        self.assertTrue(left and all("judged again when the lease reads" in m for m in left), left)
+
+    def test_a_stale_damaged_lease_spares_nothing_at_the_boot(self):
+        """Nobody has rewritten the file for longer than LEASE_TTL_S: no holder beats behind it. The CLI is the orphan the
+        census makes it and is ended, the host's scope is stopped, the cut turn resumes, and the file goes with its CLI,
+        as a dead lease does; said once, as a stale lease, naming the file."""
+        d, lp, host, boot = self._setup(age=sb.LEASE_TTL_S + 30)
+        be = self._go(boot)
+        self.assertIn(CLI_A, boot.signaled(), "the orphan is ended")
+        self.assertIn(host, boot.stops(), "the dead host's scope is stopped")
+        self.assertEqual(boot.started, [SID], "the cut turn resumes")
+        self.assertFalse(lp.exists(), "the stale file goes with its CLI")
+        rows = self._rows(be, boot)
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIn(str(lp), rows[0])
+        self.assertIn("has not been rewritten for", rows[0])
+        self.assertFalse(any("left alone" in m and "lease" in m for m in boot.said), boot.said)
+
+    def test_a_held_cli_is_judged_again_when_its_lease_goes_stale(self):
+        """The lease was rewritten just before the boot and nobody rewrites it after: once it is LEASE_TTL_S old the boot's
+        decision is taken again, the CLI it spared ended as the orphan it then is, and the session resumed."""
+        d, lp, host, boot = self._setup()
+        be = self._go(boot)
+        self.assertEqual(boot.retake(be), 1, "fresh still: nothing decided")
+        self.assertEqual((boot.signaled(), boot.started), ([], []))
+        t = time.time() - sb.LEASE_TTL_S - 5
+        os.utime(lp, (t, t))
+        self.assertEqual(boot.retake(be), 0)
+        self.assertEqual(boot.signaled(), [CLI_A], "ended now that its lease spares nothing")
+        self.assertEqual(boot.started, [SID], "and the session resumed")
+        self.assertIn(sb.BOOT_RESUME_NUDGE, sb.read_reg(Path(d), SID).get("queue") or [])
+
+    def test_a_held_cli_stays_with_its_host_when_the_lease_reads_as_the_live_hosts(self):
+        """The lease reads again a beat later, naming the spared CLI under its live host: the CLI is owned, nothing is
+        ended, and the session attaches as the boot's re-attach."""
+        d, lp, host, boot = self._setup()
+        be = self._go(boot)
+        sb.write_lease(d, {"sid": SID, "fsid": SID, "pid": CLI_A, "start": "1000", "version": "",
+                           "holder": {"pid": HOST_A, "start": "500", "kind": "host"}, "t": time.time()})
+        # the host road's classification reads identities through its own load of the lease rules: handed the scripted
+        # machine's start times through its `start` seam, as the census here reads them
+        ht = sb._ht()
+        classify = ht.host_lease_state
+        with mock.patch.object(ht, "host_lease_state", lambda lease, now, start=None: classify(lease, now, boot.starts.get)):
+            self.assertEqual(boot.retake(be), 0)
+        self.assertEqual(boot.signaled(), [])
+        self.assertEqual(boot.started, [SID])
+        self.assertIn(SID, be._boot_attach_sids)
+        self.assertEqual(sb.read_reg(Path(d), SID).get("queue") or [], [], "no restart notice: the host kept the turn")
 
 
 class UntaggedIsLeftAloneAndNamed(unittest.TestCase):

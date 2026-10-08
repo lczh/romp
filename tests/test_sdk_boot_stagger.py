@@ -161,12 +161,15 @@ class ThreadsStayDormant(unittest.TestCase):
     def test_the_orphan_reap_still_covers_a_threads_leftover_cli(self):
         # the skip sits INSIDE the resume loop, after the reap built its sid list from every alive
         # reg — a dead kernel's thread CLI is still a zombie writer nobody manages
+        # (the per-session decision, the skip with it, lives in _boot_decide since the review of #150, which takes it
+        # again for a session a lease could not settle at the boot; the boot calls it after the reap)
         import inspect
         src = inspect.getsource(sb.SdkBackend._boot_reconcile)
-        reap, skip = 'lastsids = [str(r.get("lastSid")', 'if r.get("threadOf") and not queued:'
+        reap, decide = 'lastsids = [str(r.get("lastSid")', 'self._boot_decide(sid, r, boot_t, down_t)'
         self.assertIn(reap, src)
-        self.assertIn(skip, src)
-        self.assertLess(src.index(reap), src.index(skip), "reap first over every alive reg, then the skip")
+        self.assertIn(decide, src)
+        self.assertLess(src.index(reap), src.index(decide), "reap first over every alive reg, then the decision")
+        self.assertIn('if r.get("threadOf") and not queued:', inspect.getsource(sb.SdkBackend._boot_decide))
 
 
 class ThreadWakeRemap(unittest.TestCase):
