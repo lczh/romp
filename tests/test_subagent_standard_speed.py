@@ -52,6 +52,9 @@ def _backend():
     logs = []
     be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None, log=lambda m, problem=False, **k: logs.append((str(m), problem)))
     be._logs = logs
+    # the version canary has cleared this (fake) Claude Code: its own tests are tests/test_subagent_standard_canary.py
+    be.cli_version = lambda: "2.1.282"
+    Path(d, sb.SUBAGENT_STANDARD_CANARY_STORE).write_text(json.dumps({"2.1.282": {"verdict": "pass"}}))
     return be
 
 
@@ -80,22 +83,32 @@ def _problems(be, word):
 class Recipe(unittest.TestCase):
     def test_the_recipe_is_the_one_verified_in_the_lab(self):
         self.assertEqual(sb.SUBAGENT_STANDARD_MODEL, "claude-opus-5-5")
-        self.assertEqual(sb.SUBAGENT_STANDARD_OVERRIDES, {"claude-opus-5": "claude-opus-5-5[1m]"})
+        # the borrowed catalog entry is claude-opus-4-7 (2026-10-08): no refusal fallback targets it, where claude-opus-5
+        # is the fallback for some refusal categories and the override sent those requests back to Opus 5.5 (verified on
+        # the wire: a request for claude-opus-5 under that override went out as claude-opus-5-5)
+        self.assertEqual(sb.SUBAGENT_STANDARD_OVERRIDES, {"claude-opus-4-7": "claude-opus-5-5[1m]"})
+        self.assertEqual(sb.SUBAGENT_STANDARD_CLI_PRICED_AS, "claude-opus-4-7")
         env = sb.SUBAGENT_STANDARD_ENV
         self.assertEqual(env["CLAUDE_CODE_SUBAGENT_MODEL"], "claude-opus-5-5[1m]")
         self.assertEqual(env["CLAUDE_CODE_SUBAGENT_MODEL_FORCE"], "1")
         self.assertEqual(env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "128000")
         caps = env["CLAUDE_CODE_MODEL_CAPABILITIES"]
-        self.assertTrue(caps.startswith("claude-opus-5="), "the capability edit names the override's target, never Opus 5.5")
-        self.assertIn("-fast_mode", caps.split("=", 1)[1].split(","))
-        self.assertIn("opus_5_5_prompt_bundle", caps.split("=", 1)[1].split(","))
+        self.assertTrue(caps.startswith("claude-opus-4-7="), "the capability edit names the override's target, never Opus 5.5")
+        got = set(caps.split("=", 1)[1].split(","))
+        self.assertIn("-fast_mode", got)
+        # Opus 5.5's own capabilities that the borrowed entry lacks are granted, so the subagents are handled as Opus 5.5
+        for cap in ("rejects_disabled_thinking", "mid_conv_system", "mid_conv_tool_change", "per_turn_effort",
+                    "per_turn_timing", "lean_prompt", "refusal_fallback", "opus_5_5_prompt_bundle"):
+            self.assertIn(cap, got)
+        for a, b in sb.SUBAGENT_STANDARD_ENV.items():
+            self.assertNotIn("claude-opus-5=", b, "nothing names claude-opus-5 any more: %s" % a)
 
     def test_flag_settings_carry_model_overrides_only_when_asked(self):
         d = tempfile.mkdtemp()
         p = sb.flag_settings_path(d, SID, fast=True, env=dict(ENV, **sb.SUBAGENT_STANDARD_ENV),
                                   model_overrides=sb.SUBAGENT_STANDARD_OVERRIDES)
         got = json.loads(Path(p).read_text())
-        self.assertEqual(got["modelOverrides"], {"claude-opus-5": "claude-opus-5-5[1m]"})
+        self.assertEqual(got["modelOverrides"], {"claude-opus-4-7": "claude-opus-5-5[1m]"})
         self.assertTrue(got["fastMode"])
         p2 = sb.flag_settings_path(d, SID, fast=True)
         self.assertNotIn("modelOverrides", json.loads(Path(p2).read_text()), "rewritten per use: off leaves no override behind")
@@ -187,13 +200,44 @@ class _OptionsBase(unittest.TestCase):
         return json.loads(Path(kw["settings"]).read_text()) if kw.get("settings") else {}
 
 
+class ShellScrub(_OptionsBase):
+    """The recipe's four variables are for the CLI alone: its shell commands (Bash, a `claude -p` it runs, a kernel it
+    boots) get them unset through Claude Code's session environment script (CLAUDE_ENV_FILE), verified on 2.1.282."""
+
+    def _script(self, got):
+        p = got["env"]["CLAUDE_ENV_FILE"]
+        self.assertTrue(os.path.isabs(p))
+        return Path(p).read_text()
+
+    def test_the_launch_points_claude_env_file_at_a_script_that_unsets_the_recipe(self):
+        s = sb.SdkSession(self.be, _reg(self.be, subagentStandard=True, env=ENV))
+        got = self._settings(s)
+        text = self._script(got)
+        for name in list(sb.SUBAGENT_STANDARD_ENV) + ["CLAUDE_ENV_FILE"]:
+            self.assertIn(name, text.split("unset", 1)[1], name)
+        self.assertNotIn("FEATURE_FLAG", text, "the session's own variables stay for its shells")
+
+    def test_a_session_env_file_of_its_own_is_sourced_first(self):
+        s = sb.SdkSession(self.be, _reg(self.be, subagentStandard=True, env={"CLAUDE_ENV_FILE": "/opt/team/env.sh"}))
+        got = self._settings(s)
+        text = self._script(got)
+        self.assertNotEqual(got["env"]["CLAUDE_ENV_FILE"], "/opt/team/env.sh")
+        self.assertLess(text.index("/opt/team/env.sh"), text.index("unset"), "the session's own script runs, then the unset")
+
+    def test_off_leaves_no_env_file(self):
+        s = sb.SdkSession(self.be, _reg(self.be, env=ENV))
+        self.assertNotIn("CLAUDE_ENV_FILE", self._settings(s).get("env") or {})
+
+
 class LaunchCarriesTheRecipe(_OptionsBase):
     def test_on_with_its_preconditions_writes_the_recipe_into_the_sessions_own_settings(self):
         s = sb.SdkSession(self.be, _reg(self.be, subagentStandard=True, env=ENV))
         got = self._settings(s)
         self.assertTrue(got["fastMode"])
         self.assertEqual(got["modelOverrides"], sb.SUBAGENT_STANDARD_OVERRIDES)
-        self.assertEqual(got["env"], dict(ENV, **sb.SUBAGENT_STANDARD_ENV), "beside the session's own env, never instead of it")
+        want = dict(ENV, **sb.SUBAGENT_STANDARD_ENV)
+        self.assertEqual({k: v for k, v in got["env"].items() if k != "CLAUDE_ENV_FILE"}, want,
+                         "beside the session's own env, never instead of it")
         self.assertIs(s._launch_record["subagentStandard"], True)
         self.assertEqual(sb.PICK_LAUNCH_KEYS["subagentStandard"], ("subagentStandard",))
 
@@ -354,7 +398,7 @@ class SpeedCheck(_TranscriptBase):
         self.assertEqual(sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeed"]["subStandard"], 0)
         line = _rec("msg_s1", "claude-opus-5-5", "standard", now)
         self._append(f, line)
-        charged = cpr.call_cost("claude-opus-5", _usage(line))
+        charged = cpr.call_cost(sb.SUBAGENT_STANDARD_CLI_PRICED_AS, _usage(line))
         self.assertLess(self.s._sub_std_settle(_result(charged)), 0.0)
         self.assertEqual(sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeed"]["subStandard"], 1)
         self._append(f, line)   # the same call written again
@@ -381,7 +425,7 @@ class SpeedCheck(_TranscriptBase):
         f = self.subdir / "agent-a1.jsonl"
         l1 = _rec("msg_s1", "claude-opus-5-5", "standard", _iso(time.time()))
         self._append(f, l1)
-        c1 = cpr.call_cost("claude-opus-5", _usage(l1))
+        c1 = cpr.call_cost(sb.SUBAGENT_STANDARD_CLI_PRICED_AS, _usage(l1))
         first = self.s._sub_std_settle(_result(c1))
         self.assertLess(first, 0.0)
         time.sleep(0.01)
@@ -444,12 +488,12 @@ class Repricing(_TranscriptBase):
         self._append(self.subdir / "agent-a1.jsonl", _rec("msg_s1", "claude-opus-5-5", "standard", now))
         self._append(self.subdir / "agent-a1.jsonl", _rec("msg_s2", "claude-opus-5-5", "standard", now, usage=one_h))
         recs = [_usage(l) for l in (self.subdir / "agent-a1.jsonl").read_text().splitlines()]
-        charged = sum(cpr.call_cost("claude-opus-5", u) for u in recs)
+        charged = sum(cpr.call_cost(sb.SUBAGENT_STANDARD_CLI_PRICED_AS, u) for u in recs)
         want = sum(cpr.call_cost("claude-opus-5-5", u) for u in recs) - charged
         self.assertAlmostEqual(self.s._sub_std_settle(_result(charged)), want, places=9)
         # spot check of the arithmetic: input/output/cache writes at 0.8 of Opus 5's, cache reads at 0.4
         u = recs[0]
-        self.assertAlmostEqual(cpr.call_cost("claude-opus-5", u), (1000 * 5 + 500 * 25 + 2000 * 6.25 + 10000 * 0.5) / 1e6)
+        self.assertAlmostEqual(cpr.call_cost(sb.SUBAGENT_STANDARD_CLI_PRICED_AS, u), (1000 * 5 + 500 * 25 + 2000 * 6.25 + 10000 * 0.5) / 1e6)
         self.assertAlmostEqual(cpr.call_cost("claude-opus-5-5", u), (1000 * 4 + 500 * 20 + 2000 * 5 + 10000 * 0.2) / 1e6)
 
     def test_a_cli_that_already_charged_the_real_rate_is_not_corrected_and_says_so_once(self):
@@ -472,7 +516,7 @@ class Repricing(_TranscriptBase):
         b = _rec("msg_s2", "claude-opus-5-5", "standard", _iso(t + 60))   # finished after this result was emitted
         self._append(self.subdir / "agent-a1.jsonl", a)
         self._append(self.subdir / "agent-a2.jsonl", b)
-        ca, cb = (cpr.call_cost("claude-opus-5", _usage(x)) for x in (a, b))
+        ca, cb = (cpr.call_cost(sb.SUBAGENT_STANDARD_CLI_PRICED_AS, _usage(x)) for x in (a, b))
         ra, rb = (cpr.call_cost("claude-opus-5-5", _usage(x)) for x in (a, b))
         self.assertAlmostEqual(self.s._sub_std_settle(_result(ca), now=t + 5), ra - ca, places=9)
         self.assertAlmostEqual(self.s._sub_std_settle(_result(ca + cb), now=t + 65), rb - cb, places=9)
@@ -501,9 +545,9 @@ class Repricing(_TranscriptBase):
         for i in range(start, start + n):
             line = _rec("msg_s%d" % i, "claude-opus-5-5", "standard", _iso(time.time()))
             self._append(f, line)
-            self._cum += cpr.call_cost("claude-opus-5", _usage(line))
+            self._cum += cpr.call_cost(sb.SUBAGENT_STANDARD_CLI_PRICED_AS, _usage(line))
             corrs.append((self.s._sub_std_settle(_result(self._cum)),
-                          cpr.call_cost("claude-opus-5-5", _usage(line)) - cpr.call_cost("claude-opus-5", _usage(line))))
+                          cpr.call_cost("claude-opus-5-5", _usage(line)) - cpr.call_cost(sb.SUBAGENT_STANDARD_CLI_PRICED_AS, _usage(line))))
         return corrs
 
     def test_a_replayed_result_never_moves_the_charge_mark(self):
@@ -528,7 +572,7 @@ class Repricing(_TranscriptBase):
         f = self.subdir / "agent-a1.jsonl"
         line = _rec("msg_u0", "claude-opus-5-5", "standard", _iso(time.time()))
         self._append(f, line)
-        self._cum += cpr.call_cost("claude-opus-5", _usage(line)) + 1.0   # plus history the kernel never saw
+        self._cum += cpr.call_cost(sb.SUBAGENT_STANDARD_CLI_PRICED_AS, _usage(line)) + 1.0   # plus history the kernel never saw
         self.assertEqual(self.s._sub_std_settle(_result(self._cum), unknown=True), 0.0)
         self.assertEqual(self.s._sub_std_charged, self._cum)
         for got, want in self._live_calls(1, start=1):
@@ -539,6 +583,25 @@ class Repricing(_TranscriptBase):
         src = Path(os.path.dirname(HERE), "kernel", "sdk_backend.py").read_text()
         self.assertTrue("corr = self._sub_std_settle(msg, replayed=duplicate and not unknown, unknown=unknown)" in src,
                         "the settle passes the spend fold's duplicate/unknown verdict on")
+
+    def test_the_expected_charge_follows_the_canonical_model_the_cli_reports(self):
+        # the result's modelUsage names the catalog entry Claude Code priced the key's calls as (canonicalModel): a CLI
+        # launched with an earlier recipe priced them as claude-opus-5, and one whose override did not take as Opus 5.5
+        # itself, at its real rates, which needs no correction and is no disagreement
+        self.s._sub_std_begin({"subagentStandard": True}, True)
+        line = _rec("msg_s1", "claude-opus-5-5", "standard", _iso(time.time()))
+        self._append(self.subdir / "agent-a1.jsonl", line)
+        real = cpr.call_cost("claude-opus-5-5", _usage(line))
+        r = _result(real)
+        r.model_usage[KEY]["canonicalModel"] = "claude-opus-5-5"
+        self.assertEqual(self.s._sub_std_settle(r), 0.0)
+        line2 = _rec("msg_s2", "claude-opus-5-5", "standard", _iso(time.time()))
+        self._append(self.subdir / "agent-a1.jsonl", line2)
+        charged = cpr.call_cost("claude-opus-5", _usage(line2))
+        r2 = _result(real + charged)
+        r2.model_usage[KEY]["canonicalModel"] = "claude-opus-5"
+        self.assertAlmostEqual(self.s._sub_std_settle(r2), cpr.call_cost("claude-opus-5-5", _usage(line2)) - charged, places=9)
+        self.assertFalse(_problems(self.be, "charged"))
 
     def test_a_fast_subagent_call_is_charged_as_opus_5_5_fast_and_left_alone(self):
         self.s._sub_std_begin({"subagentStandard": True}, True)
@@ -558,7 +621,7 @@ class Repricing(_TranscriptBase):
         line = _rec("msg_s1", "claude-opus-5-5", "standard", _iso(time.time()))
         self._append(self.subdir / "agent-a1.jsonl", line)
         u = _usage(line)
-        charged = cpr.call_cost("claude-opus-5", u)
+        charged = cpr.call_cost(sb.SUBAGENT_STANDARD_CLI_PRICED_AS, u)
         corr = cpr.call_cost("claude-opus-5-5", u) - charged
         r = _result(charged)
 
@@ -586,8 +649,8 @@ class Repricing(_TranscriptBase):
         line = _rec("msg_s1", "claude-opus-5-5", "standard", _iso(time.time()))
         self._append(self.subdir / "agent-a1.jsonl", line)
         u = _usage(line)
-        got = self.s._sub_std_settle(_result(2.0 + cpr.call_cost("claude-opus-5", u)))
-        self.assertAlmostEqual(got, cpr.call_cost("claude-opus-5-5", u) - cpr.call_cost("claude-opus-5", u), places=9)
+        got = self.s._sub_std_settle(_result(2.0 + cpr.call_cost(sb.SUBAGENT_STANDARD_CLI_PRICED_AS, u)))
+        self.assertAlmostEqual(got, cpr.call_cost("claude-opus-5-5", u) - cpr.call_cost(sb.SUBAGENT_STANDARD_CLI_PRICED_AS, u), places=9)
 
 
 class LiveChanges(unittest.TestCase):

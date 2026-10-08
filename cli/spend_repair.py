@@ -325,12 +325,17 @@ def plan(turns: list, restarts: list, day: str, since=None, owners=None, keyed=N
                 cum = float(r["cumulativeUsd"]) if isinstance(r.get("cumulativeUsd"), (int, float)) else None
                 base = r.get("spendBaseline")
                 rec_k = _kernel_usd(r)
+                # a Subagents at standard speed turn is recorded as Claude Code's figure plus its repricing (cliUsd,
+                # subagentRepriceUsd): Claude Code's own figure is what equals a lifetime billed once more, and the
+                # corrected turn keeps the repricing of its own calls
+                rp_k = float(r["subagentRepriceUsd"]) if isinstance(r.get("subagentRepriceUsd"), (int, float)) else 0.0
+                cli_k = rec_k - rp_k
                 repaired = isinstance(r.get("usdRecorded"), (int, float))
-                candidate = cum is not None and not base and abs(rec_k - cum) < 1e-6 and rec_k > 0
+                candidate = cum is not None and not base and abs(cli_k - cum) < 1e-6 and cli_k > 0
                 who = "%s %s" % (str(r.get("name") or sid[:8]), datetime.fromtimestamp(t).strftime("%H:%M:%S"))
                 if candidate and unknown_armed:
                     if prev_cum is not None and cum > prev_cum + 1e-6:
-                        remainder = cum - prev_cum
+                        remainder = cum - prev_cum + rp_k
                         if abs(remainder - usd) > 1e-6:
                             lifetime.append((r, usd, remainder, prev_cum, None))
                     else:
