@@ -443,7 +443,8 @@ as Claude Code is expected to charge it (Opus 5's standard rates; Opus 5.5's own
 its `total_cost_usd` delta plus cost less charge only while the charge and that expectation agree. A disagreement waits
 one result, since a call that finished after a result was sent is paid for by the next one. One that lasts is said once
 per launch, and the turn records Claude Code's figure as is, so a Claude Code that already charges these calls their
-real price is never discounted twice. A result without the per-model map is recorded as is, said once. The turn row
+real price is never discounted twice. A result without the per-model map is recorded as is, said once. A result a
+session host replays after a kernel restart moves nothing here, as it moves nothing in the ledger. The turn row
 keeps both figures (`cliUsd`, the CLI's, and `subagentRepriceUsd`, the difference); `cumulativeUsd` stays the CLI's own.
 A difference a turn cannot absorb carries to the next turn. Claude Code's own cost readouts still show Opus 5 rates.
 

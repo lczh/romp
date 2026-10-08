@@ -494,6 +494,52 @@ class Repricing(_TranscriptBase):
             self.assertEqual(self.s._sub_std_settle(_result(None)), 0.0)
         self.assertEqual(len(_problems(self.be, "charged")), 1)
 
+    def _live_calls(self, n, start=0):
+        """n new standard subagent calls, each followed by its live result: (cumulative charge, corrections)."""
+        f = self.subdir / "agent-a1.jsonl"
+        corrs = []
+        for i in range(start, start + n):
+            line = _rec("msg_s%d" % i, "claude-opus-5-5", "standard", _iso(time.time()))
+            self._append(f, line)
+            self._cum += cpr.call_cost("claude-opus-5", _usage(line))
+            corrs.append((self.s._sub_std_settle(_result(self._cum)),
+                          cpr.call_cost("claude-opus-5-5", _usage(line)) - cpr.call_cost("claude-opus-5", _usage(line))))
+        return corrs
+
+    def test_a_replayed_result_never_moves_the_charge_mark(self):
+        # after a kernel restart the host's replay hands over results the ledger already holds (the spend fold's
+        # `duplicate`), an older one included: its charge is below the mark, and moving the mark there made the next live
+        # result's charge span calls already paired (a false disagreement row, one result left at Opus 5 rates)
+        self._cum = 0.0
+        self.s._sub_std_begin({"subagentStandard": True}, True)
+        self._live_calls(2)
+        mark = self.s._sub_std_charged
+        self.assertEqual(self.s._sub_std_settle(_result(mark / 2), replayed=True), 0.0)   # the first result, replayed
+        self.assertEqual(self.s._sub_std_charged, mark, "a replayed result leaves the mark where the live ones put it")
+        for got, want in self._live_calls(2, start=2):
+            self.assertAlmostEqual(got, want, places=9)
+        self.assertFalse(_problems(self.be, "charged"))
+
+    def test_an_unknown_baseline_moves_the_mark_and_corrects_nothing(self):
+        # an attach with no watermark for the CLI: the spend fold records nothing for the span, so nothing is repriced;
+        # the mark starts there, and the next live result corrects its own calls only
+        self._cum = 0.0
+        self.s._sub_std_begin({"subagentStandard": True}, True)
+        f = self.subdir / "agent-a1.jsonl"
+        line = _rec("msg_u0", "claude-opus-5-5", "standard", _iso(time.time()))
+        self._append(f, line)
+        self._cum += cpr.call_cost("claude-opus-5", _usage(line)) + 1.0   # plus history the kernel never saw
+        self.assertEqual(self.s._sub_std_settle(_result(self._cum), unknown=True), 0.0)
+        self.assertEqual(self.s._sub_std_charged, self._cum)
+        for got, want in self._live_calls(1, start=1):
+            self.assertAlmostEqual(got, want, places=9)
+        self.assertFalse(_problems(self.be, "charged"))
+
+    def test_the_settle_hands_the_spend_folds_replay_verdict_to_the_repricing(self):
+        src = Path(os.path.dirname(HERE), "kernel", "sdk_backend.py").read_text()
+        self.assertTrue("corr = self._sub_std_settle(msg, replayed=duplicate and not unknown, unknown=unknown)" in src,
+                        "the settle passes the spend fold's duplicate/unknown verdict on")
+
     def test_a_fast_subagent_call_is_charged_as_opus_5_5_fast_and_left_alone(self):
         self.s._sub_std_begin({"subagentStandard": True}, True)
         line = _rec("msg_s1", "claude-opus-5-5", "fast", _iso(time.time()))
