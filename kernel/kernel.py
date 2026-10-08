@@ -13795,7 +13795,7 @@ def _heal_cold_folds(leaf, dropped_out=None):
     a tail-only state boot after boot, each write recording the cursor alone and every boot blaming the cap). An over-the-cap
     fold is left cold: a heal would only be written cursor-only again. Returns the names healed; `dropped_out`, when given,
     receives the names this call's drop took, healed or not (the converge pass counts its unhealed folds from them: the
-    settle write's heal on the jobs thread can run over the same leaf at once, and each drop takes a fold once)."""
+    settle write's heal can take a fold over the same leaf first, and each drop takes a fold once)."""
     dropped = set(em.drop_cold_cursors(leaf))   # no cursor: the fold reads the leaf whole once and is complete again
     if dropped_out is not None:
         dropped_out.extend(sorted(dropped))
@@ -13837,36 +13837,39 @@ def _stored_tree(path, sid):
     return hit[1] if hit else None
 
 
-_CKPT_JUST_WRITTEN = set()          # the paths the settle write took since the converge pass last looked; the pass skips them (T360 review, low 4)
-_CKPT_JUST_LOCK = threading.Lock()  # the hand-off's lock (2026-10-05): the settle write adds on the jobs thread and the converge pass takes on the
-#                                     pusher's, and a take is a copy and a clear, so without it a write landing between the two is dropped unseen
+_CKPT_JUST_WRITTEN = set()          # the paths the settle write took since the converge pass last looked; the pass skips them (T360 review,
+#                                     low 4). Both run on the jobs thread, the settle write closing the gated pass and the converge pass in
+#                                     the write phase after it (2026-10-08), so the hand-off is one thread's again: the lock the two threads
+#                                     needed while the converge pass ran on the pusher (2026-10-05) went with it
 
 
 def _ckpt_just_take():
-    """The converge pass's side of the hand-off: the paths the settle write (_persist_checkpoints, on the jobs thread) took since
-    the pass last looked, copied and cleared in one step under _CKPT_JUST_LOCK. A settle write landing mid-take waits for the
-    clear and is kept for the pass's next look, never cleared unseen."""
-    with _CKPT_JUST_LOCK:
-        taken = set(_CKPT_JUST_WRITTEN)
-        _CKPT_JUST_WRITTEN.clear()
+    """The converge pass's side of the hand-off: the paths the settle write (_persist_checkpoints) took since the pass last looked,
+    copied and cleared. The two run one after the other on the jobs thread, so nothing lands between the copy and the clear."""
+    taken = set(_CKPT_JUST_WRITTEN)
+    _CKPT_JUST_WRITTEN.clear()
     return taken
 
 
 def _begin_checkpoint_cycle():
-    """The pusher cycle's START (T362 round one, lows 2 and 3): the cycle's checkpoint byte budget is whole again, shared by the
-    builds' quiescence-drop writes and the converge pass near the cycle's end (the boot's first builds are capped where the
-    volume is; before, the pass began the cycle and the first cycle's drops ran uncapped), and the drops an earlier cycle
-    deferred are paid with this cycle's room, oldest first, no fold over their files needed. The pass's off switch
-    (ROMP_CKPT_CONVERGE_MS=0) covers the drop write: the cycle begins with no budget, and the drop pops as before T362, unless
-    a whole assembly entry pins it (recordCache.pinnedKept)."""
+    """The checkpoint cycle's START, the first job of the jobs thread's write phase (_jobs_write_phase, 2026-10-08; the pusher
+    cycle's start until then, T362 round one, lows 2 and 3): the cycle's checkpoint byte budget is whole again, shared by the
+    drops' writes and the converge pass after it; the drops an earlier cycle deferred for the budget are paid with this
+    cycle's room, oldest first, no fold over their files needed; and the work the other threads handed to this one, the
+    process's document writer, is done (em.documents_pay_handoffs: the drops a build on the pusher or a request met that
+    needed a document, each done as that thread would have done it, and a parse's rewrite after a refused document). The
+    pass's off switch (ROMP_CKPT_CONVERGE_MS=0) covers the drop write: the cycle begins with no budget, and the drop pops as
+    before T362, unless a whole assembly entry pins it (recordCache.pinnedKept)."""
     em.checkpoint_cycle_begin(CKPT_CONVERGE_BYTES if CKPT_CONVERGE_MS > 0 else 0)
     em.checkpoint_pay_owed_drops()
+    em.documents_pay_handoffs()
 
 
 def _converge_checkpoints(now):
-    """The converge pass (T360), one per pusher cycle near its end, against the cycle's checkpoint byte budget (which is why it
-    stays on the pusher while the settle writes run on the jobs thread; it skips the paths they took since its last look,
-    _ckpt_just_take): the dirty documents that lack a complete
+    """The converge pass (T360), one per jobs pass, in its write phase (_jobs_write_phase, 2026-10-08: it ran near the end of
+    every pusher cycle until then, and each document it wrote held up the next frame, the first candidate's always: an idle
+    38 MB session's assembly document took 9.9 s of one cycle in a lab), against the checkpoint cycle's byte budget begun just
+    before it; it skips the paths the settle write took since its last look (_ckpt_just_take): the dirty documents that lack a complete
     state this process now holds (em.checkpoint_converge_candidates: a fold missing from the document because it never ran
     in the writing process, a legacy bare cursor, a tail-only one) are written now, independent of settle evidence, so a
     boot's whole reads pay once and the next boot restores every fold that ran. Bounded per cycle by CKPT_CONVERGE_MS of
@@ -13877,7 +13880,8 @@ def _converge_checkpoints(now):
     its next run reads the small file whole once. A document already carrying every fold that ran is never a candidate,
     so an idle session's document is written once and then left alone. A quiescent leaf (T361) is refused unless the boot's
     own whole read is still resident, in which case the prime's launch fold writes its document at the quiescence drop from
-    that read (`viaDrop`), no read of the pass's own. Returns the documents written."""
+    that read (`viaDrop`), no read of the pass's own. Once the exit's stand-down is set no candidate is begun and no document
+    write starts (a held drop paid past it is handed on, never written: em.documents_write_here). Returns the documents written."""
     just_written = _ckpt_just_take()                       # taken on every road below, as each of them cleared the set before
     if CKPT_CONVERGE_MS <= 0:
         return 0                                           # off (ROMP_CKPT_CONVERGE_MS=0): neither the fold documents nor the assembly ones
@@ -13892,6 +13896,8 @@ def _converge_checkpoints(now):
     leaves = set(leaf_sid)
     n = 0
     for i, p in enumerate(cands):
+        if _EXIT_STAND_DOWN.is_set():
+            return n                                       # the exit has begun: the rest is the next kernel's
         if i and (time.monotonic() - t0 > CKPT_CONVERGE_MS / 1000.0 or not em.checkpoint_cycle_room(0)):
             em.converge_stat("deferred", len(cands) - i)   # gated on candidates PROCESSED, not documents written: a first
             break                                          #  candidate that writes nothing must not lift the budget (review)
@@ -13917,8 +13923,8 @@ def _converge_checkpoints(now):
                     got = _read_bytes_of(p) - before
                     em.converge_stat("heals", len(healed)); em.converge_stat("healBytes", got); em.checkpoint_cycle_charge(got)
                 unhealed = [k for k in mine if k not in healed]   # what THIS heal dropped and could not rerun (review, 2026-10-05):
-                #                                            a fold the settle write's heal on the jobs thread took first is that
-                #                                            heal's to rerun, finished or still reading the leaf, never this pass's
+                #                                            a fold another heal took first (the settle write's, earlier in the
+                #                                            pass) is that heal's to rerun, never this pass's
                 if em.entry_whole_resident(p) and _prime_leaf_folds(p):
                     em.converge_stat("primed")
             else:
@@ -13938,6 +13944,8 @@ def _converge_checkpoints(now):
         if em.pay_held_drops().get(p) and quiescent:       # the held drop wrote the document from the boot's read (converge.dropWrites,
             em.converge_stat("viaDrop")                    #  charged to this cycle's take): no write of the pass's own; a write that
             continue                                       #  did not happen (deferred, failed) falls to the pass's own below
+        if _EXIT_STAND_DOWN.is_set():
+            return n                                       # the exit began during the heal or the prime: no write starts beside it
         try:                                               # the write reads the document on disk for its carry: that read is the
             pre = em._ckpt_file(p).stat().st_size          #  pass's I/O too, so it counts against the budget (review, round 3)
         except (OSError, AttributeError):
@@ -13969,7 +13977,8 @@ def _converge_assembly(now, t0):
     and the parse read it whole at every boot (31 of 60 leaves on the devbox, about 2.5 GB, the boot's remaining cost).
     For every leaf the boot's own parse built a WHOLE assembly entry for (the assembly cache's unrestored entries, each with
     its sid and flag: the enumeration is the boot's reads, not the discover window's rows, which leave every idle leaf older
-    than 48 hours out; T382) that is quiescent, has no assembly document on disk, and whose reader's whole record entry is
+    than 48 hours out; T382) whose session is running no turn (_turn_open: the event the leaf's 120 s quiet stood for until
+    2026-10-08), has no assembly document on disk, and whose reader's whole record entry is
     still resident beside it, the document is written from that entry through the
     settle's writer (`asm_checkpoint_write`, with the parse store's tree as the settle hands it): no read of records, a stat
     per file and the cut's guard. Charged to the cycle's byte budget (an estimate from the leaf's size, trued up), deferred
@@ -13978,7 +13987,7 @@ def _converge_assembly(now, t0):
     enters the done table; a blip (a stat, the offsets) is tried twice, the second time on a later cycle (a blip inside the
     fold half's hold gets its second try from this step in the same cycle, over the entry the paid drop popped, so that leaf
     waits for the next boot's read; round two, low 1); a leaf with no entry to write from is re-examined each cycle (counted
-    once), never parsed or read by the pass. Live leaves are the settle's. The fold half of the pass writes a candidate leaf's
+    once), never parsed or read by the pass. A leaf whose session is mid-turn is the settle's. The fold half of the pass writes a candidate leaf's
     assembly document itself, inside its hold, before the held drop pops the record entry (`_converge_assembly_leaf`); this
     step covers the leaves the fold half did not touch. Returns the documents written."""
     if not ASM_CONVERGE or not em.checkpoint_drop_writes_on():
@@ -14009,6 +14018,22 @@ def _release_oldest(table, cap=4096):
 _ASM_CONVERGE_FLAG = {}             # leaf -> the file state under which a flag mismatch was counted (once, not per cycle)
 
 
+def _turn_open(sid):
+    """Whether a turn is running on session `sid`, by its row in the live map (the backend's own account: a row in one of
+    _PROGRESSING_STATES, working, compacting, retrying, or parked mid-turn on a permission or a picker). The converge pass's
+    assembly step asks it in place of the leaf's age (2026-10-08): it leaves a leaf to the settle write exactly while a turn
+    whose end is that write's event is running, which is what "unchanged for 120 s" stood for. A CLI writes its transcript
+    while it runs a turn: the turn's records, a compaction's, a backgrounded subagent's notice (which opens a turn of its
+    own and reads `working` until it settles). With no turn open (idle, waiting on the user's next message, a dormant
+    session the backend maps to waiting, a session with no live row because its CLI is gone) no turn end is coming to write
+    the document, so the pass writes it now from the boot's read, rather than two minutes after the leaf's last append. The
+    read is the pass's live snapshot, taken at the jobs pass's start: a turn begun since reads as none, and the document is
+    then written from the settled turns while the new one runs, as the settle's periodic write does for every long turn (the
+    cut never reaches an open turn), so a stale snapshot costs at most a write the settle would have made anyway. A comment
+    thread has no row in the live map and reads as no turn open, for the same reason harmlessly."""
+    return (_live_map().get(str(sid)) or {}).get("state", "") in _PROGRESSING_STATES
+
+
 def _converge_assembly_leaf(key, sid, t0, flags=None):
     """One leaf's assembly write for the pass (see _converge_assembly): True written, False not (done, refused, nothing to
     write from), None when the budget refused it (the caller defers the rest). `flags`, when the caller knows them, are the
@@ -14029,8 +14054,8 @@ def _converge_assembly_leaf(key, sid, t0, flags=None):
     if cp.exists():
         _ASM_CONVERGE_DONE[key] = st                       # the settle's document, or an earlier cycle's, stands
         return False
-    if not em.file_quiescent(key):
-        return False                                       # a live leaf: its settle writes the document
+    if _turn_open(sid):
+        return False                                       # a turn is running: its settle writes the document (_turn_open)
     human = bool(_display_sdk_human(sid))
     if flags is not None and human not in flags:
         if _ASM_CONVERGE_FLAG.get(key) != st:               # parsed only under the other flag: no document the reader would unlink
@@ -14041,6 +14066,8 @@ def _converge_assembly_leaf(key, sid, t0, flags=None):
             _ASM_CONVERGE_NOENTRY[key] = st; em.asm_converge_skip("noEntry")   #  needs both): nothing to write from, never a read
         return False
     em.asm_converge_stat("candidates")
+    if _EXIT_STAND_DOWN.is_set():
+        return None                                        # the exit has begun: no document starts beside it (the caller stops)
     est = max(4096, st[1] // 64)
     if not em.checkpoint_cycle_take(est):
         em.asm_converge_stat("deferred")
@@ -14170,13 +14197,15 @@ def _persist_checkpoints(now):
     locked step, as a drop on any thread does). The pusher no longer runs it, but a frame can still wait on it: a CPU-bound
     write shares the interpreter lock with every frame built meanwhile, and a build that parses the same leaf waits on the
     leaf's writer lock while its assembly document is written (at most the whole write the pusher used to pay). The
-    converge pass stays on the pusher, since it spends that budget; the paths written here reach it under _CKPT_JUST_LOCK
-    (_ckpt_just_take). FIRST SIGHT is taken at the pass's START (_checkpoint_first_sight, the review of 2026-10-05), so a
+    converge pass followed on 2026-10-08, into the write phase after the pass (_jobs_write_phase); the paths written here
+    reach it through _CKPT_JUST_WRITTEN (_ckpt_just_take). FIRST SIGHT is taken at the pass's START (_checkpoint_first_sight, the review of 2026-10-05), so a
     turn that settles while the pass runs is new evidence here; the first-sight branches below serve a caller that runs
     this alone. _CKPT_SETTLE_SEEN and _CKPT_PERIODIC_SEEN are written on the jobs thread alone.
-    AT AN EXIT (2026-10-05) the loop stands down: once the exit's quiesce has set _EXIT_STAND_DOWN it leaves before the next
-    session, so a pass running when SIGTERM lands finishes the one session it is writing and stops, rather than writing the
-    same dirty set the exit's own checkpoint phase writes (two writers on one interpreter lock). The exit does not wait for it:
+    AT AN EXIT (2026-10-05) the loop stands down: once the exit's quiesce has set _EXIT_STAND_DOWN no write STARTS (2026-10-08:
+    the loop leaves before the next session, the fold writes stop before their next path and the assembly document is not
+    begun), so a pass running when SIGTERM lands finishes only the write already under way, rather than writing the same
+    dirty set the exit's own checkpoint phase writes (two writers on one interpreter lock); before, the session in flight
+    went on to its assembly document, a write of seconds begun after the signal. The exit does not wait for it:
     a fold document both write ends as one whole document (each write stages to a tmp of its own thread and renames it into
     place), an assembly document the pass is writing is staged to a tmp and renamed the same way (the process exit can cut
     it short, never leave half a document), and whatever the pass leaves is still dirty for the exit's phase.
@@ -14224,10 +14253,11 @@ def _persist_checkpoints(now):
             if _p != leaf:                     #  dropped so the write leaves it out and the next boot reads that small file
                 em.drop_cold_cursors(_p)       #  whole once, complete again (T359 review, low 3; the leaf's folds heal above)
         if mine:
-            wrote = em.checkpoint_write_dirty_paths(sorted(mine))
+            wrote = em.checkpoint_write_dirty_paths(sorted(mine), stop=_EXIT_STAND_DOWN.is_set)   # no write starts past it
             written += len(wrote)
-            with _CKPT_JUST_LOCK:              # handed to the converge pass, which takes the set on the pusher's thread
-                _CKPT_JUST_WRITTEN.update(wrote)
+            _CKPT_JUST_WRITTEN.update(wrote)   # handed to the converge pass, in this thread's write phase after the pass
+        if _EXIT_STAND_DOWN.is_set():          # the exit began during the fold writes: no assembly document starts beside it
+            break
         try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry
             if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid), tree=_stored_tree(leaf, sid)):   # with a compaction
                 written += 1                   #  boundary, else a counted skip; the store's tree, when it holds one, gives the
@@ -64870,8 +64900,11 @@ _LOOPS_STOP = threading.Event()
 # The exit's stand-down (2026-10-05), set by _exit_quiesce alone: _job_stage runs no job, the pusher skips its push (the
 # clients already have the restarting frame) and the jobs pass's settle write (_persist_checkpoints) leaves its per-session
 # loop. An event of its own, not _LOOPS_STOP or _TERMINATING, so the tests that set those to end a loop or to stand in for a
-# converge never skip a stage.
+# converge never skip a stage. The event model reads it too (set_document_stop, 2026-10-08): past it no thread starts a
+# document write at a drop or a hand-off, so the jobs thread's write phase and any drop a running build meets leave the
+# interpreter to the exit's own checkpoint writes.
 _EXIT_STAND_DOWN = threading.Event()
+em.set_document_stop(_EXIT_STAND_DOWN.is_set)
 # Same idea for the CHAT PUSHER: the SDK live-tail (and any caller) sets this to push the chat NOW
 # instead of waiting out the 4s poll — the SDK stream leads the transcript on disk, so an immediate push
 # of the in-memory live atoms makes messages appear instantly. 4s stays as the backstop.
@@ -69298,12 +69331,14 @@ _JOBS_GATE_ACTS = ("views", "mark", "push", "send", "problem", "spendRow", "writ
 _JOBS_GATE_ROW_FIELDS = ("state", "since", "ctxTokens", "auth", "authLive", "authSwitchedAt", "connected", "spawning", "retryCount")   # the live
 #                                             row's fields the jobs read (never the whole row: its model-fallback retry countdown
 #                                             moves every second, which would make every row reader's input a clock)
-_JOBS_UNDECLARED = ("convergeCheckpoints",)   # owed every pass wherever it runs: a dirty set and a byte budget, no input the gate
-#                                             observes. It runs on the pusher's cycle, where nothing is gated. The checkpoint settle
-#                                             write (persistCheckpoints) and its first sight (checkpointFirstSight) run on the jobs
-#                                             pass, the first sight first and the write last (2026-10-05), and are declared in
-#                                             _JOBS_INPUTS: left undeclared there, the write would be owed on every pass and no pass
-#                                             could ever count under wouldSkipPass
+_JOBS_UNDECLARED = ("beginCheckpointCycle", "convergeCheckpoints")   # owed every pass wherever they run: a dirty set, owed and
+#                                             handed drops and a byte budget, no input the gate observes. They run on the jobs
+#                                             thread's write phase (_jobs_write_phase, 2026-10-08; the pusher's cycle before), after
+#                                             the gated pass, where nothing is gated. The checkpoint settle write (persistCheckpoints)
+#                                             and its first sight (checkpointFirstSight) run on the jobs pass, the first sight first
+#                                             and the write last (2026-10-05), and are declared in _JOBS_INPUTS: left undeclared
+#                                             there, the write would be owed on every pass and no pass could ever count under
+#                                             wouldSkipPass
 _JOBS_GATE_BOOT_KEY = ("unread",)    # the knob's stat key before the first pass reads it: equal to no stat and to no file (None), so
 #                                       the first pass always reads the knob, and the default is the read's, never a literal's
 _JOBS_GATE = {"asked": "", "modeKey": _JOBS_GATE_BOOT_KEY, "rec": {}, "lost": {}, "gen": {}, "floorSeen": {}, "tree": {}, "last": {},
@@ -70454,23 +70489,20 @@ def _job_stage(name, thunk):
 
 
 def _pusher_cycle_jobs(now, live_map, any_client):
-    """The pusher cycle's own jobs, around the push: what feeds a frame or shares the cycle's checkpoint byte budget. Everything
-    else (the sweeps, the reminder walk, the interrupt tick, the persists, the pause and retry family) runs on the JOBS thread
-    (_jobs_pass, 2026-09-13): the housekeeping's cold reads at boot held the browser's first frames behind a 30 to 60 s first
-    cycle (the user asked why the reminder walk had to finish before the UI showed at all), and their writers already end in
-    _mark_views_dirty, which wakes this loop, so nothing they decide waits for anything here. The checkpoint settle write
-    (_persist_checkpoints) followed on 2026-10-05: it feeds no frame and never charges the budget itself (a quiescence drop
-    its folds meet takes from it in one locked step, from any thread), and here every write it made ran inside the cycle
-    and delayed the next frame. Off this thread a write can still slow frames, by less: a CPU-bound write shares the
-    interpreter lock with every frame built meanwhile, and a build that parses the same leaf waits on the leaf's writer
-    lock while its assembly document is written. The converge pass, which spends the budget, stays."""
+    """The pusher cycle's own jobs, around the push: what feeds a frame. Everything else (the sweeps, the reminder walk, the
+    interrupt tick, the persists, the pause and retry family) runs on the JOBS thread (_jobs_pass, 2026-09-13): the
+    housekeeping's cold reads at boot held the browser's first frames behind a 30 to 60 s first cycle (the user asked why
+    the reminder walk had to finish before the UI showed at all), and their writers already end in _mark_views_dirty, which
+    wakes this loop, so nothing they decide waits for anything here. The checkpoint settle write (_persist_checkpoints)
+    followed on 2026-10-05, and the checkpoint cycle and the converge pass on 2026-10-08 (_jobs_write_phase): every document
+    they wrote ran inside this cycle and delayed the next frame (the converge pass wrote an idle session's assembly document
+    here, 9.9 s of one cycle over a 38 MB session in a lab), and a drop a build meets here that needs a document is handed to
+    the jobs thread, the process's one document writer, so this cycle writes none. Off this thread a write can still slow
+    frames, by less: a CPU-bound write shares the interpreter lock with every frame built meanwhile, and a build that parses
+    the same leaf waits on the leaf's writer lock while its assembly document is written."""
     _t_jobs = time.monotonic()            # /perf: this function minus the _push_all below is the `jobs` stage
     if not _PERF_STATS._mine():
         _PERF_STATS.cycle_begin()         # a caller that did not open the cycle (a test driving the jobs alone) opens it here
-    try:                                  # the cycle's checkpoint byte budget, whole again, and the drops owed from the last one
-        _job_stage('beginCheckpointCycle', lambda: _begin_checkpoint_cycle())         # (T362): before the builds below, whose quiescence drops write against it
-    except Exception:
-        sys.stderr.write("checkpoint-cycle: %s\n" % traceback.format_exc())
     _t_push = 0.0
     try:                                  # GET /sessions rows from this cycle's snapshot (plans/sessions-route-from-the-cycle.md):
         _job_stage('sessionsListing', lambda: _sessions_listing_refresh(now, live_map))   # its own try, so a fault in the key or
@@ -70502,10 +70534,6 @@ def _pusher_cycle_jobs(now, live_map, any_client):
     except Exception:
         sys.stderr.write("turn-notify: %s\n" % traceback.format_exc())
     # (the WS keepalive lives on its own _heartbeat thread — NOT here — so a slow push can't starve it)
-    try:                                  # the documents a boot's whole reads left dirty, bounded per cycle (T360) by the budget begun above;
-        _job_stage('convergeCheckpoints', lambda: _converge_checkpoints(now))        # the settle writes are the jobs pass's last job (2026-10-05)
-    except Exception:
-        sys.stderr.write("checkpoint converge: %s\n" % traceback.format_exc())
     try:                                  # the boot row's backstop: written without attachDone once the bound has passed
         _job_stage('bootRowBackstop', lambda: _boot_row_backstop(now))
     except Exception:
@@ -70637,6 +70665,25 @@ def _jobs_pass(now, live_map):
     _PERF_STATS.stage("jobsPass", time.monotonic() - _t_pass)
 
 
+def _jobs_write_phase(now):
+    """The jobs thread's write phase (2026-10-08), after its gated pass and inside its scopes: the checkpoint cycle begins
+    (its byte budget whole again, the drops owed from an earlier cycle and the drops and rewrites the other threads handed to
+    this one, the process's document writer, done against it: _begin_checkpoint_cycle), then the converge pass writes the
+    documents a boot's whole reads left wanting (_converge_checkpoints), bounded by its wall and that budget. Both ran on
+    the pusher's cycle until this date, where each document write held up the next frame (an idle 38 MB session's assembly
+    document: 9.9 s of one cycle in a lab); here they hold up only the next pass's start. Not a job the gate observes: the
+    work is a dirty set, owed drops and a byte budget, no input the gate reads, so it runs every pass, as it ran every cycle
+    (_JOBS_UNDECLARED); the settle write, which the gate does observe, closes the pass before it."""
+    try:
+        _job_stage('beginCheckpointCycle', lambda: _begin_checkpoint_cycle())
+    except Exception:
+        sys.stderr.write("checkpoint-cycle: %s\n" % traceback.format_exc())
+    try:
+        _job_stage('convergeCheckpoints', lambda: _converge_checkpoints(now))
+    except Exception:
+        sys.stderr.write("checkpoint converge: %s\n" % traceback.format_exc())
+
+
 JOBS_PASS_S = 0.5                                  # the jobs thread's pace between passes: the pusher's backstop, so a job that read
 #                                                    the world within half a second of an event before still does
 
@@ -70647,7 +70694,9 @@ def _jobs_cycle():
     memo (_compact_end_scoped) beside it: only the listing reads them, the launch error once per session at its key through
     the pair reader (_listing_pair_scoped; the rows hit the pair memo and never reach it) and the end record at its key and
     its rows, and the listing is the pusher's job, so a memo opened here was filled by nothing (2026-09-21; the key alone
-    for the launch error since the post-merge review of the listing pairing, 2026-09-22); _jobs_pass inside them, the scopes closed in the finally, the
+    for the launch error since the post-merge review of the listing pairing, 2026-09-22); _jobs_pass inside them, the gate's
+    observation closed on the pass, then the write phase (_jobs_write_phase, 2026-10-08: the checkpoint cycle and the converge
+    pass, the documents the pusher's cycle used to write) inside the same scopes, the scopes closed in the finally, the
     pass counted under /perf `jobs`, and the boot's first pass sampled and reported to the boot row like the pusher's
     first cycle."""
     _t = time.monotonic()
@@ -70670,7 +70719,12 @@ def _jobs_cycle():
         _live_scope.msgsum = [_MSGSUM_UNSET]
         _live_scope.names = _names_snapshot()
         _PERF_STATS.stage("jobs.prelude", time.monotonic() - _t)
-        _jobs_pass(now, live_map)
+        try:
+            _jobs_pass(now, live_map)
+        finally:                                # the gate observed the pass and closes on it; the write phase below is not a
+            _jobs_gate_tick_close(_gate, time.monotonic() - _t, time.thread_time() - _c)   # job it gates (_JOBS_UNDECLARED)
+            _gate = None
+        _jobs_write_phase(now)                  # the documents, after every decision of the pass, inside its scopes
     finally:
         _chat_push_scopes_close()
         _live_scope.snapshot = None
@@ -70683,7 +70737,7 @@ def _jobs_cycle():
         _live_scope.files_stat = None
         _live_scope.files_dirty = None
         _dt, _dc = time.monotonic() - _t, time.thread_time() - _c
-        _jobs_gate_tick_close(_gate, _dt, _dc)  # the pass's verdict and the gate's own cost under jobs.gate (never raises)
+        _jobs_gate_tick_close(_gate, _dt, _dc)  # (a prelude that raised before the pass: the gate closes here; never raises)
         _PERF_STATS.jobs_pass(_dt, _dc)
         if first:
             _first_cycle_sampler_stop(_FIRST_PASS_SAMPLER)
@@ -70695,26 +70749,30 @@ _JOBS_FAILED_SAID = {}                             # exception type name -> said
 
 def _jobs_loop():
     """The jobs thread: _jobs_cycle at JOBS_PASS_S, the same guard as _pusher's (a pass that raises is counted under /perf
-    jobs.passFailed, said once per kind, and retried at the pusher's failure pace), stopped by _LOOPS_STOP with the other loops."""
+    jobs.passFailed, said once per kind, and retried at the pusher's failure pace), stopped by _LOOPS_STOP with the other loops.
+    The thread is the process's document writer for the loop's life (em.document_writer, 2026-10-08): every fold and assembly
+    document is written here, at a pass's write phase (_jobs_write_phase) or by a job of the pass, and a drop another thread
+    meets that needs one is handed here, so neither the pusher's cycle nor a request waits on a document."""
     streak = 0
-    while not _LOOPS_STOP.is_set():
-        try:
-            _jobs_cycle()
-            streak = 0
-        except Exception as e:                        # Exception, never BaseException: a deliberate loop stop passes
-            _PERF_STATS.pass_failed()
-            kind = type(e).__name__
-            if kind not in _JOBS_FAILED_SAID:
-                _JOBS_FAILED_SAID[kind] = True
-                try:
-                    sys.stderr.write("jobs: a pass raised %s and was skipped (counted under /perf jobs.passFailed; said "
-                                     "once per kind): %s\n" % (kind, traceback.format_exc().rstrip().splitlines()[-1]))
-                except Exception:
-                    pass
-            streak += 1
-            _LOOPS_STOP.wait(PUSHER_FAIL_BACKOFF_S[min(streak, len(PUSHER_FAIL_BACKOFF_S)) - 1])
-            continue
-        _LOOPS_STOP.wait(JOBS_PASS_S)
+    with em.document_writer():
+        while not _LOOPS_STOP.is_set():
+            try:
+                _jobs_cycle()
+                streak = 0
+            except Exception as e:                    # Exception, never BaseException: a deliberate loop stop passes
+                _PERF_STATS.pass_failed()
+                kind = type(e).__name__
+                if kind not in _JOBS_FAILED_SAID:
+                    _JOBS_FAILED_SAID[kind] = True
+                    try:
+                        sys.stderr.write("jobs: a pass raised %s and was skipped (counted under /perf jobs.passFailed; said "
+                                         "once per kind): %s\n" % (kind, traceback.format_exc().rstrip().splitlines()[-1]))
+                    except Exception:
+                        pass
+                streak += 1
+                _LOOPS_STOP.wait(PUSHER_FAIL_BACKOFF_S[min(streak, len(PUSHER_FAIL_BACKOFF_S)) - 1])
+                continue
+            _LOOPS_STOP.wait(JOBS_PASS_S)
 
 
 _PUSHER_FAILED_SAID = {}                           # exception type name -> said once per kernel life

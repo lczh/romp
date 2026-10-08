@@ -3,13 +3,15 @@
 one thread, so at boot the reminder walk and the interrupt tick (a cold read of every session's transcript: 24 s and 6 s on the
 11:55 AM boot that decided this) held every browser frame behind a 30 to 60 s first cycle, and all day a slow job delayed the
 next refresh. The user asked why the reminder walk had to finish before the UI showed at all. Now `_pusher_cycle_jobs` keeps what
-feeds a frame or shares the cycle's checkpoint byte budget, `_jobs_pass` runs the rest in the order it always had on the jobs
-thread (`_jobs_loop`, one pass per JOBS_PASS_S) with its own liveness snapshot, /perf keeps the two loops' splits apart (`pusher`
-and `jobs`), and the boot-health row carries both firsts (`firstCycleS`, the browser's wait; `jobsFirstPassS`, the housekeeping's).
-The checkpoint settle write (`_persist_checkpoints`) followed on 2026-10-05, as the jobs pass's last job: it feeds no frame and
-charges no budget itself, and on the pusher every write it made delayed the next frame. The converge pass stays on the pusher (it spends
-the cycle's budget) and takes the settle write's paths through a locked hand-off (`_CKPT_JUST_LOCK`); the settle write's first sight of
-each session opens the pass (`_checkpoint_first_sight`), so a turn that settles while the pass runs is written at its end."""
+feeds a frame, `_jobs_pass` runs the rest in the order it always had on the jobs thread (`_jobs_loop`, one pass per JOBS_PASS_S)
+with its own liveness snapshot, /perf keeps the two loops' splits apart (`pusher` and `jobs`), and the boot-health row carries
+both firsts (`firstCycleS`, the browser's wait; `jobsFirstPassS`, the housekeeping's). The checkpoint settle write
+(`_persist_checkpoints`) followed on 2026-10-05, as the jobs pass's last job: on the pusher every write it made delayed the next
+frame; the settle write's first sight of each session opens the pass (`_checkpoint_first_sight`), so a turn that settles while the
+pass runs is written at its end. The checkpoint cycle and the converge pass followed on 2026-10-08, into the jobs thread's write
+phase after the pass (`_jobs_write_phase`): the converge pass's first candidate always went, so an idle session's assembly
+document was written inside the frame's cycle (9.9 s of one cycle over a 38 MB session in a lab). It takes the settle write's
+paths from the same thread, one after the other."""
 import concurrent.futures
 import contextlib
 import inspect
@@ -30,8 +32,8 @@ from test_asm_checkpoint import kernel_module   # noqa: E402
 JOB_NAME_RE = r"_job_stage\(['\"](\w+)['\"]"
 JOB_FN_RE = r"_job_stage\('(\w+)', lambda: (_\w+)\("     # a job's name and the function its thunk calls
 
-PUSHER_JOBS = ("beginCheckpointCycle", "sessionsListing", "applyPendingOps", "artifactsSignal", "turnNotify", "convergeCheckpoints",
-               "bootRowBackstop", "kernelSample", "apiHealth")
+PUSHER_JOBS = ("sessionsListing", "applyPendingOps", "artifactsSignal", "turnNotify", "bootRowBackstop", "kernelSample", "apiHealth")
+WRITE_PHASE = ("beginCheckpointCycle", "convergeCheckpoints")   # the jobs thread's documents, after its gated pass (2026-10-08)
 HOUSEKEEPING = ("checkpointFirstSight", "liftSpentAwaiting", "deathSweep", "endOnIdle", "deferralSweep", "autoNudge", "interruptBlock",
                 "persistTickSeen", "persistIntrMarks", "persistSpendTrees", "autoPauseOnLimit", "usagePoll", "retryUpgrade", "autoPauseOnSpend",
                 "spendGuard", "autoResumeRetry", "autoResumeSession", "autoRetry", "idleQueueDrive", "clearDoneNotes",
@@ -52,14 +54,16 @@ class Partition(unittest.TestCase):
     def setUp(self):
         self.km = kernel_module()
 
-    def test_the_two_lists_partition_the_jobs_census_in_the_old_order(self):
+    def test_the_three_lists_partition_the_jobs_census_in_the_old_order(self):
         km = self.km
         pusher = re.findall(JOB_NAME_RE, inspect.getsource(km._pusher_cycle_jobs))
         jobs = re.findall(JOB_NAME_RE, inspect.getsource(km._jobs_pass))
-        self.assertEqual(tuple(pusher), PUSHER_JOBS, "the pusher keeps what feeds a frame or shares the checkpoint budget")
+        write = re.findall(JOB_NAME_RE, inspect.getsource(km._jobs_write_phase))
+        self.assertEqual(tuple(pusher), PUSHER_JOBS, "the pusher keeps what feeds a frame, and no document writer")
         self.assertEqual(tuple(jobs), HOUSEKEEPING, "the housekeeping, in the order it always ran, the checkpoint settle write last")
-        self.assertFalse(set(pusher) & set(jobs), "no job on both threads")
-        self.assertEqual(set(pusher) | set(jobs), set(km._PerfStats.JOBS), "together they are the JOBS census")
+        self.assertEqual(tuple(write), WRITE_PHASE, "the jobs thread's write phase: the checkpoint cycle, then the converge pass")
+        self.assertFalse(set(pusher) & (set(jobs) | set(write)) or set(jobs) & set(write), "no job in two places")
+        self.assertEqual(set(pusher) | set(jobs) | set(write), set(km._PerfStats.JOBS), "together they are the JOBS census")
         self.assertEqual([nm for nm in QUIET if not hasattr(km, nm)], [], "every name the lab cycles quiet is in this kernel")
 
     def test_the_jobs_pass_keeps_its_ordering_reasons(self):
@@ -157,8 +161,8 @@ class TheBrowserNeverWaitsOnTheHousekeeping(_LabCycles):
     def test_a_slow_checkpoint_persist_lengthens_the_jobs_pass_and_not_the_pusher_cycle(self):
         """The checkpoint settle write (2026-10-05): on the pusher's cycle each write it made held up the next frame. A persist
         sleeping 0.4 s now costs the jobs pass 0.4 s and the pusher's cycle nothing; its stage rides the jobs thread's ring
-        and its run that thread's cpuByJob, while the converge pass, which spends the cycle's checkpoint byte budget, stays in
-        the pusher's split. At the base the persist ran inside the pusher's cycle, which carried the sleep."""
+        and its run that thread's cpuByJob, as the converge pass's does since 2026-10-08 (it ran in the pusher's split until
+        then). At the base the persist ran inside the pusher's cycle, which carried the sleep."""
         km = self.km
         calls = []
 
@@ -179,9 +183,9 @@ class TheBrowserNeverWaitsOnTheHousekeeping(_LabCycles):
         cycle_row = snap["pusher"]["stageRing"][-1]["stages"]
         pass_row = snap["jobs"]["stageRing"][-1]["stages"]
         self.assertNotIn("jobs.persistCheckpoints", cycle_row, sorted(cycle_row))
-        self.assertIn("jobs.convergeCheckpoints", cycle_row, "the converge pass stays on the pusher: %r" % sorted(cycle_row))
+        self.assertNotIn("jobs.convergeCheckpoints", cycle_row, "the converge pass is off the pusher: %r" % sorted(cycle_row))
         self.assertGreaterEqual(pass_row["jobs.persistCheckpoints"]["ms"], 400.0, sorted(pass_row))
-        self.assertNotIn("jobs.convergeCheckpoints", pass_row)
+        self.assertIn("jobs.convergeCheckpoints", pass_row, "and on the jobs thread's split: %r" % sorted(pass_row))
         self.assertEqual(snap["jobs"]["cpuByJob"]["persistCheckpoints"]["runs"], 1, "one run of the jobs thread's own")
         self.assertLess(snap["pusher"]["cycle_ms_max"], 300.0, "the pusher's own ring never saw the write")
 
@@ -204,11 +208,72 @@ class TheBrowserNeverWaitsOnTheHousekeeping(_LabCycles):
             return 0
         km._persist_checkpoints = persist                          # put back by tearDown (QUIET)
         km._jobs_cycle()
-        self.assertEqual(order[-1], "persistCheckpoints", order)
+        self.assertEqual(order[order.index("persistCheckpoints") + 1:], list(WRITE_PHASE),
+                         "the pass's last job; only the write phase follows it: %r" % order)
         self.assertEqual(order.count("persistCheckpoints"), 1, order)
         for job in ("autoNudge", "interruptBlock", "heldWorking"):
             self.assertLess(order.index(job), order.index("persistCheckpoints"), job)
         self.assertEqual(seen, [(True, "jobs")], "inside the pass's scope, on the jobs thread's split")
+
+    def test_the_checkpoint_cycle_and_the_converge_pass_run_on_the_jobs_thread_after_its_gated_pass(self):
+        """2026-10-08: the checkpoint cycle (the budget whole again, the owed and handed drops paid) and the converge pass ran on
+        the pusher's cycle, where every document they wrote held up the next frame. Now the pusher's cycle runs neither; the
+        jobs cycle runs both, once each, the cycle first, after the settle write that closes the gated pass, on the jobs
+        thread's split, inside the pass's scope (the discover memo the pass reads its sessions through), with the gate's
+        observation closed (they are no job it gates), and the thread is the process's document writer while its loop runs.
+        At the base the pusher's cycle ran both."""
+        km = self.km
+        calls, order = [], []
+        real = km._job_stage
+
+        def recording(name, thunk):
+            order.append(name)
+            return real(name, thunk)
+
+        def probe(name):
+            def run(*a, **k):
+                calls.append((name, km._PERF_STATS._mine(), getattr(km._JOBS_GATE_TL, "tick", None) is None,
+                              isinstance(getattr(km._live_scope, "sessions", None), dict)))
+                return 0
+            return run
+        with mock.patch.object(km, "_job_stage", recording), \
+                mock.patch.object(km, "_begin_checkpoint_cycle", probe("beginCheckpointCycle")), \
+                mock.patch.object(km, "_converge_checkpoints", probe("convergeCheckpoints")):
+            km._pusher_cycle()
+            self.assertEqual(calls, [], "the pusher's cycle began no checkpoint cycle and ran no converge pass")
+            km._jobs_cycle()
+        self.assertEqual(calls, [("beginCheckpointCycle", "jobs", True, True), ("convergeCheckpoints", "jobs", True, True)],
+                         "once each on the jobs thread's split, the cycle first, the gate closed, inside the pass's scope")
+        self.assertEqual(order[-3:], ["persistCheckpoints", "beginCheckpointCycle", "convergeCheckpoints"],
+                         "after the settle write that closes the gated pass: %r" % order)
+        src = inspect.getsource(km._jobs_loop)
+        self.assertIn("with em.document_writer():", src, "the jobs loop holds the document writer for its life")
+
+    def test_a_write_phase_job_that_raises_is_caught_and_named_and_the_cycle_still_closes(self):
+        """A raise from the checkpoint cycle, then from the converge pass, through the REAL jobs cycle (the write phase after the
+        pass): nothing escapes the cycle (an escape is counted under jobs.passFailed and backed off), stderr names the job that
+        raised, a raising checkpoint cycle still lets the converge pass run, and the cycle records its pass. On the pusher
+        until 2026-10-08, where a raise was caught the same way."""
+        km = self.km
+        for name in ("_begin_checkpoint_cycle", "_converge_checkpoints"):
+            with self.subTest(name):
+                ran = []
+
+                def boom(*a, **k):
+                    raise RuntimeError("synthetic write-phase fault")
+                patches = {"_begin_checkpoint_cycle": boom if name == "_begin_checkpoint_cycle" else (lambda: ran.append("cycle")),
+                           "_converge_checkpoints": boom if name == "_converge_checkpoints" else (lambda now: ran.append("converge"))}
+                err = io.StringIO()
+                before = km._PERF_STATS.jobs.get("passes", 0)
+                with mock.patch.multiple(km, **patches), mock.patch.object(km.sys, "stderr", err):
+                    km._jobs_cycle()                                    # raises here if the fault escaped the write phase
+                line = "checkpoint-cycle: " if name == "_begin_checkpoint_cycle" else "checkpoint converge: "
+                self.assertIn(line, err.getvalue(), err.getvalue()[-400:])
+                self.assertIn("RuntimeError: synthetic write-phase fault", err.getvalue())
+                self.assertNotIn("checkpoint persist: ", err.getvalue(), "the line names its own job")
+                self.assertEqual(ran, ["converge"] if name == "_begin_checkpoint_cycle" else ["cycle"],
+                                 "the other job of the phase still ran")
+                self.assertEqual(km._PERF_STATS.jobs.get("passes", 0) - before, 1, "and the cycle recorded its pass")
 
     def test_the_jobs_pass_has_its_own_split_and_scope(self):
         km = self.km
@@ -272,52 +337,13 @@ class TheBrowserNeverWaitsOnTheHousekeeping(_LabCycles):
 NOW = 1_800_000_000
 
 
-class _WatchedLock:
-    """A lock that names its holder and its waiters, so a probe can tell a thread blocked on it from one that finished without
-    a clock: `owner` is the holding thread's ident (None when free), `waiting` the idents blocked in acquire, and `cond` is
-    notified at every change. It wraps `inner`, the lock that does the excluding (the kernel's own when the probe hands it
-    one; a fresh one otherwise)."""
-
-    def __init__(self, inner=None):
-        self._lock = inner if inner is not None else threading.Lock()
-        self.cond = threading.Condition()
-        self.owner = None
-        self.waiting = set()
-
-    def acquire(self, blocking=True, timeout=-1):
-        me = threading.get_ident()
-        with self.cond:
-            self.waiting.add(me); self.cond.notify_all()
-        got = self._lock.acquire(blocking, timeout)
-        with self.cond:
-            self.waiting.discard(me)
-            if got:
-                self.owner = me
-            self.cond.notify_all()
-        return got
-
-    def release(self):
-        with self.cond:
-            self.owner = None; self.cond.notify_all()
-        self._lock.release()
-
-    def __enter__(self):
-        self.acquire()
-        return self
-
-    def __exit__(self, *exc):
-        self.release()
-        return False
-
-
 class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
-    """The hand-off across the two threads (2026-10-05). The settle write (_persist_checkpoints, the jobs pass's last job)
-    records the paths it wrote in _CKPT_JUST_WRITTEN; the converge pass (the pusher's, against the cycle's byte budget) skips
-    them and empties the set. The two now run at once, so the add and the take share _CKPT_JUST_LOCK: the take copies and
-    clears in one step, and a write landing in between waits for the clear and is kept for the pass's next look. Beside it,
-    what the move put on the jobs pass: the settle write's first sight at every pass's start (the settle key and the leaf's
-    stat with its time stamp, each taken once per session, whichever pass first lists it), and the fault lines of first
-    sight and of each half.
+    """The hand-off between the two halves. The settle write (_persist_checkpoints, the jobs pass's last job) records the paths
+    it wrote in _CKPT_JUST_WRITTEN; the converge pass skips them and empties the set. From 2026-10-05 the two ran on two
+    threads, the converge pass on the pusher's, under a lock; since 2026-10-08 the converge pass runs in the jobs thread's
+    write phase right after the pass, so the hand-off is one thread's again. Beside it, what the moves put on the jobs
+    thread: the settle write's first sight at every pass's start (the settle key and the leaf's stat with its time stamp,
+    each taken once per session, whichever pass first lists it), and the fault lines of first sight and of each half.
     Synthetic sids and paths; every collaborator of the two functions is stubbed, so nothing is read or written."""
 
     SID_A = "11111111-2222-3333-4444-555555555501"
@@ -347,7 +373,7 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         stub(km, "_session_fold_files", lambda sid, leaf: {str(leaf)})
         stub(km.em, "checkpoint_dirty", lambda: [s["path"] for s in self.sessions])
         stub(km.em, "drop_cold_cursors", lambda path: [])
-        stub(km.em, "checkpoint_write_dirty_paths", lambda paths=None, budget_s=None: (self.persisted.extend(paths), list(paths))[1])
+        stub(km.em, "checkpoint_write_dirty_paths", lambda paths=None, budget_s=None, stop=None: (self.persisted.extend(paths), list(paths))[1])
         stub(km.em, "asm_checkpoint_write", lambda *a, **k: False)
         stub(km, "_display_sdk_human", lambda sid: False)
         stub(km, "_stored_tree", lambda leaf, sid: None)
@@ -378,7 +404,7 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         """Every job of both lists quiet but the functions named in `keep` (read off the two functions' own sources, so a job
         added to either is quiet here too), with the API health frame and the pass's shared stat snapshot beside them."""
         km = self.km
-        quiet = {fn: (lambda *a, **k: None) for src in (km._jobs_pass, km._pusher_cycle_jobs)
+        quiet = {fn: (lambda *a, **k: None) for src in (km._jobs_pass, km._pusher_cycle_jobs, km._jobs_write_phase)
                  for _job, fn in re.findall(JOB_FN_RE, inspect.getsource(src)) if fn not in keep}
         quiet.update(_api_health_frame=lambda *a, **k: None, _files_stat_pass_open=lambda live_map: False,
                      _files_stat_pass_close=lambda opened: None)
@@ -410,89 +436,28 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
                 jobs.submit(one_pass, NOW + i).result(timeout=30)
         self.assertEqual(km._PERF_STATS.jobs.get("passes", 0) - before, n, "each pass recorded as the jobs loop records it")
 
-    def test_a_path_the_jobs_pass_wrote_is_skipped_by_the_pushers_converge_pass(self):
-        """The jobs pass on a thread of its own (the jobs thread's place), then the pusher's jobs on this one, every job of both
-        lists quiet but the two checkpoint halves: the pass's settle write writes the leaf's document and hands the path over,
-        and the pusher's converge pass, with that leaf its only candidate, writes nothing for it and empties the set; the
-        look after has nothing to skip and writes the candidate. At the base the jobs pass wrote nothing."""
+    def test_a_path_the_settle_write_wrote_is_skipped_by_the_write_phase_that_follows_it(self):
+        """The real jobs pass and the real write phase after it, one thread as in the kernel, every other job quiet: the pass's
+        settle write writes the leaf's document and hands the path over, and the write phase's converge pass, with that leaf
+        its only candidate, writes nothing for it and empties the set; the next write phase has nothing to skip and writes the
+        candidate. Neither the pusher's cycles in between writes anything."""
         km = self.km
         quiet = self._quiet({"_persist_checkpoints", "_converge_checkpoints"})
         self.sessions = [{"sid": self.SID_A, "path": self.LEAF_A}]
         km._CKPT_SETTLE_SEEN[self.SID_A] = (1, ("synthetic", 1))   # the last write saw turn-end key 1; it is 2 now: a settle
-        errors = []
-
-        def jobs_pass():
-            try:
-                km._jobs_pass(NOW, {})
-            except BaseException as e:                              # carried to the test's thread
-                errors.append(e)
+        self.cands = [self.LEAF_A]
         with mock.patch.multiple(km, **quiet):
-            th = threading.Thread(target=jobs_pass, name="jobs-probe")
-            th.start(); th.join(10)
-            self.assertFalse(th.is_alive())
-            self.assertEqual(errors, [])
+            km._jobs_pass(NOW, {})
             self.assertEqual(self.persisted, [self.LEAF_A], "the jobs pass's settle write wrote the leaf's document")
             self.assertEqual(km._CKPT_JUST_WRITTEN, {self.LEAF_A}, "and handed the path over")
-            self.cands = [self.LEAF_A]
             km._pusher_cycle_jobs(NOW, {}, False)
-            self.assertEqual(self.writes, [], "the pusher's converge pass skipped the path the settle had just written")
+            self.assertEqual((self.writes, km._CKPT_JUST_WRITTEN), ([], {self.LEAF_A}), "the pusher's cycle took nothing")
+            km._jobs_write_phase(NOW)
+            self.assertEqual(self.writes, [], "the write phase's converge pass skipped the path the settle had just written")
             self.assertEqual(km._CKPT_JUST_WRITTEN, set(), "and emptied the set at its look")
-            km._pusher_cycle_jobs(NOW + 1, {}, False)
+            km._jobs_write_phase(NOW + 1)
         self.assertEqual(self.writes, [self.LEAF_A], "the next look has nothing to skip: the candidate is written")
-        self.assertEqual(self.persisted, [self.LEAF_A], "and the pusher's cycles wrote no settle document of their own")
-
-    def test_a_settle_write_landing_while_the_pass_takes_the_set_is_kept_for_its_next_look(self):
-        """The race the lock closes. The take is a copy and a clear, and the settle write's add is made to land between them: a
-        hook on the clear starts the settle write on another thread and waits until that thread has finished or is blocked on
-        the lock this thread holds (the watched lock tells the two apart, no clock). With both sides under _CKPT_JUST_LOCK the
-        add waits for the clear, so its path is in the set after the pass and the next look skips it. With either side
-        unlocked (the base had no lock: `create=True` lets the probe stand in for one nobody takes) the add lands first and
-        the clear drops it unseen, and the next look rewrites a document just written. The watcher wraps the kernel's SHIPPED
-        lock, so the exclusion under test is that lock's (a no-op context there fails on its missing acquire); the base, which
-        had none, gets a fresh one that only the probe takes, and keeps its red."""
-        km = self.km
-        lock = _WatchedLock(getattr(km, "_CKPT_JUST_LOCK", None))
-        me = threading.get_ident()
-        state = {"hooked": 0, "thread": None, "done": False, "ready": None, "error": None}
-
-        def settle():
-            try:
-                km._persist_checkpoints(NOW)
-            except BaseException as e:                              # carried to the test's thread
-                state["error"] = e
-            finally:
-                with lock.cond:
-                    state["done"] = True; lock.cond.notify_all()
-
-        class TakeProbe(set):
-            def clear(probe):
-                state["hooked"] += 1
-                if state["hooked"] == 1:
-                    th = state["thread"] = threading.Thread(target=settle, name="jobs-probe")
-                    th.start()
-                    with lock.cond:
-                        state["ready"] = lock.cond.wait_for(
-                            lambda: state["done"] or (th.ident in lock.waiting and lock.owner == me), timeout=30)
-                super().clear()
-
-        self.sessions = [{"sid": self.SID_B, "path": self.LEAF_B}]
-        km._CKPT_SETTLE_SEEN[self.SID_B] = (1, ("synthetic", 1))
-        with mock.patch.object(km, "_CKPT_JUST_WRITTEN", TakeProbe({self.LEAF_A})), mock.patch.object(km, "_CKPT_JUST_LOCK", lock, create=True):
-            self.cands = [self.LEAF_A]
-            self.assertEqual(km._converge_checkpoints(NOW), 0)
-            self.assertGreaterEqual(state["hooked"], 1, "the take clears the set in place (a take that swaps the object needs a new probe)")
-            state["thread"].join(10)
-            self.assertFalse(state["thread"].is_alive(), "the settle write finished")
-            self.assertIsNone(state["error"])
-            self.assertTrue(state["ready"], "the settle write neither finished nor waited on the lock")
-            self.assertEqual(self.writes, [], "the pass skipped the path in the set when it looked")
-            self.assertEqual(self.persisted, [self.LEAF_B])
-            self.assertEqual(set(km._CKPT_JUST_WRITTEN), {self.LEAF_B},
-                             "the path written during the take is kept for the next look, not cleared unseen")
-            self.cands = [self.LEAF_B]
-            self.assertEqual(km._converge_checkpoints(NOW + 1), 0)
-            self.assertEqual(self.writes, [], "the next look skipped it: no second write of a document just written")
-            self.assertEqual(set(km._CKPT_JUST_WRITTEN), set())
+        self.assertEqual(self.persisted, [self.LEAF_A], "and the write phases wrote no settle document of their own")
 
     def test_the_converge_pass_takes_the_set_on_its_off_and_its_no_work_roads(self):
         """The take runs on every road of the converge pass, as each road cleared the set before the hand-off was locked (the
@@ -741,27 +706,6 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
                          "the jobs after it ran, the settle write last")
         self.assertEqual(closed, [False], "and the files-stat close")
 
-    def test_a_converge_pass_that_raises_is_caught_and_named_and_the_jobs_after_it_run(self):
-        """A raise from the converge pass through the REAL pusher jobs, every other job quiet: nothing escapes the cycle's jobs,
-        stderr names the half that raised, and the boot row backstop, the kernel sample and the API health frame after it
-        still run. Before the move both halves shared one catch and one line."""
-        km = self.km
-        quiet = self._quiet(set())
-        ran = []
-
-        def boom(now):
-            raise RuntimeError("synthetic converge fault")
-        quiet.update(_converge_checkpoints=boom, _boot_row_backstop=lambda now: ran.append("bootRowBackstop"),
-                     _kernel_sample_tick=lambda now: ran.append("kernelSample"), _api_health_push=lambda frame: ran.append("apiHealth"))
-        err = io.StringIO()
-        with mock.patch.multiple(km, **quiet), mock.patch.object(km.sys, "stderr", err):
-            km._pusher_cycle_jobs(NOW, {}, False)                   # raises here if the fault escaped the cycle's jobs
-        self.assertIn("checkpoint converge: ", err.getvalue(), err.getvalue()[-400:])
-        self.assertIn("RuntimeError: synthetic converge fault", err.getvalue())
-        self.assertNotIn("checkpoint persist: ", err.getvalue(), "the line names its own half")
-        self.assertEqual(ran, ["bootRowBackstop", "kernelSample", "apiHealth"], "the jobs after it still ran")
-
-
 class TheBootRowCarriesBothFirsts(_LabCycles):
     def test_with_the_jobs_thread_started_the_row_waits_for_the_later_first(self):
         km = self.km
@@ -907,6 +851,42 @@ class TheJobsLoop(_LabCycles):
                     km._LOOPS_STOP.clear()
         self.assertEqual(err.getvalue().count("jobs: a pass raised RuntimeError"), 1, "said once per kind: %r" % err.getvalue())
         self.assertIn("passFailed", km._PERF_STATS.snapshot()["jobs"])
+
+    def test_the_loop_holds_the_document_writer_for_its_life_and_lets_it_go(self):
+        """The jobs loop is the process's document writer while it runs (2026-10-08): inside a pass this thread may write and
+        another may not (its drops are handed here); once the loop stops, the hold is let go, so the process (a test's, here)
+        is left as it was found: any thread writes its own."""
+        km = self.km
+        em = km.em
+        seen = []
+
+        def cycle():
+            km._LOOPS_STOP.set()                                        # one pass, whatever the probe below finds
+            other = []
+
+            def probe():
+                try:
+                    other.append(em.documents_write_here())
+                except Exception as e:                                  # (the base had no writer: carried to the assert)
+                    other.append(repr(e))
+            th = threading.Thread(target=probe, name="pusher-probe")
+            th.start(); th.join(10)
+            try:
+                seen.append((em.documents_write_here(), other))
+            except Exception as e:
+                seen.append((repr(e), other))
+        saved_stop = km._LOOPS_STOP.is_set(); km._LOOPS_STOP.clear()
+        try:
+            with mock.patch.object(km, "_jobs_cycle", cycle):
+                km._jobs_loop()
+        finally:
+            if saved_stop: km._LOOPS_STOP.set()
+            else: km._LOOPS_STOP.clear()
+        self.assertEqual(seen, [(True, [False])], "inside the loop: the jobs thread writes, another thread hands its drops over")
+        after = []
+        th = threading.Thread(target=lambda: after.append(em.documents_write_here()), name="pusher-probe")
+        th.start(); th.join(10)
+        self.assertEqual(after, [True], "after the loop: any thread writes its own again")
 
     def test_the_loop_paces_at_the_pushers_backstop_and_stops_with_the_loops(self):
         km = self.km

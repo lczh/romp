@@ -126,10 +126,12 @@ class Census(unittest.TestCase):
         for job in list(km._JOBS_INPUTS) + list(km._JOBS_UNDECLARED):
             self.assertIn(job, km._PerfStats.JOBS, "%s: a real job (a _job_stage name of the census)" % job)
         self.assertFalse(set(km._JOBS_INPUTS) & set(km._JOBS_UNDECLARED))
-        self.assertEqual(set(km._JOBS_UNDECLARED), {"convergeCheckpoints"},
-                         "the checkpoint converge pass alone is owed every pass, wherever it runs")
-        pusher = re.findall(JOB_NAME_RE, inspect.getsource(km._pusher_cycle_jobs))
-        self.assertIn("convergeCheckpoints", pusher, "the converge pass runs on the pusher's cycle, where nothing is gated")
+        self.assertEqual(set(km._JOBS_UNDECLARED), {"beginCheckpointCycle", "convergeCheckpoints"},
+                         "the checkpoint cycle and the converge pass alone are owed every pass, wherever they run")
+        write = re.findall(JOB_NAME_RE, inspect.getsource(km._jobs_write_phase))
+        self.assertEqual(set(write), set(km._JOBS_UNDECLARED),
+                         "they run in the jobs thread's write phase, after the gated pass, where nothing is gated")
+        self.assertFalse(set(jobs) & set(write), "neither is a job of the gated pass")
         self.assertEqual([j for j in jobs if j not in km._JOBS_INPUTS], [],
                          "every job of the jobs pass is declared, so a quiet pass can count under wouldSkipPass")
         self.assertEqual((jobs[0], jobs[-1]), ("checkpointFirstSight", "persistCheckpoints"),
@@ -1905,7 +1907,7 @@ class TheCheckpointJobs(_GateLab):
         self.stub("_asm_refresh_maybe", lambda leaf, sid: False)
         for name, fn in (("checkpoint_dirty", lambda: list(self.dirty)), ("drop_cold_cursors", lambda path: []),
                          ("checkpoint_write_dirty_paths",
-                          lambda paths=None, budget_s=None: (self.persisted.extend(paths), list(paths))[1]),
+                          lambda paths=None, budget_s=None, stop=None: (self.persisted.extend(paths), list(paths))[1]),
                          ("asm_checkpoint_write", lambda *a, **k: False)):
             p = mock.patch.object(km.em, name, fn)
             p.start()

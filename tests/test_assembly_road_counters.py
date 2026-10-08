@@ -503,6 +503,70 @@ class AssemblyRoadCounters(Harness):
                              "the whole parse offered its document to the writer: %s (skipped: %s)" % (parse, em.asm_checkpoint_stats()["skipped"]))
             self.assertEqual(tree, self._cold(path))
 
+    def _off_the_writer(self, path):
+        """The served parse on ANOTHER thread (a build on the pusher, a request handler), waited for."""
+        import threading
+        out, err = [], []
+
+        def run():
+            try:
+                out.append(self._served(path))
+            except BaseException as e:                     # carried to the test's thread
+                err.append(e)
+        th = threading.Thread(target=run, name="pusher-probe")
+        th.start(); th.join(60)
+        self.assertFalse(th.is_alive()); self.assertEqual(err, [])
+        return out[0]
+
+    def _bit(self, path):
+        import gzip as _gz
+        return json.loads(_gz.decompress(em._asm_ckpt_file(path).read_bytes())).get("tipChildless")
+
+    def test_a_refusal_rewrite_met_off_the_document_writer_is_written_by_it(self):
+        """2026-10-08: the rewrite after a refused document was written by the parse that followed the refusal, on whatever
+        thread parsed, a build on the pusher's cycle among them, where the document's write held up every frame. The parse off
+        the writer now hands it over: no document is written there, and the writer's write phase writes it from the entry that
+        parse installed, so the next restore takes it as before. At the base the parse's own thread wrote it."""
+        import contextlib
+        path, t0 = self._documented("handoff-bit"); self._strip_bit(path)
+        self.fresh(); self._reset()
+        with getattr(em, "document_writer", contextlib.nullcontext)():
+            tree, parse, reads = self._off_the_writer(path)
+            self.assertEqual((parse.get("restore:chainRefused"), parse.get("full:refused")), (1, 1), parse)
+            self.assertIsNone(self._bit(path), "the parse off the writer wrote no document: %s" % parse)
+            self.assertEqual(parse.get("write:afterRefusalHandedOff"), 1, parse)
+            em.documents_pay_handoffs()                                 # the writer's write phase
+        parse = em.asm_checkpoint_stats()["parse"]
+        self.assertEqual(parse.get("write:afterRefusal"), 1, parse)
+        self.assertIs(self._bit(path), True, "the writer's document carries the bit")
+        self.assertFalse(em._asm_refusal_stands(path), "and no mark")
+        self.fresh(); self._reset()
+        tree2, parse2, reads2 = self._served(path)
+        self.assertEqual((parse2.get("restore"), parse2.get("restore:chainRefused", 0), parse2.get("full", 0)), (1, 0, 0),
+                         "the next restore takes it: %s" % parse2)
+        self.assertEqual(tree2, self._cold(path))
+
+    def test_a_handed_rewrite_whose_entry_was_written_meanwhile_marks_nothing(self):
+        """The hand-off's one new outcome: between the parse and the writer's turn, the entry's document was written by another
+        of the writer's jobs (the settle write runs earlier in the same pass). The writer then declines the rewrite as written,
+        and that decline must not mark the leaf refused: the mark would refuse the very document just written, and an idle
+        leaf would parse whole at every boot. Counted write:afterRefusalMoot; the next restore takes the document."""
+        import contextlib
+        path, t0 = self._documented("handoff-moot"); self._strip_bit(path)
+        self.fresh(); self._reset()
+        with getattr(em, "document_writer", contextlib.nullcontext)():
+            self._off_the_writer(path)
+            handed = getattr(em, "_ASM_REFUSAL_HANDOFF", {}).get(os.path.realpath(path))
+            tree = handed[3] if handed else None                       # the parse's tree, as the settle hands the store's
+            self.assertTrue(em.asm_checkpoint_write(path, SID, False, tree=tree), "the settle writes the entry's document first")
+            getattr(em, "documents_pay_handoffs", lambda: None)()
+        parse = em.asm_checkpoint_stats()["parse"]
+        self.assertEqual(parse.get("write:afterRefusalMoot"), 1, parse)
+        self.assertFalse(em._asm_refusal_stands(path), "no mark over the document just written")
+        self.fresh(); self._reset()
+        tree2, parse2, reads2 = self._served(path)
+        self.assertEqual((parse2.get("restore"), parse2.get("restore:refusedStanding", 0)), (1, 0), "the next restore takes it: %s" % parse2)
+
     def test_a_document_refused_for_the_tails_shape_is_marked_and_no_road_retries_while_the_leaf_stands(self):
         """Follow-up round two, medium 1: the rewrite converges only for the missing bit; for a tail whose SHAPE refuses (a
         re-rooted tail here, x4) the same cut reproduces the same refusal, so every boot paid the proof and the rewrite attempt

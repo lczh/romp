@@ -76,17 +76,35 @@ def _fire(case, backend=None, quiesce=False, broadcast=None):
 class _WriteClock:
     """A monotonic clock that stands still until the test moves it (advance), patched as the `time` global of the kernel
     and the event model for one exit, so the exit's caps and the checkpoint writer's budget count only what the test's
-    stand-in writes say they took. Everything else (time, sleep) is the real module's. Patched onto those two modules,
-    never onto the time module, so nothing outside them sees it."""
+    stand-ins say they took. It answers only on the thread that made it, the test's, where the exit runs: a module's
+    global is every thread's, so patched onto those two modules it was the clock of every thread running kernel or
+    event-model code (another test's kernel thread, a backend's sweep taking its deadline), the weakness #152 closed in
+    three other files. Every other thread reads the real clock, and assert_confined has one read it inside the window so
+    the confinement cannot quietly regress. Everything else (time, sleep) is the real module's."""
 
     def __init__(self):
         self.now = time.monotonic()
+        self.mine = threading.get_ident()
 
     def monotonic(self):
-        return self.now
+        return self.now if threading.get_ident() == self.mine else time.monotonic()
 
     def advance(self, seconds):
         self.now += seconds
+
+    def assert_confined(self, case):
+        """Inside the patch window: another thread reads both patched modules' clocks and gets the real one."""
+        seen = []
+
+        def read():
+            a = time.monotonic()
+            got = (km.time.monotonic(), km.em.time.monotonic())
+            b = time.monotonic()
+            seen.append(all(a <= v <= b for v in got))
+        th = threading.Thread(target=read, name="another-thread-reads-the-clock")
+        th.start()
+        th.join(10)
+        case.assertEqual(seen, [True], "another thread reads the real clock, never this test's")
 
     def __getattr__(self, name):
         return getattr(time, name)
@@ -1870,6 +1888,7 @@ class ExitPath(unittest.TestCase):
                  mock.patch.object(km, "EXIT_PRIME_BUDGET_S", 10.0), \
                  mock.patch.object(km, "EXIT_CKPT_WRITE_BUDGET_S", cap_s), \
                  mock.patch.object(km, "time", clock), mock.patch.object(km.em, "time", clock):
+                clock.assert_confined(self)
                 _fire(self)
             return list(written)
         everything = run(20.0)
@@ -1910,16 +1929,17 @@ class ExitPath(unittest.TestCase):
         stand.clear()
         self.assertEqual(ran, [False], "the tick job ran with the stand-down clear and not under it")
 
-    def test_a_settle_write_running_when_the_signal_lands_finishes_its_session_and_stops(self):
-        # the jobs thread is inside _persist_checkpoints (its first session's document write) when SIGTERM lands: the exit
-        # does not wait for it, writes its own rows and its own checkpoint phase, and the settle write leaves its loop after
-        # the session in flight instead of writing the same dirty set beside the exit
+    def test_a_settle_write_running_when_the_signal_lands_starts_no_write_after_it(self):
+        # the jobs thread is inside _persist_checkpoints (its first session's fold document write) when SIGTERM lands: the exit
+        # does not wait for it, writes its own rows and its own checkpoint phase, and the settle write finishes the write in
+        # flight and starts no other: not the session's assembly document (a write of seconds for a long leaf, which the base
+        # began after the signal, competing with the exit for the interpreter), and no later session
         sess = self._sessions("web", "api", "tests")
         leaves = [s["path"] for s in sess]
         entered, release = threading.Event(), threading.Event()
-        jobs_writes, exit_writes, jobs = [], [], []
+        jobs_writes, exit_writes, jobs, docs = [], [], [], []
 
-        def write_paths(paths=None, budget_s=None):
+        def write_paths(paths=None, budget_s=None, stop=None):
             if jobs and threading.current_thread() is jobs[0]:
                 jobs_writes.append(list(paths))
                 if len(jobs_writes) == 1:
@@ -1938,7 +1958,7 @@ class ExitPath(unittest.TestCase):
              mock.patch.object(km.em, "checkpoint_dirty", lambda: list(leaves)), \
              mock.patch.object(km.em, "drop_cold_cursors", lambda path: []), \
              mock.patch.object(km.em, "checkpoint_write_dirty_paths", write_paths), \
-             mock.patch.object(km.em, "asm_checkpoint_write", lambda *a, **k: False), \
+             mock.patch.object(km.em, "asm_checkpoint_write", lambda *a, **k: docs.append(a[0]) or False), \
              mock.patch.object(km, "_asm_refresh_maybe", lambda leaf, sid: False), \
              mock.patch.object(km, "_display_sdk_human", lambda sid: False), \
              mock.patch.object(km, "_stored_tree", lambda leaf, sid: None), \
@@ -1959,7 +1979,45 @@ class ExitPath(unittest.TestCase):
                 release.set()
                 th.join(10)
         self.assertFalse(th.is_alive())
-        self.assertEqual(jobs_writes, [[leaves[0]]], "the settle write finished the session in flight and stopped (the base wrote all three)")
+        self.assertEqual(jobs_writes, [[leaves[0]]], "the settle write finished the write in flight and began no other session's")
+        self.assertEqual(docs, [], "nor the session's assembly document after the signal (the base began it)")
+
+    def test_a_signal_landing_between_two_fold_documents_of_one_session_starts_neither_the_next_nor_the_assembly(self):
+        # one session whose settle owes three fold documents (the leaf, its states log, the shared postal log): the stand-down is
+        # set while the first is being written; the writer's own loop asks before every path, so the second and third are never
+        # begun, and neither is the leaf's assembly document. The base handed the whole set to a writer that never asked
+        sess = self._sessions("web")
+        leaf = sess[0]["path"]
+        files = sorted([leaf, "/synthetic/states/web.jsonl", "/synthetic/timeline/messages.jsonl"])
+        stand = km._EXIT_STAND_DOWN
+        written, docs = [], []
+
+        def write(p, force=False):
+            written.append(p)
+            stand.set()                                       # SIGTERM lands while this document is written
+            return True
+        with mock.patch.object(km, "_sessions", lambda now, *a, **k: list(sess)), \
+             mock.patch.object(km, "_ckpt_settle_key", lambda sid: ("moved",)), \
+             mock.patch.object(km, "_stat_key", lambda p: ("synthetic", 1)), \
+             mock.patch.object(km, "_heal_cold_folds", lambda leaf, dropped_out=None: []), \
+             mock.patch.object(km, "_prime_leaf_folds", lambda leaf: True), \
+             mock.patch.object(km, "_session_fold_files", lambda sid, leaf: set(files)), \
+             mock.patch.object(km.em, "checkpoint_dirty", lambda: list(files)), \
+             mock.patch.object(km.em, "drop_cold_cursors", lambda path: []), \
+             mock.patch.object(km.em, "checkpoint_write", write), \
+             mock.patch.object(km.em, "asm_checkpoint_write", lambda *a, **k: docs.append(a[0]) or False), \
+             mock.patch.object(km, "_asm_refresh_maybe", lambda leaf, sid: False), \
+             mock.patch.object(km, "_display_sdk_human", lambda sid: False), \
+             mock.patch.object(km, "_stored_tree", lambda leaf, sid: None), \
+             mock.patch.object(km, "_CKPT_JUST_WRITTEN", set()), \
+             mock.patch.dict(km._CKPT_SETTLE_SEEN, {sess[0]["sid"]: ("before",)}, clear=True), \
+             mock.patch.dict(km._CKPT_PERIODIC_SEEN, {}, clear=True):
+            try:
+                km._persist_checkpoints(0)
+            finally:
+                stand.clear()
+        self.assertEqual(written, files[:1], "the write in flight finished; the next two were never begun")
+        self.assertEqual(docs, [], "and no assembly document was begun after the signal")
 
     def test_a_raise_past_every_phase_guard_still_reaches_the_exit(self):
         # the body runs inside one try whose finally reaches the process exit: a kernel with its collector off and its
@@ -2008,27 +2066,42 @@ class ExitPath(unittest.TestCase):
     def test_no_checkpoint_write_starts_past_the_pre_drain_line(self):
         # the writer always attempts its first path (checkpoint_write_dirty_paths), so the exit calls it only while its window
         # is open: a priming item that ran past the line, a reserve as long as the deadline, or a zero checkpoint cap leaves
-        # every dirty file to the next writer, where the head started one more whole write past the line in each case
+        # every dirty file to the next writer, where the head started one more whole write past the line in each case. The
+        # priming item takes its seconds on a clock only the test moves (_WriteClock), so where it ends against the line is
+        # the code's arithmetic and never the runner's scheduling (a real sleep against a 0.2 s margin before); a control
+        # whose item ends inside the line has every dirty file written, so the three refusals are the line's and not a
+        # writer that never runs
         sess = self._sessions("web")
         dirty = ["/synthetic/ckpt/%02d.jsonl" % i for i in range(5)]
-        for label, prime_s, deadline, reserve, cap in (("a priming item past the line", 0.6, 1.0, 0.6, 5.0),
-                                                         ("the reserve at the deadline", 0.0, 1.0, 1.0, 5.0),
-                                                         ("a zero checkpoint cap", 0.0, 2.0, 0.5, 0.0)):
+        clock = _WriteClock()
+        for label, prime_s, deadline, reserve, cap, want in (("a priming item past the line", 0.6, 1.0, 0.6, 5.0, (0, 5)),
+                                                               ("the reserve at the deadline", 0.0, 1.0, 1.0, 5.0, (0, 5)),
+                                                               ("a zero checkpoint cap", 0.0, 2.0, 0.5, 0.0, (0, 5)),
+                                                               ("control: a priming item inside the line", 0.3, 1.0, 0.6, 5.0, (5, 0))):
             with self.subTest(label):
                 self._reset()
                 starts = []
 
                 def write(p, force=False):
-                    starts.append(time.monotonic())
+                    starts.append(clock.monotonic())
                     return True
-                with self._work(sessions=sess, prime=lambda leaf: time.sleep(prime_s) or True, dirty=dirty, write=write,
-                                deadline=deadline, reserve=reserve,
-                                caps={"EXIT_PRIME_BUDGET_S": 5.0, "EXIT_CKPT_WRITE_BUDGET_S": cap}):
-                    entry = time.monotonic()
+
+                def prime(leaf):
+                    clock.advance(prime_s)                    # the item's seconds, on the exit's clock
+                    return True
+                with self._work(sessions=sess, prime=prime, dirty=dirty, write=write, deadline=deadline, reserve=reserve,
+                                caps={"EXIT_PRIME_BUDGET_S": 5.0, "EXIT_CKPT_WRITE_BUDGET_S": cap}), \
+                     mock.patch.object(km, "time", clock), mock.patch.object(km.em, "time", clock):
+                    clock.assert_confined(self)
+                    entry = clock.monotonic()
                     _fire(self, LiveDrain())
-                self.assertEqual([round(t - entry, 2) for t in starts], [], "no write started past the line")
+                line = deadline - reserve
+                self.assertEqual([round(t - entry, 2) for t in starts if t - entry >= line], [], "no write started past the line")
                 done = self._done()
-                self.assertEqual((done["ckptWritten"], done["ckptLeft"]), (0, 5), "every dirty file left for the next writer")
+                if want[0] == 0:
+                    self.assertEqual((done["ckptWritten"], done["ckptLeft"]), want, "every dirty file left for the next writer")
+                else:                                         # (the stand-in dirty set does not shrink as it is written)
+                    self.assertEqual((done["ckptWritten"], len(starts)), (want[0], want[0]), "the control writes them all")
 
     def test_the_exit_writes_no_assembly_document_and_the_drain_follows_the_checkpoint_writes(self):
         # the exit's assembly phase is gone (2026-10-08): the documents' writers run while the kernel lives (the settle, the
@@ -2083,6 +2156,7 @@ class ExitPath(unittest.TestCase):
         with self._work(sessions=self._sessions("web"), dirty=dirty, write=write, deadline=b["deadline"], reserve=b["drain"],
                         caps={"EXIT_PRIME_BUDGET_S": b["prime"], "EXIT_CKPT_WRITE_BUDGET_S": b["ckpt"]}), \
              mock.patch.object(km, "time", clock), mock.patch.object(km.em, "time", clock):
+            clock.assert_confined(self)
             _fire(self, Drain())
         self.assertEqual(written, dirty[:15], "the checkpoint writes the cap allowed: %d" % len(written))
         self.assertEqual(len(handed), 1)
@@ -2091,12 +2165,15 @@ class ExitPath(unittest.TestCase):
         self.assertEqual((done["ckptWritten"], done["ckptLeft"]), (15, 40))
 
     def test_the_priming_phase_skips_at_its_cap_and_at_the_line(self):
-        # three sessions whose priming takes 0.25 s each. Cap past the deadline: the pre-drain line (0.35 s after the entry)
-        # is what stops the loop, and the drain starts by the line plus the one item in flight. Cap below the line: the loop
-        # stops at its own cap. Either way leaves are skipped and counted (above 0, not exact: the item in flight when the
-        # bound passes decides how many)
+        # three sessions whose priming takes 0.25 s each, on a clock only the items move (_WriteClock), so the count is the
+        # code's: a real sleep per item with 0.15 s of slack on the drain's start read a loaded runner's scheduling. Cap past
+        # the deadline: the pre-drain line (0.35 s after the entry) is what stops the loop. Cap below the line: the loop stops
+        # at its own cap (0.3 s). Either way the first two items start inside the bound (at 0 and 0.25 s), the third, due at
+        # 0.5 s, is skipped and counted, and the drain starts when the item in flight at the bound ends: 0.5 s, the bound plus
+        # at most one item
         sess = self._sessions("web", "api", "tests")
         item = 0.25
+        clock = _WriteClock()
         for label, deadline, reserve, cap in (("caps past the deadline", 0.7, 0.35, 5.0), ("caps below the line", 3.0, 1.0, 0.3)):
             with self.subTest(label):
                 self._reset()
@@ -2104,17 +2181,25 @@ class ExitPath(unittest.TestCase):
 
                 class Timed:
                     def drain(inner, timeout):
-                        calls.append(time.monotonic())
+                        calls.append(clock.monotonic())
                         return {"cutTurns": [], "stopped": 0}
-                with self._work(sessions=sess, prime=lambda leaf: time.sleep(item) or True, deadline=deadline, reserve=reserve,
-                                caps={"EXIT_PRIME_BUDGET_S": cap, "EXIT_CKPT_WRITE_BUDGET_S": cap}):
-                    entry = time.monotonic()
+
+                def prime(leaf):
+                    clock.advance(item)                       # the item's seconds, on the exit's clock
+                    return True
+                with self._work(sessions=sess, prime=prime, deadline=deadline, reserve=reserve,
+                                caps={"EXIT_PRIME_BUDGET_S": cap, "EXIT_CKPT_WRITE_BUDGET_S": cap}), \
+                     mock.patch.object(km, "time", clock), mock.patch.object(km.em, "time", clock):
+                    clock.assert_confined(self)
+                    entry = clock.monotonic()
                     _fire(self, Timed())
                 done = self._done()
-                self.assertGreater(done["primeSkipped"], 0, "the priming stopped before its last session: %r" % done)
-                line = deadline - reserve
-                self.assertLessEqual(calls[0] - entry, line + item + 0.15,
-                                     "the drain starts by the line plus one item: %.2f s" % (calls[0] - entry))
+                self.assertEqual((done["primed"], done["primeSkipped"]), (2, 1),
+                                 "two items started inside the bound, the third skipped and counted: %r" % done)
+                bound = min(cap, deadline - reserve)
+                self.assertAlmostEqual(calls[0] - entry, 2 * item, places=6,
+                                       msg="the drain starts as the item in flight at the bound ends: %.3f s" % (calls[0] - entry))
+                self.assertLessEqual(calls[0] - entry, bound + item, "by the bound plus one item")
 
     def test_a_drain_that_raises_leaves_the_prediction_and_the_session_count_standing(self):
         web = {"sid": SID, "name": "web"}
