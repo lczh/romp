@@ -5770,7 +5770,7 @@ class PushSessionCallback(unittest.TestCase):
         import inspect
         src = inspect.getsource(sb.SdkSession)
         i = src.index("self._inflight_texts.append(item)")
-        k = src.index('yield {"type": "user",', i)
+        k = src.index("yield msg", i)                       # the fed text's frame (sent under its own uuid since 2026-10-08)
         j = src.find("self.backend._push_soon(self.sid)", i, k)
         self.assertGreater(j, 0, "the ask sits between the pop and the yield that hands the text to the CLI")
         self.assertEqual(src.find("self.backend._push_session(self.sid)", i, k), -1,

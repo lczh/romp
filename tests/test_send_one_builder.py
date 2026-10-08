@@ -223,7 +223,7 @@ class HandOffNamesTheCycle(unittest.TestCase):
         # inputs() rules (a nested closure); the callback's mechanics are the tests below.
         src = inspect.getsource(sb.SdkSession)
         i = src.index("self._inflight_texts.append(item)")
-        k = src.index('yield {"type": "user",', i)
+        k = src.index("yield msg", i)                       # the fed text's frame (sent under its own uuid since 2026-10-08)
         seg = src[i:k]
         self.assertIn("self.backend._push_soon(self.sid)", seg,
                       "the pop names its sid to the one pusher cycle, between the pop and the yield")
