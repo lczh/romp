@@ -45289,7 +45289,10 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # last atom ahead of them (the sealed prefix on a fold hit, the turns below a render floor or a page) made its stop in
     # a turn that is not here, so its scan would run on into these events and name a later stop it never made. A cut
     # recorded inside the sealed prefix AFTER the seal demotes the fold (the spend-cut gate), so a fold hit never owes one.
-    _tail_cuts = [_c for _c in _cuts if last_t is None or _c["t"] > last_t]
+    # Compared in WHOLE seconds (the review of #177): atom times are whole seconds and the press a float, so a stop at S
+    # standing last ahead read as earlier than a press at S+0.25 and its cut was kept. The mirror case (a guard stop here
+    # sharing its second with the last atom ahead) drops the cut, the safe direction: that stop reads "interrupted".
+    _tail_cuts = [_c for _c in _cuts if last_t is None or int(_c["t"]) > last_t]
     def _texts_near(_t):
         """The disk texts an orphan note stamped at `_t` is deduped against: the turn holding the first atom stamped at or
         after it, the turn before and the turn after (a reply the transcript kept lands there), and ONLY those. Bounded

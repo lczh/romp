@@ -359,6 +359,59 @@ class Gates(_Fold):
     def test_a_sealed_cut_never_names_a_later_stop_in_a_turn_a_scheduled_firing_opened(self):
         self._sealed_cut_then_a_user_stop("[SCHEDULED TASK - AUTOMATED FIRING OF A CONFIGURED PROMPT]\nRe-run the notes-api nightly check.")
 
+    def _cut_in_its_stops_second(self, reply_t=None):
+        """The guard presses at S+0.25 on an open turn; its stop record and its message land in second S (records carry whole
+        seconds). Returns S."""
+        s = self.s
+        s.append(s.turn(0)); self.equiv("t0")
+        u = s.uid(); s.append([uline(s.tick(), "step 1: widen the notes-api search", u, s.last)])
+        a = s.uid(); s.append([aline(s.tick(), "Working on it.", a, u, tools=("Edit",), stop="tool_use")])
+        S = s.tick()
+        st = jd.STATE / "states"; st.mkdir(exist_ok=True)
+        with open(st / (SID + ".jsonl"), "a") as f:
+            f.write(json.dumps({"t": S + 0.25, "spendCut": {"rate": "1,240", "ceiling": "1,000"}}) + "\n")
+        m = s.uid(); s.append([uline(S, "[Request interrupted by user for tool use]", m, a)])
+        g = s.uid(); s.append([uline(S, km._spend_ceiling_body(1240.0, 1000.0), g, m, ps="sdk")])
+        self._g = g
+        return S
+
+    @staticmethod
+    def _causes(b):
+        return [e.get("interruptCause") for e in b["events"] if e.get("interruptMarker")]
+
+    def test_a_page_whose_last_atom_ahead_shares_the_presss_second_names_no_later_stop(self):
+        # the review of #177: the press is a float, atoms are whole seconds, so a stop at S as the last atom below the page
+        # read as earlier than a press at S+0.25, the cut was kept, and its scan (which lets a prompt in the press's own
+        # second pass) named the USER's stop of the reply to the guard's message
+        s = self.s
+        S = self._cut_in_its_stops_second()
+        s.t = S + 1
+        r = s.uid(); s.append([aline(s.tick(), "It was the search fan-out.", r, self._g, tools=("Edit",), stop="tool_use")])
+        mu = s.uid(); s.append([uline(s.tick(), "[Request interrupted by user for tool use]", mu, r)]); s.last = mu
+        self.assertEqual(self._causes(s.build()), ["spend", None], "the full build: the guard's stop, then the user's")
+        for lo in (1, 2):
+            with self.subTest(page=(lo, 3)):
+                pg = km.build_session(SID, s.now, s.tm, page=(lo, 3))
+                self.assertNotIn("spend", [e.get("interruptCause") for e in pg["events"]
+                                           if e.get("interruptMarker") and e.get("uuid") == mu],
+                                 "the user's stop is theirs on every page")
+
+    def test_a_prefix_whose_last_atom_shares_the_presss_second_names_no_later_stop(self):
+        # the cached twin: the guard's turn sealed with its reply in second S, then a turn peer mail opened is stopped by
+        # the user; the tail must not take the sealed cut for its own
+        s = self.s
+        S = self._cut_in_its_stops_second()
+        r = s.uid(); s.append([aline(S, "It was the search fan-out; stopped.", r, self._g)])
+        s.t = S + 1
+        n = s.uid(); s.append([uline(s.tick(), "#################### \U0001F4EC MESSAGE FROM api ####################\n"
+                                     "Can you re-run the search tests?\n<!-- romp-msg-id: 11111111-2222-3333-4444-00000000beef -->",
+                                     n, r, ps="sdk")])
+        a2 = s.uid(); s.append([aline(s.tick(), "On it.", a2, n, tools=("Edit",), stop="tool_use")])
+        mu = s.uid(); s.append([uline(s.tick(), "[Request interrupted by user for tool use]", mu, a2)]); s.last = mu
+        self.equiv("machine-opened turn the user stopped")
+        out = self.equiv("one more push, nothing new")
+        self.assertEqual(self._causes(out), ["spend", None])
+
     def test_a_seam_change_demotes(self):
         # a seam that really splits a sealed segment (its t strictly inside the segment's span, its segs
         # naming the segment): the tail past the seam gets new seg ids, so old events' tlIds move and the
