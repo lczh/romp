@@ -68,6 +68,9 @@ test("the count is of messages: turns and postal cards, not tool atoms, thinking
   ];
   assert.equal(MOD.messageCount(events), 4);
   assert.equal(MOD.messageCount([]), 0);
+  // the spend guard's stop and its message are notices that never fold (compact.ts): still not messages (#169 review)
+  assert.equal(MOD.messageCount([...events, { kind: "user", interruptMarker: true, interruptCause: "spend" },
+                                 { kind: "user", md: "You are spending…", rompSystem: true, spendGuard: true }]), 4);
 });
 
 test("the count words: how many older messages landed and how far back the history now reaches, in the rail's clock words", () => {

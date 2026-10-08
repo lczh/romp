@@ -5955,16 +5955,25 @@ carry and restart metrics count. The crossing is the event: nothing repeats
 while the rate stays high. Once the rate falls under half the ceiling a
 `spend.ceiling.cleared` row and a toast say so, and the guard is armed again.
 
-In the session's chat the stop reads as the guard's, never as yours: the
+In the session's chat, a stop the guard made reads as the guard's: the
 interrupt row says "stopped by the spend guard at $X an hour", with the
-ceiling in its tooltip, and the message the session was handed is its own romp
+ceiling in its tooltip. The message the session was handed is its own romp
 row, headed "Spend guard told it to stop: about $X an hour, over the $Y an hour
 ceiling", with the words it was sent one click away. Neither folds into a run
-of other notices in compact mode. Both are read off the message itself, which
-the kernel recognizes by its opening sentence (`_spend_ceiling_parse`): the
-stop is labelled the way a kernel-restart cut is labelled from its resume
-notice, so a session the guard stopped while no turn was running shows the
-message row alone.
+of other notices in compact mode.
+
+The stop is named from the guard's own record, not from its message. When the
+guard's press lands on a turn the session's live row shows running, it appends
+a `spendCut` row to `states/<sid>.jsonl` (the press's moment and the two
+figures), and the chat names the first stop record at or after that moment,
+with no prompt landing between, as the guard's. Wherever its message then
+lands, and whatever lands first, the stop keeps that name. When the guard cut
+nothing (the session was idle while its agents spent, its host keeps the turn,
+or your own stop was already in flight) there is no record, and a stop in the
+chat stays yours, however close the guard's message lands to it. The message
+row is recognized by its opening sentence (`_spend_ceiling_parse`), so a
+message the session took merged behind another send in one record is headed
+by that record's first line instead.
 
 ## The spend ledger across a host re-attach
 

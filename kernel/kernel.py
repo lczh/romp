@@ -35233,6 +35233,28 @@ def _states_notes(sid):
     return _fold_records(_states_notes_cache, p, lambda: {k: [] for k in _NOTE_KEYS}, step, ckpt="statesNotes")
 
 
+_spend_cuts_cache = {}   # path -> em.fold_records entry (the spend guard's cut records)
+
+
+def _spend_cuts(sid):
+    """The SPEND GUARD's cut records from states/<sid>.jsonl, oldest first: [{"t": press epoch (float), "rate": "1,240",
+    "ceiling": "1,000"}, …], each written by the guard right after its stop landed on an OPEN turn
+    (sdk_backend.append_spend_cut). The authoritative answer to "did the guard cut this turn?" (the review of #169,
+    2026-10-08): the guard's message is sent whether or not it cut anything, so the message cannot say. Its own fold and
+    checkpoint name, so the five durable-note lists (_states_notes) keep their shape."""
+    p = jd.STATE / "states" / ("%s.jsonl" % sid)
+
+    def step(state, o):
+        c = o.get("spendCut")
+        if isinstance(c, dict) and o.get("t"):
+            try:
+                state.append({"t": float(o["t"]), "rate": str(c.get("rate") or ""), "ceiling": str(c.get("ceiling") or "")})
+            except (TypeError, ValueError):
+                pass
+        return state
+    return sorted((dict(r) for r in _fold_records(_spend_cuts_cache, p, list, step, ckpt="spendCuts")), key=lambda r: r["t"])
+
+
 def _retry_recoveries(sid):
     """Durable recovery markers from states/<sid>.jsonl — {"t":…,"retriesRecovered":N} lines the SDK backend
     writes when a stalled api_retry turn resumes real output (append_retry_recovered). Returns
@@ -44449,8 +44471,8 @@ def _interrupt_settle(events, txt, atom=None):
     return False
 
 
-def _stamp_interrupt_causes(events):
-    """Label each interrupt marker with WHY the turn was cut, when the transcript itself says: after a
+def _stamp_interrupt_causes(events, spend_cuts=()):
+    """Label each interrupt marker with WHY the turn was cut, when the record of it says: after a
     kernel-restart cut (BOOT_RESUME_NUDGE) or a mid-turn process death (CRASH_RESUME_NUDGE) the resume
     notice romp injects follows the marker, so the seam reads "interrupted — kernel restart" instead
     of implying the user pressed stop (the user 2026-07-09). Event-based: keyed on the notice record
@@ -44458,46 +44480,62 @@ def _stamp_interrupt_causes(events):
     reads PAST non-human user records (the user 2026-08-10: a `<task-notification>` from a background
     task the same restart killed wedged between the marker and the notice, and "first user-role event
     decides" mislabeled the machine cut as a user stop) — only romp's own notice, the user speaking,
-    or the NEXT cut's marker decides the seam."""
-    for i, ev in enumerate(events):
-        if not ev.get("interruptMarker"):
+    or the NEXT cut's marker decides the seam.
+
+    `spend_cuts` (_spend_cuts: the SPEND GUARD's own records of pressing stop on an open turn, the review of #169,
+    2026-10-08) name a stop "spend" by ORDER, the way _machine_cut_cause reads the backend's machineCut stamp: the
+    first marker at or after a cut's press, with no prompt (the user's or romp's) landing between, is the stop that
+    press made; its back-to-back twin record too (T219). The guard's MESSAGE decides nothing: it is sent whether or
+    not a turn was cut, and lands wherever the session reads it, so keyed on it a user's earlier stop was relabelled
+    by a guard that cut nothing. Events carry whole seconds (`ts`), so a prompt in the press's own second bounds
+    nothing (it may precede the press); a marker in that second counts (the guard records nothing while the user's
+    own stop is in flight, _spend_guard_stop)."""
+    for c in spend_cuts or ():
+        floor = int(c.get("t") or 0)
+        if floor <= 0:
             continue
-        settles = []                                      # null settle-replies closing THIS cut turn
-        for nxt in events[i + 1:]:
-            if nxt.get("kind") == "assistant" and nxt.get("interruptSettle"):
-                settles.append(nxt)
+        hit = None
+        for i, ev in enumerate(events):
+            if ev.get("kind") != "user":
+                continue
+            t = _ev_epoch(ev)
+            if t is None or t < floor:
+                continue
+            if ev.get("interruptMarker"):
+                hit = i
+                break
+            if t > floor and (ev.get("human") or ev.get("romp")):
+                break                                     # a prompt landed first: this press wrote no stop record
+        if hit is None:
+            continue
+        run = [hit]
+        for k in range(hit + 1, len(events)):
+            if events[k].get("kind") == "thinking":
+                continue
+            if events[k].get("kind") == "user" and events[k].get("interruptMarker"):
+                run.append(k)                             # the twin record of the same cut (T219)
+                continue
+            break
+        end = next((k for k in range(run[-1] + 1, len(events)) if events[k].get("kind") == "user"
+                    and (events[k].get("human") or events[k].get("romp") or events[k].get("interruptMarker"))), len(events))
+        for k in run:
+            events[k]["interruptCause"] = "spend"
+            events[k]["interruptSpend"] = {"rate": c.get("rate") or "", "ceiling": c.get("ceiling") or ""}
+        _drop_cut_settles(events, run[0], end)
+    for i, ev in enumerate(events):
+        if not ev.get("interruptMarker") or ev.get("interruptCause") == "spend":
+            continue
+        for j in range(i + 1, len(events)):
+            nxt = events[j]
             if nxt.get("kind") != "user":
                 continue                                  # the settle-reply / thinking between marker and notice
             if nxt.get("rompSystem"):
                 body = nxt.get("md") or ""
                 cause = ("restart" if INTR_RESTART_SIG in body else    # same signatures the nudge gate
                          "crash" if INTR_CRASH_SIG in body else None)  # reads (_machine_cut_cause)
-                spend = _spend_ceiling_parse(body) if cause is None and nxt.get("spendGuard") else None
-                if spend:
-                    # the SPEND GUARD's stop (the user 2026-10-08): its message follows the stop it made, so the seam
-                    # reads "stopped by the spend guard at $X an hour" instead of the user's own stop. The chat only;
-                    # the nudge gate's reading of whose stop it was (_machine_cut_cause) is not this change's
-                    cause = "spend"
-                    ev["interruptSpend"] = {"rate": spend[0], "ceiling": spend[1]}
                 if cause:
                     ev["interruptCause"] = cause
-                    # A MACHINE cut leaves no "no response — turn settled" line (the user 2026-07-22): romp
-                    # restarted itself, so that line narrates romp's own plumbing, not anything the user did,
-                    # and the marker above already reads "interrupted — kernel restart". A GENUINE user stop
-                    # keeps it, where it IS feedback that the interrupt landed and the turn closed clean.
-                    # Dropped SERVER-side: rendering it hidden would leave a zero-height turn whose rail
-                    # time-marker restampMarkers still measures (at y=0), throwing off the spacing pass.
-                    # The dropped settle's uuid still ANSWERS on the seam (the user 2026-08-25): a cut
-                    # turn's settle atom is its last assistant atom, so verdicts/cards get anchored at
-                    # exactly this uuid — and with the event gone the click honest-failed "couldn't
-                    # locate" though the seam it closed is right there. The marker carries the alias;
-                    # the client lands data-uuids~= on it (event-based; the parent seam, never a
-                    # nearest-time guess).
-                    su = [x.get("uuid") for x in settles if x.get("uuid")]
-                    if su:
-                        ev["settleUuids"] = sorted(set(ev.get("settleUuids") or []) | set(su))
-                    for s in settles:
-                        s["_dropSettle"] = True
+                    _drop_cut_settles(events, i, j)
                 break                                     # romp's own notice decides, matched or not
             if nxt.get("interruptMarker") or nxt.get("human"):
                 break                                     # a typed prompt = user stop; a later marker owns
@@ -44507,6 +44545,31 @@ def _stamp_interrupt_causes(events):
     if any(e.get("_dropSettle") for e in events):
         events[:] = [e for e in events if not e.get("_dropSettle")]
     return events
+
+
+def _drop_cut_settles(events, i, end):
+    """A MACHINE cut leaves no "no response — turn settled" line (the user 2026-07-22): romp cut the turn itself, so
+    that line narrates romp's own plumbing, not anything the user did, and the marker at `i` already names the cause. A
+    GENUINE user stop keeps it, where it IS feedback that the interrupt landed and the turn closed clean. Dropped
+    SERVER-side: rendering it hidden would leave a zero-height turn whose rail time-marker restampMarkers still measures
+    (at y=0), throwing off the spacing pass. The dropped settle's uuid still ANSWERS on the seam (the user 2026-08-25):
+    a cut turn's settle atom is its last assistant atom, so verdicts/cards get anchored at exactly this uuid — and with
+    the event gone the click honest-failed "couldn't locate" though the seam it closed is right there. The marker
+    carries the alias; the client lands data-uuids~= on it (event-based; the parent seam, never a nearest-time guess).
+    The settles are the null settle-replies between the marker and `end` (the event that decided the cause)."""
+    ev = events[i]
+    settles = [nxt for nxt in events[i + 1:end] if nxt.get("kind") == "assistant" and nxt.get("interruptSettle")]
+    su = [x.get("uuid") for x in settles if x.get("uuid")]
+    if su:
+        ev["settleUuids"] = sorted(set(ev.get("settleUuids") or []) | set(su))
+    for s_ in settles:
+        s_["_dropSettle"] = True
+
+
+def _ev_epoch(ev):
+    """A chat event's whole-second epoch from its `ts`, or None (event_model.parse_z, the transcript's own parser)."""
+    ts = ev.get("ts")
+    return em.parse_z(ts) if isinstance(ts, str) else None
 
 
 # ── THE GOAL TREE WALK, SHARED (plans/outline-pane-provisional-row.md, 2026-09-15) ──────────────────────────────────────
@@ -44836,6 +44899,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # takes over here. DEDUP'd by (t, text) against a still-live chip so the same gesture never doubles;
     # flushed BEFORE the efforts loop so a same-second "/effort X" gesture sits above its "effort set to X".
     gestures = _past_floor(_cmd_gestures(sid)); _cgi = 0
+    # the spend guard's cut records (_spend_cuts, the #169 review): they name a stop, never render a row of their own
+    _cuts = _spend_cuts(sid)
     _live_cmd_keys = set()
     for _t in session["turns"]:
         if _t.get("pre"):
@@ -44855,7 +44920,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         orphans = _conversation_floored(sid, sess["path"], orphans)
     if sidechain:
         # a subagent's transcript carries none of the parent's side-store notes (see the docstring)
-        recoveries, gaveups, efforts, gestures, orphans = [], [], [], [], []
+        recoveries, gaveups, efforts, gestures, orphans, _cuts = [], [], [], [], [], []
     _turn_texts = {}                          # turn index → that turn's disk texts (built on demand, see the fold)
     def _texts_of_turn(_i):
         if _i not in _turn_texts:
@@ -44951,6 +45016,11 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                 # prefix — so the set of such notes must be exactly the one the prefix was sealed with;
                 # a row that landed later with an earlier stamp (an orphan salvage, a recovery) demotes
                 _fold_why = "note"
+            elif _fe.get("spend_cuts", ()) != tuple((_c["t"], _c["rate"], _c["ceiling"]) for _c in _cuts
+                                                     if _fe["last_t"] is not None and _c["t"] <= _fe["last_t"]):
+                _fold_why = "spend-cut"               # a cut record timed inside the prefix landed after the seal: the
+                #                                       stop it names may be sealed unnamed (the press and the CLI's stop
+                #                                       record race the append by microseconds)
             elif _fe["gest_skipped"] - _live_cmd_keys:
                 _fold_why = "gesture"                 # a gesture chip the live tail pruned now renders durably
             elif _fe["orphan_uuids"] & _landed_uuids:
@@ -45367,8 +45437,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                                     if g:
                                         ev["gist"] = g
                                     if _spend_ceiling_parse(text):   # the spend guard's message (the user
-                                        ev["spendGuard"] = True      #   2026-10-08): its own row, never in a notice run,
-                                        #                              and the stop above it names the guard (_stamp_interrupt_causes)
+                                        ev["spendGuard"] = True      #   2026-10-08): its own row, never in a notice run.
+                                        #                              It names no stop: the guard's cut record does (_spend_cuts)
                             if imgs:
                                 ev["images"] = imgs
                             events.append(ev)
@@ -45521,7 +45591,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         _chat_dep_scope.deps["postal_any"] = _chat_dep_scope.deps["postal_any"] or any(_chat_postal_relevant(_e) for _e in _raw_tail)
         _chat_dep_scope.deps["postal_key"], _chat_dep_scope.deps["pidx"], _chat_dep_scope.deps["msum"] = _pk, _pidx, _msum
     events = _hydrate_postal(events, _pidx, sid, captions=_msum)   # swap postal traffic for clean in/out cards (no boilerplate)
-    _stamp_interrupt_causes(events)                     # a restart/crash resume notice names the seam's cause
+    _stamp_interrupt_causes(events, _cuts)                # a restart/crash resume notice, or the spend guard's own cut
+    #                                                       record, names the seam's cause
     # The parse's turn index of each turn in this build's list, for the `turn` stamp below. The list is the live-merged one, which
     # can hold synthetic turns of stale echoes (_place_stale_echoes, `echoTurn`: at most one per idle gap, holding every echo placed
     # in it) that the parse's list does not hold, so every index past such turns is higher than the parse's by the number of them
@@ -45662,6 +45733,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                               tuple(tuple(sorted(_x.items())) for _x in efforts[:_cur[2]]),
                               tuple(tuple(sorted(_x.items())) for _x in orphans[:_cur[3]]),
                               tuple(tuple(sorted(_x.items())) for _x in gestures[:_cur[4]])),
+                    "spend_cuts": tuple((_c["t"], _c["rate"], _c["ceiling"]) for _c in _cuts if _lt is not None and _c["t"] <= _lt),
                     "gest_skipped": {(_g["t"], _g["cmd"]) for _g in gestures[:_cur[4]]
                                      if (_g["t"], _g["cmd"]) in _live_cmd_keys},
                     # only the orphans actually RENDERED into the prefix (review find 2026-09-03): one the
@@ -52689,13 +52761,18 @@ def _spend_guard_row(kind, text, sid, name, be, **fields):
         sys.stderr.write("spend-guard row: %s\n" % traceback.format_exc())
 
 
-def _spend_guard_stop(sid, be, now):
+def _spend_guard_stop(sid, be, now, cut=None):
     """The Stop button's WHOLE road for a session over the ceiling (MEDIUM 2 of the review): the interrupt, the
     interrupt-clicked stamp the chip reads, the retry suppression that keeps the auto-retry and the idle-queue drive
     from re-driving the session while the latch holds, and the views marked dirty. Not pressed while an interrupt is
     already unsettled for the sid (the escalation ladder would climb to SIGINT and SIGKILL on a second press). Returns
     "stopped", "stopping" (a stop already in flight), "detached" (a hosted session whose host keeps the turn: not
-    pressed), or "refused" (the backend would not, or owns no such session)."""
+    pressed), or "refused" (the backend would not, or owns no such session).
+
+    `cut` = (rate, ceiling), as the message prints them, when the session's live row says a turn is OPEN: a press that
+    lands on it then records the cut (sdk_backend.append_spend_cut, at the press's own moment), the event the chat names
+    the stop by (_spend_cuts, the review of #169). Nothing is recorded for a press on an idle session (it writes no stop
+    record) or for any outcome but "stopped"."""
     t0 = _interrupt_clicked.get(str(sid))
     if t0 is not None and now - t0 <= 120:
         return "stopping"
@@ -52706,6 +52783,7 @@ def _spend_guard_stop(sid, be, now):
         # had. Read before pressing, said as it is. No road to the host exists without pressing: the host's signal rung
         # is the very escalation the detached state skips
         return "detached"
+    pressed = time.time()                                 # before the press: the stop record it causes is later
     try:
         stopped = bool(be.interrupt(sid))
     except Exception:
@@ -52713,6 +52791,11 @@ def _spend_guard_stop(sid, be, now):
         stopped = False
     if not stopped:
         return "refused"
+    if cut:
+        try:
+            _sdk_defaults_module().append_spend_cut(jd.STATE, str(sid), cut[0], cut[1], t=pressed)
+        except Exception:
+            sys.stderr.write("spend-guard cut record: %s\n" % traceback.format_exc())
     _interrupt_clicked[str(sid)] = now
     err = _suppress_session_retry(sid)
     if err:
@@ -52721,16 +52804,17 @@ def _spend_guard_stop(sid, be, now):
     return "stopped"
 
 
-def _spend_guard_fire(s, rate, ceiling, now, be, clients):
+def _spend_guard_fire(s, rate, ceiling, now, be, clients, turn_open=False):
     """A crossing: stop the session (the Stop button's road), tell it once in the user's voice, tell every dashboard,
     file the row. `be` None resolves the session's OWN backend (Sessions.backend_for: the SDK's, Codex's, or the unowned
-    stand-in that refuses by name), and the sentence says what actually happened (MEDIUM 4 of the review)."""
+    stand-in that refuses by name), and the sentence says what actually happened (MEDIUM 4 of the review). `turn_open`:
+    the live row said a turn was running, so a press that lands records the cut (_spend_guard_stop)."""
     sid, name = s["sid"], s.get("name") or s["sid"][:8]
     when = time.strftime("%H:%M", time.localtime(now))
     _jobs_gate_note("spendRow")                       # (the jobs pass's gate, shadow: an act)
     if be is None:
         be = Sessions.backend_for(sid)
-    stop = _spend_guard_stop(sid, be, now)
+    stop = _spend_guard_stop(sid, be, now, cut=(_usd_words(rate), _usd_words(ceiling)) if turn_open else None)
     try:
         # the user's message rides the same door as every machine send (LOW 3): parked while the session compacts,
         # behind the user's own queued messages, and under a usage-limit hold; None is a refusal (no backend owns it)
@@ -52805,7 +52889,8 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
         st = _SPEND_GUARD.get(sid)
         if rate >= ceiling and not (st and st.get("over")):
             _SPEND_GUARD[sid] = {"over": True, "t": now, "rate": rate}
-            _spend_guard_fire(s, rate, ceiling, now, be, clients)
+            _spend_guard_fire(s, rate, ceiling, now, be, clients,
+                              turn_open=((live_map or {}).get(sid) or {}).get("state") in ("working", "retrying"))
         elif st and st.get("over") and rate < ceiling * SPEND_GUARD_REARM:
             _SPEND_GUARD[sid] = {"over": False, "t": now, "rate": rate}
             _spend_guard_clear(s, rate, ceiling, now, be, clients)

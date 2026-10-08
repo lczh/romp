@@ -567,8 +567,10 @@ class KernelFolds(Base):
     def states_recs(self, tail):
         head = [{"t": TS0, "state": "working"}, {"t": TS0 + 5, "awaiting": True, "state": "waiting"},
                 {"t": TS0 + 6, "machineCut": "restart", "state": "idle"},
-                {"t": TS0 + 7, "retriesRecovered": True, "retries": 2}]
-        rest = [{"t": TS0 + 8, "state": "working"}, {"t": TS0 + 8.5, "state": "idle", "by": "stop"},
+                {"t": TS0 + 7, "retriesRecovered": True, "retries": 2},
+                {"t": TS0 + 7.5, "spendCut": {"rate": "1,240", "ceiling": "1,000"}}]
+        rest = [{"t": TS0 + 8, "state": "working"}, {"t": TS0 + 8.25, "spendCut": {"rate": "2,050", "ceiling": "1,000"}},
+                {"t": TS0 + 8.5, "state": "idle", "by": "stop"},
                 {"t": TS0 + 9, "state": "retrying"}, {"t": TS0 + 9.5, "state": "retrying"},
                 {"t": TS0 + 10, "machineCut": "deploy"}, {"t": TS0 + 11, "retriesGaveUp": True, "retries": 5, "errorKind": "overloaded"}]
         return head + rest if tail else head
@@ -610,6 +612,7 @@ class KernelFolds(Base):
             "stateIntervals": km._state_intervals(SID, "working", TS0 + 200),
             "statesNotes": km._states_notes(SID),
             "machineCut": km._last_machine_cut(SID),
+            "spendCuts": km._spend_cuts(SID),
             "lastState": km._last_state(SID),
             "lastNaturalState": km._last_natural_state(SID),
             "retryingSince": km._fold_records(km._retrying_since_cache, jd.STATE / "states" / (SID + ".jsonl"), lambda: None,
@@ -637,7 +640,7 @@ class KernelFolds(Base):
             names |= set(self.doc(p)["folds"])
         ALL_NAMES = {"sessionMeta", "bgRunning", "bgAll", "bgJudge", "agentLaunches", "agentGist", "agentLaunchIds", "statesOverlay",
                      "stateIntervals", "statesNotes", "machineCut", "queueLedger", "wakeTail2", "postalLog", "lastState",
-                     "lastNaturalState", "retryingSince", "nudgeTimes", "parkedHandoffs"}
+                     "lastNaturalState", "retryingSince", "nudgeTimes", "parkedHandoffs", "spendCuts"}
         self.assertEqual(names, ALL_NAMES, "every kernel fold this test drives left its state in the checkpoint")
         ksrc = open(os.path.join(BIN, "romp-kernel")).read(); jsrc = open(os.path.join(BIN, "romp-judge")).read()
         import re as _re
@@ -663,6 +666,8 @@ class KernelFolds(Base):
         self.assertEqual(cold["agentLaunches"]["settled"], ["toolu_ag1"])
         self.assertEqual(len(cold["agentGist"]["steps"]), 3)
         self.assertEqual(cold["machineCut"], (float(TS0 + 10), "deploy"))
+        self.assertEqual(cold["spendCuts"], [{"t": TS0 + 7.5, "rate": "1,240", "ceiling": "1,000"},
+                                             {"t": TS0 + 8.25, "rate": "2,050", "ceiling": "1,000"}], "the guard's cut records, head and tail")
         self.assertEqual(len(cold["stateIntervals"]), 2, "two working stretches in the states rows")
         self.assertEqual(cold["lastState"], ("retrying", TS0 + 9.5)); self.assertEqual(cold["lastNaturalState"], ("retrying", TS0 + 9.5))
         self.assertEqual(cold["retryingSince"], TS0 + 9, "the current retrying stretch dates from its first row")

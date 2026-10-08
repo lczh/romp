@@ -1806,6 +1806,22 @@ def append_machine_cut(state_dir: Path, sid: str, cause: str, t: float | None = 
         f.write(json.dumps(rec) + "\n")
 
 
+def append_spend_cut(state_dir: Path, sid: str, rate: str, ceiling: str, t: float | None = None) -> None:
+    """Record that the kernel's SPEND GUARD pressed stop on this session's OPEN turn (the user 2026-10-08, who could
+    not tell the guard's stop from their own): written by the guard right after its press landed, never when it
+    pressed nothing (an idle session, a detached host, a stop already in flight) or the press was refused. The chat
+    names the first stop record at or after `t` with no prompt between as the guard's (the kernel's _spend_cuts and
+    _stamp_interrupt_causes); the guard's message, sent either way, decides nothing. `rate` and `ceiling` are the
+    figures as the message printed them ("1,240"). `t` stays a FLOAT, as append_machine_cut's does: the press precedes
+    the stop record it causes, so the bound must not move earlier. Its own "spendCut" key, so every other reader of
+    the file, which filters by its own keys, skips it."""
+    p = Path(state_dir) / "states" / (sid + ".jsonl")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"t": time.time() if t is None else float(t), "spendCut": {"rate": str(rate), "ceiling": str(ceiling)}}
+    with open(p, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
 def append_resume_fork(state_dir: Path, sid: str, from_fsid: str, to_fsid: str, t: float | None = None) -> None:
     """Record that a RESUME landed on a fresh-headed transcript fork: the CLI's init reported a NEW
     fsid for a conversation we asked it to continue (--resume), with no /clear in flight and no

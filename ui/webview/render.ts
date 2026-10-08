@@ -196,7 +196,7 @@ type ChatEvent = (
   // event renders as a labelled notice (renderInjected), never the user's bubble (the user 2026-09-07)
   // gist: a romp SYSTEM notice's USER-facing head, lifted by the kernel from the notice's <!-- romp-gist -->
   // marker (2026-09-08) — the body is written to the agent and never doubles as the head
-  | { kind: "user"; md: string; uuid?: string; ts?: string; reminders?: string[]; taskOutputs?: TaskOutputs; human?: boolean; romp?: boolean; rompAuto?: boolean; rompSystem?: boolean; gist?: string; followUp?: boolean; goal?: string; fuCtx?: string; canned?: string; tag?: string; mid?: string; mids?: string[]; images?: { src: string; path?: string }[]; undelivered?: boolean; echoT?: number; absorbed?: boolean; sentAt?: number; hiddenByPending?: boolean; source?: InjectedSource; preamble?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }
+  | { kind: "user"; md: string; uuid?: string; ts?: string; reminders?: string[]; taskOutputs?: TaskOutputs; human?: boolean; romp?: boolean; rompAuto?: boolean; rompSystem?: boolean; gist?: string; spendGuard?: boolean; interruptCause?: string; interruptSpend?: SpendFigures; followUp?: boolean; goal?: string; fuCtx?: string; canned?: string; tag?: string; mid?: string; mids?: string[]; images?: { src: string; path?: string }[]; undelivered?: boolean; echoT?: number; absorbed?: boolean; sentAt?: number; hiddenByPending?: boolean; source?: InjectedSource; preamble?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }
   | { kind: "assistant"; md: string; uuid?: string; ts?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }   // pathPreview: the links a hover may preview, by kind (T351). spacePaths: backticked filenames WITH spaces the kernel verified exist (build_session _space_paths) → whole-span links. pathLinks: path-shaped tokens the kernel verified against the filesystem, token → real open target (build_session _path_links) — the linkifier's gate
   | { kind: "thinking"; text: string; encrypted: boolean; uuid?: string; ts?: string }
   | {
@@ -2766,9 +2766,10 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
 
 // The gist strings a notice and its compact-mode group head share (noticeBrief), so a fold never says
 // something its members would not.
-// `spend`: the figures the spend guard's message printed (kernel interruptSpend, the user 2026-10-08), so its stop reads
-// as the guard's and never as the user's own
-function interruptGist(cause?: string, spend?: { rate?: string; ceiling?: string }): string {
+// `spend`: the figures the spend guard recorded when it cut the turn (kernel interruptSpend, the user 2026-10-08), so its
+// stop reads as the guard's and never as the user's own
+type SpendFigures = { rate?: string; ceiling?: string };
+function interruptGist(cause?: string, spend?: SpendFigures): string {
   return cause === "spend" && spend ? `stopped by the spend guard at $${spend.rate} an hour`
     : cause === "restart" ? "interrupted — kernel restart" : cause === "crash" ? "interrupted — process died" : "interrupted";
 }
@@ -3788,8 +3789,8 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
       // itself injected): a kernel-restart/crash cut is not the user pressing stop, and the old blanket
       // "you stopped this turn" tip blamed them for every deploy (the user 2026-07-09). A slim SESSION
       // notice with the stop square as its glyph — cause tied to effect, no italic (the audit's row 12).
-      const cause = (ev as any).interruptCause;
-      const spend = (ev as any).interruptSpend as { rate?: string; ceiling?: string } | undefined;
+      const cause = ev.interruptCause;
+      const spend = ev.interruptSpend;
       return notice({ src: "session", glyph: "session", gist: interruptGist(cause, spend), cls: "turn-interrupt",
                       sev: cause === "spend" ? "warn" : undefined,
                       tip: cause === "spend" && spend ? `romp's spend guard stopped this turn: the session was spending about $${spend.rate} an hour, over the $${spend.ceiling} an hour ceiling`
@@ -14069,7 +14070,7 @@ function noticeBrief(ev: ChatEvent): { src: string; glyph: NoticeGlyphKind; gist
   if (ev.kind === "reconnecting") return { src: "session", glyph: "power", gist: reconnectingGist(ev.effort, ev.waits) };
   if (ev.kind === "assistant") return { src: "session", glyph: "session", gist: SETTLE_GIST };
   if (ev.kind === "user") {
-    if ((ev as any).interruptMarker) return { src: "session", glyph: "session", gist: interruptGist((ev as any).interruptCause, (ev as any).interruptSpend) };
+    if ((ev as any).interruptMarker) return { src: "session", glyph: "session", gist: interruptGist(ev.interruptCause, ev.interruptSpend) };
     if ((ev as any).rompSystem) {
       const text = (ev.md || "").replace(/<!--[\s\S]*?-->/g, "").replace(/^\s*\[romp\]\s*/i, "").trim();
       return { src: "romp", glyph: "romp", gist: ev.gist ? String(ev.gist) : gistOf(text) };

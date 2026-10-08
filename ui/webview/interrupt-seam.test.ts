@@ -8,6 +8,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createRequire } from "node:module";
 
 const R = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 
@@ -24,21 +25,45 @@ test("the null settle-reply renders as a seam marker, never an assistant bubble"
 });
 
 test("the interrupt marker names the cause when the kernel stamped one", () => {
-  assert.match(R, /const cause = \(ev as any\)\.interruptCause;/);
-  assert.match(R, /interrupted — kernel restart/);
-  assert.match(R, /a romp kernel restart cut this turn; the session was resumed automatically/);
-  assert.match(R, /interrupted — process died/);
+  // rendered through the lifted seam (renderSeam, below)
+  const restart = renderSeam({ kind: "user", interruptMarker: true, interruptCause: "restart" });
+  assert.equal(restart.gist, "interrupted — kernel restart");
+  assert.equal(restart.tip, "a romp kernel restart cut this turn; the session was resumed automatically");
+  assert.equal(renderSeam({ kind: "user", interruptMarker: true, interruptCause: "crash" }).gist, "interrupted — process died");
   // the unlabeled seam keeps the user-stop reading
-  assert.match(R, /you stopped this turn here \(the stop button \/ Ctrl\+C\)/);
+  assert.equal(renderSeam({ kind: "user", interruptMarker: true }).tip, "you stopped this turn here (the stop button / Ctrl+C)");
 });
 
+// The seam's own code, lifted out of render.ts and RUN (the #169 review asked for a render, not a regex): the interrupt
+// branch of renderEventInner with a recording notice(), and the compact-mode brief's interruptGist.
+const requireCjs = createRequire(__filename);
+function lift(startAnchor: string, endAnchor: string): string {
+  const a = R.indexOf(startAnchor), b = R.indexOf(endAnchor, a);
+  assert.ok(a >= 0 && b > a, `render.ts still holds ${startAnchor}`);
+  return requireCjs("esbuild").transformSync(R.slice(a, b), { loader: "ts" }).code;
+}
+const GIST_SRC = lift("type SpendFigures =", "const SETTLE_GIST");
+const SEAM_SRC = lift("    if ((ev as any).interruptMarker) {", "    // A romp SYSTEM notice (kernel restart/resume, Retry)");
+type Spec = { src: string; glyph: string; gist: string; cls?: string; sev?: string; tip?: string };
+function renderSeam(ev: Record<string, unknown>): Spec {
+  const run = new Function("ev", "notice", GIST_SRC + "\n" + SEAM_SRC + "\nreturn null;");
+  return run(ev, (spec: Spec) => spec) as Spec;
+}
+
 test("a stop the spend guard made names the guard and its rate, never the user (the user 2026-10-08)", () => {
-  // the kernel stamps interruptCause "spend" + interruptSpend from the guard's own message
-  // (tests/test_spend_guard_chat.py); the seam and its compact-mode brief read the same gist
-  assert.match(R, /cause === "spend" && spend \? `stopped by the spend guard at \$\$\{spend\.rate\} an hour`/);
-  assert.match(R, /gist: interruptGist\(cause, spend\), cls: "turn-interrupt",\s*sev: cause === "spend" \? "warn" : undefined,/);
-  assert.match(R, /gist: interruptGist\(\(ev as any\)\.interruptCause, \(ev as any\)\.interruptSpend\)/);
-  assert.match(R, /romp's spend guard stopped this turn: the session was spending about \$\$\{spend\.rate\} an hour, over the \$\$\{spend\.ceiling\} an hour ceiling/);
+  const spend = renderSeam({ kind: "user", interruptMarker: true, interruptCause: "spend", interruptSpend: { rate: "1,240", ceiling: "1,000" } });
+  assert.equal(spend.gist, "stopped by the spend guard at $1,240 an hour");
+  assert.equal(spend.sev, "warn");
+  assert.equal(spend.tip, "romp's spend guard stopped this turn: the session was spending about $1,240 an hour, over the $1,000 an hour ceiling");
+  assert.equal(spend.cls, "turn-interrupt");
+  // the user's own stop keeps its reading, and the restart cut its own
+  const own = renderSeam({ kind: "user", interruptMarker: true });
+  assert.equal(own.gist, "interrupted");
+  assert.equal(own.tip, "you stopped this turn here (the stop button / Ctrl+C)");
+  assert.equal(own.sev, undefined);
+  assert.equal(renderSeam({ kind: "user", interruptMarker: true, interruptCause: "restart" }).gist, "interrupted — kernel restart");
+  // the compact-mode brief reads the same gist (noticeBrief)
+  assert.match(R, /if \(\(ev as any\)\.interruptMarker\) return \{ src: "session", glyph: "session", gist: interruptGist\(ev\.interruptCause, ev\.interruptSpend\) \};/);
 });
 
 test("a card anchored at a DROPPED settle's uuid lands on the seam that replaced it", () => {
