@@ -1043,13 +1043,11 @@ def last_record_uuid(path, tail_bytes: int = 262144) -> str:
 
 
 # The first result after a connect whose cost delta exceeds this is traced as an INFO line in the settle
-# (SdkSession._on_message), never a problem. On the CLI as probed (print mode, 2026-09-06) a resumed
-# process starts its counters at zero: a resume neither restores a cost-state record nor arms its writer.
-# So a first delta this large is the turn's own cost, recorded right, with nothing for the user to act
-# on; a problem row here would send them to check a figure that is correct. The trace is for the day a
-# CLI restores cost history in print mode: then a first result carries the whole history in
-# total_cost_usd, and the figure is wrong only if that restore and the connect-time seed read different
-# files (last_cost_state).
+# (SdkSession._on_message), never a problem. A resumed CLI restores the transcript's last cost-state record
+# and the connect-time seed reads the same record (last_cost_state), so the delta over the seed is the
+# turn's own cost, recorded right, with nothing for the user to act on; a problem row here would send them
+# to check a figure that is correct. The trace names the seed, so a figure that is wrong because the restore
+# and the seed read different records can be told from a big turn in the kernel log.
 SANE_TURN_USD = 200.0
 
 
@@ -1077,64 +1075,78 @@ def cost_state_watermarks(o):
     return {"total": float(total), "tokens": tokens}
 
 
-def last_cost_state(path, scan_bytes: int = 8 << 20, max_line: int = 4 << 20):
+def last_cost_state(path, max_line: int = 4 << 20):
     """The resumed transcript's LAST `cost-state` record, as the watermarks a CLI that restores it would
     hold (cost_state_watermarks), or None when the file has no such record or cannot be read.
 
-    Why read it: the CLI has a restore path for this record. Its transcript loader files `cost-state`
-    as last-wins, its writer emits totalCostUSD and modelUsage, the two counters the settle diffs, and
-    a resume that restores the record sets both. Should a CLI restore them in print mode, the first
-    result after a reconnect would carry the whole session's history in total_cost_usd, and watermarks
-    reset to zero would record that history as one turn's spend; seeding from the same file the CLI
-    reads makes the first delta this turn's own work. The seed reads transcript_path(cwd, resume_sid)
-    and reads it again when init corrects the cwd (the CLI's own string keys its transcript path), with
-    the sid the CLI LOADED when that init also landed a new fsid, so the two sides open the same file
-    (SdkSession._seed_spend_watermarks).
+    Why read it: the CLI restores this record. Its transcript loader files `cost-state` as last-wins over
+    the WHOLE file, its writer emits totalCostUSD and modelUsage, the two counters the settle diffs, and a
+    print-mode resume restores both, a fork-session resume included (it restores the record of the
+    conversation it loads, the parent's). So the first result after such a connect carries the session's
+    recorded history plus this turn in total_cost_usd, and watermarks reset to zero would record that
+    history as one turn's spend; seeding from the same record the CLI restores makes the first delta this
+    turn's own work. The seed reads transcript_path(cwd, resume_sid) and reads it again when init corrects
+    the cwd (the CLI's own string keys its transcript path), with the sid the CLI LOADED when that init
+    also landed a new fsid, so the two sides open the same file (SdkSession._seed_spend_watermarks).
 
-    What the CLI does today, as probed in print mode (2026-09-06): its writer runs only once the process
-    has claimed its cost state. The interactive TUI claims it at startup; a print-mode (SDK) process
-    claims it only through the /clear session-id rotation, and a print-mode resume claims nothing and
-    restores nothing. The /clear saver runs before the rotation, so the SECOND and later /clear in one
-    process appends a record to the conversation that /clear abandons; the conversation romp resumes
-    (the reg's lastSid, the current one) never carries one. So every seed today reads zero, and the
-    CLI's counters start at zero on the same resume: the two agree. A record reaches a resumed file two
-    ways: a lastSid left on an abandoned conversation (the kernel dying between the saver's write and
-    the init flip), and a transcript the interactive CLI wrote (its writer runs from startup) that romp
-    later resumes; the print-mode CLI still starts at zero in both, and the shrunken-counter rule
-    records the first turn whole while its own total sits below the seed. The residual: a first
-    turn costlier than the whole recorded history is under-counted by the seed, and the same holds per
-    token field (_turn_usage diffs each field on its own), so a first turn whose count in one field
-    exceeds the recorded history's is under-counted in that field.
+    The record sits where the CLI's writer left it, and that can be far from the end: a session under a
+    per-session host keeps one CLI for days, and that CLI writes the record when it ends, not as it runs, so
+    its transcript grows past the last record by everything since. Live (2026-10): a hosted session's last
+    record lay 52 to 100 MB before the end of its transcript; every comment thread forked from it restored
+    that record's $4,826 while the scan, then bounded to the last 8 MB on the premise that a print-mode
+    resume restores nothing (a 2026-09-06 probe), read none and seeded zero, and each thread's first turn
+    of about a dollar was recorded as $4,826: 41 such turns, $198k of a ledger whose transcripts held
+    $70k. So the scan reads back as far as the record is, the whole file when there is none, as the CLI's
+    own load of the same file does at the same connect. If a CLI does NOT restore the record (an older one),
+    its own first total sits below the seed and the shrunken-counter rule records that turn whole. The residual: a first turn costlier than the whole recorded history is
+    under-counted by the seed, and the same holds per token field (_turn_usage diffs each field on its own).
 
-    Scans BACKWARDS in 64 KB chunks and stops at the first hit, so a transcript that carries the record
-    costs a chunk or two. A line split across chunks is reassembled ONCE, when the scan reaches the
-    newline before it: its pieces are kept in a list as the chunks arrive and joined there, so each byte
-    read is copied a fixed number of times however long the line is (concatenating the carried fragment
-    onto every chunk copied it once per chunk, quadratic in the line; review find, 2026-09-09). A line
-    longer than `max_line` (4 MB by default) is not a record, since a record is under 1 KB: its pieces
-    are dropped as they arrive and the line is skipped unjoined, which also bounds the memory the scan
-    holds by the cap rather than by the line. The scan is BOUNDED to the last `scan_bytes` (8 MB by
-    default; last_record_uuid's tail read has the same reason: a transcript can be tens of MB and this
-    runs on the event loop at every connect): a record older than that is treated as absent, which is
-    the answer the print-mode CLI gives for its own counters today (it restores nothing), so the two
-    sides still agree (review find, 2026-09-09); the line the bound cuts through is a fragment and is
-    never joined."""
+    Scans BACKWARDS in 64 KB chunks and stops at the first hit, so a transcript whose record is near its
+    end costs a chunk or two. A chunk that can hold no part of a record line is passed over without being
+    split into lines: no marker in it, none straddling its edge with the chunk after it, and none in the
+    line it carries on, so a transcript of hundreds of MB with no record costs one sequential read and a
+    substring search, not a split of every chunk. A line split across chunks is reassembled ONCE, when the
+    scan reaches the newline before it: its pieces are kept in a list as the chunks arrive and joined
+    there, so each byte read is copied a fixed number of times however long the line is (concatenating the
+    carried fragment onto every chunk copied it once per chunk, quadratic in the line; review find,
+    2026-09-09). A line longer than `max_line` (4 MB by default) is not a record, since a record is under
+    a few KB: its pieces are dropped as they arrive and the line is skipped unjoined, which also bounds the
+    memory the scan holds by the cap rather than by the line."""
     marker = b'"cost-state"'
+    edge = len(marker) - 1      # a marker across a chunk edge has at most this many bytes on either side of it
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
             pos = f.tell()
-            floor = max(0, pos - int(scan_bytes))   # the oldest byte the bounded scan may reach
             frags = []          # the pieces read so far of the line the last chunk opened with, in file
             #                     order (each chunk read is earlier in the file than the one before)
             carried = 0         # that line's length so far, counted whether or not its pieces are kept: past
             #                     max_line the line is not a record, so its pieces are dropped as they
             #                     arrive and the line is skipped without a join
-            while pos > floor:
-                step = min(pos - floor, 1 << 16)
+            held = False        # that line's pieces hold the marker, one across the edge between two included
+            later = b""         # the first `edge` bytes of the chunk read before this one (the next in the file)
+            while pos > 0:
+                step = min(pos, 1 << 16)
                 pos -= step
                 f.seek(pos)
-                parts = f.read(step).split(b"\n")   # leading piece, complete lines, trailing piece; ONE
+                chunk = f.read(step)
+                across = marker in chunk[-edge:] + later   # a marker across this chunk's edge with the next one
+                later = chunk[:edge]
+                if not (held or across or marker in chunk):
+                    # no line this chunk completes can be a record, so none is split out; only the carried
+                    # line's bookkeeping moves, exactly as below
+                    nl = chunk.find(b"\n")
+                    if nl < 0:
+                        carried += step
+                        if carried <= max_line:
+                            frags.insert(0, chunk)
+                        else:
+                            frags = []
+                    elif pos > 0:
+                        carried = nl
+                        frags = [chunk[:nl]] if carried <= max_line else []
+                    continue
+                parts = chunk.split(b"\n")         # leading piece, complete lines, trailing piece; ONE
                 #                                      element when the chunk holds no newline at all
                 lines = []                          # the lines this chunk completes, newest first
                 if len(parts) > 1:
@@ -1143,6 +1155,9 @@ def last_cost_state(path, scan_bytes: int = 8 << 20, max_line: int = 4 << 20):
                         lines.append(b"".join([parts[-1]] + frags))
                     lines.extend(reversed(parts[1:-1]))
                     frags, carried = [], 0
+                    held = marker in parts[0]       # the leading piece starts the next carried line
+                else:
+                    held = True                     # the whole chunk is a piece of the carried line, and holds it
                 if pos == 0:
                     # the file's head: the leading piece is the start of the carried line, or all of it
                     if carried + len(parts[0]) <= max_line:
@@ -9328,8 +9343,8 @@ class SdkSession:
         """Reset the spend watermarks for the CLI process a connect just started: zero for a fresh
         process, or, when the resumed transcript carries a `cost-state` record, the counters that record
         holds, because a CLI that restores them reports its first total_cost_usd as the whole session's
-        history plus this turn (last_cost_state has the full story, including why every seed reads zero
-        on the CLI as probed). Arms the first-result check either way. Called at connect, and again from
+        history plus this turn (last_cost_state has the full story, including why it reads the whole
+        file). Arms the first-result check either way. Called at connect, and again from
         the init handler when the CLI's cwd corrects the registry's before any result has settled: the
         transcript path is keyed on the cwd, so that is when the seed can have read the wrong file. That
         second call is for a resumed session only (a fresh process has no loaded transcript to read), and
@@ -10200,6 +10215,7 @@ class SdkSession:
                         # an OLDER epoch's replay must not overwrite it). A record without one keeps the epoch on record
                         # (the follow-up's second round, lows 1 and 2)
                         self._spend_session_id = epoch or str(getattr(self, "_spend_session_id", "") or "")
+                    prior = self._last_cost_total   # the watermark this result is folded over (the seed, for a first result)
                     if unknown or duplicate:
                         delta = 0.0       # unknown: the lifetime's total, this turn's share unknowable; duplicate: already folded
                     else:
@@ -10254,11 +10270,12 @@ class SdkSession:
                                               problem=False)
                         else:
                             self.backend._log("spend: %s's first result after connect cost $%.2f, above %.0f USD for "
-                                              "one turn (the CLI's cumulative total: $%.2f). Recorded as is: a fresh "
-                                              "CLI process starts its cost at zero, so this is the turn's own cost. It "
-                                              "would be wrong only if a CLI that restores cost history read a different "
-                                              "transcript than the connect-time seed (last_cost_state)."
-                                              % (self.name, delta, SANE_TURN_USD, total), problem=False)
+                                              "one turn (the CLI's cumulative total: $%.2f, over a connect-time seed of "
+                                              "$%.2f from the resumed transcript's last cost-state record, zero with "
+                                              "none). Recorded as is: the turn's own cost over the record the CLI "
+                                              "restores. It would be wrong only if the CLI restored a different record "
+                                              "than the seed read (last_cost_state)."
+                                              % (self.name, delta, SANE_TURN_USD, total, prior), problem=False)
                     elif unknown:
                         self.backend._log("spend: %s's %s after a host attach carries the surviving CLI's "
                                           "cumulative total ($%.2f) with no watermark on record: this turn's own cost is "

@@ -155,7 +155,7 @@ class Rebill(unittest.TestCase):
         self.lines.clear()
         s2 = self._session()
         self._run(s2, _result(300.0, 10))                   # a fresh process's big first turn: the old text
-        self.assertTrue(any("first result after connect cost $300.00" in l and "a fresh CLI process starts its cost at zero" in l for l in self.lines), self.lines)
+        self.assertTrue(any("first result after connect cost $300.00" in l and "over a connect-time seed of $0.00" in l for l in self.lines), self.lines)
 
     def test_the_attach_flag_is_cleared_on_every_road_but_an_attach(self):
         # M6 (the review of the fix): a flag left True by an earlier attach in this object's life made the seed wait for
