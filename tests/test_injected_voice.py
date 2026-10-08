@@ -258,6 +258,20 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
         self.assertIn("renamed", body)
         self.assertIn("'tests'", body, "…and it names the new name itself")
 
+    def test_the_subagent_identity_note_speaks_plainly(self):
+        # Subagents at standard speed (2026-10-08): the subagents' environment line names the catalog entry the recipe
+        # borrows, so their system prompt gets one plain line naming the model they really run on. It names no
+        # machinery and no romp noun: the reader is a subagent that knows nothing of any of it
+        import os as _os
+        sb = load_source("romp_sdk_backend_voice", _os.path.join(BIN, "romp_sdk_backend.py"))
+        note = sb.SUBAGENT_STANDARD_IDENTITY_NOTE
+        self.assertNotIn("<!--", note)
+        self.assertNotIn("\n", note, "one line")
+        for word, why in ROMP_WORDS:
+            self.assertNotIn(word, note.lower(), "(%r: %s)" % (word, why))
+        self.assertIn("claude-opus-5-5", note)
+        self.assertIn("June 2026", note)
+
     def test_the_lost_tasks_notice_asks_for_a_check_in_the_persons_voice(self):
         # the lost-background-tasks notice (task_death_notice) is the same [romp]-prefixed mechanics
         # family; past the prefix it speaks plainly, to "you". Since 2026-09-05 it says the tasks were

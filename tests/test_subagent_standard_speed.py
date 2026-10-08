@@ -241,6 +241,15 @@ class LaunchCarriesTheRecipe(_OptionsBase):
         self.assertIs(s._launch_record["subagentStandard"], True)
         self.assertEqual(sb.PICK_LAUNCH_KEYS["subagentStandard"], ("subagentStandard",))
 
+    def test_the_subagents_are_told_which_model_they_run_on(self):
+        # their environment line names the borrowed entry (Opus 4.7, cutoff January 2026); one appended line of their
+        # system prompt names Opus 5.5 (Claude Code's --append-subagent-system-prompt: subagents only, never the main loop)
+        s = sb.SdkSession(self.be, _reg(self.be, subagentStandard=True))
+        kw = self.be._options(s, dict)
+        self.assertEqual(kw["extra_args"]["append-subagent-system-prompt"], sb.SUBAGENT_STANDARD_IDENTITY_NOTE)
+        s2 = sb.SdkSession(self.be, _reg(self.be))
+        self.assertNotIn("append-subagent-system-prompt", self.be._options(s2, dict).get("extra_args") or {})
+
     def test_off_launches_exactly_as_before(self):
         s = sb.SdkSession(self.be, _reg(self.be, env=ENV))
         got = self._settings(s)
