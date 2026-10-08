@@ -83614,7 +83614,11 @@ def _drain_and_exit(reason, signum=None, what="SIGTERM", audit=None, t0=None, t0
     try:
         _deadline_s = float(EXIT_DEADLINE_S)
         _end = t0 + _deadline_s                              # every phase ends by here (plus one item)
-        _pre_drain = _end - float(EXIT_DRAIN_BUDGET_S)       # and every phase before the drain by here: the drain's reserve
+        _pre_drain = t0 + (_deadline_s - float(EXIT_DRAIN_BUDGET_S))   # and every phase before the drain by here: the drain's
+        #                                                      reserve. The window's length first, then from the entry: taken as _end
+        #                                                      less the reserve, a reserve as long as the deadline put the line one
+        #                                                      float step past the entry at some clock readings ((t + 1.0) - 1.0 > t),
+        #                                                      and every dirty file was written at the entry (CI, 2026-10-08)
         res = {}
         err = ""
         reason_err = ""
