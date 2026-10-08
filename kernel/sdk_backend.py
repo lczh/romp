@@ -7198,6 +7198,27 @@ class SdkSession:
             self.backend._persist_echoes(self.sid)
         self._mark("waiting")
         self.backend.retire_live_work(self.sid)    # the abandoned turn's stream is gone with its client
+        self._strand_texts(stranded)
+
+    def _strand_carried_hold(self) -> None:
+        """A hold carried across a reconnect (the connect loop's top: the CLI reported holding the text, and the reconnect
+        was to go to the same CLI) whose connect reached a CLI the hello did not prove to be that one (a fresh CLI after a
+        handover that failed, a host older than the CLI identity, a kernel child): the text was in the old CLI's queue, so
+        it takes the stranded road a teardown gives any text fed to a CLI that is gone (_strand_texts), and the hold goes so
+        the queue moves on. Left standing, it would wait for a lifecycle frame no CLI will write."""
+        u, self._untaken = self._untaken, None
+        if u is None:
+            return
+        self.backend._log("feed hold (%s): the reconnect reached another CLI than the one holding the last fed text; it "
+                          "takes the stranded road" % self.name)
+        self._strand_texts([u.get("item", u["text"])])
+        if self._input_wake is not None:
+            self._input_wake.set()
+
+    def _strand_texts(self, stranded) -> None:
+        """Texts fed to a CLI that will not run them (the reconcile's, and a carried hold's: _strand_carried_hold): with no
+        conversation materialised, back at the head of the queue under their own ids; on a resumable conversation, peer
+        banners go back to the bus by id and every other unlanded send is flagged, never re-fed (the docstring above)."""
         if stranded and not self.resume_sid:
             with self._lock:
                 self._q_prepend(stranded, self._unfeed_locked(stranded))   # back at the head under their own ids
@@ -8641,8 +8662,21 @@ class SdkSession:
             # the teardown closes stdin and gives the CLI a grace to exit on its own (_do_request_reconnect),
             # long enough to finish the drained turn, and when it did the next build finds the record and
             # prunes the flag (_mark_dropped_echoes is self-correcting).
+            # EXCEPT on a reconnect to the SAME CLI (a host re-exec at a turn's end, an attach retry: `keeps`, below)
+            # when that CLI reported holding the text (its lifecycle `queued`: `received`). The CLI and its prompt queue
+            # live on, the text still in it, and the host's journal brings the CLI's later `started` for it to the next
+            # connection, which releases the hold exactly as it would have without the reconnect (2026-10-08). Handed to
+            # the reconcile, the text was flagged never delivered, a peer's banner went back to the bus and came again
+            # while the CLI still held the first copy, and the next queued text was fed in behind it to fuse with it.
+            # The hold is `carried` until the next hello proves the CLI is the same (_on_host_hello); a connect that
+            # reaches another CLI, or none, strands it then (_strand_carried_hold). A text the CLI never reported holding
+            # (its frame lost in the handover, or a CLI that writes no lifecycle frames) takes the reconcile as before.
+            keeps, self._reattach_keeps_cli = getattr(self, "_reattach_keeps_cli", False), False
             u, self._untaken = self._untaken, None
-            if u is not None and u.get("settled"):
+            if u is not None and keeps and u.get("received"):
+                u["carried"] = True
+                self._untaken = u
+            elif u is not None and u.get("settled"):
                 with self._lock:
                     self._inflight_texts.append(u.get("item", u["text"]))
                     self.inflight = max(self.inflight, 1)
@@ -8652,7 +8686,6 @@ class SdkSession:
             # connect re-attaches to the same CLI (a host re-exec at a turn's end, an attach retry): that CLI and its
             # work live on, and retiring them told the session its tasks were cut while they ran and left quiet() reading
             # an empty set, so a relaunch waiting for quiet cut them for real (2026-10-01)
-            keeps, self._reattach_keeps_cli = getattr(self, "_reattach_keeps_cli", False), False
             if not keeps:
                 # the gesture that asked for this relaunch (a Restart, a rewind, an Apply now) names the cut in the
                 # notice; taken here, at the teardown it caused, so the next relaunch starts with none
@@ -8702,6 +8735,8 @@ class SdkSession:
                     connected = True
                     self._host_attach_retries = 0   # consecutive incomplete attaches, as the stand-down's docstring
                     #   promises: a recovered timeout earlier in this object's life never counts toward a later bound
+                    if (getattr(self, "_untaken", None) or {}).get("carried"):
+                        self._strand_carried_hold()   # the hello did not prove the CLI the same: it never held this text
                     if self._host is None:
                         # a KERNEL CHILD (hosts off): the SDK spawned a CLI of this client's own, which dies with the client,
                         # so every connect that gets here is a fresh CLI and the block runs at the connect (an iteration that
@@ -9866,12 +9901,18 @@ class SdkSession:
         CLI moved THAT text into a turn, its own or the running one at a tool boundary, so the next text can go in without
         fusing with it. A text whose turn had already ended when it was taken (a settled hold) joins the fed-turn twin here,
         since the turn it is in is the one starting now. A terminal state without a start (cancelled, discarded, refused)
-        means the CLI will not run it: the hold goes all the same, said in the log. `queued` releases nothing, nor does any
-        frame for another uuid (an earlier text's, or one a previous kernel sent)."""
+        means the CLI will not run it: the hold goes all the same, said in the log. `queued` releases nothing; it records
+        that the CLI HOLDS the text (`received`), which is what lets the hold stand across a reconnect to the same CLI (the
+        connect loop's top). No frame for another uuid (an earlier text's, or one a previous kernel sent) does either."""
         if getattr(self, "_raw_frames", None) is not False:
             self._lifecycle = True
         u = getattr(self, "_untaken", None)
-        if u is None or not cl.command_uuid or cl.command_uuid != u.get("cu") or cl.state not in _LIFECYCLE_TAKEN:
+        if u is None or not cl.command_uuid or cl.command_uuid != u.get("cu"):
+            return
+        if cl.state == "queued":
+            u["received"] = True
+            return
+        if cl.state not in _LIFECYCLE_TAKEN:
             return
         if cl.state == "started":
             if u.get("settled") and getattr(self, "_inflight_texts", None) is not None:
@@ -13192,6 +13233,11 @@ class SdkBackend:
         decided = self._fresh_cli_decision(sess, c)
         if decided == "survivor" and getattr(sess, "_host_is_attach", False):
             self._seed_surviving_work(sess)
+            u = getattr(sess, "_untaken", None)
+            if isinstance(u, dict) and u.pop("carried", None):
+                # a hold carried across the reconnect (SdkSession's loop top) meets the CLI that reported holding its text:
+                # the hold stands, and that CLI's own lifecycle frames (it wrote one for this very text) release it
+                sess._lifecycle = True
         try:
             open_turns = int(hello.get("inflight") or 0)
         except (TypeError, ValueError):
@@ -14379,9 +14425,10 @@ class SdkBackend:
                 if not texts:
                     continue                       # every wake signal here was already driven
                 # No count of the tail's other entries rides along (2026-10-08): the log line said "+N other queued
-                # item(s)" from them, and on a weeks-old transcript N ran past 1,800 while nothing was queued. Most
-                # were peer messages the CLI delivered long ago as meta records, which _undelivered_wake_tail does not
-                # read as delivery, so the number read as a backlog that did not exist.
+                # item(s)" from them, and on a weeks-old transcript N ran past 1,800 while nothing was queued: romp's own
+                # sends, which the CLI logs without text, and peer messages the CLI had delivered as meta records, which
+                # the tail did not then read as delivery. The tail holds neither now (_undelivered_wake_tail), and the
+                # count stays out: the drive's line names what it delivers.
                 # LATCH in memory only: one drive per watermark within this process. The reg's
                 # driveMark is written by _drive_deliver AFTER the enqueue lands — persisting here
                 # made a kernel death in the latch→delivery window (seconds to minutes behind the
