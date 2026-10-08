@@ -76,16 +76,36 @@ await page.waitForFunction((u) => { const ts = Array.from(document.querySelector
 const live = await state(); const regionsLive = await regions(); const rowLive = await rowAtTop();
 // ROAD 2b (T386 stage 2, low 8): a fill BELOW the viewport. The head gap still stands above the filled run; a jump to the transcript
 // top puts the reader at the gap's TOP edge, the edge met by scrolling DOWN, so the gap asks for its top page (lo 0), which fills in
-// place with the reader's row held.
+// place with the reader held where they are.
+// The reader's place is read in the page, in the SAME task as the ask's send: the fill is the page's reply to that ask, so the reading
+// precedes the fill by construction. It was read by a round trip after the driver saw the ask on the wire, which raced the reply: when
+// the reply won (about half the runs) both readings were taken after the fill and agreed vacuously, and when the driver won, its reading
+// named the first rendered row, the tail run's top some 26,000 px below a viewport that showed only the gap. The row is the first one ON
+// SCREEN (null when the viewport holds no row), never one past the viewport's bottom.
+await page.evaluate(() => {
+  window.__readerPlace = () => {
+    const c = document.getElementById("content"), cr = c.getBoundingClientRect();
+    let row = null;
+    for (const t of Array.from(document.querySelectorAll("#content .turn[data-uuid]"))) { const r = t.getBoundingClientRect(); if (r.bottom > cr.top + 1 && r.top < cr.bottom - 1) { row = { uuid: t.dataset.uuid, y: Math.round(r.top - cr.top) }; break; } }
+    return { st: c.scrollTop, row };
+  };
+  window.__placeAtAsk = null;
+  const send = WebSocket.prototype.send;
+  WebSocket.prototype.send = function (d) {
+    if (window.__placeAtAsk === null) { try { const m = JSON.parse(d); if (m && m.type === "loadTurns") window.__placeAtAsk = Object.assign({ lo: m.lo, hi: m.hi }, window.__readerPlace()); } catch (e) { /* not a frame */ } }
+    return send.call(this, d);
+  };
+});
 const belowBefore = await sentOf("loadTurns"); const belowGesturesBefore = await gestures();
 await page.evaluate(() => { const c = document.getElementById("content"); c.scrollTop = 0; });
 await painted();
 await page.waitForFunction((n) => window.__sent.filter((m) => m.type === "loadTurns").length > n, belowBefore, { timeout: 10000 }).catch(() => {});
 const belowAsks = await page.evaluate((n) => window.__sent.filter((m) => m.type === "loadTurns").slice(n).map((m) => ({ lo: m.lo, hi: m.hi })), belowBefore);
-const belowRowBefore = await rowAtTop();
-await page.waitForFunction(() => { const rs = (typeof window.__rompRegions === "function" && window.__rompRegions()) || []; return rs.length > 0 && rs[0].kind === "run" && rs[0].lo === 0; }, null, { timeout: 10000 }).catch(() => {});
+// the fill: the reply's run at the head is among the regions and its first row is rendered (the reply is placed and painted in one task)
+await page.waitForFunction(() => { const rs = (typeof window.__rompRegions === "function" && window.__rompRegions()) || []; return rs.length > 0 && rs[0].kind === "run" && rs[0].lo === 0 && !!rs[0].first && Array.from(document.querySelectorAll("#content .turn[data-uuid]")).some((t) => t.dataset.uuid === rs[0].first); }, null, { timeout: 10000 }).catch(() => {});
 await painted();
-const belowRegions = await regions(); const belowRowAfter = await rowAtTop(); const belowGestures = await gestures();
+const belowAtAsk = await page.evaluate(() => window.__placeAtAsk);
+const belowRegions = await regions(); const belowAfter = await page.evaluate(() => window.__readerPlace()); const belowGestures = await gestures();
 // R3 (the client merge guard, 2026-09-19), the last measurement: after the fill, the live tail and the below-fill, the bottom of the view is
 // the transcript's newest row (the synthetic live turn's reply), and the rendered rows stand in transcript order (the file's records, then
 // the injected turn)
@@ -93,7 +113,7 @@ const r3 = await bottomCheck(tail.events[1].uuid, transcriptOrder().concat(tail.
 process.stdout.write("RESULT:" + JSON.stringify({ r3, boot: { regions: bootRegions, turns: boot.turns, atBottom: boot.atBottom, notice: boot.notice, strip: boot.strip }, turnsBefore, asks, gapsAsked, regionsAsked, rowBefore, rowAfter, gesturesBefore, gesturesAfter, fills,
   filled: { regions: regionsFilled, gaps: filled.gaps, turns: filled.turns, firstUuid: filled.firstUuid, lastUuid: filled.lastUuid, top: filled.top, notice: filled.notice, strip: filled.strip },
   gapPerTurn, runPerTurn,
-  rowLive, below: { asks: belowAsks, regions: belowRegions, rowBefore: belowRowBefore, rowAfter: belowRowAfter, gestures: belowGestures, gesturesBefore: belowGesturesBefore },
+  rowLive, below: { asks: belowAsks, regions: belowRegions, atAsk: belowAtAsk, after: belowAfter, gestures: belowGestures, gesturesBefore: belowGesturesBefore },
   live: { regions: regionsLive, lastUuid: live.lastUuid, atBottom: live.atBottom, notice: live.notice, strip: live.strip, turns: live.turns, top: live.top } }) + "\n");
 await browser.close();
 """
@@ -147,7 +167,10 @@ class ServedHistoryRegions(WindowLab):
         self.assertFalse(f["notice"], "a scroll-driven fill shows no notice: the glyph inside the gap is its cue")
 
     def test_a_gap_met_from_above_asks_for_its_top_page_and_fills_below_the_viewport(self):
-        # T386 stage 2, low 8: the head gap's TOP edge, met by scrolling down, asks for the top page (lo 0) and fills with the row held
+        # T386 stage 2, low 8: the head gap's TOP edge, met by scrolling down, asks for the top page (lo 0) and fills with the reader held.
+        # The reader's place is read at the ask (before the fill by construction) and after the fill is rendered; at the transcript top the
+        # head gap covers the viewport, so no row is on screen and the fill anchors on the point under the viewport top (fillInPlace), the
+        # head: the reader stays at scrollTop 0 and the head page's first row is the row they now read there.
         r = self._result()
         b = r["below"]
         self.assertGreaterEqual(len(b["asks"]), 1, "the gap met from above asked for no page: %r" % b)
@@ -156,8 +179,14 @@ class ServedHistoryRegions(WindowLab):
         self.assertEqual(b["regions"][0]["kind"], "run", "the head page filled into a run at the top: %r" % b["regions"])
         self.assertEqual(b["regions"][0]["lo"], 0, "…starting at the head: %r" % b["regions"])
         self.assertLessEqual(b["gestures"] - b["gesturesBefore"], 1, "the below-fill added no gesture beyond the reader's own jump into the gap: %r" % b)
-        if b["rowBefore"] and b["rowAfter"]:
-            self.assertEqual(b["rowAfter"]["uuid"], b["rowBefore"]["uuid"], "the reader's row held through the below-fill: %r → %r" % (b["rowBefore"], b["rowAfter"]))
+        at, after = b["atAsk"], b["after"]
+        self.assertIsNotNone(at, "the reader's place was read when the gap asked: %r" % b)
+        self.assertEqual((at["lo"], at["hi"]), (b["asks"][0]["lo"], b["asks"][0]["hi"]), "…at the head page's own ask: %r" % b)
+        self.assertEqual(at["st"], 0, "the reader stood at the transcript top when the gap asked (the premise): %r" % at)
+        self.assertIsNone(at["row"], "…with no row on screen: the head gap covered the viewport (the premise): %r" % at)
+        self.assertEqual(after["st"], at["st"], "the below-fill did not move the reader: %r → %r" % (at, after))
+        self.assertIsNotNone(after["row"], "the head page's rows are on screen after the fill: %r" % after)
+        self.assertEqual(after["row"]["uuid"], b["regions"][0]["first"], "the row the reader now reads at the top is the head page's first: %r, %r" % (after, b["regions"][0]))
 
     def test_the_head_gap_is_drawn_at_the_rendered_runs_per_turn_height(self):
         # MEDIUM 2: a gap's height counts TURNS times px-per-turn, not display units; within ten percent of the rendered run's per-turn height
