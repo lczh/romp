@@ -625,15 +625,19 @@ class DriveDelivery(unittest.TestCase):
     def test_a_bare_queued_message_rides_along_but_is_never_resent(self):
         """The CLI delivers its own queued plain messages at its next turn; the drive re-sending one
         would double-deliver it. Only wake-signal texts go into the driven turn; the bare entry is
-        counted, not sent."""
+        neither sent nor counted (2026-10-08): the log line's "+N other queued item(s)" was read from
+        entries the tail never retires (peer messages the CLI delivered as meta records), and on a
+        weeks-old transcript it reported 1,800 queued items while nothing was queued."""
         s = self._live()
         entries = [_ent(10, _wrap(0)), _ent(11, "a queued plain message", wrapper=False),
                    _ent(12, _wrap(1), ts=TS % (15, 0))]
         self.be.drive_idle_queue([self._cand(entries=entries)], wait=True)
         self.assertEqual(s.sent, [_wrap(0) + "\n\n" + _wrap(1)],
                          "a bare queued message is the CLI's own to deliver — never re-sent")
-        self.assertTrue(any("+1 other queued item" in str(m) for m in self.logs),
-                        "the ride-along is counted in the drive's log line")
+        lines = [str(m) for m in self.logs if "idle-queue drive" in str(m)]
+        self.assertTrue(any("waking the session for 2 queued notification(s)" in m for m in lines), lines)
+        self.assertFalse(any("other queued item" in m for m in lines),
+                         "the drive's log line counts what it delivers, never the tail's other entries: %r" % lines)
 
     def test_an_agent_notice_rides_along_but_is_never_resent(self):
         # the parser demotes agent completion notices to wrapper=False (the CLI delivers that class
@@ -645,7 +649,7 @@ class DriveDelivery(unittest.TestCase):
         self.be.drive_idle_queue([self._cand(entries=entries)], wait=True)
         self.assertEqual(s.sent, [_wrap(0) + "\n\n" + _wrap(1)],
                          "re-sending an agent notice would double-deliver a subagent completion")
-        self.assertTrue(any("+1 other queued item" in str(m) for m in self.logs))
+        self.assertFalse(any("other queued item" in str(m) for m in self.logs), "%r" % self.logs)
 
     def test_a_kernel_death_between_latch_and_delivery_is_not_a_discard(self):
         """The reg's driveMark is written AFTER the enqueue lands: a kernel death between acceptance

@@ -4863,8 +4863,9 @@ class RateLimitUsageStaleness(unittest.TestCase):
         self.assertIn("asyncio.ensure_future(self._do_refresh_usage())", src,
                       "every turn end refreshes the exact /usage snapshot (event-based)")
         q = inspect.getsource(sb.SdkSession._do_refresh_usage)
-        self.assertIn('_send_control_request({"subtype": "get_usage"})', q,
-                      "the designed CLI control request, via the SDK transport")
+        self.assertIn('_send_control_request({"subtype": "get_usage", "skip_behaviors": True})', q,
+                      "the designed CLI control request, via the SDK transport, asking for the rate limits alone "
+                      "(tests/test_usage_refresh_skips_behaviors.py)")
 
     def test_on_message_routes_rate_limit_events_to_the_recorder(self):
         s = sb.SdkSession(self.be, {"sid": "11111111-2222-3333-4444-555555555555", "name": "n", "cwd": self.d})

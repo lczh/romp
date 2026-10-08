@@ -8282,7 +8282,8 @@ class SdkSession:
         EVERY window — session, weekly_all, and the model-scoped weekly (Fable) — numbers the
         RateLimitEvent stream only ever supplies in the warning band and the statusline never carries at
         all (it lacks the Fable window entirely). Refreshed at every turn end (event-based, beside the
-        context refresh) and on demand from the kernel's /usage click. Guarded: one in flight."""
+        context refresh) and on demand from the kernel's /usage click. Guarded: one in flight. It asks for the
+        rate limits alone (skip_behaviors, 2026-10-08; the note at the request says why)."""
         if not self.client or self._usage_refreshing:
             return
         if self.api_key_auth:
@@ -8300,7 +8301,15 @@ class SdkSession:
                                   "bars will fall back to the rate-limit event stream" % self.name,
                                   problem=True)
             else:
-                r = await q._send_control_request({"subtype": "get_usage"})
+                # skip_behaviors (2026-10-08): without it the CLI also builds the answer's `behaviors` section, a scan
+                # its own schema says "reads every transcript touched in the last seven days", and while the scan runs
+                # the CLI takes no input: the hook answer its next turn waits for and every message sent meanwhile sit
+                # unread. romp reads rate_limits alone (_record_usage_snapshot). On a machine with gigabytes of recent
+                # transcripts the scan took 14 to 30 s after every result, so a session working through queued
+                # background-task notifications (one turn each) spent that long on each before it reached the user's
+                # next message, reading as idle all the while (tests/test_usage_refresh_skips_behaviors.py). The CLIs
+                # romp runs honour the field (2.1.263, 2.1.280, 2.1.281: behaviors comes back null at once).
+                r = await q._send_control_request({"subtype": "get_usage", "skip_behaviors": True})
         except Exception as e:
             # LOUD (the user 2026-08-02, whose 5h bar read 18% against a real 45%). This used to swallow
             # every failure, so a refresh that never landed was indistinguishable from one that did: the
@@ -14190,14 +14199,17 @@ class SdkBackend:
                          and (prev[0] != path or e["pos"] > prev[1] or e["ts"] > prev[2])]
                 if not texts:
                     continue                       # every wake signal here was already driven
-                others = sum(1 for e in c["entries"] if e.get("text") and not e.get("wrapper"))
+                # No count of the tail's other entries rides along (2026-10-08): the log line said "+N other queued
+                # item(s)" from them, and on a weeks-old transcript N ran past 1,800 while nothing was queued. Most
+                # were peer messages the CLI delivered long ago as meta records, which _undelivered_wake_tail does not
+                # read as delivery, so the number read as a backlog that did not exist.
                 # LATCH in memory only: one drive per watermark within this process. The reg's
                 # driveMark is written by _drive_deliver AFTER the enqueue lands — persisting here
                 # made a kernel death in the latch→delivery window (seconds to minutes behind the
                 # spawn stagger) discard the backlog forever, silently (2026-08-18 review).
                 self._drive_marks[sid] = (path, pos, ts)
                 self._drive_inflight.add(sid)     # released in _drive_deliver's finally, whatever path
-                todo.append((sid, texts, others, (path, pos, ts), prev))
+                todo.append((sid, texts, (path, pos, ts), prev))
             except Exception:
                 self._log("idle-queue drive (%s): %s" % (sid[:8] or "?", traceback.format_exc()))
         if not todo:
@@ -14215,7 +14227,7 @@ class SdkBackend:
         every drive logs one kernel-log line naming the session and the queued count (normal
         operation, not a problem); every failure — a refused reconnect, a failed send — lands in the
         problem ring, never silent."""
-        for sid, texts, others, mark, prev in todo:
+        for sid, texts, mark, prev in todo:
             try:
                 # Re-resolve at the send moment, never the acceptance-time snapshot: earlier
                 # candidates' spawns can hold this delivery back for minutes, and a session that died
@@ -14270,9 +14282,8 @@ class SdkBackend:
                 except Exception:
                     self._log("idle-queue drive (%s): drive mark not persisted (a kernel restart may "
                               "re-drive this backlog once): %s" % (sid[:8], traceback.format_exc()))
-                self._log("idle-queue drive (%s): waking the session for %d queued notification(s)%s"
-                          % (s.name, len(texts),
-                             " (+%d other queued item(s))" % others if others else ""))
+                self._log("idle-queue drive (%s): waking the session for %d queued notification(s)"
+                          % (s.name, len(texts)))
                 self._poke()
             except Exception:
                 self._log("idle-queue drive (%s): delivery failed: %s" % (sid[:8], traceback.format_exc()))
