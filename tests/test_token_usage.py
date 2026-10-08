@@ -9,6 +9,7 @@ import os
 import pathlib
 import tempfile
 import shutil
+import sys
 import time
 import unittest
 from datetime import datetime, timezone
@@ -613,16 +614,15 @@ class TokenAnalytics(unittest.TestCase):
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
         self.saved_state, self.saved_discover = jd.STATE, jd.discover
-        self.saved_cfg, self.saved_refresh = km.PRICE_CONFIG, km._refresh_remote_prices
+        self.saved_cfg = km.PRICE_CONFIG
         jd.STATE = pathlib.Path(self.td.name)
         km.PRICE_CONFIG = pathlib.Path(self.td.name) / "no-prices.json"   # nonexistent → defaults only
-        km._refresh_remote_prices = lambda now: None                     # no network in tests
         km._ANALYTICS_MEMO.clear()                                       # the TTL memo must not leak across tests
         km._JUDGE_USAGE_CACHE.update(path=None, size=-1, mtime=0.0, rows=[])
 
     def tearDown(self):
         jd.STATE, jd.discover = self.saved_state, self.saved_discover
-        km.PRICE_CONFIG, km._refresh_remote_prices = self.saved_cfg, self.saved_refresh
+        km.PRICE_CONFIG = self.saved_cfg
         self.td.cleanup()
 
     def test_window_splits_sessions_vs_per_judge_and_tier(self):
@@ -656,24 +656,19 @@ class TokenAnalytics(unittest.TestCase):
 
 
 class CostWeighting(unittest.TestCase):
-    """The cost-weighted analytics: SESSIONS priced tokens × _model_prices (defaults < remote feed <
-    ~/.config override); JUDGES use claude's exact logged cost. The remote feed is monkeypatched off so
-    these never touch the network."""
+    """The cost-weighted analytics: SESSIONS priced per call, tokens × _model_prices (Claude Code's own table <
+    ~/.config override) with the CLI's arithmetic; JUDGES use claude's exact logged cost."""
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
-        self.saved_cfg, self.saved_refresh = km.PRICE_CONFIG, km._refresh_remote_prices
-        self.saved_remote = dict(km._price_cache.get("remote", {}))
+        self.saved_cfg = km.PRICE_CONFIG
         self.saved_state, self.saved_discover = jd.STATE, jd.discover
         km.PRICE_CONFIG = pathlib.Path(self.td.name) / "model-prices.json"
-        km._refresh_remote_prices = lambda now: None      # no network in tests → defaults/config only
-        km._price_cache["remote"] = {}
         jd.STATE = pathlib.Path(self.td.name)
         km._ANALYTICS_MEMO.clear()                        # the TTL memo must not leak across tests
         km._JUDGE_USAGE_CACHE.update(path=None, size=-1, mtime=0.0, rows=[])
 
     def tearDown(self):
-        km.PRICE_CONFIG, km._refresh_remote_prices = self.saved_cfg, self.saved_refresh
-        km._price_cache["remote"] = self.saved_remote
+        km.PRICE_CONFIG = self.saved_cfg
         jd.STATE, jd.discover = self.saved_state, self.saved_discover
         self.td.cleanup()
 
@@ -684,9 +679,10 @@ class CostWeighting(unittest.TestCase):
         self.assertIsNone(km._price_for("some-other-model", prices), "unknown family → uncounted")
 
     def test_fable_and_sonnet5_are_priced_not_uncounted(self):
-        # Regression: both signed as None AND matched no family, so their tokens costed $0 silently.
-        prices = km._model_prices(NOW)
-        for mid, rate in (("claude-fable-5", 50e-6), ("claude-sonnet-5", 15e-6)):
+        # Regression: both signed as None AND matched no family, so their tokens costed $0 silently. Sonnet 5 at the rate
+        # Claude Code bills it (its catalog's tier_2_10), the figure the ledger it is read beside holds.
+        prices = km._model_prices()
+        for mid, rate in (("claude-fable-5", 50e-6), ("claude-sonnet-5", 10e-6)):
             row = km._price_for(mid, prices)
             self.assertIsNotNone(row, mid + " must be priced, not uncounted")
             self.assertEqual(row["out"], rate, mid + " output rate")
@@ -695,13 +691,12 @@ class CostWeighting(unittest.TestCase):
 
     def test_fable_5_1_has_its_own_row_with_the_quarter_rate_cache_read(self):
         # Before the row existed the family fallback handed Fable 5.1 Fable 5's $1/Mtok cache read — 4x
-        # its list rate (Claude Code 2.1.261's catalog: tier_10_50_cache_read_0_25), and the remote feed
-        # could never correct it because only exact (family, major, minor) signatures match.
-        prices = km._model_prices(NOW)
+        # its list rate (Claude Code 2.1.261's catalog: tier_10_50_cache_read_0_25).
+        prices = km._model_prices()
         row = km._price_for("claude-fable-5-1", prices)
         self.assertEqual((row["in"], row["out"], row["cache_w"], row["cache_r"]), (10e-6, 50e-6, 12.5e-6, 0.25e-6))
         self.assertEqual(km._price_for("claude-fable-5", prices)["cache_r"], 1e-6, "Fable 5 keeps its own rate")
-        self.assertEqual(km._price_sig("claude-fable-5-1"), ("fable", "5", "1"), "signs distinctly, so the feed can reach it")
+        self.assertEqual(km._price_sig("claude-fable-5-1"), ("fable", "5", "1"), "signs distinctly")
         self.assertEqual(km._price_for("claude-fable-5-1-20261201", prices)["cache_r"], 0.25e-6,
                          "…and a dated id of the same model lands on the fable-5-1 row by signature, not on the first fable row")
 
@@ -713,18 +708,13 @@ class CostWeighting(unittest.TestCase):
         self.assertEqual(km._price_sig("claude-sonnet-5-20260101"), ("sonnet", "5", None), "date is not a minor")
         self.assertIsNone(km._price_sig("gpt-4o"), "non-Anthropic id")
 
-    def test_remote_feed_can_reach_every_baked_in_model(self):
-        # _refresh_remote_prices builds `want` from DEFAULT_MODEL_PRICES; an id that cannot sign is
-        # invisible to the feed forever, which is how fable/sonnet-5 would have stayed stale.
-        want = {km._price_sig(k): k for k in km.DEFAULT_MODEL_PRICES if km._price_sig(k)}
-        self.assertEqual(len(want), len(km.DEFAULT_MODEL_PRICES),
-                         "every baked-in model must sign, or the feed can never refresh it")
-
     def test_config_overrides_default_price(self):
         km.PRICE_CONFIG.write_text(json.dumps(
             {"claude-opus-4-8": {"in": 9e-6, "out": 40e-6, "cache_w": 1e-6, "cache_r": 1e-7}}))
-        pr = km._model_prices(NOW)
+        pr = km._model_prices()
         self.assertEqual(pr["claude-opus-4-8"]["in"], 9e-6, "config overrides the baked-in default")
+        self.assertEqual(pr["claude-opus-4-8"]["cache_w_1h"], 10e-6, "…and only the keys it names")
+        self.assertEqual(pr["claude-opus-4-8"]["fast"]["in"], 10e-6, "the fast rates stay the CLI's unless configured")
         self.assertEqual(pr["claude-sonnet-4-6"]["out"], 15e-6, "an unconfigured model keeps its default")
 
     def test_session_cost_prices_per_message_model_and_all_token_classes(self):
@@ -739,6 +729,54 @@ class CostWeighting(unittest.TestCase):
         cost = km._session_cost(path, NOW - 3600, prices)
         expected = 1000 * 5e-6 + 500 * 25e-6 + 2000 * 6.25e-6 + 40000 * 0.5e-6   # cache reads count too
         self.assertAlmostEqual(cost, expected, places=9)
+
+    def test_session_cost_prices_each_call_as_claude_code_does_fast_mode_and_hour_long_cache_writes_included(self):
+        """The spend audit (2026-10-08): the table had no Opus 5.5 row (a family fallback priced it as Opus 4.8) and no
+        fast tier. Two synthetic Opus 5.5 calls, one standard with an hour-long cache write and one fast, which Claude
+        Code's arithmetic at its list rates bills at $2.086; the old table read them as $2.015, and as the same figure
+        whatever their speed."""
+        path = pathlib.Path(self.td.name) / "opus55.jsonl"
+        path.write_text(
+            _asst({"input_tokens": 2000, "output_tokens": 10000, "cache_creation_input_tokens": 50000,
+                   "cache_read_input_tokens": 1000000, "speed": "standard",
+                   "cache_creation": {"ephemeral_1h_input_tokens": 40000, "ephemeral_5m_input_tokens": 10000}},
+                  iso(NOW - 300), model="claude-opus-5-5", mid="msg_std") + "\n"
+            + _asst({"input_tokens": 1000, "output_tokens": 20000, "cache_creation_input_tokens": 30000,
+                     "cache_read_input_tokens": 500000, "speed": "fast",
+                     "cache_creation": {"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 30000}},
+                    iso(NOW - 200), model="claude-opus-5-5", mid="msg_fast") + "\n")
+        # $ per million tokens: 4 input, 20 output, 5 (5-minute) and 8 (1-hour) cache write, 0.2 cache read; fast twice each
+        cli = ((2000 * 4 + 10000 * 20 + 10000 * 5 + 40000 * 8 + 1000000 * 0.2)
+               + (1000 * 8 + 20000 * 40 + 30000 * 10 + 500000 * 0.4)) / 1e6
+        self.assertAlmostEqual(cli, 2.086, places=9)
+        self.assertAlmostEqual(km._session_cost(str(path), NOW - 3600, km._model_prices()), 2.086, places=9)
+
+    def test_the_kernel_prices_with_claude_codes_table_and_a_dated_id_finds_its_own_row(self):
+        """One table (kernel/cli_prices.py), shared with the spend repair: the kernel's baked-in prices are it, so a model
+        Claude Code prices is never a family guess here, and a dated id of any model in it lands on that model's row."""
+        cp = sys.modules["romp_cli_prices"]
+        self.assertEqual(km.DEFAULT_MODEL_PRICES, cp.price_rows())
+        prices = km._model_prices()
+        for mid in cp.CLI_PRICES:
+            self.assertIs(km._price_for(mid + "-20991231", prices), prices[mid], mid)
+        self.assertEqual(km._price_for("claude-opus-5-5", prices)["fast"]["out"], 40e-6)
+
+    def test_a_model_the_table_lacks_is_guessed_from_its_family_and_said_once(self):
+        """A family guess priced Opus 5.5 as Opus 4.8 with no word anywhere; a model id Claude Code's table lacks is still
+        priced (the newest model of its family), and named in the kernel log once per kernel life."""
+        import io
+        prices = km._model_prices()
+        km._PRICE_UNKNOWN_SAID.discard("claude-opus-9")
+        err = io.StringIO()
+        with mock.patch.object(sys, "stderr", err):
+            self.assertIs(km._price_for("claude-opus-9", prices), prices["claude-opus-5-5"])
+            self.assertIs(km._price_for("claude-opus-9", prices), prices["claude-opus-5-5"])
+            self.assertIs(km._price_for("claude-opus-5-5-20991231", prices), prices["claude-opus-5-5"])
+            self.assertIsNone(km._price_for("<synthetic>", prices))
+        said = err.getvalue().splitlines()
+        self.assertEqual(len(said), 1, said)
+        self.assertIn("'claude-opus-9' is not in Claude Code's price table", said[0])
+        self.assertIn("priced as claude-opus-5-5", said[0])
 
     def test_analytics_carries_cost_both_sides(self):
         p1 = pathlib.Path(self.td.name) / "s1.jsonl"

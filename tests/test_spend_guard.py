@@ -117,6 +117,39 @@ class SpendRate(unittest.TestCase):
         self.assertEqual(km._spend_window_usd(self.leaf, NOW + 5000, 600, PRICES), 0.0)
         self.assertEqual(km._spend_window_usd(os.path.join(self.td.name, "absent.jsonl"), NOW, 600, PRICES), 0.0)
 
+    def test_the_default_table_prices_each_call_as_claude_code_does_fast_mode_and_hour_long_cache_writes_included(self):
+        """The spend audit (2026-10-08): the guard's own table had no Opus 5.5 row and no fast tier, so it read Opus 5.5 at
+        Opus 4.8's rates whatever the call's speed and every cache write at the 5-minute rate. A synthetic turn of three
+        Opus 5.5 calls, one standard with an hour-long cache write, one fast in the leaf, one fast with an hour-long write in
+        a subagent: Claude Code's arithmetic at its list rates records the turn at $2.65 (total_cost_usd), and the guard's
+        default table must read the same. The old table read it as $2.3425."""
+        def call(t, mid, usage):
+            rec = assistant(t, mid, 0, model="claude-opus-5-5")
+            rec["message"]["usage"] = dict(usage, service_tier="standard", inference_geo="global")
+            return rec
+        write_jsonl(self.leaf, [
+            user(NOW - 300, "u1"),
+            call(NOW - 290, "msg_std", {"input_tokens": 2000, "output_tokens": 10000, "cache_creation_input_tokens": 50000,
+                                        "cache_read_input_tokens": 1000000, "speed": "standard",
+                                        "cache_creation": {"ephemeral_1h_input_tokens": 40000, "ephemeral_5m_input_tokens": 10000}}),
+            call(NOW - 200, "msg_fast", {"input_tokens": 1000, "output_tokens": 20000, "cache_creation_input_tokens": 30000,
+                                         "cache_read_input_tokens": 500000, "speed": "fast",
+                                         "cache_creation": {"ephemeral_1h_input_tokens": 0, "ephemeral_5m_input_tokens": 30000}})])
+        sub = Path(self.leaf).with_suffix("") / "subagents"
+        write_jsonl(sub / "agent-1.jsonl", [
+            call(NOW - 150, "msg_sub", {"input_tokens": 500, "output_tokens": 4000, "cache_creation_input_tokens": 20000,
+                                        "cache_read_input_tokens": 200000, "speed": "fast",
+                                        "cache_creation": {"ephemeral_1h_input_tokens": 20000, "ephemeral_5m_input_tokens": 0}})],
+            mtime=NOW - 150)
+        # Claude Code's rates for Opus 5.5 in $ per million tokens: 4 input, 20 output, 5 (5-minute) and 8 (1-hour) cache
+        # write, 0.2 cache read; fast mode twice each
+        cli = ((2000 * 4 + 10000 * 20 + 10000 * 5 + 40000 * 8 + 1000000 * 0.2)
+               + (1000 * 8 + 20000 * 40 + 30000 * 10 + 500000 * 0.4)
+               + (500 * 8 + 4000 * 40 + 20000 * 16 + 200000 * 0.4)) / 1e6
+        self.assertAlmostEqual(cli, 2.65, places=9)
+        with mock.patch.object(km, "PRICE_CONFIG", Path(self.td.name) / "no-model-prices.json"):
+            self.assertAlmostEqual(km._spend_window_usd(self.leaf, NOW, 600), 2.65, places=9)
+
     def test_the_window_reads_the_leaf_and_a_subagent_file_with_a_tail_accepted(self):
         """After a restart the assembly checkpoint restores a transcript as a TAIL entry (the records past its cut); the
         whole-file road would upgrade every live transcript to a full re-read on the guard's first cycle (the checkpoint's
@@ -535,18 +568,14 @@ class Guard(unittest.TestCase):
         self.assertIn("_spend_tree_list_dir(root, m, set(m[\"dirs\"]))", inspect.getsource(km._spend_window_files), "the tree memo's listing, the walk's rule kept")
         self.assertIn("_spend_window_files(leaf, since, now, stat=stat)", inspect.getsource(km._spend_window_usd))
 
-    def test_the_guard_never_starts_the_price_feed_fetch(self):
-        """The cost view refreshes the remote price feed when its cache is stale; the guard runs on the pusher's path in
-        every kernel, hermetic test kernels included, so it merges the table WITHOUT that refresh."""
+    def test_the_guard_fires_on_the_merged_table(self):
+        """The guard runs on the pusher's path in every kernel, hermetic test kernels included: its default prices are
+        Claude Code's table merged with the user's override, read without any network (the community price feed the cost
+        view once refreshed is gone, 2026-10-08), and a crossing fires on them."""
         self._spend(NOW, 200.0)
-        with mock.patch.object(km, "_refresh_remote_prices") as refresh:
+        with mock.patch.object(km, "PRICE_CONFIG", Path(self.td.name) / "no-model-prices.json"):
             km._spend_guard_tick(NOW, {SID: {"state": "working"}}, sessions=self.sessions, be=self.be, clients=self.clients)
-            km._spend_window_usd(self.leaf, NOW)
-        refresh.assert_not_called()
-        self.assertEqual(self.be.interrupts, [SID], "…and the crossing still fired on the merged table")
-        with mock.patch.object(km, "_refresh_remote_prices") as refresh:
-            km._model_prices(int(NOW))
-        refresh.assert_called_once_with(int(NOW))
+        self.assertEqual(self.be.interrupts, [SID], "the crossing fired on the merged table")
 
     def test_the_pusher_runs_the_guard_every_cycle_after_the_spend_pause_check(self):
         import inspect

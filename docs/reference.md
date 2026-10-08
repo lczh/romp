@@ -5865,8 +5865,13 @@ or delete.
 
 Every jobs pass the kernel reads each live session's spend rate: the
 dollars its transcript and the agent transcripts beside it (the subagents and
-workflow agents it fanned out) record over the last ten minutes, priced by the
-same per-model table the cost view uses, scaled to an hour. The data is what
+workflow agents it fanned out) record over the last ten minutes, scaled to an
+hour. Each call is priced the way Claude Code prices it, from its own rates
+(`kernel/cli_prices.py`): a fast call at the model's fast rates, cache writes
+held for an hour at their own rate, the same table the cost view uses, so the
+rate reads beside the dollars the CLI records. A model the table lacks is
+priced as the newest model of its family, or the dearest row when no family
+matches, and named once in the kernel log. The data is what
 the kernel already holds for the chat and the feed (the record cache), so the
 check reads little that is new: an agent file that changed inside the window is
 read, and after a restart an agent file inside the window whose restored tail
@@ -6093,10 +6098,20 @@ few side calls it writes to no transcript). The record's dollars and its four
 token columns come out of the row's day and hour buckets (the hour where the
 ledger still keeps it), its `bySid` entry under the session the kernel billed
 and its `byLogin` entry under its stored login, both read off the buckets
-because a turn row names neither; the `key` split and the turn counts stay.
+because a turn row names neither; for a row the API key billed, the bucket's
+`key` split and the session's too, where the kernel had folded the whole
+figure. Whether the key billed it is read off the same buckets: the key's share
+holds the row and the rest cannot (the registry's current word only when both
+can, since a session switched since reads as it is now). The turn counts stay.
 The row keeps the kernel's figures as `usdRecorded` and `tokRecorded`, carries
-the record taken out as `restoredCostUsd` and is stamped `repairRule` 6, so a
-second run finds nothing. A row a record could explain but the per-call
+the record taken out as `restoredCostUsd` and is stamped `repairRule` 6 and
+`restoredKeyed`, so a second run finds nothing. A row an earlier run corrected
+before the key split was decided (no `restoredKeyed`) is caught up by the same
+command, once: it is decided on the buckets as that run found them and, where
+the key billed it, its record comes out of the key split. The session a record
+was taken from is the one whose key split stands above its total, the state
+that run left. The report lists every bucket whose key split exceeds its
+total, as the ledger stands and as it would after the run. A row a record could explain but the per-call
 evidence does not confirm is listed and left as recorded. The dry run prints
 the subtractions per day and the ledger's month totals before and after;
 `--apply` keeps the same order and backups as the staircase repair, with a
@@ -7038,7 +7053,11 @@ analytics** opens the **Token usage** panel: two bars, **Sessions** and
 judges' bar stacks **By judge** or by **Index vs triage**, the measure is
 **Tokens** or **Cost ($)**, and a line under the legend reads the judges as a
 percentage of the session tokens, with the combined figure. Judge cost is what
-was logged; session cost is tokens priced from a table.
+was logged; session cost is each call's tokens priced at Claude Code's own
+rates, fast calls and hour-long cache writes included, with
+`~/.config/romp/model-prices.json` overriding a model's row (dollars per token:
+`in`, `out`, `cache_w`, `cache_w_1h`, `cache_r`, and a `fast` row of the same
+keys).
 
 **What your usage costs.** The bottom bar's usage figures open **Usage at API
 prices**, which the palette reaches as **Token usage** too: a card for the

@@ -56,6 +56,7 @@ pal = load_source("romp_palette", HERE / "palette.py")  # session-identity palet
 sb = load_source("romp_session_backend", HERE / "session_backend.py")  # the SessionBackend ABC
 lg = load_source("romp_logins", HERE / "logins.py")  # stored Claude logins (T346): the registry beside the machine's own login
 gcf = load_source("romp_gc_freeze", HERE / "gc_freeze.py")  # Road B for #1735: freeze the loaded decoded heap out of the collector's walk
+cpr = load_source("romp_cli_prices", HERE / "cli_prices.py")  # Claude Code's own per-call prices: the one table that prices tokens
 CHAT_VIEW = ROOT / "vscode-extension"               # the tuned UI, current in this worktree via `git merge main`
 # ROMP_DIST_DIR: test seam (romp-lab serves a COPY of the built bundles, so its rebuild simulations —
 # mtime bumps that must raise the reload banner — never touch the dist the LIVE kernel serves).
@@ -51962,8 +51963,9 @@ def _series_index(hour_key, h0):
 # the last SPEND_GUARD_WINDOW_S seconds, scaled to an hour, from data the kernel already holds: the record cache the
 # pusher serves the leaf transcript from (em._read_jsonl_incremental), plus the agent transcripts beside the leaf
 # (`<leaf stem>/subagents/*.jsonl`, the subagents and workflow agents the session fanned out; only the files that
-# changed inside the window are read), each assistant record priced by the same table the cost view uses (tokens by
-# _price_for; a response logged more than once, one per content block, counts once, at its largest usage row).
+# changed inside the window are read), each assistant record priced by the same table the cost view uses (_price_for's
+# row, Claude Code's own arithmetic over the record's usage: kernel/cli_prices.py; a response logged more than once, one
+# per content block, counts once, at its largest usage row).
 # Over the ceiling, once per crossing: the session is INTERRUPTED (the Stop button's road, so the fan-out ends now,
 # not after the model reads a message), handed ONE message in the user's voice (no romp vocabulary; the voice test
 # renders it), every connected dashboard gets a warn toast naming the session, the rate and the moment, and one
@@ -52452,10 +52454,7 @@ def _spend_file_rows(f, since, prices, dearest, agent=False):
         row = _price_for(str(m.get("model") or ""), prices) or dearest
         if not row:
             continue
-        c = (int(u.get("input_tokens") or 0) * float(row.get("in") or 0)
-             + int(u.get("output_tokens") or 0) * float(row.get("out") or 0)
-             + int(u.get("cache_creation_input_tokens") or 0) * float(row.get("cache_w") or 0)
-             + int(u.get("cache_read_input_tokens") or 0) * float(row.get("cache_r") or 0))
+        c = cpr.call_usd(row, u)                         # Claude Code's arithmetic: the fast rates, the 1-hour writes
         mid = m.get("id")
         if mid:
             i = best.get(mid)
@@ -52516,12 +52515,12 @@ def _spend_tail_index(ent, size):
 
 def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, stat=True):
     """Dollars the session spent in the last `window_s` seconds: the leaf's and its agent files' rows in the window
-    (_spend_file_rows), priced by `prices` (the merged table by default, without the feed refresh). Every agent file is
+    (_spend_file_rows), priced by `prices` (the merged table by default, _model_prices). Every agent file is
     then folded (_spend_fold_agent, 2026-10-01): the guard's read of a workflow agent, which has no card, was the only one,
     and with no fold over it a returned agent's records stayed in the record cache for the kernel's life. The leaf, the first
     file, is never folded here."""
     if prices is None:
-        prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
+        prices = _model_prices()
     dearest = max(prices.values(), key=lambda p: float(p.get("out") or 0)) if prices else None
     since = now - window_s
     total = 0
@@ -52752,7 +52751,7 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
     _spend_guard_seed()                                  # once per kernel life: the ledger's verdicts
     rows = _alive_sessions(now, live_map) if sessions is None else sessions
     if prices is None:
-        prices = _model_prices(int(now), refresh=False)   # never a network fetch from the pusher's path
+        prices = _model_prices()
     live, live_paths = set(), set()
     for s in rows:
         sid, path = s.get("sid"), s.get("path")
@@ -56324,7 +56323,7 @@ def _lane_memo(sid, parsed, session, goals, caps, cap_key, live, bft, parse_ok=T
     return value[:6]
 
 
-_session_tok_cache = {}   # transcript path -> ((mtime, size), [(t, in, out, cache_w, cache_r, model), ...]): one
+_session_tok_cache = {}   # transcript path -> ((mtime, size), [(t, in, out, cache_w, cache_r, model, extras), ...]): one
 #                           token row per API RESPONSE (message.id) in THAT file. The main transcript and each
 #                           subagent transcript cache separately, so a file that moved re-parses itself alone
 
@@ -56491,11 +56490,13 @@ def _transcript_tok_rows(p):
                     continue
                 m = o.get("message") or {}
                 u = m.get("usage") or {}
-                row = (_msg_epoch(o),
+                x = cpr.usage_extras(u)          # what the call's price needs beyond its counts (1-hour writes, fast,
+                row = (_msg_epoch(o),            #  US inference, web searches): None in the common all-neutral case
                        int(u.get("input_tokens") or 0), int(u.get("output_tokens") or 0),
                        int(u.get("cache_creation_input_tokens") or 0),
                        int(u.get("cache_read_input_tokens") or 0),
-                       m.get("model") or "")   # for cost weighting (price is per-model)
+                       m.get("model") or "",     # for cost weighting (price is per-model)
+                       x if any(x) else None)
                 mid = m.get("id")
                 if mid:
                     j = by_id.get(mid)
@@ -56537,20 +56538,21 @@ def _session_usage(path, t0, prices):
     """The analytics build's ONE pass over a session's rows: token totals over responses timestamped
     >= t0 (the SESSIONS half of the split, cut at the same t0 as the PIPELINE half, _judge_usage, so
     the modal compares like-for-like) and the token-price estimate over the same span (`cost`: each
-    response's tokens x its model's _model_prices row — an ESTIMATE; sessions log no cost of their own,
-    unlike judges — with cache reads priced too, cheap per token but huge in volume). `prices` None
+    response priced as Claude Code prices it, its model's _model_prices row with the call's own extras, a fast
+    call at the fast rates and 1-hour writes at their rate — an ESTIMATE in the sense that sessions log no cost of
+    their own, unlike judges — with cache reads priced too, cheap per token but huge in volume). `prices` None
     skips the pricing. Undated rows count (defensive). Zeros when the transcript is unreadable."""
     out = {"in": 0, "out": 0, "cache_w": 0, "cache_r": 0, "cost": 0.0}
     rows = _session_tok_rows(path)
     if rows is None:
         return out
-    for (t, i, o, cw, cr, model) in rows:
+    for (t, i, o, cw, cr, model, x) in rows:
         if t is not None and t < t0:
             continue
         out["in"] += i; out["out"] += o; out["cache_w"] += cw; out["cache_r"] += cr
         pr = _price_for(model, prices) if prices else None
         if pr:
-            out["cost"] += i * pr["in"] + o * pr["out"] + cw * pr["cache_w"] + cr * pr["cache_r"]
+            out["cost"] += cpr.cost_parts(pr, i, o, cw, cr, *(x or ()))
     return out
 
 
@@ -56658,122 +56660,92 @@ def _judge_usage(t0):
 # left; the analytics modal's _token_analytics is the one arbitrary-window rollup.)
 
 
-# ── per-model $ prices for the cost-weighted analytics view ──────────────────────────────────────
-# The cost view weights tokens by real $. JUDGES carry claude -p's exact total_cost_usd (logged per call
-# in judge-usage.jsonl), so their cost needs NO price table. SESSIONS (the transcript) carry tokens but no
-# cost, so we price them tokens × rate. Anthropic publishes no pricing API, so rates come from, lowest →
-# highest precedence: a baked-in DEFAULT table (so the view always works offline), a best-effort refresh
-# of the community LiteLLM price feed (cached, stale-while-revalidate, never fatal), and the user's
-# ~/.config/romp/model-prices.json override. Values are $ per token, keyed by our internal model ids.
+# ── per-model $ prices: the cost view's session estimate and the spend guard's rate ──────────────────────────────
+# JUDGES carry claude -p's exact total_cost_usd (logged per call in judge-usage.jsonl), so their cost needs NO price table.
+# SESSIONS (the transcript) carry tokens but no cost, so they are priced per call, tokens x rate, with Claude Code's OWN
+# table and arithmetic (kernel/cli_prices.py: its catalog's rates, 1-hour cache writes at their own rate, a fast call at
+# the model's fast rates), so the figure reads beside the total_cost_usd the spend ledger holds. The kernel kept a table
+# of its own until the spend audit (2026-10-08), refreshed from a community price feed by (family, major, minor): it had
+# no Opus 5.5 row, so the family fallback priced Opus 5.5 at Opus 4.8's rates, and neither it nor the feed knew fast mode
+# or the 1-hour write rate; the guard read standard Opus 5.5 at about 1.6 times its price and fast Opus 5.5 at 0.9. The
+# feed is gone with it: it could only ever overwrite the CLI's rates with rates that ignore both. The user's
+# ~/.config/romp/model-prices.json still overrides a model's row ($ per token: in, out, cache_w, cache_w_1h, cache_r, and
+# a `fast` row of the same keys), the user's own word over the list price.
 PRICE_CONFIG = Path(os.path.expanduser("~/.config/romp/model-prices.json"))
-PRICE_FEED_URL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
-PRICE_TTL = 6 * 3600
-DEFAULT_MODEL_PRICES = {   # $/token: input, output, cache write (5m), cache read. Starting points only —
-                           # the LiteLLM refresh overwrites these with the live feed (which carries the
-                           # exact ids), so they just need to be sane when offline / before the first fetch.
-    "claude-fable-5":            {"in": 10e-6, "out": 50e-6, "cache_w": 12.5e-6, "cache_r": 1e-6},
-    "claude-fable-5-1":          {"in": 10e-6, "out": 50e-6, "cache_w": 12.5e-6, "cache_r": 0.25e-6},   # its
-    #   own row: without one the family fallback priced Fable 5.1's cache reads at Fable 5's $1/Mtok — 4x
-    #   the list rate. Rates read from Claude Code's baked-in model catalog (2.1.261, checked on 2.1.263),
-    #   where claude-fable-5-1 carries the tier `tier_10_50_cache_read_0_25` (10 / 50 / 12.5 / 0.25 $/Mtok;
-    #   1h cache writes are 20 and are folded into cache_w here at the 5m rate, a known simplification)
-    "claude-opus-4-8":           {"in": 5e-6, "out": 25e-6, "cache_w": 6.25e-6, "cache_r": 0.5e-6},
-    "claude-sonnet-5":           {"in": 3e-6, "out": 15e-6, "cache_w": 3.75e-6, "cache_r": 0.3e-6},
-    "claude-sonnet-4-6":         {"in": 3e-6, "out": 15e-6, "cache_w": 3.75e-6, "cache_r": 0.3e-6},
-    "claude-haiku-4-5-20251001": {"in": 1e-6, "out": 5e-6,  "cache_w": 1.25e-6, "cache_r": 0.1e-6},
-}   # Sonnet 5 is listed at its STANDARD rate, not the introductory one, so the table stays right
-    # once the intro period ends; the feed refresh corrects it either way while the intro is live.
-_price_cache = {"t": 0, "remote": {}}   # remote feed prices, refreshed on a TTL in the background
+DEFAULT_MODEL_PRICES = cpr.price_rows()   # {model id: row}, $ per token, newest model first in each family
+_PRICE_KEYS = ("in", "out", "cache_w", "cache_w_1h", "cache_r")
+_PRICE_UNKNOWN_SAID = set()               # model ids the table could not place, said once each per kernel life
 
 
 def _price_sig(name):
-    """(family, major, minor) of an Anthropic model id, or None. Families: fable/opus/sonnet/haiku.
+    """(family, major, minor) of an Anthropic model id, or None. Families: fable/mythos/opus/sonnet/haiku.
     The minor is OPTIONAL so single-number ids sign too ('claude-opus-4-8' → ('opus','4','8'),
     'claude-sonnet-5' → ('sonnet','5',None), 'claude-fable-5' → ('fable','5',None)); it is capped at
     two digits so a trailing DATE is not mistaken for one ('claude-sonnet-5-20260101' still signs as
     ('sonnet','5',None), and 'claude-haiku-4-5-20251001' as ('haiku','4','5')). Matching stays
     conservative: a differing minor is a DIFFERENT signature, never a silent near-miss."""
-    m = re.search(r"(fable|opus|sonnet|haiku)\D*(\d+)(?:[.\-](\d{1,2})(?!\d))?", (name or "").lower())
+    m = re.search(r"(fable|mythos|opus|sonnet|haiku)\D*(\d+)(?:[.\-](\d{1,2})(?!\d))?", (name or "").lower())
     return (m.group(1), m.group(2), m.group(3)) if m else None
 
 
-def _refresh_remote_prices(now):
-    """Best-effort, stale-while-revalidate: if the cached feed is older than PRICE_TTL, kick a background
-    fetch and return immediately (the caller uses defaults/config + whatever's cached). The match is
-    CONSERVATIVE — by exact (family, major, minor) — so a near-miss (our opus-4-8 vs a feed opus-4-1) is
-    never silently mispriced; an unmatched model just keeps its baked-in default. Never raises."""
-    if now - _price_cache["t"] < PRICE_TTL:
-        return
-    _price_cache["t"] = now                          # stamp first so a slow/failing fetch isn't hammered
-    want = {_price_sig(k): k for k in DEFAULT_MODEL_PRICES if _price_sig(k)}
-
-    def work():
-        try:
-            import urllib.request
-            with urllib.request.urlopen(PRICE_FEED_URL, timeout=4) as r:
-                feed = json.loads(r.read().decode("utf-8", "replace"))
-        except Exception:
-            return
-        out = {}
-        for k, v in (feed.items() if isinstance(feed, dict) else []):
-            if not str(k).lower().startswith("claude") or not isinstance(v, dict):
-                continue
-            sig = _price_sig(k)
-            if sig not in want or want[sig] in out:
-                continue
-            try:
-                inp = float(v["input_cost_per_token"])
-                out[want[sig]] = {"in": inp, "out": float(v["output_cost_per_token"]),
-                                  "cache_w": float(v.get("cache_creation_input_token_cost") or inp),
-                                  "cache_r": float(v.get("cache_read_input_token_cost") or inp)}
-            except Exception:
-                continue
-        _price_cache["remote"] = out
-
-    threading.Thread(target=work, name="price-refresh", daemon=True).start()
-
-
-def _model_prices(now=None, refresh=True):
-    """The merged $/token price map: baked-in DEFAULT < best-effort remote feed < user config override. `refresh`
-    (the default) lets a stale feed cache kick its background fetch; the spend guard passes False, since it runs on
-    the pusher's path in every kernel (a hermetic test kernel included) and must never start a network fetch: it
-    merges whatever the cost view's last refresh left in the cache (T350)."""
-    if now is None:
-        now = int(time.time())
-    if refresh:
-        _refresh_remote_prices(now)
+def _model_prices():
+    """The merged $/token price map: Claude Code's own table (DEFAULT_MODEL_PRICES) < the user's config override. A config
+    row overrides the keys it names and keeps the rest of the model's row (its fast rates included); no network, so the
+    spend guard reads it on the pusher's path in every kernel."""
     prices = {k: dict(v) for k, v in DEFAULT_MODEL_PRICES.items()}
-    prices.update({k: dict(v) for k, v in _price_cache["remote"].items()})
     try:
         cfg = json.loads(PRICE_CONFIG.read_text())
         for k, v in (cfg.items() if isinstance(cfg, dict) else []):
             if isinstance(v, dict):
-                base = prices.get(k, {})
-                prices[k] = {kk: float(v.get(kk, base.get(kk, 0)) or 0) for kk in ("in", "out", "cache_w", "cache_r")}
+                row = dict(prices.get(k, {}))
+                row.update({kk: float(v.get(kk) or 0) for kk in _PRICE_KEYS if kk in v})
+                for kk in ("in", "out", "cache_w", "cache_r"):
+                    row.setdefault(kk, 0.0)
+                if isinstance(v.get("fast"), dict):
+                    row["fast"] = {kk: float(v["fast"].get(kk, row.get(kk, 0)) or 0) for kk in _PRICE_KEYS}
+                prices[k] = row
     except Exception:
         pass
     return prices
 
 
 def _price_for(model, prices):
-    """The price row for a model: exact id, else the priced model with the same (family, major, minor)
-    signature (a dated `claude-fable-5-1-2026…` lands on the fable-5-1 row, not on whichever fable row
-    the table lists first — the two differ 4x on cache reads), else any priced model of the same family
-    (fable/opus/sonnet/haiku) so an unknown id still gets a sane rate, else None (uncounted — defensive)."""
+    """The price row for a model: exact id, else the row of the Claude Code model it is a dated form of
+    (`claude-opus-5-5-2026…` on claude-opus-5-5, never on claude-opus-5), else the priced model with the same
+    (family, major, minor) signature (a config-only id), else the newest priced model of the same family, else None.
+    A model id that reaches the family guess or the miss is said once per kernel life on stderr (the kernel log): a
+    family guess is how Opus 5.5 came to be priced as Opus 4.8 without a word. A record the CLI wrote itself
+    (`<synthetic>`, no API call) is no model and is not said."""
     if model in prices:
         return prices[model]
+    mid = cpr.model_id(model)
+    if mid is not None and mid in prices:
+        return prices[mid]
     sig = _price_sig(model)
     if sig:
         for k, v in prices.items():
             if _price_sig(k) == sig:
                 return v
     m = (model or "").lower()
-    for fam in ("fable", "opus", "sonnet", "haiku"):
+    for fam in ("fable", "mythos", "opus", "sonnet", "haiku"):
         if fam in m:
             for k, v in prices.items():
                 if fam in k.lower():
+                    _price_unknown(model, "priced as " + k)
                     return v
+    if m and not m.startswith("<"):
+        _price_unknown(model, "and no model of its family is")
     return None
+
+
+def _price_unknown(model, how):
+    if model in _PRICE_UNKNOWN_SAID:
+        return
+    _PRICE_UNKNOWN_SAID.add(model)
+    try:
+        sys.stderr.write("prices: model %r is not in Claude Code's price table (kernel/cli_prices.py); %s\n" % (model, how))
+    except Exception:
+        pass
 
 
 def _session_cost(path, t0, prices):
@@ -56801,7 +56773,7 @@ def _token_analytics(now, window):
     if memo and memo["jkey"] == jkey and now - memo["t"] < 15:
         return memo["resp"]
     t0 = now - window
-    prices = _model_prices(now)
+    prices = _model_prices()
     s = {"in": 0, "out": 0, "cost": 0.0}
     # discover at the MODAL's window, never the 48h default: the 7d/30d views used to sum judges over
     # the full window but sessions over only the last 48h of activity — the "judges = N% of session
@@ -68191,7 +68163,7 @@ def _push_notify(title, body, sid="", badge=None, kind="card", card_id="", host=
     needs-you count for the app icon (None omits it — the mirrored federated shape,
     plans/federated-push.md); and kind/card_id/host, so the tap can also scroll the feed to the
     card and name the origin of a relayed event. Runs on the pusher thread, so all network work
-    moves to a daemon thread (the _refresh_remote_prices discipline) and this never blocks or
+    moves to a daemon thread and this never blocks or
     raises."""
     subs = _push_subs()
     if not subs:
@@ -69879,7 +69851,6 @@ _JOBS_GATE_MEM = {   # an input that is not a file, read at each declaring job's
     "intrBlocked": lambda: _jg_ledger_part("intrBlocked"),
     "compactClicked": lambda: tuple(sorted((str(k), v) for k, v in list(_compact_clicked.items()))),
     "held": lambda: tuple(sorted(str(k) for k in list(_held_working))),
-    "prices": lambda: (_price_cache.get("t"), id(_price_cache.get("remote"))),
     "ckptSettle": lambda: _jg_ckpt_settle(),         # each listed session's settle evidence, by the settle write's own reader
 }
 
@@ -70516,7 +70487,7 @@ _JOBS_INPUTS = {
     "usagePoll": {"inputs": (), "due": lambda tick: _usage_poll_last[0] + USAGE_POLL_SECS},
     "retryUpgrade": {"inputs": (), "due": lambda tick: _retry_upgrade_last[0] + RETRY_UPGRADE_TICK_S},
     "autoPauseOnSpend": {"inputs": ("box:retryPaused", "files:transcript", "rows", "members")},
-    "spendGuard": {"inputs": ("files:transcript", "rows", "members", "box:spendCeiling", "box:prices", "mem:prices"),
+    "spendGuard": {"inputs": ("files:transcript", "rows", "members", "box:spendCeiling", "box:prices"),
                    "due": _jg_due_spend, "owed": _jg_owed_spend},
     "autoResumeRetry": {"inputs": ("box:retryPaused", "box:usage", "box:account", "files:transcript", "rows", "members"),
                         "due": _jg_due_resume},

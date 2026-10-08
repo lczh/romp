@@ -62,7 +62,7 @@ SID_TESTS = "33333333-4444-5555-6666-777777777777"
 MANAGER_VARS = ("ROMP_MANAGER_PORT", "ROMP_SERVE_PORT", "ROMP_MANAGER_PID", "ROMP_SUPERVISED")
 WEB_TURNS = 400       # a transcript large enough that the cold row's full assembly shows in the counters
 EXPECTED_NEUTRALIZED = {
-    "km._refresh_remote_prices", "km._warm_fleet_bg", "km._system_notify", "km._push_notify", "km._push_forward",
+    "km._warm_fleet_bg", "km._system_notify", "km._push_notify", "km._push_forward",
     "km._badge_push", "km._repo_index_spawn",   # the repo listing's refresh thread, run inline (2026-10-07)
     "romp_kernel_perf_bench.subprocess", "romp_judge.subprocess", "romp_sdk_backend.subprocess",
     "romp_credentials.subprocess",   # loaded by sdk_backend; its credential helper runs as a subprocess (review find, 2026-09-08)
@@ -994,7 +994,7 @@ class Recorders(unittest.TestCase):
                                _atomic_write=self._fake_atomic_write,
                                _read_state_json=lambda path, st=None, expect=None: None,
                                _order_audit_path=lambda: Path(self.state) / "order-audit.jsonl",
-                               _refresh_remote_prices=None, _warm_fleet_bg=None, _system_notify=None,
+                               _warm_fleet_bg=None, _system_notify=None,
                                _push_notify=None, _push_forward=None, _badge_push=None,
                                _repo_index_spawn=None, _repo_index_refresh=lambda cwd: None)
 
@@ -1020,7 +1020,6 @@ class Recorders(unittest.TestCase):
         km._system_notify("romp: api", "body")
         km._push_forward([{"title": "api: done", "body": "body", "sid": SID_API, "kind": "card", "cardId": "g7"}])
         km._badge_push(3)
-        self.assertIsNone(km._refresh_remote_prices(time.time()))
         self.assertIsNone(km._warm_fleet_bg(time.time()))
         self.assertEqual(rec["notifications"],
                          [("push", "api: done"), ("push", "api: done"), ("push", "web finished a turn"), ("push", "tests: done"),
@@ -1157,7 +1156,7 @@ class CheckpointShadow(unittest.TestCase):
                                _atomic_write=lambda path, text, mode=None: None,
                                _read_state_json=lambda path, st=None, expect=None: None,
                                _order_audit_path=lambda: Path(self.state) / "order-audit.jsonl",
-                               _refresh_remote_prices=None, _warm_fleet_bg=None, _system_notify=None,
+                               _warm_fleet_bg=None, _system_notify=None,
                                _push_notify=None, _push_forward=None, _badge_push=None,
                                _repo_index_spawn=None, _repo_index_refresh=lambda cwd: None)
 
