@@ -72,6 +72,26 @@ def _fire(case, backend=None, quiesce=False, broadcast=None):
             km._graceful_term(signal.SIGTERM, None)
     ex.assert_called_once_with(0)
 
+
+class _WriteClock:
+    """A monotonic clock that stands still until the test moves it (advance), patched as the `time` global of the kernel
+    and the event model for one exit, so the exit's caps and the checkpoint writer's budget count only what the test's
+    stand-in writes say they took. Everything else (time, sleep) is the real module's. Patched onto those two modules,
+    never onto the time module, so nothing outside them sees it."""
+
+    def __init__(self):
+        self.now = time.monotonic()
+
+    def monotonic(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 # The kernel under test's own state root: bound when it loaded under this module's XDG_STATE_HOME, and
 # where its import-time constants (RESTART_CUTS_FILE) live.
 STATE_ROOT = km.RESTART_CUTS_FILE.parent
@@ -1819,20 +1839,24 @@ class ExitPath(unittest.TestCase):
     def test_the_leaves_primed_at_exit_are_written_before_any_other_dirty_file(self):
         # the priming exists so a leaf's checkpoint carries a cursor for every fold; written in the store's sorted order, the
         # files the budget reached were the alphabetically first, not the leaves just primed. Two of three sessions prime,
-        # and their leaves sort last among ten dirty files
+        # and their leaves sort last among ten dirty files.
+        # The cap is measured on a clock only the writes move (_WriteClock: each write takes one second of it), so how many
+        # writes a cap allows is decided by the exit's code and never by the runner's scheduling. With real 0.2 s sleeps
+        # against a 0.3 s cap, a macOS runner whose first sleep ran past 0.3 s wrote one leaf instead of two (CI, 2026-10-08)
         sess = self._sessions("web", "api", "tests")
-        primed = {self.LEAVES["api"], self.LEAVES["tests"]}
-        dirty = sorted(["/synthetic/a%02d.jsonl" % i for i in range(8)] + sorted(primed))
-        self.assertEqual(dirty[-2:], sorted(primed), "the primed leaves sort last")
+        primed = [self.LEAVES["api"], self.LEAVES["tests"]]      # in the order the exit primes them: the listing's order
+        dirty = sorted(["/synthetic/a%02d.jsonl" % i for i in range(8)] + primed)
+        self.assertEqual(dirty[-2:], primed, "the primed leaves sort last")
         written = []
+        clock = _WriteClock()
 
-        def run(write_s, cap_s):
+        def run(cap_s):
             del written[:]
             km.RESTART_CUTS_FILE.unlink() if km.RESTART_CUTS_FILE.exists() else None
             km._EXIT_ONCE = threading.Lock()
 
             def write(p, force=False):
-                time.sleep(write_s)
+                clock.advance(1.0)
                 written.append(p)
                 return True
             with mock.patch.object(km, "_sessions", lambda now, *a, **k: list(sess)), \
@@ -1845,14 +1869,17 @@ class ExitPath(unittest.TestCase):
                  mock.patch.object(km, "EXIT_DEADLINE_S", 30.0, create=True), \
                  mock.patch.object(km, "EXIT_DRAIN_BUDGET_S", 1.0), \
                  mock.patch.object(km, "EXIT_PRIME_BUDGET_S", 10.0), \
-                 mock.patch.object(km, "EXIT_CKPT_WRITE_BUDGET_S", cap_s):
+                 mock.patch.object(km, "EXIT_CKPT_WRITE_BUDGET_S", cap_s), \
+                 mock.patch.object(km, "time", clock), mock.patch.object(km.em, "time", clock):
                 _fire(self)
             return list(written)
-        everything = run(0.0, 10.0)
-        self.assertEqual(sorted(everything[:2]), sorted(primed), "the primed leaves first: %r" % everything)
-        self.assertEqual(len(everything), 10, "then every other dirty file")
-        two = run(0.2, 0.3)                          # a cap that fits two writes (the first always writes; 0.1 s of slack each way)
-        self.assertEqual(sorted(two), sorted(primed), "the writes the cap allowed went to the leaves just primed: %r" % two)
+        everything = run(20.0)
+        self.assertEqual(everything[:2], primed, "the primed leaves first: %r" % everything)
+        self.assertEqual(everything[2:], dirty[:8], "then every other dirty file, in the store's order: %r" % everything)
+        self.assertEqual(run(0.5), primed[:1], "a cap shorter than one write: the one write the writer always makes goes to the "
+                                               "first leaf primed")
+        self.assertEqual(run(1.5), primed, "a cap that fits two writes: both went to the leaves just primed")
+        self.assertEqual(run(2.5), primed + dirty[:1], "a third write: the store's first other dirty file")
 
     def test_the_stand_down_skips_the_tick_jobs_and_the_settle_writes_loop(self):
         stand = getattr(km, "_EXIT_STAND_DOWN", None)
