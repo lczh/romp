@@ -385,14 +385,16 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         self.assertGreater(len(quiet), 20, sorted(quiet))
         return quiet
 
-    def _cycles_and_passes(self, patches, between=None, n=3):
+    def _cycles_and_passes(self, patches, between=None, n=3, on_jobs_thread=None):
         """The pusher's cycle, then the jobs thread's pass, `n` times, one thread each as in the kernel, under `patches` (the
         quiet jobs and the world a test sets); `between(i)` runs before the i-th cycle, where the world moves between passes.
         Each pass is recorded as the kernel's jobs loop records it (_PERF_STATS.jobs_pass, in the same submitted call on the
         jobs thread), so a job that tells the boot's first pass by the pass count (or by the first-pass split it records)
         sees the later passes as later (review of 2026-10-05, round four). The jobs loop's other signal for the boot's first
         pass, the boot marks (_BOOT_HEALTH_DONE and _BOOT_FIRST, which _jobs_cycle reads before the pass and reports after
-        it), is not advanced here: every pass of this harness reads as the boot's first by those marks (round five)."""
+        it), is not advanced here: every pass of this harness reads as the boot's first by those marks (round five).
+        `on_jobs_thread` runs first on the jobs thread (the pool's initializer): a test that patches the process's clock
+        learns that thread's identity there, so the patch reads only on the two threads the harness runs."""
         km = self.km
         before = km._PERF_STATS.jobs.get("passes", 0)
 
@@ -400,7 +402,7 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
             km._jobs_pass(now, {})
             km._PERF_STATS.jobs_pass(0.0)
         with mock.patch.multiple(km, **patches), \
-                concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="jobs-probe") as jobs:
+                concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="jobs-probe", initializer=on_jobs_thread) as jobs:
             for i in range(n):
                 if between is not None:
                     between(i)
@@ -654,6 +656,11 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
                 clock["t"] = t0 + 10.0                              # the boot's first pass runs 10 s past its first sight
 
         def between(i):
+            seen = []
+            other = threading.Thread(target=lambda: seen.append(time.monotonic()), name="another-thread-reads-the-clock")
+            other.start()
+            other.join()
+            self.assertNotEqual(seen, [clock["t"]], "another thread reads the real clock, never this test's")
             if i == 1:
                 leaf["size"] = 2                                    # web's leaf grows before the second pass, inside the period
                 clock["t"] = t0 + 15.0
@@ -664,8 +671,17 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         patches.update(_auto_nudge_tick=walk, CKPT_PERIOD_S=period,
                        _stat_key=lambda path: ("synthetic", leaf["size"] if str(path) == self.LEAF_A else 1))
         self.sessions = [{"sid": self.SID_A, "path": self.LEAF_A}, {"sid": self.SID_B, "path": self.LEAF_B}]
-        with mock.patch.object(km.time, "monotonic", lambda: clock["t"]):
-            self._cycles_and_passes(patches, between)
+        # The patched clock reads only on this test's two threads, the pusher's (this one) and the jobs thread the harness
+        # starts. `km.time` is the process's one time module, so the patch is process-wide, and every other thread (another
+        # test's kernel thread, a backend's sweep taking its deadline) read this test's clock, as a thread's read took a
+        # step of tests/test_perf_stats.py's scripted clock (PR #150). Another thread gets the real clock, and one reads it
+        # before every cycle (`between`) to keep it so.
+        mine, real_clock = {threading.get_ident()}, time.monotonic
+
+        def _clock():
+            return clock["t"] if threading.get_ident() in mine else real_clock()
+        with mock.patch.object(km.time, "monotonic", _clock):
+            self._cycles_and_passes(patches, between, on_jobs_thread=lambda: mine.add(threading.get_ident()))
         self.assertEqual(walks, [t0, t0 + 15.0, t0 + period + 5.0], "the walk ran in every pass, on the patched clock")
         self.assertEqual(after_second["persisted"], [], "the growth inside the period since first sight was not written")
         self.assertEqual(after_second["entry"], (("synthetic", 1), t0), "and web's entry kept first sight's stat and stamp")

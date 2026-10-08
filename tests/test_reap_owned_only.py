@@ -103,10 +103,13 @@ class Boot:
         self.d, self.ps, self.sessions, self.hosts = d, ps, sessions, hosts
         self.tags, self.starts, self.sids = tags, dict(starts or {}), tuple(sids)
         self.runs, self.killed, self.said, self.started = [], [], [], []
+        self.ps_fault = None        # an exception the process listing raises instead of answering (a ps that cannot run)
 
     def run(self, argv, **kw):
         self.runs.append(list(argv))
         out = ""
+        if argv == sb.PS_ARGV and self.ps_fault is not None:
+            raise self.ps_fault
         if argv == sb.PS_ARGV:
             out = "\n".join(self.ps) + "\n"
         elif argv == sb.SCOPE_LIST_ARGV:
@@ -317,6 +320,29 @@ class AnUnreadableLeaseIsJudgedByItsAge(unittest.TestCase):
         self.assertEqual(boot.signaled(), [CLI_A], "ended now that its lease spares nothing")
         self.assertEqual(boot.started, [SID], "and the session resumed")
         self.assertIn(sb.BOOT_RESUME_NUDGE, sb.read_reg(Path(d), SID).get("queue") or [])
+
+    def test_a_held_cli_whose_process_listing_fails_once_its_lease_settles_stays_deferred_for_the_next_pass(self):
+        """A failed process listing is no verdict on the CLI the boot spared. The deferral used to leave the set before the
+        listing was read, so one failed `ps` left the session down until something else connected it, with only a log
+        line. It stays deferred and the next pass reads the listing again; the failure is said once for the episode, and
+        the listing reading again ends it."""
+        d, lp, host, boot = self._setup()
+        be = self._go(boot)
+        t = time.time() - sb.LEASE_TTL_S - 5
+        os.utime(lp, (t, t))                                                   # the lease settled: stale
+        boot.ps_fault = OSError("synthetic: ps could not run")
+        for _ in range(3):
+            self.assertEqual(boot.retake(be), 1, "no listing, no verdict: still deferred")
+        self.assertEqual((boot.signaled(), boot.started), ([], []), "nothing ended, nothing started")
+        said = [m for m in boot.said if "process listing" in m]
+        self.assertEqual(len(said), 1, "said once for the episode, not once per pass: %r" % said)
+        self.assertIn("synthetic: ps could not run", said[0])
+        boot.ps_fault = None
+        self.assertEqual(boot.retake(be), 0, "the listing reads: judged, and decided again")
+        self.assertEqual(boot.signaled(), [CLI_A], "the orphan ended now that the listing names it")
+        self.assertEqual(boot.started, [SID], "and the session resumed")
+        self.assertIn(sb.BOOT_RESUME_NUDGE, sb.read_reg(Path(d), SID).get("queue") or [])
+        self.assertEqual(sum("process listing reads again" in m for m in boot.said), 1, boot.said[-4:])
 
     def test_a_held_cli_stays_with_its_host_when_the_lease_reads_as_the_live_hosts(self):
         """The lease reads again a beat later, naming the spared CLI under its live host: the CLI is owned, nothing is

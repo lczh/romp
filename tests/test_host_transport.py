@@ -1337,6 +1337,71 @@ class BackendHostRules(unittest.TestCase):
         self.assertEqual((sb.read_reg(Path(d), SID) or {}).get("queue"), [sb.BOOT_RESUME_NUDGE], "the restart notice")
         self.assertIn("machineCut", (Path(d) / "states" / (SID + ".jsonl")).read_text())
 
+    def test_a_message_that_starts_the_session_while_its_boot_decision_is_taken_gets_no_restart_notice_behind_it(self):
+        """The decision checked that the session was not running, let go of the lock that starts sessions, and only then
+        put the restart notice at the head of the saved queue. A message landing in between started the session, whose
+        queue was seeded from the saved one without the notice, and the notice then sat in the saved queue of a running
+        session: the next queue write dropped it, or a later boot delivered it about a restart long past, and the cut was
+        stamped on a session that had moved on. The check and the write are one step under that lock: a session a message
+        started is its own, and nothing is written for it. Both roads that take the decision: the boot's, and the deferral
+        watch's once a lease settles."""
+        import threading
+        for road in ("boot", "deferral"):
+            with self.subTest(road=road):
+                d, be = self._be()
+                Path(d, "session-hosts").write_text("off")
+                hold = threading.Event()
+
+                def start(sess):                                   # a session thread that runs until the test lets go
+                    sess.thread = threading.Thread(target=hold.wait, args=(30,), name="sdk-stand-in", daemon=True)
+                    sess.thread.start()
+                    self.addCleanup(lambda: (hold.set(), sess.thread.join(5)))
+                if road == "deferral":
+                    self._deferred_boot(d, be)
+                    self._age(d, sb.LEASE_TTL_S + 5)               # the lease goes stale: the decision is a resume
+                else:
+                    sb.write_reg(Path(d), SID, {"sid": SID, "name": "web", "cwd": d, "alive": True, "lastSid": SID, "queue": []})
+                    sb.append_state(Path(d), SID, "working")
+                real, landed = sb.cut_turn_start, []
+
+                def a_message_lands(state_dir, sid):               # inside the decision, after its check, before its write
+                    if not landed:
+                        landed.append(be._ensure(SID))             # what send() does first: start the session
+                    return real(state_dir, sid)
+                with mock.patch.object(sb, "cut_turn_start", a_message_lands), mock.patch.object(sb.SdkSession, "start", start):
+                    if road == "deferral":
+                        self.assertEqual(be._lease_deferral_once(), 0)
+                    else:
+                        be._boot_reconcile([sb.read_reg(Path(d), SID)])
+                self.assertTrue(landed and landed[0] is be.sessions[SID] and landed[0].thread.is_alive(), "the message started it")
+                self.assertEqual((sb.read_reg(Path(d), SID) or {}).get("queue") or [], [],
+                                 "no restart notice in the saved queue of a running session")
+                self.assertEqual(landed[0].pending(), [], "nor in its own")
+                self.assertNotIn("machineCut", (Path(d) / "states" / (SID + ".jsonl")).read_text(), "and no cut stamped")
+                self.assertTrue(any("running already" in m for m in be._test_logs), be._test_logs[-4:])
+
+    def test_a_failing_deferral_pass_is_said_once_per_episode(self):
+        """A pass that raised at the top level logged its traceback every LEASE_HEARTBEAT_S, inside the `except`, so each
+        landed in the error center: a fault that lasted filled it. Said once when the passes start failing, with the
+        traceback; nothing while they keep failing; a plain line when a pass succeeds again, which ends the episode."""
+        d, be = self._be()
+        script = iter(["fail", "fail", "fail", 1, "fail", "fail", 0])
+
+        def once():
+            step = next(script)
+            if step == "fail":
+                raise RuntimeError("synthetic pass fault")
+            return step
+        with mock.patch.object(be, "_lease_deferral_once", once):
+            be._lease_deferral_loop(sleep=lambda s: None)
+        failed = [r["text"] for r in be.problems() if "lease deferrals: a pass failed" in r.get("text", "")]
+        self.assertEqual(len(failed), 2, "one row per episode, not one per pass: %r" % failed)
+        self.assertTrue(all("RuntimeError: synthetic pass fault" in t for t in failed), "each with its traceback")
+        again = [m for m in be._test_logs if "lease deferrals: a pass succeeded" in m]
+        self.assertEqual(len(again), 2, "each episode ends on a plain line: %r" % be._test_logs[-6:])
+        self.assertIn("after 3 failed", again[0])
+        self.assertFalse([r for r in be.problems() if "a pass succeeded" in r.get("text", "")], "never a problem itself")
+
     def test_two_automatic_messages_with_the_same_words_are_both_queued(self):
         # the fourth item: a by-text dedupe dropped a legitimately repeated notice and reported it accepted
         d, be = self._be()

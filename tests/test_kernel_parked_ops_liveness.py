@@ -198,9 +198,19 @@ class DeliveryRidesTheSettle(unittest.TestCase):
             km._pusher_cycle()                                                    # back-to-back, as a wake would
             self.assertEqual(self.be.calls, [("send", "one")], "the compact does NOT fire into the opening turn")
         far = time.monotonic() + 7200.0                                           # the fallback window passed
-        with mock.patch.object(km.time, "monotonic", lambda: far), redirect_stderr(io.StringIO()):
+        # far for THIS thread only, the one the cycle and its drain run on. `km.time` is the process's one time module, so
+        # the patch is process-wide, and every other thread (another test's kernel thread, a backend's sweep) read the clock
+        # two hours ahead, as a thread's read took a step of tests/test_perf_stats.py's scripted clock (PR #150). Another
+        # thread gets the real clock; one reads it inside the window below to keep it so.
+        mine, real_clock, seen = threading.get_ident(), time.monotonic, []
+        with mock.patch.object(km.time, "monotonic", lambda: far if threading.get_ident() == mine else real_clock()), \
+                redirect_stderr(io.StringIO()):
             km._pusher_cycle()
+            other = threading.Thread(target=lambda: seen.append(time.monotonic()), name="another-thread-reads-the-clock")
+            other.start()
+            other.join()
         self.assertEqual(self.be.calls, [("send", "one"), ("send", "/compact")])
+        self.assertLess(seen[0], far - 3600.0, "another thread reads the real clock, never this test's")
 
     def test_a_dead_sessions_queue_drop_takes_its_hold_with_it(self):
         # the hold check precedes delivery, so a hold present when send() raises can only have been armed

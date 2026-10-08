@@ -8817,12 +8817,23 @@ class SdkSession:
         except Exception as e:
             self.backend._log("host (%s): stand-down state write failed: %s" % (self.name, e))
 
+    def _connect_failure_text(self, exc) -> str:
+        """What a failed connect reported, worded as the could-not-start card words it (launch_failure_text): the CLI's own
+        stderr when the exception defers to it (the SDK's exit error carries only SDK_STDERR_PLACEHOLDER, and the CLI said
+        why on stderr before it exited), the exception's own text otherwise. A connect that failed before any CLI ran (a
+        host lease that cannot be read, a missing binary) is never worded from the stderr an earlier CLI left behind."""
+        defers = SDK_STDERR_PLACEHOLDER in str(getattr(exc, "stderr", "") or "")
+        return launch_failure_text(exc, self.stderr_tail() if defers else "")
+
     def _rewind_failed(self, exc):
-        """The CLI refused a rewind connect. Drop the one-shot flag (never re-offer a target the CLI just
-        refused), pull the held edit turn off the queue, and surface both a warn toast (with the message
-        text, so nothing is silently lost) and a kernel-log line. The session then reconnects plainly.
-        A BARE rollback (delete) enqueued nothing — the queue's head, if any, is an unrelated held
-        message (postal etc.) that must survive and ride the un-rewound branch."""
+        """A rewind connect failed: the CLI refused the target, or the connect failed before any CLI ran (a host lease
+        that cannot be read, say). Drop the one-shot flag (never re-offer a target the CLI just refused, nor apply it
+        unasked on a later connect), pull the held edit turn off the queue, and surface both a warn toast (with the
+        message text, so nothing is silently lost) and a kernel-log line, each naming what the connect reported
+        (_connect_failure_text; "the CLI refused it" for any failure blamed the CLI for a lease it never saw). The
+        session then reconnects plainly. A BARE rollback (delete) enqueued nothing — the queue's head, if any, is an
+        unrelated held message (postal etc.) that must survive and ride the un-rewound branch."""
+        why = self._connect_failure_text(exc)
         bare = self._rewind_bare
         self._rewind_to = self._rewind_leaf = ""
         self._rewind_bare = False
@@ -8838,14 +8849,13 @@ class SdkSession:
                                      rewindWait=False)
         except Exception as e:
             self.backend._log("rewind (%s): registry clear failed: %s" % (self.name, e))
-        self.backend._log("rewind (%s): the CLI refused --resume-session-at (%s: %s) — flag dropped, "
-                          "%s" % (self.name, type(exc).__name__, exc,
-                                  "the rollback did not happen" if bare else "edited message returned to the user"))
+        self.backend._log("rewind (%s): the connect with --resume-session-at failed (%s) — flag dropped, %s"
+                          % (self.name, why, "the rollback did not happen" if bare else "edited message returned to the user"))
         try:
             self.backend._notify("chat", {"type": "warn", "text":
-                ("the rollback failed (the session's CLI refused it) — the conversation is unchanged" if bare else
-                 "the rewind failed (the session's CLI refused it) — your edited message was NOT sent%s"
-                 % ((": " + dropped) if dropped else ""))})
+                ("the rollback failed (%s) — the conversation is unchanged" % why if bare else
+                 "the rewind failed (%s) — your edited message was NOT sent%s"
+                 % (why, (": " + dropped) if dropped else ""))})
         except Exception as e:
             self.backend._log("rewind (%s): could not tell the chat the rewind failed: %s" % (self.name, e))
         # the conversation is unchanged → the kernel RESTORES the cards its gesture-time hold hid
@@ -12044,6 +12054,7 @@ class SdkBackend:
         self._leases: dict = {}            # sid -> (session, lease dict): the leases this kernel holds (T305)
         self._boot_attach_sids: set = set()   # sids the boot reconcile attached to a live host (T315)
         self._lease_deferred: dict = {}       # sid -> a boot decision an unreadable lease could not settle (_lease_defer)
+        self._lease_listing_failed = False    # the deferral's process listing is failing: said once per episode (_lease_rejudge)
         self._lease_watch_thread = None       # the thread taking those decisions again as their leases settle
         self._host_spawning: set = set()   # sids with a host spawn in flight (one host per session, ever)
         self._host_recently_ended: dict = {}   # sid -> host identity this kernel asked to end (its lease removal races a reconnect)
@@ -13788,8 +13799,10 @@ class SdkBackend:
         registry row `r` read fresh and its host lease: ('lease', None) when that lease cannot be read and may be a live
         host's (the caller defers it, _lease_defer); ('attach', None) when a live host holds its CLI; ('start', (cut,
         queued, dead_tasks)) when it resumes, its resume nudge and notices already prepended to the persisted queue and
-        a cut turn stamped; (None, None) when it stays as it is. Shared by the boot's loop and by the same decision taken
-        again once a deferring lease resolves (_lease_deferral_once), with the boot's own `boot_t` and `down_t`."""
+        a cut turn stamped; ('running', None) when a message started the session while this was decided, so it is the
+        message's and nothing is written for it; (None, None) when it stays as it is. Shared by the boot's loop and by the
+        same decision taken again once a deferring lease resolves (_lease_deferral_once), with the boot's own `boot_t` and
+        `down_t`."""
         queued = [t for t in (r.get("queue") or []) if isinstance(t, str) and t]
         lstate = self._host_lease(sid, if_unreadable="unreadable")[1]
         if lstate == "unreadable":
@@ -13847,22 +13860,34 @@ class SdkBackend:
         prepend = ([nudge] if cut else []) \
                 + ([ASK_DIED_NOTICE] if ask_died else []) \
                 + ([task_death_notice(dead_tasks)] if dead_tasks else [])
-        if prepend or dead_tasks:
-            with self._reg_lock:
-                reg = read_reg(self.state_dir, sid) or dict(r)
-                reg["queue"] = prepend + [t for t in (reg.get("queue") or [])
-                                          if isinstance(t, str) and t and t not in prepend]
-                if dead_tasks:
-                    reg["bgTasks"] = []   # reported — never re-notify for the same deaths
-                if ask_died:
-                    reg["pendingAsk"] = False   # asked once per death — the re-raise mints a fresh flag
-                write_reg(self.state_dir, sid, reg)
-        if cut:
-            # Durable "romp cut this, romp is continuing it" stamp, written with the resume
-            # notice rather than waiting for it to reach disk — so the interrupt-block tick
-            # cannot read the intervening bare stop record as the user stopping the session
-            # (see append_machine_cut).
-            append_machine_cut(self.state_dir, sid, "restart")
+        # Not running, and the writes below: ONE step under self._lock, which _ensure starts sessions under. A message that
+        # started the session first owns it (nothing written); one after adopts the saved queue, notices and all. Checked
+        # apart from the write, a message in between left the notices in a running session's saved queue and the cut
+        # stamped on a session that had moved on. _lock, then _reg_lock: _ensure's order
+        with self._lock:
+            s = self.sessions.get(sid)
+            running = bool(s and s.thread.is_alive())
+            if not running:
+                if prepend or dead_tasks:
+                    with self._reg_lock:
+                        reg = read_reg(self.state_dir, sid) or dict(r)
+                        reg["queue"] = prepend + [t for t in (reg.get("queue") or [])
+                                                  if isinstance(t, str) and t and t not in prepend]
+                        if dead_tasks:
+                            reg["bgTasks"] = []   # reported — never re-notify for the same deaths
+                        if ask_died:
+                            reg["pendingAsk"] = False   # asked once per death — the re-raise mints a fresh flag
+                        write_reg(self.state_dir, sid, reg)
+                if cut:
+                    # Durable "romp cut this, romp is continuing it" stamp, written with the resume
+                    # notice rather than waiting for it to reach disk — so the interrupt-block tick
+                    # cannot read the intervening bare stop record as the user stopping the session
+                    # (see append_machine_cut).
+                    append_machine_cut(self.state_dir, sid, "restart")
+        if running:
+            self._log("boot reconcile: %s is running already (a message started it while its restart was being decided), "
+                      "so nothing is written for it" % (r.get("name") or sid[:8]))
+            return "running", None
         return "start", (cut, len(queued), bool(dead_tasks))
 
     # ── a boot decision a lease could not settle, taken again when it can (the review of #150) ──────────────────────────
@@ -13899,15 +13924,25 @@ class SdkBackend:
 
     def _lease_deferral_loop(self, sleep=None) -> None:
         """The deferral watch: one pass each LEASE_HEARTBEAT_S while any boot decision is deferred on a lease; exits when
-        none is. `sleep` is the test seam, as _lease_beat_loop's is."""
+        none is. `sleep` is the test seam, as _lease_beat_loop's is. A pass that fails is said once per episode, with its
+        traceback (a problem row, logged inside the `except`), and the episode ends at the next pass that succeeds, said as
+        a plain line: logged on every failed pass, a fault that lasted put a traceback in the error center each beat."""
         sleep = sleep or time.sleep
+        failed = 0                        # passes failed in a row: the episode, open while above zero
         while True:                       # loop-ok: one pass per lease beat, the cadence its evidence moves at; ends with the set
             sleep(LEASE_HEARTBEAT_S)
             try:
                 left = self._lease_deferral_once()
             except Exception:
-                self._log("lease deferrals: a pass failed: %s" % traceback.format_exc())
+                failed += 1
+                if failed == 1:
+                    self._log("lease deferrals: a pass failed (said once until a pass succeeds; the watch tries again each "
+                              "%.0f s): %s" % (LEASE_HEARTBEAT_S, traceback.format_exc()))
                 left = 1
+            else:
+                if failed:
+                    self._log("lease deferrals: a pass succeeded after %d failed" % failed, problem=False)
+                failed = 0
             if left == 0:
                 with self._lock:
                     if not getattr(self, "_lease_deferred", None):
@@ -13940,13 +13975,18 @@ class SdkBackend:
                     continue
                 r.setdefault("sid", sid)
                 if not all(self._lease_rejudge(u, pids, d["lastsids"]) for u, pids in d["holds"].items() if pids):
-                    self._log("boot reconcile (%s): stays down: a claude process on its conversation that the boot spared "
-                              "for an unreadable lease could not be ended now that the lease settled" % name)
+                    # no process listing, so no verdict on the CLIs the boot spared (_lease_rejudge says so, once per
+                    # episode): the deferral stays for the next pass. Dropped here, the session stayed down until something
+                    # else connected it, with one log line to say why
+                    with self._lock:
+                        self._lease_deferred.setdefault(sid, d)
                     continue
                 outcome, _ = self._boot_decide(sid, r, d["boot_t"], d["down_t"])
                 if outcome == "lease":
                     self._lease_defer(sid, {sid: {}}, d["boot_t"], d["down_t"], d["lastsids"])
                     continue
+                if outcome == "running":
+                    continue                          # a message started it meanwhile; _boot_decide said so
                 self._log("boot reconcile (%s): its host lease settled; decided again: %s"
                           % (name, {"attach": "attaching to its live host", "start": "resuming it"}.get(outcome, "nothing to start")))
                 if outcome == "attach":
@@ -13964,15 +14004,27 @@ class SdkBackend:
         lease as it now reads (a stale or absent one is no lease; a readable one only when it names one of them), and only
         their verdicts are taken (anything else on the machine is not this reap's), and an orphan is ended with its tree
         and its row, as the boot ends one (every held CLI carried this kernel's tag). True when none is left unjudged
-        beside the session (each gone, owned, or ended); False when the listing could not be read."""
+        beside the session (each gone, owned, or ended); False when the listing could not be read, which is no verdict:
+        the caller keeps the deferral and the next pass reads the listing again. That failure is said once per episode,
+        and the next listing that reads ends it (a listing failing for a while would otherwise put a row in the error
+        center each beat)."""
         live = {int(p) for p, st in pids.items() if st and proc_start(int(p)) == st}
         if not live:
             return True
         try:
             ps_lines = subprocess.run(PS_ARGV, capture_output=True, text=True, timeout=10).stdout.splitlines()
         except Exception as e:
-            self._log("boot reconcile: the process listing for the CLIs spared on %s's lease failed: %s" % (lease_sid[:8], e))
+            if not getattr(self, "_lease_listing_failed", False):
+                self._lease_listing_failed = True
+                self._log("boot reconcile: the process listing failed (%s: %s), so the claude process(es) the boot spared "
+                          "on %s's unreadable lease cannot be judged now that it settled; every session waiting on such a "
+                          "judgment stays down, and the listing is read again each %.0f s"
+                          % (type(e).__name__, e, lease_sid[:8], LEASE_HEARTBEAT_S))
             return False
+        if getattr(self, "_lease_listing_failed", False):
+            self._lease_listing_failed = False
+            self._log("boot reconcile: the process listing reads again; the CLIs spared on unreadable leases are judged",
+                      problem=False)
         lease = self._lease_read(lease_sid)[0]
         try:
             leases = [lease] if isinstance(lease, dict) and int(lease.get("pid")) in live else []
@@ -16031,7 +16083,8 @@ class SdkBackend:
             self.sessions[sid] = s
             # the queue mirror can move between the reg read above and this insert: an automatic message queued
             # behind a stand-down (an append, under _reg_lock alone, seeing no session yet; the commit-15 review's
-            # third item) or the boot reconcile's notices (a prepend). Nothing in memory has enqueued yet (the
+            # third item). (The boot reconcile's notices cannot: _boot_decide prepends them under this lock, after
+            # checking that no session runs.) Nothing in memory has enqueued yet (the
             # caller's enqueue follows this return), so the mirror is adopted whole from a fresh read under
             # _reg_lock now that the insert is visible: a later _persist_queue then writes back what the mirror
             # held plus what memory adds. (An enqueue that races the window between this read and the caller's is
