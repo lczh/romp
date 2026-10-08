@@ -207,29 +207,44 @@ class RestartOverACheckpointedSession(unittest.TestCase):
         k.send_signal(signal.SIGTERM)
         k.wait(timeout=30)
 
+    def _docs(self):
+        ckdir = os.path.join(self.state, "checkpoints")
+        return [f for f in os.listdir(ckdir) if f.endswith(".asm.json.gz")] if os.path.isdir(ckdir) else []
+
+    def _settle_document(self, port):
+        """web's turn ends once the jobs pass has taken its first sight of web, and the settle write then writes web's assembly
+        document from the parse a tab just made; returns once the document is on disk (the event a test's stop waits for), or
+        after 60 s. The turn end is a later lastStopAt in web's registry entry (what the Stop hook records, the settle write's
+        primary evidence), published by a rename the way every writer of the file does: a states-log row would serve the
+        settle too, but it is one of the files the judges key their memos on, and the next kernel would find those memos
+        stale and re-plan the session (its caption tasks read every pre-cut body). The exit's drain wrote the document until
+        2026-10-08, when the exit stopped writing documents."""
+        for _ in range(120):                       # loop-ok: bounded; a pass ran, so its first sight of web is on record
+            if (self._get(port, "/perf").get("jobs") or {}).get("passes", 0) >= 1:
+                break
+            time.sleep(0.5)
+        reg = Path(self.state, "sdk", WEB + ".json")
+        rec = json.loads(reg.read_text())
+        rec["lastStopAt"] = self.t0 + 95
+        tmp = reg.with_name(reg.name + ".tmp.%d.0.1" % os.getpid())
+        tmp.write_text(json.dumps(rec))
+        os.replace(tmp, reg)
+        for _ in range(120):                       # loop-ok: bounded; the document on disk is the event
+            if self._docs():
+                break
+            time.sleep(0.5)
+        return self._docs()
+
     def test_the_second_kernel_restores_the_assembly_from_the_first_kernels_document(self):
         k1, p1, log1 = self._boot()
-        ckdir = os.path.join(self.state, "checkpoints")
-
-        def docs_now():
-            return [f for f in os.listdir(ckdir) if f.endswith(".asm.json.gz")] if os.path.isdir(ckdir) else []
         try:
-            for _ in range(120):                   # loop-ok: bounded; the jobs pass's first sight of web is on record once a pass ran
-                if (self._get(p1, "/perf").get("jobs") or {}).get("passes", 0) >= 1:
-                    break
-                time.sleep(0.5)
             dt1, _ = self._open_tab(p1)
-            with open(os.path.join(self.state, "states", WEB + ".jsonl"), "a") as f:   # web's turn end: the settle evidence moves, so
-                f.write(json.dumps({"t": self.t0 + 72, "state": "idle"}) + "\n")      #  the next pass's settle write takes the document
-            for _ in range(120):                   # loop-ok: bounded; the document on disk is the event the stop waits for
-                if docs_now():
-                    break
-                time.sleep(0.5)
+            self._settle_document(p1)
             perf1 = self._get(p1, "/perf")["asmCheckpoint"]
             self.assertEqual(perf1["fallbacks"], {}, "a first boot has nothing to fall back from")
         finally:
             self._stop(k1)
-        docs = docs_now()
+        docs = self._docs()
         self.assertEqual(len(docs), 1, "the settle wrote web's assembly document while the kernel ran (the exit writes none); "
                                        "wrote: %s; the writer's skips: %s; the kernel's last lines:%s"
                          % (docs, perf1.get("skipped"), self._log_tail(log1)))

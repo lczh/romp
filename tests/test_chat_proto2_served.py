@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """T323 stage 4b (2026-09-11): the proto-2 chat wire over a real hermetic kernel. A first kernel parses a compacted
-synthetic session whole and leaves its assembly document at exit; a second kernel boots from it. A proto-2 tab's
+synthetic session whole and its settle write leaves the assembly document (the exit's drain did until 2026-10-08); a
+second kernel boots from it. A proto-2 tab's
 session frame is the post-boundary tail with headKnown false and headTotal null and hydrates nothing (the
 flattening step: no pre-cut body is read at a first open); loadOlder by uuid walks page by page to the head, where
 the count appears, and the pages plus the tail equal what an index (proto-1) client on the same kernel assembles
@@ -162,7 +163,8 @@ class Proto2Wire(A.RestartOverACheckpointedSession):
             self.assertIn(f1["events"][0]["uuid"].split(":")[0][0], ("u", "b", "s"),
                           "the run begins at a turn's first record (a prompt, or a compaction's boundary or summary), not at an assistant record: %r" % f1["events"][0].get("uuid"))
             c1.close()
-            time.sleep(2.0)
+            self.assertEqual(len(self._settle_document(p1)), 1, "web's settle wrote its assembly document before the stop "
+                                                                 "(the exit writes none)")
         finally:
             self._stop(k1)
         size = os.path.getsize(self.leaf)
