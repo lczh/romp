@@ -3314,16 +3314,64 @@ class SpendRecord(unittest.TestCase):
         self.addCleanup(td.cleanup)
         return td.name
 
-    def _resumed_session(self, transcript_lines, sid="11111111-2222-3333-4444-eeeeeeeeeeee", name="n"):
+    def _resumed_session(self, transcript_lines, sid="11111111-2222-3333-4444-eeeeeeeeeeee", name="n", **reg):
         """A session whose reg resumes _FSID from self.d, with that transcript on disk under a private
-        CLAUDE_CONFIG_DIR (transcript_path reads the env at call time)."""
+        CLAUDE_CONFIG_DIR (transcript_path reads the env at call time). `reg` adds registry fields (a fork's
+        forkOf and threadOf)."""
         env = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": self._private_dir()})
         env.start()
         self.addCleanup(env.stop)
         p = Path(sb.transcript_path(self.d, self._FSID))
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("\n".join(transcript_lines) + "\n")
-        return self._spend_session(sid, name=name, cwd=self.d, lastSid=self._FSID)
+        return self._spend_session(sid, name=name, cwd=self.d, lastSid=self._FSID, **reg)
+
+    # a tool-result-sized transcript line; 140 of them are about 9 MB, more than the 8 MB the scan once stopped at
+    _BIG_FILLER = json.dumps({"type": "user", "uuid": "u", "message": {"role": "user", "content": "x" * 65000}})
+
+    def test_a_record_far_before_the_transcripts_end_still_seeds_the_resume(self):
+        """A hosted session keeps one CLI for days, and that CLI writes its cost-state record when it ends, not
+        as it runs, so the transcript grows past its last record by every turn since (live, 2026-10: 52 to 100 MB).
+        A fresh CLI resuming it restores that record wherever it sits. The seed read only the last 8 MB, found
+        nothing, and seeded zero, so the restored history was recorded as the first turn's spend."""
+        mu = {"claude-x": {"inputTokens": 900, "outputTokens": 120,
+                           "cacheReadInputTokens": 400000, "cacheCreationInputTokens": 20000}}
+        s, run, day = self._resumed_session([
+            json.dumps({"type": "user", "uuid": "u1", "message": {"role": "user", "content": "hello"}}),
+            self._cost_state(300.0, mu),
+        ] + [self._BIG_FILLER] * 140)
+        p = Path(sb.transcript_path(self.d, self._FSID))
+        self.assertGreater(p.stat().st_size, (8 << 20) + 300000, "the premise: the record is more than 8 MB back")
+        s._seed_spend_watermarks()
+        self.assertEqual(s._last_cost_total, 300.0, "the record the CLI restores is the seed, however far back")
+        run(self._costed(300.75, {"claude-x": {"inputTokens": 905, "outputTokens": 160,
+                                               "cacheReadInputTokens": 430000, "cacheCreationInputTokens": 21000}}))
+        d = day()
+        self.assertAlmostEqual(d["usd"], 0.75, msg="the turn's own cost, not the restored history plus it")
+        self.assertEqual((d["tokIn"], d["tokOut"], d["tokCacheR"], d["tokCacheW"]), (5, 40, 30000, 1000))
+
+    def test_a_comment_thread_forked_from_a_long_lived_session_bills_its_owner_only_its_own_turn(self):
+        """The live case (2026-10): a comment thread is a fork of its owner's conversation, and the fork's CLI
+        restores the record in the OWNER's transcript, the file it loads. Each thread's first turn of about a
+        dollar was billed to the owner as the owner's whole recorded history, $4,826 a time, 41 times. The
+        thread's seed reads the same file the CLI loads (its resume target is the owner's conversation), so the
+        owner is billed the thread's turn and the turn ledger row carries the same figure."""
+        owner = "11111111-2222-3333-4444-ffffffffffff"
+        mu = {"claude-x": {"inputTokens": 100, "outputTokens": 10,
+                           "cacheReadInputTokens": 1000, "cacheCreationInputTokens": 100}}
+        s, run, day = self._resumed_session([self._cost_state(4800.0, mu)] + [self._BIG_FILLER] * 140,
+                                            sid="11111111-2222-3333-4444-cccccccccccc", name="web-comment-1",
+                                            forkOf=self._FSID, threadOf=owner)
+        self.assertEqual((s.resume_sid, s.thread_of), (self._FSID, owner), "the premise: a thread born as a fork")
+        s._seed_spend_watermarks()
+        run(self._costed(4801.25, {"claude-x": {"inputTokens": 110, "outputTokens": 30,
+                                                "cacheReadInputTokens": 61000, "cacheCreationInputTokens": 600}}))
+        d = day()
+        self.assertAlmostEqual(d["usd"], 1.25)
+        self.assertAlmostEqual(d["bySid"][owner]["usd"], 1.25, msg="the owner is billed the thread's turn alone")
+        rows = [json.loads(l) for l in Path(self.d, "turns.jsonl").read_text().splitlines()]
+        self.assertEqual([(r["usd"], r["cumulativeUsd"], r["spendBaseline"]) for r in rows],
+                         [(1.25, 4801.25, "fresh")], "the turn ledger row says the same")
 
     def test_connect_seeds_the_watermarks_from_the_transcripts_last_cost_state(self):
         """The CLI's transcript loader files `cost-state` as last-wins and its writer emits totalCostUSD
@@ -3380,7 +3428,7 @@ class SpendRecord(unittest.TestCase):
         s._last_cost_total, s._last_usage_totals = 9.0, {"input_tokens": 9}   # stale from the old process
         s._seed_spend_watermarks()
         self.assertEqual((s._last_cost_total, s._last_usage_totals), (0.0, {}),
-                         "no record: a fresh process starts at zero, as every resume does on the CLI as probed")
+                         "no record: nothing for the CLI to restore, so a fresh process starts at zero")
         run(self._costed(1.5, {"claude-x": {"inputTokens": 100}}))
         self.assertAlmostEqual(day()["usd"], 1.5, msg="the first result is recorded whole")
         self.assertEqual(day()["tokIn"], 100)
@@ -3468,8 +3516,8 @@ class SpendRecord(unittest.TestCase):
 
     def test_last_cost_state_reassembles_a_long_line_and_finds_the_record_before_it(self):
         """A transcript line is one JSON record, and a tool result can make one several MB long. The
-        scan walks such a line back to its first byte in 64 KB reads, covering the bounded tail once
-        and nothing more, reassembles it, and takes the record before it."""
+        scan walks such a line back to its first byte in 64 KB reads, covering the file once and
+        nothing more, reassembles it, and takes the record before it."""
         p = Path(self._private_dir()) / "t.jsonl"
         mu = {"m": {"inputTokens": 7, "outputTokens": 3}}
         long_line = json.dumps({"type": "user", "uuid": "u", "message": {"role": "user", "content": "x" * (3 << 20)}})
@@ -3478,31 +3526,47 @@ class SpendRecord(unittest.TestCase):
         reads = self._reads_through_a_stand_in()
         self.assertEqual(sb.last_cost_state(str(p))["total"], 2.25)
         size = p.stat().st_size
-        self.assertEqual(sum(reads), size, "the whole file, under the 8 MB bound, is read once")
+        self.assertEqual(sum(reads), size, "the whole file is read once")
         self.assertEqual(len(reads), -(-size // (1 << 16)), "in chunks of 64 KB, the head chunk shorter")
         self.assertLessEqual(max(reads), 1 << 16)
 
-    def test_the_bound_reads_the_same_tail_and_drops_the_line_it_cuts_through(self):
-        """The scan reads the last `scan_bytes` of the file and nothing before them: a record older than
-        that is absent, and the line the bound cuts through is a fragment, never joined, so a record
-        whose first byte the bound lands on is absent too, and found once the bound reaches the newline
-        before it. This held before the pieces were collected in a list and holds after: a guard on the
-        range read."""
+    def test_the_scan_reads_back_as_far_as_the_record_and_the_whole_file_when_there_is_none(self):
+        """The CLI restores the transcript's last record wherever it sits, so the scan has no bound: a record
+        far back is found, and a file with none is read to its head, each byte once."""
+        p = Path(self._private_dir()) / "t.jsonl"
+        mu = {"m": {"inputTokens": 7, "outputTokens": 3}}
+        p.write_text(self._cost_state(2.25, mu) + "\n" + (self._BIG_FILLER + "\n") * 140)
+        reads = self._reads_through_a_stand_in()
+        self.assertEqual(sb.last_cost_state(str(p))["total"], 2.25, "about 9 MB back: found")
+        self.assertEqual(sum(reads), p.stat().st_size, "the whole file, once")
+        reads.clear()
+        p.write_text((self._BIG_FILLER + "\n") * 140)
+        self.assertIsNone(sb.last_cost_state(str(p)), "no record anywhere: None")
+        self.assertEqual(sum(reads), p.stat().st_size)
+
+    def test_a_marker_across_a_chunk_edge_or_after_its_lines_first_chunk_is_still_found(self):
+        """The scan passes over a chunk without splitting it into lines when no record line can end in it.
+        Two shapes a chunk-local search alone would miss: the marker cut by a chunk edge (neither chunk holds
+        it whole), and a record line whose marker lies in a later chunk than the line's first byte, so the
+        chunk that completes the line holds no marker of its own."""
         p = Path(self._private_dir()) / "t.jsonl"
         mu = {"m": {"inputTokens": 7, "outputTokens": 3}}
         filler = json.dumps({"type": "user", "uuid": "u", "message": {"role": "user", "content": "x" * 900}})
-        bound = 3 << 16
-        rec = self._cost_state(2.25, mu)
-        p.write_text(rec + "\n" + (filler + "\n") * 300)          # about 290 KB after the record
-        reads = self._reads_through_a_stand_in()
-        self.assertIsNone(sb.last_cost_state(str(p), scan_bytes=bound), "older than the bound: absent")
-        self.assertEqual(sum(reads), bound, "the last scan_bytes of the file, and no more")
-        # the bound lands exactly on the record's first byte: the record is the cut line, a fragment; one
-        # byte more reaches the newline before it, and the record is a whole line again
-        tail = self._line_of(bound - len(rec) - 2, type="user", uuid="u", message={"role": "user"})
-        p.write_text((filler + "\n") * 5 + rec + "\n" + tail + "\n")
-        self.assertIsNone(sb.last_cost_state(str(p), scan_bytes=bound))
-        self.assertEqual(sb.last_cost_state(str(p), scan_bytes=bound + 1)["total"], 2.25)
+        head = "\n".join([filler] * 80) + "\n"
+        rec = self._cost_state(5.5, mu)
+        at = rec.index('"cost-state"') + 4               # the edge falls four bytes into the marker
+        for cut in (at, at + 4):
+            tail = "x" * ((1 << 16) - (len(rec) - cut) - 2) + "\n"
+            p.write_text(head + rec + "\n" + tail)
+            self.assertEqual(p.stat().st_size - (1 << 16), len(head.encode()) + cut, "the premise: the edge")
+            self.assertEqual(sb.last_cost_state(str(p))["total"], 5.5, f"the edge {cut} bytes into the record")
+        # a record whose first key pads it: the marker sits about 70 KB into the line, two chunks after its start
+        padded = json.dumps({"pad": "x" * 70000, "type": "cost-state", "sessionId": self._FSID,
+                             "totalCostUSD": 4.0, "modelUsage": mu})
+        p.write_text(head + padded + "\n" + filler + "\n")
+        self.assertEqual(sb.last_cost_state(str(p))["total"], 4.0)
+        p.write_text(self._cost_state(1.0, mu) + "\n" + head + padded + "\n" + (filler + "\n") * 80)
+        self.assertEqual(sb.last_cost_state(str(p))["total"], 4.0, "the later record wins over an earlier one")
 
     def test_a_line_longer_than_the_cap_is_not_a_record_and_the_earlier_record_wins(self):
         """A cost-state record is under 1 KB. A line longer than last_cost_state's cap (4 MB) is skipped
@@ -3584,7 +3648,7 @@ class SpendRecord(unittest.TestCase):
         p.write_text(self._cost_state(2.25, mu) + "\n" + big + "\n" + filler + "\n")
         rec, peak = scan()
         self.assertEqual(rec["total"], 2.25, "the record before the 7 MB line is found")
-        self.assertEqual(sum(reads), p.stat().st_size, "the range read is the same bounded tail")
+        self.assertEqual(sum(reads), p.stat().st_size, "the range read is the whole file, once")
         self.assertEqual(adds, [], "no chunk is concatenated onto: a line's pieces are joined once")
         self.assertLess(peak, (4 << 20) + (2 << 20), "held: the 4 MB cap plus chunks, never the 7 MB line")
         over = self._record_line(7.0, (4 << 20) + 1, mu)
@@ -3595,9 +3659,9 @@ class SpendRecord(unittest.TestCase):
         self.assertLess(peak, (4 << 20) + (2 << 20), "held: its pieces, and no joined line beside them")
 
     def test_a_first_result_after_connect_above_the_single_turn_mark_is_recorded_and_traced_as_info(self):
-        """On the CLI as probed a resumed process starts its cost counters at zero, so a first delta above
-        the mark is the turn's own cost: recorded as is and traced in the kernel log, NOT a problem (a
-        problem row for a right figure sends the user to check a record that is correct)."""
+        """The seed is the record a resumed CLI restores (zero with none), so a first delta above the mark is the
+        turn's own cost: recorded as is and traced in the kernel log with the seed it was folded over, NOT a
+        problem (a problem row for a right figure sends the user to check a record that is correct)."""
         lines = []
         self.be._log_cb = lines.append
         traced = lambda: [l for l in lines if "first result after connect" in l]
@@ -3610,6 +3674,7 @@ class SpendRecord(unittest.TestCase):
         self.assertEqual(len(traced()), 1)
         self.assertIn("250.00", traced()[0])
         self.assertIn("Recorded as is", traced()[0])
+        self.assertIn("seed of $0.00", traced()[0], "the seed it was folded over is named")
         self.assertEqual(self.be.problems(), [], "an info line: the figure is right, nothing to act on")
         self.assertAlmostEqual(day()["usd"], 255.0, msg="recorded anyway; the record drops nothing")
         run(self._costed(500.0, {"m": {"inputTokens": 30}}))   # a 250 USD delta on the NEXT result
