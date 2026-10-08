@@ -76,7 +76,12 @@ test("render.ts: the transcript's foot line keeps its room whether or not it sho
   assert.match(RENDER, /content\?\.insertBefore\(elv, document\.getElementById\("live-status"\) \|\| document\.getElementById\("live-ask"\)\);/);
   assert.match(CSS, /#live-status \{[^}]*height: 18px;/, "a fixed height: a stretch starting or ending moves nothing on screen");
   assert.match(CSS, /\.live-thinking\.quiet \.meta-dots i \{ animation: none;/, "a silent stream stills the dots");
-  assert.match(RENDER, /\nliveStatusEl\(\);/, "created at load, so its room is never a late box under a bottom reader");
+  // never made at load: the pane loader lifts at #content's first child other than the picker host (kernel _pane_spin),
+  // so the box waits for a painted transcript, and a bottom reader stays at the bottom when it adds its room
+  assert.doesNotMatch(RENDER, /\nliveStatusEl\(\);/, "no foot line at load, ahead of the transcript");
+  const mk = RENDER.slice(RENDER.indexOf("function liveStatusEl("), RENDER.indexOf("function paintLiveThinking("));
+  assert.match(mk, /if \(!content \|\| !v \|\| !v\.el\.children\.length\) return null;/);
+  assert.match(mk, /const atEnd = atBottom\(content\);[\s\S]*content\.insertBefore\(n, document\.getElementById\("live-ask"\)\);\s*\n\s*if \(atEnd\) writeScroll\(content, content\.scrollHeight, "live-status", true\);/);
 });
 
 test("render.ts: a live status lives as long as its socket, and an unreachable host's session shows none", () => {
@@ -106,7 +111,8 @@ test("render.ts: thinking rows carry the exact figure, and the footer the turn's
 
 test("kernel: the frame rides the pusher for chat and Sessions-pane clients, outside every build", () => {
   assert.match(KERNEL, /_send_tab_order\(c, tab_order, tab_meta, live_map\)\n\s*_send_live_status\(c, tab_order, live_map\)/);
-  assert.match(KERNEL, /for c in tl_clients:[^\n]*\n\s*_send_live_status\(c, live_map, live_map\)/);
+  assert.match(KERNEL, /for c in tl_clients:\n\s*_send_live_status\(c, live_map, live_map\)\n\s*_PERF_STATS\.stage\("push\.timeline"/,
+    "the Sessions pane's frames go after its lanes and bars, never ahead of the cold-frame guard");
   assert.match(KERNEL, /else if\(m\.type==="liveStatus"&&panel\.liveStatus\)panel\.liveStatus\(m\);/, "the browser timeline's inline boot routes it");
 });
 

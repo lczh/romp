@@ -59318,8 +59318,14 @@ def _send_live_status(c, sids, live_map):
     slot, so an unchanged status costs a comparison and a moving one costs ~100 bytes and no build. A session with nothing
     live is sent only to a client that was shown something for it (the frame that clears it); one never shown anything is
     sent nothing, so a board of idle sessions puts no frame on the wire."""
-    with _client_lock(c):                                  # the dedup dict is shared with the handler thread
-        held = [k[1] for k in (c.get("sent") or {}) if isinstance(k, tuple) and len(k) == 2 and k[0] == "liveStatus"]
+    held = []
+    for _ in range(3):     # read WITHOUT the client's slot lock (an idle board must never wait on a pane's lock for nothing):
+        try:               # a key the handler thread inserts mid-read raises, and a re-read settles it
+            held = [k[1] for k in list((c.get("sent") or {}).keys())
+                    if isinstance(k, tuple) and len(k) == 2 and k[0] == "liveStatus"]
+            break
+        except RuntimeError:
+            held = []
     shown = set(held)
     for sid in dict.fromkeys(list(sids) + held):   # …and every session this client was shown something for, so a session
         #                                             that left the map (its CLI gone) still gets the frame that clears it
@@ -59330,6 +59336,7 @@ def _send_live_status(c, sids, live_map):
             _send_client(c, ("liveStatus", sid), f)        # the frame that clears what the page shows…
             with _client_lock(c):
                 c.get("sent", {}).pop(("liveStatus", sid), None)   # …and then nothing more until there is something
+            #                                                         (the lock only where a frame just went: a slot was held)
 
 
 def _note_needfull_status(c, sid):
@@ -64959,8 +64966,6 @@ def _push(targets, connect=False, live_map=None):
         tl_warming = False
         if want_tl:
             tl_clients = [c for c in targets if c["app"] == "timeline"]
-            for c in tl_clients:   # each lane's live status (a thinking stretch → its chip's "Thinking · 14s"): no build
-                _send_live_status(c, live_map, live_map)
             live_first = connect and _built_timeline[1] is None     # cold start, nothing warmed yet → live only
             if live_first:
                 # Outside any lock (round two, medium 2): the pane's FIRST frame, the live lanes skeleton, which parses nothing.
@@ -65044,6 +65049,10 @@ def _push(targets, connect=False, live_map=None):
                             sent_cold = _tl_cold_lanes_at_send(tl_cold)   # the pusher's: the newest memo, chosen under the lock
                             if sent_cold is not None:
                                 _send_client(c, ("timeline",), sent_cold[2], pre=sent_cold[3], sig=sent_cold[4])
+            # each lane's live status (a thinking stretch → its chip's "Thinking · 14s"): no build, and AFTER the lanes and
+            # the bars, so its sends never take a pane's slot lock ahead of the cold-frame guard above
+            for c in tl_clients:
+                _send_live_status(c, live_map, live_map)
         _PERF_STATS.stage("push.timeline", time.monotonic() - _t_stage)
     except Exception:
         sys.stderr.write("push build: %s\n" % traceback.format_exc())

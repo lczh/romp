@@ -4746,26 +4746,31 @@ function applyLiveStatus(m: { id?: unknown; thinking?: unknown; tasks?: unknown 
 
 // The transcript's foot line: ONE element under every thread (ensureView inserts threads before it), of a FIXED height
 // whether or not it shows anything, so a thinking stretch starting and ending moves nothing on screen: the line's room is
-// reserved at the foot of every transcript, where the reply will appear, and the follow-mode scroll never sees a box
-// appear or go (T262f's tail rule). Created on first use, so no page skeleton has to carry it.
+// reserved at the foot of the transcript, where the reply will appear, and the follow-mode scroll never sees a box come
+// and go (T262f's tail rule). Made ONCE, by the first stretch shown over a PAINTED transcript, and kept: never at load,
+// since the pane loader lifts at #content's first child other than the picker host (kernel _pane_spin), and a box there
+// before the transcript would lift it over a blank chat. A reader at the bottom when it adds its room stays there.
 function liveStatusEl(): HTMLElement | null {
   const have = document.getElementById("live-status");
   if (have) return have;
   const content = document.getElementById("content");
-  if (!content) return null;
+  const v = activeId ? views.get(activeId) : null;
+  if (!content || !v || !v.el.children.length) return null;   // no painted transcript yet: the 1 s tick asks again
+  const atEnd = atBottom(content);   // measured before the box adds its room
   const n = el("div", "");
   n.id = "live-status";
   content.insertBefore(n, document.getElementById("live-ask"));
+  if (atEnd) writeScroll(content, content.scrollHeight, "live-status", true);
   return n;
 }
 
 // The active session's "Thinking · 14s" (and, once the stream has gone silent, "· quiet for 15s"): the loader dots while
 // frames flow, still dots once quiet, never a spinner past what the frames proved.
 function paintLiveThinking(): void {
+  const th = activeId && !fileTabOpen && !snapView && !hostIsDown(activeId) ? liveStatus.get(activeId)?.thinking : null;   // an unreachable host's session: no word on it
+  if (!th) { const have = document.getElementById("live-status"); if (have?.firstChild) have.replaceChildren(); return; }
   const n = liveStatusEl();
   if (!n) return;
-  const th = activeId && !fileTabOpen && !snapView && !hostIsDown(activeId) ? liveStatus.get(activeId)?.thinking : null;   // an unreachable host's session: no word on it
-  if (!th) { if (n.firstChild) n.replaceChildren(); return; }
   const now = Date.now() / 1000;
   let line = n.firstElementChild as HTMLElement | null;
   if (!line) {
@@ -5529,7 +5534,6 @@ function apiRetryTick(): void {
   }
 }
 setInterval(() => { apiRetryTick(); retryingTick(); liveStatusTick(); }, 1000);   // ONE 1s timer drives the countdowns and the live-status clocks
-liveStatusEl();   // the transcript's foot line exists from the first paint, so its reserved room is never a late box under a bottom reader
 
 function renderTool(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement {
   if (ev.name === "AskUserQuestion") { const a = renderAsk(ev); if (a) return a; }

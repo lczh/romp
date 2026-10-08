@@ -11508,7 +11508,8 @@ class SdkSession:
             self._wf_slots.clear()
             died = sorted((dict(v) for v in self._bg_tasks.values()), key=lambda d: d.get("since") or 0)
             self._bg_tasks.clear()
-            self._bg_foreground.clear()
+            if getattr(self, "_bg_foreground", None) is not None:   # getattr: __new__-built test doubles
+                self._bg_foreground.clear()
         if died:
             note = task_death_notice(died, did=CUT_BY.get(cut_by, ""))
             with self._lock:
@@ -11649,11 +11650,11 @@ class SdkSession:
         per frame; the pusher's cycle reads `last` when _thinking_row decides whether the stretch has gone quiet). A frame
         outside a live turn (no client, nothing in flight, a stop under way) starts nothing."""
         now = time.time()
-        th = self._thinking
+        th = getattr(self, "_thinking", None)   # getattr: __new__-built test doubles
         if th is not None:
             th["last"] = now
             return
-        if not self.client or self.inflight <= 0 or self._interrupted:
+        if not getattr(self, "client", None) or getattr(self, "inflight", 0) <= 0 or getattr(self, "_interrupted", False):
             return
         self._thinking = {"t": now, "last": now}
         self.backend._wake_push()   # the pusher alone: a stretch starting changes no judge input
@@ -11661,7 +11662,7 @@ class SdkSession:
     def _end_thinking(self):
         """The thinking stretch is over (its block landed, its request failed, the turn ended or stopped, the CLI went
         away): clear it, waking the pusher once and only when one was streaming."""
-        if self._thinking is not None:
+        if getattr(self, "_thinking", None) is not None:   # getattr: __new__-built test doubles
             self._thinking = None
             self.backend._wake_push()
 
@@ -11671,7 +11672,7 @@ class SdkSession:
         stream has been silent instead of counting on as if it were not. None otherwise. Gated here as well as cleared at
         each ending event, so a missed ending cannot leave it standing past its turn, its stop or its CLI; a retry storm
         and a compaction wear their own live cards, so neither shows it."""
-        th = self._thinking
+        th = getattr(self, "_thinking", None)   # getattr: __new__-built test doubles
         if th is None or not self.client or self.inflight <= 0 or self._interrupted or self.retrying \
                 or getattr(self, "_compacting", False):
             return None
@@ -11688,10 +11689,13 @@ class SdkSession:
 
     def _note_bg_ended(self, tid: str):
         """Remember an ended task id (caller holds _sub_lock), newest last, capped."""
-        self._bg_ended.pop(tid, None)
-        self._bg_ended[tid] = True
-        while len(self._bg_ended) > self._BG_ENDED_CAP:
-            self._bg_ended.popitem(last=False)
+        ended = getattr(self, "_bg_ended", None)   # getattr: __new__-built test doubles carry none
+        if ended is None:
+            return
+        ended.pop(tid, None)
+        ended[tid] = True
+        while len(ended) > self._BG_ENDED_CAP:
+            ended.popitem(last=False)
 
     def _on_bg_level(self, d: dict):
         """system/background_tasks_changed → the live set reconciled to the CLI's own list of every live background task
@@ -11705,12 +11709,16 @@ class SdkSession:
         if not isinstance(tasks, list):
             return
         level = {str(t["task_id"]): t for t in tasks if isinstance(t, dict) and t.get("task_id")}
+        fg = getattr(self, "_bg_foreground", None)   # getattr: __new__-built test doubles
+        gone = getattr(self, "_bg_ended", None)
         with self._sub_lock:
-            ended = [tid for tid in self._bg_tasks if tid not in level and tid not in self._bg_foreground]
+            ended = [tid for tid in self._bg_tasks if tid not in level and not (fg and tid in fg)]
             added = [tid for tid in level if tid not in self._bg_tasks]
             for tid in level:
-                self._bg_foreground.discard(tid)   # listed as background: the level speaks for it from here
-                self._bg_ended.pop(tid, None)      # live by the CLI's own word (a resumed agent reuses its id)
+                if fg is not None:
+                    fg.discard(tid)          # listed as background: the level speaks for it from here
+                if gone is not None:
+                    gone.pop(tid, None)      # live by the CLI's own word (a resumed agent reuses its id)
         for tid in ended:
             self._on_task_event("task_notification", {"task_id": tid})
         for tid in added:
@@ -11736,8 +11744,10 @@ class SdkSession:
         ended = False            # this event ENDED the task (a notification, or a terminal patch status)
         wf = False               # the task is a Workflow run — its agents report through its progress list
         sub_changed = False
+        gone_ids = getattr(self, "_bg_ended", None)        # getattr: __new__-built test doubles carry neither
+        fg = getattr(self, "_bg_foreground", None)
         with self._sub_lock:
-            if subtype == "task_progress" and tid in self._bg_ended and tid not in self._bg_tasks:
+            if subtype == "task_progress" and gone_ids and tid in gone_ids and tid not in self._bg_tasks:
                 # progress chatter for a task that already ENDED (its notification, a terminal patch or the level came
                 # first): late, never a reason to list it as running again
                 return
@@ -11748,9 +11758,10 @@ class SdkSession:
                                                    "since": int(time.time()),
                                                    "toolUseId": d.get("tool_use_id") or "", "lastTool": ""}
                     changed = True
-                    self._bg_ended.pop(tid, None)   # an explicit start brings an id back (a resumed agent reuses its id)
-                    if subtype == "task_started" and d.get("is_backgrounded") is False:
-                        self._bg_foreground.add(tid)   # registered in the foreground: the level will not list it
+                    if gone_ids is not None:
+                        gone_ids.pop(tid, None)   # an explicit start brings an id back (a resumed agent reuses its id)
+                    if subtype == "task_started" and d.get("is_backgrounded") is False and fg is not None:
+                        fg.add(tid)               # registered in the foreground: the level will not list it
                 if not entry.get("toolUseId") and d.get("tool_use_id"):
                     entry["toolUseId"] = str(d.get("tool_use_id"))   # a level-made entry learns it from its bookend…
                     changed = True                                   # …and mirrors it, once (the box joins on it)
@@ -11788,10 +11799,11 @@ class SdkSession:
                     ended = True
                     wf = (gone or {}).get("type") == "local_workflow" or tid in self._wf_agents
                     self._note_bg_ended(tid)
-                    self._bg_foreground.discard(tid)
+                    if fg is not None:
+                        fg.discard(tid)
                 elif subtype == "task_updated" and isinstance(d.get("patch"), dict) \
-                        and d["patch"].get("is_backgrounded") is True:
-                    self._bg_foreground.discard(tid)   # moved to the background: the level speaks for it from here
+                        and d["patch"].get("is_backgrounded") is True and fg is not None:
+                    fg.discard(tid)   # moved to the background: the level speaks for it from here
             if ended and self._subagents.pop(tid, None) is not None:
                 sub_changed = True   # a Task agent's own task ended — with or without its SubagentStop
         if wf and (ended or isinstance(d.get("workflow_progress"), list)):

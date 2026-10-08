@@ -1503,13 +1503,14 @@ class Diagnostics(unittest.TestCase):
         lines = []
         be = _backend(log=lines.append)
         s = _session(be)
-        for st in ("memory_recall", "memory_recall", "thinking_tokens"):
+        # (thinking_tokens was this test's second subtype until 2026-10-08, when the live thinking label began handling it)
+        for st in ("memory_recall", "memory_recall", "elicitation_complete"):
             _feed(s, FakeSystemMessage(st, {"k1": 1, "k2": 2}))
         hits = [l for l in lines if "unhandled SystemMessage subtype" in l]
         self.assertEqual(len(hits), 2)
         self.assertIn("'memory_recall'", hits[0])
         self.assertIn("['k1', 'k2']", hits[0])
-        self.assertIn("'thinking_tokens'", hits[1])
+        self.assertIn("'elicitation_complete'", hits[1])
 
     def test_handled_subtypes_are_never_reported_as_unhandled(self):
         lines = []

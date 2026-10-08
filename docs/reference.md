@@ -6580,9 +6580,10 @@ What a session is doing at this moment, each piece read from an event Claude Cod
 
 - **Thinking.** The first of Claude Code's thinking-progress updates in a stretch starts the label: "Thinking · 14s"
   at the foot of the chat, where the reply will appear, the same words on the session's chip in the Sessions pane,
-  and a ring on the working dot of its tab (its tooltip carries the words). The seconds count from that first update,
-  which with summarized thinking can arrive a few seconds after the model began, and a short thought may show for only
-  an instant. The next reply block, the end of the turn, an API retry, a stop or the session's process ending clears it.
+  and a ring on the working dot of its tab (its tooltip carries the words). The seconds count from that first update.
+  With summarized thinking it arrives only when the summary starts streaming, which can be well after the model began
+  (fifteen seconds into a long thought in testing), so the count can read less than the turn's own clock, and a short
+  thought may show for only an instant. The next reply block, the end of the turn, an API retry, a stop or the session's process ending clears it.
   When no update has come for ten seconds the label says so ("quiet for 15s") and the dots stop, rather than
   counting on as if it were still streaming. The update's own token estimate is not shown: with summarized thinking it
   can be off by half.

@@ -64,6 +64,7 @@ export const WRITER_CLASS: Readonly<Record<string, "reader" | "page">> = {
   "land-guess": "page",   // the jump into the gap where a landing's target will be, before its window arrives (T386 stage 2)
   "land-cancel": "page",   // the reader put back where the pre-jump moved them from, when a span-less or missing reply cannot land (T386 stage 2)
   "file-tab-back": "page",   // the transcript's held place put back when a file tab gives the pane back (render.ts leaveFileTab, 2026-09-30)
+  "live-status": "page",   // a bottom reader kept at the bottom when the transcript's foot line first adds its room (render.ts liveStatusEl, 2026-10-08)
 };
 /** The write helper (the root) and its wrappers, with the position of the WRITER argument in each call (round six, low 1; round
  *  seven, mediums 1 and 2). The census pin (landing-settle.test.ts, through writer-census.ts on the TypeScript compiler's parser)

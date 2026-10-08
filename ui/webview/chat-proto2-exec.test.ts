@@ -48,7 +48,7 @@ test("renderEvent stamps an orphan note's record uuid on its turn beside the not
     renderEventInner: () => fakeEl(), isOptimistic: () => false, eventEpoch: () => 1700000000,
     el: (_t: string, cls: string) => { const e = fakeEl(); e.className = cls; return e; },
   };
-  const js = liftBetween("function renderEvent(ev: ChatEvent, prevEpoch?: number | null, worked?: number | null): HTMLElement {", "\nfunction renderEventInner(");
+  const js = liftBetween("function renderEvent(ev: ChatEvent, prevEpoch?: number | null, worked?: number | null, thought?: number | null): HTMLElement {", "\nfunction renderEventInner(");
   const api = liftWith(js, scope, ["renderEvent"]);
   const turn = api.renderEvent({ kind: "assistant", uuid: "orphan:1700000000:1", orphaned: true, orphanOf: "rec-9", md: "salvaged" });
   assert.equal(turn.dataset.uuid, "orphan:1700000000:1", "the note's own key lands the walks");
