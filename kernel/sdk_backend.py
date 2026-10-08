@@ -8282,17 +8282,8 @@ class SdkSession:
         EVERY window — session, weekly_all, and the model-scoped weekly (Fable) — numbers the
         RateLimitEvent stream only ever supplies in the warning band and the statusline never carries at
         all (it lacks the Fable window entirely). Refreshed at every turn end (event-based, beside the
-        context refresh) and on demand from the kernel's /usage click. Guarded: one in flight.
-
-        The request names `skip_behaviors` (2026-10-08). Without it the CLI also builds the answer's `behaviors`
-        section, a scan its own schema says "reads every transcript touched in the last seven days", and while
-        the scan runs the CLI takes no input: the hook answer its next turn waits for and every message sent
-        meanwhile sit unread. romp reads rate_limits alone (_record_usage_snapshot). On a machine with
-        gigabytes of recent transcripts the scan took 14 to 30 s after every result, so a session working
-        through queued background-task notifications (one turn each) spent that long on each before it
-        reached the user's next message, showing as idle all the while
-        (tests/test_usage_refresh_skips_behaviors.py). The CLIs romp runs honour the field (checked on 2.1.263,
-        2.1.280 and 2.1.281: behaviors comes back null, in hundredths of a second)."""
+        context refresh) and on demand from the kernel's /usage click. Guarded: one in flight. It asks for the
+        rate limits alone (skip_behaviors, 2026-10-08; the note at the request says why)."""
         if not self.client or self._usage_refreshing:
             return
         if self.api_key_auth:
@@ -8310,6 +8301,14 @@ class SdkSession:
                                   "bars will fall back to the rate-limit event stream" % self.name,
                                   problem=True)
             else:
+                # skip_behaviors (2026-10-08): without it the CLI also builds the answer's `behaviors` section, a scan
+                # its own schema says "reads every transcript touched in the last seven days", and while the scan runs
+                # the CLI takes no input: the hook answer its next turn waits for and every message sent meanwhile sit
+                # unread. romp reads rate_limits alone (_record_usage_snapshot). On a machine with gigabytes of recent
+                # transcripts the scan took 14 to 30 s after every result, so a session working through queued
+                # background-task notifications (one turn each) spent that long on each before it reached the user's
+                # next message, reading as idle all the while (tests/test_usage_refresh_skips_behaviors.py). The CLIs
+                # romp runs honour the field (2.1.263, 2.1.280, 2.1.281: behaviors comes back null at once).
                 r = await q._send_control_request({"subtype": "get_usage", "skip_behaviors": True})
         except Exception as e:
             # LOUD (the user 2026-08-02, whose 5h bar read 18% against a real 45%). This used to swallow
