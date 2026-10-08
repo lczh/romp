@@ -10660,13 +10660,16 @@ def _set_thinking_summaries(enabled, gt=None):
 # ON by default. Off, the task tracking system stands down: the producer starts no judge tier (no
 # kernel-initiated model call; judge.py's MODEL_CALLERS and _judge_run_impl's gate are the census and
 # the backstop), the feed and the outline are not built and their panes show a notice, the shell hides
-# their buttons, and the goal-based nudges wait (their goals no longer update; the compaction
-# suggestion and the debt reminders need no judge and keep going). The stores stay: on resumes from
-# them. Per-install in its store shape (thinking-summaries.json's), but a KERNEL_SETTING in federation
+# their buttons and says so in the strip, and the goal-based nudges wait (their goals no longer update; the
+# compaction suggestion and the debt reminders need no judge and keep going). The goal machinery that only
+# moves feed cards stands down with them (the interrupt block, the awaiting lift, the producer's goals
+# snapshot), the chat's ledger drops the judges' output, and a pass in flight ends at its next stage
+# (2026-10-08: the user turned judging off on both machines for the kernel's time). The stores stay: on
+# resumes from them. Per-install in its store shape (thinking-summaries.json's), but a KERNEL_SETTING in federation
 # (the gear's click reaches every attached kernel, T248) so the mesh holds one value and the gear marks
 # a disagreement. Absent, unreadable or malformed reads ON: the opt-out must be provable, and reading
 # never creates the file.
-TASK_TRACKING_FILE = "task-tracking.json"
+TASK_TRACKING_FILE = jd.TASK_TRACKING_FILE   # "task-tracking.json": one name for the kernel and the judges' own process
 
 
 _tt_read_fault_said = {}   # the switch file's read fault said this episode (path -> text); a clean read or absence ends it
@@ -10674,14 +10677,12 @@ _tt_read_fault_said = {}   # the switch file's read fault said this episode (pat
 
 def _tracking_value(d):
     """THE ONE READER of the switch's stored value (round five, low 3: three readers with two rules cannot drift if there is
-    one): (on, proved). A dict whose `enabled` is a real boolean is proved and reads as it says; a dict without the key
-    is the readable default (on, proved); anything else, a non-dict or a non-boolean value, reads on and UNPROVED, which
-    the display read says once per episode and the setter treats as no prior value."""
-    if isinstance(d, dict):
-        v = d.get("enabled", True)
-        if isinstance(v, bool):
-            return v, True
-    return True, False
+    one): (on, proved). The rule itself lives in judge.py (jd.tracking_value), where the judges' own process reads the same
+    file under it (jd.tracking_file_on, its TASK_TRACKING_ON), so the kernel's readers and the child's are one rule: a dict
+    whose `enabled` is a real boolean is proved and reads as it says; a dict without the key is the readable default (on,
+    proved); anything else reads on and UNPROVED, which the display read says once per episode and the setter treats as no
+    prior value."""
+    return jd.tracking_value(d)
 
 
 def _note_tracking_read_fault(p, why):
@@ -14456,7 +14457,14 @@ def _interrupt_block_tick(now, live_map):
     push's fixed cost, and on the stand-down path below (a marker whose block a judge now owns) it
     pushed with nothing new to show. The two fault paths push nothing either: an unproved ledger
     stands the block down before any write, and a refused marker write leaves the store write's own
-    dirty mark to carry the flip."""
+    dirty mark to carry the flip.
+
+    The Task tracking switch off stands the tick down whole, as a mute does for one session (T404): the flip moves a goal
+    card into the feed's Needs you column, and with tracking off there is no feed and no judge keeping those goals current.
+    The tick evaluates the then-current world on the first pass the switch is on: a stop the user has not followed up blocks
+    then, and a block it placed before the flip lifts then if the user re-engaged meanwhile."""
+    if not _task_tracking_on():
+        return
     alive = _alive_sessions(now, live_map)
     for s in alive:
         sid = s["sid"]
@@ -15226,6 +15234,8 @@ def _auto_nudge_pass(now, live_map, run_dead_wait):
     _looks_t = time.monotonic(); _set_stage("jobs.autoNudge.looks")   # the looks: one mark over the loop (plans/nudge-walk-events.md)
     _parse_ms0 = _PERF_STATS.stages.get("jobs.autoNudge.parse", 0.0)   # the parse marks its own time inside the loop: the looks
     #                                                                     mark is the loop's wall OUTSIDE it, so the parts partition the job
+    _NUDGE_HORIZON.tracking = tracking                    # the pass's one read of the switch, for every look below (_auto_nudge_session's
+    #                                                       untracked road); cleared after the loop, so a look outside a pass reads on
     for _i, s in enumerate(alive):
         if _yielding and getattr(_NUDGE_HORIZON, "cold", 0) >= 1 and getattr(_NUDGE_HORIZON, "cold_last", False):
             _NUDGE_WALK_STATS["deferredSessions"] += len(alive) - _i
@@ -15260,6 +15270,7 @@ def _auto_nudge_pass(now, live_map, run_dead_wait):
             _jobs_gate_owe("fault")                       # (the jobs pass's gate, shadow: a look that raised is looked at again next pass)
             sys.stderr.write("auto-nudge (session %s): %s\n"
                              % (s.get("sid") or "?", traceback.format_exc()))
+    _NUDGE_HORIZON.tracking = None
     _set_stage("jobs.autoNudge")                          # the looks close with the loop, however it ended: its wall less the parses' (1736 round two)
     _PERF_STATS.stage("jobs.autoNudge.looks", max(0.0, time.monotonic() - _looks_t - (_PERF_STATS.stages.get("jobs.autoNudge.parse", 0.0) - _parse_ms0) / 1000.0))
     _NUDGE_LOOK_STATS.clear(); _NUDGE_LOOK_ASKERS.clear()   # the keys were this pass's: a look outside a pass keys for itself
@@ -15553,7 +15564,12 @@ def _lift_spent_awaiting(now, live_map):
     decided on: a writer that publishes between the probe and the load (the closer re-placing the deciding
     launch under another card) costs one writer load that decides nothing (`noop`), never a lift from a
     stale decision. After the loop, the gate entries and the placed-launch memo's entries of sids that
-    left the alive set are dropped: nothing to gate, nothing to place for."""
+    left the alive set are dropped: nothing to gate, nothing to place for.
+
+    The Task tracking switch off stands the lift down (T404): the stamps it retracts are the judges' and the card it moves
+    is the feed's; the returns it rules on stay in the transcript, so the first pass the switch is on rules on them."""
+    if not _task_tracking_on():
+        return
     seen = set()
     for s in _alive_sessions(now, live_map):
         sid = s["sid"]
@@ -17342,6 +17358,18 @@ def _auto_nudge_session(s, now, live_map, nudged, waitfor, alive_ids=None, wake_
         return "progressing"
     if _session_awaiting(sid, s["path"], True):      # AWAITING dispatched AGENT work (subagents / SDK overlay) →
         return "awaiting-dispatch"                                # in flight, not stalled (the user 2026-06-22); idle is True here
+    if getattr(_NUDGE_HORIZON, "tracking", None) is False:
+        # THE UNTRACKED ROAD (the Task tracking switch off, read once by the pass): every gate and leg below this line waits on
+        # the judges or acts on what they filed. The closer never settles a turn that ended after the flip and the planner
+        # never places it, so the closer and placement gates would hold this look forever, and the debt reminder at the end
+        # of the look, which needs no judge, never went out for any session with a new turn (the switch's docs said it
+        # does). The goal walk's legs (the plain nudge, the stall ladder, the awaiting dead-man's lift) move goal cards the
+        # feed alone shows, from stamps no judge is keeping current; they evaluate again on the first pass the switch is
+        # on. So the look goes from the session gates above, which the reminder needs (idle, unqueued, not awaiting), to it.
+        if _debt_leg_open(fired, wake_only, reminders):
+            _debt_reminder_outcomes(sid, lt, now)
+            fired = _fire_debt_reminder(sid, now, alive_ids)
+        return fired                                 # walk_completed stays False: never a memo a tracked look could be served
     lt_id = lt.get("id")
     # ARMING TURN (the user 2026-07-06, business): arm/dedup off the newest ended turn with a GENUINE
     # trigger (human/sdk/peer). A romp-injected turn — a nudge's own response, a kernel-restart resume
@@ -39081,8 +39109,10 @@ def _chat_sig_shared():
     read here) and the count of recorded host suspensions (_downtime, append-only, read by
     _session_working). A shared file that moves mid-push is read old here and new by that push's builds,
     which caches new content under the old identity: the next push takes the new identity, misses and
-    rebuilds: one extra build, never a stale hit that lasts."""
-    return {"flags": _chat_ident(jd.STATE / "session-flags.json"),
+    rebuilds: one extra build, never a stale hit that lasts. The flags component carries the Task tracking switch's file
+    beside session-flags.json: both say whether a session's ledger shows the judges' output (a mute for one session, the
+    switch for every one, T404), so a flip rebuilds every tab once."""
+    return {"flags": (_chat_ident(jd.STATE / "session-flags.json"), _chat_ident(jd.STATE / TASK_TRACKING_FILE)),
             "ncards": _chat_ident(jd.STATE / "notify-cards.json"),
             "colormap": _colormap(),
             # …plus the login's display (T346: the organisation and kind word beside the name, and every stored
@@ -45885,7 +45915,12 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             _launch_no_retry = bool(_lerr.get("noRetry"))
     # TOC ledger: archiver headline (the tab tooltip's Summary; the bullets list retired 2026-07-07 —
     # its in-chat readers were deleted with the ledger box, and the tooltip reads recent/tree instead)
-    arch = jd.load_archive(sid) or {}
+    # The Task tracking switch off (T404): the ledger carries none of the judges' output, the headline, the goal tree and the
+    # recent tops, as for a muted session: a tab's hover summary and recent tasks would otherwise stand frozen at the flip,
+    # and the walk below is skipped (its only readers are that hover, the Outline, and the clear and close confirmations'
+    # list of open cards). Read once per build; the switch's file is in the chat signature's flags component.
+    _tracked = _task_tracking_on()
+    arch = (jd.load_archive(sid) or {}) if _tracked else {}
     last_turn = session["turns"][-1] if session["turns"] else None
     # "working on" — what the session is doing RIGHT NOW: the in-progress turn's caption if it has one
     # yet, else its prompt (≤140 chars), matching the timeline work-bar's `working on:` hover. Only while
@@ -45940,14 +45975,16 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     if _lhit is not None:
         _chat_memo_bump(_ledger_memo_stats, "hit")
         tree, _live_roots = _lhit[3], _lhit[4]       # the memo's own lists: the ledger slices them, nothing writes a row
+    elif not _tracked:
+        tree, _live_roots = [], []                   # tracking off: no walk (blanked below in any case)
     else:
         tree, _live_roots = _goal_tree_walk(sid, gstore, seg_trig, seg_work, anchors=True)   # the shared walk (plans/outline-pane-provisional-row.md): the Outline's provisional row takes the same over the store alone
         if _lkey is not None:
             _chat_memo_bump(_ledger_memo_stats, "miss")
             _ledger_memo[sid] = (_lkey, parsed, gstore, tree, _live_roots)
-    recent_tops = sorted(_live_roots + _archive_roots(sid), key=lambda r: r["t"] or 0, reverse=True)[:5]
-    if _session_flag(sid, "hideFromFeed"):       # muted → out of task tracking: the ledger shows no goal tree / current task
-        tree, current, recent_tops = [], None, []
+    recent_tops = sorted(_live_roots + _archive_roots(sid), key=lambda r: r["t"] or 0, reverse=True)[:5] if _tracked else []
+    if not _tracked or _session_flag(sid, "hideFromFeed"):   # muted, or tracking off → out of task tracking: the ledger shows no
+        tree, current, recent_tops = [], None, []            #  goal tree / current task
     # the FEED's per-session needs-you verdict, read ONCE for this build: the ledger (needsInput, the section
     # rows' word) and the status (needsYou, the tab's Needs you ring) both carry it, and two reads could straddle a
     # concurrent pusher's swap of the set (a connect-thread build races the cycle) — a row saying "needs you"
@@ -64763,7 +64800,7 @@ def _push(targets, connect=False, live_map=None):
                     feed["ledgers"] = sorted(feed["ledgers"] + _prov_rows, key=lambda r: _bo.get(r["sid"], len(_bo)))
                 _prov_ledger_memo_evict(_bo, _flagged_outline)   # at EVERY attach, not only with rows: no reader, an unlisted tab or a built one drops its entry (thread-safe: another push may be inserting)
             if feed.get("off"):                          # the chat's dots carry on while the feed is not built (T404 round two,
-                _dots_w, _dots_a = _chat_dots_off(now, live_map)   # low 9): the same two signals, derived outside the feed build
+                _dots_w, _dots_a = _chat_dots_off_cached(now, live_map, fsig)   # low 9): the same two signals, derived outside the feed build
             else:
                 _dots_w, _dots_a = feed["working"], feed.get("awaiting") or []
             for c in chat_clients:                       # the working-dot list (chat reads feed["working"]);
@@ -65864,6 +65901,23 @@ def _chat_dots_off(now, live_map):
         except Exception:
             sys.stderr.write("chat dots (tracking off): %s\n" % traceback.format_exc())
     return working, awaiting
+
+
+_dots_off_memo = [None, None]   # (the view signature, (working, awaiting)) of the last off-frame dots derivation
+
+
+def _chat_dots_off_cached(now, live_map, sig):
+    """_chat_dots_off served while the view signature stands (`sig`, _fleet_view_sig: the transcripts' and states logs'
+    mtimes, every row field the dots read, the background-task ids, the five-second bucket), the key the feed build it
+    replaces was cached on: with tracking off the push paid this walk over every alive session on every cycle, where the
+    built feed it stands in for was served from its cache between rebuilds. A push with no signature (no feed audience)
+    derives it fresh."""
+    if sig is not None and _dots_off_memo[0] == sig:
+        return _dots_off_memo[1]
+    dots = _chat_dots_off(now, live_map)
+    if sig is not None:
+        _dots_off_memo[:] = [sig, dots]
+    return dots
 
 
 def _cached_feed(now, live_map, sig, connect=False):
@@ -69513,7 +69567,9 @@ def _producer():
                 sys.stderr.write("episode: %s\n" % traceback.format_exc())
             _pass_fp = _judge_store_fp() if _last_judge_fp[0] is None else None   # the first pass anchors on the
                                                        # pre-pass look; later passes anchor on the previous look
-            _begin_goals_pass()                        # snapshot PRE-pass goal stores → the feed serves them for the
+            if tracking:                               # off (T404): no judge pass writes a store and no feed is built, so there is
+                _begin_goals_pass()                    #  nothing to isolate: the snapshot read every goal store's bytes each pass
+                                                       # snapshot PRE-pass goal stores → the feed serves them for the
                                                        # whole pass, so no half-applied intermediate ever shows
             if in_child:                               # stage three: the request to the child stands where the pass body runs, after the
                 _judge_child_pass(tracking)            #  goals snapshot opened and before the compact and the generation bump; the pass
@@ -76671,6 +76727,12 @@ _LANDING_COLLAPSE_JS = """
   // the Task tracking switch (T404): kernel-side; /version says at boot (noteVersion), the gear says on the flip (a taskTracking message); absent reads on
   function taskTracking(){return window.__rompTaskTracking!==false;}
   window.__rompApplyPanes=function(){apply();};
+  // the strip's note while tracking is off (#rail-tt-off): a click or Enter/Space opens the settings at Task tracking. The strip is
+  // static shell markup, never rebuilt by a push, so the listener sits on the note itself, attached once
+  (function(){var n=document.getElementById('rail-tt-off');if(!n)return;
+    function go(){if(window.__rompOpenSettings)window.__rompOpenSettings('tasks');}
+    n.addEventListener('click',go);
+    n.addEventListener('keydown',function(e){if(e.key==='Enter'||e.key===' '){e.preventDefault();go();}});})();
   // The pane KEYS, from _PANE_ORDER (the one list of panes), so a pane added there is broadcast below without
   // anyone remembering this block. The panes learn which panes are ON SCREEN from the shell, which holds that
   // state: {romp:'panes',on:{key:bool}} goes to every pane iframe on every apply(), a toggle being the event
@@ -77613,6 +77675,13 @@ def _landing():
             "body.no-files-control .rail-btn[data-pane=files],body.no-files-control #mtabs button[data-pane=files]{display:none}"
             # the Task tracking switch off (T404): the Outline and Feed buttons and the phone's tabs for them are gone
             "body.no-task-tracking .rail-btn[data-pane=\"fleet\"],body.no-task-tracking .rail-btn[data-pane=\"feed\"],body.no-task-tracking #mtabs button[data-pane=\"fleet\"],body.no-task-tracking #mtabs button[data-pane=\"feed\"]{display:none}"
+            # …and the note in their place: the rail label's size and geometry at the regular weight (a note, not a toggle), the
+            # rail's dim ink, the toggles' hover wash
+            ".rail-note{display:none;flex:0 0 auto;line-height:1;font:400 11px 'Inter',system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;"
+            "color:#8a8a8a;padding:4px 9px;border-radius:5px;cursor:pointer;user-select:none;align-items:center;white-space:nowrap;"
+            "transition:color .1s,background .1s}"
+            "body.no-task-tracking .rail-note{display:flex}"
+            ".rail-note:hover,.rail-note:focus-visible{color:#cfe6ff;background:rgba(255,255,255,0.06);outline:none}"
             # the ↻ refresh + ⛭ settings actions sit in .rail-acts, pinned to the RIGHT (margin-left:auto on the
             # wrapper) of the bottom bar and ALWAYS visible — settings (⛭, last in the DOM) at the far right.
             ".rail-act{flex:0 0 auto;display:flex;align-items:center;justify-content:center;margin:1px 4px;padding:4px 0;"
@@ -78385,6 +78454,8 @@ def _landing():
             "body.theme-light .rail-btn{color:#5D574E}"
             "body.theme-light .rail-btn:hover{color:#C2410C;background:rgba(0,0,0,0.05)}"
             "body.theme-light .rail-btn.on{color:var(--accent);background:rgba(194,65,12,0.10);border-color:rgba(194,65,12,0.35)}"
+            "body.theme-light .rail-note{color:#5D574E}"   # the strip's Task tracking note, the rail labels' light ink and hover
+            "body.theme-light .rail-note:hover,body.theme-light .rail-note:focus-visible{color:#C2410C;background:rgba(0,0,0,0.05)}"
             "body.theme-light .rail-act{color:#5D574E}"
             "body.theme-light .rail-act:hover{color:#1F1E1D;background:rgba(0,0,0,0.06)}"
             # the light rail recolors above outspecify the bare `.on` rules ((0,2,1) beats (0,2,0)),
@@ -78572,6 +78643,10 @@ def _landing():
             "<div class=rail-scroll>"
             # the pane toggles, from _PANE_ORDER — the ONE ordering the mobile tabs share
             + _rail_buttons_html(panes) +
+            # the Task tracking switch off (T404): the Outline and Feed toggles are gone (body.no-task-tracking), and this note
+            # stands where they were, so the strip says why and its click opens the settings at Task tracking, where the switch
+            # is. Hidden while tracking is on (CSS); wired once by _LANDING_COLLAPSE_JS (the strip is never rebuilt)
+            "<div id=rail-tt-off class=rail-note role=button tabindex=0>Task tracking off</div>"
             # the Claude /usage rate-limit bars (Pro/Max): three compact vertical bar-pairs (used % colored +
             # elapsed % slate), %-label, full detail on hover — side-by-side in the bottom bar.
             "<div id=rail-usage data-keycmd=usage.open></div>"

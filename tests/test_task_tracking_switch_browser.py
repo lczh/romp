@@ -10,7 +10,9 @@ across the wait while it grew before and grows again after. Flipped back, the bu
 Round two: the Outline pane is turned on first so its page is loaded, and after the flip both panes show the notice ON TOP with
 the romp loader gone within seconds, not at its 30 s failsafe (the outline's _keepLoader used to re-assert it forever); a write
 the kernel refuses (a directory where the file goes) leaves the switch, the shell and the kernel on and draws the stale toast
-with the kept value; the notice's button on a standalone /feed page opens the dashboard at Task tracking. The producer's gate
+with the kept value; the notice's button on a standalone /feed page opens the dashboard at Task tracking. Round three
+(2026-10-08): while off the strip shows "Task tracking off" where the two buttons were and its click opens the settings at
+Task tracking; the standalone pages are the notice alone (the outline's search bar and both feet hide). The producer's gate
 itself is executed with stubs in tests/test_task_tracking_switch.py (this boot's session is live to the kernel, so
 the counter moves while on and stands still while off: the switch's proof on the real producer). Skips LOUDLY without the
 extension deps or a browser (a failure under ROMP_SERVED_TESTS_REQUIRE=1, the file name being a served module's).
@@ -55,7 +57,7 @@ if (feedF) await feedF.evaluate(() => { const w = window; w.__ttFrames = [];
 const feedFrames = () => feedF ? feedF.evaluate(() => window.__ttFrames) : Promise.resolve(null);
 const shell = () => page.evaluate(() => {
   const vis = (sel) => { const b = document.querySelector(sel); return !!b && getComputedStyle(b).display !== "none"; };
-  return { noTracking: document.body.classList.contains("no-task-tracking"), fleetBtn: vis(".rail-btn[data-pane=fleet]"), feedBtn: vis(".rail-btn[data-pane=feed]"), chatBtn: vis(".rail-btn[data-pane=chat]"),
+  return { noTracking: document.body.classList.contains("no-task-tracking"), fleetBtn: vis(".rail-btn[data-pane=fleet]"), feedBtn: vis(".rail-btn[data-pane=feed]"), chatBtn: vis(".rail-btn[data-pane=chat]"), ttNote: vis("#rail-tt-off"),
            poFeed: document.body.classList.contains("po-feed"), poFleet: document.body.classList.contains("po-fleet") };
 });
 const gear = () => setF.evaluate(() => {
@@ -145,7 +147,9 @@ const probeStandalone = (pg) => pg.evaluate(() => { const o = document.getElemen
   let onTop = null, hitDesc = null;
   if (o && !o.hidden) { const t = o.querySelector("p") || o; const r = t.getBoundingClientRect(); const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
     onTop = !!hit && (hit === o || o.contains(hit)); hitDesc = hit ? (hit.tagName + "#" + hit.id + "." + hit.className) : "nothing"; }
-  return { noticeShown: !!o && !o.hidden, spinGone: !!sp && sp.classList.contains("gone"), noticeOnTop: onTop, hit: hitDesc, url: location.pathname }; });
+  const shown = (id) => { const e = document.getElementById(id); return !!e && getComputedStyle(e).display !== "none"; };
+  return { noticeShown: !!o && !o.hidden, spinGone: !!sp && sp.classList.contains("gone"), noticeOnTop: onTop, hit: hitDesc, url: location.pathname,
+           controls: { search: shown("fleet-search-bar"), outlineFoot: shown("fleet-foot"), feedFoot: shown("feed-foot") } }; });
 await p2.waitForTimeout(3500);
 const standaloneBefore = await probeStandalone(p2);
 const p3 = await ctx.newPage();
@@ -161,6 +165,19 @@ let tasksPane = null;
   if (sf) tasksPane = await sf.waitForFunction(() => { const pane = document.querySelector("#rsettings .rs-pane[data-pane=tasks]"); return !!pane && !pane.hidden; }, null, { timeout: 10000 }).then(() => true).catch(() => false); }
 out.standalone = { before: standaloneBefore, url: p2.url(), settingsOpen: await p2.evaluate(() => document.body.classList.contains("settings-open")), tasksPane };
 await p2.close();
+// THE STRIP'S NOTE: a fresh dashboard while off shows "Task tracking off" where the Outline and Feed toggles were, and its click
+// opens the settings at Task tracking, where the switch is
+{ const p4 = await ctx.newPage();
+  await p4.goto(cfg.landing);
+  await p4.waitForSelector("#rail-gear", { timeout: 20000 });
+  await p4.waitForFunction(() => document.body.classList.contains("no-task-tracking"), null, { timeout: 15000 }).catch(() => {});
+  const note = await p4.evaluate(() => { const n = document.getElementById("rail-tt-off"); return { shown: !!n && getComputedStyle(n).display !== "none", text: n ? n.textContent : null }; });
+  await p4.click("#rail-tt-off", { timeout: 5000 }).catch(() => {});
+  await p4.waitForFunction(() => document.body.classList.contains("settings-open"), null, { timeout: 20000 }).catch(() => {});
+  let sf = p4.frames().find((x) => x.url().includes("/settings")); for (let i = 0; i < 50 && !sf; i++) { await p4.waitForTimeout(100); sf = p4.frames().find((x) => x.url().includes("/settings")); }
+  const tasks = sf ? await sf.waitForFunction(() => { const pane = document.querySelector("#rsettings .rs-pane[data-pane=tasks]"); return !!pane && !pane.hidden; }, null, { timeout: 10000 }).then(() => true).catch(() => false) : false;
+  out.stripNote = { ...note, settingsOpen: await p4.evaluate(() => document.body.classList.contains("settings-open")), tasksPane: tasks };
+  await p4.close(); }
 await page.waitForTimeout(4000);   // several producer passes' worth of wall time while off: the counter must not move
 out.afterWait = await kernel();
 // BACK ON
@@ -211,6 +228,7 @@ class ServedTaskTrackingSwitch(QueuedLab):
         self.assertTrue(b["kernel"]["taskTracking"] and b["kernel"]["settingsTaskTracking"], "/version says on, top level and in settings" + table)
         self.assertFalse(b["shell"]["noTracking"], table)
         self.assertTrue(b["shell"]["fleetBtn"] and b["shell"]["feedBtn"], "the Outline and Feed buttons show" + table)
+        self.assertFalse(b["shell"]["ttNote"], "the strip's Task tracking note is hidden while on" + table)
         self.assertEqual(b["gear"]["jrowsOff"], 0, "no judge row greyed" + table)
         self.assertFalse(b["gear"]["nudgeNote"] or b["gear"]["compactNote"], "the Automation notes are hidden while on" + table)
         self.assertTrue(b["kernel"]["feedNoticeHidden"] and not b["kernel"]["feedNoticeShown"], "/feed carries the notice hidden" + table)
@@ -224,6 +242,7 @@ class ServedTaskTrackingSwitch(QueuedLab):
         self.assertTrue(o["shell"]["noTracking"], "the shell wears body.no-task-tracking" + table)
         self.assertFalse(o["shell"]["fleetBtn"] or o["shell"]["feedBtn"], "the Outline and Feed buttons are gone" + table)
         self.assertTrue(o["shell"]["chatBtn"], "the chat's button stays" + table)
+        self.assertTrue(o["shell"]["ttNote"], "the strip's note stands where the two toggles were" + table)
         self.assertFalse(o["shell"]["poFeed"] or o["shell"]["poFleet"], "an open pane of theirs closed on the same apply" + table)
         self.assertTrue(o["kernel"]["feedNoticeShown"] and not o["kernel"]["feedNoticeHidden"], "a fresh /feed renders the notice unhidden" + table)
 
@@ -271,6 +290,21 @@ class ServedTaskTrackingSwitch(QueuedLab):
             self.assertTrue(p and p["noticeShown"], key + ": the standalone page shows the notice" + tb)
             self.assertTrue(p["spinGone"], key + ": the loader is gone and stays gone" + tb)
             self.assertTrue(p["noticeOnTop"], key + ": the notice is what the pointer hits, not the loader (hit: %s)" % p.get("hit") + tb)
+
+    def test_off_the_strip_says_so_and_its_note_opens_the_settings_at_task_tracking(self):
+        r = self._result(); n = r.get("stripNote"); table = "\n  " + json.dumps(n) + " on: " + json.dumps(r["on"]["shell"])
+        self.assertTrue(n and n["shown"], "a fresh dashboard while off shows the note in the strip" + table)
+        self.assertEqual(n["text"], "Task tracking off", table)
+        self.assertTrue(n["settingsOpen"] and n["tasksPane"], "its click opens the settings on the Task tracking tab" + table)
+        self.assertFalse(r["on"]["shell"]["ttNote"], "on again, the note goes" + table)
+
+    def test_off_the_standalone_pages_are_the_notice_alone(self):
+        # the outline's search bar and its foot (Group, Collapse, Expand, the recency slider, Show completed) and the feed's foot
+        # act on goal trees and cards there are none of while off: they go with the list
+        r = self._result(); table = "\n  feed: " + json.dumps(r["standalone"]["before"]) + " outline: " + json.dumps(r.get("fleetStandalone"))
+        f, o = r["standalone"]["before"]["controls"], r["fleetStandalone"]["controls"]
+        self.assertFalse(f["feedFoot"], "the feed's foot is hidden with the notice up" + table)
+        self.assertFalse(o["search"] or o["outlineFoot"], "the outline's search bar and foot are hidden with the notice up" + table)
 
     def test_a_write_the_kernel_refuses_leaves_the_switch_the_shell_and_the_kernel_on_and_says_so(self):
         # round two, medium 4: the gear and the shell went off 6 ms after the click while the kernel kept tracking on

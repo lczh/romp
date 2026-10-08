@@ -161,6 +161,7 @@ CENSUS = {
     "_session_chip": ("pure", "over classified inputs: the parse and live tail, the row, the backend brackets, the clock booleans, the live task rows, the watches, the states overlay, the store and the downtime list"),
     "_session_cwd": ("sig", "cwd", "the names entry's cwd, else the transcript's stamp"),
     "_session_flag": ("sig", "flags"),
+    "_task_tracking_on": ("sig", "flags", "the Task tracking switch (T404): its file's identity rides the flags component beside session-flags.json; off blanks the ledger's judge output as a mute does"),
     "_mail_off_fields": ("sig", "flags", "the effective mail state and its reason from ONE derivation (postalServiceOff, mailOffWhy): the record's readability and threadOf through _thread_reg (reg), then the mailbox flag with its legacy twin (flags) (T356)"),
     "_session_meta": ("pure", "over the transcript's records, memoized by record identity (transcript)"),
     "_session_retry_suppressed": ("sig", "retry"),
@@ -707,6 +708,22 @@ class Differential(_World):
         self.assertEqual(self.moved(a, self.sig()), ("hold",))
         km._rewind_hold_clear(SID)
         self.assertEqual(self.sig(), a)
+
+    def test_the_task_tracking_switch_misses_under_flags_and_off_blanks_the_ledgers_judge_output(self):
+        # T404: off, the ledger carries none of the judges' output (the archiver's headline, the goal tree, the recent tops), as
+        # for a muted session, so a tab's hover stops showing what the judges said before the flip; the switch's file rides
+        # the flags component, so the flip rebuilds the tab
+        jd.ARCHDIR.mkdir(parents=True, exist_ok=True)
+        (jd.ARCHDIR / (SID + ".json")).write_text(json.dumps({"headline": "a notes-api spike", "abstract": ""}))
+        self.store({"g1": {"id": "g1", "text": "ship the search endpoint", "t": T0 + 5, "parentId": None}}, {"g1": "working"})
+        on = km.build_session(SID, NOW, self.live_map)["ledger"]
+        self.assertEqual(on["summary"], "a notes-api spike", "on: the headline shows")
+        a = self.sig()
+        (jd.STATE / "task-tracking.json").write_text(json.dumps({"enabled": False, "gt": 1}))
+        self.assertEqual(self.moved(a, self.sig()), ("flags",), "the flip moves the flags component alone")
+        off = km.build_session(SID, NOW, self.live_map)["ledger"]
+        self.assertEqual((off["summary"], off["tree"], off["recent"], off["current"]), ("", [], [], None),
+                         "off: no headline, no tree, no recent tops")
 
     def test_the_archive_headline_and_the_episode_log_each_miss_under_their_own_label(self):
         a = self.sig()

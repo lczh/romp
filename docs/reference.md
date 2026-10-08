@@ -6186,24 +6186,39 @@ first frame and re-rang every remote warn once the frames arrived.
 
 **Off, the kernel stands down** the two judge tiers (the producer starts no index and no triage thread: no
 kernel-initiated model call, no `judge-usage.jsonl` row), the feed and outline builds (the panes receive one frame with
-`off` and show a notice in place of their list; the `/feed` and `/fleet` pages render the notice, and its button opens the
-settings at Task tracking, through the shell when the pane sits in one, else by sending a standalone page to the
-dashboard with `#settings=tasks`), and the goal nudges, which wait, since their redundancy read is a judge call. A call in
-flight when the switch flips finishes; the next pass starts nothing. The stores stay on disk; on again resumes from them.
+`off` and show a notice in place of their list; the `/feed` and `/fleet` pages render the notice alone, their search bar and
+foot hidden with the list, and its button opens the settings at Task tracking, through the shell when the pane sits in one,
+else by sending a standalone page to the dashboard with `#settings=tasks`), and the goal nudges, which wait, since their
+redundancy read is a judge call. The rest of the goal machinery stands down with them, since it moves cards only the feed
+shows, from stamps no judge keeps current: the nudge walk's goal legs (the plain nudge, the stall ladder, the awaiting
+dead-man's lift), the interrupt rule that moves a stopped session's card to Needs you, the lift that retracts an awaiting
+stamp once its dispatches return, and the producer's pre-pass goals snapshot (it read every goal store each pass to keep the
+feed consistent mid-pass). Each evaluates the then-current world on the first pass the switch is on. The chat's ledger
+carries none of the judges' output while off, as for a muted session: a tab's hover has no Summary and no Recent, and the
+clear and close confirmations list no open cards. A call in flight when the switch flips finishes; the pass it belongs to
+ends at its next stage (the triage tier between its stages, the index tier before the archiver), in the kernel and in the
+judges' own process alike, which reads the switch's file under the kernel's rule (`jd.tracking_file_on`); each model call
+after the flip is refused at the call gate as a stand-down, never a failure, so what the pass left stays owed and runs once
+the switch is on, through the same pools and the same judge concurrency as any pass. The stores stay on disk; on again
+resumes from them.
 
-**Off, these carry on:** the chat and the Sessions pane (its judging band is empty), the sessions' working and awaiting
-dots in the chat (derived from the transcripts, outside the feed build), the compaction suggestion, the reminders
-about unanswered messages from other sessions, which need no judge and follow Auto Nudge's own switch, and the error
+**Off, these carry on:** the chat and the Sessions pane (its judging band shows no new runs), the sessions' working and
+awaiting dots in the chat (derived from the transcripts outside the feed build, and served while the feed's view signature
+stands), the compaction suggestion, the reminders about unanswered messages from other sessions, which need no judge and
+follow Auto Nudge's own switch (the walk reaches them past the gates that wait on the judges' verdicts, which no turn ended
+after the flip would ever pass), and the error
 center (the dashboard's bell): a failed machine sync, a refused state write or a session that cannot start is told while
 off as before, since the notice rings ride the off frame. An opt-out of judging is not an opt-out of being told when the
 machine fails. One pre-existing gap stands, tracking on or off: a browser with the Feed pane turned off in the gear's Panes
 section never loads the feed frame, so no ring row reaches that browser's bell; the shell should feed the bell from the
 frame it already receives rather than from the feed frame alone. The producer's
-episode settle, goals snapshot and evidence frame still run as store bookkeeping, and a rewind's reconcile runs as before.
+episode settle still runs (the chat's clear card and the timeline's clear seams read the episode log), and a rewind's
+reconcile runs as before.
 
-The shell hides the Outline and Feed buttons and phone tabs (`body.no-task-tracking`) and closes an open pane of theirs
-in memory (the stored pane set stands); the gear greys the judge rows, the two pane toggles and the Judging-bands boxes
-with the tooltip "Enable task tracking to use this (Settings, Task tracking)."
+The shell hides the Outline and Feed buttons and phone tabs (`body.no-task-tracking`), shows the note "Task tracking off"
+in the strip where the two buttons were (its click, or Enter on it, opens the settings at Task tracking), and closes an
+open pane of theirs in memory (the stored pane set stands); the gear greys the judge rows, the two pane toggles and the
+Judging-bands boxes with the tooltip "Enable task tracking to use this (Settings, Task tracking)."
 
 Where to read it: `/version` carries `taskTracking` at the top level and in `settings`, with its stamp under
 `settingsGt` as `task-tracking`; `/perf` carries `judge.tierStarts`, the count of judge tier threads started, flat while

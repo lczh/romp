@@ -113,3 +113,8 @@ animation:fask-swirl-spin 2.4s linear infinite}
 
 /* the in-place rename on a session's head (the row's menu, 2026-09-16): the strip's .tab-rename shape, in the pane's type */
 .fl-rename { font: inherit; color: inherit; background: var(--vscode-input-background, rgba(255,255,255,0.06)); border: 1px solid var(--box-border, rgba(255,255,255,0.18)); border-radius: 3px; padding: 0 4px; min-width: 4ch; }
+
+/* The Task tracking switch off (T404): the kernel's notice (#tt-off) stands in for the list, and the search bar and the
+   foot's controls, which act on goal trees there are none of, go with it, so the pane is the notice alone. */
+body:has(#tt-off:not([hidden])) #fleet-search-bar,
+body:has(#tt-off:not([hidden])) #fleet-foot { display: none; }
