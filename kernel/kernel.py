@@ -1292,6 +1292,10 @@ class _PerfStats:
         writer["cycle_ms_p50"] = self._pct(wring, 0.5)
         writer["cycle_ms_p90"] = self._pct(wring, 0.9)
         writer["cycle_ms_ring_max"] = wring[-1] if wring else 0.0
+        try:                                               # the writer's live part (review of PR 158): its writes in flight with
+            writer.update(_DOC_PROGRESS.report())          #  their age and expectation, what its writes taught, the backlog now and
+        except Exception as e:                             #  at its largest: a stuck writer shows here from the first second
+            writer["progressError"] = "%s: %s" % (type(e).__name__, e)
         try:                                               # the jobs pass's gate in shadow: its counters, the knob, the pace
             jobs["gate"] = _jobs_gate_report(gate)         #  an enforcing loop would keep (_jobs_gate_report)
         except Exception:
@@ -13964,7 +13968,9 @@ def _converge_checkpoints(now):
             if p in leaves:                                #  mid-heal, before the prime ran (review, low 2)
                 before = _read_bytes_of(p)
                 mine = []                                  # the cold folds THIS heal's drop takes, each under the event model's lock
-                healed = _heal_cold_folds(p, mine)         # drops every tail-only cursor, reruns the five leaf folds
+                with _DOC_PROGRESS.write("heal", p, _read_size(p)) as _w:
+                    healed = _heal_cold_folds(p, mine)     # drops every tail-only cursor, reruns the five leaf folds
+                    _w.wrote = bool(healed)
                 if healed:
                     got = _read_bytes_of(p) - before
                     em.converge_stat("heals", len(healed)); em.converge_stat("healBytes", got); em.checkpoint_cycle_charge(got)
@@ -13987,7 +13993,10 @@ def _converge_checkpoints(now):
                     sys.stderr.write("assembly converge: %s\n" % traceback.format_exc())
         if unhealed:                                       # a fold the heal cannot rerun here (not one of the leaf's five): its
             em.converge_stat("unhealed", len(unhealed))    #  cursor and cold mark are dropped, the write leaves it out, its next
-        if em.pay_held_drops().get(p) and quiescent:       # the held drop wrote the document from the boot's read (converge.dropWrites,
+        with _DOC_PROGRESS.write("fold", p, _read_size(p)) as _w:
+            _paid = em.pay_held_drops()                    # the held drop's write, if one is owed (writer progress: review of PR 158)
+            _w.wrote = bool(_paid.get(p))
+        if _paid.get(p) and quiescent:                     # the held drop wrote the document from the boot's read (converge.dropWrites,
             em.converge_stat("viaDrop")                    #  charged to this cycle's take): no write of the pass's own; a write that
             continue                                       #  did not happen (deferred, failed) falls to the pass's own below
         if _EXIT_STAND_DOWN.is_set():
@@ -13998,7 +14007,9 @@ def _converge_checkpoints(now):
             pre = 0
         if pre:
             em.converge_stat("docReadBytes", pre); em.checkpoint_cycle_charge(pre)
-        if em.checkpoint_write(p):                         #  run reads the file whole once, and the path is no candidate for it
+        with _DOC_PROGRESS.write("fold", p, _read_size(p)) as _w:
+            _wrote_p = _w.wrote = bool(em.checkpoint_write(p))
+        if _wrote_p:                                       #  run reads the file whole once, and the path is no candidate for it
             n += 1
             try:
                 size = em._ckpt_file(p).stat().st_size
@@ -14163,7 +14174,10 @@ def _converge_assembly_leaf(key, sid, t0, flags=None):
         return None
     reasons = []
     try:
-        wrote = em.asm_checkpoint_write(key, sid, human, tree=_stored_tree_under(key, sid, human), reason_out=reasons, who="converge pass")
+        with _DOC_PROGRESS.write("assembly", key, st[1]) as _w:
+            wrote = em.asm_checkpoint_write(key, sid, human, tree=_stored_tree_under(key, sid, human), reason_out=reasons,
+                                            who="converge pass")
+            _w.wrote = bool(wrote)
     except Exception:
         sys.stderr.write("assembly converge: %s\n" % traceback.format_exc()); wrote = False
     if wrote:
@@ -14365,7 +14379,8 @@ def _ckpt_settle_write(sid, leaf, settle_due):
     written = 0
     if _EXIT_STAND_DOWN.is_set():
         return 0
-    _heal_cold_folds(leaf)                # the settle heals a tail-only fold (T359); the exit drain does not
+    with _DOC_PROGRESS.write("heal", leaf, _read_size(leaf)) as _w:
+        _w.wrote = bool(_heal_cold_folds(leaf))   # the settle heals a tail-only fold (T359); the exit drain does not
     _prime_leaf_folds(leaf)
     dirty = set(em.checkpoint_dirty())
     mine = _session_fold_files(sid, leaf) & dirty
@@ -14373,13 +14388,17 @@ def _ckpt_settle_write(sid, leaf, settle_due):
         if _p != leaf:                     #  dropped so the write leaves it out and the next boot reads that small file
             em.drop_cold_cursors(_p)       #  whole once, complete again (T359 review, low 3; the leaf's folds heal above)
     if mine:
-        wrote = em.checkpoint_write_dirty_paths(sorted(mine), stop=_EXIT_STAND_DOWN.is_set)   # no write starts past it
+        with _DOC_PROGRESS.write("fold", leaf, sum(_read_size(_p) for _p in mine)) as _w:
+            wrote = em.checkpoint_write_dirty_paths(sorted(mine), stop=_EXIT_STAND_DOWN.is_set)   # no write starts past it
+            _w.wrote = bool(wrote)
         written += len(wrote)
         _CKPT_JUST_WRITTEN.update(wrote)   # handed to the converge pass, which runs after this on the same thread
     if _EXIT_STAND_DOWN.is_set():          # the exit began during the fold writes: no assembly document starts beside it
         return written
     try:                                   # the assembly document for the leaf (T323 stage 4a): from a whole entry
-        if em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid), tree=_stored_tree(leaf, sid)):   # with a compaction
+        with _DOC_PROGRESS.write("assembly", leaf, _read_size(leaf)) as _w:
+            _wrote_asm = _w.wrote = bool(em.asm_checkpoint_write(leaf, sid, _display_sdk_human(sid), tree=_stored_tree(leaf, sid)))
+        if _wrote_asm:                     # with a compaction
             written += 1                   #  boundary, else a counted skip; the store's tree, when it holds one, gives the
     #                                          document its turns section (T323 stage 4c: a restore builds the turns without an
     #                                          atom); never a parse of its own (the settle reads no leaf whole)
@@ -71044,6 +71063,209 @@ _CKPT_SETTLE_HANDED = {}                           # sid -> (leaf, settle_due): 
 #                                                    first, one per session (a later decision for a session still waiting folds in)
 
 
+def _read_size(path):
+    """A file's size for the writer's progress events (0 when it will not stat)."""
+    try:
+        return os.path.getsize(str(path))
+    except OSError:
+        return 0
+
+
+class _DocWriterProgress:
+    """The document writer's progress events and the bound its own history gives the write in flight (the review of PR 158: a
+    stuck writer was silent; hand-offs piled up, no document was written, and only /perf writer going stale said so). Every
+    write of the writer's turn is bracketed, begin(kind, path, bytes) and end(wrote) (kernel call sites, and the event
+    model's through em.set_document_progress), and recorded on the writer's own thread alone (the thread holding
+    em.document_writer). Kinds: "assembly" (an assembly document, its bytes the leaf's), "fold" (fold documents, the file's
+    bytes), "heal" (a tail-only fold refolded whole: a read of the file).
+    A write in flight is OVERDUE when two things hold at a watch, both the writer's own events:
+    - it has outlasted what the writer's completed writes of its kind give a write of its size: max(the longest any took,
+      its bytes x the slowest any went per byte), learned only from writes that did work (a skip teaches nothing);
+    - the writer's thread spent no CPU since the previous watch (its thread CPU clock unchanged): it is waiting, not
+      writing, so a slow write that is working is never called stuck, however far past its expectation.
+    The clock is the jobs pass's cadence: watch() runs at each pass's end, and a write is judged only from the second
+    watch that finds it in flight, so the CPU test always spans a whole pass. A kind with no completed write in this kernel
+    has no expectation and is not judged, nor is any write where the thread CPU clock is unavailable (no
+    pthread_getcpuclockid, macOS); its age, expectation and the writer's backlog are in /perf writer from the first second
+    either way (report). Said once per write: the episode ends when that write ends, said on stderr as it does."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.stack = []          # the writes in flight, outermost first: {kind, path, bytes, t0, said, clk, cpu}
+        self.hist = {}           # kind -> {"writes", "longest" (s), "worst" (s per byte)}
+        self.overdue = 0         # writes said overdue (one per episode)
+        self.peak = {}           # the hand-off tables' largest sizes seen at a watch
+
+    @staticmethod
+    def _mine():
+        w = em._DOC_WRITER["thread"]
+        return w is not None and w == threading.get_ident()
+
+    @staticmethod
+    def _own_cpu_clock():
+        """This thread's CPU clock id, taken on the thread itself (another thread passing an ident that may have exited to
+        pthread_getcpuclockid is undefined behaviour; reading a dead thread's clock id later is an OSError), or None."""
+        try:
+            return time.pthread_getcpuclockid(threading.get_ident())
+        except (AttributeError, OSError):
+            return None
+
+    def begin(self, kind, path, nbytes, at=None):
+        if not self._mine():
+            return
+        item = {"kind": str(kind), "path": str(path), "bytes": int(nbytes or 0),
+                "t0": time.monotonic() if at is None else at, "said": False, "clk": self._own_cpu_clock(), "cpu": None}
+        with self.lock:
+            self.stack.append(item)
+
+    def end(self, wrote=True, at=None):
+        if not self._mine():
+            return
+        at = time.monotonic() if at is None else at
+        with self.lock:
+            if not self.stack:
+                return
+            item = self.stack.pop()
+            secs = max(0.0, at - item["t0"])
+            if wrote:
+                h = self.hist.setdefault(item["kind"], {"writes": 0, "longest": 0.0, "worst": 0.0})
+                h["writes"] += 1
+                h["longest"] = max(h["longest"], secs)
+                if item["bytes"] > 0:
+                    h["worst"] = max(h["worst"], secs / item["bytes"])
+        if item["said"]:
+            try:
+                sys.stderr.write("document writer: the %s document for %s finished after %s (it had been said overdue)\n"
+                                 % (item["kind"], item["path"], _doc_secs(secs)))
+            except Exception:
+                pass
+
+    def write(self, kind, path, nbytes):
+        """`with _DOC_PROGRESS.write(kind, path, bytes) as w: ...; w.wrote = <did it write>`: begin and end around one write."""
+        return _DocWrite(self, kind, path, nbytes)
+
+    def _expect_locked(self, kind, nbytes):
+        h = self.hist.get(kind)
+        if not h or not h["writes"]:
+            return None
+        return max(h["longest"], nbytes * h["worst"])
+
+    @staticmethod
+    def _cpu(item):
+        if item.get("clk") is None:
+            return None
+        try:
+            return time.clock_gettime(item["clk"])
+        except OSError:
+            return None
+
+    def watch(self, at=None):
+        """The jobs pass's end: (the innermost write in flight, its age, its expectation) the first time it is overdue, else
+        None (see the class)."""
+        handed = _doc_handed_sizes()
+        with self.lock:
+            for k, v in handed.items():
+                self.peak[k] = max(self.peak.get(k, 0), v)
+            top = self.stack[-1] if self.stack else None
+            if top is None or top["said"]:
+                return None
+            at = time.monotonic() if at is None else at   # (no clock read with nothing in flight)
+            cpu = self._cpu(top)
+            prev, top["cpu"] = top["cpu"], cpu
+            if cpu is None or prev is None or cpu != prev:
+                return None                               # first sight, no CPU clock, or the writer worked since the last watch
+            exp = self._expect_locked(top["kind"], top["bytes"])
+            age = at - top["t0"]
+            if exp is None or age <= exp:
+                return None
+            top["said"] = True
+            self.overdue += 1
+            return {k: v for k, v in top.items() if k != "clk"}, age, exp
+
+    def report(self, at=None):
+        """/perf writer's live part: the writes in flight (innermost last) with their age and expectation, what each kind's
+        completed writes taught, the writes said overdue, and the hand-off tables now and at their largest."""
+        handed = _doc_handed_sizes()
+        with self.lock:
+            if at is None:                                # the clock only when a write is in flight: a snapshot with none
+                at = time.monotonic() if self.stack else 0.0   # reads no clock (the perf tests count the cycle's reads)
+            flight = []
+            for it in self.stack:
+                e = self._expect_locked(it["kind"], it["bytes"])
+                flight.append({"kind": it["kind"], "path": it["path"], "bytes": it["bytes"], "ageS": round(at - it["t0"], 2),
+                               "expectS": round(e, 2) if e is not None else None, "overdue": it["said"],
+                               "cpuClock": it.get("clk") is not None})
+            kinds = {k: {"writes": h["writes"], "longestS": round(h["longest"], 3), "worstSPerMB": round(h["worst"] * 1e6, 3)}
+                     for k, h in self.hist.items()}
+            for k, v in handed.items():
+                self.peak[k] = max(self.peak.get(k, 0), v)
+            return {"inFlight": flight, "byKind": kinds, "overdue": self.overdue, "handed": handed, "handedPeak": dict(self.peak)}
+
+
+class _DocWrite:
+    """One bracketed write (_DocWriterProgress.write); `wrote` is what the caller learned (None: assume it did)."""
+
+    def __init__(self, tracker, kind, path, nbytes):
+        self.t, self.args, self.wrote = tracker, (kind, path, nbytes), None
+
+    def __enter__(self):
+        try:
+            self.t.begin(*self.args)
+        except Exception:
+            pass
+        return self
+
+    def __exit__(self, exc_type, *exc):
+        try:
+            self.t.end(wrote=(exc_type is None and self.wrote is not False))
+        except Exception:
+            pass
+        return False
+
+
+def _doc_secs(secs):
+    secs = float(secs)
+    return "%.1f s" % secs if secs < 60 else "%d min %d s" % (int(secs // 60), int(secs % 60))
+
+
+def _doc_handed_sizes():
+    """The writer's backlog, table by table: handed drops and rewrites (the event model's), handed settle writes, owed drops."""
+    return {"drops": len(em._DROP_HANDOFF), "rewrites": len(em._ASM_REFUSAL_HANDOFF), "settles": len(_CKPT_SETTLE_HANDED),
+            "owed": len(em._DROP_OWED)}
+
+
+_DOC_PROGRESS = _DocWriterProgress()
+em.set_document_progress(_DOC_PROGRESS)
+_DOC_WATCH_SAID = {}                               # exception type name -> said once (a watch that raised never fails a pass)
+
+
+def _doc_writer_watch():
+    """The jobs pass's end (_doc_writer_wake): a write the document writer has spent longer on than its own history gives
+    (_DocWriterProgress.watch) is said once, on stderr and as a problem row in the error center, naming the write, its size,
+    how long, the expectation it outlasted, and the backlog waiting behind it. Never raises into the pass."""
+    try:
+        got = _DOC_PROGRESS.watch()
+        if got is None:
+            return None
+        item, age, exp = got
+        waiting = sum(_doc_handed_sizes().values())
+        line = ("romp's document writer has spent %s on one %s document (%s, %.1f MB), longer than its own %s writes give for "
+                "that size in this kernel (%s); session history saves are waiting behind it (%d handed or owed, /perf writer)"
+                % (_doc_secs(age), item["kind"], item["path"], item["bytes"] / 1e6, item["kind"], _doc_secs(exp), waiting))
+        sys.stderr.write("document writer: %s\n" % line)
+        _sdk_problem(line)
+        return line
+    except Exception as e:
+        kind = type(e).__name__
+        if kind not in _DOC_WATCH_SAID:
+            _DOC_WATCH_SAID[kind] = True
+            try:
+                sys.stderr.write("document writer watch: %s (said once per kind)\n" % traceback.format_exc().rstrip().splitlines()[-1])
+            except Exception:
+                pass
+        return None
+
+
 def _ckpt_settle_hand(sid, leaf, settle_due):
     """The jobs pass's side of a settle write while the document writer runs (_persist_checkpoints): the session's write handed
     to the writer, which does it at its next cycle exactly as the pass would have (_ckpt_settle_write). A session already
@@ -71081,6 +71303,7 @@ def _doc_writer_wake(now, live_map):
     with _DOC_WRITER_LOCK:
         _DOC_WRITER_SNAP["now"], _DOC_WRITER_SNAP["live"] = now, live_map
     _DOC_WRITER_WAKE.set()
+    _doc_writer_watch()                   # the pass's cadence is the writer's watch: a write past its own bound is said
 
 
 def _doc_writer_cycle():

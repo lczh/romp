@@ -542,6 +542,111 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
         self.assertEqual(self.persisted, [self.LEAF_B], "past the stand-down no write starts")
         self.assertEqual(list(km._CKPT_SETTLE_HANDED), [self.SID_C], "and what is left stays handed")
 
+    # ── the review of PR 158: a stuck document writer is loud, and its backlog shows in /perf ─────────────────────────────
+    def test_the_bound_is_the_writers_own_history_and_a_working_write_is_never_called_stuck(self):
+        """The watch's rule on a tracker driven by explicit times and thread CPU readings."""
+        km = self.km
+        t = km._DocWriterProgress()
+        cpu = [5.0]
+        t._cpu = lambda item: cpu[0]
+        prev = km.em._DOC_WRITER["thread"]
+        self.addCleanup(km.em._DOC_WRITER.__setitem__, "thread", prev)
+        km.em._DOC_WRITER["thread"] = threading.get_ident()         # this thread is the writer for the test
+        t.begin("fold", "/synthetic/web/a.jsonl", 1000, at=0.0)
+        t.end(wrote=True, at=0.1)                                  # the kind learns: longest 0.1 s, 0.1 ms per byte
+        t.begin("fold", "/synthetic/web/b.jsonl", 500, at=0.5)
+        t.end(wrote=False, at=9.5)                                 # a write that wrote nothing teaches nothing
+        t.begin("fold", "/synthetic/web/c.jsonl", 2000, at=1.0)   # expected at most max(0.1, 2000 x 0.0001) = 0.2 s
+        self.assertIsNone(t.watch(at=1.05), "first sight: no whole pass watched yet")
+        self.assertIsNone(t.watch(at=1.15), "within its expectation")
+        got = t.watch(at=1.5)
+        self.assertIsNotNone(got, "past it, and no CPU since the last watch: overdue")
+        item, age, exp = got
+        self.assertEqual((item["kind"], item["path"], round(age, 2), round(exp, 2)), ("fold", "/synthetic/web/c.jsonl", 0.5, 0.2))
+        self.assertIsNone(t.watch(at=2.0), "said once per write")
+        self.assertEqual(t.report(at=2.0)["inFlight"][0]["overdue"], True)
+        t.end(wrote=True, at=3.0)                                  # the episode ends with the write (it also teaches: 2 s)
+        t.begin("fold", "/synthetic/web/d.jsonl", 2000, at=10.0)  # expected at most max(2.0, 2000 x 0.001) = 2.0 s
+        t.watch(at=10.1)
+        cpu[0] = 6.0
+        self.assertIsNone(t.watch(at=13.0), "past its expectation but the writer worked since the last watch: slow, not stuck")
+        self.assertIsNotNone(t.watch(at=13.5), "no CPU across the next whole pass: overdue, a new episode")
+        self.assertEqual(t.overdue, 2)
+        t.end(at=14.0)
+        t.begin("assembly", "/synthetic/web/leaf.jsonl", 10 ** 8, at=20.0)
+        for at in (20.1, 100.0, 1000.0):
+            self.assertIsNone(t.watch(at=at), "a kind with no completed write has no expectation: never judged")
+        t.end(at=1001.0)
+        t._cpu = lambda item: None
+        t.begin("fold", "/synthetic/web/e.jsonl", 10, at=2000.0)
+        for at in (2000.1, 3000.0, 4000.0):
+            self.assertIsNone(t.watch(at=at), "no thread CPU clock: never judged")
+
+    def test_a_write_stuck_on_the_real_writer_is_said_once_and_its_backlog_shows_in_perf(self):
+        """The real writer's settle writes on a thread holding the role, the real jobs-pass end (_doc_writer_wake) as the watch:
+        one heal completes and teaches its kind, the next blocks (waiting on a lock it never gets, as a deadlock would), and
+        within a few passes a problem row names it, its size and how long; while it is stuck a second session's settle write
+        handed over shows in /perf writer's backlog, and the write in flight shows overdue. Released, it ends and the writer
+        goes on. At the base nothing said it: no row, and /perf writer had no live part."""
+        km = self.km
+        leaf = self.td_leaf()
+        self.sessions = [{"sid": self.SID_A, "path": leaf}]
+        entered, release = threading.Event(), threading.Event()
+        heals = []
+
+        def heal(path, dropped_out=None):
+            heals.append(path)
+            if len(heals) == 1:
+                return ["agentLaunches"]                           # a heal that did work: the kind learns its pace
+            entered.set()
+            release.wait(30)                                       # stuck: waiting, no CPU spent
+            return []
+        writer = self._writer_thread()
+        before_rows = len(km._SDK_BOOT_PROBLEMS)
+        err = io.StringIO()
+        with mock.patch.object(km, "_heal_cold_folds", heal), mock.patch.object(km.sys, "stderr", err):
+            km._ckpt_settle_hand(self.SID_A, leaf, True)
+            writer.submit(km._ckpt_settle_writes_pay).result(timeout=30)
+            km._ckpt_settle_hand(self.SID_A, leaf, True)
+            stuck = writer.submit(km._ckpt_settle_writes_pay)
+            self.assertTrue(entered.wait(30), "the second heal began")
+            rows, deadline = [], time.monotonic() + 20
+            while not rows and time.monotonic() < deadline:
+                km._doc_writer_wake(NOW, {})                       # a jobs pass ends: the writer's watch
+                rows = [r for r in km._SDK_BOOT_PROBLEMS[before_rows:] if "document writer" in r["text"]]
+                if not rows:
+                    threading.Event().wait(0.05)                   # (the next pass's end)
+            self.assertEqual(len(rows), 1, "one problem row for the stuck write: %r" % km._SDK_BOOT_PROBLEMS[before_rows:])
+            text = rows[0]["text"]
+            self.assertIn("heal", text); self.assertIn(leaf, text); self.assertIn("MB", text)
+            self.assertRegex(text, r"spent [0-9.]+ s", "how long")
+            km._ckpt_settle_hand(self.SID_B, self.LEAF_B, True)     # handed while the writer is stuck
+            for _ in range(3):
+                km._doc_writer_wake(NOW, {})
+            self.assertEqual(len([r for r in km._SDK_BOOT_PROBLEMS[before_rows:] if "document writer" in r["text"]]), 1,
+                             "said once per write")
+            w = km._PERF_STATS.snapshot()["writer"]
+            self.assertEqual([(f["kind"], f["path"], f["overdue"]) for f in w["inFlight"]], [("heal", leaf, True)], w["inFlight"])
+            self.assertGreater(w["inFlight"][0]["ageS"], w["inFlight"][0]["expectS"])
+            self.assertEqual(w["handed"]["settles"], 1, "the backlog grows while it is stuck: %r" % w["handed"])
+            self.assertGreaterEqual(w["handedPeak"]["settles"], 1)
+            self.assertEqual(w["byKind"]["heal"]["writes"], 1)
+            release.set()
+            stuck.result(timeout=30)
+        self.assertIn("finished after", err.getvalue(), "the episode's end is said on stderr")
+        self.assertEqual(km._PERF_STATS.snapshot()["writer"]["inFlight"], [])
+
+    def td_leaf(self):
+        """A real leaf file of a known size (the progress events read its size)."""
+        import shutil
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        p = os.path.join(d, self.SID_A + ".jsonl")
+        with open(p, "w") as fh:
+            fh.write("x" * 2048 + "\n")
+        return p
+
     def test_the_converge_pass_takes_the_set_on_its_off_and_its_no_work_roads(self):
         """The take runs on every road of the converge pass, as each road cleared the set before the hand-off was locked (the
         review of 2026-10-05): a path the settle write handed over is taken with the pass off (ROMP_CKPT_CONVERGE_MS=0) and
