@@ -18,7 +18,8 @@ hook table (the T303 probe).
 The socket protocol is newline-delimited JSON frames, field `t` naming the frame:
   kernel → host: attach {kernel:{pid,start,version}, ack:N}, in {data}, ack {offset}, signal {sig},
                  end {grace}, detach, ping
-  host → kernel: hello {host, cli:{pid, start, fsid, spawnedAt, login, launch}, journal:{next}, parked:[ids]}, out {offset, data}, stderr {line},
+  host → kernel: hello {host, cli:{pid, start, fsid, spawnedAt, login, launch}, journal:{next}, parked:[ids], inflight, inflightScope},
+                 out {offset, data}, stderr {line},
                  exit {code, signal, cause}, fault {kind, text}, busy {kernel}, pong
 One kernel is attached at a time. Connection loss without `detach` is a kernel death to the host; a
 `detach` is not (the host keeps running). An unattached host whose CLI is idle past the grace ends it.
@@ -724,7 +725,14 @@ class SessionHost:
         self.kernel = None
         self.inflight = 0               # open turns: a text-bearing user line fed opens one; a result closes ALL of them (the CLI folds
         #                                 queued lines into the running turn and answers with one result); an output row after the result
-        #                                 (an assistant or user row: the CLI running a queued line as its own turn) re-opens one
+        #                                 (an assistant or user row: the CLI running a queued line as its own turn) re-opens one. ANY row
+        #                                 re-opens it, a backgrounded subagent's too: what the unattached grace gate and the re-exec's
+        #                                 quiet check read, since that output is work the CLI is still doing (_grace_loop, _reexec_now)
+        self.main_turns = 0             # the MAIN conversation's open turns, what the hello reports (an attaching kernel adopts it as
+        #                                 its own count): opened by a text-bearing user line fed, closed by a result, re-opened only by
+        #                                 a main-conversation frame (an init, or an assistant or user row with no parent_tool_use_id).
+        #                                 A backgrounded subagent streams on after the main turn's result, tagged parent_tool_use_id;
+        #                                 counted here it read as a turn in flight to every kernel that attached before the next result
         self.idle_since = self.now()
         self.exit_info = None
         self.ending = None              # (deadline, cause) once `end` was requested
@@ -746,6 +754,9 @@ class SessionHost:
             self.fsid = str(h.get("fsid") or self.fsid)
             self._read_count = int(h.get("read_count") or self.journal.next_offset)
             self.inflight = int(h.get("inflight") or 0)
+            # a handoff from code older than the main count has none: the handover runs only when nothing is open (the
+            # quiet check reads inflight, which counts every row the main count does), so its inflight, zero, is exact
+            self.main_turns = int(h.get("main_turns", self.inflight) or 0)
             self.journal.acked = int(h.get("acked", ACK_NONE))
             for rec in h.get("parked") or []:
                 try:
@@ -896,7 +907,8 @@ class SessionHost:
             if self._read_count != self.journal.next_offset:
                 raise RuntimeError("count")
             handoff = {"cli_pid": int(self.cli_pid), "cli_start": self.cli_start, "cli_spawned_at": self.cli_spawned_at, "fsid": self.fsid,
-                       "fds": fds, "read_count": self._read_count, "inflight": self.inflight, "acked": self.journal.acked,
+                       "fds": fds, "read_count": self._read_count, "inflight": self.inflight, "main_turns": self.main_turns,
+                       "acked": self.journal.acked,
                        "parked": [{"offset": v["offset"], "t": v["t"], "record": v["record"]} for v in self.parked.open.values()],
                        "answered": sorted(self.parked.answered), "version_from": self.version, "t": self.now()}
             hpath = self.dir / "reexec.json"
@@ -1060,12 +1072,15 @@ class SessionHost:
                 self._unwritten.pop(off, None)
 
     def _track(self, msg: dict, off: int) -> None:
-        """Bookkeeping per message: the fsid from the init, the turn count, open requests."""
+        """Bookkeeping per message: the fsid from the init, the two turn counts (inflight, every row; main_turns, the main
+        conversation's alone: see their fields), open requests."""
         mt = msg.get("type")
         if mt == "system" and msg.get("subtype") == "init" and msg.get("session_id"):
             if str(msg["session_id"]) != self.fsid:
                 self.fsid = str(msg["session_id"])
                 self._write_lease()
+            if self.main_turns == 0 and not msg.get("parent_tool_use_id"):
+                self.main_turns = 1                        # a turn's first frame (one per turn), the kernel's _turn_frame rule
         elif mt == "result":
             # ONE result closes everything fed: the CLI folds messages queued while it works into the running turn
             # and answers them with a single result, so a fed-minus-resulted count stays above zero forever after a
@@ -1075,13 +1090,18 @@ class SessionHost:
             # assistant or user row after this result (its own user line was counted before the result, so nothing on
             # the input side can tell a fold from a queue; the output can).
             self.inflight = 0
+            self.main_turns = 0
             self.idle_since = self.now()
             if self._reexec_pending is not None:                  # a kernel asked mid-turn: the turn's end is the event
                 python, launcher = self._reexec_pending
                 asyncio.ensure_future(self._reexec_now(python, launcher))
-        elif mt in ("assistant", "user") and self.inflight == 0:
-            self.inflight = 1                              # output arriving with no turn counted: a queued line running as its own turn
-            self.log("turn-reopened", offset=off)
+        elif mt in ("assistant", "user"):
+            main = not msg.get("parent_tool_use_id")
+            if self.inflight == 0:
+                self.inflight = 1                          # output arriving with no turn counted: a queued line running as its own
+                self.log("turn-reopened", offset=off, main=main)   # turn, or a backgrounded subagent still at work
+            if main and self.main_turns == 0:
+                self.main_turns = 1                        # the main conversation running a turn nothing fed here opened
         elif mt == "control_request":
             self.parked.park(msg, off, self.now(), attached=self.attached is not None)
             self.log("request-open", requestId=str(msg.get("request_id") or ""),
@@ -1264,7 +1284,10 @@ class SessionHost:
                                     # the launch record the spec carried (None from a spec written before the record)
                                     "launch": self.spec.get("launch") if isinstance(self.spec.get("launch"), dict) else None},
                             "journal": {"next": read_at_attach}, "parked": self.parked.ids(),
-                            "inflight": self.inflight,      # the open turns, so an attaching kernel knows it is mid-turn
+                            # the MAIN conversation's open turns, so an attaching kernel knows it is mid-turn (a backgrounded
+                            # subagent's output keeps the host's own count open, never this one); inflightScope says so, and a
+                            # hello without it comes from a host older than the main count
+                            "inflight": self.main_turns, "inflightScope": "main",
                             "exited": self.exit_info is not None})
         # each offset is resolved at ITS moment: from memory while unwritten, from the journal once landed, so
         # a record the writer lands during a drain yield is never between two snapshots (finding 4 of the
@@ -1311,6 +1334,7 @@ class SessionHost:
         if isinstance(obj, dict):
             if obj.get("type") == "user" and _opens_turn(obj):
                 self.inflight += 1
+                self.main_turns += 1
             elif obj.get("type") == "control_response":
                 rid = str(((obj.get("response") or {}).get("request_id")) or "")
                 if rid in self.parked.answered:

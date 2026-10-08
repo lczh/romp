@@ -13051,6 +13051,18 @@ class SdkBackend:
         # as Working forever: every send parked behind a turn that had ended days before (the user's laptop,
         # 2026-09-18). The count is never carried across an attach; a zero clears the fed-text twin too, since the
         # CLI answered everything it was fed.
+        # A host's count is the MAIN conversation's (inflightScope "main", 2026-10-08): this kernel counts no subagent
+        # frame (_turn_frame), and a host that re-opened its count on a backgrounded subagent's output had every kernel
+        # attaching before the next result read a turn in flight. A host older than that scope says nothing of it, and
+        # its count is the best word there is: zero is exact (it counts every row a main turn has), more may be a
+        # subagent at work, and it is adopted as it stands, since reading a real turn as idle feeds into it and strands
+        # it at the next reconnect. The turn's result settles it either way, and the host's re-exec into this code (at
+        # that result) brings the scoped count to the next attach. Said once per attach, so a Working that outlives its
+        # turn after a deploy has its explanation in the log.
+        if open_turns > 0 and hello.get("inflightScope") != "main":
+            self._log("host (%s): the host's code predates the main-turn count; its %d open turn(s) may include a "
+                      "background subagent's output and read as a turn in flight until the next result"
+                      % (sess.name, open_turns))
         sess.inflight = open_turns
         if open_turns == 0:
             texts = getattr(sess, "_inflight_texts", None)

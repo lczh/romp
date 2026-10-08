@@ -467,6 +467,25 @@ class BackendHostRules(unittest.TestCase):
                          "the host's count is adopted EXACTLY, down as well as up: a stale count on our side never survives an attach "
                          "(the base kept the higher of the two and read Working for two days); a spawn's hello leaves the slot to the init record")
 
+    def test_hello_reads_the_main_turn_count_and_says_when_an_older_hosts_count_may_include_a_subagent(self):
+        """Version skew at the hello (2026-10-08): a host on current code reports the MAIN conversation's open turns
+        (inflightScope "main"), adopted as they stand with nothing said. A host older than that scope re-opened its count on
+        a backgrounded subagent's rows too; its count is still the best word on a real turn (zero exact, more possibly a
+        subagent), so it is adopted, and the kernel log says why the session may read as mid-turn until the next result."""
+        d, be = self._be()
+        t = types.SimpleNamespace(hello={"host": {"pid": 1, "start": "a"}, "cli": {"pid": 2, "start": "b"}}, ack_offset=5)
+        base = {"host": {"pid": 1, "start": "a"}, "cli": {"pid": 2, "start": "b"}, "journal": {"next": 6}, "parked": []}
+        said = lambda: [l for l in be._test_logs if "predates the main-turn count" in str(l)]
+        for hello, want, lines in ((dict(base, inflight=0, inflightScope="main"), 0, 0),
+                                   (dict(base, inflight=1, inflightScope="main"), 1, 0),
+                                   (dict(base, inflight=0), 0, 0),
+                                   (dict(base, inflight=1), 1, 1)):
+            s = types.SimpleNamespace(sid=SID, name="web", inflight=0, _inflight_texts=[], _host=t, _host_is_attach=True,
+                                      _fire_boot_settled=lambda: None)
+            del be._test_logs[:]
+            be._on_host_hello(s, hello)
+            self.assertEqual((s.inflight, len(said())), (want, lines), "hello %r" % ({k: hello.get(k) for k in ("inflight", "inflightScope")},))
+
     def test_a_reexec_request_reads_the_hosts_answer_and_an_older_host_as_a_refusal(self):
         """The kernel's half of the re-exec (2026-09-18): one connection, one frame, one answer. A host that knows the frame
         answers it; a host older than the frame answers `fault not-attached`, which reads as a refusal; a socket nobody
