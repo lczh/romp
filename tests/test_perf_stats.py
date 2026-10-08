@@ -47,6 +47,7 @@ SID = "11111111-2222-3333-4444-555555555555"
 # and node ids collide across test modules under the shared placeholder (CLAUDE.md, goal-store fixtures).
 GOAL_SID = "77777777-8888-9999-aaaa-bbbbbbbbbbbb"
 TOP_KEYS = {"now", "since", "uptime_s", "log", "process", "pusher", "jobs", "stages_ms", "builds", "sends",   # jobs: the jobs thread's passes
+            "writer",                                      # writer: the document writer's cycles, every document written (review of PR 155)
             "heap",                                        # heap: where the resident size sits at the read, gauges over every content cache (2026-09-15)
             "gc",                                          # gc: the collector's pauses per generation, from the gc.callbacks hook (2026-09-16)
             "goals", "memos", "judge", "http", "parses",   # parses: cold event-model parses (T323 stage 1)
@@ -119,6 +120,10 @@ class Collector(unittest.TestCase):
         for k in ("cycle_ms_p50", "cycle_ms_p90", "cycle_ms_ring_max", "cycle_ms_max", "cycle_cpu_ms_sum"):
             self.assertEqual(p[k], 0.0, k)
         self.assertEqual(p["ring_n"], 0)
+        w = snap["writer"]                                 # the document writer's cycles (the review of PR 155), at zero
+        self.assertEqual((w["cycles"], w["cycleFailed"], w["ring_n"], w["lastCycle"]), (0, 0, 0, None))
+        for k in ("cycle_ms_p50", "cycle_ms_p90", "cycle_ms_ring_max", "cycle_ms_max", "cycle_cpu_ms_sum"):
+            self.assertEqual(w[k], 0.0, k)
         self.assertEqual(set(snap["stages_ms"]), set(km._PerfStats.STAGES))
         self.assertEqual(p["chatFullWhy"], {}, "the proto-2 full frames' reason map (2026-09-19) starts empty")
         self.assertEqual(set(snap["builds"]), {"chat", "feed", "timeline", "feedJson", "thread"})   # thread: the comment popover's build (2026-09-08)

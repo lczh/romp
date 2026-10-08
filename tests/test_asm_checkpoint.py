@@ -1088,12 +1088,13 @@ class ConvergeAssembly(Harness):
                 self.cycle(NOW + 600)
                 self.assertTrue(em._asm_ckpt_file(path).exists(), "no turn running (%s): written now" % name)
 
-    def test_the_pushers_cycle_writes_no_document_and_the_jobs_threads_write_phase_does(self):
+    def test_the_pushers_cycle_writes_no_document_and_the_document_writers_cycle_does(self):
         """2026-10-08: the converge pass ran near the end of every pusher cycle, and its first candidate always went, so an idle
         session's assembly document was written inside the cycle that builds every frame (9.9 s of one cycle over a 38 MB
         session in a lab; 0.6 to 2.5 s for a 4 MB one on a live box). The real pusher jobs over an idle leaf the boot parsed,
-        with no document and no turn running, the frame jobs quiet: the cycle writes nothing. The jobs thread's write phase,
-        the process's document writer, writes it. At the base the pusher's cycle wrote it."""
+        with no document and no turn running, the frame jobs quiet: the cycle writes nothing. The document writer's jobs (the
+        jobs thread's write phase on 2026-10-08, its own thread since the review of PR 155), run by the process's document
+        writer, write it. At the base the pusher's cycle wrote it."""
         path = self.idle_leaf("pusher", age=600)
         km = self.km
         quiet = {nm: (lambda *a, **k: None) for nm in ("_sessions_listing_refresh", "_apply_pending_ops", "_artifacts_signal",
@@ -1105,9 +1106,94 @@ class ConvergeAssembly(Harness):
         self.assertFalse(em._asm_ckpt_file(path).exists(), "the pusher's cycle wrote a document: %s" % em.asm_checkpoint_stats()["converge"])
         self.assertEqual(em.asm_checkpoint_stats()["converge"]["candidates"], 0, "nor looked for one")
         with em.document_writer():
-            km._jobs_write_phase(NOW + 602)
-        self.assertTrue(em._asm_ckpt_file(path).exists(), "written at the jobs thread's write phase")
+            km._document_write_phase(NOW + 602)
+        self.assertTrue(em._asm_ckpt_file(path).exists(), "written by the document writer's jobs")
         self.assertEqual(em.asm_checkpoint_stats()["converge"]["writes"], 1)
+
+    # ── the review of PR 155: the file's own writer says whether it is mid-turn, for every kind of entry ───────────────────────
+    def _leaf_under(self, rel, sid, age=600):
+        """A leaf at `rel` under the test's root, idle, with no assembly document, parsed once by this process under `sid` (the
+        subagent viewer parses an agent's file under its parent's id; the comments frame parses a thread under the thread's)."""
+        import time
+        records, sent = G.SINGLE_FILE["compaction_atom"]
+        p = self.td / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("".join(json.dumps(r) + "\n" for r in records()))
+        old = time.time() - age; os.utime(p, (old, old))
+        self.fresh()
+        em.parse_session(str(p), rompuuid=sid, name="impl", dir="/TESTDIR", candidate_files=[str(p)], states=None,
+                         postal_log=sent or [], now=NOW)
+        self.assertEqual([(w[0], w[1]) for w in em.asm_whole_entries()], [(str(p), sid)], "the boot's parse, under that id")
+        self.assertFalse(em._asm_ckpt_file(str(p)).exists())
+        return str(p)
+
+    AGENT = "a0123456789abcdef"                                    # a synthetic agent id, the CLI's shape (a + 16 hex)
+
+    def test_a_subagent_transcript_is_left_while_the_subagent_runs_whatever_its_parents_turn(self):
+        """The review of PR 155: the subagent viewer parses an agent's file under its PARENT's id, and the pass read the parent's
+        row to decide whether that file was being written. A background agent runs while its parent sits waiting (an interrupt
+        settled the parent's turn, or the agent outlives it), so every pass took the agent's file as idle and wrote its document
+        while the agent appended to it, taking the file's writer lock and re-segmenting it under the viewer's render. The agent
+        itself is the file's writer: its file is left while the backend lists it running (a SubagentStart not yet stopped, or
+        its lifecycle task, whose id is the agent's), and written once it is gone from both, whatever its parent is doing then.
+        At the base the first cycle wrote it beside the running agent, and the last cycle, the parent mid-turn on another
+        agent, left the returned agent's file unwritten."""
+        path = self._leaf_under("proj/%s/subagents/agent-%s.jsonl" % (SID, self.AGENT), SID)
+        for k, row in enumerate(({"state": "waiting", "subagents": [{"agentId": self.AGENT, "type": "general"}], "bgTasks": []},
+                                 {"state": "waiting", "subagents": [], "bgTasks": [{"taskId": self.AGENT, "toolUseId": "toolu_x"}]},
+                                 {"state": "waiting", "subagents": [{"agentId": self.AGENT}], "bgTasks": [{"taskId": self.AGENT}]})):
+            self.live = {SID: row}
+            self.cycle(NOW + 600 + k)
+            self.assertFalse(em._asm_ckpt_file(path).exists(), "the agent is running (%r): its file is being written" % row)
+        self.assertEqual(em.asm_checkpoint_stats()["converge"]["candidates"], 0)
+        other = "a" + "f" * 16
+        self.live = {SID: {"state": "working", "subagents": [{"agentId": other}], "bgTasks": [{"taskId": other}]}}
+        self.cycle(NOW + 610)                                      # the parent mid-turn, another agent running: this one returned
+        self.assertTrue(em._asm_ckpt_file(path).exists(), "the agent is gone from the live sets: its file is written")
+        self.assertEqual(em.asm_checkpoint_stats()["converge"]["writes"], 1)
+
+    def test_a_subagent_of_a_session_with_no_running_process_is_written(self):
+        """A dormant session's row (no process: the backend lists no live sets) or no row at all: no CLI runs, so no agent of
+        it is writing; the agent's file is written from the boot's parse."""
+        for name, live in (("dormant", {SID: {"state": "waiting"}}), ("gone", {})):
+            with self.subTest(name):
+                path = self._leaf_under("%s/%s/subagents/workflows/wf_1/agent-%s.jsonl" % (name, SID, self.AGENT), SID)
+                self.km._ASM_CONVERGE_DONE.clear()
+                self.live = live
+                self.cycle(NOW + 600)
+                self.assertTrue(em._asm_ckpt_file(path).exists(), "no process runs (%s): written" % name)
+
+    def test_a_comment_threads_transcript_is_left_while_the_threads_own_session_runs_a_turn(self):
+        """The review of PR 155: a comment thread has no row in the live map (live_sessions skips threadOf registrations), so the
+        pass read every thread as idle and wrote its document while its CLI appended to it. The thread's own session is the
+        file's writer: read from the backend (SdkBackend.session_work, the thread's running session), its transcript is left
+        while that session runs a turn, and written once the turn has ended or no process runs it. Driven through a real
+        backend over a registered thread. At the base the first cycle wrote it beside the running turn."""
+        km = self.km
+        sb = km._sdk_defaults_module()                              # the sdk_backend module the kernel builds from
+        tsid = "11111111-2222-3333-4444-0000000000c1"               # a private synthetic thread id
+        root = Path(tempfile.mkdtemp())
+        (root / "session-hosts").write_text("off\n")
+        be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
+        reg = {"sid": tsid, "name": "web-comment-1", "cwd": "/tmp/notes-api", "alive": True, "threadOf": SID, "lastSid": tsid}
+        sb.write_reg(km.jd.STATE, tsid, reg)                       # the kernel reads the thread's registration (_thread_reg)
+        self.addCleanup(lambda: (km.jd.STATE / "sdk" / (tsid + ".json")).unlink(missing_ok=True))
+        s = sb.SdkSession(be, reg)
+        s.thread = type("Alive", (), {"is_alive": lambda self: True})()
+        be.sessions[tsid] = s
+        saved = km._sdk_backend
+        km._sdk_backend = be
+        self.addCleanup(setattr, km, "_sdk_backend", saved)
+        path = self._leaf_under("proj/%s.jsonl" % tsid, tsid)
+        self.live = {SID: {"state": "waiting"}}                     # the parent idle; the thread is no row of the live map
+        s.inflight, s.retrying, s._interrupted = 1, False, False   # the thread's turn in flight
+        self.cycle(NOW + 600)
+        self.assertFalse(em._asm_ckpt_file(path).exists(), "the thread's turn is running: its transcript is being written")
+        self.assertEqual(em.asm_checkpoint_stats()["converge"]["candidates"], 0)
+        s.inflight = 0
+        sb.append_state(root, tsid, "waiting")                      # the turn ended
+        self.cycle(NOW + 601)
+        self.assertTrue(em._asm_ckpt_file(path).exists(), "the thread's turn ended: written from the boot's parse")
 
 
 

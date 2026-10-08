@@ -546,6 +546,43 @@ class AssemblyRoadCounters(Harness):
                          "the next restore takes it: %s" % parse2)
         self.assertEqual(tree2, self._cold(path))
 
+    def test_a_handed_rewrite_whose_entry_the_cache_evicted_before_the_writers_turn_is_still_written(self):
+        """The review of PR 155: the writer found a handed rewrite's entry by the leaf's key in the assembly cache, and an entry
+        the cache evicted between the parse and the writer's turn (256 entries; a box with some 250 sessions and threads plus
+        the judges' parses churns it) was "no entry": nothing written and nothing marked, the refusal gone silently, so every
+        later parse of the leaf paid the proof and the whole parse again, and under that churn the rewrite might never land.
+        The hand-off now keeps what the rewrite needs, the whole entry the parse installed, and the writer writes from it when
+        the cache no longer holds it: the document gains the bit, no mark, and the next restore takes it. The eviction here is
+        the cache's own, at a cap of one, by another leaf's parse. At the base the rewrite was counted moot and the next boot
+        refused the document again."""
+        import contextlib
+        path, t0 = self._documented("handoff-evicted"); self._strip_bit(path)
+        other = self._five_shape_file("handoff-evictor")[0]
+        self.fresh(); self._reset()
+        with getattr(em, "document_writer", contextlib.nullcontext)():
+            tree, parse, reads = self._off_the_writer(path)
+            self.assertEqual(parse.get("write:afterRefusalHandedOff"), 1, parse)
+            self.assertIsNone(self._bit(path), "nothing written off the writer")
+            saved = em._ASM_CACHE_MAX
+            em._ASM_CACHE_MAX = 1
+            try:
+                self._parse_lineage(other, [other])                     # the cache at its cap: this parse evicts the leaf's entry
+            finally:
+                em._ASM_CACHE_MAX = saved
+            key = (os.path.realpath(path), SID, False)
+            with em._ASM_LOCK:
+                self.assertNotIn(key, em._ASM_CACHE, "the premise: the cache evicted the parse's entry before the writer's turn")
+            em.documents_pay_handoffs()                                 # the writer's write phase
+        parse = em.asm_checkpoint_stats()["parse"]
+        self.assertEqual((parse.get("write:afterRefusal"), parse.get("write:afterRefusalMoot", 0)), (1, 0), parse)
+        self.assertIs(self._bit(path), True, "written from the entry the hand-off kept: the document carries the bit")
+        self.assertFalse(em._asm_refusal_stands(path), "and no mark")
+        self.fresh(); self._reset()
+        tree2, parse2, reads2 = self._served(path)
+        self.assertEqual((parse2.get("restore"), parse2.get("restore:chainRefused", 0), parse2.get("full", 0)), (1, 0, 0),
+                         "the next restore takes it: %s" % parse2)
+        self.assertEqual(tree2, self._cold(path))
+
     def test_a_handed_rewrite_whose_entry_was_written_meanwhile_marks_nothing(self):
         """The hand-off's one new outcome: between the parse and the writer's turn, the entry's document was written by another
         of the writer's jobs (the settle write runs earlier in the same pass). The writer then declines the rewrite as written,

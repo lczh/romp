@@ -128,9 +128,10 @@ class Census(unittest.TestCase):
         self.assertFalse(set(km._JOBS_INPUTS) & set(km._JOBS_UNDECLARED))
         self.assertEqual(set(km._JOBS_UNDECLARED), {"beginCheckpointCycle", "convergeCheckpoints"},
                          "the checkpoint cycle and the converge pass alone are owed every pass, wherever they run")
-        write = re.findall(JOB_NAME_RE, inspect.getsource(km._jobs_write_phase))
-        self.assertEqual(set(write), set(km._JOBS_UNDECLARED),
-                         "they run in the jobs thread's write phase, after the gated pass, where nothing is gated")
+        write = re.findall(JOB_NAME_RE, inspect.getsource(km._document_write_phase))
+        self.assertEqual(set(write) - {"settleWrites"}, set(km._JOBS_UNDECLARED),
+                         "they run on the document writer's thread (the review of PR 155), where nothing is gated, beside the "
+                         "settle writes the pass hands it")
         self.assertFalse(set(jobs) & set(write), "neither is a job of the gated pass")
         self.assertEqual([j for j in jobs if j not in km._JOBS_INPUTS], [],
                          "every job of the jobs pass is declared, so a quiet pass can count under wouldSkipPass")
@@ -200,7 +201,7 @@ class FaultCensus(unittest.TestCase):
         "autoResumeRetry": ("_auto_resume_retry",), "autoResumeSession": ("_auto_resume_session_retry",),
         "autoRetry": ("_auto_retry_tick", "_fire_api_retry"), "idleQueueDrive": ("_idle_queue_drive_tick",),
         "clearDoneNotes": ("_clear_done_working_notes",), "heldWorking": ("_held_working_pass",),
-        "checkpointFirstSight": ("_checkpoint_first_sight",), "persistCheckpoints": ("_persist_checkpoints",),
+        "checkpointFirstSight": ("_checkpoint_first_sight",), "persistCheckpoints": ("_persist_checkpoints", "_ckpt_settle_write"),
     }
     UNRECORDED = "the evaluation its tick check opened is never recorded: the job is owed under unrecorded"
     DIRTY = "the memo stays dirty: the persist is owed under dirty"
@@ -227,8 +228,10 @@ class FaultCensus(unittest.TestCase):
         ("_held_working_pass", "OSError", 0): "the belt is owed every pass while a hold stands (held)",
         ("_held_working_pass", "Exception", 0): "the belt is owed every pass while a hold stands (held)",
         ("_held_working_pass", "Exception", 1): "the belt is owed every pass while a hold stands (held)",
-        ("_persist_checkpoints", "Exception", 0): "an assembly document that failed: the settle is recorded as written all the same, "
-                                                 "so the base never retries it before the next settle or period write either",
+        ("_ckpt_settle_write", "Exception", 0): "an assembly document that failed: the settle is recorded as written all the same, "
+                                                "so the base never retries it before the next settle or period write either (the "
+                                                "write itself runs on the document writer's thread while the loops run: review of "
+                                                "PR 155)",
     }
     OWING = {   # the swallowing handlers that owe a fault: the review's seven first, then the census's own finds and the earlier fold's
         ("_auto_nudge_pass", "Exception", 0), ("_auto_nudge_pass", "Exception", 1), ("_auto_nudge_pass", "Exception", 2),

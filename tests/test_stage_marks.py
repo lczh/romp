@@ -78,6 +78,7 @@ ALLOW = {
                                    "hold its Thread line literal",
     ("kernel.py", "main", "_pusher"): "marks inside: push and connect through _push's decorator",
     ("kernel.py", "main", "_jobs_loop"): "marks inside: jobs.<name> through _job_stage",
+    ("kernel.py", "main", "_doc_writer_loop"): "marks inside: jobs.<name> through _job_stage (the document writer's jobs)",
     ("kernel.py", "main", "_heartbeat"): "WS keepalive frames",
     ("kernel.py", "main", "_parent_watch"): "a pid probe on the spawning manager",
     ("kernel.py", "main", "_update_check_loop"): "the main-drift git probe",
