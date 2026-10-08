@@ -151,7 +151,9 @@ class BuildSessionWiring(unittest.TestCase):
     def test_causes_are_stamped_after_hydration(self):
         import inspect
         src = inspect.getsource(km.build_session)
-        self.assertIn("_stamp_interrupt_causes(events, _cuts)", src)   # + the spend guard's cut records (#169 review)
+        self.assertIn("_stamp_interrupt_causes(events, _tail_cuts)", src)   # + the spend guard's cut records (#169 review)
+        # …only the cuts this build's events can hold (#176 review): none pressed at or before the atom ahead of them
+        self.assertIn('_tail_cuts = [_c for _c in _cuts if last_t is None or _c["t"] > last_t]', src)
 
 
 if __name__ == "__main__":
