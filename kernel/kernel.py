@@ -32396,8 +32396,8 @@ def _listing_request_scope():
 def _listing_refused(view, wants):
     """The refusal a request gets when the view cannot vouch for what it asks (None when it can): one of the products
     `wants` names (_LISTING_PRODUCTS) faulted at its last build, so the kept copy may be stale, or was never built. Answered
-    as a 503 with the time and the error, which the postal bus reads as a kernel that did not answer (it rules no session
-    dead on one): the cycle is the listing's one builder, and a stale listing served as current would read a dead session
+    as a 503 with the time and the error, which the postal bus quotes to a sender as this refusal, never as a kernel that
+    did not answer, and rules no session dead on (postal_service.ListingRefused): the cycle is the listing's one builder, and a stale listing served as current would read a dead session
     as live or a new one as absent, quietly (the authoritative-sources rule)."""
     for name in wants:
         product, fault = _LISTING_PRODUCTS[name]

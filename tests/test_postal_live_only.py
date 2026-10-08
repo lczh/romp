@@ -5,10 +5,15 @@ name resolves only to a currently-live session — there is no dead-session resu
 no parking mail for a session that isn't running. This pins that simplification so the
 removed surfaces can't quietly creep back. No real session data here (synthetic UUIDs).
 """
+import contextlib
+import io
 import json
 import os
+import socket
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from romp_load import load_source
 
 from tests.conftest import restore_env
@@ -180,6 +185,151 @@ class KernelSilenceIsNotDeadness(unittest.TestCase):
         res = pm.resolve_recipient("ghost")
         self.assertEqual((res["kind"], res["status"]), ("error", 404))
         self.assertIn("no live romp session named 'ghost'", res["error"])
+
+
+# The kernel's own words when a product of its listing faulted at its last build (kernel.py
+# _listing_refused), synthetic: it answers GET /sessions with a 503 and this as the body's "error".
+LISTING_FAULT = ("the session listing's rows cannot be served: its build has failed since 12:00:00 "
+                 "(2 builds; the last: KeyError: 'dir'), so the kept copy may be stale; the kernel log "
+                 "has the traceback")
+WEB = "11111111-2222-3333-4444-555555555555"
+
+
+class _ListingKernel:
+    """A real loopback HTTP server standing in for the kernel's GET /sessions, so the bus's REAL fetch
+    path (urllib, the token header, the HTTPError) runs: `status` 503 answers with the kernel's refusal
+    body, 200 with `rows`. A request without the bus's token is answered 401, as the kernel does."""
+
+    def __init__(self, token):
+        self.status, self.rows, self.hits = 503, [], 0
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                fake.hits += 1
+                if self.headers.get("X-Romp-Token") != token:
+                    code, body = 401, {"ok": False, "error": "unauthorized"}
+                elif fake.status == 200:
+                    code, body = 200, fake.rows
+                else:
+                    code, body = fake.status, {"ok": False, "error": LISTING_FAULT}
+                data = json.dumps(body).encode("utf-8")
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *a):            # keep the server's access log out of the captured stderr
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.base = "http://127.0.0.1:%d" % self.server.server_address[1]
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class KernelRefusalIsAnAnswer(unittest.TestCase):
+    """A kernel that answers GET /sessions with a 503 (a product of its listing faulted at its last
+    build) ANSWERED: the bus caught the HTTPError with every other failure and told the sender the
+    kernel "didn't answer — likely mid-restart", discarding the kernel's own reason without logging it
+    anywhere (2026-10-08). The refusal a sender sees now says the kernel answered and quotes its
+    reason; the listing still cannot vouch for liveness, so no session is ruled dead on it; an
+    unreachable kernel keeps the mid-restart reading; and the kernel's refusal is logged once per
+    episode (consecutive refused fetches), with one line when the listing answers again, never once
+    per fetch: every session's postal service fetches the listing constantly."""
+
+    TOKEN = "listing-test-token"
+
+    def setUp(self):
+        self._prior_seam = os.environ.pop("ROMP_SESSIONS_FILE", None)   # no seam: the source is the kernel
+        self._base, self._token = pm.KERNEL_BASE, pm.SERVE_TOKEN
+        self.kernel = _ListingKernel(self.TOKEN)
+        pm.KERNEL_BASE, pm.SERVE_TOKEN = self.kernel.base, self.TOKEN
+        self._answer_once()                          # an episode an earlier test left open ends here, unseen
+        self.kernel.status = 503
+
+    def tearDown(self):
+        self._answer_once()                          # this test's episode ends, so the next starts on an answer
+        pm.KERNEL_BASE, pm.SERVE_TOKEN = self._base, self._token
+        self.kernel.close()
+        restore_env("ROMP_SESSIONS_FILE", self._prior_seam)
+        pm.HEARTBEATS.clear()
+        for f in pm.QUARANTINE.glob("lr-*.json") if pm.QUARANTINE.is_dir() else ():
+            f.unlink()
+
+    def _answer_once(self):
+        self.kernel.status = 200
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertTrue(pm._kernel_sessions_checked()[1])
+
+    def test_the_refusal_quotes_the_kernel_and_claims_neither_silence_nor_death(self):
+        res = pm.resolve_recipient("web")
+        self.assertGreater(self.kernel.hits, 1, "the real fetch path reached the server")
+        self.assertEqual((res["kind"], res["status"]), ("error", 503))
+        self.assertIn(LISTING_FAULT, res["error"], "the kernel's own reason reaches the sender")
+        self.assertIn("answered", res["error"])
+        self.assertNotIn("didn't answer", res["error"], "the kernel DID answer")
+        self.assertNotIn("mid-restart", res["error"])
+        self.assertIn("NOT a claim that 'web' is dead", res["error"])
+
+    def test_a_refused_listing_rules_no_session_dead(self):
+        for who in ("web", "api", WEB, WEB[:8]):
+            res = pm.resolve_recipient(who)
+            self.assertEqual((res["kind"], res["status"]), ("error", 503), who)
+            self.assertNotIn("no live romp session", res["error"], who)
+        rows, answered = pm.local_agents_checked(threads=True)
+        self.assertEqual(rows, [])
+        self.assertFalse(answered, "a refused listing never vouches for liveness")
+
+    def test_an_approve_on_a_refused_listing_quotes_the_kernel(self):
+        self.assertTrue(pm._quarantine_put("TESTHOST", {"mid": "lr-appr-1", "to": "web", "frm": "api",
+                                                        "frm_id": "", "body": "the held text"}, WEB))
+        ok, err = pm.quarantine_decide("lr-appr-1", "approve")
+        self.assertFalse(ok)
+        self.assertIn(LISTING_FAULT, err)
+        self.assertNotIn("didn't answer", err)
+        self.assertIn("The held message is untouched", err)
+        self.assertIsNotNone(pm.quarantine_get("lr-appr-1"), "the hold stands")
+
+    def test_an_unreachable_kernel_keeps_the_mid_restart_reading(self):
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()                                    # a closed port: nothing answers there
+        pm.KERNEL_BASE = "http://127.0.0.1:%d" % port
+        try:
+            res = pm.resolve_recipient("web")
+        finally:
+            pm.KERNEL_BASE = self.kernel.base
+        self.assertEqual((res["kind"], res["status"]), ("error", 503))
+        self.assertIn("didn't answer — likely mid-restart", res["error"])
+        self.assertNotIn(LISTING_FAULT, res["error"])
+        self.assertNotIn("no live romp session", res["error"])
+
+    def test_the_refusal_is_logged_once_per_episode(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            for _ in range(3):
+                pm.resolve_recipient("web")          # two fetches each: the pool and the probe
+            pm.local_agents_checked()
+            self.kernel.status, self.kernel.rows = 200, [{"id": WEB, "name": "web"}]
+            for _ in range(3):
+                self.assertTrue(pm.local_agents_checked()[1])
+            self.kernel.status = 503                 # a second episode is said again, once
+            for _ in range(2):
+                pm.local_agents_checked()
+        lines = err.getvalue().splitlines()
+        said = [i for i, l in enumerate(lines) if LISTING_FAULT in l]
+        healed = [i for i, l in enumerate(lines) if "session listing answers again" in l]
+        self.assertEqual(len(said), 2, "one line per episode, not one per fetch: %r" % lines)
+        self.assertIn("HTTP 503", lines[said[0]])
+        self.assertEqual(len(healed), 1, "one line when the listing answers again: %r" % lines)
+        self.assertLess(said[0], healed[0])
+        self.assertLess(healed[0], said[1])
 
 
 class AnsweredButAbsentIsNotDeadness(unittest.TestCase):
