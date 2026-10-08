@@ -638,9 +638,10 @@ class TheSettleWriteHandsItsPathsToTheConvergePass(unittest.TestCase):
 
     def td_leaf(self):
         """A real leaf file of a known size (the progress events read its size)."""
+        import shutil
         import tempfile
         d = tempfile.mkdtemp()
-        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        self.addCleanup(shutil.rmtree, d, True)
         p = os.path.join(d, self.SID_A + ".jsonl")
         with open(p, "w") as fh:
             fh.write("x" * 2048 + "\n")
