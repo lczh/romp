@@ -14460,14 +14460,15 @@ def _interrupt_block_tick(now, live_map):
     stands the block down before any write, and a refused marker write leaves the store write's own
     dirty mark to carry the flip.
 
-    The Task tracking switch off stands the tick down whole, as a mute does for one session (T404): the flip moves a goal
-    card into the feed's Needs you column, and with tracking off there is no feed and no judge keeping those goals current.
-    The tick evaluates the then-current world on the first pass the switch is on: a stop the user has not followed up blocks
-    then, and a block it placed before the flip lifts then if the user re-engaged meanwhile."""
-    if not _task_tracking_on():
-        return
+    The Task tracking switch off stands the per-session work down, as a mute does for one session (T404): the flip moves a
+    goal card into the feed's Needs you column, and with tracking off there is no feed and no judge keeping those goals
+    current. The tick evaluates the then-current world on the first pass the switch is on: a stop the user has not followed
+    up blocks then, and a block it placed before the flip lifts then if the user re-engaged meanwhile. The clean-up after the
+    loop runs either way: it is the bound on every memo of departed sessions it names (the subagents walk memo's home is
+    here, beside the interrupt marks), and the switch can stay off for weeks while sessions come and go."""
+    tracked = _task_tracking_on()
     alive = _alive_sessions(now, live_map)
-    for s in alive:
+    for s in (alive if tracked else ()):
         sid = s["sid"]
         if _session_flag(sid, "hideFromFeed"):           # muted from the feed → no interrupt-block bookkeeping either
             continue
@@ -15567,14 +15568,17 @@ def _lift_spent_awaiting(now, live_map):
     stale decision. After the loop, the gate entries and the placed-launch memo's entries of sids that
     left the alive set are dropped: nothing to gate, nothing to place for.
 
-    The Task tracking switch off stands the lift down (T404): the stamps it retracts are the judges' and the card it moves
-    is the feed's; the returns it rules on stay in the transcript, so the first pass the switch is on rules on them."""
-    if not _task_tracking_on():
-        return
+    The Task tracking switch off stands the per-session ruling down (T404): the stamps it retracts are the judges' and the
+    card it moves is the feed's; the returns it rules on stay in the transcript, so the first pass the switch is on rules on
+    them. The alive set is still read and the clean-up after the loop still runs: it releases a departed session's gate
+    entry and the parse and store the two placement caches pin, which nothing else bounds."""
+    tracked = _task_tracking_on()
     seen = set()
     for s in _alive_sessions(now, live_map):
         sid = s["sid"]
         seen.add(sid)
+        if not tracked:
+            continue                                  # off: the alive set for the clean-up below, no ruling
         try:
             if live_map.get(sid) is None:                 # dormant → its tasks died with the CLI, don't rule
                 continue

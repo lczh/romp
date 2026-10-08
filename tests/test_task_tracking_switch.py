@@ -750,28 +750,71 @@ class TheUntrackedLook(_Base):
 
 class TheGoalCardRules(_Base):
     """The interrupt → Needs you flip and the awaiting-stamp lift move goal cards the feed alone shows, from the judges'
-    stamps: off, both stand down whole (no session is even listed); on, they walk the sessions as before (red before: both
-    walked while off)."""
+    stamps: off, neither does any per-session work; on, they walk the sessions as before. Their clean-up of departed
+    sessions' cached state runs either way: the interrupt marks and their persisted rows, the states-overlay fold and the
+    subagents walk memo (whose bound lives in the interrupt tick), the lift's gate rows and the two placement caches, which
+    pin a parse and a goal store each and nothing else bounds (the review of #168: the first cut returned before the
+    clean-up, so a kernel left off grew with every session that ended)."""
+    LIVE = "61616161-2222-3333-4444-555555555555"
+    GONE = "62626262-2222-3333-4444-555555555555"
+
     def setUp(self):
         super().setUp()
-        self._saved = km._alive_sessions
-        self.listed = []
-        km._alive_sessions = lambda now, live_map: self.listed.append(now) or []
+        self._saved = (km._alive_sessions, km._session_flag)
+        self.listed, self.looked = [], []
+        self.live_path, self.gone_path = os.path.join(self._td, "live.jsonl"), os.path.join(self._td, "gone.jsonl")
+        km._alive_sessions = lambda now, live_map: self.listed.append(now) or [{"sid": self.LIVE, "path": self.live_path, "name": "web"}]
+        km._session_flag = lambda sid, flag: self.looked.append(sid) or True     # the interrupt tick's first per-session read (muted: skip)
 
     def tearDown(self):
-        km._alive_sessions = self._saved
+        km._alive_sessions, km._session_flag = self._saved
+        for sid in (self.LIVE, self.GONE):
+            for k in [k for k in km._intr_marks_memo if k[0] == sid]:
+                km._intr_marks_memo.pop(k, None)
+            km._INTR_MARKS_DISK.pop(sid, None)
+            km._lift_seen.pop(sid, None); km._BG_TOPS_CACHE.pop(sid, None); km._PLACEMENT_IDX.pop(sid, None)
+            km._states_overlay_cache.pop(str(km.jd.STATE / "states" / ("%s.jsonl" % sid)), None)
+        for p in (self.live_path, self.gone_path):
+            km._SUBAGENT_TREES.pop(str(km._subagents_dir(p)), None)
         super().tearDown()
 
-    def test_off_both_rules_stand_down(self):
+    def _seed(self):
+        for sid, path in ((self.LIVE, self.live_path), (self.GONE, self.gone_path)):
+            km._intr_marks_memo[(sid, "judge")] = ("pinned parse",)
+            km._INTR_MARKS_DISK[sid] = [0, 0, 0.0, "", False, 0.0, 0.0]
+            km._states_overlay_cache[str(km.jd.STATE / "states" / ("%s.jsonl" % sid))] = ("fold",)
+            km._SUBAGENT_TREES[str(km._subagents_dir(path))] = ("tree",)
+            km._lift_seen[sid] = ("fingerprint",)
+            km._BG_TOPS_CACHE[sid] = ("parse", "store", {})
+            km._PLACEMENT_IDX[sid] = ("store", {})
+
+    def _held(self, sid, path):
+        return {"intrMarks": any(k[0] == sid for k in km._intr_marks_memo), "intrDisk": sid in km._INTR_MARKS_DISK,
+                "overlay": str(km.jd.STATE / "states" / ("%s.jsonl" % sid)) in km._states_overlay_cache,
+                "subagents": str(km._subagents_dir(path)) in km._SUBAGENT_TREES, "liftSeen": sid in km._lift_seen,
+                "bgTops": sid in km._BG_TOPS_CACHE, "placement": sid in km._PLACEMENT_IDX}
+
+    def test_off_no_per_session_work_and_a_session_that_ended_is_evicted_from_every_cache(self):
         km._set_task_tracking(False, gt=1)
-        km._interrupt_block_tick(1, {})
-        km._lift_spent_awaiting(2, {})
-        self.assertEqual(self.listed, [], "neither rule listed a session while off")
+        self._seed()
+        asked = []
+        class _Rows(dict):
+            def get(self, k, d=None):
+                asked.append(k)
+                return dict.get(self, k, d)
+        km._interrupt_block_tick(1, _Rows({self.LIVE: {"state": "waiting"}}))
+        km._lift_spent_awaiting(2, _Rows({self.LIVE: {"state": "waiting"}}))
+        self.assertEqual((self.looked, asked), ([], []), "no session was looked at while off")
+        self.assertEqual(self._held(self.GONE, self.gone_path), dict.fromkeys(self._held(self.GONE, self.gone_path), False),
+                         "the session that ended is released from every cache")
+        self.assertEqual(self._held(self.LIVE, self.live_path), dict.fromkeys(self._held(self.LIVE, self.live_path), True),
+                         "the live session's entries stay")
 
     def test_on_both_rules_walk(self):
         km._interrupt_block_tick(1, {})
         km._lift_spent_awaiting(2, {})
         self.assertEqual(self.listed, [1, 2])
+        self.assertEqual(self.looked, [self.LIVE], "on, the interrupt tick looks at the live session")
 
 
 class TheChatDotsWhileOff(_Base):
