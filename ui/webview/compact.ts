@@ -16,8 +16,11 @@
  *  romp notice on a user row). Peers, API errors, boundaries, asks, to-dos and every real bubble stay standalone.
  *  Pure over the event's shape so render.ts (the fold) and reveal-progress.ts (what counts as a message) share ONE
  *  reading (T336 review: the progress count took injected notices for messages). */
-export function isFoldableNoticeShape(ev: { kind: string; interruptMarker?: unknown; interruptSettle?: unknown; rompSystem?: unknown; md?: unknown; source?: unknown; human?: unknown; undelivered?: unknown }): boolean {
+export function isFoldableNoticeShape(ev: { kind: string; interruptMarker?: unknown; interruptSettle?: unknown; interruptCause?: unknown; rompSystem?: unknown; spendGuard?: unknown; md?: unknown; source?: unknown; human?: unknown; undelivered?: unknown }): boolean {
   if (ev.kind === "retried" || ev.kind === "effortApplied" || ev.kind === "modelFallback" || ev.kind === "reconnecting") return true;
+  // The spend guard's stop and its message are never low-stakes (the user 2026-10-08): swept into "2 notices" beside a
+  // background report, the stop read as a plain interrupt and the guard's message went unrecognised. Each stands alone.
+  if (ev.kind === "user" && (ev.spendGuard || ev.interruptCause === "spend")) return false;
   if (ev.kind === "user") return !!(ev.interruptMarker || (ev.rompSystem && ev.md) || (ev.source && !ev.human && !ev.undelivered));
   if (ev.kind === "assistant") return !!ev.interruptSettle;
   return false;

@@ -43,7 +43,7 @@ test("the stop record renders as a slim SESSION notice, not a message bubble", (
   // 2026-09-08 (the notice-vocabulary pass): the ONE builder; the stop square is the notice's glyph (cause tied to
   // effect), the italic dropped — one information type, one weight
   assert.match(SRC, /if \(\(ev as any\)\.interruptMarker\) \{/);
-  assert.match(SRC, /return notice\(\{ src: "session", glyph: "session", gist: interruptGist\(cause\), cls: "turn-interrupt",/);
+  assert.match(SRC, /return notice\(\{ src: "session", glyph: "session", gist: interruptGist\(cause, spend\), cls: "turn-interrupt",/);
   assert.match(SRC, /session: '<rect x="4" y="4" width="8" height="8" rx="1\.3"\/>'/, "the stop button's own glyph");
   assert.doesNotMatch(CSS, /\.interrupt-line|\.interrupt-square/);
   assert.match(CSS, /\.notice\.notice-slim \{/);

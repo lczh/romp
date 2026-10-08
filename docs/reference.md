@@ -5893,6 +5893,17 @@ carry and restart metrics count. The crossing is the event: nothing repeats
 while the rate stays high. Once the rate falls under half the ceiling a
 `spend.ceiling.cleared` row and a toast say so, and the guard is armed again.
 
+In the session's chat the stop reads as the guard's, never as yours: the
+interrupt row says "stopped by the spend guard at $X an hour", with the
+ceiling in its tooltip, and the message the session was handed is its own romp
+row, headed "Spend guard told it to stop: about $X an hour, over the $Y an hour
+ceiling", with the words it was sent one click away. Neither folds into a run
+of other notices in compact mode. Both are read off the message itself, which
+the kernel recognizes by its opening sentence (`_spend_ceiling_parse`): the
+stop is labelled the way a kernel-restart cut is labelled from its resume
+notice, so a session the guard stopped while no turn was running shows the
+message row alone.
+
 ## The spend ledger across a host re-attach
 
 A session under a host keeps its CLI process across a kernel restart, and the

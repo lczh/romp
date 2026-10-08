@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { compactDisplay, itemAnchor, STANDALONE_TOOLS, actionHead, actionParts, actionPhrases, toolRowLabel, diffTotals, toolInputText, type DisplayItem } from "./compact";
+import { compactDisplay, isFoldableNoticeShape, itemAnchor, STANDALONE_TOOLS, actionHead, actionParts, actionPhrases, toolRowLabel, diffTotals, toolInputText, type DisplayItem } from "./compact";
 
 test("compactDisplay: thinking is dropped entirely", () => {
   const d = compactDisplay(["user", "thinking", "assistant"]);
@@ -113,6 +113,22 @@ test("the foldable set is the caller's (isFoldableNotice): effort/model-swap/rel
   // with the array present, a "retried" NOT marked foldable is a plain event (the array is authoritative)
   assert.deepEqual(compactDisplay(["retried", "retried"], undefined, [false, false]),
     [{ kind: "event", index: 0 }, { kind: "event", index: 1 }]);
+});
+
+test("the spend guard's stop and its message never fold into a notice run (the user 2026-10-08)", () => {
+  // the guard stopping a session over its hourly ceiling is not a low-stakes notice: swept into "2 notices" beside a
+  // background report, the stop read as a plain interrupt and the guard's message went unrecognised
+  assert.equal(isFoldableNoticeShape({ kind: "user", interruptMarker: true, interruptCause: "spend" }), false);
+  assert.equal(isFoldableNoticeShape({ kind: "user", rompSystem: true, md: "You are spending…", spendGuard: true }), false);
+  // every other interrupt and romp notice folds as before
+  assert.equal(isFoldableNoticeShape({ kind: "user", interruptMarker: true }), true);
+  assert.equal(isFoldableNoticeShape({ kind: "user", interruptMarker: true, interruptCause: "restart" }), true);
+  assert.equal(isFoldableNoticeShape({ kind: "user", rompSystem: true, md: "[romp] The romp kernel restarted" }), true);
+  // the live shape: the guard's stop, a background agent's report, the reply, the guard's message
+  const evs = [{ kind: "user", interruptMarker: true, interruptCause: "spend" }, { kind: "user", source: { kind: "subagent" } },
+               { kind: "assistant" }, { kind: "user", rompSystem: true, md: "You are spending…", spendGuard: true }];
+  assert.deepEqual(compactDisplay(evs.map((e) => e.kind), undefined, evs.map((e) => isFoldableNoticeShape(e as any))),
+    [{ kind: "event", index: 0 }, { kind: "event", index: 1 }, { kind: "event", index: 2 }, { kind: "event", index: 3 }]);
 });
 
 test("retry runs and tool runs break each other — two folds, never one mixed group", () => {

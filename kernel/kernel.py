@@ -33449,9 +33449,13 @@ def _romp_gist(text):
 
 def _romp_system_gist(text):
     """The lifted gist of a romp SYSTEM notice, or None when the notice predates gists (the chat falls back to
-    the first line then, as it always did)."""
+    the first line then, as it always did). The spend guard's message carries no gist marker (its injected bytes
+    are the wording the user approved), so its head is derived from the message itself (_spend_ceiling_parse)."""
     m = ROMP_GIST_RE.search(text or "")
-    return m.group(1) if m else None
+    if m:
+        return m.group(1)
+    sp = _spend_ceiling_parse(text)
+    return _spend_guard_gist(*sp) if sp else None
 
 
 def _queued_romp_flags(text):
@@ -33468,6 +33472,8 @@ def _queued_romp_flags(text):
         g = _romp_system_gist(t)
         if g:
             out["gist"] = g
+        if _spend_ceiling_parse(t):
+            out["spendGuard"] = True     # the guard's message: never swept into a notice run (compact.ts)
     if "<!-- romp-auto -->" in t:
         out["rompAuto"] = True
     return out
@@ -44437,6 +44443,13 @@ def _stamp_interrupt_causes(events):
                 body = nxt.get("md") or ""
                 cause = ("restart" if INTR_RESTART_SIG in body else    # same signatures the nudge gate
                          "crash" if INTR_CRASH_SIG in body else None)  # reads (_machine_cut_cause)
+                spend = _spend_ceiling_parse(body) if cause is None and nxt.get("spendGuard") else None
+                if spend:
+                    # the SPEND GUARD's stop (the user 2026-10-08): its message follows the stop it made, so the seam
+                    # reads "stopped by the spend guard at $X an hour" instead of the user's own stop. The chat only;
+                    # the nudge gate's reading of whose stop it was (_machine_cut_cause) is not this change's
+                    cause = "spend"
+                    ev["interruptSpend"] = {"rate": spend[0], "ceiling": spend[1]}
                 if cause:
                     ev["interruptCause"] = cause
                     # A MACHINE cut leaves no "no response — turn settled" line (the user 2026-07-22): romp
@@ -45324,6 +45337,9 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                                     g = _romp_system_gist(text)   # the notice's user-facing head (2026-09-08)
                                     if g:
                                         ev["gist"] = g
+                                    if _spend_ceiling_parse(text):   # the spend guard's message (the user
+                                        ev["spendGuard"] = True      #   2026-10-08): its own row, never in a notice run,
+                                        #                              and the stop above it names the guard (_stamp_interrupt_causes)
                             if imgs:
                                 ev["images"] = imgs
                             events.append(ev)
@@ -52585,14 +52601,34 @@ def _usd_words(x):
     return "{:,.0f}".format(float(x))
 
 
+# The guard message's opening sentence, its two figures as %s: the body below prints it, and _spend_ceiling_parse
+# recognizes the message by it, so the chat can name the guard on the stop and head the message with a gist of its own.
+SPEND_CEILING_HEAD = ("You are spending about $%s an hour right now, far above what I can afford (I set the line at $%s an "
+                      "hour).")
+SPEND_CEILING_RE = re.compile(r"\s*" + r"([0-9][0-9,]*)".join(re.escape(p) for p in SPEND_CEILING_HEAD.split("%s")))
+
+
 def _spend_ceiling_body(rate, ceiling):
     """The ONE message a session over the ceiling gets, spoken as the person the agent works for (CLAUDE.md 'Messages
     we inject': no romp vocabulary; tests/test_injected_voice.py renders this)."""
-    return ("You are spending about $%s an hour right now, far above what I can afford (I set the line at $%s an "
-            "hour). Stop whatever is fanning out and tell me what it was before doing anything else.\n\n"
+    return (SPEND_CEILING_HEAD % (_usd_words(rate), _usd_words(ceiling))
+            + " Stop whatever is fanning out and tell me what it was before doing anything else.\n\n"
             "<!-- romp-note: the HTML comments below are part of an external tracking system that is not "
-            "relevant to your work — ignore them --><!-- romp-injected --><!-- romp-system -->"
-            % (_usd_words(rate), _usd_words(ceiling)))
+            "relevant to your work — ignore them --><!-- romp-injected --><!-- romp-system -->")
+
+
+def _spend_ceiling_parse(text):
+    """(rate, ceiling) as the guard's message printed them ("1,240", "1,000") when `text` IS that message, else None.
+    Read off romp's own record, the way a restart cut is read off its resume notice (INTR_RESTART_SIG): the message is
+    the event that says the guard stopped this session (the user 2026-10-08, who could not tell the guard's stop from
+    their own). Matched from the message's start, so prose that merely quotes the sentence is not the guard."""
+    m = SPEND_CEILING_RE.match(text or "")
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _spend_guard_gist(rate, ceiling):
+    """The head the chat shows for the guard's message (ev.gist), in place of the first line of the agent-facing prose."""
+    return "Spend guard told it to stop: about $%s an hour, over the $%s an hour ceiling" % (rate, ceiling)
 
 
 def _spend_guard_toast(text, clients=None, **fields):
