@@ -71,7 +71,7 @@ test("the fold's CONTENT order is prompt, then every tool call (one dim row each
 });
 
 test("the level-0 preview shows only while RUNNING with the fold CLOSED; a FINISHED head still carries the open-transcript arrow", () => {
-  const tail = (RENDER.match(/if \(\(ev\.name === "Task" \|\| ev\.name === "Agent"\) && ev\.agentId\) \{[\s\S]*?\n  \}\n  return turn;/) || [""])[0];
+  const tail = (RENDER.match(/if \(\(ev\.name === "Task" \|\| ev\.name === "Agent"\) && ev\.agentId\) \{[\s\S]*?\n  \}\n(?:  for \(const b of liveBits\) head\.appendChild\(b\);[^\n]*\n)?  return turn;/) || [""])[0];
   assert.ok(tail.length > 200, "found the arrow/preview block");
   // the arrow is gated on agentId alone — nothing about output, clock or run-state (the user asked that a
   // finished agent keep its arrow, 2026-09-05)

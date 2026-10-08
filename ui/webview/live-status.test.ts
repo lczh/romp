@@ -84,14 +84,25 @@ test("render.ts: the transcript's foot line keeps its room whether or not it sho
   assert.match(mk, /const atEnd = atBottom\(content\);[\s\S]*content\.insertBefore\(n, document\.getElementById\("live-ask"\)\);\s*\n\s*if \(atEnd\) writeScroll\(content, content\.scrollHeight, "live-status", true\);/);
 });
 
-test("render.ts: a live status lives as long as its socket, and an unreachable host's session shows none", () => {
+test("render.ts: a live status lives as long as its socket, a relay's reopen included", () => {
   assert.match(RENDER, /if \(m\.type === "wsup" \|\| m\.type === "hostUp"\) dropLiveStatus\(m\.type === "hostUp" \? \(Array\.isArray\(m\.hosts\) \? m\.hosts : \[\]\) : null\);/);
-  assert.match(RENDER, /!hostIsDown\(activeId\) \? liveStatus\.get\(activeId\)\?\.thinking : null/);
-  assert.match(RENDER, /const th = hostIsDown\(id\) \? undefined : liveStatus\.get\(id\)\?\.thinking;/);
+  // a remote kernel's restart reopens the host's relay and fires neither wsup nor hostUp (the second review of #171)
+  const relay = RENDER.slice(RENDER.indexOf('window.addEventListener("romp:hostRelayUp", (e) => {'));
+  assert.match(relay.slice(0, 600), /if \(h\) dropLiveStatus\(\[h\]\);/);
+});
+
+test("render.ts: the foot line and the tab ring show only while the session works by its own status", () => {
+  const shown = RENDER.slice(RENDER.indexOf("function thinkingShown("), RENDER.indexOf("function paintLiveThinking("));
+  assert.match(shown, /if \(!id \|\| hostIsDown\(id\)\) return null;/, "an unreachable host's session shows none");
+  assert.match(shown, /return st === "working" \? liveStatus\.get\(id\)\?\.thinking \|\| null : null;/,
+    "a stretch whose clearing frame was lost cannot count on over an idle session");
+  assert.match(RENDER, /const th = activeId && !fileTabOpen && !snapView \? thinkingShown\(activeId\) : null;/);
+  assert.match(RENDER, /function applyTabThinking\(tab: HTMLElement, id: string\): void \{[\s\S]{0,200}const th = thinkingShown\(id\);/);
 });
 
 test("render.ts + styles.css: the tab's cue is a static ring that cannot move the strip", () => {
-  assert.match(CSS, /\.tab-dot\.thinking \{ outline: 1\.5px solid color-mix\(in srgb, var\(--st-working-bg\) 55%, transparent\); outline-offset: 1\.5px; \}/);
+  assert.match(CSS, /\.tab-dot\.thinking \{ outline: 1\.5px solid color-mix\(in srgb, var\(--st-working-bg\) 55%, transparent\); outline-offset: 1\.5px; \}\n/);
+  assert.match(CSS, /\.tab-dot\.await \{ background: var\(--st-awaitbg-bg\); \}   \/\* awaiting-bg: the dot matches the await-green chip/, "the await rule keeps its own comment");
   assert.doesNotMatch(CSS, /\.tab-dot\.thinking[^{]*\{[^}]*animation/, "no pulse on the tab dot (dropped as distracting, 2026-06-16)");
   assert.match(RENDER, /if \(s\.id\) applyTabThinking\(tab, s\.id\);/, "every tab build re-applies the cue");
 });
@@ -101,6 +112,11 @@ test("render.ts: a waiting tool runs only on the kernel's word, and a cut one ne
   assert.match(RENDER, /const noResult = ev\.running === false && !ev\.agentRunning && !ev\.output && !ev\.isError;/);
   assert.match(RENDER, /dot\(ev\.isError \? "ring" : \(running \|\| ev\.agentRunning\) \? "working" : noResult \? "ring" : "green"\)/);
   assert.match(RENDER, /const t = el\("span", "tool-elapsed"\); t\.dataset\.since = String\(since\);/, "the elapsed time ticks from the call's own stamp");
+  // the ticking and changing text goes LAST on the head, after the fold toggle and the open arrow, so its growth shifts
+  // nothing a click aims at (the second review of #171)
+  const tool = RENDER.slice(RENDER.indexOf("function renderTool("), RENDER.indexOf("function agentOpenButton("));
+  assert.doesNotMatch(tool, /head\.appendChild\(t\);|head\.appendChild\(p\);/, "never appended where it was built, ahead of the toggle");
+  assert.match(tool, /for \(const b of liveBits\) head\.appendChild\(b\);[^\n]*\n\s*return turn;\n\}\n/, "appended at the very end");
 });
 
 test("render.ts: thinking rows carry the exact figure, and the footer the turn's total", () => {
@@ -109,10 +125,13 @@ test("render.ts: thinking rows carry the exact figure, and the footer the turn's
   assert.match(RENDER, /const f = elapsedFooter\(secs, turnThoughtTokens\(s\.events, ev\)\);/, "the tail path's patch builds the same footer");
 });
 
-test("kernel: the frame rides the pusher for chat and Sessions-pane clients, outside every build", () => {
-  assert.match(KERNEL, /_send_tab_order\(c, tab_order, tab_meta, live_map\)\n\s*_send_live_status\(c, tab_order, live_map\)/);
-  assert.match(KERNEL, /for c in tl_clients:\n\s*_send_live_status\(c, live_map, live_map\)\n\s*_PERF_STATS\.stage\("push\.timeline"/,
-    "the Sessions pane's frames go after its lanes and bars, never ahead of the cold-frame guard");
+test("kernel: the frames are built once a push and ride it to chat and Sessions-pane clients, outside every build", () => {
+  assert.match(KERNEL, /ls_frames = _live_status_frames\(live_map\) if \(want_chat or want_tl\) else \(\{\}, \{\}\)/);
+  assert.match(KERNEL, /_send_tab_order\(c, tab_order, tab_meta, live_map\)\n\s*_send_live_status\(c, ls_frames\[0\], tab_set\)/);
+  const send = KERNEL.slice(KERNEL.indexOf("def _send_live_status("), KERNEL.indexOf("def _note_needfull_status("));
+  assert.doesNotMatch(send, /_live_status_frame\(|c\.get\("sent"\) or \{\}\)\s*if|for k in/, "no per-client frame build and no scan of the sent table");
+  assert.match(KERNEL, /for c in tl_clients:\n\s*_send_live_status\(c, ls_frames\[1\]\)[^\n]*\n\s*_PERF_STATS\.stage\("push\.timeline"/,
+    "the Sessions pane's thinking-only frames go after its lanes and bars, never ahead of the cold-frame guard");
   assert.match(KERNEL, /else if\(m\.type==="liveStatus"&&panel\.liveStatus\)panel\.liveStatus\(m\);/, "the browser timeline's inline boot routes it");
 });
 

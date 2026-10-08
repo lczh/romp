@@ -131,7 +131,7 @@ import { dirStatusHint, nextDirActive, createDirPrompt, type DirStatus } from ".
 import { mediaSrc, kernelUrl, swirlOSrc } from "./media";
 import { initStrip, fmtReset } from "./strip";
 import { durLabel } from "./duration";
-import { readLiveStatus, thinkingText, thinkingShort, thinkingTip, thoughtLabel, taskProgressText, turnThoughtTokens, tokensShort, type LiveStatus } from "./live-status";   // what a session is doing this second (thinking, its subagents' progress), from the kernel's liveStatus frame (2026-10-08)
+import { readLiveStatus, thinkingText, thinkingShort, thinkingTip, thoughtLabel, taskProgressText, turnThoughtTokens, tokensShort, type LiveStatus, type ThinkingLive } from "./live-status";   // what a session is doing this second (thinking, its subagents' progress), from the kernel's liveStatus frame (2026-10-08)
 import { apiErrorReason } from "./api-error-reason";
 import { chatMdExtensions, userMdHtml } from "./chat-md";
 import { setTip, pruneTip } from "./tip";
@@ -4767,8 +4767,17 @@ function liveStatusEl(): HTMLElement | null {
 
 // The active session's "Thinking · 14s" (and, once the stream has gone silent, "· quiet for 15s"): the loader dots while
 // frames flow, still dots once quiet, never a spinner past what the frames proved.
+// A live status is shown only while its session is WORKING by its own status (the event model's open turn), whatever
+// frame arrived: a stretch whose clearing frame was lost (a relay that reopened onto a restarted kernel) can never count
+// on over an idle session (the second review of #171, 2026-10-08). An unreachable host's session shows none either.
+function thinkingShown(id: string | null | undefined): ThinkingLive | null {
+  if (!id || hostIsDown(id)) return null;
+  const st = (liveSession(id) || sessions.get(id))?.status?.state;
+  return st === "working" ? liveStatus.get(id)?.thinking || null : null;
+}
+
 function paintLiveThinking(): void {
-  const th = activeId && !fileTabOpen && !snapView && !hostIsDown(activeId) ? liveStatus.get(activeId)?.thinking : null;   // an unreachable host's session: no word on it
+  const th = activeId && !fileTabOpen && !snapView ? thinkingShown(activeId) : null;
   if (!th) { const have = document.getElementById("live-status"); if (have?.firstChild) have.replaceChildren(); return; }
   const n = liveStatusEl();
   if (!n) return;
@@ -4792,7 +4801,7 @@ function paintLiveThinking(): void {
 function applyTabThinking(tab: HTMLElement, id: string): void {
   const d = tab.querySelector<HTMLElement>(".tab-dot");
   if (!d) return;
-  const th = hostIsDown(id) ? undefined : liveStatus.get(id)?.thinking;
+  const th = thinkingShown(id);
   d.classList.toggle("thinking", !!th);
   if (th) {
     if (d.dataset.baseTitle == null) d.dataset.baseTitle = d.title;
@@ -5563,14 +5572,18 @@ function renderTool(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement {
   head.appendChild(name);
   if (lbl.secondary) { const c = el("span", "tool-name tool-secondary"); c.textContent = lbl.secondary; head.appendChild(c); }
   if (ev.file) head.appendChild(fileLink(ev.file));   // EVERY event with a file keeps its link (round two, medium 2); a label that names the path names it as this link, never twice
-  // a running tool's elapsed time, from the tool call's own stamp, ticked by the 1 s timer (liveStatusTick) with no rebuild
+  // a running tool's elapsed time and a running subagent's progress: both tick or change between pushes, so they go at
+  // the END of the head (appended below, after the fold toggle and the open arrow), where growing text moves nothing
+  // a click could aim at (the second review of #171, 2026-10-08)
+  const liveBits: HTMLElement[] = [];
+  // the elapsed time, from the tool call's own stamp, ticked by the 1 s timer (liveStatusTick) with no rebuild
   const since = running && ev.ts ? Date.parse(ev.ts) / 1000 : NaN;
   if (Number.isFinite(since) && since > 0) {
     const t = el("span", "tool-elapsed"); t.dataset.since = String(since); t.textContent = durLabel(Date.now() / 1000 - since);
     setTip(t, "running for this long; the time stops when its result arrives");
-    head.appendChild(t);
+    liveBits.push(t);
   }
-  // a running subagent's progress (its last tool, its tool calls, its tokens), as the CLI's task_progress reports it: the
+  // the subagent's progress (its last tool, its tool calls, its tokens), as the CLI's task_progress reports it: the
   // kernel's liveStatus frame fills it by the call's id (paintTaskProgress), between pushes and without a rebuild
   if ((ev.name === "Task" || ev.name === "Agent") && (running || ev.agentRunning) && ev.toolUseId) {
     const p = el("span", "agent-live"); p.dataset.tu = ev.toolUseId;
@@ -5578,7 +5591,7 @@ function renderTool(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement {
     // preview): the span then carries only the tokens, so no figure is said twice on one row
     if (ev.agentGist || ev.stepsTotal || ev.agentSteps?.length) p.dataset.brief = "1";
     p.textContent = taskProgressText(liveStatus.get(renderingOwnerSid || renderingSid || "")?.tasks[ev.toolUseId], p.dataset.brief === "1");
-    head.appendChild(p);
+    liveBits.push(p);
   }
   // An edit's totals are the diff fold's toggle below (+A -R), printed once per row (round two, medium 1); a FAILED edit's error fold
   // replaces that fold and prints no totals: a failed edit changed nothing (round three, low d). The head carries no totals span.
@@ -5708,6 +5721,7 @@ function renderTool(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement {
     head.appendChild(agentOpenButton(ev.agentId, ev.uuid || null, renderingOwnerSid || renderingSid || null));
     if (ev.agentGist && !(fkey && openFolds.has(fkey))) head.insertAdjacentElement("afterend", renderAgentGist(ev.agentSteps, ev.agentGist));
   }
+  for (const b of liveBits) head.appendChild(b);   // the ticking and changing text last: nothing after it to shift
   return turn;
 }
 
@@ -6421,7 +6435,7 @@ function showTabTip(tab: HTMLElement, s: Session): void {
     // aria-label and the cold tab's title (a value span has no role, so an aria-label on it would be inert).
     rows.push(["Needs you", nc > 0 ? (nc === 1 ? "1 thing" : nc + " things") : ""]);
   }
-  const thl = liveStatus.get(s.id)?.thinking;   // the live thinking stretch, as the foot line words it (live-status.ts)
+  const thl = thinkingShown(s.id);   // the live thinking stretch, as the foot line words it (live-status.ts), while it works
   if (thl) rows.push(["Thinking", thinkingText(thl, now).replace(/^Thinking · /, "")]);
   if (s.cwd) rows.push(["📁", s.cwd]);
   if (s.gitBranch) rows.push(["⎇", s.gitBranch]);
@@ -18977,6 +18991,7 @@ window.addEventListener("romp:wsup", () => {
 window.addEventListener("romp:hostRelayUp", (e) => {
   const h = String((((e as CustomEvent).detail || {}) as any).host || "");
   if (h) reshipPendingUploads([h]);
+  if (h) dropLiveStatus([h]);   // …and that host's live statuses (the second review of #171): a remote kernel's restart reopens the relay and fires neither wsup nor hostUp, and the new kernel sends no frame clearing what the old one showed
   // …and the figure previews parked on that host's link (T291): the relay socket's open is the reconnect-class
   // event a remote kernel's restart produces (it fires neither romp:wsup nor hostUp), so settled previews
   // make their one attempt here as well

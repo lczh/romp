@@ -241,20 +241,45 @@ class LiveStatusFrame(unittest.TestCase):
         out = []
         c = {"app": "chat", "send": out.append, "sent": {}}
         live = {SID: {"state": "working"}}
-        km._send_live_status(c, [SID], live)
+        km._send_live_status(c, km._live_status_frames(live)[0], {SID})
         self.assertEqual(out, [], "an idle board puts no frame on the wire")
         live[SID]["thinkingLive"] = {"t": NOW}
-        km._send_live_status(c, [SID], live)
-        km._send_live_status(c, [SID], live)
+        km._send_live_status(c, km._live_status_frames(live)[0], {SID})
+        km._send_live_status(c, km._live_status_frames(live)[0], {SID})
         self.assertEqual(len(out), 1, "the start goes once; an unchanged status is deduped")
         self.assertEqual(json.loads(out[0])["thinking"], {"t": NOW})
-        live.pop(SID)   # the CLI went away: the row left the map, the sid left the caller's list
-        km._send_live_status(c, [], live)
+        live.pop(SID)   # the CLI went away: the row left the map
+        km._send_live_status(c, km._live_status_frames(live)[0], set())
         self.assertEqual(len(out), 2)
         self.assertIsNone(json.loads(out[1])["thinking"], "the frame that clears it reaches a client shown something")
-        km._send_live_status(c, [], live)
+        km._send_live_status(c, km._live_status_frames(live)[0], set())
         self.assertEqual(len(out), 2, "…and then nothing more")
         self.assertNotIn(("liveStatus", SID), c["sent"])
+        self.assertEqual(c["liveShown"], set())
+
+    def test_frames_are_built_once_per_push_whatever_the_number_of_clients(self):
+        # the second review of #171: ~5.6 ms a push at 130 sessions x 7 clients when each client rebuilt every frame
+        live = {"11111111-2222-3333-4444-%012d" % i: {"state": "working"} for i in range(130)}
+        live["11111111-2222-3333-4444-000000000007"]["thinkingLive"] = {"t": NOW}
+        calls = []
+        real = km._live_status_frame
+        with mock.patch.object(km, "_live_status_frame", side_effect=lambda *a: calls.append(a) or real(*a)):
+            frames = km._live_status_frames(live)
+            clients = [{"app": "chat", "send": lambda s: None, "sent": {}} for _ in range(7)]
+            for c in clients:
+                km._send_live_status(c, frames[0], set(live))
+        self.assertEqual(len(calls), 1, "one frame built: the one session with something live, once for every client")
+
+    def test_the_sessions_pane_gets_thinking_and_never_progress(self):
+        live = {SID: {"state": "working", "bgTasks": [{"toolUseId": "toolu_A", "taskId": "a1", "lastTool": "Bash",
+                                                        "agentProgress": {"calls": 2}}]}}
+        chat, pane = km._live_status_frames(live)
+        self.assertIn(SID, chat)
+        self.assertNotIn(SID, pane, "a progress-only status is nothing the Sessions pane draws: no frame")
+        live[SID]["thinkingLive"] = {"t": NOW}
+        chat, pane = km._live_status_frames(live)
+        self.assertEqual(pane[SID][0]["tasks"], {}, "the pane's twin carries the thinking alone")
+        self.assertEqual(pane[SID][0]["thinking"], {"t": NOW})
 
 
 class BackgroundLevel(unittest.TestCase):
@@ -319,6 +344,19 @@ class BackgroundLevel(unittest.TestCase):
         self.assertEqual(self._ids(), ["f1"])
         self._ev("background_tasks_changed", {"tasks": []})
         self.assertEqual(self._ids(), [], "backgrounded, the level speaks for it")
+
+    def test_a_foreground_task_survives_a_restart_and_the_first_level_after_it(self):
+        # the registry mirror carries the foreground flag, so the attach's seed restores it and the CLI's first background
+        # level after the restart (which never lists a foreground task) does not end it (the second review of #171)
+        self._ev("task_started", {"task_id": "f1", "tool_use_id": "toolu_f1", "description": "explore the router",
+                                  "task_type": "local_agent", "is_backgrounded": False})
+        mirror = sb.read_reg(self.s.backend.state_dir, SID)["bgTasks"]
+        self.assertEqual([(t["taskId"], t.get("fg")) for t in mirror], [("f1", True)])
+        fresh = sb.SdkSession(self.s.backend, {"sid": SID, "name": "api", "cwd": self.td, "mode": "acceptEdits"})
+        self.s.backend._seed_surviving_work(fresh)
+        self.assertEqual(sorted(fresh._bg_tasks), ["f1"])
+        _feed(fresh, _Sys("background_tasks_changed", {"tasks": []}))
+        self.assertEqual(sorted(fresh._bg_tasks), ["f1"], "still the foreground agent's own bookends' to end")
 
     def test_a_level_end_retires_the_agent_with_its_task(self):
         self.s._subagents["a1111111"] = {"type": "general-purpose", "since": NOW}
@@ -420,21 +458,46 @@ class RunningTools(_BuildCase):
     def _tools(self, row):
         return {e["toolUseId"] if e.get("toolUseId") else e.get("uuid"): e for e in self._events(row) if e.get("kind") == "tool"}
 
+    def _states(self, *recs):
+        """The session's state log (the event model's turn-end source: a "waiting" record is a result, "idle" an
+        interrupt), at the path the kernel's parse reads it (STATE/states/<sid>.jsonl)."""
+        d = Path(self._td) / "states"
+        d.mkdir(exist_ok=True)
+        (d / (SID + ".jsonl")).write_text("".join(json.dumps({"t": t, "state": st}) + "\n" for t, st in recs))
+
     def test_a_tool_waiting_in_the_live_turn_is_running(self):
         self._write(self._recs())
+        self._states((NOW - 100, "working"))
         evs = [e for e in self._events({"state": "working"}) if e.get("kind") == "tool"]
         self.assertEqual(len(evs), 2)
         done, waiting = evs
         self.assertNotIn("running", done, "a tool whose result landed carries no flag")
         self.assertIs(waiting["running"], True)
 
-    def test_it_stops_running_when_the_turn_is_no_longer_live(self):
+    def test_a_tool_waiting_on_a_permission_prompt_is_still_running(self):
+        # the session reports the prompt as its state while its turn stays open: the call's result is still coming
         self._write(self._recs())
-        for state in ("waiting", "blocked"):
+        self._states((NOW - 100, "working"), (NOW - 84, "permission"))
+        for state in ("permission", "picker"):
             waiting = [e for e in self._events({"state": state}) if e.get("kind") == "tool"][-1]
-            self.assertIs(waiting["running"], False, "%s: its result can no longer come" % state)
-        waiting = [e for e in self._events(None) if e.get("kind") == "tool"][-1]
-        self.assertIs(waiting["running"], False, "no row at all: the CLI is gone")
+            self.assertIs(waiting["running"], True, "%s: an approval box open over the call is no ended turn" % state)
+
+    def test_a_restart_before_the_re_attach_does_not_end_it(self):
+        # after a kernel restart the dormant row reads "waiting" until the session re-attaches to its live CLI; the turn
+        # is still open in the transcript and its state log, so the call keeps running instead of flapping to "no result"
+        self._write(self._recs())
+        self._states((NOW - 100, "working"))
+        for row in ({"state": "waiting"}, None):
+            waiting = [e for e in self._events(row) if e.get("kind") == "tool"][-1]
+            self.assertIs(waiting["running"], True, "row %r: nothing ended the turn" % (row,))
+
+    def test_it_stops_running_when_the_turn_truly_ended(self):
+        # a result ("waiting" in the state log) or an interrupt ("idle") ends the turn: the result can no longer come
+        for end in ("waiting", "idle"):
+            self._write(self._recs())
+            self._states((NOW - 100, "working"), (NOW - 80, end))
+            waiting = [e for e in self._events({"state": "waiting"}) if e.get("kind") == "tool"][-1]
+            self.assertIs(waiting["running"], False, "%s: the turn ended" % end)
 
     def test_an_orphan_in_an_older_turn_never_runs_again(self):
         # the turn holding toolu_B ended without its result (a cut CLI), and a later turn is working now
@@ -443,6 +506,7 @@ class RunningTools(_BuildCase):
                                _urec(NOW - 60, "u3", "and the lint", "a2b"),
                                _arec(NOW - 55, "a3", [_tool("toolu_C", "ruff check")], "u3", mid="msg_3")]
         self._write(recs)
+        self._states((NOW - 100, "working"), (NOW - 70, "waiting"), (NOW - 60, "working"))
         evs = [e for e in self._events({"state": "working"}) if e.get("kind") == "tool"]
         self.assertEqual(len({e.get("turn") for e in evs}), 2, "the fixture spans two turns")
         self.assertEqual([e.get("running") for e in evs], [None, False, True],
@@ -451,6 +515,7 @@ class RunningTools(_BuildCase):
     def test_parallel_calls_waiting_in_the_live_turn_all_run(self):
         self._write(self._recs()[:1] + [_arec(NOW - 95, "a1", [_tool("toolu_A", "pytest -q")], "u1", mid="msg_1"),
                                         _arec(NOW - 95, "a1b", [_tool("toolu_A2", "ruff check")], "a1", mid="msg_1")])
+        self._states((NOW - 100, "working"))
         evs = [e for e in self._events({"state": "working"}) if e.get("kind") == "tool"]
         self.assertEqual([e.get("running") for e in evs], [True, True])
 

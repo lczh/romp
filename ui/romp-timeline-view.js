@@ -838,26 +838,21 @@ function tlAwaitSuffix(kind, count) {
 }
 
 // LIVE THINKING on a lane (2026-10-08): the kernel's liveStatus frame names a thinking stretch streaming in the session
-// (its first frame `t`, and `quiet`, its last frame once the stream has gone silent: kernel _live_status_frame), and the
-// lane's WORKING chip reads "Thinking · 14s" / "Thinking · quiet 15s" for as long as it streams, counted here. tlDur is
-// the chat's ONE duration format (ui/webview/duration.ts durLabel), twinned because this file loads standalone (a drift
-// pin holds the two equal: ui/timeline-thinking.test.ts); tlThinkingLabel is live-status.ts thinkingShort's twin.
-function tlDur(secs) {
-  secs = Math.max(0, Math.floor(secs));
-  if (secs < 60) return secs + 's';
-  const m = Math.floor(secs / 60);
-  if (m < 60) return m + 'm ' + (secs % 60) + 's';
-  const h = Math.floor(m / 60);
-  if (h < 24) return h + 'h ' + String(m % 60).padStart(2, '0') + 'm';
-  return Math.floor(h / 24) + 'd ' + String(h % 24).padStart(2, '0') + 'h';
+// (kernel _live_status_frame), and the lane's WORKING chip reads "Thinking", with the subagent count it already wore, while
+// the stretch's frames flow; once they go quiet (the frame's `quiet`) the chip says Working again, so the pane claims
+// thinking only while the CLI proves it. The seconds are the chat's (its foot line and the tab's tooltip count them): a
+// count here would need a chip wide enough for its widest form on every working lane, a standing cost to the plot's
+// width, and the second review of #171 ruled out the alternative, a chip that widens and slides the plot sideways. A
+// working lane's chip is laid out for the wider of its two labels (tlChipCandidates), so a stretch starting or ending
+// rewrites the chip's text in place and moves no column, battery or plot edge, with no draw.
+function tlSubSuffix(n) {
+  return n ? ' · ' + n + (n === 1 ? ' subagent' : ' subagents') : '';
 }
-function tlThinkingLabel(th, nowS) {
-  return th.quiet ? 'Thinking · quiet ' + tlDur(nowS - th.quiet) : 'Thinking · ' + tlDur(nowS - th.t);
+function tlThinkingLabel(th, nSub) {
+  return th && !th.quiet ? 'Thinking' + tlSubSuffix(nSub) : null;
 }
-// The width a ticking label is laid out for: its seconds read as two digits, so the chip is sized once per minute's
-// shape rather than every time a count gains a digit ("9s" → "10s"), and the tick redraws only past that.
-function tlThinkReserve(label) {
-  return String(label).replace(/(\d+)s$/, (m, d) => (d.length < 2 ? '0' + d : d) + 's').replace(/\d/g, '0');
+function tlChipCandidates(base, nSub) {
+  return [base, 'Thinking' + tlSubSuffix(nSub)];
 }
 
 function badgeFor(s) {
@@ -1422,8 +1417,7 @@ class TimelinePanel {
     this._compactBars = new Map();   // sid -> persistent scan-bar div (CSS-animated; repositioned per draw)
     this._workLabels = new Map();    // sid -> persistent WORKING-badge label div (CSS color-pulse; repositioned per draw)
     this._thinking = new Map();      // sid -> {t, quiet} while a thinking stretch streams (liveStatus frames; tlThinkingLabel)
-    this._thinkReserve = new Map();  // sid -> the label width draw() laid that lane's chip out for (tlThinkReserve)
-    this._thinkTimer = null;         // the 1 s clock while any lane thinks (_tickThinking); stopped when none does
+    this._chipBase = new Map();      // sid -> {label, sub}: a working lane's own chip label and subagent count, as draw() last laid it out
     this._metaDots = new Map();      // sid -> persistent 3-dot "model switching…" pulse div (mirrors the chat badge's .meta-dots; repositioned per draw)
     try {
       if (typeof document !== 'undefined' && document.head && !document.getElementById('tl-compact-css')) {
@@ -3289,50 +3283,34 @@ class TimelinePanel {
   // never touched again → the compositor breathes it continuously, smooth regardless of the redraw cadence).
   // draw() only nudges its position/text/size here. Centered on (cx, cy) in SVG user coords via translate(-50%).
   // (Mirrors _positionCompactBar; the chat chip's .chip-pulse gets the same 1.5s clock. The user 2026-07-01.)
-  // A liveStatus frame (kernel _live_status_frame) for one session: its thinking stretch, or none. A stretch starting or
-  // ending changes the lane's chip label and width, so it lays the lanes out once (held like every draw while a tip is up,
-  // a pointer is pressed or the pane is out of sight); a frame that only moves the quiet stamp is a text change the tick
-  // makes in place.
+  // A liveStatus frame (kernel _live_status_frame) for one session: its thinking stretch, or none. A working lane's chip is
+  // laid out for both of its labels (tlChipCandidates), so a stretch starting, going quiet or ending is a text change in
+  // the chip's overlay div (_paintThinking) and never a draw (the second review of #171: one full draw per edge).
   liveStatus(m) {
     const id = m && typeof m.id === 'string' ? m.id : '';
     if (!id) return;
     const raw = m.thinking;
     const th = raw && typeof raw.t === 'number' && raw.t > 0 ? { t: raw.t, quiet: typeof raw.quiet === 'number' && raw.quiet > 0 ? raw.quiet : 0 } : null;
-    const had = this._thinking.has(id);
     if (th) this._thinking.set(id, th); else this._thinking.delete(id);
-    if (this._thinking.size && !this._thinkTimer && typeof setInterval === 'function') this._thinkTimer = setInterval(() => this._tickThinking(), 1000);
-    if (!this._thinking.size && this._thinkTimer) { clearInterval(this._thinkTimer); this._thinkTimer = null; }
-    const lane = this.data && Array.isArray(this.data.sessions) ? this.data.sessions.find((s) => s.id === id) : null;
-    if (had !== !!th && lane && lane.state === 'working') this._liveRelayout();
-    else this._tickThinking();
+    this._paintThinking(id);
   }
-  // The socket that carried the live status is gone (a kernel restart: `hosts` null) or a remote host came back (its ids,
-  // host-prefixed): what it showed is dropped, and the new socket's kernel re-sends whatever is live now.
+  // The socket that carried the live status is gone (a kernel restart: `hosts` null) or a remote host's relay reopened
+  // (its ids, host-prefixed; romp:hostRelayUp): what it showed is dropped, and the new socket's kernel re-sends whatever
+  // is live now.
   liveStatusReset(hosts) {
-    let hit = false;
     for (const id of Array.from(this._thinking.keys())) {
       if (hosts && !hosts.some((h) => typeof h === 'string' && id.startsWith(h + ':'))) continue;
-      this._thinking.delete(id); hit = true;
+      this._thinking.delete(id);
+      this._paintThinking(id);
     }
-    if (!this._thinking.size && this._thinkTimer) { clearInterval(this._thinkTimer); this._thinkTimer = null; }
-    if (hit) this._liveRelayout();
   }
-  _liveRelayout() {
-    if ((this.tip && this.tip.classList && this.tip.classList.contains('show')) || this._hiddenForPaint() || this._pointerHeld) { this._dirtyWhileTip = true; return; }
-    this.draw();
-  }
-  // The 1 s clock: each thinking lane's label rewritten in its overlay div; a label past the width its chip was laid out
-  // for lays the lanes out again (about once a minute while a stretch runs).
-  _tickThinking() {
-    const now = Date.now() / 1000;
-    for (const [sid, th] of this._thinking) {
-      const lab = this._workLabels.get(sid);
-      if (!lab) continue;
-      const text = tlThinkingLabel(th, now);
-      const res = this._thinkReserve.get(sid);
-      if (!res || this.badgeWidth(tlThinkReserve(text)) > this.badgeWidth(res) + 0.5) { this._liveRelayout(); return; }
-      if (lab.textContent !== text) { lab.textContent = text; lab.dataset.label = text; }
-    }
+  // One lane's chip text: Thinking while its stretch's frames flow, else the lane's own working label, written into the
+  // persistent overlay div only where it moved. No draw: the chip was laid out for both.
+  _paintThinking(sid) {
+    const lab = this._workLabels.get(sid), base = this._chipBase.get(sid);
+    if (!lab || !base) return;
+    const text = tlThinkingLabel(this._thinking.get(sid), base.sub) || base.label;
+    if (lab.textContent !== text) { lab.textContent = text; lab.dataset.label = text; }
   }
   _positionWorkLabel(sid, cx, cy, text) {
     if (!this._compactLayer) return;
@@ -6139,16 +6117,17 @@ class TimelinePanel {
       : compactingNow(s)
       ? { label: 'Compacting', bg: BADGE.compacting.bg, fg: BADGE.compacting.fg }   // NO %: the scraped pct was laggy/inaccurate, and the SDK offers none (compact_progress events are lifecycle-only — investigated 2026-07-02); the scan-bar is the live cue
       : badgeFor(s))
-      // a WORKING lane that is thinking right now reads "Thinking · 14s" (the liveStatus frame); its chip is laid out for
-      // the label's reserve, so the 1 s tick rewrites the text in place until the count outgrows it (_tickThinking)
+      // every WORKING lane's chip is laid out for the widest label it could wear (tlChipCandidates), so the thinking label
+      // (the liveStatus frame) replaces its text in place, starting, ticking and ending, with no column moving
       .map((b, k) => {
-        const th = b && vis[k].state === 'working' ? this._thinking.get(vis[k].id) : null;
-        if (!th) return b;
-        const label = tlThinkingLabel(th, Date.now() / 1000);
-        return Object.assign({}, b, { label, reserve: tlThinkReserve(label) });
+        const s = vis[k];
+        if (!b || s.state !== 'working' || compactingNow(s)) return b;
+        const nSub = (s.subagents && s.subagents.length) || 0;
+        const reserve = tlChipCandidates(b.label, nSub).reduce((w, l) => (this.badgeWidth(l) > this.badgeWidth(w) ? l : w));
+        return Object.assign({}, b, { base: b.label, sub: nSub, reserve, label: tlThinkingLabel(this._thinking.get(s.id), nSub) || b.label });
       });
-    this._thinkReserve.clear();
-    vis.forEach((s, k) => { const b = visB[k]; if (b && b.reserve) this._thinkReserve.set(s.id, b.reserve); });
+    this._chipBase.clear();
+    vis.forEach((s, k) => { const b = visB[k]; if (b && b.base != null) this._chipBase.set(s.id, { label: b.base, sub: b.sub }); });
     const visC = vis.map((s) => ctxInfo(s));
     const maxName = Math.max(40, ...(vis.length ? vis : data.sessions).map((s) => this.labelWidth(s.name)));
     // model+effort column: each word is a clickable picker drawn as [model ▾] [effort ▾], so reserve the
@@ -7359,4 +7338,4 @@ class TimelinePanel {
   body(s) { return s ? '<div class="b">' + s + '</div>' : ''; }
 }
 
-module.exports = { TimelinePanel, tlDur, tlThinkingLabel, tlThinkReserve, tlRows, selBandRows, tagSections, tabGroupsState, sectionFolded, toggleSectionFold, tlGroupByTag, setTlGroupByTag, TAG_CHIP_GEOM, TAG_CHIP_STYLE, TABGROUPS_KEY, TABGROUPS_DEFAULT_COLLAPSED, expandBar, expandBars, expandJudging, BAR_WIRE, JUDGING_WIRE, badgeFor, roundedPath, crossX, workAnchorOf, idleGaps, fmtSpan, dotLit, barLit, interpNow, shouldReanchorEdge, reanchorEdge, isFreshNowSample, barEndT, dragAxis, stripRompMarks, collapseRepeat, reqText, menuTop, offsetRect, viewVisible, viewLabel, viewMoreCount, viewToggleMember, viewTagUnion, lensAll, lensToggle, lensVisible, lensLabel, lensSummary, timelineLens, loadModelChoices, MODEL_CHOICES, EFFORT_CHOICES, CODEX_EFFORT_CHOICES, codexEffortChoices, codexModelsError };
+module.exports = { TimelinePanel, tlThinkingLabel, tlChipCandidates, tlRows, selBandRows, tagSections, tabGroupsState, sectionFolded, toggleSectionFold, tlGroupByTag, setTlGroupByTag, TAG_CHIP_GEOM, TAG_CHIP_STYLE, TABGROUPS_KEY, TABGROUPS_DEFAULT_COLLAPSED, expandBar, expandBars, expandJudging, BAR_WIRE, JUDGING_WIRE, badgeFor, roundedPath, crossX, workAnchorOf, idleGaps, fmtSpan, dotLit, barLit, interpNow, shouldReanchorEdge, reanchorEdge, isFreshNowSample, barEndT, dragAxis, stripRompMarks, collapseRepeat, reqText, menuTop, offsetRect, viewVisible, viewLabel, viewMoreCount, viewToggleMember, viewTagUnion, lensAll, lensToggle, lensVisible, lensLabel, lensSummary, timelineLens, loadModelChoices, MODEL_CHOICES, EFFORT_CHOICES, CODEX_EFFORT_CHOICES, codexEffortChoices, codexModelsError };

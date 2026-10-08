@@ -184,7 +184,7 @@ test("the source keeps the two rules where the behaviour lives", () => {
   assert.match(PREVIEW, /parkMdImg\(img, src\);/, "a markdown image that failed is parked, not registered for any per-message heal (T291c)");
   // a remote kernel's restart reopens the relay socket and fires neither romp:wsup nor hostUp: that event heals too
   const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
-  assert.match(RENDER, /window\.addEventListener\("romp:hostRelayUp", \(e\) => \{[\s\S]{0,600}?refreshSettledPreviews\(\);/);
+  assert.match(RENDER, /window\.addEventListener\("romp:hostRelayUp", \(e\) => \{[\s\S]{0,900}?refreshSettledPreviews\(\);/);   // (900: the relay's live-status drop sits above it since 2026-10-08)
   assert.match(PREVIEW, /const \{ note \} = waitBox\(\);\s*\n\s*if \(!note\.textContent\) setNote\(note, got > 0 \? "resuming… "/, "an attempt keeps the note that is up");
   assert.match(PREVIEW, /const setNote = \(note: HTMLElement, text: string\) => \{ if \(note\.textContent !== text\) note\.textContent = text; \};/, "the words change only when they do");
 });
