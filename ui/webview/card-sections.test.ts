@@ -84,6 +84,10 @@ test("stateBadges: nothing for a plain item; each state its badge with the card'
   assert.deepEqual(badges({ nudgeFailed: true }).map((b) => [b.className, b.textContent, b.title]), [["fask-nudgefailed", "follow-up failed", BADGE_WORDS.nudgeFailed.title]]);
   assert.deepEqual(badges({ interrupting: true }).map((b) => [b.className, b.textContent]), [["fask-interrupting", "interrupting…"]]);
   assert.deepEqual(badges({ interrupted: true }).map((b) => [b.className, b.textContent, b.title]), [["fask-interrupted", "interrupted", BADGE_WORDS.interrupted.title]]);
+  // the spend guard's stop (2026-10-08): the same badge, its hover naming the guard instead of the user
+  assert.deepEqual(badges({ interrupted: "spend" }).map((b) => [b.className, b.textContent, b.title]), [["fask-interrupted", "interrupted", BADGE_WORDS.interruptedSpend.title]]);
+  assert.match(BADGE_WORDS.interruptedSpend.title, /^the spend guard stopped this session mid-turn/);
+  assert.doesNotMatch(BADGE_WORDS.interruptedSpend.title, /you stopped/);
 });
 
 test("stateBadges: the card's precedence: the swirl's Analyzing caption replaces the re-judging chip; a plain reply (rejudging) never wears it; follow-up failed outranks both interrupt words; the interrupt words never show together", () => {

@@ -152,7 +152,7 @@ HELPERS = {
     "_blocked_placeholder": ("sig", ("transcript", "captions", "ask")),
     "_awaiting_card": ("sig", ("transcript",)),
     # the states log (machine cuts, the retrying-since fold, the awaiting overlay) and the live row
-    "_interrupt_suppresses_nudge": ("sig", ("states",)),
+    "_interrupted_by": ("sig", ("states",)),   # the badge: the counted stop's marks and who made it (2026-10-08)
     "_session_retrying": ("sig", ("states", "row")),
     "_session_awaiting": ("sig", ("states", "reg", "row", "bg", "watch", "subagents", "peers")),
     # the names registry (own sid, and the peers a card names)

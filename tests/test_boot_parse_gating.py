@@ -523,8 +523,8 @@ class TickJobsKeyOnAChange(unittest.TestCase):
             self.assertIsNone(km._interrupt_block_key(r), "an unproved ledger: no key, the tick evaluates")
         self.assertEqual(km._NUDGE_FILE_KEYED_ROADS["interrupt-block"],
                          ("_interrupt_block_key", "_session_working", "_suspended_after", "_interrupt_marks", "_last_machine_cut",
-                          "_interrupt_marks_atoms", "_machine_cut_cause", "_intr_blocked", "_record_interrupt_block",
-                          "_interrupt_focus_top", "_intr_block_stands", "_lift_interrupt_block"),
+                          "_interrupt_marks_atoms", "_machine_cut_cause", "_interrupt_stop_cause", "_spend_cuts", "_intr_blocked",
+                          "_record_interrupt_block", "_interrupt_focus_top", "_intr_block_stands", "_lift_interrupt_block"),
                          "the road's exact members: the key builder, the verdict's readers and the arms' store readers (round two)")
         self.assertEqual(km._INTERRUPT_BLOCK_UNREAD, (5, 7), "the constant positions: the episode log and the postal log; the clears log is real")
         with km._TICK_SEEN_LOCK:
@@ -638,7 +638,7 @@ class TickJobsKeyOnAChange(unittest.TestCase):
                       _compacting_now=lambda *a, **k: False, _api_error=lambda path: False,
                       _interrupt_marks=lambda turns, sid, family="judge", path=None: (1000, 900), _session_working=lambda turns: False,
                       _auto_nudge_resume=lambda: None, _auto_nudge_data=lambda: {}, _intr_blocked=lambda sid=None, data=None: None,
-                      _record_interrupt_block=lambda sid, ev: "g1")
+                      _record_interrupt_block=lambda sid, ev, why=None: "g1")
         for refused, marked in ((False, False), (True, True)):
             km._TICK_SEEN.clear()
             with mock.patch.multiple(km, **common), \

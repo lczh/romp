@@ -2295,10 +2295,33 @@ def _interrupt_marks_atoms(atoms, cut_t=0.0, cut_cause=""):
         if em.is_interrupt_record(a):
             if _machine_cut_cause(users, i, cut_t, cut_cause):
                 continue                                 # machine cut → romp re-engaged, not the user
-            last_intr = max(last_intr, t)
+            last_intr = max(last_intr, t)                # the user's stop, or the spend guard's (it waits on the user too)
         elif a.get("author") == "human":
             last_human = max(last_human, t)
     return last_intr, last_human
+
+
+def _interrupt_stop_cause(turns, sid, stop_t):
+    """Who made the stop _interrupt_marks counted at `stop_t`: "spend" when the spend guard's own record says it cut
+    that turn, "" for the user's own (2026-10-08: the card of a session the guard stopped told the user they had
+    stopped it). The guard's cut records (_spend_cuts, states/<sid>.jsonl) under the chat's own order rule
+    (_spend_cut_runs), over the thread's user records: the guard's MESSAGE decides nothing, since it is sent whether or
+    not a turn was cut. A guard's stop stays a counted stop (it hands the session to the user, who is then the one it
+    waits on), so the tally and its memo are untouched; this is read only where a counted stop is SHOWN, the interrupt
+    block's why and the feed's badge. Run contiguity is among user records alone: a twin stop with no user record
+    between it and the cut's stop cannot belong to another turn, which would have opened on one."""
+    if not stop_t or not sid:
+        return ""
+    cuts = _spend_cuts(sid)
+    if not cuts:
+        return ""
+    users = [a for a in _interrupt_marks_facts(turns) if a.get("type") == "user" and a.get("author", "") is not None]
+    rows = [(a.get("t"), "marker" if em.is_interrupt_record(a) else "prompt" if a.get("author") in ("human", "romp")
+             else "other") for a in users]
+    for _c, run in _spend_cut_runs(rows, cuts):
+        if any(users[k].get("t") == stop_t for k in run):
+            return "spend"
+    return ""
 
 
 def _interrupt_suppresses_nudge(turns, sid="", family=None, path=None):
@@ -2320,6 +2343,15 @@ def _interrupt_suppresses_nudge(turns, sid="", family=None, path=None):
     `family` is _interrupt_marks' memo family, passed through by the per-cycle callers."""
     last_intr, last_human = _interrupt_marks(turns, sid, family, path)
     return last_intr > last_human
+
+
+def _interrupted_by(turns, sid):
+    """The feed badge's reading of the display parse: False unless the newest action on the thread is a counted stop
+    (_interrupt_suppresses_nudge's predicate), else who made it: "spend" for the spend guard, True for the user."""
+    stop_t, human_t = _interrupt_marks(turns, sid, family="display")
+    if stop_t <= human_t:
+        return False
+    return _interrupt_stop_cause(turns, sid, stop_t) or True
 
 
 def _last_human_msg_t(turns):
@@ -13031,7 +13063,7 @@ def _interrupt_focus_top(store):
     return None
 
 
-def _record_interrupt_block(sid, ev):
+def _record_interrupt_block(sid, ev, why=None):
     """Interrupted → Blocked (the user 2026-07-07, extending the stalled rule): the user stopped the
     session mid-turn and nothing will move until they speak, so by definition the focus goal needs
     them. Record a block verdict (src "interrupt") in the goal's diary — the same normal ladder every
@@ -13069,7 +13101,8 @@ def _record_interrupt_block(sid, ev):
         # ever minted, the re-engagement lift (gated on the marker) could never run, and the card sat in
         # Needs-you until a judge happened to unblock it. Nothing is appended: the diary already says it.
         return gid
-    why = jd.INTERRUPT_BLOCK_WHY      # shared constant, PROCEDURAL (see judge.procedural_block_why)
+    why = why or jd.INTERRUPT_BLOCK_WHY   # shared constants, PROCEDURAL (see judge.procedural_block_why); the tick passes
+    #                                       SPEND_STOP_BLOCK_WHY when the spend guard made the stop (_interrupt_stop_cause)
     ev = int(ev or 0)
     ceil = max((e.get("ev_t") or 0 for e in (nd.get("log") or [])
                 if e.get("kind") in ("unblock", "reopen", "done", "settle")), default=0)
@@ -14531,7 +14564,8 @@ def _interrupt_block_tick(now, live_map):
                 # folding under them — see _record_interrupt_block's stand-down
                 ev = max([stop_t] + [a.get("t") or 0 for turn in turns
                                      for a in (turn.get("atoms") or [])])
-                g = _record_interrupt_block(sid, ev)
+                g = _record_interrupt_block(sid, ev, why=(jd.SPEND_STOP_BLOCK_WHY   # the guard's stop names the guard
+                                                          if _interrupt_stop_cause(turns, sid, stop_t) == "spend" else None))
                 if g is None:                                    # a stand-down decided from the files (no focus top, the diary
                     _tick_job_done("interrupt-block", s, files_st)   # outranks): evaluated; the same files give the same answer.
                 #                                                  False (a store fault) records nothing: the next tick retries
@@ -17203,8 +17237,9 @@ _NUDGE_FILE_KEYED_ROADS = {       # the functions each marked verdict's road rea
     "walk-completed": ("_debt_asks", "_asker_row_alive", "_nudge_asks_by_target"),   # the other skippable exit (r is False with the walk
     #                                    completed) rides the debt leg: its readers are traced too (round three, low 2)
     "interrupt-block": ("_interrupt_block_key", "_session_working", "_suspended_after", "_interrupt_marks", "_last_machine_cut",
-                        "_interrupt_marks_atoms", "_machine_cut_cause", "_intr_blocked", "_record_interrupt_block",
-                        "_interrupt_focus_top", "_intr_block_stands", "_lift_interrupt_block"),   # the interrupt tick's skip road
+                        "_interrupt_marks_atoms", "_machine_cut_cause", "_interrupt_stop_cause", "_spend_cuts", "_intr_blocked",
+                        "_record_interrupt_block", "_interrupt_focus_top", "_intr_block_stands",
+                        "_lift_interrupt_block"),   # the interrupt tick's skip road
     #                                    (T401 (3)): its key, the verdict's readers and the arms' store readers (whose override replay
     #                                    reads the clears log, so that position stays a real stat), the ledger read by this session's row
 }
@@ -44528,33 +44563,16 @@ def _stamp_interrupt_causes(events, spend_cuts=()):
     not a turn was cut, and lands wherever the session reads it, so keyed on it a user's earlier stop was relabelled
     by a guard that cut nothing. Events carry whole seconds (`ts`), so a prompt in the press's own second bounds
     nothing (it may precede the press); a marker in that second counts (the guard records nothing while the user's
-    own stop is in flight, _spend_guard_stop)."""
-    for c in spend_cuts or ():
-        floor = int(c.get("t") or 0)
-        if floor <= 0:
-            continue
-        hit = None
-        for i, ev in enumerate(events):
-            if ev.get("kind") != "user":
-                continue
-            t = _ev_epoch(ev)
-            if t is None or t < floor:
-                continue
-            if ev.get("interruptMarker"):
-                hit = i
-                break
-            if t > floor and (ev.get("human") or ev.get("romp")):
-                break                                     # a prompt landed first: this press wrote no stop record
-        if hit is None:
-            continue
-        run = [hit]
-        for k in range(hit + 1, len(events)):
-            if events[k].get("kind") == "thinking":
-                continue
-            if events[k].get("kind") == "user" and events[k].get("interruptMarker"):
-                run.append(k)                             # the twin record of the same cut (T219)
-                continue
-            break
+    own stop is in flight, _spend_guard_stop). The order rule itself is _spend_cut_runs, shared with the card's reading
+    (_interrupt_stop_cause)."""
+    rows = []
+    for ev in events:
+        if ev.get("kind") != "user":
+            rows.append((None, "skip" if ev.get("kind") == "thinking" else "other"))
+        else:
+            rows.append((_ev_epoch(ev), "marker" if ev.get("interruptMarker")
+                         else "prompt" if (ev.get("human") or ev.get("romp")) else "other"))
+    for c, run in _spend_cut_runs(rows, spend_cuts):
         end = next((k for k in range(run[-1] + 1, len(events)) if events[k].get("kind") == "user"
                     and (events[k].get("human") or events[k].get("romp") or events[k].get("interruptMarker"))), len(events))
         for k in run:
@@ -44584,6 +44602,41 @@ def _stamp_interrupt_causes(events, spend_cuts=()):
     if any(e.get("_dropSettle") for e in events):
         events[:] = [e for e in events if not e.get("_dropSettle")]
     return events
+
+
+def _spend_cut_runs(rows, spend_cuts):
+    """[(cut, run), …]: for each of the spend guard's cut records (_spend_cuts) that made a stop, the indexes of that
+    stop's records in `rows`, ONE rule for the chat (_stamp_interrupt_causes) and the card (_interrupt_stop_cause).
+    `rows` = [(whole-second epoch or None, kind)], kind "marker" (a stop record), "prompt" (the user's or romp's),
+    "skip" (passed over inside a run: a thinking block) or "other". The first marker at or after the press's second,
+    with no prompt landing after that second first, is the cut's stop; each marker straight after it (skips aside) is
+    its back-to-back twin (T219). A press that met a prompt first wrote no stop record and names nothing."""
+    out = []
+    for c in spend_cuts or ():
+        floor = int(c.get("t") or 0)
+        if floor <= 0:
+            continue
+        hit = None
+        for i, (t, kind) in enumerate(rows):
+            if kind not in ("marker", "prompt") or t is None or t < floor:
+                continue
+            if kind == "marker":
+                hit = i
+                break
+            if t > floor:
+                break                                     # a prompt landed first: this press wrote no stop record
+        if hit is None:
+            continue
+        run = [hit]
+        for k in range(hit + 1, len(rows)):
+            if rows[k][1] == "skip":
+                continue
+            if rows[k][1] == "marker":
+                run.append(k)                             # the twin record of the same cut (T219)
+                continue
+            break
+        out.append((c, run))
+    return out
 
 
 def _drop_cut_settles(events, i, end):
@@ -49041,7 +49094,7 @@ def _feed_session_key(s, tm, ctx, prev_entry):
         because the store has no slot to re-read into; the entry then reads unknown until the leaf is back and parsed.
       cut: the SDK backend's pending_cut(sid), a chat DELETE rollback that changes the parse with no file change.
       states: (_chat_ident(STATE/states/<fsid>.jsonl), _chat_ident(STATE/states/<anchor>.jsonl)). The parse key's
-        states file, the machine cuts (_interrupt_suppresses_nudge → _last_machine_cut), _session_retrying's
+        states file, the machine cuts (_interrupted_by → _last_machine_cut), _session_retrying's
         retrying-since fold, the awaiting overlay (_session_awaiting → _states_awaiting_overlay).
       names: (s["name"], the names snapshot's fields for fsid: _names_parts). The card's name (discover's read) and
         colour (_name_color); the snapshot's CONTENT, not the file, since the body reads the cycle's snapshot.
@@ -49712,9 +49765,9 @@ def _feed_session_entry(s, ctx):
     # like the working dot: the badge snaps in once _warm_fleet_bg fills the parse. The read is memoized
     # on that cache object's identity (_interrupt_marks, the "display" family), so an unchanged parse
     # costs no scan per build.
+    # The badge's value names who stopped it: True for the user, "spend" for the spend guard (2026-10-08).
     try:
-        sess_interrupted = bool(ps) and not who_working and \
-            _interrupt_suppresses_nudge(ps["turns"], fsid, family="display")
+        sess_interrupted = bool(ps) and not who_working and _interrupted_by(ps["turns"], fsid)
     except Exception:
         sess_interrupted = False
     # A user interrupt still IN FLIGHT (dispatched, not yet settled): the card wears a steady
@@ -50651,7 +50704,7 @@ def _feed_session_entry(s, ctx):
                         if (_stall_rec and not nudge_failed
                             and (column == "working" or _stall_block)) else None),
             "interrupting": bool(sess_interrupting and (column == "working" or (col == "blocked" and _lastblk == "interrupt"))),   # a user interrupt is IN FLIGHT → steady "interrupting…" badge until it settles (the user 2026-07-07)
-            "interrupted": bool(sess_interrupted and not sess_interrupting and (column == "working" or (col == "blocked" and _lastblk == "interrupt"))),   # the user stopped this session and hasn't re-engaged → "interrupted" badge (only ONCE the interrupt has settled); nudge suppressed until their next message (the user 2026-07-05)
+            "interrupted": (sess_interrupted if (sess_interrupted and not sess_interrupting and (column == "working" or (col == "blocked" and _lastblk == "interrupt"))) else False),   # the user stopped this session and hasn't re-engaged → "interrupted" badge (only ONCE the interrupt has settled); nudge suppressed until their next message (the user 2026-07-05)
             "column": column,
             "board": "feed", "category": column,   # the board model's two fields (plans/card-boards.md, phase two): the feed's category IS the column
             "recheck": recheck,                  # targeted follow-up on a soft-block → de-urgented (dotted), moved to Working, pending re-judge
