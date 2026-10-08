@@ -35,3 +35,10 @@ test("a click or Enter flips the switch through the kernel's op and closes the m
   assert.match(KERNEL, /elif t == "setSubagentStandard" and msg\.get\("value"\) in \("on", "off"\):/);
   assert.match(KERNEL, /"Couldn't turn on Subagents at standard speed: %s\."/);   // the refusal names its reason
 });
+
+test("a switch change waiting for its relaunch shows outside the menu: the fast badge's dots and the fast menu's Apply now", () => {
+  // the kernel folds it into the status the fast badge and Apply now already read (2026-10-08 review)
+  assert.match(SDK, /"fastPending": bool\(getattr\(self, "_fast_pending", ""\)\) or self\._sub_std_pending\(\)/);
+  assert.match(RENDER, /const waitingPick: WaitingPick \| null = kind === "effort" \? "effort" : kind === "fast" \? "fast" : null;/);
+  assert.match(SDK, /"subagentStandardOffered": self\.subagent_standard_offered\(\)/);   // not offered on Slow unless on
+});

@@ -230,7 +230,8 @@ def _rec(mid, model, speed, ts, stop="end_turn", usage=None, sidechain=False):
 
 
 def _iso(t):
-    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(t))
+    """A transcript stamp, to the millisecond as Claude Code writes it."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + ".%03dZ" % int((t % 1) * 1000)
 
 
 class _TranscriptBase(unittest.TestCase):
@@ -248,6 +249,7 @@ class _TranscriptBase(unittest.TestCase):
         self.subdir = self.main.with_suffix("") / "subagents"
         self.subdir.mkdir(parents=True, exist_ok=True)
         self.main.write_text(_rec("msg_old_main", "claude-opus-5-5", "standard", _iso(time.time() - 3600)))   # history
+        self.s.client = object()   # connected: _sub_std_begin runs at the connect, after the client is up
         self.t0 = time.time()
 
     def tearDown(self):
@@ -261,7 +263,33 @@ class _TranscriptBase(unittest.TestCase):
             f.write(line)
 
 
+KEY = "claude-opus-5-5[1m]"   # the model string the CLI bills the forced subagent calls under (its modelUsage key)
+
+
+def _result(key_cost=None, total=0.5):
+    """A ResultMessage stand-in: the CLI's cumulative total and its per-model map, the recipe key's cumulative charge."""
+    class _R:
+        subtype = "success"
+    r = _R()
+    r.total_cost_usd = total
+    mu = {"claude-opus-5-5": {"inputTokens": 10, "outputTokens": 10, "cacheReadInputTokens": 0,
+                              "cacheCreationInputTokens": 0, "costUSD": 0.4}}
+    if key_cost is not None:
+        mu[KEY] = {"inputTokens": 1, "outputTokens": 1, "cacheReadInputTokens": 0, "cacheCreationInputTokens": 0,
+                   "costUSD": key_cost}
+    r.model_usage = mu
+    return r
+
+
+def _usage(line):
+    return json.loads(line)["message"]["usage"]
+
+
 class SpeedCheck(_TranscriptBase):
+    def _fast_off_without_reason(self):
+        """What a CLI whose main model lost its fast-mode capability reports at a turn's start: off, no reason."""
+        self.s.fast, self.s.fast_reason, self.s._fast_unlocked = "off", "", True
+
     def test_a_clean_launch_records_main_fast_and_subagents_standard(self):
         self.s._sub_std_begin({"subagentStandard": True}, True)
         now = _iso(time.time())
@@ -285,30 +313,52 @@ class SpeedCheck(_TranscriptBase):
         said = _problems(self.be, "fast")
         self.assertEqual(len(said), 1, said)
         self.assertEqual(sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeed"]["verdict"], "subagent-fast")
+        time.sleep(0.01)
         self.s._sub_std_begin({"subagentStandard": True}, True)   # a relaunch is a new episode
         self._append(self.subdir / "agent-a3.jsonl", _rec("msg_s3", "claude-opus-5-5", "fast", _iso(time.time())))
         self.s._sub_std_settle()
         self.assertEqual(len(_problems(self.be, "fast")), 2)
 
-    def test_a_main_loop_that_never_ran_fast_is_said(self):
+    def test_a_main_loop_the_cli_reports_unable_to_run_fast_is_said(self):
+        # the recipe's breakage of the main loop looks like this: fast_mode_state off with no reason (the main model's
+        # capability lookup says no), while fast mode is wanted and the connection carries the opt-in (lab, 2.1.282)
         self.s._sub_std_begin({"subagentStandard": True}, True)
+        self._fast_off_without_reason()
         self._append(self.main, _rec("msg_m1", "claude-opus-5-5", "standard", _iso(time.time())))
         self.s._sub_std_settle()
         self.assertEqual(sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeed"]["verdict"], "main-slow")
         self.assertEqual(len(_problems(self.be, "main loop")), 1)
+
+    def test_a_standard_main_call_is_not_judged_where_the_cli_explains_it(self):
+        # a cooldown, a refusal with its reason, the user's own Slow, a state of "on" (a standard call there is the
+        # cooldown's fallback), a connection made without the opt-in: none of these is the recipe's breakage
+        cases = [("on", "", True, True), ("cooldown", "", True, True), ("off", "preference", True, True),
+                 ("off", "", False, True), ("off", "", True, False), ("", "", True, True)]
+        for i, (state, reason, wanted, unlocked) in enumerate(cases):
+            self.be._problems.clear()
+            self.s._sub_std_begin({"subagentStandard": True}, True)
+            self.s.fast, self.s.fast_reason, self.s._fast_unlocked = state, reason, unlocked
+            self.s.fast_opt, self.s.fast_off = wanted, not wanted
+            self._append(self.main, _rec("msg_x%d" % i, "claude-opus-5-5", "standard", _iso(time.time())))
+            self.s._sub_std_settle()
+            self.assertEqual(sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeed"]["verdict"], "ok",
+                             "judged under %r" % ((state, reason, wanted, unlocked),))
+            self.assertFalse(_problems(self.be, "main loop"))
 
     def test_a_partial_record_is_counted_when_its_final_record_lands(self):
         self.s._sub_std_begin({"subagentStandard": True}, True)
         now = _iso(time.time())
         f = self.subdir / "agent-a1.jsonl"
         self._append(f, _rec("msg_s1", "claude-opus-5-5", None, now, stop=None, usage={"output_tokens": 7}))
-        self.assertEqual(self.s._sub_std_settle(), 0.0)
+        self.assertEqual(self.s._sub_std_settle(_result(0.0)), 0.0)
         self.assertEqual(sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeed"]["subStandard"], 0)
-        self._append(f, _rec("msg_s1", "claude-opus-5-5", "standard", now))
-        self.assertLess(self.s._sub_std_settle(), 0.0)
+        line = _rec("msg_s1", "claude-opus-5-5", "standard", now)
+        self._append(f, line)
+        charged = cpr.call_cost("claude-opus-5", _usage(line))
+        self.assertLess(self.s._sub_std_settle(_result(charged)), 0.0)
         self.assertEqual(sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeed"]["subStandard"], 1)
-        self._append(f, _rec("msg_s1", "claude-opus-5-5", "standard", now))   # the same call written again
-        self.assertEqual(self.s._sub_std_settle(), 0.0, "a call is priced once")
+        self._append(f, line)   # the same call written again
+        self.assertEqual(self.s._sub_std_settle(_result(charged)), 0.0, "a call is priced once")
 
     def test_a_launch_without_the_recipe_reads_nothing(self):
         # the switch is on but the serving CLI was launched before it (an attach, a relaunch still waiting for quiet)
@@ -326,39 +376,129 @@ class SpeedCheck(_TranscriptBase):
         self.assertEqual(sb.launch_value({"effort": "high"}, "subagentStandard"), False)
 
     def test_an_attach_resumes_the_episode_and_reprices_what_no_kernel_watched_once(self):
+        self.s._cli_ident = lambda: "4242:s1"
         self.s._sub_std_begin({"subagentStandard": True}, True)
         f = self.subdir / "agent-a1.jsonl"
-        self._append(f, _rec("msg_s1", "claude-opus-5-5", "standard", _iso(time.time())))
-        first = self.s._sub_std_settle()
+        l1 = _rec("msg_s1", "claude-opus-5-5", "standard", _iso(time.time()))
+        self._append(f, l1)
+        c1 = cpr.call_cost("claude-opus-5", _usage(l1))
+        first = self.s._sub_std_settle(_result(c1))
         self.assertLess(first, 0.0)
         time.sleep(0.01)
-        self._append(f, _rec("msg_s2", "claude-opus-5-5", "standard", _iso(time.time() + 1)))   # while no kernel watched
+        self._append(f, _rec("msg_s2", "claude-opus-5-5", "standard", _iso(time.time())))   # while no kernel watched
         s2 = sb.SdkSession(self.be, sb.read_reg(Path(self.be.state_dir), SID))       # the next kernel's object
+        s2._cli_ident = lambda: "4242:s1"
         s2._sub_std_begin({"subagentStandard": True}, False)                          # an attach to the same CLI
-        self.assertAlmostEqual(s2._sub_std_settle(), first, places=9, msg="msg_s2 alone: msg_s1 was repriced before")
+        self.assertAlmostEqual(s2._sub_std_settle(_result(2 * c1), ), first, places=9,
+                               msg="msg_s2 alone: msg_s1 was repriced before")
         self.assertEqual(sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeed"]["subStandard"], 2)
 
 
+class StaleScan(_TranscriptBase):
+    """A fresh launch starts a fresh episode in the registry too, and an attach resumes only its own CLI's."""
+
+    def test_an_attach_after_a_relaunch_resumes_the_new_launch_not_the_old_one(self):
+        s = self.s
+        s._cli_ident = lambda: "100:a"
+        s._sub_std_begin({"subagentStandard": True}, True)                      # launch A, with the recipe
+        s.fast, s.fast_reason, s._fast_unlocked = "off", "", True
+        self._append(self.main, _rec("msg_a_m1", "claude-opus-5-5", "standard", _iso(time.time())))
+        s._sub_std_settle()
+        self.assertEqual(len(_problems(self.be, "main loop")), 1)
+        time.sleep(0.01)
+        s._cli_ident = lambda: "200:b"
+        s._sub_std_begin({"subagentStandard": False}, True)                     # launch B, without it
+        self.assertIsNone(sb.read_reg(Path(self.be.state_dir), SID).get("subagentSpeedScan"),
+                          "a launch without the recipe leaves no episode to resume")
+        self._append(self.subdir / "agent-b1.jsonl", _rec("msg_b_s1", "claude-opus-5-5", "fast", _iso(time.time())))
+        time.sleep(0.01)
+        s._cli_ident = lambda: "300:c"
+        s._sub_std_begin({"subagentStandard": True}, True)                      # launch C, with it again
+        scan = sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeedScan"]
+        self.assertEqual((scan["cli"], scan["said"], scan["counts"]["mainStandard"]), ("300:c", [], 0))
+        s2 = sb.SdkSession(self.be, sb.read_reg(Path(self.be.state_dir), SID))   # a kernel restart, an attach to C
+        s2._cli_ident = lambda: "300:c"
+        s2._sub_std_begin({"subagentStandard": True}, False)
+        self.assertEqual(s2._sub_std_said, set())
+        s2._sub_std_settle()
+        self.assertFalse(_problems(self.be, "subagent call ran in fast"), "B's fast call was B's, launched without it")
+        self.assertEqual(sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeed"]["subFast"], 0)
+
+    def test_an_attach_to_another_cli_starts_a_fresh_episode(self):
+        self.s._cli_ident = lambda: "100:a"
+        self.s._sub_std_begin({"subagentStandard": True}, True)
+        self._append(self.subdir / "agent-a1.jsonl", _rec("msg_s1", "claude-opus-5-5", "standard", _iso(time.time())))
+        self.s._sub_std_settle()
+        s2 = sb.SdkSession(self.be, sb.read_reg(Path(self.be.state_dir), SID))
+        s2._cli_ident = lambda: "999:z"
+        s2._sub_std_begin({"subagentStandard": True}, False)
+        self.assertEqual(s2._sub_std_counts["subStandard"], 0, "another CLI's tallies are not this one's")
+        self.assertEqual(sb.read_reg(Path(self.be.state_dir), SID)["subagentSpeedScan"]["cli"], "999:z")
+
+
 class Repricing(_TranscriptBase):
-    def test_the_correction_is_opus_5_5_less_opus_5_for_each_standard_subagent_call(self):
+    def test_the_correction_is_the_real_cost_less_what_the_cli_charged(self):
         self.s._sub_std_begin({"subagentStandard": True}, True)
         now = _iso(time.time())
         one_h = {"cache_creation": {"ephemeral_5m_input_tokens": 500, "ephemeral_1h_input_tokens": 1500}}
         self._append(self.subdir / "agent-a1.jsonl", _rec("msg_s1", "claude-opus-5-5", "standard", now))
         self._append(self.subdir / "agent-a1.jsonl", _rec("msg_s2", "claude-opus-5-5", "standard", now, usage=one_h))
-        recs = [json.loads(l)["message"]["usage"] for l in (self.subdir / "agent-a1.jsonl").read_text().splitlines()]
-        want = sum(cpr.call_cost("claude-opus-5-5", u) - cpr.call_cost("claude-opus-5", u) for u in recs)
-        got = self.s._sub_std_settle()
-        self.assertAlmostEqual(got, want, places=9)
+        recs = [_usage(l) for l in (self.subdir / "agent-a1.jsonl").read_text().splitlines()]
+        charged = sum(cpr.call_cost("claude-opus-5", u) for u in recs)
+        want = sum(cpr.call_cost("claude-opus-5-5", u) for u in recs) - charged
+        self.assertAlmostEqual(self.s._sub_std_settle(_result(charged)), want, places=9)
         # spot check of the arithmetic: input/output/cache writes at 0.8 of Opus 5's, cache reads at 0.4
         u = recs[0]
         self.assertAlmostEqual(cpr.call_cost("claude-opus-5", u), (1000 * 5 + 500 * 25 + 2000 * 6.25 + 10000 * 0.5) / 1e6)
         self.assertAlmostEqual(cpr.call_cost("claude-opus-5-5", u), (1000 * 4 + 500 * 20 + 2000 * 5 + 10000 * 0.2) / 1e6)
 
-    def test_a_fast_subagent_call_is_not_repriced(self):
+    def test_a_cli_that_already_charged_the_real_rate_is_not_corrected_and_says_so_once(self):
+        # a server-side price for the key (or any other cause) that bills these calls at Opus 5.5's own rates: romp
+        # subtracting the Opus 5 premium again would under-record them
         self.s._sub_std_begin({"subagentStandard": True}, True)
-        self._append(self.subdir / "agent-a1.jsonl", _rec("msg_s1", "claude-opus-5-5", "fast", _iso(time.time())))
-        self.assertEqual(self.s._sub_std_settle(), 0.0, "a fast call was not priced as Opus 5 standard: left as the CLI priced it")
+        cum = 0.0
+        for i in range(3):
+            line = _rec("msg_s%d" % i, "claude-opus-5-5", "standard", _iso(time.time()))
+            self._append(self.subdir / "agent-a1.jsonl", line)
+            cum += cpr.call_cost("claude-opus-5-5", _usage(line))
+            self.assertEqual(self.s._sub_std_settle(_result(cum)), 0.0)
+        said = _problems(self.be, "charged")
+        self.assertEqual(len(said), 1, said)
+
+    def test_a_call_the_result_has_not_paid_for_yet_waits_for_the_result_that_has(self):
+        self.s._sub_std_begin({"subagentStandard": True}, True)
+        t = time.time()
+        a = _rec("msg_s1", "claude-opus-5-5", "standard", _iso(t))
+        b = _rec("msg_s2", "claude-opus-5-5", "standard", _iso(t + 60))   # finished after this result was emitted
+        self._append(self.subdir / "agent-a1.jsonl", a)
+        self._append(self.subdir / "agent-a2.jsonl", b)
+        ca, cb = (cpr.call_cost("claude-opus-5", _usage(x)) for x in (a, b))
+        ra, rb = (cpr.call_cost("claude-opus-5-5", _usage(x)) for x in (a, b))
+        self.assertAlmostEqual(self.s._sub_std_settle(_result(ca), now=t + 5), ra - ca, places=9)
+        self.assertAlmostEqual(self.s._sub_std_settle(_result(ca + cb), now=t + 65), rb - cb, places=9)
+        self.assertFalse(_problems(self.be, "charged"))
+
+    def test_a_result_without_the_clis_per_model_charge_corrects_nothing_and_says_so_once(self):
+        self.s._sub_std_begin({"subagentStandard": True}, True)
+        for i in range(2):
+            self._append(self.subdir / "agent-a1.jsonl", _rec("msg_s%d" % i, "claude-opus-5-5", "standard", _iso(time.time())))
+            r = _result(None)
+            del r.model_usage   # an SDK that drops the map (sdk_backend.usage_fallback_is_sdk)
+            self.assertEqual(self.s._sub_std_settle(r), 0.0)
+        self.assertEqual(len(_problems(self.be, "per-model")), 1)
+
+    def test_a_map_without_the_recipes_key_is_a_disagreement_said_once(self):
+        self.s._sub_std_begin({"subagentStandard": True}, True)
+        for i in range(3):
+            self._append(self.subdir / "agent-a1.jsonl", _rec("msg_s%d" % i, "claude-opus-5-5", "standard", _iso(time.time())))
+            self.assertEqual(self.s._sub_std_settle(_result(None)), 0.0)
+        self.assertEqual(len(_problems(self.be, "charged")), 1)
+
+    def test_a_fast_subagent_call_is_charged_as_opus_5_5_fast_and_left_alone(self):
+        self.s._sub_std_begin({"subagentStandard": True}, True)
+        line = _rec("msg_s1", "claude-opus-5-5", "fast", _iso(time.time()))
+        self._append(self.subdir / "agent-a1.jsonl", line)
+        self.assertAlmostEqual(self.s._sub_std_settle(_result(cpr.call_cost("claude-opus-5-5", _usage(line)))), 0.0, places=9)
 
     def test_the_turn_records_the_repriced_dollars_and_keeps_the_clis_figure_on_the_row(self):
         s = self.s
@@ -369,21 +509,15 @@ class Repricing(_TranscriptBase):
         s._do_refresh_usage = _noop
         s._seed_spend_watermarks()
         s._sub_std_begin({"subagentStandard": True}, True)
-        u = json.loads(_rec("msg_s1", "claude-opus-5-5", "standard", _iso(time.time())))["message"]["usage"]
-        self._append(self.subdir / "agent-a1.jsonl", _rec("msg_s1", "claude-opus-5-5", "standard", _iso(time.time())))
-        corr = cpr.call_cost("claude-opus-5-5", u) - cpr.call_cost("claude-opus-5", u)
-
-        class _R:
-            subtype = "success"
-        r = _R()
-        r.total_cost_usd = 0.5
-        r.model_usage = {"claude-opus-5-5": {"inputTokens": 10, "outputTokens": 10, "cacheReadInputTokens": 0,
-                                             "cacheCreationInputTokens": 0, "costUSD": 0.4},
-                         "claude-opus-5-5[1m]": {"inputTokens": 1000, "outputTokens": 500, "cacheReadInputTokens": 10000,
-                                                 "cacheCreationInputTokens": 2000, "costUSD": 0.1}}
+        line = _rec("msg_s1", "claude-opus-5-5", "standard", _iso(time.time()))
+        self._append(self.subdir / "agent-a1.jsonl", line)
+        u = _usage(line)
+        charged = cpr.call_cost("claude-opus-5", u)
+        corr = cpr.call_cost("claude-opus-5-5", u) - charged
+        r = _result(charged)
 
         async def go():
-            s._on_message(r, type("A", (), {}), _R, type("S", (), {}))
+            s._on_message(r, type("A", (), {}), type(r), type("S", (), {}))
             await asyncio.sleep(0)
         asyncio.run(go())
         day = json.loads(Path(self.be.state_dir, "spend.json").read_text())["days"][time.strftime("%Y-%m-%d")]
@@ -393,6 +527,58 @@ class Repricing(_TranscriptBase):
         self.assertAlmostEqual(row["cliUsd"], 0.5, places=6)
         self.assertAlmostEqual(row["subagentRepriceUsd"], corr, places=6)
         self.assertAlmostEqual(row["cumulativeUsd"], 0.5, places=6, msg="the CLI's cumulative stays the CLI's own")
+
+    def test_the_charge_watermark_follows_the_cost_state_a_resumed_cli_restores(self):
+        # a resumed CLI restores its modelUsage from the transcript's cost-state record: the key's charge there is
+        # history, not this launch's
+        with open(self.main, "a") as f:
+            f.write(json.dumps({"type": "cost-state", "totalCostUSD": 3.0,
+                                "modelUsage": {KEY: {"inputTokens": 1, "outputTokens": 1, "costUSD": 2.0}}}) + "\n")
+        self.s.resume_sid = SID
+        self.s._seed_spend_watermarks()
+        self.s._sub_std_begin({"subagentStandard": True}, True)
+        line = _rec("msg_s1", "claude-opus-5-5", "standard", _iso(time.time()))
+        self._append(self.subdir / "agent-a1.jsonl", line)
+        u = _usage(line)
+        got = self.s._sub_std_settle(_result(2.0 + cpr.call_cost("claude-opus-5", u)))
+        self.assertAlmostEqual(got, cpr.call_cost("claude-opus-5-5", u) - cpr.call_cost("claude-opus-5", u), places=9)
+
+
+class LiveChanges(unittest.TestCase):
+    """A live change that ends the session's qualification relaunches it without the recipe once quiet."""
+
+    def setUp(self):
+        self.be = _backend()
+        self.s = _live(self.be, subagentStandard=True)
+        self.s.set_model_live = lambda *a, **k: None
+        self.s.client = object()   # connected
+        self.s._sub_std_begin(dict(self.s.launch_values()), True)
+        self.assertTrue(self.s._sub_std_launched)
+
+    def test_a_live_model_pick_that_breaks_it_relaunches_once_quiet_and_the_row_says_it_is_still_active(self):
+        for model in ("claude-opus-5-5[1m]",):
+            self.assertTrue(self.be.set_model(SID, model))
+            self.assertIn("subagent speed", self.s.asks)
+            self.assertIn("subagentStandard", sb.read_reg(Path(self.be.state_dir), SID)["relaunchWait"]["picks"])
+            snap = self.s.snapshot()
+            self.assertTrue(snap["subagentSpeed"].startswith("still active until the relaunch"), snap["subagentSpeed"])
+            self.assertTrue(snap["fastPending"], "the fast badge says a change waits for its relaunch")
+            self.assertTrue(snap["subagentStandardOffered"])
+
+    def test_a_live_fast_off_relaunches_once_quiet(self):
+        self.s._fast_unlocked = True
+        self.be.send = lambda *a, **k: True
+        self.assertTrue(self.be.set_fast(SID, "off"))
+        self.assertIn("subagent speed", self.s.asks)
+
+    def test_a_pick_that_keeps_it_qualifying_asks_nothing(self):
+        self.assertTrue(self.be.set_model(SID, "claude-opus-5-5"))
+        self.assertNotIn("subagent speed", self.s.asks)
+        self.assertFalse(self.s.snapshot()["fastPending"])
+
+    def test_turning_it_off_says_still_active_until_the_relaunch(self):
+        self.assertTrue(self.be.set_subagent_standard(SID, "off"))
+        self.assertEqual(self.s.snapshot()["subagentSpeed"], "still active until the relaunch")
 
 
 class Surfaces(unittest.TestCase):
@@ -412,6 +598,15 @@ class Surfaces(unittest.TestCase):
         be = _backend()
         s = sb.SdkSession(be, _reg(be, model="claude-fable-5-1"))
         self.assertFalse(s.snapshot()["subagentStandardOffered"])
+
+    def test_a_session_set_to_slow_is_not_offered_it_unless_it_is_on(self):
+        be = _backend()
+        s = sb.SdkSession(be, _reg(be, fast=False, fastOff=True))
+        self.assertFalse(s.snapshot()["subagentStandardOffered"], "Slow: the switch would buy nothing")
+        self.assertFalse(be._live_row(sb.read_reg(Path(be.state_dir), SID), SID)["subagentStandardOffered"])
+        s = sb.SdkSession(be, _reg(be, fast=False, fastOff=True, subagentStandard=True))
+        self.assertTrue(s.snapshot()["subagentStandardOffered"], "on: offered, so it can be turned off")
+        self.assertIn("fast mode", s.snapshot()["subagentSpeed"])
 
     def test_the_kernel_routes_the_op_and_threads_the_status(self):
         kern = Path(os.path.dirname(HERE), "kernel", "kernel.py").read_text()
