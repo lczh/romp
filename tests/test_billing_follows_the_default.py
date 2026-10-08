@@ -27,6 +27,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -334,6 +335,73 @@ class RelaunchesShareTheLaunchBudget(_Unit):
         self.assertEqual(len(relaunched), sb.BOOT_RESUME_CONCURRENCY)
 
 
+class AReleaseNeverMissesAWaiter(unittest.TestCase):
+    """take() asked for a slot and, finding none, joined the queue in a second step: a release landing between the two found
+    no waiter to offer the freed slot to, and the waiter that queued behind it sat until something else asked (review
+    2026-10-08). Here the release is forced into exactly that gap. The semaphore's failed non-blocking acquire starts it on
+    another thread and lets take() go on only once the release has gone as far as it can: all the way (the gap is open), or
+    up to the lock the queue is read under, where it waits for take() to finish queueing (the gap is closed). Events order
+    every step; nothing sleeps."""
+
+    def test_a_release_between_the_failed_acquire_and_the_enqueue_hands_the_freed_slot_to_the_waiter(self):
+        slots = sb._LaunchSlots(1)
+        self.assertTrue(slots.acquire(blocking=False))   # the one slot, held by a launch in flight
+        progressed = threading.Event()                   # the release finished, or has to wait for the slots' lock
+        releaser = []
+
+        class _WatchedLock:
+            """The slots' lock, saying when a thread has to wait for it because another holds it."""
+            def __init__(self):
+                self._l, self.owner = threading.Lock(), None
+
+            def __enter__(self):
+                if self.owner not in (None, threading.get_ident()):
+                    progressed.set()
+                self._l.acquire()
+                self.owner = threading.get_ident()
+                return self
+
+            def __exit__(self, *exc):
+                self.owner = None
+                self._l.release()
+
+        real = slots._sem
+
+        class _GapSem:
+            """The slots' semaphore, releasing the held slot on another thread right after take()'s acquire finds none."""
+            def acquire(self, blocking=True, timeout=None):
+                got = real.acquire(blocking, timeout)
+                if not got and not releaser:
+                    t = threading.Thread(target=lambda: (slots.release(), progressed.set()), daemon=True)
+                    releaser.append(t)
+                    t.start()
+                    if not progressed.wait(10):          # a hang guard only: the event is the ordering
+                        raise AssertionError("the release neither finished nor reached the slots' lock")
+                return got
+
+            def release(self):
+                real.release()
+
+        slots._lock, slots._sem = _WatchedLock(), _GapSem()
+
+        class _Waiter:
+            sid, ended, took = OTHER, False, None
+
+            def _schedule_on_loop(self, fn):
+                fn()                                     # its loop runs what is scheduled at once
+                return True
+
+            def _slot_offered(self):
+                self.took = slots.take(self)             # an offered relaunch asks again (SdkSession._slot_offered)
+
+        w = _Waiter()
+        self.assertFalse(slots.take(w), "no slot at the ask: it queues")
+        releaser[0].join(10)
+        self.assertFalse(releaser[0].is_alive(), "the release finished")
+        self.assertIs(w.took, True, "the slot the release freed went to the waiter, on that release")
+        self.assertFalse(slots.waiting(w), "and it left the queue with it")
+
+
 class AnUnknownLaunchRecordDecidesNothing(_Unit):
     """With no launch record on hand (between a teardown and the next connect, during an attach, while a connect keeps
     failing) a pick is recorded and the next connect's reconcile decides; it used to read as a mismatch."""
@@ -424,11 +492,101 @@ class ALiveHostStillServes(_Unit):
     def test_a_pick_on_a_session_whose_host_still_runs_its_cli_lands_nothing_before_the_attach(self):
         sb.write_reg(self.d, SID, {"sid": SID, "name": "web", "cwd": self.d, "alive": True, "auth": "login",
                                    "apiKeyAuth": False})
-        self.be._lease_survives = lambda sid: True       # an unattached comment thread, an attach that stood down
+        self.be._lease_survives = lambda sid, **_: True       # an unattached comment thread, an attach that stood down
         self.assertTrue(self.be.set_auth(SID, "key"))
         reg = sb.read_reg(self.d, SID)
         self.assertFalse(reg.get("authSwitchedAt"), "the old account's CLI still serves it")
         self.assertIs(reg.get("apiKeyAuth"), False, "…and its report stands until the attach compares")
+
+
+class AnUnreadableLeaseIsNoEvidenceTheHostIsGone(_Unit):
+    """_lease_survives read a lease it could not read as 'no host', and said nothing (review 2026-10-08). No lease file is no
+    host; a lease that exists and cannot be read is said in the problem log once per episode, and every caller answers as
+    if the host may still run the CLI: no landing, no 'not serving', no boot heal, no dropped flag, the waiting marks kept."""
+
+    KEY = ("lease-unreadable", SID)
+
+    def setUp(self):
+        super().setUp()
+        self.lines = []
+        self.be._log_cb = lambda m: self.lines.append(str(m))
+
+    def _unreadable(self, how="garbled"):
+        p = sb.lease_path(self.d, SID)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if how == "garbled":
+            p.write_text('{"sid": ')                     # not a lease record (write_lease is atomic: no reader sees half)
+        else:
+            p.mkdir()                                    # the read fails with an I/O error (IsADirectoryError)
+        return p
+
+    def _said(self, be=None):
+        return [r for r in (be or self.be).problems() if r.get("key") == self.KEY]
+
+    def test_no_lease_is_no_host_and_an_unreadable_one_answers_as_its_caller_states_said_once_per_episode(self):
+        for answer in (True, False):
+            self.assertIs(self.be._lease_survives(SID, if_unreadable=answer), False, "no lease file: no host")
+        self.assertEqual(self._said(), [], "and nothing to say")
+        p = self._unreadable()
+        self.assertIs(self.be._lease_survives(SID, if_unreadable=True), True)
+        self.assertIs(self.be._lease_survives(SID, if_unreadable=False), False)
+        self.assertIs(self.be._lease_survives(SID, if_unreadable=True), True)
+        rows = self._said()
+        self.assertEqual(len(rows), 1, "one problem row for the episode, however often it is asked")
+        self.assertIn("cannot read the session host's lease", rows[0]["text"])
+        self.assertEqual(rows[0].get("count"), 1)
+        p.unlink()                                       # it reads again (as no lease): the episode ends
+        self.assertIs(self.be._lease_survives(SID, if_unreadable=True), False)
+        self.assertEqual(sum("lease reads again" in l for l in self.lines), 1, self.lines)
+        self._unreadable(how="io")                       # a new episode is said again
+        self.assertIs(self.be._lease_survives(SID, if_unreadable=True), True)
+        self.assertEqual(sum("cannot read the session host's lease" in l for l in self.lines), 2, self.lines)
+        self.assertIn("IsADirectoryError", self.lines[-1])
+        self.assertEqual(self._said()[0].get("count"), 2, "the ring counts the second episode on the same row")
+
+    def test_a_pick_while_the_lease_cannot_be_read_lands_nothing(self):
+        sb.write_reg(self.d, SID, {"sid": SID, "name": "web", "cwd": self.d, "alive": True, "auth": "login",
+                                   "apiKeyAuth": False})
+        self._unreadable()
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        reg = sb.read_reg(self.d, SID)
+        self.assertFalse(reg.get("authSwitchedAt"), "a host may still run the old account's CLI: serving, no landing")
+        self.assertIs(reg.get("apiKeyAuth"), False, "…and that CLI's report stands")
+        self.assertEqual(len(self._said()), 1, "said")
+
+    def test_a_cli_end_while_the_lease_cannot_be_read_lands_nothing(self):
+        s = self._live(SID, "web", auth="login", apiKeyAuth=False)
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self.assertTrue(sb.read_reg(self.d, SID).get("authPending"))
+        s.inflight = 0
+        self._unreadable()
+        self.be._on_session_gone(s)
+        reg = sb.read_reg(self.d, SID)
+        self.assertTrue(reg.get("authPending"), "the thread ended, but a host may still run the CLI the switch waits on")
+        self.assertFalse(reg.get("authSwitchedAt"), "no landing stamped")
+        self.assertIs(reg.get("apiKeyAuth"), False)
+        self.assertEqual(len(self._said()), 1, "said")
+
+    def test_the_boot_leaves_what_a_host_may_still_own(self):
+        """A kernel boots over a session whose lease cannot be read: its awaiting stands, a held send past the age line is
+        not flagged never delivered, a /clear its CLI had taken relights the bracket, and a pick waiting for its relaunch
+        keeps its mark. Each of these the boot does when the lease reads as no host."""
+        old = int(time.time()) - int(sb.REDELIVER_MAX_AGE_S) - 600   # read as gone, it would be flagged without a scan
+        sb.write_reg(self.d, SID, {"sid": SID, "name": "web", "cwd": self.d, "alive": True,
+                                   "echoes": [{"t": old, "text": "a synthetic held send", "uuid": "echo:held-1"}],
+                                   "clearingTaken": ["echo:clear-1"], "effortPending": True,
+                                   "relaunchWait": {"picks": {"effort": {"effort": "high"}}}})
+        sb.append_awaiting(self.d, SID, True)
+        self._unreadable()
+        be = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None)
+        self.assertIs(sb.last_awaiting(self.d, SID), True, "its awaiting may be real: not healed")
+        echo = next(a for a in be.live_atoms(SID) if a.get("_echo_text") == "a synthetic held send")
+        self.assertFalse(echo.get("dropped"), "the host may still hold the send: not flagged")
+        s = sb.SdkSession(be, sb.read_reg(self.d, SID))
+        self.assertEqual(s._taken_clear_qids, ["echo:clear-1"], "the take is restored")
+        self.assertTrue(s._clearing, "…and the bracket relit")
+        self.assertTrue(sb.read_reg(self.d, SID).get("effortPending"), "the pick still waits for its relaunch")
+        self.assertEqual(len(self._said(be)), 1, "said once across every reading the boot made")
 
 
 class TheAttachComparesBilling(psr._Harness):

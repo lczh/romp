@@ -345,7 +345,7 @@ class ClearBatchEchoRetires(unittest.TestCase):
         # restart with the lease SURVIVING: a fresh backend + session over the same reg restore the take
         be2 = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None)
         be2._text_landed = lambda *a, **k: False
-        be2._lease_survives = lambda sid: True
+        be2._lease_survives = lambda sid, **_: True
         s2 = sb.SdkSession(be2, sb.read_reg(self.d, SID))
         self.assertEqual(s2._taken_clear_qids, ["echo:cr2"], "lease survives → the take is restored")
         self.assertEqual(s2._own_turn_clear_qid, "echo:cr2", "…and the own-turn arm round-trips back from clearingOwnTurn")
@@ -354,7 +354,7 @@ class ClearBatchEchoRetires(unittest.TestCase):
         # restart with the lease GONE: the take is not restored (the /clear never ran → its echo is a loss)
         be3 = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None)
         be3._text_landed = lambda *a, **k: False
-        be3._lease_survives = lambda sid: False
+        be3._lease_survives = lambda sid, **_: False
         s3 = sb.SdkSession(be3, sb.read_reg(self.d, SID))
         self.assertEqual(s3._taken_clear_qids, [], "lease gone → nothing restored; the echo is a genuine loss")
         self.assertIsNone(s3._own_turn_clear_qid, "…and the own-turn arm is not restored either")
