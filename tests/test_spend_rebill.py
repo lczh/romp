@@ -597,13 +597,16 @@ class Rebill(unittest.TestCase):
         self.assertIn('costState={"total": float(total), "tokens": dict(self._last_usage_totals),', inspect.getsource(sb.SdkSession._persist_cost_state))
 
 
-def _result_mu(total, mu):
+def _result_mu(total, mu, canonical=None):
     """A result whose modelUsage map carries, per model, cumulative (input, output, cache read, cache write) tokens and
-    the dollars Claude Code billed them."""
+    the dollars Claude Code billed them; `canonical` maps an entry's raw model string to the canonicalModel Claude Code
+    reports beside it (the id its pricing lookup used)."""
     r = _ResultMessage()
     r.total_cost_usd = total
-    r.model_usage = {m: {"inputTokens": t[0], "outputTokens": t[1], "cacheReadInputTokens": t[2], "cacheCreationInputTokens": t[3],
-                         "webSearchRequests": 0, "costUSD": c} for m, (t, c) in mu.items()}
+    r.model_usage = {m: dict({"inputTokens": t[0], "outputTokens": t[1], "cacheReadInputTokens": t[2], "cacheCreationInputTokens": t[3],
+                              "webSearchRequests": 0, "costUSD": c},
+                             **({"canonicalModel": canonical[m]} if canonical and m in canonical else {}))
+                     for m, (t, c) in mu.items()}
     r.usage = {}
     return r
 
@@ -640,6 +643,24 @@ class PriceDrift(unittest.TestCase):
         self.assertIn("claude-sonnet-5-5", said[1])
         self.assertIn("does not have", said[1])
         self.assertAlmostEqual(self._day()["usd"], 4.801, msg="the check never touches the count")
+
+    def test_an_entry_is_held_to_the_rates_of_the_model_claude_code_priced_it_as(self):
+        """Review of #175: Claude Code keys modelUsage by the raw model string and names the id its pricing lookup used in
+        canonicalModel. Under Subagents at standard speed the subagents run as claude-opus-5-5[1m] and are billed at Opus
+        5's rates: a million cache reads at $0.50, above the top of Opus 5.5's reach ($0.44, fast and US inference). Held
+        to Opus 5's rates, as Claude Code priced them, that is no drift."""
+        s = self._session()
+        self._run(s, _result_mu(0.50, {"claude-opus-5-5[1m]": ((0, 0, 1000000, 0), 0.50)},
+                                canonical={"claude-opus-5-5[1m]": "claude-opus-5"}))
+        self.assertEqual(self.said(), [])
+
+    def test_an_entry_without_canonical_model_is_held_to_its_own_ids_rates(self):
+        """An older CLI names no canonicalModel: the entry's own id is the pricing id, as before."""
+        s = self._session()
+        self._run(s, _result_mu(0.50, {"claude-opus-5-5[1m]": ((0, 0, 1000000, 0), 0.50)}))
+        said = self.said()
+        self.assertEqual(len(said), 1, said)
+        self.assertIn("claude-opus-5-5[1m]", said[0])
 
     _day = Rebill._day
 

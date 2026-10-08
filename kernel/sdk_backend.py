@@ -9776,7 +9776,12 @@ class SdkSession:
         the map does not split. Outside that by more than PRICE_DRIFT_TOL, or a model the table lacks: one problem naming
         the model and the ratio, once per model per kernel life. The table changes only with the code, so a kernel life
         is the episode, and a mix of fast and standard turns cannot make it ring again and again. Per result, from the
-        message alone, no transcript read; a fault here is swallowed, since a line is not worth the turn's count."""
+        message alone, no transcript read; a fault here is swallowed, since a line is not worth the turn's count.
+        The map is keyed by the raw model string a request named; the id Claude Code's pricing lookup used rides beside
+        it as canonicalModel (overwritten per request, so a turn's delta gets that turn's), and that is the id the
+        entry is held to (the review of #175: under Subagents at standard speed the subagents run as
+        claude-opus-5-5[1m] and are billed at Opus 5's rates, whose cache reads alone sit above Opus 5.5's reach).
+        A CLI that names none: the raw string, as before."""
         try:
             mu = getattr(msg, "model_usage", None)
             if not isinstance(mu, dict):
@@ -9795,7 +9800,8 @@ class SdkSession:
                 d = cur if last is None or any(c < l for c, l in zip(cur, last)) else [c - l for c, l in zip(cur, last)]
                 if d[0] < self.PRICE_DRIFT_MIN_USD:
                     continue
-                b = _cpr.cost_bounds(model, d[1], d[2], d[3], d[4], d[5])
+                priced = str(m.get("canonicalModel") or model)      # the id Claude Code priced the entry as
+                b = _cpr.cost_bounds(priced, d[1], d[2], d[3], d[4], d[5])
                 if b is not None and b[0] * (1 - self.PRICE_DRIFT_TOL) <= d[0] <= b[1] * (1 + self.PRICE_DRIFT_TOL):
                     continue
                 be = self.backend
@@ -9803,20 +9809,21 @@ class SdkSession:
                     said = getattr(be, "_price_drift_said", None)
                     if said is None:
                         said = be._price_drift_said = set()
-                    if model in said:
+                    if priced in said:
                         continue
-                    said.add(model)
+                    said.add(priced)
+                who = model if priced == model else "%s (priced as %s)" % (model, priced)
                 if b is None:
                     text = ("prices: Claude Code billed $%.2f for %s on %s's last turn, a model romp's price table does "
                             "not have (kernel/cli_prices.py). The spend guard and the cost view guess its price from its "
-                            "family until the table gains a row." % (d[0], model, self.name))
+                            "family until the table gains a row." % (d[0], who, self.name))
                 else:
                     ratio = d[0] / b[0] if d[0] < b[0] else d[0] / b[1]
                     text = ("prices: Claude Code billed $%.2f for %s on %s's last turn, %.2fx the nearest figure romp's "
                             "price table gives those tokens ($%.2f to $%.2f at any speed and cache duration). The table "
                             "(kernel/cli_prices.py) no longer matches Claude Code's rates for this model, so the spend "
-                            "guard and the cost view misprice it." % (d[0], model, self.name, ratio, b[0], b[1]))
-                be._log(text, problem=True, key=("price-drift", model))
+                            "guard and the cost view misprice it." % (d[0], who, self.name, ratio, b[0], b[1]))
+                be._log(text, problem=True, key=("price-drift", priced))
         except Exception:
             pass
 

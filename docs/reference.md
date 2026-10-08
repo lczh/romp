@@ -5931,7 +5931,9 @@ priced as the newest model of its family, or the dearest row when no family
 matches, and named once in the kernel log; only a date may follow a known id
 (`claude-sonnet-5-5` is not `claude-sonnet-5`). The table is kept by hand, so
 each result's per-model dollars from Claude Code are checked against what its
-rates can give that model's tokens at any speed and cache duration: a model the
+rates can give that model's tokens at any speed and cache duration, the model
+being the one Claude Code says it priced the entry as (`canonicalModel`, beside
+the raw model string the entry is keyed by): a model the
 table lacks, or a bill outside that reach by more than a percent, is raised in
 the error center once per kernel life, naming the model and the ratio. The data is what
 the kernel already holds for the chat and the feed (the record cache), so the
