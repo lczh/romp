@@ -658,6 +658,18 @@ class Plan(unittest.TestCase):
         p5 = rp.plan(turns5, [at(10, 30)], DAY)
         self.assertEqual((p5["rows"], p5["stoodDown"]), ([], []), "disarmed by the seeded row, no judgement made")
 
+    def test_a_lifetime_row_of_a_subagents_at_standard_speed_session_is_recognised_by_claude_codes_own_figure(self):
+        # the kernel records such a turn as Claude Code's figure plus its repricing (cliUsd, subagentRepriceUsd), so the
+        # row's dollars no longer equal its cumulative when the lifetime was billed once more; Claude Code's own figure
+        # still does, and the corrected turn keeps its repricing
+        turns = [row(A, "web", at(10, 0), 3.0) | {"cumulativeUsd": 100.0},
+                 row(A, "web", at(10, 40), 0.0) | {"cumulativeUsd": 148.4878, "spendBaseline": "attach-unknown", "redelivered": True},
+                 row(A, "web", at(10, 50), round(159.2004 - 0.5, 6)) | {"cumulativeUsd": 159.2004, "cliUsd": 159.2004,
+                                                                        "subagentRepriceUsd": -0.5}]
+        got = {c["t"]: c for c in rp.plan(turns, [at(10, 30)], DAY)["rows"]}
+        self.assertEqual(sorted(got), [at(10, 50)])
+        self.assertAlmostEqual(got[at(10, 50)]["corrected"], 159.2004 - 148.4878 - 0.5, places=6)
+
     def test_the_lifetime_rule_is_idempotent_stamps_its_own_rule_into_the_row_and_the_journal_and_restores_what_it_no_longer_believes(self):
         # the 1473 review's two mediums: run two re-armed the chain on the corrected row (its usd no longer equal to its
         # cumulative) and zeroed the post-clear turn; a lifetime correction was never re-judged or restored

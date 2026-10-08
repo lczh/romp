@@ -5420,29 +5420,69 @@ def flag_settings_path(state_dir, sid: str, *, ultracode: bool = False, fast: bo
 # still Opus 5.5 on the wire:
 #   * every subagent runs `claude-opus-5-5[1m]` (CLAUDE_CODE_SUBAGENT_MODEL, and _FORCE so no agent definition and no
 #     per-call `model` parameter picks another); the [1m] suffix is a no-op on the wire, Opus 5.5 being natively 1M;
-#   * `modelOverrides` maps the catalog's claude-opus-5 to that exact string, so the CLI's canonical lookup of it answers
-#     claude-opus-5 (an override value is matched exactly, so the main loop's plain claude-opus-5-5 is untouched);
-#   * CLAUDE_CODE_MODEL_CAPABILITIES takes `fast_mode` off claude-opus-5 and gives it Opus 5.5's prompt capabilities;
-#   * CLAUDE_CODE_MAX_OUTPUT_TOKENS keeps the subagents' output cap at Opus 5.5's 128000 (Opus 5's default is 64000).
+#   * `modelOverrides` maps a catalog entry to that exact string, so the CLI's canonical lookup of it answers that entry (an
+#     override value is matched exactly, so the main loop's plain claude-opus-5-5 is untouched). The entry is
+#     claude-opus-4-7 (2026-10-08, was claude-opus-5): an override also sends every request FOR its entry to the string,
+#     and claude-opus-5 is the target of Claude Code's refusal fallback for some categories, main loop included, so those
+#     fallbacks went back to Opus 5.5 (verified on the wire: a claude-opus-5 request went out as claude-opus-5-5). No
+#     fallback targets claude-opus-4-7; it is 1M-native with an output cap of 128000 like Opus 5.5, and priced like Opus 5;
+#   * CLAUDE_CODE_MODEL_CAPABILITIES takes `fast_mode` off that entry and grants it the Opus 5.5 capabilities it lacks
+#     (the prompt bundle among them), so the subagents are handled as Opus 5.5 in all but name, cutoff and price;
+#   * CLAUDE_CODE_MAX_OUTPUT_TOKENS keeps the subagents' default output cap at Opus 5.5's 128000 (the entry's is 64000);
+#   * CLAUDE_ENV_FILE (written per launch, subagent_standard_shell_script) unsets the four variables for the CLI's shell
+#     commands, so its Bash, a `claude -p` it runs, a kernel it boots, launch as they would without the switch.
+# What no recipe in 2.1.282 can change, researched 2026-10-08: the subagents' identity line and the CLI's own price for them
+# follow the borrowed entry (the identity line is the entry's display name and cutoff, built from the canonical id with no
+# settings hook; a model-catalog URL is a signed model-picker config, gated off by a server flag for this account; a
+# modelPricing table is honoured from admin managed settings only), and FORCE stays (Explore and Plan are `model: inherit`,
+# which is the parent's fast model, and only FORCE overrides inherit). romp reprices the calls from the CLI's own charge.
 # Verified on 2.1.282 through a logging proxy (main requests `speed: "fast"` with the fast-mode beta, subagent requests no
-# speed and no beta, both `model: claude-opus-5-5`) and through romp's own launch path. The side effects and the
-# fragility are in docs/reference.md, "Subagents at standard speed (experimental)". Two preconditions: the session's model
-# is exactly claude-opus-5-5 (opus[1m] or claude-opus-5-5[1m] would be re-canonicalized too and the main loop would lose
-# fast mode; another model makes the forced Opus 5.5 subagents a model change), and fast mode is on (without it the
-# subagents already run at standard speed and the side effects buy nothing).
+# speed and no beta, both `model: claude-opus-5-5`, max_tokens 128000) and through romp's own launch path. The side effects
+# and the fragility are in docs/reference.md, "Subagents at standard speed (experimental)". Two preconditions: the
+# session's model is exactly claude-opus-5-5 (opus[1m] or claude-opus-5-5[1m] would be re-canonicalized too and the main
+# loop would lose fast mode; another model makes the forced Opus 5.5 subagents a model change), and fast mode is on
+# (without it the subagents already run at standard speed and the side effects buy nothing).
 SUBAGENT_STANDARD_MODEL = "claude-opus-5-5"
 SUBAGENT_STANDARD_SUBAGENT_MODEL = "claude-opus-5-5[1m]"
-SUBAGENT_STANDARD_OVERRIDES = {"claude-opus-5": SUBAGENT_STANDARD_SUBAGENT_MODEL}
+SUBAGENT_STANDARD_BORROWED = "claude-opus-4-7"
+SUBAGENT_STANDARD_OVERRIDES = {SUBAGENT_STANDARD_BORROWED: SUBAGENT_STANDARD_SUBAGENT_MODEL}
 SUBAGENT_STANDARD_ENV = {
-    "CLAUDE_CODE_MODEL_CAPABILITIES": ("claude-opus-5=-fast_mode,-opus_5_prompt_bundle,opus_5_5_prompt_bundle,"
-                                       "-thinking_disabled_effort_cap,rejects_disabled_thinking,per_turn_effort,"
-                                       "per_turn_timing"),
+    "CLAUDE_CODE_MODEL_CAPABILITIES": (SUBAGENT_STANDARD_BORROWED + "=-fast_mode,rejects_disabled_thinking,mid_conv_system,"
+                                       "mid_conv_tool_change,per_turn_effort,per_turn_timing,lean_prompt,refusal_fallback,"
+                                       "opus_5_5_prompt_bundle"),
     "CLAUDE_CODE_SUBAGENT_MODEL": SUBAGENT_STANDARD_SUBAGENT_MODEL,
     "CLAUDE_CODE_SUBAGENT_MODEL_FORCE": "1",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "128000",
 }
-# the rates Claude Code charges a recipe subagent call at: the canonical id the override gives it (cli_prices)
-SUBAGENT_STANDARD_CLI_PRICED_AS = "claude-opus-5"
+# the rates Claude Code charges a recipe subagent call at when its result names no canonical model: the borrowed entry
+SUBAGENT_STANDARD_CLI_PRICED_AS = SUBAGENT_STANDARD_BORROWED
+SUBAGENT_STANDARD_SHELL_DIR = "sdk-shell-env"   # per-session CLAUDE_ENV_FILE scripts (subagent_standard_shell_script)
+
+
+def subagent_standard_shell_script(state_dir, sid: str, chain: str = "", log=None) -> str:
+    """Write this session's shell environment script and return its path ("" when it cannot be written: the launch then
+    carries no CLAUDE_ENV_FILE and the variables reach its shells, said once by the caller). Claude Code runs the script
+    named by CLAUDE_ENV_FILE before each shell command (2.1.282: "Session environment loaded from CLAUDE_ENV_FILE"), so
+    it unsets the recipe's variables there and leaves the CLI's own environment, the one that forces the subagents'
+    model, untouched. `chain` is a CLAUDE_ENV_FILE the session already had: it runs first."""
+    lines = ["# written by the session manager for this session's shell commands; rewritten at each launch"]
+    if chain:
+        q = "'" + chain.replace("'", "'\\''") + "'"
+        lines.append("[ -r %s ] && . %s" % (q, q))
+    lines.append("unset %s CLAUDE_ENV_FILE" % " ".join(sorted(SUBAGENT_STANDARD_ENV)))
+    d = os.path.join(str(state_dir), SUBAGENT_STANDARD_SHELL_DIR)
+    p = os.path.join(d, "%s.sh" % sid)
+    try:
+        os.makedirs(d, exist_ok=True)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        os.chmod(p, 0o600)
+    except OSError as e:
+        if log:
+            log("subagent speed (%s): the shell environment script %s is unwritable (%s)" % (sid[:8], p, e), problem=True)
+        return ""
+    return p
 
 
 def subagent_standard_refusal(model, fast) -> str:
@@ -8122,6 +8162,7 @@ class SdkSession:
         on_key = self._sub_std_main_on_key()
         expected = real = 0.0
         counted = False
+        key_calls = []
         calls = list(getattr(self, "_sub_std_deferred", []))
         self._sub_std_deferred = []
         for path in [main] + subs:
@@ -8143,11 +8184,14 @@ class SdkSession:
             fast = u.get("speed") == "fast"
             c[("sub" if sub else "main") + ("Fast" if fast else "Standard")] += 1
             if sub or on_key:
-                r = _cpr.call_cost(SUBAGENT_STANDARD_MODEL, u)
-                e = r if fast else _cpr.call_cost(SUBAGENT_STANDARD_CLI_PRICED_AS, u)
-                if r is not None and e is not None:
-                    real += r
-                    expected += e
+                key_calls.append((u, fast))
+        canon = self._sub_std_canonical(msg)
+        for u, fast in key_calls:
+            r = _cpr.call_cost(SUBAGENT_STANDARD_MODEL, u)
+            e = r if fast else _cpr.call_cost(canon, u)
+            if r is not None and e is not None:
+                real += r
+                expected += e
         corr = self._sub_std_reconcile(msg, expected, real, replayed=replayed, unknown=unknown)
         if not counted and msg is None:
             return 0.0
@@ -8180,6 +8224,17 @@ class SdkSession:
         return (getattr(self, "fast", "") == "off" and not getattr(self, "fast_reason", "")
                 and bool(getattr(self, "_fast_unlocked", False)) and self.fast_effective()
                 and self.subagent_standard_carried() and not self._sub_std_pending())
+
+    def _sub_std_canonical(self, msg) -> str:
+        """The catalog entry Claude Code prices the recipe key's calls as: the result's own word (modelUsage[key]
+        canonicalModel, which a CLI launched with an earlier recipe names as claude-opus-5, and one whose override did not
+        take as claude-opus-5-5), kept for the results that do not carry it, else the borrowed entry."""
+        mu = getattr(msg, "model_usage", None) if msg is not None else None
+        ent = mu.get(SUBAGENT_STANDARD_SUBAGENT_MODEL) if isinstance(mu, dict) else None
+        c = ent.get("canonicalModel") if isinstance(ent, dict) else None
+        if isinstance(c, str) and _cpr.model_id(c):
+            self._sub_std_canon = c
+        return getattr(self, "_sub_std_canon", "") or SUBAGENT_STANDARD_CLI_PRICED_AS
 
     def _sub_std_reconcile(self, msg, expected: float, real: float, replayed: bool = False, unknown: bool = False) -> float:
         """The turn's repricing from Claude Code's own charge under the recipe's key (see _sub_std_settle)."""
@@ -16657,7 +16712,11 @@ class SdkBackend:
         if getattr(sess, "subagent_standard", False):
             why = sess.subagent_standard_refusal()
             if not why:
+                chain = str(env_vars.get("CLAUDE_ENV_FILE") or os.environ.get("CLAUDE_ENV_FILE") or "")
                 env_vars = dict(env_vars, **SUBAGENT_STANDARD_ENV)
+                shell = subagent_standard_shell_script(self.state_dir, sess.sid, chain=chain, log=self._log)
+                if shell:
+                    env_vars["CLAUDE_ENV_FILE"] = shell   # the four variables stay with the CLI, not its shell commands
                 overrides = SUBAGENT_STANDARD_OVERRIDES
                 sess._sub_std_inert_said = ""
             elif sess._sub_std_inert_said != why:

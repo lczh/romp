@@ -404,23 +404,31 @@ A model pick or a fast-mode toggle applies to a running session at once, without
 switch's conditions while the running CLI carries the recipe (a pick of `claude-opus-5-5[1m]`, `opus[1m]`, `opus` or
 another model, or fast mode turned off), the session relaunches without the recipe as soon as nothing would be cut, and
 until then the row says the recipe is still active and why it goes. Until that relaunch the recipe keeps working on
-the new pick: a pick ending in `[1m]` is billed and canonicalized like the subagents (no fast mode, Opus 5 rates; romp
-reprices those calls too). The switch itself stays on, and the next launch leaves it out and says why once; a pick or
+the new pick: a pick ending in `[1m]` is billed and canonicalized like the subagents (no fast mode, the borrowed entry's
+rates; romp reprices those calls too). The switch itself stays on, and the next launch leaves it out and says why once; a pick or
 toggle that meets the conditions again brings it back the same way. To change the model or fast mode on purpose, turn
 the switch off first.
 
 **What a launch carries.** In the session's own per-session settings file (never a settings file shared by a
-directory): `modelOverrides: {"claude-opus-5": "claude-opus-5-5[1m]"}`, plus four variables beside the session's own
+directory): `modelOverrides: {"claude-opus-4-7": "claude-opus-5-5[1m]"}`, plus four variables beside the session's own
 env: `CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-5-5[1m]` and `CLAUDE_CODE_SUBAGENT_MODEL_FORCE=1` (every subagent runs that
 model string, which is Opus 5.5 on the wire, Opus 5.5 being natively 1M), `CLAUDE_CODE_MODEL_CAPABILITIES` (takes fast
-mode off `claude-opus-5`, the catalog entry the override maps that string to, and gives it Opus 5.5's prompt
-capabilities) and `CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000` (Opus 5's default output cap is half Opus 5.5's). The main
-loop's plain `claude-opus-5-5` is matched by no override, so it keeps fast mode. The launch record says whether the
-recipe rode the launch, so a kernel that attaches to a CLI launched before a change relaunches it like any other pick.
-The four variables are in the CLI's environment, so every process the session starts inherits them: its Bash commands,
-a `claude -p` it runs, a lab kernel it boots. The model override is a settings key of that one CLI and reaches none of
-them, so in such a child the variables act alone: its subagents are forced onto `claude-opus-5-5[1m]`, which there is
-plain Opus 5.5 and runs at the child's own speed, and its output cap is 128000.
+mode off `claude-opus-4-7`, the catalog entry the override maps that string to, and grants it the Opus 5.5 capabilities
+it lacks, the prompt bundle among them) and `CLAUDE_CODE_MAX_OUTPUT_TOKENS=128000` (the entry's default output cap is
+half Opus 5.5's). The main loop's plain `claude-opus-5-5` is matched by no override, so it keeps fast mode. The launch
+record says whether the recipe rode the launch, so a kernel that attaches to a CLI launched before a change relaunches
+it like any other pick.
+
+The borrowed entry is `claude-opus-4-7` because an override also sends every request for its entry to the overriding
+string, and Claude Code's refusal fallback asks for `claude-opus-5` or `claude-opus-4-8` (some refusal categories, the
+main loop's included); borrowing either would send those fallbacks back to Opus 5.5. Nothing asks for Opus 4.7 by
+itself, so only an explicit pick of it in that session is redirected.
+
+The four variables are in the CLI's own environment, where they force the subagents' model. Its shell commands do not
+get them: the launch also sets `CLAUDE_ENV_FILE` to a script romp writes for the session (in the state directory's
+`sdk-shell-env`), which Claude Code runs before each shell command and which unsets them, so a Bash command, a
+`claude -p` it starts and a kernel it boots launch as they would without the switch. A `CLAUDE_ENV_FILE` the session
+already had runs first. Processes Claude Code starts without a shell, such as its MCP servers, still inherit them.
 
 **The speed check.** After a launch that carried the recipe, the kernel reads each Opus 5.5 call's `usage.speed` from
 the main transcript and the subagents' transcripts at every result: the main loop should read `fast`, every subagent
@@ -434,29 +442,38 @@ Every launch starts a fresh check there (`subagentSpeedScan`, keyed to the CLI p
 surviving CLI resumes that CLI's check and no other.
 
 **Spend.** Claude Code prices a recipe subagent call at the rates of the catalog entry the override maps its model to,
-Opus 5's ($5/$25, cache reads $0.50 against Opus 5.5's $0.20), so its `total_cost_usd` overstates those calls by a
+Opus 4.7's ($5/$25, cache reads $0.50 against Opus 5.5's $0.20), so its `total_cost_usd` overstates those calls by a
 quarter, more for cache reads. romp's ledger records them at their real price instead, from both sides' own figures.
 What Claude Code charged is its result's per-model figure for the recipe's model string,
 `modelUsage["claude-opus-5-5[1m]"].costUSD` (cumulative like the rest of the map, folded per result). What the calls
 cost is each call's own transcript usage priced with kernel/cli_prices.py at Opus 5.5's rates. Each call is also priced
-as Claude Code is expected to charge it (Opus 5's standard rates; Opus 5.5's own for a fast call), and the turn records
+as Claude Code is expected to charge it (the standard rates of the entry the result names as the key's
+`canonicalModel`, the borrowed entry when it names none; Opus 5.5's own for a fast call), and the turn records
 its `total_cost_usd` delta plus cost less charge only while the charge and that expectation agree. A disagreement waits
 one result, since a call that finished after a result was sent is paid for by the next one. One that lasts is said once
 per launch, and the turn records Claude Code's figure as is, so a Claude Code that already charges these calls their
 real price is never discounted twice. A result without the per-model map is recorded as is, said once. A result a
 session host replays after a kernel restart moves nothing here, as it moves nothing in the ledger. The turn row
 keeps both figures (`cliUsd`, the CLI's, and `subagentRepriceUsd`, the difference); `cumulativeUsd` stays the CLI's own.
-A difference a turn cannot absorb carries to the next turn. Claude Code's own cost readouts still show Opus 5 rates.
+A difference a turn cannot absorb carries to the next turn. Claude Code's own cost readouts still show the borrowed
+entry's rates. The spend repair reads such a row by Claude Code's own figure (`cliUsd`) where it compares a turn with
+its cumulative, and a turn it corrects keeps its repricing.
 
 **Side effects, and why it is experimental.**
 
-- The subagents' environment line names the wrong model: "Opus 5 (1M context) … claude-opus-5-5[1m] … knowledge cutoff
-  May 2026", where a normal subagent reads Opus 5.5 and June 2026. The calls are Opus 5.5.
-- Anything in the session that asks for `claude-opus-5` is redirected to Opus 5.5 by the override, Claude Code's own
-  refusal fallback among them (it falls back to Opus 5 for some refusal categories), so that fallback cannot leave
-  Opus 5.5.
+- The subagents' environment line names the borrowed entry: "Opus 4.7 (1M context) … claude-opus-5-5[1m] … knowledge
+  cutoff January 2026", where a normal subagent reads Opus 5.5 and June 2026. The calls are Opus 5.5. Claude Code builds
+  that line from the model's catalog entry, and in 2.1.282 nothing a launch can set reaches it: the catalog is compiled
+  in, and the model-catalog URL setting names a signed model-picker list (which models the picker offers), not the
+  catalog, and is switched off by a server flag for this account.
+- Claude Code's own price for those calls is the borrowed entry's: its per-model price table is honoured from an
+  administrator's managed settings only, and its model aliases with capabilities are for other providers. romp's
+  repricing above is the correction.
 - The FORCE variable applies to every subagent type, Explore, workflow agents and teammates included, and hides the
-  Agent tool's `model` parameter, so a session with the switch on cannot send a subagent to another model.
+  Agent tool's `model` parameter, so a session with the switch on cannot send a subagent to another model. Without it
+  the recipe would only be a default: Explore and Plan are defined as `model: inherit`, which is the parent's own fast
+  model string, and a per-call `opus` resolves to the parent's model too, so the commonest subagents would still run
+  fast. Only FORCE overrides an inherited model.
 - It rests on undocumented behaviour: `CLAUDE_CODE_MODEL_CAPABILITIES` and how `modelOverrides` values decide a model's
   capabilities. A Claude Code update can change either without notice; the speed check is the backstop, and the switch
   should be turned off when it reports a fast subagent call or a slow main loop.
