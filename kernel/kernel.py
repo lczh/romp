@@ -32254,14 +32254,14 @@ def _listing_threads_part(view, live_map, names):
 def _listing_claims_part(view, live_map, names):
     """GET /sessions/by-fsid's claims, kept beside the rows they answer with: transcript id -> the live sessions and comment
     threads whose records hold it, after the lineage rule (_session_by_fsid says why each piece exists). Each owner is a row
-    of this view: its sid, its lastSid, and for an SDK one the ids its two ledgers record (SdkBackend.recorded_fsids, each
-    ledger read once and then only what was appended); a fork or a thread yields an id its parent's records hold (the
+    of this view: its sid, its lastSid, and for an SDK one the ids its two ledgers record (_recorded_fsids, each ledger
+    folded through the shared incremental reader); a fork or a thread yields an id its parent's records hold (the
     parent's sid, its lastSid and its ledgers, whether or not it still runs; the parent from the thread row, or the fork
     lineage on the registry's rows table, SdkBackend.fork_parents). The key is those sets themselves, read here each
     cycle (two stats per SDK owner and per parent), so the map is rebuilt exactly when one of them moved."""
     L = _SESSIONS_LISTING
     be = _sdk()
-    recorded = getattr(be, "recorded_fsids", None) if be else None
+    recorded = (lambda sid: _recorded_fsids(be, sid)) if be and hasattr(be, "fsid_ledgers") else None
     forks = (be.fork_parents() if be and hasattr(be, "fork_parents") else None) or {}
     owners = [(str(r.get("id")), str(r.get("lastSid") or r.get("id")), r.get("backend") == "sdk", forks.get(str(r.get("id")), ""))
               for r in (view["rows"] or [])]
@@ -32290,6 +32290,47 @@ def _listing_claims_part(view, live_map, names):
     view.update({"claims": claims, "claimsFault": None})
     L["claimsKey"] = key
     L["claimsBuilt"] += 1
+
+
+_fsid_folds = {}            # ledger path -> fold_records cursor of the transcript ids it records (_recorded_fsids)
+_fsid_fold_faulted = set()  # ledger paths whose last fold failed: said once per episode
+
+
+def _fsid_step(state, r, pick):
+    """One ledger row folded into the transcript ids it records: a row of a shape `pick` cannot read is skipped, as the
+    reader skips one that does not decode."""
+    if not isinstance(r, dict):
+        return state
+    try:
+        got = frozenset(str(v) for v in pick(r) if v)
+    except (AttributeError, TypeError):
+        return state
+    return state | got if got - state else state
+
+
+def _recorded_fsids(be, sid):
+    """The transcript ids `sid`'s two ledgers record (the paths and the per-row picks SdkBackend.fsid_ledgers names), each
+    folded through the shared incremental reader (event_model.fold_records), which the kernel's own folds of the same
+    states ledger already use: an unchanged ledger costs a stat, a grown one its appended rows, and a rewrite (a shrink, a
+    same-size-new-mtime, a changed prefix under the reader's guard) is read again from its start. Read here, on the
+    pusher under its stage mark, never in the backend, whose threads reach no reader of the event model. A ledger that is
+    there but would not read (EACCES, EIO, EMFILE, a directory in its place) is answered without and not memoized
+    (fold_records' "fail"), by owns()'s rule (review find on #933): latching the partial set would 404 the session's own
+    prior transcript until the ledger next changed. That is said once per episode, not per cycle."""
+    out = frozenset()
+    for path, pick in be.fsid_ledgers(sid):
+        kinds = []
+        out |= _fold_records(_fsid_folds, path, frozenset, lambda st, r, _pick=pick: _fsid_step(st, r, _pick),
+                             on=kinds.append)
+        if "fail" in kinds:
+            if path not in _fsid_fold_faulted:
+                _fsid_fold_faulted.add(path)
+                sys.stderr.write("sessions-listing: the transcript-id ledger %s is there but would not read; the by-fsid "
+                                 "claims answer without it until it does\n" % path)
+        elif path in _fsid_fold_faulted:
+            _fsid_fold_faulted.discard(path)
+            sys.stderr.write("sessions-listing: the transcript-id ledger %s reads again\n" % path)
+    return out
 
 
 _SESSIONS_LISTING_FLIGHT = threading.Lock()   # rule 1's one build before the first cycle (_listing_ready), taken by the cycle's
@@ -32496,7 +32537,7 @@ def _session_by_fsid(fsid):
     """(HTTP status, JSON body) for GET /sessions/by-fsid?fsid=<id>: the ONE live session's /sessions row
     whose transcript ids include `fsid` — the sid itself, its current transcript (the row's lastSid), each
     /clear episode head the boundary tick recorded and both ends of every resume fork
-    (SdkBackend.recorded_fsids; a Codex session's only transcript ids are its sid and its lastSid; the tick
+    (_recorded_fsids over SdkBackend.fsid_ledgers; a Codex session's only transcript ids are its sid and its lastSid; the tick
     walks the discovered, tabbed sessions, so a comment thread's /clear heads leave no row and a thread is on
     record here through its reg and its resume forks). A session born as a fork also carries its PARENT's
     fork-time transcript in its records, which never makes it an owner (lineage, below). The postal bus

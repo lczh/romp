@@ -690,13 +690,13 @@ class _Threads(_Listing):
             setattr(obj, name, lambda *a, **k: (walks.append(name), real(*a, **k))[1])
             self.addCleanup((lambda: obj.__dict__.pop(name, None)) if instance else (lambda: setattr(obj, name, real)))
 
-        for name in ("thread_sessions", "recorded_fsids", "fork_parents", "fork_children"):
+        for name in ("thread_sessions", "fsid_ledgers", "fork_parents", "fork_children"):
             wrap(self.be, name, instance=True)
-        for name in ("_thread_rows", "_session_rows_from", "_session_rows", "_thread_reg_read"):
+        for name in ("_thread_rows", "_session_rows_from", "_session_rows", "_thread_reg_read", "_recorded_fsids",
+                     "_fold_records"):                                       # the shared reader the ledgers are folded through
             wrap(km, name)
         for name in ("list_regs", "known_fsids"):
             wrap(sb, name)
-        wrap(sb._em, "fold_records")                                        # the shared reader the ledgers are folded through
         return walks
 
     def _foreign_write(self, sid, reg):

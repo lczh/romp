@@ -907,20 +907,8 @@ def canon_dir(raw: str) -> tuple[str, str]:
 _FSID_LEDGERS = (("episodes", lambda r: [r.get("fsid")]),   # each /clear episode head (the boundary tick, the fork seed)
                  ("states", lambda r: [(r.get("resumeFork") or {}).get(k) for k in ("from", "to")]))   # both ends of a resume fork
 #                the two append-only ledgers that record a session's transcript ids beyond its sid and its current lastSid, and
-#                what each row contributes: known_fsids reads them whole, SdkBackend.recorded_fsids folds them through the shared
-#                incremental reader (_fsid_step)
-
-
-def _fsid_step(state: frozenset, r, pick) -> frozenset:
-    """One ledger row folded into the transcript ids it records (SdkBackend.recorded_fsids, through event_model.fold_records):
-    a row of a shape `pick` cannot read is skipped, as the reader skips one that does not decode."""
-    if not isinstance(r, dict):
-        return state
-    try:
-        got = frozenset(str(v) for v in pick(r) if v)
-    except (AttributeError, TypeError):
-        return state
-    return state | got if got - state else state
+#                what each row contributes: known_fsids reads them whole; the kernel folds them through the shared incremental
+#                reader, from the paths and picks SdkBackend.fsid_ledgers names
 
 
 def known_fsids(state_dir: Path, sid: str, reg: dict | None = None, faults: list | None = None) -> set[str]:
@@ -931,8 +919,8 @@ def known_fsids(state_dir: Path, sid: str, reg: dict | None = None, faults: list
     that is not there contributes nothing; one that IS there but would not read (EACCES, EIO, EMFILE, a
     directory in its place) contributes nothing either, and its name is appended to `faults` when the
     caller passes a list, so a caller can tell an absent record from a transient miss. The kernel's
-    GET /sessions/by-fsid reads the two ledgers through SdkBackend.recorded_fsids instead, which reads
-    each once and then only what was appended (the cycle asks it for every live session)."""
+    GET /sessions/by-fsid folds the two ledgers instead (SdkBackend.fsid_ledgers names them), reading each
+    once and then only what was appended (the cycle reads them for every live session)."""
     out = {str(sid)}
     reg = reg if reg is not None else (read_reg(state_dir, sid) or {})
     if reg.get("lastSid"):
@@ -11793,7 +11781,6 @@ class SdkBackend:
         self._notify = notify              # notify(app, msg) -> push to clients (kernel._send_to_app)
         self._poke_cb = poke               # wake the kernel's producer/judges (optional)
         self._owns_memo: dict = {}         # sid -> ((reg mtime_ns, size), owns?) — see owns()
-        self._fsid_folds: dict = {}        # ledger path -> fold_records cursor of its transcript ids — recorded_fsids()
         self._rows_table_memo = None       # (registry directory stamp, {"threads", "forkParents", "forkChildren"}) — _rows_table()
         self._push_cb = push               # wake the kernel's PUSHER → immediate chat push (live tail)
         self._push_session_cb = push_session   # targeted ONE-session push (kernel _push_session_now) for
@@ -18127,35 +18114,17 @@ class SdkBackend:
         self._owns_memo[sid] = (key, ok)
         return ok
 
-    def recorded_fsids(self, sid: str) -> frozenset:
-        """The transcript ids `sid`'s two append-only ledgers record beyond its sid and its current lastSid (which the
-        caller holds already): each /clear episode head (episodes/<sid>.jsonl) and both ends of every resume fork
-        (states/<sid>.jsonl resumeFork rows), the rows _FSID_LEDGERS names. The kernel's pusher reads this for every live
-        session and comment thread each cycle, to keep the claims GET /sessions/by-fsid answers from: a session's postal
-        MCP server is a child started with the CLI and keeps the CLAUDE_CODE_SESSION_ID of that moment for its whole
-        life, a /clear mints a new transcript id under the same sid, and these records are the authority on which session
-        the prior id belonged to (2026-09-15: every message a post-/clear session sent through its tools arrived
-        unattributed). Each ledger is folded through the shared incremental reader (event_model.fold_records), which the
-        kernel's own folds of the same states ledger already use: an unchanged ledger costs a stat, a grown one its
-        appended rows, and a rewrite (a shrink, a same-size-new-mtime, a changed prefix under the reader's guard) is read
-        again from its start. A ledger that is there but would not read (EACCES, EIO, EMFILE, a directory in its place)
-        is answered without and not memoized, by owns()'s rule (review find on #933): latching the partial set would 404
-        the session's own prior transcript until the ledger next changed. The line that says so is keyed per sid in the
-        problem ring, so a ledger that stays unreadable counts on one entry instead of appending one per cycle."""
-        folds = getattr(self, "_fsid_folds", None)
-        if folds is None:
-            folds = self._fsid_folds = {}
-        sid = str(sid)
-        out = frozenset()
-        for sub, pick in _FSID_LEDGERS:
-            failed = []
-            out |= _em.fold_records(folds, os.path.join(str(self.state_dir), sub, sid + ".jsonl"), frozenset,
-                                    lambda st, r, _pick=pick: _fsid_step(st, r, _pick),
-                                    on=lambda kind: failed.append(kind) if kind == "fail" else None)
-            if failed:
-                self._log("recorded_fsids(%s): the %s ledger is there but would not read — answered without it, not cached"
-                          % (sid[:8], sub), problem=True, key=("recorded_fsids", sid))
-        return out
+    def fsid_ledgers(self, sid: str) -> list:
+        """[(path, pick), …]: the two append-only ledgers that record `sid`'s transcript ids beyond its sid and its current
+        lastSid, and what each row contributes (pick(row) -> ids): each /clear episode head (episodes/<sid>.jsonl) and both
+        ends of every resume fork (states/<sid>.jsonl resumeFork rows), the rows _FSID_LEDGERS names. The kernel's GET
+        /sessions/by-fsid claims are built from them: a session's postal MCP server is a child started with the CLI and
+        keeps the CLAUDE_CODE_SESSION_ID of that moment for its whole life, a /clear mints a new transcript id under the
+        same sid, and these records are the authority on which session the prior id belonged to (2026-09-15: every message
+        a post-/clear session sent through its tools arrived unattributed). The kernel reads them, on its pusher, through
+        the shared incremental reader (_recorded_fsids); this module reaches no reader of the event model, so its own
+        threads stay callback-only (tests/test_stage_marks.py)."""
+        return [(os.path.join(str(self.state_dir), sub, str(sid) + ".jsonl"), pick) for sub, pick in _FSID_LEDGERS]
 
     def ensure_scheduled(self) -> int:
         """Keep a CLI process ALIVE for every session with ARMED SESSION TIMERS (reg sessionCrons, the

@@ -421,8 +421,8 @@ class SessionByFsidRoute(unittest.TestCase):
         self.root = km.jd.STATE
         self.be = self.sb.SdkBackend(self.root, "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
         self.asked = []                                   # the sids whose transcript records were read (the cycle's claims)
-        real = self.be.recorded_fsids
-        self.be.recorded_fsids = lambda sid: (self.asked.append(sid), real(sid))[1]
+        real = self.be.fsid_ledgers
+        self.be.fsid_ledgers = lambda sid: (self.asked.append(sid), real(sid))[1]
         names = self.names = {WEB: ("web", "/tmp/notes-api", "#112233", "#ffffff"),
                               API: ("api", "/tmp/notes-api", "#445566", "#ffffff")}
         self.live = {WEB: {"state": "idle", "backend": "sdk"}, API: {"state": "working", "backend": "sdk"}}
@@ -665,15 +665,22 @@ class SessionByFsidRoute(unittest.TestCase):
         # tries that session again, while an unaffected session's fold stands
         (self.root / "states").mkdir(exist_ok=True)
         (self.root / "states" / (API + ".jsonl")).mkdir()
-        said = []
-        self.be._log = lambda m, *a, **k: said.append(m) if "would not read" in m else None
+        import io
+        import sys
+        tried = []
+        real_fold = km._fold_records
+        km._fold_records = lambda cache, path, *a, **k: (tried.append(Path(str(path)).stem), real_fold(cache, path, *a, **k))[1]
         reads, restore = self._module_reads()
+        err = io.StringIO()
         try:
-            for _ in range(2):
-                self.assertEqual(self._by(OLD_FSID)[1]["id"], WEB, "the route still answers off the readable records")
-            self.assertEqual(len([m for m in said if API[:8] in m]), 2, "the faulted ledger is tried again each cycle, not latched")
+            with mock.patch.object(sys, "stderr", err):
+                for _ in range(2):
+                    self.assertEqual(self._by(OLD_FSID)[1]["id"], WEB, "the route still answers off the readable records")
+            self.assertEqual(tried.count(API), 4, "both of api's ledgers are folded each cycle: the faulted one is not latched")
+            self.assertEqual(err.getvalue().count("would not read"), 1, "said once for the episode, not per cycle")
             self.assertEqual(reads, {WEB}, "the clean one is read once")
         finally:
+            km._fold_records = real_fold
             restore()
 
 
