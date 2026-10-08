@@ -50,10 +50,12 @@ STUBBORN_PY = ("import signal, sys, time\n"
                "time.sleep(300)\n")
 # The launcher starts the process in a session of its own and exits, so the process is an orphan the way a host is
 # once its kernel is gone (its parent, init or the user manager, reaps it), never a child this test would have to reap.
-# It gives the process SIGTERM's default disposition, as a real host has (the kernel that spawns it handles SIGTERM, and
-# a handled signal is reset at exec): an ignored SIGTERM is inherited across exec, and a CI runner hands its steps one.
+# It gives the process SIGTERM's default disposition, unblocked, as a real host has (the kernel that spawns it handles
+# SIGTERM, and a handled signal is reset at exec): an ignored SIGTERM and a blocked one are both inherited across exec,
+# and a CI runner hands its steps one or the other.
 LAUNCH_PY = ("import signal, subprocess, sys\n"
              "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+             "signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})\n"
              "p = subprocess.Popen(sys.argv[1:], start_new_session=True, stdin=subprocess.DEVNULL,\n"
              "                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
              "print(p.pid)\n")
