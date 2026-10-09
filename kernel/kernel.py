@@ -23282,6 +23282,28 @@ def _refuse_drive(client, op, sid, msg, why=None):
         pass
 
 
+_DRIVE_ID_OPS = ("sendMessage", "rewindSend", "rewindDelete", "interrupt", "compactSession", "answerAsk", "toggleAsk", "submitAsk",
+                 "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "dismissEcho", "apiRetry", "setModel", "setEffort", "setMode", "setFast",
+                 "setSubagentStandard", "setAuth", "endSession", "renameSession", "moveSession", "stopTask", "rewindFiles", "mcpAction", "forkSession",
+                 "commentCreate", "commentReply", "commentResolve", "commentDelete", "commentSeen", "commentPromote",
+                 "commentMerge")
+
+
+def _is_drive_op(msg):
+    """Is `msg` a per-session DRIVE op, one _drive routes (a send, an interrupt, an answer, a setting, a rename…)? The
+    socket's read loop dispatches such an op the moment it is read, ahead of whatever the client's lane is still serving
+    (Handler._ws, 2026-10-09). The same shapes as _drive's front door, whose own list (ID_OPS) this tuple mirrors:
+    tests/test_ws_push_lane.py holds the two equal."""
+    if not isinstance(msg, dict):
+        return False
+    t = msg.get("type")
+    if t in _DRIVE_ID_OPS and msg.get("id"):
+        return True
+    if t in ("compact", "sendCommand") and msg.get("name"):
+        return True
+    return t == "askFollowUp" and bool(msg.get("itemId") or msg.get("id")) and bool(msg.get("text") or msg.get("cont"))
+
+
 def _drive(msg, client):
     """Route a per-session DRIVE op — send / interrupt / compact / ask picker / model·effort·mode / rename /
     end / follow-up — to whichever backend OWNS the sid (Sessions.backend_for(sid)), and return True. UI /
@@ -58542,6 +58564,73 @@ def _note_chat_withheld_at_close(client, now=None):
         return False
 
 
+# ── a socket's ops run on a LANE beside its read loop; a drive op never waits on it (2026-10-09) ──────────────────
+# The read loop used to dispatch every op inline, so nothing the page sent was read while an op ran. The `ready` arm and
+# every `needFull` serve a whole connect push (Handler._push_one, every tab of the board), and on a linked machine running
+# dozens of large sessions that push took three to five minutes after every page load (the caps frame that ends the ready
+# arm arrived that late, measured from the page's own frame counters). Two chat messages typed in that window sat unread
+# in the socket; the reload that followed closed it before the loop came back to read them, and neither side kept a trace
+# (the user 2026-10-09). A third, sent just before a deploy, died unread with the kernel the same way.
+# Now the read loop only reads. A DRIVE op (_is_drive_op: a send, an interrupt, an answer, a session setting) is
+# dispatched the moment it is read; every other op goes to the client's lane, one worker thread that dispatches them in
+# arrival order, exactly the order they had on the handler thread. So a connect push and everything after it keep their
+# order (a history ask, a views write, the next needFull), while a user's message to a session is handed over at once.
+# When the socket ends, the client is marked `closing` and the read loop waits for its lane to drain before tearing the
+# client down: every op the kernel read is still dispatched, as it was when it ran inline, while a connect push that has
+# not started is skipped and one that is building stops at its next tab (_push_one, _push), since no reader is left for it.
+def _ws_arm_lane(client):
+    """Start a socket's lane (see above): a queue of (kind, job) and the one worker that drains it. Called by Handler._ws."""
+    lane = {"q": queue.Queue(), "lock": threading.Lock(), "pending": 0}
+    client["lane"] = lane
+    # the worker carries the socket request's own stage mark (http.GET.ws, set by the request's dispatch on this thread), so a
+    # build or a hydration an op makes lands under the mark it landed under when the op ran on the handler thread (T401)
+    stage = getattr(_STAGE_TL, "name", None) or "ws-lane"
+    t = threading.Thread(target=_stage_marked(stage)(_lane_worker), args=(client, lane), daemon=True, name="ws-lane")
+    lane["thread"] = t
+    t.start()
+    return lane
+
+
+def _lane_put(lane, kind, job):
+    with lane["lock"]:
+        lane["pending"] += 1
+    lane["q"].put((kind, job))
+
+
+def _lane_worker(client, lane):
+    """Dispatch one socket's lane in order until its sentinel. A job that raises is logged the way the read loop logs a
+    failing op (`ws handler [kind]`) and the next one still runs; a socket error drops the client, as it did when the op
+    ran on the read thread, and a dropped client's remaining jobs are not run (the read loop stopped reading for it then)."""
+    while True:
+        item = lane["q"].get()
+        if item is None:
+            return
+        kind, job = item
+        try:
+            if client.get("alive", True):
+                job()
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            _drop_dead_ws_client(client, "a %s op hit a socket error (%s)" % (kind, e))
+        except Exception:
+            sys.stderr.write("ws handler [%s]: %s\n" % (kind, traceback.format_exc()))
+        finally:
+            with lane["lock"]:
+                lane["pending"] -= 1
+
+
+def _lane_close(client):
+    """The socket ended: mark the client closing (a connect push still to run, or running, stops: _push_one, _push), let
+    the lane dispatch what the read loop read, and end its worker. Blocks until it has."""
+    lane = client.get("lane")
+    if lane is None:
+        return
+    client["closing"] = True
+    lane["q"].put(None)
+    t = lane.get("thread")
+    if t is not None and t is not threading.current_thread():
+        t.join()
+
+
 def _drop_dead_ws_client(client, why):
     """Mark a peer dead and shut its socket: the handler thread's blocking read returns EOF, its finally
     removes the client from _clients, and the sender thread ends on the sentinel. Logged once per client."""
@@ -64900,6 +64989,8 @@ def _push(targets, connect=False, live_map=None):
                         _work = _again + [x for x in _work if x["sid"] in newly] + [x for x in _work if x["sid"] not in newly]
                 if not _work:
                     break
+                if connect and not any(c.get("alive", True) and not c.get("closing") for c in targets):
+                    break                                # the pane this connect push serves has gone: no reader for the rest (_lane_close)
                 s = _work.pop(0)
                 _served.add(s["sid"])
                 is_active = s["sid"] in active           # the watched tab(s): served like any tab while the key holds
@@ -83978,6 +84069,7 @@ class Handler(BaseHTTPRequestHandler):
             client["col"] = col
         if provrows:
             client["provRows"] = True
+        lane = _ws_arm_lane(client)                # every op but a drive op runs on the client's lane, in order (_ws_arm_lane)
         _register_ws_client(client)
         _note_ws_open(client, reconnect=reconnect)   # the durable record of this open: app, wid, kind (page or relay), reconnect
         if client.get("reconnect"):
@@ -84001,8 +84093,13 @@ class Handler(BaseHTTPRequestHandler):
                     msg = json.loads(payload.decode("utf-8", "replace"))
                 except Exception:
                     msg = None
+                if not _is_drive_op(msg):
+                    # on the lane, behind whatever it still serves (a connect push, a history page), in arrival order
+                    _lane_put(lane, (msg or {}).get("type") if isinstance(msg, dict) else None,
+                              functools.partial(self._dispatch_ws, msg, client))
+                    continue
                 try:
-                    self._dispatch_ws(msg, client)
+                    self._dispatch_ws(msg, client)     # a drive op: dispatched now, never behind the lane
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     raise   # a genuine socket failure → let the outer handler tear the connection down
                 except Exception:
@@ -84012,6 +84109,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
+            _lane_close(client)                    # what the loop read is still dispatched; a connect push nobody can read stops
             client["alive"] = False
             sendq.put(None)                    # end this client's sender thread
             _note_chat_withheld_at_close(client)   # a socket that closed without ever declaring its wire, chat frames withheld: said once, here
@@ -84514,6 +84612,8 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def _push_one(self, client):
+        if client.get("closing"):
+            return                                # its socket ended before this push ran (_lane_close): nobody left to read it
         _t0 = time.monotonic()
         try:
             _push([client], connect=True)         # full state to a fresh client (its per-client dedup is empty);

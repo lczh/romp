@@ -834,6 +834,12 @@ class ViewerClose(Base):
         def recv(rfile):
             if pending:
                 return pending.pop(0)
+            # the socket's ops run on its lane, beside this read loop (kernel.py _ws_arm_lane, 2026-10-09): the page closes once
+            # what it sent has been served, so the close is read after the lane has dispatched the frames before it
+            lane = got[0].get("lane") if got else None
+            end = time.time() + 30
+            while lane is not None and lane["pending"] and time.time() < end:
+                time.sleep(0.005)
             if at_close is not None:
                 at_close()
             return (0x8, b"", True)
