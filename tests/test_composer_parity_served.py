@@ -54,6 +54,12 @@ N1 = "Why a page load?"
 N2 = "Measure it first."
 LEAD = "Replying to this part of the conversation:"
 FAKE_REPLY = "Both are measured on the staging box."   # the fake Agent SDK's reply to the thread's sent run
+# ONE fixed synthetic instant stamps every fixture row and starts the page's clock, in a page told it is in UTC: midday,
+# so the rows (an hour back at most) and the page's today are one day at any hour on any runner. The rows used to be
+# stamped from the wall clock, an hour back: in the first hour after midnight they fell on the page's yesterday, a day
+# divider opened the thread's messages, they overflowed the popover's scroll box, and the drag over the second passage
+# captured a prefix of it (red twice in CI between 00:00 and 01:00 UTC on 2026-10-09).
+NOW = 1768478400   # 2026-01-15T12:00:00Z
 
 
 def _free_port():
@@ -94,7 +100,8 @@ const finish = async (why) => { if (why) out.died = why; fs.writeFileSync(cfg.ou
 const wait = (page, fn, arg, why, ms) => page.waitForFunction(fn, arg, { timeout: ms || T }).catch(async (e) => { await finish(why + " (" + String(e).split("\n")[0] + ")"); });
 const THEMES = { dark: "yatharth", light: "yatharth-light" };   // the settings store's keys, read by theme.ts at boot
 async function open(theme) {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 }, deviceScaleFactor: 2 });
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 }, deviceScaleFactor: 2, timezoneId: "UTC" });
+  await ctx.clock.install({ time: cfg.nowMs });   // the fixture's NOW, flowing from there: its rows are an hour old, today
   await ctx.grantPermissions(["clipboard-read", "clipboard-write"], { origin: new URL(cfg.chat).origin });
   if (theme) await ctx.addInitScript((t) => { try { if (!localStorage.getItem("romp:settings")) localStorage.setItem("romp:settings", JSON.stringify({ theme: t })); } catch (e) {} }, THEMES[theme]);
   const page = await ctx.newPage();
@@ -293,7 +300,7 @@ class ComposerParityServed(unittest.TestCase):
             {"sid": WEB, "name": "web", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": WEB, "alive": True,
              "model": "claude-opus-5", "liveModel": "Opus 5"}))
         Path(state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
-        t0 = int(time.time()) - 3600
+        t0 = NOW - 3600
         parent = [user(t0, "u1", None, "where does the web side of notes-api start?", WEB),
                   agent(t0 + 5, "a1", "u1", A1, WEB),
                   user(t0 + 60, "u2", "a1", "how long should the list responses be cached?", WEB),
@@ -312,7 +319,7 @@ class ComposerParityServed(unittest.TestCase):
              "alive": False, "mode": "auto", "effort": "high", "model": "claude-opus-5"}))   # no forkOf: the fork has happened
         Path(state, "comments", WEB + ".json").write_text(json.dumps({"threads": [
             {"tid": THREAD, "sid": THREAD, "name": "web-comment-1", "anchorUuid": "a2", "cutUuid": "a2", "exact": PASSAGE,
-             "status": "open", "createdT": t, "lastSeenT": int(time.time()), "color": "#e8b220"}]}))
+             "status": "open", "createdT": t, "lastSeenT": NOW, "color": "#e8b220"}]}))
         cls.port, cls.token = _free_port(), "testtok-parity"
         env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST", ROMP_CLI_SCOPE="0",
                               PYTHONPATH=FAKE_SDK,   # the sessions run on the fake Agent SDK, so the thread's conversation is served
@@ -354,7 +361,7 @@ class ComposerParityServed(unittest.TestCase):
         out = os.path.join(cls.lab, "result.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (cls.port, cls.token), "web": WEB, "tid": THREAD,
-                       "r1": "r1", "r2": "r2", "n1": N1, "n2": N2, "out": out,
+                       "r1": "r1", "r2": "r2", "n1": N1, "n2": N2, "out": out, "nowMs": NOW * 1000,
                        "shots": os.environ.get("COMPOSER_PARITY_SHOTS") or ""}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         with open(driver, "w") as f:
