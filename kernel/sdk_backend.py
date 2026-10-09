@@ -6571,6 +6571,9 @@ class SdkSession:
         #   lets such a "preference" stand down instead of holding the session at normal speed for good.
         self._fast_token_login = False   # this connection's login rides the environment (_options); per connection
         self._fast_guess_asked = False   # a relaunch was asked for this connection's guessed refusal (_adopt_fast_state)
+        self._fast_off_sent = False      # a literal '/fast off' went to this connection's CLI, which takes its opt-in away
+        #   (_ask_missing_opt_in: such a CLI lacks the opt-in although its launch carried it); per connection
+        self._fast_opt_in_said = False   # a CLI launched here with the opt-in still lacks it: said once (_ask_missing_opt_in)
         self._upgrade_retry = None   # Retry upgrades after downgrades (the user 2026-09-17): while set, {"from", "to",
         #   "pick", "since", "next", "attempts"} — this session's model fell from `from` to `to` without a pick and the
         #   kernel's tick asks for the pick again every RETRY_UPGRADE_S (retry_model_upgrades → request_reconnect); cleared
@@ -8972,11 +8975,13 @@ class SdkSession:
         # from fast_effective at the connect, which for an ATTACH to a CLI that survived a kernel restart is the rule's
         # wish today, not the spawn's fact (a switch turned on across the restart read as already armed, so the rule
         # never asked and the session stayed slow; and set_fast would have sent a literal '/fast on' the CLI refuses).
-        # The readback corrects it, and the rule is asked again from the truth (2026-09-17).
-        relearn = False
-        if reason == "sdk_opt_in_required" and getattr(self, "_fast_unlocked", False):
+        # The readback corrects it, and the opt-in is asked for again from the truth (2026-09-17; _ask_missing_opt_in).
+        # Whether a launch now would carry the opt-in is read HERE, before this report's blanked reason replaces the one
+        # standing: a refusal the CLI answered with earlier (fast_reason) still holds the flag back for a flagless CLI.
+        lacks = reason == "sdk_opt_in_required"
+        wants = lacks and self.fast_effective()
+        if lacks and getattr(self, "_fast_unlocked", False):
             self._fast_unlocked = False
-            relearn = True
         # 'sdk_opt_in_required' is NOT a refusal to respect — it is the one refusal romp is
         # BUILT to cure (set_fast reconnects with the fastMode flag-settings opt-in), and the
         # CLI stamps it on EVERY connect made without the flag (verified live 2026-08-10 on
@@ -9028,7 +9033,18 @@ class SdkSession:
             self.fast_rule_refused = ""
         changed = fast != self.fast or reason != self.fast_reason
         self.fast, self.fast_reason = fast, reason
-        if changed or refused_ask or rule_refused or rule_lifted or newly_checked:
+        # The registry's copy is compared as well as the one in memory (2026-10-09): the reconcile flips the in-memory
+        # state to on when a launch carries a waiting fast pick, without the registry, so the CLI's own "on" then
+        # changed nothing in memory and was never written. The registry kept "off" for a session running fast, and a
+        # restarted kernel and every reader of the registry took it at its word.
+        stale = False
+        if not changed:
+            try:
+                r = read_reg(self.backend.state_dir, self.sid) or {}
+                stale = (r.get("liveFast") or "") != fast or (r.get("liveFastReason") or "") != reason
+            except Exception:
+                stale = False
+        if changed or stale or refused_ask or rule_refused or rule_lifted or newly_checked:
             try:
                 kw = dict(liveFast=fast, liveFastReason=reason)
                 if refused_ask:
@@ -9062,9 +9078,57 @@ class SdkSession:
                               "organization about; this CLI was launched without the check that settles it, so the "
                               "session relaunches with it%s" % (self.name, "" if self.quiet() else " once it is quiet"))
             self.want_switch_reconnect("fast mode")
-        if relearn:
-            self._after_model_change(self.model, self.model)   # the flag this connection lacks, asked for from the truth
+        if lacks:
+            self._ask_missing_opt_in(wants)   # the flag this CLI lacks, asked for from the CLI's own word
         return changed or refused_ask
+
+    def _ask_missing_opt_in(self, wants: bool) -> None:
+        """The CLI just said it lacks the fast-mode opt-in (sdk_opt_in_required, in the initialize answer every connect
+        gets, an attach included, and in every turn's init). When a launch from the session's state would carry it
+        (`wants`: fast_effective, read before the report's blanked reason replaced a standing refusal), ask for the
+        relaunch that does, through want_switch_reconnect: applied the moment the session is quiet, never cutting a
+        turn, a subagent or a background task.
+
+        WHY THE CLI'S WORD AND NOT THE LAUNCH RECORD (2026-10-09). A kernel restart lost the ask twice over. Always fast's
+        ask lives in one kernel's memory (a model switch raised it), and the kernel that re-attached to the surviving
+        CLI saw no model change, so nothing asked again. And a session's own fast pick, recorded as waiting, read as
+        applied at the attach because the CLI's launch record carries the opt-in, although a literal '/fast off' sent to
+        that CLI earlier (a Slow click on a flagged connection) had taken the opt-in away: from then on the CLI reported
+        sdk_opt_in_required at every report, even after the per-session settings file regained the key, so only a
+        relaunch carries the opt-in again (read from the hosts' journals, 2026-10-09). The launch record says what rode
+        the launch; this report says what the CLI has now. Both roads asked nothing, and the sessions ran at normal
+        speed until restarted by hand.
+
+        Never a loop: a CLI THIS kernel launched carrying the opt-in, with no literal '/fast off' sent since
+        (_fast_off_sent), that still lacks it would be relaunched with the same flag and say the same, so that case is
+        said once per connection, loudly, and nothing is asked. A refusal with a reason, the user's Slow and the switch
+        off all read through fast_effective. One ask: a relaunch already asked for, standing or on its way, carries the
+        opt-in itself."""
+        try:
+            if not wants:
+                return
+            if (getattr(self, "_switch_wanted", "") or getattr(self, "_switch_ask_pending", "")
+                    or getattr(self, "_reconnect_when_idle", False) or getattr(self, "_reconnect", False)):
+                return
+            launched_with = (not getattr(self, "_host_is_attach", False)
+                             and bool((getattr(self, "_launch_record", None) or {}).get("fast")))
+            if launched_with and not getattr(self, "_fast_off_sent", False):
+                if not getattr(self, "_fast_opt_in_said", False):
+                    self._fast_opt_in_said = True
+                    self.backend._log("fast mode (%s): this CLI was launched with the fast-mode opt-in and still reports "
+                                      "that it lacks it; a relaunch would carry the same flag, so none is asked"
+                                      % self.name, problem=True)
+                return
+            own = bool(getattr(self, "fast_opt", False))
+            if own:
+                self._fast_pending = "on"   # the pick's dots until a launch carries the opt-in (set_fast's mark)
+            self.backend._log("%s (%s): the CLI reports it lacks the fast-mode opt-in — reconnecting with it%s"
+                              % ("fast mode" if own else "always fast", self.name,
+                                 "" if self.quiet() else " once the session is quiet"))
+            self.want_switch_reconnect("fast mode" if own else "always fast")
+        except Exception as e:
+            self.backend._log("fast mode (%s): %s" % (self.name, e), problem=True)
+
     async def _do_adopt_server_info(self):
         """Fast-mode state at CONNECT, before any turn. The init message _adopt_fast_state feeds on
         only streams WITH a turn — so after a kernel restart every session's fast badge sat blank
@@ -9478,6 +9542,7 @@ class SdkSession:
             self._fast_expect = ""   # a fresh connection's first init speaks for the flag, not for any
             #   toggle sent on the old one — never hold a pre-reconnect expectation against it
             self._fast_guess_asked = False   # a guessed "preference" asks its relaunch once per connection
+            self._fast_off_sent = self._fast_opt_in_said = False   # a fresh CLI: nothing sent to it, nothing said of it
             connected = False
             try:
                 transport = None
@@ -19662,6 +19727,8 @@ class SdkBackend:
         if s._fast_unlocked:                   # opted in at connect → the CLI interprets the literal send
             if not self.send(sid, "/fast " + value):
                 return False
+            if value == "off":
+                s._fast_off_sent = True        # the CLI drops its opt-in with it: a later On needs a relaunch (_ask_missing_opt_in)
             s.fast = value
             s._fast_expect = value             # the send's own turn-init is one word stale; let it yield
             s._sub_std_requalify()             # fast off ends Subagents at standard speed's conditions: relaunch once quiet
