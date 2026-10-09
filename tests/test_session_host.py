@@ -851,6 +851,32 @@ class HostProcess(unittest.TestCase):
             h._track(msg, i)
             self.assertEqual((h.inflight, h.main_turns), want, "after %r" % (msg,))
 
+    def test_the_clis_echo_of_a_model_switch_opens_neither_count(self):
+        """2026-10-09: the CLI answers a set_model control request by streaming its command output as a user row (flagged
+        isReplay) with no init before it and no result after it. Both counts took it for a turn the CLI had opened itself,
+        and nothing closed them: the hello handed the stale turn to every kernel that attached, and the session read as a
+        turn in flight for good (Always fast's reconnect, which waits for quiet, never ran). It is no turn; the next real
+        turn still opens on its init, and a row after a result still re-opens."""
+        spec_path, spec = self._spec()
+        h = sh.SessionHost(spec_path, lease_api={"write_lease": lambda *a, **k: None, "remove_lease": lambda *a, **k: None,
+                                                 "proc_start": lambda pid: "1"})
+        h.fsid = FSID
+        echo = {"type": "user", "message": {"role": "user", "content": "<local-command-stdout>Set model to `claude-opus-5-5`"
+                                                                          "</local-command-stdout>"},
+                "parent_tool_use_id": None, "isReplay": True}
+        steps = [(echo, (0, 0)),
+                 ({"type": "system", "subtype": "init", "session_id": FSID}, (0, 1)),
+                 ({"type": "assistant"}, (1, 1)), ({"type": "result"}, (0, 0)),
+                 (echo, (0, 0)), ({"type": "user"}, (1, 1)), ({"type": "result"}, (0, 0))]
+        for i, (msg, want) in enumerate(steps):
+            h._track(msg, i)
+            self.assertEqual((h.inflight, h.main_turns), want, "after %r" % (msg,))
+        self.assertTrue(sh._command_echo(echo))
+        self.assertTrue(sh._command_echo(dict(echo, message={"content": [{"type": "text", "text": echo["message"]["content"]}]})))
+        self.assertFalse(sh._command_echo({"type": "user", "message": {"content": "a row of a turn the CLI runs itself"}}))
+        self.assertFalse(sh._command_echo({"type": "user", "message": {"content": [{"type": "tool_result", "content": "x"}]}}))
+        h.journal.close()
+
     def test_a_handover_from_code_without_the_main_count_starts_it_from_the_quiet_inflight(self):
         """A host re-executed from code older than the main count hands over no main_turns; the handover runs only when the
         host's own count is zero (the quiet check), so the main count starts there, and a newer handoff's own value wins."""

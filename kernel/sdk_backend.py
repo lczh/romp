@@ -10655,14 +10655,21 @@ class SdkSession:
         keeps streaming after the main turn's result, and its frames say nothing about the main
         conversation's prompt queue. Counted, they read an idle session as running a turn nothing would
         settle until some later result, and one arriving between a feed from idle and the fed turn's
-        init would release the hold with the text still in the CLI's queue."""
+        init would release the hold with the text still in the CLI's queue.
+        Nor is the command output a CONTROL REQUEST streams (_is_command_stdout): the CLI answers set_model
+        with a `<local-command-stdout>Set model to …` user record (flagged isReplay on the wire), with no
+        init before it and no result after it, so it is no turn and proves nothing about the queue. Counted,
+        it read a session switched in place on an idle CLI as a turn in flight for good (2026-10-09): the
+        card said Working, and Always fast's reconnect, which waits for quiet, waited for a result that
+        never came. The chat already reads the same record as a closed command turn (msg_to_atom). A local
+        command a person typed is counted at its feed, as every fed text is."""
         if getattr(msg, "parent_tool_use_id", None):
             return False
         if isinstance(msg, (AssistantMessage, ResultMessage)):
             return True
         if isinstance(msg, SystemMessage):
             return getattr(msg, "subtype", None) == "init"
-        return type(msg).__name__.lstrip("_") == "UserMessage"
+        return type(msg).__name__.lstrip("_") == "UserMessage" and not _is_command_stdout(msg)
 
     def _untaken_taken(self, msg, AssistantMessage, ResultMessage, SystemMessage) -> bool:
         """Has the CLI TAKEN the last fed text (self._untaken), so the next queued text may be fed
