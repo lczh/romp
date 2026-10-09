@@ -371,7 +371,15 @@ class RealArm(Harness):
         got, sent = [], []
         real = (km._register_ws_client, km._ws_recv, km._mk_ws_send, km._alive_sessions)
         km._register_ws_client = lambda c: (got.append(c), km._clients.append(c))
-        km._ws_recv = lambda rfile: next_frame(sent)
+        def recv(rfile):
+            # a connect push runs on the client's push lane, beside this read loop (kernel.py _run_push, 2026-10-09): the
+            # scripted page sends its next op once the frames that push serves have arrived, as a real page does
+            lane = got[0].get("pushLane") if got else None
+            end = time.time() + 30
+            while lane is not None and lane["running"] and time.time() < end:
+                time.sleep(0.005)
+            return next_frame(sent)
+        km._ws_recv = recv
         km._mk_ws_send = lambda q, sock, client: (lambda s: sent.append(json.loads(s)))
         if alive_rows:
             km._alive_sessions = lambda now, tmux: list(self.rows)
