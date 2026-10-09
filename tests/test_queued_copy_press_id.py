@@ -213,7 +213,8 @@ class TheNoIdRouteTakesTheTextAlone(_PlainRouteFixture):
         self.assertTrue(km._drive({"type": "sendMessage", "id": SID, "text": "hello there", "qid": A}, client))
         self.assertEqual(self.plain.calls, ["hello there"], "the text reached the backend; the id stayed with the kernel")
         self.assertNotIn(SID, km._pending_ops, "handed over, not parked")
-        self.assertEqual(sent, [], "nothing refused")
+        self.assertEqual(sent, [{"type": "sendAck", "id": SID, "qid": A, "ok": True, "dup": False}],
+                         "answered (kernel.py _send_ack, 2026-10-09), nothing refused")
 
     def test_a_follow_up_carrying_an_id_reaches_the_backend(self):
         client = {"send": lambda s: None}
@@ -382,7 +383,8 @@ class TheWireCarriesTheId(unittest.TestCase):
         self.assertTrue(km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": B}, self.client))
         self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True), ("send", WORDS, "human", B, True)],
                          "the id is the fourth slot; the fifth says the composer's send is the user's (T315)")
-        self.assertEqual(self.sent, [], "nothing refused")
+        # each parked send is answered (sendAck: the kernel holds it, kernel.py _send_ack, 2026-10-09); nothing else, nothing refused
+        self.assertEqual([(f["type"], f["qid"], f["ok"]) for f in self.sent], [("sendAck", A, True), ("sendAck", B, True)], "nothing refused")
 
     def test_a_follow_up_parks_its_wrapped_body_under_the_id(self):
         self.assertTrue(km._drive({"type": "askFollowUp", "itemId": SID + ":g4", "text": "and the fix?", "qid": A}, self.client))

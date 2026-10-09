@@ -97,6 +97,11 @@ export type PendingSend = {
                        //   a queued copy after the press that no earlier same-text send claimed): the send
                        //   reached it, so a connection drop before or after cannot have lost it — `lost` is
                        //   cleared and never set again
+  wire?: Record<string, unknown>;   // the message as it was posted (sendMessage / askFollowUp, its qid included): what a resend
+                       //   posts again, byte for byte, when no kernel has answered the send (send-acks.ts, 2026-10-09)
+  acked?: boolean;     // a kernel answered this send (its sendAck frame): it was handed over, parked or refused there, so it is
+                       //   never sent again; until then the page keeps it, across a reload too, and resends it on the next socket
+                       //   whose kernel says it recognises a resend (send-acks.ts)
   clear?: boolean;     // a transcript-resetting /clear (on a non-Codex backend): it writes no record IN THE CONVERSATION
                        //   IT CLEARS, so its echo there never lands, and in a same-second batch is never OVERTAKEN. Its bubble ends on the CLEAR
                        //   BOUNDARY instead (the fresh episode the /clear forks in, carried to reconcilePending as

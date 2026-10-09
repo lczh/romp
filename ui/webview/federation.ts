@@ -991,6 +991,7 @@ interface Conn {
   connT: number;    // when the current socket's connect() attempt started — the watchdog's reference point
   everOpened?: boolean; // a socket for this conn has reached `open` at least once (the shim's everConnected)
   readyAcked?: boolean; // the remote answered this page's `ready` with a `caps` frame at least once (the shim's readyAcked): the redial gate's latch that the remote served this page whole and holds its sessions
+  acksSeen?: boolean; // the CURRENT socket's kernel said (its keepalive's `acks`) that it answers chat sends and recognises a resend: the chat's unanswered sends to this host go again on it (romp:hostAcks; render.ts resendUnacked, 2026-10-09)
   dialedReconnect?: boolean; // the CURRENT socket was dialed with reconnect=1, so its open must post NO `ready`: the redial's dial term IS the handshake, and a `ready` would make the remote's ready reset pop `reconnect` and serve the whole board (the shim posts no ready on a redial for the same reason)
   // KERNEL_SETTING messages (newest per type) and the pane's own BOOKKEEPING (newest per key, see
   // BOOKKEEPING) that arrived while this host's socket was down — flushed on the socket's open event
@@ -1132,6 +1133,10 @@ export class FederationManager {
       // this (host-prefix.ts hostDialLive: the socket's CONNECTING state), and romp:hostDial below says
       // when it changes — on the dial, the open and the close, never on a timer
       dialing: (h: string) => { const c = this.conns.get(h); return hostDialLive(this.dialingHosts.has(h), c && c.ws ? c.ws.readyState : null); },
+      // is this host's socket open, and has its kernel said on it that it answers chat sends (romp:hostAcks)? The chat's
+      // restored and unanswered sends go again only to such a socket (render.ts resendUnacked)
+      open: (h: string) => { const c = this.conns.get(h); return !!(c && c.ws && c.ws.readyState === 1); },
+      acks: (h: string) => { const c = this.conns.get(h); return !!(c && c.acksSeen && c.ws && c.ws.readyState === 1); },
     };
     // A drag in ANY pane rewrites the arrangement; every other pane hears it through `storage` (which fires
     // only in other same-origin contexts) and this one through the writer's own CustomEvent. Both land here,
@@ -1978,6 +1983,7 @@ export class FederationManager {
     conn.connT = Date.now();
     conn.lastRecv = 0;
     conn.resumeProvisional = 0;   // a fresh socket starts unmarked: the provisional rule was the resumed socket's
+    conn.acksSeen = false;        // …and has said nothing about answering sends yet: its own keepalive says it (onmessage)
     // a REDIAL only when the remote served this page whole before (everOpened && readyAcked) and the page has a
     // proto to name, mirroring the shim's everConnected && bundleReady && readyAcked gate; then reconnect=1 rides
     // the URL and this socket's open posts NO ready (the redial's dial term IS the handshake, see onopen)
@@ -2029,6 +2035,13 @@ export class FederationManager {
       } catch (e) {
         return;
       }
+      if (msg && msg.type === "ka" && msg.acks && !conn.acksSeen) {
+        // the first keepalive on this socket that says the kernel answers chat sends and recognises a resend: the chat's
+        // sends to this host that no kernel has answered go again now (render.ts resendUnacked). A page-level event, once
+        // per socket; an older kernel's keepalive carries no `acks`, so nothing is ever sent to it twice
+        conn.acksSeen = true;
+        try { window.dispatchEvent(new CustomEvent("romp:hostAcks", { detail: { host: conn.host } })); } catch (e) { /* never break the relay */ }
+      }
       if (msg && msg.type === "ka") return;
       // the remote's `caps` frame is its ready arm's word that it PROCESSED this page's ready and served it whole
       // (kernel.py _send_caps, sent by the ready arm alone): latch it as the redial gate's readyAcked, exactly as
@@ -2039,6 +2052,10 @@ export class FederationManager {
     ws.onclose = (ev: CloseEvent) => {
       this.dialEvent(conn.host, false);   // the attempt ended (refused, or the socket dropped): still until the redial
       this.diag("hostconn", { host: conn.host, ev: "close", code: ev.code, clean: ev.wasClean, detached: conn.closed });
+      conn.acksSeen = false;
+      // the remote twin of the shim's romp:wsdown: a send to this host that its kernel has not answered may never have
+      // reached it, and the chat says so on the bubble until the next socket's resend is answered (render.ts)
+      try { window.dispatchEvent(new CustomEvent("romp:hostRelayDown", { detail: { host: conn.host } })); } catch (e) { /* never break the relay */ }
       if (!conn.closed) setTimeout(() => this.connect(conn), 2000); // reconnect a dropped remote
     };
     ws.onerror = () => {
