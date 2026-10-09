@@ -58412,7 +58412,7 @@ def _ws_arm_push_lane(client):
     client["pushLane"] = {"lock": threading.Lock(), "jobs": collections.deque(), "running": False}
 
 
-def _run_push(client, kind, job):
+def _run_push(client, job, kind):
     """Run `job` (a connect push and whatever must follow it in order) on the client's push lane, or inline when the
     client has none. `kind` names the op for the log line a failing job writes. Returns whether the job was queued."""
     lane = client.get("pushLane") if isinstance(client, dict) else None
@@ -82454,8 +82454,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the repair full below serves from it (a superset) or, if the turns are gone, sets them aside via `rebased`.
                 # _send_chat_proto2 consumes it, so a later no-key needFull (a click, the prefetch) is not served from it (M3).
                 client.setdefault("heldTailFirst", {})[sid] = msg["heldTailFirst"]
-            # repair NOW, not on the next 0.5-3s tick, on the client's push lane: never on this read thread (_run_push)
-            _run_push(client, "needFull", lambda: self._push_one(client))
+            _run_push(client, lambda: self._push_one(client), "needFull")   # repair NOW, on the push lane, never on this read thread
             return
         if msg and msg.get("type") in ("loadOlder", "loadAround", "loadNewer", "loadTurns") and msg.get("id") \
                 and (client.get("proto") or 1) >= 2 and not isinstance(msg.get("before"), int):
@@ -82659,7 +82658,7 @@ class Handler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
                 _apih_resend(client)          # and the bottom bar's API cell, from the last frame (same reason)
-            _run_push(client, "ready", _serve_ready)
+            _run_push(client, _serve_ready, "ready")
         elif msg and msg.get("type") == "setSessionFlag" and msg.get("id") and msg.get("flag"):
             # timeline lane gear → toggle a per-session view flag (e.g. hideFromFeed). Persisted +
             # re-broadcast so the feed drops/restores that session's cards immediately. The notify
