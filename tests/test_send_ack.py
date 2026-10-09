@@ -18,6 +18,7 @@ Synthetic ids and texts only (the notes-api demo world).
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from romp_load import load_source
@@ -57,7 +58,7 @@ class _Backend:
         return []
 
 
-class SendAck(unittest.TestCase):
+class _SendFixture(unittest.TestCase):
     def setUp(self):
         self.state = Path(tempfile.mkdtemp())
         self.be = _Backend()
@@ -85,10 +86,9 @@ class SendAck(unittest.TestCase):
         self._reset_store()
 
     def _reset_store(self):
-        """The decided ids as a fresh kernel finds them: nothing in memory, the file read again on first use."""
+        """The decided ids as a fresh kernel finds them before its boot reads the file: nothing in memory."""
         with km._SEND_ACCEPTS_LOCK:
             km._SEND_ACCEPTS.clear()
-            km._SEND_ACCEPTS_STATE["loaded"] = False
             km._SEND_ACCEPTS_STATE["said"] = False
         km._pending_ops.pop(SID, None)
 
@@ -101,6 +101,8 @@ class SendAck(unittest.TestCase):
     def acks(self):
         return [f for f in self.frames if f.get("type") == "sendAck"]
 
+
+class SendAck(_SendFixture):
     def test_a_send_is_answered_once_it_is_handed_over(self):
         self.assertTrue(self._send())
         self.assertEqual(self.be.sent, [(SID, "add a test for the search cache", Q1)], "delivered once, under the press's id")
@@ -115,7 +117,8 @@ class SendAck(unittest.TestCase):
     def test_the_kernel_recognises_a_resend_across_its_own_restart(self):
         self._send()
         self.assertTrue((self.state / "accepted-sends.json").exists(), "the decision is on disk")
-        self._reset_store()                  # a fresh kernel process: memory gone, the file stays
+        self._reset_store()                  # a fresh kernel process: memory gone, the file stays…
+        self.assertEqual(km._send_accepts_boot_load(), 1, "…and its boot reads it back (main)")
         self._send(resend=True)
         self.assertEqual(len(self.be.sent), 1, "a restart between the send and the page's resend delivers nothing twice")
         self.assertTrue(self.acks()[-1]["dup"])
@@ -171,6 +174,87 @@ class SendAck(unittest.TestCase):
             km._followup_body, km.jd.optimistic_followup, km._predict_working, km._ack_card_move = saved
         self.assertEqual(len(self.be.sent), 1, "the follow-up reached the session once")
         self.assertEqual([(a["ok"], a["dup"]) for a in self.acks()], [(True, False), (True, True)])
+
+
+class SendAckOrdering(_SendFixture):
+    """The copies of one send that arrive out of order or at once (the review of #198, 2026-10-09): every socket reads on its
+    own thread, so the page's resend on a new socket can be read before the original on the old one, and a second tab can
+    restore and resend the first tab's send. Counted at the session (what the backend was handed), not at the answers."""
+
+    def _client(self):
+        frames = []
+        return {"app": "chat", "wid": "w2", "alive": True, "send": lambda s: frames.append(json.loads(s))}, frames
+
+    def test_an_original_read_after_its_resend_is_delivered_once(self):
+        self._send(resend=True)              # the new socket's resend, read first
+        self._send()                         # the old socket's original, read after it
+        self.assertEqual(len(self.be.sent), 1, "the session got the message once")
+        self.assertEqual([(a["ok"], a["dup"]) for a in self.acks()], [(True, False), (True, True)])
+
+    def test_two_copies_arriving_at_once_are_delivered_once_and_both_hear_the_outcome(self):
+        gate, entered = threading.Event(), threading.Event()
+        real = self.be.send
+
+        def slow(sid, text, qid=None, user=False, paths=None):
+            entered.set()
+            gate.wait(5)                     # the first copy is mid-delivery…
+            return real(sid, text, qid=qid, user=user, paths=paths)
+        self.be.send = slow
+        t = threading.Thread(target=self._send)
+        t.start()
+        self.assertTrue(entered.wait(5))
+        other, frames = self._client()
+        km._drive({"type": "sendMessage", "id": SID, "text": "add a test for the search cache", "qid": Q1, "resend": True}, other)
+        self.assertEqual(frames, [], "…so the second is not answered ok before the outcome is known")
+        gate.set()
+        t.join(5)
+        self.assertEqual(len(self.be.sent), 1, "delivered once")
+        self.assertEqual([(f["ok"], f["dup"]) for f in frames], [(True, True)], "the waiting copy hears the outcome")
+
+    def test_a_copy_waiting_on_a_refused_original_hears_the_refusal(self):
+        gate, entered = threading.Event(), threading.Event()
+
+        def refuse(sid, text, qid=None, user=False, paths=None):
+            entered.set()
+            gate.wait(5)
+            return False
+        self.be.send = refuse
+        t = threading.Thread(target=self._send)
+        t.start()
+        self.assertTrue(entered.wait(5))
+        other, frames = self._client()
+        km._drive({"type": "sendMessage", "id": SID, "text": "add a test for the search cache", "qid": Q1, "resend": True}, other)
+        gate.set()
+        t.join(5)
+        self.assertEqual([(f["ok"], f["dup"]) for f in frames], [(False, True)],
+                         "refused: the resending page is told so, never ok, so it keeps the words (before: ok, and the copy dropped)")
+
+    def test_the_decisions_on_disk_are_whole(self):
+        self._send()
+        rows = json.loads((self.state / "accepted-sends.json").read_text())["accepted"]
+        self.assertEqual([(r["qid"], r["sid"], r["ok"]) for r in rows], [(Q1, SID, True)])
+        self.assertEqual([p.name for p in self.state.iterdir() if ".tmp." in p.name], [], "no temp file left behind")
+
+
+class WithdrawnBeforeItArrived(_SendFixture):
+    """The ✎ or the ✕ on the page's own unconfirmed bubble, for a send this kernel never received (its frame lost in a socket
+    that closed): the withdrawal holds, the words stay in the box, and a copy that arrives later is not delivered."""
+
+    def _cancel(self, qid=Q1, text="add a test for the search cache"):
+        km._drive({"type": "cancelQueued", "id": SID, "md": text, "qid": qid}, self.client)
+        return [f for f in self.frames if f.get("type") == "cancelResult"][-1]
+
+    def test_a_withdrawal_of_a_send_never_received_holds_and_a_late_copy_is_refused(self):
+        res = self._cancel()
+        self.assertTrue(res["ok"], "not 'too late': it never arrived, so nothing went through (before: ok false, and the box emptied)")
+        self._send(resend=True)              # the old socket's late flush, or another tab's resend
+        self.assertEqual(self.be.sent, [], "the withdrawn message is not delivered")
+        self.assertEqual((self.acks()[-1]["ok"], self.acks()[-1]["dup"]), (False, True))
+
+    def test_a_withdrawal_after_the_send_went_through_is_still_too_late(self):
+        self._send()
+        res = self._cancel()
+        self.assertFalse(res["ok"], "handed over: no recall exists")
 
 
 class AcksAnnounced(unittest.TestCase):

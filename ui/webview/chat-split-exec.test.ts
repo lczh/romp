@@ -482,6 +482,7 @@ function idleWorld(o: { col?: string; provisionalId?: string | null; failed?: st
     const dismissSession = (id) => { dismissed.push(id); };
     const setActive = (id) => { activeId = id; };
     const persistDrafts = () => {}; const growComposer = () => {}; const renderTabs = () => {};
+    const persistKeptSends = () => {};   // the kept-sends store (send-acks.ts): a provisional tab's teardown writes it
     const showConfirm = (title) => { confirms.push(title); };
     const vscodeApi = null;
   `;

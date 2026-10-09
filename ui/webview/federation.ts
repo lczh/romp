@@ -991,6 +991,7 @@ interface Conn {
   connT: number;    // when the current socket's connect() attempt started — the watchdog's reference point
   everOpened?: boolean; // a socket for this conn has reached `open` at least once (the shim's everConnected)
   readyAcked?: boolean; // the remote answered this page's `ready` with a `caps` frame at least once (the shim's readyAcked): the redial gate's latch that the remote served this page whole and holds its sessions
+  acksEver?: boolean; // some socket of this page's to this host has said it (acksSeen): a chat send dropped while the host is down is kept and resent, so its toast says that (dropWarn)
   acksSeen?: boolean; // the CURRENT socket's kernel said (its keepalive's `acks`) that it answers chat sends and recognises a resend: the chat's unanswered sends to this host go again on it (romp:hostAcks; render.ts resendUnacked, 2026-10-09)
   dialedReconnect?: boolean; // the CURRENT socket was dialed with reconnect=1, so its open must post NO `ready`: the redial's dial term IS the handshake, and a `ready` would make the remote's ready reset pop `reconnect` and serve the whole board (the shim posts no ready on a redial for the same reason)
   // KERNEL_SETTING messages (newest per type) and the pane's own BOOKKEEPING (newest per key, see
@@ -1137,6 +1138,9 @@ export class FederationManager {
       // restored and unanswered sends go again only to such a socket (render.ts resendUnacked)
       open: (h: string) => { const c = this.conns.get(h); return !!(c && c.ws && c.ws.readyState === 1); },
       acks: (h: string) => { const c = this.conns.get(h); return !!(c && c.acksSeen && c.ws && c.ws.readyState === 1); },
+      // has the attached-host list been read (the /tunnels poll answered)? Until then "not in hosts()" proves nothing: the chat
+      // drops a kept send to a host no longer attached only once this is true (render.ts hostGone)
+      hostsRead: () => this.hostsRead,
     };
     // A drag in ANY pane rewrites the arrangement; every other pane hears it through `storage` (which fires
     // only in other same-origin contexts) and this one through the writer's own CustomEvent. Both land here,
@@ -1799,8 +1803,13 @@ export class FederationManager {
   // Only for a gesture: the pane's own bookkeeping is held instead (BOOKKEEPING), since a toast about a
   // message the user never sent reads as a failure of the tap they did make (2026-09-10).
   private dropWarn(host: string, msg: any): void {
+    // a chat send carrying its press's id, to a host whose kernel has said it recognises a resend: the chat keeps it and sends it
+    // again when the link is back (render.ts resendUnacked), so the toast says that and nobody retypes it (the review of #198)
+    const c = this.conns.get(host);
+    const kept = !!(msg && (msg.type === "sendMessage" || msg.type === "askFollowUp") && typeof msg.qid === "string" && c && c.acksEver);
     window.dispatchEvent(new MessageEvent("message", { data: { type: "warn",
-      text: `${host} is unreachable (its kernel isn't answering) — “${(msg && msg.type) || "action"}” was not delivered` } }));
+      text: kept ? `${host} is unreachable (its kernel isn't answering): your message is kept and goes out when the link is back`
+                 : `${host} is unreachable (its kernel isn't answering) — “${(msg && msg.type) || "action"}” was not delivered` } }));
     // a comment create also gets the typed refusal its own kernel would have sent (2026-10-01): the comment box waits on
     // that, not on any warn, to hand the words back, and a create that never left this page is refused for good
     if (msg && msg.type === "commentCreate" && typeof msg.id === "string" && msg.uuid)
@@ -2040,6 +2049,7 @@ export class FederationManager {
         // sends to this host that no kernel has answered go again now (render.ts resendUnacked). A page-level event, once
         // per socket; an older kernel's keepalive carries no `acks`, so nothing is ever sent to it twice
         conn.acksSeen = true;
+        conn.acksEver = true;
         try { window.dispatchEvent(new CustomEvent("romp:hostAcks", { detail: { host: conn.host } })); } catch (e) { /* never break the relay */ }
       }
       if (msg && msg.type === "ka") return;

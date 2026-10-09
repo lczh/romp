@@ -106,6 +106,7 @@ def _forget(sid):
     """Drop the sid's parked ops from memory AND the disk mirror, and every per-sid latch these paths touch."""
     km._pending_ops.pop(sid, None)
     km._save_pending_ops()
+    km._SEND_ACCEPTS.clear()                         # the send ids decided so far: a test's id is new to the next test (kernel.py _send_admit)
     km._moving.discard(sid)
     km._drain_hold.pop(sid, None)
     km._inflight_ops.pop(sid, None)                  # a drain a test cut short must not leave its head marked for the next
@@ -208,6 +209,7 @@ class CodexSlashRefused(_Guarded):
         # the path with a second slash rides along as the control that was never parked or refused
         for text in SLASH_SHAPED_PROSE + ("/etc/hosts has the entry",):
             self.be.calls, self.sent[:] = [], []
+            km._SEND_ACCEPTS.clear()   # each text is its own press under the one QID: new to the kernel each time (_send_admit)
             state = {}
             self.assertFalse(km._route_meta_command(self.be, SID, text, self.client, state=state), text)
             self.assertEqual(state, {}, text)

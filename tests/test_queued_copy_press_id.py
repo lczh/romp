@@ -114,6 +114,7 @@ class _ParkFixture(unittest.TestCase):
         km._compacting_now = lambda sid: False
         km._pending_ops.pop(SID, None)
         km._inflight_ops.pop(SID, None)
+        km._SEND_ACCEPTS.clear()   # the send ids decided so far: every test reuses A and B, each new to it (kernel.py _send_admit)
 
     def tearDown(self):
         (km._compacting_now, km._working_now, km.Sessions.backend_for, km._push_all,
@@ -347,8 +348,8 @@ class CancelBackendQueuedById(unittest.TestCase):
 
 class TheWireCarriesTheId(unittest.TestCase):
     """The ws handler: sendMessage and askFollowUp post the id the client minted; a cancelQueued names it. The
-    kernel accepts only an id in its own echo form that the session does not already hold, and mints as before
-    otherwise (a forged or colliding id could name another send's copy)."""
+    kernel accepts only an id in its own echo form, and mints as before for one in another form; a copy of an id the
+    session already holds is the same message, answered and not delivered again (kernel.py _send_admit)."""
 
     def setUp(self):
         self.sent = []
@@ -369,6 +370,7 @@ class TheWireCarriesTheId(unittest.TestCase):
         km._mark_views_dirty = lambda: None
         km._pending_ops.pop(SID, None)
         km._inflight_ops.pop(SID, None)
+        km._SEND_ACCEPTS.clear()   # the send ids decided so far: every test reuses A, B and C, each new to it (kernel.py _send_admit)
 
     def tearDown(self):
         (km._name_of, km._sdk, km.Sessions.backend_for, km._compacting_now, km._working_now,
@@ -392,27 +394,32 @@ class TheWireCarriesTheId(unittest.TestCase):
         self.assertEqual((op[0], op[3]), ("send", A))
         self.assertIn("and the fix?", op[1])
 
-    def test_an_id_in_another_form_or_one_the_session_holds_is_not_taken_and_the_kernel_mints_as_before(self):
+    def test_an_id_in_another_form_is_not_taken_and_one_the_session_holds_is_the_same_message(self):
         for bad in ("s-1", "echo:", "echo:zz", "echo:" + "A" * 32, "echo:" + "a" * 8, "echo:" + "a" * 70, 7, None):
             km._drive({"type": "sendMessage", "id": SID, "text": "words %r" % (bad,), "qid": bad}, self.client)
         self.assertTrue(all(km._op_qid(op) is None and (len(op) == 3 or op[3] is None) for op in km._pending_ops[SID]),
                         "no id for one in another form (the fourth slot None under the user's fifth): %r" % (km._pending_ops[SID],))
         km._pending_ops.pop(SID, None)
+        # A second copy of an id the session holds is the SAME message (kernel.py _send_admit, 2026-10-09): a page's resend
+        # read before its original, or a second tab restoring the first one's unanswered send. Until then the kernel minted
+        # a fresh id for it and delivered the words twice; now it answers the copy as delivered and adds nothing.
+        dups = lambda: [(f["qid"], f["ok"]) for f in self.sent if f.get("type") == "sendAck" and f.get("dup")]
         # held by a parked op
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": A}, self.client)
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": A}, self.client)
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True), ("send", WORDS, "human", None, True)],
-                         "the second press of a held id parks without it")
+        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", A, True)], "the second copy parks nothing")
+        self.assertEqual(dups(), [(A, True)], "…and is answered as the message the kernel holds")
         km._pending_ops.pop(SID, None)
+        km._SEND_ACCEPTS.clear()   # from here the session's own copies alone say the id is held (a record lost, or a kernel from before it)
         # held by the backend's queue
         self.be.q.append(("older copy", B))
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": B}, self.client)
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", None, True)])
-        km._pending_ops.pop(SID, None)
+        self.assertNotIn(SID, km._pending_ops, "a copy the queue holds is not delivered again")
         # held by a live echo (a fed copy between the queue and its landing)
         self.be.live_atoms = lambda sid: [{"uuid": C, "_echo_text": "fed copy"}]
         km._drive({"type": "sendMessage", "id": SID, "text": WORDS, "qid": C}, self.client)
-        self.assertEqual(km._pending_ops[SID], [("send", WORDS, "human", None, True)])
+        self.assertNotIn(SID, km._pending_ops, "nor one a live echo wears")
+        self.assertEqual(dups(), [(A, True), (B, True), (C, True)])
 
     def test_a_cancel_that_names_the_id_removes_that_copy_whatever_index_the_click_carried(self):
         km._pending_ops[SID] = [("send", WORDS, "human", A), ("send", WORDS, "human", B)]
@@ -434,9 +441,11 @@ class TheWireCarriesTheId(unittest.TestCase):
         km._drive({"type": "cancelQueued", "id": SID, "idx": 0, "md": WORDS, "qid": B}, self.client)
         self.assertEqual(self.be.q, [(WORDS, A)], "the copy the click named by id left; the one at the index stays")
         self.assertTrue(self.sent[-1]["ok"])
-        # an id neither queue holds: the honest miss, and the same-words neighbours in both queues stay
+        # an id neither queue holds, of a send that went through (the kernel decided on it): the honest miss, and the
+        # same-words neighbours in both queues stay
         km._pending_ops[SID] = [("send", WORDS, "human", B)]
         self.assertEqual(self.be.q, [(WORDS, A)])
+        km._send_settle(None, SID, C, True)
         km._drive({"type": "cancelQueued", "id": SID, "md": WORDS, "qid": C}, self.client)
         self.assertFalse(self.sent[-1]["ok"])
         self.assertIn("too late", self.sent[-1]["text"])

@@ -13,11 +13,23 @@
 //     the event romp:hostAcks), the page posts the very message again (resendable). The kernel takes a send it has
 //     already decided on as a duplicate and answers it again without delivering it twice;
 //   - a kernel that never says so (one from before the protocol) is never sent anything twice: the send keeps its
-//     "not confirmed" label, and its words stay on the bubble, where the ✎ puts them back in the box.
+//     "not confirmed" label, and its words stay on the bubble, where the ✎ puts them back in the box. So does a send
+//     older than the kernel's memory of what it decided (RESEND_MAX_AGE_MS);
+//   - the store is shared by every tab of the origin: each tab writes its own sends and keeps the others' (mergeKept),
+//     and a send it withdraws or sees answered leaves the store with that write.
 // An answer ends all of that: ok proves the kernel holds the send (`received`, as a copy of it seen in a frame does),
 // not-ok is a refusal whose own frame has said why.
 
 import { pendingBody, type PendingSend } from "./send-pending";
+import { isProvisionalId } from "./provisional";
+
+// How long the page keeps an unanswered send, how many it keeps, and how old a send may be and still be resent. The kernel
+// remembers the sends it decided on for seven days (kernel.py _SEND_ACCEPTS_TTL_S): a resend older than that could be
+// delivered a second time, so the page never resends past RESEND_MAX_AGE_MS, a day inside it. A kept send older than that
+// still comes back on a reload, labelled "not confirmed" with its words on the bubble, until KEPT_MAX_AGE_MS drops it.
+export const RESEND_MAX_AGE_MS = 6 * 86400_000;
+export const KEPT_MAX_AGE_MS = 14 * 86400_000;
+export const KEPT_MAX = 200;
 
 /** One unanswered send as the page keeps it across a reload: enough to draw its bubble again and to resend it. */
 export type KeptSend = {
@@ -47,12 +59,15 @@ export function unanswered(p: PendingSend): boolean {
   return !p.acked && !p.received && !!p.qid && !!p.wire;
 }
 
-/** Every unanswered send, in the shape the page keeps across a reload (render.ts persists it with the drafts). */
-export function keptSends(entries: Iterable<[string, PendingSend[]]>): KeptSend[] {
+/** Every unanswered send young enough to keep, in the shape the page keeps across a reload (render.ts persists it with the
+ *  drafts). A send to a session still being created (a provisional id) is never kept: it was never posted, and the
+ *  session's real send carries its own entry. */
+export function keptSends(entries: Iterable<[string, PendingSend[]]>, now: number = Date.now()): KeptSend[] {
   const out: KeptSend[] = [];
   for (const [sid, list] of entries) {
+    if (isProvisionalId(sid)) continue;
     for (const p of list) {
-      if (!unanswered(p)) continue;
+      if (!unanswered(p) || now - p.ts > KEPT_MAX_AGE_MS) continue;
       out.push({ sid, text: p.text, qid: p.qid as string, ts: p.ts, wire: { ...(p.wire as Record<string, unknown>) },
                  ...(p.imgPaths && p.imgPaths.length ? { imgPaths: p.imgPaths.slice() } : {}),
                  ...(p.paths && p.paths.length ? { paths: p.paths.slice() } : {}),
@@ -64,7 +79,7 @@ export function keptSends(entries: Iterable<[string, PendingSend[]]>): KeptSend[
 
 /** The kept sends a fresh page reads back, every row checked: a row that is not one (a corrupt or foreign value) is
  *  skipped, never trusted, and a wire whose id is not the row's own is not posted again. */
-export function restoreKept(raw: unknown): KeptSend[] {
+export function restoreKept(raw: unknown, now: number = Date.now()): KeptSend[] {
   if (!Array.isArray(raw)) return [];
   const out: KeptSend[] = [];
   const seen = new Set<string>();
@@ -72,8 +87,8 @@ export function restoreKept(raw: unknown): KeptSend[] {
     if (!r || typeof r !== "object") continue;
     const o = r as Record<string, unknown>;
     const w = o.wire as Record<string, unknown> | undefined;
-    if (typeof o.sid !== "string" || !o.sid || typeof o.text !== "string" || typeof o.qid !== "string" || !QID_RE.test(o.qid)
-        || typeof o.ts !== "number" || !w || typeof w !== "object" || w.qid !== o.qid
+    if (typeof o.sid !== "string" || !o.sid || isProvisionalId(o.sid) || typeof o.text !== "string" || typeof o.qid !== "string" || !QID_RE.test(o.qid)
+        || typeof o.ts !== "number" || now - o.ts > KEPT_MAX_AGE_MS || !w || typeof w !== "object" || w.qid !== o.qid
         || (w.type !== "sendMessage" && w.type !== "askFollowUp") || seen.has(o.qid)) continue;
     seen.add(o.qid);
     out.push({ sid: o.sid, text: o.text, qid: o.qid, ts: o.ts, wire: { ...w },
@@ -82,6 +97,20 @@ export function restoreKept(raw: unknown): KeptSend[] {
                ...(o.clear === true ? { clear: true } : {}) });
   }
   return out;
+}
+
+/** What the page writes back to the store every tab of this origin shares (render.ts persistKeptSends): its own unanswered
+ *  sends, plus every stored send it has never held, so another tab's unanswered sends survive this tab's write. A send this
+ *  page has held and no longer holds (answered, landed, withdrawn with the ✎ or the ✕) is gone from the store. A send to a
+ *  host no longer attached is dropped (`hostGone`); the age and count caps hold, the newest kept. */
+export function mergeKept(mine: KeptSend[], stored: KeptSend[], held: ReadonlySet<string>, now: number,
+                          hostGone: (sid: string) => boolean = () => false): KeptSend[] {
+  const byQid = new Map<string, KeptSend>();
+  for (const k of stored) if (!held.has(k.qid)) byQid.set(k.qid, k);
+  for (const k of mine) byQid.set(k.qid, k);
+  const out = [...byQid.values()].filter((k) => now - k.ts <= KEPT_MAX_AGE_MS && !hostGone(k.sid));
+  out.sort((a, b) => a.ts - b.ts);
+  return out.slice(-KEPT_MAX);
 }
 
 /** A kept send as a pending entry again. It says "not confirmed" (`lost`) until a kernel answers it: the page that sent
@@ -97,11 +126,12 @@ export function pendingFromKept(k: KeptSend): PendingSend {
  *  of that host's sessions not already posted on this socket (`gen` counts the host's sockets, so a send is resent once
  *  per socket). `hostOf` maps a session id to its host ("" for the local kernel). */
 export function resendable(entries: Iterable<[string, PendingSend[]]>, host: string, hostOf: (sid: string) => string,
-                           resentOn: WeakMap<PendingSend, number>, gen: number): { sid: string; p: PendingSend }[] {
+                           resentOn: WeakMap<PendingSend, number>, gen: number, now: number = Date.now()): { sid: string; p: PendingSend }[] {
   const out: { sid: string; p: PendingSend }[] = [];
   for (const [sid, list] of entries) {
-    if (hostOf(sid) !== host) continue;
-    for (const p of list) if (unanswered(p) && resentOn.get(p) !== gen) out.push({ sid, p });
+    if (hostOf(sid) !== host || isProvisionalId(sid)) continue;
+    // older than the kernel's memory of what it decided: a resend could deliver it twice, so it keeps its label instead
+    for (const p of list) if (unanswered(p) && resentOn.get(p) !== gen && now - p.ts <= RESEND_MAX_AGE_MS) out.push({ sid, p });
   }
   return out;
 }

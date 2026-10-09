@@ -613,6 +613,21 @@ test("the diagnostics door sends a reload-core breadcrumb up this pane's socket"
 // after the bound had delivered the messages, and the bound-time line said otherwise). The reload core calls the shim's
 // __rompShimPersist right before location.reload(): messages still queued go with the page and the pane says so, on the
 // notify bridge the shell's bell listens for, naming itself by its LABEL, never its key.
+test("a chat send carrying its press's id is not counted in the loss line: the page keeps it across the reload and resends it", () => {
+  // the review of #198 (2026-10-09): the line said "not delivered" for sends the reloaded page delivers, and a user who
+  // believed it retyped the message and sent it twice
+  const h = new Harness(shimJs("chat"));
+  h.ws.open(); h.bundleReady(); h.ws.close();
+  h.win.__rompLocalSend({ type: "sendMessage", id: "s1", text: "rebuild the index", qid: "echo:" + "a".repeat(32) });
+  (h.win.__rompShimPersist || (() => {}))();
+  assert.equal(h.posted.filter((m) => m.romp === "notify").length, 0, "only a kept send queued: no loss line");
+  h.win.__rompLocalSend({ type: "activeTab", id: "t1" });
+  (h.win.__rompShimPersist || (() => {}))();
+  assert.deepEqual(h.posted.filter((m) => m.romp === "notify").map((m) => m.text),
+                   ["1 message queued for the Chat pane could not be sent before the dashboard reloaded; it was not delivered."],
+                   "the line counts the other message alone");
+});
+
 test("the loss line is said at the reload from the queue's state then, names the pane by its label, and is silent after a flush", () => {
   const h = new Harness(shimJs("chat"));
   h.ws.open(); h.bundleReady(); h.ws.close();
