@@ -81674,9 +81674,13 @@ class Handler(BaseHTTPRequestHandler):
                             "the login record could not be saved (%s); retry once romp's state directory takes writes again" % e}),
                             "application/json")
                     _push_soon()
+                    # the account as the record now holds it (lg.link stored clean_identity of what came in, and always leaves a
+                    # readable link), never the identity as received: anything clean_identity folds, drops or caps (a relayed
+                    # body's CLI kind word, a multi-line organisation, an over-long email) read back otherwise as something the
+                    # record does not hold (review of #78)
                     return self._send(200, json.dumps({"ok": True, "id": lid, "label": str(rec.get("label") or ""),
                                                        "display": lg.display(rec), "linked": _login_link_public(rec),
-                                                       "account": _claude_login_display_of(idn)}), "application/json")
+                                                       "account": _claude_login_display_of(lg.linked(rec))}), "application/json")
                 if b.get("unlink") is not None:
                     # {"unlink": <id or label>}: take a link back; the login reads as its record alone again. With "on",
                     # the stored login lives on that connected kernel, which is asked to (_login_link_relay)

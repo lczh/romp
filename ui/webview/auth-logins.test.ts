@@ -150,28 +150,387 @@ test("the picker rebuild runs: three choices are buttons, four are a dropdown, o
   assert.equal(wrap.querySelector("select.picker-auth-select"), null);
 });
 
-test("the gear lists the stored logins with a Remove and the feed names a refused login", () => {
+// gear.js's stored-logins read and the link POST, lifted and run over a stand-in fetch (the lift idiom of the picker test above):
+// the two var statements they share, lgDate, lgWhen, lgLogins, lgSignIn, lgPost, lgLater and lgFetchLogins, with document, fetch,
+// ku, lgOwn, console, selfName and post standing in. Each GET and POST /logins and each fill's /tunnels read is a promise the
+// test settles; drawn() reads the rows off the stand-in #rs-logins, and draws() counts its drawings
+type Defer = { promise: Promise<unknown>; resolve: (v: unknown) => void; reject: (e: unknown) => void };
+function defer(): Defer {
+  const d = {} as Defer;
+  d.promise = new Promise((resolve, reject) => { d.resolve = resolve; d.reject = reject; });
+  return d;
+}
+const settle = async () => { for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r)); };
+type Stub = { tagName: string; className: string; textContent: string; title: string; type: string; hidden: boolean; disabled: boolean;
+  value: string; children: Stub[]; options: Stub[]; appendChild: (c: Stub) => Stub; addEventListener: () => void; remove: () => void };
+function stub(tag: string): Stub {
+  const n = { tagName: tag.toUpperCase(), className: "", textContent: "", title: "", type: "", hidden: false, disabled: false, value: "",
+    children: [] as Stub[], addEventListener: () => {}, remove: () => {} } as Stub;
+  n.options = n.children;
+  n.appendChild = (c) => { n.children.push(c); return c; };
+  return n;
+}
+function liftGear(head: string): string {
+  const i = GEAR.indexOf(head);
+  assert.ok(i >= 0 && GEAR.indexOf(head, i + 1) < 0, head + " occurs once in gear.js");
+  if (head.startsWith("var ")) return GEAR.slice(i, GEAR.indexOf(";", i) + 1);
+  let depth = 0, j = GEAR.indexOf("{", i);
+  for (; j < GEAR.length; j++) { if (GEAR[j] === "{") depth++; else if (GEAR[j] === "}") { depth--; if (!depth) break; } }
+  return GEAR.slice(i, j + 1);
+}
+const answer = (d: unknown) => ({ json: () => Promise.resolve(d) });
+const notJson = () => ({ json: () => Promise.reject(new SyntaxError("not JSON")) });   // a 500 with a plain-text body
+const named = (name: string) => ({ logins: [{ id: "0123456789ab", label: name, addedAt: 0 }] });
+const LINK = { link: { login: "0123456789ab", sameAs: "TESTHOST" } }, LINK2 = { link: { login: "ba9876543210", sameAs: "TESTHOST" } };
+function gearLogins() {
+  const list = stub("div");
+  let draws = 0;
+  Object.defineProperty(list, "textContent", { get: () => "", set: () => { draws++; list.children.length = 0; } });
+  const gets: Defer[] = [], posts: Defer[] = [], said: unknown[] = [], errors: unknown[] = [];
+  const doc = { getElementById: (id: string) => (id === "rs-logins" ? list : null), createElement: (tag: string) => stub(tag) };
+  const fetchStub = (_url: string, opts?: { method?: string }) => {
+    const q = defer();
+    (opts && opts.method === "POST" ? posts : gets).push(q);
+    return q.promise;
+  };
+  const src = ["var lgL = ", "var lgBusy = ", "function lgDate(", "function lgWhen(", "function lgLogins(", "function lgSignIn(",
+    "function lgPost(", "function lgLater(", "function lgFetchLogins("].map(liftGear).join("\n");
+  const api = new Function("document", "fetch", "ku", "lgOwn", "console", "selfName", "post",
+    src + "\nreturn { fill: lgFetchLogins, post: lgPost };")(doc, fetchStub, (p: string) => p,
+    (d: any) => said.push(d && d.logins && d.logins[0] && d.logins[0].label), { error: (...a: unknown[]) => errors.push(a) }, "TESTHOST",
+    () => {}) as { fill: (after?: Promise<unknown>) => unknown; post: (body: unknown, st: Stub, ctl: Stub, label: string) => void };
+  // the rows drawn: each one's name and, where it has one, its picker's machines
+  const drawn = () => list.children.filter((r) => r.className === "rs-login-row").map((r) => {
+    const sel = r.children.find((c) => c.className === "rs-login-link");
+    return { name: r.children[0].textContent, picker: sel ? sel.options.map((o) => o.value) : null };
+  });
+  const names = () => drawn().map((r) => r.name);
+  // a fill run to its end, its /logins answered with `name` and its /tunnels read settled with no kernel: true if it drew
+  const fillDraws = async (name: string) => {
+    const t = defer(), n = gets.length, d0 = draws;
+    api.fill(t.promise);
+    gets[n].resolve(answer(named(name)));
+    t.resolve([]);
+    await settle();
+    return draws > d0;
+  };
+  return { api, gets, posts, said, errors, drawn, names, fillDraws, draws: () => draws };
+}
+
+test("the gear lists the stored logins with a Remove and the feed names a refused login", async () => {
   assert.match(GEAR, /<div id=rs-logins class=rs-logins style='margin-top:8px'><\/div>/);
-  assert.match(GEAR, /fetch\(ku\('\/logins'\), \{ cache: 'no-store' \}\)\.then\(function \(r\) \{ return r\.json\(\); \}\)\.then\(lgLogins\)/);
+  // lgFetchLogins, run (gearLogins above)
+  {
+    // overlapping fills: each answer is said as it arrives; the rows wait for a /tunnels read; the newest fill draws, listing its
+    // own read's kernels, and the older read settling after it changes neither the rows nor the list
+    const g = gearLogins(), t1 = defer(), t2 = defer();
+    g.api.fill(t1.promise);
+    g.api.fill(t2.promise);
+    g.gets[0].resolve(answer(named("first")));
+    g.gets[1].resolve(answer(named("second")));
+    await settle();
+    assert.deepEqual(g.said, ["first", "second"], "each answer is said as it arrives (lgOwn), no /tunnels read settled");
+    assert.equal(g.draws(), 0, "no rows are drawn before a /tunnels read settles");
+    t2.resolve([{ host: "web-box" }]);
+    await settle();
+    assert.deepEqual(g.drawn(), [{ name: "second", picker: ["", "TESTHOST", "web-box"] }],
+      "the newer fill draws once its /tunnels read settles, listing that read's kernels");
+    t1.resolve([{ host: "api-box" }]);
+    await settle();
+    assert.equal(g.draws(), 1, "the older fill's read, settling after it, draws nothing");
+    g.api.fill();
+    g.gets[2].resolve(answer(named("third")));
+    await settle();
+    assert.deepEqual(g.drawn(), [{ name: "third", picker: ["", "TESTHOST", "web-box"] }],
+      "a caller that draws at once lists the newer fill's kernels, not the list that settled last");
+  }
+  {
+    // a fill whose own answer arrived first draws the newer answer, not its own
+    const g = gearLogins(), t = defer();
+    g.api.fill(t.promise);
+    g.gets[0].resolve(answer(named("the fill's own")));
+    await settle();
+    g.api.fill();
+    g.gets[1].resolve(answer(named("newer")));
+    await settle();
+    t.resolve([]);
+    await settle();
+    assert.equal(g.draws(), 2, "the caller that draws at once drew, then the fill once its /tunnels read settled");
+    assert.deepEqual(g.names(), ["newer"], "…the newer answer, not its own");
+  }
+  {
+    // `after` rejecting (fill()'s own catch threw) is logged, and the rows are drawn
+    const g = gearLogins(), t = defer();
+    g.api.fill(t.promise);
+    g.gets[0].resolve(answer(named("one")));
+    t.reject(new Error("the catch threw"));
+    await settle();
+    assert.equal(g.errors.length, 1, "the rejection is logged once");
+    assert.deepEqual(g.names(), ["one"], "…and the rows are drawn");
+  }
+  {
+    // two fills wait on a newer one whose read fails, the older settling last: nothing is drawn until the failed fill's /tunnels
+    // read settles, then once; a later fill whose read fails, none waiting on it, draws nothing more
+    const g = gearLogins(), t = [defer(), defer(), defer(), defer()];
+    for (let k = 0; k < 3; k++) g.api.fill(t[k].promise);
+    g.gets[0].resolve(answer(named("one")));
+    g.gets[1].resolve(answer(named("two")));
+    g.gets[2].resolve(notJson());
+    t[1].resolve([]);
+    await settle();
+    t[0].resolve([]);
+    await settle();
+    assert.equal(g.draws(), 0, "fills 1 and 2 wait on fill 3, whose /tunnels read has not settled");
+    t[2].resolve([]);
+    await settle();
+    assert.equal(g.draws(), 1, "once it has, the rows are drawn once");
+    assert.deepEqual(g.names(), ["two"], "…from the newest answer");
+    g.api.fill(t[3].promise);
+    g.gets[3].resolve(notJson());
+    t[3].resolve([]);
+    await settle();
+    assert.equal(g.draws(), 1, "a later fill whose read fails draws nothing, none waiting on it");
+  }
+  {
+    // a caller that draws at once, then the only fill, whose /logins read fails: nothing more is drawn
+    const g = gearLogins(), t = defer();
+    g.api.fill();
+    g.gets[0].resolve(answer(named("one")));
+    await settle();
+    assert.equal(g.draws(), 1, "the caller that draws at once drew");
+    g.api.fill(t.promise);
+    g.gets[1].resolve(notJson());
+    t.resolve([]);
+    await settle();
+    assert.equal(g.draws(), 1, "the only fill, its read failed, draws nothing");
+  }
+  {
+    // while a link is on its way, a fill's drawing is skipped, and so is a waiting fill's when the fill it waits on gives up; a
+    // caller that draws at once still draws
+    const g = gearLogins(), t = [defer(), defer()];
+    g.api.post(LINK, stub("span"), stub("select"), "");
+    assert.equal(await g.fillDraws("one"), false, "a fill's drawing is skipped while a link is on its way");
+    g.api.fill(t[0].promise);
+    g.api.fill(t[1].promise);
+    g.gets[1].resolve(answer(named("two")));
+    g.gets[2].resolve(notJson());
+    t[0].resolve([]);
+    await settle();
+    t[1].resolve([]);
+    await settle();
+    assert.equal(g.draws(), 0, "so is a waiting fill's, when the fill it waits on gives up");
+    g.api.fill();
+    g.gets[3].resolve(answer(named("three")));
+    await settle();
+    assert.deepEqual(g.names(), ["three"], "a caller that draws at once still draws");
+  }
+  {
+    // a fill whose /tunnels read settles while a link is on its way still waits on a newer fill, and draws when that fill gives up
+    // after the link's refusal
+    const g = gearLogins(), t1 = defer(), t2 = defer();
+    g.api.fill(t1.promise);
+    g.api.fill(t2.promise);
+    g.gets[0].resolve(answer(named("one")));
+    g.gets[1].resolve(notJson());
+    g.api.post(LINK, stub("span"), stub("select"), "");
+    t1.resolve([]);
+    await settle();
+    g.posts[0].resolve(answer({ ok: false, error: "refused" }));
+    await settle();
+    t2.resolve([]);
+    await settle();
+    assert.deepEqual(g.names(), ["one"], "the waiting fill draws once the newer fill gives up");
+  }
+  {
+    // the newer fill's /logins read fails and its `after` rejects (fill()'s own catch threw): the fill waiting on it draws
+    const g = gearLogins(), t1 = defer(), t2 = defer();
+    g.api.fill(t1.promise);
+    g.api.fill(t2.promise);
+    g.gets[0].resolve(answer(named("one")));
+    g.gets[1].resolve(notJson());
+    t1.resolve([]);
+    await settle();
+    assert.equal(g.draws(), 0, "the older fill waits on the newer one");
+    t2.reject(new Error("the catch threw"));
+    await settle();
+    assert.deepEqual(g.names(), ["one"], "the waiting fill draws once the newer fill gives up on a rejected `after`");
+  }
+  assert.match(GEAR, /function lgLater\(n\) \{[^\n]*\n\s*for \(var k = n \+ 1; k <= lgFills; k\+\+\) if \(!lgFailed\[k\]\) return true;\n\s*return false;/,
+    "…a later fill counts until its /logins read has failed and its /tunnels read has settled");
+  assert.match(GEAR, /lgAcct\(\);[^\n]*\n\s*return kernels;[^\n]*\n\s*\}\)\.catch\(function \(e\) \{[^\n]*\n\s*kernels = \[\];[^\n]*lgAcct\(\); return kernels; \}\);/,
+    "fill()'s /tunnels read settles with the connected kernels, or none when it failed, for the pickers to list");
+  assert.match(GEAR, /var kernelsRead = fetch\(ku\('\/tunnels'\), \{ cache: 'no-store' \}\)/, "fill() keeps its /tunnels read to hand on");
+  assert.match(GEAR, /lgRender\(v\);[^\n]*\n\s*lgFetchLogins\(kernelsRead\);/, "…and hands it to the stored logins' read, beside /version's");
   assert.match(GEAR, /post\(\{ type: 'loginRemove', id: r\.id \}\);\s*\n\s*row\.remove\(\);/);
-  assert.match(GEAR, /lgFetchLogins\(\);\s*\/\/ …and the stored logins beside it \(T346\)/);
   assert.match(GEAR, /'No other Claude logins stored on this machine\. Add one with romp login add <label>\.'/);
   assert.match(GEARCSS, /\.rs-logins \.rs-login-row \{ display: flex; align-items: center; gap: 8px;/);
+  assert.match(GEAR, /'<span style="flex:1 1 auto;min-width:0"><b>[^<]*<\/b>' \+\n\s*'<span class=rs-sub id=rs-login-acct>/,
+    "the Account row's span shrinks to the row, so the rows' names ellipsize (tests/test_login_link_picker_served.py measures each row's Remove against the card)");
   assert.match(FEED, /it\.blocked\.login \? `⚠ Can't analyze · \$\{it\.blocked\.login\}`\s*\n\s*: it\.blocked\.mode === "key" \? "⚠ Can't analyze · API key" : "⚠ Can't analyze · login";/);
   assert.match(FEED, /mode\?: string; login\?: string; since\?: number;/);
 });
 
-test("the gear's stored-login row links a login to a machine's sign-in and unlinks it, said as the user's statement (2026-10-01)", () => {
+test("the gear's stored-login row links a login to a machine's sign-in and unlinks it, said as the user's statement (2026-10-01)", async () => {
   // linked: the note names the machine and that the link is the user's, and an Unlink takes it back
   assert.match(GEAR, /if \(ln\) note = \(note \? note \+ ' \\u00b7 ' : ''\) \+ 'same account as ' \+ lgSignIn\(ln\.host\) \+ ', linked by you';/);
   assert.match(GEAR, /lgPost\(\{ unlink: r\.id \}, st, ul, 'Unlink'\);/);
   // not linked, and the record names no account of its own: a Same account as… picker over this machine and every connected kernel
   assert.match(GEAR, /\} else if \(!r\.ownAccount\) \{/);
-  assert.match(GEAR, /\[selfName \|\| 'local'\]\.concat\(\(kernels \|\| \[\]\)\.map\(function \(k\) \{ return k\.host; \}\)\)/);
+  assert.match(GEAR, /\[selfName \|\| 'local'\]\.concat\(lgKernels\.map\(function \(k\) \{ return k\.host; \}\)\)/,
+    "the picker lists the kernels of the newest settings fill whose /tunnels read has settled (tests/test_login_link_picker_served.py reads it after overlapping opens)");
   assert.match(GEAR, /lgPost\(\{ link: \{ login: r\.id, sameAs: sel\.value \} \}, st, sel, ''\);/);
   // the kernel's answer decides: ok re-reads the list, a refusal is said in the row with the control restored
   assert.match(GEAR, /fetch\(ku\('\/logins'\), \{ method: 'POST', headers: \{ 'Content-Type': 'application\/json' \}, body: JSON\.stringify\(body\) \}\)/);
-  assert.match(GEAR, /\.then\(function \(d\) \{ if \(d && d\.ok\) lgFetchLogins\(\); else refused\(\(d && d\.error\) \|\| 'refused'\); \}\)/);
-  assert.match(GEAR, /sel\.disabled = true; st\.className = 'rs-note'; st\.textContent = 'Linking\\u2026';/, "acknowledged before the round-trip");
+  // lgPost and its count of links and unlinks on their way, run (gearLogins above)
+  {
+    const g = gearLogins(), st = stub("span"), sel = stub("select");
+    sel.disabled = true;
+    sel.value = "TESTHOST";
+    g.api.post(LINK, st, sel, "");
+    assert.equal(await g.fillDraws("during"), false, "a fill's drawing is skipped from the send");
+    g.posts[0].resolve(answer({ ok: false, error: "no sign-in there" }));
+    await settle();
+    assert.deepEqual([st.className, st.textContent, sel.disabled, sel.value], ["rs-note rs-login-bad", "no sign-in there", false, ""],
+      "a refusal is said in the row, the picker enabled at its placeholder");
+    assert.equal(g.draws(), 0, "…and nothing is drawn over the refusal");
+    assert.equal(await g.fillDraws("after"), true, "…and the next fill draws");
+  }
+  {
+    const g = gearLogins(), st = stub("span"), ul = stub("button");
+    ul.disabled = true;
+    g.api.post({ unlink: "0123456789ab" }, st, ul, "Unlink");
+    g.posts[0].resolve(notJson());
+    await settle();
+    assert.deepEqual([st.textContent, ul.disabled, ul.textContent], ["the kernel did not answer; try again", false, "Unlink"],
+      "no answer is said in the row, the button restored");
+    assert.equal(await g.fillDraws("after"), true, "…and the next fill draws");
+  }
+  {
+    // an ok: a fill settling while its re-read is on its way is skipped; the re-read draws once, and then the next fill draws
+    const g = gearLogins();
+    g.api.post(LINK, stub("span"), stub("select"), "");
+    g.posts[0].resolve(answer({ ok: true }));
+    await settle();
+    assert.equal(g.gets.length, 1, "the ok re-reads the list");
+    assert.equal(await g.fillDraws("during"), false, "a fill settling while the re-read is on its way is skipped");
+    g.gets[0].resolve(answer(named("re-read")));
+    await settle();
+    assert.equal(g.draws(), 1, "the re-read draws, once");
+    assert.deepEqual(g.names(), ["re-read"]);
+    assert.equal(await g.fillDraws("after"), true, "…and the next fill draws");
+  }
+  {
+    // oks whose re-reads fail after a fill's drawing was skipped: the rows are drawn once no link or unlink is on its way, not while
+    // another link is
+    const g = gearLogins();
+    g.api.post(LINK, stub("span"), stub("select"), "");
+    g.api.post(LINK2, stub("span"), stub("select"), "");
+    assert.equal(await g.fillDraws("skipped"), false, "a fill's drawing is skipped while the two links are on their way");
+    g.posts[0].resolve(answer({ ok: true }));
+    await settle();
+    g.gets[1].resolve(notJson());
+    await settle();
+    assert.equal(g.draws(), 0, "the first link's re-read fails, the second link still on its way: nothing is drawn");
+    g.posts[1].resolve(answer({ ok: true }));
+    await settle();
+    g.gets[2].resolve(notJson());
+    await settle();
+    assert.equal(g.draws(), 1, "the second link's re-read fails too: the rows are drawn once");
+    assert.deepEqual(g.names(), ["skipped"], "…from the newest answer");
+  }
+  {
+    // the same when the skipped drawing was a waiting fill's
+    const g = gearLogins(), t1 = defer(), t2 = defer();
+    g.api.fill(t1.promise);
+    g.api.fill(t2.promise);
+    g.gets[0].resolve(answer(named("waiting")));
+    g.gets[1].resolve(notJson());
+    t1.resolve([]);
+    await settle();
+    g.api.post(LINK, stub("span"), stub("select"), "");
+    t2.resolve([]);
+    await settle();
+    assert.equal(g.draws(), 0, "the waiting fill's drawing is skipped while the link is on its way");
+    g.posts[0].resolve(answer({ ok: true }));
+    await settle();
+    g.gets[2].resolve(notJson());
+    await settle();
+    assert.deepEqual(g.names(), ["waiting"], "the link's re-read fails: the rows are drawn from the newest answer");
+  }
+  {
+    // a waiting fill draws when the fill it waits on gives up; a link's ok whose re-read fails then draws nothing more
+    const g = gearLogins(), t1 = defer(), t2 = defer();
+    g.api.fill(t1.promise);
+    g.api.fill(t2.promise);
+    g.gets[0].resolve(answer(named("waiting")));
+    g.gets[1].resolve(notJson());
+    t1.resolve([]);
+    await settle();
+    t2.resolve([]);
+    await settle();
+    assert.equal(g.draws(), 1, "the waiting fill draws once the fill it waits on gives up");
+    g.api.post(LINK, stub("span"), stub("select"), "");
+    g.posts[0].resolve(answer({ ok: true }));
+    await settle();
+    g.gets[2].resolve(notJson());
+    await settle();
+    assert.equal(g.draws(), 1, "…then the link's re-read fails: nothing more is drawn");
+  }
+  {
+    // a refusal after the skip: the other link's ok with a failed re-read draws nothing, so the refusal stays shown
+    const g = gearLogins(), st = stub("span");
+    g.api.post(LINK, st, stub("select"), "");
+    g.api.post(LINK2, stub("span"), stub("select"), "");
+    assert.equal(await g.fillDraws("skipped"), false, "a fill's drawing is skipped while the two links are on their way");
+    g.posts[0].resolve(answer({ ok: false, error: "no sign-in there" }));
+    await settle();
+    g.posts[1].resolve(answer({ ok: true }));
+    await settle();
+    g.gets[1].resolve(notJson());
+    await settle();
+    assert.equal(st.textContent, "no sign-in there", "the first link's refusal is shown");
+    assert.equal(g.draws(), 0, "the second link's re-read fails: nothing is drawn over it");
+  }
+  {
+    // no answer after the skip: nothing is drawn over the note
+    const g = gearLogins(), st = stub("span");
+    g.api.post(LINK, st, stub("select"), "");
+    assert.equal(await g.fillDraws("skipped"), false, "a fill's drawing is skipped while the link is on its way");
+    g.posts[0].resolve(notJson());
+    await settle();
+    assert.equal(st.textContent, "the kernel did not answer; try again", "no answer is said in the row");
+    assert.equal(g.draws(), 0, "…and nothing is drawn over the no-answer note");
+  }
+  {
+    // no answer after the skip, then the other link's ok with a failed re-read: nothing is drawn over the note
+    const g = gearLogins(), st = stub("span");
+    g.api.post(LINK, st, stub("select"), "");
+    g.api.post(LINK2, stub("span"), stub("select"), "");
+    assert.equal(await g.fillDraws("skipped"), false, "a fill's drawing is skipped while the two links are on their way");
+    g.posts[0].resolve(notJson());
+    await settle();
+    g.posts[1].resolve(answer({ ok: true }));
+    await settle();
+    g.gets[1].resolve(notJson());
+    await settle();
+    assert.equal(st.textContent, "the kernel did not answer; try again", "the first link's no answer is said in its row");
+    assert.equal(g.draws(), 0, "the second link's re-read fails: nothing is drawn over the no-answer note");
+  }
+  assert.match(GEAR, /go\.hidden = true; sel\.disabled = true; st\.className = 'rs-note'; st\.textContent = 'Linking\\u2026';/,
+    "acknowledged before the round-trip, Link gone (tests/test_login_link_picker_served.py presses Enter again while the link is in flight)");
+  // the pick only chooses and Link sends it (review of #78: in the Linux builds of Chromium, Firefox and WebKit, a focused, closed
+  // select fires change on an arrow key). Where the send is hung and the pick kept, not what a key does:
+  // tests/test_login_link_picker_served.py presses ArrowDown, ArrowUp back to the placeholder (Link goes), ArrowDown again and
+  // then Link from the keyboard; it reads that a pick taken back with the placeholder is not put back by a redraw, and that a
+  // reopen after a refused link shows no pick and no Link (Link dropped the pick)
+  assert.match(GEAR, /sel\.addEventListener\('change', function \(\) \{\n\s*go\.hidden = !sel\.value;\n\s*if \(sel\.value\) lgPicks\[r\.id\] = sel\.value; else delete lgPicks\[r\.id\];\n\s*\}\);\n\s*go\.addEventListener\('click', function \(\) \{\n\s*if \(!sel\.value\) return;\n\s*delete lgPicks\[r\.id\];\n\s*go\.hidden = true;/,
+    "change only shows or hides Link and keeps the pick by login; the link POST is sent from Link's click, which drops the kept pick");
+  // where the redraw takes a kept pick back, not that it does: tests/test_login_link_picker_served.py toggles a synchronized
+  // switch, picks a machine, and reads the pick and Link after each of two re-run drawings, then presses Link; it reads the pick
+  // after a reopen of settings, and reads it dropped when its machine has left the kernel list and when its login was linked
+  // elsewhere and unlinked before the rows were drawn again (the reset below)
+  assert.match(GEAR, /var kept = picks\[r\.id\];\n\s*if \(kept && Array\.prototype\.some\.call\(sel\.options, function \(o\) \{ return o\.value === kept; \}\)\) \{\n\s*sel\.value = kept; go\.hidden = false; lgPicks\[r\.id\] = kept;/,
+    "a redrawn row takes back the pick its predecessor held while that machine is still listed, with Link showing");
+  assert.match(GEAR, /var picks = lgPicks;[^\n]*\n\s*lgPicks = \{\};\n\s*lgL\.textContent = '';/, "…from the picks the replaced rows held, so a login no longer drawn keeps none");
   assert.match(GEARCSS, /\.rs-logins \.rs-login-link \{ flex: 0 0 auto;/);
 });

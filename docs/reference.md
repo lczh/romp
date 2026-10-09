@@ -1127,7 +1127,8 @@ Org · enterprise)` for the machine's own login, `Login (<label> · Org ·
 kind)` for a stored one, each piece only when known), and the gear's Account
 section, which lists the stored logins with a Remove each, plus a `Same account
 as…` picker (this machine and every connected kernel) on a login that names no
-account, or an Unlink on a linked one. That list is the stored logins of the
+account, where choosing a machine shows a Link button that records the link, or
+an Unlink on a linked one. That list is the stored logins of the
 kernel serving the dashboard. The pick reaches
 the kernel as `login` (the machine's own), `key` or `login:<id>`; the
 registry's `auth` stays `login` | `key`, and a new `authLogin` field names the

@@ -308,7 +308,8 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
 .rs-logins .rs-login-rm { flex: 0 0 auto; cursor: pointer; font: inherit; background: var(--btn-bg, #2a2a2a); color: var(--fg, #ccc);
   border: 1px solid var(--hairline, #3a3a3a); border-radius: 5px; padding: 2px 8px; }
 .rs-logins .rs-login-rm[disabled] { opacity: 0.5; cursor: default; }
-/* the Same account as… picker (2026-10-01): the Remove button's dress, so the row stays one line of two quiet controls */
+/* the Same account as… picker (2026-10-01): the Remove button's dress, so the row stays one line of quiet controls (Link joins
+   them once a machine is picked) */
 .rs-logins .rs-login-link { flex: 0 0 auto; max-width: 12em; cursor: pointer; font: inherit; background: var(--btn-bg, #2a2a2a); color: var(--fg, #ccc);
   border: 1px solid var(--hairline, #3a3a3a); border-radius: 5px; padding: 1px 4px; }
 .rs-logins .rs-login-link[disabled] { opacity: 0.5; cursor: default; }
