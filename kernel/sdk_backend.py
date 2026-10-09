@@ -5510,26 +5510,62 @@ SUBAGENT_CANARY_PROMPT = ('Call the Agent tool exactly once, with subagent_type 
                           'with the single word OK and nothing else." After it returns, reply with the single word DONE.')
 
 
+def result_error_text(msg) -> str:
+    """What an errored ResultMessage says went wrong, in the CLI's own words, "" for a result that is no error: its
+    `result` text (an API error's is the CLI's line for it, "API Error: 400 ..."), then any `errors` it lists, else the
+    failing call's HTTP status or the result's subtype. Kept on the session at the settle (SdkSession._result_error) for
+    the version canary's verdict, which reads the result the backend received rather than any transcript."""
+    if getattr(msg, "is_error", None) is not True:
+        return ""
+    parts = []
+    res = getattr(msg, "result", None)
+    if isinstance(res, str) and res.strip():
+        parts.append(res)
+    errs = getattr(msg, "errors", None)
+    if isinstance(errs, (list, tuple)):
+        parts += [str(e) for e in errs if str(e).strip() and str(e) not in parts]
+    if not parts:
+        st = getattr(msg, "api_error_status", None)
+        parts.append(("API error %d" % st) if isinstance(st, int) and not isinstance(st, bool)
+                     else str(getattr(msg, "subtype", "") or "an error result with no text"))
+    return " ".join(" ".join(parts).split())
+
+
+def _canary_reason(text, n: int = 300) -> str:
+    return " ".join(str(text or "").split())[:n]
+
+
 def subagent_canary_verdict(check, launched: bool, finished: bool, fast: str, fast_reason: str, *, started: bool,
-                            start_failure: str = "", errored: bool = False) -> dict:
+                            start_failure: str = "", errored: bool = False, error_text: str = "",
+                            billing_refused: str = "") -> dict:
     """The probe's verdict from what its session's speed check counted (`check`: mainFast, mainStandard, subFast,
-    subStandard), whether its session started at all (`started`: its CLI came up; `start_failure`, the backend's own
-    reason when it did not), whether its launch carried the recipe, whether its turn finished and whether its result was
-    an error (`errored`), and the fast-mode state its CLI reported. "pass": the main loop ran fast and the subagent ran at
-    standard speed. "fail": a subagent call ran fast, or the CLI could not run the main loop fast for no reason it names
-    (what the recipe's breakage looks like). Anything that proves neither, "inconclusive": a session that never started
-    (said with its reason, first: until 2026-10-09 a probe whose session crashed at the start read as a launch without
-    the recipe), a launch without the recipe, no finished turn, a turn that ended in an error (no credential, an
-    overloaded API: what its calls did not show is no failure of the recipe), no subagent call, fast mode unavailable to
-    the account."""
+    subStandard), whether its session started at all (`started`: its CLI came up; `start_failure`, the launch error the
+    backend recorded for it when it did not), whether its launch carried the recipe, whether its turn finished, whether
+    its result was an error (`errored`, with `error_text`: the result's own words, result_error_text), the fast-mode
+    state its CLI reported, and why the billing the probe was given could not apply (`billing_refused`: the backend's own
+    refusal, auth_unavailable_why). "pass": the main loop ran fast and the subagent ran at standard speed. "fail": a
+    subagent call ran fast, or the CLI could not run the main loop fast for no reason it names (what the recipe's
+    breakage looks like). Anything that proves neither, "inconclusive": a session that never started (said with its
+    reason, first: until 2026-10-09 a probe whose session crashed at the start read as a launch without the recipe), a
+    launch without the recipe, no finished turn, a turn that ended in an error, no subagent call, fast mode unavailable
+    to the account.
+    A turn that ended in an error stays inconclusive whatever the error says, and says it: a CLI that rejects one of the
+    recipe's variables would 400 the first main-loop call, but so does a request the account or the API refuses for its
+    own reasons, and nothing in the result tells the two apart without a second, plain probe turn to compare with
+    (reading the recipe into an error's wording would be a guess). The switch stays held off either way, so the user
+    reads the CLI's words and Check again runs it again. Until 2026-10-09 the error's text was dropped and the error
+    center said only that the turn ended in an error. A billing refusal leads any verdict but a pass: the probe's turn ran
+    on some other credential or none, which explains a refused or missing fast mode better than the symptom does."""
     c = check if isinstance(check, dict) else {}
     n = lambda k: int(c.get(k) or 0)
     figures = {k: n(k) for k in ("mainFast", "mainStandard", "subFast", "subStandard")}
     def out(verdict, why):
+        if billing_refused and verdict != "pass":
+            why = "the probe could not use the machine's default billing (%s); %s" % (_canary_reason(billing_refused), why)
         return dict(figures, verdict=verdict, why=why)
     if not started:
         return out("inconclusive", "the probe's session did not start: %s"
-                   % (" ".join(str(start_failure or "").split())[:300] or "the backend gave no reason"))
+                   % (_canary_reason(start_failure) or "no reason was recorded for its launch"))
     if not launched:
         return out("inconclusive", "the probe's launch did not carry the workaround")
     if not finished:
@@ -5537,7 +5573,8 @@ def subagent_canary_verdict(check, launched: bool, finished: bool, fast: str, fa
     if figures["subFast"]:
         return out("fail", "a subagent call ran in fast mode")
     if errored and not (figures["mainFast"] and figures["subStandard"]):
-        return out("inconclusive", "the probe's turn ended in an error")
+        said = _canary_reason(error_text)
+        return out("inconclusive", "the probe's turn ended in an error" + (": %s" % said if said else ""))
     if fast != "on" and fast_reason:
         return out("inconclusive", "fast mode is not available here (%s)" % fast_reason)
     if not figures["mainFast"]:
@@ -5589,18 +5626,18 @@ def subagent_canary_billing(kernel_state, probe_state) -> str:
     the probe bills what the sessions do. Until 2026-10-09 the probe's state had no default, and on a box whose one login
     is a stored one (no login of the machine's own, no apiKeyHelper) its CLI started with no credential at all, refused
     fast mode ("preference") and ended its turn in an error, while the sessions on that box ran fast. No explicit
-    default: nothing is written, and the probe launches plain, as an unpicked session does there. Returns what it gave
-    ("login", "login <id>", "key", "")."""
+    default: nothing is written, and the probe launches plain, as an unpicked session does there. A default naming a
+    record that is gone is copied as it stands: the probe's launch then falls through to the machine's own login exactly
+    as a session's does (explicit_default_login), and the probe can say which billing did not apply (auth_unavailable_why
+    on what this returns). Returns what it gave ("login", "login <id>", "key", "")."""
     d = read_sdk_defaults(Path(kernel_state))
     side = d.get("auth") if (d.get("authExplicit") and d.get("auth") in ("login", "key")) else ""
     if not side:
         return ""
     lid = SdkBackend.reg_login(d) if side == "login" else ""
     rec = _logins.read_record(kernel_state, lid) if lid else None
-    if lid and rec is None:
-        lid = ""   # the record is gone: the default falls through to the machine's own login, as a session's does
     if rec is not None:
-        _logins.write_record(probe_state, rec)
+        _logins.write_record(probe_state, rec)   # 0700 directory, 0600 file: write_record's own treatment
     write_sdk_default(Path(probe_state), auth=side, authExplicit=True, authLogin=lid)
     return ("%s %s" % (side, lid)) if lid else side
 
@@ -6379,6 +6416,7 @@ class SdkSession:
         #                                instructions payload (parent_tool_use_id link) as a skillMd atom
         self.since = 0
         self._first_out_t = None   # the turn's first streamed WORK atom (turns.jsonl firstOutT; reset per fresh feed)
+        self._result_error = ""    # the last result's own error words (result_error_text), "" after a clean one
         self._turn_reprice = None  # (the CLI's dollars, the Subagents at standard speed repricing) for the turn in flight
         self._sub_std_carry = 0.0  # repricing a turn could not absorb (it would have gone below zero): the next turn's
         self._turn_spend = None    # (delta usd, turn usage) the spend fold recorded for the turn in flight, read by the
@@ -11151,6 +11189,10 @@ class SdkSession:
                 # sweep — 2026-09-07 review.)
                 # /api-health: the settle names a give-up's status (api_error_status) and ends the turn
                 self._ah_note_result(msg)
+                # the result's own error words, "" for a clean one (result_error_text): the version canary's probe
+                # reads them for its verdict, so a probe turn the API refused says what the CLI said. Ahead of the
+                # bookkeeping, so the turn row the finally writes never lands before them
+                self._result_error = result_error_text(msg)
                 if self._rewind_to and getattr(self, "_rewind_wait", False):
                     # delete-while-busy: THIS settle is the interrupted turn ending — the flag is being
                     # ARMED here, not consumed. Second observer of the turn-end fact (the Stop hook is
@@ -19939,8 +19981,11 @@ class SdkBackend:
         Its stdout's last JSON line is the verdict."""
         script = _HERE / "subagent_canary.py"
         env = subagent_canary_env(os.environ, startup_auth_env())
+        # --helper-xdg-state: this kernel's own XDG_STATE_HOME ("" = unset), which the token commands and helpers the
+        # probe runs see in place of the probe's temp root (credentials.pin_helper_env): a stored login's command that
+        # keeps state there worked at every session's launch and failed only in the probe (review of #190, 2026-10-09)
         argv = [sys.executable, str(script), "--claude", str(self.claude_bin), "--kernel-dir", str(_HERE),
-                "--kernel-state", str(self.state_dir)]
+                "--kernel-state", str(self.state_dir), "--helper-xdg-state", os.environ.get("XDG_STATE_HOME", "")]
         root = sdk_import_root()
         if root:
             argv += ["--sdk-path", root]
@@ -19948,6 +19993,10 @@ class SdkBackend:
             p = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=SUBAGENT_CANARY_TIMEOUT_S,
                                stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
+            # subprocess.run killed and reaped the probe before raising, so its pid names no process now: the sweep takes
+            # its temp root (the copied login record in it) and its scratch directory at once, under the sweep's own rules
+            # (the probe's names only, never a running probe's), rather than at the next probe's start or kernel boot
+            self._sweep_canary_leftovers()
             return {"verdict": "inconclusive", "why": "the probe did not finish within %d s" % SUBAGENT_CANARY_TIMEOUT_S}
         except OSError as e:
             return {"verdict": "inconclusive", "why": "the probe did not start (%s)" % e}

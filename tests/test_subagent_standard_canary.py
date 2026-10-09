@@ -21,13 +21,22 @@ The mechanics under test, with the probe itself replaced by a stub (no CLI here)
   * the probe is handed, as arguments, where the kernel imports the Agent SDK from (a fresh interpreter lacks the venv
     entry the kernel put on its own path) and the kernel's state directory, whose machine default billing (a stored
     login's record with it) its launch then bills, as an unpicked session's does;
-  * inside the probe's own process the gate is open (it is the probe).
+  * inside the probe's own process the gate is open (it is the probe);
+  * a turn that ended in an error says what its result said (the settle keeps the result's own words on the session
+    before the turn row lands), and stays inconclusive; a session that never started names only a launch error the
+    backend recorded for it; a billing that could not apply (a stored login refused, expired or removed, or its token
+    command failing) leads the verdict, in the backend's own words, and no verdict or log line carries a token;
+  * the probe's launch falls exactly as an unpicked session's does when the default's stored login cannot bill, its
+    token command sees the kernel's XDG_STATE_HOME, and the login record it copies is private (0700 / 0600) and goes
+    with its temp root, at its own cleanup or, for a probe the kernel stopped at its time limit, at once.
 
 Synthetic fixtures only: placeholder sids, an invented session name, a fake binary.
 """
+import asyncio
 import json
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -510,12 +519,9 @@ class TheProbesInterpreter(unittest.TestCase):
                          p.stderr[-500:])
 
 
-class TheProbesBilling(unittest.TestCase):
-    """On a machine whose one login is a stored one (no login of the machine's own, no apiKeyHelper), every session
-    follows the machine default and launches with that login's token. The probe's fresh state root had no default, so
-    its CLI started with no credential at all, refused fast mode ("preference") and ended its turn in an error, while
-    the sessions it gates ran fast. Its state now takes the kernel's machine default billing, the stored login's record
-    with it, and its launch decides on the road an unpicked session's launch takes."""
+class _BillingScratch:
+    """A scratch Claude config with no apiKeyHelper and no managed settings, no boot-claimed login tokens, a stand-in
+    Agent SDK module when none is importable, and a kernel state and a probe state to copy between."""
 
     def setUp(self):
         self.cfg = tempfile.mkdtemp()
@@ -543,6 +549,14 @@ class TheProbesBilling(unittest.TestCase):
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
             os.environ["CLAUDE_CONFIG_DIR"] = self._cfg_before
+
+
+class TheProbesBilling(_BillingScratch, unittest.TestCase):
+    """On a machine whose one login is a stored one (no login of the machine's own, no apiKeyHelper), every session
+    follows the machine default and launches with that login's token. The probe's fresh state root had no default, so
+    its CLI started with no credential at all, refused fast mode ("preference") and ended its turn in an error, while
+    the sessions it gates ran fast. Its state now takes the kernel's machine default billing, the stored login's record
+    with it, and its launch decides on the road an unpicked session's launch takes."""
 
     def _probe_launch_env(self):
         be = sb.SdkBackend(str(self.probe_state), "/bin/true", lambda *a, **k: None, log=lambda m, **k: None)
@@ -577,10 +591,354 @@ class TheProbesBilling(unittest.TestCase):
         self.assertFalse((self.probe_state / sb._logins.LOGINS_DIR).exists(), "a key default carries no record")
 
     def test_a_default_naming_a_removed_record_falls_to_the_machines_own_login(self):
+        """Copied as it stands (the fall itself is the launch's, below in TheProbesBillingParity), so the probe can say
+        which billing did not apply."""
         gone = sb._logins.mint_id()   # an id no record carries (minted at run time: a literal reads as a key to the scanner)
         sb.write_sdk_default(self.kernel_state, auth="login", authExplicit=True, authLogin=gone)
-        self.assertEqual(sb.subagent_canary_billing(self.kernel_state, self.probe_state), "login")
-        self.assertEqual(sb.read_sdk_defaults(self.probe_state).get("authLogin"), "")
+        self.assertEqual(sb.subagent_canary_billing(self.kernel_state, self.probe_state), "login %s" % gone)
+        self.assertEqual(sb.read_sdk_defaults(self.probe_state).get("authLogin"), gone)
+        self.assertFalse((self.probe_state / sb._logins.LOGINS_DIR).exists(), "no record to copy")
+
+
+
+# ---- the post-merge review of the probe (2026-10-09) ----
+
+class _Msg:
+    """Message doubles by class name, the shapes SdkSession._on_message keys on."""
+class _Assistant(_Msg):
+    pass
+class _Result(_Msg):
+    uuid, num_turns = "r1", 1
+class _System(_Msg):
+    pass
+_Assistant.__name__, _Result.__name__, _System.__name__ = "AssistantMessage", "ResultMessage", "SystemMessage"
+
+
+def _result(**fields):
+    return type("ResultMessage", (_Result,), dict(fields))()
+
+
+async def _noop(*a, **k):
+    return None
+
+
+def _run_time_token():
+    """A token-like value assembled at run time (the secret scanner reads this file): distinctive enough that a leak
+    anywhere is found by a substring search."""
+    return "-".join(["probe", "tok", __import__("secrets").token_hex(8)])
+
+
+class TheErroredTurnsOwnWords(unittest.TestCase):
+    """A probe turn the API refused (a new CLI rejecting one of the recipe's variables 400s the first main-loop call)
+    was filed "the probe's turn ended in an error" and nothing more: the error center said the check could not finish and
+    never what the CLI said. The settle keeps the result's own words on the session, and the verdict carries them."""
+
+    REFUSAL = "API Error: 400 synthetic rejection of a request setting by a newer CLI"
+
+    def test_the_results_own_words(self):
+        self.assertEqual(sb.result_error_text(_result(is_error=True, result=self.REFUSAL, api_error_status=400)),
+                         self.REFUSAL)
+        self.assertEqual(sb.result_error_text(_result(is_error=True, result=None, subtype="error_during_execution",
+                                                      errors=["synthetic execution fault"])),
+                         "synthetic execution fault")
+        self.assertEqual(sb.result_error_text(_result(is_error=True, result="", api_error_status=529)), "API error 529")
+        self.assertEqual(sb.result_error_text(_result(is_error=False, result="DONE")), "", "a clean result is no error")
+
+    def test_the_settle_keeps_the_error_before_the_row_and_the_probes_verdict_says_it(self):
+        """Driven end to end below the CLI: a real session settles an errored result over the probe's state root (its
+        turn row lands in turns.jsonl), and the probe's turn reads the row and the session's words, as in main()."""
+        state = tempfile.mkdtemp()
+        Path(state, "session-hosts").write_text("off")
+        real = sb.SdkBackend(state, "/bin/true", lambda *a, **k: None, log=lambda m, **k: None)
+        sess = sb.SdkSession(real, {"sid": SID, "name": "canary", "cwd": state})
+        sess._do_refresh_context = sess._do_refresh_usage = _noop
+        sess._connected.set()
+        sess._sub_std_launched, sess.fast, sess.fast_reason = True, "on", ""
+        msg = _result(is_error=True, result=self.REFUSAL, api_error_status=400, subtype="success", duration_ms=5,
+                      duration_api_ms=4)
+        seen = {}
+
+        class Settling(_StandIn):
+            def send(self, sid, text, user=False):
+                self.sessions[sid] = sess
+                sess.inflight = 1
+                asyncio.run(self._settle())
+
+            async def _settle(self):
+                sess._handle_stream_message(msg, _Assistant, _Result, _System)
+                seen["at_row"] = sess._result_error   # what the probe reads, as the row lands
+                await asyncio.sleep(0)
+        v = cn.probe_turn(sb, Settling(state), state, SID, timeout=30, tick=0.01)
+        self.assertEqual(seen["at_row"], self.REFUSAL)
+        self.assertEqual(v["verdict"], "inconclusive",
+                         "nothing in the result tells a refused recipe variable from any other refused request")
+        self.assertEqual(v["why"], "the probe's turn ended in an error: " + self.REFUSAL)
+        clean = _result(is_error=False, result="DONE", subtype="success")
+        sess.inflight = 1
+
+        async def settle_clean():
+            sess._handle_stream_message(clean, _Assistant, _Result, _System)
+            await asyncio.sleep(0)
+        asyncio.run(settle_clean())
+        self.assertEqual(sess._result_error, "", "a clean result clears it")
+
+    def test_the_error_center_line_carries_the_words(self):
+        be = _backend()
+        msgs = []
+        be._log = lambda m, **k: msgs.append(m)
+        v = sb.subagent_canary_verdict({}, launched=True, finished=True, fast="on", fast_reason="", started=True,
+                                       errored=True, error_text=self.REFUSAL)
+        be._canary_finished("2.1.282", v)
+        self.assertTrue(any(self.REFUSAL in m and "could not check" in m for m in msgs), msgs)
+        self.assertIn(self.REFUSAL, be.recipe_hold(), "and the row's hold line")
+
+
+class AStartFailureNamesOnlyItsOwnLaunch(unittest.TestCase):
+    """With no launch error recorded, the reason fell back to the backend's newest problem of any kind, which could be
+    a line about something else entirely. Only the probe's session's own launch error is named; otherwise the verdict
+    says no reason was recorded."""
+
+    def test_an_unrelated_problem_is_not_the_reason(self):
+        state = tempfile.mkdtemp()
+
+        class Noisy(_StandIn):
+            def problems(self, limit=0):
+                return [{"text": "synthetic unrelated problem about some other session"}]
+        v = cn.probe_turn(sb, Noisy(state), state, SID, timeout=0.05, tick=0.01)
+        self.assertEqual(v["verdict"], "inconclusive")
+        self.assertEqual(v["why"], "the probe's session did not start: no reason was recorded for its launch")
+
+
+class TheProbesBillingParity(_BillingScratch, unittest.TestCase):
+    """The billing the probe was given, when it cannot apply: its launch falls exactly as an unpicked session's launch
+    does on the kernel's own state (a refused, expired or removed stored login: to the machine's own login), the verdict
+    says why in the backend's own words, a token command that fails only in the probe is said rather than read as a
+    downstream symptom, and no verdict or log line carries a token."""
+
+    def setUp(self):
+        super().setUp()
+        Path(self.kernel_state, "session-hosts").write_text("off")
+        self.machine_token = _run_time_token()
+        sb._STARTUP_AUTH_ENV = {"CLAUDE_CODE_OAUTH_TOKEN": self.machine_token}   # the machine's own login, claimed at boot
+        self.lines = []
+        self._xdg_before = os.environ.get("XDG_STATE_HOME")
+
+    def tearDown(self):
+        sb._cred._HELPER_ENV_PINNED.clear()
+        if self._xdg_before is None:
+            os.environ.pop("XDG_STATE_HOME", None)
+        else:
+            os.environ["XDG_STATE_HOME"] = self._xdg_before
+        super().tearDown()
+
+    def _launch(self, state, login_ok=True):
+        """(the launch's environment, the backend) for an unpicked session's launch over `state`."""
+        be = sb.SdkBackend(str(state), "/bin/true", lambda *a, **k: None, log=lambda m, **k: self.lines.append(m))
+        be.login_ok = lambda: login_ok
+        sid = be.spawn("canary", str(state), sid=SID)
+        s = sb.SdkSession(be, dict(sb.read_reg(Path(state), sid), model=sb.SUBAGENT_STANDARD_MODEL, fast=True))
+        return be._options(s, dict)["env"], be
+
+    def _stored(self, cmd, **extra):
+        rec = dict({"id": sb._logins.mint_id(), "label": "Work", "tokenCmd": cmd,
+                    "addedAt": int(__import__("time").time()) - 86400}, **extra)
+        sb._logins.write_record(self.kernel_state, rec)
+        sb.write_sdk_default(self.kernel_state, model="claude-opus-5-5", auth="login", authExplicit=True,
+                             authLogin=rec["id"])
+        return rec
+
+    def test_a_refused_an_expired_and_a_removed_stored_login_fall_as_a_sessions_launch_does(self):
+        year = 366 * 86400
+        for case, extra, why in (("refused", {"refused": "synthetic refusal"}, "the Work login was refused: synthetic refusal"),
+                                 ("expired", {"addedAt": int(__import__("time").time()) - year},
+                                  "the Work login's token is a year old and has expired; add it again"),
+                                 ("removed", None, "no stored login with that id")):
+            with self.subTest(case=case):
+                self.kernel_state, self.probe_state = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
+                for d in (self.kernel_state, self.probe_state):
+                    Path(d, "session-hosts").write_text("off")
+                stored = _run_time_token()
+                rec = self._stored("printf '%%s' '%s'" % stored, **(extra or {}))
+                if extra is None:
+                    sb._logins.remove(self.kernel_state, rec["id"])
+                session_env, _ = self._launch(self.kernel_state)
+                billing = sb.subagent_canary_billing(self.kernel_state, self.probe_state)
+                probe_env, probe_be = self._launch(self.probe_state)
+                self.assertEqual(session_env.get("CLAUDE_CODE_OAUTH_TOKEN"), self.machine_token,
+                                 "the session's launch falls to the machine's own login")
+                self.assertEqual(probe_env.get("CLAUDE_CODE_OAUTH_TOKEN"), session_env.get("CLAUDE_CODE_OAUTH_TOKEN"),
+                                 "and the probe's falls the same way")
+                self.assertNotIn(stored, json.dumps(probe_env) + json.dumps(session_env), "the dead login's command never ran")
+                self.assertEqual(cn._billing_refusal(probe_be, billing), why)
+                v = sb.subagent_canary_verdict({}, launched=True, finished=True, fast="off", fast_reason="preference",
+                                               started=True, billing_refused=cn._billing_refusal(probe_be, billing))
+                self.assertEqual(v["why"], "the probe could not use the machine's default billing (%s); fast mode is not "
+                                           "available here (preference)" % why)
+
+    def test_a_token_command_failing_in_the_probe_is_said_and_the_kernels_record_is_untouched(self):
+        rec = self._stored("exit 3")
+        billing = sb.subagent_canary_billing(self.kernel_state, self.probe_state)
+        env, be = self._launch(self.probe_state, login_ok=False)
+        self.assertEqual(env.get("CLAUDE_CODE_OAUTH_TOKEN"), self.machine_token, "the launch took the fall")
+        why = cn._billing_refusal(be, billing)
+        self.assertEqual(why, "the Work login was refused: the token command did not answer: the token command failed "
+                              "(non-zero exit)")
+        self.assertNotIn("refused", sb._logins.read_record(self.kernel_state, rec["id"]),
+                         "the refusal is the probe's copy's, never the kernel's record")
+        state = tempfile.mkdtemp()
+
+        class Billed(_StandIn):
+            def auth_unavailable_why(self, side, lid=""):
+                return be.auth_unavailable_why(side, lid)
+        sess = types.SimpleNamespace(_connected=threading.Event(), _sub_std_launched=True, fast="off",
+                                     fast_reason="preference")
+        sess._connected.set()
+        v = cn.probe_turn(sb, Billed(state, session=sess, row={"isError": True}), state, SID, timeout=30, tick=0.01,
+                          billing=billing)
+        self.assertEqual(v["why"], "the probe could not use the machine's default billing (%s); the probe's turn ended "
+                                   "in an error" % why)
+
+    def test_the_token_command_sees_the_kernels_xdg_state_home(self):
+        """The probe runs under XDG_STATE_HOME = its temp root; a token command that reads its store there worked at
+        every session's launch and failed only in the probe. Pinned to the kernel's value, it sees what a session's does."""
+        kernel_xdg = tempfile.mkdtemp()
+        token = _run_time_token()
+        os.makedirs(os.path.join(kernel_xdg, "synthetic-store"))
+        Path(kernel_xdg, "synthetic-store", "value").write_text(token)
+        rec = self._stored('cat "$XDG_STATE_HOME/synthetic-store/value"')
+        billing = sb.subagent_canary_billing(self.kernel_state, self.probe_state)
+        os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()           # the probe's own temp root
+        env, be = self._launch(self.probe_state, login_ok=False)
+        self.assertNotEqual(env.get("CLAUDE_CODE_OAUTH_TOKEN"), token, "unpinned: the command reads the probe's root")
+        self.assertIn("token command", cn._billing_refusal(be, billing))
+        sb._logins.clear_refused(self.probe_state, rec["id"])
+        sb._cred.pin_helper_env(XDG_STATE_HOME=kernel_xdg)
+        env, be = self._launch(self.probe_state, login_ok=False)
+        self.assertEqual(env.get("CLAUDE_CODE_OAUTH_TOKEN"), token, "pinned: the kernel's store, as at a session's launch")
+        self.assertEqual(cn._billing_refusal(be, billing), "")
+        sb._cred.pin_helper_env(XDG_STATE_HOME="")
+        self.assertNotIn("XDG_STATE_HOME", sb._cred.helper_env(), "a kernel with none: the helper sees none")
+        with self.assertRaises(ValueError):
+            sb._cred.pin_helper_env(SOME_SECRET="x")                   # a pin never widens what a helper sees
+
+    def test_the_copy_is_private_and_holds_the_command_not_the_token(self):
+        token = _run_time_token()
+        rec = self._stored("printf '%%s' '%s'" % token.replace("-", "_"))   # the command, whatever it prints
+        os.chmod(sb._logins.logins_dir(self.kernel_state), 0o755)             # whatever the kernel's modes are
+        sb.subagent_canary_billing(self.kernel_state, self.probe_state)
+        d = sb._logins.logins_dir(self.probe_state)
+        self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(sb._logins.record_path(self.probe_state, rec["id"])).st_mode), 0o600)
+        self.assertEqual(sb._logins.read_record(self.probe_state, rec["id"]), rec, "metadata and the command, as stored")
+        self.assertNotIn(token, sb._logins.record_path(self.probe_state, rec["id"]).read_text())
+
+    def test_no_verdict_or_log_line_carries_a_token(self):
+        """Three commands: one that answers (the token reaches the launch's environment, so the search below is not
+        vacuous), one that prints the token and then fails, one that prints it twice on a line (no valid key). Neither
+        the backend's log lines, nor its problem ring, nor the refusal, nor the verdict the probe prints carries it."""
+        for case in ("answers", "prints-then-fails", "prints-junk"):
+            with self.subTest(case=case):
+                self.kernel_state, self.probe_state = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
+                for d in (self.kernel_state, self.probe_state):
+                    Path(d, "session-hosts").write_text("off")
+                token = _run_time_token()
+                cmd = {"answers": "printf '%%s' '%s'" % token,
+                       "prints-then-fails": "printf '%%s' '%s'; exit 1" % token,
+                       "prints-junk": "printf '%%s %%s' '%s' '%s'" % (token, token)}[case]
+                self._stored(cmd)
+                self.lines = []
+                billing = sb.subagent_canary_billing(self.kernel_state, self.probe_state)
+                env, be = self._launch(self.probe_state, login_ok=False)
+                if case == "answers":
+                    self.assertEqual(env.get("CLAUDE_CODE_OAUTH_TOKEN"), token)
+                else:
+                    self.assertNotEqual(env.get("CLAUDE_CODE_OAUTH_TOKEN"), token)
+                refusal = cn._billing_refusal(be, billing)
+                v = sb.subagent_canary_verdict({}, launched=True, finished=True, fast="off", fast_reason="preference",
+                                               started=True, errored=True, error_text="API Error: 401 synthetic",
+                                               billing_refused=refusal)
+                emitted = "\n".join(self.lines + [r["text"] for r in be.problems()] + [json.dumps(v)])
+                self.assertNotIn(token, emitted)
+                if case != "answers":
+                    self.assertIn("the token command", refusal)
+
+
+class ATimedOutProbe(unittest.TestCase):
+    """A probe killed at the kernel's time limit left its temp root, with the copied login record in it, until the next
+    probe's start or the kernel's boot. The kernel sweeps right after the timeout: subprocess.run killed and reaped the
+    probe first, so its pid file names no process; a running probe's directories stay."""
+
+    def test_the_kernel_sweeps_a_timed_out_probes_directories_at_once(self):
+        be = _backend()
+        tmp = tempfile.mkdtemp()
+        dead_root = Path(tmp, sb.SUBAGENT_CANARY_PREFIX + "timedout1")
+        dead_work = Path(tmp, sb.SUBAGENT_CANARY_PREFIX + "work-timedout2")
+        live_root = Path(tmp, sb.SUBAGENT_CANARY_PREFIX + "running3")
+
+        def run(argv, **kw):
+            for d, pid in ((dead_root, 999999999), (dead_work, 999999999), (live_root, os.getpid())):
+                d.mkdir()
+                (d / sb.SUBAGENT_CANARY_PID_FILE).write_text(str(pid))
+            sb._logins.write_record(dead_root / "romp", {"id": sb._logins.mint_id(), "label": "Work", "tokenCmd": "true"})
+            raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
+        saved = (sb.subprocess.run, sb.tempfile.tempdir)
+        sb.subprocess.run, sb.tempfile.tempdir = run, tmp
+        try:
+            v = be._run_canary_subprocess("2.1.282")
+        finally:
+            sb.subprocess.run, sb.tempfile.tempdir = saved
+        self.assertEqual(v["verdict"], "inconclusive")
+        self.assertIn("did not finish within", v["why"])
+        self.assertFalse(dead_root.exists(), "the timed-out probe's temp root and its login copy go at once")
+        self.assertFalse(dead_work.exists())
+        self.assertTrue(live_root.exists(), "never a running probe's")
+
+    def test_the_kernel_hands_the_probe_its_xdg_state_home(self):
+        be = _backend()
+        seen = {}
+
+        def run(argv, **kw):
+            seen["argv"] = argv
+            return types.SimpleNamespace(stdout='{"verdict": "pass", "why": ""}\n', stderr="", returncode=0)
+        saved = sb.subprocess.run
+        sb.subprocess.run = run
+        try:
+            be._run_canary_subprocess("2.1.282")
+        finally:
+            sb.subprocess.run = saved
+        argv = seen["argv"]
+        self.assertEqual(argv[argv.index("--helper-xdg-state") + 1], os.environ.get("XDG_STATE_HOME", ""))
+
+
+class TheProbeScriptPinsAndCleansUp(unittest.TestCase):
+    """The probe script itself, run as the kernel runs it, over a stand-in kernel directory: it pins the kernel's
+    XDG_STATE_HOME for the helpers it runs before its backend loads, and its temp root (where the login record was
+    copied) is gone when it exits."""
+
+    def test_the_pin_before_the_backend_and_no_temp_root_after(self):
+        kdir, kstate, tmp = tempfile.mkdtemp(), tempfile.mkdtemp(), tempfile.mkdtemp()
+        Path(kdir, "sdk_backend.py").write_text(
+            "import os, types\n"
+            "PINNED = {}\n"
+            "_cred = types.SimpleNamespace(pin_helper_env=lambda **kw: PINNED.update(kw))\n"
+            "def subagent_canary_billing(kernel_state, probe_state):\n"
+            "    os.makedirs(os.path.join(probe_state, 'logins'))\n"
+            "    open(os.path.join(kernel_state, 'probe-state-was'), 'w').write(probe_state)\n"
+            "    return ''\n"
+            "class SdkBackend:\n"
+            "    def __init__(self, state, *a, **k):\n"
+            "        raise RuntimeError('pinned %r' % PINNED.get('XDG_STATE_HOME'))\n")
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        env["TMPDIR"] = tmp
+        p = subprocess.run([sys.executable, CANARY, "--claude", "/bin/true", "--kernel-dir", kdir, "--kernel-state", kstate,
+                            "--helper-xdg-state", "/synthetic/kernel/xdg"], env=env, capture_output=True, text=True,
+                           timeout=60, stdin=subprocess.DEVNULL)
+        v = json.loads(p.stdout.strip().splitlines()[-1])
+        self.assertEqual(v["why"], "the probe failed: pinned '/synthetic/kernel/xdg'", p.stderr[-500:])
+        was = Path(kstate, "probe-state-was").read_text()
+        self.assertTrue(was.startswith(tmp))
+        self.assertFalse(os.path.exists(was), "the probe's state, and the record copied into it, are gone")
+        self.assertEqual([n for n in os.listdir(tmp) if n.startswith(sb.SUBAGENT_CANARY_PREFIX)], [])
 
 
 if __name__ == "__main__":
