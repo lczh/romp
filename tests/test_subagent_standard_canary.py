@@ -16,6 +16,11 @@ The mechanics under test, with the probe itself replaced by a stub (no CLI here)
   * turning the switch on starts the probe when the version has none, and asks for no relaunch until it passes;
   * the probe's verdict from the speed check's figures (pure), and the probe's environment (no session identity, no
     recipe variables, the kernel's own login tokens, the canary marker);
+  * a probe whose session never started says so with the backend's own reason, and stops waiting at once; a turn that
+    ended in an error is no failure of the recipe;
+  * the probe is handed, as arguments, where the kernel imports the Agent SDK from (a fresh interpreter lacks the venv
+    entry the kernel put on its own path) and the kernel's state directory, whose machine default billing (a stored
+    login's record with it) its launch then bills, as an unpicked session's does;
   * inside the probe's own process the gate is open (it is the probe).
 
 Synthetic fixtures only: placeholder sids, an invented session name, a fake binary.
@@ -323,7 +328,7 @@ class Leftovers(unittest.TestCase):
 
 class Probe(unittest.TestCase):
     def test_the_verdict_from_the_speed_checks_figures(self):
-        v = sb.subagent_canary_verdict
+        v = lambda *a, **k: sb.subagent_canary_verdict(*a, started=True, **k)
         ok = {"mainFast": 2, "mainStandard": 0, "subFast": 0, "subStandard": 1}
         self.assertEqual(v(ok, launched=True, finished=True, fast="on", fast_reason="")["verdict"], "pass")
         self.assertEqual(v(dict(ok, subFast=1), launched=True, finished=True, fast="on", fast_reason="")["verdict"], "fail")
@@ -357,6 +362,225 @@ class Probe(unittest.TestCase):
             self.assertTrue(pin in src, "the probe script lacks %s" % pin)
         self.assertNotIn("mcp_config", src, "no peer messaging in the probe")
         self.assertNotIn("no hooks of the kernel", src, "the probe's CLI loads the user's hooks; the docstring says so")
+
+
+CANARY = os.path.join(os.path.dirname(HERE), "kernel", "subagent_canary.py")
+cn = load_source("romp_subagent_canary_t", CANARY)
+
+
+class _StandIn:
+    """A backend stand-in for the probe's turn (probe_turn): what the real one shows the probe, nothing more."""
+
+    def __init__(self, state, launch_error=None, session=None, row=None):
+        self.state, self._launch_error, self._session, self._row = state, launch_error, session, row
+        self.sessions, self._pending_ask, self.last_subagent_standard_refusal = {}, {}, ""
+
+    def _update_reg(self, sid, **fields):
+        pass
+
+    def set_subagent_standard(self, sid, value):
+        return True
+
+    def send(self, sid, text, user=False):
+        if self._session is not None:
+            self.sessions[sid] = self._session
+        if self._row is not None:
+            Path(self.state, "turns.jsonl").write_text(json.dumps(dict(self._row, sid=sid)) + "\n")
+
+    def launch_error(self, sid):
+        return self._launch_error
+
+    def problems(self, limit=0):
+        return []
+
+
+class ASessionThatNeverStarted(unittest.TestCase):
+    """A probe whose session crashed at the start (on one machine the probe's interpreter could not import the Agent SDK)
+    read "the probe's launch did not carry the workaround": the verdict blamed the recipe's launch for a session that
+    never reached a CLI. It says the session did not start, with the backend's own reason, and stops waiting at once."""
+
+    def test_the_verdict_names_the_start_failure_before_anything_else(self):
+        v = sb.subagent_canary_verdict({}, launched=False, finished=False, fast="", fast_reason="", started=False,
+                                       start_failure="No module named 'claude_agent_sdk'")
+        self.assertEqual(v["verdict"], "inconclusive")
+        self.assertEqual(v["why"], "the probe's session did not start: No module named 'claude_agent_sdk'")
+        v = sb.subagent_canary_verdict({}, launched=False, finished=False, fast="", fast_reason="", started=False)
+        self.assertIn("did not start", v["why"], "no reason recorded is still a session that did not start")
+
+    def test_the_probe_reads_the_backends_launch_error_and_does_not_wait_out_the_turn(self):
+        state = tempfile.mkdtemp()
+        be = _StandIn(state, launch_error={"text": "the CLI could not start: synthetic reason", "at": 0})
+        t0 = __import__("time").time()
+        v = cn.probe_turn(sb, be, state, SID, timeout=30, tick=0.01)
+        self.assertLess(__import__("time").time() - t0, 5, "a launch error ends the wait: nothing will finish")
+        self.assertEqual(v["verdict"], "inconclusive")
+        self.assertEqual(v["why"], "the probe's session did not start: the CLI could not start: synthetic reason")
+
+    def test_a_turn_that_ended_in_an_error_is_no_failure_of_the_recipe(self):
+        """A CLI that started without a credential ends its turn in an error before any call: no main-loop call ran
+        fast, which the old order read as the recipe's breakage ("the main loop did not run in fast mode")."""
+        state = tempfile.mkdtemp()
+        sess = types.SimpleNamespace(_connected=threading.Event(), _sub_std_launched=True, fast="on", fast_reason="")
+        sess._connected.set()
+        be = _StandIn(state, session=sess, row={"isError": True})
+        v = cn.probe_turn(sb, be, state, SID, timeout=30, tick=0.01)
+        self.assertEqual((v["verdict"], v["why"]), ("inconclusive", "the probe's turn ended in an error"))
+        ok = {"mainFast": 2, "subStandard": 1}
+        self.assertEqual(sb.subagent_canary_verdict(ok, launched=True, finished=True, fast="on", fast_reason="",
+                                                    started=True, errored=True)["verdict"], "pass",
+                         "calls that already showed the recipe working stand over a later error")
+        self.assertEqual(sb.subagent_canary_verdict(dict(ok, subFast=1), launched=True, finished=True, fast="on",
+                                                    fast_reason="", started=True, errored=True)["verdict"], "fail")
+
+
+class TheProbesInterpreter(unittest.TestCase):
+    """The kernel's interpreter finds the Agent SDK through the venv entry kernel._ensure_sdk_on_path puts on its own
+    path at run time; the probe is a fresh interpreter without it, so on a machine whose interpreter does not find the
+    SDK by itself every probe's session died at the import. The kernel hands the probe that entry, as an argument."""
+
+    def test_the_sdk_import_root_is_the_path_entry_the_package_resolves_from(self):
+        site = tempfile.mkdtemp()
+        os.makedirs(os.path.join(site, "romp_canary_fake_sdk_pkg"))
+        Path(site, "romp_canary_fake_sdk_pkg", "__init__.py").write_text("")
+        Path(site, "romp_canary_fake_sdk_mod.py").write_text("")
+        sys.path.insert(0, site)
+        try:
+            self.assertEqual(sb.sdk_import_root("romp_canary_fake_sdk_pkg"), site)
+            self.assertEqual(sb.sdk_import_root("romp_canary_fake_sdk_mod"), site)
+        finally:
+            sys.path.remove(site)
+        self.assertEqual(sb.sdk_import_root("romp_canary_no_such_package"), "")
+
+    def _run(self, be):
+        seen = {}
+
+        def run(argv, **kw):
+            seen.update(argv=argv, env=kw.get("env"))
+            return types.SimpleNamespace(stdout='{"verdict": "pass", "why": ""}\n', stderr="", returncode=0)
+        saved = (sb.subprocess.run, sb.sdk_import_root)
+        sb.subprocess.run = run
+        return seen, saved
+
+    def test_the_kernel_hands_the_probe_its_sdk_entry_and_its_state_directory(self):
+        be = _backend()
+        site = tempfile.mkdtemp()
+        seen, saved = self._run(be)
+        sb.sdk_import_root = lambda name="claude_agent_sdk": site
+        try:
+            self.assertEqual(be._run_canary_subprocess("2.1.282")["verdict"], "pass")
+        finally:
+            sb.subprocess.run, sb.sdk_import_root = saved
+        argv = seen["argv"]
+        self.assertEqual(argv[argv.index("--sdk-path") + 1], site)
+        self.assertEqual(argv[argv.index("--kernel-state") + 1], str(be.state_dir))
+        self.assertNotIn(site, str(seen["env"].get("PYTHONPATH") or ""),
+                         "an argument, never PYTHONPATH: the probe's CLI and its hooks would inherit it")
+        seen, saved = self._run(be)
+        sb.sdk_import_root = lambda name="claude_agent_sdk": ""
+        try:
+            be._run_canary_subprocess("2.1.282")
+        finally:
+            sb.subprocess.run, sb.sdk_import_root = saved
+        self.assertNotIn("--sdk-path", seen["argv"], "an SDK this process cannot import has no entry to hand over")
+
+    def test_the_probe_puts_the_entry_on_its_path_and_takes_the_billing_before_its_backend_loads(self):
+        """The probe script itself, run as the kernel runs it, over a stand-in kernel directory whose backend module
+        imports the Agent SDK at its top (resolvable here only through --sdk-path) and reports what it found."""
+        site = tempfile.mkdtemp()
+        os.makedirs(os.path.join(site, "claude_agent_sdk"))
+        Path(site, "claude_agent_sdk", "__init__.py").write_text('WHERE = "the entry the kernel handed over"\n')
+        kdir = tempfile.mkdtemp()
+        Path(kdir, "sdk_backend.py").write_text(
+            "import os\n"
+            "import claude_agent_sdk\n"
+            "def subagent_canary_billing(kernel_state, probe_state):\n"
+            "    open(os.path.join(probe_state, 'billing-from'), 'w').write(kernel_state)\n"
+            "class SdkBackend:\n"
+            "    def __init__(self, state, *a, **k):\n"
+            "        billing = open(os.path.join(state, 'billing-from')).read()\n"
+            "        raise RuntimeError('sdk: %s; billing: %s' % (claude_agent_sdk.WHERE, billing))\n")
+        kstate = tempfile.mkdtemp()
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        import subprocess
+        p = subprocess.run([sys.executable, CANARY, "--claude", "/bin/true", "--kernel-dir", kdir,
+                            "--kernel-state", kstate, "--sdk-path", site], env=env, capture_output=True, text=True,
+                           timeout=60, stdin=subprocess.DEVNULL)
+        v = json.loads(p.stdout.strip().splitlines()[-1])
+        self.assertEqual(v["why"], "the probe failed: sdk: the entry the kernel handed over; billing: %s" % kstate,
+                         p.stderr[-500:])
+
+
+class TheProbesBilling(unittest.TestCase):
+    """On a machine whose one login is a stored one (no login of the machine's own, no apiKeyHelper), every session
+    follows the machine default and launches with that login's token. The probe's fresh state root had no default, so
+    its CLI started with no credential at all, refused fast mode ("preference") and ended its turn in an error, while
+    the sessions it gates ran fast. Its state now takes the kernel's machine default billing, the stored login's record
+    with it, and its launch decides on the road an unpicked session's launch takes."""
+
+    def setUp(self):
+        self.cfg = tempfile.mkdtemp()
+        self._cfg_before = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = self.cfg      # no apiKeyHelper, no machine login in this scratch config
+        self._managed = sb._cred.managed_settings_path
+        sb._cred.managed_settings_path = lambda: os.path.join(self.cfg, "no-managed-settings.json")
+        self._startup = sb._STARTUP_AUTH_ENV
+        sb._STARTUP_AUTH_ENV = {}
+        self._fake_sdk = "claude_agent_sdk" not in sys.modules and not sb.sdk_importable()
+        if self._fake_sdk:
+            fake = types.ModuleType("claude_agent_sdk")
+            fake.HookMatcher = lambda **kw: types.SimpleNamespace(**kw)
+            sys.modules["claude_agent_sdk"] = fake
+        self.kernel_state = Path(tempfile.mkdtemp())
+        self.probe_state = Path(tempfile.mkdtemp())
+        Path(self.probe_state, "session-hosts").write_text("off")
+
+    def tearDown(self):
+        if self._fake_sdk:
+            sys.modules.pop("claude_agent_sdk", None)
+        sb._cred.managed_settings_path = self._managed
+        sb._STARTUP_AUTH_ENV = self._startup
+        if self._cfg_before is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self._cfg_before
+
+    def _probe_launch_env(self):
+        be = sb.SdkBackend(str(self.probe_state), "/bin/true", lambda *a, **k: None, log=lambda m, **k: None)
+        be.login_ok = lambda: False                       # no login of the machine's own
+        sid = be.spawn("canary", str(self.probe_state), sid=SID)
+        s = sb.SdkSession(be, dict(sb.read_reg(self.probe_state, sid), model=sb.SUBAGENT_STANDARD_MODEL, fast=True))
+        return be._options(s, dict)["env"]
+
+    def test_a_stored_login_default_reaches_the_probes_launch(self):
+        token = "".join(["synthetic", "-probe-", "login"])   # not credential-shaped: the scanner reads this file
+        rec = {"id": sb._logins.mint_id(), "label": "Work", "tokenCmd": "printf '%%s' '%s'" % token,
+               "addedAt": int(__import__("time").time()) - 86400}
+        sb._logins.write_record(self.kernel_state, rec)
+        sb.write_sdk_default(self.kernel_state, model="claude-opus-5-5", auth="login", authExplicit=True,
+                             authLogin=rec["id"])
+        before = self._probe_launch_env()
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", before, "a fresh state root: no default, no credential")
+        self.assertEqual(sb.subagent_canary_billing(self.kernel_state, self.probe_state), "login %s" % rec["id"])
+        env = self._probe_launch_env()
+        self.assertEqual(env.get("CLAUDE_CODE_OAUTH_TOKEN"), token, "the stored login's command, run at the launch")
+        self.assertEqual(env.get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"), "1", "and the skip such a login carries")
+        d = sb.read_sdk_defaults(self.probe_state)
+        self.assertEqual(sorted(k for k in d if not k.endswith("Tok")), ["auth", "authExplicit", "authLogin"],
+                         "the billing only: no model, effort or mode of the user's rides into the probe")
+
+    def test_without_an_explicit_default_the_probe_launches_plain_as_an_unpicked_session_does(self):
+        sb.write_sdk_default(self.kernel_state, auth="login", authExplicit=False)   # a retired seed, not a default
+        self.assertEqual(sb.subagent_canary_billing(self.kernel_state, self.probe_state), "")
+        self.assertFalse((self.probe_state / "sdk-defaults.json").exists())
+        sb.write_sdk_default(self.kernel_state, auth="key", authExplicit=True)
+        self.assertEqual(sb.subagent_canary_billing(self.kernel_state, self.probe_state), "key")
+        self.assertFalse((self.probe_state / sb._logins.LOGINS_DIR).exists(), "a key default carries no record")
+
+    def test_a_default_naming_a_removed_record_falls_to_the_machines_own_login(self):
+        gone = sb._logins.mint_id()   # an id no record carries (minted at run time: a literal reads as a key to the scanner)
+        sb.write_sdk_default(self.kernel_state, auth="login", authExplicit=True, authLogin=gone)
+        self.assertEqual(sb.subagent_canary_billing(self.kernel_state, self.probe_state), "login")
+        self.assertEqual(sb.read_sdk_defaults(self.probe_state).get("authLogin"), "")
 
 
 if __name__ == "__main__":
