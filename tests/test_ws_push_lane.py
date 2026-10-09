@@ -1,19 +1,24 @@
-"""A pane's connect pushes run beside its socket's read loop, never in it (2026-10-09).
+"""A socket's ops run on a lane beside its read loop, and a drive op never waits on it (2026-10-09).
 
-The `ready` arm and every `needFull` serve a whole connect push (Handler._push_one). They ran inline on the socket's
-handler thread, the thread that also READS the socket, so on a kernel where that push took minutes every frame the
-page sent meanwhile sat unread: two chat messages typed after a page load waited behind it, and the reload that
-followed closed the socket before the loop came back to read them. Nothing on either side recorded them. These tests
-drive the real read loop (Handler._ws) and the real dispatch over a scripted socket, with the connect push held open
-on an event, and pin:
+The read loop dispatched every op inline, and the `ready` arm and every `needFull` serve a whole connect push
+(Handler._push_one), so on a kernel where that push took minutes nothing the page sent was read meanwhile: two chat
+messages typed after a page load waited behind it, and the reload that followed closed the socket before the loop came
+back to read them. Nothing on either side recorded them. These tests drive the real read loop (Handler._ws), the real
+dispatch and the real _push_one over a scripted socket, with the connect push itself (_push) held open on an event, and
+pin:
 
-  - an op read after `ready` (a sendMessage) is dispatched while the connect push is still running;
-  - the push work keeps its order: the connect push, the arrangement, the caps frame, then a needFull's push;
-  - a socket that closes mid-push stops the lane: the queued pushes never run and the worker ends;
-  - a connect push whose pane has gone stops building at its next tab.
+  - a drive op read after `ready` (a sendMessage) is dispatched while the connect push is still running;
+  - every other op keeps the order it had on the handler thread: the connect push, the arrangement and the caps
+    frame, then the next op, then a needFull's push;
+  - a socket that ends mid-push: the read loop waits for its lane, so every op it read is still dispatched, while a
+    connect push nobody can read any more is skipped, and the lane's worker ends;
+  - a connect push whose pane has gone stops building at its next tab;
+  - the read loop's drive-op predicate names exactly the ops _drive routes.
 
 Synthetic ids only.
 """
+import ast
+import inspect
 import io
 import json
 import os
@@ -42,13 +47,13 @@ def _frame(msg):
 
 class _Harness:
     """The real Handler._ws over a scripted socket: `frames` are read in order (WAIT blocks the read until `hold` is
-    set; the end of the list is the page closing the socket). The connect push is a stub that records its call and
-    blocks on `release`; the dispatch is the real one, with _drive recording a sendMessage instead of delivering it
-    and the ready arm's two trailing frames recorded by name."""
+    set; the end of the list is the page closing the socket). The dispatch and Handler._push_one are the real ones; the
+    connect push itself (_push) is a stub that records its call and blocks on `release`; _drive records a sendMessage
+    instead of delivering it; the ready arm's two trailing frames are recorded by name."""
 
     def __init__(self, frames, block_pushes=1):
         self.frames = list(frames)
-        self.events = []                  # what ran, in order: "push", "viewOrder", "caps", "send"
+        self.events = []                  # what ran, in order: "push", "viewOrder", "caps", "send", "active"
         self.lock = threading.Lock()
         self.release = threading.Event()  # lets the held connect push return
         self.hold = threading.Event()     # lets a WAIT in the script pass
@@ -79,7 +84,18 @@ class _Harness:
             if isinstance(msg, dict) and msg.get("type") == "sendMessage":
                 h.note("send")
                 return True
+            if isinstance(msg, dict) and msg.get("type") == "activeTab":
+                h.note("active")
             return real_drive(msg, client)
+
+        def push(targets, connect=False, live_map=None):
+            with h.lock:
+                h.pushes += 1
+                n = h.pushes
+            h.client = targets[0]
+            h.note("push")
+            if n <= h.block_pushes:
+                h.release.wait(10)
 
         class FakeSelf:
             headers = {"Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="}
@@ -93,19 +109,12 @@ class _Harness:
             def send_header(self, *a): pass
             def end_headers(self): pass
             _dispatch_ws = km.Handler._dispatch_ws
+            _push_one = km.Handler._push_one
 
-            def _push_one(self, client):
-                with h.lock:
-                    h.pushes += 1
-                    n = h.pushes
-                h.client = client
-                h.note("push")
-                if n <= h.block_pushes:
-                    h.release.wait(10)
-
-        saved = (km._ws_recv, km._drive, km._send_view_order, km._send_caps)
+        saved = (km._ws_recv, km._drive, km._push, km._send_view_order, km._send_caps)
         km._ws_recv = self.recv
         km._drive = drive
+        km._push = push
         km._send_view_order = lambda client: h.note("viewOrder")
         km._send_caps = lambda client, views_seq=None: h.note("caps")
         self._saved = saved
@@ -120,7 +129,7 @@ class _Harness:
             self.loop_done.set()
 
     def restore(self):
-        km._ws_recv, km._drive, km._send_view_order, km._send_caps = self._saved
+        km._ws_recv, km._drive, km._push, km._send_view_order, km._send_caps = self._saved
 
     def wait_for(self, pred, timeout=3.0):
         end = time.time() + timeout
@@ -132,10 +141,11 @@ class _Harness:
         return False
 
 
-class ConnectPushOffTheReadLoop(unittest.TestCase):
+class OpsOffTheReadLoop(unittest.TestCase):
     def _harness(self, frames, **kw):
         h = _Harness(frames, **kw)
         self.addCleanup(h.restore)
+        self.addCleanup(h.loop_done.wait, 10)
         self.addCleanup(h.hold.set)
         self.addCleanup(h.release.set)
         return h
@@ -155,57 +165,52 @@ class ConnectPushOffTheReadLoop(unittest.TestCase):
         h.hold.set()
         self.assertTrue(h.loop_done.wait(5), "the read loop ended when the page closed the socket")
 
-    def test_the_push_work_keeps_its_order(self):
+    def test_every_other_op_keeps_its_order_behind_the_push(self):
         h = self._harness([_frame({"type": "ready", "proto": 2}),
+                           _frame({"type": "activeTab", "id": SID}),
                            _frame({"type": "needFull", "id": SID, "why": "gap"}),
                            _frame({"type": "sendMessage", "id": SID, "text": "add a test for the cache",
                                    "qid": "echo:" + "b" * 32}),
                            WAIT])
         h.run()
         self.assertTrue(h.wait_for(lambda ev: "send" in ev), "the send was dispatched")
-        self.assertEqual(h.events.count("push"), 1, "the needFull's push waits behind the ready arm's, on the same lane")
+        self.assertEqual([e for e in h.events if e != "send"], ["push"],
+                         "the tab switch and the needFull wait behind the connect push, as they did on the handler thread")
+        self.assertIsNone(h.client.get("active"), "the switch has not run yet")
         h.release.set()
         self.assertTrue(h.wait_for(lambda ev: ev.count("push") == 2))
-        pushwork = [e for e in h.events if e != "send"]
-        self.assertEqual(pushwork, ["push", "viewOrder", "caps", "push"],
-                         "the connect push, the arrangement and the caps frame, then the needFull's push: the order the "
-                         "handler thread gave them")
+        self.assertEqual([e for e in h.events if e != "send"], ["push", "viewOrder", "caps", "active", "push"],
+                         "the connect push, the arrangement and the caps frame, the switch, then the needFull's push")
+        self.assertEqual(h.client.get("active"), SID)
         self.assertLess(h.events.index("send"), h.events.index("caps"), "the send did not wait for any of it")
         h.hold.set()
         self.assertTrue(h.loop_done.wait(5))
 
-    def test_a_socket_that_closes_mid_push_stops_the_lane(self):
+    def test_a_socket_that_ends_mid_push_dispatches_what_it_read_and_skips_the_pushes(self):
         h = self._harness([_frame({"type": "ready", "proto": 2}),
+                           WAIT,                                              # the connect push starts…
                            _frame({"type": "needFull", "id": SID, "why": "gap"}),
-                           _frame({"type": "needFull", "id": SID, "why": "prefetch"})])   # then the page goes
+                           _frame({"type": "activeTab", "id": SID}),
+                           _frame({"type": "needFull", "id": SID, "why": "prefetch"})])   # …then the page goes
         h.run()
-        self.assertTrue(h.loop_done.wait(5),
-                        "the read loop reached the close while the connect push was still running")
-        self.assertTrue(h.wait_for(lambda ev: "push" in ev))
-        lane = h.client.get("pushLane")
-        self.assertIsNotNone(lane, "the socket handler armed the client's push lane")
-        self.assertFalse(h.client.get("alive"), "the closed socket's client is dead")
-        h.release.set()
-        end = time.time() + 5
-        while time.time() < end and lane["running"]:
+        self.assertTrue(h.wait_for(lambda ev: "push" in ev), "the connect push is running")
+        h.hold.set()                                                          # the rest is read, then the close
+        end = time.time() + 3
+        while time.time() < end and not h.client.get("closing"):
             time.sleep(0.01)
-        self.assertFalse(lane["running"], "the lane's worker ended")
-        self.assertEqual(len(lane["jobs"]), 0, "and dropped the pushes queued for the pane that went")
-        self.assertEqual(h.pushes, 1, "neither queued needFull push ran after the socket closed")
-        self.assertNotIn("caps", h.events, "the ready arm stops after its push once the pane has gone: no caps to a closed socket")
-
-    def test_a_client_without_a_lane_runs_the_push_inline(self):
-        # a direct dispatch (a test's stand-in client, no socket handler) keeps today's synchronous arm
-        sent = []
-        hs = object.__new__(km.Handler)
-        hs._push_one = lambda c: sent.append("push")
-        client = {"app": "chat", "wid": "w1", "alive": True, "send": lambda s: sent.append(json.loads(s).get("type"))}
-        km.Handler._dispatch_ws(hs, {"type": "needFull", "id": SID, "why": "gap"}, client)
-        self.assertEqual(sent, ["push"], "no lane: the push ran before the dispatch returned")
+        self.assertFalse(h.loop_done.is_set(), "the read loop reached the close and waits for its lane")
+        self.assertTrue(h.client.get("closing"), "the client is marked closing")
+        h.release.set()
+        self.assertTrue(h.loop_done.wait(5), "the lane drained and the loop tore the client down")
+        self.assertEqual(h.pushes, 1, "neither needFull's connect push ran for the pane that went")
+        self.assertIn("active", h.events, "an op the loop read before the close was still dispatched")
+        self.assertFalse(h.client.get("alive"))
+        self.assertFalse(h.client["lane"]["thread"].is_alive(), "the lane's worker ended")
+        self.assertEqual(h.client["lane"]["pending"], 0)
 
 
 class ConnectPushStopsForAGonePane(unittest.TestCase):
-    def test_the_build_loop_stops_at_the_next_tab_once_its_pane_has_gone(self):
+    def _run(self, flip):
         sids = ["11111111-2222-3333-4444-55555555%04x" % i for i in range(1, 4)]
         tabs = [{"sid": s, "name": n, "path": "/nonexistent/%s.jsonl" % s} for s, n in zip(sids, ("web", "api", "tests"))]
         built = []
@@ -213,7 +218,7 @@ class ConnectPushStopsForAGonePane(unittest.TestCase):
 
         def build(sid, now, live_map):
             built.append(sid)
-            client["alive"] = False        # the page closed its socket while this tab built
+            flip(client)                   # the page went while this tab built
             return None
 
         saved = {k: getattr(km, k) for k in ("_chat_tab_sessions", "build_session", "_chat_build_sig", "_live_map")}
@@ -226,7 +231,44 @@ class ConnectPushStopsForAGonePane(unittest.TestCase):
         finally:
             for k, v in saved.items():
                 setattr(km, k, v)
+        return sids, built
+
+    def test_the_build_loop_stops_at_the_next_tab_once_its_socket_is_closing(self):
+        sids, built = self._run(lambda c: c.__setitem__("closing", True))
         self.assertEqual(built, sids[:1], "one tab built, then the connect push saw its pane gone and built no more")
+
+    def test_and_once_its_client_is_dead(self):
+        sids, built = self._run(lambda c: c.__setitem__("alive", False))
+        self.assertEqual(built, sids[:1])
+
+    def test_a_push_that_had_not_started_is_skipped(self):
+        called = []
+        saved = km._push
+        km._push = lambda targets, connect=False, live_map=None: called.append(connect)
+        try:
+            km.Handler._push_one(object.__new__(km.Handler), {"app": "chat", "closing": True})
+            km.Handler._push_one(object.__new__(km.Handler), {"app": "chat"})
+        finally:
+            km._push = saved
+        self.assertEqual(called, [True], "only the live client's connect push ran")
+
+
+class DriveOpsAreTheOnesDriveRoutes(unittest.TestCase):
+    def test_the_predicate_mirrors_drives_own_list(self):
+        tree = ast.parse(inspect.getsource(km._drive).lstrip())
+        own = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "ID_OPS" for t in node.targets):
+                own = tuple(ast.literal_eval(node.value))
+        self.assertIsNotNone(own, "_drive keeps its ID_OPS list")
+        self.assertEqual(own, km._DRIVE_ID_OPS, "the read loop's list is _drive's, op for op")
+        for t in own:
+            self.assertTrue(km._is_drive_op({"type": t, "id": SID}), t)
+        self.assertTrue(km._is_drive_op({"type": "compact", "name": "web"}))
+        self.assertTrue(km._is_drive_op({"type": "askFollowUp", "itemId": SID + ":g1", "cont": True}))
+        for m in ({"type": "ready"}, {"type": "needFull", "id": SID}, {"type": "activeTab", "id": SID},
+                  {"type": "sendMessage"}, {"type": "askFollowUp", "itemId": SID + ":g1"}, None, "x"):
+            self.assertFalse(km._is_drive_op(m), m)
 
 
 if __name__ == "__main__":

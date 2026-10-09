@@ -23282,6 +23282,28 @@ def _refuse_drive(client, op, sid, msg, why=None):
         pass
 
 
+_DRIVE_ID_OPS = ("sendMessage", "rewindSend", "rewindDelete", "interrupt", "compactSession", "answerAsk", "toggleAsk", "submitAsk",
+                 "addCustomAsk", "cancelAsk", "askText", "cancelQueued", "dismissEcho", "apiRetry", "setModel", "setEffort", "setMode", "setFast",
+                 "setSubagentStandard", "setAuth", "endSession", "renameSession", "moveSession", "stopTask", "rewindFiles", "mcpAction", "forkSession",
+                 "commentCreate", "commentReply", "commentResolve", "commentDelete", "commentSeen", "commentPromote",
+                 "commentMerge")
+
+
+def _is_drive_op(msg):
+    """Is `msg` a per-session DRIVE op, one _drive routes (a send, an interrupt, an answer, a setting, a rename…)? The
+    socket's read loop dispatches such an op the moment it is read, ahead of whatever the client's lane is still serving
+    (Handler._ws, 2026-10-09). The same shapes as _drive's front door, whose own list (ID_OPS) this tuple mirrors:
+    tests/test_ws_push_lane.py holds the two equal."""
+    if not isinstance(msg, dict):
+        return False
+    t = msg.get("type")
+    if t in _DRIVE_ID_OPS and msg.get("id"):
+        return True
+    if t in ("compact", "sendCommand") and msg.get("name"):
+        return True
+    return t == "askFollowUp" and bool(msg.get("itemId") or msg.get("id")) and bool(msg.get("text") or msg.get("cont"))
+
+
 def _drive(msg, client):
     """Route a per-session DRIVE op — send / interrupt / compact / ask picker / model·effort·mode / rename /
     end / follow-up — to whichever backend OWNS the sid (Sessions.backend_for(sid)), and return True. UI /
@@ -58391,61 +58413,68 @@ def _note_chat_withheld_at_close(client, now=None):
         return False
 
 
-# ── a pane's connect pushes run off its socket's read thread (2026-10-09) ────────────────────────────────────
-# The `ready` arm and every `needFull` serve a whole connect push (Handler._push_one: _push([client], connect=True), every
-# tab of the board). They used to run inline on the socket's handler thread, which is also the thread that READS the
-# socket, so nothing the page sent was read until the push returned. On a linked machine running dozens of large sessions
-# that push took three to five minutes after every page load (the caps frame that ends the ready arm arrived that late,
-# measured from the page's own frame counters), and two chat messages typed in that window sat unread in the socket: the
-# reload that followed closed it before the loop came back to read them, and neither side kept a trace (the user
-# 2026-10-09). A third, sent just before a deploy, died unread with the kernel the same way.
-# So the push work goes to a per-client LANE: one worker thread at a time per client, its jobs in arrival order, so the
-# ready arm's sequence (connect push, arrangement, caps, the ready stamp, a parked reveal) and every needFull push after it
-# keep the order they had on the handler thread, while the read thread goes straight back to reading and every other op,
-# a sendMessage first of all, is dispatched the moment it arrives. The arms' cheap state flips (the wire, the handshake,
-# the base reset) stay inline, so an op read after them sees them as before. The lane is armed by the real socket
-# handler alone (_ws_arm_push_lane); a client without one (a test's stand-in, a direct _dispatch_ws) runs the job inline,
-# exactly as before. A socket that closes stops the lane at the next job boundary: the queued pushes are dropped (a push
-# to a pane that is gone has no reader), and a connect push already building stops at its next tab (_push).
-def _ws_arm_push_lane(client):
-    """Give a socket's client its push lane (see above). Called by Handler._ws alone."""
-    client["pushLane"] = {"lock": threading.Lock(), "jobs": collections.deque(), "running": False}
+# ── a socket's ops run on a LANE beside its read loop; a drive op never waits on it (2026-10-09) ──────────────────
+# The read loop used to dispatch every op inline, so nothing the page sent was read while an op ran. The `ready` arm and
+# every `needFull` serve a whole connect push (Handler._push_one, every tab of the board), and on a linked machine running
+# dozens of large sessions that push took three to five minutes after every page load (the caps frame that ends the ready
+# arm arrived that late, measured from the page's own frame counters). Two chat messages typed in that window sat unread
+# in the socket; the reload that followed closed it before the loop came back to read them, and neither side kept a trace
+# (the user 2026-10-09). A third, sent just before a deploy, died unread with the kernel the same way.
+# Now the read loop only reads. A DRIVE op (_is_drive_op: a send, an interrupt, an answer, a session setting) is
+# dispatched the moment it is read; every other op goes to the client's lane, one worker thread that dispatches them in
+# arrival order, exactly the order they had on the handler thread. So a connect push and everything after it keep their
+# order (a history ask, a views write, the next needFull), while a user's message to a session is handed over at once.
+# When the socket ends, the client is marked `closing` and the read loop waits for its lane to drain before tearing the
+# client down: every op the kernel read is still dispatched, as it was when it ran inline, while a connect push that has
+# not started is skipped and one that is building stops at its next tab (_push_one, _push), since no reader is left for it.
+def _ws_arm_lane(client):
+    """Start a socket's lane (see above): a queue of (kind, job) and the one worker that drains it. Called by Handler._ws."""
+    lane = {"q": queue.Queue(), "lock": threading.Lock(), "pending": 0}
+    client["lane"] = lane
+    t = threading.Thread(target=_stage_marked("ws-lane")(_lane_worker), args=(client, lane), daemon=True, name="ws-lane")
+    lane["thread"] = t
+    t.start()
+    return lane
 
 
-def _run_push(client, job, kind):
-    """Run `job` (a connect push and whatever must follow it in order) on the client's push lane, or inline when the
-    client has none. `kind` names the op for the log line a failing job writes. Returns whether the job was queued."""
-    lane = client.get("pushLane") if isinstance(client, dict) else None
-    if lane is None:
-        job()
-        return False
+def _lane_put(lane, kind, job):
     with lane["lock"]:
-        lane["jobs"].append((kind, job))
-        if lane["running"]:
-            return True                        # the running worker takes it in turn
-        lane["running"] = True
-    threading.Thread(target=_stage_marked("ws-push")(_push_lane_worker), args=(client, lane), daemon=True, name="ws-push").start()
-    return True
+        lane["pending"] += 1
+    lane["q"].put((kind, job))
 
 
-def _push_lane_worker(client, lane):
-    """Drain one client's push lane in order, then end. A job that raises is logged the way the read loop logs a
-    failing op (`ws handler [kind]`), and the next job still runs; a socket error drops the client, as it did when
-    the push ran on the read thread. A client that has gone (alive False) takes no further job: the queue is
-    dropped and the worker ends."""
+def _lane_worker(client, lane):
+    """Dispatch one socket's lane in order until its sentinel. A job that raises is logged the way the read loop logs a
+    failing op (`ws handler [kind]`) and the next one still runs; a socket error drops the client, as it did when the op
+    ran on the read thread, and a dropped client's remaining jobs are not run (the read loop stopped reading for it then)."""
     while True:
-        with lane["lock"]:
-            if not lane["jobs"] or not client.get("alive", True):
-                lane["jobs"].clear()
-                lane["running"] = False
-                return
-            kind, job = lane["jobs"].popleft()
+        item = lane["q"].get()
+        if item is None:
+            return
+        kind, job = item
         try:
-            job()
+            if client.get("alive", True):
+                job()
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
-            _drop_dead_ws_client(client, "its %s push hit a socket error (%s)" % (kind, e))
+            _drop_dead_ws_client(client, "a %s op hit a socket error (%s)" % (kind, e))
         except Exception:
             sys.stderr.write("ws handler [%s]: %s\n" % (kind, traceback.format_exc()))
+        finally:
+            with lane["lock"]:
+                lane["pending"] -= 1
+
+
+def _lane_close(client):
+    """The socket ended: mark the client closing (a connect push still to run, or running, stops: _push_one, _push), let
+    the lane dispatch what the read loop read, and end its worker. Blocks until it has."""
+    lane = client.get("lane")
+    if lane is None:
+        return
+    client["closing"] = True
+    lane["q"].put(None)
+    t = lane.get("thread")
+    if t is not None and t is not threading.current_thread():
+        t.join()
 
 
 def _drop_dead_ws_client(client, why):
@@ -64802,8 +64831,8 @@ def _push(targets, connect=False, live_map=None):
                         _work = _again + [x for x in _work if x["sid"] in newly] + [x for x in _work if x["sid"] not in newly]
                 if not _work:
                     break
-                if connect and not any(c.get("alive", True) for c in targets):
-                    break                                # the pane this connect push serves has gone: no reader for the rest (_run_push)
+                if connect and not any(c.get("alive", True) and not c.get("closing") for c in targets):
+                    break                                # the pane this connect push serves has gone: no reader for the rest (_lane_close)
                 s = _work.pop(0)
                 _served.add(s["sid"])
                 is_active = s["sid"] in active           # the watched tab(s): served like any tab while the key holds
@@ -82454,7 +82483,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the repair full below serves from it (a superset) or, if the turns are gone, sets them aside via `rebased`.
                 # _send_chat_proto2 consumes it, so a later no-key needFull (a click, the prefetch) is not served from it (M3).
                 client.setdefault("heldTailFirst", {})[sid] = msg["heldTailFirst"]
-            _run_push(client, lambda: self._push_one(client), "needFull")   # repair NOW, on the push lane, never on this read thread
+            self._push_one(client)                            # repair NOW, not on the next 0.5-3s tick
             return
         if msg and msg.get("type") in ("loadOlder", "loadAround", "loadNewer", "loadTurns") and msg.get("id") \
                 and (client.get("proto") or 1) >= 2 and not isinstance(msg.get("before"), int):
@@ -82602,63 +82631,59 @@ class Handler(BaseHTTPRequestHandler):
             #                                   its lock, so the connect push below serves the view its handshake declared
             if _active_chat_audience(client):
                 _send_active_chat(client)      # T347: the window's focus, ahead of the first paint (the Artifacts pane too, 9.5; never a relay-kind client)
-            def _serve_ready():   # the connect push and what follows it, in order, on the client's push lane (_run_push)
-                # Capture the seq of the views blob the pushes below serve — from the frames THIS thread
-                # enqueues, so a pusher-thread frame landing meanwhile is not mistaken for the connect push's
-                # (the caps frame's viewsSeq, see KERNEL_WS_CAPS)
-                _VIEWS_SERVED.seqs = []
+            # Capture the seq of the views blob the pushes below serve — from the frames THIS thread
+            # enqueues, so a pusher-thread frame landing meanwhile is not mistaken for the connect push's
+            # (the caps frame's viewsSeq, see KERNEL_WS_CAPS)
+            _VIEWS_SERVED.seqs = []
+            try:
+                # the tab strip rides the connect push (living PLUS kept-open, via the slot the reset cleared); none of its own here
+                self._push_one(client)
+            finally:
+                seqs, _VIEWS_SERVED.seqs = _VIEWS_SERVED.seqs, None
+            # The viewer's ARRANGEMENT this kernel keeps (2026-09-23), before the caps frame like every
+            # other part of the connect push: the page applies it to the strip, the lanes and the feed's
+            # groups the moment it lands, and a browser that carries an arrangement into a kernel that has
+            # none publishes its own off this frame, so the move loses nobody's order. Its own dedup slot,
+            # so a reconnect that changes nothing costs nothing.
+            _send_view_order(client)
+            # What this kernel can do for the page (KERNEL_WS_CAPS), after the pushes above and on every
+            # `ready`: the shell's socket, which re-sends ready at every open, learns them again; a page
+            # whose views writes were in flight across a drop learns, when a ready reaches its socket and
+            # this frame answers it, that their answers may never come; and the pane shim reads the frame
+            # as the kernel's word that this ready was processed and the page served whole ahead of it, the
+            # latch of its redial gate (readyAcked in _shim): the frame goes last and from this arm alone. It
+            # carries the seq of the views blob those pushes served (viewsSeq), read above — or, when
+            # they served none (a chat page on a sentinel cycle gets no tabOrder frame), the STORE's
+            # current seq, the seq the next push serves (the 2026-09-05 review: with null here nothing
+            # re-armed a page's gate after a restart over a restored older store, and it rejected every
+            # later push under the old seq until the next write). Null only when there is no store at
+            # all — a fresh install, or a legacy store whose first stamp could not be written — which
+            # has no seq.
+            if seqs:
+                views_seq = max(seqs)
+            else:
                 try:
-                    # the tab strip rides the connect push (living PLUS kept-open, via the slot the reset cleared); none of its own here
-                    self._push_one(client)
-                finally:
-                    seqs, _VIEWS_SERVED.seqs = _VIEWS_SERVED.seqs, None
-                if not client.get("alive", True):
-                    return                    # the pane went while its push ran: no caps, no ready stamp for a closed socket
-                # The viewer's ARRANGEMENT this kernel keeps (2026-09-23), before the caps frame like every
-                # other part of the connect push: the page applies it to the strip, the lanes and the feed's
-                # groups the moment it lands, and a browser that carries an arrangement into a kernel that has
-                # none publishes its own off this frame, so the move loses nobody's order. Its own dedup slot,
-                # so a reconnect that changes nothing costs nothing.
-                _send_view_order(client)
-                # What this kernel can do for the page (KERNEL_WS_CAPS), after the pushes above and on every
-                # `ready`: the shell's socket, which re-sends ready at every open, learns them again; a page
-                # whose views writes were in flight across a drop learns, when a ready reaches its socket and
-                # this frame answers it, that their answers may never come; and the pane shim reads the frame
-                # as the kernel's word that this ready was processed and the page served whole ahead of it, the
-                # latch of its redial gate (readyAcked in _shim): the frame goes last and from this arm alone. It
-                # carries the seq of the views blob those pushes served (viewsSeq), read above — or, when
-                # they served none (a chat page on a sentinel cycle gets no tabOrder frame), the STORE's
-                # current seq, the seq the next push serves (the 2026-09-05 review: with null here nothing
-                # re-armed a page's gate after a restart over a restored older store, and it rejected every
-                # later push under the old seq until the next write). Null only when there is no store at
-                # all — a fresh install, or a legacy store whose first stamp could not be written — which
-                # has no seq.
-                if seqs:
-                    views_seq = max(seqs)
-                else:
-                    try:
-                        views_seq = _timeline_views().get("seq")
-                    except Exception:
-                        views_seq = None
-                _send_caps(client, views_seq=views_seq)
-                # From here the pane LISTENS and holds its frames (the push above): a tap that arrives now is sent
-                # to it directly (_reveal_request targets panes with this stamp only, T312: a socket registered at
-                # its handshake but still loading its bundle has no listener, and its own `ready` message counts
-                # as an answer to _note_ws_inbound, so a frame sent to it earlier was lost and its copy retired);
-                # one that arrived before this point parked, and is consumed right below.
-                client["ready"] = True
-                # a push tap parked a reveal for this window's chat pane → deliver it now, AFTER the
-                # ready push, so the tab it names already exists on the client (ordered socket)
-                _consume_pending_reveal(client)
-                # a shell that just connected paints the app-icon badge from the latest count — an
-                # installed app relaunching is exactly when the icon's number needs truing up
-                if client.get("app") == "shell" and _BADGE_LAST[0] is not None:
-                    try:
-                        client["send"](json.dumps({"type": "badge", "n": _BADGE_LAST[0]}))
-                    except Exception:
-                        pass
-                _apih_resend(client)          # and the bottom bar's API cell, from the last frame (same reason)
-            _run_push(client, _serve_ready, "ready")
+                    views_seq = _timeline_views().get("seq")
+                except Exception:
+                    views_seq = None
+            _send_caps(client, views_seq=views_seq)
+            # From here the pane LISTENS and holds its frames (the push above): a tap that arrives now is sent
+            # to it directly (_reveal_request targets panes with this stamp only, T312: a socket registered at
+            # its handshake but still loading its bundle has no listener, and its own `ready` message counts
+            # as an answer to _note_ws_inbound, so a frame sent to it earlier was lost and its copy retired);
+            # one that arrived before this point parked, and is consumed right below.
+            client["ready"] = True
+            # a push tap parked a reveal for this window's chat pane → deliver it now, AFTER the
+            # ready push, so the tab it names already exists on the client (ordered socket)
+            _consume_pending_reveal(client)
+            # a shell that just connected paints the app-icon badge from the latest count — an
+            # installed app relaunching is exactly when the icon's number needs truing up
+            if client.get("app") == "shell" and _BADGE_LAST[0] is not None:
+                try:
+                    client["send"](json.dumps({"type": "badge", "n": _BADGE_LAST[0]}))
+                except Exception:
+                    pass
+            _apih_resend(client)          # and the bottom bar's API cell, from the last frame (same reason)
         elif msg and msg.get("type") == "setSessionFlag" and msg.get("id") and msg.get("flag"):
             # timeline lane gear → toggle a per-session view flag (e.g. hideFromFeed). Persisted +
             # re-broadcast so the feed drops/restores that session's cards immediately. The notify
@@ -83884,7 +83909,7 @@ class Handler(BaseHTTPRequestHandler):
             client["col"] = col
         if provrows:
             client["provRows"] = True
-        _ws_arm_push_lane(client)                  # connect pushes run beside this read loop, never in it (_run_push)
+        lane = _ws_arm_lane(client)                # every op but a drive op runs on the client's lane, in order (_ws_arm_lane)
         _register_ws_client(client)
         _note_ws_open(client, reconnect=reconnect)   # the durable record of this open: app, wid, kind (page or relay), reconnect
         if client.get("reconnect"):
@@ -83908,8 +83933,13 @@ class Handler(BaseHTTPRequestHandler):
                     msg = json.loads(payload.decode("utf-8", "replace"))
                 except Exception:
                     msg = None
+                if not _is_drive_op(msg):
+                    # on the lane, behind whatever it still serves (a connect push, a history page), in arrival order
+                    _lane_put(lane, (msg or {}).get("type") if isinstance(msg, dict) else None,
+                              functools.partial(self._dispatch_ws, msg, client))
+                    continue
                 try:
-                    self._dispatch_ws(msg, client)
+                    self._dispatch_ws(msg, client)     # a drive op: dispatched now, never behind the lane
                 except (BrokenPipeError, ConnectionResetError, OSError):
                     raise   # a genuine socket failure → let the outer handler tear the connection down
                 except Exception:
@@ -83919,6 +83949,7 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
+            _lane_close(client)                    # what the loop read is still dispatched; a connect push nobody can read stops
             client["alive"] = False
             sendq.put(None)                    # end this client's sender thread
             _note_chat_withheld_at_close(client)   # a socket that closed without ever declaring its wire, chat frames withheld: said once, here
@@ -84421,6 +84452,8 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def _push_one(self, client):
+        if client.get("closing"):
+            return                                # its socket ended before this push ran (_lane_close): nobody left to read it
         _t0 = time.monotonic()
         try:
             _push([client], connect=True)         # full state to a fresh client (its per-client dedup is empty);
