@@ -275,7 +275,18 @@ forks (one boundary ends one `/clear`, in press order), and the kernel retires i
 `/clear` echo at that same boundary by the taken copy's id. A Codex `/clear` runs the
 native clear instead (a fresh app-server thread), so it reaches no clear boundary and its bubble ends the ordinary way, on the acknowledging chip when the clear runs and on the refusal when it fails. The served lab's fake SDK writes the fresh-episode record group too (CLI 2.1.280 emits a session caveat, the `/clear` command-name record, and a local-command record within milliseconds of the init), so a solo `/clear` there ends on a ready frame with the `/clear` a landed command row. The clear-to-empty leftover an earlier record-less fixture showed (2026-09-24) was that fixture's gap, not a kernel bug.
 While the socket is down the bubble is labelled "not confirmed", until a kernel
-copy of the send clears the label. A send that landed mid-turn (`absorbed` on the
+copy of the send clears the label. A kernel that speaks the send acknowledgement
+(its keepalive carries `acks`, its caps list `sendAck`) answers every send that
+carries the press's id with a `sendAck` frame once it has handed the send over,
+parked it or refused it. Until that answer the page keeps the send in its
+persisted state, so a reload brings the bubble back labelled "not confirmed"
+instead of dropping the words, and it posts the send again, marked `resend`, on
+the next socket whose kernel says it recognises one. That kernel answers a resend
+it has already decided on as a duplicate and delivers nothing twice; the decided
+ids live in `accepted-sends.json` under the state root, so a kernel restart
+between the send and the resend changes nothing. A kernel that never says so is
+never sent anything twice: its sends keep the label, and the ✎ puts the words
+back in the box. A send that landed mid-turn (`absorbed` on the
 user chat event) is placed where the model READ it: at its landing time, the
 moment the CLI took it off its queue, below the steps that ran while it waited
 (T252d, the user 2026-09-08). Their reasoning: the pane used to draw the message

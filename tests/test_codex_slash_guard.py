@@ -163,8 +163,11 @@ class CodexSlashRefused(_Guarded):
         # the composer's press: the sendMessage arm, with the copy id the client minted
         self.assertTrue(km._drive({"type": "sendMessage", "id": SID, "text": "/help", "qid": QID}, self.client))
         self.assertEqual(self.be.calls, [], "the backend never saw the text: no send, no echo, no prompt")
-        self.assertEqual(len(self.sent), 1, "one frame on the delivering socket")
-        frame = self.sent[0]
+        # beside the send's answer (sendAck, kernel.py _send_ack: decided here, so the page never resends it)
+        self.assertEqual([f["type"] for f in self.sent if f["type"] == "sendAck"], ["sendAck"])
+        warns = [f for f in self.sent if f["type"] != "sendAck"]
+        self.assertEqual(len(warns), 1, "one frame on the delivering socket")
+        frame = warns[0]
         self.assertEqual((frame["type"], frame["sid"], frame["qid"]), ("warn", SID, QID),
                          "the warn names the session and the press, so the chat retires the bubble it drew")
         self.assertIn("runs in Codex", frame["text"])
@@ -561,9 +564,10 @@ class RealBackendGuard(unittest.TestCase):
         self.assertEqual(self.fake.called("turn_steer"), [], "no steer with the word")
         self.assertEqual(self.be.live_atoms(SID2), [], "no echo minted: the backend's send never ran")
         self.assertEqual(self.be._session(SID2).queue, [], "the durable queue took nothing")
-        self.assertEqual(len(self.sent), 1)
-        self.assertEqual((self.sent[0]["type"], self.sent[0]["sid"], self.sent[0]["qid"]), ("warn", SID2, QID))
-        self.assertIn("has no /help", self.sent[0]["text"])
+        warns = [f for f in self.sent if f["type"] != "sendAck"]   # beside the send's answer (kernel.py _send_ack)
+        self.assertEqual(len(warns), 1)
+        self.assertEqual((warns[0]["type"], warns[0]["sid"], warns[0]["qid"]), ("warn", SID2, QID))
+        self.assertIn("has no /help", warns[0]["text"])
         self.assertEqual(len(self.fake.called("thread_start")), 1, "no thread minted either: a refusal is not a clear")
         self.assertEqual(self.fake.called("thread_compact"), [], "nor compacted: a refusal is not a compaction")
         self.assertIn("web: ", km._SYNC_NOTICES[-1]["text"], "the bell row names the session")

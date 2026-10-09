@@ -75,6 +75,7 @@ import { NavHistory } from "./nav-history";
 import { StagedStack, quoteReplyBody, stagedPosts, type StagedMsg } from "./staged-messages";
 import { isSlashCommand } from "./staged-messages";   // the viewer's message bar refuses a slash command (2026-09-30)
 import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, isKernelEchoUuid, newPending, mintQid, reconcilePending, clearBoundarySeen, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody, refusedRestoreText } from "./send-pending";
+import { applySendAck, defaultWire, keptSends, markHostLost, pendingFromKept, resendable, resendWire, restoreKept } from "./send-acks";
 import { type FrameWm, frameOlder, droppedLandedHuman, dropsLandedRow, forgetHeldWm } from "./frame-guard";   // the frame watermark guard (2026-09-22): an older build's frame is ignored, a vanished landed turn is filed; a reconnect forgets the held watermarks
 import { type LandEvent, LandingWatch } from "./send-landing";   // the send-landing invariant (2026-09-23): observation only, around the frame dispatch (landingBefore / landingAfter)
 import { readBaseFp, checkBase, newResyncState, onMismatch, onAgree, forgetResync, staleAnswer } from "./chat-resync";   // the delta's base check (2026-09-23): a delta cut against a base the page does not hold is refused and the full asked for, bounded by event
@@ -605,7 +606,9 @@ function reconcileOptimisticInner(s: Session, clearBoundary: boolean = false): v
                                        && (e.qid === q || (Array.isArray(e.qids) && e.qids.includes(q)))))
       chatDiagRow("pending-survived-landing", { sid: s.id, qid: q, clear: !!kp.clear });
   }
+  const _before = (pendingSent.get(s.id) || []).length;
   if (r.keep.length) pendingSent.set(s.id, r.keep); else pendingSent.delete(s.id);
+  if (r.keep.length !== _before) persistKeptSends();   // a landing or a verdict retired a send: the kept list follows
   const heldBy = new Map<PendingSend, NonNullable<Extract<ChatEvent, { kind: "queued" }>["held"]>>();
   const covered = new Set<PendingSend>();   // a kernel copy that stays shown (non-cancelable: no recall exists) covers ours
   for (const p of r.unqueue) {
@@ -738,11 +741,16 @@ function hideQueuedCopy(s: Session, p: PendingSend): { held?: Extract<ChatEvent,
 // copy's id the caller minted at the press (mintQid) and posted with the send, so the kernel queues or parks the
 // copy under the id this bubble wears and the bubble, the kernel's chip and the ✕ agree from the press; a caller
 // that posts nothing (a provisional tab's send, held until the session exists) lets the entry mint its own.
-function registerOptimistic(id: string, text: string, imgPaths?: string[], qid?: string, paths?: string[], clear?: boolean): void {
+function registerOptimistic(id: string, text: string, imgPaths?: string[], qid?: string, paths?: string[], clear?: boolean, wire?: Record<string, unknown>): void {
   const arr = pendingSent.get(id) || [];
   const p = newPending(text, imgPaths, Date.now(), qid, paths, clear);
   arr.push(p);   // the anchor (`at`) is stamped by the reconcile just below
+  // the message as posted, for a resend if no kernel answers it (send-acks.ts): a follow-up hands its own; a plain or quoted
+  // send posted exactly the default
+  p.wire = wire || defaultWire(id, p);
+  if (hostSocketDown(id)) p.lost = "connection";   // posted to a host whose socket is down: it went nowhere yet (federation's toast says so)
   pendingSent.set(id, arr);
+  persistKeptSends();   // kept across a reload until a kernel answers it
   try { if (p.qid) landingWatch.send(id, p.qid, p.ts); } catch { /* observation only (send-landing.ts) */ }
   const s = sessions.get(id);
   // No resident frame to stamp against: the active tab is a PLACEHOLDER (its meta arrived, its payload
@@ -795,6 +803,91 @@ function markPendingLost(why: string): void {
   }
   if (activeChanged) appendActive();
 }
+
+// ── unanswered sends (send-acks.ts, 2026-10-09) ──────────────────────────────────────────────────────
+// A send is the page's until its kernel ANSWERS it (sendAck). Until then it is kept across a reload (the persisted state,
+// beside the drafts), it says "not confirmed" when the socket to its kernel goes down, and it is posted again on the next
+// socket whose kernel says it recognises a resend (romp:hostAcks); that kernel takes a send it already has as a duplicate.
+// The decisions are send-acks.ts's; this keeps the map, the storage and the events.
+const resentOn = new WeakMap<PendingSend, number>();   // the host socket generation a send was last posted again on
+const ackGen = new Map<string, number>();              // host → how many sockets to it have said they recognise a resend
+let keptSig = "";
+function persistKeptSends(): void {
+  try {
+    const kept = keptSends(pendingSent);
+    const sig = kept.map((k) => k.qid).join(",");
+    if (sig === keptSig) return;                       // nothing changed for the store: no write per push
+    keptSig = sig;
+    vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), pendingSends: kept });
+  } catch { /* storage refused: the sends still live in this page */ }
+}
+/** A remote session whose host's socket is not open: a send posted to it now went nowhere (federation's toast). */
+function hostSocketDown(sid: string): boolean {
+  const h = hostOf(sid);
+  if (!h) return false;
+  try { const fed = (window as any).__rompFed; return !!fed && typeof fed.open === "function" && !fed.open(h); } catch { return false; }
+}
+/** Has the socket to `host` ("" = this page's own kernel) said that its kernel recognises a resend? */
+function hostAcks(host: string): boolean {
+  try {
+    if (!host) return !!(window as any).__rompAcksLocal;
+    const fed = (window as any).__rompFed;
+    return !!fed && typeof fed.acks === "function" && !!fed.acks(host);
+  } catch { return false; }
+}
+/** Post again every unanswered send to `host`'s sessions, once per socket: its kernel answers each (a duplicate it
+ *  already has is answered without being delivered twice). One journal row per resend: the send's id, never its text. */
+function resendUnacked(host: string): void {
+  if (!vscodeApi) return;
+  const gen = (ackGen.get(host) || 0) + 1;
+  ackGen.set(host, gen);
+  for (const { sid, p } of resendable(pendingSent, host, hostOf, resentOn, gen)) {
+    resentOn.set(p, gen);
+    vscodeApi.postMessage(resendWire(p));
+    vscodeApi.postMessage({ type: "clientDiag", surface: "chat", what: "resend", data: { sid, key: p.qid, host, restored: p.lost === "reload" } });
+  }
+}
+/** A send's answer, by the id the press minted (the kernel's sendAck frame). */
+function onSendAck(sid: string, qid: string, ok: boolean): void {
+  const list = pendingSent.get(sid);
+  if (!list || !applySendAck(list, qid, ok)) return;
+  persistKeptSends();
+  const s = sessions.get(sid);
+  if (s) reconcileOptimistic(s);      // a "not confirmed" label may go
+  if (sid === activeId) appendActive();
+}
+/** That host's socket went down: its unanswered sends say "not confirmed" until the next socket's resend is answered. */
+function markHostPendingLost(host: string): void {
+  let activeChanged = false;
+  for (const sid of markHostLost(pendingSent, host, hostOf, "connection")) {
+    const s = sessions.get(sid);
+    if (s) reconcileOptimistic(s);
+    if (sid === activeId) activeChanged = true;
+  }
+  if (activeChanged) appendActive();
+}
+// What the last page kept: its unanswered sends come back as bubbles labelled "not confirmed", and go again as soon as a
+// socket to their kernel says it recognises a resend (now, when it already has; else on its romp:hostAcks).
+try {
+  const kept = restoreKept(((vscodeApi?.getState?.() || {}) as any).pendingSends);
+  const hosts = new Set<string>();
+  for (const k of kept) {
+    const list = pendingSent.get(k.sid) || [];
+    if (list.some((p) => p.qid === k.qid)) continue;
+    list.push(pendingFromKept(k));
+    pendingSent.set(k.sid, list);
+    hosts.add(hostOf(k.sid));
+  }
+  for (const h of hosts) if (hostAcks(h)) resendUnacked(h);
+} catch { /* a corrupt store restores nothing; restoreKept already skips a bad row */ }
+window.addEventListener("romp:hostAcks", (e: Event) => {
+  const h = (e as CustomEvent).detail?.host;
+  if (typeof h === "string") resendUnacked(h);
+});
+window.addEventListener("romp:hostRelayDown", (e: Event) => {
+  const h = (e as CustomEvent).detail?.host;
+  if (typeof h === "string" && h) markHostPendingLost(h);
+});
 
 // ── conversation rewind (edit a past message, SDK sessions) ──────────────────────────────────────
 // Editing a user bubble rewinds the conversation to just before it and sends the edited text as the
@@ -19211,7 +19304,7 @@ function routeUserMessage(sid: string, text: string, cites: Citation[] | undefin
   // `paths`: every attachment the trailing line carries, on the frame (the kernel keeps it beside the copy's id and ships
   // it on the queued copy) and on the record, so a rescind gives back exactly what went out (T373 fold, medium 1)
   const att = paths && paths.length ? { paths } : {};
-  if (goalCite?.itemId) { vscodeApi.postMessage({ type: "askFollowUp", itemId: goalCite.itemId, text, sid, qid, ...att }); registerOptimistic(sid, text, imgPaths, qid, paths); }
+  if (goalCite?.itemId) { const fu = { type: "askFollowUp", itemId: goalCite.itemId, text, sid, qid, ...att }; vscodeApi.postMessage(fu); registerOptimistic(sid, text, imgPaths, qid, paths, false, fu); }   // the follow-up's own wire, for a resend (send-acks.ts)
   else if (quoteCites.length) { const body = quoteReplyBody(quoteCites, text); vscodeApi.postMessage({ type: "sendMessage", id: sid, text: body, qid, ...att }); registerOptimistic(sid, body, imgPaths, qid, paths); }
   // EVERY send gets its optimistic bubble, /clear included: it is the send's only trace and its only cancel
   // during a socket outage, and a refused Codex /clear needs the entry for the warn handler to restore. A
@@ -21945,6 +22038,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   if (m.type === "pipeState" && m.up) forgetHeldWm(sessions, null);   // …and the held watermarks go (frame-guard.ts, 2026-09-23): the kernel behind the pane's pipe may be a fresh process whose live-tail revision restarted at 0
   if (m.type === "pipeState" && !m.up && paneArranges(window as any)) { setViewOrderPublisher(null); setFoldsPublisher(null); }   // the pipe that heard the kernel's arrangement is gone: stop speaking for it until the next connection's viewOrder frame (view-order.ts ViewOrderPublisher, 2026-09-23)
   if (m.type === "pipeState") { if (!m.up) { markPendingLost("connection"); onWireDown(); } pipeBanner(!!m.up, Number(m.queued) || 0); return; }   // the pane's down edge clears the in-flight asks as the socket's does (round nine, medium 2)
+  if (m.type === "sendAck") { if (typeof m.id === "string" && typeof m.qid === "string") onSendAck(m.id, m.qid, !!m.ok); return; }   // a kernel answered a send (send-acks.ts)
   // any kernel message proves the kernel is reachable again — heal previews whose fetch died in a
   // restart window (preview.ts retryFailedPreviews; a no-op when nothing failed). federation's
   // tunnel poll rides this same path: it dispatches {type:"hostUp"} on a host's down→up transition,

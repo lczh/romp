@@ -34,7 +34,7 @@ test("the plain send registers an optimistic bubble; follow-up/quote sends keep 
   // kernel-side echo (the branch lives in routeUserMessage since the staged flush, 2026-08-15)
   assert.match(RENDER, /else \{ vscodeApi\.postMessage\(\{ type: "sendMessage", id: sid, text, qid, \.\.\.att \}\); registerOptimistic\(sid, text, imgPaths, qid, paths, isClearCmd\(text\) && liveSession\(sid\)\?\.status\?\.backend !== "codex"\); \}/);
   // registerOptimistic shows it NOW (before any push) via reconcile + appendActive
-  assert.match(RENDER, /function registerOptimistic\(id: string, text: string, imgPaths\?: string\[\], qid\?: string, paths\?: string\[\], clear\?: boolean\): void/);   // + the /clear-ends-at-boundary flag (2026-09-24); + the dragged-image paths → echo thumbnails; + the copy's id the caller minted and posted
+  assert.match(RENDER, /function registerOptimistic\(id: string, text: string, imgPaths\?: string\[\], qid\?: string, paths\?: string\[\], clear\?: boolean, wire\?: Record<string, unknown>\): void/);   // + the /clear-ends-at-boundary flag (2026-09-24); + the dragged-image paths → echo thumbnails; + the copy's id the caller minted and posted; + the posted wire, for a resend no kernel answered (send-acks.ts)
   // the active-tab arm still paints via appendActive (the snap gate moved ahead of it, 2026-08-30); the reconcile names what it
   // changed (repaintFromChange), no stale mark: a send touches the tail units it changes and nothing above (2026-09-23)
   assert.match(RENDER, /reconcileOptimistic\(s\);\s*\n\s*if \(id === activeId\) \{/);

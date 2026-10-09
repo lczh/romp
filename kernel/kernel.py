@@ -23320,27 +23320,48 @@ def _drive(msg, client):
     # no error, no record. Per the fail-loudly rule, an op we cannot deliver must SAY so instead of degrading
     # into a no-op. `_kernel_knows` is the registry, not liveness: a dead-but-ours session still resolves, so
     # reviving sends keep working — only a genuinely foreign sid lands here.
+    # a chat send's press-minted id, which the kernel answers (sendAck) and recognises when the page sends it again
+    _aq = _wire_qid(msg) if ((t == "sendMessage" and msg.get("text")) or t == "askFollowUp") else None
     if not _kernel_knows(sid):
         _refuse_drive(client, t, sid, msg)
+        _send_ack(client, sid, _aq, False)                # decided: refused (no session here will ever take it)
         return True                                       # consumed: refused, reported, and recorded
     be = Sessions.backend_for(sid)
+    if _aq and msg.get("resend"):
+        # the page's RESEND of a send no kernel answered (after a reconnect or a reload, send-acks.ts): when this kernel has
+        # already decided on it, or the session holds a copy under its id, it is answered again and never delivered twice.
+        # Only a resend is looked up: a first post is always delivered, as before
+        _seen = _send_seen(_aq, sid, be)
+        if _seen is not None:
+            _send_ack(client, sid, _aq, _seen["ok"] is not False, dup=True)
+            return True
     if t == "sendMessage" and msg.get("text"):
         # a typed "/model X" / "/effort X" / "/fast X" is a SETTING, not a message: it takes the kernel's
         # own setter — registry, sdk-defaults, pick memory and the reconnect's --model all follow — never
         # the CLI as literal text (see _route_meta_command). Everything else is the CLI's.
-        if _route_meta_command(be, sid, str(msg["text"]), client, qid=_wire_qid(msg)):   # the press-minted copy id rides a refusal (2026-09-19)
-            _push_soon()
-        else:
-            if _send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be), user=True, paths=_wire_paths(msg)) is None:
-                if be is not _UNOWNED and sid in _ending_sids:
-                    # the session is ENDING (the End doors' cancel latched it, _drop_parked_on_end): its park was refused, or
-                    # its backend refused the handover, and the words come back to THIS pane the way End hands a parked
-                    # message back, through the not-delivered path with the text in the copy slot (2026-09-21). A session
-                    # no backend owns keeps the bare warn below.
-                    _refuse_drive(client, t, sid, msg, why="The session ended before romp could hand this over")
-                else:
-                    client["send"](json.dumps({"type": "warn", "text": "the message was not delivered: no running backend owns this session"}))
-            _push_soon()  # idle → instant echo; SDK busy → queued bubble forwarded mid-turn + folded (but a SLASH COMMAND parks to fire alone at turn end — mid-turn it would land as text, not execute); a backend that cannot forward, busy → held + merged at turn end
+        try:
+            if _aq:
+                _send_decide(_aq, sid, None)              # being decided: a resend arriving meanwhile is a duplicate
+            if _route_meta_command(be, sid, str(msg["text"]), client, qid=_wire_qid(msg)):   # the press-minted copy id rides a refusal (2026-09-19)
+                _ok = True
+                _push_soon()
+            else:
+                _ok = _send_or_park(be, sid, str(msg["text"]), echo="human", qid=_client_qid(msg, sid, be), user=True, paths=_wire_paths(msg)) is not None
+                if not _ok:
+                    if be is not _UNOWNED and sid in _ending_sids:
+                        # the session is ENDING (the End doors' cancel latched it, _drop_parked_on_end): its park was refused, or
+                        # its backend refused the handover, and the words come back to THIS pane the way End hands a parked
+                        # message back, through the not-delivered path with the text in the copy slot (2026-09-21). A session
+                        # no backend owns keeps the bare warn below.
+                        _refuse_drive(client, t, sid, msg, why="The session ended before romp could hand this over")
+                    else:
+                        client["send"](json.dumps({"type": "warn", "text": "the message was not delivered: no running backend owns this session"}))
+                _push_soon()  # idle → instant echo; SDK busy → queued bubble forwarded mid-turn + folded (but a SLASH COMMAND parks to fire alone at turn end — mid-turn it would land as text, not execute); a backend that cannot forward, busy → held + merged at turn end
+        except BaseException:
+            if _aq:
+                _send_forget(_aq)                         # no decision was made: the page's resend may try again
+            raise
+        _send_settle(client, sid, _aq, _ok)
     elif t == "rewindSend" and msg.get("uuid") and msg.get("text"):
         # Edit a past message (SDK sessions): rewind the conversation to just before it and send the
         # edited text as the branch's next turn. NO optimistic kernel echo — the edit lands mid-chat
@@ -23428,6 +23449,8 @@ def _drive(msg, client):
         # Mid-compaction the whole send is PARKED (queued bubble; delivered when compaction ends — _send_or_park);
         # the backend echoes the send for itself.
         try:
+            if _aq:
+                _send_decide(_aq, sid, None)              # being decided: a resend arriving meanwhile is a duplicate
             _handed = _send_or_park(be, sid, body, qid=_client_qid(msg, sid, be),
                                     user=not msg.get("nudge"), paths=_wire_paths(msg))   # a follow-up is the user's; a nudge is romp's; its attachments ride as a send's do (T373 fold round two)
         except OSError as e:
@@ -23435,12 +23458,19 @@ def _drive(msg, client):
             # refusal this arm already has, with the cause, where the raise used to reach the receive loop's OSError arm and tear
             # the socket down with the typed text (Continue, a typed reply and the modal's Check status all ride this arm)
             _refuse_drive(client, t, sid, msg, why="romp could not write its state (%s)" % _store_fault_copy(e))
+            _send_settle(client, sid, _aq, False)
             return True
+        except BaseException:
+            if _aq:
+                _send_forget(_aq)                         # no decision was made: the page's resend may try again
+            raise
         if _handed is None:
             # the feed predicted the move on the click; the err frame carrying op + itemId is what it reverts
             # on (_refuse_drive's shape), so the card comes back at once with the reason, not on the backstop
             _refuse_drive(client, t, sid, msg, why="No running backend owns this session")
+            _send_settle(client, sid, _aq, False)
             return True                                   # consumed, refused: no cue, no reopen, no note
+        _send_settle(client, sid, _aq, True)              # handed over or parked: the page's copy has its kernel
         if iid:                                           # optimistic: reopen the card NOW, before the judge pass
             _predict_working("followup", ids=[iid])       # instant cue to every feed view (chat-typed citation
             #                                               follow-ups included) — the reopen below is what the
@@ -42139,21 +42169,142 @@ def _client_qid(msg, sid, be):
     q = _wire_qid(msg)
     if not q:
         return None
-    held = False
-    with _pending_ops_lock:
-        held = any(_op_qid(op) == q for op in _pending_ops.get(str(sid)) or ())
-    if not held:
-        try:
-            metas = be.pending_queued_meta(sid) if hasattr(be, "pending_queued_meta") else None
-            held = any(isinstance(m, dict) and m.get("qid") == q for m in (metas or ()))
-            if not held and hasattr(be, "live_atoms"):
-                held = any(isinstance(a, dict) and a.get("uuid") == q for a in (be.live_atoms(sid) or ()))
-        except Exception:
-            held = True
-    if held:
+    if _qid_held(q, sid, be):
         sys.stderr.write("send: a client id the session already holds was refused, the kernel mints: %s\n" % sid)
         return None
     return q
+
+
+def _qid_held(q, sid, be):
+    """Whether the session already holds a copy wearing id `q`: on a parked op, on a queued copy (pending_queued_meta)
+    or on a live echo (a fed copy between the queue and its landing wears one). Fails toward held: a hold that cannot be
+    checked reads as held."""
+    with _pending_ops_lock:
+        if any(_op_qid(op) == q for op in _pending_ops.get(str(sid)) or ()):
+            return True
+    try:
+        metas = be.pending_queued_meta(sid) if hasattr(be, "pending_queued_meta") else None
+        if any(isinstance(m, dict) and m.get("qid") == q for m in (metas or ())):
+            return True
+        if hasattr(be, "live_atoms"):
+            return any(isinstance(a, dict) and a.get("uuid") == q for a in (be.live_atoms(sid) or ()))
+    except Exception:
+        return True
+    return False
+
+
+# ── the send acknowledgement (2026-10-09) ───────────────────────────────────────────────────────────────────────
+# Every chat send carries the id the page minted at the press (`qid`, send-pending.ts mintQid). The kernel answers it
+# on the socket that carried it with {type: "sendAck", id, qid, ok, dup} the moment it has decided the send's fate:
+# handed to the backend, parked, or refused (ok False, beside the refusal's own frame). Until that answer the page does
+# not know the kernel has the message, and two messages a user typed into a linked machine's session were lost in
+# exactly that gap (the user 2026-10-09): they sat unread in a socket that then closed, and nothing on either side
+# recorded them. With the answer, the page keeps every unanswered send (across a reload too) and sends it again on the
+# next connection to that kernel, marked `resend`; this kernel takes a resend it has already decided on as a duplicate (`dup`) and answers
+# it again without delivering it twice. The decided ids are kept in STATE/accepted-sends.json, so a kernel restart
+# between a send and the page's resend still recognises it. The keepalive says the kernel speaks this protocol
+# (`acks` on every ka frame, _keepalive_all): a page resends only to a kernel that said so on the current socket,
+# because an older kernel would deliver a resend twice.
+_ACKED_SEND_OPS = ("sendMessage", "askFollowUp")
+_SEND_ACCEPTS_FILE = "accepted-sends.json"
+_SEND_ACCEPTS_CAP = 5000                 # ids kept, newest last; a resend comes at the next connection, within minutes
+_SEND_ACCEPTS_TTL_S = 7 * 86400          # …or after a reload of a page left open for days
+_SEND_ACCEPTS = collections.OrderedDict()   # qid -> {"sid", "t", "ok"}; ok None while the send is being decided
+_SEND_ACCEPTS_LOCK = threading.Lock()
+_SEND_ACCEPTS_STATE = {"loaded": False, "said": False}
+
+
+def _send_accepts_path():
+    return jd.STATE / _SEND_ACCEPTS_FILE
+
+
+def _send_accepts_load_locked():
+    """Read the decided ids once per kernel life. A file that exists and cannot be read is said once on stderr: from
+    then on a resend of a send decided before this kernel started is not recognised, and may be delivered twice."""
+    if _SEND_ACCEPTS_STATE["loaded"]:
+        return
+    _SEND_ACCEPTS_STATE["loaded"] = True
+    try:
+        raw = json.loads(_send_accepts_path().read_text())
+    except FileNotFoundError:
+        return
+    except Exception as e:
+        sys.stderr.write("send acks: %s could not be read (%s); a resend of a message sent before this kernel started "
+                         "may be delivered twice\n" % (_send_accepts_path(), e))
+        return
+    rows = raw.get("accepted") if isinstance(raw, dict) else None
+    for r in rows if isinstance(rows, list) else ():
+        if isinstance(r, dict) and isinstance(r.get("qid"), str) and _CLIENT_QID_RE.fullmatch(r["qid"]):
+            _SEND_ACCEPTS[r["qid"]] = {"sid": str(r.get("sid") or ""), "t": float(r.get("t") or 0), "ok": r.get("ok")}
+
+
+def _send_accepts_save_locked(now):
+    cut = now - _SEND_ACCEPTS_TTL_S
+    for q in [q for q, r in _SEND_ACCEPTS.items() if r["t"] < cut]:
+        _SEND_ACCEPTS.pop(q, None)
+    while len(_SEND_ACCEPTS) > _SEND_ACCEPTS_CAP:
+        _SEND_ACCEPTS.popitem(last=False)
+    rows = [{"qid": q, "sid": r["sid"], "t": int(r["t"]), "ok": r["ok"]} for q, r in _SEND_ACCEPTS.items() if r["ok"] is not None]
+    try:
+        _atomic_write(_send_accepts_path(), json.dumps({"accepted": rows}))
+    except OSError as e:
+        if not _SEND_ACCEPTS_STATE["said"]:
+            _SEND_ACCEPTS_STATE["said"] = True
+            sys.stderr.write("send acks: %s could not be written (%s); a resend after a kernel restart may be "
+                             "delivered twice\n" % (_send_accepts_path(), e))
+
+
+def _send_seen(q, sid, be):
+    """The decision this kernel already made on the send wearing `q` for `sid`, or None when it has made none: a
+    recorded decision (ok True or False; None while one is being made), else a copy the session holds under that
+    id (ok True), so a resend of a send already in flight is never delivered twice."""
+    with _SEND_ACCEPTS_LOCK:
+        _send_accepts_load_locked()
+        r = _SEND_ACCEPTS.get(q)
+        if r is not None and r["sid"] == str(sid):
+            return {"ok": r["ok"]}
+    if be is not None and be is not _UNOWNED and _qid_held(q, sid, be):
+        return {"ok": True}
+    return None
+
+
+def _send_decide(q, sid, ok, now=None):
+    """Record the send's fate under its id: ok None while it is being decided (a resend arriving meanwhile is a
+    duplicate), True when it was handed over or parked, False when it was refused. `forget` undoes a None that
+    never came to a decision (the attempt raised), so the page's resend may try again."""
+    now = time.time() if now is None else now
+    with _SEND_ACCEPTS_LOCK:
+        _send_accepts_load_locked()
+        _SEND_ACCEPTS[q] = {"sid": str(sid), "t": now, "ok": ok}
+        _SEND_ACCEPTS.move_to_end(q)
+        if ok is not None:
+            _send_accepts_save_locked(now)
+
+
+def _send_forget(q):
+    with _SEND_ACCEPTS_LOCK:
+        r = _SEND_ACCEPTS.get(q)
+        if r is not None and r["ok"] is None:
+            _SEND_ACCEPTS.pop(q, None)
+
+
+def _send_settle(client, sid, q, ok):
+    """The send wearing `q` is decided (handed over or parked: ok True; refused: ok False): record it and answer the page."""
+    if not q:
+        return
+    _send_decide(q, sid, bool(ok))
+    _send_ack(client, sid, q, ok)
+
+
+def _send_ack(client, sid, q, ok, dup=False):
+    """Answer the page that sent `q` (the socket that carried it). Never raises: a socket that is gone has no reader,
+    and the page's resend on its next connection is answered then."""
+    if client is None or not q:
+        return
+    try:
+        client["send"](json.dumps({"type": "sendAck", "id": str(sid), "qid": q, "ok": bool(ok), "dup": bool(dup)}))
+    except Exception:
+        pass
 
 
 def _op_user(op) -> bool:
@@ -58604,7 +58755,8 @@ def _keepalive_all(now=None):
     # it raised the reload banner, the user 2026-07-13, whose stale tab sat silent through several rebuilds) —
     # no per-page /version polling. The VS Code extension compares it against its bundled build stamp the same
     # way and keeps its banner: a webview reload cannot fix bundled-code drift.
-    s = json.dumps({"type": "ka", "dv": _dist_ver(), "pv": _panes_rev()})   # pv: the pane set's revision (plans/panes-as-data.md); a page baked with another is offered a reload
+    s = json.dumps({"type": "ka", "dv": _dist_ver(), "pv": _panes_rev(),   # pv: the pane set's revision (plans/panes-as-data.md); a page baked with another is offered a reload
+                    "acks": 1})   # this kernel answers every chat send (sendAck) and recognises a resend: the page's word to resend on this socket (_send_ack)
     now = _ws_clock() if now is None else now
     with _clients_lock:
         targets = list(_clients)
@@ -60089,7 +60241,7 @@ def _send_slot_delta(c, key, ftype, payload, pre, sig, parts=None):
 #             (_carry_tag_names), on this kernel's own tags and, after the home answers ok, on a tag homed on
 #             an attached kernel (_carry_after_forward). Without it the page writes the carried order itself,
 #             a lens write after the edit (render.ts commitTagUnionEdit).
-KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet", "chatTurn", "applyNow", "tagNameCarry")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
+KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSession", "viewFiles", "tagSet", "chatTurn", "applyNow", "tagNameCarry", "sendAck")   # chatProto2: the uuid-anchored chat wire (T323 stage 4b);
 #                                              viewOrder: this kernel keeps the viewer's arrangement (2026-09-23);
 #                                              viewFolds: …and its folded groups, on the same frame (2026-09-23);
 #                                              viewFiles: …and its file tabs, on the same frame (2026-09-30)
@@ -60103,6 +60255,9 @@ KERNEL_WS_CAPS = ("tagEdit", "chatProto2", "viewOrder", "viewFolds", "restartSes
 #   unknownOp, which the row reads as the refusal it is instead of latching on a reply that never comes
 #   applyNow: Apply now (2026-10-01), a pick waiting for a quiet session pushed through from its control — a page that
 #   draws the row and a kernel that does not know the op answers unknownOp, which the page says in a toast
+#   sendAck: every chat send carrying a press-minted id is answered with a sendAck frame and a resend of it is recognised
+#   (2026-10-09, _send_ack). The page reads the same word off the keepalive (`acks`), which reaches it within a beat of
+#   the socket's open, where this frame waits for the connect push
 # The caps frame: {type: "caps", caps: [...], viewsSeq: int|null}. `viewsSeq` (the 2026-09-05
 # review) is the write seq of the views blob the READY HANDLER'S OWN connect push served this client — the
 # tabOrder frame's for a chat page, the timeline skeleton's (`data.views`), the feed frame's — read from
@@ -72248,6 +72403,7 @@ def _shim(app, v=0, no_stale=False, pv=None, data=None):
     return """
 %s
 (function(){/*shim-core*/var queue=[],ws=null,everConnected=false;
+var acksSeen=false;window.__rompAcksLocal=false;   // this socket's kernel answers chat sends and recognises a resend (the keepalive's `acks`): set by its first such keepalive, cleared at every open, told to the bundle as romp:hostAcks (host "") so its unanswered sends go again (render.ts, 2026-10-09)
 var bundleReady=false,readyQueued=false,readyAcked=false,readyProto=0,readyMsg=null;   // readyProto/readyMsg: the bundle's ready as sent, for the redial's dial term (&proto=) and for a fresh dial after a ready no caps frame answered (the socket died between the kernel's pushes and its frame): onopen posts it again, so the kernel serves the page whole, answers, and the redials after carry the flag (round 3, C); one the flush just sent is not doubled   // the BUNDLE's own {type:"ready"} has passed through send() on this page / is waiting in `queue` for an open (onopen clears it once the flush has carried it) / has been ANSWERED: the kernel's caps frame has arrived on a socket of this page (onmessage), the ready arm's own statement (_send_caps, sent after that arm's pushes) that it processed the bundle's ready and served the page whole ahead of it; the dial's reconnect term (connect) keys on all three
 var queuedDiag=0,DIAG_QUEUE_MAX=20;   // clientDiag rows waiting in `queue` for a reconnect, capped (an outage must not pile up breadcrumbs); other queued messages are untouched
 var queuedForeign=0,FOREIGN_QUEUE_MAX=20;   // of those, the window-sender rows (window-sender.ts noteForeign and the timeline boot's copy), which another page's posts cause: capped on their own count, so they never take one of the DIAG_QUEUE_MAX slots this page's own rows keep (under one cap, a foreign page posting into every frame during an outage cut the page's own record of it, the 2026-09-29 review); counted in queuedDiag as well, so the reload hold and the loss line leave them out like every breadcrumb; the cap is noteForeign's NOTE_MAX
@@ -72478,7 +72634,7 @@ ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponen
 // socket dropped (the pane's romp loader) needs the socket's RETURN as its event to come back down. The
 // first connect deliberately doesn't fire it — nothing is waiting on it, and the loader must stay up until
 // real content lands.
-ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);if(bundleReady&&!readyAcked&&!readyQueued&&readyMsg)ws.send(readyMsg);readyQueued=false;queue=[];queuedDiag=0;queuedForeign=0;
+ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;acksSeen=false;window.__rompAcksLocal=false;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);if(bundleReady&&!readyAcked&&!readyQueued&&readyMsg)ws.send(readyMsg);readyQueued=false;queue=[];queuedDiag=0;queuedForeign=0;
 try{if(window.__rompReload)window.__rompReload.ended();}catch(e){}   // T265: the flush is the ending event for the "sends" hold — a reload owed while a prompt sat in the queue goes now
 if(failedConnects){send({type:"clientDiag",surface:"pane-shim",what:"wsconnfail",data:{app:APP,attempts:failedConnects,firstFailMs:Date.now()-firstFailT}});failedConnects=0;firstFailT=0;}   // the redials that never opened since the last open, as ONE row: how many, and how long ago the first failed
 if(wasReconn){var ann=restartAnnounced&&Date.now()-restartAnnounced<30000;restartAnnounced=0;   // one-shot: spent here
@@ -72490,6 +72646,7 @@ ws.onmessage=function(ev){lastRecv=Date.now();resumeProvisional=0;if(returnAt)re
 if(msg&&msg.type==="caps")readyAcked=true;   // the kernel's answer to a ready it processed: _send_caps, which the ready arm alone sends, after its own pushes. From here a redial may declare itself (the dial term in connect); the frame goes on to the bundle below like any other
 if(msg&&msg.type==="reloadRequired"){try{if(window.__rompReload)window.__rompReload.require(msg.why);}catch(e){}return;}   // the safety valve (2026-09-16): a kernel that must force a reload for correctness; the core honours it through its holds; nothing sends it today
 if(msg&&msg.type==="unknownOp"){try{if(window.__rompReload)window.__rompReload.behind();}catch(e){}}   // this page asked for something the kernel does not know (a page from before the kernel's build): the standing offer's wording gains the reason; the frame goes on to the bundle, whose degrade path answers it (render.ts onUnknownOp)
+if(msg&&msg.type==="ka"&&msg.acks&&!acksSeen){acksSeen=true;window.__rompAcksLocal=true;try{window.dispatchEvent(new CustomEvent("romp:hostAcks",{detail:{host:""}}));}catch(e){}}   // the first keepalive on this socket that says its kernel answers chat sends: the bundle's unanswered sends go again (render.ts resendUnacked); a page-level event, never a frame for the bundle
 if(msg&&msg.type==="ka"&&LOADEDPV&&msg.pv&&msg.pv!==LOADEDPV){var RP=window.__rompReload;if(RP&&RP.notePanes)RP.notePanes(msg.pv);}   // the pane set's revision beside the build token (plans/panes-as-data.md): a moved one is handed to the reload core, which OFFERS a reload
 if(msg&&msg.type==="ka"){if(LOADEDV&&msg.dv&&msg.dv>LOADEDV)raiseBuild(msg.dv);
 if(stalePending&&++staleKa>=2){var sw=stalePending;stalePending="";raiseStale(sw);}   // the SECOND keepalive since the arm, no resync between: a full heartbeat period on THIS socket with the kernel alive, talking to it, and not resyncing it — the view IS stale. (One keepalive alone can be a beat queued at accept, ahead of the resync frame.)

@@ -78,7 +78,7 @@ test("every composer-shaped send rides the same gate — staged flush and provis
   // the staged flush releases each post of the run (one message, plus any item that goes alone) through routeUserMessage…
   assert.match(RENDER, /function flushStaged\(sid: string, typed\?: \{ text: string; cites\?: Citation\[\]; imgPaths\?: string\[\]; paths\?: string\[\] \}\): number \{\s*\n\s*const run = stagedMsgs\.takeAll\(sid\);\s*\n\s*for \(const p of stagedPosts\(run, typed\)\) routeUserMessage\(sid, p\.text, p\.cites as Citation\[\] \| undefined, p\.imgPaths, p\.paths\);/);
   // …whose every branch registers the optimistic bubble (2026-08-23), so the gate covers them all
-  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ [^\n]*registerOptimistic\(sid, text, imgPaths, qid, paths\); \}/);
+  assert.match(RENDER, /if \(goalCite\?\.itemId\) \{ [^\n]*registerOptimistic\(sid, text, imgPaths, qid, paths, false, fu\); \}/);   // + the follow-up's own wire, for a resend (send-acks.ts)
   assert.match(RENDER, /else if \(quoteCites\.length\) \{ [^\n]*registerOptimistic\(sid, body, imgPaths, qid, paths\); \}/);
   assert.match(RENDER, /else \{ [^\n]*registerOptimistic\(sid, text, imgPaths, qid, paths, [^\n]*\); \}/);
   // provisional adoption re-sends through registerOptimistic too
