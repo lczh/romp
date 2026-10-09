@@ -527,7 +527,12 @@ following to every connected machine's kernel):
   nothing is cut (the wait is said once in the kernel log, with what is running;
   the kernel looks once more the instant before the reconnect and stands down if
   the CLI has started work since); turning the switch on or off reaches every
-  running session the same way. A session you set to **Slow** from its
+  running session the same way. The kernel also reads the CLI's own report at
+  every connect, a reattach after a kernel restart included: a CLI that says it
+  lacks the opt-in while the session should have it (by this switch or by the
+  session's own **Fast** pick) is relaunched with it once the session is quiet.
+  A **Slow** pick sent to a CLI that has the opt-in takes it away from that
+  CLI, so a later **Fast** pick relaunches it the same way. A session you set to **Slow** from its
   statusline stays slow until you set it to **Fast** again, and a comment thread
   launched slow, or forked from a slow session, counts as such a pick. If the CLI refuses fast mode for a
   session with a reason (extra usage off, an organisation gate), the kernel log

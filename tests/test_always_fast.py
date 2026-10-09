@@ -483,3 +483,125 @@ class AModelSwitchOnAnIdleCliOpensNoTurn(unittest.TestCase):
         self.assertTrue(tf(_SystemMessage("init")), "a turn's init still counts")
         self.assertTrue(tf(_AssistantMessage()))
         self.assertFalse(tf(_UserMessage("x", parent_tool_use_id="toolu_1")), "a subagent's record still does not")
+
+
+LACKS = {"fast_mode_state": "off", "fast_mode_disabled_reason": "sdk_opt_in_required"}
+
+
+class TheClisWordAtEveryConnectAsksForTheOptIn(unittest.TestCase):
+    """2026-10-09: a kernel restart lost the ask for the fast-mode opt-in, and sessions ran at normal speed until someone
+    restarted them by hand. Two roads led there. Always fast's ask lives in one kernel's memory (a model switch raised it),
+    and the kernel that re-attached to the surviving CLI saw no model change, so nothing asked again. And a session's own
+    fast pick, recorded as waiting for its relaunch, read as applied at the attach because the CLI's launch record carries
+    the opt-in, although a literal '/fast off' sent to that CLI earlier had taken the opt-in away (the CLI then reports
+    sdk_opt_in_required for the rest of its life; seen on the CLI 2.1.282). The CLI says which of its connections lack the
+    opt-in in the initialize answer every connect gets, an attach included, and in every turn's init: that word, read
+    against what a launch from the session's state would carry (fast_effective), is what asks for the relaunch, carried
+    when the session is quiet. Synthetic sessions, no CLI."""
+
+    def _attached(self, launch_fast, **reg):
+        be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, reg.pop("switch", "on"))
+        s = _sess(be, **dict({"liveModel": "Opus 5.5", "liveModelId": "claude-opus-5-5", "model": "claude-opus-5-5",
+                              "liveFast": "off"}, **reg))
+        s._host_is_attach = True                   # an earlier kernel launched the CLI this connect reached
+        s._fast_unlocked = bool(launch_fast)       # the connect's reading of that CLI's launch record (cli.launch)
+        s._asks = []; s.request_reconnect = lambda *a, **k: s._asks.append((a, k))
+        return be, s
+
+    def test_always_fast_asks_at_an_attach_to_a_cli_launched_without_the_opt_in(self):
+        be, s = self._attached(launch_fast=False)
+        s._adopt_fast_state(LACKS)
+        self.assertEqual(s._asks, [((), {"defer": False})], "quiet: the relaunch that carries the opt-in, now")
+        self.assertTrue(any(m.startswith("always fast (web):") and "opt-in" in m for m in be._logs), be._logs)
+
+    def test_the_sessions_own_pick_asks_when_its_cli_lost_the_opt_in(self):
+        for switch in ("on", "off"):
+            be, s = self._attached(launch_fast=True, fast=True, switch=switch)
+            s._adopt_fast_state(LACKS)
+            self.assertEqual(len(s._asks), 1, "the launch record says the flag rode the launch; the CLI says it has none "
+                                              "now: the CLI's word wins (switch %s)" % switch)
+            self.assertEqual(s._fast_pending, "on", "the pick's dots until a launch carries it")
+            self.assertTrue(any(m.startswith("fast mode (web):") and "opt-in" in m for m in be._logs), be._logs)
+
+    def test_the_incident_a_waiting_pick_read_as_applied_at_the_attach_then_the_cli_says_otherwise(self):
+        be, s = self._attached(launch_fast=True, fast=True, fastOff=False)
+        sb.write_reg(be.state_dir, SID, dict(sb.read_reg(be.state_dir, SID),
+                                             relaunchWait={"why": "fast mode", "t": 1, "picks": {"fast": {"fast": True}}}))
+        s._fast_pending = "on"
+        launch = dict(s.launch_values())           # an earlier kernel's launch record, carrying the opt-in
+        s._reconcile_waiting_picks(launch, launched_here=False, spawned_at=1)
+        self.assertEqual(s._fast_pending, "", "the record carries the pick, so the reconcile reads it as applied")
+        s._adopt_fast_state(LACKS)                 # the attach's initialize answer
+        self.assertEqual(s._asks, [((), {"defer": False})], "the CLI's word re-raises the ask; quiet, so it is carried now")
+
+    def test_a_busy_session_keeps_the_ask_standing_and_nothing_is_cut(self):
+        be, s = self._attached(launch_fast=False)
+        s.inflight = 1
+        s._adopt_fast_state(LACKS)
+        self.assertEqual(s._asks, [], "mid-turn: no reconnect")
+        self.assertEqual(s._switch_wanted, "always fast")
+        s._adopt_fast_state(LACKS)                 # the next init says the same: one ask, not two
+        self.assertEqual(s._switch_wanted, "always fast")
+        self.assertEqual(len([m for m in be._logs if m.startswith("always fast (web):") and "opt-in" in m]), 1, be._logs)
+
+    def test_no_ask_when_the_cli_has_the_opt_in_or_nothing_wants_it(self):
+        be, s = self._attached(launch_fast=False)
+        s._adopt_fast_state({"fast_mode_state": "on"})
+        self.assertEqual(s._asks, [], "the CLI reports fast on: nothing to relaunch for")
+        for reg, why in (({"fastOff": True}, "the user put this session on Slow"),
+                         ({"switch": "off"}, "the switch is off and the session has no ask of its own"),
+                         ({"fastRuleRefused": "extra_usage_disabled"}, "the CLI refused the switch's flag: no refuse loop"),
+                         ({"liveFastReason": "extra_usage_disabled"}, "a refusal stands for this session"),
+                         ({"liveModel": "Fable 5.1", "liveModelId": "claude-fable-5-1", "model": "claude-fable-5-1"},
+                          "a model that cannot run fast")):
+            be, s = self._attached(launch_fast=False, **reg)
+            s._adopt_fast_state(LACKS)
+            self.assertEqual(s._asks, [], why)
+
+    def test_a_cli_launched_here_with_the_opt_in_that_still_lacks_it_is_said_once_and_never_relaunched(self):
+        be, s = self._attached(launch_fast=True)
+        s._host_is_attach = False                  # THIS kernel launched it, carrying the flag
+        s._launch_record = dict(s.launch_values())
+        self.assertTrue(s._launch_record["fast"])
+        s._adopt_fast_state(LACKS)
+        s._adopt_fast_state(LACKS)
+        self.assertEqual(s._asks, [], "a relaunch would carry the same flag: relaunch → lacks → relaunch is a loop")
+        said = [m for m in be._logs if "opt-in" in m and "launched" in m]
+        self.assertEqual(len(said), 1, be._logs)
+
+    def test_a_literal_slow_then_on_on_the_same_cli_relaunches_it(self):
+        # '/fast off' on a connection made with the flag takes the CLI's opt-in away, so the user's next On is refused by
+        # that CLI; its next report says it lacks the opt-in, and only a relaunch can carry it again
+        be, s = self._attached(launch_fast=True, fast=True)
+        s._host_is_attach = False
+        s._launch_record = dict(s.launch_values())
+        be.send = lambda sid, text: True; be._wake_push = lambda: None
+        be.set_fast(SID, "off")
+        be.set_fast(SID, "on")                     # still unlocked as far as romp knows: the literal send
+        s._adopt_fast_state(LACKS)
+        self.assertEqual(len(s._asks), 1, "the CLI's own word after the literal Slow: relaunch to carry the opt-in again")
+
+
+class TheRegistryFollowsTheClisWord(unittest.TestCase):
+    """2026-10-09: a relaunch that carried a waiting fast pick flipped the in-memory fast state to on (the reconcile's
+    optimistic flip) without the registry, so the CLI's own "on" changed nothing in memory and was never written: the
+    registry kept "off" for a session running fast, and a restarted kernel and every reader of the registry believed it."""
+
+    def test_the_clis_word_is_written_when_the_registry_differs_though_memory_already_agrees(self):
+        be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "off")
+        s = _sess(be, liveModelId="claude-opus-5-5", model="claude-opus-5-5", fast=True, liveFast="off",
+                  relaunchWait={"why": "fast mode", "t": 1, "picks": {"fast": {"fast": True}}})
+        s._fast_pending = "on"
+        s._reconcile_waiting_picks(dict(s.launch_values()), launched_here=True)
+        self.assertEqual(s.fast, "on", "the reconcile's flip (memory only)")
+        s._adopt_fast_state({"fast_mode_state": "on"})
+        self.assertEqual(sb.read_reg(be.state_dir, SID)["liveFast"], "on")
+
+    def test_an_unchanged_word_the_registry_already_has_writes_nothing(self):
+        be = _backend()
+        s = _sess(be, liveModelId="claude-opus-5-5", liveFast="on", liveFastReason="")
+        writes = []
+        real = be._update_reg
+        be._update_reg = lambda sid, **kw: (writes.append(kw), real(sid, **kw))
+        s._adopt_fast_state({"fast_mode_state": "on"})
+        self.assertEqual(writes, [])
