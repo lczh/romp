@@ -309,9 +309,33 @@ def helper_ttl_s() -> float:
     return max(0, ms) / 1000.0
 
 
+_HELPER_ENV_PINNED = {}   # name -> value this process pins for the helpers it runs (pin_helper_env); "" = absent
+
+
+def _helper_passes(name: str) -> bool:
+    return name in HELPER_ENV_PASSTHROUGH or name.startswith(HELPER_ENV_PREFIXES)
+
+
+def pin_helper_env(**values) -> None:
+    """Pin whitelisted names in the environment the helpers this process runs see (helper_env), over this process's
+    own; a value of "" means the name is absent. For a process whose own value is not the machine's: the version
+    canary's probe runs with XDG_STATE_HOME at its temp root, and pins the kernel's, so a stored login's token command
+    sees what it sees at every session's launch (until 2026-10-09 one that kept state there failed only in the probe).
+    A name outside the whitelist is refused: a pin never widens what a helper sees."""
+    for k, v in values.items():
+        if not _helper_passes(k):
+            raise ValueError("%s is not passed to helpers" % k)
+        _HELPER_ENV_PINNED[k] = str(v or "")
+
+
 def helper_env() -> dict:
-    return {k: v for k, v in os.environ.items()
-            if k in HELPER_ENV_PASSTHROUGH or k.startswith(HELPER_ENV_PREFIXES)}
+    env = {k: v for k, v in os.environ.items() if _helper_passes(k)}
+    for k, v in _HELPER_ENV_PINNED.items():
+        if v:
+            env[k] = v
+        else:
+            env.pop(k, None)
+    return env
 
 
 def run_helper(cmd, label: str = "apiKeyHelper", timeout_s=None) -> str:

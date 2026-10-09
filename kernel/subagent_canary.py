@@ -17,12 +17,16 @@ What it shares with the machine is the Claude login, used the way any session us
 directory (--kernel-state), and the probe's state takes the machine default billing from it, a stored login's record
 included (sdk_backend.subagent_canary_billing), so its launch bills what an unpicked session's does (the machine's own
 credential store, a stored login's token command run at the launch, or the token the kernel was given, passed in its
-environment). The kernel also hands it where it imports the Agent SDK from (--sdk-path), which this script puts on its
+environment). The token commands and helpers it runs see the kernel's XDG_STATE_HOME (--helper-xdg-state), not its own
+temp root. The kernel also hands it where it imports the Agent SDK from (--sdk-path), which this script puts on its
 own path before anything loads, as kernel._ensure_sdk_on_path did for the kernel. One fast Opus 5.5 turn whose main loop
 starts one subagent: a few cents.
 
 Prints one JSON line, the verdict (sdk_backend.subagent_canary_verdict), and exits 0; any failure to run is an
-"inconclusive" verdict, never a pass, and a session that never started says so with the backend's own reason."""
+"inconclusive" verdict, never a pass. A session that never started says so with the launch error the backend recorded
+for it (or that none was recorded), a turn that ended in an error says what its result said, and a billing that could
+not apply says why, in the backend's own words. No token rides any of them: the backend puts a stored login's token
+into the launch's environment and nowhere else, and says a failing token command in static words."""
 import argparse
 import importlib.util
 import json
@@ -44,19 +48,33 @@ def _connected(sess) -> bool:
 
 
 def _start_failure(be, sid) -> str:
-    """Why the probe's session never started, in the backend's own words: the launch error it recorded for the session
-    (a missing SDK, a credential that would not resolve, the CLI's refusal and its stderr line), else its newest problem."""
+    """Why the probe's session never started, in the backend's own words: the launch error it recorded for THIS session
+    (a missing SDK, a credential that would not resolve, the CLI's refusal and its stderr line), "" when it recorded
+    none. Never the backend's newest problem of another kind: until 2026-10-09 that fallback could name a line that had
+    nothing to do with the launch, and the verdict says plainly that no reason was recorded instead."""
     rec = be.launch_error(sid) or {}
-    if rec.get("text"):
-        return str(rec["text"])
-    probs = be.problems()
-    return str(probs[-1].get("text") or "") if probs else ""
+    return str(rec.get("text") or "")
 
 
-def probe_turn(sb, be, state, sid, timeout=TURN_TIMEOUT_S, tick=1.0) -> dict:
+def _billing_refusal(be, billing) -> str:
+    """Why the billing the probe was given (subagent_canary_billing's "login", "login <id>" or "key") could not apply to
+    its launch, in the backend's own words (auth_unavailable_why), "" when it could or none was given. Read after the
+    turn: a stored login whose token command failed at the launch was marked refused then, with the command's reason, in
+    the probe's own copy of the record (never the kernel's), and an API that refused its token marks it the same way."""
+    side, _, lid = str(billing or "").partition(" ")
+    if side not in ("login", "key"):
+        return ""
+    try:
+        return str(be.auth_unavailable_why(side, lid) or "")
+    except Exception as e:
+        return "whether it applied could not be read (%s)" % e
+
+
+def probe_turn(sb, be, state, sid, timeout=TURN_TIMEOUT_S, tick=1.0, billing="") -> dict:
     """The probe's one turn on a backend built over its own state root: the switch on, the prompt sent, the turn awaited
     (or the session's start failure, or a question no one will answer), and the verdict read from the session's speed
-    check. Apart from main() so the tests drive it with a stand-in backend."""
+    check, with the errored result's own words and the billing that did not apply (`billing`: what the probe's state
+    was given). Apart from main() so the tests drive it with a stand-in backend."""
     be._update_reg(sid, model=sb.SUBAGENT_STANDARD_MODEL, fast=True, effort="low")
     if not be.set_subagent_standard(sid, "on"):
         return {"verdict": "inconclusive", "why": "the switch was refused: %s" % be.last_subagent_standard_refusal}
@@ -82,11 +100,14 @@ def probe_turn(sb, be, state, sid, timeout=TURN_TIMEOUT_S, tick=1.0) -> dict:
     launched = bool(getattr(s, "_sub_std_launched", False))
     started = started or _connected(s) or launched or finished
     reg = sb.read_reg(Path(state), sid) or {}
+    errored = row.get("isError") is True
     verdict = sb.subagent_canary_verdict(reg.get("subagentSpeed"), launched=launched, finished=finished,
                                          fast=str(getattr(s, "fast", "") or ""),
                                          fast_reason=str(getattr(s, "fast_reason", "") or ""),
                                          started=started, start_failure="" if started else _start_failure(be, sid),
-                                         errored=row.get("isError") is True)
+                                         errored=errored,
+                                         error_text=str(getattr(s, "_result_error", "") or "") if errored else "",
+                                         billing_refused=_billing_refusal(be, billing))
     if isinstance(row.get("usd"), (int, float)):
         verdict["usd"] = row["usd"]
     return verdict
@@ -98,6 +119,7 @@ def main(argv=None) -> int:
     ap.add_argument("--kernel-dir", required=True)
     ap.add_argument("--kernel-state", default="")   # the kernel's state directory: the machine default billing
     ap.add_argument("--sdk-path", default="")       # the sys.path entry the kernel imports the Agent SDK from
+    ap.add_argument("--helper-xdg-state", default=None)   # the kernel's XDG_STATE_HOME ("" = unset), for its helpers
     a = ap.parse_args(argv)
     if a.sdk_path and a.sdk_path not in sys.path:
         sys.path.insert(0, a.sdk_path)   # this process only: PYTHONPATH would ride into the CLI and its hooks
@@ -118,11 +140,16 @@ def main(argv=None) -> int:
         sb = importlib.util.module_from_spec(spec)
         sys.modules["romp_sdk_backend_canary"] = sb
         spec.loader.exec_module(sb)
-        if a.kernel_state:
-            sb.subagent_canary_billing(a.kernel_state, state)
+        if a.helper_xdg_state is not None:
+            # the token commands and helpers this process runs see the kernel's XDG_STATE_HOME, not the temp root the
+            # probe and its CLI run under: a command that keeps state there works here as it does at a session's launch
+            sb._cred.pin_helper_env(XDG_STATE_HOME=a.helper_xdg_state)
+        billing = sb.subagent_canary_billing(a.kernel_state, state) if a.kernel_state else ""
+        # the backend's log goes nowhere (the probe prints one line, its verdict); what the verdict needs from it is read
+        # from its structured records instead: the launch error, the result's error, the billing's refusal
         be = sb.SdkBackend(state, a.claude, lambda *x, **k: None, log=lambda m, **k: None)
         sid = be.spawn("canary", work, sid=str(uuid.uuid4()))
-        verdict = probe_turn(sb, be, state, sid)
+        verdict = probe_turn(sb, be, state, sid, billing=billing)
     except Exception as e:
         verdict = {"verdict": "inconclusive", "why": "the probe failed: %s" % e}
     finally:
