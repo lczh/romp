@@ -58431,7 +58431,10 @@ def _ws_arm_lane(client):
     """Start a socket's lane (see above): a queue of (kind, job) and the one worker that drains it. Called by Handler._ws."""
     lane = {"q": queue.Queue(), "lock": threading.Lock(), "pending": 0}
     client["lane"] = lane
-    t = threading.Thread(target=_stage_marked("ws-lane")(_lane_worker), args=(client, lane), daemon=True, name="ws-lane")
+    # the worker carries the socket request's own stage mark (http.GET.ws, set by the request's dispatch on this thread), so a
+    # build or a hydration an op makes lands under the mark it landed under when the op ran on the handler thread (T401)
+    stage = getattr(_STAGE_TL, "name", None) or "ws-lane"
+    t = threading.Thread(target=_stage_marked(stage)(_lane_worker), args=(client, lane), daemon=True, name="ws-lane")
     lane["thread"] = t
     t.start()
     return lane
