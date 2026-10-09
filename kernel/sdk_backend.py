@@ -5510,24 +5510,34 @@ SUBAGENT_CANARY_PROMPT = ('Call the Agent tool exactly once, with subagent_type 
                           'with the single word OK and nothing else." After it returns, reply with the single word DONE.')
 
 
-def subagent_canary_verdict(check, launched: bool, finished: bool, fast: str, fast_reason: str) -> dict:
+def subagent_canary_verdict(check, launched: bool, finished: bool, fast: str, fast_reason: str, *, started: bool,
+                            start_failure: str = "", errored: bool = False) -> dict:
     """The probe's verdict from what its session's speed check counted (`check`: mainFast, mainStandard, subFast,
-    subStandard), whether its launch carried the recipe, whether its turn finished, and the fast-mode state its CLI
-    reported. "pass": the main loop ran fast and the subagent ran at standard speed. "fail": a subagent call ran fast, or
-    the CLI could not run the main loop fast for no reason it names (what the recipe's breakage looks like). Anything that
-    proves neither, "inconclusive": no finished turn, no subagent call, a launch without the recipe, fast mode unavailable
-    to the account."""
+    subStandard), whether its session started at all (`started`: its CLI came up; `start_failure`, the backend's own
+    reason when it did not), whether its launch carried the recipe, whether its turn finished and whether its result was
+    an error (`errored`), and the fast-mode state its CLI reported. "pass": the main loop ran fast and the subagent ran at
+    standard speed. "fail": a subagent call ran fast, or the CLI could not run the main loop fast for no reason it names
+    (what the recipe's breakage looks like). Anything that proves neither, "inconclusive": a session that never started
+    (said with its reason, first: until 2026-10-09 a probe whose session crashed at the start read as a launch without
+    the recipe), a launch without the recipe, no finished turn, a turn that ended in an error (no credential, an
+    overloaded API: what its calls did not show is no failure of the recipe), no subagent call, fast mode unavailable to
+    the account."""
     c = check if isinstance(check, dict) else {}
     n = lambda k: int(c.get(k) or 0)
     figures = {k: n(k) for k in ("mainFast", "mainStandard", "subFast", "subStandard")}
     def out(verdict, why):
         return dict(figures, verdict=verdict, why=why)
+    if not started:
+        return out("inconclusive", "the probe's session did not start: %s"
+                   % (" ".join(str(start_failure or "").split())[:300] or "the backend gave no reason"))
     if not launched:
         return out("inconclusive", "the probe's launch did not carry the workaround")
     if not finished:
         return out("inconclusive", "the probe's turn did not finish")
     if figures["subFast"]:
         return out("fail", "a subagent call ran in fast mode")
+    if errored and not (figures["mainFast"] and figures["subStandard"]):
+        return out("inconclusive", "the probe's turn ended in an error")
     if fast != "on" and fast_reason:
         return out("inconclusive", "fast mode is not available here (%s)" % fast_reason)
     if not figures["mainFast"]:
@@ -5550,6 +5560,49 @@ def subagent_canary_env(base, auth_env) -> dict:
     # blocked the probe's stop up to the CLI's cap, with extra fast calls and a model told to repair mail
     env["ROMP_SUMMARIZING"] = "1"
     return env
+
+
+def sdk_import_root(name: str = "claude_agent_sdk") -> str:
+    """The sys.path entry this process imports `name` from, "" when it cannot import it: for the Agent SDK, the copy the
+    kernel's interpreter finds by itself, or the dedicated venv's site-packages that kernel._ensure_sdk_on_path put on
+    the kernel's path at run time. The version canary's probe is a fresh interpreter with neither, so the kernel hands
+    it this entry (--sdk-path) and the probe puts it on its own path; never PYTHONPATH, which the probe's CLI would
+    inherit and pass to every hook and tool shell it runs. Until 2026-10-09 the probe had no such entry, and on a box
+    whose interpreter finds the SDK only through the venv its session died at the import."""
+    try:
+        spec = importlib.util.find_spec(name)
+    except (ImportError, ValueError):
+        return ""
+    if spec is None:
+        return ""
+    locs = list(spec.submodule_search_locations or [])
+    where = os.path.dirname(locs[0]) if locs else (os.path.dirname(spec.origin) if spec.origin else "")
+    return where if where and os.path.isdir(where) else ""
+
+
+def subagent_canary_billing(kernel_state, probe_state) -> str:
+    """Give the probe's fresh state root the billing the sessions it gates launch on: the kernel's explicit machine
+    default (sdk-defaults.json `auth` with `authExplicit`, and `authLogin`) and, when that names a stored login, that
+    login's record (logins.py: metadata and the command that prints the token, never a token). The probe's backend then
+    decides its launch's billing on the road an unpicked session's launch takes (_options' _decide: the explicit default
+    when this box can bill it, a stored login's command run at the launch, the fast-mode skip such a login carries), so
+    the probe bills what the sessions do. Until 2026-10-09 the probe's state had no default, and on a box whose one login
+    is a stored one (no login of the machine's own, no apiKeyHelper) its CLI started with no credential at all, refused
+    fast mode ("preference") and ended its turn in an error, while the sessions on that box ran fast. No explicit
+    default: nothing is written, and the probe launches plain, as an unpicked session does there. Returns what it gave
+    ("login", "login <id>", "key", "")."""
+    d = read_sdk_defaults(Path(kernel_state))
+    side = d.get("auth") if (d.get("authExplicit") and d.get("auth") in ("login", "key")) else ""
+    if not side:
+        return ""
+    lid = SdkBackend.reg_login(d) if side == "login" else ""
+    rec = _logins.read_record(kernel_state, lid) if lid else None
+    if lid and rec is None:
+        lid = ""   # the record is gone: the default falls through to the machine's own login, as a session's does
+    if rec is not None:
+        _logins.write_record(probe_state, rec)
+    write_sdk_default(Path(probe_state), auth=side, authExplicit=True, authLogin=lid)
+    return ("%s %s" % (side, lid)) if lid else side
 
 
 def subagent_standard_refusal(model, fast) -> str:
@@ -19880,13 +19933,19 @@ class SdkBackend:
             threading.Thread(target=go, name="subagent-canary", daemon=True).start()
 
     def _run_canary_subprocess(self, version: str) -> dict:
-        """The probe, in a subprocess of this interpreter (it has the SDK): kernel/subagent_canary.py. Its stdout's last
-        JSON line is the verdict."""
+        """The probe, in a subprocess of this interpreter: kernel/subagent_canary.py. It is handed where this process
+        imports the Agent SDK from (sdk_import_root: a fresh interpreter lacks the venv entry the kernel put on its own
+        path) and this kernel's state directory, whose machine default billing it launches on (subagent_canary_billing).
+        Its stdout's last JSON line is the verdict."""
         script = _HERE / "subagent_canary.py"
         env = subagent_canary_env(os.environ, startup_auth_env())
+        argv = [sys.executable, str(script), "--claude", str(self.claude_bin), "--kernel-dir", str(_HERE),
+                "--kernel-state", str(self.state_dir)]
+        root = sdk_import_root()
+        if root:
+            argv += ["--sdk-path", root]
         try:
-            p = subprocess.run([sys.executable, str(script), "--claude", str(self.claude_bin), "--kernel-dir", str(_HERE)],
-                               env=env, capture_output=True, text=True, timeout=SUBAGENT_CANARY_TIMEOUT_S,
+            p = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=SUBAGENT_CANARY_TIMEOUT_S,
                                stdin=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
             return {"verdict": "inconclusive", "why": "the probe did not finish within %d s" % SUBAGENT_CANARY_TIMEOUT_S}
