@@ -420,3 +420,66 @@ class TheSwitchReachesRunningSessions(unittest.TestCase):
         src = inspect.getsource(sb.SdkBackend.fork)
         self.assertIn('if fast == "off" or (not fast and parent.get("fastOff")):', src)
         self.assertIn('reg["fastOff"] = True', src)
+
+
+class _UserMessage:
+    """The SDK's UserMessage by name (the kernel duck-types the stream's classes): content, uuid, no subagent tag."""
+    def __init__(self, content, uuid="u-echo", parent_tool_use_id=None):
+        self.content, self.uuid, self.parent_tool_use_id = content, uuid, parent_tool_use_id
+        self.tool_use_result, self.origin = None, None
+class _AssistantMessage:
+    pass
+class _ResultMessage:
+    pass
+class _SystemMessage:
+    def __init__(self, subtype="init", data=None):
+        self.subtype, self.data = subtype, (data or {})
+_UserMessage.__name__ = "UserMessage"; _AssistantMessage.__name__ = "AssistantMessage"
+_ResultMessage.__name__ = "ResultMessage"; _SystemMessage.__name__ = "SystemMessage"
+# the line the CLI streams for a set_model control request (its own fixed wording, not session text)
+SWITCH_ECHO = "<local-command-stdout>Set model to `%s`</local-command-stdout>"
+
+
+class AModelSwitchOnAnIdleCliOpensNoTurn(unittest.TestCase):
+    """2026-10-09: sessions whose model was switched in place on an idle CLI read as a turn in flight for good. The CLI
+    answers set_model by streaming its command output as a user record (SWITCH_ECHO, flagged isReplay), with no init before
+    it and no result after it; the count of turns the CLI opens itself (_on_message, by _turn_frame) took that record for
+    such a turn, and nothing ever settled it. The card read Working, and Always fast's reconnect, which waits for a quiet
+    session, waited at every event and every tick for a result that was never coming. Synthetic session, no CLI."""
+
+    def _switched(self):
+        be = _backend(); _switch(be, sb.ALWAYS_FAST_STORE, "on")
+        s = _sess(be, liveModel="Fable 5.1", liveModelId="claude-fable-5-1", model="claude-fable-5-1")
+        s.model, s._model_id, s._fast_unlocked = "Fable 5.1", "claude-fable-5-1", False
+        s._asks = []; s.request_reconnect = lambda *a, **k: s._asks.append((a, k))
+
+        class Client:   # the CLI's answer, in its order: the echo streams first, then set_model's control response
+            async def set_model(self, model):
+                s._on_message(_UserMessage(SWITCH_ECHO % model), _AssistantMessage, _ResultMessage, _SystemMessage)
+
+            async def get_context_usage(self):
+                return {"model": "claude-opus-5-5", "percentage": 3}
+        s.client = Client()
+        be.set_model(SID, "claude-opus-5-5")   # no loop here, so the live request is run by hand below
+        import asyncio
+        asyncio.run(s._do_set_model("claude-opus-5-5", {"picked": "claude-opus-5-5", "tok": None,
+                                                        "seq": s._pick_seq, "chain": ()}))
+        return be, s
+
+    def test_the_clis_echo_of_the_switch_opens_no_turn_and_always_fast_reconnects_at_once(self):
+        be, s = self._switched()
+        self.assertEqual((s.model, s._model_id), ("Opus 5.5", "claude-opus-5-5"), "the switch landed")
+        self.assertEqual(s.inflight, 0, "the echo is no turn: nothing will ever settle a count it raises")
+        self.assertTrue(s.quiet())
+        self.assertEqual(s.live_state()[0], "waiting", "an idle session does not read as Working")
+        self.assertEqual(s._asks, [((), {"defer": False})], "Always fast's reconnect is carried at once, the session being quiet")
+        self.assertFalse([m for m in be._logs if "waiting for the session to go quiet" in m], be._logs)
+
+    def test_the_turn_frames_are_unchanged_but_for_the_echo(self):
+        tf = lambda m: sb.SdkSession._turn_frame(m, _AssistantMessage, _ResultMessage, _SystemMessage)
+        self.assertFalse(tf(_UserMessage(SWITCH_ECHO % "claude-opus-5-5")), "a control request's command output")
+        self.assertFalse(tf(_UserMessage([{"type": "text", "text": SWITCH_ECHO % "fable"}])), "the same line as a text block")
+        self.assertTrue(tf(_UserMessage("a turn the CLI runs for a notification")), "the CLI's own user record still counts")
+        self.assertTrue(tf(_SystemMessage("init")), "a turn's init still counts")
+        self.assertTrue(tf(_AssistantMessage()))
+        self.assertFalse(tf(_UserMessage("x", parent_tool_use_id="toolu_1")), "a subagent's record still does not")

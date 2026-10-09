@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import socket
 import sys
@@ -369,6 +370,21 @@ def _opens_turn(obj: dict) -> bool:
     if isinstance(content, list):
         return any(isinstance(c, dict) and c.get("type") == "text" and str(c.get("text") or "").strip() for c in content)
     return False
+
+
+_COMMAND_ECHO_RE = re.compile(r"^\s*<local-command-stdout>[\s\S]*?</local-command-stdout>")
+
+
+def _command_echo(msg: dict) -> bool:
+    """Whether a `user` row the CLI streams is the command output of a control request: set_model answers with a
+    `<local-command-stdout>Set model to …` row (flagged isReplay), with no init before it and no result after it. It is
+    no turn, so it opens neither count (_track): counted, nothing ever closed it, and the hello handed that turn to every
+    kernel that attached (2026-10-09). The kernel's own count skips the same row (sdk_backend _is_command_stdout)."""
+    m = msg.get("message") if isinstance(msg.get("message"), dict) else {}
+    content = m.get("content")
+    if isinstance(content, list):
+        content = " ".join(str(c.get("text") or "") for c in content if isinstance(c, dict) and c.get("type") == "text")
+    return isinstance(content, str) and bool(_COMMAND_ECHO_RE.match(content))
 
 
 def read_journal_dir(directory, offset: int = 0):
@@ -1095,7 +1111,7 @@ class SessionHost:
             if self._reexec_pending is not None:                  # a kernel asked mid-turn: the turn's end is the event
                 python, launcher = self._reexec_pending
                 asyncio.ensure_future(self._reexec_now(python, launcher))
-        elif mt in ("assistant", "user"):
+        elif mt in ("assistant", "user") and not (mt == "user" and _command_echo(msg)):   # a control request's echo: no turn
             main = not msg.get("parent_tool_use_id")
             if self.inflight == 0:
                 self.inflight = 1                          # output arriving with no turn counted: a queued line running as its own
