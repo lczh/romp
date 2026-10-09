@@ -557,6 +557,9 @@ class TheClisWordAtEveryConnectAsksForTheOptIn(unittest.TestCase):
             be, s = self._attached(launch_fast=False, **reg)
             s._adopt_fast_state(LACKS)
             self.assertEqual(s._asks, [], why)
+            s._adopt_fast_state(LACKS)             # the next turn's init says the same (2026-10-09, the review of #197)
+            self.assertEqual(s._asks, [], "%s, at the second report too: the first one's blanked reason must not "
+                                          "erase what held it back" % why)
 
     def test_a_cli_launched_here_with_the_opt_in_that_still_lacks_it_is_said_once_and_never_relaunched(self):
         be, s = self._attached(launch_fast=True)
@@ -605,3 +608,170 @@ class TheRegistryFollowsTheClisWord(unittest.TestCase):
         be._update_reg = lambda sid, **kw: (writes.append(kw), real(sid, **kw))
         s._adopt_fast_state({"fast_mode_state": "on"})
         self.assertEqual(writes, [])
+
+
+CLI_X = {"pid": 4242, "start": "1700000001"}    # a hosted CLI's identity, as the host's hello names it (pid:start)
+CLI_Y = {"pid": 4343, "start": "1700000002"}
+
+
+def _kernel(state_dir=None):
+    """A kernel's backend over `state_dir` (a fresh one when None), Always fast on, with the REAL problem ring behind the
+    log so a test can count its entries."""
+    if state_dir is None:
+        state_dir = tempfile.mkdtemp()
+        Path(state_dir, "session-hosts").write_text("off")   # outside the runner's belt (CLAUDE.md, 2026-09-11)
+    be = sb.SdkBackend(state_dir, "/bin/true", lambda *a, **k: None)
+    be._logs = []
+    real = be._log
+    be._log = lambda msg, *a, **k: (be._logs.append(msg), real(msg, *a, **k))[1]
+    _switch(be, sb.ALWAYS_FAST_STORE, "on")
+    return be
+
+
+def _session_from_reg(be):
+    """The session as a kernel that just started builds it: from the registry, nothing in memory."""
+    s = sb.SdkSession(be, sb.read_reg(be.state_dir, SID))
+    s.thread = type("T", (), {"is_alive": lambda self: True})()
+    be.sessions[SID] = s
+    return s
+
+
+def _connect(s, cli, attach, launch_fast=None):
+    """One connect to the hosted CLI `cli`, as _amain leaves it: the loop top's per-connection reset, the hello's identity,
+    and the launch the connect reads (this connect's own record for a launch; the host's echo for an attach)."""
+    s._fast_off_sent = s._fast_opt_in_said = False
+    s._host = type("H", (), {"hello": {"cli": dict(cli)}, "exit_info": None})()
+    s._host_is_attach = attach
+    if attach:
+        s._hello_launch = {"fast": bool(launch_fast)}
+        s._fast_unlocked = bool(launch_fast)
+    else:
+        s._launch_record = dict(s.launch_values())
+        s._fast_unlocked = s.fast_effective()
+    s._asks = []
+    s.request_reconnect = lambda *a, **k: s._asks.append((a, k))
+    s._switch_wanted = ""
+
+
+class TheGuardBelongsToTheCliNotTheConnection(unittest.TestCase):
+    """2026-10-09, the review of #197: a CLI launched with the fast-mode opt-in that still says it lacks it is never
+    relaunched for it (a relaunch carries the same flag and hears the same). That guard lived in one connection's memory and
+    skipped every attach, so after a kernel restart or a host re-exec the kernel attached to the same CLI and asked for the
+    relaunch anyway: a Claude Code that ignores or renames the opt-in cost every Opus session one quiet relaunch per deploy,
+    and each trip added a fresh row to the 100-entry problem ring. The guard is keyed on the CLI's identity now and kept in
+    the registry, and it holds on a live model change too. Synthetic sessions and CLI identities, no CLI."""
+
+    def _launched_and_tripped(self):
+        be = _kernel()
+        _sess(be, liveModel="Opus 5.5", liveModelId="claude-opus-5-5", model="claude-opus-5-5", liveFast="off")
+        s = _session_from_reg(be)
+        _connect(s, CLI_X, attach=False)
+        self.assertTrue(s._launch_record["fast"], "this kernel launched the CLI carrying the opt-in")
+        s._adopt_fast_state(LACKS)
+        self.assertEqual(s._asks, [], "the guard: no relaunch for a flag that cannot take")
+        return be, s
+
+    def _said(self, be):
+        return [m for m in be._logs if "launched with the fast-mode opt-in" in m]
+
+    def test_the_next_kernel_attaching_to_the_same_cli_asks_nothing_and_says_nothing(self):
+        be, _ = self._launched_and_tripped()
+        self.assertEqual(len(self._said(be)), 1)
+        be2 = _kernel(be.state_dir)               # the kernel restarts; the host keeps the CLI
+        s2 = _session_from_reg(be2)
+        _connect(s2, CLI_X, attach=True, launch_fast=True)
+        s2._adopt_fast_state(LACKS)               # the attach's initialize answer
+        s2._adopt_fast_state(LACKS)               # …and the next turn's init
+        self.assertEqual(s2._asks, [], "the same CLI: a relaunch would hear the same, after a restart as before it")
+        self.assertEqual(s2._switch_wanted, "", "…and no ask is left standing for the next quiet moment either")
+        self.assertEqual(self._said(be2), [], "said once for this CLI, by the kernel that launched it")
+
+    def test_a_host_re_exec_inside_one_kernel_keeps_the_guard(self):
+        be, s = self._launched_and_tripped()
+        _connect(s, CLI_X, attach=True, launch_fast=True)   # the host re-execs into new code and the kernel attaches again
+        s._adopt_fast_state(LACKS)
+        self.assertEqual(s._asks, [])
+        self.assertEqual(len(self._said(be)), 1)
+
+    def test_an_attach_to_a_cli_the_guard_never_named_still_asks(self):
+        # a CLI an earlier kernel launched with the opt-in may have lost it to a '/fast off' that kernel sent (the #197
+        # incident); only the launching kernel can tell the two apart, so an attach no record names asks as before
+        be, _ = self._launched_and_tripped()
+        be2 = _kernel(be.state_dir)
+        s2 = _session_from_reg(be2)
+        _connect(s2, CLI_Y, attach=True, launch_fast=True)
+        s2._adopt_fast_state(LACKS)
+        self.assertEqual(len(s2._asks), 1, "another CLI: the record names CLI X, not this one")
+
+    def test_the_problem_ring_holds_one_entry_per_session_however_many_clis_trip(self):
+        be, s = self._launched_and_tripped()
+        _connect(s, CLI_Y, attach=False)          # the user's Fast click relaunched it: a new CLI, the same answer
+        s._adopt_fast_state(LACKS)
+        self.assertEqual(s._asks, [])
+        self.assertEqual(len(self._said(be)), 2, "said once per CLI in the log")
+        rows = [r for r in be.problems() if "launched with the fast-mode opt-in" in r["text"]]
+        self.assertEqual(len(rows), 1, "one ring entry for the session, counting its CLIs: %r" % rows)
+        self.assertEqual(rows[0].get("count"), 2)
+
+    def test_a_live_model_change_on_a_guarded_cli_asks_nothing(self):
+        be, s = self._launched_and_tripped()
+        s._after_model_change("claude-opus-5-5", "claude-opus-5-5[1m]")
+        self.assertEqual(s._asks, [], "the CLI's report cleared _fast_unlocked; the guard holds for a model change too")
+        self.assertEqual(s._switch_wanted, "")
+        be2 = _kernel(be.state_dir)               # …and on the next kernel, attached to the same CLI
+        s2 = _session_from_reg(be2)
+        _connect(s2, CLI_X, attach=True, launch_fast=True)
+        s2._adopt_fast_state(LACKS)
+        s2._after_model_change("claude-opus-5-5", "claude-opus-5-5[1m]")
+        self.assertEqual(s2._asks, [])
+
+    def test_a_model_change_on_a_connection_made_without_the_flag_still_asks(self):
+        be = _kernel()
+        _sess(be, liveModel="Fable 5.1", liveModelId="claude-fable-5-1", model="claude-fable-5-1", liveFast="off")
+        s = _session_from_reg(be)
+        _connect(s, CLI_X, attach=False)
+        self.assertFalse(s._launch_record["fast"], "launched on Fable: no flag")
+        s._adopt_fast_state(LACKS)
+        s.model, s._model_id = "Opus 5.5", "claude-opus-5-5"
+        s._after_model_change("Fable 5.1", "Opus 5.5")
+        self.assertEqual(len(s._asks), 1, "Opus arrived on a connection that never carried the flag: the guard is not this")
+
+
+class ARememberedRefusalHoldsAcrossReports(unittest.TestCase):
+    """2026-10-09, the review of #197: a refusal standing only in liveFastReason held back the report that blanked it, and
+    the next report asked for a flagged relaunch whose answer only refused again. The real road: your own Fast pick refused
+    with a reason under Always fast. Synthetic session, no CLI."""
+
+    def test_a_refused_fast_pick_under_always_fast_costs_no_extra_relaunch(self):
+        be = _kernel()
+        _sess(be, liveModel="Opus 5.5", liveModelId="claude-opus-5-5", model="claude-opus-5-5", liveFast="off")
+        s = _session_from_reg(be)
+        _connect(s, CLI_X, attach=False)
+        self.assertTrue(s._fast_unlocked, "the switch armed this connection")
+        be.send = lambda sid, text: True; be._wake_push = lambda: None; be._notify = lambda *a, **k: None
+        self.assertTrue(be.set_fast(SID, "on"))   # the literal send on a flagged connection
+        s._adopt_fast_state({"fast_mode_state": "off", "fast_mode_disabled_reason": "extra_usage_disabled"})
+        self.assertEqual(len(s._asks), 1, "the refused pick: cleared, and the flagless relaunch asked for (as before)")
+        self.assertFalse(s.fast_opt)
+        _connect(s, CLI_Y, attach=False)          # that relaunch
+        self.assertFalse(s._launch_record["fast"], "flagless: the refusal held the switch back at the launch")
+        s._adopt_fast_state(LACKS)                # its initialize answer
+        s._adopt_fast_state(LACKS)                # …and the next turn's init
+        self.assertEqual(s._asks, [], "no flagged relaunch just to hear the same refusal")
+        self.assertEqual(s.fast_reason, "", "the badge still comes back: the opt-in reason is blanked as before")
+        self.assertEqual(sb.read_reg(be.state_dir, SID).get("fastRuleRefused"), "extra_usage_disabled",
+                         "remembered where the next kernel reads it")
+        self.assertEqual([m for m in be._logs if m.startswith("always fast (web): the CLI refused")], [],
+                         "the refused pick was said by its own toast; the switch says nothing on top")
+        be.set_fast(SID, "on")                    # the user's next pick lifts it, as any gesture lifts the switch's memory
+        self.assertEqual(sb.read_reg(be.state_dir, SID).get("fastRuleRefused"), "")
+
+    def test_with_the_switch_off_nothing_is_remembered_for_it(self):
+        be = _kernel(); _switch(be, sb.ALWAYS_FAST_STORE, "off")
+        _sess(be, liveModel="Opus 5.5", liveModelId="claude-opus-5-5", liveFast="off", liveFastReason="extra_usage_disabled")
+        s = _session_from_reg(be)
+        _connect(s, CLI_X, attach=False)
+        s._adopt_fast_state(LACKS)
+        self.assertEqual((s.fast_rule_refused, s.fast_reason), ("", ""))
+        self.assertFalse(sb.read_reg(be.state_dir, SID).get("fastRuleRefused"))
+
