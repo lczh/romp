@@ -281,7 +281,8 @@ test("a withdrawal in one tab is honoured by another tab that restored the same 
   assert.match(RENDER, /vscodeApi\.postMessage\(\{ type: "cancelQueued", id: t\.sid, md: t\.text, qid: t\.qid \}\);/, "the kernel hears it when the link is back");
   assert.match(RENDER, /for \(const \{ sid, p \} of resendable\(pendingSent, host, hostOf, resentOn, gen, now, gone\)\)/);
   assert.match(RENDER, /if \(list\.some\(\(p\) => p\.qid === k\.qid\) \|\| gone\.has\(k\.qid\)\) continue;/, "a reload does not bring a withdrawn send back");
-  assert.match(RENDER, /if \(typeof m\.md === "string"\) confirmWithdrawal\(m\.id, m\.md\);/, "a kernel's answer confirms it, so no tab re-posts the cancel");
+  assert.match(RENDER, /if \(typeof m\.md === "string"\) confirmWithdrawal\(m\.id, m\.md, typeof m\.qid === "string" \? m\.qid : undefined\);/, "a kernel's answer confirms it, so no tab re-posts the cancel");
+  assert.match(RENDER, /const mine = qid \? t\.qid === qid : \(t\.sid === sid && t\.text === md\);/, "by the send's id: one answer, one withdrawal");
 });
 
 test("withdrawals in the store are checked, merged by id, a confirmed copy kept, bounded", () => {

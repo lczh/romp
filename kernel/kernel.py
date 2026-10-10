@@ -23345,6 +23345,14 @@ def _drive(msg, client):
     # a chat send's press-minted id, which the kernel answers (sendAck) and recognises when the page sends it again
     _aq = _wire_qid(msg) if ((t == "sendMessage" and msg.get("text")) or t == "askFollowUp") else None
     if not _kernel_knows(sid):
+        if t == "cancelQueued":
+            # a withdrawal for a session this kernel does not have (gone since, or never here): there is nothing to cancel, and
+            # the send it withdraws can never be delivered here either, so it is answered as done, quietly, never with the
+            # not-delivered dialog. The page re-posts a withdrawal its first cancel could not deliver (render.ts
+            # resendUnacked), and a dialog here came back on every reconnect, in every tab (the review of #201)
+            client["send"](json.dumps({"type": "cancelResult", "ok": True, "gone": True, "id": sid,
+                                       "md": str(msg.get("md") or ""), "text": "", "qid": _wire_qid(msg)}))
+            return True
         _refuse_drive(client, t, sid, msg)
         _send_ack(client, sid, _aq, False)                # decided: refused (no session here will ever take it)
         return True                                       # consumed: refused, reported, and recorded
@@ -23578,7 +23586,7 @@ def _drive(msg, client):
         # the old silent miss that read as a successful cancel.
         err = _cancel_parked(sid, int(msg["park"]), str(msg.get("md") or ""), qid=_wire_qid(msg))
         client["send"](json.dumps({"type": "cancelResult", "ok": not err, "id": sid,
-                                   "md": str(msg.get("md") or ""), "text": err or ""}))
+                                   "md": str(msg.get("md") or ""), "text": err or "", "qid": _wire_qid(msg)}))
         _push_soon()
     elif t == "cancelQueued" and msg.get("idx") is not None and hasattr(be, "unqueue"):
         # ✕ on a backend-queue message: pull it back out (drift-guarded by the bubble's body); the
@@ -23587,7 +23595,7 @@ def _drive(msg, client):
         # silent miss showed the message as deleted while the CLI answered it anyway).
         err = _cancel_backend_queued(be, sid, int(msg["idx"]), str(msg.get("md") or ""), qid=_wire_qid(msg))
         client["send"](json.dumps({"type": "cancelResult", "ok": not err, "id": sid,
-                                   "md": str(msg.get("md") or ""), "text": err or ""}))
+                                   "md": str(msg.get("md") or ""), "text": err or "", "qid": _wire_qid(msg)}))
         _push_soon()
     elif t == "cancelQueued" and msg.get("md"):
         # ✕ at the OPTIMISTIC stage (the user 2026-08-30, who pressed send mid-compaction and sat in
@@ -23616,7 +23624,7 @@ def _drive(msg, client):
             # had already gone through, or never reached this kernel. sid only: the body is the user's text
             sys.stderr.write("queued-cancel miss: %s (body-only)\n" % sid)
         client["send"](json.dumps({"type": "cancelResult", "ok": not err, "id": sid,
-                                   "md": md, "text": err or ""}))
+                                   "md": md, "text": err or "", "qid": _wire_qid(msg)}))
         _push_soon()
     elif t == "dismissEcho" and hasattr(be, "dismiss_echo"):
         # ✕ on a never-delivered bubble (a send whose CLI died holding it — the backend's dropped-echo
@@ -42258,7 +42266,12 @@ def _send_log_path():
 
 def _send_acks_problem(text, kind, **fields):
     """A fault in the send record, said where it can be found again: stderr, the session-events ledger and the kernel
-    log's problem row (and the error center's ring when the Claude Code backend is up)."""
+    log's problem row (and the error center's ring when the Claude Code backend is up). Said during the boot load it is
+    HELD, not said: building the backend there would put it ahead of the boot passes that must precede it
+    (_model_alias_boot_pass), so main says it once the backend's own boot has begun (_send_accepts_boot_report)."""
+    if _SEND_ACCEPTS_STATE.get("booting"):
+        _SEND_ACCEPTS_STATE.setdefault("bootReports", []).append((text, kind, fields))
+        return
     sys.stderr.write("send acks: %s\n" % text)
     try:
         m = sys.modules.get("romp_sdk_backend") or load_source("romp_sdk_backend", HERE / "sdk_backend.py")
@@ -42287,14 +42300,58 @@ def _send_row(r):
         return None
 
 
+def _send_accepts_boot_report():
+    """Say what the boot load held (_send_acks_problem): run by main after the boot passes, once the backend is being built."""
+    for text, kind, fields in _SEND_ACCEPTS_STATE.pop("bootReports", None) or ():
+        _send_acks_problem(text, kind, **fields)
+
+
+def _send_log_repair_tail_locked():
+    """A crash in the middle of an append leaves half a line at the end of the log, and the next append would be written
+    onto it and lost with it at the next boot. Cut the log back to its last whole line (the write lock held). Returns
+    whether a torn line was cut."""
+    path = _send_log_path()
+    _SEND_ACCEPTS_STATE["tailOk"] = True
+    try:
+        with open(path, "rb+") as fh:
+            data = fh.read()
+            if not data or data.endswith(b"\n"):
+                return False
+            fh.truncate(data.rfind(b"\n") + 1)
+            fh.flush()
+            os.fsync(fh.fileno())
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        _SEND_ACCEPTS_STATE["tailOk"] = False
+        _send_write_fault(e)
+        return False
+
+
 def _send_accepts_boot_load():
     """Read the decided ids, once, at boot (main): the whole-file form first, then the log, a later line winning. Nothing
-    in either file can stop the kernel: a file that cannot be read, a line that is not JSON and a row that is not a
-    decision are skipped and said (a problem row naming the counts), and every good row is kept. A send whose record was
-    lost is recognised only while the session still holds a copy of it. Returns the count of decisions read."""
-    rows, bad, unread = [], 0, []
+    in either file can stop the kernel: a file that cannot be read, a line that is not JSON, a torn last line (cut first,
+    _send_log_repair_tail_locked) and a row that is not a decision are skipped and said (a problem row naming the counts,
+    held until the boot passes have run: _send_acks_problem), and every good row is kept. A whole-file form left by an
+    older kernel is folded into the log at once (a compaction). A send whose record was lost is recognised only while the
+    session still holds a copy of it. Returns the count of decisions read."""
+    _SEND_ACCEPTS_STATE["booting"] = True
+    try:
+        return _send_accepts_boot_load_inner()
+    finally:
+        _SEND_ACCEPTS_STATE["booting"] = False
+
+
+def _send_accepts_boot_load_inner():
+    rows, bad, unread, legacy = [], 0, [], False
+    with _SEND_WRITE_LOCK:
+        torn = _send_log_repair_tail_locked()
+    if torn:
+        bad += 1
     try:
         raw = json.loads(_send_accepts_path().read_text())
+        legacy = True
         got = raw.get("accepted") if isinstance(raw, dict) else None
         if not isinstance(got, list):
             unread.append(_SEND_ACCEPTS_FILE)
@@ -42328,6 +42385,9 @@ def _send_accepts_boot_load():
             _SEND_ACCEPTS.move_to_end(got[0])
             n += 1
         _SEND_ACCEPTS_STATE["lines"] = lines
+    if legacy or _send_accepts_path().exists():
+        with _SEND_WRITE_LOCK:
+            _send_log_compact_locked(time.time())   # the whole-file form, folded into the log and retired
     if bad or unread:
         _send_acks_problem("the record of decided chat sends had %d unreadable row(s)%s; the rest (%d) were kept, and a resend "
                            "of a send whose row was lost is recognised only while its session still holds a copy"
@@ -42360,11 +42420,13 @@ def _send_write_fault(e):
 
 def _send_log_append(q, sid, t, ok):
     """One decision, made durable before the page hears it: a line appended to the log and fsynced, under the file's own
-    lock and never the map's, so no other send waits on this disk write. The log is compacted once it holds twice the
-    live decisions (_send_log_compact)."""
+    lock and never the map's, so no other send waits on this disk write. The log is compacted once it holds 500 lines
+    more than the live decisions (_send_log_compact_locked)."""
     path = _send_log_path()
     row = json.dumps({"qid": q, "sid": str(sid), "t": int(t), "ok": bool(ok)})
     with _SEND_WRITE_LOCK:
+        if not _SEND_ACCEPTS_STATE.get("tailOk"):
+            _send_log_repair_tail_locked()       # never append onto half a line (a crash, or a write that failed part way)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             fresh = not path.exists()
@@ -42376,11 +42438,12 @@ def _send_log_append(q, sid, t, ok):
                 _fsync_dir(path)
             _SEND_ACCEPTS_STATE["lines"] += 1
         except OSError as e:
+            _SEND_ACCEPTS_STATE["tailOk"] = False   # the write may have left part of the line
             _send_write_fault(e)
             return
         with _SEND_ACCEPTS_LOCK:
             live = len(_SEND_ACCEPTS)
-        if _SEND_ACCEPTS_STATE["lines"] > max(2 * live, 1000):
+        if _SEND_ACCEPTS_STATE["lines"] > max(live + 500, 1000):   # at most 500 superseded or expired lines between compactions
             _send_log_compact_locked(t)
 
 
@@ -85354,6 +85417,7 @@ def main():
     threading.Thread(target=_sdk, daemon=True, name="sdk-boot").start()   # construct the SDK backend NOW so its boot
     #                                                           reconcile (cut turns, queues, orphans) runs at
     #                                                           boot, not on the first lazy touch
+    threading.Thread(target=_stage_marked("send-acks")(_send_accepts_boot_report), daemon=True, name="send-acks").start()   # what the send record's boot load held, said now the boot passes have run
     threading.Thread(target=_rewind_holds_boot, daemon=True).start()   # resolve holds whose take/fail
     #                                                           event fired while no kernel was up (it
     #                                                           builds the backend itself if it wins the race)
