@@ -612,6 +612,7 @@ class TheRegistryFollowsTheClisWord(unittest.TestCase):
 
 CLI_X = {"pid": 4242, "start": "1700000001"}    # a hosted CLI's identity, as the host's hello names it (pid:start)
 CLI_Y = {"pid": 4343, "start": "1700000002"}
+CLI_Z = {"pid": 4444, "start": "1700000003"}
 
 
 def _kernel(state_dir=None):
@@ -674,7 +675,7 @@ class TheGuardBelongsToTheCliNotTheConnection(unittest.TestCase):
     def _said(self, be):
         return [m for m in be._logs if "launched with the fast-mode opt-in" in m]
 
-    def test_the_next_kernel_attaching_to_the_same_cli_asks_nothing_and_says_nothing(self):
+    def test_the_next_kernel_attaching_to_the_same_cli_asks_nothing_and_says_why_once(self):
         be, _ = self._launched_and_tripped()
         self.assertEqual(len(self._said(be)), 1)
         be2 = _kernel(be.state_dir)               # the kernel restarts; the host keeps the CLI
@@ -684,7 +685,15 @@ class TheGuardBelongsToTheCliNotTheConnection(unittest.TestCase):
         s2._adopt_fast_state(LACKS)               # …and the next turn's init
         self.assertEqual(s2._asks, [], "the same CLI: a relaunch would hear the same, after a restart as before it")
         self.assertEqual(s2._switch_wanted, "", "…and no ask is left standing for the next quiet moment either")
-        self.assertEqual(self._said(be2), [], "said once for this CLI, by the kernel that launched it")
+        # the review of #199 (2026-10-10): the launching kernel's line went with its problem ring, and the session then sat
+        # at normal speed under a standing Fast pick or Always fast with no reason anywhere. The next kernel says it from the
+        # registry's record: once, however many reports and re-attaches to the same CLI follow
+        self.assertEqual(len(self._said(be2)), 1, "said again by the kernel that attached, from the registry's record")
+        _connect(s2, CLI_X, attach=True, launch_fast=True)   # a host re-exec inside this kernel: the same CLI again
+        s2._adopt_fast_state(LACKS)
+        self.assertEqual(len(self._said(be2)), 1, "once per CLI in a kernel's life")
+        rows = [r for r in be2.problems() if "launched with the fast-mode opt-in" in r["text"]]
+        self.assertEqual(len(rows), 1, "the reason is in this kernel's error center: %r" % rows)
 
     def test_a_host_re_exec_inside_one_kernel_keeps_the_guard(self):
         be, s = self._launched_and_tripped()
@@ -775,3 +784,117 @@ class ARememberedRefusalHoldsAcrossReports(unittest.TestCase):
         self.assertEqual((s.fast_rule_refused, s.fast_reason), ("", ""))
         self.assertFalse(sb.read_reg(be.state_dir, SID).get("fastRuleRefused"))
 
+
+
+REFUSED = {"fast_mode_state": "off", "fast_mode_disabled_reason": "extra_usage_disabled"}
+
+
+class TheReviewOf199(unittest.TestCase):
+    """2026-10-10, the review of #199. Toggling a Model switch (here or from a peer) relaunched every session whose CLI was
+    launched with the opt-in and still lacks it; a remembered refusal could only be lifted by a Fast or Slow pick or the CLI
+    reporting fast on, so a session refused under one login stayed at normal speed after billing moved to a login that
+    has fast mode. Synthetic sessions, CLI identities and billing, no CLI."""
+
+    OTHER = "11111111-2222-4333-8444-000000000799"
+
+    def _guarded(self):
+        be = _kernel()
+        be._always_fast_seen = True               # the switch as this kernel booted with it
+        _sess(be, liveModel="Opus 5.5", liveModelId="claude-opus-5-5", model="claude-opus-5-5", liveFast="off")
+        s = _session_from_reg(be)
+        _connect(s, CLI_X, attach=False)
+        s._adopt_fast_state(LACKS)
+        self.assertTrue(s._opt_in_cannot_take(), "the guard stands for CLI X")
+        return be, s
+
+    def test_toggling_either_switch_never_relaunches_a_guarded_cli(self):
+        be, s = self._guarded()
+        _switch(be, sb.RETRY_UPGRADE_STORE, "on")
+        self.assertEqual(be.apply_model_switches(), 0, "a Retry upgrades toggle (before: one quiet relaunch to hear the same)")
+        self.assertEqual(be.apply_model_switches(), 0, "a peer re-sending the same value")
+        _switch(be, sb.ALWAYS_FAST_STORE, "off"); be.apply_model_switches()
+        _switch(be, sb.ALWAYS_FAST_STORE, "on")
+        self.assertEqual(be.apply_model_switches(), 0, "Always fast off and on again")
+        self.assertEqual((s._asks, s._switch_wanted), ([], ""))
+        be2 = _kernel(be.state_dir)               # …and on the next kernel, attached to the same CLI
+        s2 = _session_from_reg(be2)
+        _connect(s2, CLI_X, attach=True, launch_fast=True)
+        s2._adopt_fast_state(LACKS)
+        self.assertEqual(be2.apply_model_switches(), 0)
+        self.assertEqual(s2._asks, [])
+
+    def test_a_flip_of_always_fast_forgets_every_remembered_refusal_and_nothing_else_does(self):
+        be = _kernel()
+        be._always_fast_seen = True
+        _sess(be, liveModel="Opus 5.5", liveModelId="claude-opus-5-5", model="claude-opus-5-5", liveFast="off")
+        _sess(be, sid=self.OTHER, name="api", liveModel="Opus 5.5", liveModelId="claude-opus-5-5", liveFast="off",
+              liveFastReason="extra_usage_disabled", fastRuleRefused="extra_usage_disabled")
+        be.sessions.pop(self.OTHER)              # dormant: its registry is all there is
+        s = _session_from_reg(be)
+        _connect(s, CLI_X, attach=False)
+        s._adopt_fast_state(REFUSED)              # the switch armed the flag and the CLI refused with a reason
+        _connect(s, CLI_Y, attach=False)          # a flagless relaunch since (the refusal held the switch back)
+        self.assertFalse(s._launch_record["fast"])
+        s._adopt_fast_state(LACKS)
+
+        def refused(sid):
+            r = sb.read_reg(be.state_dir, sid)
+            return (r.get("fastRuleRefused") or "", r.get("liveFastReason") or "")
+        _switch(be, sb.RETRY_UPGRADE_STORE, "on"); be.apply_model_switches()
+        be.apply_model_switches()                 # a peer re-sending the same values
+        self.assertEqual((s.fast_rule_refused, refused(SID)[0], refused(self.OTHER)[0]), ("extra_usage_disabled",) * 3,
+                         "no flip of Always fast: nothing is forgotten")
+        _switch(be, sb.ALWAYS_FAST_STORE, "off"); be.apply_model_switches()
+        self.assertEqual((s.fast_rule_refused, s.fast_reason, refused(SID), refused(self.OTHER)), ("", "", ("", ""), ("", "")),
+                         "the flip forgets the refusal, live and dormant (before: only a Fast or Slow pick did)")
+        self.assertEqual(s._asks, [], "off: nothing wants the flag")
+        _switch(be, sb.ALWAYS_FAST_STORE, "on")
+        self.assertEqual(be.apply_model_switches(), 1, "on again: the next launch asks the CLI again")
+        _connect(s, CLI_Z, attach=False)
+        self.assertTrue(s._launch_record["fast"], "the relaunch carries the opt-in")
+        s._adopt_fast_state(REFUSED)
+        self.assertEqual(refused(SID)[0], "extra_usage_disabled", "the CLI's answer is remembered again: the reason still applies")
+
+    def test_a_launch_on_another_billing_asks_again_though_the_old_cli_refused_meanwhile(self):
+        be = _kernel()
+        _sess(be, liveModel="Opus 5.5", liveModelId="claude-opus-5-5", model="claude-opus-5-5", liveFast="off")
+        s = _session_from_reg(be)
+        _connect(s, CLI_X, attach=False)
+        s._cli_launch = {"auth": "", "authLogin": ""}   # the reconcile's record: launched on the automatic billing
+        s._adopt_fast_state(REFUSED)
+        self.assertEqual(sb.read_reg(be.state_dir, SID).get("fastRefusalBilling"), ["", ""], "kept with the billing it came under")
+        self.assertFalse(s._fast_refusal_new_billing(), "a launch on the same billing: the refusal holds")
+        self.assertFalse(s.fast_effective())
+        sb.write_sdk_default(be.state_dir, auth="login", authExplicit=True, authLogin="")   # billing moves (the default it follows)
+        s._adopt_fast_state(REFUSED)              # the old CLI's next turn, before the relaunch for the new billing
+        self.assertTrue(s._fast_refusal_new_billing(), "the launch onto the new billing forgets the old one's refusal")
+        self.assertTrue(s.fast_effective(), "…so it carries the opt-in (before: normal speed until a Fast or Slow pick)")
+        r = sb.read_reg(be.state_dir, SID)
+        self.assertEqual((r.get("fastRuleRefused"), r.get("liveFastReason"), "fastRefusalBilling" in r), ("", "", False))
+        _connect(s, CLI_Y, attach=False)
+        s._cli_launch = {"auth": "login", "authLogin": ""}
+        s._adopt_fast_state(REFUSED)              # the new login refuses too: remembered again, under it
+        self.assertEqual(s.fast_rule_refused, "extra_usage_disabled")
+        self.assertEqual(sb.read_reg(be.state_dir, SID).get("fastRefusalBilling"), ["login", ""])
+        self.assertFalse(s._fast_refusal_new_billing(), "and holds while the billing stays")
+
+    def test_a_dormant_session_asks_again_at_its_next_launch_after_a_restart(self):
+        be = _kernel()
+        _sess(be, liveModel="Opus 5.5", liveModelId="claude-opus-5-5", model="claude-opus-5-5", liveFast="off",
+              fastRuleRefused="extra_usage_disabled", fastRefusalBilling=["", ""])
+        sb.write_sdk_default(be.state_dir, auth="login", authExplicit=True, authLogin="")
+        s = _session_from_reg(_kernel(be.state_dir))   # the next kernel builds it from the registry
+        self.assertEqual(s.fast_refusal_billing, ("", ""))
+        self.assertTrue(s._fast_refusal_new_billing())
+        self.assertTrue(s.fast_effective())
+        # …and a refusal no billing was recorded with (a registry written before this) stands, as before
+        _sess(be, sid=self.OTHER, name="api", liveModel="Opus 5.5", liveModelId="claude-opus-5-5",
+              fastRuleRefused="extra_usage_disabled")
+        o = sb.SdkSession(be, sb.read_reg(be.state_dir, self.OTHER))
+        self.assertFalse(o._fast_refusal_new_billing())
+        self.assertFalse(o.fast_effective())
+
+    def test_every_launch_reads_the_billing_check_before_the_options(self):
+        src = inspect.getsource(sb.SdkSession)
+        i, j = src.find("self._fast_refusal_new_billing()"), src.find("opts = self.backend._options(self, ClaudeAgentOptions)")
+        self.assertTrue(0 < i < j, "the check runs before _options and the snapshot read fast_effective")
