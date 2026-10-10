@@ -75,7 +75,8 @@ import { NavHistory } from "./nav-history";
 import { StagedStack, quoteReplyBody, stagedPosts, type StagedMsg } from "./staged-messages";
 import { isSlashCommand } from "./staged-messages";   // the viewer's message bar refuses a slash command (2026-09-30)
 import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, isKernelEchoUuid, newPending, mintQid, reconcilePending, clearBoundarySeen, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody, refusedRestoreText } from "./send-pending";
-import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, pendingFromKept, resendable, resendWire, restoreKept } from "./send-acks";
+import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, mergeTombstones, pendingFromKept, resendable, resendWire, restoreKept,
+         restoreTombstones, type Tombstone } from "./send-acks";
 import { type FrameWm, frameOlder, droppedLandedHuman, dropsLandedRow, forgetHeldWm } from "./frame-guard";   // the frame watermark guard (2026-09-22): an older build's frame is ignored, a vanished landed turn is filed; a reconnect forgets the held watermarks
 import { type LandEvent, LandingWatch } from "./send-landing";   // the send-landing invariant (2026-09-23): observation only, around the frame dispatch (landingBefore / landingAfter)
 import { readBaseFp, checkBase, newResyncState, onMismatch, onAgree, forgetResync, staleAnswer } from "./chat-resync";   // the delta's base check (2026-09-23): a delta cut against a base the page does not hold is refused and the full asked for, bounded by event
@@ -812,7 +813,15 @@ function markPendingLost(why: string): void {
 const resentOn = new WeakMap<PendingSend, number>();   // the host socket generation a send was last posted again on
 const ackGen = new Map<string, number>();              // host → how many sockets to it have said they recognise a resend
 const heldQids = new Set<string>();                    // every send this page has held (pressed or restored): the merge's "mine"
+const withdrawnHere = new Map<string, Tombstone>();    // this page's withdrawals, and any it confirmed with a kernel (send-acks.ts Tombstone)
+const cancelOn = new Map<string, number>();            // withdrawal id → the host socket generation its cancel was re-posted on
 let keptSig = "";
+/** Every withdrawal the store holds, from every tab, plus this page's own (read fresh: another tab may have withdrawn since). */
+function withdrawals(now: number): Tombstone[] {
+  let stored: Tombstone[] = [];
+  try { stored = restoreTombstones(((vscodeApi?.getState?.() || {}) as any).withdrawnSends, now); } catch { /* none readable */ }
+  return mergeTombstones([...withdrawnHere.values()], stored, now);
+}
 /** A remote host that is no longer attached (the federation layer has read the host list, and it is not on it). */
 function hostGone(sid: string): boolean {
   const h = hostOf(sid);
@@ -829,12 +838,24 @@ function persistKeptSends(): void {
   try {
     const now = Date.now();
     const mine = keptSends(pendingSent, now);
-    const sig = mine.map((k) => k.qid).join(",");
+    const sig = mine.map((k) => k.qid).join(",") + "|" + [...withdrawnHere.values()].map((t) => t.qid + (t.confirmed ? "+" : "")).join(",");
     if (sig === keptSig) return;                       // nothing changed for the store: no write per push
     keptSig = sig;
     const st = (vscodeApi?.getState?.() || {}) as any;  // read fresh: another tab may have written since
-    vscodeApi?.setState?.({ ...st, pendingSends: mergeKept(mine, restoreKept(st.pendingSends, now), heldQids, now, hostGone) });
+    const tombs = mergeTombstones([...withdrawnHere.values()], restoreTombstones(st.withdrawnSends, now), now);
+    const gone = new Set(tombs.map((t) => t.qid));
+    vscodeApi?.setState?.({ ...st, pendingSends: mergeKept(mine, restoreKept(st.pendingSends, now), heldQids, now, hostGone, gone),
+                            withdrawnSends: tombs });
   } catch { /* storage refused: the sends still live in this page */ }
+}
+/** The kernel answered a withdrawal (cancelResult for the session and the words): any withdrawal of it is confirmed, so no
+ *  tab posts its cancel again. */
+function confirmWithdrawal(sid: string, md: string): void {
+  let changed = false;
+  for (const t of withdrawals(Date.now())) {
+    if (t.sid === sid && t.text === md && !t.confirmed) { withdrawnHere.set(t.qid, { ...t, confirmed: true }); changed = true; }
+  }
+  if (changed) persistKeptSends();
 }
 /** A remote session whose host's socket is not open: a send posted to it now went nowhere (federation's toast). */
 function hostSocketDown(sid: string): boolean {
@@ -856,16 +877,36 @@ function resendUnacked(host: string): void {
   if (!vscodeApi) return;
   const gen = (ackGen.get(host) || 0) + 1;
   ackGen.set(host, gen);
-  for (const { sid, p } of resendable(pendingSent, host, hostOf, resentOn, gen)) {
+  const now = Date.now();
+  const tombs = withdrawals(now).filter((t) => hostOf(t.sid) === host);
+  const gone = new Set(tombs.map((t) => t.qid));
+  // a send withdrawn in ANY tab (the review of #200): this tab restored it at its load and still holds it; it goes now,
+  // never resent behind the withdrawal
+  for (const [sid, list] of pendingSent) {
+    if (hostOf(sid) !== host || !list.some((p) => p.qid && gone.has(p.qid))) continue;
+    const keep = list.filter((p) => !(p.qid && gone.has(p.qid)));
+    if (keep.length) pendingSent.set(sid, keep); else pendingSent.delete(sid);
+    const s = sessions.get(sid);
+    if (s) reconcileOptimistic(s);
+    if (sid === activeId) appendActive();
+  }
+  persistKeptSends();
+  // …and the kernel hears each withdrawal it has not answered yet, so its own record refuses any copy that still arrives
+  for (const t of tombs) {
+    if (t.confirmed || cancelOn.get(t.qid) === gen) continue;
+    cancelOn.set(t.qid, gen);
+    vscodeApi.postMessage({ type: "cancelQueued", id: t.sid, md: t.text, qid: t.qid });
+  }
+  for (const { sid, p } of resendable(pendingSent, host, hostOf, resentOn, gen, now, gone)) {
     resentOn.set(p, gen);
     vscodeApi.postMessage(resendWire(p));
     vscodeApi.postMessage({ type: "clientDiag", surface: "chat", what: "resend", data: { sid, key: p.qid, host, restored: p.lost === "reload" } });
   }
 }
 /** A send's answer, by the id the press minted (the kernel's sendAck frame). */
-function onSendAck(sid: string, qid: string, ok: boolean): void {
+function onSendAck(sid: string, qid: string, ok: boolean, retry = false): void {
   const list = pendingSent.get(sid);
-  if (!list || !applySendAck(list, qid, ok)) return;
+  if (!list || !applySendAck(list, qid, ok, retry)) return;
   persistKeptSends();
   const s = sessions.get(sid);
   if (s) reconcileOptimistic(s);      // a "not confirmed" label may go
@@ -885,10 +926,11 @@ function markHostPendingLost(host: string): void {
 // socket to their kernel says it recognises a resend (now, when it already has; else on its romp:hostAcks).
 try {
   const kept = restoreKept(((vscodeApi?.getState?.() || {}) as any).pendingSends);
+  const gone = new Set(withdrawals(Date.now()).map((t) => t.qid));
   const hosts = new Set<string>();
   for (const k of kept) {
     const list = pendingSent.get(k.sid) || [];
-    if (list.some((p) => p.qid === k.qid)) continue;
+    if (list.some((p) => p.qid === k.qid) || gone.has(k.qid)) continue;   // withdrawn in some tab: not brought back
     list.push(pendingFromKept(k));
     heldQids.add(k.qid);
     pendingSent.set(k.sid, list);
@@ -5442,6 +5484,9 @@ function rescindQueued(el: HTMLElement, toComposer: boolean): void {
     const rec = own ? (own.paths && own.paths.length ? own.paths : own.imgPaths) : null;   // every attachment the press knew (the record; images alone on an older entry), before the entry goes
     if (rec && rec.length) ownPaths = rec.slice();
     if (dropPending(list, qmd, qts, qid)) { if (list.length) pendingSent.set(sidQ, list); else pendingSent.delete(sidQ); }
+    // a withdrawal of a send no kernel has answered is kept in the store every tab reads, by its id: a tab that restored the
+    // same send never resends it, and the kernel is told when the link is back if this cancel cannot reach it now
+    if (own && own.qid && own.wire && !own.acked && !own.received) withdrawnHere.set(own.qid, { qid: own.qid, sid: sidQ, text: own.text, ts: Date.now() });
     persistKeptSends();   // withdrawn (the ✕, or the ✎ that puts the words back in the box): gone from the kept list too, or a reload would send it
   }
   // a PROVISIONAL tab's send has never left the client (T244): forget it from the queue adoption would
@@ -22057,7 +22102,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   if (m.type === "pipeState" && m.up) forgetHeldWm(sessions, null);   // …and the held watermarks go (frame-guard.ts, 2026-09-23): the kernel behind the pane's pipe may be a fresh process whose live-tail revision restarted at 0
   if (m.type === "pipeState" && !m.up && paneArranges(window as any)) { setViewOrderPublisher(null); setFoldsPublisher(null); }   // the pipe that heard the kernel's arrangement is gone: stop speaking for it until the next connection's viewOrder frame (view-order.ts ViewOrderPublisher, 2026-09-23)
   if (m.type === "pipeState") { if (!m.up) { markPendingLost("connection"); onWireDown(); } pipeBanner(!!m.up, Number(m.queued) || 0); return; }   // the pane's down edge clears the in-flight asks as the socket's does (round nine, medium 2)
-  if (m.type === "sendAck") { if (typeof m.id === "string" && typeof m.qid === "string") onSendAck(m.id, m.qid, !!m.ok); return; }   // a kernel answered a send (send-acks.ts)
+  if (m.type === "sendAck") { if (typeof m.id === "string" && typeof m.qid === "string") onSendAck(m.id, m.qid, !!m.ok, !!m.retry); return; }   // a kernel answered a send (send-acks.ts)
   // any kernel message proves the kernel is reachable again — heal previews whose fetch died in a
   // restart window (preview.ts retryFailedPreviews; a no-op when nothing failed). federation's
   // tunnel poll rides this same path: it dispatches {type:"hostUp"} on a host's down→up transition,
@@ -22310,6 +22355,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   // session was already asked to raise its question again.
   else if (m.type === "askLost" && typeof m.text === "string") warnToast(m.text);
   else if (m.type === "cancelResult" && typeof m.id === "string") {
+    if (typeof m.md === "string") confirmWithdrawal(m.id, m.md);   // a kernel answered: no tab posts this withdrawal's cancel again
     const key = m.id + " " + (typeof m.md === "string" ? m.md : "");   // the same separator the rescind stores under (a NUL byte sat here, unreadable in any text view, so no refusal ever found its stash; the T373 fold lab caught it)
     const stash = pendingCancelRestores.get(key);
     pendingCancelRestores.delete(key);

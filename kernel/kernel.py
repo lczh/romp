@@ -23373,7 +23373,7 @@ def _drive(msg, client):
                 _push_soon()  # idle → instant echo; SDK busy → queued bubble forwarded mid-turn + folded (but a SLASH COMMAND parks to fire alone at turn end — mid-turn it would land as text, not execute); a backend that cannot forward, busy → held + merged at turn end
         except BaseException:
             if _aq:
-                _send_forget(_aq)                         # no decision was made: the page's resend may try again
+                _send_forget(_aq, sid, client)            # no decision was made: this page and any waiting copy hear "not delivered, retry"
             raise
         _send_settle(client, sid, _aq, _ok)
     elif t == "rewindSend" and msg.get("uuid") and msg.get("text"):
@@ -23476,7 +23476,7 @@ def _drive(msg, client):
             return True
         except BaseException:
             if _aq:
-                _send_forget(_aq)                         # no decision was made: the page's resend may try again
+                _send_forget(_aq, sid, client)            # no decision was made: this page and any waiting copy hear "not delivered, retry"
             raise
         if _handed is None:
             # the feed predicted the move on the click; the err frame carrying op + itemId is what it reverts
@@ -42198,7 +42198,14 @@ def _client_qid(msg, sid, be):
 def _qid_held(q, sid, be):
     """Whether the session already holds a copy wearing id `q`: on a parked op, on a queued copy (pending_queued_meta)
     or on a live echo (a fed copy between the queue and its landing wears one). Fails toward held: a hold that cannot be
-    checked reads as held."""
+    checked reads as held (the id-minting caller, _client_qid, then mints its own). The send's front door asks
+    _qid_hold_state instead, which says when the check could not be made."""
+    st = _qid_hold_state(q, sid, be)
+    return st is not False
+
+
+def _qid_hold_state(q, sid, be):
+    """_qid_held's three answers: True (held), False (not held), None (the check raised: unknown)."""
     with _pending_ops_lock:
         if any(_op_qid(op) == q for op in _pending_ops.get(str(sid)) or ()):
             return True
@@ -42208,8 +42215,9 @@ def _qid_held(q, sid, be):
             return True
         if hasattr(be, "live_atoms"):
             return any(isinstance(a, dict) and a.get("uuid") == q for a in (be.live_atoms(sid) or ()))
-    except Exception:
-        return True
+    except Exception as e:
+        sys.stderr.write("send: could not check whether %s holds a copy (%s)\n" % (sid, type(e).__name__))   # the sid alone: never the id or the words
+        return None
     return False
 
 
@@ -42229,12 +42237,14 @@ def _qid_held(q, sid, be):
 # recognises it. The keepalive says the kernel speaks this protocol (`acks` on every ka frame, _keepalive_all): a page
 # resends only to a kernel that said so on the current socket, because an older kernel would deliver a resend twice.
 _ACKED_SEND_OPS = ("sendMessage", "askFollowUp")
-_SEND_ACCEPTS_FILE = "accepted-sends.json"
+_SEND_ACCEPTS_FILE = "accepted-sends.json"     # the whole-file form #198 wrote: read at boot, retired by the first compaction
+_SEND_LOG_FILE = "accepted-sends.jsonl"        # one line per decision, appended and fsynced; compacted now and then
 _SEND_ACCEPTS_CAP = 10000                # ids kept, newest last: human sends, so a week's are far below it
 _SEND_ACCEPTS_TTL_S = 7 * 86400          # the page resends nothing older than this (send-acks.ts RESEND_MAX_AGE_MS sits under it)
 _SEND_ACCEPTS = collections.OrderedDict()   # qid -> {"sid", "t", "ok", "waiters"}; ok None while the send is being decided
-_SEND_ACCEPTS_LOCK = threading.Lock()
-_SEND_ACCEPTS_STATE = {"said": False}
+_SEND_ACCEPTS_LOCK = threading.Lock()       # the map: held for dictionary work alone, never across a disk write
+_SEND_WRITE_LOCK = threading.Lock()         # the log file: one writer at a time, outside the map's lock
+_SEND_ACCEPTS_STATE = {"said": False, "lines": 0}
 _SEND_NEW, _SEND_PENDING = object(), object()   # _send_claim's two answers that are not a decision
 
 
@@ -42242,52 +42252,169 @@ def _send_accepts_path():
     return jd.STATE / _SEND_ACCEPTS_FILE
 
 
+def _send_log_path():
+    return jd.STATE / _SEND_LOG_FILE
+
+
+def _send_acks_problem(text, kind, **fields):
+    """A fault in the send record, said where it can be found again: stderr, the session-events ledger and the kernel
+    log's problem row (and the error center's ring when the Claude Code backend is up)."""
+    sys.stderr.write("send acks: %s\n" % text)
+    try:
+        m = sys.modules.get("romp_sdk_backend") or load_source("romp_sdk_backend", HERE / "sdk_backend.py")
+        be = None
+        try:
+            be = _sdk()
+        except Exception:
+            pass
+        m.problem_row(jd.STATE, text, kind, log=getattr(be, "_log", None) if be else None, **fields)
+    except Exception:
+        pass
+
+
+def _send_row(r):
+    """One stored decision as (qid, record), or None for a row that is not one. Never raises."""
+    try:
+        if not isinstance(r, dict) or not isinstance(r.get("qid"), str) or not _CLIENT_QID_RE.fullmatch(r["qid"]):
+            return None
+        if r.get("ok") not in (True, False) or isinstance(r.get("t"), bool):
+            return None
+        t = float(r.get("t") or 0)
+        if not math.isfinite(t):
+            return None
+        return r["qid"], {"sid": str(r.get("sid") or ""), "t": t, "ok": r["ok"], "waiters": []}
+    except Exception:
+        return None
+
+
 def _send_accepts_boot_load():
-    """Read the decided ids, once, at boot (main). A file that exists and cannot be read is said on stderr: from then on a
-    resend of a send decided before this kernel started is recognised only while the session still holds a copy of it."""
+    """Read the decided ids, once, at boot (main): the whole-file form first, then the log, a later line winning. Nothing
+    in either file can stop the kernel: a file that cannot be read, a line that is not JSON and a row that is not a
+    decision are skipped and said (a problem row naming the counts), and every good row is kept. A send whose record was
+    lost is recognised only while the session still holds a copy of it. Returns the count of decisions read."""
+    rows, bad, unread = [], 0, []
     try:
         raw = json.loads(_send_accepts_path().read_text())
+        got = raw.get("accepted") if isinstance(raw, dict) else None
+        if not isinstance(got, list):
+            unread.append(_SEND_ACCEPTS_FILE)
+            got = []
+        rows.extend(got)
     except FileNotFoundError:
-        return 0
-    except Exception as e:
-        sys.stderr.write("send acks: %s could not be read (%s); a resend of a message sent before this kernel started "
-                         "may be delivered twice\n" % (_send_accepts_path(), e))
-        return 0
-    rows = raw.get("accepted") if isinstance(raw, dict) else None
+        pass
+    except Exception:
+        unread.append(_SEND_ACCEPTS_FILE)
+    lines = 0
+    try:
+        with open(_send_log_path(), "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                lines += 1
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    bad += 1
+    except FileNotFoundError:
+        pass
+    except Exception:
+        unread.append(_SEND_LOG_FILE)
     n = 0
     with _SEND_ACCEPTS_LOCK:
-        for r in rows if isinstance(rows, list) else ():
-            if isinstance(r, dict) and isinstance(r.get("qid"), str) and _CLIENT_QID_RE.fullmatch(r["qid"]) and r.get("ok") in (True, False):
-                _SEND_ACCEPTS[r["qid"]] = {"sid": str(r.get("sid") or ""), "t": float(r.get("t") or 0), "ok": r["ok"], "waiters": []}
-                n += 1
+        for r in rows:
+            got = _send_row(r)
+            if got is None:
+                bad += 1
+                continue
+            _SEND_ACCEPTS[got[0]] = got[1]
+            _SEND_ACCEPTS.move_to_end(got[0])
+            n += 1
+        _SEND_ACCEPTS_STATE["lines"] = lines
+    if bad or unread:
+        _send_acks_problem("the record of decided chat sends had %d unreadable row(s)%s; the rest (%d) were kept, and a resend "
+                           "of a send whose row was lost is recognised only while its session still holds a copy"
+                           % (bad, (" and could not read %s" % ", ".join(unread)) if unread else "", n),
+                           "send-acks.unreadable", badRows=bad, kept=n)
     return n
 
 
-def _send_accepts_save_locked(now):
+def _fsync_dir(path):
+    """fsync the directory holding `path`, so a rename or a new file inside it survives a crash. Best-effort: a platform
+    whose directories cannot be opened has nothing more to offer."""
+    try:
+        fd = os.open(str(Path(path).parent), os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _send_write_fault(e):
+    if not _SEND_ACCEPTS_STATE["said"]:
+        _SEND_ACCEPTS_STATE["said"] = True
+        _send_acks_problem("%s could not be written (%s); a resend after a kernel restart may be delivered twice"
+                           % (_send_log_path(), e), "send-acks.unwritable")
+
+
+def _send_log_append(q, sid, t, ok):
+    """One decision, made durable before the page hears it: a line appended to the log and fsynced, under the file's own
+    lock and never the map's, so no other send waits on this disk write. The log is compacted once it holds twice the
+    live decisions (_send_log_compact)."""
+    path = _send_log_path()
+    row = json.dumps({"qid": q, "sid": str(sid), "t": int(t), "ok": bool(ok)})
+    with _SEND_WRITE_LOCK:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fresh = not path.exists()
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(row + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            if fresh:
+                _fsync_dir(path)
+            _SEND_ACCEPTS_STATE["lines"] += 1
+        except OSError as e:
+            _send_write_fault(e)
+            return
+        with _SEND_ACCEPTS_LOCK:
+            live = len(_SEND_ACCEPTS)
+        if _SEND_ACCEPTS_STATE["lines"] > max(2 * live, 1000):
+            _send_log_compact_locked(t)
+
+
+def _send_log_compact_locked(now):
+    """Rewrite the log as the live decisions alone (the write lock held): the expired and the evicted drop, the rest are
+    written to a temp file, fsynced, renamed over the log, and the directory fsynced. The whole-file form is retired."""
     cut = now - _SEND_ACCEPTS_TTL_S
-    for q in [q for q, r in _SEND_ACCEPTS.items() if r["t"] < cut and r["ok"] is not None]:
-        _SEND_ACCEPTS.pop(q, None)
-    while len(_SEND_ACCEPTS) > _SEND_ACCEPTS_CAP:
-        _SEND_ACCEPTS.popitem(last=False)
-    rows = [{"qid": q, "sid": r["sid"], "t": int(r["t"]), "ok": r["ok"]} for q, r in _SEND_ACCEPTS.items() if r["ok"] is not None]
-    path = _send_accepts_path()
+    with _SEND_ACCEPTS_LOCK:
+        for q in [q for q, r in _SEND_ACCEPTS.items() if r["t"] < cut and r["ok"] is not None]:
+            _SEND_ACCEPTS.pop(q, None)
+        while len(_SEND_ACCEPTS) > _SEND_ACCEPTS_CAP:
+            _SEND_ACCEPTS.popitem(last=False)
+        rows = [json.dumps({"qid": q, "sid": r["sid"], "t": int(r["t"]), "ok": r["ok"]})
+                for q, r in _SEND_ACCEPTS.items() if r["ok"] is not None]
+    path = _send_log_path()
     tmp = path.with_name("%s.tmp.%d.%d" % (path.name, os.getpid(), threading.get_ident()))
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(tmp, "w") as fh:            # written whole, flushed to disk, then renamed over the old file: a crash leaves the
-            fh.write(json.dumps({"accepted": rows}))   # old file or the new one, never a torn one
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write("".join(r + "\n" for r in rows))
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
+        _fsync_dir(path)
+        _SEND_ACCEPTS_STATE["lines"] = len(rows)
+        try:
+            _send_accepts_path().unlink()
+        except FileNotFoundError:
+            pass
     except OSError as e:
         try:
             tmp.unlink()
         except OSError:
             pass
-        if not _SEND_ACCEPTS_STATE["said"]:
-            _SEND_ACCEPTS_STATE["said"] = True
-            sys.stderr.write("send acks: %s could not be written (%s); a resend after a kernel restart may be "
-                             "delivered twice\n" % (path, e))
+        _send_write_fault(e)
 
 
 def _send_claim(q, sid, client, now=None):
@@ -42306,21 +42433,32 @@ def _send_claim(q, sid, client, now=None):
             return r["ok"]
         _SEND_ACCEPTS[q] = {"sid": sid, "t": now, "ok": None, "waiters": []}
         _SEND_ACCEPTS.move_to_end(q)
+        while len(_SEND_ACCEPTS) > _SEND_ACCEPTS_CAP:
+            _SEND_ACCEPTS.popitem(last=False)
     return _SEND_NEW
 
 
-def _send_forget(q):
-    """The attempt that claimed `q` raised and decided nothing: the mark goes, so a later copy may try again. A copy that
-    was waiting gets no answer, and its page keeps the send and resends it on its next connection."""
+def _send_forget(q, sid=None, client=None):
+    """The attempt that claimed `q` decided nothing (it raised, or the check it needed could not be made): the mark goes,
+    and the page that sent it and every copy that waited on it are told it was NOT delivered and may be sent again
+    (`retry`), so none of them sits unconfirmed on a socket that stays up. Nothing is recorded."""
     with _SEND_ACCEPTS_LOCK:
         r = _SEND_ACCEPTS.get(q)
+        waiters = []
         if r is not None and r["ok"] is None:
+            waiters = list(r.get("waiters") or ())
             _SEND_ACCEPTS.pop(q, None)
+    if sid is None:
+        return
+    _send_ack(client, sid, q, False, retry=True)
+    for w in waiters:
+        if w is not client:
+            _send_ack(w, sid, q, False, dup=True, retry=True)
 
 
 def _send_settle(client, sid, q, ok, dup=False):
-    """The send wearing `q` is decided (handed over or parked: ok True; refused: ok False): record it, answer the page that
-    sent it, and answer every copy that waited for this decision with the same outcome."""
+    """The send wearing `q` is decided (handed over or parked: ok True; refused: ok False): record it durably, then answer
+    the page that sent it and every copy that waited for this decision with the same outcome."""
     if not q:
         return
     now = time.time()
@@ -42329,20 +42467,24 @@ def _send_settle(client, sid, q, ok, dup=False):
         waiters = list(r.get("waiters") or ()) if r is not None else []
         _SEND_ACCEPTS[q] = {"sid": str(sid), "t": now, "ok": bool(ok), "waiters": []}
         _SEND_ACCEPTS.move_to_end(q)
-        _send_accepts_save_locked(now)
+    _send_log_append(q, sid, now, ok)        # durable before anyone hears it, outside the map's lock
     _send_ack(client, sid, q, ok, dup=dup)
     for w in waiters:
         if w is not client:
             _send_ack(w, sid, q, ok, dup=True)
 
 
-def _send_ack(client, sid, q, ok, dup=False):
-    """Answer the page that sent `q` (the socket that carried it). Never raises: a socket that is gone has no reader,
-    and the page's resend on its next connection is answered then."""
+def _send_ack(client, sid, q, ok, dup=False, retry=False):
+    """Answer the page that sent `q` (the socket that carried it). `retry`: not delivered and not decided, so the page
+    keeps the send and offers it again on its next connection. Never raises: a socket that is gone has no reader, and
+    the page's resend on its next connection is answered then."""
     if client is None or not q:
         return
     try:
-        client["send"](json.dumps({"type": "sendAck", "id": str(sid), "qid": q, "ok": bool(ok), "dup": bool(dup)}))
+        fr = {"type": "sendAck", "id": str(sid), "qid": q, "ok": bool(ok), "dup": bool(dup)}
+        if retry:
+            fr["retry"] = True
+        client["send"](json.dumps(fr))
     except Exception:
         pass
 
@@ -42351,15 +42493,16 @@ def _send_withdraw_unreceived(q, sid, be):
     """A withdrawal (the ✕ or the ✎ on the page's own unconfirmed bubble) for a send wearing `q` that no queue holds: True
     when this kernel never received it, after recording it as decided not-ok, so a copy arriving later (a late flush, another
     tab's resend) is answered as refused and never delivered; False when it did receive it (handed over, in flight, or being
-    decided right now), which is the honest "too late"."""
+    decided right now), which is the honest "too late", and when whether the session holds it cannot be checked."""
     claim = _send_claim(q, sid, None)
     if claim is _SEND_PENDING:
         return False
     if claim is not _SEND_NEW:
         return claim is False                    # refused or withdrawn before: the withdrawal stands; handed over: too late
-    if be is not None and be is not _UNOWNED and _qid_held(q, sid, be):
-        _send_forget(q)                          # the session holds it (fed, between the queue and its landing): too late
-        return False
+    held = _qid_hold_state(q, sid, be) if (be is not None and be is not _UNOWNED) else False
+    if held is not False:
+        _send_forget(q, sid, None)               # the session holds it (fed, between the queue and its landing), or it cannot be
+        return False                             # told: too late, the conservative answer for a recall
     _send_settle(None, sid, q, False)
     return True
 
@@ -42369,14 +42512,22 @@ def _send_admit(client, sid, q, be):
     decided), False when it is a copy of a send this kernel already has, which is answered (now, or when the first copy
     is decided) and must not be delivered. A copy the session still holds under `q` with no record of it (a record lost,
     or one written before the store existed) is the same message: answered as delivered, never given a new id and sent
-    again."""
+    again. When that check cannot be made, the send is NOT taken for delivered: nothing is recorded and the page is told
+    it was not delivered and may send it again (`retry`), said loudly here."""
     claim = _send_claim(q, sid, client)
     if claim is _SEND_PENDING:
         return False
     if claim is not _SEND_NEW:
         _send_ack(client, sid, q, claim, dup=True)
         return False
-    if be is not None and be is not _UNOWNED and _qid_held(q, sid, be):
+    held = _qid_hold_state(q, sid, be) if (be is not None and be is not _UNOWNED) else False
+    if held is None:
+        _send_acks_problem("a chat send to %s was not delivered: romp could not check whether the session already holds it; "
+                           "the page keeps it and offers it again on its next connection" % (_name_of(sid) or sid),
+                           "send-acks.check-failed", sid=str(sid))
+        _send_forget(q, sid, client)
+        return False
+    if held:
         _send_settle(client, sid, q, True, dup=True)
         return False
     return True

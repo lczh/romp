@@ -286,11 +286,17 @@ send that carries an id, not only a resend, in one locked step with the mark
 that claims a new one: a resend read before its original (each socket reads on
 its own thread), or a second tab resending the first tab's send, is answered as a
 duplicate and delivered once, and a copy that arrives while the first is still
-being decided waits for that outcome, a refusal included. The decided ids live in
-`accepted-sends.json` under the state root, read at boot, so a kernel restart
-between the send and the resend changes nothing. A withdrawal (the ✎ or the ✕ on
-an unconfirmed bubble) of a send the kernel never received holds: the words stay
-in the box, and a copy arriving later is refused. The store of kept sends is
+being decided waits for that outcome, a refusal included. A send the kernel
+could not take this time (a check it needed raised, or the attempt itself did) is
+answered `retry`: not delivered, kept by the page and offered again on its next
+connection. The decided ids live in `accepted-sends.jsonl` under the state root,
+one fsynced line per decision appended outside the map's lock and compacted now
+and then, read at boot, where a malformed row is skipped and said and never stops
+the kernel. A withdrawal (the ✎ or the ✕ on an unconfirmed bubble) of a send the
+kernel never received holds: the words stay in the box, and a copy arriving later
+is refused. The page keeps the withdrawal in the shared store by the send's id, so
+another tab that restored the same send drops it instead of resending it, and the
+kernel is told when the link is back if the cancel could not reach it then. The store of kept sends is
 shared by every tab of the page's origin, each tab writing its own and keeping the
 others', bounded to 200 sends and 14 days; a send older than six days is never
 resent (the kernel remembers seven) and keeps its label instead. A kernel that

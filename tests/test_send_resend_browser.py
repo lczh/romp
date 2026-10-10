@@ -51,14 +51,26 @@ catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const page = await browser.newPage({ viewport: { width: 1000, height: 600 } });
 page.on("pageerror", (e) => fs.appendFileSync(cfg.consoleLog, "pageerror: " + e + "\n"));
 await page.addInitScript((text) => {
-  window.__sent = []; window.__acks = [];
-  window.addEventListener("message", (e) => { const m = e.data; if (m && m.type === "sendAck") window.__acks.push({ qid: m.qid, ok: m.ok, dup: m.dup }); });
+  window.__sent = []; window.__acks = []; window.__firstPaint = null; window.__ackAt = null; window.__resendAt = null;
+  window.addEventListener("message", (e) => { const m = e.data; if (m && m.type === "sendAck") { window.__acks.push({ qid: m.qid, ok: m.ok, dup: m.dup }); if (m.ok && window.__ackAt === null) window.__ackAt = performance.now(); } });
+  // the FIRST paint of a bubble carrying the text on this page load, with its label, and when it happened: the label a restored
+  // send wears is "not confirmed" only until its kernel answers, and the answer can land before the session's frame paints
+  // (a poll would read whichever came first, CI 2026-10-10)
+  const seen = () => {
+    if (window.__firstPaint) return;
+    const turn = Array.from(document.querySelectorAll("#content .turn")).find((el) => (el.textContent || "").includes(text) && el.getClientRects().length > 0);
+    if (!turn) return;
+    const tx = turn.textContent || "";
+    window.__firstPaint = { at: performance.now(), label: tx.includes("not confirmed") ? "not confirmed" : tx.includes("sending") ? "sending" : "other" };
+  };
+  new MutationObserver(seen).observe(document, { subtree: true, childList: true, characterData: true });
   const origSend = WebSocket.prototype.send;
   WebSocket.prototype.send = function (d) {
     let m = null;
     try { m = JSON.parse(d); } catch (e) {}
     if (m && m.type === "sendMessage" && typeof m.text === "string" && m.text === text) {
       window.__sent.push({ qid: m.qid, resend: !!m.resend });
+      if (m.resend && window.__resendAt === null) window.__resendAt = performance.now();   // from here a kernel can know of it
       // the first page load swallows the send: the frame never reaches the kernel, as an unread frame in a closing socket does
       if (!sessionStorage.getItem("lab-dropped:" + text)) { sessionStorage.setItem("lab-dropped:" + text, "1"); return; }
     }
@@ -107,7 +119,9 @@ for (let i = 0; i < 40 && !restored; i++) {   // loop-ok: bounded poll for the r
 let acked = false;
 try { await page.waitForFunction(() => window.__acks.some((a) => a.ok), null, { timeout: 30000 }); acked = true; } catch (e) {}
 await page.waitForTimeout(500);
-const after = { restored, acked, sent: await page.evaluate(() => window.__sent), acks: await page.evaluate(() => window.__acks), bubble: await bubble() };
+const after = { restored, acked, sent: await page.evaluate(() => window.__sent), acks: await page.evaluate(() => window.__acks), bubble: await bubble(),
+                firstPaint: await page.evaluate(() => window.__firstPaint), ackAt: await page.evaluate(() => window.__ackAt),
+                resendAt: await page.evaluate(() => window.__resendAt) };
 const out = cfg.out;
 fs.writeFileSync(out, JSON.stringify({ before, after }));
 console.log("RESULT-FILE:" + out);
@@ -231,7 +245,12 @@ class ServedResendAfterReload(unittest.TestCase):
         self.assertEqual([s["resend"] for s in before["sent"]], [False], "one post, swallowed")
         qid = before["sent"][0]["qid"]
         self.assertIsNotNone(after["restored"], "after the reload the send is back on the page: the reload no longer drops the words")
-        self.assertEqual(after["restored"]["labels"], ["not confirmed"], "…captioned not confirmed until a kernel answers it")
+        fp, resend_at = after["firstPaint"], after["resendAt"]
+        self.assertIsNotNone(fp, "the page painted the restored bubble")
+        if resend_at is None or fp["at"] < resend_at:
+            # painted before the resend left the page, so before any kernel could know of the send: it must say so. Painted
+            # later, the kernel's answer (or its queued copy) may already have taken the label away, which is the design
+            self.assertEqual(fp["label"], "not confirmed", "…captioned not confirmed until a kernel answers it")
         self.assertIn({"qid": qid, "resend": True}, after["sent"], "the page posted the very send again, marked as a resend")
         self.assertTrue(after["acked"], "the kernel answered the resend")
         self.assertIn(qid, [a["qid"] for a in after["acks"] if a["ok"]])
