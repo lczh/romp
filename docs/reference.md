@@ -1006,15 +1006,78 @@ a setup-token anyway, so it guesses from a flag cached in its configuration
 directory; that guess refused fast mode, with the reason `preference`, to
 sessions on an enterprise seat that serves it. Every launch whose login rides
 the environment (a stored login, or a machine token in the manager's
-environment) therefore also carries `CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1`,
-and the API decides: an organisation that has fast mode off refuses the fast
+environment) and that asks for fast mode, on Claude Code 2.1.271 or later,
+therefore also carries the switch `CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK=1`,
+and the API decides. An organisation that has fast mode off refuses the fast
 request, which the CLI then reports as `preference` on the organisation's
 word, and romp treats that as the real refusal it is (the toast for a
-session's own pick, the kernel log for Always fast). A CLI launched before
-this, which romp only reattached to across a restart and which is still
-guessing, is relaunched once the session is quiet, with the user's pick left
-on; a `preference` remembered before the change no longer holds Always fast
-back. A judge call billed to such a login carries the same switch.
+session's own pick, the kernel log for Always fast). Below 2.1.271 the switch
+would hide that refusal: an older CLI reports fast mode on while the API
+refuses every fast request and the CLI reruns each one at normal speed. Romp
+therefore reads the version of the `claude` it launches (`claude -v`, once per
+binary file in each process), for a launch that asks for fast mode only; a
+launch that does not ask reads nothing and carries no switch. A read that times
+out, is killed or cannot start is tried again at the next launch that asks for
+fast mode. While that read waits, a launch that holds one of the machine-wide
+launch slots keeps it, so other sessions' relaunches and cold launches cannot
+take that slot before the read ends.
+At boot, a re-attach to a CLI that its session host kept reads the version the
+same way and keeps its attach slot while the read waits. Once every attach slot
+is held this way, the next re-attach waits for one of those reads to end, and
+so does every re-attach and cold launch the boot starts after it.
+After a restart, the judges' first pass waits up to 8 s for every boot
+re-attach to finish, so it waits for these reads too.
+Below 2.1.271, or when the version cannot be read, romp leaves out the switch
+and the CLI's own check stands; that check can refuse fast mode to a seat that
+serves it, and the kernel log names the version or the reason. Romp acts on
+that refusal: the session's own pick goes back off, or Always fast is held
+back. The toast and the Always fast line say that Claude Code's own check
+refused, and add that 2.1.271 or later lets the API decide, or that the
+version could not be read. Below 2.1.271 the refusal is recorded, and it stays
+after an update of Claude Code: the session's own pick stays off until fast
+mode is turned on for that session again, and Always fast stays held back
+until fast mode is turned on for that session again, until Always fast is
+turned off or on, or until the session launches on another billing. When
+the launch's version could not be read, a refused own pick still goes off, but
+Always fast is held back only until fast mode is turned on for that session
+again, until Always fast is turned off or on, until the session launches on
+another billing, or until the kernel restarts, and after the restart
+it arms a launch again, which carries the switch if its version read finds
+2.1.271 or later. Under Always fast, a refused own pick also holds Always fast
+back for that session, from the relaunch without fast mode that follows the
+refusal. That hold is silent: there is no Always fast line, only the pick's
+toast and its log line. The badge stays **Slow**, and a **Fast** pick lifts
+the hold. Below 2.1.271 the hold outlasts an update of Claude Code until that
+pick, until Always fast is turned off or on, or until the session launches on
+another billing; when the version could not be read, it lasts at most until
+the kernel restarts.
+A CLI that romp launched with the switch before romp began reading the
+version, on a version below 2.1.271, keeps the switch until it next relaunches,
+so its refusals stay hidden until then.
+After a restart, romp judges a CLI it reattached to by how that CLI was
+launched, which the session host records: a refusal from a CLI launched with
+the switch is a real refusal. When a CLI launched without it, or under a host
+that predates the record, reports `preference`, the session relaunches once it
+is quiet, with the user's pick
+left on, if three things hold: the login still rides the environment and
+today's version read did not find Claude Code below 2.1.271 (a read that found
+no version does not count against it); the session wants fast mode (its own
+pick, or Always fast not held back); and romp holds no refusal for it,
+recorded or in this kernel's memory, not counting one remembered from before
+romp added the switch. When the first or the last of these does not hold, the
+`preference` is answered as a refusal; when the host keeps no record, the toast
+and the Always fast line then say only that it may come from Claude Code's own
+check.
+A `preference` remembered before romp added the switch (2026-10-01) no longer
+holds Always fast back.
+A judge call billed to such a login carries the same switch, under the same
+version floor.
+While its version read waits, the call keeps its worker in its pass's pool,
+which runs as many calls at once as Judge concurrency allows (below). Once
+every worker is held this way, the pass's queued calls wait for one of those
+reads to end. The courier and the distiller's straggler drain make their calls
+on the triage tier's own thread, so while `claude -v` does not answer, each of
+their calls waits for its own read, in series, whatever Judge concurrency is.
 
 The command runs the way the kernel runs the box's own key helper: under a
 whitelisted environment (`PATH`, `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `LANG`,

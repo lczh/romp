@@ -27,7 +27,7 @@ One kernel is attached at a time. Connection loss without `detach` is a kernel d
 Secrets: the spec carries the environment overlay (a key helper command, PATH additions), so nothing
 from the spec or any environment value is ever written to host.log, the journal or a frame, beyond the two
 host keys the hello echoes on purpose: `login` (a stored login's identifier) and `launch` (the kernel's
-launch record: pick values and an env digest), neither of which holds a credential.
+launch record: pick values, an env digest and the fastGuess boolean), neither of which holds a credential.
 
 Sibling modules are reached the kernel's way (kernel/loadsource.py under stable names); the lease
 helpers come from sdk_backend, which imports without the SDK and runs nothing at import.
@@ -92,8 +92,10 @@ SPEC_HOST_KEYS = ("sid", "name", "version", "hook_timeout_s", "hook_self_answer_
 #                               hello's cli.login so an attaching kernel stamps the login the launch USED, not the one
 #                               today's availability would pick (2026-09-14); never a token, key or other credential value
                   "launch")   # the picks the launch carries (the kernel's launch record: effort, billing pick, fast flag,
-#                               permission mode, an env digest), echoed in the hello's cli.launch so a kernel attaching after
-#                               a restart can tell whether a pick that was waiting for a relaunch reached this CLI (2026-10-01)
+#                               permission mode, an env digest, and fastGuess: whether the launch's login rode the
+#                               environment without the org-check skip), echoed in the hello's cli.launch so a kernel
+#                               attaching after a restart can tell whether a pick that was waiting for a relaunch
+#                               reached this CLI (2026-10-01), and how to read its fast-mode "preference"
 # Testing seams the spec may carry (never set by the kernel): a delay per journal write, an offset whose
 # write raises. They exist so the reader-behind fault and the journal-fault path can be driven in a test.
 SPEC_TEST_KEYS = ("_test_journal_delay_s", "_test_journal_fault_at", "_test_journal_gap_fault")

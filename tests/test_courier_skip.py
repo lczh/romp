@@ -14,12 +14,19 @@ inside one session's scan is that session's pass-crash row: the other sessions p
 queued are dropped and theirs are kept, it is not recorded, and the tiers after the courier run (CourierScanCrash).
 
 Synthetic fixtures only: placeholder sids, invented text, hostname TESTHOST; a temp root per test."""
+import contextlib
+import io
 import json
 import os
 import re
+import sys
 import tempfile
+import threading
+import time
+import types
 import unittest
 from datetime import datetime, timezone
+from unittest import mock
 from romp_load import load_source
 from pathlib import Path
 
@@ -524,6 +531,86 @@ class CourierScanCrash(_World):
         self.assertTrue(self._planted(jd.load_goals(A)) and self._planted(jd.load_goals(B)), "A and B placed")
         self.assertEqual([(r["judge"], r["fsid"]) for r in self._crash_rows()], [("courier", C)])
         self.assertNotIn(C, jd._COURIER_SEEN)
+
+
+class CourierVersionReads(_World):
+    def test_fast_courier_calls_on_a_login_riding_the_environment_read_the_version_in_series_on_the_calling_thread(self):
+        """Pins current behaviour, a disclosed residual the PR states; not a fix. Three sessions each owe one courier
+        call, the pass is run with concurrency 6, and every call is a fast call billed to a login riding the
+        environment. The stand-in claude's -v never answers: each read waits until the test lets it go and is then
+        ended by a signal, so no version is kept. Each call reads the version on the thread that runs the courier and
+        reaches the CLI only once its own read has ended, and the next call's read starts only after that."""
+        jd.courier_llm = self.saved[-1]                 # the real courier_llm (tearDown puts the saved one back)
+        saved_sb = sys.modules.get("romp_sdk_backend")
+
+        def put_back():
+            if saved_sb is None:
+                sys.modules.pop("romp_sdk_backend", None)
+            else:
+                sys.modules["romp_sdk_backend"] = saved_sb
+        sys.modules["romp_sdk_backend"] = load_source("romp_sdk_backend_courier_reads",
+                                                      os.path.join(BIN, "romp_sdk_backend.py"))
+        self.addCleanup(put_back)
+        d = os.path.join(self.td.name, "bin")
+        os.mkdir(d)
+        reads, cli = os.path.join(d, "reads"), os.path.join(d, "claude")
+        holds = [os.path.join(d, "hold%d" % k) for k in (1, 2, 3)]
+        for hold in holds:
+            open(hold, "w").close()
+        # a stand-in claude: the k-th -v adds a line to `reads`, waits while hold<k> exists, then ends by a signal
+        with open(cli, "w") as f:
+            f.write("#!/bin/sh\necho x >> '%s'\ni=$(( $(wc -l < '%s') ))\nn=0\n"
+                    "while [ -e '%s'$i ] && [ $n -lt 200 ]; do sleep 0.05; n=$((n+1)); done\nkill -9 $$\n"
+                    % (reads, reads, os.path.join(d, "hold")))
+        os.chmod(cli, 0o755)
+        with open(os.path.join(HERE, "fixtures", "claude-p-result-envelope-fast.json")) as f:
+            fast = json.load(f)
+        tok = "".join(["sk", "-ant-", "oat01-", os.urandom(12).hex()])
+
+        def n_reads():
+            try:
+                with open(reads) as f:
+                    return len(f.read().splitlines())
+            except OSError:
+                return 0
+        reached = []                                    # per CLI call: on the courier's thread, and reads started
+        real_run = jd.subprocess.run
+
+        def fake_run(cmd, *a, **kw):
+            if isinstance(cmd, list) and cmd[:1] == ["perl"]:        # the CLI call (_judge_cmd's alarm wrapper)
+                reached.append((threading.current_thread() is courier, n_reads()))
+                return types.SimpleNamespace(returncode=0, stdout=json.dumps(fast), stderr="")
+            return real_run(cmd, *a, **kw)
+        jd._discover_cache["fp"] = None
+        jd._discover_cache["result"] = None
+        jd._postal_from_memo["key"] = None
+        courier = threading.Thread(target=jd.run_courier, kwargs={"now": T0 + 200, "concurrency": 6}, daemon=True)
+        held = []                                       # while read k waits: reads started, calls at the CLI
+        with mock.patch.object(jd, "_judge_engine", return_value="claude"), \
+                mock.patch.object(jd, "_judge_auth", return_value="login"), \
+                mock.patch.object(jd, "_login_auth_env", return_value={"CLAUDE_CODE_OAUTH_TOKEN": tok}), \
+                mock.patch.object(jd, "_tier_fast", return_value=True), \
+                mock.patch.object(jd, "_triage_model", return_value="opus"), \
+                mock.patch.dict(os.environ, {"ROMP_CLAUDE_BIN": cli}), \
+                mock.patch.object(jd.subprocess, "run", fake_run), contextlib.redirect_stderr(io.StringIO()):
+            courier.start()
+            try:
+                for k, hold in enumerate(holds, 1):
+                    end = time.monotonic() + 10
+                    while n_reads() < k and courier.is_alive() and time.monotonic() < end:
+                        time.sleep(0.01)
+                    time.sleep(0.3)
+                    held.append((n_reads(), len(reached)))
+                    os.unlink(hold)
+            finally:
+                for hold in holds:
+                    if os.path.exists(hold):
+                        os.unlink(hold)
+                courier.join(20)
+        self.assertEqual(held, [(1, 0), (2, 1), (3, 2)],
+                         "while a call's version read waits, no other call reads the version or reaches the CLI")
+        self.assertEqual(reached, [(True, 1), (True, 2), (True, 3)],
+                         "each call reaches the CLI on the courier's thread after its own read, before the next read")
 
 
 if __name__ == "__main__":

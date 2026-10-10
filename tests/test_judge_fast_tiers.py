@@ -23,6 +23,7 @@ import os
 import sys
 import tempfile
 import threading as _real_threading
+import time
 import types
 import unittest
 from pathlib import Path
@@ -484,7 +485,7 @@ class RunEndToEnd(_Base):
         # judge child, as it did before the per-tier boxes and as it reaches every session
         with patch.dict(os.environ, {"CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK": "1", "CLAUDE_CODE_DISABLE_FAST_MODE": "1"}):
             out, seen = self._run(fast, auth="login")
-        self.assertNotIn("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", seen["env"], "a login-billed call: the CLI's probe already asks the paying account")
+        self.assertIsNone(seen["env"].get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"), "a login-billed call: the CLI's probe already asks the paying account")
         self.assertEqual(seen["env"].get("CLAUDE_CODE_DISABLE_FAST_MODE"), "1", "the operator's kill switch reaches the judge child")
         self.assertEqual(json.loads(seen["cmd"][seen["cmd"].index("--settings") + 1]), {"fastMode": True, "apiKeyHelper": ""})
         with patch.dict(os.environ, {"CLAUDE_CODE_DISABLE_FAST_MODE": "1"}):
@@ -494,45 +495,158 @@ class RunEndToEnd(_Base):
         # fast off for the tier, or a model that cannot run it: no probe, no opt-in
         out, seen = self._run(fast, auth="key", model="sonnet")
         self.assertNotIn("--settings", seen["cmd"])
-        self.assertNotIn("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", seen["env"])
+        self.assertIsNone(seen["env"].get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"))
         km._set_judge_fast("off")
         out, seen = self._run(fast, auth="key")
         self.assertNotIn("--settings", seen["cmd"])
+
+    def _claude(self, version):
+        """A stand-in claude printing `version` the way `claude -v` does (the judges read it through ROMP_CLAUDE_BIN, as
+        _judge_claude_bin resolves it); never a real CLI."""
+        d = tempfile.mkdtemp()
+        p = os.path.join(d, "claude")
+        with open(p, "w") as f:
+            f.write("#!/bin/sh\necho '%s (Claude Code)'\n" % version)
+        os.chmod(p, 0o755)
+        return p
+
+    def _token_call(self, auth, login_env=None, model="opus", claude=None):
+        """One judge call billed to `auth` (fast when the tier asks it on a model that can run fast mode, _tier_fast)
+        on a stand-in claude at 2.1.282 (or `claude`). The CLI call itself is faked; every other process the call starts
+        runs for real: a stored login's token command (/bin/sh, through credentials.run_helper) and the version read of
+        the claude it runs. Returns the CLI call's argv and env, and what the judges wrote to stderr."""
+        real_sb = load_source("romp_sdk_backend_judgefasttoken", os.path.join(BIN, "romp_sdk_backend.py"))
+        sys.modules["romp_sdk_backend"].token_fast_org_env = real_sb.token_fast_org_env
+        fast = _fixture("claude-p-result-envelope-fast.json")
+        seen = {}
+        real_run = jd.subprocess.run
+        def fake_run(cmd, *a, **kw):
+            if isinstance(cmd, list) and cmd[:1] == ["perl"]:        # the CLI call (_judge_cmd's alarm wrapper)
+                seen["cmd"], seen["env"] = list(cmd), dict(kw.get("env") or {})
+                return types.SimpleNamespace(returncode=0, stdout=json.dumps(fast), stderr="")
+            return real_run(cmd, *a, **kw)
+        err = io.StringIO()
+        jd.subprocess.run = fake_run
+        try:
+            with patch.object(jd, "_judge_engine", return_value="claude"), patch.object(jd, "_judge_auth", return_value=auth), \
+                 patch.object(jd, "_login_auth_env", return_value=login_env or {}), \
+                 patch.dict(os.environ, {"ROMP_CLAUDE_BIN": claude or self._claude("2.1.282")}), contextlib.redirect_stderr(err):
+                jd._judge_run(model, "SYS", "u", judge="planner", tier="triage")
+        finally:
+            jd.subprocess.run = real_run
+        return seen, err.getvalue()
 
     def test_a_fast_call_billed_to_a_login_riding_the_environment_carries_the_skip(self):
         """2026-10-01: the CLI cannot ask the organization's fast-mode setting for a login riding the environment (a
         stored login's setup-token, or a machine token in the manager's environment) and guesses "preference"; the
         call carries the sessions' rule (sdk_backend.token_fast_org_env), so the API's own answer decides. The real
         rule rides the fake backend module here, and the token is assembled at run time."""
-        real_sb = load_source("romp_sdk_backend_judgefasttoken", os.path.join(BIN, "romp_sdk_backend.py"))
-        sys.modules["romp_sdk_backend"].token_fast_org_env = real_sb.token_fast_org_env
         km._set_judge_fast("on")
-        fast = _fixture("claude-p-result-envelope-fast.json")
         tok = "".join(["sk", "-ant-", "oat01-", "%024x" % 0xA11CE])
-
-        def run(login_env, model="opus"):
-            seen = {}
-            def fake_run(cmd, input=None, capture_output=None, text=None, cwd=None, env=None, timeout=None):
-                seen["cmd"], seen["env"] = list(cmd), dict(env or {})
-                return types.SimpleNamespace(returncode=0, stdout=json.dumps(fast), stderr="")
-            saved = jd.subprocess.run
-            jd.subprocess.run = fake_run
-            try:
-                with patch.object(jd, "_judge_engine", return_value="claude"), patch.object(jd, "_judge_auth", return_value="login"), \
-                     patch.object(jd, "_login_auth_env", return_value=login_env), contextlib.redirect_stderr(io.StringIO()):
-                    jd._judge_run(model, "SYS", "u", judge="planner", tier="triage")
-            finally:
-                jd.subprocess.run = saved
-            return seen
-
-        seen = run({"CLAUDE_CODE_OAUTH_TOKEN": tok})
+        seen, _ = self._token_call("login", {"CLAUDE_CODE_OAUTH_TOKEN": tok})
         self.assertEqual(seen["env"].get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"), "1", "the CLI would only guess for this login")
         self.assertEqual(seen["env"].get("CLAUDE_CODE_OAUTH_TOKEN"), tok)
         self.assertEqual(self.asked, [], "no key account to ask: the login bills the call")
-        seen = run({})
-        self.assertNotIn("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", seen["env"], "a login the CLI holds itself: its own check stands")
-        seen = run({"CLAUDE_CODE_OAUTH_TOKEN": tok}, model="sonnet")
-        self.assertNotIn("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK", seen["env"], "a call that asks no fast mode carries nothing")
+        seen, _ = self._token_call("login", {})
+        self.assertIsNone(seen["env"].get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"), "a login the CLI holds itself: its own check stands")
+        seen, _ = self._token_call("login", {"CLAUDE_CODE_OAUTH_TOKEN": tok}, model="sonnet")
+        self.assertIsNone(seen["env"].get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"), "a call that asks no fast mode carries nothing")
+
+    def test_a_fast_call_billed_to_a_stored_login_carries_the_skip_beside_the_token_its_command_printed(self):
+        """The stored-login road ('login:<id>', the enterprise seat's case): the record's token command runs for real and
+        its output rides the child's environment with the skip, and the token is in no argument."""
+        km._set_judge_fast("on")
+        tok = "".join(["sk", "-ant-", "oat01-", os.urandom(12).hex()])
+        rec = {"id": jd._logins.mint_id(), "label": "Work", "tokenCmd": "printf '%%s' '%s'" % tok,
+               "addedAt": int(time.time()) - 86400}
+        jd._logins.write_record(jd.STATE, rec)
+        try:
+            seen, err = self._token_call("login:" + rec["id"])
+            self.assertTrue("cmd" in seen, "the call reached the CLI: %s" % err)
+            self.assertTrue(seen["env"].get("CLAUDE_CODE_OAUTH_TOKEN") == tok, "the token its command printed")
+            self.assertEqual(seen["env"].get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"), "1", "and the skip beside it")
+            self.assertFalse([a for a in seen["cmd"] if tok in a], "the token rides the environment, never an argument")
+            self.assertEqual(self.asked, [], "a login bills the call: no key account asked")
+        finally:
+            jd._logins.record_path(jd.STATE, rec["id"]).unlink()
+
+    def test_below_claude_code_2_1_271_a_token_call_keeps_the_clis_own_check(self):
+        """Below 2.1.271 the skip hides the API's refusal: the CLI reports fast mode on while each fast request is refused
+        and rerun at standard speed, and that "on" would clear the tier's fast-refused record. So the call carries the
+        token and the opt-in but no skip, and the judges say why once."""
+        km._set_judge_fast("on")
+        said = set(jd._TOKEN_FAST_SAID)              # the process's once: emptied here, so this call is the first to say it
+        jd._TOKEN_FAST_SAID.clear()
+        self.addCleanup(lambda: (jd._TOKEN_FAST_SAID.clear(), jd._TOKEN_FAST_SAID.update(said)))
+        tok = "".join(["sk", "-ant-", "oat01-", "%024x" % 0xB0B])
+        old = self._claude("2.1.266")
+        seen, err = self._token_call("login", {"CLAUDE_CODE_OAUTH_TOKEN": tok}, claude=old)
+        self.assertIsNone(seen["env"].get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"), "below the floor the skip would hide the refusal")
+        self.assertTrue(seen["env"].get("CLAUDE_CODE_OAUTH_TOKEN") == tok)
+        self.assertEqual(json.loads(seen["cmd"][seen["cmd"].index("--settings") + 1]), {"fastMode": True, "apiKeyHelper": ""})
+        self.assertIn("judges: fast mode: Claude Code 2.1.266 is older than 2.1.271", err, "the judges say why, on stderr")
+        seen, err = self._token_call("login", {"CLAUDE_CODE_OAUTH_TOKEN": tok}, claude=old)
+        self.assertIsNone(seen["env"].get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK"))
+        self.assertNotIn("older than", err, "said once per process")
+
+    def test_a_fast_call_on_a_login_riding_the_environment_keeps_its_pool_worker_while_its_version_read_waits(self):
+        """Pins current behaviour, a limit the PR states; not a fix. In a judges' pool of one worker, a fast call billed
+        to a login riding the environment reads the version of the claude it runs, and the read waits. A fast call billed
+        to the key, submitted behind it, reads no version. It does not reach the CLI while the read waits, and reaches it
+        once the read has ended."""
+        real_sb = load_source("romp_sdk_backend_judgefasttoken", os.path.join(BIN, "romp_sdk_backend.py"))
+        sys.modules["romp_sdk_backend"].token_fast_org_env = real_sb.token_fast_org_env
+        km._set_judge_fast("on")
+        tok = "".join(["sk", "-ant-", "oat01-", "%024x" % 0xF00D])
+        d = tempfile.mkdtemp()
+        reading, hold, claude = (os.path.join(d, n) for n in ("reading", "hold", "claude"))
+        open(hold, "w").close()
+        # a stand-in claude: each -v adds a line to `reading`, then waits while `hold` exists
+        with open(claude, "w") as f:
+            f.write("#!/bin/sh\necho x >> '%s'\nn=0\nwhile [ -e '%s' ] && [ $n -lt 200 ]; do sleep 0.05; n=$((n+1)); done\n"
+                    "echo '2.1.282 (Claude Code)'\n" % (reading, hold))
+        os.chmod(claude, 0o755)
+        fast = _fixture("claude-p-result-envelope-fast.json")
+        reached = {}                                 # per call, at the CLI: whether the read still waited
+        real_run = jd.subprocess.run
+
+        def fake_run(cmd, *a, **kw):
+            if isinstance(cmd, list) and cmd[:1] == ["perl"]:        # the CLI call (_judge_cmd's alarm wrapper)
+                reached[jd._judge_ctx.fsid] = os.path.exists(hold)
+                return types.SimpleNamespace(returncode=0, stdout=json.dumps(fast), stderr="")
+            return real_run(cmd, *a, **kw)
+
+        def call(fsid):
+            jd._judge_ctx.fsid = fsid
+            jd._judge_run("opus", "SYS", "u", judge="planner", tier="triage")
+        jd.subprocess.run = fake_run
+        try:
+            with patch.object(jd, "_judge_engine", return_value="claude"), \
+                 patch.object(jd, "_judge_auth", side_effect=lambda fsid: "key" if fsid == "key-call" else "login"), \
+                 patch.object(jd, "_login_auth_env", return_value={"CLAUDE_CODE_OAUTH_TOKEN": tok}), \
+                 patch.dict(os.environ, {"ROMP_CLAUDE_BIN": claude}), contextlib.redirect_stderr(io.StringIO()), \
+                 jd.ThreadPoolExecutor(max_workers=1) as pool:
+                try:
+                    first = pool.submit(call, "token-call")
+                    end = time.monotonic() + 10
+                    while not os.path.exists(reading) and time.monotonic() < end:
+                        time.sleep(0.01)
+                    second = pool.submit(call, "key-call")
+                    time.sleep(0.3)
+                    self.assertEqual((os.path.exists(reading), reached), (True, {}),
+                                     "while the token call's version read waits, it keeps the pool's one worker, and the "
+                                     "key-billed call does not reach the CLI")
+                finally:
+                    if os.path.exists(hold):
+                        os.unlink(hold)
+                first.result(10)
+                second.result(10)
+        finally:
+            jd.subprocess.run = real_run
+        with open(reading) as f:
+            reads = len(f.read().splitlines())
+        self.assertEqual((reached, reads), ({"token-call": False, "key-call": False}, 1),
+                         "both calls reach the CLI once the read has ended, and only the token call read the version")
 
     def test_an_error_envelope_keeps_its_readback_as_a_zero_cost_row_and_the_refusal_is_recorded(self):
         km._set_judge_fast("on")

@@ -975,7 +975,13 @@ class ThreadForkInvisibility(unittest.TestCase):
         # CLI's documented fastMode opt-in key. A refusal clears the ask + toasts, same model.
         import inspect
         self.assertIn('self.fast_opt = bool(reg.get("fast"))', inspect.getsource(sb.SdkSession.__init__))
-        self.assertIn("fast=sess.fast_effective()", inspect.getsource(sb.SdkBackend._options))   # the session's ask, or the machine's Always fast switch (2026-09-17)
+        import re
+        opts = inspect.getsource(sb.SdkBackend._options)
+        # the flag settings take fast_effective's value (the session's ask, or the machine's Always fast switch, 2026-09-17):
+        # the call itself, or a name _options binds to it
+        flag = re.search(r"\bfast=([\w.]+(?:\(\))?)", opts[opts.index("flag_settings_path("):]).group(1)
+        if flag != "sess.fast_effective()":
+            self.assertRegex(opts, r"\b%s = sess\.fast_effective\(\)" % re.escape(flag))
         self.assertIn('keys["fastMode"] = True', inspect.getsource(sb.flag_settings_path))
         refusal = inspect.getsource(sb.SdkSession._adopt_fast_state)
         self.assertIn('refused_ask = bool(reason) and self.fast_opt and fast != "on"', refusal)
