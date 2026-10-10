@@ -6565,6 +6565,12 @@ class SdkSession:
         #   sdk_opt_in_required, which _adopt_fast_state blanks into fast_reason, and the switch would re-arm the flag
         #   at the connect after that (refuse → reconnect → refuse, stretched to two connects). Cleared by an explicit
         #   toggle of this session (set_fast: the user's gesture is new information) and by the CLI reporting fast on.
+        _frb = reg.get("fastRefusalBilling")
+        self.fast_refusal_billing = (tuple(_frb) if isinstance(_frb, list) and len(_frb) == 2
+                                     and all(isinstance(x, str) for x in _frb) else None)   # (side, stored login id) of the
+        #   CLI whose report gave the standing refusal (fast_reason, carried into fast_rule_refused): a launch on another
+        #   billing asks again (_fast_refusal_new_billing, 2026-10-10). None when not known (a reg written before it, a CLI
+        #   no launch record vouches for): such a refusal stands as before.
         self.fast_refusal_checked = bool(reg.get("fastRefusalChecked"))   # a refusal reason was adopted from a CLI whose
         #   fast-mode permission the organization or the API settled (2026-10-01). Absent on every reg written before
         #   token_fast_org_env, when a login riding the environment left the CLI to GUESS "preference": fast_effective
@@ -9048,6 +9054,15 @@ class SdkSession:
             self.fast_rule_refused = reason
         if rule_lifted:
             self.fast_rule_refused = ""
+        # A reason this CLI reports speaks for the billing it was launched on (its launch record, _cli_launch): kept beside
+        # the refusal, so a launch on another billing asks again (_fast_refusal_new_billing). A carried refusal keeps the
+        # billing its reason was reported under.
+        retag = False
+        if reason:
+            cl = getattr(self, "_cli_launch", None)
+            under = (str(cl.get("auth") or ""), str(cl.get("authLogin") or "")) if isinstance(cl, dict) else None
+            if under != getattr(self, "fast_refusal_billing", None):
+                self.fast_refusal_billing, retag = under, True
         changed = fast != self.fast or reason != self.fast_reason
         self.fast, self.fast_reason = fast, reason
         # The registry's copy is compared as well as the one in memory (2026-10-09): the reconcile flips the in-memory
@@ -9061,7 +9076,7 @@ class SdkSession:
                 stale = (r.get("liveFast") or "") != fast or (r.get("liveFastReason") or "") != reason
             except Exception:
                 stale = False
-        if changed or stale or refused_ask or rule_refused or rule_lifted or newly_checked or carried_refusal:
+        if changed or stale or refused_ask or rule_refused or rule_lifted or newly_checked or carried_refusal or retag:
             try:
                 kw = dict(liveFast=fast, liveFastReason=reason)
                 if refused_ask:
@@ -9070,6 +9085,8 @@ class SdkSession:
                     kw["fastRuleRefused"] = self.fast_rule_refused
                 if newly_checked:
                     kw["fastRefusalChecked"] = True
+                if retag:
+                    kw["fastRefusalBilling"] = list(self.fast_refusal_billing) if self.fast_refusal_billing else None
                 self.backend._update_reg(self.sid, **kw)
             except Exception as e:
                 self.backend._log("fast-state persist (%s): registry write failed: %s" % (self.name, e))
@@ -9098,6 +9115,37 @@ class SdkSession:
         if lacks:
             self._ask_missing_opt_in(wants)   # the flag this CLI lacks, asked for from the CLI's own word
         return changed or refused_ask
+
+    def _fast_refusal_new_billing(self) -> bool:
+        """At a launch (_amain, before _options reads fast_effective): a refusal of fast mode that the CLI gave under
+        another billing than the one this launch carries (billing_launch: the session's own pick, else the machine default)
+        speaks for an account the session is leaving, so it is forgotten, the switch's memory (fastRuleRefused) and the
+        reason (liveFastReason) together, and this launch carries the opt-in again where the session wants it; the CLI's
+        answer is remembered again if the reason still applies (the review of #199, 2026-10-10: a session refused under one
+        login stayed at normal speed after billing moved to a login that has fast mode, and only a Fast or Slow pick lifted
+        it). Keyed on the launch, not on the billing pick: a relaunch for the new billing waits for a quiet moment, and a
+        report from the old CLI in between would only refuse again, while every road to a new billing (a pick, the machine
+        default, a dormant session's next launch) passes through here. A refusal whose billing is not known stands.
+        Returns whether one was forgotten."""
+        try:
+            tag = getattr(self, "fast_refusal_billing", None)
+            standing = getattr(self, "fast_rule_refused", "") or getattr(self, "fast_reason", "")
+            if not tag or not standing:
+                return False
+            now = tuple(self.billing_launch())
+            if now == tuple(tag):
+                return False
+            self.fast_rule_refused = self.fast_reason = ""
+            self.fast_refusal_billing = None
+            self.backend._update_reg_dropping(self.sid, drop=("fastRefusalBilling",), fastRuleRefused="", liveFastReason="")
+            self.backend._log("fast mode (%s): the CLI refused fast mode under another billing (%s); this launch is on %s, "
+                              "so it asks again" % (self.name, _FAST_REFUSALS.get(standing, standing),
+                                                    self.backend.login_display(now[1]) or {"login": "the machine's login",
+                                                    "key": "the API key"}.get(now[0], "the automatic billing")))
+            return True
+        except Exception as e:
+            self.backend._log("fast mode (%s): %s" % (self.name, e), problem=True)
+            return False
 
     def _ask_missing_opt_in(self, wants: bool) -> None:
         """The CLI just said it lacks the fast-mode opt-in (sdk_opt_in_required, in the initialize answer every connect
@@ -9129,7 +9177,13 @@ class SdkSession:
                     or getattr(self, "_reconnect_when_idle", False) or getattr(self, "_reconnect", False)):
                 return
             if self._opt_in_cannot_take():
-                return   # said already for this CLI: by this connection, or by the kernel that launched it
+                # Nothing is asked. Said once per CLI in each kernel's life (_say_opt_in_lacking): the kernel that launched
+                # this CLI said it, but in a problem ring a restart empties, and the session then sat at normal speed under
+                # a standing Fast pick or Always fast with no reason anywhere (the review of #199, 2026-10-10).
+                if not getattr(self, "_fast_opt_in_said", False):
+                    self._fast_opt_in_said = True
+                    self._say_opt_in_lacking()
+                return
             launched_with = (not getattr(self, "_host_is_attach", False)
                              and bool((getattr(self, "_launch_record", None) or {}).get("fast")))
             if launched_with and not getattr(self, "_fast_off_sent", False):
@@ -9140,9 +9194,7 @@ class SdkSession:
                         self.backend._update_reg(self.sid, fastOptInLacking=ident)
                     except Exception as e:
                         self.backend._log("fast mode (%s): registry write failed: %s" % (self.name, e))
-                self.backend._log("fast mode (%s): this CLI was launched with the fast-mode opt-in and still reports "
-                                  "that it lacks it; a relaunch would carry the same flag, so none is asked"
-                                  % self.name, problem=True, key=("fast-opt-in-lacking", self.sid))
+                self._say_opt_in_lacking()
                 return
             own = bool(getattr(self, "fast_opt", False))
             if own:
@@ -9153,6 +9205,28 @@ class SdkSession:
             self.want_switch_reconnect("fast mode" if own else "always fast")
         except Exception as e:
             self.backend._log("fast mode (%s): %s" % (self.name, e), problem=True)
+
+    def _say_opt_in_lacking(self) -> None:
+        """Say why this session runs at normal speed although it should run fast: its CLI was launched with the fast-mode
+        opt-in and still reports lacking it, so nothing asks for a relaunch (_ask_missing_opt_in). Once per CLI in this
+        kernel's life (the backend's _opt_in_lacking_said, by session): a kernel that only ATTACHES to a guarded CLI after a
+        restart says it too, from the registry's record, since the launching kernel's line went with its problem ring. One
+        ring entry per session (the key), counting its CLIs."""
+        said = getattr(self.backend, "_opt_in_lacking_said", None)
+        if said is None:
+            said = {}
+            try:
+                self.backend._opt_in_lacking_said = said
+            except Exception:
+                pass
+        ident = self._fast_cli_ident()   # "" for a kernel child, which dies with this kernel: its connection says it once
+        if ident:
+            if said.get(self.sid) == ident:
+                return
+            said[self.sid] = ident
+        self.backend._log("fast mode (%s): this CLI was launched with the fast-mode opt-in and still reports "
+                          "that it lacks it; a relaunch would carry the same flag, so none is asked"
+                          % self.name, problem=True, key=("fast-opt-in-lacking", self.sid))
 
     def _fast_cli_ident(self) -> str:
         """The hosted CLI this connection speaks to, as "pid:start" from the host's hello (the identity hostAck and the
@@ -9587,6 +9661,7 @@ class SdkSession:
             # retry ATTACHED to that fresh CLI and nothing stamped for its life (the spawnedAt fix's rounds, 2026-09-14).
             # _options builds the options only.
             carried = getattr(self, "_pick_seq", 0)   # read BEFORE _options reads the pick: one made in between counts as not carried
+            self._fast_refusal_new_billing()          # a refusal another billing gave holds nothing back at this launch
             try:
                 opts = self.backend._options(self, ClaudeAgentOptions)
             except Exception as e:
@@ -13515,6 +13590,9 @@ class SdkBackend:
         # whose stream died or whose model switch was refused just looked odd with no way to find out.
         self._problems: list[dict] = []
         self._problem_seq = 0
+        self._opt_in_lacking_said = {}   # sid -> the guarded CLI already said in this kernel's life (_say_opt_in_lacking)
+        self._always_fast_seen = always_fast_on(self.state_dir)   # the switch as apply_model_switches last saw it: a flip
+        #   forgets every remembered refusal (_forget_fast_refusals)
         self._problem_lock = threading.Lock()
         self._note_env_credential_names()   # name what the kernel's environment leaks into every session, once;
         #                                     after startup_auth_env's claim above, so it names what sessions inherit
@@ -19729,7 +19807,20 @@ class SdkBackend:
         already fallen back unarmed — the very card the user was looking at). Always fast: every live session whose flag
         should now be there, or no longer be there, reconnects once it is quiet (want_switch_reconnect: now if nothing
         runs, else at the event that ends the last of it; a session's own ask is untouched either way). Retry upgrades: every live session whose model sits below its pick
-        arms now, from the pick's label; off clears through _retry_armed. Returns how many sessions were asked."""
+        arms now, from the pick's label; off clears through _retry_armed. Returns how many sessions were asked.
+
+        Both switches land here, from this kernel's gear and from a peer's propagated pick alike, so two rules keep a call
+        from asking more than the flip itself means (the review of #199, 2026-10-10). A CLI that was launched with the opt-in
+        and still lacks it (_opt_in_cannot_take) is never asked for, as at its report and at a model change: before, every
+        toggle of either switch relaunched each such session once, quietly, to hear the same. And only a real flip of
+        Always fast (the store differs from the value this backend last saw) forgets the remembered refusals
+        (_forget_fast_refusals), so the next launch asks the CLI again; a Retry upgrades toggle or a peer re-sending the
+        same value forgets nothing."""
+        on = always_fast_on(self.state_dir)
+        was = getattr(self, "_always_fast_seen", None)
+        self._always_fast_seen = on
+        if was is not None and was != on:
+            self._forget_fast_refusals("Always fast turned %s" % ("on" if on else "off"))
         asked = 0
         for sid, s in list(self.sessions.items()):
             th = getattr(s, "thread", None)
@@ -19737,7 +19828,9 @@ class SdkBackend:
                 continue
             try:
                 want = s.fast_effective()
-                if want != bool(getattr(s, "_fast_unlocked", False)) and not (getattr(s, "_switch_wanted", "") or getattr(s, "_reconnect_when_idle", False) or getattr(s, "_reconnect", False)):
+                have = bool(getattr(s, "_fast_unlocked", False))
+                guarded = want and not have and s._opt_in_cannot_take()   # the flag rode its launch and did not take
+                if want != have and not guarded and not (getattr(s, "_switch_wanted", "") or getattr(s, "_reconnect_when_idle", False) or getattr(s, "_reconnect", False)):
                     self._log("always fast (%s): the switch %s — reconnecting %s the opt-in%s"
                               % (s.name, "wants the flag" if want else "went off", "with" if want else "without",
                                  "" if s.quiet() else " once the session is quiet"))
@@ -19748,6 +19841,34 @@ class SdkBackend:
             except Exception as e:
                 self._log("model switches (%s): %s" % (s.name, e), problem=True)
         return asked
+
+    def _forget_fast_refusals(self, why: str) -> int:
+        """Always fast just flipped (apply_model_switches): every session's remembered refusal of fast mode goes, the
+        switch's memory (fastRuleRefused) and the CLI's last refusal reason (liveFastReason) with the billing it was given
+        under (fastRefusalBilling), in the registry and on the live session object, so the next launch carries the opt-in
+        again where the switch now wants it, and the CLI's answer is remembered again if the reason still applies. Both
+        fields, because either alone holds the switch back (fast_effective) and the reason left standing would be carried
+        straight back into the memory at the next flagless report (_adopt_fast_state). Dormant sessions included: their next
+        launch reads the registry. Returns how many sessions had a refusal to forget."""
+        n = 0
+        for reg in list_regs(self.state_dir):
+            sid = str(reg.get("sid") or "")
+            s = self.sessions.get(sid) if sid else None
+            if not sid or not (reg.get("fastRuleRefused") or reg.get("liveFastReason")
+                               or (s is not None and (getattr(s, "fast_rule_refused", "") or getattr(s, "fast_reason", "")))):
+                continue
+            try:
+                self._update_reg_dropping(sid, drop=("fastRefusalBilling",), fastRuleRefused="", liveFastReason="")
+                if s is not None:
+                    s.fast_rule_refused = s.fast_reason = ""
+                    s.fast_refusal_billing = None
+                n += 1
+            except Exception as e:
+                self._log("always fast (%s): could not forget the refusal: %s" % (reg.get("name") or sid[:8], e), problem=True)
+        if n:
+            self._log("always fast: %s; the fast-mode refusal remembered for %d session%s is forgotten, and the next "
+                      "launch asks the CLI again" % (why, n, "" if n == 1 else "s"))
+        return n
 
     def set_fast(self, sid: str, value: str) -> bool:
         """Toggle fast mode ('on'|'off'). The CLI's /fast descriptor is marked supportsNonInteractive,

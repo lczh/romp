@@ -532,14 +532,18 @@ following to every connected machine's kernel):
   lacks the opt-in while the session should have it (by this switch or by the
   session's own **Fast** pick) is relaunched with it once the session is quiet.
   A CLI that was launched with the opt-in and still says it lacks it is never
-  relaunched for it: the kernel log says so once for that CLI, and neither a
-  reattach after a kernel restart nor a model change asks again. A **Slow** pick sent to a CLI that has the opt-in takes it away from that
+  relaunched for it: the error center says so once for that CLI, again after a
+  kernel restart, and neither a reattach, a model change nor turning Always fast
+  or Retry upgrades on or off asks again. A **Slow** pick sent to a CLI that has the opt-in takes it away from that
   CLI, so a later **Fast** pick relaunches it the same way. A session you set to **Slow** from its
   statusline stays slow until you set it to **Fast** again, and a comment thread
   launched slow, or forked from a slow session, counts as such a pick. If the CLI refuses fast mode for a
   session with a reason (extra usage off, an organisation gate), the kernel log
   says so once and that session runs at normal speed until the reason clears (the
-  CLI reporting fast on for it, or your own Fast or Slow pick on it); the switch is
+  CLI reporting fast on for it, or your own Fast or Slow pick on it). Turning
+  Always fast off or on, or a launch on another billing than the one that was
+  refused, asks the CLI again, and its answer is remembered again if the reason
+  still applies. The switch is
   never the literal `/fast on`, which on a non-Opus session would make the CLI
   change model.
 - **Retry upgrades after downgrades** acts when a session's model changes to a
