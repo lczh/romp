@@ -11,6 +11,7 @@ Real processes stand in for a host and its CLI (a host leads its own process gro
 the sweep must leave alone: an unrelated process, a lease naming that process's pid with another start time (a reused
 pid), and a kernel-held lease. Synthetic ids only.
 """
+import builtins
 import contextlib
 import errno
 import importlib.util
@@ -73,13 +74,18 @@ LAUNCH_PY = ("import signal, subprocess, sys\n"
 
 
 def alive(pid):
+    """kill(0) finds the process and its state is neither a zombie (Z) nor mid-reap (X). Two reads, as in the tool: a
+    process reaped between them has ended (ENOENT or ESRCH on the state read), and any other failure of that read says
+    nothing about it, so it counts as running."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
-    try:                                                   # a zombie awaiting its reaper has ended
+    try:
         with open("/proc/%d/stat" % pid) as f:
-            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+            return f.read().rsplit(")", 1)[1].split()[0] not in ("Z", "X")
+    except (FileNotFoundError, ProcessLookupError):
+        return not os.path.isdir("/proc")              # with procfs, reaped since kill(0); macOS: kill(0) decides
     except OSError:
         return True
 
@@ -179,8 +185,8 @@ class EndingTheLabsOwnHosts(unittest.TestCase):
 
 
 class _InProcessSweep(unittest.TestCase):
-    """Runs end-hosts.py's main in this process, on a stand-in host that is this test's own child (so it stays a
-    zombie until the test reaps it), with the tool's reads open to placing and answering."""
+    """A stand-in host that is this test's own child, so it stays a zombie until the test reaps it, and end-hosts.py's
+    main run in this process with the tool's reads open to placing and answering."""
 
     def setUp(self):
         td = tempfile.TemporaryDirectory()
@@ -211,6 +217,14 @@ class _InProcessSweep(unittest.TestCase):
             except ProcessLookupError:
                 pass
             child.wait()
+
+    def _until_ended(self, pid, within=10.0):
+        """Wait for the child to become a zombie, without reaping it (WNOWAIT)."""
+        deadline = time.monotonic() + within
+        while os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
+            if time.monotonic() > deadline:
+                raise AssertionError("the stand-in never ended on SIGTERM")
+            time.sleep(0.01)
 
     def _sweep(self, proc_start=None, tool_open=None, tool_os=None, grace_s=None):
         """Run the tool's main on the state root and return what it printed. Its backend answers proc_start with
@@ -264,14 +278,6 @@ class AReapBetweenTheTwoReads(_InProcessSweep):
     def setUp(self):
         super().setUp()
         self._stand_in(DYING_PY)
-
-    def _until_ended(self, pid, within=10.0):
-        """Wait for the child to become a zombie, without reaping it (WNOWAIT)."""
-        deadline = time.monotonic() + within
-        while os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
-            if time.monotonic() > deadline:
-                raise AssertionError("the stand-in never ended on SIGTERM")
-            time.sleep(0.01)
 
     def _placed_sweep(self, between_the_reads, tool_open=None):
         """Run the tool, calling `between_the_reads` after the start-time read of the look that follows the one that
@@ -385,6 +391,68 @@ class TheArmWithoutProcfs(_InProcessSweep):
                          "its start time still matched, so the host counted as running and got SIGKILL")
         child.wait(timeout=10)
         self.assertEqual(child.returncode, -signal.SIGKILL, "SIGKILL ended it")
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "procfs: the two reads a reaper can land between")
+class TheTestsOwnLivenessCheck(_InProcessSweep):
+    """alive(), which _gone polls in the tests above, reads twice as the tool does (kill(0), then the state), so a reap
+    can land between its reads too. It reads them as the tool does. The stand-in is this test's own child, ended by
+    SIGTERM and left a zombie until the test reaps it at the placed moment."""
+
+    def setUp(self):
+        super().setUp()
+        self._stand_in(DYING_PY)
+        os.kill(self.child.pid, signal.SIGTERM)
+        self._until_ended(self.child.pid)
+
+    def _state_reads(self, answer):
+        """alive()'s own open, with its read of the child's state answered by `answer(path)`; returns the reads made."""
+        stat, served = "/proc/%d/stat" % self.child.pid, []
+
+        def alive_open(path, *args, **kwargs):
+            if path == stat:
+                served.append(path)
+                return answer(path)
+            return builtins.open(path, *args, **kwargs)
+
+        return mock.patch.object(sys.modules[__name__], "open", alive_open, create=True), served
+
+    def test_a_process_reaped_between_its_two_reads_has_ended(self):
+        real_kill = os.kill
+
+        def kill(p, sig):
+            real_kill(p, sig)                          # kill(0) finds the zombie
+            if p == self.child.pid and sig == 0:
+                self.child.wait()                      # and its parent reaps it before the state read
+
+        with mock.patch.object(os, "kill", kill):
+            ended = not alive(self.child.pid)
+        self.assertEqual(self.child.returncode, -signal.SIGTERM, "the reap landed between the two reads")
+        self.assertTrue(ended, "a process reaped between alive()'s two reads has ended")
+
+    def test_a_process_caught_mid_reap_has_ended(self):
+        def mid_reap(path):
+            with builtins.open(path) as f:
+                head, tail = f.read().rsplit(")", 1)
+            fields = tail.split()
+            self.assertEqual(fields[0], "Z", "the stand-in is a zombie")
+            return io.StringIO("%s) X %s\n" % (head, " ".join(fields[1:])))
+
+        patch, served = self._state_reads(mid_reap)
+        with patch:
+            ended = not alive(self.child.pid)
+        self.assertTrue(served, "alive()'s state read was shown X")
+        self.assertTrue(ended, "a process mid-reap has ended")
+
+    def test_a_state_read_that_cannot_tell_leaves_the_process_running(self):
+        def cannot_tell(path):
+            raise OSError(errno.EMFILE, os.strerror(errno.EMFILE))
+
+        patch, served = self._state_reads(cannot_tell)
+        with patch:
+            running = alive(self.child.pid)
+        self.assertTrue(served, "alive()'s state read met the error")
+        self.assertTrue(running, "EMFILE says nothing about the process, so it counts as running")
 
 
 class TheLabsCleanupRunsIt(unittest.TestCase):
