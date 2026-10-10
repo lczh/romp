@@ -345,6 +345,48 @@ class AStateReadThatCannotTell(_InProcessSweep):
                 self.assertEqual(child.returncode, -signal.SIGKILL, "SIGKILL ended it")
 
 
+class _PathWithoutProcfs:
+    """os.path as on macOS: it finds no /proc; everything else is this process's os.path."""
+
+    def isdir(self, p):
+        return os.fspath(p) != "/proc" and os.path.isdir(p)
+
+    def __getattr__(self, name):
+        return getattr(os.path, name)
+
+
+class _OsWithoutProcfs:
+    """The tool's os as on macOS: its path finds no /proc; everything else is this process's os."""
+    path = _PathWithoutProcfs()
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "shows the tool a machine without procfs from a Linux one")
+class TheArmWithoutProcfs(_InProcessSweep):
+    """Without procfs (macOS) every state read fails, and the start time alone decides whether a process still runs.
+    The Linux cells that gate a change never take that arm, so here the tool is shown no /proc through its own os and
+    its /proc opens fail as they do there. This pins the arm as it stood before the reap fix; it is not new behaviour."""
+
+    def test_without_procfs_a_failed_state_read_leaves_the_start_time_to_decide(self):
+        child = self._stand_in(STUBBORN_PY)
+        served = []
+
+        def tool_open(path, *args, **kwargs):
+            if os.fspath(path).startswith("/proc/"):
+                served.append(path)
+                raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), path)
+            return open(path, *args, **kwargs)
+
+        line = self._sweep(tool_open=tool_open, tool_os=_OsWithoutProcfs(), grace_s=0.3)
+        self.assertTrue(served, "the tool's state reads failed as they do without procfs")
+        self.assertEqual(line, "lab hosts: ended 1 host(s) and 0 CLI(s) (1 needed SIGKILL)",
+                         "its start time still matched, so the host counted as running and got SIGKILL")
+        child.wait(timeout=10)
+        self.assertEqual(child.returncode, -signal.SIGKILL, "SIGKILL ended it")
+
+
 class TheLabsCleanupRunsIt(unittest.TestCase):
     def test_cleanup_ends_the_labs_hosts_after_the_kernel_and_before_the_directory_goes(self):
         src = LAB_SH.read_text()
