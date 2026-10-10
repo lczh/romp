@@ -91,6 +91,8 @@ class _SendFixture(unittest.TestCase):
         with km._SEND_ACCEPTS_LOCK:
             km._SEND_ACCEPTS.clear()
             km._SEND_ACCEPTS_STATE["said"] = False
+            km._SEND_ACCEPTS_STATE["tailOk"] = False
+            km._SEND_ACCEPTS_STATE.pop("bootReports", None)
         km._pending_ops.pop(SID, None)
 
     def _send(self, qid=Q1, text="add a test for the search cache", resend=False):
@@ -267,11 +269,12 @@ class Round3(_SendFixture):
         (self.state / "accepted-sends.jsonl").write_text(text)
 
     def test_a_malformed_row_or_a_garbage_file_never_stops_the_kernel(self):
-        good = {"qid": Q1, "sid": SID, "t": 1_790_000_000, "ok": True}
+        good = {"qid": Q1, "sid": SID, "t": int(time.time()) - 60, "ok": True}   # inside the seven days the boot's compaction keeps
         self._write_log(json.dumps(good) + "\n" + json.dumps(dict(good, qid=Q2, t="soon")) + "\nnot json at all\n"
                         + json.dumps({"qid": "s-1", "ok": True}) + "\n" + json.dumps(dict(good, qid="echo:" + "3" * 32, t=float("nan"))).replace("NaN", "1e999") + "\n")
         (self.state / "accepted-sends.json").write_text("\x00\x01 garbage, not json")
         self.assertEqual(km._send_accepts_boot_load(), 1, "the good row kept; boot does not raise")
+        km._send_accepts_boot_report()       # what the load held, said once the boot passes have run (main)
         self.assertIn(Q1, km._SEND_ACCEPTS)
         self.assertNotIn(Q2, km._SEND_ACCEPTS, "the row whose time is not a number is skipped")
         rows = [json.loads(ln) for ln in (self.state / "session-events.jsonl").read_text().splitlines()]
@@ -325,15 +328,63 @@ class Round3(_SendFixture):
     def test_the_record_is_an_appended_log_compacted_from_the_live_decisions(self):
         (self.state / "accepted-sends.json").write_text(json.dumps({"accepted": [{"qid": Q2, "sid": SID, "t": int(time.time()) - 60, "ok": True}]}))
         self.assertEqual(km._send_accepts_boot_load(), 1, "#198's whole-file form is still read")
+        self.assertFalse((self.state / "accepted-sends.json").exists(), "and folded into the log at boot (the review of #201)")
         self._send()
         self._send(qid="echo:" + "4" * 32)
         lines = (self.state / "accepted-sends.jsonl").read_text().splitlines()
-        self.assertEqual([json.loads(ln)["qid"] for ln in lines], [Q1, "echo:" + "4" * 32], "one line per decision, appended")
+        self.assertEqual([json.loads(ln)["qid"] for ln in lines], [Q2, Q1, "echo:" + "4" * 32], "one line per decision, appended")
         with km._SEND_WRITE_LOCK:
             km._send_log_compact_locked(time.time())
         rows = [json.loads(ln)["qid"] for ln in (self.state / "accepted-sends.jsonl").read_text().splitlines()]
         self.assertEqual(sorted(rows), sorted([Q2, Q1, "echo:" + "4" * 32]), "the compaction keeps every live decision")
         self.assertFalse((self.state / "accepted-sends.json").exists(), "and retires the whole-file form")
+
+
+class Round4(_SendFixture):
+    """The review of #201 (2026-10-10)."""
+
+    def test_the_boot_load_never_builds_the_backend_and_says_its_problem_after_the_boot_passes(self):
+        (self.state / "accepted-sends.jsonl").write_text(json.dumps({"qid": Q2, "sid": SID, "t": "soon", "ok": True}) + "\n")
+        built = []
+        saved = km._sdk
+        km._sdk = lambda: built.append(1)
+        try:
+            km._send_accepts_boot_load()
+            self.assertEqual(built, [], "the load did not build the Claude Code backend: the boot passes must come first")
+            ev = self.state / "session-events.jsonl"
+            self.assertFalse(ev.exists() and "send-acks.unreadable" in ev.read_text(), "the problem is held, not said yet")
+            km._send_accepts_boot_report()
+            self.assertIn("send-acks.unreadable", ev.read_text(), "and said once main reaches the backend's boot")
+        finally:
+            km._sdk = saved
+
+    def test_a_torn_last_line_is_cut_and_the_next_decision_survives_the_next_boot(self):
+        good = json.dumps({"qid": Q1, "sid": SID, "t": int(time.time()), "ok": True})
+        (self.state / "accepted-sends.jsonl").write_text(good + "\n" + '{"qid": "echo:' + "2" * 20)   # a crash mid-append
+        self.assertEqual(km._send_accepts_boot_load(), 1)
+        self._send(qid="echo:" + "5" * 32)
+        self._reset_store()
+        self.assertEqual(km._send_accepts_boot_load(), 2, "both decisions read back: the new one was not written onto the torn line")
+        self.assertTrue((self.state / "accepted-sends.jsonl").read_text().endswith("\n"))
+
+    def test_an_append_never_lands_on_half_a_line_even_without_a_boot_load(self):
+        (self.state / "accepted-sends.jsonl").write_text('{"qid": "echo:' + "2" * 20)
+        km._SEND_ACCEPTS_STATE["tailOk"] = False
+        self._send()
+        self._reset_store()
+        self.assertEqual(km._send_accepts_boot_load(), 1)
+        self.assertIn(Q1, km._SEND_ACCEPTS)
+
+    def test_a_withdrawal_for_a_session_this_kernel_does_not_have_resolves_quietly(self):
+        other = "99999999-8888-7777-6666-555555555555"
+        km._drive({"type": "cancelQueued", "id": other, "md": "rebuild the index", "qid": Q1}, self.client)
+        self.assertEqual([(f["type"], f.get("ok"), f.get("gone"), f.get("qid")) for f in self.frames],
+                         [("cancelResult", True, True, Q1)], "answered as done: no not-delivered dialog (before: the err frame, every reconnect)")
+        self.assertFalse((self.state / "undelivered.jsonl").exists(), "and nothing filed as a lost message")
+
+    def test_every_cancel_answer_names_the_send(self):
+        km._drive({"type": "cancelQueued", "id": SID, "md": "add a test for the search cache", "qid": Q1}, self.client)
+        self.assertEqual([f.get("qid") for f in self.frames if f.get("type") == "cancelResult"], [Q1])
 
 
 class AcksAnnounced(unittest.TestCase):

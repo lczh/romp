@@ -850,10 +850,13 @@ function persistKeptSends(): void {
 }
 /** The kernel answered a withdrawal (cancelResult for the session and the words): any withdrawal of it is confirmed, so no
  *  tab posts its cancel again. */
-function confirmWithdrawal(sid: string, md: string): void {
+function confirmWithdrawal(sid: string, md: string, qid?: string): void {
   let changed = false;
   for (const t of withdrawals(Date.now())) {
-    if (t.sid === sid && t.text === md && !t.confirmed) { withdrawnHere.set(t.qid, { ...t, confirmed: true }); changed = true; }
+    // by the send's id when the answer names one (a current kernel): one answer confirms one withdrawal, never every
+    // withdrawal that happens to share its words; by the session and the words for a kernel that names none
+    const mine = qid ? t.qid === qid : (t.sid === sid && t.text === md);
+    if (mine && !t.confirmed) { withdrawnHere.set(t.qid, { ...t, confirmed: true }); changed = true; }
   }
   if (changed) persistKeptSends();
 }
@@ -22355,7 +22358,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   // session was already asked to raise its question again.
   else if (m.type === "askLost" && typeof m.text === "string") warnToast(m.text);
   else if (m.type === "cancelResult" && typeof m.id === "string") {
-    if (typeof m.md === "string") confirmWithdrawal(m.id, m.md);   // a kernel answered: no tab posts this withdrawal's cancel again
+    if (typeof m.md === "string") confirmWithdrawal(m.id, m.md, typeof m.qid === "string" ? m.qid : undefined);   // a kernel answered (a session it no longer has included: `gone`): no tab posts this withdrawal's cancel again
     const key = m.id + " " + (typeof m.md === "string" ? m.md : "");   // the same separator the rescind stores under (a NUL byte sat here, unreadable in any text view, so no refusal ever found its stash; the T373 fold lab caught it)
     const stash = pendingCancelRestores.get(key);
     pendingCancelRestores.delete(key);

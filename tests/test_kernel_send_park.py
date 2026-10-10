@@ -460,8 +460,9 @@ class QueuedBubble(unittest.TestCase):
         # and the optimistic md-only arm (a ✕ before any park/idx has round-tripped).
         import inspect
         src = inspect.getsource(km._drive)
-        self.assertEqual(src.count('"type": "cancelResult"'), 3,
-                         "one authoritative reply per cancel arm (park + idx + md-only)")
+        self.assertEqual(src.count('"type": "cancelResult"'), 4,
+                         "one authoritative reply per cancel arm (park + idx + md-only), and the quiet answer for a session this "
+                         "kernel does not have (2026-10-10: a re-posted withdrawal there is done, never the not-delivered dialog)")
         self.assertIn('"ok": not err', src)
         self.assertIn('"text": err or ""', src)
 

@@ -91,7 +91,7 @@ const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kern
 const SDKBE = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "sdk_backend.py"), "utf8");
 
 test("the kernel answers every cancelQueued with an authoritative cancelResult frame", () => {
-  assert.equal(KERNEL.split('"type": "cancelResult"').length - 1, 3, "one reply per cancel arm (park + idx + the 2026-08-30 md-only optimistic arm)");
+  assert.equal(KERNEL.split('"type": "cancelResult"').length - 1, 4, "one reply per cancel arm (park + idx + the 2026-08-30 md-only optimistic arm), and the quiet answer for a session the kernel does not have (2026-10-10)");
   assert.match(KERNEL, /"ok": not err/);
   assert.match(KERNEL, /def _cancel_miss_text\(md\):/, "the 'too late' wording is built kernel-side");
   assert.match(KERNEL, /too late to cancel — the message already reached the session/);
