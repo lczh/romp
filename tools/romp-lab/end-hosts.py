@@ -68,16 +68,19 @@ def main(argv):
     def still(pid, start):
         """The recorded process, still running: its start time matches, and it is not a zombie awaiting its reaper.
 
-        Two reads, so a reaper can land between them: a process the first read finds is gone by the second, or caught
-        mid-reap (state X). Both have ended; read as running, they made a process that ended on SIGTERM count as
-        needing SIGKILL."""
+        Two reads, so a reaper can land between them: a process the first read finds is gone by the second (ENOENT or
+        ESRCH), or caught mid-reap (state X). Both have ended; read as running, they made a process that ended on
+        SIGTERM count as needing SIGKILL. Any other failure of the second read says nothing about the process, so it
+        still counts as running, and a host that ignores SIGTERM still gets SIGKILL."""
         if sb.proc_start(pid) != start:
             return False
         try:
             with open("/proc/%d/stat" % pid) as f:
                 return f.read().rsplit(")", 1)[1].split()[0] not in ("Z", "X")
-        except OSError:
+        except (FileNotFoundError, ProcessLookupError):
             return not os.path.isdir("/proc")         # with procfs, reaped since the first read; macOS: start decides
+        except OSError:
+            return True                               # a read that cannot tell (EMFILE, EACCES): still running
 
     def signal_one(pid, what, sig):
         try:

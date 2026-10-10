@@ -12,6 +12,7 @@ the sweep must leave alone: an unrelated process, a lease naming that process's 
 pid), and a kernel-held lease. Synthetic ids only.
 """
 import contextlib
+import errno
 import importlib.util
 import io
 import json
@@ -177,8 +178,78 @@ class EndingTheLabsOwnHosts(unittest.TestCase):
         self.assertIn("needed SIGKILL", r.stdout)
 
 
+class _InProcessSweep(unittest.TestCase):
+    """Runs end-hosts.py's main in this process, on a stand-in host that is this test's own child (so it stays a
+    zombie until the test reaps it), with the tool's reads open to placing and answering."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.dir = Path(td.name)
+        self.state = self.dir / "state" / "romp"
+        self.signalled, self.children = [], []
+
+    def _stand_in(self, code):
+        """Start a stand-in host running `code`, wait until it is up, and record it as the lab's host."""
+        mark = self.dir / ("up-%d" % len(self.children))
+        child = subprocess.Popen([sys.executable, "-c", code, str(mark)], start_new_session=True,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.children.append(child)
+        self.addCleanup(self._end, child)
+        wait_for(mark)
+        identity = self.state / "hosts" / SID_HOST / "identity.json"
+        identity.parent.mkdir(parents=True, exist_ok=True)
+        identity.write_text(json.dumps({"pid": child.pid, "start": sb.proc_start(child.pid)}))
+        self.child = child
+        return child
+
+    @staticmethod
+    def _end(child):
+        if child.returncode is None:                   # not reaped yet: it is still this test's child, so its pid is too
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.wait()
+
+    def _sweep(self, proc_start=None, tool_open=None, tool_os=None, grace_s=None):
+        """Run the tool's main on the state root and return what it printed. Its backend answers proc_start with
+        `proc_start` (the real one by default); `tool_open`, `tool_os` and `grace_s` replace the tool's own open, os and
+        GRACE_S (module globals, which its functions find before the builtins). Each signal the tool sends the
+        stand-in lands in self.signalled."""
+        pid = self.child.pid
+        self.signalled = []
+        real_kill, real_killpg = os.kill, os.killpg
+
+        def kill(p, sig):
+            if p == pid and sig:
+                self.signalled.append(sig)
+            return real_kill(p, sig)
+
+        def killpg(g, sig):
+            if g == pid:
+                self.signalled.append(sig)
+            return real_killpg(g, sig)
+
+        spec = importlib.util.spec_from_file_location("romp_end_hosts_in_process", TOOL)
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        for name, value in (("open", tool_open), ("os", tool_os), ("GRACE_S", grace_s)):
+            if value is not None:
+                setattr(tool, name, value)
+        backend = types.SimpleNamespace(proc_start=proc_start or sb.proc_start)
+        loadsource = types.ModuleType("loadsource")
+        loadsource.load_source = lambda name, path: backend
+        out = io.StringIO()
+        with mock.patch.dict(sys.modules, {"loadsource": loadsource}), mock.patch.object(sys, "path", list(sys.path)), \
+                mock.patch.object(os, "kill", kill), mock.patch.object(os, "killpg", killpg), contextlib.redirect_stdout(out):
+            rc = tool.main(["end-hosts.py", str(self.state)])
+        self.assertEqual(rc, 0)
+        return out.getvalue().strip()
+
+
 @unittest.skipUnless(sys.platform.startswith("linux"), "procfs: the two reads a reaper can land between")
-class AReapBetweenTheTwoReads(unittest.TestCase):
+class AReapBetweenTheTwoReads(_InProcessSweep):
     """A process that ends on SIGTERM is reaped by its parent at a moment the sweep does not choose, and the sweep's
     liveness check reads twice: the start time, then the state. A reap landing between the two reads means the
     process has ended. Read as running, it made the sweep report "(1 needed SIGKILL)" for a host that had ended on
@@ -191,25 +262,8 @@ class AReapBetweenTheTwoReads(unittest.TestCase):
     start-time read and the tool's state read."""
 
     def setUp(self):
-        td = tempfile.TemporaryDirectory()
-        self.addCleanup(td.cleanup)
-        self.state = Path(td.name) / "state" / "romp"
-        mark = Path(td.name) / "up"
-        self.child = subprocess.Popen([sys.executable, "-c", DYING_PY, str(mark)], start_new_session=True,
-                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.addCleanup(self._end_child)
-        wait_for(mark)
-        identity = self.state / "hosts" / SID_HOST / "identity.json"
-        identity.parent.mkdir(parents=True)
-        identity.write_text(json.dumps({"pid": self.child.pid, "start": sb.proc_start(self.child.pid)}))
-
-    def _end_child(self):
-        if self.child.returncode is None:              # not reaped yet: it is still this test's child, so its pid is too
-            try:
-                os.killpg(self.child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            self.child.wait()
+        super().setUp()
+        self._stand_in(DYING_PY)
 
     def _until_ended(self, pid, within=10.0):
         """Wait for the child to become a zombie, without reaping it (WNOWAIT)."""
@@ -219,51 +273,28 @@ class AReapBetweenTheTwoReads(unittest.TestCase):
                 raise AssertionError("the stand-in never ended on SIGTERM")
             time.sleep(0.01)
 
-    def _sweep(self, between_the_reads, tool_open=None):
-        """Run end-hosts.py's main on the state root, calling `between_the_reads` after the start-time read of the look
-        that follows the one that met the zombie. Returns what the tool printed."""
-        pid, signalled, looks = self.child.pid, [], []
-        real_kill, real_killpg = os.kill, os.killpg
-
-        def kill(p, sig):
-            if p == pid and sig:
-                signalled.append(sig)
-            return real_kill(p, sig)
-
-        def killpg(g, sig):
-            if g == pid:
-                signalled.append(sig)
-            return real_killpg(g, sig)
+    def _placed_sweep(self, between_the_reads, tool_open=None):
+        """Run the tool, calling `between_the_reads` after the start-time read of the look that follows the one that
+        met the zombie. Returns what the tool printed."""
+        pid, looks = self.child.pid, []
 
         def proc_start(p):
-            if p == pid and signalled:
+            if p == pid and self.signalled:
                 self._until_ended(pid)
             start = sb.proc_start(p)
-            if p == pid and signalled:
+            if p == pid and self.signalled:
                 looks.append(start)
                 if len(looks) == 2:
                     between_the_reads()
             return start
 
-        spec = importlib.util.spec_from_file_location("romp_end_hosts_reap_race", TOOL)
-        tool = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(tool)
-        if tool_open is not None:
-            tool.open = tool_open                      # a module global: the tool's own open() calls find it first
-        backend = types.SimpleNamespace(proc_start=proc_start)
-        loadsource = types.ModuleType("loadsource")
-        loadsource.load_source = lambda name, path: backend
-        out = io.StringIO()
-        with mock.patch.dict(sys.modules, {"loadsource": loadsource}), mock.patch.object(sys, "path", list(sys.path)), \
-                mock.patch.object(os, "kill", kill), mock.patch.object(os, "killpg", killpg), contextlib.redirect_stdout(out):
-            rc = tool.main(["end-hosts.py", str(self.state)])
-        self.assertEqual(rc, 0)
-        self.assertEqual(signalled[:1], [signal.SIGTERM], "the tool sent the stand-in SIGTERM first")
+        line = self._sweep(proc_start, tool_open)
+        self.assertEqual(self.signalled[:1], [signal.SIGTERM], "the tool sent the stand-in SIGTERM first")
         self.assertGreaterEqual(len(looks), 2, "the tool looked again after meeting the zombie, so the reap was placed")
-        return out.getvalue().strip()
+        return line
 
     def test_a_process_reaped_between_the_reads_ended_on_sigterm(self):
-        line = self._sweep(self.child.wait)            # its parent reaps it: the second read finds no process
+        line = self._placed_sweep(self.child.wait)     # its parent reaps it: the second read finds no process
         self.assertEqual(self.child.returncode, -signal.SIGTERM, "SIGTERM ended it")
         self.assertEqual(line, "lab hosts: ended 1 host(s) and 0 CLI(s)", "so no SIGKILL was needed")
 
@@ -282,9 +313,36 @@ class AReapBetweenTheTwoReads(unittest.TestCase):
                 return io.StringIO("%s) X %s\n" % (head, " ".join(fields[1:])))
             return open(path, *args, **kwargs)
 
-        line = self._sweep(lambda: mid_reap.append(True), tool_open)
+        line = self._placed_sweep(lambda: mid_reap.append(True), tool_open)
         self.assertEqual(mid_reap, [], "the tool's state read after the placed moment was shown X")
         self.assertEqual(line, "lab hosts: ended 1 host(s) and 0 CLI(s)", "a process mid-reap has ended; no SIGKILL needed")
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "procfs: the state read and the errors it can fail with")
+class AStateReadThatCannotTell(_InProcessSweep):
+    """Only ENOENT and ESRCH on the state read say the process is gone. Any other failure (too many open files, no
+    permission) says nothing about it, so the process still counts as running and a host that ignores SIGTERM still
+    gets SIGKILL. The stand-in ignores SIGTERM, and every state read the tool makes after it signals fails."""
+
+    def test_a_read_that_cannot_tell_leaves_a_host_that_ignores_sigterm_to_sigkill(self):
+        for err in (OSError(errno.EMFILE, os.strerror(errno.EMFILE)),
+                    PermissionError(errno.EACCES, os.strerror(errno.EACCES))):
+            with self.subTest(errno=errno.errorcode[err.errno]):
+                child = self._stand_in(STUBBORN_PY)
+                stat, served = "/proc/%d/stat" % child.pid, []
+
+                def tool_open(path, *args, err=err, **kwargs):
+                    if path == stat and self.signalled:
+                        served.append(path)
+                        raise err
+                    return open(path, *args, **kwargs)
+
+                line = self._sweep(tool_open=tool_open, grace_s=0.3)
+                self.assertTrue(served, "the tool's state reads after SIGTERM met the error")
+                self.assertEqual(line, "lab hosts: ended 1 host(s) and 0 CLI(s) (1 needed SIGKILL)",
+                                 "a read that cannot tell leaves the host running, so it gets SIGKILL")
+                child.wait(timeout=10)
+                self.assertEqual(child.returncode, -signal.SIGKILL, "SIGKILL ended it")
 
 
 class TheLabsCleanupRunsIt(unittest.TestCase):
