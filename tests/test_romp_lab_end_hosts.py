@@ -283,6 +283,7 @@ class AReapBetweenTheTwoReads(unittest.TestCase):
             return open(path, *args, **kwargs)
 
         line = self._sweep(lambda: mid_reap.append(True), tool_open)
+        self.assertEqual(mid_reap, [], "the tool's state read after the placed moment was shown X")
         self.assertEqual(line, "lab hosts: ended 1 host(s) and 0 CLI(s)", "a process mid-reap has ended; no SIGKILL needed")
 
 
