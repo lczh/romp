@@ -306,6 +306,26 @@ class AReapBetweenTheTwoReads(_InProcessSweep):
         self.assertEqual(self.child.returncode, -signal.SIGTERM, "SIGTERM ended it")
         self.assertEqual(line, "lab hosts: ended 1 host(s) and 0 CLI(s)", "so no SIGKILL was needed")
 
+    def test_a_process_reaped_whose_state_read_fails_with_esrch_ended_on_sigterm(self):
+        # A read of a process that goes while the read is under way fails with ESRCH, not ENOENT, and means gone just
+        # the same. The test reaps the child at the placed moment and fails the tool's next state read with ESRCH.
+        stat, esrch = "/proc/%d/stat" % self.child.pid, []
+
+        def reap():
+            self.child.wait()
+            esrch.append(True)
+
+        def tool_open(path, *args, **kwargs):
+            if path == stat and esrch:
+                esrch.clear()
+                raise ProcessLookupError(errno.ESRCH, os.strerror(errno.ESRCH), path)
+            return open(path, *args, **kwargs)
+
+        line = self._placed_sweep(reap, tool_open)
+        self.assertEqual(esrch, [], "the tool's state read after the reap failed with ESRCH")
+        self.assertEqual(self.child.returncode, -signal.SIGTERM, "SIGTERM ended it")
+        self.assertEqual(line, "lab hosts: ended 1 host(s) and 0 CLI(s)", "ESRCH means gone, so no SIGKILL was needed")
+
     def test_a_process_caught_mid_reap_has_ended(self):
         # Inside the reap itself the state reads X (dead, its reaper collecting it). No test can hold a real reaper
         # there, so the tool's state read after the placed moment is shown X for the zombie it is.
@@ -431,6 +451,23 @@ class TheTestsOwnLivenessCheck(_InProcessSweep):
             ended = not alive(self.child.pid)
         self.assertEqual(self.child.returncode, -signal.SIGTERM, "the reap landed between the two reads")
         self.assertTrue(ended, "a process reaped between alive()'s two reads has ended")
+
+    def test_a_process_reaped_whose_state_read_fails_with_esrch_has_ended(self):
+        real_kill = os.kill
+
+        def kill(p, sig):
+            real_kill(p, sig)                          # kill(0) finds the zombie
+            if p == self.child.pid and sig == 0:
+                self.child.wait()                      # and its parent reaps it before the state read
+
+        def esrch(path):
+            raise ProcessLookupError(errno.ESRCH, os.strerror(errno.ESRCH), path)
+
+        patch, served = self._state_reads(esrch)
+        with patch, mock.patch.object(os, "kill", kill):
+            ended = not alive(self.child.pid)
+        self.assertTrue(served, "alive()'s state read after the reap failed with ESRCH")
+        self.assertTrue(ended, "ESRCH means gone")
 
     def test_a_process_caught_mid_reap_has_ended(self):
         def mid_reap(path):
