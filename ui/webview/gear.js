@@ -97,7 +97,11 @@ var GEAR_HTML =
   // all, and the keyboard shortcuts: settings about the dashboard as a whole, not one surface of it
   "<div class='rs-sec rs-sec-first'>Account</div>" +
   "<div class='rs-row' id=rs-billing style='cursor:default'>" +
-  '<span style="flex:1 1 auto"><b>Claude login</b>' +
+  // min-width:0 so the span is the row's width and no wider: a stored login's name and note then ellipsize. Without it the
+  // widest stored-login row's text set the span's width, and so every row's: a linked login's long name or its same-account
+  // note, or at phone width a row's label and date beside the picker, could push every Remove past the card's edge (review of
+  // #78). Below about 360 px a row showing Link still runs past it
+  '<span style="flex:1 1 auto;min-width:0"><b>Claude login</b>' +
   '<span class=rs-sub id=rs-login-acct>…</span>' +
   // THE MACHINE'S LOGIN AT REST (2026-09-30): who it is signed in as, in a permanent line under the label, and one dim line on
   // how it bills beside an API key when one is set up here. Until then "Logged in as" sat in the hover popover alone, so a
@@ -1221,14 +1225,21 @@ function initGear(post, opts) {
   // under the machine's own with a Remove each. Read from the kernel's authed /logins on every settings fill
   // and after a Remove: labels, organisations, dates and states, never a token. A Remove acknowledges at once
   // (the row goes, the button disables) and the re-read confirms.
-  var lgL = document.getElementById('rs-logins');
+  // lgLast: the newest /logins answer to arrive, less the logins a Remove has taken out since (the Remove's click), and lgFills:
+  // how many settings fills have asked for it; lgFailed: by fill number, the fills whose /logins read failed, each entered once
+  // its own /tunnels read has settled; lgWait: the newest fill whose rows wait on a later fill (0: none); lgKernels: the kernel
+  // list of the newest fill whose /tunnels read has settled, and lgKernelsN that fill's number (all lgFetchLogins); lgPicks: by
+  // stored login's id, the machine picked in its row and not yet sent with Link (lgLogins)
+  var lgL = document.getElementById('rs-logins'), lgLast = null, lgFills = 0, lgFailed = {}, lgWait = 0, lgKernels = [], lgKernelsN = 0, lgPicks = {};
   function lgDate(t) { try { return new Date(t * 1000).toLocaleDateString(); } catch (e) { return ''; } }
   function lgWhen(t) {
     if (typeof t !== 'number') return 'soon';
     var d = Math.round((t * 1000 - Date.now()) / 86400000);
     return d <= 0 ? 'now (the token is a year old)' : 'in ' + d + ' day' + (d === 1 ? '' : 's');
   }
-  function lgLogins(d) {
+  // what a /logins answer says that needs no kernel list, said as soon as it arrives: the machine's own login (the who-line's
+  // full name and its billing line, through lgAcct) and the description's sentence on the stored logins
+  function lgOwn(d) {
     var rows = (d && d.logins) || [];
     // what the row's one description says about the stored logins: as a second rs-sub of its own it floated a second popover
     // over the first whenever the row was hovered (both sit at the row's foot), the 2026-09-02 stacking again
@@ -1236,7 +1247,14 @@ function initGear(post, opts) {
                            : 'No other Claude logins stored on this machine. Add one with romp login add <label>.';
     if (d && d.machine && typeof d.machine === 'object') lgMachine = d.machine;
     lgAcct();
+  }
+  // the stored logins' rows, from the same answer, drawn from lgFetchLogins and lgPost
+  function lgLogins(d) {
+    var rows = (d && d.logins) || [];
     if (!lgL) return;
+    lgSkipped = false;
+    var picks = lgPicks;   // the picks the rows being replaced held; a row drawn below takes its own back (the picker's comment)
+    lgPicks = {};
     lgL.textContent = '';
     if (rows.length) {   // the list's heading, in the flow above its rows
       var head = document.createElement('div');
@@ -1277,26 +1295,52 @@ function initGear(post, opts) {
         });
         row.appendChild(ul);
       } else if (!r.ownAccount) {
-        // the machines whose sign-in this login could be: this one and every connected kernel. romp copies the picked
-        // sign-in's account from that machine's own kernel and refuses, in the row, when it has none or does not answer
+        // the machines whose sign-in this login could be: this one and every connected kernel, as read by the newest settings
+        // fill whose /tunnels read has settled (lgKernels). romp copies the picked sign-in's account from that machine's own
+        // kernel and refuses, in the row, when it has none or does not answer
         var sel = document.createElement('select');
         sel.className = 'rs-login-link';
-        sel.title = 'Say this login is the same Claude account as a machine\'s sign-in, so the spend breakdown counts them as one account. romp copies that sign-in\'s account; it cannot read a token\'s account itself.';
+        sel.title = 'Pick the machine whose sign-in is the same Claude account as this login, then press Link beside it, so the spend breakdown counts them as one account. romp copies that sign-in\'s account; it cannot read a token\'s account itself.';
         var o0 = document.createElement('option');
         o0.value = ''; o0.textContent = 'Same account as\u2026';
         sel.appendChild(o0);
-        [selfName || 'local'].concat((kernels || []).map(function (k) { return k.host; })).forEach(function (h) {
+        [selfName || 'local'].concat(lgKernels.map(function (k) { return k.host; })).forEach(function (h) {
           if (!h) return;
           var o = document.createElement('option');
           o.value = h; o.textContent = lgSignIn(h);
           sel.appendChild(o);
         });
+        // the pick only chooses and Link sends it: a focused, closed select fires change on an arrow key, End or a typed letter
+        // (the Linux builds of Chromium, Firefox and WebKit, measured), so linking on change linked a login the user was only
+        // looking through (review of #78). Link shows while a machine is picked, so the row at rest keeps its width, and goes
+        // once pressed (the note says Linking…); a refusal puts the picker back at its placeholder, which keeps Link away until
+        // the next pick
+        var go = document.createElement('button');
+        go.type = 'button';
+        go.className = 'rs-login-rm rs-login-go';
+        go.textContent = 'Link';
+        go.title = 'Link this login to the sign-in picked beside it.';
+        go.hidden = true;
+        // a pick not yet sent outlives a redraw of the rows, while its machine is still listed: for 21 s after a synchronized
+        // switch or a pin changes, fill() re-runs (refillSoon), and a redraw of these rows put the picker back at its
+        // placeholder and took Link away before it was pressed. Pressing Link, or picking the placeholder, drops it; closing
+        // settings does not, so a reopen on the same page shows the pick and Link again
+        var kept = picks[r.id];
+        if (kept && Array.prototype.some.call(sel.options, function (o) { return o.value === kept; })) {
+          sel.value = kept; go.hidden = false; lgPicks[r.id] = kept;
+        }
         sel.addEventListener('change', function () {
+          go.hidden = !sel.value;
+          if (sel.value) lgPicks[r.id] = sel.value; else delete lgPicks[r.id];
+        });
+        go.addEventListener('click', function () {
           if (!sel.value) return;
-          sel.disabled = true; st.className = 'rs-note'; st.textContent = 'Linking\u2026';
+          delete lgPicks[r.id];
+          go.hidden = true; sel.disabled = true; st.className = 'rs-note'; st.textContent = 'Linking\u2026';
           lgPost({ link: { login: r.id, sameAs: sel.value } }, st, sel, '');
         });
         row.appendChild(sel);
+        row.appendChild(go);
       }
       var rm = document.createElement('button');
       rm.type = 'button';
@@ -1307,6 +1351,9 @@ function initGear(post, opts) {
         rm.disabled = true; rm.textContent = 'Removing…';
         post({ type: 'loginRemove', id: r.id });
         row.remove();
+        // the login leaves lgLast too: a drawing of that answer before the re-read below has drawn (a fill's, or the one after a
+        // link's ok whose re-read failed) drew the removed login back
+        if (lgLast && Array.isArray(lgLast.logins)) lgLast.logins = lgLast.logins.filter(function (x) { return !x || x.id !== r.id; });
         lgFetchLogins();
       });
       row.appendChild(rm);
@@ -1316,21 +1363,73 @@ function initGear(post, opts) {
   // a machine's sign-in in the row's words: this machine's own, or a connected kernel's by its host name
   function lgSignIn(h) { return (!h || h === 'local' || h === selfName) ? 'this machine\'s sign-in' : h + '\'s sign-in'; }
   // link / unlink: the kernel's POST /logins answers ok (the list re-reads) or the refusal, said in the row's note with
-  // the control restored, so a host with no sign-in or one not answering is never a silent nothing
+  // the control restored, so a host with no sign-in or one not answering is never a silent nothing. lgBusy counts the POSTs on
+  // their way: from the send until the refusal, no answer, or the ok's re-read has settled (lgFetchLogins). lgSkipped: a fill's
+  // drawing was skipped while one was on its way, with no drawing, refusal or no answer since; once an ok's re-read has settled
+  // and no other link or unlink is on its way, lgLast is drawn if lgSkipped is set
+  var lgBusy = 0, lgSkipped = false;
   function lgPost(body, st, ctl, label) {
     function refused(why) {
+      lgSkipped = false;
       st.className = 'rs-note rs-login-bad'; st.textContent = why; st.title = why;
       ctl.disabled = false;
       if (ctl.tagName === 'SELECT') ctl.value = ''; else ctl.textContent = label;
     }
+    lgBusy++;
     fetch(ku('/logins'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.ok) lgFetchLogins(); else refused((d && d.error) || 'refused'); })
-      .catch(function () { refused('the kernel did not answer; try again'); });
+      .then(function (d) {
+        if (d && d.ok) return Promise.resolve(lgFetchLogins()).then(function () { lgBusy--; if (!lgBusy && lgSkipped) lgLogins(lgLast); });
+        lgBusy--;
+        refused((d && d.error) || 'refused');
+      })
+      .catch(function () { lgBusy--; refused('the kernel did not answer; try again'); });
   }
-  function lgFetchLogins() {
+  // the stored logins' read (T346), from the authed /logins. The machine's own login and the description are said when the answer
+  // arrives; the rows wait for `after`, fill()'s /tunnels read, settled either way, because each row's Same account as… picker
+  // lists the kernels connected then. Drawn on the answer alone, a /logins that answered first built the pickers from the previous
+  // open's kernels, so a first open listed this machine alone (review of #78). One read per fill. Fills overlap and their reads can
+  // answer out of order, so each fill is numbered. The pickers list the kernels of the newest fill whose /tunnels read has settled
+  // (lgKernels), not the last list to arrive: an older fill's /tunnels answering after a newer one's put back the kernels connected
+  // before. A fill draws its rows only if every later fill's /logins read has failed; one that waits on a later fill (lgWait) draws
+  // when that read fails, once that fill's /tunnels read has settled too, so the drawing lists its kernels. The other callers
+  // (Remove, a link's or an unlink's ok, a finished sign-in) pass nothing and draw at once, with the same kernel list.
+  // A drawing draws lgLast, not its fill's own answer: a link or a Remove pressed while /tunnels is on its way has its re-read drawn
+  // at once, and the fill's answer drawn after it showed the link undone and the removed login back, though the kernel held the
+  // change. That holds when the fill's own answer arrived first; an older answer that arrives after the re-read is still drawn.
+  // While a link or an unlink is on its way (lgBusy), a fill's drawing is skipped (lgSkipped, lgPost).
+  // `after` rejects only when fill()'s own catch threw; that is logged, as fill()'s catch logs the /tunnels failure, and the rows
+  // are drawn all the same.
+  function lgLater(n) {   // a fill numbered after n that has not given up (a failed read gives up once its /tunnels read settles)
+    for (var k = n + 1; k <= lgFills; k++) if (!lgFailed[k]) return true;
+    return false;
+  }
+  function lgFetchLogins(after) {
     if (!lgL) return;
-    fetch(ku('/logins'), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(lgLogins).catch(function () {});
+    var mine = after ? ++lgFills : 0;   // this fill's number; 0 for a caller that draws at once
+    if (after) Promise.resolve(after).then(function (ks) {
+      if (mine > lgKernelsN && Array.isArray(ks)) { lgKernels = ks; lgKernelsN = mine; }
+    }, function (e) { try { console.error('romp: settings: the cross-machine fill\'s failure handler threw', e); } catch (_e) {} });
+    return fetch(ku('/logins'), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+      lgLast = d;
+      lgOwn(d);
+      function rows() {
+        if (mine) {
+          if (lgLater(mine)) { if (mine > lgWait) lgWait = mine; return; }
+          lgWait = 0;
+          if (lgBusy) { lgSkipped = true; return; }
+        }
+        lgLogins(lgLast);
+      }
+      return Promise.resolve(after).then(rows, rows);
+    }, function () {
+      if (!mine) return;
+      function gone() {   // this fill gives up its claim; a fill waiting on it draws if no later fill is left and no link or unlink is on its way
+        lgFailed[mine] = true;
+        if (lgWait && !lgLater(lgWait)) { lgWait = 0; if (!lgBusy) lgLogins(lgLast); else lgSkipped = true; }
+      }
+      Promise.resolve(after).then(gone, gone);
+    }).catch(function () {});
   }
   // The paste-code UI lives in a MODAL (the user 2026-08-30: "it would just be a login button…
   // then it would pop up another modal that says paste the code so it doesn't always sit there
@@ -2301,15 +2400,16 @@ function initGear(post, opts) {
     fillProposals(v);   // the pending proposals and this machine's pins under their rows (one A)
     // ONE /tunnels fetch feeds every cross-machine comparison: the autoNudge box and the select marks.
     // A failed /tunnels leaves the local answers standing, unmarked — same fallback as before.
-    fetch(ku('/tunnels'), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+    var kernelsRead = fetch(ku('/tunnels'), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
       var rows = (d && d.tunnels) || [];
       kernels = rows.filter(function (t) { return t && t.status === 'up'; });
       fillAutoNudge(v.autoNudge, rows);
       fillMixedMarks(v, rows);
       fillScope(v); fillScopedRows(v);   // phase two: the machine selector and the scoped rows read the same rows
       lgAcct();   // …and the Account row names this machine once other machines' kernels are connected
+      return kernels;   // the read settles with the connected kernels, which the stored logins' pickers list (lgFetchLogins)
     }).catch(function (e) { try { console.error('romp: settings: the /tunnels read or the cross-machine fill failed', e); } catch (_e) {}   // fail loudly: a swallowed fault hid the selector
-      kernels = []; fillAutoNudge(v.autoNudge, []); fillMixedMarks(v, []); fillScope(v); fillScopedRows(v); lgAcct(); });
+      kernels = []; fillAutoNudge(v.autoNudge, []); fillMixedMarks(v, []); fillScope(v); fillScopedRows(v); lgAcct(); return kernels; });
     lastV = v; selfName = (typeof v.host === 'string' && v.host) ? v.host : selfName;
     if (ths) ths.checked = !!v.thinkingSummaries;   // per-install opt-in: this kernel's persisted answer is authoritative
     if (wcf) wcf.checked = !!v.wholeChatFrames;     // the Whole chat frames switch: the same per-install rule
@@ -2319,7 +2419,7 @@ function initGear(post, opts) {
     if (rtr) rtr.checked = !!v.routerModels;   // Extra models from your API gateway: the same per-install rule
     if (csg) csg.checked = !!v.compactSuggest;   // T208+: the kernel's persisted opt-in is authoritative
     lgRender(v);   // the Billing login block (T157) rides the same /version read
-    lgFetchLogins();   // …and the stored logins beside it (T346), from the authed /logins
+    lgFetchLogins(kernelsRead);   // …and the stored logins beside it (T346), handed the /tunnels read above
     if ((v.login || {}).state && !lgTimer) lgTimer = setTimeout(lgPoll, 1500);   // a flow mid-run resumes polling
     if (typeof v.updateMode === 'string') setShow(upm, v.updateMode);   // the kernel's persisted mode is authoritative
     if (typeof v.judgeModel === 'string') setShow(jm, v.judgeModel);   // the judge's ACTUAL current model/effort per tier is authoritative

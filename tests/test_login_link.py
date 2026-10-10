@@ -292,6 +292,31 @@ class Doors(Served):
         st, d = self._req({"link": "enterprise"})
         self.assertEqual(st, 400)
 
+    # the relayed form as the record's kernel receives it when it is NOT attached to the machine whose sign-in it is: the one-way
+    # case `romp login link --on` exists for (the review of #78). The Relay tests below attach this handler to itself, so the
+    # relaying side and the record's side read one stubbed sign-in and could not tell a kernel that records the identity it was
+    # handed from one that re-reads the sign-in itself. The body names an account other than this machine's stubbed sign-in,
+    # with fields the door cleans (a CLI kind word, a two-line organisation).
+    RELAYED = {"acct": "b2b2b2b2b2b2", "orgDigest": ORGD, "org": "Example\n  Org", "kind": "team", "email": "dev@example.com"}
+
+    def test_a_relayed_identity_from_a_machine_not_attached_here_is_recorded(self):
+        self.assertNotIn("OTHERHOST", km._remotes, "the record's kernel cannot reach the sign-in's machine itself")
+        st, d = self._req({"link": {"login": "enterprise", "sameAs": "OTHERHOST", "identity": self.RELAYED}})
+        self.assertEqual((st, d["ok"]), (200, True), d)
+        idn = lg.linked(lg.read_record(self.state, LID))
+        self.assertEqual((idn["host"], idn["acct"], idn["org"], idn["kind"], idn["email"]),
+                         ("OTHERHOST", "b2b2b2b2b2b2", "Example Org", "enterprise", "dev@example.com"),
+                         "the relayed account (not this machine's %s), under the relaying kernel's name for its machine, cleaned" % DIGEST)
+        self.assertEqual(d["linked"]["host"], "OTHERHOST")
+
+    def test_the_link_answer_names_the_account_the_record_stores(self):
+        st, d = self._req({"link": {"login": "enterprise", "sameAs": "OTHERHOST", "identity": self.RELAYED}})
+        self.assertEqual((st, d["ok"]), (200, True), d)
+        stored = km._claude_login_display_of(lg.linked(lg.read_record(self.state, LID)))
+        self.assertNotEqual(km._claude_login_display_of(self.RELAYED), stored,
+                            "the fixture's body reads otherwise than the record stored from it (the kind word, the two-line org)")
+        self.assertEqual(d["account"], stored, "the account as stored, never the body as received")
+
 
 class Relay(Served):
     """`romp login link … --on <host>`: attachments often run one way (one machine's ssh reaches the other's kernel and
