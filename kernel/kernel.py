@@ -23349,7 +23349,10 @@ def _drive(msg, client):
             # a withdrawal for a session this kernel does not have (gone since, or never here): there is nothing to cancel, and
             # the send it withdraws can never be delivered here either, so it is answered as done, quietly, never with the
             # not-delivered dialog. The page re-posts a withdrawal its first cancel could not deliver (render.ts
-            # resendUnacked), and a dialog here came back on every reconnect, in every tab (the review of #201)
+            # resendUnacked), and a dialog here came back on every reconnect, in every tab (the review of #201). Quiet to the page,
+            # never to the log: a line names the session, so a withdrawal answered this way can be found again (sid only: the
+            # body is the user's text)
+            sys.stderr.write("queued-cancel: a withdrawal for %s, a session this kernel does not have, answered as gone\n" % sid)
             client["send"](json.dumps({"type": "cancelResult", "ok": True, "gone": True, "id": sid,
                                        "md": str(msg.get("md") or ""), "text": "", "qid": _wire_qid(msg)}))
             return True
@@ -42308,8 +42311,9 @@ def _send_accepts_boot_report():
 
 def _send_log_repair_tail_locked():
     """A crash in the middle of an append leaves half a line at the end of the log, and the next append would be written
-    onto it and lost with it at the next boot. Cut the log back to its last whole line (the write lock held). Returns
-    whether a torn line was cut."""
+    onto it and lost with it at the next boot. Cut the log back to its last whole line (the write lock held). A last line
+    that is a whole decision short only of its newline (the crash fell between the row and its newline) is kept, and the
+    newline added: cutting it lost a decision the page had been told about. Returns whether a torn line was cut."""
     path = _send_log_path()
     _SEND_ACCEPTS_STATE["tailOk"] = True
     try:
@@ -42317,10 +42321,18 @@ def _send_log_repair_tail_locked():
             data = fh.read()
             if not data or data.endswith(b"\n"):
                 return False
-            fh.truncate(data.rfind(b"\n") + 1)
+            cut = data.rfind(b"\n") + 1
+            try:
+                whole = _send_row(json.loads(data[cut:])) is not None
+            except Exception:
+                whole = False
+            if whole:
+                fh.write(b"\n")                  # the read left the position at the end
+            else:
+                fh.truncate(cut)
             fh.flush()
             os.fsync(fh.fileno())
-        return True
+        return not whole
     except FileNotFoundError:
         return False
     except OSError as e:
@@ -42334,8 +42346,11 @@ def _send_accepts_boot_load():
     in either file can stop the kernel: a file that cannot be read, a line that is not JSON, a torn last line (cut first,
     _send_log_repair_tail_locked) and a row that is not a decision are skipped and said (a problem row naming the counts,
     held until the boot passes have run: _send_acks_problem), and every good row is kept. A whole-file form left by an
-    older kernel is folded into the log at once (a compaction). A send whose record was lost is recognised only while the
-    session still holds a copy of it. Returns the count of decisions read."""
+    older kernel is folded into the log at once (a compaction), unless either file could not be read: the fold would
+    replace a log it never read with the rows it did, and retire a whole-file form it never read, so both files are left
+    as they are, no compaction rewrites them for the rest of this kernel's life (_send_log_compact_locked), and the
+    problem row says so. A send whose record was lost is recognised only while the session still holds a copy of it.
+    Returns the count of decisions read."""
     _SEND_ACCEPTS_STATE["booting"] = True
     try:
         return _send_accepts_boot_load_inner()
@@ -42385,14 +42400,16 @@ def _send_accepts_boot_load_inner():
             _SEND_ACCEPTS.move_to_end(got[0])
             n += 1
         _SEND_ACCEPTS_STATE["lines"] = lines
-    if legacy or _send_accepts_path().exists():
+    _SEND_ACCEPTS_STATE["unread"] = tuple(unread)   # the files no compaction may rewrite or retire this kernel life
+    if not unread and (legacy or _send_accepts_path().exists()):
         with _SEND_WRITE_LOCK:
             _send_log_compact_locked(time.time())   # the whole-file form, folded into the log and retired
     if bad or unread:
         _send_acks_problem("the record of decided chat sends had %d unreadable row(s)%s; the rest (%d) were kept, and a resend "
                            "of a send whose row was lost is recognised only while its session still holds a copy"
-                           % (bad, (" and could not read %s" % ", ".join(unread)) if unread else "", n),
-                           "send-acks.unreadable", badRows=bad, kept=n)
+                           % (bad, (" and could not read %s, so the record's files are left as they are until a kernel "
+                                    "can read them" % ", ".join(unread)) if unread else "", n),
+                           "send-acks.unreadable", badRows=bad, kept=n, unread=", ".join(unread))
     return n
 
 
@@ -42449,7 +42466,10 @@ def _send_log_append(q, sid, t, ok):
 
 def _send_log_compact_locked(now):
     """Rewrite the log as the live decisions alone (the write lock held): the expired and the evicted drop, the rest are
-    written to a temp file, fsynced, renamed over the log, and the directory fsynced. The whole-file form is retired."""
+    written to a temp file, fsynced, renamed over the log, and the directory fsynced. The whole-file form is retired. A
+    file the boot load could not read is never touched (_SEND_ACCEPTS_STATE "unread", said by the boot load): the log is
+    not rewritten from the decisions read without it, and the whole-file form is not retired unread."""
+    unread = _SEND_ACCEPTS_STATE.get("unread") or ()
     cut = now - _SEND_ACCEPTS_TTL_S
     with _SEND_ACCEPTS_LOCK:
         for q in [q for q, r in _SEND_ACCEPTS.items() if r["t"] < cut and r["ok"] is not None]:
@@ -42458,6 +42478,8 @@ def _send_log_compact_locked(now):
             _SEND_ACCEPTS.popitem(last=False)
         rows = [json.dumps({"qid": q, "sid": r["sid"], "t": int(r["t"]), "ok": r["ok"]})
                 for q, r in _SEND_ACCEPTS.items() if r["ok"] is not None]
+    if _SEND_LOG_FILE in unread:
+        return                                   # the map is still kept to its bounds; only the file is left alone
     path = _send_log_path()
     tmp = path.with_name("%s.tmp.%d.%d" % (path.name, os.getpid(), threading.get_ident()))
     try:
@@ -42468,10 +42490,11 @@ def _send_log_compact_locked(now):
         os.replace(tmp, path)
         _fsync_dir(path)
         _SEND_ACCEPTS_STATE["lines"] = len(rows)
-        try:
-            _send_accepts_path().unlink()
-        except FileNotFoundError:
-            pass
+        if _SEND_ACCEPTS_FILE not in unread:
+            try:
+                _send_accepts_path().unlink()
+            except FileNotFoundError:
+                pass
     except OSError as e:
         try:
             tmp.unlink()
