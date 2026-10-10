@@ -75,7 +75,7 @@ import { NavHistory } from "./nav-history";
 import { StagedStack, quoteReplyBody, stagedPosts, type StagedMsg } from "./staged-messages";
 import { isSlashCommand } from "./staged-messages";   // the viewer's message bar refuses a slash command (2026-09-30)
 import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, isKernelEchoUuid, newPending, mintQid, reconcilePending, clearBoundarySeen, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody, refusedRestoreText } from "./send-pending";
-import { applySendAck, defaultWire, keptSends, markHostLost, pendingFromKept, resendable, resendWire, restoreKept } from "./send-acks";
+import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, pendingFromKept, resendable, resendWire, restoreKept } from "./send-acks";
 import { type FrameWm, frameOlder, droppedLandedHuman, dropsLandedRow, forgetHeldWm } from "./frame-guard";   // the frame watermark guard (2026-09-22): an older build's frame is ignored, a vanished landed turn is filed; a reconnect forgets the held watermarks
 import { type LandEvent, LandingWatch } from "./send-landing";   // the send-landing invariant (2026-09-23): observation only, around the frame dispatch (landingBefore / landingAfter)
 import { readBaseFp, checkBase, newResyncState, onMismatch, onAgree, forgetResync, staleAnswer } from "./chat-resync";   // the delta's base check (2026-09-23): a delta cut against a base the page does not hold is refused and the full asked for, bounded by event
@@ -606,9 +606,8 @@ function reconcileOptimisticInner(s: Session, clearBoundary: boolean = false): v
                                        && (e.qid === q || (Array.isArray(e.qids) && e.qids.includes(q)))))
       chatDiagRow("pending-survived-landing", { sid: s.id, qid: q, clear: !!kp.clear });
   }
-  const _before = (pendingSent.get(s.id) || []).length;
   if (r.keep.length) pendingSent.set(s.id, r.keep); else pendingSent.delete(s.id);
-  if (r.keep.length !== _before) persistKeptSends();   // a landing or a verdict retired a send: the kept list follows
+  persistKeptSends();   // a landing or a verdict retired a send: the kept list follows (written only when it changed)
   const heldBy = new Map<PendingSend, NonNullable<Extract<ChatEvent, { kind: "queued" }>["held"]>>();
   const covered = new Set<PendingSend>();   // a kernel copy that stays shown (non-cancelable: no recall exists) covers ours
   for (const p of r.unqueue) {
@@ -746,8 +745,9 @@ function registerOptimistic(id: string, text: string, imgPaths?: string[], qid?:
   const p = newPending(text, imgPaths, Date.now(), qid, paths, clear);
   arr.push(p);   // the anchor (`at`) is stamped by the reconcile just below
   // the message as posted, for a resend if no kernel answers it (send-acks.ts): a follow-up hands its own; a plain or quoted
-  // send posted exactly the default
-  p.wire = wire || defaultWire(id, p);
+  // send posted exactly the default. A send to a session still being created (a provisional id) was never posted: no wire,
+  // so it is neither kept nor resent, and the real send at the adoption registers its own
+  if (!isProvisionalId(id)) { p.wire = wire || defaultWire(id, p); if (p.qid) heldQids.add(p.qid); }
   if (hostSocketDown(id)) p.lost = "connection";   // posted to a host whose socket is down: it went nowhere yet (federation's toast says so)
   pendingSent.set(id, arr);
   persistKeptSends();   // kept across a reload until a kernel answers it
@@ -811,14 +811,29 @@ function markPendingLost(why: string): void {
 // The decisions are send-acks.ts's; this keeps the map, the storage and the events.
 const resentOn = new WeakMap<PendingSend, number>();   // the host socket generation a send was last posted again on
 const ackGen = new Map<string, number>();              // host → how many sockets to it have said they recognise a resend
+const heldQids = new Set<string>();                    // every send this page has held (pressed or restored): the merge's "mine"
 let keptSig = "";
+/** A remote host that is no longer attached (the federation layer has read the host list, and it is not on it). */
+function hostGone(sid: string): boolean {
+  const h = hostOf(sid);
+  if (!h) return false;
+  try {
+    const fed = (window as any).__rompFed;
+    return !!fed && typeof fed.hostsRead === "function" && fed.hostsRead() && typeof fed.hosts === "function" && !fed.hosts().includes(h);
+  } catch { return false; }
+}
+/** Write this page's unanswered sends to the store, keeping every other tab's (send-acks.ts mergeKept). Called after every
+ *  change to the pending sends: a press, an answer, a landing, a withdrawal, a tab's teardown; it writes only when this
+ *  page's own set changed. */
 function persistKeptSends(): void {
   try {
-    const kept = keptSends(pendingSent);
-    const sig = kept.map((k) => k.qid).join(",");
+    const now = Date.now();
+    const mine = keptSends(pendingSent, now);
+    const sig = mine.map((k) => k.qid).join(",");
     if (sig === keptSig) return;                       // nothing changed for the store: no write per push
     keptSig = sig;
-    vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), pendingSends: kept });
+    const st = (vscodeApi?.getState?.() || {}) as any;  // read fresh: another tab may have written since
+    vscodeApi?.setState?.({ ...st, pendingSends: mergeKept(mine, restoreKept(st.pendingSends, now), heldQids, now, hostGone) });
   } catch { /* storage refused: the sends still live in this page */ }
 }
 /** A remote session whose host's socket is not open: a send posted to it now went nowhere (federation's toast). */
@@ -875,6 +890,7 @@ try {
     const list = pendingSent.get(k.sid) || [];
     if (list.some((p) => p.qid === k.qid)) continue;
     list.push(pendingFromKept(k));
+    heldQids.add(k.qid);
     pendingSent.set(k.sid, list);
     hosts.add(hostOf(k.sid));
   }
@@ -5426,6 +5442,7 @@ function rescindQueued(el: HTMLElement, toComposer: boolean): void {
     const rec = own ? (own.paths && own.paths.length ? own.paths : own.imgPaths) : null;   // every attachment the press knew (the record; images alone on an older entry), before the entry goes
     if (rec && rec.length) ownPaths = rec.slice();
     if (dropPending(list, qmd, qts, qid)) { if (list.length) pendingSent.set(sidQ, list); else pendingSent.delete(sidQ); }
+    persistKeptSends();   // withdrawn (the ✕, or the ✎ that puts the words back in the box): gone from the kept list too, or a reload would send it
   }
   // a PROVISIONAL tab's send has never left the client (T244): forget it from the queue adoption would
   // re-send, and post no kernel cancel — the kernel has no such session yet, and a miss there would
@@ -9296,6 +9313,7 @@ function dropProvisional(): { queued: string[]; draft: string } {
     const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
     draft = (activeId === id && ta) ? ta.value : (drafts.get(id) ?? "");
     pendingSent.delete(id);                // the optimistic bubbles belong to a tab that is going away
+    persistKeptSends();
     dismissSession(id, "close");           // drops it from sessions/order/views and reselects
     noteColumnIdle();                      // the create is gone: a peer's deferred close of this column may go ahead
   }
@@ -9360,6 +9378,7 @@ function failProvisional(why: string): void {
   const draft = (activeId === id && ta0) ? ta0.value : (drafts.get(id) ?? "");
   const held = [...queued, draft].filter(Boolean).join("\n\n");
   pendingSent.delete(id);            // the dashed "received" bubbles fold into the held text instead
+  persistKeptSends();
   failedProvisionals.add(id);
   const s = sessions.get(id);
   // "closed" gives the tab the dead treatment (struck label, plain ✕) — but the composer stays LIVE
@@ -22212,6 +22231,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
         const dropped = dropPending(list, "", undefined, m.qid);   // by id alone: the text argument is inert
         if (dropped) {
           if (list.length) pendingSent.set(m.sid, list); else pendingSent.delete(m.sid);
+          persistKeptSends();   // refused: gone from the kept list, its words back in the box
           const s = sessions.get(m.sid); if (s) reconcileOptimistic(s);   // the view repaints the units the reconcile changed
           if (m.sid === activeId) appendActive();
         }

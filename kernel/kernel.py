@@ -23349,21 +23349,13 @@ def _drive(msg, client):
         _send_ack(client, sid, _aq, False)                # decided: refused (no session here will ever take it)
         return True                                       # consumed: refused, reported, and recorded
     be = Sessions.backend_for(sid)
-    if _aq and msg.get("resend"):
-        # the page's RESEND of a send no kernel answered (after a reconnect or a reload, send-acks.ts): when this kernel has
-        # already decided on it, or the session holds a copy under its id, it is answered again and never delivered twice.
-        # Only a resend is looked up: a first post is always delivered, as before
-        _seen = _send_seen(_aq, sid, be)
-        if _seen is not None:
-            _send_ack(client, sid, _aq, _seen["ok"] is not False, dup=True)
-            return True
     if t == "sendMessage" and msg.get("text"):
         # a typed "/model X" / "/effort X" / "/fast X" is a SETTING, not a message: it takes the kernel's
         # own setter — registry, sdk-defaults, pick memory and the reconnect's --model all follow — never
         # the CLI as literal text (see _route_meta_command). Everything else is the CLI's.
+        if _aq and not _send_admit(client, sid, _aq, be):
+            return True                                   # a copy of a send this kernel already has: answered, never delivered twice
         try:
-            if _aq:
-                _send_decide(_aq, sid, None)              # being decided: a resend arriving meanwhile is a duplicate
             if _route_meta_command(be, sid, str(msg["text"]), client, qid=_wire_qid(msg)):   # the press-minted copy id rides a refusal (2026-09-19)
                 _ok = True
                 _push_soon()
@@ -23470,9 +23462,9 @@ def _drive(msg, client):
                 if iid else text)
         # Mid-compaction the whole send is PARKED (queued bubble; delivered when compaction ends — _send_or_park);
         # the backend echoes the send for itself.
+        if _aq and not _send_admit(client, sid, _aq, be):
+            return True                                   # a copy of a follow-up this kernel already has: answered, nothing reopened twice
         try:
-            if _aq:
-                _send_decide(_aq, sid, None)              # being decided: a resend arriving meanwhile is a duplicate
             _handed = _send_or_park(be, sid, body, qid=_client_qid(msg, sid, be),
                                     user=not msg.get("nudge"), paths=_wire_paths(msg))   # a follow-up is the user's; a nudge is romp's; its attachments ride as a send's do (T373 fold round two)
         except OSError as e:
@@ -23613,6 +23605,12 @@ def _drive(msg, client):
             err2 = _cancel_backend_queued(be, sid, -1, md, qid=qid)
             if err2 is None:
                 err = None
+        if err and qid and _send_withdraw_unreceived(qid, sid, be):
+            # neither queue holds it and this kernel never received a send with that id (the page withdrew a send it never
+            # heard answered: its frame lost in a socket that closed, or still on its way): the withdrawal holds, and a copy
+            # that arrives later is refused, never delivered behind the user's back (2026-10-09). "Too late" here was false,
+            # and it took the words back out of the box the ✎ had just put them in.
+            err = None
         if err:
             # evidence for the next report (T244): a ✕ whose cancel found nothing in either queue — the send
             # had already gone through, or never reached this kernel. sid only: the body is the user's text
@@ -42217,105 +42215,125 @@ def _qid_held(q, sid, be):
 
 # ── the send acknowledgement (2026-10-09) ───────────────────────────────────────────────────────────────────────
 # Every chat send carries the id the page minted at the press (`qid`, send-pending.ts mintQid). The kernel answers it
-# on the socket that carried it with {type: "sendAck", id, qid, ok, dup} the moment it has decided the send's fate:
-# handed to the backend, parked, or refused (ok False, beside the refusal's own frame). Until that answer the page does
-# not know the kernel has the message, and two messages a user typed into a linked machine's session were lost in
-# exactly that gap (the user 2026-10-09): they sat unread in a socket that then closed, and nothing on either side
-# recorded them. With the answer, the page keeps every unanswered send (across a reload too) and sends it again on the
-# next connection to that kernel, marked `resend`; this kernel takes a resend it has already decided on as a duplicate (`dup`) and answers
-# it again without delivering it twice. The decided ids are kept in STATE/accepted-sends.json, so a kernel restart
-# between a send and the page's resend still recognises it. The keepalive says the kernel speaks this protocol
-# (`acks` on every ka frame, _keepalive_all): a page resends only to a kernel that said so on the current socket,
-# because an older kernel would deliver a resend twice.
+# on the socket that carried it with {type: "sendAck", id, qid, ok, dup} once it knows the send's fate: handed to the
+# backend, parked, or refused (ok False, beside the refusal's own frame). Until that answer the page does not know the
+# kernel has the message, and two messages a user typed into a linked machine's session were lost in exactly that gap
+# (the user 2026-10-09): they sat unread in a socket that then closed, and nothing on either side recorded them. With
+# the answer, the page keeps every unanswered send (across a reload too) and sends it again on the next connection to
+# that kernel. EVERY send carrying an id is looked up (_send_claim), not only one marked `resend`: each socket reads on
+# its own thread, so a resend on a new socket can be read before the original on the old one, and a second tab can
+# restore and resend another tab's send. The lookup and the mark that claims a new id are one locked step, so two
+# copies arriving at once are delivered once. A copy that arrives while the first is still being decided waits for that
+# decision and is answered with it (a refusal included), never with an early ok. The decided ids are kept in
+# STATE/accepted-sends.json, read at boot (main), so a kernel restart between a send and the page's resend still
+# recognises it. The keepalive says the kernel speaks this protocol (`acks` on every ka frame, _keepalive_all): a page
+# resends only to a kernel that said so on the current socket, because an older kernel would deliver a resend twice.
 _ACKED_SEND_OPS = ("sendMessage", "askFollowUp")
 _SEND_ACCEPTS_FILE = "accepted-sends.json"
-_SEND_ACCEPTS_CAP = 5000                 # ids kept, newest last; a resend comes at the next connection, within minutes
-_SEND_ACCEPTS_TTL_S = 7 * 86400          # …or after a reload of a page left open for days
-_SEND_ACCEPTS = collections.OrderedDict()   # qid -> {"sid", "t", "ok"}; ok None while the send is being decided
+_SEND_ACCEPTS_CAP = 10000                # ids kept, newest last: human sends, so a week's are far below it
+_SEND_ACCEPTS_TTL_S = 7 * 86400          # the page resends nothing older than this (send-acks.ts RESEND_MAX_AGE_MS sits under it)
+_SEND_ACCEPTS = collections.OrderedDict()   # qid -> {"sid", "t", "ok", "waiters"}; ok None while the send is being decided
 _SEND_ACCEPTS_LOCK = threading.Lock()
-_SEND_ACCEPTS_STATE = {"loaded": False, "said": False}
+_SEND_ACCEPTS_STATE = {"said": False}
+_SEND_NEW, _SEND_PENDING = object(), object()   # _send_claim's two answers that are not a decision
 
 
 def _send_accepts_path():
     return jd.STATE / _SEND_ACCEPTS_FILE
 
 
-def _send_accepts_load_locked():
-    """Read the decided ids once per kernel life. A file that exists and cannot be read is said once on stderr: from
-    then on a resend of a send decided before this kernel started is not recognised, and may be delivered twice."""
-    if _SEND_ACCEPTS_STATE["loaded"]:
-        return
-    _SEND_ACCEPTS_STATE["loaded"] = True
+def _send_accepts_boot_load():
+    """Read the decided ids, once, at boot (main). A file that exists and cannot be read is said on stderr: from then on a
+    resend of a send decided before this kernel started is recognised only while the session still holds a copy of it."""
     try:
         raw = json.loads(_send_accepts_path().read_text())
     except FileNotFoundError:
-        return
+        return 0
     except Exception as e:
         sys.stderr.write("send acks: %s could not be read (%s); a resend of a message sent before this kernel started "
                          "may be delivered twice\n" % (_send_accepts_path(), e))
-        return
+        return 0
     rows = raw.get("accepted") if isinstance(raw, dict) else None
-    for r in rows if isinstance(rows, list) else ():
-        if isinstance(r, dict) and isinstance(r.get("qid"), str) and _CLIENT_QID_RE.fullmatch(r["qid"]):
-            _SEND_ACCEPTS[r["qid"]] = {"sid": str(r.get("sid") or ""), "t": float(r.get("t") or 0), "ok": r.get("ok")}
+    n = 0
+    with _SEND_ACCEPTS_LOCK:
+        for r in rows if isinstance(rows, list) else ():
+            if isinstance(r, dict) and isinstance(r.get("qid"), str) and _CLIENT_QID_RE.fullmatch(r["qid"]) and r.get("ok") in (True, False):
+                _SEND_ACCEPTS[r["qid"]] = {"sid": str(r.get("sid") or ""), "t": float(r.get("t") or 0), "ok": r["ok"], "waiters": []}
+                n += 1
+    return n
 
 
 def _send_accepts_save_locked(now):
     cut = now - _SEND_ACCEPTS_TTL_S
-    for q in [q for q, r in _SEND_ACCEPTS.items() if r["t"] < cut]:
+    for q in [q for q, r in _SEND_ACCEPTS.items() if r["t"] < cut and r["ok"] is not None]:
         _SEND_ACCEPTS.pop(q, None)
     while len(_SEND_ACCEPTS) > _SEND_ACCEPTS_CAP:
         _SEND_ACCEPTS.popitem(last=False)
     rows = [{"qid": q, "sid": r["sid"], "t": int(r["t"]), "ok": r["ok"]} for q, r in _SEND_ACCEPTS.items() if r["ok"] is not None]
+    path = _send_accepts_path()
+    tmp = path.with_name("%s.tmp.%d.%d" % (path.name, os.getpid(), threading.get_ident()))
     try:
-        _atomic_write(_send_accepts_path(), json.dumps({"accepted": rows}))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w") as fh:            # written whole, flushed to disk, then renamed over the old file: a crash leaves the
+            fh.write(json.dumps({"accepted": rows}))   # old file or the new one, never a torn one
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
     except OSError as e:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
         if not _SEND_ACCEPTS_STATE["said"]:
             _SEND_ACCEPTS_STATE["said"] = True
             sys.stderr.write("send acks: %s could not be written (%s); a resend after a kernel restart may be "
-                             "delivered twice\n" % (_send_accepts_path(), e))
+                             "delivered twice\n" % (path, e))
 
 
-def _send_seen(q, sid, be):
-    """The decision this kernel already made on the send wearing `q` for `sid`, or None when it has made none: a
-    recorded decision (ok True or False; None while one is being made), else a copy the session holds under that
-    id (ok True), so a resend of a send already in flight is never delivered twice."""
-    with _SEND_ACCEPTS_LOCK:
-        _send_accepts_load_locked()
-        r = _SEND_ACCEPTS.get(q)
-        if r is not None and r["sid"] == str(sid):
-            return {"ok": r["ok"]}
-    if be is not None and be is not _UNOWNED and _qid_held(q, sid, be):
-        return {"ok": True}
-    return None
-
-
-def _send_decide(q, sid, ok, now=None):
-    """Record the send's fate under its id: ok None while it is being decided (a resend arriving meanwhile is a
-    duplicate), True when it was handed over or parked, False when it was refused. `forget` undoes a None that
-    never came to a decision (the attempt raised), so the page's resend may try again."""
+def _send_claim(q, sid, client, now=None):
+    """ONE locked step for a send wearing `q`: the decision already made on it (True or False), _SEND_PENDING when a copy
+    is being decided right now (`client` then waits for that decision, _send_settle answers it), or _SEND_NEW after
+    marking `q` as being decided by the caller, who must end the mark with _send_settle or _send_forget."""
     now = time.time() if now is None else now
+    sid = str(sid)
     with _SEND_ACCEPTS_LOCK:
-        _send_accepts_load_locked()
-        _SEND_ACCEPTS[q] = {"sid": str(sid), "t": now, "ok": ok}
+        r = _SEND_ACCEPTS.get(q)
+        if r is not None and r["sid"] == sid:
+            if r["ok"] is None:
+                if client is not None:
+                    r["waiters"].append(client)
+                return _SEND_PENDING
+            return r["ok"]
+        _SEND_ACCEPTS[q] = {"sid": sid, "t": now, "ok": None, "waiters": []}
         _SEND_ACCEPTS.move_to_end(q)
-        if ok is not None:
-            _send_accepts_save_locked(now)
+    return _SEND_NEW
 
 
 def _send_forget(q):
+    """The attempt that claimed `q` raised and decided nothing: the mark goes, so a later copy may try again. A copy that
+    was waiting gets no answer, and its page keeps the send and resends it on its next connection."""
     with _SEND_ACCEPTS_LOCK:
         r = _SEND_ACCEPTS.get(q)
         if r is not None and r["ok"] is None:
             _SEND_ACCEPTS.pop(q, None)
 
 
-def _send_settle(client, sid, q, ok):
-    """The send wearing `q` is decided (handed over or parked: ok True; refused: ok False): record it and answer the page."""
+def _send_settle(client, sid, q, ok, dup=False):
+    """The send wearing `q` is decided (handed over or parked: ok True; refused: ok False): record it, answer the page that
+    sent it, and answer every copy that waited for this decision with the same outcome."""
     if not q:
         return
-    _send_decide(q, sid, bool(ok))
-    _send_ack(client, sid, q, ok)
+    now = time.time()
+    with _SEND_ACCEPTS_LOCK:
+        r = _SEND_ACCEPTS.get(q)
+        waiters = list(r.get("waiters") or ()) if r is not None else []
+        _SEND_ACCEPTS[q] = {"sid": str(sid), "t": now, "ok": bool(ok), "waiters": []}
+        _SEND_ACCEPTS.move_to_end(q)
+        _send_accepts_save_locked(now)
+    _send_ack(client, sid, q, ok, dup=dup)
+    for w in waiters:
+        if w is not client:
+            _send_ack(w, sid, q, ok, dup=True)
 
 
 def _send_ack(client, sid, q, ok, dup=False):
@@ -42327,6 +42345,41 @@ def _send_ack(client, sid, q, ok, dup=False):
         client["send"](json.dumps({"type": "sendAck", "id": str(sid), "qid": q, "ok": bool(ok), "dup": bool(dup)}))
     except Exception:
         pass
+
+
+def _send_withdraw_unreceived(q, sid, be):
+    """A withdrawal (the ✕ or the ✎ on the page's own unconfirmed bubble) for a send wearing `q` that no queue holds: True
+    when this kernel never received it, after recording it as decided not-ok, so a copy arriving later (a late flush, another
+    tab's resend) is answered as refused and never delivered; False when it did receive it (handed over, in flight, or being
+    decided right now), which is the honest "too late"."""
+    claim = _send_claim(q, sid, None)
+    if claim is _SEND_PENDING:
+        return False
+    if claim is not _SEND_NEW:
+        return claim is False                    # refused or withdrawn before: the withdrawal stands; handed over: too late
+    if be is not None and be is not _UNOWNED and _qid_held(q, sid, be):
+        _send_forget(q)                          # the session holds it (fed, between the queue and its landing): too late
+        return False
+    _send_settle(None, sid, q, False)
+    return True
+
+
+def _send_admit(client, sid, q, be):
+    """The front door of a chat send wearing `q`: True when the caller should deliver it (a new id, now marked as being
+    decided), False when it is a copy of a send this kernel already has, which is answered (now, or when the first copy
+    is decided) and must not be delivered. A copy the session still holds under `q` with no record of it (a record lost,
+    or one written before the store existed) is the same message: answered as delivered, never given a new id and sent
+    again."""
+    claim = _send_claim(q, sid, client)
+    if claim is _SEND_PENDING:
+        return False
+    if claim is not _SEND_NEW:
+        _send_ack(client, sid, q, claim, dup=True)
+        return False
+    if be is not None and be is not _UNOWNED and _qid_held(q, sid, be):
+        _send_settle(client, sid, q, True, dup=True)
+        return False
+    return True
 
 
 def _op_user(op) -> bool:
@@ -72683,7 +72736,7 @@ var buildRaised=false,freshPending=false,restartAnnounced=0;   // buildRaised: t
 // reload then would take the queue with it. Diag rows never hold. The flush in ws.onopen is the ending event.
 // messages queued for a socket that has not come back hold the reload (their loss is the reload's cost), bounded like the fresh hold:
 // after a minute the reload goes anyway, so a dead socket cannot keep a page on an old build (the manager 2026-09-14)
-var sendsSince=0,SENDS_HOLD_MS=60000;
+var sendsSince=0,SENDS_HOLD_MS=60000,queuedKept=0;   // queuedKept: the queued chat sends carrying their press's id, which the page keeps across a reload (send-acks.ts), so the loss line leaves them out
 var SENDS_DROPPED_KEY="romp:sendsDropped";
 window.__rompPaneBusy=function(){var q=everConnected&&queue.length>queuedDiag;if(!q){sendsSince=0;return "";}if(!sendsSince)sendsSince=Date.now();return Date.now()-sendsSince<SENDS_HOLD_MS?"sends":"";};
 // The reload core calls this on every pane right before location.reload(): messages still queued AT THAT MOMENT go with the
@@ -72691,7 +72744,7 @@ window.__rompPaneBusy=function(){var q=everConnected&&queue.length>queuedDiag;if
 // returned and flushed after the bound had delivered them). Embedded: the notify bridge the shell's bell listens for, whose
 // center keeps the line across the reload. Standalone: the line is kept in the session store with the page's path and shown
 // once by the next life on the same path (below), since the bar raised now goes with the page.
-window.__rompShimPersist=function(){var n=queue.length-queuedDiag;if(n<=0)return;
+window.__rompShimPersist=function(){var n=queue.length-queuedDiag-Math.min(queuedKept,queue.length-queuedDiag);if(n<=0)return;   // a chat send carrying its press's id is not counted: the page keeps it across the reload and sends it again (render.ts persistKeptSends)
 var t=n+" message"+(n===1?"":"s")+" queued for the "+LABEL+" pane could not be sent before the dashboard reloaded; "+(n===1?"it was":"they were")+" not delivered.";
 try{if(window.parent!==window){var pn=null;try{pn=window.parent.__rompNotify;}catch(e3){}   // same origin: the shell's write path, synchronously, before location.reload() takes the page; a message would arrive too late
 if(typeof pn==="function")pn("warn",t);else window.parent.postMessage({romp:"notify",kind:"warn",text:t},"*");}
@@ -72725,7 +72778,7 @@ ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponen
 // socket dropped (the pane's romp loader) needs the socket's RETURN as its event to come back down. The
 // first connect deliberately doesn't fire it — nothing is waiting on it, and the loader must stay up until
 // real content lands.
-ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;acksSeen=false;window.__rompAcksLocal=false;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);if(bundleReady&&!readyAcked&&!readyQueued&&readyMsg)ws.send(readyMsg);readyQueued=false;queue=[];queuedDiag=0;queuedForeign=0;
+ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");resumeProvisional=0;acksSeen=false;window.__rompAcksLocal=false;queuedKept=0;var wasReconn=everConnected;everConnected=true;for(var i=0;i<queue.length;i++)ws.send(queue[i]);if(bundleReady&&!readyAcked&&!readyQueued&&readyMsg)ws.send(readyMsg);readyQueued=false;queue=[];queuedDiag=0;queuedForeign=0;
 try{if(window.__rompReload)window.__rompReload.ended();}catch(e){}   // T265: the flush is the ending event for the "sends" hold — a reload owed while a prompt sat in the queue goes now
 if(failedConnects){send({type:"clientDiag",surface:"pane-shim",what:"wsconnfail",data:{app:APP,attempts:failedConnects,firstFailMs:Date.now()-firstFailT}});failedConnects=0;firstFailT=0;}   // the redials that never opened since the last open, as ONE row: how many, and how long ago the first failed
 if(wasReconn){var ann=restartAnnounced&&Date.now()-restartAnnounced<30000;restartAnnounced=0;   // one-shot: spent here
@@ -72797,6 +72850,7 @@ ws.onerror=function(){try{ws.close();}catch(e){}};}
 function diagStamp(m){var c={};for(var k in m)c[k]=m[k];c.build=LOADEDV;c.boot=BOOTID;return c;}
 function send(m){if(m&&m.type==="clientDiag")m=diagStamp(m);var s=JSON.stringify(m);if(m&&m.type==="ready"){bundleReady=true;readyProto=(m.proto===2?2:1);readyMsg=s;}   // the bundle's listener is installed: from here a redial may declare itself (the dial term in connect)
 if(ws&&ws.readyState===1){ws.send(s);return;}
+if(m&&(m.type==="sendMessage"||m.type==="askFollowUp")&&typeof m.qid==="string")queuedKept++;   // kept by the page across a reload: not a loss at the reload (__rompShimPersist)
 if(m&&m.type==="ready")readyQueued=true;   // ...and this one waits for the open: the redial that carries it dials as a fresh page (onopen clears the bit after the flush)
 if(m&&m.type==="clientDiag"){var fr=m.surface==="window-sender";if(fr?queuedForeign>=FOREIGN_QUEUE_MAX:queuedDiag-queuedForeign>=DIAG_QUEUE_MAX)return;if(fr)queuedForeign++;queuedDiag++;}   // breadcrumbs waiting for a reconnect are capped, this page's own and the window-sender rows each on their own count; everything else queues as before
 queue.push(s);}
@@ -85112,6 +85166,7 @@ def main():
     # postal bus or the SDK backend spawn anything that could inherit it. RuntimeError: the
     # manager crash-loops the traceback into manager.log until the file is repaired (the serve token's shape).
     jd._cred.check_boot_environment()
+    _send_accepts_boot_load()                                 # the sends this kernel already decided on, before any socket opens
     _ensure_bundles()
     try:                                                      # the diary boot sweep (2026-07-07): migrate every
         _death_boot_pass()                                    # deaths no kernel was up to see: stamp them

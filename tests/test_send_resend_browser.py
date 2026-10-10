@@ -60,7 +60,7 @@ await page.addInitScript((text) => {
     if (m && m.type === "sendMessage" && typeof m.text === "string" && m.text === text) {
       window.__sent.push({ qid: m.qid, resend: !!m.resend });
       // the first page load swallows the send: the frame never reaches the kernel, as an unread frame in a closing socket does
-      if (!sessionStorage.getItem("lab-dropped")) { sessionStorage.setItem("lab-dropped", "1"); return; }
+      if (!sessionStorage.getItem("lab-dropped:" + text)) { sessionStorage.setItem("lab-dropped:" + text, "1"); return; }
     }
     return origSend.call(this, d);
   };
@@ -77,7 +77,27 @@ await page.fill("#composer-input", cfg.text);
 await page.press("#composer-input", "Enter");
 await page.waitForTimeout(1500);
 const before = { bubble: await bubble(), sent: await page.evaluate(() => window.__sent), acks: await page.evaluate(() => window.__acks) };
+if (cfg.withdraw) {
+  // the ✎ on the unconfirmed bubble: the words go back into the box and the send is withdrawn
+  await page.evaluate((t) => {
+    const turn = Array.from(document.querySelectorAll("#content .turn")).find((el) => (el.textContent || "").includes(t));
+    const btn = turn && turn.querySelector('[data-act="qedit"]');
+    if (btn) btn.click();
+  }, cfg.text);
+  await page.waitForTimeout(800);
+  before.composer = await page.evaluate(() => (document.getElementById("composer-input") || {}).value || "");
+  before.afterWithdraw = await bubble();
+}
 await page.reload();
+if (cfg.withdraw) {
+  await page.waitForSelector(".turn.turn-user", { timeout: 30000 });
+  await page.waitForTimeout(4000);                 // several one-second keepalives: any resend would have gone by now
+  const out = cfg.out;
+  fs.writeFileSync(out, JSON.stringify({ before, after: { sent: await page.evaluate(() => window.__sent), bubble: await bubble() } }));
+  console.log("RESULT-FILE:" + out);
+  await browser.close();
+  process.exit(0);
+}
 await page.waitForSelector(".turn.turn-user", { timeout: 30000 });
 let restored = null;
 for (let i = 0; i < 40 && !restored; i++) {   // loop-ok: bounded poll for the restored bubble's first paint
@@ -147,6 +167,41 @@ class ServedResendAfterReload(unittest.TestCase):
             cls.kernel.kill()
             cls.kernel.wait()
         shutil.rmtree(getattr(cls, "lab", ""), ignore_errors=True)
+
+    def _drive(self, text, withdraw=False):
+        cfg = os.path.join(self.lab, "cfg-%d.json" % int(withdraw))
+        console_log = os.path.join(self.lab, "console.log")
+        Path(console_log).write_text("")
+        with open(cfg, "w") as f:
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "text": text, "withdraw": withdraw,
+                       "consoleLog": console_log, "out": os.path.join(self.lab, "result-%d.json" % int(withdraw))}, f)
+        driver = os.path.join(self.lab, "driver.mjs")
+        Path(driver).write_text(DRIVER)
+        try:
+            p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=DRIVER_TIMEOUT_S,
+                               env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
+        except subprocess.TimeoutExpired:
+            self.fail("the driver ran past its %d s budget\nkernel:\n%s" % (DRIVER_TIMEOUT_S, open(self.klog).read()[-2500:]))
+        if p.returncode == 3:
+            raise unittest.SkipTest("no playwright browser on this box — the served guard needs one")
+        self.assertEqual(p.returncode, 0, "driver failed:\n" + p.stdout[-3000:] + p.stderr[-3000:] + "\nkernel:\n" + open(self.klog).read()[-2500:])
+        line = next((ln for ln in p.stdout.splitlines() if ln.startswith("RESULT-FILE:")), None)
+        self.assertIsNotNone(line, "driver printed no result:\n" + p.stdout[-3000:])
+        self.assertEqual(Path(console_log).read_text().strip(), "", "the page threw")
+        return json.loads(Path(line[len("RESULT-FILE:"):]).read_text())
+
+    def test_a_send_withdrawn_with_the_pencil_stays_withdrawn_across_the_reload(self):
+        # the review of #198 (2026-10-09): the withdrawal did not rewrite the kept list, so the reload restored the send and
+        # resent it while the box still held its words: sent once by the resend, and again when the user pressed Enter
+        text = "please drop the unused import from the notes-api router"
+        r = self._drive(text, withdraw=True)
+        before, after = r["before"], r["after"]
+        print("SEND-WITHDRAW:", json.dumps(r))
+        self.assertEqual(before["acks"], [], "the swallowed send was never answered")
+        self.assertEqual(before["afterWithdraw"]["n"], 0, "the ✎ took the bubble away")
+        self.assertIn(text, before["composer"], "and put the words back in the box")
+        self.assertEqual([s for s in after["sent"] if s["resend"]], [], "the reload resent nothing")
+        self.assertEqual(after["bubble"]["n"], 0, "and drew no bubble for the withdrawn send")
 
     def test_an_unread_send_survives_the_reload_and_is_delivered_by_the_resend(self):
         cfg = os.path.join(self.lab, "cfg.json")

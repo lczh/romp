@@ -281,12 +281,21 @@ carries the press's id with a `sendAck` frame once it has handed the send over,
 parked it or refused it. Until that answer the page keeps the send in its
 persisted state, so a reload brings the bubble back labelled "not confirmed"
 instead of dropping the words, and it posts the send again, marked `resend`, on
-the next socket whose kernel says it recognises one. That kernel answers a resend
-it has already decided on as a duplicate and delivers nothing twice; the decided
-ids live in `accepted-sends.json` under the state root, so a kernel restart
-between the send and the resend changes nothing. A kernel that never says so is
-never sent anything twice: its sends keep the label, and the ✎ puts the words
-back in the box. A send that landed mid-turn (`absorbed` on the
+the next socket whose kernel says it recognises one. The kernel looks up every
+send that carries an id, not only a resend, in one locked step with the mark
+that claims a new one: a resend read before its original (each socket reads on
+its own thread), or a second tab resending the first tab's send, is answered as a
+duplicate and delivered once, and a copy that arrives while the first is still
+being decided waits for that outcome, a refusal included. The decided ids live in
+`accepted-sends.json` under the state root, read at boot, so a kernel restart
+between the send and the resend changes nothing. A withdrawal (the ✎ or the ✕ on
+an unconfirmed bubble) of a send the kernel never received holds: the words stay
+in the box, and a copy arriving later is refused. The store of kept sends is
+shared by every tab of the page's origin, each tab writing its own and keeping the
+others', bounded to 200 sends and 14 days; a send older than six days is never
+resent (the kernel remembers seven) and keeps its label instead. A kernel that
+never says it recognises a resend is never sent anything twice: its sends keep the
+label, and the ✎ puts the words back in the box. A send that landed mid-turn (`absorbed` on the
 user chat event) is placed where the model READ it: at its landing time, the
 moment the CLI took it off its queue, below the steps that ran while it waited
 (T252d, the user 2026-09-08). Their reasoning: the pane used to draw the message

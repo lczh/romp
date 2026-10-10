@@ -124,6 +124,7 @@ def _forget(sid):
     """Drop the sid's parked ops from memory AND the disk mirror, and every per-sid latch these paths touch."""
     km._pending_ops.pop(sid, None)
     km._save_pending_ops()
+    km._SEND_ACCEPTS.clear()                         # the send ids decided so far: a test's id is new to the next test (kernel.py _send_admit)
     km._moving.discard(sid)
     km._drain_hold.pop(sid, None)
     km._inflight_ops.pop(sid, None)
