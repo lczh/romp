@@ -1,23 +1,23 @@
 """The cold-boot chat build diet, the client half (the user's ruling 2026-09-14: the selected tab builds first; the strip's other tabs
 spread over later refreshes; hidden tabs are not built until shown). A hermetic kernel over TWENTY-SEVEN synthetic sessions, the real
-/chat page served from a copy of the built bundle, driven by Playwright. Roads, one browser: (1) the dial: after a reload whose recorded
-reason is a kernel restart the chat pane's first socket dials skeleton=1 beside active=, and after a build reload it does too (any reload
-the reload core fired; restarts are invisible and a newer build is offered, so the one reload left is the one the user accepts, 2026-09-16); (2) the first
+/chat page served from a copy of the built bundle, driven by Playwright. Roads, one browser: (1) the dial: the chat pane's first socket
+of EVERY page load dials skeleton=1 (2026-10-10; until then only a load the reload core fired did), beside active= once the page has a
+watched tab: after a restart reload, after a build reload, and on a fresh open, which has no watched tab yet and is served whole by the
+kernel's fail-safe; (2) the first
 refresh: one full session frame, the selected tab's, ahead of the strip's paint, the other tabs as statuses with the strip listing the
 skeleton set; (3) the spread: the visible skeletons fill on later idle callbacks one at a time, and tabs the #only= filter hides stay
 skeletons until the filter shows them; (4) the measurement: time to the selected tab's first row, to the strip's 27 tabs, to every visible
-tab built, for the restart reload and for a fresh open with no record; (5) a plain reload right after a restart reload dials no diet: the
-record is consumed by the read that acted on it; (6) after a restart record every pane of the served dashboard dials, and only the chat
+tab built, for the restart reload and for a fresh open with no record; (5) a plain reload right after a restart reload dials the diet
+too, and the record is consumed by the load it was written for; (6) after a restart record every pane of the served dashboard dials, and only the chat
 pane's dial carries the term; (7) lifting the #only= filter re-arms the idle prefetch: the revealed skeletons are asked for with no kernel
-push in between; (8a) a record a standalone feed page's reload wrote steers no chat dial and is consumed; (8b) a malformed record is
-consumed; (8c) a scalar or fieldless record is consumed and diets nothing; (9) a tagged section folded before a restart reload keeps its
+push in between; (8a) a record a standalone feed page's reload wrote is consumed, and the load diets as every load does; (8b) a
+malformed record is consumed; (8c) a scalar or fieldless record is consumed; (9) a tagged section folded before a restart reload keeps its
 tabs unbuilt while folded, and opening it re-arms the prefetch so their asks follow with no kernel push in between; (10) a SIBLING chat
 document in the same browser context opening that section (the tab-groups store's storage event) re-arms this page too. (11) The Outline pane's provisional row (plans/outline-pane-provisional-row.md, 2026-09-15), on a SECOND boot of the same kernel
 with goal stores seeded: a chat page dialing the diet with its idle prefetch held by the lab, then the Outline page; the Outline's dial
 carries provrows=1 and its first frame lists every session, all but the selected one provisional, while the chat has one full frame and
 /perf counts the cold skips; a click on a second tab builds it and its row loses the mark on the next frame; a muted session's
-provisional row shows no goals; a raw unflagged Outline socket makes the kernel build every tab. The fresh open after a boot (no record, no diet)
-is covered by NEITHER half today: this lab measures it and the design decision on it is the manager's. Synthetic only (placeholder ids,
+provisional row shows no goals; a raw unflagged Outline socket makes the kernel build every tab. Synthetic only (placeholder ids,
 invented text)."""
 import json
 import os
@@ -105,7 +105,7 @@ const fullsBy = () => page.evaluate(() => { const by = {}; for (const f of windo
 const firstFrames = (n) => page.evaluate((k) => window.__frames.slice(0, k), n);
 const allBuiltT = () => page.evaluate((all) => { const seen = new Set(); for (const f of window.__frames) { if (f.type === "session" && f.n) { seen.add(f.id); if (seen.size >= all.length) return f.t; } } return null; }, sids);
 const waitFulls = (k, ms) => page.waitForFunction((k) => { const s = new Set(); for (const f of window.__frames) if (f.type === "session" && f.n) s.add(f.id); return s.size >= k; }, k, { timeout: ms }).catch(() => {});
-// ROAD 4a (the FRESH open: the page the driver head opened, no reload record; the kernel half's case, measured here)
+// ROAD 4a (the FRESH open: the page the driver head opened, no reload record and no watched tab yet: it dials the diet and the kernel serves it whole)
 await waitFulls(sids.length, 60000);
 const skelOf = () => page.evaluate(() => { const f = window.__frames.find((x) => x.skel !== null); return f ? { type: f.type, n: f.skel, t: f.t } : null; });
 const painted = () => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 0)))));
@@ -159,7 +159,7 @@ await page.waitForFunction(() => document.querySelectorAll("#tabs .tab, #tabs [d
 const skelAfterReveal = await skelCount();   // the tabs the filter hid come back: skeletons at the head (never built while hidden), loaded tabs at the base
 await page.waitForFunction(() => document.querySelectorAll("#tabs .tab-skeleton").length === 0, null, { timeout: 60000 }).catch(() => {});
 const revealed = { skelAfterReveal, skelFinal: await skelCount(), tabs: await tabCount() };
-// ROAD 5 (round two, medium 1): a PLAIN reload right after a restart reload dials no diet: the record was consumed by the read that acted on it
+// ROAD 5 (round two, medium 1): a PLAIN reload right after a restart reload dials the diet too; the record was consumed by the load it was written for
 await page.evaluate(() => { sessionStorage.setItem("romp:reloadReason", JSON.stringify({ reason: "restart", t: Date.now() })); });
 await page.reload();
 await page.waitForSelector("#tabs .tab, #tabs [data-sid]", { timeout: 20000 });
@@ -196,7 +196,7 @@ const paneDials = [];
 for (const fr of page.frames()) { try { const ds = await fr.evaluate(() => (window.__dials || []).slice()); for (const d of ds) paneDials.push(d.replace(/token=[^&]*/, "token=X")); } catch (e) { /* a frame without the hook */ } }
 await page.goto(cfg.chat);
 await page.waitForSelector("#tabs .tab, #tabs [data-sid]", { timeout: 20000 });
-// ROAD 8c (round two, low b): a scalar or fieldless record is consumed and diets nothing
+// ROAD 8c (round two, low b): a scalar or fieldless record is consumed; the load diets as every load does
 const scalars = [];
 for (const raw of ["5", "\"x\"", "{}"]) {
   await page.evaluate((r) => { sessionStorage.setItem("romp:reloadReason", r); }, raw);
@@ -258,7 +258,7 @@ await page.evaluate(() => { sessionStorage.setItem("romp:reloadReason", JSON.str
 await page.reload();
 await page.waitForSelector("#tabs .tab, #tabs [data-sid]", { timeout: 20000 });
 const build = { dial: (await page.evaluate(() => window.__dials[0] || null)) };
-// ROAD 8a (low 1): a record a standalone FEED page's own reload wrote (its path) lingers in the tab and must not steer the next chat document's dial; it is consumed
+// ROAD 8a (low 1): a record a standalone FEED page's own reload wrote (its path) lingers in the tab; the next chat document consumes it
 await page.evaluate(() => { sessionStorage.setItem("romp:reloadReason", JSON.stringify({ reason: "restart", path: "/feed", t: Date.now() })); });
 await page.reload();
 await page.waitForSelector("#tabs .tab, #tabs [data-sid]", { timeout: 20000 });
@@ -605,7 +605,9 @@ class ColdBootDiet(unittest.TestCase):
         self.assertIn("&skeleton=1", r["restart"]["dial"], "the first dial after a kernel restart's reload declares the diet: %r" % r["restart"]["dial"])
         self.assertIn("&active=" + self.sids[2], r["restart"]["dial"], "…beside the selected tab: %r" % r["restart"]["dial"])
         self.assertIn("&skeleton=1", r["build"]["dial"] or "", "a build reload dials the diet too: the one reload the core fires lands a fresh page on a kernel that just restarted (the follow-up after PR 1661): %r" % r["build"]["dial"])
-        self.assertNotIn("skeleton=1", r["fresh"]["dial"] or "", "a fresh open dials as before (the kernel half's case): %r" % r["fresh"]["dial"])
+        self.assertIn("&skeleton=1", r["fresh"]["dial"] or "", "a fresh open dials the diet too (every load does, 2026-10-10): %r" % r["fresh"]["dial"])
+        self.assertNotIn("&active=", r["fresh"]["dial"] or "", "…with no watched tab yet, so the kernel serves it whole: %r" % r["fresh"]["dial"])
+        self.assertEqual(r["fresh"]["fulls"], N_SESSIONS, "a page with no watched tab is served every tab (the fail-safe): %r" % r["fresh"]["fulls"])
 
     def test_the_first_refresh_after_a_restart_reload_builds_the_selected_tab_first_and_the_rest_as_skeletons(self):
         r = self._result()
@@ -633,25 +635,25 @@ class ColdBootDiet(unittest.TestCase):
         self.assertEqual(rv["skelAfterReveal"], hidden_n, "the tabs the filter hid come back as SKELETONS: none was built while hidden (at the base they came back loaded): %r" % rv)
         self.assertEqual(rv["skelFinal"], 0, "…and load once shown: %r" % rv)
 
-    def test_a_plain_reload_after_a_restart_reload_dials_no_diet_the_record_consumed_on_the_read(self):
-        # round two, medium 1
+    def test_a_plain_reload_dials_the_diet_too_and_the_record_is_consumed_by_its_load(self):
+        # round two, medium 1; every load diets since 2026-10-10
         r = self._result()
         self.assertIn("&skeleton=1", r["restart2"]["dial"] or "", "the restart reload dialed the diet: %r" % r["restart2"])
-        self.assertIsNone(r["restart2"]["recordLeft"], "the read that acted on the record consumed it: %r" % r["restart2"])
-        self.assertNotIn("skeleton=1", r["plain"]["dial"] or "", "the plain reload right after dials as before: %r" % r["plain"])
+        self.assertIsNone(r["restart2"]["recordLeft"], "the load the record was written for consumed it: %r" % r["restart2"])
+        self.assertIn("&skeleton=1", r["plain"]["dial"] or "", "the plain reload right after dials the diet too: %r" % r["plain"])
 
-    def test_a_feed_pages_record_steers_no_chat_dial_and_a_malformed_record_is_consumed(self):
-        # the follow-up after PR 1661, lows 1 and 6
+    def test_any_record_is_consumed_and_every_load_diets_whatever_it_says(self):
+        # the follow-up after PR 1661, lows 1 and 6; the record no longer decides the diet (2026-10-10)
         r = self._result()
         f = r["feedRecord"]
-        self.assertNotIn("skeleton=1", f["dial"] or "", "a record a standalone feed page's reload wrote steers no chat dial: %r" % f)
-        self.assertIsNone(f["recordLeft"], "…and is consumed, so it lingers for no later document: %r" % f)
+        self.assertIn("&skeleton=1", f["dial"] or "", "a load after a standalone feed page's record diets as every load does: %r" % f)
+        self.assertIsNone(f["recordLeft"], "…and the record is consumed, so it lingers for no later document: %r" % f)
         m = r["malformed"]
-        self.assertNotIn("skeleton=1", m["dial"] or "", "a malformed record dials no diet: %r" % m)
-        self.assertIsNone(m["recordLeft"], "…and is consumed (removed before it is parsed): %r" % m)
-        for s in r["scalars"]:   # round two, low b: only an object with the fields counts
-            self.assertNotIn("skeleton=1", s["dial"] or "", "a scalar or fieldless record dials no diet: %r" % s)
-            self.assertIsNone(s["recordLeft"], "…and is consumed: %r" % s)
+        self.assertIn("&skeleton=1", m["dial"] or "", "a load after a malformed record diets: %r" % m)
+        self.assertIsNone(m["recordLeft"], "…and the record is consumed: %r" % m)
+        for s in r["scalars"]:
+            self.assertIn("&skeleton=1", s["dial"] or "", "a load after a scalar or fieldless record diets: %r" % s)
+            self.assertIsNone(s["recordLeft"], "…and the record is consumed: %r" % s)
 
     def test_a_folded_section_keeps_its_tabs_unbuilt_and_opening_it_re_arms_the_prefetch(self):
         # round two, medium 1 (the unfold re-arms the idle prefetch) and the executed fold gate (the follow-up's low 3)

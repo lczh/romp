@@ -1,8 +1,10 @@
 """A federated chat pane dials the remote with the PAGE'S OWN terms (the design in
 plans/federated-pane-dial-terms.md; the code it decides). Two hermetic kernels on one box:
 a hub that owns no session and a checked-in TESTHOST that owns two ("api" the watched tab, "worker" a cold
-one). The hub's /chat page, in a skeleton posture (?skeleton=1) with the watched tab persisted as a REMOTE
-session, dials TESTHOST's relay socket. Before this change the remote dial carried only app+wid, so the
+one). The hub's /chat page, its MAIN pane on a plain open, with the watched tab persisted as a REMOTE session,
+dials TESTHOST's relay socket. Every main-pane load dials the diet (2026-10-10), and the remote dial carries it
+ungated: the local socket has opened before federation dials any remote, so a term gated on the local socket's
+first dial never reached a remote, and every linked kernel built its whole board for the page. Before this change the remote dial carried only app+wid, so the
 remote built every tab whole, held no skeleton set, and filed an anonymous relay row: the cost the user's
 long chat thread ran on. Now federation.ts reads the shim's __rompDialTerms and carries them to each remote
 socket, so the remote is served the way the local pane is.
@@ -110,7 +112,7 @@ def _kernel(lab, name, port, token, sessions):
 
 # The Chromium driver: hook every socket URL the page dials (window.__dials), persist the watched tab as a
 # REMOTE session before the page's scripts run (the shim's ?active= and __rompDialTerms read it), open the
-# hub's /chat page in a skeleton posture, and wait for the relay socket to the remote. The kernel-side
+# hub's main /chat page (no column, no skeleton view: its diet is the page load's own), and wait for the relay socket to the remote. The kernel-side
 # observables (the remote's /perf and client-diag) are read from Python after this returns.
 DRIVER = r"""
 import { createRequire } from "node:module";
@@ -213,7 +215,7 @@ class FederatedDialTerms(unittest.TestCase):
     def _drive(cls):
         cfg = os.path.join(cls.lab, "cfg.json")
         with open(cfg, "w") as f:
-            json.dump({"chat": "http://127.0.0.1:%d/chat?skeleton=1&wid=%s&token=%s" % (cls.hport, WID, cls.htoken),
+            json.dump({"chat": "http://127.0.0.1:%d/chat?wid=%s&token=%s" % (cls.hport, WID, cls.htoken),   # the main pane
                        "remote0": REMOTE0}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -305,7 +307,7 @@ class FederatedDialTerms(unittest.TestCase):
         qs = parse_qs(urlsplit(self._relay_dial()).query)
         self.assertEqual(qs.get("app"), ["chat"], "the pane's app")
         self.assertEqual(qs.get("delta"), ["1"], "delta rides every dial, as the local pane's does")
-        self.assertEqual(qs.get("skeleton"), ["1"], "the page's skeleton posture rode the remote dial")
+        self.assertEqual(qs.get("skeleton"), ["1"], "the main pane's first-dial diet rode the remote dial, after the local socket had opened")
         self.assertEqual(qs.get("active"), [SID_R0], "the watched remote tab, stripped to its bare sid")
 
     def test_the_remote_iid_is_namespaced_by_the_hub_wid(self):

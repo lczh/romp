@@ -88,7 +88,7 @@ class _Harness:
                 h.note("active")
             return real_drive(msg, client)
 
-        def push(targets, connect=False, live_map=None):
+        def push(targets, connect=False, live_map=None, only=None):
             with h.lock:
                 h.pushes += 1
                 n = h.pushes
@@ -244,7 +244,7 @@ class ConnectPushStopsForAGonePane(unittest.TestCase):
     def test_a_push_that_had_not_started_is_skipped(self):
         called = []
         saved = km._push
-        km._push = lambda targets, connect=False, live_map=None: called.append(connect)
+        km._push = lambda targets, connect=False, live_map=None, only=None: called.append(connect)
         try:
             km.Handler._push_one(object.__new__(km.Handler), {"app": "chat", "closing": True})
             km.Handler._push_one(object.__new__(km.Handler), {"app": "chat"})

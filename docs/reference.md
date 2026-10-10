@@ -3194,7 +3194,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   browser's own first draw after a reload or a restart: `count`, `ms_sum`,
   `ms_max`, `ms_last`, and the same per app under `byApp`; the pusher's
   cycles never see this push, so before it the restart's logo phase had no
-  number),
+  number; a `needFull`'s repair push, which serves only the tab the page
+  asked for, is counted apart under `repair` with the same four fields),
   `cycle_ms_sum`, `cycle_ms_max` (since start), `cycle_ms_last`,
   `cycle_cpu_ms_sum` (the pusher thread's own CPU time), `cycle_ms_p50`,
   `cycle_ms_p90`, `cycle_ms_ring_max`, `ring_n` from the last 256 cycles,
@@ -6965,6 +6966,13 @@ is wanted. Click a skeleton tab and the romp loader stands in until its transcri
 lands; the tabs you do not click fill in one at a time while the page is idle, never
 while the browser tab is hidden. Until then a skeleton tab's hover tooltip says it is
 not loaded yet.
+
+Opening or reloading the dashboard works the same way, for this machine's sessions
+and for every linked machine's: the tab you were reading arrives whole and the others
+arrive as skeletons, so the first paint costs one transcript however many sessions are
+running. Each skeleton tab that loads, by a click or while the page is idle, costs the
+kernel that one tab. A page with no tab to show yet (a new browser profile) is sent
+every tab whole.
 
 ![After a reconnect, the tab you were reading is back in full while the other tabs wait as skeletons](assets/guide/reconnect-skeleton-tabs.png){ width="32%" }
 ![Clicking a skeleton tab puts up the loader until its transcript arrives](assets/guide/reconnect-skeleton-click.png){ width="32%" }

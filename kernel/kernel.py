@@ -587,7 +587,8 @@ class _PerfStats:
                            "idle_cycles": 0, "idle_ms_sum": 0.0, "idle_cpu_ms_sum": 0.0, "splitFailed": 0, "cycleFailed": 0}
             # a fresh client's full push on its handler thread (2026-09-14): the browser's own first draw after a reload or a
             # restart, per app; the pusher's cycles never see it, so the restart's logo phase had no number before this
-            self.connect_push_stats = {"count": 0, "ms_sum": 0.0, "ms_max": 0.0, "ms_last": 0.0, "byApp": {}}
+            self.connect_push_stats = {"count": 0, "ms_sum": 0.0, "ms_max": 0.0, "ms_last": 0.0, "byApp": {},
+                                       "repair": {"count": 0, "ms_sum": 0.0, "ms_max": 0.0, "ms_last": 0.0}}
             # the proto-2 full session frames by the reason the sender had (2026-09-19), copied into the snapshot's pusher as
             # chatFullWhy: its own attribute, since snapshot()'s dict(self.pusher) is a shallow copy that would share a nested
             # map with every reader; see chat_full_why
@@ -694,11 +695,19 @@ class _PerfStats:
         with self.lock:
             self.pusher["wakes_event" if by_event else "wakes_backstop"] += 1
 
-    def connect_push(self, app, dt):
-        """One connect push (a fresh client's full state on its handler thread): its wall seconds, per app too."""
+    def connect_push(self, app, dt, repair=False):
+        """One connect push (a fresh client's full state on its handler thread): its wall seconds, per app too. A needFull's
+        repair push (`repair`: the asked tabs alone, 2026-10-10) is counted apart, under `repair`, so the whole-board figure
+        stays the page load's."""
         ms = dt * 1000.0
         with self.lock:
             c = self.connect_push_stats
+            if repair:
+                r = c["repair"]
+                r["count"] += 1; r["ms_sum"] += ms; r["ms_last"] = ms
+                if ms > r["ms_max"]:
+                    r["ms_max"] = ms
+                return
             c["count"] += 1; c["ms_sum"] += ms; c["ms_last"] = ms
             if ms > c["ms_max"]:
                 c["ms_max"] = ms
@@ -65041,20 +65050,29 @@ def _send_feed_frames(targets, feed_src, feed):
                     return
 
 
-@_stage_marked(lambda targets, connect=False, live_map=None: "connect" if connect else "push")
+@_stage_marked(lambda targets, connect=False, live_map=None, only=None: "connect" if connect else "push")
 #                                   T401: the pusher's push reads under "push"; a fresh client's full push on its handler thread
 #                                   (a browser reload) under "connect", so push: rows stay the cycle's; restored whatever exit
-def _push(targets, connect=False, live_map=None):
+def _push(targets, connect=False, live_map=None, only=None):
     """Build the payloads once (cached parses) and send each target only the pieces that CHANGED for it.
     Drives both the periodic pusher (all clients) and a fresh connect (one client): a new/reconnecting
     client (empty dedup) gets the full state; steady-state sends only diffs. Builds only the apps the
     targets actually need (no timeline parse with no timeline client). connect=True (a fresh client) serves
     any stored feed build without the dirty or signature test, and builds only when none is stored, so a
     reload is instant (the user 2026-06-25); the timeline's connect path is described at its section.
-    `live_map` lets the periodic pusher hand down its cycle's ONE liveness snapshot (see _pusher_cycle);
-    other callers (connect pushes, ad-hoc _push_all) leave it None and pay their own read."""
+    `live_map` lets the periodic pusher hand down its cycle's ONE liveness snapshot (see _pusher_cycle); a connect push hands
+    down the one its scope read (_connect_push_scope), and an ad-hoc caller that leaves it None pays its own read.
+    `only` (a set of sids, connect pushes alone): the REPAIR push a needFull asks for (2026-10-10). The chat loop serves those
+    tabs and no other, the per-session comments and glossary frames go for those tabs alone, and the feed and timeline
+    sections are skipped: the asking page holds everything else from its own connect push and the pusher's cycles, which
+    keep sending it. Before this, every needFull ran the whole board push for one tab, and the page's idle prefetch asks
+    once per skeleton tab, so filling N tabs cost N whole-board pushes. The tab strip and the live statuses still go first,
+    deduped on their slots; and a repair that turns out to send a redial's FIRST strip (_resolve_reconnect popped the flag
+    here: no push has served the socket yet) serves the redial's whole view, as a connect push does."""
     if not targets:
         return
+    if only is not None:
+        only = {str(x) for x in only}
     now = int(time.time())
     # When the world this push reads was read: the pusher cycle's stamp, taken before its liveness read (_pusher_cycle), for
     # the map a cycle hands down; this push's own read otherwise. Two cold-lanes builds are ordered by it, and the cold lanes
@@ -65072,6 +65090,8 @@ def _push(targets, connect=False, live_map=None):
     want_fleet = any(c["app"] == "fleet" for c in targets)
     want_feed = _feed_audience(targets)          # the Sessions pane (app "fleet") rides the feed payload; chat needs feed["working"]
     want_tl = any(c["app"] == "timeline" for c in targets)
+    if only is not None:                         # a needFull's repair push: the asked tabs, nothing else (docstring)
+        want_fleet = want_feed = want_tl = False
     chat_clients = [c for c in targets if c["app"] == "chat"]
     # CARDS FIRST on a cold kernel (the user 2026-09-12: after a restart the sessions load fast now and the cards still
     # wait): the first push with a feed pane after a boot builds every chat page (cold parses, most of the refresh)
@@ -65127,6 +65147,9 @@ def _push(targets, connect=False, live_map=None):
                 _send_live_status(c, ls_frames[0], tab_set)   # what each tab is doing this second (thinking, its subagents' progress): no build
                 if redialed:                             # the redial's first strip stands in for the ready it never posts:
                     _consume_pending_reveal(c, why="the pane's redial")   # a reveal parked for its window lands behind the strip
+                    if only is not None:                 # …and a repair that is that first strip's sender is the first push to
+                        only = None                      #  serve this socket at all: it serves the redial's whole view (the
+                        want_feed = _feed_audience(targets)   # watched tab, the transcript-less ones, a status per skeleton)
             active = {c.get("active") for c in chat_clients if c.get("active")}
             # …and the sids a per-session event named since the last cycle (_push_session_soon, 2026-09-23): the SDK's
             # queue pop, which needs the pane to learn at once that the copy left romp's queue for the CLI. They rank
@@ -65142,6 +65165,8 @@ def _push(targets, connect=False, live_map=None):
             # dots on a session that had been ready for all of it (the user 2026-08-08).
             build_order = sorted(chat_list, key=lambda s: 0 if s["sid"] in active or s["sid"] in first
                                  or not os.path.exists(s["path"]) else 1)
+            if only is not None:
+                build_order = [s for s in build_order if s["sid"] in only]   # a needFull's repair: the asked tabs alone
             # ONE key for every tab (_chat_build_sig): the watched tab and the background tabs alike are served
             # from _built_chat while the complete signature holds, and rebuilt when a component moved. The
             # watched tab used to have a second, exact key beside the background tabs' file-stat one, with a
@@ -65609,7 +65634,8 @@ def _push(targets, connect=False, live_map=None):
             # comments/ store exists — an ~free stat for everyone else). Each frame rides its OWN
             # per-sid dedup slot, never the chat delta baseline (the 2026-07-28 stranded-delta rule):
             # an unchanged frame costs nothing on the wire and the chatTail stream stays untouched.
-            for s in (chat_list if chat_clients else []):
+            _frame_tabs = [s for s in chat_list if only is None or s["sid"] in only] if chat_clients else []   # a repair: its tabs
+            for s in _frame_tabs:
                 gen = _comments_gen.get(s["sid"], 0)   # BEFORE the build reads the store (_send_comments_frame)
                 try:
                     fr = _comments_frame(s["sid"], live_map)
@@ -65621,7 +65647,7 @@ def _push(targets, connect=False, live_map=None):
             # THE GLOSSARY (T351 stage 2): one {type:"glossary"} frame per session whose group has a file, on its own
             # per-sid dedup slot like the comments frame: the file is stat'd here (the event), parsed once per mtime, and
             # an unchanged index costs nothing on the wire
-            for s in (chat_list if chat_clients else []):
+            for s in _frame_tabs:
                 try:
                     gfr = _glossary_frame(s["sid"])
                 except Exception:
@@ -65961,6 +65987,49 @@ def _push_all(live_map=None):
     with _clients_lock:
         clients = list(_clients)
     _push(clients, live_map=live_map)
+
+
+@contextlib.contextmanager
+def _connect_push_scope():
+    """The world a connect push reads, opened ONCE for the push the way _pusher_cycle opens the pusher's (2026-10-10): the
+    liveness snapshot with its stamp, the sid->path memo, the discover rows, the billing-availability memo, the
+    subagents-tree samples, the caption-map slot and the names snapshot. Yields the snapshot for _push's `live_map`.
+
+    A connect push (a page's `ready`, every `needFull`) runs on the socket's lane thread, which has no cycle scope, so every
+    read below the push that the pusher's cycle shares was taken afresh: on a synthetic board of 38 sessions the cold push
+    read the liveness map 381 times (the build's background-task and awaiting reads ask for it per tab, several times each)
+    and walked discovery 82 times, and a skeleton page's push read it 122 times for one build and 37 provisional statuses.
+    On the main machine a liveness read stats every registration and reads each running session's login records, about
+    27 ms (the pusher's prelude, /perf), so the lane paid seconds per page load for reads the pusher pays once a cycle.
+
+    The snapshot ages through the push exactly as a cycle's does through the cycle; the next cycle reads the world afresh. A
+    thread that already holds a snapshot (a pusher cycle, a jobs pass) is left as it is: nothing is opened, None is yielded,
+    and _push pays its own read as before. Every slot opened here is cleared in the finally, the chat loop's own scopes with
+    them (_chat_push_scopes_close), so nothing outlives the push on the lane thread, a liveness read that raised included."""
+    if getattr(_live_scope, "snapshot", None) is not None:
+        yield None
+        return
+    try:
+        _live_scope.snapshot_t = time.time()  # the snapshot's stamp, taken before it (_push's world_t, as a cycle's)
+        live_map = _live_map()
+        _live_scope.snapshot = live_map
+        _live_scope.paths = {}
+        _live_scope.sessions = {}
+        _live_scope.auth = {}
+        _live_scope.subagent_trees = {}
+        _live_scope.msgsum = [_MSGSUM_UNSET]
+        _live_scope.names = _names_snapshot()
+        yield live_map
+    finally:
+        _chat_push_scopes_close()
+        _live_scope.snapshot = None
+        _live_scope.snapshot_t = None
+        _live_scope.names = None
+        _live_scope.paths = None
+        _live_scope.sessions = None
+        _live_scope.auth = None
+        _live_scope.subagent_trees = None
+        _live_scope.msgsum = None
 
 
 def _push_session_now(sid):
@@ -72593,7 +72662,7 @@ function key(o){return o?o.reason+':'+(o.detail||''):'';}
 function fire(){if(fired)return;fired=true;persist();
 try{location.reload();}catch(e){fired=false;refusedFor=key(owed);R.waiting='refused';if(R.refused)R.refused(owed);if(owed.reason==='build'){offered={dv:seen.dv,code:seen.code,pv:seen.pv};owed=null;render();}return;}   /* a refused reload of an ACCEPTED offer puts the offer back: the line returns with its Reload, and the user may try again or reload by hand; a forced request keeps the latch */
 try{sessionStorage.setItem('romp:reloaded',JSON.stringify({reason:owed.reason,detail:owed.detail||'',from:LOADED,path:location.pathname,t:Date.now()}));}catch(e){}
-try{sessionStorage.setItem('romp:reloadReason',JSON.stringify({reason:owed.reason,path:location.pathname,t:Date.now()}));}catch(e){}   /* kept for the chat pane's first dial (the diet): announce() removes the record above before a pane dials, and a pane inside the shell never announces; the path says which document reloaded, so a standalone feed page's reload never steers the next chat document's dial */
+try{sessionStorage.setItem('romp:reloadReason',JSON.stringify({reason:owed.reason,path:location.pathname,t:Date.now()}));}catch(e){}   /* the reload's durable record: announce() removes the record above before a pane dials, and a pane inside the shell never announces; the chat shim's first dial consumes this one (it dials the diet on every load) */
 try{document.body.classList.remove('settings-open','picker-open');}catch(e){}}
 var heldFor=null;
 function tryFire(){if(!owed||fired)return;if(refusedFor!==null&&refusedFor===key(owed))return;var b=busy();
@@ -72722,17 +72791,12 @@ var COL=new URLSearchParams(location.search).get("col")||"";if(COL==="1")COL="";
 // (Handler._ws → _resolve_reconnect: the redial diet, for a fresh page that has a hint). false everywhere else: the
 // first column, a standalone page and every non-chat pane dial exactly as today.
 var SKEL=new URLSearchParams(location.search).get("skeleton")==="1";
-// The RELOAD DIET (the user 2026-09-14: the selected tab builds first, the strip's other tabs spread over later refreshes, hidden tabs not
-// until shown; and restarts are invisible, so the one reload the reload core fires is the one the user accepts when a newer build is
-// offered, a fresh page on a kernel that has the build; 2026-09-16): a main chat pane whose page the reload core just reloaded, for ANY reason, dials its first socket as a skeleton client,
-// the later column's shape, so the kernel serves the strip with the skeleton set, ONE full for the active tab and a status per other tab,
-// and the page's idle prefetch fills the rest. The signal is the reload core's durable record (romp:reloadReason, written in fire() with the
-// reason and the path of the document that reloaded; the announce record is consumed before this shim dials). The chat shim alone reads
-// it (the slot below is emitted for the chat app; every other pane's shim carries the false), REMOVES it before parsing it (a malformed or
-// scalar record is consumed and diets nothing, as announce() consumes its record), and acts on it only when it is an object with the fields
-// and its path names the shell or a chat document, so a standalone feed or timeline page's own reload steers no later chat dial. A column
-// and a skeleton view leave the record alone (their dials are the shell's statement); a redial carries the diet through reconnect=1; a
-// fresh open with no record dials as before.
+// The FIRST-DIAL DIET (the user 2026-09-14: the selected tab builds first, the strip's other tabs spread over later refreshes, hidden tabs
+// not until shown): the main chat pane dials the first socket of EVERY page load as a skeleton client (2026-10-10), the later column's
+// shape, so the kernel serves the strip with the skeleton set, ONE full for the active tab and a status per other tab, and the page's
+// idle prefetch fills the rest, one needFull at a time. The slot below is emitted for the chat app (every other pane's shim carries the
+// false); it consumes the reload core's durable record (romp:reloadReason) so the record never outlives its load. A column and a skeleton
+// view leave the record alone (their dials are the shell's statement); a redial carries the diet through reconnect=1.
 %s
 // This PAGE's instance id — minted once per load, never stored: every connect of this page carries it, so the
 // kernel retires this page's previous socket on a reconnect, and never another page's (a duplicated tab copies
@@ -72917,7 +72981,7 @@ function connect(){if(ws&&(ws.readyState===0||ws.readyState===1))return;   // on
 if(returnAt)returnRedialed=true;   // a dial inside a return window (whatever path led here) → the return-fresh row says so
 connT=Date.now();var proto=location.protocol==="https:"?"wss://":"ws://";
 var active="";try{var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";}catch(e){}
-ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")+(COL?"&col="+encodeURIComponent(COL):"")+((SKEL||(RESTART_DIET&&!everConnected))?"&skeleton=1":"")+(APP==="fleet"?"&provrows=1":""));   // skeleton=1: a later chat column, or the main pane's FIRST dial after any reload the reload core fired (RESTART_DIET), served as a view of the session its ?active= names (above). reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
+ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")+(COL?"&col="+encodeURIComponent(COL):"")+((SKEL||(RESTART_DIET&&!everConnected))?"&skeleton=1":"")+(APP==="fleet"?"&provrows=1":""));   // skeleton=1: a later chat column, or the main pane's FIRST dial of every page load (RESTART_DIET), served as a view of the session its ?active= names (above). reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
 // onopen: flush the queue; a RECONNECT (after a drop) also PROMPTS a reload — the fresh socket resyncs live via
 // the kernel's next push, and the banner offers a full reload for anything a live push doesn't cover. This
 // replaced the old silent location.reload() (the user 2026-07-05: don't foist a reload; let me click). Since T265
@@ -73081,7 +73145,7 @@ last.rev=d.rev;last.msg=m;return m;}
 window.__rompLocalSend=send;window.__rompApp=APP;
 window.__rompDiag=function(what,data){try{send({type:"clientDiag",surface:"reload-core",what:what,data:data});}catch(e){}};   // the reload core's breadcrumb door: this pane's socket, the serving kernel (the core itself names no send route)   // federation.ts (the multi-kernel manager) routes local sends + knows the app through these
 var SK="romp-vscode-state-%s"+(COL?":"+COL:"");   // persist webview state to localStorage so UI prefs survive a refresh — per chat column (split screen 2026-09-08)
-window.__rompDialTerms=function(){var a="";try{var st=JSON.parse(localStorage.getItem(SK)||"null");a=(st&&st.activeId)||"";}catch(e){}return{app:APP,iid:IID,active:a,col:COL,skeleton:((SKEL||(RESTART_DIET&&!everConnected))?1:0),provrows:(APP==="fleet"?1:0),proto:readyProto,delta:1};};   // the page's live dial terms for federation.ts to carry to each remote socket (2026-09-15): the same terms the local /ws dial above states, read fresh so a remote redial reflects current state; the reader namespaces iid and strips active per host
+window.__rompDialTerms=function(){var a="";try{var st=JSON.parse(localStorage.getItem(SK)||"null");a=(st&&st.activeId)||"";}catch(e){}return{app:APP,iid:IID,active:a,col:COL,skeleton:((SKEL||RESTART_DIET)?1:0),provrows:(APP==="fleet"?1:0),proto:readyProto,delta:1};};   // the page's live dial terms for federation.ts to carry to each remote socket (2026-09-15): the terms the local /ws dial above states, read fresh so a remote redial reflects current state; the reader namespaces iid and strips active per host. The skeleton term is the page's diet itself, not gated on THIS socket's history as the local dial's is (2026-10-10): the local socket has opened before federation dials any remote, so the gated term never reached a remote and every linked kernel built its whole board for the page; a remote's redial states reconnect=1 beside it, which the kernel serves as any redial
 window.acquireVsCodeApi=function(){return{postMessage:function(m){if(window.__rompFed){window.__rompFed.outbound(m);}else{send(m);}},
 getState:function(){try{return JSON.parse(localStorage.getItem(SK)||"null");}catch(e){return null;}},
 setState:function(s){try{localStorage.setItem(SK,JSON.stringify(s));}catch(e){}}};};connect();
@@ -73128,19 +73192,16 @@ returnDiag("return",row);});/*end-shim-core*/})();   // filed AFTER the redial s
 """ % (_reload_core(v, pvv), _RESTART_DIET_JS if app == "chat" else "var RESTART_DIET=false;", app, label, int(v), json.dumps(_BOOT_ID), "true" if no_stale else "false", json.dumps(pvv), app, app)
 
 
-# The chat shim's restart-diet read (the user 2026-09-14; round two of PR 1661): the main chat pane reads the reload core's durable record
-# ONCE, consumes it whatever it says (the next reload then decides afresh), and dials the diet for any reload the core fired when the
-# record is an object with the fields whose path names the shell or a chat document (the user's rulings: restarts are invisible, and
-# since 2026-09-16 the one reload the core fires is the one the user accepts when a newer build is offered, a fresh page on a kernel
-# that has the build; a scalar or fieldless record diets nothing). A
-# column (col=N) and a skeleton view (skeleton=1) leave the record alone: their dials are the shell's statement, not this page's.
-_RESTART_DIET_JS = ("var RESTART_DIET=false;if(!COL&&!SKEL){var rr=null;try{var raw=sessionStorage.getItem('romp:reloadReason');sessionStorage.removeItem('romp:reloadReason');"
-                    "rr=raw?JSON.parse(raw):null;}catch(e){}"
-                    "RESTART_DIET=!!(rr&&typeof rr==='object'&&typeof rr.reason==='string'&&(rr.path===undefined||rr.path==='/'||String(rr.path).indexOf('/chat')===0));}")
-# The record is REMOVED before it is parsed (a malformed one is consumed too, as announce() does), and any reload the reload core fired
-# dials the diet (the user's rulings: restarts invisible since 2026-09-14, a newer build offered since 2026-09-16, so the one reload left
-# is the one the user accepts, a fresh page on a kernel that has the build): the record's presence decides, not its reason. A record written by a standalone feed or timeline page's own
-# reload names that path and steers nothing (path === undefined only for a record an older core wrote).
+# The chat shim's first-dial diet (the user's ruling of 2026-09-14: the selected tab builds first, the strip's other tabs spread over
+# later refreshes, hidden tabs not until shown). The main chat pane dials its FIRST socket of every page load as a skeleton client
+# (2026-10-10): a reload the reload core fired, and a load nobody fired too (a manual reload, a new window). Until then a load with no
+# reload record dialed as a page that holds nothing and wants everything, and the kernel built every tab before the page's caps frame:
+# on a machine with dozens of large sessions that took minutes per page load, repeated for each linked kernel the hub dialed (the
+# federated dials carry this term, __rompDialTerms). The reload core's durable record is still consumed here, read or not, so it never
+# outlives the load it was written for. A column (col=N) and a skeleton view (skeleton=1) leave the record alone: their dials are the
+# shell's statement, not this page's. A page with no watched tab (no ?active=) dials the term all the same, and the kernel serves such
+# a local page whole (_resolve_reconnect's fail-safe).
+_RESTART_DIET_JS = "var RESTART_DIET=false;if(!COL&&!SKEL){try{sessionStorage.removeItem('romp:reloadReason');}catch(e){}RESTART_DIET=true;}"
 
 
 def _shim_core_js(app="test", v=0):
@@ -82848,7 +82909,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the repair full below serves from it (a superset) or, if the turns are gone, sets them aside via `rebased`.
                 # _send_chat_proto2 consumes it, so a later no-key needFull (a click, the prefetch) is not served from it (M3).
                 client.setdefault("heldTailFirst", {})[sid] = msg["heldTailFirst"]
-            self._push_one(client)                            # repair NOW, not on the next 0.5-3s tick
+            self._push_one(client, only={sid})                # repair NOW, not on the next 0.5-3s tick: this tab alone
             return
         if msg and msg.get("type") in ("loadOlder", "loadAround", "loadNewer", "loadTurns") and msg.get("id") \
                 and (client.get("proto") or 1) >= 2 and not isinstance(msg.get("before"), int):
@@ -84816,17 +84877,21 @@ class Handler(BaseHTTPRequestHandler):
             except OSError:
                 pass
 
-    def _push_one(self, client):
+    def _push_one(self, client, only=None):
+        """The connect push to one client: the whole board for a `ready`, the asked tabs alone for a needFull (`only`, see
+        _push), inside one liveness snapshot and discovery walk (_connect_push_scope). Timed under /perf connectPush, the
+        repairs apart from the whole-board pushes (connect_push's `repair`)."""
         if client.get("closing"):
             return                                # its socket ended before this push ran (_lane_close): nobody left to read it
         _t0 = time.monotonic()
         try:
-            _push([client], connect=True)         # full state to a fresh client (its per-client dedup is empty);
-            #                                       a connect serves any stored feed build without the dirty or
+            with _connect_push_scope() as live_map:   # one liveness read, one discovery walk for the whole push
+                _push([client], connect=True, live_map=live_map, only=only)   # full state to a fresh client (its per-client dedup
+            #                                       is empty); a connect serves any stored feed build without the dirty or
             #                                       signature test, and builds only when none is stored; the
             #                                       timeline's connect path is described at its section in _push
         finally:                                  # the browser's own first draw, timed (2026-09-14): the ledger and the stage
-            _PERF_STATS.connect_push(client.get("app"), time.monotonic() - _t0)   # rings time the pusher's cycles alone, so
+            _PERF_STATS.connect_push(client.get("app"), time.monotonic() - _t0, repair=only is not None)   # rings time the pusher's cycles alone, so
             #                                       the logo phase after a restart had no number
 
 

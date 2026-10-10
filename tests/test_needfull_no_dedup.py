@@ -43,10 +43,10 @@ class _Self:
         self.calls = []
         self._po = push_one
 
-    def _push_one(self, client):
+    def _push_one(self, client, only=None):
         self.calls.append(client)
         if self._po:
-            self._po(client)
+            self._po(client, only)   # `only`: a needFull's repair names its tab (the real body: _push(..., only=only))
 
 
 class KernelAnswersEveryNeedFull(unittest.TestCase):
@@ -91,7 +91,7 @@ class KernelAnswersEveryNeedFull(unittest.TestCase):
 
     def _ask(self, c, sid):
         """One needFull through the real WS dispatch; returns the session ids the answering push sent for this client."""
-        h = _Self(push_one=lambda cl: km._push([cl], connect=True))
+        h = _Self(push_one=lambda cl, only=None: km._push([cl], connect=True, only=only))
         c["_frames"].clear()
         km.Handler._dispatch_ws(h, {"type": "needFull", "id": sid, "why": "gap"}, c)
         return [f["id"] for f in c["_frames"] if f["type"] == "session"]
