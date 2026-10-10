@@ -267,8 +267,10 @@ class AReapBetweenTheTwoReads(_InProcessSweep):
     """A process that ends on SIGTERM is reaped by its parent at a moment the sweep does not choose, and the sweep's
     liveness check reads twice: the start time, then the state. A reap landing between the two reads means the
     process has ended. Read as running, it made the sweep report "(1 needed SIGKILL)" for a host that had ended on
-    SIGTERM: the CI failure of test_a_host_and_its_cli_are_ended_and_nothing_else in eight Python jobs from 2026-10-08
-    to 10-10, in runs that took 0.2 s, so the 5 s grace was never waited out. Here the reap lands there every time.
+    SIGTERM: the CI failure of test_a_host_and_its_cli_are_ended_and_nothing_else in 15 Python jobs across 13 of the 54
+    CI runs from the test's landing (2026-10-08) to 2026-10-10, counting every attempt of every run. Each failing job
+    ran the test in 0.16 to 0.21 s, so the tool never waited out its 5 s grace before SIGKILL. Here the reap lands
+    there every time.
 
     The stand-in is this test's own child, so it stays a zombie until the test reaps it. The tool runs in-process with
     its backend's proc_start wrapped: once the tool has signalled the child, each look first waits for the child to
