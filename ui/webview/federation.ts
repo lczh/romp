@@ -1807,9 +1807,13 @@ export class FederationManager {
     // again when the link is back (render.ts resendUnacked), so the toast says that and nobody retypes it (the review of #198)
     const c = this.conns.get(host);
     const kept = !!(msg && (msg.type === "sendMessage" || msg.type === "askFollowUp") && typeof msg.qid === "string" && c && c.acksEver);
+    // …and a withdrawal (the ✎ or the ✕ on such a send) is kept too: every tab honours it, and the kernel hears it when the link
+    // is back (render.ts resendUnacked)
+    const withdrawn = !!(msg && msg.type === "cancelQueued" && typeof msg.qid === "string" && c && c.acksEver);
     window.dispatchEvent(new MessageEvent("message", { data: { type: "warn",
       text: kept ? `${host} is unreachable (its kernel isn't answering): your message is kept and goes out when the link is back`
-                 : `${host} is unreachable (its kernel isn't answering) — “${(msg && msg.type) || "action"}” was not delivered` } }));
+          : withdrawn ? `${host} is unreachable (its kernel isn't answering): the message stays withdrawn, and romp tells it so when the link is back`
+          : `${host} is unreachable (its kernel isn't answering) — “${(msg && msg.type) || "action"}” was not delivered` } }));
     // a comment create also gets the typed refusal its own kernel would have sent (2026-10-01): the comment box waits on
     // that, not on any warn, to hand the words back, and a create that never left this page is refused for good
     if (msg && msg.type === "commentCreate" && typeof msg.id === "string" && msg.uuid)

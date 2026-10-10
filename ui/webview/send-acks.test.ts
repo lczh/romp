@@ -9,8 +9,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { newPending, type PendingSend } from "./send-pending";
-import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, pendingFromKept, resendable, resendWire, restoreKept, unanswered,
-         KEPT_MAX, KEPT_MAX_AGE_MS, RESEND_MAX_AGE_MS } from "./send-acks";
+import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, mergeTombstones, pendingFromKept, resendable, resendWire, restoreKept,
+         restoreTombstones, unanswered, KEPT_MAX, KEPT_MAX_AGE_MS, RESEND_MAX_AGE_MS, TOMB_MAX } from "./send-acks";
 import { dropPending } from "./send-pending";
 import { FederationManager } from "./federation";
 import { hostOf } from "./host-prefix";
@@ -176,11 +176,11 @@ test("the chat keeps, answers, resends and restores its sends through send-acks.
   const reg = RENDER.slice(RENDER.indexOf("\nfunction registerOptimistic("), RENDER.indexOf("\nfunction registerOptimistic(") + 2500);
   assert.match(reg, /p\.wire = wire \|\| defaultWire\(id, p\);/, "every send keeps the message it posted");
   assert.match(reg, /persistKeptSends\(\);/, "…and is kept across a reload from the press");
-  assert.match(RENDER, /if \(m\.type === "sendAck"\) \{ if \(typeof m\.id === "string" && typeof m\.qid === "string"\) onSendAck\(m\.id, m\.qid, !!m\.ok\); return; \}/);
+  assert.match(RENDER, /if \(m\.type === "sendAck"\) \{ if \(typeof m\.id === "string" && typeof m\.qid === "string"\) onSendAck\(m\.id, m\.qid, !!m\.ok, !!m\.retry\); return; \}/);
   assert.match(RENDER, /window\.addEventListener\("romp:hostAcks", /, "a socket that says it recognises a resend gets the unanswered sends");
   assert.match(RENDER, /window\.addEventListener\("romp:hostRelayDown", /, "a relay that went down marks its sends not confirmed");
   assert.match(RENDER, /restoreKept\(\(\(vscodeApi\?\.getState\?\.\(\) \|\| \{\}\) as any\)\.pendingSends\)/, "a fresh page reads back what the last one kept");
-  assert.match(RENDER, /vscodeApi\?\.setState\?\.\(\{ \.\.\.st, pendingSends: mergeKept\(mine, restoreKept\(st\.pendingSends, now\), heldQids, now, hostGone\) \}\);/,
+  assert.match(RENDER, /vscodeApi\?\.setState\?\.\(\{ \.\.\.st, pendingSends: mergeKept\(mine, restoreKept\(st\.pendingSends, now\), heldQids, now, hostGone, gone\),\n\s*withdrawnSends: tombs \}\);/,
                "the write merges into what the store holds now, every other tab's sends kept");
   assert.match(RENDER, /pendingSent\.delete\(s\.id\);\n  persistKeptSends\(\);/, "a landing that retires a send updates what is kept");
   // a follow-up keeps its own wire (the goal it answers rides it)
@@ -199,7 +199,7 @@ test("a send withdrawn with the ✎ or the ✕ leaves the store with that write,
   store = mergeKept(keptSends(pending, NOW), restoreKept(store, NOW), held, NOW);
   assert.deepEqual(restoreKept(store, NOW).map((k) => k.qid), [qid("b")], "the reload restores only what is still owed");
   // every removal in the chat writes the store (the ✕/✎ handler, the refusal warn, a provisional tab's teardown)
-  assert.match(RENDER, /pendingSent\.delete\(sidQ\); \}\n    persistKeptSends\(\);/, "the ✕/✎ handler");
+  assert.match(RENDER, /pendingSent\.delete\(sidQ\); \}\n(?:\s*\/\/[^\n]*\n)*\s*if \(own && own\.qid[^\n]*\n\s*persistKeptSends\(\);/, "the ✕/✎ handler");
   assert.match(RENDER, /else pendingSent\.delete\(m\.sid\);\n          persistKeptSends\(\);/, "the refusal that names the press");
   assert.equal((RENDER.match(/pendingSent\.delete\(id\);[^\n]*\n\s*persistKeptSends\(\);/g) || []).length, 2, "both provisional teardowns");
 });
@@ -263,4 +263,42 @@ test("a send dropped while its host is down says it is kept, once that host has 
     fm.conns.get("TESTHOST").closed = true;
     void events;
   });
+});
+
+// ── the review of #200 (2026-10-09): a withdrawal every tab honours; a kernel that could not take a send ──────────
+test("a withdrawal in one tab is honoured by another tab that restored the same send", () => {
+  // tab A pressed it, the link went down, tab B reloaded and restored it from the shared store
+  const inA = sent(REMOTE, "rebuild the index", qid("a")), inB = pendingFromKept(keptSends(new Map([[REMOTE, [inA]]]), NOW)[0]);
+  // tab A withdraws it with the ✎ while the cancel cannot reach the host: the withdrawal goes into the store
+  const store = mergeTombstones([{ qid: qid("a"), sid: REMOTE, text: inA.text, ts: NOW }], [], NOW);
+  // the link returns: tab B reads the store's withdrawals before it resends
+  const gone = new Set(restoreTombstones(store, NOW).map((t) => t.qid));
+  const r = resendable(new Map([[REMOTE, [inB]]]), "TESTHOST", hostOf, new WeakMap(), 1, NOW, gone);
+  assert.deepEqual(r, [], "tab B does not resend a send tab A withdrew");
+  assert.deepEqual(mergeKept([], keptSends(new Map([[REMOTE, [inB]]]), NOW), new Set(), NOW, () => false, gone), [], "and the store drops it");
+  // and the page wiring: the ✎/✕ records it, the resend path drops withdrawn sends and tells the kernel, the restore skips them
+  assert.match(RENDER, /if \(own && own\.qid && own\.wire && !own\.acked && !own\.received\) withdrawnHere\.set\(own\.qid, \{ qid: own\.qid, sid: sidQ, text: own\.text, ts: Date\.now\(\) \}\);/);
+  assert.match(RENDER, /vscodeApi\.postMessage\(\{ type: "cancelQueued", id: t\.sid, md: t\.text, qid: t\.qid \}\);/, "the kernel hears it when the link is back");
+  assert.match(RENDER, /for \(const \{ sid, p \} of resendable\(pendingSent, host, hostOf, resentOn, gen, now, gone\)\)/);
+  assert.match(RENDER, /if \(list\.some\(\(p\) => p\.qid === k\.qid\) \|\| gone\.has\(k\.qid\)\) continue;/, "a reload does not bring a withdrawn send back");
+  assert.match(RENDER, /if \(typeof m\.md === "string"\) confirmWithdrawal\(m\.id, m\.md\);/, "a kernel's answer confirms it, so no tab re-posts the cancel");
+});
+
+test("withdrawals in the store are checked, merged by id, a confirmed copy kept, bounded", () => {
+  const t = { qid: qid("b"), sid: LOCAL, text: "x", ts: NOW - 1000 };
+  assert.deepEqual(restoreTombstones([t, { ...t, qid: "s-1" }, { ...t, ts: NOW - KEPT_MAX_AGE_MS - 1 }, null], NOW).map((x) => x.qid), [qid("b")]);
+  const merged = mergeTombstones([t], [{ ...t, confirmed: true }], NOW);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].confirmed, true, "a kernel's confirmation is not lost to an unconfirmed copy");
+  const many = Array.from({ length: TOMB_MAX + 3 }, (_, i) => ({ qid: "echo:" + i.toString(16).padStart(32, "0"), sid: LOCAL, text: "w", ts: NOW - 10_000 + i }));
+  assert.equal(mergeTombstones(many, [], NOW).length, TOMB_MAX);
+});
+
+test("a send the kernel could not take this time stays unanswered, says not confirmed, and goes again on the next socket", () => {
+  const p = sent(LOCAL, "check the api tests", qid("c"));
+  assert.equal(applySendAck([p], qid("c"), false, true), p);
+  assert.equal(p.acked, undefined, "not decided");
+  assert.equal(p.lost, "retry", "labelled not confirmed");
+  assert.ok(unanswered(p), "still owed");
+  assert.deepEqual(resendable(new Map([[LOCAL, [p]]]), "", hostOf, new WeakMap(), 2, NOW).map((x) => x.p.qid), [qid("c")]);
 });

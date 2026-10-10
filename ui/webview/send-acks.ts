@@ -30,6 +30,14 @@ import { isProvisionalId } from "./provisional";
 export const RESEND_MAX_AGE_MS = 6 * 86400_000;
 export const KEPT_MAX_AGE_MS = 14 * 86400_000;
 export const KEPT_MAX = 200;
+export const TOMB_MAX = 500;
+
+/** A WITHDRAWAL, kept in the store every tab shares (2026-10-09, the review of #200): the ✎ or the ✕ on an unconfirmed
+ *  bubble, by the send's id. Another tab that restored the same send at its load still holds it; before it resends, it
+ *  reads the store's withdrawals and drops a withdrawn send instead (render.ts resendUnacked). The page that withdrew it
+ *  also tells the kernel, when the link is back, if the cancel could not reach it then (`confirmed` once a kernel
+ *  answered), so the kernel's own withdrawal record refuses any copy that still arrives. */
+export type Tombstone = { qid: string; sid: string; text: string; ts: number; confirmed?: boolean };
 
 /** One unanswered send as the page keeps it across a reload: enough to draw its bubble again and to resend it. */
 export type KeptSend = {
@@ -104,13 +112,39 @@ export function restoreKept(raw: unknown, now: number = Date.now()): KeptSend[] 
  *  page has held and no longer holds (answered, landed, withdrawn with the ✎ or the ✕) is gone from the store. A send to a
  *  host no longer attached is dropped (`hostGone`); the age and count caps hold, the newest kept. */
 export function mergeKept(mine: KeptSend[], stored: KeptSend[], held: ReadonlySet<string>, now: number,
-                          hostGone: (sid: string) => boolean = () => false): KeptSend[] {
+                          hostGone: (sid: string) => boolean = () => false,
+                          withdrawn: ReadonlySet<string> = new Set()): KeptSend[] {
   const byQid = new Map<string, KeptSend>();
   for (const k of stored) if (!held.has(k.qid)) byQid.set(k.qid, k);
   for (const k of mine) byQid.set(k.qid, k);
-  const out = [...byQid.values()].filter((k) => now - k.ts <= KEPT_MAX_AGE_MS && !hostGone(k.sid));
+  const out = [...byQid.values()].filter((k) => now - k.ts <= KEPT_MAX_AGE_MS && !hostGone(k.sid) && !withdrawn.has(k.qid));
   out.sort((a, b) => a.ts - b.ts);
   return out.slice(-KEPT_MAX);
+}
+
+/** The withdrawals a page reads from the store, every row checked; a row past the age cap is gone. */
+export function restoreTombstones(raw: unknown, now: number = Date.now()): Tombstone[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Tombstone[] = [];
+  for (const r of raw) {
+    if (!r || typeof r !== "object") continue;
+    const o = r as Record<string, unknown>;
+    if (typeof o.qid !== "string" || !QID_RE.test(o.qid) || typeof o.sid !== "string" || !o.sid || typeof o.text !== "string"
+        || typeof o.ts !== "number" || now - o.ts > KEPT_MAX_AGE_MS) continue;
+    out.push({ qid: o.qid, sid: o.sid, text: o.text, ts: o.ts, ...(o.confirmed === true ? { confirmed: true } : {}) });
+  }
+  return out;
+}
+
+/** The store's withdrawals after this page's write: every tab's, by id, a confirmed copy winning, the newest TOMB_MAX kept. */
+export function mergeTombstones(mine: Tombstone[], stored: Tombstone[], now: number): Tombstone[] {
+  const by = new Map<string, Tombstone>();
+  for (const t of [...stored, ...mine]) {
+    if (now - t.ts > KEPT_MAX_AGE_MS) continue;
+    const had = by.get(t.qid);
+    by.set(t.qid, had && had.confirmed && !t.confirmed ? had : t);
+  }
+  return [...by.values()].sort((a, b) => a.ts - b.ts).slice(-TOMB_MAX);
 }
 
 /** A kept send as a pending entry again. It says "not confirmed" (`lost`) until a kernel answers it: the page that sent
@@ -126,12 +160,14 @@ export function pendingFromKept(k: KeptSend): PendingSend {
  *  of that host's sessions not already posted on this socket (`gen` counts the host's sockets, so a send is resent once
  *  per socket). `hostOf` maps a session id to its host ("" for the local kernel). */
 export function resendable(entries: Iterable<[string, PendingSend[]]>, host: string, hostOf: (sid: string) => string,
-                           resentOn: WeakMap<PendingSend, number>, gen: number, now: number = Date.now()): { sid: string; p: PendingSend }[] {
+                           resentOn: WeakMap<PendingSend, number>, gen: number, now: number = Date.now(),
+                           withdrawn: ReadonlySet<string> = new Set()): { sid: string; p: PendingSend }[] {
   const out: { sid: string; p: PendingSend }[] = [];
   for (const [sid, list] of entries) {
     if (hostOf(sid) !== host || isProvisionalId(sid)) continue;
-    // older than the kernel's memory of what it decided: a resend could deliver it twice, so it keeps its label instead
-    for (const p of list) if (unanswered(p) && resentOn.get(p) !== gen && now - p.ts <= RESEND_MAX_AGE_MS) out.push({ sid, p });
+    // older than the kernel's memory of what it decided: a resend could deliver it twice, so it keeps its label instead;
+    // withdrawn in any tab: never sent again
+    for (const p of list) if (unanswered(p) && resentOn.get(p) !== gen && now - p.ts <= RESEND_MAX_AGE_MS && !withdrawn.has(p.qid as string)) out.push({ sid, p });
   }
   return out;
 }
@@ -143,10 +179,13 @@ export function resendWire(p: PendingSend): Record<string, unknown> {
 
 /** Apply a kernel's answer to the session's pending sends. ok: the kernel holds the send, so it is `received` and its
  *  "not confirmed" label goes; not ok: refused there (its own frame said why), so it is never sent again and keeps its
- *  label. Returns the entry answered, or null when none wears the id (a push already retired it). */
-export function applySendAck(list: PendingSend[], qid: string, ok: boolean): PendingSend | null {
+ *  label; `retry`: not delivered and not decided (the kernel could not take it this time), so it stays unanswered,
+ *  says "not confirmed", and is offered again on the next connection. Returns the entry answered, or null when none
+ *  wears the id (a push already retired it). */
+export function applySendAck(list: PendingSend[], qid: string, ok: boolean, retry: boolean = false): PendingSend | null {
   const p = list.find((x) => x.qid === qid);
   if (!p) return null;
+  if (retry && !ok) { p.lost = "retry"; return p; }
   p.acked = true;
   if (ok) { p.received = true; p.lost = undefined; }
   else p.lost = p.lost || "refused";

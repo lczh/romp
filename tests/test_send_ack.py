@@ -8,7 +8,7 @@ gap from the kernel's side:
   - a sendMessage or askFollowUp carrying the press-minted id (`qid`) is answered on its socket with
     {type: "sendAck", id, qid, ok, dup} once the kernel has decided its fate (handed over or parked: ok; refused: not ok);
   - the page resends an unanswered send on its next socket; a send the kernel has already decided on is answered
-    again as a duplicate and never delivered twice, also across a kernel restart (STATE/accepted-sends.json), and a
+    again as a duplicate and never delivered twice, also across a kernel restart (STATE/accepted-sends.jsonl), and a
     copy the session still holds under that id counts as decided;
   - an attempt that raises records nothing, so the page's resend tries again;
   - the keepalive says the kernel speaks the protocol (`acks`), and the caps frame lists `sendAck`.
@@ -19,6 +19,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from romp_load import load_source
@@ -116,7 +117,7 @@ class SendAck(_SendFixture):
 
     def test_the_kernel_recognises_a_resend_across_its_own_restart(self):
         self._send()
-        self.assertTrue((self.state / "accepted-sends.json").exists(), "the decision is on disk")
+        self.assertTrue((self.state / "accepted-sends.jsonl").exists(), "the decision is on disk")
         self._reset_store()                  # a fresh kernel process: memory gone, the file stays…
         self.assertEqual(km._send_accepts_boot_load(), 1, "…and its boot reads it back (main)")
         self._send(resend=True)
@@ -144,7 +145,8 @@ class SendAck(_SendFixture):
         self.be.raises = RuntimeError("boom")
         with self.assertRaises(RuntimeError):
             self._send()
-        self.assertEqual(self.acks(), [], "no answer: the page keeps the send")
+        self.assertEqual([(a["ok"], a.get("retry")) for a in self.acks()], [(False, True)],
+                         "not delivered, retry: the page keeps the send and offers it again")
         self.be.raises = None
         self._send(resend=True)
         self.assertEqual(len(self.be.sent), 1, "the resend delivered it")
@@ -231,7 +233,7 @@ class SendAckOrdering(_SendFixture):
 
     def test_the_decisions_on_disk_are_whole(self):
         self._send()
-        rows = json.loads((self.state / "accepted-sends.json").read_text())["accepted"]
+        rows = [json.loads(ln) for ln in (self.state / "accepted-sends.jsonl").read_text().splitlines()]
         self.assertEqual([(r["qid"], r["sid"], r["ok"]) for r in rows], [(Q1, SID, True)])
         self.assertEqual([p.name for p in self.state.iterdir() if ".tmp." in p.name], [], "no temp file left behind")
 
@@ -255,6 +257,83 @@ class WithdrawnBeforeItArrived(_SendFixture):
         self._send()
         res = self._cancel()
         self.assertFalse(res["ok"], "handed over: no recall exists")
+
+
+class Round3(_SendFixture):
+    """The review of #200 (2026-10-09): a malformed record must never stop the kernel; a check that cannot be made must
+    never read as delivered; a copy waiting on an attempt that raises is answered; the record is an appended log."""
+
+    def _write_log(self, text):
+        (self.state / "accepted-sends.jsonl").write_text(text)
+
+    def test_a_malformed_row_or_a_garbage_file_never_stops_the_kernel(self):
+        good = {"qid": Q1, "sid": SID, "t": 1_790_000_000, "ok": True}
+        self._write_log(json.dumps(good) + "\n" + json.dumps(dict(good, qid=Q2, t="soon")) + "\nnot json at all\n"
+                        + json.dumps({"qid": "s-1", "ok": True}) + "\n" + json.dumps(dict(good, qid="echo:" + "3" * 32, t=float("nan"))).replace("NaN", "1e999") + "\n")
+        (self.state / "accepted-sends.json").write_text("\x00\x01 garbage, not json")
+        self.assertEqual(km._send_accepts_boot_load(), 1, "the good row kept; boot does not raise")
+        self.assertIn(Q1, km._SEND_ACCEPTS)
+        self.assertNotIn(Q2, km._SEND_ACCEPTS, "the row whose time is not a number is skipped")
+        rows = [json.loads(ln) for ln in (self.state / "session-events.jsonl").read_text().splitlines()]
+        prob = [r for r in rows if r.get("kind") == "send-acks.unreadable"]
+        self.assertEqual(len(prob), 1, "said once, as a problem row")
+        self.assertEqual((prob[0]["badRows"], prob[0]["kept"]), (4, 1))
+        # …and the whole-file form #198 wrote, holding the same bad row: it raised out of main() and the kernel could not start
+        self._reset_store()
+        (self.state / "accepted-sends.jsonl").unlink()
+        (self.state / "accepted-sends.json").write_text(json.dumps({"accepted": [good, dict(good, qid=Q2, t="soon")]}))
+        self.assertEqual(km._send_accepts_boot_load(), 1, "the good row kept, the bad one skipped")
+
+    def test_a_check_that_cannot_be_made_is_not_taken_for_delivered(self):
+        real = self.be.pending_queued_meta
+        self.be.pending_queued_meta = lambda sid: (_ for _ in ()).throw(RuntimeError("queue unreadable"))
+        self._send()
+        self.assertEqual(self.be.sent, [], "not delivered, and not claimed to be")
+        self.assertEqual([(a["ok"], a.get("retry")) for a in self.acks()], [(False, True)], "the page is told: not delivered, retry")
+        self.assertNotIn(Q1, km._SEND_ACCEPTS, "nothing recorded")
+        self.be.pending_queued_meta = real
+        self._send(resend=True)
+        self.assertEqual(len(self.be.sent), 1, "the page's next offer is delivered (before: answered 'delivered' forever, never sent)")
+
+    def test_a_copy_waiting_on_an_attempt_that_raises_is_answered(self):
+        gate, entered = threading.Event(), threading.Event()
+
+        def boom(sid, text, qid=None, user=False, paths=None):
+            entered.set()
+            gate.wait(5)
+            raise RuntimeError("the backend fell over")
+        self.be.send = boom
+        errs = []
+
+        def first():
+            try:
+                self._send()
+            except RuntimeError as e:
+                errs.append(e)
+        t = threading.Thread(target=first)
+        t.start()
+        self.assertTrue(entered.wait(5))
+        frames = []
+        other = {"app": "chat", "wid": "w2", "alive": True, "send": lambda s: frames.append(json.loads(s))}
+        km._drive({"type": "sendMessage", "id": SID, "text": "add a test for the search cache", "qid": Q1, "resend": True}, other)
+        gate.set()
+        t.join(5)
+        self.assertEqual(len(errs), 1)
+        self.assertEqual([(a["ok"], a.get("retry")) for a in self.acks()], [(False, True)], "the original's page hears it")
+        self.assertEqual([(f["ok"], f.get("retry")) for f in frames], [(False, True)], "and so does the waiting copy (before: neither)")
+
+    def test_the_record_is_an_appended_log_compacted_from_the_live_decisions(self):
+        (self.state / "accepted-sends.json").write_text(json.dumps({"accepted": [{"qid": Q2, "sid": SID, "t": int(time.time()) - 60, "ok": True}]}))
+        self.assertEqual(km._send_accepts_boot_load(), 1, "#198's whole-file form is still read")
+        self._send()
+        self._send(qid="echo:" + "4" * 32)
+        lines = (self.state / "accepted-sends.jsonl").read_text().splitlines()
+        self.assertEqual([json.loads(ln)["qid"] for ln in lines], [Q1, "echo:" + "4" * 32], "one line per decision, appended")
+        with km._SEND_WRITE_LOCK:
+            km._send_log_compact_locked(time.time())
+        rows = [json.loads(ln)["qid"] for ln in (self.state / "accepted-sends.jsonl").read_text().splitlines()]
+        self.assertEqual(sorted(rows), sorted([Q2, Q1, "echo:" + "4" * 32]), "the compaction keeps every live decision")
+        self.assertFalse((self.state / "accepted-sends.json").exists(), "and retires the whole-file form")
 
 
 class AcksAnnounced(unittest.TestCase):
