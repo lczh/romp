@@ -117,7 +117,7 @@ class OpenFolderRemote(unittest.TestCase):
         argv = self.calls[0]
         self.assertEqual(argv[0], "osascript")
         joined = " ".join(argv)
-        self.assertIn("ssh -t gpu1", joined)
+        self.assertIn("ssh -t -- gpu1", joined, "a `--` guard precedes the host")
         self.assertIn("cd /work/proj", joined)
         self.assertIn("exec $SHELL -l", joined, "a login shell, not a one-shot command that closes")
 
@@ -132,8 +132,8 @@ class OpenFolderRemote(unittest.TestCase):
         argv = self.calls[0]
         # `open -na Ghostty --args -e ssh …` — -n (new instance) is required so macOS passes --args to Ghostty
         self.assertEqual(argv[:6], ["open", "-na", "Ghostty", "--args", "-e", "ssh"])
-        self.assertEqual(argv[6:8], ["-t", "gpu1"])
-        self.assertEqual(argv[8], "cd /work/proj 2>/dev/null; exec $SHELL -l", "cd + login shell, one ssh arg")
+        self.assertEqual(argv[6:9], ["-t", "--", "gpu1"], "a `--` guard precedes the host")
+        self.assertEqual(argv[9], "cd /work/proj 2>/dev/null; exec $SHELL -l", "cd + login shell, one ssh arg")
 
     def test_editor_local_pref_does_not_derive_a_terminal(self):
         # a NON-terminal local opener (an editor) must NOT be misused as an SSH terminal — fall back to the default
@@ -165,6 +165,31 @@ class OpenFolderRemote(unittest.TestCase):
             self.assertTrue(any("cd /work/proj" in a for a in self.calls[0]))
         finally:
             km.sys.platform = saved
+
+    def test_a_host_the_guard_refuses_never_reaches_ssh(self):
+        # The id's host prefix becomes ssh's target here, and any client the socket admits names that
+        # id. A host the guard refuses (here a name carrying a space) must be refused before any launch;
+        # the same gate attach_remote applies to its host. Platform pinned so the assertion holds anywhere.
+        saved = km.sys.platform
+        try:
+            km.sys.platform = "linux"
+            km._open_folder_remote("bad host", "/work/proj")
+        finally:
+            km.sys.platform = saved
+        self.assertEqual(self.calls, [], "a refused host launches nothing")
+
+    def test_the_xterm_fallback_keeps_the_host_positional(self):
+        # Beside the host rule above, the fallback ssh argv keeps the host positional, matching every
+        # tunnel ssh argv.
+        saved = km.sys.platform
+        try:
+            km.sys.platform = "linux"
+            km._open_folder_remote("gpu1", "/work/proj")
+        finally:
+            km.sys.platform = saved
+        argv = self.calls[0]
+        self.assertIn("--", argv, "the host is kept positional")
+        self.assertLess(argv.index("--"), argv.index("gpu1"), "the separator comes before the host")
 
     def test_override_with_host_and_dir_placeholders(self):
         os.environ["ROMP_OPEN_REMOTE_FOLDER"] = "open -a Ghostty --args -e ssh -t {host} cd-to:{dir}"

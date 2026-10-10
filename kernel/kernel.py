@@ -24067,6 +24067,12 @@ def _open_folder_remote(host, cwd):
     d = str(cwd or "").strip() or "~"
     if not host:
         return
+    if not _safe_ssh_host(host):
+        # The session id's host prefix becomes ssh's target here, and any client the socket admits
+        # names that id. Validate it with the same gate attach_remote applies to its host, before it
+        # reaches the terminal's ssh, and keep it positional. Loud on stderr.
+        sys.stderr.write("openFolderRemote: refusing unsafe host %r\n" % host)
+        return
     tmpl = _remote_folder_opener()
     if not tmpl and sys.platform == "darwin":
         # No explicit remote config → FOLLOW the local folder preference's terminal: if the local opener is
@@ -24075,7 +24081,7 @@ def _open_folder_remote(host, cwd):
         # already running, so it would just focus Ghostty and never run the ssh. `-e <cmd>` runs the command.
         app = _local_terminal_app()
         if app:
-            tmpl = "open -na %s --args -e ssh -t {host} 'cd {dir} 2>/dev/null; exec $SHELL -l'" % shlex.quote(app)
+            tmpl = "open -na %s --args -e ssh -t -- {host} 'cd {dir} 2>/dev/null; exec $SHELL -l'" % shlex.quote(app)
     try:
         if tmpl:
             parts = shlex.split(tmpl)
@@ -24083,11 +24089,11 @@ def _open_folder_remote(host, cwd):
         else:
             remote_cmd = "cd %s 2>/dev/null; exec $SHELL -l" % shlex.quote(d)
             if sys.platform == "darwin":
-                script = "ssh -t %s %s" % (shlex.quote(host), shlex.quote(remote_cmd))
+                script = "ssh -t -- %s %s" % (shlex.quote(host), shlex.quote(remote_cmd))
                 argv = ["osascript", "-e", 'tell application "Terminal" to do script %s' % json.dumps(script),
                         "-e", 'tell application "Terminal" to activate']
             else:
-                argv = ["xterm", "-e", "ssh", "-t", host, remote_cmd]   # the universal Linux fallback (mirrors xdg-open's role for _open_folder)
+                argv = ["xterm", "-e", "ssh", "-t", "--", host, remote_cmd]   # the universal Linux fallback (mirrors xdg-open's role for _open_folder); `--` keeps the host positional
         subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         sys.stderr.write("openFolderRemote: %s\n" % traceback.format_exc())
@@ -30284,6 +30290,10 @@ def _update_remote(host, head=None):
     host = str(host or "").strip()
     if not host:
         return False, "no host"
+    if not _safe_ssh_host(host):
+        # The host becomes ssh's target and the left side of git's `host:dir` push URL; validate it
+        # with the same gate attach_remote applies, and keep it positional.
+        return False, "invalid host"
     with _remotes_lock:
         _rr = _remotes.get(host)
     if _rr is not None and _rr.get("checkin_peer"):
@@ -30583,6 +30593,10 @@ def _pull_remote(host):
     host = str(host or "").strip()
     if not host:
         return False, "no host"
+    if not _safe_ssh_host(host):
+        # The host becomes ssh's target and the left side of git's `host:dir` fetch URL; validate it
+        # with the same gate attach_remote applies, and keep it positional.
+        return False, "invalid host"
     with _remotes_lock:
         _rr = _remotes.get(host)
     if _rr is not None and _rr.get("checkin_peer"):
@@ -31993,6 +32007,10 @@ def _start_remote(host):
     host = str(host or "").strip()
     if not host:
         return False, "no host"
+    if not _safe_ssh_host(host):
+        # Validate the host before the update leg's ssh/git or the row status is touched, the same
+        # gate attach_remote applies to its host.
+        return False, "invalid host"
     with _remotes_lock:
         r = _remotes.get(host)
         kport = int((r or {}).get("kernel_port") or _REMOTE_KERNEL_PORT)

@@ -100,6 +100,15 @@ class PullRemote(unittest.TestCase):
     def test_no_host_is_a_no_op(self):
         self.assertEqual(km._pull_remote(""), (False, "no host"))
 
+    def test_a_host_the_guard_refuses_is_rejected_before_any_subprocess(self):
+        # /tunnels/pull takes the host from the request body with no host rule; it becomes the left side
+        # of git's `host:dir` fetch URL. Validate it with the same gate attach_remote applies, before any
+        # ssh or git runs. A refused host here carries a space.
+        calls = self._wire()
+        ok, detail = km._pull_remote("bad host")
+        self.assertEqual((ok, detail), (False, "invalid host"))
+        self.assertEqual(calls, [], "no ssh or git runs for a refused host")
+
     def test_a_checked_in_host_is_refused_with_the_honest_reason(self):
         # This is the observed bug: a sync attempted at a host with no ssh route died with a bare
         # "No route to host". The row knows there is no path — say so, and say where to sync instead.

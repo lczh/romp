@@ -106,6 +106,15 @@ class UpdateRemote(unittest.TestCase):
     def test_no_host_is_a_no_op(self):
         self.assertEqual(km._update_remote(""), (False, "no host"))
 
+    def test_a_host_the_guard_refuses_is_rejected_before_any_subprocess(self):
+        # /tunnels/update takes the host from the request body with no host rule. The host becomes the
+        # left side of git's `host:dir` push URL; validate it with the same gate attach_remote applies,
+        # before any ssh or git runs, and keep it positional. A refused host here carries a space.
+        calls = self._wire()
+        ok, detail = km._update_remote("bad host")
+        self.assertEqual((ok, detail), (False, "invalid host"))
+        self.assertEqual(calls, [], "no ssh or git runs for a refused host")
+
     def test_a_clean_ancestor_remote_is_pushed_reset_and_restarted(self):
         calls = self._wire(apply_out="SYNCED:abcdef0")
         ok, detail = km._update_remote("TESTHOST")

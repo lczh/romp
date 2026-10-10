@@ -46,6 +46,16 @@ class StartRemote(unittest.TestCase):
     def test_no_host_is_a_no_op(self):
         self.assertEqual(km._start_remote(""), (False, "no host"))
 
+    def test_a_host_the_guard_refuses_is_rejected_before_the_update_leg(self):
+        # /tunnels/start takes the host from the request body with no host rule; it flows into
+        # _update_remote's ssh/git. Validate it with the same gate attach_remote applies, before the
+        # update leg runs and before the row status is touched. A refused host here carries a space.
+        seen = []
+        km._update_remote = lambda h: (seen.append(h) or (True, ""))
+        ok, detail = km._start_remote("bad host")
+        self.assertEqual((ok, detail), (False, "invalid host"))
+        self.assertEqual(seen, [], "a refused host never reaches the update/ssh leg")
+
     def test_up_to_date_host_gets_a_plain_boot_and_a_fresh_token(self):
         km._update_remote = lambda h: (True, "already up to date (abc1234)")
         ok, detail = km._start_remote(HOST)
