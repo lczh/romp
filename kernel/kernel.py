@@ -2638,6 +2638,9 @@ def _version_info(authed=False):
             # run: a hub measures drift on the checkout and offers a restart on the code (plans/drift-by-running-code.md)
             "checkout_sha": _local_head(short=True) or "", "restart_pending": _restart_pending(),
             "boot": _BOOT_ID,   # lets a page retire update offers from a previous kernel life (2026-08-15)
+            # a linked kernel holding a row for this one pulls its push events (GET /push/events) when this is set, and this
+            # one stops forwarding to that kernel once ITS /version carries it (plans/federated-push.md, the transition)
+            "pushPull": PUSH_PULL_PROTO,
             "uptime_s": int(time.time() - _STARTED), "dist_ver": _dist_ver(), "bundles": bundles,
             # how often a backend's liveness read RAISED since boot and its previous rows were served instead
             # (_backend_rows: the loud, counted stand-down that replaced the tmux-presence fallback, 2026-09-11)
@@ -26648,6 +26651,7 @@ def _remote_public(r):
             # session list is unavailable, in its own words; "" otherwise. The row says so rather than "no kernel"
             "listingError": (r.get("listing_error") or "") if (r.get("status") or "down") == "up" else "",
             "trust": r.get("trust") or "directed",   # per-host federation trust: trusted|directed|isolated
+            "pushPulled": _push_pull_eligible(r),    # this kernel pulls its push events (plans/federated-push.md)
             "kernelSha": r.get("kernel_sha") or "", "localSha": (_local_head(short=True) or _kernel_sha() or ""),
             # The RELEASE each side descends from (the user 2026-07-30): a sha alone says nothing without
             # your own sha in your head, and the whole point of the row is a comparison. "" when the remote
@@ -27359,6 +27363,7 @@ def _poll_remote_version(r):
             csha = r.get("checkout_sha") or None                   # the last good value the row held, as kernel_sha above
         rp = j.get("restart_pending")
         return {"sha": sha, "ver": ver, "shaConfirmed": sha_ok,
+                "pushPull": _push_pull_proto(j.get("pushPull")),   # 0 from a build that does not serve /push/events
                 "checkoutSha": csha, "restartPending": rp if isinstance(rp, bool) else None,
                 "autoNudge": an if isinstance(an, bool) else None,
                 "settings": st if isinstance(st, dict) else None,
@@ -32304,6 +32309,7 @@ def _tunnel_supervisor():
                         r["settings"] = (rver or {}).get("settings")      # its whole kernel-side dict (None = older kernel)
                         r["settingsGt"] = (rver or {}).get("settingsGt")  # each store's last-applied stamp (T248b: the adopt seam)
                         r["settingsPinned"] = (rver or {}).get("settingsPinned")   # its pinned stores (phase two: the gear's scoped view)
+                        r["push_pull"] = (rver or {}).get("pushPull") or 0   # it serves /push/events: pulled, and no longer forwarded to
                     if ruse is not None:
                         # {} = the host ANSWERED with nothing to show → clear; None = no answer (blip/
                         # rate-gate) → keep the last reading (see _poll_remote_usage)
@@ -32391,6 +32397,7 @@ def _tunnel_supervisor():
             # None of it used to reach disk — only the act routes saved — so the file could sit frozen on a
             # failure long after the row recovered. Signature-gated: a steady fleet writes nothing.
             _remotes_save_if_changed()
+            _push_pull_reconcile()       # a puller for every trusted row whose kernel serves its push events (plans/federated-push.md)
         except Exception:
             sys.stderr.write("tunnel-supervisor: %s\n" % traceback.format_exc())
         _tunnel_wake.wait(_supervisor_wait_s(time.time()))
@@ -67075,10 +67082,9 @@ def _build_feed_locked(now, live_map, sig):
         _push_notify(_t, _b, _sid, _badge, kind="card", card_id=_iid)
         _buzzed.append({"title": _t, "body": _b, "sid": _sid, "kind": "card", "cardId": _iid})
     if _buzzed:
-        # …and to trusted peers' devices (plans/federated-push.md): the phone subscribed at the
-        # always-on box must buzz for THIS kernel's cards too — which kernel detected an event is
-        # romp's business, never the user's. Only what buzzed HERE travels, so a peer's phone
-        # hears each turn end once too.
+        # …and to the devices of trusted peers that do not pull yet (plans/federated-push.md, the legacy
+        # leg): only what buzzed HERE travels. A peer that pulls reads this build's candidates from the
+        # ring _feed_notifications filled, gated by its own switches, never by these.
         _push_forward(_buzzed)
     _badge_push(_badge)                                   # app-icon count for installed shells (proposal 3)
     return feed
@@ -68162,23 +68168,35 @@ def _feed_notifications_diff(feed):
             # in working now, but announced before: the mark is what keeps a return to that column silent
             nxt[iid] = {"sid": sid, "board": board, "column": None, "announced": ent["announced"], "announcedAt": ent.get("announcedAt")}
     out = []
+    ring = []                                        # the same entries as pull candidates (plans/federated-push.md, the pull section)
     if not first_boot:
         cards = _notify_cards()
         for iid, a, col, e in entered:
-            if not _notify_card_effective(cards, iid, e["sid"]):
-                continue
+            bell = _push_explicit_bell(e["sid"], iid, cards)
+            if bell is False:
+                continue                             # muted on this machine: no device anywhere hears it, and nothing is told
             if e["announced"] == col and not _notify_user_acted_since(e["sid"], iid, e["announcedAt"]):
                 continue                             # the same (card, column), told already, nothing of the user's since
+            # Told from here on, whichever devices hear it: the announcement is the card ENTERING the column, offered to
+            # this machine's devices (gated below by this machine's switches) and to every kernel that pulls from this
+            # one (gated there by theirs). So a card that entered while this machine's master was off and comes back to
+            # the same column with nothing of the user's in between stays quiet, like the first boot's seed: it was on
+            # the board all along (2026-10-10; until the pull, an unarmed entry left no mark).
             e["announced"], e["announcedAt"] = col, now_t
             needs_you = col == _board_needs_you(a.get("board"))   # the board's badge category: the authoritative state, not the words (the same read as _needs_you_count)
             what = "Needs you" if needs_you else "Completed"
             txt = str(a.get("text") or "").strip()
-            out.append((_notify_title(a.get("name") or "session", needs_you),
-                        "%s: %s" % (what, txt[:140] if txt else "a task changed state"),
-                        e["sid"], iid))
+            title = _notify_title(a.get("name") or "session", needs_you)
+            body = "%s: %s" % (what, txt[:140] if txt else "a task changed state")
+            ring.append({"kind": "card", "sid": e["sid"], "title": title, "body": body, "name": str(a.get("name") or ""),
+                         "cardId": iid, "column": col, "at": now_t, "bell": "on" if bell else "default",
+                         "turnKey": _turn_end_key(e["sid"]) if e["sid"] else 0})
+            if _notify_card_effective(cards, iid, e["sid"]):   # THIS machine's devices: card > session > its own master
+                out.append((title, body, e["sid"], iid))
     _NOTIFY_PREV[0] = nxt
     _notify_prev_write(nxt)                          # after the marks: the file records what was told
     _prune_notify_cards(set(cur) | set(nxt))         # a card still remembered is not gone
+    _push_ring_add(ring)                             # after the snapshot moved: a serve re-validates against it (_push_event_current)
     if first_boot:
         sys.stderr.write("[notify] no snapshot on disk — seeded %d cards from the board silently\n" % len(nxt))
     return out
@@ -69253,23 +69271,24 @@ def _push_notify(title, body, sid="", badge=None, kind="card", card_id="", host=
 
 
 def _push_forward(events):
-    """The federated half of the push sink (plans/federated-push.md; the user 2026-08-08, who wants
-    one device subscription to buzz for EVERY connected kernel): hand this kernel's fresh bell
-    events — [{title, body, sid, kind, cardId}] — to every attached TRUSTED peer, and each peer
-    delivers them to the devices subscribed to IT (kind/cardId ride so a tap on the mirrored
-    notification lands on the card, not just the session; a peer of an older build ignores them). Rides the channel every kernel-to-kernel control call already
-    rides (_peer_call: the pair's tunnel + the token exchanged at attach) — no new legs, no new
-    trust surface. Only events THIS kernel detected are ever forwarded, and /push/relay mirrors to
-    devices only, never onward, so a cycle of attachments cannot echo an event back. Fire-and-forget
-    on a daemon thread (the _push_notify discipline); a peer that is down misses the moment by
-    design — its own dashboard was equally blind while it was down. No status filter on purpose: a
-    flapping tunnel mark must not cost a bell, and a dead peer just times out inside the thread."""
+    """The LEGACY push-from-origin leg (plans/federated-push.md), kept only for the version transition:
+    hand this kernel's fresh bell events — [{title, body, sid, kind, cardId}] — to every attached
+    TRUSTED peer whose kernel does NOT pull them (its /version advertises no `pushPull`, so its row here
+    carries no `push_pull`), and that peer delivers them to the devices subscribed to IT. A peer that
+    pulls hears every event through GET /push/events instead (the pull section below), so this stops
+    for each peer the moment the supervisor's poll of its /version sees the capability, and the peer
+    ignores a relay from a kernel it pulls from as a belt. Delete this function, the /push/relay route
+    and the forward calls once auto-update has converged every linked kernel on a pulling build (the
+    removal condition, written into the plan). Rides _peer_call (the pair's tunnel + the token
+    exchanged at attach); /push/relay mirrors to devices only, never onward, so a cycle of attachments
+    cannot echo. Fire-and-forget on a daemon thread; a dead peer just times out inside the thread."""
     if not events:
         return
     with _remotes_lock:
         peers = [dict(r) for r in _remotes.values()
                  if (r.get("trust") or "directed") == "trusted"
-                 and r.get("local_port") and r.get("token")]
+                 and r.get("local_port") and r.get("token")
+                 and not _push_pull_proto(r.get("push_pull"))]   # that peer pulls: it hears every event by GET /push/events
     if not peers:
         return
     body = {"origin": _self_host(), "events": [dict(e) for e in events]}
@@ -69282,6 +69301,364 @@ def _push_forward(events):
                 pass                               # one unreachable peer must not block the rest
 
     threading.Thread(target=run, daemon=True).start()
+
+
+# ── federated push, the PULL direction (plans/federated-push.md, 2026-10-10) ──────────────────────────────────────────────
+# Every other cross-machine flow in romp (the dashboard relay, the supervisor's polls, settings converge, auto-update, the
+# postal peer exchange) is started by the kernel that holds the row and reads toward itself; push was the one flow the
+# ORIGIN started, toward rows in its own table, and with ssh-attach only the attacher holds a row, so an attached
+# machine's events never reached the phone subscribed at the attacher. Push now runs the same way round as the rest: the
+# kernel holding a row PULLS its peer's push events, over the row's own port and token (the credentials the dashboard
+# relay already uses, so push scope = dashboard scope: the hosts a dashboard shows are exactly the rows its kernel holds).
+#
+# THE ORIGIN'S HALF. Every event this kernel DETECTS, from its own stores (a card entering a notified column,
+# _feed_notifications_diff; a human turn ending, _turn_notify_tick), lands in an in-memory ring as a CANDIDATE, whatever
+# this kernel's own switches say: those govern this machine's own devices only. The one gate applied here is the explicit
+# bell the user set on THIS machine's stores, which the merged dashboard writes by sid to the kernel owning the session: an
+# explicit mute (a card's bell off, else its session's) drops the event before it is a candidate; an explicit arm rides as
+# bell "on"; no override rides as "default", which the subscriber resolves against its own master. Keyed (this kernel
+# life's _BOOT_ID, seq). A puller long-polls GET /push/events?after=<boot>:<seq>&wait=<s> and the answer returns the moment
+# an event lands (the postal /peer-exchange shape: an empty-handed answer parks on a wake, never a polling cadence).
+# STALENESS, at serve time and with no time limit (_push_event_current): a card event is served only while the card still
+# sits in that column and the user has not acted on it since; a turn event only while that turn end is still the session's
+# latest. A cursor this life cannot serve from (no cursor, another life's, or one the ring has overflowed past) resumes at
+# the newest event: the answer says why and how many were skipped, and the puller says so in one loud line.
+PUSH_PULL_PROTO = 1          # advertised in /version as `pushPull`: a peer pulls from a kernel whose /version carries it
+PUSH_RING_CAP = 256          # candidates kept per kernel life; a puller further behind resumes at the newest, loudly
+PUSH_EVENTS_WAIT_MAX = 25.0  # the longest one GET /push/events parks before answering empty-handed
+PUSH_PULL_WAIT = 20          # what a puller asks for (the postal exchange's EXCHANGE_WAIT)
+_PUSH_RING = collections.deque(maxlen=PUSH_RING_CAP)   # the candidates, oldest first, each {seq, kind, sid, ...}
+_PUSH_RING_SEQ = [0]                                   # the newest seq this life issued (0 = none yet)
+_push_ring_cond = threading.Condition()                # guards both; a new candidate notifies every parked GET
+# what an event carries over the wire; the ring's other fields (column, at) are the origin's own staleness evidence
+_PUSH_EVENT_WIRE = ("seq", "kind", "sid", "title", "body", "name", "cardId", "bell", "turnKey")
+
+
+def _push_pull_proto(v):
+    """A peer's advertised pull protocol as an int, 0 when it advertised none (an older build) or something unreadable."""
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
+
+
+def _push_explicit_bell(sid, item_id="", cards=None):
+    """The bell the user set on THIS machine for an event: the card's own override first (a card event), else the
+    session's; True/False for an explicit choice, None for no override (the event follows the subscriber's default).
+    The master is NOT read here: it is this machine's switch for this machine's devices (`cards` lets a per-build
+    caller resolve against one read of the store)."""
+    if item_id:
+        v = (cards if cards is not None else _notify_cards()).get(item_id)
+        if v is not None:
+            return bool(v)
+    return _session_flag_raw(sid, "notify") if sid else None
+
+
+def _push_ring_add(events):
+    """File detected candidates in the ring (each a dict; the seq is assigned here) and release every parked GET."""
+    if not events:
+        return
+    with _push_ring_cond:
+        for ev in events:
+            _PUSH_RING_SEQ[0] += 1
+            e = dict(ev)
+            e["seq"] = _PUSH_RING_SEQ[0]
+            _PUSH_RING.append(e)
+        _push_ring_cond.notify_all()
+
+
+def _push_cursor_parse(s):
+    """'<boot>:<seq>' as (boot, seq), or None for anything else. The boot is _BOOT_ID's text, split at the LAST colon."""
+    boot, sep, seq = str(s or "").rpartition(":")
+    if not sep or not boot or not seq.isdigit():
+        return None
+    return boot, int(seq)
+
+
+def _push_event_current(ev):
+    """Is a ring event still news, read at serve time from the stores that own the answer (no time limit)? A turn
+    event: that turn end is still the session's latest (_turn_end_key). A card event: the card still sits in the column
+    it entered (the notify snapshot, the last feed build's view) and the user has not acted on it since
+    (_notify_user_acted_since, the override journal). Either: the bell set on this machine is not now an explicit mute."""
+    sid = str(ev.get("sid") or "")
+    if ev.get("kind") == "turn":
+        if _push_explicit_bell(sid) is False:
+            return False
+        return bool(ev.get("turnKey")) and _turn_end_key(sid) == ev.get("turnKey")
+    iid = str(ev.get("cardId") or "")
+    if _push_explicit_bell(sid, iid) is False:
+        return False
+    ent = (_NOTIFY_PREV[0] or {}).get(iid)
+    if not ent or ent.get("column") != ev.get("column"):
+        return False
+    return not _notify_user_acted_since(sid, iid, ev.get("at"))
+
+
+def _push_events_serve(after, wait):
+    """One GET /push/events answer: {boot, next, events[, stale][, reset, skipped]}. `after` is the puller's cursor
+    ('<boot>:<seq>', '' for none); `wait` the seconds to park when nothing is newer (capped). A cursor of this life the
+    ring still covers parks until an event newer than it lands, then answers every newer event that is still current
+    (_push_event_current; `stale` counts the rest) and `next` = the newest seq examined. Anything else resets: `reset`
+    is no-cursor (the puller holds none), restarted (another life's cursor, or one this life never issued) or overflow
+    (the ring dropped events past it), `skipped` the events this answer passes over, and `next` the newest seq, so the
+    puller resumes at the newest event. The wait is the only lock held across time, and nothing else takes it."""
+    cur = _push_cursor_parse(after) if after else None
+    try:
+        wait = max(0.0, min(float(wait or 0), PUSH_EVENTS_WAIT_MAX))
+    except (TypeError, ValueError):
+        wait = 0.0
+    with _push_ring_cond:
+        if cur is not None and cur[0] == _BOOT_ID and cur[1] == _PUSH_RING_SEQ[0] and wait > 0:
+            _push_ring_cond.wait_for(lambda: _PUSH_RING_SEQ[0] > cur[1], timeout=wait)
+        newest = _PUSH_RING_SEQ[0]
+        oldest = _PUSH_RING[0]["seq"] if _PUSH_RING else newest + 1
+        reset = None
+        if cur is None:
+            reset = "no-cursor"
+        elif cur[0] != _BOOT_ID or cur[1] > newest:
+            reset = "restarted"
+        elif cur[1] < oldest - 1:
+            reset = "overflow"
+        if reset:
+            return {"boot": _BOOT_ID, "next": newest, "events": [], "reset": reset,
+                    "skipped": newest - cur[1] if reset == "overflow" else newest}
+        batch = [dict(e) for e in _PUSH_RING if e["seq"] > cur[1]]
+    served = [{k: e.get(k) for k in _PUSH_EVENT_WIRE} for e in batch if _push_event_current(e)]
+    out = {"boot": _BOOT_ID, "next": batch[-1]["seq"] if batch else cur[1], "events": served}
+    if len(served) < len(batch):
+        out["stale"] = len(batch) - len(served)
+    return out
+
+
+# THE PULLER'S HALF (the hub, the kernel a phone subscribed at). One thread per TRUSTED row that has a port and a token
+# and whose /version advertises pushPull, started by the supervisor's pass (_push_pull_reconcile) and gone when the row
+# is. Its cursor is kept on disk per row (push-pull-cursors.json), so this kernel's restart resumes where it left off and
+# the events fired meanwhile are served if still current. The sids wear THIS kernel's name for the row (the dashboard's
+# tab address, host-prefix.ts), never the name the origin declares for itself. THE GATE here (_push_pull_gate) is this
+# kernel's: the master off holds every event, the turn switch off holds the turn events, a "default" bell resolves to the
+# master (on, past the first gate), and the one-buzz-per-turn-end rule is _buzz_claim keyed on the prefixed sid and the
+# ORIGIN's turn-end key, so a turn end and the card it raises buzz once between them whichever lands first. Each event
+# passes the gate at most once, by (row, boot, seq), a backstop beside the cursor.
+PUSH_PULL_SEEN_CAP = 2048
+_push_pullers = {}                   # row name -> its puller Thread
+_push_pull_wakes = {}                # row name -> Event: a puller in its retry backoff dials again the pass its row answers
+_push_pull_fails = {}                # row name -> the puller's consecutive failures (0 = its last call answered)
+_push_pull_lock = threading.Lock()
+_PUSH_PULL_SEEN = collections.OrderedDict()   # (row, boot, seq) -> True, the newest PUSH_PULL_SEEN_CAP
+_PUSH_PULL_CURSORS = [None]          # row name -> '<boot>:<seq>', loaded from disk on first use
+_push_pull_cursor_lock = threading.Lock()
+_PUSH_PULL_SAID = {}                 # row name -> the last fault said for it, so each distinct one is said once
+_PUSH_PULL_CURSOR_FAULT = [None]     # the cursor file's last write failure, said once per episode
+_PUSH_RELAY_IGNORED_SAID = set()     # origins whose relays this kernel ignored (it pulls them), each said once a life
+
+
+def _push_pull_cursors_path():
+    return jd.STATE / "push-pull-cursors.json"      # resolved per call: tests redirect jd.STATE
+
+
+def _push_pull_cursor(name):
+    """The cursor this kernel holds for row `name` ('' for none). A file that cannot be read reads as no cursors, said
+    once by the reader: each puller then resumes at its peer's newest event and says so."""
+    with _push_pull_cursor_lock:
+        if _PUSH_PULL_CURSORS[0] is None:
+            try:
+                raw = _read_state_json(_push_pull_cursors_path(), expect=dict)
+            except _StateUnreadable as e:
+                sys.stderr.write("romp: web push: %s — every linked machine's events resume at its newest\n" % e)
+                raw = None
+            _PUSH_PULL_CURSORS[0] = {str(k): str(v) for k, v in (raw or {}).items()
+                                     if isinstance(v, str) and _push_cursor_parse(v)}
+        return _PUSH_PULL_CURSORS[0].get(name, "")
+
+
+def _push_pull_cursor_set(name, cursor):
+    """Record the cursor for row `name`, in memory and on disk (0600, the one atomic write door), when it moved."""
+    with _push_pull_cursor_lock:
+        cur = dict(_PUSH_PULL_CURSORS[0] or {})
+        if cur.get(name) == cursor:
+            return
+        cur[name] = cursor
+        _PUSH_PULL_CURSORS[0] = cur
+        try:
+            _write_state_json(_push_pull_cursors_path(), json.dumps(cur, sort_keys=True), note=False, mode=0o600)
+        except _StateUnwritable as e:
+            if _PUSH_PULL_CURSOR_FAULT[0] != str(e):     # once per episode; a landed write ends it
+                _PUSH_PULL_CURSOR_FAULT[0] = str(e)
+                sys.stderr.write("romp: web push: %s — a restart of this kernel resumes each linked machine's events at "
+                                 "its newest\n" % e)
+            return
+        _PUSH_PULL_CURSOR_FAULT[0] = None
+
+
+def _push_pull_say(name, key, line):
+    """Say `line` on stderr unless the same fault (`key`) was the last one said for row `name`."""
+    if _PUSH_PULL_SAID.get(name) == key:
+        return
+    _PUSH_PULL_SAID[name] = key
+    sys.stderr.write(line.rstrip("\n") + "\n")
+
+
+def _push_pull_eligible(r):
+    """Does this kernel pull row `r`'s push events: trusted (only a host the user marked trusted may buzz their devices),
+    reachable the dashboard's way (a port and a token), and its kernel advertising the pull protocol?"""
+    return (bool(r) and (r.get("trust") or "directed") == "trusted" and bool(r.get("local_port"))
+            and bool(r.get("token")) and _push_pull_proto(r.get("push_pull")) > 0)
+
+
+def _push_pulled_row(origin):
+    """Is the kernel that declares itself `origin` one this kernel pulls from? Mapped onto the row by the name the row
+    holds or the self-name its /version taught it (_peer_key). The /push/relay route ignores such a kernel's relays."""
+    key = _peer_key(origin)
+    with _remotes_lock:
+        r = _remotes.get(key)
+        return _push_pull_eligible(dict(r)) if r is not None else False
+
+
+def _push_pull_reconcile():
+    """The supervisor pass's step: a puller for every eligible row that has none running, and a retry now for a puller
+    waiting out its backoff whose row answered this pass (the row answering is the event the retry waits for)."""
+    with _remotes_lock:
+        rows = {h: dict(r) for h, r in _remotes.items()}
+    with _push_pull_lock:
+        for name, r in rows.items():
+            if not _push_pull_eligible(r):
+                continue
+            t = _push_pullers.get(name)
+            if t is None or not t.is_alive():
+                _push_pull_wakes.setdefault(name, threading.Event())
+                t = threading.Thread(target=_push_pull_loop, args=(name,), name="push-pull:%s" % name, daemon=True)
+                _push_pullers[name] = t
+                t.start()
+            elif r.get("status") == "up" and _push_pull_fails.get(name):
+                _push_pull_wakes[name].set()
+
+
+@_stage_marked("push.pull")                                  # its gate reads stores and pushes: marked for the census (T401 (5a))
+def _push_pull_loop(name):
+    """One puller: ask, gate what came back, move the cursor, ask again. The origin's long-poll sets the pace, so a healthy
+    loop is one parked request. A call that does not answer waits out an exponential backoff (capped at 30 s, the postal
+    dialer's ladder) or the pass its row answers again, whichever is first. Exits when the row stops being eligible."""
+    wake = _push_pull_wakes.setdefault(name, threading.Event())
+    try:
+        while True:
+            with _remotes_lock:
+                r = dict(_remotes.get(name) or {})
+            if not _push_pull_eligible(r):
+                break
+            if _push_pull_once(name, r):
+                _push_pull_fails[name] = 0
+                continue
+            n = _push_pull_fails[name] = _push_pull_fails.get(name, 0) + 1
+            wake.clear()
+            wake.wait(min(30, 2 ** min(n, 5)))
+    finally:
+        with _push_pull_lock:
+            if _push_pullers.get(name) is threading.current_thread():
+                _push_pullers.pop(name, None)
+            _push_pull_fails.pop(name, None)
+
+
+_PUSH_RESET_WHY = {
+    "no-cursor": "this kernel holds no record of where it left off",
+    "restarted": "its kernel restarted since this kernel last heard from it",
+    "overflow": "it fired more than it keeps while this kernel was away",
+}
+
+
+def _push_pull_get(r, path, timeout):
+    """GET `path` on row `r`'s kernel through its forward, with its token in the X-Romp-Token header (never the URL, which
+    a log line could print). (status, parsed dict), status 0 with {"error"} when the call never got an answer."""
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", int(r.get("local_port") or 0), timeout=timeout)
+        c.request("GET", path, headers={"X-Romp-Token": str(r.get("token") or "")})
+        resp = c.getresponse()
+        data = resp.read()
+        c.close()
+        try:
+            j = json.loads(data.decode("utf-8") or "{}")
+        except ValueError:
+            j = {}
+        return resp.status, (j if isinstance(j, dict) else {})
+    except Exception as e:
+        return 0, {"error": str(e)[:160]}
+
+
+def _push_pull_once(name, r):
+    """One long-poll of row `name`'s /push/events and the gate over what it answers. True when it answered (the loop asks
+    again at once), False when it did not (the loop backs off). The events pass the gate BEFORE the cursor moves on disk:
+    a crash between the two re-offers them to the next life, which the origin re-validates, rather than losing them."""
+    cursor = _push_pull_cursor(name)
+    path = "/push/events?wait=%d" % PUSH_PULL_WAIT + (("&after=" + quote(cursor, safe="")) if cursor else "")
+    st, j = _push_pull_get(r, path, PUSH_PULL_WAIT + 10)
+    if st == 0:
+        return False                                     # unreachable: the row's own status says so on the panel
+    boot, nxt, events = j.get("boot"), j.get("next"), j.get("events")
+    if (st != 200 or not isinstance(boot, str) or not boot or not isinstance(nxt, int) or isinstance(nxt, bool) or nxt < 0
+            or not isinstance(events, list)):
+        _push_pull_say(name, "http-%s" % st, "romp: web push: '%s' answered the event pull with HTTP %s%s — its events do "
+                       "not reach this kernel's devices until it answers" % (name, st, (": %s" % j.get("error")) if j.get("error") else ""))
+        return False
+    _PUSH_PULL_SAID.pop(name, None)                      # it answers: the next fault is news again
+    if j.get("reset"):
+        sys.stderr.write("romp: web push: events from '%s' resume at its newest — %s; %d event(s) it fired meanwhile "
+                         "skipped\n" % (name, _PUSH_RESET_WHY.get(j.get("reset"), str(j.get("reset"))),
+                                        int(j.get("skipped") or 0)))
+    fresh = []
+    for ev in events:
+        seq = ev.get("seq") if isinstance(ev, dict) else None
+        if not isinstance(seq, int) or isinstance(seq, bool):
+            continue
+        k = (name, boot, seq)
+        with _push_pull_lock:                            # one memo for every row's puller
+            if k in _PUSH_PULL_SEEN:
+                continue                                 # passed the gate once already (the backstop beside the cursor)
+            _PUSH_PULL_SEEN[k] = True
+            while len(_PUSH_PULL_SEEN) > PUSH_PULL_SEEN_CAP:
+                _PUSH_PULL_SEEN.popitem(last=False)
+        fresh.append(ev)
+    if fresh:
+        _push_pull_gate(name, fresh)
+    _push_pull_cursor_set(name, "%s:%d" % (boot, nxt))
+    return True
+
+
+def _push_pull_gate(name, events):
+    """THIS kernel's gate over events pulled from row `name` (the section comment): trust re-read now (a row lowered while
+    the call was parked buzzes nothing), the master and the turn switch, the bell, then the one buzz per turn end. Returns
+    how many buzzed. Held events are said in one line per batch, as the relay's are."""
+    tier = _host_trust(name)
+    if tier != "trusted":
+        _push_pull_say(name, "tier", "romp: web push: dropped %d event(s) pulled from '%s' (its trust here is '%s'; only a "
+                       "trusted host's events reach this kernel's devices — the network panel's per-host selector raises it)"
+                       % (len(events), name, tier or "unknown"))
+        return 0
+    held = {"all": 0, "turn": 0}
+    n = 0
+    for ev in events:
+        kind = "turn" if ev.get("kind") == "turn" else "card"
+        if ev.get("bell") not in ("on", "default"):
+            continue                                     # an explicit mute never leaves its origin; anything else is unreadable
+        if not _notify_all_on():
+            held["all"] += 1
+            continue
+        if kind == "turn" and not _notify_turns_on():
+            held["turn"] += 1
+            continue
+        t, b = str(ev.get("title") or ""), str(ev.get("body") or "")
+        if not (t or b):
+            continue
+        sid0 = str(ev.get("sid") or "")
+        sid = "%s:%s" % (name, sid0) if sid0 else ""
+        card_id = str(ev.get("cardId") or "") if kind == "card" else ""
+        sname = str(ev.get("name") or "")
+        if not _buzz_claim(sid, ev.get("turnKey") or 0, "bell" if kind == "card" else "turn"):
+            if kind == "card":                           # the turn end already buzzed: the card replaces its notification quietly
+                _push_notify(t, b, sid, kind="card", card_id=card_id, host=name, quiet=True, name=sname)
+            continue
+        _push_notify(t, b, sid, kind=kind, card_id=card_id, host=name, name=sname)   # badge omitted: the origin's count is not ours
+        n += 1
+    if held["all"] or held["turn"]:
+        sys.stderr.write("romp: web push: held %d event(s) pulled from '%s' — %d under this kernel's main notification "
+                         "switch (off), %d turn-finished event(s) under its turn switch (off); the switches here decide "
+                         "what reaches the devices subscribed here\n" % (held["all"] + held["turn"], name, held["all"], held["turn"]))
+    return n
 
 
 # ── the turn-finished push (the bell popover's third row, 2026-09-05) ─────────────────────────────
@@ -69387,21 +69764,28 @@ def _turn_notify_tick(now, live_map):
         _TURN_PREV[sid] = key
         if prev is None or key == prev or not key:
             continue                                     # baseline / nothing new / no settle evidence
-        if not (_notify_all_on() and _notify_turns_on() and _notify_session_effective(sid)):
-            continue
         if _turn_opener(reg) != "human":
             continue                                     # the CLI or romp opened this turn (a subagent's task notification,
             #                                              a scheduled prompt, a nudge): nobody asked the user anything, so
             #                                              nothing to buzz about — and no claim spent, the bell event's is its own
-        if not _buzz_claim(sid, key, "turn"):
-            continue                                     # a bell event already buzzed for this turn end
+        bell = _push_explicit_bell(sid)
+        if bell is False:
+            continue                                     # the session's own bell is off on this machine: no device hears it
         body = _first_line(_last_assistant_text(s.get("path") or "")) or "finished a turn"
         sname = str(s.get("name") or _name_of(sid) or sid[:8])
         title = _notify_title(sname)                             # a turn end is never a needs-you
+        # a pull candidate whatever THIS machine's switches say: they govern its own devices, and a kernel pulling from
+        # this one applies its own (plans/federated-push.md, the pull section)
+        _push_ring_add([{"kind": "turn", "sid": sid, "title": title, "body": body, "name": sname,
+                         "bell": "on" if bell else "default", "turnKey": key}])
+        if not (_notify_all_on() and _notify_turns_on() and _notify_session_effective(sid)):
+            continue
+        if not _buzz_claim(sid, key, "turn"):
+            continue                                     # a bell event already buzzed for this turn end
         _push_notify(title, body, sid, kind="turn", name=sname)  # badge omitted: the count rides its own push; the routing block carries the name the title wears
         fired.append({"title": title, "body": body, "sid": sid, "kind": "turn"})   # the kind rides to peers too, so their tap lands the same way
     if fired:
-        _push_forward(fired)                             # peers' phones hear it too, the bell-event way
+        _push_forward(fired)                             # the legacy leg, to peers that do not pull yet
     return fired
 
 
@@ -81108,6 +81492,19 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, json.dumps({"key": pub}), "application/json", cache="no-cache")
                 except RuntimeError as e:
                     return self._send(500, str(e), "text/plain")
+            if p == "/push/events":
+                # a linked kernel PULLING this one's push events (plans/federated-push.md, the pull section;
+                # _push_events_serve): behind the serve token like every route a row's holder calls, the token
+                # that row already carries for the dashboard relay. A long-poll: it parks up to `wait` seconds
+                # until an event newer than `after` lands. A malformed cursor is the caller's bug, said as a 400.
+                _pa = (q.get("after") or [""])[0]
+                if _pa and _push_cursor_parse(_pa) is None:
+                    return self._send(400, "bad cursor", "text/plain")
+                try:
+                    _pw = float((q.get("wait") or ["0"])[0] or 0)
+                except ValueError:
+                    return self._send(400, "bad wait", "text/plain")
+                return self._send(200, json.dumps(_push_events_serve(_pa, _pw)), "application/json", cache="no-cache")
             if p == "/push/pending":
                 # the page's question on every coming-back (the ledger block above _push_ledger): every push to THIS
                 # device — its own subscription endpoint — that nobody has settled, newest first, each wearing its
@@ -81629,6 +82026,15 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, "bad json", "text/plain")
                 if not origin or not isinstance(events, list):
                     return self._send(400, "missing origin or events", "text/plain")
+                if _push_pulled_row(origin):
+                    # this kernel PULLS that kernel's events (plans/federated-push.md, the transition): they arrive by
+                    # GET /push/events, gated here once, so a relay from it is the same events a second time. The
+                    # origin stops relaying once its poll of our /version sees pushPull; this holds the gap. Said once
+                    if origin not in _PUSH_RELAY_IGNORED_SAID:
+                        _PUSH_RELAY_IGNORED_SAID.add(origin)
+                        print("romp: web push: ignoring events relayed by '%s' — this kernel pulls its events instead, "
+                              "so they arrive once" % origin, file=sys.stderr)
+                    return self._send(200, json.dumps({"ok": True, "mirrored": 0, "pulled": True}), "application/json")
                 tier = _host_trust(origin)
                 if tier != "trusted":
                     print("romp: web push: dropped %d bell event(s) relayed from '%s' (its trust "

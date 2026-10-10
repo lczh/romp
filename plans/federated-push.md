@@ -1,72 +1,195 @@
-# Federated push: one subscription buzzes for every connected kernel
+# Federated push: one subscription buzzes for every linked kernel
 
-Status: IMPLEMENTED, landing in the commit that adds this file.
+Status: the PULL direction is the design of record (2026-10-10). It replaces push-from-origin
+(2026-08-08), which stays only as a transition leg with a written removal condition (below).
 
-The ask (the user 2026-08-08, minutes after installing the home-screen app): with kernels
-linked, having to think about WHICH kernel a notification comes from is exactly the mechanics
-romp exists to hide — a device subscribed at one kernel should get the bell events of every
-kernel connected to it. Concretely: the phone is installed against the always-on box, the
-laptop's sessions do the day's work, and the laptop's "needs you" must still buzz the pocket.
+The ask (the user 2026-08-08, minutes after installing the home-screen app): with kernels linked,
+having to think about WHICH kernel a notification comes from is exactly the mechanics romp exists
+to hide. A device subscribed at one kernel should get the bell events of every kernel connected to
+it. The phone is installed against the always-on box, the laptop's sessions do the day's work, and
+the laptop's "needs you" must still buzz the pocket.
 
 **The invariant: push scope = dashboard scope.** The dashboard you subscribed from shows every
-attached host's sessions merged together; the bell you tapped there means "notify me about all
-of this", not "about the slice this kernel happens to own".
+linked host's sessions merged together, and the bell you tapped there means "notify me about all of
+this", not "about the slice this kernel happens to own". The hosts a dashboard shows are exactly the
+rows its kernel holds: `_remote_ws` relays a host's socket only through a row's port and token, and
+404s without one. So the hosts whose events reach a device are exactly the rows held by the kernel
+the device subscribed at, minus the ones the user has not marked trusted.
 
-## Why the gap existed
+## Why push-from-origin failed
 
-The merged multi-host view is assembled in the BROWSER (`federation.js`: one socket per kernel,
-ids prefixed `host:`); the serving kernel splices relay connections and reads nothing. So the
-kernel that holds a push subscription never sees another host's cards, and its bell detector
-(`_feed_notifications`, diffing fresh feed builds) fires for local sessions only.
+The first design (2026-08-08) forwarded at the event source: when a kernel's bell fired, its
+`_push_forward` POSTed the event to `/push/relay` on every trusted row in its OWN `_remotes`, and
+the receiver mirrored it to its own devices. Two things were wrong with that.
 
-## Design: forward at the event source, mirror at the subscriber
+1. **The topology is one-way.** With ssh-attach (the default way to link a machine), only the
+   attacher holds a row: the hub dialed the laptop, the hub holds the laptop's port and token, and
+   the laptop holds nothing for the hub. The laptop's `_push_forward` had nobody to send to, so its
+   turn ends and needs-you cards never reached the phone subscribed at the hub. Only the two-way
+   arrangements (check-in, "Share my sessions") gave the origin a row back, and those are the
+   exception.
+2. **The origin gated on its own switches.** The forward ran only for events that buzzed on the
+   ORIGIN: its master, its turn switch and its bells. On an attached machine the master and turn
+   switch are absent (nobody opens that machine's popover; the user toggles the hub's), so they read
+   off and nothing was forwarded even where a row existed. A latent bug rode on the same gate: when
+   the origin's own turn push claimed the turn end's one buzz (`_buzz_claim`), the needs-you card
+   that the same turn end raised yielded locally, and since only what buzzed locally was forwarded,
+   the hub never heard that needs-you at all.
 
-When a kernel's bell fires (the same armed-card feed-build transition that drives every other
-sink), `_push_forward` hands the fired events — `[{title, body, sid}]` — to every attached
-TRUSTED peer via `POST /push/relay`; the receiving kernel mirrors them out through its own
-`_push_notify` to the devices subscribed to it.
+## The map: every other cross-machine flow starts at the row holder
 
-Decisions, and the reasons they went this way:
+Every cross-machine flow in romp except push is started by the kernel that holds the row and reads
+toward itself:
 
-- **The existing pair channel, no new legs.** Every attached pair can already `_peer_call` each
-  other: the tunnel plus the serve token exchanged at attach/check-in. Both sides run the same
-  code, so events flow in both directions of an attachment automatically.
-- **A relayed event is terminal.** `/push/relay` delivers to local devices and never forwards
-  onward, so attachment cycles cannot echo an event; no event ids or seen-sets are needed.
-- **Trust is judged by origin at delivery time, receiver-side** — the same by-origin judgment
-  the postal bus makes for inbound mail. Only a host the user marked `trusted` may buzz their
-  devices; `directed`/`isolated`/unknown drops WITH ITS REASON on stderr (fail loudly), naming
-  the network panel's per-host selector as the remedy. The sender also forwards only to trusted
-  peers: your events leave your kernel only toward boxes you control.
-- **The origin is worn on the sid, the way every federated surface routes** (`host-prefix.ts`):
-  the mirrored event's sid gains `origin:` so a tap routes through the merged dashboard's own
-  tabs. The title passes through exactly as the origin composed it (`Romp needs you: web`,
-  `Romp: web` — `_notify_title`): the session name alone, since 2026-09-09. Until then the relay
-  grafted the origin onto the title too (`romp: boxa:web`); the user found the host noise in
-  the words, when the tap already carries the routing in `data`.
-- **Mirrored events omit `badge`** and the service worker applies `setAppBadge` only to a
-  numeric value: the origin kernel's needs-you count is not the receiving kernel's count, and
-  repainting 0 would clear a real local badge.
-- **`_reveal_msg` trusts the browser for prefixed sids.** A `host:sid` focus is handed to the
-  chat pane as-is (its tabs route it); the local session-list liveness check would otherwise
-  mint a wrong `confirmRevive` from the wrong kernel's world.
+- the dashboard relay (`/remote/<host>/ws`, `_remote_ws`): the hub splices its browser's socket to
+  the row's port with the row's token;
+- the supervisor's polls (`_tunnel_supervisor`): `/sessions`, `/version`, `/usage`,
+  `/api-health/frame`, the tag views, each through the row;
+- settings converge (`_converge_peer_settings`): the hub reads the peer's `/version` and pushes its
+  newer picks through the peer's gesture route, both legs started by the row holder;
+- auto-update (`_maybe_auto_push`, `_auto_pull_remote`): started by the supervisor's pass over a row;
+- the postal peer exchange: each bus dials the peers its kernel told it about (the kernel's rows),
+  and the dialed side long-polls (`/peer-exchange`).
 
-## Verified findings that shaped it
+Push was the only flow the ORIGIN started. The fix is to turn it round like the rest.
 
-1. `_remotes` rows carry `local_port` + `token` for BOTH attach styles (ssh-attach fetches the
-   token; check-in hands it over in `_checkin_payload`) — so the authenticated kernel-to-kernel
-   channel needed no new trust surface.
-2. The chat pane's `focus` handler routes by tab id and already expects jumps "incl. from a
-   remote kernel"; remote tabs exist under their prefixed ids once federation merges them.
+## The design: the row holder pulls
 
-## Known follow-ups, deliberately not in this landing
+### The origin's half
 
-- **Cold-start precision for remote sids.** A tap that boots the app delivers its parked reveal
-  on the chat pane's `ready` — possibly before federation has merged the origin host's tabs, in
-  which case the focus lands on the dashboard, not the session. Event-based fix when it earns
-  its keep: park the prefixed focus browser-side until that host's tabs arrive.
-- **A merged badge count.** The icon count is the local kernel's needs-you number; a truly
-  federated count is a design question (sum across hosts? per-host chips?) for later.
-- **Visibility for tier-dropped relays.** stderr satisfies fail-loudly for an operator; if
-  dropped relays turn out to matter in practice, the bus's held-mail quarantine-card treatment
-  is the pattern to copy.
+Every event the origin DETECTS lands in an in-memory ring as a candidate. Detection stays where it
+was, reading the origin's own stores: the card diff (`_feed_notifications_diff`, a card entering a
+notified column) and the turn tick (`_turn_notify_tick`, a turn the user opened ending). The ring is
+keyed `(bootId, seq)`, the boot id being this kernel life's `_BOOT_ID`, and holds the newest 256.
+
+`GET /push/events?after=<bootId>:<seq>&wait=<s>` serves it, behind the serve token like every route a
+row's holder calls. It is a long-poll in the postal `/peer-exchange` shape: with nothing newer than
+the cursor it parks on a condition variable, and the first new candidate releases every parked
+request. No polling cadence anywhere. The answer is `{boot, next, events[, stale]}`, with
+`{reset, skipped}` when it resets (below). `next` is the newest seq examined, the puller's next cursor.
+
+The origin advertises the capability in `/version` as `pushPull: 1`.
+
+### The hub's half
+
+The hub runs one puller thread per TRUSTED row that has a port and a token and whose `/version`
+advertises `pushPull` (`_push_pull_reconcile`, at the end of each supervisor pass, which also wakes a
+puller waiting out its retry backoff when its row answered that pass). It uses the row's own port and
+token, the credentials the dashboard relay already uses, so no new credential and no new trust
+surface. A call that does not answer backs off exponentially (capped at 30 s, the postal dialer's
+ladder).
+
+The cursor is kept on disk per row (`push-pull-cursors.json`, 0600), so a hub restart resumes where
+it left off. The events pass the hub's gate BEFORE the cursor moves on disk: a crash between the two
+re-offers them, and the origin re-validates them, rather than losing them.
+
+Sids are prefixed with the HUB's own name for the row (`TESTHOST:<sid>`), the merged dashboard's tab
+address, never the name the origin declares for itself. `/push/relay` prefixed and judged trust by
+the self-declared name, which broke when the hub knew the host under a different ssh name.
+
+### The gating split
+
+- **The origin applies only the explicit bells.** The card and session bells live on the origin (the
+  merged dashboard writes them by sid to the kernel that owns the session). An explicit mute (the
+  card's bell off, else its session's) drops the event before it is a candidate. An explicit arm
+  rides as `bell: "on"`, and no override rides as `bell: "default"`. The origin's master and turn
+  switch govern the origin's own devices only, never the candidates.
+- **The hub applies its own switches.** Its master off holds every pulled event, its turn switch off
+  holds the turn events, and a `"default"` bell resolves to its master (on, past the first gate). A
+  held batch is said in one line, as relayed events were.
+- **The hub owns the one-buzz-per-turn-end rule**, keyed on its own row name, the sid and the
+  origin's turn-end key: `_buzz_claim` on the prefixed sid, with the turn key every candidate
+  carries. A turn end and the card it raises buzz once between them, whichever arrives first; a card
+  that yields replaces the turn notification quietly (the per-session tag). This removes the latent
+  bug above, because the origin's own claim no longer decides what leaves it.
+
+An announcement is the card ENTERING the column, offered to the origin's devices (gated by its
+switches) and to every puller (gated by theirs). So the card diff marks a candidate announced
+whatever the origin's own switches say. A card that entered while the origin's master was off and
+comes back to the same column with nothing of the user's in between stays quiet, like the first
+boot's seed: it was on the board all along. Before the pull, an unarmed entry left no mark.
+
+### Staleness
+
+The origin re-validates each event when it serves it, with no time limit (`_push_event_current`):
+
+- a card event is served only while the card still sits in the column it entered (the notify
+  snapshot, the last feed build's view) and the user has not acted on it since (the override
+  journal, the record `_notify_user_acted_since` already reads);
+- a turn event is served only while that turn end is still the session's latest (`_turn_end_key`);
+- either is dropped if an explicit mute was set on the origin since.
+
+A stale event is skipped, counted in `stale`, and the cursor passes it.
+
+### Restarts and gaps
+
+The hub resumes at the newest event, skipping the missed ones (the user's explicit choice), in three
+cases: the ring overflowed past its cursor (`overflow`), the origin restarted, so a new boot id
+(`restarted`), or the hub holds no cursor (`no-cursor`: it lost the file, or this is a new row). The
+answer carries the reason and how many events it skipped, and the hub says so in one loud line:
+
+    romp: web push: events from 'TESTHOST' resume at its newest — its kernel restarted since this
+    kernel last heard from it; 2 event(s) it fired meanwhile skipped
+
+A hub restart WITH its cursor resumes from it, and the events fired meanwhile are served if they are
+still current.
+
+## The transition: one mechanism per pair, and its removal condition
+
+Old and new kernels meet during an update, so both legs exist for now, and each pair uses exactly one:
+
+- The hub pulls from any origin that advertises `pushPull`, and ignores `/push/relay` from an origin
+  it pulls from. The origin is mapped onto the row by the row's key or the self-name its `/version`
+  taught the row (`_peer_key`). The ignore is said once per origin.
+- The origin keeps `_push_forward` only toward rows whose `/version` does not advertise the pull, and
+  stops for each as soon as the supervisor's poll of that row sees `pushPull` (the row's
+  `push_pull`).
+- The hub's gate passes each pulled event at most once by `(row, bootId, seq)`, a backstop beside the
+  cursor.
+
+**Removal condition:** once auto-update has converged every linked kernel on a build that serves
+`/push/events`, delete `_push_forward`, its two call sites, the `/push/relay` route and its tests
+(`tests/test_kernel_webpush_federation.py`'s forward and relay classes), and the hub's relay-ignore.
+
+## What stays from the first design
+
+- **A pulled event omits `badge`.** The origin's needs-you count is not the hub's, and the worker
+  applies `setAppBadge` only to a numeric value, so a pulled event never clears a real local count.
+- **The title passes through as the origin composed it** (`_notify_title`: the session name alone).
+  The host rides only the sid prefix and the payload's `host`.
+- **`_reveal_msg` trusts the browser for prefixed sids.** A `host:sid` focus is handed to the chat
+  pane as-is; the local session list would otherwise mint a wrong `confirmRevive`.
+- **Trust is the user's line.** Only a host the user marked trusted is pulled; the gate re-reads the
+  trust at delivery, so a row lowered while a call was parked buzzes nothing.
+
+## Known limits and follow-ups
+
+- **Card bells need a feed build.** The card diff runs on the origin's feed builds, which happen while
+  a client rides the feed (any dashboard socket, the hub's relay included). An origin no dashboard is
+  looking at detects turn ends but not card moves. This predates the pull and holds for a single
+  kernel too.
+- **Explicit bells and the origin's master.** The origin's bell setters store a click only when it
+  differs from the ORIGIN's master (a click matching it returns the bell to following the default),
+  and the merged dashboard paints a remote session's bell against the origin's master too. While an
+  origin's master is off, its sessions' bells read off on the merged dashboard and a mute click is
+  not stored, so the event still carries `"default"` and the hub's master decides. Viewer-relative
+  bells (the origin sends the raw override, the browser resolves against the hub's master and a click
+  sends on, off or default) close this; see the PR for the decision.
+- **A merged badge** (optional, not built): each long-poll answer could carry the origin's needs-you
+  count, for an icon count across every linked kernel.
+- **Cold-start precision for remote sids.** A tap that boots the app delivers its parked reveal on
+  the chat pane's `ready`, possibly before federation has merged that host's tabs. The event-based
+  fix, when it earns its keep, is to park the prefixed focus browser-side until those tabs arrive.
+
+## Tests
+
+- `tests/test_push_pull_kernels.py`: two real kernels where only the hub holds a row (the check-in
+  shape), a loopback push service, the hub's ledger as the record. A turn end and a needs-you card on
+  the origin each reach the hub's gate exactly once, under the hub's name for the row. Then a hub
+  restart with its cursor (the missed event served once), a hub restart without it (resumes at the
+  newest, says so, delivers nothing old) and an origin restart (resumes at the newest, the next turn
+  end delivered once), and nothing twice throughout.
+- `tests/test_push_pull.py`: the ring under each detector, the explicit-bell gate, the latent claim
+  bug, the serve (long-poll release, each reset, staleness, the token gate), the hub's gate, the
+  puller (reset line, cursor on disk, dedupe, refusal), and the transition (the forward skips pullers,
+  the relay-ignore, the `/version` poll, an event offered both ways reaching the devices once).
