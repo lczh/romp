@@ -224,6 +224,33 @@ class ConnectPushWork(unittest.TestCase):
         self.assertEqual(set(board(c)), set(SIDS))
 
 
+    def test_05_a_repair_also_serves_a_tab_its_strip_lists_that_the_page_holds_in_no_form(self):
+        # a session created since the page's last push: the repair's strip lists it, so its full rides the same push (as it
+        # rides any push that sends the strip), never a cycle later; a tab the page holds stays out of the repair
+        c = self._client(reconnect=True, dietSkeleton=True, active=WATCHED)
+        km._clients[:] = [c]
+        self._connect(c)
+        skel = list(c.get("skeletonOrder") or [])
+        new = "11111111-2222-3333-4444-777777777799"
+        p = os.path.join(self.tmp, new + ".jsonl")
+        with open(p, "w") as f:
+            f.write("x" * 500)
+        self.paths[new] = p
+        NAME[new] = "billing"
+        SIDS.append(new)
+        self.live[new] = dict(self.live[WATCHED])
+        try:
+            self._reset_calls()
+            n0 = len(self._sessions_of(c))
+            self._need_full(c, skel[0])
+            self.assertEqual(sorted(self.calls["build"]), sorted([skel[0], new]), "the asked tab and the new one: %r" % self.calls["build"])
+            self.assertEqual(sorted(f["id"] for f in self._sessions_of(c)[n0:]), sorted([skel[0], new]))
+            self.assertEqual(set(c.get("skeleton") or ()), set(skel[1:]), "the other skeletons stay as they were")
+        finally:
+            SIDS.remove(new)
+            NAME.pop(new, None)
+
+
 class FirstDialDiet(unittest.TestCase):
     """The client half (2026-10-10): the main chat pane dials the first socket of EVERY page load as a skeleton client, and the
     federated dial terms carry the page's diet to every linked kernel, ungated by the local socket's history."""

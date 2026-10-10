@@ -59922,6 +59922,15 @@ def _held_as_skeleton_by_all(sid, clients):
     return True
 
 
+def _held_in_some_form(c):
+    """The sids client `c` holds in some form, read under its slot lock: a base (echat), a skeleton, or a chat frame on its
+    slot with no base (a transcript-less tab's full records none). A needFull's repair push serves, beside the asked tab, every
+    tab its strip lists outside this set (_push's `only`): a session created since the page's last push."""
+    with _client_lock(c):
+        return set(c.get("echat") or ()) | set(c.get("skeleton") or ()) \
+            | {k[1] for k in (c.get("sent") or {}) if isinstance(k, tuple) and len(k) == 2 and k[0] == "chat"}
+
+
 def _skeleton_for(c, act, chat_list):
     """The sids a reconnecting client is NOT looking at, ascending by transcript size — a free stat, the byte
     proxy the kernel has before building anything (the tail length ties at WIRE_TAIL for every busy session,
@@ -65067,8 +65076,10 @@ def _push(targets, connect=False, live_map=None, only=None):
     sections are skipped: the asking page holds everything else from its own connect push and the pusher's cycles, which
     keep sending it. Before this, every needFull ran the whole board push for one tab, and the page's idle prefetch asks
     once per skeleton tab, so filling N tabs cost N whole-board pushes. The tab strip and the live statuses still go first,
-    deduped on their slots; and a repair that turns out to send a redial's FIRST strip (_resolve_reconnect popped the flag
-    here: no push has served the socket yet) serves the redial's whole view, as a connect push does."""
+    deduped on their slots, and a tab that strip lists which the page holds in no form (a session created since its last
+    push) is served with the asked ones, as any push that sends the strip serves it; a repair that turns out to send a
+    redial's FIRST strip (_resolve_reconnect popped the flag here: no push has served the socket yet) serves the redial's
+    whole view, as a connect push does."""
     if not targets:
         return
     if only is not None:
@@ -65150,6 +65161,12 @@ def _push(targets, connect=False, live_map=None, only=None):
                     if only is not None:                 # …and a repair that is that first strip's sender is the first push to
                         only = None                      #  serve this socket at all: it serves the redial's whole view (the
                         want_feed = _feed_audience(targets)   # watched tab, the transcript-less ones, a status per skeleton)
+                elif only is not None:
+                    # …and a tab the strip just listed that the page holds in no form (neither a base nor a skeleton: a session
+                    # created since its last push) rides the repair too, as it rides any push that sends the strip, so the
+                    # strip never names a tab whose full waits for the next cycle
+                    _held = _held_in_some_form(c)
+                    only |= {x for x in tab_order if x not in _held}
             active = {c.get("active") for c in chat_clients if c.get("active")}
             # …and the sids a per-session event named since the last cycle (_push_session_soon, 2026-09-23): the SDK's
             # queue pop, which needs the pane to learn at once that the copy left romp's queue for the CLI. They rank
