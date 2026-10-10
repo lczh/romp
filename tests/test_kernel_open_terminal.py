@@ -8,7 +8,9 @@ cwd — the local opener would run against a path that doesn't exist here (a sil
 routes `openFolder` to stay LOCAL with the session id's host prefix left INTACT; the kernel splits it
 (_split_host_id) and dispatches to _open_folder_remote instead of _open_folder when a host is present.
 SYNTHETIC fixtures; subprocess is stubbed so nothing actually launches."""
+import contextlib
 import inspect
+import io
 import os
 import sys
 import tempfile
@@ -110,30 +112,38 @@ class OpenFolderRemote(unittest.TestCase):
         self.assertEqual(self.calls, [])
 
     def test_default_macos_opens_terminal_via_osascript_running_ssh(self):
-        if sys.platform != "darwin":
-            self.skipTest("macOS-only default opener")
-        km._open_folder_remote("gpu1", "/work/proj")   # no local pref → the built-in Terminal.app default
+        # Platform pinned to darwin so this macOS branch runs on every machine, not only on a Mac.
+        saved = km.sys.platform
+        try:
+            km.sys.platform = "darwin"
+            km._open_folder_remote("gpu1", "/work/proj")   # no local pref → the built-in Terminal.app default
+        finally:
+            km.sys.platform = saved
         self.assertEqual(len(self.calls), 1)
         argv = self.calls[0]
         self.assertEqual(argv[0], "osascript")
         joined = " ".join(argv)
-        self.assertIn("ssh -t gpu1", joined)
+        self.assertIn("ssh -t -- gpu1", joined, "a `--` guard precedes the host")
         self.assertIn("cd /work/proj", joined)
         self.assertIn("exec $SHELL -l", joined, "a login shell, not a one-shot command that closes")
 
     def test_no_remote_config_follows_the_local_ghostty_terminal(self):
         # the user 2026-07-03: with no explicit remote config, an SSH terminal should open in the SAME terminal
         # the local folder pref names (Ghostty), not default to Terminal.app.
-        if sys.platform != "darwin":
-            self.skipTest("macOS-only derivation")
+        # Platform pinned to darwin so this macOS branch runs on every machine, not only on a Mac.
         os.environ["ROMP_OPEN_FOLDER"] = "open -a Ghostty {dir}"
-        km._open_folder_remote("gpu1", "/work/proj")
+        saved = km.sys.platform
+        try:
+            km.sys.platform = "darwin"
+            km._open_folder_remote("gpu1", "/work/proj")
+        finally:
+            km.sys.platform = saved
         self.assertEqual(len(self.calls), 1)
         argv = self.calls[0]
         # `open -na Ghostty --args -e ssh …` — -n (new instance) is required so macOS passes --args to Ghostty
         self.assertEqual(argv[:6], ["open", "-na", "Ghostty", "--args", "-e", "ssh"])
-        self.assertEqual(argv[6:8], ["-t", "gpu1"])
-        self.assertEqual(argv[8], "cd /work/proj 2>/dev/null; exec $SHELL -l", "cd + login shell, one ssh arg")
+        self.assertEqual(argv[6:9], ["-t", "--", "gpu1"], "a `--` guard precedes the host")
+        self.assertEqual(argv[9], "cd /work/proj 2>/dev/null; exec $SHELL -l", "cd + login shell, one ssh arg")
 
     def test_editor_local_pref_does_not_derive_a_terminal(self):
         # a NON-terminal local opener (an editor) must NOT be misused as an SSH terminal — fall back to the default
@@ -165,6 +175,62 @@ class OpenFolderRemote(unittest.TestCase):
             self.assertTrue(any("cd /work/proj" in a for a in self.calls[0]))
         finally:
             km.sys.platform = saved
+
+    def test_a_host_the_guard_refuses_never_reaches_ssh(self):
+        # The id's host prefix becomes ssh's target here, and any client the socket admits names that
+        # id. A host the guard refuses (here a name carrying a space) must be refused before any launch;
+        # the same gate attach_remote applies to its host. Platform pinned so the assertion holds anywhere.
+        saved = km.sys.platform
+        err = io.StringIO()
+        try:
+            km.sys.platform = "linux"
+            with contextlib.redirect_stderr(err):
+                km._open_folder_remote("bad host", "/work/proj")
+        finally:
+            km.sys.platform = saved
+        self.assertEqual(self.calls, [], "a refused host launches nothing")
+        self.assertIn("openFolderRemote: refusing unsafe host 'bad host'\n", err.getvalue(),
+                      "the refusal is reported on stderr, its only trace")
+
+    def test_a_host_the_guard_refuses_launches_nothing_through_a_configured_template(self):
+        # The configured-template branch ($ROMP_OPEN_REMOTE_FOLDER) applies the same host rule, on any platform.
+        os.environ["ROMP_OPEN_REMOTE_FOLDER"] = "term --ssh {host} --dir {dir}"
+        km._open_folder_remote("bad host", "/work/proj")
+        self.assertEqual(self.calls, [], "a refused host launches nothing through a configured template")
+
+    def test_a_host_the_guard_refuses_launches_nothing_through_the_macos_terminal_default(self):
+        # The macOS Terminal.app default applies the same host rule. Platform pinned to darwin.
+        saved = km.sys.platform
+        try:
+            km.sys.platform = "darwin"
+            km._open_folder_remote("bad host", "/work/proj")   # no local pref, so the built-in Terminal.app default
+        finally:
+            km.sys.platform = saved
+        self.assertEqual(self.calls, [], "a refused host launches nothing through the Terminal.app default")
+
+    def test_a_host_the_guard_refuses_launches_nothing_through_the_derived_macos_terminal(self):
+        # The macOS terminal derived from the local folder pref applies the same host rule. Platform pinned to darwin.
+        os.environ["ROMP_OPEN_FOLDER"] = "open -a Ghostty {dir}"
+        saved = km.sys.platform
+        try:
+            km.sys.platform = "darwin"
+            km._open_folder_remote("bad host", "/work/proj")
+        finally:
+            km.sys.platform = saved
+        self.assertEqual(self.calls, [], "a refused host launches nothing through the derived terminal")
+
+    def test_the_xterm_fallback_keeps_the_host_positional(self):
+        # Beside the host rule above, the fallback ssh argv keeps the host positional, matching every
+        # tunnel ssh argv.
+        saved = km.sys.platform
+        try:
+            km.sys.platform = "linux"
+            km._open_folder_remote("gpu1", "/work/proj")
+        finally:
+            km.sys.platform = saved
+        argv = self.calls[0]
+        self.assertIn("--", argv, "the host is kept positional")
+        self.assertLess(argv.index("--"), argv.index("gpu1"), "the separator comes before the host")
 
     def test_override_with_host_and_dir_placeholders(self):
         os.environ["ROMP_OPEN_REMOTE_FOLDER"] = "open -a Ghostty --args -e ssh -t {host} cd-to:{dir}"
