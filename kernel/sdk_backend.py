@@ -1735,9 +1735,9 @@ def append_effort_applied(state_dir: Path, sid: str, effort: str, t: int | None 
 # so a pick still waiting for a quiet session when the kernel restarts was never applied: the new kernel attached to the
 # CLI launched before the pick, cleared the pick's pending marks as moot, and recorded the effort as applied. The pick is
 # persisted (the reg's `relaunchWait`: which picks wait, with the values asked for) and every connect compares it with
-# what the connected CLI was LAUNCHED with: the launch record _options builds (SdkSession.launch_values), which the host
-# spawn writes into its spec and the host echoes in every hello (cli.launch). Each pick names the launch values it
-# decides; the env is compared by digest, never by value.
+# what the connected CLI was LAUNCHED with: the launch record _options builds (SdkSession.launch_values, plus
+# fastGuess, a fast-mode fact no pick compares), which the host spawn writes into its spec and the host echoes in every
+# hello (cli.launch). Each pick names the launch values it decides; the env is compared by digest, never by value.
 PICK_LAUNCH_KEYS = {"effort": ("effort",), "billing": ("auth", "authLogin"), "fast": ("fast",), "mode": ("mode",),
                     "env": ("env",), "subagentStandard": ("subagentStandard",)}
 # What a launch record written before a key existed carried for it: a host spawned by an older kernel echoes a record
@@ -6000,7 +6000,50 @@ def key_fast_org_env(key: str, log) -> dict[str, str]:
     return {"CLAUDE_CODE_DISABLE_FAST_MODE": "1"}
 
 
-def token_fast_org_env(env) -> dict[str, str]:
+FAST_ORG_SKIP_MIN_CLI = (2, 1, 271)   # the version whose changelog entry fixes the skip hiding the API's refusal
+CLI_VERSION_TIMEOUT_S = 5.0           # one `claude -v` (the SDK's own minimum-version check allows 2 s)
+_CLI_VERSIONS: dict = {}              # (real path, inode, size, mtime_ns) -> ((major, minor, patch) or None, why)
+
+
+def claude_cli_version(path) -> tuple:
+    """(version, why) for the Claude Code binary at `path`: version is (major, minor, patch), read from the binary's own
+    `-v` the way the SDK's minimum-version check reads it (the first x.y.z the output opens with), or None with `why` in
+    words when it cannot be read. Read once per binary FILE: keyed on the real path with its inode, size and modification
+    time, so the first read after an upgrade gets the new one (the native installer repoints a symlink at a new file;
+    an npm install puts a new file at the same path). What the binary answered by exiting on its own is kept, a version
+    or an output that carries none; a read that timed out, was ended by a signal or could not run is not (a box busy at
+    boot, an out-of-memory or cgroup kill, a fork refused), its output is not read, and the next read asks again. A
+    bare name resolves on PATH, as the launch's own spawn resolves it."""
+    try:
+        name = str(path)
+        real = os.path.realpath((shutil.which(name) or name) if os.sep not in name else name)
+        st = os.stat(real)
+    except (OSError, TypeError, ValueError) as e:
+        return None, "%s could not be read (%s)" % (path, type(e).__name__)
+    key = (real, st.st_ino, st.st_size, st.st_mtime_ns)
+    if key in _CLI_VERSIONS:
+        return _CLI_VERSIONS[key]
+    keep = False
+    try:
+        r = subprocess.run([real, "-v"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                           timeout=CLI_VERSION_TIMEOUT_S, check=False)
+        if r.returncode < 0:   # ended by a signal: no answer of the binary's own, its output perhaps cut short
+            out = (None, "%s -v was ended by signal %d" % (path, -r.returncode))
+        else:
+            m = re.match(rb"\s*([0-9]+)\.([0-9]+)\.([0-9]+)", r.stdout or b"")
+            out = (tuple(int(x) for x in m.groups()), "") if m else \
+                (None, "%s -v printed no version (exit %s)" % (path, r.returncode))
+            keep = True
+    except subprocess.TimeoutExpired:
+        out = (None, "%s -v did not answer within %g s" % (path, CLI_VERSION_TIMEOUT_S))
+    except Exception as e:
+        out = (None, "%s -v could not run (%s)" % (path, type(e).__name__))
+    if keep:
+        _CLI_VERSIONS[key] = out
+    return out
+
+
+def token_fast_org_env(env, cli=None, log=None, said=None) -> dict[str, str]:
     """Env additions for a launch whose login rides the environment as CLAUDE_CODE_OAUTH_TOKEN: a stored login's
     `claude setup-token` bearer (the environment road, docs/reference.md "Several Claude logins"), or a machine login
     whose token the manager's environment carries. The CLI cannot ask the organization's fast-mode setting for such a
@@ -6019,8 +6062,51 @@ def token_fast_org_env(env) -> dict[str, str]:
     mode off with a 400 ("Fast mode is not enabled"), which the CLI records as the SERVER's "preference", a state the
     skip does not override, and it retries the request at standard speed (read in 2.1.282's source, not exercised
     live). The refusal then reaches _adopt_fast_state as a real one, loudly. A launch with no token in its environment
-    gets nothing here: the CLI's own check stands."""
-    return {"CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK": "1"} if (env or {}).get("CLAUDE_CODE_OAUTH_TOKEN") else {}
+    gets nothing here: the CLI's own check stands.
+
+    The skip is set only for a CLI at FAST_ORG_SKIP_MIN_CLI (2.1.271) or later, `cli` being the binary the launch runs
+    (claude_cli_version reads it). Below it the skip hides the refusal it relies on: in 2.1.266 (bundle read, never run)
+    the availability rule returns the organization's reason only while the skip is unset, so a CLI under the skip
+    reports fast mode "on" with no reason at initialize, at every init and every result, and sends every request fast,
+    takes the 400 and reruns it at standard speed. The 2.1.278 bundle carries the exemption for the server's answer, and
+    its changelog files that fix under 2.1.271 (no bundle between the two was read). So below the floor, or when the
+    version cannot be read, the CLI's own check stands, the side that refuses: it may refuse fast mode to a seat that
+    serves it, which is loud, where the skip's "on" would hide a real refusal. `log(msg, problem=...)` says why a launch
+    goes without the skip (an unknown version as a problem), each distinct line once per `said`, a set the caller keeps
+    (a backend's, the judges' process's)."""
+    return token_fast_org_read(env, cli, log, said)[0]
+
+
+def token_fast_org_read(env, cli=None, log=None, said=None, fast=True) -> tuple:
+    """token_fast_org_env's additions for `env` and the launch's read case: "" when no token rides `env`; "unread"
+    for a launch without the fast flag (`fast` false), which reads no version, gets no skip and logs nothing; else
+    "skip" for a known version at FAST_ORG_SKIP_MIN_CLI or later, "floor" for a known version below it, and "retry"
+    when no version is known (a read that failed, an answer without a version, no binary named)."""
+    if not (env or {}).get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return {}, ""
+    if not fast:
+        return {}, "unread"
+    version, why = claude_cli_version(cli) if cli else (None, "no binary was named")
+    if version is not None and version >= FAST_ORG_SKIP_MIN_CLI:
+        return {"CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK": "1"}, "skip"
+    floor = ".".join(str(x) for x in FAST_ORG_SKIP_MIN_CLI)
+    if version is not None:
+        msg = ("fast mode: Claude Code %s is older than %s, below which the org-check skip would hide the API's "
+               "refusal; a CLI launched now for a login riding the environment therefore goes without the skip and "
+               "keeps its own check, which may refuse fast mode to a seat that serves it. Updating Claude Code lets "
+               "later launches that ask for fast mode carry the skip" % (".".join(str(x) for x in version), floor))
+    else:
+        msg = ("fast mode: the Claude Code version is unknown (%s); romp gives the org-check skip only to %s or later, "
+               "so a CLI launched now for a login riding the environment goes without it and keeps its own check"
+               % (why, floor))
+    if log is not None and (said is None or msg not in said):
+        if said is not None:
+            said.add(msg)
+        try:
+            log(msg, problem=version is None)
+        except Exception:
+            pass
+    return {}, ("floor" if version is not None else "retry")
 
 
 def helper_fast_org_env(log, cwd=None) -> dict:
@@ -6571,11 +6657,16 @@ class SdkSession:
         #   CLI whose report gave the standing refusal (fast_reason, carried into fast_rule_refused): a launch on another
         #   billing asks again (_fast_refusal_new_billing, 2026-10-10). None when not known (a reg written before it, a CLI
         #   no launch record vouches for): such a refusal stands as before.
-        self.fast_refusal_checked = bool(reg.get("fastRefusalChecked"))   # a refusal reason was adopted from a CLI whose
-        #   fast-mode permission the organization or the API settled (2026-10-01). Absent on every reg written before
-        #   token_fast_org_env, when a login riding the environment left the CLI to GUESS "preference": fast_effective
-        #   lets such a "preference" stand down instead of holding the session at normal speed for good.
+        self._fast_mark_on_disk = bool(reg.get("fastRefusalChecked"))   # whether the registry holds the mark below now
+        self.fast_refusal_checked = self._fast_mark_on_disk or self.sid in getattr(backend, "_fast_checked_sids", ())
+        #   a refusal reason was adopted from the CLI, not blanked as a guess (_adopt_fast_state, 2026-10-01). A refusal
+        #   at a launch this kernel made whose version could not be read (_fast_token_case "retry") is marked in this
+        #   kernel's memory only: the backend's _fast_checked_sids, which a session object rebuilt from the registry reads
+        #   too. Absent on every reg written before token_fast_org_env, when a login riding the environment left the CLI
+        #   to GUESS "preference": fast_effective lets such a "preference" stand down instead of holding the session at
+        #   normal speed for good.
         self._fast_token_login = False   # this connection's login rides the environment (_options); per connection
+        self._fast_token_case = ""   # …and its launch's version read (token_fast_org_read): skip, floor, retry, unread
         self._fast_guess_asked = False   # a relaunch was asked for this connection's guessed refusal (_adopt_fast_state)
         self._fast_off_sent = False      # a literal '/fast off' went to this connection's CLI, which takes its opt-in away
         #   (_ask_missing_opt_in: such a CLI lacks the opt-in although its launch carried it); per connection
@@ -6630,7 +6721,7 @@ class SdkSession:
             self._effort_pending = self.effort or DEFAULT_EFFORT
         if "fast" in _waiting:
             self._fast_pending = "on"
-        self._launch_record = None   # what the last launch from _options carried (launch_values at that moment)
+        self._launch_record = None   # what the last launch from _options carried (launch_values then, and fastGuess)
         self._hello_launch = None    # the connected host's echo of its spawn's launch record (cli.launch), this connect only
         self._cwd_request_open = False   # move()'s set_cwd round trip is in flight: quiet() holds a relaunch back for it
         self._launch_slot = False    # this session's relaunch holds a launch slot (_LaunchSlots), from its take to its CLI up
@@ -7267,10 +7358,14 @@ class SdkSession:
         """Change the model on a CONNECTED session via the SDK control channel. No-op if not yet
         connected — _options applies chosen_model on connect instead. `prev` is what set_model wrote
         (`picked`) and the token of its shared-defaults write (`tok`) — the keys every layer's revert
-        compares against if the CLI refuses the switch (_do_set_model, the mode path's T139 rule)."""
+        compares against if the CLI refuses the switch (_do_set_model, the mode path's T139 rule).
+        A pick made while _options waits on the version read is held, and reaches the CLI once a connect is
+        up if it is still the session's model then (_send_held_picks)."""
         if self.loop and self.client:
             self.loop.call_soon_threadsafe(
                 lambda: asyncio.ensure_future(self._do_set_model(model, prev)))
+        else:
+            self._hold_live_pick(self._do_set_model, model, prev)
 
     # ---- the accepted model (see __init__) ----
 
@@ -7285,10 +7380,41 @@ class SdkSession:
     def set_mode_live(self, mode, prev="default"):
         """Change the permission mode on a CONNECTED session via the SDK control channel. `prev` is
         the last CONFIRMED mode, captured by set_mode before its optimistic flip — the value every
-        layer reverts to if the CLI refuses the switch (T139)."""
+        layer reverts to if the CLI refuses the switch (T139). A pick made while _options waits on the
+        version read is held, and reaches the CLI once a connect is up if it is still the session's mode
+        then (_send_held_picks)."""
         if self.loop and self.client:
             self.loop.call_soon_threadsafe(
                 lambda: asyncio.ensure_future(self._do_set_mode(mode, prev)))
+        else:
+            self._hold_live_pick(self._do_set_mode, mode, prev)
+
+    def _hold_live_pick(self, send, value, prev):
+        """A model or permission-mode pick that found no client. While _options waits on the version read
+        (_picks_held_open is a list) the pick is held for _send_held_picks, since the options already hold the model
+        and the mode. At any other moment nothing is held."""
+        if getattr(self, "_picks_held_open", None) is None:
+            return
+        with self._lock:
+            held = self._picks_held_open
+            if held is not None:
+                held.append((send, value, prev))
+
+    def _send_held_picks(self):
+        """Send the picks _hold_live_pick held, in the order they were made, now that a connect is up: at a launch the
+        ones this connect's version read held (its options carry any earlier one, _picks_launched), at an attach all
+        of them. A held pick is sent only while it is still the session's model (for a mode pick, its mode). Returns
+        whether a model pick was sent. Loop thread."""
+        with self._lock:
+            held, self._picks_held = getattr(self, "_picks_held", None) or [], []
+            if not getattr(self, "_host_is_attach", False):
+                held = held[getattr(self, "_picks_launched", 0):]
+            held = [(send, value, prev) for send, value, prev in held
+                    if ((prev or {}).get("picked") == self.chosen_model if send == self._do_set_model
+                        else value == self.mode)]
+        for send, value, prev in held:
+            asyncio.ensure_future(send(value, prev))
+        return any(send == self._do_set_model for send, _value, _prev in held)
 
     def resolve_ask(self, kind: str, payload=None) -> bool:
         """Deliver a picker/permission UI action (answer/toggle/submit/custom/
@@ -8003,16 +8129,15 @@ class SdkSession:
         beat the switch: the user put THIS session on Slow (fast_off), and the CLI refused fast mode for it with a
         reason (fast_reason, the persisted liveFastReason — an org gate, extra usage off): re-arming the flag would
         loop refuse → reconnect → refuse. The flag is all the rule ever arms — never the literal '/fast on', which on
-        a non-Opus session makes the CLI switch the model. _options and _amain read the same expression, so the
-        flag file and the per-connection snapshot cannot disagree."""
+        a non-Opus session makes the CLI switch the model. _options reads it once for the flag file and the launch
+        record, and _amain's per-connection snapshot takes the record's value, so the two cannot disagree."""
         if getattr(self, "fast_opt", False):
             return True
         if getattr(self, "fast_off", False):
             return False
-        # A refusal holds the switch back, except a "preference" no checked launch gave: a reg written before
-        # token_fast_org_env carries the CLI's guess for a login riding the environment (2026-10-01), and holding the
-        # session at normal speed on it would keep a misread forever. The next launch carries the skip and its answer
-        # is the org's or the API's; a real "preference" comes back from it and is remembered, checked, from then on.
+        # A refusal holds the switch back, except a "preference" not marked checked (fast_refusal_checked): a reg
+        # written before token_fast_org_env carries the CLI's guess for a login riding the environment (2026-10-01),
+        # and holding the session at normal speed on it would keep a misread forever.
         checked = getattr(self, "fast_refusal_checked", False)
         if any(r and (r != "preference" or checked)
                for r in (getattr(self, "fast_reason", ""), getattr(self, "fast_rule_refused", ""))):
@@ -8963,6 +9088,31 @@ class SdkSession:
             except Exception as e:
                 self.backend._log("model-restored card (%s): %s" % (self.name, e), problem=True)
 
+    def _fast_refusal_why(self, reason, words) -> str:
+        """What the refusal toast and the Always fast line say for `reason`, `words` being _FAST_REFUSALS's. A
+        "preference" names Claude Code's own check when it comes from an attach whose launch record says fastGuess and
+        the fast flag, or from a launch this kernel made whose read case is floor or retry, and adds this connection's
+        read case when it is floor or retry; from an attach with no launch record, it says the refusal may come from
+        that check. Anything else keeps `words`, a launch without the fast flag included (read case unread, or a launch
+        record whose fast is false)."""
+        if reason != "preference":
+            return words
+        case = getattr(self, "_fast_token_case", "")
+        if getattr(self, "_host_is_attach", False):
+            launch = getattr(self, "_hello_launch", None)
+            if not isinstance(launch, dict):
+                return "the refusal may come from Claude Code's own check"
+            if launch.get("fastGuess") is not True or launch.get("fast") is False:
+                return words
+        elif case not in ("floor", "retry"):
+            return words
+        own = "Claude Code's own check refused it for this login"
+        if case == "floor":
+            return own + " (Claude Code %s or later lets the API decide)" % ".".join(str(x) for x in FAST_ORG_SKIP_MIN_CLI)
+        if case == "retry":
+            return own + " (Claude Code's version could not be read)"
+        return own
+
     def _adopt_fast_state(self, d) -> bool:
         """Adopt fast-mode truth from a CLI payload that carries it. The per-turn init message and the
         connect-time initialize response (get_server_info) share the exact field names (verified live
@@ -8999,6 +9149,10 @@ class SdkSession:
         # refusal was remembered. Only under the switch, which is all the memory holds back; silently, since the toast
         # for the refused pick already said why; and only a reason fast_effective itself honours (an unchecked guess of
         # "preference" holds nothing). The user's next pick lifts it, as it lifts any refusal of the switch's.
+        # It also carries a checked "preference" from Claude Code's own check below 2.1.271 (token_fast_org_env): a
+        # flagged relaunch on the same version would only be refused again, but this hold outlasts an update of Claude
+        # Code until the user's next pick, until Always fast is turned off or on (_forget_fast_refusals), or until the
+        # session launches on another billing (_fast_refusal_new_billing).
         carried_refusal = ""
         if lacks and not getattr(self, "fast_opt", False) and not getattr(self, "fast_rule_refused", "") \
                 and always_fast_on(getattr(self.backend, "state_dir", None)):
@@ -9014,21 +9168,62 @@ class SdkSession:
         # to Opus and looked for the toggle). Blank it: the badge shows "Slow" and a
         # click cures the reason; every OTHER reason still hides the dead control.
         reason = "" if reason == "sdk_opt_in_required" else reason
-        # …and a "preference" from a CLI this kernel only ATTACHED to, under a login riding the environment, is that CLI's
-        # own GUESS when it was launched before token_fast_org_env (2026-10-01: such a CLI cannot ask the org about the
-        # login, and guessed "disabled" for an enterprise seat that serves fast mode). Not a refusal to remember, nor one to
-        # answer by clearing the user's pick: the cure is a launch that carries the skip, asked for below, whose answer is
-        # the org's or the API's. Every launch this kernel makes carries it, so only an attach can still be guessing; a
-        # "preference" already adopted from a checked launch (fast_refusal_checked) stands as the real one it is.
-        guessed = reason == "preference" and getattr(self, "_fast_token_login", False) \
-            and getattr(self, "_host_is_attach", False) and not getattr(self, "fast_refusal_checked", False)
+        # …and a "preference" from a CLI this kernel only ATTACHED to may be that CLI's GUESS when it was launched with the
+        # fast flag, its login riding the environment and without the skip (2026-10-01: such a CLI cannot ask the org
+        # about the login, and guessed "disabled" for an enterprise seat that serves fast mode). Not a refusal to remember,
+        # nor one to answer by clearing the user's pick: the cure is a relaunch, asked for below, whose answer is the org's
+        # or the API's when it carries the skip. Which launch it was is the attached CLI's own fact, never today's options: the host
+        # echoes its spawn's launch record (cli.launch, _hello_launch), whose fastGuess says the launch had the token
+        # and no skip. A record without the field was written by a kernel that gave every such launch the skip (the
+        # record came after token_fast_org_env), so its "preference" is a real answer, from the first restart on
+        # (review 2026-10-01: keyed on today's options, a refusal from a CLI launched WITH the skip was blanked, the
+        # pick kept and a relaunch asked). A hello with no record (a host spawned before it) cannot say, and reads as
+        # guessing. Either way only when today's options carry the token and their version read is not below the floor
+        # (_fast_token_case "floor": a relaunch would get no skip either, and the CLI's own check stands). A launch this
+        # kernel made is no attach, and a "preference" already adopted as checked (fast_refusal_checked) stands.
+        launch = getattr(self, "_hello_launch", None) if getattr(self, "_host_is_attach", False) else None
+        launched_guessing = launch.get("fastGuess") is True if isinstance(launch, dict) else True
+        may_guess = getattr(self, "_host_is_attach", False) and launched_guessing \
+            and getattr(self, "_fast_token_login", False) and getattr(self, "_fast_token_case", "") != "floor"
+        guessed = reason == "preference" and may_guess and not getattr(self, "fast_refusal_checked", False)
         if guessed:
             reason = ""
-        # A reason that survives the two cures above is the CLI's real answer. Remembered as checked, which is what lets
-        # fast_effective tell it from a guess a reg written before token_fast_org_env may still carry.
+        # A reason that survives the two cures above is answered as the CLI's real one and remembered as checked, which
+        # is what lets fast_effective tell it from a guess a reg written before token_fast_org_env may still carry. Each
+        # such refusal is marked in this kernel's memory (_fast_checked_sids), which a session object rebuilt from the
+        # registry reads too. A refusal at a launch this kernel made whose version is unknown (_fast_token_case "retry")
+        # gets no mark in the registry, and an older mark there is cleared: a later kernel's launch may carry the skip.
+        # Any other refusal at a launch this kernel made is marked in the registry, one at a launch without the fast
+        # flag ("unread") included: Claude Code's fast-mode check (read in the 2.1.288 bundle) answers such a launch
+        # from the SDK with sdk_opt_in_required before it reads the organization's status, and only a managed policy
+        # answers "preference" ahead of that. At an attach it is marked unless the CLI may be guessing (may_guess) and
+        # the refusal was already marked checked.
+        # An attach that adopts a "preference" while today's options carry the token and nothing is marked checked: from
+        # a CLI launched without the flag (this connection's flag false, rule_refused below) it is a managed policy's (the
+        # reading above), which a launch with the flag meets too, so under Always fast it is said as the switch's refusal
+        # when the switch would arm the flag (fast_effective, read before the mark below).
+        flagless_refused = reason == "preference" and getattr(self, "_host_is_attach", False) \
+            and getattr(self, "_fast_token_login", False) and not getattr(self, "fast_refusal_checked", False) \
+            and self.fast_effective()
         newly_checked = bool(reason) and not getattr(self, "fast_refusal_checked", False)
         if newly_checked:
             self.fast_refusal_checked = True
+        if reason:
+            checked_sids = getattr(self.backend, "_fast_checked_sids", None)
+            if checked_sids is not None:
+                checked_sids.add(self.sid)
+        attach = getattr(self, "_host_is_attach", False)
+        case = getattr(self, "_fast_token_case", "")
+        mark_on_disk = None   # the registry's mark to write, when it changes
+        if reason:
+            if attach:
+                mark_on_disk = None if (may_guess and not newly_checked) else True
+            elif case == "retry":
+                mark_on_disk = False
+            else:
+                mark_on_disk = True
+            if mark_on_disk == getattr(self, "_fast_mark_on_disk", False):
+                mark_on_disk = None
         # A refusal that lands while the user's ask is ARMED (fast_opt — they picked On) is the CLI
         # ANSWERING that ask, not standing state to hide behind: adopting it silently made the toggle
         # the user had just clicked vanish without a word, with the ask left armed on disk forever
@@ -9043,8 +9238,10 @@ class SdkSession:
         # reason: said once per reason in the log, loudly, and remembered in the session's fast_rule_refused, which
         # fast_effective reads from here on — the next connect does not re-arm the flag, and a flagless connect's
         # sdk_opt_in_required (blanked into fast_reason above) cannot erase that memory. The CLI reporting fast ON for
-        # this session lifts it: the reason is gone.
-        rule_refused = bool(reason) and not self.fast_opt and getattr(self, "_fast_unlocked", False) \
+        # this session lifts it: the reason is gone. The managed policy's refusal above (flagless_refused) is said and
+        # remembered the same way.
+        rule_refused = bool(reason) and not self.fast_opt \
+            and (getattr(self, "_fast_unlocked", False) or flagless_refused) \
             and always_fast_on(getattr(self.backend, "state_dir", None)) \
             and (reason != getattr(self, "fast_rule_refused", "") or newly_checked)
         rule_lifted = fast == "on" and bool(getattr(self, "fast_rule_refused", ""))
@@ -9076,25 +9273,28 @@ class SdkSession:
                 stale = (r.get("liveFast") or "") != fast or (r.get("liveFastReason") or "") != reason
             except Exception:
                 stale = False
-        if changed or stale or refused_ask or rule_refused or rule_lifted or newly_checked or carried_refusal or retag:
+        if changed or stale or refused_ask or rule_refused or rule_lifted or newly_checked or carried_refusal or retag or mark_on_disk is not None:
             try:
                 kw = dict(liveFast=fast, liveFastReason=reason)
                 if refused_ask:
                     kw["fast"] = False
                 if rule_refused or rule_lifted or carried_refusal:
                     kw["fastRuleRefused"] = self.fast_rule_refused
-                if newly_checked:
-                    kw["fastRefusalChecked"] = True
+                if mark_on_disk is not None:
+                    kw["fastRefusalChecked"] = mark_on_disk
                 if retag:
                     kw["fastRefusalBilling"] = list(self.fast_refusal_billing) if self.fast_refusal_billing else None
                 self.backend._update_reg(self.sid, **kw)
+                if mark_on_disk is not None:
+                    self._fast_mark_on_disk = mark_on_disk
             except Exception as e:
                 self.backend._log("fast-state persist (%s): registry write failed: %s" % (self.name, e))
         if rule_refused:
             self.backend._log("always fast (%s): the CLI refused fast mode — %s; this session runs at normal speed until "
-                              "that clears" % (self.name, _FAST_REFUSALS.get(reason, "the CLI reports %r" % reason)), problem=True)
+                              "that clears" % (self.name, self._fast_refusal_why(
+                                  reason, _FAST_REFUSALS.get(reason, "the CLI reports %r" % reason))), problem=True)
         if refused_ask:
-            why = _FAST_REFUSALS.get(reason, "the CLI reports %r" % reason)
+            why = self._fast_refusal_why(reason, _FAST_REFUSALS.get(reason, "the CLI reports %r" % reason))
             self.backend._log("fast mode (%s): the CLI refused the toggle — %s" % (self.name, reason),
                               problem=True)
             try:
@@ -9108,9 +9308,18 @@ class SdkSession:
             # once per connection (every init repeats the guess until the relaunch lands), on the quiet road: this is the
             # kernel's reconnect, nobody's gesture on the session, so it cuts no turn, subagent or background task
             self._fast_guess_asked = True
-            self.backend._log("fast mode (%s): the CLI reports 'preference', its own guess for a login it cannot ask the "
-                              "organization about; this CLI was launched without the check that settles it, so the "
-                              "session relaunches with it%s" % (self.name, "" if self.quiet() else " once it is quiet"))
+            # a record says the launch had the token and no skip; with none the kernel cannot tell (a CLI launched under
+            # a host that echoes no record may have carried the skip, its "preference" then the API's), so the line says
+            # only that it may be a guess. A record of a launch without the fast flag names no guess: such a CLI's
+            # "preference" is a managed policy's (the 2.1.288 reading above)
+            known = isinstance(launch, dict)
+            flagless = known and launch.get("fast") is False
+            self.backend._log("fast mode (%s): the CLI reports 'preference'%s for a login it cannot ask the "
+                              "organization about; %s, so the session relaunches%s"
+                              % (self.name, "" if flagless else ", its own guess" if known else ", which may be its own guess",
+                                 "this CLI was launched without the check that settles it" if known
+                                 else "this CLI's host keeps no record of whether its launch carried the check that settles it",
+                                 "" if self.quiet() else " once it is quiet"))
             self.want_switch_reconnect("fast mode")
         if lacks:
             self._ask_missing_opt_in(wants)   # the flag this CLI lacks, asked for from the CLI's own word
@@ -9669,11 +9878,14 @@ class SdkSession:
                 # as a launch problem without treating it as a refused rewind.
                 self.backend._record_launch_error(self, e)
                 raise
-            # Whether THIS connection carries the fastMode opt-in — snapshotted at the same moment
-            # _options composes the flag-settings file, so the two can never disagree. The CLI only
-            # interprets literal '/fast on|off' sends on a connection made with the flag; set_fast
-            # reads this to choose between the live send and an applying reconnect.
-            self._fast_unlocked = self.fast_effective()   # the session's own ask, or the machine's Always fast switch
+            # Whether THIS connection carries the fastMode opt-in: the value _options gave the flag-settings file (its
+            # launch record), so the two can never disagree, even when the session's ask or the machine's Always fast
+            # switch changed while _options waited on the version read. The CLI only interprets literal '/fast on|off'
+            # sends on a connection made with the flag; set_fast reads this to choose between the live send and an
+            # applying reconnect. A change of fast mode made during that wait is applied by a relaunch after the
+            # connect.
+            self._fast_unlocked = bool((self._launch_record or {}).get("fast"))
+            fast_moved = self._fast_unlocked != bool(self.fast_effective())
             self._fast_expect = ""   # a fresh connection's first init speaks for the flag, not for any
             #   toggle sent on the old one — never hold a pre-reconnect expectation against it
             self._fast_guess_asked = False   # a guessed "preference" asks its relaunch once per connection
@@ -9719,6 +9931,7 @@ class SdkSession:
                     self.backend._push_soon(self.sid)
                     self._connected.set()   # the control channel exists from here (move() waits on this)
                     self._release_launch_slot()   # a relaunch's CLI is up: its launch slot goes to the next one waiting
+                    held_model = self._send_held_picks()   # a model or mode picked while a version read waited
                     if self._host is None:
                         self.backend._lease_open(self, client)   # ownership by lease (T305): pid + start time, heartbeat
                     #   (under a host the HOST holds the lease)
@@ -9751,6 +9964,16 @@ class SdkSession:
                         self._sub_std_begin(launch, launched_here)   # the speed check's episode: whether THIS CLI carries the recipe
                     except Exception as e:
                         self.backend._log("subagent speed (%s): %s" % (self.name, e), problem=True)
+                    if held_model:
+                        self._sub_std_requalify()   # the model pick sent above, as SdkBackend.set_model requalifies a live one
+                    if fast_moved and bool(self.fast_effective()) != self._fast_unlocked and not (
+                            self._switch_wanted or getattr(self, "_reconnect_when_idle", False)
+                            or getattr(self, "_reconnect", False)):
+                        # fast mode changed after _options decided this launch's flag (a toggle during its version read),
+                        # and this CLI's flag disagrees: the change applies at a relaunch, once nothing would be cut
+                        self.backend._log("fast mode (%s): changed while the launch was being prepared; the session "
+                                          "relaunches%s" % (self.name, "" if self.quiet() else " once it is quiet"))
+                        self.want_switch_reconnect("fast mode")
                     # PRE-TURN PUBLISH (the user 2026-06-27): pull the live model + context % the INSTANT we
                     # connect — before any turn — so a freshly-created SDK session shows its model and context on
                     # OPEN, like a tmux session does on launch. The old path keyed model/ctx resolution off the
@@ -9769,8 +9992,11 @@ class SdkSession:
                     # this, nothing showed after a kernel restart until each session's next turn.
                     asyncio.ensure_future(self._do_adopt_server_info())
                     if getattr(self, "_host_is_attach", False):
-                        self._arm_if_below_pick()   # an attach replays no init and serves nothing new: a standing fallback re-arms its retry here
-                        self._maybe_seed_fallback_cause()   # …and a standing fallback whose cause this kernel never saw reads it off the transcript
+                        # not when a held model pick was just sent: that pick is still in flight (apply_model_switches
+                        # leaves such a pick alone the same way)
+                        if not held_model:
+                            self._arm_if_below_pick()   # an attach replays no init and serves nothing new: a standing fallback re-arms its retry here
+                            self._maybe_seed_fallback_cause()   # …and a standing fallback whose cause this kernel never saw reads it off the transcript
                     feeder = asyncio.ensure_future(client.query(inputs()))
                     recv = asyncio.ensure_future(self._drain(client, AssistantMessage, ResultMessage, SystemMessage))
                     waker = asyncio.ensure_future(self._wake.wait())
@@ -13584,6 +13810,9 @@ class SdkBackend:
         startup_auth_env()                        # the login tokens leave this process's environment: the
         #   transport merges options.env over it, so a token left there would ride every launch, a
         #   key-billed one included. romp holds no API key (credentials.py, 2026-09-08).
+        self._fast_cli_said = set()               # token_fast_org_env's lines (a CLI below its floor, a version unknown): each once
+        self._fast_checked_sids = set()           # sessions with a fast-mode refusal marked checked in this kernel's life
+        #                                           (_adopt_fast_state); a session object rebuilt from the registry reads it
         self._helper_read_said = False            # the "Claude Code settings unreadable" row: once per process
         # Backend PROBLEMS, kept in a bounded ring so the dashboard can show them (see _log): until
         # 2026-07-28 every SDK failure went to the kernel log alone, which nobody tails, so a session
@@ -14022,8 +14251,9 @@ class SdkBackend:
             #   in every hello as cli.login, so the kernel that first sees the CLI stamps the login the launch used (never a
             #   token or key: those ride the env overlay, and the hello never carries them)
             spec["launch"] = dict(getattr(sess, "_launch_record", None) or {})   # the picks this launch carries, echoed in
-            #   every hello as cli.launch: what a kernel attaching after a restart compares a waiting pick with (2026-10-01).
-            #   Pick values and an env DIGEST only (launch_values), never a credential
+            #   every hello as cli.launch: what a kernel attaching after a restart compares a waiting pick with
+            #   (2026-10-01), and judges the CLI's fast-mode "preference" by (fastGuess, _adopt_fast_state). Pick values,
+            #   an env DIGEST (launch_values) and the fastGuess boolean only, never a credential
             spec_path = ht.write_spawn_spec(self.state_dir, sess.sid, spec)
             sock = ht.host_sock(self.state_dir, sess.sid)
             try:
@@ -14466,7 +14696,8 @@ class SdkBackend:
         if not isinstance(c, dict):
             c = {}
         # what this CLI was launched with (the spawn spec's launch record, echoed) and when: the connect's reconcile of the
-        # picks still waiting for a relaunch reads them (_reconcile_waiting_picks); None from a host older than the record
+        # picks still waiting for a relaunch reads them (_reconcile_waiting_picks), and _adopt_fast_state reads the
+        # record's fastGuess at an attach; None from a host older than the record
         sess._hello_launch = c.get("launch") if isinstance(c.get("launch"), dict) else None
         _sp = c.get("spawnedAt")
         sess._hello_spawned_at = _sp if isinstance(_sp, int) and not isinstance(_sp, bool) and _sp > 0 else None
@@ -17146,8 +17377,10 @@ class SdkBackend:
                 # per version by the canary itself (_canary_finished), so here it is a log line
                 self._log("subagent speed (%s): Subagents at standard speed is on but this launch leaves it out: %s"
                           % (sess.name, why), problem=bool(refusal))
+        fast_flag = sess.fast_effective()   # the flag this launch carries; a token launch reads its version only then
+        launch_now = dict(sess.launch_values(), fast=fast_flag)   # the picks it carries, taken before that read waits
         fs = flag_settings_path(self.state_dir, sess.sid,
-                                ultracode=(sess.effort or "") == "ultracode", fast=sess.fast_effective(),
+                                ultracode=(sess.effort or "") == "ultracode", fast=fast_flag,
                                 env=env_vars, no_helper=login, model_overrides=overrides, log=self._log)
         if fs:
             kw["settings"] = fs
@@ -17155,6 +17388,24 @@ class SdkBackend:
         # bill the key for this session; an explicit key pick with no helper anywhere (and no login to
         # fall to) leaves the CLI to decide, and a login landing then is the pick contradicted.
         launch_keyed = not login and keyed_box
+
+        def _version_read(env):
+            # token_fast_org_read for this launch; a model or mode picked meanwhile is held for the connect, after any
+            # pick still held (SdkSession._hold_live_pick)
+            lock = getattr(sess, "_lock", None) or threading.Lock()
+            with lock:
+                sess._picks_held_open = []
+            try:
+                return token_fast_org_read(env, self.claude_bin, self._log, getattr(self, "_fast_cli_said", None),
+                                           fast_flag)
+            finally:
+                with lock:
+                    sess._picks_held = list(getattr(sess, "_picks_held", None) or []) + sess._picks_held_open
+                    sess._picks_held_open = None
+        # A pick still held here was held by an earlier connect's read, and that connect never came up: these options
+        # carry it, so a launch from them sends only what this connect's read holds (SdkSession._send_held_picks)
+        sess._picks_launched = len(getattr(sess, "_picks_held", None) or [])
+        token_case = ""
         if login_id:
             # A launch billed to a STORED login (T346): the token its command printed rides this ONE process as
             # CLAUDE_CODE_OAUTH_TOKEN, exactly where the machine's own login tokens ride a login launch (the environment
@@ -17166,7 +17417,10 @@ class SdkBackend:
             # ANTHROPIC_API_KEY, which outranks a bearer too, cannot ride the child either: this overlay cannot unset an
             # inherited variable, and the kernel's own environment never carries the name (check_boot_environment).
             kw["env"] = dict(kw["env"], CLAUDE_CODE_OAUTH_TOKEN=login_token)
-            kw["env"].update(token_fast_org_env(kw["env"]))   # the CLI cannot ask the org about this login: it would guess
+            # the CLI cannot ask the org about this login: it would guess (the skip only from Claude Code 2.1.271 on,
+            # and only for a launch that carries the fast flag)
+            _add, token_case = _version_read(kw["env"])
+            kw["env"].update(_add)
         elif login or (side != "key" and not keyed_box):
             # The login tokens claimed at boot ride every launch that bills the login: a login pick, and an
             # unpicked session on a box with no helper (its effective billing IS the login, and the judges'
@@ -17175,12 +17429,19 @@ class SdkBackend:
             # for unpicked sessions). A key-billed launch, picked or by the box's helper, gets no token: a
             # bearer would outrank the helper in the CLI's precedence.
             kw["env"] = dict(kw["env"], **startup_auth_env())
-            kw["env"].update(token_fast_org_env(kw["env"]))
+            _add, token_case = _version_read(kw["env"])
+            kw["env"].update(_add)
         else:
             kw["env"] = dict(kw["env"], **helper_fast_org_env(self._log, sess.cwd))
-        # Whether this launch's login rides the environment, the one kind the CLI cannot ask the org about: read by
-        # _adopt_fast_state, where a CLI this kernel only ATTACHED to may predate token_fast_org_env and still be guessing.
-        sess._fast_token_login = bool(kw["env"].get("CLAUDE_CODE_OAUTH_TOKEN"))
+        # Whether this launch's login rides the environment, the one kind the CLI cannot ask the org about, its version
+        # read (token_fast_org_read) and whether it carries the skip that lets the API answer instead. _adopt_fast_state
+        # reads the first two for this connection; the one bit an attach needs rides the launch record below (fastGuess:
+        # the token without the skip), where a later kernel ATTACHING to this CLI reads it from
+        # the host's hello.
+        _tok = bool(kw["env"].get("CLAUDE_CODE_OAUTH_TOKEN"))
+        _skip = kw["env"].get("CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK") == "1"
+        sess._fast_token_login = _tok
+        sess._fast_token_case = token_case if _tok else ""
         sess._launched_keyed = launch_keyed
         # What a launch from THESE options carries ("" = the machine's own). For a LAUNCH the stamp records it as the
         # launched login and resets the init evidence to none: a relaunch that stops carrying the helper (the login
@@ -17194,8 +17455,11 @@ class SdkBackend:
         sess._options_login = login_id
         sess._launched_unkeyed_pick = side == "key" and not launch_keyed
         # the picks THIS launch carries (launch_values): the reconcile at the connect compares the waiting picks with it, and
-        # the host road writes it into the spawn spec, so a later kernel attaching to this CLI reads what it launched with
-        sess._launch_record = sess.launch_values()
+        # the host road writes it into the spawn spec, so a later kernel attaching to this CLI reads what it launched with;
+        # beside them fastGuess, the launch's fast-mode fact above (a boolean, never the token), which no pick compares.
+        # Kept there and not on the reg: the host echoes it in every hello, which an attach reads before the CLI's first
+        # answer. Taken with the flag (launch_now), so a pick made while the version read waits is not recorded as carried
+        sess._launch_record = dict(launch_now, fastGuess=_tok and not _skip)
         sess._launch_record["subagentStandard"] = bool(overrides)   # what THIS launch decided above, never recomputed
         if self.session_hosts_on():
             # under a host, a hook the kernel cannot answer in time (a restart in progress) is answered by the
@@ -20384,11 +20648,13 @@ class SdkBackend:
         return True
 
     def _reg_fast_effective(self, reg: dict) -> bool:
-        """SdkSession.fast_effective for a session that has no live object: the same rule over its registry row."""
+        """SdkSession.fast_effective for a session that has no live object: the same rule over its registry row and this
+        kernel's memory of a refusal marked checked (_fast_checked_sids), which a session object rebuilt from the row reads."""
         ns = types.SimpleNamespace(
             fast_opt=bool(reg.get("fast")), fast_off=bool(reg.get("fastOff")),
             fast_reason=reg.get("liveFastReason") or "", fast_rule_refused=reg.get("fastRuleRefused") or "",
-            fast_refusal_checked=bool(reg.get("fastRefusalChecked")), backend=self,
+            fast_refusal_checked=bool(reg.get("fastRefusalChecked"))
+            or str(reg.get("sid") or "") in getattr(self, "_fast_checked_sids", ()), backend=self,
             chosen_model=reg.get("model") or "", _model_id=reg.get("liveModelId") or "", model=reg.get("liveModel") or "")
         return bool(SdkSession.fast_effective(ns))
 

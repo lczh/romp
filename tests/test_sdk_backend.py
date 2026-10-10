@@ -582,10 +582,14 @@ class LiveTail(unittest.TestCase):
         self.assertEqual(be.live_atoms(sid), [], "nothing claimed in the chat — no live CLI took it")
         s = sb.SdkSession(be, {"sid": sid, "name": "n", "cwd": "/tmp", "fast": True})
         self.assertTrue(s.fast_opt, "a fresh construction picks the ask up from the reg")
-        # the per-connection unlock is snapshotted from fast_opt exactly where _connect_once builds
-        # the options that carry the flag, so the two can never disagree
+        # the per-connection unlock is snapshotted where _connect_once builds the options that carry the flag, so the
+        # two can never disagree: the expression _options reads (2026-09-17), or the launch record's flag, which _options
+        # sets from that same value (a source pin; executed, for a toggle while _options waits on the version read:
+        # tests/test_pick_survives_restart.py, AToggleWhileTheLaunchIsPrepared)
         import inspect
-        self.assertIn("self._fast_unlocked = self.fast_effective()", inspect.getsource(sb.SdkSession._amain))   # the same expression _options reads (2026-09-17)
+        import re
+        snap = re.search(r"self\._fast_unlocked = ([^#\n]+)", inspect.getsource(sb.SdkSession._amain)).group(1).strip()
+        self.assertIn(snap, ("self.fast_effective()", 'bool((self._launch_record or {}).get("fast"))'))
 
     def test_set_fast_refuses_bad_values_and_unknown_sids(self):
         d = tempfile.mkdtemp()

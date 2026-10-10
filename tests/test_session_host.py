@@ -453,8 +453,11 @@ class HostProcess(unittest.TestCase):
     def test_the_hello_echoes_the_specs_launch_record(self):
         """The kernel's launch record (the picks the spawn carried: effort, the billing pick, the fast flag, the mode, an env
         digest; 2026-10-01) rides the spec as a host key and comes back in every hello as cli.launch, so a kernel attaching
-        to this CLI after a restart can tell whether a pick that was waiting for a relaunch reached it."""
-        rec = {"effort": "high", "auth": "login", "authLogin": "", "fast": False, "mode": "default", "env": "0123456789abcdef"}
+        to this CLI after a restart can tell whether a pick that was waiting for a relaunch reached it. The whole record,
+        not the picks alone: its fastGuess (whether the launch's login rode the environment without the org-check skip)
+        is how that kernel judges the CLI's fast-mode "preference" (tests/test_fast_mode_token_login.py)."""
+        rec = {"effort": "high", "auth": "login", "authLogin": "", "fast": False, "mode": "default", "env": "0123456789abcdef",
+               "fastGuess": True}
         host, sock, spec = self._start(launch=rec)
         k, hello = self._attach(sock)
         self.assertEqual(hello["cli"]["launch"], rec)

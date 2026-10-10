@@ -96,8 +96,21 @@ class FastEffective(unittest.TestCase):
         self.assertTrue(s.fast_effective(), "…and needs no switch")
 
     def test_the_connect_and_the_snapshot_read_the_one_expression(self):
-        self.assertIn("fast=sess.fast_effective()", inspect.getsource(sb.SdkBackend._options))
-        self.assertIn("self._fast_unlocked = self.fast_effective()", inspect.getsource(sb.SdkSession._amain))
+        # source pins: the flag settings take fast_effective's value (the call, or a name _options binds to it), and the
+        # connection's snapshot is that expression or the launch record's flag, which _options sets from the same value
+        # (executed: for the flag file and the record, tests/test_fast_mode_token_login.py,
+        # Launches.test_the_flag_file_and_the_launch_record_take_the_same_answer_of_the_fast_rule; for the snapshot, a
+        # toggle while _options waits on the version read, tests/test_pick_survives_restart.py,
+        # AToggleWhileTheLaunchIsPrepared)
+        import re
+        opts = inspect.getsource(sb.SdkBackend._options)
+        flag = re.search(r"\bfast=([\w.]+(?:\(\))?)", opts[opts.index("flag_settings_path("):]).group(1)
+        if flag != "sess.fast_effective()":
+            self.assertRegex(opts, r"\b%s = sess\.fast_effective\(\)" % re.escape(flag), "the one value reaches the flag settings")
+        snap = re.search(r"self\._fast_unlocked = ([^#\n]+)", inspect.getsource(sb.SdkSession._amain)).group(1).strip()
+        if snap != "self.fast_effective()":
+            self.assertIn('_launch_record or {}).get("fast")', snap, "the snapshot takes the launch record's flag")
+            self.assertRegex(opts, r"launch_values\(\), fast=%s\)" % re.escape(flag), "and the record carries the flag settings' value")
         rule_src = inspect.getsource(sb.SdkSession.fast_effective) + inspect.getsource(sb.SdkSession._after_model_change) + inspect.getsource(sb.SdkBackend.apply_model_switches)
         self.assertIn('"/fast ', inspect.getsource(sb.SdkBackend.set_fast), "the literal send, spelled as the toggle spells it (so the check below is not vacuous)")
         self.assertNotIn('"/fast', rule_src, "the rule never sends the literal toggle: on a non-Opus session the CLI answers it by switching model")

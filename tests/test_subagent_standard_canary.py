@@ -559,7 +559,7 @@ class TheProbesBilling(_BillingScratch, unittest.TestCase):
     with it, and its launch decides on the road an unpicked session's launch takes."""
 
     def _probe_launch_env(self):
-        be = sb.SdkBackend(str(self.probe_state), "/bin/true", lambda *a, **k: None, log=lambda m, **k: None)
+        be = sb.SdkBackend(str(self.probe_state), _fake_claude("2.1.999"), lambda *a, **k: None, log=lambda m, **k: None)
         be.login_ok = lambda: False                       # no login of the machine's own
         sid = be.spawn("canary", str(self.probe_state), sid=SID)
         s = sb.SdkSession(be, dict(sb.read_reg(self.probe_state, sid), model=sb.SUBAGENT_STANDARD_MODEL, fast=True))

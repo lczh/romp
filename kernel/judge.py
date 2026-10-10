@@ -1740,14 +1740,24 @@ def _fast_org_env():
         return env
 
 
+_TOKEN_FAST_SAID = set()   # token_fast_org_env's lines for judge calls (a CLI below its floor, a version unknown): each
+#                            once per process, since a judge call is not a connect
+
+
 def _token_fast_org_env(env):
     """The sessions' rule for a fast call whose login rides the environment (sdk_backend.token_fast_org_env,
     2026-10-01): the CLI cannot ask the organization's fast-mode setting for such a login and guesses "preference",
-    so the call carries the CLI's skip and the API's own answer decides. A pure function of the call's env, so
-    nothing is memoised; a load failure leaves the CLI's own check standing and says so."""
+    so the call carries the CLI's skip and the API's own answer decides, on the claude this call runs
+    (_judge_claude_bin) at 2.1.271 or later: below that the skip would hide the refusal, so the CLI's own check
+    stands, as it does when the version cannot be read. A function of the call's env and that binary's version
+    (read once per binary file, and again after a read that did not answer, in sdk_backend.claude_cli_version), so
+    its result is not memoised; only the lines it has said are kept, in _TOKEN_FAST_SAID. A load failure leaves the
+    CLI's own check standing and says so."""
     try:
         sb = sys.modules.get("romp_sdk_backend") or load_source("romp_sdk_backend", HERE / "sdk_backend.py")
-        return dict(sb.token_fast_org_env(env) or {})
+        def log(msg, problem=False):
+            sys.stderr.write("judges: %s\n" % msg)
+        return dict(sb.token_fast_org_env(env, _judge_claude_bin(), log, _TOKEN_FAST_SAID) or {})
     except Exception as e:
         sys.stderr.write("judges: fast-mode org check for a token login failed (%s); the CLI's own check stands\n" % e)
         return {}
