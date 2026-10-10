@@ -15,6 +15,8 @@ gap from the kernel's side:
 
 Synthetic ids and texts only (the notes-api demo world).
 """
+import contextlib
+import io
 import json
 import os
 import tempfile
@@ -93,6 +95,7 @@ class _SendFixture(unittest.TestCase):
             km._SEND_ACCEPTS_STATE["said"] = False
             km._SEND_ACCEPTS_STATE["tailOk"] = False
             km._SEND_ACCEPTS_STATE.pop("bootReports", None)
+            km._SEND_ACCEPTS_STATE.pop("unread", None)
         km._pending_ops.pop(SID, None)
 
     def _send(self, qid=Q1, text="add a test for the search cache", resend=False):
@@ -385,6 +388,82 @@ class Round4(_SendFixture):
     def test_every_cancel_answer_names_the_send(self):
         km._drive({"type": "cancelQueued", "id": SID, "md": "add a test for the search cache", "qid": Q1}, self.client)
         self.assertEqual([f.get("qid") for f in self.frames if f.get("type") == "cancelResult"], [Q1])
+
+
+class Round5(_SendFixture):
+    """The review of #202 (2026-10-10): the boot never rewrites or retires a file it could not read, a last line short only
+    of its newline is kept, and a withdrawal answered as gone leaves a line in the kernel log."""
+
+    def _row(self, q, ago=60):
+        return json.dumps({"qid": q, "sid": SID, "t": int(time.time()) - ago, "ok": True})
+
+    def _problems(self):
+        ev = self.state / "session-events.jsonl"
+        rows = [json.loads(ln) for ln in ev.read_text().splitlines()] if ev.exists() else []
+        return [r for r in rows if r.get("kind") == "send-acks.unreadable"]
+
+    def test_a_log_the_boot_could_not_read_is_never_replaced_by_the_fold(self):
+        log = self.state / "accepted-sends.jsonl"
+        log.write_text(self._row(Q1) + "\n")
+        (self.state / "accepted-sends.json").write_text(json.dumps({"accepted": [json.loads(self._row(Q2))]}))
+        real_open = open
+
+        def unreadable(path, mode="r", *a, **k):      # the log refuses a read (a permission, an I/O error); any user, root included
+            if str(path) == str(log) and mode == "r":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_open(path, mode, *a, **k)
+        km.open = unreadable
+        try:
+            self.assertEqual(km._send_accepts_boot_load(), 1, "the whole-file form's row is still read")
+        finally:
+            del km.open
+        self.assertEqual(log.read_text(), self._row(Q1) + "\n", "the log is left as it was (before: replaced by the legacy rows alone)")
+        self.assertTrue((self.state / "accepted-sends.json").exists(), "and the whole-file form is not retired")
+        with km._SEND_WRITE_LOCK:
+            km._send_log_compact_locked(time.time())   # the compaction an append triggers later in the same kernel life
+        self.assertEqual(log.read_text(), self._row(Q1) + "\n", "no later compaction rewrites it either")
+        km._send_accepts_boot_report()
+        prob = self._problems()
+        self.assertEqual(len(prob), 1, "said, loudly")
+        self.assertEqual(prob[0]["unread"], "accepted-sends.jsonl")
+        self.assertIn("left as they are", prob[0]["text"])
+
+    def test_a_whole_file_form_the_boot_could_not_read_is_never_deleted(self):
+        log = self.state / "accepted-sends.jsonl"
+        log.write_text(self._row(Q1) + "\n")
+        legacy = self.state / "accepted-sends.json"
+        legacy.write_text('{"accepted": [' + self._row(Q2))        # cut short: not JSON
+        self.assertEqual(km._send_accepts_boot_load(), 1)
+        self.assertTrue(legacy.exists(), "an unreadable whole-file form is kept for a kernel that can read it (before: deleted)")
+        self.assertEqual(log.read_text(), self._row(Q1) + "\n", "and the fold is skipped")
+        self._send(qid="echo:" + "6" * 32)
+        with km._SEND_WRITE_LOCK:
+            km._send_log_compact_locked(time.time())
+        self.assertTrue(legacy.exists(), "a later compaction does not retire it either")
+        self.assertEqual(sorted(json.loads(ln)["qid"] for ln in log.read_text().splitlines()), sorted([Q1, "echo:" + "6" * 32]),
+                         "while the readable log is still compacted")
+        km._send_accepts_boot_report()
+        self.assertEqual([p["unread"] for p in self._problems()], ["accepted-sends.json"])
+
+    def test_a_last_line_short_only_of_its_newline_is_kept_and_finished(self):
+        log = self.state / "accepted-sends.jsonl"
+        log.write_text(self._row(Q1) + "\n" + self._row(Q2))   # the crash fell between the row and its newline
+        self.assertEqual(km._send_accepts_boot_load(), 2, "both decisions kept (before: the second was cut as torn)")
+        self.assertEqual(log.read_text(), self._row(Q1) + "\n" + self._row(Q2) + "\n", "the newline added, nothing cut")
+        km._send_accepts_boot_report()
+        self.assertEqual(self._problems(), [], "nothing was lost, so nothing is said")
+        self._send(qid="echo:" + "7" * 32)
+        self._reset_store()
+        self.assertEqual(km._send_accepts_boot_load(), 3, "and the next decision lands on a line of its own")
+
+    def test_a_withdrawal_answered_as_gone_names_the_session_in_the_log(self):
+        other = "99999999-8888-7777-6666-555555555555"
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            km._drive({"type": "cancelQueued", "id": other, "md": "rebuild the index", "qid": Q1}, self.client)
+        self.assertEqual([(f["type"], f.get("gone")) for f in self.frames], [("cancelResult", True)])
+        self.assertIn(other, err.getvalue(), "a line names the session (before: no trace)")
+        self.assertNotIn("rebuild the index", err.getvalue(), "and never the words")
 
 
 class AcksAnnounced(unittest.TestCase):
