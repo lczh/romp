@@ -58,7 +58,7 @@ test("the kernel handles needFull by forgetting what that client holds", () => {
   const helper = KERNEL.slice(h, h + 1500);
   assert.ok(helper.includes('"echat"'), "drop the client's tail base → next push sends a full session");
   assert.ok(helper.includes('("chat", sid)'), "drop the dedup slot → the full send isn't swallowed");
-  assert.ok(body.includes("_push_one(client)"), "repair immediately, not on the next tick");
+  assert.ok(body.includes("_push_one(client, only={sid})"), "repair immediately, not on the next tick: the asked tab alone (2026-10-10)");
 });
 
 test("a failed jump is filed in the error center, not just toasted", () => {

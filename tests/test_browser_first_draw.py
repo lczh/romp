@@ -23,7 +23,7 @@ class ConnectPushTimed(unittest.TestCase):
     def test_a_connect_push_is_counted_per_app(self):
         km = self.km
         client = {"app": "feed", "alive": True}
-        with mock.patch.object(km, "_push", side_effect=lambda targets, connect=False, live_map=None: time.sleep(0.02)):
+        with mock.patch.object(km, "_push", side_effect=lambda targets, connect=False, live_map=None, only=None: time.sleep(0.02)):
             km.Handler._push_one(mock.Mock(), client)
         cp = km._PERF_STATS.snapshot()["pusher"]["connectPush"]
         self.assertEqual(cp["count"], 1)

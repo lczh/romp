@@ -198,6 +198,11 @@ await waitFn(() => !document.getElementById("romp-boot"), null, "boot splash nev
 // column 1 shows the hub's own session and TESTHOST's under its prefix (the remote's strip has landed in column 1)
 await waitTabs("f-chat", [cfg.sidA, cfg.remote]);
 if ((await activeIn("f-chat")) !== cfg.sidA) { await clickTab("f-chat", cfg.sidA); await waitActive("f-chat", cfg.sidA); }
+// …and TESTHOST's tab LOADED there: the page dials every kernel with its first-dial diet (2026-10-10), so an unwatched remote tab
+// arrives as a skeleton and fills on the idle prefetch; dragged before that, the prefetch's ask (whose answer step 1 holds at
+// the wire) leaves it a placeholder mid-gesture, which is not draggable
+await waitFn((sid) => { const d = document.getElementById("f-chat").contentDocument; const t = d && d.querySelector('#tabs .tab[data-id="' + sid + '"]');
+  return !!t && !t.classList.contains("tab-skeleton") && !t.classList.contains("tab-placeholder"); }, cfg.remote, "the remote tab never loaded in column 1");
 out.col1Before = await tabsIn("f-chat");
 await page.evaluate(() => { window.__shellLog = []; });
 

@@ -141,7 +141,7 @@ class FeedFirstColdPush(unittest.TestCase):
 
     def test_the_early_pass_precedes_the_chat_section_in_the_source(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()
-        push = src[src.index("def _push(targets, connect=False, live_map=None):"):]
+        push = src[src.index("def _push(targets, connect=False, live_map=None, only=None):"):]
         self.assertLess(push.index("_feed_first(now, live_map, targets, connect)"), push.index("chat_list = _chat_tab_sessions(now, live_map)"))
 
 

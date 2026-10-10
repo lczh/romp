@@ -82,10 +82,10 @@ class _Self:
         self.calls = []
         self._po = push_one
 
-    def _push_one(self, client):
+    def _push_one(self, client, only=None):
         self.calls.append(client)
         if self._po:
-            self._po(client)
+            self._po(client, only)   # `only`: a needFull's repair names its tab (the real body: _push(..., only=only))
 
 
 def _fake_self(path):
@@ -296,7 +296,7 @@ class SkeletonReconnect(unittest.TestCase):
         self.assertEqual(c["skeleton"], set(), "the set emptied")
         self.assertNotIn(("status", S3), c["sent"], "_client_reset_chat_sid popped the status slot with the release")
         self.assertEqual(h.calls, [c], "the repair push ran on the handler thread, not on the next tick")
-        km._push([c], connect=True)                                             # what that _push_one does
+        km._push([c], connect=True, only={S3})                                  # what that _push_one does: the asked tab alone
         self.assertEqual(self._sessions(c), [S3])
         to = self._tab_orders(c)
         self.assertEqual(len(to), 1, "the strip changed (no set) → re-sent")
@@ -537,7 +537,7 @@ class SkeletonReconnect(unittest.TestCase):
         c["reconnect"] = True                          # whatever the flag's state, the reset pops it before its push
         km.Handler._dispatch_ws(_Self(), {"type": "needFull", "id": S3, "why": "gap"}, c)   # an ask no push answered (a bare
         self.assertEqual(c.get("askedFull"), {S3})   #  _Self runs no push_one): its mark stands into the ready (2026-09-19)
-        h = _Self(lambda cl: km._push([cl], connect=True))   # the real _push_one body
+        h = _Self(lambda cl, only=None: km._push([cl], connect=True, only=only))   # the real _push_one body
         km.Handler._dispatch_ws(h, {"type": "ready"}, c)
         for k in ("skeleton", "skeletonOrder", "reconnect", "askedFull"):
             self.assertNotIn(k, c, k)                  # a renderer that just evaluated holds nothing and asked nothing
@@ -710,6 +710,7 @@ class SkeletonReconnect(unittest.TestCase):
                          {"_client_reset_chat_base", "_release_skeleton_locked", "_resolve_reconnect",
                           "_held_as_skeleton_by_all",   # the cold-tab gate's reader (2026-09-14), under the lock
                           "_send_light_status",         # ...and its status send, membership re-checked under the lock (round three)
+                          "_held_in_some_form",         # a needFull repair's read of what the page holds in any form, under the lock (2026-10-10)
                           "_tab_order_frame", "_send_chat_or_status", "_send_tab_order",
                           # the two READERS of the connect query's skeleton=1 term (a later chat column's dial,
                           # 2026-09-11): _ws sets the client's `reconnect` and `skeletonOnReady` flags from it, and
@@ -769,7 +770,7 @@ class SkeletonReconnect(unittest.TestCase):
             # 2. the ready arm: the reset pops the set and the flag, the survivor re-arms it, the connect push serves the
             #    same view again, the arm stamps the client and the park lands behind the strip
             c["_frames"].clear()
-            h = _Self(lambda cl: km._push([cl], connect=True))   # the real _push_one body
+            h = _Self(lambda cl, only=None: km._push([cl], connect=True, only=only))   # the real _push_one body
             with contextlib.redirect_stderr(trail):
                 km.Handler._dispatch_ws(h, {"type": "ready"}, c)
             self.assertEqual(h.calls, [c])
@@ -821,7 +822,7 @@ class SkeletonReconnect(unittest.TestCase):
         km._push([c])                                 # the pre-ready cycle: the set, the strip, a status per other tab
         self.assertEqual(self._sessions(c), [])
         c["_frames"].clear()
-        h = _Self(lambda cl: (in_the_gap(cl, S2), km._push([cl], connect=True)))
+        h = _Self(lambda cl, only=None: (in_the_gap(cl, S2), km._push([cl], connect=True, only=only)))
         with contextlib.redirect_stderr(io.StringIO()):
             km.Handler._dispatch_ws(h, {"type": "ready"}, c)
         self.assertEqual(h.calls, [c])
@@ -838,7 +839,7 @@ class SkeletonReconnect(unittest.TestCase):
         c = self._client(active=S1, reconnect=True, skeletonOnReady=True)
         km._push([c])
         c["_frames"].clear()
-        h = _Self(lambda cl: (in_the_gap(cl, S1), km._push([cl], connect=True)))
+        h = _Self(lambda cl, only=None: (in_the_gap(cl, S1), km._push([cl], connect=True, only=only)))
         with contextlib.redirect_stderr(io.StringIO()):
             km.Handler._dispatch_ws(h, {"type": "ready"}, c)
         self.assertEqual([f["type"] for f in c["_frames"] if f.get("id") == S1 and f["type"] in ("session", "chatTail")], ["session"],
@@ -864,7 +865,7 @@ class SkeletonReconnect(unittest.TestCase):
                          "a frame no client took seeds nothing; the map holds %r"
                          % ({sid[-1]: len(evs) for sid, evs in km._prev_chat_events.items()},))
         c["_frames"].clear()
-        h = _Self(lambda cl: km._push([cl], connect=True))
+        h = _Self(lambda cl, only=None: km._push([cl], connect=True, only=only))
         with contextlib.redirect_stderr(io.StringIO()):
             km.Handler._dispatch_ws(h, {"type": "ready"}, c)
         self.assertEqual(self._sessions(c), [S1, S4], "the ready arm's push delivers the watched tab whole (and the transcript-less)")
@@ -946,7 +947,7 @@ class SkeletonReconnect(unittest.TestCase):
         self.assertNotIn("ready", c, "a pre-ready pop stamps nothing")
         self.assertIsNone(c.get("reconnect"))
         c["_frames"].clear()
-        h = _Self(lambda cl: km._push([cl], connect=True))
+        h = _Self(lambda cl, only=None: km._push([cl], connect=True, only=only))
         with contextlib.redirect_stderr(io.StringIO()):
             km.Handler._dispatch_ws(h, {"type": "ready"}, c)
         self.assertNotIn("skeletonOnReady", c)
@@ -1073,7 +1074,7 @@ class SkeletonReconnect(unittest.TestCase):
         # the journal names the ready, not the redial, and there is one focus (green before and after the change)
         c, trail = self._park_for_a_redialing_page("sw")
         try:
-            h = _Self(lambda cl: km._push([cl], connect=True))   # the real _push_one body
+            h = _Self(lambda cl, only=None: km._push([cl], connect=True, only=only))   # the real _push_one body
             with contextlib.redirect_stderr(trail):
                 km.Handler._dispatch_ws(h, {"type": "ready"}, c)
             self.assertEqual(h.calls, [c])
@@ -3112,33 +3113,30 @@ class SkeletonReconnect(unittest.TestCase):
 
 class RestartDiet(unittest.TestCase):
     """The user's ruling (2026-09-14): after a reload the selected tab builds first, the strip's other tabs spread over later refreshes,
-    hidden tabs not until shown; and restarts are invisible, so the one reload the reload core fires is the one the user accepts when a
-    newer build is offered (2026-09-16), a fresh page on a kernel that has the build. The client half: the main chat pane's FIRST dial after any reload the core fired is a skeleton
-    dial (the later column's shape), so the kernel's existing handshake serves the strip with the skeleton set, one full for the active
-    tab and a status per other tab; a redial carries the diet through reconnect=1 as before. Pinned in the served shim's source: the
-    reload core keeps the reason and the document's path in a durable record (announce() removes the announce record before a pane
-    dials, and a pane inside the shell never announces); the chat shim alone reads it, removes it BEFORE parsing (a malformed record is
-    consumed too), and dials skeleton=1 on its first socket when the record names the shell or a chat document; a column and a skeleton
-    view leave the record alone; every other pane's shim carries the false alone; the kernel arms the term for a chat socket only."""
+    hidden tabs not until shown. The client half: the main chat pane's FIRST dial of every page load is a skeleton dial (the later
+    column's shape; any load since 2026-10-10, where it was the loads the reload core fired), so the kernel's existing handshake serves
+    the strip with the skeleton set, one full for the active tab and a status per other tab; a redial carries the diet through
+    reconnect=1 as before. Pinned in the served shim's source: the reload core keeps the reason and the document's path in a durable
+    record (announce() removes the announce record before a pane dials, and a pane inside the shell never announces); the chat shim alone
+    consumes it, and dials skeleton=1 on its first socket; a column and a skeleton view leave the record alone; every other pane's shim
+    carries the false alone; the kernel arms the term for a chat socket only."""
 
-    def test_the_first_dial_after_a_restart_reload_is_a_skeleton_dial(self):
+    def test_the_first_dial_of_every_page_load_is_a_skeleton_dial(self):
         src = open(os.path.join(BIN, "romp-kernel")).read()
         fire = src[src.index("function fire(){"):src.index("var heldFor=null;")]
         self.assertIn("sessionStorage.setItem('romp:reloadReason',JSON.stringify({reason:owed.reason,path:location.pathname,t:Date.now()}))", fire,
                       "the reload core keeps the reason and the document's path durably when it fires (the announce record is consumed before the panes dial)")
         chat, feed = km._shim("chat"), km._shim("feed")
-        self.assertIn("""var RESTART_DIET=false;if(!COL&&!SKEL){var rr=null;try{var raw=sessionStorage.getItem('romp:reloadReason');sessionStorage.removeItem('romp:reloadReason');rr=raw?JSON.parse(raw):null;}catch(e){}RESTART_DIET=!!(rr&&typeof rr==='object'&&typeof rr.reason==='string'&&(rr.path===undefined||rr.path==='/'||String(rr.path).indexOf('/chat')===0));}""", chat,
-                      "the chat shim removes the record BEFORE parsing it and dials the diet on any reload the core fired for the shell or a chat document, only for an object with the fields (a scalar is consumed and diets nothing): a main pane, not a column, not a skeleton view")
-        self.assertIn("sessionStorage.setItem('romp:reloadReason',JSON.stringify({reason:owed.reason,path:location.pathname,t:Date.now()}))", src,
-                      "the reload core's record names the document that reloaded, so a standalone feed page's reload steers no chat dial")
-        read = "sessionStorage.getItem('romp:reloadReason')"   # the READ; the reload core's write of the record rides every page's shim
-        self.assertNotIn(read, feed, "a non-chat pane's shim never reads the record (round two, medium 2)")
+        self.assertIn("""var RESTART_DIET=false;if(!COL&&!SKEL){try{sessionStorage.removeItem('romp:reloadReason');}catch(e){}RESTART_DIET=true;}""", chat,
+                      "the chat shim consumes the record and dials the diet on every load: a main pane, not a column, not a skeleton view")
+        read = "sessionStorage.removeItem('romp:reloadReason')"   # the CONSUME; the reload core's write of the record rides every page's shim
+        self.assertNotIn(read, feed, "a non-chat pane's shim never consumes the record (round two, medium 2)")
         self.assertIn("var RESTART_DIET=false;", feed, "…it carries the false alone, so the shared dial line still compiles")
         for other in ("fleet", "files", "timeline", "settings"):
             self.assertNotIn(read, km._shim(other), other)
         self.assertIn('skeleton = (q.get("skeleton") or [""])[0] == "1" and app == "chat"', src, "the kernel arms the skeleton diet for a chat socket alone (round two, medium 2)")
         self.assertIn("""((SKEL||(RESTART_DIET&&!everConnected))?"&skeleton=1":"")""", src,
-                      "the dial carries skeleton=1 for a column, or for the main pane's FIRST socket after a restart reload (a redial dials as before)")
+                      "the dial carries skeleton=1 for a column, or for the main pane's FIRST socket of the load (a redial dials as before)")
         # the kernel side the dial lands on is unchanged and already pinned above: skeleton=1 without reconnect arms skeletonOnReady at the
         # handshake, and the ready arm serves the strip with the skeleton set, one full for the active tab, a status per other tab
         self.assertIn('client["skeletonOnReady"] = True', src)
