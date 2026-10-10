@@ -66,14 +66,18 @@ def main(argv):
     me, my_group = os.getpid(), os.getpgid(0)
 
     def still(pid, start):
-        """The recorded process, still running: its start time matches, and it is not a zombie awaiting its reaper."""
+        """The recorded process, still running: its start time matches, and it is not a zombie awaiting its reaper.
+
+        Two reads, so a reaper can land between them: a process the first read finds is gone by the second, or caught
+        mid-reap (state X). Both have ended; read as running, they made a process that ended on SIGTERM count as
+        needing SIGKILL."""
         if sb.proc_start(pid) != start:
             return False
         try:
             with open("/proc/%d/stat" % pid) as f:
-                return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+                return f.read().rsplit(")", 1)[1].split()[0] not in ("Z", "X")
         except OSError:
-            return True                               # no procfs (macOS): the start time alone decides
+            return not os.path.isdir("/proc")         # with procfs, reaped since the first read; macOS: start decides
 
     def signal_one(pid, what, sig):
         try:

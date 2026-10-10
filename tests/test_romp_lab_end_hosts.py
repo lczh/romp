@@ -11,6 +11,9 @@ Real processes stand in for a host and its CLI (a host leads its own process gro
 the sweep must leave alone: an unrelated process, a lease naming that process's pid with another start time (a reused
 pid), and a kernel-held lease. Synthetic ids only.
 """
+import contextlib
+import importlib.util
+import io
 import json
 import os
 import re
@@ -19,8 +22,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -48,6 +53,11 @@ STUBBORN_PY = ("import signal, sys, time\n"
                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
                "open(sys.argv[1], 'w').write('up')\n"
                "time.sleep(300)\n")
+DYING_PY = ("import signal, sys, time\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+            "signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM})\n"
+            "open(sys.argv[1], 'w').write('up')\n"
+            "time.sleep(300)\n")
 # The launcher starts the process in a session of its own and exits, so the process is an orphan the way a host is
 # once its kernel is gone (its parent, init or the user manager, reaps it), never a child this test would have to reap.
 # It gives the process SIGTERM's default disposition, unblocked, as a real host has (the kernel that spawns it handles
@@ -165,6 +175,115 @@ class EndingTheLabsOwnHosts(unittest.TestCase):
         r = self._run()
         self.assertTrue(self._gone(host), r.stdout + r.stderr)
         self.assertIn("needed SIGKILL", r.stdout)
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "procfs: the two reads a reaper can land between")
+class AReapBetweenTheTwoReads(unittest.TestCase):
+    """A process that ends on SIGTERM is reaped by its parent at a moment the sweep does not choose, and the sweep's
+    liveness check reads twice: the start time, then the state. A reap landing between the two reads means the
+    process has ended. Read as running, it made the sweep report "(1 needed SIGKILL)" for a host that had ended on
+    SIGTERM: the CI failure of test_a_host_and_its_cli_are_ended_and_nothing_else in eight Python jobs from 2026-10-08
+    to 10-10, in runs that took 0.2 s, so the 5 s grace was never waited out. Here the reap lands there every time.
+
+    The stand-in is this test's own child, so it stays a zombie until the test reaps it. The tool runs in-process with
+    its backend's proc_start wrapped: once the tool has signalled the child, each look first waits for the child to
+    finish dying (a zombie, unreaped), and the look after the one that met the zombie has the reap land between its
+    start-time read and the tool's state read."""
+
+    def setUp(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        self.state = Path(td.name) / "state" / "romp"
+        mark = Path(td.name) / "up"
+        self.child = subprocess.Popen([sys.executable, "-c", DYING_PY, str(mark)], start_new_session=True,
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(self._end_child)
+        wait_for(mark)
+        identity = self.state / "hosts" / SID_HOST / "identity.json"
+        identity.parent.mkdir(parents=True)
+        identity.write_text(json.dumps({"pid": self.child.pid, "start": sb.proc_start(self.child.pid)}))
+
+    def _end_child(self):
+        if self.child.returncode is None:              # not reaped yet: it is still this test's child, so its pid is too
+            try:
+                os.killpg(self.child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            self.child.wait()
+
+    def _until_ended(self, pid, within=10.0):
+        """Wait for the child to become a zombie, without reaping it (WNOWAIT)."""
+        deadline = time.monotonic() + within
+        while os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is None:
+            if time.monotonic() > deadline:
+                raise AssertionError("the stand-in never ended on SIGTERM")
+            time.sleep(0.01)
+
+    def _sweep(self, between_the_reads, tool_open=None):
+        """Run end-hosts.py's main on the state root, calling `between_the_reads` after the start-time read of the look
+        that follows the one that met the zombie. Returns what the tool printed."""
+        pid, signalled, looks = self.child.pid, [], []
+        real_kill, real_killpg = os.kill, os.killpg
+
+        def kill(p, sig):
+            if p == pid and sig:
+                signalled.append(sig)
+            return real_kill(p, sig)
+
+        def killpg(g, sig):
+            if g == pid:
+                signalled.append(sig)
+            return real_killpg(g, sig)
+
+        def proc_start(p):
+            if p == pid and signalled:
+                self._until_ended(pid)
+            start = sb.proc_start(p)
+            if p == pid and signalled:
+                looks.append(start)
+                if len(looks) == 2:
+                    between_the_reads()
+            return start
+
+        spec = importlib.util.spec_from_file_location("romp_end_hosts_reap_race", TOOL)
+        tool = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tool)
+        if tool_open is not None:
+            tool.open = tool_open                      # a module global: the tool's own open() calls find it first
+        backend = types.SimpleNamespace(proc_start=proc_start)
+        loadsource = types.ModuleType("loadsource")
+        loadsource.load_source = lambda name, path: backend
+        out = io.StringIO()
+        with mock.patch.dict(sys.modules, {"loadsource": loadsource}), mock.patch.object(sys, "path", list(sys.path)), \
+                mock.patch.object(os, "kill", kill), mock.patch.object(os, "killpg", killpg), contextlib.redirect_stdout(out):
+            rc = tool.main(["end-hosts.py", str(self.state)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(signalled[:1], [signal.SIGTERM], "the tool sent the stand-in SIGTERM first")
+        self.assertGreaterEqual(len(looks), 2, "the tool looked again after meeting the zombie, so the reap was placed")
+        return out.getvalue().strip()
+
+    def test_a_process_reaped_between_the_reads_ended_on_sigterm(self):
+        line = self._sweep(self.child.wait)            # its parent reaps it: the second read finds no process
+        self.assertEqual(self.child.returncode, -signal.SIGTERM, "SIGTERM ended it")
+        self.assertEqual(line, "lab hosts: ended 1 host(s) and 0 CLI(s)", "so no SIGKILL was needed")
+
+    def test_a_process_caught_mid_reap_has_ended(self):
+        # Inside the reap itself the state reads X (dead, its reaper collecting it). No test can hold a real reaper
+        # there, so the tool's state read after the placed moment is shown X for the zombie it is.
+        stat, mid_reap = "/proc/%d/stat" % self.child.pid, []
+
+        def tool_open(path, *args, **kwargs):
+            if path == stat and mid_reap:
+                mid_reap.clear()
+                with open(path) as f:
+                    head, tail = f.read().rsplit(")", 1)
+                fields = tail.split()
+                self.assertEqual(fields[0], "Z", "the stand-in is a zombie at the placed moment")
+                return io.StringIO("%s) X %s\n" % (head, " ".join(fields[1:])))
+            return open(path, *args, **kwargs)
+
+        line = self._sweep(lambda: mid_reap.append(True), tool_open)
+        self.assertEqual(line, "lab hosts: ended 1 host(s) and 0 CLI(s)", "a process mid-reap has ended; no SIGKILL needed")
 
 
 class TheLabsCleanupRunsIt(unittest.TestCase):
