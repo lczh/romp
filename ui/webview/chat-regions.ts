@@ -175,6 +175,25 @@ export function gapTurnPx(units: Iterable<{ kind: string; lo?: number; hi?: numb
   return turns * per > maxPx ? maxPx / turns : per;
 }
 
+/** The share of the layout limit the page's ESTIMATES may stand for together (2026-10-02): the gaps (gapTurnPx) and the units of
+ *  the runs it holds while they are hidden in a spacer, as each window build sizes them (units the keyed paint appends below the
+ *  window between builds take the figure as it stands, and can pass the share, by at most their count times it, until the next
+ *  build: render.ts heldPxOf; the served climb reads both, tests/test_long_history_height_browser.py
+ *  LongHistoryClimb). With the gaps' bound alone, a reader who climbed back through a long session from a tall tail added
+ *  each page's rows at the average unit measured off that tail, and the thread passed the limit again, its end out of reach. The rest
+ *  of the limit is left to the rendered window, whose rows stand at their real height. */
+export const HIDDEN_SHARE = 0.5;
+
+/** The px a unit of the held runs stands for while it is hidden in a spacer: `avgUnitPx`, lowered when the gaps (`gapsPx`, as the
+ *  spacer map draws them) and every unit that is not a gap, at `avgUnitPx`, would stand taller together than `maxPx`. Every such
+ *  unit is counted, rendered or not, so the figure does not move when the window does. */
+export function heldUnitPx(units: Iterable<{ kind: string }>, avgUnitPx: number, gapsPx: number, maxPx: number): number {
+  let n = 0;
+  for (const u of units) if (u.kind !== "gap") n++;
+  const room = Math.max(0, maxPx - gapsPx);
+  return n * avgUnitPx > room ? room / n : avgUnitPx;
+}
+
 /** The page-aligned span holding turn `t`, clipped to the gap: what a gap asks for when the reader stands INSIDE it (the viewport between
  *  its edges, a scrollbar jump into history) and met neither edge, so the page they look at comes first (2026-10-01). */
 export function pageAt(gap: { lo: number; hi: number }, t: number, pageTurns: number): { lo: number; hi: number } {

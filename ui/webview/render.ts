@@ -41,7 +41,7 @@ import { markerLabel, dayContext, DayWalk, relativeLabel, relativeLines } from "
 import { composeStatusWidgets, folderIconNode, folderLink, type StatusRecord } from "./status-widgets";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
 import { compactDisplay, isFoldableNoticeShape, itemAnchor, type DisplayItem } from "./compact";
-import { insertRun, regionsFromRuns, gapHeight, gapTurnPx, GAPS_SHARE, LAYOUT_LIMIT_FALLBACK, pageAt, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, kernelTurnOf, measureTurnPx, type MeasuredRow, type Region, type Run, type Gap, type Ev } from "./chat-regions";
+import { insertRun, regionsFromRuns, gapHeight, gapTurnPx, GAPS_SHARE, HIDDEN_SHARE, heldUnitPx, LAYOUT_LIMIT_FALLBACK, pageAt, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, kernelTurnOf, measureTurnPx, type MeasuredRow, type Region, type Run, type Gap, type Ev } from "./chat-regions";
 import { senderKind, SenderKind } from "./sender-identity";
 import { railPads, TICK_PAD } from "./rail-pads";   // the comment ticks' clamped hit pads (the comment-forward rail, 2026-09-24)
 import { loadSettings, saveSettings, onExternalSettingsChange, installSettingsSync, type RompSettings } from "./settings";
@@ -1653,8 +1653,8 @@ let landTrail: string[] = [];
 // real .turn nodes; the older head [0, winStart) collapses into ONE measured
 // `.tx-spacer` div at the top. Scrolling near the top lazily expands the window
 // downward (renders older turns, shrinks the spacer) — the classic chat-app
-// "load more as you scroll back". The spacer carries a REAL height (winStart ×
-// avgTurnH), so content.scrollHeight stays honest and stick-to-bottom never snaps
+// "load more as you scroll back". The spacer carries a REAL height (the hidden
+// units' estimates: sizeSpacers), so content.scrollHeight stays honest and stick-to-bottom never snaps
 // (the failure mode of the reverted content-visibility approach). winStart === 0
 // ⇒ no spacer, whole transcript rendered (short sessions, compact mode).
 // Invariant: view.rendered === len (every event accounted for). Note the DOM child
@@ -1668,7 +1668,7 @@ let landTrail: string[] = [];
 // every event object; a pass edited events in place without swapping them).
 interface PaintOut { pe: number | null; mark: number | null }
 interface Painted { items: DisplayItem[]; sig: (string | undefined)[]; out: (PaintOut | undefined)[] }
-interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner)
+interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; heldPx?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner)
 const views = new Map<string, View>();
 
 // Pending pickers (AskUserQuestion / tool-permission) keyed by session id. These
@@ -3407,7 +3407,7 @@ function paintGlowRuler(): void {
     const topSp = v.el.querySelector<HTMLElement>(".tx-spacer-top"), botSp = v.el.querySelector<HTMLElement>(".tx-spacer-bot");
     segs.push(...windowSpans(units, { winStart: v.winStart ?? 0, winEnd: v.winEnd ?? (v.unitTotal ?? 0), unitTotal: v.unitTotal ?? 0,
                                       topY: yOf(topSp), topH: topSp ? topSp.offsetHeight : 0, botY: yOf(botSp), botH: botSp ? botSp.offsetHeight : 0,
-                                      avg: v.avgTurnH ?? 60 }));
+                                      avg: unitPx(v) }));
   }
   segs.sort((a, b) => a.top - b.top);
   // coalesce contiguous / overlapping turns into ONE band; a multi-segment goal hover → a few disjoint bands
@@ -3622,10 +3622,25 @@ function eventUnitIndex(s: Session): Int32Array {
 // scrollTop or the window AT ALL: under pure scrolling nothing moves, and a mark moves only when
 // information arrives — a height first measured (or remeasured: an image sizing in, a fold
 // toggling), events appending — the event-keyed remap the design rule asks for. The rendered
-// window still feeds the cache every paint, so the frame converges to truth as units are seen;
-// the scrollbar thumb lives in the real-pixel frame, whose totals the cache tracks to within the
-// average-height estimate for never-rendered units — same accuracy class as the spacers that
-// size that scrollbar in the first place. Returns null while the pane is hidden or degenerate;
+// window still feeds the cache every paint, so the frame converges to truth as units are seen.
+// The scrollbar is not drawn from this frame. It spans the rendered window, where a gap stands at
+// its own estimate, and two spacers, which estimate a hidden unit their own way (a gap at its own
+// estimate since T386, a held unit at the bounded figure since 2026-10-02: sizeSpacers, unitPx).
+// While a spacer stands, the frame is the sum below: a unit its cache holds no height for counts
+// at the raw average, and a gap, which is no .turn, is never cached; a mark's place on the track is
+// its unit's offset over the frame's total (paintScrollMarks). So wherever the scrollbar and this
+// sum give a stretch of the thread different heights (for example a gap anywhere, a held unit in a
+// spacer, or the rendered rows, since the sum omits the space between them: T245 below), every
+// mark can sit apart from its row's place on the scrollbar, a rendered row's included. The cache
+// is keyed by unit index and never cleared, so after a page of older history shifts the indices,
+// each cached height stays under its old index, whichever unit now holds it, until that unit is
+// rendered. What is designed is that the frame is the marks' own: apart from the exact frame
+// below, taken only while no spacer stands, it depends on neither scrollTop nor the window (a mark
+// moves when information arrives, for example a height measured, events appended or a page of
+// older history inserted), and the notches and the comment ticks share it (paintScrollMarks,
+// updateCommentRail); a click on either goes through scrollToAnchor. No scroll walk or jump reads
+// it, so it plays no part in reaching the end of a long thread. Returns null while the pane is
+// hidden or degenerate;
 // offsetOf returns null out of range — callers skip that mark, the next paint lands it.
 function contentOffsetFrame(content: HTMLElement, v: View, s: Session):
     { sh: number; offsetOf: (i: number) => number | null } | null {
@@ -3721,10 +3736,10 @@ function paintScrollMarks(): void {
   const cRect = content.getBoundingClientRect();
   // The WHOLE loaded conversation gets notches, not just the rendered DOM window (the user
   // 2026-08-17, who scrolled back and watched the newer messages' marks vanish): the chat
-  // virtualizes — a window of real turns between two spacers sized by the renderer's avg-height
-  // estimate, and the scrollbar spans that estimated whole. contentOffsetFrame owns that mapping —
-  // exactly as accurate as the scrollbar the user is reading the notches against, and shared with
-  // the comment rail so the two mark kinds can never disagree about order.
+  // virtualizes: a window of real turns between two spacers sized by the hidden units' estimates
+  // (sizeSpacers), and the scrollbar spans that estimated whole. contentOffsetFrame places the marks
+  // in a frame of its own (its comment says where a mark can sit apart from its row's place on the
+  // scrollbar), shared with the comment rail so the two mark kinds can never disagree about order.
   const frame = contentOffsetFrame(content, v, s);
   if (!frame) { box.style.display = "none"; scrollMarksSig = ""; return; }
   const sh = frame.sh;
@@ -13854,7 +13869,7 @@ function unitSig(v: View, s: Session, it: DisplayItem, prevEpoch: number | null,
 function sizeBottomSpacer(v: View, bot: HTMLElement, top: HTMLElement | null): void {
   const total = v.unitTotal ?? 0;
   const before = parseFloat(bot.style.height) || 0;
-  const after = hiddenHeight(v, total - (v.spacerCountBot ?? 0), total, v.avgTurnH ?? 60);
+  const after = hiddenHeight(v, total - (v.spacerCountBot ?? 0), total, unitPx(v));
   if (after === before) return;
   bot.style.height = after + "px";
   if (activeId && views.get(activeId) === v) {
@@ -13964,8 +13979,9 @@ function dayWalkBefore(s: Session, items: DisplayItem[], unitStart: number): Day
 // ── Unified bidirectional virtualization (the user 2026-06-25) ─────────────────────────────────────────
 // Both modes render a window of UNITS [winStart, winEnd): a unit is one event (normal) or one folded
 // compactDisplay item (compact). The hidden head [0, winStart) collapses into a TOP spacer and the hidden
-// tail [winEnd, total) into a BOTTOM spacer, each sized by (hidden-unit count × avg row height) so the
-// scrollbar spans the whole transcript. On scroll, virtualizeToViewport() re-renders AROUND wherever the
+// tail [winEnd, total) into a BOTTOM spacer, each sized by its hidden units' estimates (a gap at its own,
+// every other unit at unitPx: sizeSpacers) so the scrollbar spans the whole transcript. On scroll,
+// virtualizeToViewport() re-renders AROUND wherever the
 // viewport lands — a steady scroll-back OR a scrollbar jump — so random access works, not just contiguous
 // scroll. Every rendered node is tagged data-unit so the scroll↔unit mapping can locate it.
 
@@ -14142,6 +14158,7 @@ function renderWindowItems(v: View, s: Session, items: DisplayItem[], unitStart:
   // top spacer grew by 180,000 px on a send on a long transcript)
   measureRows(v);
   v.gapUnits = gapUnitsOf(items, v.pxPerTurn);
+  v.heldPx = heldPxOf(v, items);   // the held units' figure, off the gaps just mapped (heldPxOf)
   sizeSpacers(v);
 }
 /** The tallest box this browser lays out, in CSS px, at the current scale and zoom (2026-10-01): a fixed-position probe asked for a
@@ -14169,6 +14186,21 @@ if (typeof window !== "undefined") window.addEventListener("resize", () => { lay
 let gapsBoundHeld: number | null = null;
 function gapsMaxPx(): number { return gapsBoundHeld ?? layoutLimitPx() * GAPS_SHARE; }
 if (typeof window !== "undefined") (window as any).__rompGapsBound = (px: number | null): void => { gapsBoundHeld = typeof px === "number" && px > 0 ? px : null; };
+/** The px a hidden unit of a held run stands for (chat-regions.ts heldUnitPx): v.avgTurnH ?? 60, lowered when the gaps as the
+ *  spacer map draws them and the held runs' units at that figure would pass their share of the measured layout limit together
+ *  (HIDDEN_SHARE). Set at each window build (renderWindowItems) and on a first measure (sizeSpacers), off the units the window is
+ *  painted from; read by the spacers and every walk over them (unitPx). The keyed paint (tailDiff) keeps it, so the top spacer it
+ *  leaves standing and the walks over that spacer still agree; units it appends below the window take the figure as it stands, which
+ *  can pass the share, by at most their count times the figure, until the next build (the served climb appends replies below the
+ *  window and reads both: tests/test_long_history_height_browser.py LongHistoryClimb,
+ *  test_rows_appended_below_the_window_take_the_held_figure_until_the_next_build). */
+function heldPxOf(v: View, items: DisplayItem[]): number {
+  let gaps = 0;
+  if (v.gapUnits) for (const h of v.gapUnits.values()) gaps += h;
+  return heldUnitPx(items, v.avgTurnH ?? 60, gaps, layoutLimitPx() * HIDDEN_SHARE);
+}
+/** The px the spacers and every walk over them take for a hidden unit that is not a gap. */
+function unitPx(v: View): number { return v.heldPx ?? v.avgTurnH ?? 60; }
 /** The gap units' heights, by unit: each its own estimate (turns x px-per-turn), not the average row (T386 stage 2). */
 function gapUnitsOf(items: DisplayItem[], pxPerTurn: number | undefined): Map<number, number> | undefined {
   const gu = new Map<number, number>();
@@ -14176,14 +14208,14 @@ function gapUnitsOf(items: DisplayItem[], pxPerTurn: number | undefined): Map<nu
   for (let u = 0; u < items.length; u++) { const it = items[u]; if (it.kind === "gap") gu.set(u, gapHeight(it, per)); }   // per TURN, not per display unit (medium 2)
   return gu.size ? gu : undefined;
 }
-/** The estimated height of the units [from, to): a gap its own, every other unit the measured average. */
+/** The estimated height of the units [from, to): a gap its own, every other unit `avg` (unitPx). */
 function hiddenHeight(v: View, from: number, to: number, avg: number): number {
   let h = 0;
   for (let u = from; u < to; u++) h += v.gapUnits?.get(u) ?? avg;
   return Math.max(0, Math.round(h));
 }
 
-// Size the head/tail spacers to (hidden-unit count × avg rendered row height) so the scrollbar spans the
+// Size the head/tail spacers to the hidden units' estimates (a gap its own, every other unit unitPx) so the scrollbar spans the
 // whole transcript. avgTurnH is measured once off the rendered rows (only when VISIBLE — a display:none
 // pre-built view reports offsetHeight 0, so don't cache a 0) and reused; the spacers sit off-viewport, so a
 // per-row estimate is invisible.
@@ -14191,12 +14223,14 @@ function sizeSpacers(v: View): void {
   const top = v.el.querySelector(".tx-spacer-top") as HTMLElement | null;
   const bot = v.el.querySelector(".tx-spacer-bot") as HTMLElement | null;
   if (!top && !bot) return;
-  const hadPerTurn = v.pxPerTurn != null;
+  const hadPerTurn = v.pxPerTurn != null, hadAvg = v.avgTurnH != null;
   measureRows(v);
   // the first measure of px-per-turn (a view built hidden measures nothing; its first visible sizing does): the gaps take the
   // measured figure NOW, so no later rebuild re-sizes them by the difference under the reader (2026-09-23)
   if (!hadPerTurn && v.pxPerTurn != null && v.painted) v.gapUnits = gapUnitsOf(v.painted.items, v.pxPerTurn);
-  const avg = v.avgTurnH ?? 60;
+  // …and the held units' figure with them, as on a first measure of the average unit
+  if (((!hadPerTurn && v.pxPerTurn != null) || (!hadAvg && v.avgTurnH != null)) && v.painted) v.heldPx = heldPxOf(v, v.painted.items);
+  const avg = unitPx(v);
   const topBefore = top ? (parseFloat(top.style.height) || 0) : 0, botBefore = bot ? (parseFloat(bot.style.height) || 0) : 0;
   const total = v.unitTotal ?? ((v.spacerCount ?? 0) + (v.spacerCountBot ?? 0));
   const topAfter = top ? hiddenHeight(v, 0, v.spacerCount ?? 0, avg) : 0, botAfter = bot ? hiddenHeight(v, total - (v.spacerCountBot ?? 0), total, avg) : 0;
@@ -14210,7 +14244,7 @@ function sizeSpacers(v: View): void {
   }
 }
 /** The rows' measured heights, once per view and only while it is visible (a display:none view reports 0): the average unit
- *  the spacers size hidden units by, and the px per TURN a gap is sized by. */
+ *  (the held units' figure starts from it: heldPxOf), and the px per TURN a gap is sized by. */
 function measureRows(v: View): void {
   if (v.avgTurnH == null) {
     let h = 0, n = 0;
@@ -14279,9 +14313,9 @@ function topSpacerY(v: View, content: HTMLElement): number {
   return top ? top.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop : 0;
 }
 /** The estimated top, in scroll space, of a unit hidden in a spacer (the same walk unitAtScroll maps a position by: each hidden unit its
- *  own height, a gap's estimate else the average), or null when it is not hidden. */
+ *  own height, a gap's estimate else unitPx), or null when it is not hidden. */
 function hiddenUnitTop(v: View, content: HTMLElement, u: number): number | null {
-  const avg = v.avgTurnH ?? 60;
+  const avg = unitPx(v);
   if (u < (v.winStart ?? 0)) {
     if (!v.el.querySelector(".tx-spacer-top")) return null;
     let y = topSpacerY(v, content);
@@ -14298,15 +14332,15 @@ function hiddenUnitTop(v: View, content: HTMLElement, u: number): number | null 
   }
   return null;
 }
-// Estimate the UNIT index at the viewport top: a spacer maps by avg height; a rendered row by its data-unit.
+// Estimate the UNIT index at the viewport top: a spacer maps by the hidden units' estimates; a rendered row by its data-unit.
 function unitAtScroll(v: View, content: HTMLElement): number {
-  const avg = v.avgTurnH ?? 60;
+  const avg = unitPx(v);
   const st = content.scrollTop;
   const cTop = content.getBoundingClientRect().top;
   const yOf = (e: HTMLElement) => e.getBoundingClientRect().top - cTop + st;   // position in scroll space
   const top = v.el.querySelector(".tx-spacer-top") as HTMLElement | null;
   const topH = top ? top.offsetHeight : 0, topY = topSpacerY(v, content);
-  if (st < topY + topH) {   // in the top spacer: walk the hidden units by their own heights (a gap's estimate, else the average) from where it starts
+  if (st < topY + topH) {   // in the top spacer: walk the hidden units by their own heights (a gap's estimate, else unitPx) from where it starts
     if (!v.gapUnits) return Math.max(0, Math.floor((st - topY) / avg));
     let y = topY;
     for (let u = 0; u < (v.winStart ?? 0); u++) { y += v.gapUnits.get(u) ?? avg; if (st < y) return u; }
@@ -15966,14 +16000,55 @@ function updateJumpBtn(): void {
   if (off) jumpBtn.style.bottom = (Math.max(0, window.innerHeight - c.getBoundingClientRect().bottom) + 8) + "px";
   updateJumpCluster();   // the jump cluster sits over this chip's slot and places its stops against this scroll position — same events, same measure
 }
-jumpBtn.onclick = () => {
+function goToBottom(): void {
   const c = document.getElementById("content");
   if (!c) return;
   writeScroll(c, c.scrollHeight, "jump-button", true);   // the snap IS the acknowledgment
   const v = activeId ? views.get(activeId) : undefined;
   if (v) { v.stick = true; v.scrollTop = c.scrollTop; }   // the explicit re-entry into follow mode
   updateJumpBtn();                                    // at the bottom now — the chip hides itself
-};
+}
+jumpBtn.onclick = goToBottom;
+// End and Ctrl+End take the chip's road when the shown #content contains the location. The location is the focused element;
+// while the page body has focus, the newer of the selection's anchor and the last press, by the times of the last selectionchange
+// and the last pointerdown, except that a press inside #content is read over an anchor outside it; or whichever of the two exists.
+// The press is a live range at the start of the pointerdown's target, which the DOM moves to the removed node's parent when the
+// target or an ancestor is removed.
+// Not with Shift, Alt or Meta held, nor while the focused element uses End itself (a text field, a textarea, a contenteditable
+// element, a select, a range input, or an audio or video with controls, a finite duration above zero and not ended), nor while a
+// box between the location and #content that holds the focused element or the last press can still scroll down. Anywhere else End
+// is the browser's.
+const usesEnd = (f: HTMLElement): boolean => f.isContentEditable || f instanceof HTMLTextAreaElement || f instanceof HTMLSelectElement
+  || (f instanceof HTMLInputElement && /^(text|search|url|tel|email|password|number|range)$/.test(f.type))
+  || (f instanceof HTMLMediaElement && f.controls && isFinite(f.duration) && f.duration > 0 && !f.ended);
+let lastPress: Range | null = null;
+let pressAt = -1, selAt = -1;   // the times of the last pointerdown and the last selectionchange
+window.addEventListener("selectionchange", (e) => { selAt = e.timeStamp; }, true);
+window.addEventListener("pointerdown", (e) => {
+  lastPress = null;
+  pressAt = e.timeStamp;
+  if (e.target instanceof Node) { lastPress = document.createRange(); lastPress.setStart(e.target, 0); }
+}, true);
+window.addEventListener("keydown", (e) => {
+  if (e.key !== "End" || e.shiftKey || e.altKey || e.metaKey) return;
+  const c = document.getElementById("content");
+  if (!c || c.clientHeight <= 0) return;   // #content not shown
+  const ae = document.activeElement;
+  const anchor = document.getSelection()?.anchorNode ?? null;
+  const press = lastPress ? lastPress.startContainer : null;
+  const inside = (n: Node): boolean => c.contains(n instanceof Element ? n : n.parentElement);
+  const at: Node | null = ae && ae !== document.body ? ae
+    : anchor && press ? (pressAt > selAt || (inside(press) && !inside(anchor)) ? press : anchor) : anchor ?? press;
+  const elx = at instanceof Element ? at : at?.parentElement ?? null;
+  if (!elx || !c.contains(elx)) return;
+  if (ae && ae !== document.body && usesEnd(ae as HTMLElement)) return;
+  for (let b: Element | null = elx; b && b !== c; b = b.parentElement) {
+    const oy = getComputedStyle(b).overflowY;
+    if ((oy === "auto" || oy === "scroll") && b.scrollTop + b.clientHeight < b.scrollHeight - 1 && (b.contains(ae) || b.contains(press))) return;
+  }
+  e.preventDefault();
+  goToBottom();
+});
 {
   const c = document.getElementById("content");
   if (c) {
@@ -16780,7 +16855,7 @@ function preJumpIntoGap(sid: string, t: number | null | undefined, rec: WindowAs
       const items = displayItems(s);
       const idx = items.findIndex((it) => it.kind === "gap" && it.lo === r.lo && it.hi === r.hi);
       if (idx < 0) { landTrail.push("pre-jump-noitem"); return; }
-      const avg = v.avgTurnH ?? 60, own = hiddenHeight(v, idx, idx + 1, avg);
+      const avg = unitPx(v), own = hiddenHeight(v, idx, idx + 1, avg);
       if (idx < (v.winStart ?? 0)) y = topSpacerY(v, content) + hiddenHeight(v, 0, idx, avg) + frac * own;
       else { const bot = v.el.querySelector(".tx-spacer-bot") as HTMLElement | null; y = content.scrollHeight - (bot ? bot.offsetHeight : 0) + hiddenHeight(v, v.winEnd ?? idx, idx, avg) + frac * own; }
     }
@@ -16794,6 +16869,9 @@ function preJumpIntoGap(sid: string, t: number | null | undefined, rec: WindowAs
 }
 // the served labs read the session's regions on demand (a gap inside a spacer has no element to read): kind, span, and a run's event count
 if (typeof window !== "undefined") (window as any).__rompRegions = (sid?: string): unknown => { const s = sessions.get(sid || activeId || ""); return s?.regions ? s.regions.map((r) => r.kind === "gap" ? { kind: "gap", lo: r.lo, hi: r.hi } : { kind: "run", lo: r.lo, hi: r.hi, n: r.events.length, first: keyOf(r.events[0] as { uuid?: string; key?: string }) ?? null, last: keyOf(r.events[r.events.length - 1] as { uuid?: string; key?: string }) ?? null }) : null; };
+// the long-history lab (tests/test_long_history_height_browser.py) reads the active view's measures: the px per turn and the average
+// unit the page measured, the held units' figure (heldPx), the unit count, the rendered window, the layout limit it measured
+if (typeof window !== "undefined") (window as any).__rompViewMeasure = (): unknown => { const v = views.get(activeId || ""); return v ? { pxPerTurn: v.pxPerTurn ?? null, avgUnit: v.avgTurnH ?? null, heldPx: v.heldPx ?? null, units: v.unitTotal ?? null, winStart: v.winStart ?? null, winEnd: v.winEnd ?? null, layoutLimit: layoutLimitPx() } : null; };
 if (typeof window !== "undefined") (window as any).__rompTurnUnderTop = (): number | null => { const sid = activeId || ""; const s = sessions.get(sid), v = views.get(sid), c = document.getElementById("content"); if (!s || !v || !c) return null; return turnUnderTop(v, s, displayItems(s), turnOfEvents(s), c, c.scrollTop); };   // the lab reads the point under the viewport top as a turn (round five)
 (window as any).__rompLandTrail = (): string[] => landTrail.slice();   // the landing trail so far, for a served lab's payload (round eight: CI's reload restore parked with no window ask; the trail names the branch it took)
 (window as any).__rompAskState = (sid?: string): unknown => { const id = sid || activeId || ""; const s = sessions.get(id); return { loadingOlder: loadingOlder.has(id), gapLoading: gapLoading.size, gapKeys: Array.from(gapLoading), landingGaps: Array.from(windowAsks.values()).reduce((n, a) => n + a.filter((r) => !r.cancelled && !!r.gap).length, 0), asks: (windowAsks.get(id) ?? []).map((r) => ({ anchor: r.anchor.slice(-6), nav: r.nav, cancelled: r.cancelled, gap: r.gap, origin: r.origin })), hasGap: !!(s && s.regions && s.regions.some((r) => r.kind === "gap")), olderOnServer: !!(s && olderOnServer(s)) }; };
@@ -21311,7 +21389,7 @@ function turnOfEvents(s: Session): number[] {
 }
 /** The point under the viewport top as a TURN (fractional) before a rebuild: a rendered gap element under the top gives lo plus the
  *  fraction into it; a rendered row gives its turn; a point in the top spacer walks the hidden units by their own heights (a gap's
- *  estimate, else the average) to the unit it falls in. Null when nothing can be named. */
+ *  estimate, else unitPx) to the unit it falls in. Null when nothing can be named. */
 function turnUnderTop(v: View, s: Session, items: DisplayItem[], turns: number[], content: HTMLElement, top: number): number | null {
   const cTop = content.getBoundingClientRect().top, st = content.scrollTop;
   for (const c of Array.from(v.el.children) as HTMLElement[]) {
@@ -21325,7 +21403,7 @@ function turnUnderTop(v: View, s: Session, items: DisplayItem[], turns: number[]
   const spacer = v.el.querySelector(".tx-spacer-top") as HTMLElement | null;
   const topH = spacer ? spacer.offsetHeight : 0, topY = topSpacerY(v, content);
   if (spacer && top < topY + topH) {   // the walk starts where the spacer does (topSpacerY); a top in the padding above it is its start
-    const at = Math.max(top, topY), avg = v.avgTurnH ?? 60; let y = topY;
+    const at = Math.max(top, topY), avg = unitPx(v); let y = topY;
     for (let u = 0; u < (v.winStart ?? 0) && u < items.length; u++) {
       const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, gapTurnPx(items, v.pxPerTurn, gapsMaxPx()))) : avg;
       if (at < y + h) { if (it.kind === "gap") return it.lo + (it.hi - it.lo) * ((at - y) / h); const f = itemFirstEvent(it); return f >= 0 && f < turns.length ? turns[f] : null; }
@@ -21345,7 +21423,7 @@ function yOfTurn(v: View, s: Session, items: DisplayItem[], turns: number[], con
     const tr = c.dataset.turn; if (tr == null || tr === "" || Number(tr) !== whole) continue;   // the row names its turn (round six)
     return c.getBoundingClientRect().top - cTop + st + c.offsetHeight * Math.min(1, Math.max(0, t - whole));
   }
-  const avg = v.avgTurnH ?? 60; let y = topSpacerY(v, content);   // a hidden unit: the spacer's walk, from where the spacer starts
+  const avg = unitPx(v); let y = topSpacerY(v, content);   // a hidden unit: the spacer's walk, from where the spacer starts
   for (let u = 0; u < (v.winStart ?? 0) && u < items.length; u++) {
     const it = items[u]; const h = it.kind === "gap" ? (v.gapUnits?.get(u) ?? gapHeight(it, gapTurnPx(items, v.pxPerTurn, gapsMaxPx()))) : avg;
     if (it.kind === "gap" && t >= it.lo && t < it.hi) return y + h * ((t - it.lo) / (it.hi - it.lo));

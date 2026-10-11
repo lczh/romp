@@ -7,11 +7,13 @@ the gap stayed in the viewport, and it asked for page after page while the reade
 
 Served, on a hermetic kernel over a synthetic transcript built to cross the limit: about two thousand short turns of history, then a
 tail of tall ones (each reply a long code block), so the page measures a tall turn off the tail and the head gap, at that figure, would
-stand far past the limit. Three labs:
+stand far past the limit. The labs:
 
 LongHistoryHeight, at a forced 2x scale (the reported browser's). The page must:
 - land with the newest row on screen at the bottom, and a jump to the end must keep it there;
 - keep its scroll height under the limit;
+- at the landing, estimate a row hidden in a spacer at the average unit it measured, the units it holds standing at that average
+  under a fifth of the limit;
 - sit still at the end: no page asked, no scroll written while the reader waits there;
 - keep a scrollbar jump into the middle of the history where it was dropped (a gap is one display unit, and a re-window used to put
   its top at the viewport top: the reader was sent to the head), asking the page holding the turn under the viewport top, once (its
@@ -25,27 +27,104 @@ LongHistoryHeight, at a forced 2x scale (the reported browser's). The page must:
   stand inside the re-window's edge margin): re-window ONCE for a scroll there, not again on the echo of its own moving write;
   and keep a scrollbar drop into a gap hidden in the bottom spacer inside that gap, asking the page under the viewport top (the bottom
   spacer is walked by each unit's own estimate; at the average unit the drop mapped far past the gap and showed nothing).
+Its premise is read off the page: a box asked for 20,000,000 px lays out at most the 2x limit, and the head gap at the px per turn the
+page measured would stand past that limit by more than a fifth.
 
-UnreachableEndSettles, at a forced 12x scale (limit 2,796,202), with a tail taller than the limit on its own: the end is out of reach
-for a reason that is not the gap. The page must settle there: no re-window on the echo of its own write (the loop that re-rendered the
-view and crept the reader up by a few px, once per render, for as long as the tab stayed open), no page walk, no error; and the gaps
-are drawn at most a quarter of the limit the page measured.
+LongHistoryClimb, at 2x over a taller tail: a reader drops into the head gap and climbs back through the history with the wheel for
+CLIMB_PAGES pages, one page asked per step, by which point the rows the page holds, at the average unit it measured off the tail, would
+stand past the limit by more than a fifth. The scroll height must stay under the limit at every page, the estimates in it (the spacers
+and any gap drawn) at most half of it; the go-to-bottom chip's first press must bring the newest row on screen within a screen of the
+bottom, and its second leave the reader at the bottom. Then replies land below the window while the reader stands in the history (the
+residual chat-regions.ts HIDDEN_SHARE discloses): the reader drops back to the tail run's first rows, under the gap above them, one
+reply lands, then APPEND_TURNS more in one write, which the keyed paint puts in the bottom spacer at the held figure as it stands. The
+estimates must grow by that write's unit count (two units a turn) times that figure, within 2 px, and pass the half by at most that,
+and the next window build (a press of the chip) must bring them back under it. Before any reply lands, the window moves while the unit
+count holds (the climb's last page, the chip's second press, ROAD 9's drop), and the held figure must not move with it. Each test that reads
+the climb checks its premise first, so a short climb fails every one of them on its own. A failed run is not re-run over the transcript
+ROAD 9 grew, and when the driver fails after printing the climb's record (before ROAD 9), the tests that read the climb alone read that
+record.
 
-UnreachableEndInsideAGapSettles, the same fixture with the gaps' bound held past the limit from the boot (a served-lab hook): the end
+LongHistoryBuiltHidden, at 2x beside a second, short session. When the page lands on that session (the first-show test checks it first), the
+idle prebuild builds the long session's view while it is hidden, where nothing can be measured. Its first show keeps that window, and
+the figure a row hidden in a spacer takes must then be the average unit measured there. A settings change while the reader is on the
+short session rebuilds the long view hidden again (its average unit forgotten, its px per turn kept), and at the switch back a hidden
+row must stand at the average measured then.
+
+LongHistoryBuiltHiddenBounded, the same two sessions over LongHistoryClimb's taller tail, where the long session's rows at the average
+unit measured at its first show would stand past the room the gaps leave in half the limit. A scroll above the window after that show
+builds a window over the same units, and a hidden row must take, at the show, the figure that build sets.
+
+UnreachableEndSettles, at a forced 12x scale (limit 2,796,202), with replies tall enough that the thread stands at the limit and its
+newest row is out of reach. The page must settle there: no re-window on the echo of its own write (the loop that re-rendered the view
+and crept the reader up by a few px, once per render, for as long as the tab stayed open), no page walk, no error; the gaps are drawn
+at most a quarter of the limit the page measured, and the estimates in the scroll height (the spacers and any gap drawn) at most half
+of it.
+
+Every check that the estimates in the scroll height stand at most a bound allows 4 px past it.
+
+UnreachableEndInsideAGapSettles, the same fixture at TALL_LINES 1500 (UnreachableEndSettles' is 3000) with the gaps' bound held past the limit from the boot (a served-lab hook): the end
 lies inside a gap the layout clamps, and a fill's rebuilt gap there asks nothing on its first observation, so the page settles, not walks;
 and a reader parked in a gap there while a page they did not ask for lands gets the page holding their turn asked once, and no other page.
+
+LongHistoryEnd, at 2x over LongHistoryClimb's taller tail: a reader drops into the head gap, climbs back END_PAGES pages with the
+wheel, clicks in the transcript and presses End once. The newest row must then be on screen, within a screen of the bottom.
+
+LongHistoryEndAfterAFoldToggle, LongHistoryEnd's road over a history whose short turns each carry a Bash call: the click lands on a
+tool row's fold toggle with nothing selected before, and leaves the selection with no anchor. The newest row must then be on screen,
+within a screen of the bottom.
+
+LongHistoryEndAfterTypingAndAFoldToggle, that road at TALL_LINES 1800 with two words typed in the message box before the click: the
+selection's anchor stays in the footer, outside the transcript, and the press on the toggle comes after it. The page must take
+End, and the newest row must then be on screen, within a screen of the bottom.
+
+LongHistoryEndAfterTypingAFoldToggleAndASelectionOnTheStrip, LongHistoryEndAfterAFoldToggleAndSelectAll and
+LongHistoryEndAfterAFoldToggleAndACommentBoxClosedWithEscape, the typing class's road (the last two with nothing typed) with a step
+after the click: the selection collapsed on the strip by a script; Ctrl+A; a word of a reply double-clicked, the comment key pressed,
+two words typed in its box, then Escape. Each leaves the selection's anchor outside the transcript, changed after the last press, which
+lies inside it. The page must take End, and the newest row must then be on screen, within a screen of the bottom.
+
+LongHistoryEndAfterACaretInAToolOutputBoxAndAShiftClickOutsideIt, LongHistoryEndAfterAClickOutsideAToolOutputBoxAndAFindInsideIt,
+LongHistoryEndAfterACaretInAToolOutputBoxAFoldToggleAndTextWrittenIntoTheMessageBox and
+LongHistoryEndAfterACaretInAToolOutputBoxAndAFoldToggle, the typing class's road with nothing typed, every eighth short turn's Bash
+output 200 lines long and classic scrollbars, and after the click one such output opened at its top: a click on a word in its box, then
+Shift+click on a word of a reply outside it; a click on a word of a reply, then window.find of a line in the box; a click on a word in
+the box, a press on another tool row's fold toggle, then the message box's text written by a script; the same without the write. Each
+leaves the selection's anchor in the box, which can still scroll down, and the last press in the transcript outside it; in the first
+three the selection changed after that press. The page must take End, and the newest row must then be on screen, within a screen of
+the bottom.
+
+LongHistoryEndAfterAFoldToggleAndAPage, LongHistoryEndAfterAFoldToggle's road with its last history page climbed between the click and
+End, by which point the pressed toggle is no longer in the document. The newest row must then be on screen, within a screen of the
+bottom.
+
+LongHistoryEndWithNoSelectionAfterAClickAndAPage, LongHistoryEnd's road with the selection emptied after the click and its last
+history page climbed before End, by which point the clicked element is no longer in the document. The newest row must then be on
+screen, within a screen of the bottom.
+
+The classes after it, but the last, run LongHistoryEnd's road with an element reached in place of the click (END_AT; a reply's element
+sits in every eighth short answer, END_MARKUP): pressed, with focus then on the page body and no selection (a reply's role="menu" element,
+its role="listbox" element, its task-list checkbox), or focused (a link or a Copy button inside a reply's role="listbox" element, a
+question card's checkbox, a reply's audio whose clip has ended, failed to load, is not preloaded or has no source, a reply's video with
+no controls and a tabindex, its clip loaded). Each checks where End meets the element; the newest row must then be on screen, within a
+screen of the bottom.
+
+LongHistoryEndFromAReplysAudioPlayControl, the last, runs that road with focus on the play control of a reply's audio, reached by Tab: the
+page does not receive End, and no scroll event of the transcript at its end comes while focus is on the audio.
 
 Synthetic fixtures only (placeholder uuids, invented prose).
 """
 import json
+import math
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+import wave
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
@@ -61,6 +140,11 @@ LAYOUT_LIMIT_1X = 33_554_432   # the tallest box Chromium lays out at a 1x scale
 JUMP_TURN = 600       # the early turn the jump-to-turn leg lands on
 PAGE_TURNS = 16       # the kernel's history page (kernel.py PAGE_TURNS)
 FALLBACK_SHARE_PX = 16_777_216 // 4   # chat-regions.ts LAYOUT_LIMIT_FALLBACK times GAPS_SHARE: the bound UnreachableEndInsideAGapSettles holds the gaps at
+SID2 = "cccccccc-1111-2222-3333-666666666666"   # LongHistoryBuiltHidden's second session, "api": short
+SHORT_TURNS = 15      # its turns
+ASK_CARD = {"kind": "multi", "header": "Tables", "question": "Which tables should the notes-api keep?",   # a question card the End press meets
+            "options": [{"n": 1, "label": "notes", "checked": False, "selected": True}, {"n": 2, "label": "tags", "checked": False, "selected": False}],
+            "cursor": 1, "cursorFound": True, "multiSelect": True, "sig": "lab-end-far-1"}
 
 DRIVER = r"""
 import { createRequire } from "node:module";
@@ -69,7 +153,7 @@ const require = createRequire(process.env.EXT_PKG);
 const { chromium } = require("playwright");
 const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
 let browser;
-try { browser = await chromium.launch({ args: ["--force-device-scale-factor=" + cfg.scale] }); }   // the scale divides the layout limit
+try { browser = await chromium.launch({ args: ["--force-device-scale-factor=" + cfg.scale], ...(cfg.bars ? { ignoreDefaultArgs: ["--hide-scrollbars"] } : {}) }); }   // the scale divides the layout limit; cfg.bars: classic scrollbars
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const page = await browser.newPage({ viewport: cfg.viewport });
 // a class that holds the gaps' bound from the boot hands the figure to the page's lab hook (__rompGapsBound) the moment the page defines it,
@@ -88,7 +172,31 @@ await page.addInitScript(() => {
   Object.defineProperty(Element.prototype, "scrollTop", { configurable: true, get() { return d.get.call(this); },
     set(v) { if (this.id === "content") window.__writes++; d.set.call(this, v); } });
 });
-// the kernel's history replies, held at the wire on demand (the parked-reader leg): the page's ask is answered when the driver says
+// ROAD 11 with a reply's element the End press meets (cfg.endAt): a live range at each pointerdown's target, and at the press, before
+// the page's own listener, where focus, the selection's anchor and that range sit against the element (window.__atEnd stays null
+// when the key never reaches the window)
+if (cfg.endAt) await page.addInitScript(() => {
+  window.__endRange = null; window.__atEnd = null;
+  window.addEventListener("pointerdown", (e) => { window.__endRange = null; if (e.target instanceof Node) { window.__endRange = document.createRange(); window.__endRange.setStart(e.target, 0); } }, true);
+  window.addEventListener("keydown", (e) => {
+    if (e.key !== "End") return;
+    const t = document.querySelector("[data-lab-end]"), c = document.getElementById("content"), a = document.getSelection().anchorNode, r = window.__endRange, f = document.activeElement;
+    window.__atEnd = { inContent: !!t && c.contains(t), focused: !!t && f === t, bodyFocused: f === document.body, anchor: !!a, pressIn: !!t && !!r && t.contains(r.startContainer),
+                       pressInContent: !!r && c.contains(r.startContainer),
+                       dist: c.scrollHeight - c.scrollTop - c.clientHeight, ch: c.clientHeight,
+                       media: t instanceof HTMLMediaElement ? { readyState: t.readyState, duration: t.duration, ended: t.ended, networkState: t.networkState, error: t.error ? t.error.code : null, controls: t.controls } : null };
+  }, true);
+});
+// a reply's audio clips (cfg.endMedia: name to file), served at media.test with byte ranges
+if (cfg.endMedia) await page.route("https://media.test/**", async (route) => {
+  const f = cfg.endMedia[route.request().url().split("/").pop()];
+  if (!f) return route.fulfill({ status: 404, body: "" });
+  const body = fs.readFileSync(f), range = route.request().headers()["range"], m = range && /bytes=(\d+)-(\d*)/.exec(range);
+  if (!m) return route.fulfill({ status: 200, body, headers: { "content-type": "audio/wav", "accept-ranges": "bytes" } });
+  const a = +m[1], b = m[2] ? Math.min(+m[2], body.length - 1) : body.length - 1;
+  return route.fulfill({ status: 206, body: body.subarray(a, b + 1), headers: { "content-type": "audio/wav", "accept-ranges": "bytes", "content-range": "bytes " + a + "-" + b + "/" + body.length } });
+});
+// the kernel's history replies, held at the wire on demand: the page's ask is answered when the driver says
 let holdTurns = false; const held = [];
 await page.routeWebSocket((u) => /[?&]app=chat(?:&|$)/.test(u.href), (ws) => {
   const server = ws.connectToServer();
@@ -107,30 +215,38 @@ const asks = () => page.evaluate(() => window.__sent.filter((m) => m.type === "l
 const asksPast = (n, ms) => page.waitForFunction((k) => window.__sent.filter((m) => m.type === "loadTurns").length > k, n, { timeout: ms }).catch(() => {});
 const setTop = async (y) => { await page.evaluate((yy) => { document.getElementById("content").scrollTop = yy; }, y); await painted(); };
 // the page's view: the newest row's place, the scroll extent, the gap under the viewport top (its span, its drawn height and the turn
-// under the top by its fraction), the first turn row on screen and the turn it names
-const reading = () => page.evaluate((newest) => {
+// under the top by its fraction), the first turn row on screen and the turn it names. The newest row is the fixture's last reply as
+// written at setup (cfg.newest) unless the caller names another: ROAD 9 names the last reply it appended for the chip press after
+// both its landings
+const reading = (uuid = cfg.newest) => page.evaluate((newest) => {
   const c = document.getElementById("content"), cr = c.getBoundingClientRect();
   const row = document.querySelector(`#content .turn[data-uuid="${newest}"]`);
   const r = row ? row.getBoundingClientRect() : null;
   const g = Array.from(document.querySelectorAll("#content .tx-gap")).find((x) => { if (x.offsetParent === null) return false; const b = x.getBoundingClientRect(); return b.bottom > cr.top && b.top < cr.bottom; });
   const gr = g ? g.getBoundingClientRect() : null;
   const rows = Array.from(c.querySelectorAll(".turn[data-uuid]")).filter((e) => { if (e.offsetParent === null) return false; const b = e.getBoundingClientRect(); return b.height > 0 && b.bottom > cr.top && b.top < cr.bottom; });
-  return { sh: c.scrollHeight, st: c.scrollTop, ch: c.clientHeight, dist: c.scrollHeight - c.scrollTop - c.clientHeight,
+  // the estimates in the scroll height: the spacers and every gap drawn (the rest is rows at their real height)
+  const est = Array.from(c.querySelectorAll(".tx-spacer, .tx-gap")).filter((e) => e.offsetParent !== null).reduce((t, e) => t + e.offsetHeight, 0);
+  return { sh: c.scrollHeight, st: c.scrollTop, ch: c.clientHeight, dist: c.scrollHeight - c.scrollTop - c.clientHeight, est,
            newestRendered: !!row, newestOnScreen: !!r && r.bottom > cr.top + 1 && r.top < cr.bottom - 1,
            gap: g ? { lo: +g.dataset.lo, hi: +g.dataset.hi, h: gr.height, turnAtTop: gr.top <= cr.top && gr.bottom > cr.top ? +g.dataset.lo + (+g.dataset.hi - +g.dataset.lo) * ((cr.top - gr.top) / gr.height) : null } : null,
            rowsOnScreen: rows.length, rowTurn: rows.length && rows[0].dataset.turn ? +rows[0].dataset.turn : null,
            regions: typeof window.__rompRegions === "function" ? window.__rompRegions() : null };
-}, cfg.newest);
+}, uuid);
 // the visible px of the gap elements on screen, and whether each wears the loader (a page of it on the wire)
 const blankPx = () => page.evaluate(() => {
   const c = document.getElementById("content"), cr = c.getBoundingClientRect(); let px = 0; const gaps = [];
   for (const g of Array.from(document.querySelectorAll("#content .tx-gap"))) { if (g.offsetParent === null) continue; const b = g.getBoundingClientRect(); const vis = Math.max(0, Math.min(b.bottom, cr.bottom) - Math.max(b.top, cr.top)); if (vis > 0) { px += vis; gaps.push({ lo: +g.dataset.lo, hi: +g.dataset.hi, top: Math.round(b.top - cr.top), vis: Math.round(vis), loading: g.classList.contains("tx-gap-loading") }); } }
   return { px: Math.round(px), gaps };
 });
-const out = { pageErrors };
+// the active view's measures, read through the page's hook (render.ts __rompViewMeasure)
+const measure = () => page.evaluate(() => typeof window.__rompViewMeasure === "function" ? window.__rompViewMeasure() : null);
+// the tallest box this launch lays out: a box asked for 20,000,000 px reads what the layout clamps it to (the scale flag took)
+const limitProbe = await page.evaluate(() => { const d = document.createElement("div"); d.style.cssText = "position:absolute;left:0;top:0;width:1px;height:20000000px;visibility:hidden"; document.body.appendChild(d); const h = d.getBoundingClientRect().height; d.remove(); return h; });
+const out = { pageErrors, scale: cfg.scale, limitProbe };
 // ROAD 1: the boot lands at the end; let the first measure re-size the gap and any ask it provokes go out (a page reply would land too)
 await painted(); await page.waitForTimeout(2500); await painted();
-out.landed = Object.assign(await reading(), { asks: await asks() });
+out.landed = Object.assign(await reading(), { asks: await asks(), measure: await measure() });
 // ROAD 2: the reader jumps to the end, twice (the second after whatever the first provoked has settled), and waits there
 for (let i = 0; i < 2; i++) { await setTop(1e9); await page.waitForTimeout(1500); await painted(); }
 out.jumped = Object.assign(await reading(), { asks: await asks() });
@@ -248,6 +364,403 @@ if (cfg.legs.includes("long")) {
           return k ? (k.classList.contains("turn") ? "row" : k.classList.contains("tx-gap") ? "gap" : k.classList.contains("tx-spacer") ? "spacer" : k.className) : null; }, threadSel) };
     } else out.long.drop = { hidden, noSpacer: true }; }
 }
+if (cfg.legs.includes("climb")) {
+  // ROAD 8: a reader drops into the head gap, climbs back through the history page by page with the wheel, then presses the
+  // go-to-bottom chip (twice, as a reader does when the first press leaves them short of the bottom)
+  const loaded = () => page.waitForFunction(() => window.__rompAskState().gapLoading === 0, null, { timeout: 15000 }).catch(() => {});
+  const a0 = (await asks()).length;
+  holdTurns = true;   // the drop is read before its page can land
+  await setTop(Math.round((await reading()).sh * 0.15));
+  const drop = await reading();
+  release();
+  await asksPast(a0, 10000); await loaded(); await page.waitForTimeout(500); await painted();
+  const box = await page.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+  await page.mouse.move(box.x, box.y);
+  const steps = [];
+  for (let p = 0; p < cfg.climbPages; p++) {
+    const n = (await asks()).length;
+    let w = 0;
+    while (w < 40 && (await asks()).length === n) { await page.mouse.wheel(0, -1200); await painted(); w++; }
+    if ((await asks()).length === n) break;
+    await loaded(); await painted();
+    const r = await reading();
+    steps.push({ wheels: w, sh: r.sh, st: r.st, est: r.est, asked: (await asks()).slice(n) });
+  }
+  const climbed = Object.assign(await reading(), { measure: await measure() });
+  const press = async (uuid) => { await page.click("#jump-bottom", { timeout: 5000 }).catch(() => {}); await page.waitForTimeout(1500); await painted(); return Object.assign(await reading(uuid), { measure: await measure() }); };
+  const chip1 = await press();
+  const chip2 = await press();
+  // the climb's own record, printed before ROAD 9 grows the transcript: when a later road fails, the tests that read the climb alone
+  // still read it (the lab's _climb takes this line when the driver failed or printed no result)
+  process.stdout.write("CLIMB:" + JSON.stringify({ drop, steps, climbed, chip1, chip2 }) + "\n");
+  // ROAD 9 (the class's appended turns): replies land below the window while the reader stands in the history. The reader drops
+  // back to the tail run's first rows, cfg.append.into units under its top (the units between that one and the top spacer's end are
+  // all tail units, at the held figure each), so the window built there holds the climbed run's last units, the gap above the tail
+  // run and the tail run's first units (in the lab's runs 140 units: 67, the gap, then 72, 36 of them tall replies): the reader
+  // stands far from both its edges (no re-window follows a write there), and a bottom spacer holds the units under it. One reply
+  // lands first; then the rest land in one write, which the keyed paint (render.ts tailDiff) puts in the bottom spacer at the held
+  // figure as it stands. A press of the chip is the next window build.
+  // Each landing is read after its units arrive or a 20 s wait ends, its newest row still the fixture's last reply as written at
+  // setup (cfg.newest); the chip press after both landings names the last reply appended
+  let below = null;
+  if (cfg.append) {
+    const land = async (file, units) => {
+      const u0 = (await measure()).units;
+      fs.appendFileSync(cfg.append.transcript, fs.readFileSync(file, "utf8"));
+      await page.waitForFunction((n) => { const m = window.__rompViewMeasure(); return !!m && m.units >= n; }, u0 + units, { timeout: 20000 }).catch(() => {});
+      await painted(); await page.waitForTimeout(500); await painted();
+      return Object.assign(await reading(), { measure: await measure() });
+    };
+    const to = await page.evaluate((into) => {
+      const c = document.getElementById("content"), cr = c.getBoundingClientRect(), t = c.querySelector(".tx-spacer-top"), m = window.__rompViewMeasure();
+      const tail = (typeof window.__rompRegions === "function" ? window.__rompRegions() : []).find((r) => r.kind === "run" && r.hi == null);
+      if (!t || !m || !tail) return null;
+      const above = m.winStart - (m.units - tail.n) - into;   // hidden tail units between the drop's unit and the top spacer's end
+      return above > 0 ? Math.round(t.getBoundingClientRect().bottom - cr.top + c.scrollTop - above * (m.heldPx ?? m.avgUnit)) : null;
+    }, cfg.append.into);
+    if (to != null) { await setTop(to); await page.waitForTimeout(1000); await painted(); }
+    const dropped = Object.assign(await reading(), { measure: await measure() });
+    const first = await land(cfg.append.first, 2);
+    const rest = await land(cfg.append.lines, cfg.append.units);
+    const next = await press(cfg.append.newest);
+    below = { to, dropped, first, rest, next };
+  }
+  out.climb = { drop, steps, climbed, chip1, chip2, below };
+}
+if (cfg.legs.includes("shown")) {
+  // ROAD 10 (the class's second session): a view built while hidden takes its measures when it is first shown. When the page lands on
+  // the short session cfg.sid2 (the first-show tests check it), the idle prebuild builds the long session's view hidden (display none: nothing
+  // measures there, and its hidden rows are sized at the fallback figure). Its first show keeps that window (render.ts landActive,
+  // sizeSpacers). Then the page's settings event (render.ts rerenderAll: every view emptied, its average unit forgotten, its px per
+  // turn kept) while the reader is on the short session; the idle prebuild builds the long view hidden again, and the switch back
+  // shows it. A mark set on the hidden view's top spacer before each show says whether the show kept the prebuilt window or built
+  // another one
+  const thread = (sid) => page.evaluate((s) => {
+    const t = document.querySelector(`#content .thread[data-session="${s}"]`);
+    if (!t) return null;
+    const top = t.querySelector(".tx-spacer-top");
+    return { display: t.style.display, children: t.children.length, topPx: top ? parseFloat(top.style.height) || 0 : null,
+             kept: !!(top && top.dataset.lab === "kept") };
+  }, sid);
+  const mark = (sid) => page.evaluate((s) => { const t = document.querySelector(`#content .thread[data-session="${s}"] .tx-spacer-top`); if (t) t.dataset.lab = "kept"; return !!t; }, sid);
+  const show = async (sid) => { await page.evaluate((i) => window.postMessage({ type: "focus", id: i }, "*"), sid); await page.waitForTimeout(2500); await painted(); };
+  const regions = (sid) => page.evaluate((s) => typeof window.__rompRegions === "function" ? window.__rompRegions(s) : null, sid);
+  const boot = { active: await measure(), long: await thread(cfg.sid), marked: await mark(cfg.sid) };
+  await show(cfg.sid);
+  const first = { measure: await measure(), long: await thread(cfg.sid), regions: await regions(cfg.sid) };
+  if (cfg.legs.includes("rebuild")) {
+    // the bounded class: a scroll 20 hidden units above the window's start builds a window of its own over the same units, which sets
+    // the figure afresh (render.ts renderWindowItems); then back to the end, where the show left the reader
+    const to = await page.evaluate((s) => {
+      const c = document.getElementById("content"), cr = c.getBoundingClientRect(), m = window.__rompViewMeasure();
+      const t = c.querySelector(`.thread[data-session="${s}"] .tx-spacer-top`);
+      return t && m ? Math.round(t.getBoundingClientRect().bottom - cr.top + c.scrollTop - 20 * (m.heldPx ?? m.avgUnit)) : null;
+    }, cfg.sid);
+    if (to != null) { await setTop(to); await page.waitForTimeout(2500); await painted(); }
+    first.rebuilt = { to, measure: await measure() };
+    await setTop(1e9); await page.waitForTimeout(1500); await painted();
+  }
+  await show(cfg.sid2);
+  await page.evaluate(() => window.dispatchEvent(new Event("romp:settings")));
+  await page.waitForTimeout(5000); await painted();
+  const hidden = { active: await measure(), long: await thread(cfg.sid), marked: await mark(cfg.sid) };
+  await show(cfg.sid);
+  const again = { measure: await measure(), long: await thread(cfg.sid), regions: await regions(cfg.sid) };
+  out.shown = { boot, first, hidden, again };
+}
+if (cfg.legs.includes("end")) {
+  // ROAD 11: End from far back. The reader drops into the head gap at 15% of the scroll range and climbs cfg.endPages history
+  // pages with the wheel (each page's reply held at the wire until its ask is seen), then clicks in the transcript (its centre, or a
+  // tool row's fold toggle: cfg.endPress; cfg.endType: words typed in the message box before the toggle; cfg.endAfter: a step after
+  // it) and presses End once
+  // (cfg.endAt.ask: a question card at the transcript's end first, the kernel's askLive frame dispatched by the lab)
+  if (cfg.endAt && cfg.endAt.ask) {
+    await page.evaluate((m) => window.dispatchEvent(new MessageEvent("message", { data: m })), { type: "askLive", id: cfg.sid, ask: cfg.endAt.ask });
+    await page.waitForFunction(() => !!document.querySelector("#live-ask .ask-check input"), null, { timeout: 10000 }); await painted();
+  }
+  const loaded = () => page.waitForFunction(() => window.__rompAskState().gapLoading === 0, null, { timeout: 15000 }).catch(() => {});
+  const a0 = (await asks()).length;
+  holdTurns = true;   // the drop is read before its page can land
+  await setTop(Math.round((await reading()).sh * 0.15));
+  const drop = await reading();
+  release();
+  await asksPast(a0, 6000); await loaded(); await page.waitForTimeout(800); await painted();
+  const box = await page.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+  await page.mouse.move(box.x, box.y);
+  const steps = [];
+  for (let p = 0; p < cfg.endPages; p++) {
+    const n = (await asks()).length;
+    holdTurns = true;
+    let w = 0;
+    while (w < 80 && (await asks()).length === n) { await page.mouse.wheel(0, -1200); await painted(); w++; }
+    if ((await asks()).length === n) { release(); break; }
+    await page.waitForTimeout(150); await painted();
+    release();
+    await loaded(); await painted(); await page.waitForTimeout(150); await painted();
+    const r = await reading();
+    steps.push({ wheels: w, sh: r.sh, st: r.st, asked: (await asks()).slice(n) });
+  }
+  const climbed = Object.assign(await reading(), { measure: await measure() });
+  // cfg.endAt instead of the click: the element at.sel, one wholly on screen, else the rendered one nearest the viewport's centre,
+  // brought to the centre when at.intoView and picked again (a window build the scroll provokes can replace it); its audio staged
+  // (at.media: "loaded" at 0 s and half volume, "ended" seeked to its end, "failed" read once its error is set); then reached by at.way:
+  // "focus" (element.focus), "tab" (Tab at.tab times from the last link before it to at.pre) or "press" (a real click on it, then focus
+  // returned to the page body and the selection emptied). Then, before End: where focus sits against it, the focused node in the
+  // accessibility tree, its audio's state and the distance from the bottom
+  const stageEnd = async (at) => {
+    const pick = () => page.evaluate((sel) => {
+      const c = document.getElementById("content"), cr = c.getBoundingClientRect();
+      const all = Array.from(document.querySelectorAll(sel)).filter((e) => c.contains(e) && (e.getClientRects().length > 0 || e.tagName === "AUDIO"));
+      const on = all.filter((e) => { const b = e.getBoundingClientRect(); return b.height > 0 && b.top >= cr.top + 4 && b.bottom <= cr.bottom - 4; });
+      const mid = (e) => Math.abs(e.getBoundingClientRect().top - cr.top - cr.height / 2);
+      const t = on[0] || all.sort((x, y) => mid(x) - mid(y))[0];
+      document.querySelectorAll("[data-lab-end]").forEach((e) => e.removeAttribute("data-lab-end"));
+      if (t) t.setAttribute("data-lab-end", "1");
+      return t ? (on[0] ? "on screen" : "nearest") : null; }, at.sel);
+    let picked = await pick();
+    if (at.intoView && picked === "nearest") {
+      await page.evaluate(() => document.querySelector("[data-lab-end]").scrollIntoView({ block: "center" }));
+      await painted(); await page.waitForTimeout(1200); await painted();
+      picked = await pick();
+    }
+    if (!picked) return { picked };
+    const T = "[data-lab-end]";
+    if (at.media === "loaded" || at.media === "ended") {
+      await page.waitForFunction((s) => document.querySelector(s).readyState >= 1, T, { timeout: 15000 }).catch(() => {});
+      await page.evaluate(([s, end]) => { const m = document.querySelector(s); m.volume = 0.5; m.currentTime = end ? m.duration : 0; }, [T, at.media === "ended"]);
+      if (at.media === "ended") await page.waitForFunction((s) => document.querySelector(s).ended, T, { timeout: 5000 }).catch(() => {});
+    } else if (at.media === "failed") await page.waitForFunction((s) => !!document.querySelector(s).error, T, { timeout: 15000 }).catch(() => {});
+    if (at.way === "focus") await page.evaluate((s) => document.querySelector(s).focus({ preventScroll: true }), T);
+    else if (at.way === "tab") {
+      await page.evaluate(([s, pre]) => { const t = document.querySelector(s); const ps = Array.from(document.querySelectorAll('a[href="' + pre + '"]')).filter((a) => a.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING); if (ps.length) ps[ps.length - 1].focus({ preventScroll: true }); }, [T, at.pre]);
+      for (let i = 0; i < at.tab; i++) await page.keyboard.press("Tab");
+    } else {
+      const p = await page.evaluate((s) => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(), b = document.querySelector(s).getBoundingClientRect();
+        return b.height > 0 && b.top >= cr.top && b.bottom <= cr.bottom ? { x: b.left + Math.min(12, b.width / 2), y: b.top + b.height / 2 } : null; }, T);
+      if (p) await page.mouse.click(p.x, p.y);
+      await painted();
+      await page.evaluate(() => { const f = document.activeElement; if (f && f !== document.body && f.blur) f.blur(); document.getSelection().removeAllRanges(); });
+    }
+    await painted(); await page.waitForTimeout(150);
+    let ax = null;
+    if (at.way === "tab") {
+      const s = await page.context().newCDPSession(page);
+      try { ax = (await s.send("Accessibility.getFullAXTree")).nodes.filter((n) => n.role && n.role.value !== "RootWebArea" && (n.properties || []).some((q) => q.name === "focused" && q.value && q.value.value === true)).map((n) => (n.role && n.role.value) + ":" + (n.name && n.name.value)); }
+      finally { await s.detach().catch(() => {}); }
+    }
+    const staged = await page.evaluate((s) => { const c = document.getElementById("content"), t = document.querySelector(s), f = document.activeElement;
+      return { inContent: c.contains(t), focused: f === t, bodyFocused: f === document.body, anchor: !!document.getSelection().anchorNode,
+               dist: c.scrollHeight - c.scrollTop - c.clientHeight, ch: c.clientHeight,
+               media: t instanceof HTMLMediaElement ? { readyState: t.readyState, duration: t.duration, ended: t.ended, currentTime: t.currentTime, paused: t.paused } : null }; }, T);
+    return { picked, ax, staged };
+  };
+  let toggle = null, comment = null;
+  if (cfg.endAt) { /* no click: stageEnd reaches the element */ }
+  else if (cfg.endPress === "toggle") {
+    // the times of the last selectionchange and the last pointerdown, read by listeners added after the page's own
+    await page.evaluate(() => { window.__selT = -1; window.__pressT = -1;
+      window.addEventListener("selectionchange", (e) => { window.__selT = e.timeStamp; }, true);
+      window.addEventListener("pointerdown", (e) => { window.__pressT = e.timeStamp; }, true); });
+    if (cfg.endType) { await page.click("#composer-input"); await page.keyboard.type(cfg.endType); await painted(); await page.waitForTimeout(300); }
+    // the first tool row's fold toggle wholly on screen, the selection's ranges counted before the click, the click's press recorded
+    toggle = await page.evaluate(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect();
+      const t = Array.from(c.querySelectorAll(".tool-fold-toggle")).find((e) => { const b = e.getBoundingClientRect(); return b.height > 0 && b.top >= cr.top && b.bottom <= cr.bottom; });
+      window.__press = null; window.addEventListener("pointerdown", (e) => { window.__press = e.target; }, true);
+      if (!t) return null; const b = t.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2, ranges: document.getSelection().rangeCount }; });
+    if (toggle) await page.mouse.click(toggle.x, toggle.y);
+    // cfg.endAfter, after the click: "collapse" (the selection collapsed on the strip's first tab by a script), "selectAll" (Ctrl+A), or
+    // "comment" (a word of a reply on screen double-clicked, the comment key pressed, two words typed in its box, then Escape)
+    if (toggle && cfg.endAfter) {
+      await painted(); await page.waitForTimeout(300);
+      if (cfg.endAfter === "collapse") await page.evaluate(() => { const tab = document.querySelector("#tabs .tab");
+        const w = document.createTreeWalker(tab, NodeFilter.SHOW_TEXT, { acceptNode: (n) => n.textContent.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+        document.getSelection().collapse(w.nextNode(), 1); });
+      else if (cfg.endAfter === "selectAll") await page.keyboard.press("Control+A");
+      else {
+        // (read before Escape: the click count of each press of the double click, whether the last press lies in the reply's paragraph,
+        // and the comment box, its focus and its text)
+        const w = await page.evaluate(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect();
+          const ps = Array.from(c.querySelectorAll(".turn-assistant .md p")).filter((p) => { const b = p.getBoundingClientRect(); return b.height > 0 && b.top >= cr.top + 20 && b.bottom <= cr.bottom - 20 && /^Answer \d+/.test(p.textContent); });
+          const p = ps[Math.floor(ps.length / 2)]; if (!p) return null;
+          window.__labWord = p; window.__downs = []; window.addEventListener("mousedown", (e) => { window.__downs.push(e.detail); }, true);
+          const r = document.createRange(), t = document.createTreeWalker(p, NodeFilter.SHOW_TEXT).nextNode(); r.setStart(t, 0); r.setEnd(t, 6); const b = r.getBoundingClientRect();
+          return { x: Math.round(b.left + 12), y: Math.round(b.top + b.height / 2) }; });
+        if (w) { await page.mouse.dblclick(w.x, w.y); await painted(); await page.waitForTimeout(300); }
+        await page.keyboard.press("Control+Slash"); await painted(); await page.waitForTimeout(600);
+        await page.keyboard.type("a note"); await page.waitForTimeout(200);
+        comment = await page.evaluate(() => { const b = document.querySelector("#cmt-pop .cmt-input"), p = window.__press, pe = p && (p.nodeType === 1 ? p : p.parentElement);
+          return { downs: window.__downs || null, pressOnWord: !!pe && !!window.__labWord && window.__labWord.contains(pe), opened: !!b, focused: !!b && document.activeElement === b, text: b ? b.value : null }; });
+        await page.keyboard.press("Escape");
+      }
+      await painted(); await page.waitForTimeout(300);
+    }
+  } else {
+    if (cfg.endPageAfter) await page.evaluate(() => { window.__press = null; window.addEventListener("pointerdown", (e) => { window.__press = e.target; }, true); });
+    await page.mouse.click(box.x, box.y);
+  }
+  // cfg.endBox, after the click: a closed tool row whose output holds 200 lines opened, its box (one that scrolls on its own) named by its
+  // row's data-uuid, so a window build that rebuilds the row still finds it, and brought into view at its top until the same element
+  // stays there through a settle; then "shift" (a click on a word inside the box, then Shift+click on a word of a reply outside it),
+  // "find" (a click on a word of a reply outside the box, then window.find of a line inside it), "toggle" (the pane scrolled so that the
+  // nearest other tool row's fold toggle above the box stands 20 px under the top with the box's top lines on screen, a click on a word
+  // inside the box, then a click on that toggle) or "toggleWrite" ("toggle", then the message box's text written by a script with an
+  // input event). Read right before End and after it: focus, the selection's anchor and the last press against the box, which of the
+  // last selectionchange and the last pointerdown came later, the last selectionchange's target, and the box's scroll
+  let boxRoad = null, boxRead = null;
+  if (cfg.endBox) {
+    await painted(); await page.waitForTimeout(300);
+    await page.evaluate(() => { window.__selTarget = null;
+      window.addEventListener("selectionchange", (e) => { const t = e.target; window.__selTarget = !t ? null : t === document ? "document" : t.tagName + (t.id ? "#" + t.id : ""); }, true);
+      const J = window.__labBox = { row: null, tog: null };
+      J.box = () => J.row && Array.from(document.querySelectorAll('#content .turn[data-uuid="' + J.row + '"] .tool-io-fold')).find((e) => e.offsetParent !== null && e.scrollHeight > e.clientHeight + 100) || null;
+      J.toggle = () => J.tog && Array.from(document.querySelectorAll('#content .turn[data-uuid="' + J.tog + '"] .tool-fold-toggle')).find((e) => e.getClientRects().length > 0) || null; });
+    boxRead = () => page.evaluate(() => { const c = document.getElementById("content"), s = document.getSelection(), a = s && s.anchorNode, ae = a && (a.nodeType === 1 ? a : a.parentElement);
+      const p = window.__press, pe = p && (p.nodeType === 1 ? p : p.parentElement), b = window.__labBox.box();
+      return { bodyFocused: document.activeElement === document.body, anchorInContent: !!ae && c.contains(ae), anchorInBox: !!b && !!ae && b.contains(ae),
+               pressInContent: !!pe && c.contains(pe), pressInBox: !!b && !!pe && b.contains(pe), pressOnToggle: !!pe && c.contains(pe) && !!pe.closest(".tool-fold-toggle"),
+               later: window.__pressT > window.__selT ? "press" : "selection", selTarget: window.__selTarget,
+               box: b ? { st: Math.round(b.scrollTop), max: b.scrollHeight - b.clientHeight, canScroll: b.scrollTop + b.clientHeight < b.scrollHeight - 1 } : null,
+               dist: Math.round(c.scrollHeight - c.scrollTop - c.clientHeight), ch: c.clientHeight }; });
+    boxRoad = { road: cfg.endBox };
+    // the long output's fold toggle: one wholly on screen, else the one nearest the pane's middle brought there and picked again
+    let lt = null;
+    for (let i = 0; i < 3 && !lt; i++) {
+      lt = await page.evaluate(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect();
+        const ts = Array.from(c.querySelectorAll(".tool-fold-toggle")).filter((e) => e.getClientRects().length > 0 && /^200 lines$/.test(e.textContent.trim()) && !(e.closest(".turn") && e.closest(".turn").classList.contains("fold-open")));
+        const on = ts.find((e) => { const b = e.getBoundingClientRect(); return b.top >= cr.top + 4 && b.bottom <= cr.bottom - 4; });
+        const row = on && on.closest(".turn[data-uuid]");
+        if (row) { const b = on.getBoundingClientRect(); return { x: b.left + b.width / 2, y: b.top + b.height / 2, row: row.getAttribute("data-uuid") }; }
+        const mid = (e) => Math.abs(e.getBoundingClientRect().top - cr.top - cr.height / 2);
+        const t = ts.sort((x, y) => mid(x) - mid(y))[0]; if (t) t.scrollIntoView({ block: "center" }); return null; });
+      if (!lt) { await painted(); await page.waitForTimeout(1200); await painted(); }
+    }
+    boxRoad.row = lt && lt.row;
+    if (lt) { await page.evaluate((u) => { window.__labBox.row = u; }, lt.row); await page.mouse.click(lt.x, lt.y); await painted(); await page.waitForTimeout(600); await painted(); }
+    // into view at its top until the same element is still wholly on screen after a settle
+    boxRoad.settled = false;
+    for (let i = 0; i < 8 && !boxRoad.settled; i++) {
+      await page.evaluate(() => { const b = window.__labBox.box(); if (!b) return; b.__labSame = 1; b.scrollTop = 0;
+        const r = b.getBoundingClientRect(), cr = document.getElementById("content").getBoundingClientRect();
+        if (!(r.top >= cr.top + 20 && r.bottom <= cr.bottom - 20)) b.scrollIntoView({ block: "center" }); });
+      await painted(); await page.waitForTimeout(1200); await painted();
+      boxRoad.settled = await page.evaluate(() => { const b = window.__labBox.box(); if (!b) return false;
+        const r = b.getBoundingClientRect(), cr = document.getElementById("content").getBoundingClientRect();
+        return b.__labSame === 1 && r.top >= cr.top + 20 && r.bottom <= cr.bottom - 20 && b.scrollTop === 0; });
+    }
+    if (cfg.endBox === "toggle" || cfg.endBox === "toggleWrite") {
+      // the nearest other tool row's fold toggle above the box (not a 200-line one), named by its row's data-uuid; the pane scrolled so it
+      // stands 20 px under the top with the box's top lines on screen, until both still stand so after a settle
+      boxRoad.arranged = false;
+      for (let i = 0; i < 6 && !boxRoad.arranged; i++) {
+        await page.evaluate(() => { const J = window.__labBox, c = document.getElementById("content"), cr = c.getBoundingClientRect(), b = J.box(); if (!b) return;
+          b.__labSame = 1; b.scrollTop = 0;
+          const row = b.closest(".turn"), br = b.getBoundingClientRect();
+          let t = J.toggle();
+          if (!t) {
+            t = Array.from(c.querySelectorAll(".tool-fold-toggle")).filter((e) => e.getClientRects().length > 0 && !(row && row.contains(e)) && !/^200 lines$/.test(e.textContent.trim()) && e.getBoundingClientRect().bottom <= br.top)
+              .sort((x, y) => y.getBoundingClientRect().top - x.getBoundingClientRect().top)[0] || null;
+            const tr = t && t.closest(".turn[data-uuid]"); J.tog = tr ? tr.getAttribute("data-uuid") : null; if (!J.tog) return;
+          }
+          const tt = t.getBoundingClientRect().top;
+          if (Math.abs(tt - (cr.top + 20)) > 2) c.scrollTop += tt - (cr.top + 20); });
+        await painted(); await page.waitForTimeout(1200); await painted();
+        boxRoad.arranged = await page.evaluate(() => { const J = window.__labBox, cr = document.getElementById("content").getBoundingClientRect(), b = J.box(), t = J.toggle();
+          if (!b || !t) return false; const br = b.getBoundingClientRect(), tr = t.getBoundingClientRect();
+          return b.__labSame === 1 && tr.top >= cr.top + 4 && tr.bottom <= cr.bottom - 4 && br.top >= cr.top + 4 && br.top + 80 <= cr.bottom - 4 && b.scrollTop === 0; });
+      }
+    }
+    await page.evaluate(() => document.getSelection().removeAllRanges());
+    // a word inside the box near its top (" line 3:"), and a word of a reply on screen outside the box
+    const inBox = async () => {
+      const w = boxRoad.inBox = await page.evaluate(() => { const b = window.__labBox.box(); if (!b) return null;
+        const bb = b.getBoundingClientRect(), cr = document.getElementById("content").getBoundingClientRect(), tw = document.createTreeWalker(b, NodeFilter.SHOW_TEXT);
+        for (let n = tw.nextNode(); n; n = tw.nextNode()) { const i = n.textContent.indexOf(" line 3:"); if (i < 0) continue;
+          const r = document.createRange(); r.setStart(n, i + 1); r.setEnd(n, i + 5); const q = r.getBoundingClientRect();
+          if (q.height > 0 && q.top >= bb.top && q.bottom <= bb.bottom && q.top >= cr.top && q.bottom <= cr.bottom) return { x: Math.round(q.left + 6), y: Math.round(q.top + q.height / 2) }; }
+        return null; });
+      if (w) { await page.mouse.click(w.x, w.y); await painted(); await page.waitForTimeout(300); }
+    };
+    const outBox = () => page.evaluate(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(), b = window.__labBox.box(), bb = b ? b.getBoundingClientRect() : null;
+      const ps = Array.from(c.querySelectorAll(".turn-assistant .md p")).filter((p) => { const q = p.getBoundingClientRect();
+        return q.height > 0 && q.top >= cr.top + 20 && q.bottom <= cr.bottom - 20 && /^Answer \d+/.test(p.textContent) && (!bb || q.bottom < bb.top - 4 || q.top > bb.bottom + 4); });
+      const p = ps[Math.floor(ps.length / 2)]; if (!p) return null;
+      const n = document.createTreeWalker(p, NodeFilter.SHOW_TEXT).nextNode(), r = document.createRange(); r.setStart(n, 0); r.setEnd(n, 6); const q = r.getBoundingClientRect();
+      return { x: Math.round(q.left + 12), y: Math.round(q.top + q.height / 2) }; });
+    if (cfg.endBox === "shift") {
+      await inBox();
+      const w = boxRoad.out = await outBox();
+      if (w) { await page.keyboard.down("Shift"); await page.mouse.click(w.x, w.y); await page.keyboard.up("Shift"); await painted(); await page.waitForTimeout(300); }
+    } else if (cfg.endBox === "find") {
+      const w = boxRoad.out = await outBox();
+      if (w) { await page.mouse.click(w.x, w.y); await painted(); await page.waitForTimeout(300); }
+      boxRoad.found = await page.evaluate(() => { const b = window.__labBox.box(), m = b && /note (\d+) line 1:/.exec(b.textContent); return m ? window.find("note " + m[1] + " line 120:", false, false, true) : null; });
+      await painted(); await page.waitForTimeout(600); await painted();
+    } else {
+      await inBox();
+      const t = boxRoad.toggle = await page.evaluate(() => { const t = window.__labBox.toggle(); if (!t) return null; const b = t.getBoundingClientRect(); return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }; });
+      if (t) { await page.mouse.click(t.x, t.y); await painted(); await page.waitForTimeout(300); }
+      if (cfg.endBox === "toggleWrite") {
+        await page.evaluate(() => { const ta = document.getElementById("composer-input"); ta.value = "a draft"; ta.dispatchEvent(new Event("input", { bubbles: true })); });
+        await painted(); await page.waitForTimeout(300);
+      }
+    }
+    boxRoad.before = await boxRead();
+  }
+  // where the click left focus, the selection's anchor and the last press (cfg.endAt: the staged element's reading)
+  const clicked = cfg.endAt ? await stageEnd(cfg.endAt) : await page.evaluate(() => { const c = document.getElementById("content"), a = document.getSelection()?.anchorNode; const ae = a && (a.nodeType === 1 ? a : a.parentElement);
+    const p = window.__press, pe = p && (p.nodeType === 1 ? p : p.parentElement);
+    return { bodyFocused: document.activeElement === document.body, anchor: !!a, anchorInContent: !!ae && c.contains(ae), anchorInFooter: !!ae && !!ae.closest("#footer"),
+             pressOnToggle: !!pe && c.contains(pe) && !!pe.closest(".tool-fold-toggle"), pressInContent: !!pe && c.contains(pe),
+             selT: window.__selT ?? null, pressT: window.__pressT ?? null }; });
+  clicked.toggle = toggle;
+  if (comment) clicked.comment = comment;
+  if (boxRoad) clicked.box = boxRoad;
+  if (cfg.endUnselect) clicked.unselected = await page.evaluate(() => { document.getSelection().removeAllRanges(); return !document.getSelection().anchorNode; });
+  if (cfg.endPageAfter) {
+    // one more history page between the click and End, climbed as above; then whether the element the click pressed is still in the
+    // document
+    const n = (await asks()).length, before = await measure();
+    holdTurns = true;
+    let w = 0;
+    while (w < 80 && (await asks()).length === n) { await page.mouse.wheel(0, -1200); await painted(); w++; }
+    await page.waitForTimeout(150); await painted();
+    release();
+    await loaded(); await painted(); await page.waitForTimeout(150); await painted();
+    clicked.after = { wheels: w, asked: (await asks()).slice(n), before, measure: await measure(),
+                      gapLoading: await page.evaluate(() => window.__rompAskState().gapLoading),
+                      pressConnected: await page.evaluate(() => window.__press ? window.__press.isConnected : null) };
+  }
+  // (cfg.endAt.scrolls: where focus and the element sit right before End, and the other media elements of its reply, then every #content
+  // scroll event from the press on, read by a listener added after the page's own: its time from the press, the position in that event
+  // and whether focus was in a media element)
+  if (cfg.endAt && cfg.endAt.scrolls) clicked.armed = await page.evaluate(() => {
+    const c = document.getElementById("content"), t = document.querySelector("[data-lab-end]"), J = window.__endScrolls = { t0: performance.now(), events: [] };
+    c.addEventListener("scroll", () => { const f = document.activeElement;
+      J.events.push({ t: Math.round(performance.now() - J.t0), st: c.scrollTop, ch: c.clientHeight, sh: c.scrollHeight, active: f ? f.tagName : null, inMedia: f instanceof HTMLMediaElement }); }, { passive: true });
+    const row = t && t.closest(".turn");
+    return { focused: !!t && document.activeElement === t, connected: !!t && t.isConnected, dist: c.scrollHeight - c.scrollTop - c.clientHeight, ch: c.clientHeight,
+             others: row ? Array.from(row.querySelectorAll("audio, video")).filter((m) => m !== t).map((m) => ({ tag: m.tagName, inMenu: !!m.closest('[role="menu"]'), controls: m.controls, focused: document.activeElement === m })) : null };
+  });
+  // whether the page took End: a window keydown listener added after the page's own reads End's default prevented (null when the key
+  // never reaches the window)
+  await page.evaluate(() => { window.__endTaken = null; window.addEventListener("keydown", (e) => { if (e.key === "End") window.__endTaken = e.defaultPrevented; }); });
+  // (cfg.endPageAfter: where focus and the selection sit when End is pressed, read by a window keydown listener in the capture phase,
+  // before the page's own)
+  if (cfg.endPageAfter) await page.evaluate(() => { window.__atPress = null; window.addEventListener("keydown", (e) => {
+    if (e.key === "End") window.__atPress = { bodyFocused: document.activeElement === document.body, anchor: !!document.getSelection().anchorNode }; }, true); });
+  await page.keyboard.press("End");
+  await page.waitForTimeout(4000); await painted();
+  clicked.taken = await page.evaluate(() => window.__endTaken);
+  if (cfg.endPageAfter) clicked.atPress = await page.evaluate(() => window.__atPress);
+  if (boxRoad) boxRoad.after = await boxRead();
+  if (cfg.endAt) clicked.atEnd = await page.evaluate(() => window.__atEnd);
+  // the scroll events, and, read with them, whether focus is in a media element
+  if (cfg.endAt && cfg.endAt.scrolls) Object.assign(clicked, await page.evaluate(() => ({ scrolls: window.__endScrolls.events, inMediaAtRead: document.activeElement instanceof HTMLMediaElement })));
+  // where the newest row ends, in px above the bottom of the transcript's pane (null when it is not rendered)
+  const bottomPx = await page.evaluate((u) => { const c = document.getElementById("content"), r = document.querySelector(`#content .turn[data-uuid="${u}"]`);
+    return r ? Math.round(c.getBoundingClientRect().bottom - r.getBoundingClientRect().bottom) : null; }, cfg.newest);
+  out.end = { drop, steps, climbed, clicked, pressed: Object.assign(await reading(), { measure: await measure(), bottomPx }) };
+}
 if (cfg.legs.includes("gapDrawn")) {
   // the head gap's drawn height: a jump to the head renders its element (the last leg: it asks the head page)
   await setTop(0); await page.waitForTimeout(1000); await painted();
@@ -268,6 +781,23 @@ class _LongHistoryLab:
     TALL_LINES = 600      # lines in each tall reply's code block (~18 px each)
     LEGS = ()
     GAPS_HELD = None      # px: the gaps' bound the page is held at from its boot (the served labs' hook), else the measured share
+    CLIMB_PAGES = 0       # the history pages the climb's wheel loads after the drop's own page, before it presses the go-to-bottom chip
+    APPEND_TURNS = 0      # ROAD 9: the turns the transcript grows by in one write after the climb's chip presses and one first turn
+    APPEND_INTO = 2       # where ROAD 9's reader drops: this many units under the top of the tail run
+    SECOND_SESSION = False   # ROAD 10: a second, short session (SID2) beside the long one
+    END_PAGES = 0         # ROAD 11: the history pages the wheel climbs before the click (with END_AT, before the element is reached)
+    END_PRESS = "text"    # ROAD 11: what the click before End lands on: "text" (the transcript's centre) or "toggle" (a tool row's fold toggle)
+    END_TYPE = None       # ROAD 11 with END_PRESS "toggle": words typed in the message box before the click
+    END_AFTER = None      # ROAD 11 with END_PRESS "toggle": a step after the click (the driver's cfg.endAfter)
+    END_UNSELECT = False     # ROAD 11: the selection emptied after the click
+    END_PAGE_AFTER = False   # ROAD 11: one more history page asked and filled between the click and End
+    HISTORY_TOOLS = False   # each short turn's reply opens with a Bash call: a tool row with a fold toggle
+    END_MARKUP = ""     # ROAD 11: a reply's own markup added to every eighth short answer, for END_AT to reach
+    END_AT = None       # ROAD 11: instead of the click, the element End meets and how it is reached (the driver's stageEnd)
+    END_MEDIA = False   # ROAD 11: serve the clips a reply's audio plays (clip.wav, three seconds; bad.wav, which decodes as nothing)
+    END_BOX = None      # ROAD 11 with END_PRESS "toggle": a road in a tool output box after the click (the driver's cfg.endBox)
+    LONG_OUTPUT = False   # with HISTORY_TOOLS: every eighth short turn's Bash call prints 200 lines
+    BARS = False        # classic scrollbars (the browser launched without --hide-scrollbars)
 
     @classmethod
     def _skip(cls, why):
@@ -309,13 +839,70 @@ class _LongHistoryLab:
             recs.append({"type": "user", "uuid": u, "parentUuid": prev, "timestamp": tu, "sessionId": SID,
                          "message": {"role": "user", "content": "question number %d about the notes api" % k}})
             text = ("Answer %d: the notes index, row by row.\n\n" % k + tall) if k >= TURNS - TALL else \
-                "Answer %d: the handler reads the note by id and returns it." % k
+                "Answer %d: the handler reads the note by id and returns it." % k + ("\n\n" + cls.END_MARKUP if cls.END_MARKUP and k % 8 == 0 else "")
+            if cls.HISTORY_TOOLS and k < TURNS - TALL:
+                t, r = "55555555-6666-7777-8888-%012d" % k, "66666666-7777-8888-9999-%012d" % k
+                recs.append({"type": "assistant", "uuid": t, "parentUuid": u, "timestamp": ta, "sessionId": SID,
+                             "message": {"role": "assistant", "model": "claude-fable-5-1", "stop_reason": "tool_use",
+                                         "content": [{"type": "tool_use", "id": "toolu_%d" % k, "name": "Bash",
+                                                      "input": {"command": "python3 notes.py --show %d" % k}}]}})
+                recs.append({"type": "user", "uuid": r, "parentUuid": t, "timestamp": ta, "sessionId": SID,
+                             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_%d" % k,
+                                                                      "content": "".join("note %d line %d: the notes table row was read\n" % (k, i) for i in range(1, 201))
+                                                                      if cls.LONG_OUTPUT and k % 8 == 0 else "note %d\ntitle: notes api\nstatus: ok" % k}]}})
+                u = r
             recs.append({"type": "assistant", "uuid": a, "parentUuid": u, "timestamp": ta, "sessionId": SID,
                          "message": {"role": "assistant", "model": "claude-fable-5-1", "stop_reason": "end_turn",
                                      "content": [{"type": "text", "text": text}]}})
             prev = a
-        Path(proj, SID + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+        cls.transcript = os.path.join(proj, SID + ".jsonl")
+        Path(cls.transcript).write_text("".join(json.dumps(r) + "\n" for r in recs))
         cls.newest = "22222222-3333-4444-5555-%012d" % (2 * TURNS - 1)
+        more = []   # the turns ROAD 9 appends (one, then APPEND_TURNS), chained on from the last; their replies are short (a unit below
+        #             the window stands for the held figure whatever its height, and short rows keep the page's memory down)
+        for k in range(TURNS, TURNS + 1 + cls.APPEND_TURNS if cls.APPEND_TURNS else TURNS):
+            u = "11111111-2222-3333-4444-%012d" % (2 * k)
+            a = "22222222-3333-4444-5555-%012d" % (2 * k + 1)
+            more.append({"type": "user", "uuid": u, "parentUuid": prev, "sessionId": SID,
+                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(BASE + 2 * k)),
+                         "message": {"role": "user", "content": "question number %d about the notes api" % k}})
+            more.append({"type": "assistant", "uuid": a, "parentUuid": u, "sessionId": SID,
+                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(BASE + 2 * k + 1)),
+                         "message": {"role": "assistant", "model": "claude-fable-5-1", "stop_reason": "end_turn",
+                                     "content": [{"type": "text", "text": "Answer %d: the handler reads the note by id and returns it." % k}]}})
+            prev = a
+        cls.append_first = os.path.join(cls.lab, "append-first.jsonl")
+        Path(cls.append_first).write_text("".join(json.dumps(r) + "\n" for r in more[:2]))
+        cls.append_lines = os.path.join(cls.lab, "append.jsonl")
+        Path(cls.append_lines).write_text("".join(json.dumps(r) + "\n" for r in more[2:]))
+        cls.append_newest = more[-1]["uuid"] if more else None
+        if cls.SECOND_SESSION:   # "api": a few short turns, every one newer than the long session's last
+            Path(state, "names", SID2).write_text("api\t%s\t\t\n" % cwd)
+            Path(state, "sdk", SID2 + ".json").write_text(json.dumps(
+                {"sid": SID2, "name": "api", "cwd": cwd, "mode": "auto", "effort": "high",
+                 "lastSid": SID2, "alive": True, "model": "claude-fable-5-1", "liveModel": "Fable 5.1"}))
+            short, prev2, base2 = [], None, BASE + 2 * (TURNS + 1 + cls.APPEND_TURNS) + 1000
+            for k in range(SHORT_TURNS):
+                u = "33333333-4444-5555-6666-%012d" % (2 * k)
+                a = "44444444-5555-6666-7777-%012d" % (2 * k + 1)
+                short.append({"type": "user", "uuid": u, "parentUuid": prev2, "sessionId": SID2,
+                              "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(base2 + 2 * k)),
+                              "message": {"role": "user", "content": "check %d on the notes api tests" % k}})
+                short.append({"type": "assistant", "uuid": a, "parentUuid": u, "sessionId": SID2,
+                              "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(base2 + 2 * k + 1)),
+                              "message": {"role": "assistant", "model": "claude-fable-5-1", "stop_reason": "end_turn",
+                                          "content": [{"type": "text", "text": "Result %d: the test passes." % k}]}})
+                prev2 = a
+            Path(proj, SID2 + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in short))
+        cls.media = None
+        if cls.END_MEDIA:
+            cls.media = {"clip.wav": os.path.join(cls.lab, "clip.wav"), "bad.wav": os.path.join(cls.lab, "bad.wav")}
+            with wave.open(cls.media["clip.wav"], "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(8000)
+                w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / 8000))) for i in range(3 * 8000)))
+            Path(cls.media["bad.wav"]).write_bytes(b"RIFF" + struct.pack("<I", 4036) + b"WAVEjunk" + bytes((i * 37) % 251 for i in range(4028)))
         cls.port = _free_port()
         cls.token = "testtok-longhistory"
         env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token)
@@ -333,6 +920,8 @@ class _LongHistoryLab:
             cls.kernel.kill()
             cls._skip("hermetic kernel never served /healthz here")
         cls._r = None
+        cls._failed = None        # the driver's failure, once it has failed (_result)
+        cls._climb_early = None   # the climb's record, printed before ROAD 9 (_climb)
 
     @classmethod
     def tearDownClass(cls):
@@ -346,19 +935,37 @@ class _LongHistoryLab:
         return LAYOUT_LIMIT_1X // self.SCALE
 
     def _result(self):
-        if type(self)._r is not None:
-            return type(self)._r
+        cls = type(self)
+        if cls._r is not None:
+            return cls._r
+        if cls._failed is not None:
+            # a stored failure (ROAD 9 appends to the transcript, so a second run would drive another fixture): every later call fails
+            # with it
+            self.fail("an earlier driver run failed (not re-run): " + cls._failed)
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "newest": self.newest,
-                       "scale": self.SCALE, "viewport": self.VIEWPORT, "legs": list(self.LEGS), "sid": SID, "base": BASE, "jumpTurn": JUMP_TURN,
-                       "pageTurns": PAGE_TURNS, "gapsHeld": self.GAPS_HELD}, f)
+                       "scale": self.SCALE, "viewport": self.VIEWPORT, "legs": list(self.LEGS), "sid": SID, "sid2": SID2, "base": BASE, "jumpTurn": JUMP_TURN,
+                       "pageTurns": PAGE_TURNS, "gapsHeld": self.GAPS_HELD,
+                       "climbPages": self.CLIMB_PAGES, "endPages": self.END_PAGES, "endPress": self.END_PRESS,
+                       "endUnselect": self.END_UNSELECT, "endPageAfter": self.END_PAGE_AFTER,
+                       "endAt": self.END_AT, "endMedia": self.media, "endType": self.END_TYPE, "endAfter": self.END_AFTER,
+                       "endBox": self.END_BOX, "bars": self.BARS,
+                       # every appended event is a display unit of its own here (a prompt, a text reply)
+                       "append": {"transcript": self.transcript, "first": self.append_first, "lines": self.append_lines,
+                                  "units": 2 * self.APPEND_TURNS, "newest": self.append_newest, "into": self.APPEND_INTO}
+                       if self.APPEND_TURNS else None}, f)
         driver = os.path.join(self.lab, "drive.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
-        p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=300,
-                           env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
-        if p.returncode == 3:
+        try:
+            p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=300,
+                               env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
+            rc, stdout, stderr = p.returncode, p.stdout, p.stderr
+        except subprocess.TimeoutExpired as e:   # the output so far comes back as bytes
+            rc = "none: killed after 300 s"
+            stdout, stderr = ((b.decode("utf-8", "replace") if isinstance(b, bytes) else (b or "")) for b in (e.stdout, e.stderr))
+        if rc == 3:
             self._skip("no playwright browser on this box — the served lab needs one")
         klog = ""
         try:
@@ -366,12 +973,21 @@ class _LongHistoryLab:
                 klog = f.read()[-2500:]
         except OSError:
             pass
-        self.assertEqual(p.returncode, 0, "driver failed:\n" + p.stdout[-3000:] + p.stderr[-3000:] + "\nkernel:\n" + klog)
-        line = next((ln for ln in p.stdout.splitlines() if ln.startswith("RESULT:")), None)
-        self.assertIsNotNone(line, "driver printed no result:\n" + p.stdout[-3000:])
-        type(self)._r = json.loads(line[len("RESULT:"):])
-        print("LONG-HISTORY:", type(self).__name__, json.dumps(type(self)._r), file=sys.stderr)
-        return type(self)._r
+        lines = stdout.splitlines()
+        early = next((ln for ln in lines if ln.startswith("CLIMB:")), None)
+        try:
+            cls._climb_early = json.loads(early[len("CLIMB:"):]) if early else None
+        except ValueError:   # cut off mid-line by a kill
+            cls._climb_early = None
+        line = next((ln for ln in lines if ln.startswith("RESULT:")), None)
+        if rc != 0 or line is None:
+            shown = "\n".join(ln for ln in lines if not ln.startswith(("CLIMB:", "RESULT:")))   # the records are read, not shown
+            cls._failed = (("driver failed (exit %s)" % rc) if rc != 0 else "driver printed no result") + ":\n" + shown[-3000:] + "\n" \
+                + stderr[-3000:] + "\nkernel:\n" + klog
+            self.fail(cls._failed)
+        cls._r = json.loads(line[len("RESULT:"):])
+        print("LONG-HISTORY:", cls.__name__, json.dumps(cls._r), file=sys.stderr)
+        return cls._r
 
     @staticmethod
     def _brief(x):
@@ -396,6 +1012,24 @@ class LongHistoryHeight(_LongHistoryLab, unittest.TestCase):
         self.assertTrue(rs and rs[-1]["kind"] == "run" and rs[-1]["hi"] is None, "the tail run is last and open-ended: %r" % rs)
         widest = max((x["hi"] - x["lo"] for x in rs if x["kind"] == "gap"), default=0)
         self.assertGreater(widest, 1900, "a gap holds most of the transcript's turns (the estimate the lab is built to push past the limit): %r" % rs)
+
+    def test_the_head_gap_at_the_measured_px_per_turn_would_stand_past_the_layout_limit(self):
+        r = self._result()
+        self.assertLessEqual(r["limitProbe"], self.limit, "the %dx scale took: a box asked for 20,000,000 px lays out at most the limit: %r" % (self.SCALE, r["limitProbe"]))
+        m = r["landed"]["measure"]
+        self.assertTrue(m and m["pxPerTurn"], "the page measured a px per turn: %r" % m)
+        widest = max((x["hi"] - x["lo"] for x in r["landed"]["regions"] or [] if x["kind"] == "gap"), default=0)
+        self.assertGreater(widest * m["pxPerTurn"], 1.2 * self.limit, "the head gap at the measured figure stands past the limit with a margin: %d turns x %.1f px" % (widest, m["pxPerTurn"]))
+
+    def test_a_row_hidden_at_the_landing_takes_the_measured_average_unit(self):
+        # chat-regions.ts heldUnitPx lowers the figure only when the gaps and the units the page holds, at the average unit, would stand
+        # past half the limit. The figure a hidden row takes is render.ts unitPx's: the held figure, or the average where none is set
+        m = self._result()["landed"]["measure"]
+        self.assertTrue(m, "the page reports its view's measures (render.ts __rompViewMeasure): %r" % m)
+        self.assertGreater(m["winStart"], 1, "rows are hidden above the window, past the head gap's one unit: %r" % m)
+        self.assertLess(m["units"] * m["avgUnit"], self.limit / 5, "the units the page holds, at the average unit it measured, stand under a fifth of the limit: %r" % m)
+        figure = m["heldPx"] if m["heldPx"] is not None else m["avgUnit"]
+        self.assertEqual(figure, m["avgUnit"], "a row hidden in a spacer takes the measured average unit: %r" % m)
 
     def test_the_page_lands_with_the_newest_row_on_screen(self):
         L = self._result()["landed"]
@@ -510,16 +1144,205 @@ class LongHistoryHeight(_LongHistoryLab, unittest.TestCase):
         self.assertTrue(b["after"]["rowTurn"] is not None and plo <= b["after"]["rowTurn"] < phi, "…of the turns asked: %r" % self._brief(b["after"]))
 
 
+class LongHistoryClimb(_LongHistoryLab, unittest.TestCase):
+    SCALE = 2
+    TALL_LINES = 2400     # an average unit of ~21,600 px off the tall tail: each page the climb loads holds 32 rows
+    LEGS = ("climb",)
+    CLIMB_PAGES = 24
+    APPEND_TURNS = 100    # 200 units, past the 140 the window renders, so at the held figure they carry the estimates past the half
+
+    def _climb(self):
+        """The climb's record, its premise checked first, so each test that reads the climb fails on a short or misplaced climb by
+        itself (run alone, or with the premise test gone): the drop lands inside the head gap, the wheel loads CLIMB_PAGES pages, one
+        asked per step, and the units the page then holds, at the average unit it measured, stand past the limit by more than a fifth.
+        When the driver failed after the climb (in ROAD 9), the record it printed before that road is the climb's record, so each test
+        that reads the climb alone still reads it; the two tests that read ROAD 9 too (the append test and the held-figure test) and the
+        page-error test report the failure."""
+        try:
+            c = self._result()["climb"]
+        except AssertionError:
+            c = type(self)._climb_early
+            if c is None:
+                raise
+            print("LONG-HISTORY:", type(self).__name__, self._testMethodName, "reads the climb record the failed driver printed before ROAD 9", file=sys.stderr)
+        self.assertTrue(c["drop"]["gap"] and c["drop"]["gap"]["turnAtTop"] is not None, "the drop lands inside the head gap: %r" % self._brief(c["drop"]))
+        self.assertEqual(len(c["steps"]), self.CLIMB_PAGES, "the wheel climb loads %d pages, one per step: %r" % (self.CLIMB_PAGES, c["steps"]))
+        self.assertEqual([len(x["asked"]) for x in c["steps"]], [1] * self.CLIMB_PAGES, "…each step asking one page: %r" % c["steps"])
+        m = c["climbed"]["measure"]
+        self.assertTrue(m, "the page reports its view's measures (render.ts __rompViewMeasure): %r" % m)
+        self.assertGreater(m["units"] * m["avgUnit"], 1.2 * self.limit, "the units the page holds, at the average unit it measured, stand past the limit with a margin: %r" % m)
+        return c
+
+    def test_the_climb_holds_rows_whose_estimate_at_the_measured_average_would_pass_the_limit(self):
+        self._climb()
+
+    def test_the_scroll_height_stays_under_the_layout_limit_through_the_climb(self):
+        c = self._climb()
+        sh = [x["sh"] for x in c["steps"]] + [c["chip1"]["sh"], c["chip2"]["sh"]]
+        self.assertLess(max(sh), self.limit, "the thread fits the tallest box Chrome lays out at this scale, page by page: %r" % sh)
+
+    def test_the_estimates_stand_at_most_half_the_layout_limit_through_the_climb(self):
+        # chat-regions.ts HIDDEN_SHARE: at every reading of the climb and of the chip presses after it, the spacers and the gaps drawn
+        # stand at most 4 px past half the limit
+        c = self._climb()
+        est = [x["est"] for x in c["steps"]] + [c["chip1"]["est"], c["chip2"]["est"]]
+        self.assertTrue(all(e > 0 for e in est), "every reading holds a spacer or a gap: %r" % est)
+        self.assertLessEqual(max(est), self.limit / 2 + 4, "the estimates in the scroll height, page by page: %r" % est)
+
+    def test_the_go_to_bottom_chip_shows_the_newest_row_after_the_climb(self):
+        c = self._climb()
+        self.assertTrue(c["chip1"]["newestOnScreen"], "the newest row is on screen after the first press: %r" % self._brief(c["chip1"]))
+        self.assertLessEqual(c["chip1"]["dist"], c["chip1"]["ch"], "…within a screen of the bottom (the newest row alone stands many screens tall here, so on screen is a looser bar): %r" % self._brief(c["chip1"]))
+        self.assertTrue(c["chip2"]["newestOnScreen"], "…and after the second: %r" % self._brief(c["chip2"]))
+        self.assertLessEqual(c["chip2"]["dist"], 2, "…at the bottom: %r" % self._brief(c["chip2"]))
+
+    def test_rows_appended_below_the_window_take_the_held_figure_until_the_next_build(self):
+        # ROAD 9, the residual chat-regions.ts HIDDEN_SHARE and render.ts heldPxOf disclose: the keyed paint (tailDiff) keeps the held
+        # figure, so the units it appends below the window are estimated at it, and can carry the estimates past the half, by at most
+        # their count times it, until the next window build (a press of the chip here) sizes every hidden unit afresh.
+        # The code before this change has no held figure, and over it this test fails before any check of the figure (without the
+        # measure hook the driver fails; with only the hook added, the road's premise fails); a change that closes the residual
+        # rewrites this test along with the disclosure.
+        # The result first, then the climb's premise: when ROAD 9 fails and this test ran the driver (it is collected first), the
+        # failure is reported as it came ("driver failed ..."); with _climb first, the climb's record would be read around it and this
+        # test would raise the stored failure as one an earlier test met
+        res = self._result()
+        self._climb()
+        b = res["climb"]["below"]   # ROAD 9's own record: a failure in the road fails this test, never read around
+        self.assertIsNotNone(b, "the class appended replies after the climb")
+        d, f, r, n = b["dropped"], b["first"], b["rest"], b["next"]
+        md, mf, mr = d["measure"], f["measure"], r["measure"]
+        # the road's premise: the first reply landed, units are hidden below the window, and the held figure is under the average
+        self.assertEqual(mf["units"] - md["units"], 2, "the first reply landed: %r then %r" % (md, mf))
+        self.assertTrue(mf["winEnd"] < mf["units"], "units are hidden below the window the reader stands in: %r" % mf)
+        self.assertTrue(mf.get("heldPx") is not None and mf["heldPx"] < mf["avgUnit"], "the held figure is under the average unit: %r" % mf)
+        half = self.limit / 2
+        self.assertLessEqual(f["est"], half + 4, "after the first reply the estimates stand at most 4 px past the half: %r" % self._brief(f))
+        k = mr["units"] - mf["units"]
+        self.assertEqual(k, 2 * self.APPEND_TURNS, "every appended event landed as a unit of its own: %r then %r" % (mf, mr))
+        self.assertEqual((mr["winStart"], mr["winEnd"]), (mf["winStart"], mf["winEnd"]), "the window stayed where it was: %r then %r" % (mf, mr))
+        self.assertEqual(mr["heldPx"], mf["heldPx"], "the keyed paint keeps the held figure (a rebuild would recompute it, over the appended units too)")
+        self.assertAlmostEqual(r["est"] - f["est"], k * mf["heldPx"], delta=2,
+                               msg="the bottom spacer grew by the appended units at the held figure: %d then %d, %d units at %.2f px" % (f["est"], r["est"], k, mf["heldPx"]))
+        self.assertGreater(r["est"], half, "the appended units carried the estimates past the half (the residual's state, reached): %d" % r["est"])
+        self.assertLessEqual(r["est"], half + k * mf["heldPx"] + 4, "…by at most their count times the figure: %d" % r["est"])
+        self.assertLessEqual(n["est"], half + 4, "the next window build (a press of the chip) brings the estimates back under the half: %r" % self._brief(n))
+        self.assertLess(max(x["sh"] for x in (d, f, r, n)), self.limit, "the thread fits the tallest box through the road: %r" % [x["sh"] for x in (d, f, r, n)])
+
+    def test_the_held_figure_stays_put_while_the_window_moves(self):
+        # chat-regions.ts heldUnitPx counts every unit that is not a gap, rendered or hidden, so window builds over the same units set
+        # the same figure: after the climb's last page (the window at the top of the loaded rows), after the chip's second press (at
+        # the end) and after ROAD 9's drop (at the tail run's first rows), with no unit landing in between.
+        # The result first, then the climb's premise, as in the append test: the drop's reading is ROAD 9's record
+        res = self._result()
+        self._climb()
+        c = res["climb"]
+        self.assertIsNotNone(c["below"], "the class dropped back to the tail run after the climb")
+        ms = [("the climb's last page", c["climbed"]["measure"]), ("the chip's second press", c["chip2"]["measure"]),
+              ("ROAD 9's drop", c["below"]["dropped"]["measure"])]
+        self.assertEqual(len({m["units"] for _, m in ms}), 1, "no unit landed between the three readings: %r" % ms)
+        self.assertEqual(len({(m["winStart"], m["winEnd"]) for _, m in ms}), 3, "each reading stands in a window of its own: %r" % ms)
+        self.assertTrue(all(m["heldPx"] is not None and m["heldPx"] < m["avgUnit"] for _, m in ms), "the held figure is set, under the average unit: %r" % ms)
+        self.assertEqual(len({m["heldPx"] for _, m in ms}), 1, "the held figure stays put while the window moves: %r" % ms)
+
+
+class _BuiltHiddenLab(_LongHistoryLab):
+    """ROAD 10's two sessions, mixed into LongHistoryBuiltHidden and LongHistoryBuiltHiddenBounded below (a mixin, so the runner
+    collects no lab of its own)."""
+    SCALE = 2
+    LEGS = ("shown",)
+    SECOND_SESSION = True
+    BOUND = False         # whether the long session's units, at the average unit measured at a show, engage the bound (heldUnitPx)
+
+    def _shown(self, show):
+        """ROAD 10's record at one show of the long session ("first", or "again" after the settings change), its premises checked first,
+        so each test fails on its own when the road did not set up what it reads: before the show the reader was on the short session
+        (at the first show, where the page landed) and the long view stood built while hidden; the show kept that window (a window
+        build sets the figure itself, render.ts renderWindowItems, and would leave the first measure's setting unread); and the bound is
+        engaged or not as the class says (chat-regions.ts heldUnitPx). Not engaged (BOUND false): the units at the measured average
+        stand under a fifth of the limit, so with the gaps at their quarter of it they stand under half, and the figure a hidden row
+        takes is the measured average itself. Engaged: the head gap at the measured px per turn stands past its quarter of the limit,
+        so it is drawn at that quarter, and the units at the measured average stand past the quarter it leaves of the half by more
+        than a tenth."""
+        s = self._result()["shown"]
+        before, r = (s["boot"] if show == "first" else s["hidden"]), s[show]
+        m = r["measure"]
+        self.assertTrue(m and m["avgUnit"], "the long session is shown and measured: %r" % r)
+        self.assertTrue(before["active"] and before["active"]["units"] * 4 < m["units"],
+                        "before the show the reader was on the short session: %r, then the long one %r" % (before["active"], m))
+        self.assertTrue(before["long"] and before["long"]["display"] == "none" and before["long"]["children"] > 0 and before["marked"],
+                        "before the show the long view stood built while hidden, its top spacer marked: %r" % before)
+        self.assertTrue(r["long"] and r["long"]["display"] != "none" and r["long"]["kept"], "the show kept the window built hidden: %r" % r)
+        self.assertGreater(m["winStart"], 1, "rows are hidden above the window, past the head gap's one unit: %r" % m)
+        if not self.BOUND:
+            self.assertLess(m["units"] * m["avgUnit"], self.limit / 5, "the units at the measured average stand under a fifth of the limit: %r" % m)
+        else:
+            gap = max((x["hi"] - x["lo"] for x in r.get("regions") or [] if x["kind"] == "gap"), default=0)
+            self.assertGreater(gap * m["pxPerTurn"], self.limit / 4, "the head gap at the measured px per turn stands past its quarter of the limit: %d turns, %r" % (gap, m))
+            self.assertGreater(m["units"] * m["avgUnit"], 1.1 * self.limit / 4, "the units at the measured average stand past the quarter of the limit the gaps leave of its half: %r" % m)
+        return s
+
+
+class LongHistoryBuiltHidden(_BuiltHiddenLab, unittest.TestCase):
+    TALL_LINES = 600      # LongHistoryHeight's tail: the units the page holds, at the average unit, stand under a fifth of the limit
+
+    def test_at_the_first_show_of_a_view_built_hidden_the_hidden_row_figure_is_the_measured_average(self):
+        # render.ts sizeSpacers: the first measure of the average unit (with the px per turn's, here) sets the held figure off it. The
+        # figure a hidden row takes is render.ts unitPx's: the held figure, or the average where none is set
+        s = self._shown("first")
+        m = s["first"]["measure"]
+        figure = m["heldPx"] if m["heldPx"] is not None else m["avgUnit"]
+        self.assertEqual(figure, m["avgUnit"], "the figure a hidden row takes (render.ts unitPx) is the average measured at the show: %r" % m)
+
+    def test_after_a_settings_change_the_switch_back_sizes_hidden_rows_at_the_average_measured_then(self):
+        # render.ts sizeSpacers: the first measure of the average unit alone (the px per turn kept through the settings change) sets
+        # the held figure off it; the top spacer, sized at the fallback figure while hidden, takes it. The figure a hidden row takes is
+        # render.ts unitPx's, as above
+        s = self._shown("again")
+        m = s["again"]["measure"]
+        figure = m["heldPx"] if m["heldPx"] is not None else m["avgUnit"]
+        self.assertEqual(figure, m["avgUnit"], "a row hidden in a spacer takes the average measured at the switch back: %r" % m)
+        self.assertGreater(s["again"]["long"]["topPx"], s["hidden"]["long"]["topPx"],
+                           "the top spacer grew from the fallback figure to the measured one: %r then %r" % (s["hidden"]["long"], s["again"]["long"]))
+
+
+class LongHistoryBuiltHiddenBounded(_BuiltHiddenLab, unittest.TestCase):
+    TALL_LINES = 2400     # LongHistoryClimb's tail: an average unit of ~21,600 px, so the long session's units engage the bound at the show
+    LEGS = ("shown", "rebuild")
+    BOUND = True
+
+    def test_at_the_first_show_the_hidden_row_figure_is_the_one_the_next_window_build_sets(self):
+        # render.ts sizeSpacers: the first measure re-maps the gaps at the measured px per turn and sets the held figure off them, under
+        # the share of the limit (heldPxOf), as a window build does. The scroll after the show builds a window over the same units, so
+        # the figure that build sets is the one the show must have set. The figure a hidden row takes is render.ts unitPx's: the held
+        # figure, or the average where none is set
+        s = self._shown("first")
+        m, b = s["first"]["measure"], (s["first"].get("rebuilt") or {}).get("measure")
+        self.assertTrue(b, "the scroll after the show was read: %r" % s["first"].get("rebuilt"))
+        self.assertEqual((b["units"], b["avgUnit"]), (m["units"], m["avgUnit"]), "no unit landed, and the average stood, between the show and the build: %r then %r" % (m, b))
+        self.assertNotEqual((b["winStart"], b["winEnd"]), (m["winStart"], m["winEnd"]), "the scroll built a window of its own: %r then %r" % (m, b))
+        shown, built = (x["heldPx"] if x["heldPx"] is not None else x["avgUnit"] for x in (m, b))
+        self.assertEqual(shown, built, "the figure a hidden row takes (render.ts unitPx) at the show is the one the window build sets: %r then %r" % (m, b))
+
+
 class UnreachableEndSettles(_LongHistoryLab, unittest.TestCase):
     SCALE = 12            # the layout limit is 2,796,202 px
     VIEWPORT = {"width": 640, "height": 480}   # a smaller page, so the 12x raster costs what a 1000 x 600 page does at 8x
-    TALL_LINES = 1500     # a turn of ~27,000 px: the tail run alone (~3.4 million px) stands past the limit, whatever the gap
+    TALL_LINES = 3000     # tall enough that the thread stands at the limit with its newest row out of reach (the premise test below)
     LEGS = ("gapDrawn",)
 
     def test_the_end_is_out_of_reach_for_a_reason_that_is_not_the_gap(self):
         J = self._result()["jumped"]
         self.assertGreaterEqual(J["sh"], self.limit - 1, "the thread stands at the layout limit (the lab's premise): %r" % self._brief(J))
         self.assertFalse(J["newestOnScreen"], "…so the newest row is out of reach: %r" % self._brief(J))
+
+    def test_the_estimates_stand_at_most_half_the_layout_limit_at_the_end(self):
+        # chat-regions.ts HIDDEN_SHARE at this scale: at the landing and after the jump to the end, the spacers and the gaps drawn
+        # stand at most 4 px past half the limit
+        r = self._result()
+        for road in ("landed", "jumped"):
+            self.assertGreater(r[road]["est"], 0, "%s: the reading holds a spacer or a gap: %r" % (road, self._brief(r[road])))
+            self.assertLessEqual(r[road]["est"], self.limit / 2 + 4, "%s: the estimates in the scroll height: %r" % (road, self._brief(r[road])))
 
     def test_the_gaps_are_drawn_at_most_a_quarter_of_the_measured_limit(self):
         g = self._result()["gapDrawn"]
@@ -532,7 +1355,7 @@ class UnreachableEndSettles(_LongHistoryLab, unittest.TestCase):
         self.assertLessEqual(len(r["jumped"]["asks"]), 1, "no page walk at the end: %r" % r["jumped"]["asks"])
 
 class UnreachableEndInsideAGapSettles(_LongHistoryLab, unittest.TestCase):
-    """The case a fill's quiet gaps exist for (2026-10-02): UnreachableEndSettles' fixture with the gaps' bound held, from the boot, at the
+    """The case a fill's quiet gaps exist for (2026-10-02): UnreachableEndSettles' fixture at TALL_LINES 1500 (that class's is 3000) with the gaps' bound held, from the boot, at the
     fallback's share (a quarter of 16,777,216, 4,194,304 px), past this scale's whole limit, so the end lies inside a gap the layout
     clamps, a gap that cannot leave the viewport. Every fill there rebuilds that gap under the reader; were its first observation to ask,
     the page would walk the gap one page per reply for as long as pages came. Below the limit a fill's gaps are not quiet
@@ -574,6 +1397,269 @@ class UnreachableEndInsideAGapSettles(_LongHistoryLab, unittest.TestCase):
         self.assertTrue(lo <= t < hi, "…the one holding the parked reader's turn (%.1f): %r" % (t, a))
         self.assertEqual(len(a), 1, "that page alone, once: %r" % a)
         self.assertTrue(p["after"]["rowTurn"] is not None and lo <= p["after"]["rowTurn"] < hi, "…whose rows come on screen: %r" % self._brief(p["after"]))
+
+
+class LongHistoryEnd(_LongHistoryLab, unittest.TestCase):
+    SCALE = 2
+    TALL_LINES = 2400     # LongHistoryClimb's tail
+    LEGS = ("end",)
+    END_PAGES = 8
+
+    def _assert_the_click(self, k):
+        self.assertTrue(k["bodyFocused"] and k["anchorInContent"], "the click left focus on the page body and the selection's anchor in the transcript: %r" % k)
+
+    def test_the_first_end_from_far_back_shows_the_newest_row(self):
+        e = self._result()["end"]
+        self.assertTrue(e["drop"]["gap"] and e["drop"]["gap"]["turnAtTop"] is not None, "the drop lands inside the head gap: %r" % self._brief(e["drop"]))
+        self.assertEqual([len(x["asked"]) for x in e["steps"]], [1] * self.END_PAGES, "the wheel climbs %d pages, one asked per step: %r" % (self.END_PAGES, e["steps"]))
+        c = e["climbed"]
+        self.assertGreater(c["dist"], 100 * c["ch"], "the reader stands more than a hundred screens from the bottom: %r" % self._brief(c))
+        self._assert_the_click(e["clicked"])
+        p = e["pressed"]
+        self.assertTrue(p["newestOnScreen"], "the newest row is on screen after the first End: %r" % self._brief(p))
+        self.assertLessEqual(p["dist"], p["ch"], "…within a screen of the bottom: %r" % self._brief(p))
+
+
+class LongHistoryEndAfterAFoldToggle(LongHistoryEnd):
+    HISTORY_TOOLS = True
+    END_PRESS = "toggle"
+
+    def _assert_the_click(self, k):
+        self.assertTrue(k["toggle"] and k["toggle"]["ranges"] == 0, "a fold toggle on screen, nothing selected before the click: %r" % k)
+        self.assertTrue(k["bodyFocused"] and not k["anchor"] and k["pressOnToggle"],
+                        "the click left focus on the page body, the selection with no anchor and the last press on the toggle: %r" % k)
+
+
+class LongHistoryEndAfterTypingAndAFoldToggle(LongHistoryEndAfterAFoldToggle):
+    TALL_LINES = 1800     # a tail the base lays out under the layout limit
+    END_TYPE = "a draft"
+
+    def _assert_the_click(self, k):
+        self.assertTrue(k["toggle"] and k["bodyFocused"] and k["pressOnToggle"],
+                        "a fold toggle on screen; the click left focus on the page body and the last press on the toggle: %r" % k)
+        self.assertTrue(k["anchor"] and not k["anchorInContent"] and k["anchorInFooter"], "…and the selection's anchor in the footer (anchorInFooter): %r" % k)
+        self.assertGreater(k["pressT"], k["selT"], "…and the press on the toggle after the selection's last change: %r" % k)
+
+    def test_the_page_takes_the_first_end_from_far_back_and_shows_the_newest_row(self):
+        e = self._result()["end"]
+        self.assertEqual([len(x["asked"]) for x in e["steps"]], [1] * self.END_PAGES, "the wheel climbs %d pages, one asked per step: %r" % (self.END_PAGES, e["steps"]))
+        self.assertGreater(e["climbed"]["dist"], 100 * e["climbed"]["ch"], "the reader stands more than a hundred screens from the bottom: %r" % self._brief(e["climbed"]))
+        self._assert_the_click(e["clicked"])
+        p = e["pressed"]
+        self.assertEqual((e["clicked"]["taken"], p["newestOnScreen"], p["dist"] <= p["ch"]), (True, True, True),
+                         "the page took End, and the newest row is on screen within a screen of the bottom: taken %r, %r" % (e["clicked"]["taken"], self._brief(p)))
+
+
+class _ASelectionAfterTheClick:
+    """ROAD 11 with END_AFTER (mixed in ahead of LongHistoryEndAfterTypingAndAFoldToggle): a selection change after the press."""
+
+    def _assert_the_click(self, k):
+        self.assertTrue(k["toggle"] and k["bodyFocused"] and k["pressInContent"],
+                        "a fold toggle on screen; focus on the page body and the last press inside the transcript: %r" % k)
+        self.assertTrue(k["anchor"] and not k["anchorInContent"] and k["selT"] > k["pressT"],
+                        "…then the selection changed after the press, its anchor outside the transcript: %r" % k)
+
+
+class LongHistoryEndAfterTypingAFoldToggleAndASelectionOnTheStrip(_ASelectionAfterTheClick, LongHistoryEndAfterTypingAndAFoldToggle):
+    END_AFTER = "collapse"
+
+
+class LongHistoryEndAfterAFoldToggleAndSelectAll(_ASelectionAfterTheClick, LongHistoryEndAfterTypingAndAFoldToggle):
+    END_TYPE = None
+    END_AFTER = "selectAll"
+
+
+class LongHistoryEndAfterAFoldToggleAndACommentBoxClosedWithEscape(_ASelectionAfterTheClick, LongHistoryEndAfterTypingAndAFoldToggle):
+    END_TYPE = None
+    END_AFTER = "comment"
+
+    def _assert_the_click(self, k):
+        c = k.get("comment") or {}
+        self.assertTrue(c.get("downs") == [1, 2] and c.get("pressOnWord"), "after the click, a double click on a word of a reply, which made the last press: %r" % c)
+        self.assertTrue(c.get("opened") and c.get("focused") and c.get("text") == "a note",
+                        "…then the comment key opened the comment box, with focus and the two words typed in it: %r" % c)
+        super()._assert_the_click(k)
+
+
+class _ABoxRoad:
+    """ROAD 11 with END_BOX (mixed in ahead of LongHistoryEndAfterTypingAndAFoldToggle, nothing typed): a road in a tool output box
+    after the click, every eighth short turn's output 200 lines long, classic scrollbars. BOX_PREMISE: readings right before End."""
+    END_TYPE = None
+    LONG_OUTPUT = True
+    BARS = True
+    BOX_PREMISE = {}
+
+    def _assert_the_click(self, k):
+        r = k.get("box") or {}
+        b = r.get("before") or {}
+        self.assertTrue(k["toggle"] and b.get("bodyFocused") and b["anchorInContent"] and b["anchorInBox"] and b["box"] and b["box"]["canScroll"],
+                        "a fold toggle on screen; focus on the page body, the selection's anchor in a tool output box that can still scroll down: toggle %r, %r" % (k["toggle"], r))
+        self.assertTrue(b["pressInContent"] and not b["pressInBox"] and b["dist"] > b["ch"],
+                        "…the last press in the transcript outside that box, more than a screen from the bottom: %r" % r)
+        self.assertEqual({x: b[x] for x in self.BOX_PREMISE}, self.BOX_PREMISE, "…and %r: %r" % (self.BOX_PREMISE, r))
+
+
+class LongHistoryEndAfterACaretInAToolOutputBoxAndAShiftClickOutsideIt(_ABoxRoad, LongHistoryEndAfterTypingAndAFoldToggle):
+    END_BOX = "shift"
+    BOX_PREMISE = {"later": "selection"}
+
+
+class LongHistoryEndAfterAClickOutsideAToolOutputBoxAndAFindInsideIt(_ABoxRoad, LongHistoryEndAfterTypingAndAFoldToggle):
+    END_BOX = "find"
+    BOX_PREMISE = {"later": "selection", "selTarget": "document"}
+
+    def _assert_the_click(self, k):
+        self.assertIs((k.get("box") or {}).get("found"), True, "window.find found the line in the box: %r" % k.get("box"))
+        super()._assert_the_click(k)
+
+
+class LongHistoryEndAfterACaretInAToolOutputBoxAFoldToggleAndTextWrittenIntoTheMessageBox(_ABoxRoad, LongHistoryEndAfterTypingAndAFoldToggle):
+    END_BOX = "toggleWrite"
+    BOX_PREMISE = {"later": "selection", "pressOnToggle": True, "selTarget": "TEXTAREA#composer-input"}
+
+
+class LongHistoryEndAfterACaretInAToolOutputBoxAndAFoldToggle(_ABoxRoad, LongHistoryEndAfterTypingAndAFoldToggle):
+    END_BOX = "toggle"
+    BOX_PREMISE = {"later": "press", "pressOnToggle": True}
+
+
+class _APageAfterTheClick:
+    """ROAD 11 with seven history pages climbed before the click and one between the click and End (mixed in ahead of an End class)."""
+    END_PAGES = 7
+    END_PAGE_AFTER = True
+
+    def _assert_the_click(self, k):
+        super()._assert_the_click(k)
+        a = k["after"]
+        self.assertEqual(len(a["asked"]), 1, "after the click the wheel asks one history page: %r" % a)
+        self.assertTrue(a["gapLoading"] == 0 and a["measure"]["units"] > a["before"]["units"], "…which lands and fills: %r" % a)
+        self.assertIs(a["pressConnected"], False, "…and the element the click pressed is no longer in the document: %r" % a)
+        p = k.get("atPress")
+        self.assertTrue(p and p["bodyFocused"] and not p["anchor"], "…and when End is pressed, focus on the page body and no anchor in the selection: %r" % p)
+
+
+class LongHistoryEndAfterAFoldToggleAndAPage(_APageAfterTheClick, LongHistoryEndAfterAFoldToggle):
+    pass
+
+
+class LongHistoryEndWithNoSelectionAfterAClickAndAPage(_APageAfterTheClick, LongHistoryEnd):
+    END_UNSELECT = True
+
+    def _assert_the_click(self, k):
+        super()._assert_the_click(k)
+        self.assertTrue(k["unselected"], "the selection was emptied after the click: %r" % k)
+
+
+class _EndAt:
+    """ROAD 11 with END_AT in place of the click (mixed in ahead of LongHistoryEnd), read where End meets the element."""
+
+    def _assert_the_click(self, k):
+        a = k.get("atEnd")
+        self.assertTrue(k["picked"] and a and a["inContent"], "End reached the page with the element in the transcript: %r" % k)
+        self.assertGreater(a["dist"], 100 * a["ch"], "…more than a hundred screens from the bottom: %r" % k)
+        if self.END_AT["way"] == "press":
+            self.assertTrue(a["bodyFocused"] and not a["anchor"] and a["pressIn"], "…with focus on the page body, no anchor and the last press on the element: %r" % k)
+        else:
+            self.assertTrue(a["focused"] and not a["anchor"] and not a["pressInContent"], "…with focus on the element, no anchor and no press in the transcript: %r" % k)
+
+
+class LongHistoryEndAfterAPressOnAReplysMenu(_EndAt, LongHistoryEnd):
+    END_MARKUP = '<div id="lab-end" role="menu">The note menu: open, rename or delete a note.</div>'
+    END_AT = {"sel": '[id="user-content-lab-end"]', "way": "press", "intoView": True}
+
+
+class LongHistoryEndAfterAPressOnAReplysListbox(_EndAt, LongHistoryEnd):
+    END_MARKUP = '<div id="lab-end" role="listbox">The note list: notes one, two and three.</div>'
+    END_AT = {"sel": '[id="user-content-lab-end"]', "way": "press", "intoView": True}
+
+
+class LongHistoryEndWithFocusOnALinkInAReplysListbox(_EndAt, LongHistoryEnd):
+    END_MARKUP = '<div role="listbox">The note list: <a id="lab-end" href="https://example.test/note">a note link</a>.</div>'
+    END_AT = {"sel": '[id="user-content-lab-end"]', "way": "focus", "intoView": True}
+
+
+class LongHistoryEndWithFocusOnACopyButtonInAReplysListbox(_EndAt, LongHistoryEnd):
+    END_MARKUP = '<div id="lab-list" role="listbox">The note list:\n\n```\nfenced block inside the listbox\n```\n\n</div>'
+    END_AT = {"sel": '[id="user-content-lab-list"] pre.has-copy > .code-copy', "way": "focus", "intoView": True}
+
+
+class LongHistoryEndAfterAPressOnAReplysTaskCheckbox(_EndAt, LongHistoryEnd):
+    END_MARKUP = "- [ ] an open task item\n- [x] a done task item"
+    END_AT = {"sel": "#content .md li input", "way": "press", "intoView": True}
+
+
+class LongHistoryEndWithFocusOnAQuestionCardCheckbox(_EndAt, LongHistoryEnd):
+    END_AT = {"sel": "#live-ask .ask-check input", "way": "focus", "ask": ASK_CARD}
+
+
+class _AMediaElement(_EndAt):
+    """END_AT on a reply's audio or video, focused (mixed in ahead of LongHistoryEnd); MEDIA_STATE checks its state at the press."""
+    END_MEDIA = True
+    END_AT = {"sel": '[id="user-content-lab-end"]', "way": "focus", "intoView": True}
+
+    def _assert_the_click(self, k):
+        super()._assert_the_click(k)
+        m = k["atEnd"]["media"]
+        self.assertTrue(m is not None and all(m[x] == v for x, v in self.MEDIA_STATE.items()), "…a medium with %r: %r" % (self.MEDIA_STATE, m))
+
+
+class LongHistoryEndWithFocusOnAnAudioThatHasEnded(_AMediaElement, LongHistoryEnd):
+    END_MARKUP = '<audio id="lab-end" controls src="https://media.test/clip.wav"></audio>'
+    END_AT = dict(_AMediaElement.END_AT, media="ended")
+    MEDIA_STATE = {"ended": True, "duration": 3}
+
+
+class LongHistoryEndWithFocusOnAnAudioThatFailedToLoad(_AMediaElement, LongHistoryEnd):
+    END_MARKUP = '<audio id="lab-end" controls src="https://media.test/bad.wav"></audio>'
+    END_AT = dict(_AMediaElement.END_AT, media="failed")
+    MEDIA_STATE = {"error": 4, "readyState": 0, "duration": None}
+
+
+class LongHistoryEndWithFocusOnAnAudioThatPreloadsNothing(_AMediaElement, LongHistoryEnd):
+    END_MARKUP = '<audio id="lab-end" controls preload="none" src="https://media.test/clip.wav"></audio>'
+    MEDIA_STATE = {"error": None, "readyState": 0, "duration": None, "networkState": 1}
+
+
+class LongHistoryEndWithFocusOnAnAudioWithNoSource(_AMediaElement, LongHistoryEnd):
+    END_MARKUP = '<audio id="lab-end" controls></audio>'
+    MEDIA_STATE = {"error": None, "readyState": 0, "duration": None, "networkState": 0}
+
+
+class LongHistoryEndWithFocusOnAReplysVideoWithNoControls(_AMediaElement, LongHistoryEnd):
+    END_MARKUP = '<video id="lab-end" tabindex="0" src="https://media.test/clip.wav"></video>'
+    END_AT = dict(_AMediaElement.END_AT, media="loaded")
+    MEDIA_STATE = {"controls": False, "error": None, "duration": 3, "ended": False}
+
+
+class LongHistoryEndFromAReplysAudioPlayControl(LongHistoryEnd):
+    """The page does not receive End from a reply's audio play control, and the transcript's own scroll does not reach its end while
+    focus is there."""
+    END_MEDIA = True
+    END_MARKUP = ('<a href="https://example.test/pre-audio">pre audio</a>\n\n<audio id="lab-end" controls src="https://media.test/clip.wav"></audio>\n\n'
+                  '<div role="menu">media menu:\n\n<a href="https://example.test/pre-menu-audio">pre menu audio</a>\n\n'
+                  '<audio controls src="https://media.test/clip.wav"></audio>\n\n</div>')
+    END_AT = {"sel": '[id="user-content-lab-end"]', "way": "tab", "tab": 2, "pre": "https://example.test/pre-audio", "intoView": True,
+              "media": "loaded", "scrolls": True}
+    test_the_first_end_from_far_back_shows_the_newest_row = None
+
+    def test_the_page_does_not_receive_end_and_the_scroll_does_not_reach_its_end_while_focus_is_on_the_audio(self):
+        e = self._result()["end"]
+        self.assertEqual([len(x["asked"]) for x in e["steps"]], [1] * self.END_PAGES, "the wheel climbs %d pages, one asked per step: %r" % (self.END_PAGES, e["steps"]))
+        k = e["clicked"]
+        s, a = k["staged"], k["armed"]
+        self.assertTrue(k["picked"] and s["inContent"] and "button:play" in (k["ax"] or []) and a["connected"] and a["focused"],
+                        "focus on the play control of a reply's audio in the transcript at the press: %r" % k)
+        self.assertTrue(s["media"]["readyState"] >= 1 and s["media"]["duration"] == 3, "…its clip loaded: %r" % k)
+        self.assertGreater(a["dist"], 100 * a["ch"], "…more than a hundred screens from the bottom: %r" % k)
+        self.assertEqual(a["others"], [{"tag": "AUDIO", "inMenu": True, "controls": True, "focused": False}],
+                         '…not on the reply\'s second audio, which has controls and sits in its role="menu" element: %r' % k)
+        self.assertIsNone(k["atEnd"], "End does not reach the page: %r" % k)
+        ev = k["scrolls"]
+        self.assertTrue(ev and ev[0]["inMedia"], "the browser scrolls the transcript, focus in a media element at its first scroll event: %r" % ev)
+        self.assertFalse(k["inMediaAtRead"], "focus had left the audio when the scroll events were read: %r" % ev)
+        self.assertEqual([x for x in ev if x["inMedia"] and abs(x["st"] + x["ch"] - x["sh"]) <= 1], [],
+                         "no scroll event at the transcript's end comes while focus is on the audio: %r" % ev)
+
 
 if __name__ == "__main__":
     unittest.main()
