@@ -168,8 +168,9 @@ test("upsert computes wasSkeleton beside awaitingFull.delete and routes a just-l
 
 test("the idle prefetch: runPrebuild asks nextPrefetch (hidden = document.hidden || the pane display:none) for exactly one, and viewState is null for a skeleton", () => {
   const run = fn("runPrebuild");
-  assert.match(run, /if \(pendingBuildRaf != null\) \{ schedulePrebuild\(\); return; \}[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*const next = nextPrefetch\(skeletonTabs, activeId, awaitingFull, document\.hidden \|\| paneHidden\(\), stripShowsTab\);\s*\n\s*if \(next\) requestFullSession\(next, "prefetch"\);/,
-    "…for exactly one tab the strip SHOWS (tabInView and the #only= filter, the user 2026-09-14: hidden tabs are not built until shown)");
+  assert.match(run, /if \(pendingBuildRaf != null\) \{ schedulePrebuild\(\); return; \}[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*const next = nextPrefetch\(skeletonTabs, activeId, awaitingFull, document\.hidden \|\| paneHidden\(\), stripShowsTab, \(id\) => !hostSocketDown\(id\)\);\s*\n\s*if \(next\) requestFullSession\(next, "prefetch"\);/,
+    "…for exactly one tab the strip SHOWS (tabInView and the #only= filter, the user 2026-09-14: hidden tabs are not built until shown), "
+    + "whose socket can answer (a linked machine's relay open, 2026-10-11)");
   assert.match(run, /const viewState = \(id: string\): ViewState \| null => \{\s*\n\s*if \(skeletonTabs\.ids\.has\(id\)\) return null;/,
     "the pure planner never builds DOM for a stale session");
   assert.match(RENDER, /function paneHidden\(\): boolean \{\s*\n\s*try \{ return \(window\.parent !== window && \(window\.innerWidth === 0 \|\| window\.innerHeight === 0\)\) \|\| \(window as PaneHiddenHost\)\.__rompPaneHidden === true; \}/,
@@ -425,6 +426,22 @@ test("run: a column's own session, listed by the strip but not among its skeleto
   // …the neighbouring skeleton still asks on its pick: the gate is the set, not the missing session
   w.api.set({ activeId: "B" }); w.api.showActive();
   assert.deepEqual(w.HOOKS.fulls, ["skeleton-click:B"]);
+});
+
+test("a relay's close releases that host's asks and re-arms the prefetch for the others; its reopen re-arms it for its own (2026-10-11)", () => {
+  // a linked machine that drops mid-prefetch: its in-flight ask has no socket to answer it, and the one-at-a-time rule held every
+  // other machine's tabs behind it until the relay reopened. The close is the event: release that host's asks, re-arm the chain
+  // (which skips the closed relay's tabs: runPrebuild's reachable test, pinned above), and the reopen re-arms it for that host
+  const listeners = [...RENDER.matchAll(/window\.addEventListener\("romp:hostRelayDown", \(e: Event\) => \{([\s\S]*?)\n\}\);/g)].map((m) => m[1]);
+  const release = listeners.find((b) => b.includes("clearAsksForHost"));
+  assert.ok(release, "a relay-down listener releases the asks");
+  assert.match(release!, /if \(!h\) return;\s*\n\s*clearAsksForHost\(h\);\s*\n\s*schedulePrebuild\(\);/, "that host's asks, then the chain re-armed");
+  const i = RENDER.indexOf('window.addEventListener("romp:hostRelayUp", (e) => {');
+  const up = RENDER.slice(i, RENDER.indexOf("\n});", i));
+  assert.match(up, /\n  if \(h\) schedulePrebuild\(\);/, "the reopen re-arms the chain for that host's tabs");
+  assert.ok(up.indexOf("clearAsksForHost(h);") < up.indexOf("if (h) schedulePrebuild();"), "after its asks are cleared");
+  assert.match(fn("hostSocketDown"), /return !!fed && typeof fed\.open === "function" && !fed\.open\(h\);/,
+    "reachability is the relay socket's own open state, published by federation (a local id is always reachable)");
 });
 
 test("the relay's reopen forgets that host's loaded record (2026-09-23): a restarted remote kernel's skeleton list is adopted", () => {

@@ -132,13 +132,19 @@ export function onHostSocketUp(st: SkeletonState, admits: (id: string) => boolea
  *  nobody sees — the very regime this exists to spare), while ANY skeleton id is already in flight (one at a
  *  time: a 1 MB full ahead of the active tab's 2 KB tail on a slow link delays that tail; one bounds it), and
  *  when nothing is left. Otherwise the first id of the kernel's order still held, not the active tab (its own
- *  click path asks), and in the current view (a view-hidden tab loads on click instead). */
+ *  click path asks), and in the current view (a view-hidden tab loads on click instead).
+ *
+ *  `reachable` (2026-10-11): whether the socket that would answer an ask for this id is open (a linked machine's relay;
+ *  this page's own kernel always is). An unreachable id is neither fetched nor counted as in flight: before, a relay that
+ *  dropped mid-prefetch left its ask in flight with no answer coming until the relay reopened, and the one-at-a-time rule
+ *  then stopped the prefetch for every other machine's tabs too. Its tabs resume when the relay reopens. */
 export function nextPrefetch(st: SkeletonState, activeId: string | null, inFlight: ReadonlySet<string>,
-                             hidden: boolean, inView: (id: string) => boolean): string | null {
+                             hidden: boolean, inView: (id: string) => boolean,
+                             reachable: (id: string) => boolean = () => true): string | null {
   if (hidden) return null;
-  for (const id of st.ids) if (inFlight.has(id)) return null;
+  for (const id of st.ids) if (inFlight.has(id) && reachable(id)) return null;
   for (const id of st.order) {
-    if (!st.ids.has(id) || id === activeId) continue;
+    if (!st.ids.has(id) || id === activeId || !reachable(id)) continue;
     if (inView(id)) return id;
   }
   return null;

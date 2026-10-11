@@ -201,6 +201,49 @@ class CreateIsIdempotent(unittest.TestCase):
         self.assertTrue(acks and acks[-1]["tid"] == rows[0]["tid"], acks)
         self.assertEqual(self._warns(), [])
 
+    def _write_unrelated(self, n, parent):
+        """`n` records that are not the anchor, appended to the parent's transcript, each followed by two retry passes (the second
+        sees no new write); returns the last record's uuid, the chain's new leaf."""
+        p = Path(km._sessions(0)[0]["path"])
+        for i in range(n):
+            u = "w%02d" % i
+            with p.open("a") as fh:
+                fh.write(json.dumps(aline(self.now - 400 + i, "the notes-api step %d" % i, u, parent=parent)) + "\n")
+            parent = u
+            km._retry_parked_creates()
+            km._retry_parked_creates()
+        return parent
+
+    def test_a_parked_creates_budget_counts_its_transcripts_writes_not_the_retries(self):
+        # (2026-10-11) the budget counted retries, sized for pusher cycles, and every needFull's repair ran the retry too, so a
+        # page's idle prefetch (37 repairs on the measured board) dropped a parked create in seconds, before its anchor landed:
+        # a silent loss. A try is spent now only when the transcript was written since the last one, the event the park waits on
+        km._parked_creates.clear()
+        self._create(uuid="a9")
+        self.assertEqual(len(km._parked_creates), 1, "premise: the anchor is not on disk yet, so the create parked")
+        for _ in range(km._PARK_MAX_TRIES + 10):         # more passes than the budget, the transcript quiet
+            km._retry_parked_creates()
+        self.assertEqual([pk["tries"] for pk in km._parked_creates], [0], "a quiet transcript spends nothing: the park stands")
+        leaf = self._write_unrelated(km._PARK_MAX_TRIES - 1, "a1")
+        self.assertEqual([pk["tries"] for pk in km._parked_creates], [km._PARK_MAX_TRIES - 1],
+                         "one try per write that still lacks the record, however many passes ran")
+        p = Path(km._sessions(0)[0]["path"])
+        with p.open("a") as fh:                            # the record lands at last
+            fh.write(json.dumps(aline(self.now - 100, "Add a jitter to the backoff.", "a9", parent=leaf)) + "\n")
+        km._retry_parked_creates()
+        self.assertEqual(km._parked_creates, [], "created once it landed")
+        self.assertEqual(len(self._rows()), 1)
+
+    def test_a_parked_create_leaves_the_park_after_the_budgets_writes_without_its_record(self):
+        km._parked_creates.clear()
+        self._create(uuid="a9")
+        self.assertEqual(len(km._parked_creates), 1)
+        self._write_unrelated(km._PARK_MAX_TRIES - 1, "a1")
+        self.assertEqual(len(km._parked_creates), 1, "one write short of the budget: still parked")
+        self._write_unrelated(1, "w%02d" % (km._PARK_MAX_TRIES - 2))
+        self.assertEqual(km._parked_creates, [], "the budget's last write without the record: the record isn't coming")
+        self.assertEqual(self._rows(), [])
+
     def test_a_repost_arriving_while_the_pushers_retry_creates_is_not_a_second_thread(self):
         # THE RACE (review, 2026-09-09): the pusher sends the chat frame before it retries parked creates,
         # the client re-posts the create on that frame, and the re-post lands on a WS thread while the

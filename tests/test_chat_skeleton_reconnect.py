@@ -3115,10 +3115,10 @@ class RestartDiet(unittest.TestCase):
     """The user's ruling (2026-09-14): after a reload the selected tab builds first, the strip's other tabs spread over later refreshes,
     hidden tabs not until shown. The client half: the main chat pane's FIRST dial of every page load is a skeleton dial (the later
     column's shape; any load since 2026-10-10, where it was the loads the reload core fired), so the kernel's existing handshake serves
-    the strip with the skeleton set, one full for the active tab and a status per other tab; a redial carries the diet through
-    reconnect=1 as before. Pinned in the served shim's source: the reload core keeps the reason and the document's path in a durable
-    record (announce() removes the announce record before a pane dials, and a pane inside the shell never announces); the chat shim alone
-    consumes it, and dials skeleton=1 on its first socket; a column and a skeleton view leave the record alone; every other pane's shim
+    the strip with the skeleton set, one full for the active tab and a status per other tab; its redials carry the term too (2026-10-11),
+    beside reconnect=1 once the kernel answered the page's ready. Pinned in the served shim's source: the reload core keeps the reason
+    and the document's path in a durable record (announce() removes the announce record before a pane dials, and a pane inside the shell
+    never announces); the chat shim alone consumes it, and dials skeleton=1 on every socket; a column and a skeleton view leave the record alone; every other pane's shim
     carries the false alone; the kernel arms the term for a chat socket only."""
 
     def test_the_first_dial_of_every_page_load_is_a_skeleton_dial(self):
@@ -3135,8 +3135,8 @@ class RestartDiet(unittest.TestCase):
         for other in ("fleet", "files", "timeline", "settings"):
             self.assertNotIn(read, km._shim(other), other)
         self.assertIn('skeleton = (q.get("skeleton") or [""])[0] == "1" and app == "chat"', src, "the kernel arms the skeleton diet for a chat socket alone (round two, medium 2)")
-        self.assertIn("""((SKEL||(RESTART_DIET&&!everConnected))?"&skeleton=1":"")""", src,
-                      "the dial carries skeleton=1 for a column, or for the main pane's FIRST socket of the load (a redial dials as before)")
+        self.assertIn("""((SKEL||RESTART_DIET)?"&skeleton=1":"")""", src,
+                      "the dial carries skeleton=1 for a column, or for the main pane on every socket of the load, its redials too (2026-10-11)")
         # the kernel side the dial lands on is unchanged and already pinned above: skeleton=1 without reconnect arms skeletonOnReady at the
         # handshake, and the ready arm serves the strip with the skeleton set, one full for the active tab, a status per other tab
         self.assertIn('client["skeletonOnReady"] = True', src)

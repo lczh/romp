@@ -14666,7 +14666,9 @@ function runPrebuild(deadline: IdleDeadline): void {
   // …and never a tab the strip does not SHOW (the user 2026-09-14: hidden tabs are not built until shown): stripShowsTab is the strip's own
   // visibility (tabInView for the views and another column's holds, the #only= filter, and a collapsed section's fold); a tab the filter
   // reveals later is prefetched when the reveal re-arms this chain (onOnlyHashChange), or loads on the switch that shows it
-  const next = nextPrefetch(skeletonTabs, activeId, awaitingFull, document.hidden || paneHidden(), stripShowsTab);
+  // …and never a tab whose linked machine's relay is closed (2026-10-11): its ask has no socket to answer it, so the chain skips
+  // that machine's tabs and keeps filling the others'; the relay's reopen (romp:hostRelayUp) re-arms it for them
+  const next = nextPrefetch(skeletonTabs, activeId, awaitingFull, document.hidden || paneHidden(), stripShowsTab, (id) => !hostSocketDown(id));
   if (next) requestFullSession(next, "prefetch");
   const viewState = (id: string): ViewState | null => {
     if (skeletonTabs.ids.has(id)) return null;   // a skeleton's stale session must never get its DOM pre-built
@@ -19208,6 +19210,7 @@ window.addEventListener("romp:hostRelayUp", (e) => {
   // !tabOrderSeen), so the one-shot fallback was blocked; the relay reopening is a show-tab event, re-run the strip
   // render, which re-fires staleActiveFallback → silentActivate for a shown column that still has no active.
   if (!activeId && !provisionalId) renderTabs();
+  if (h) schedulePrebuild();   // …and the idle prefetch for that host's skeleton tabs (2026-10-11): the chain skipped them while its relay was closed (runPrebuild)
 });
 
 // Sids whose SEND is HELD until every pending ship acks (the user 2026-08-16: sending mid-upload
@@ -20933,6 +20936,16 @@ window.addEventListener("romp:wsup", () => pendingFullWhy.clear());   // …and 
 let skeletonDiagArmed = true;
 // (the skeleton state's socket flip rides the shim's {type:"wsup"} FRAME, dispatched above in frame order — not this
 // event, which fires at onopen while the dead socket's last frames may still be draining from the FIFO)
+// A relay's CLOSE releases that host's asks too (2026-10-11): an ask sent on the socket that died is never answered, and latched it
+// held the idle prefetch's one-at-a-time slot, so every other machine's skeleton tabs stopped filling until this relay reopened. The
+// chain skips the closed relay's tabs (runPrebuild's reachable test) and is re-armed here for everyone else's; the reopen clears again
+// (above) and re-arms it for this host's.
+window.addEventListener("romp:hostRelayDown", (e: Event) => {
+  const h = String(((e as CustomEvent).detail || {}).host || "");
+  if (!h) return;
+  clearAsksForHost(h);
+  schedulePrebuild();
+});
 // A send still unconfirmed at the socket's down edge may never have reached the kernel: say so on its bubble
 window.addEventListener("romp:wsdown", () => markPendingLost("connection"));
 window.addEventListener("romp:wsdown", () => onWireDown());

@@ -7040,7 +7040,10 @@ and for every linked machine's: the tab you were reading arrives whole and the o
 arrive as skeletons, so the first paint costs one transcript however many sessions are
 running. Each skeleton tab that loads, by a click or while the page is idle, costs the
 kernel that one tab. A page with no tab to show yet (a new browser profile) is sent
-every tab whole.
+every tab whole. A page whose connection drops before its first load finishes keeps
+the skeleton tabs on the next try too. If a linked machine's connection drops while
+its tabs are filling in, the other machines' tabs keep filling in, and its own resume
+when it reconnects.
 
 ![After a reconnect, the tab you were reading is back in full while the other tabs wait as skeletons](assets/guide/reconnect-skeleton-tabs.png){ width="32%" }
 ![Clicking a skeleton tab puts up the loader until its transcript arrives](assets/guide/reconnect-skeleton-click.png){ width="32%" }

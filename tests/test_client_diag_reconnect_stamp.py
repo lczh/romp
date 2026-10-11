@@ -195,7 +195,8 @@ class TheHandlerStampsTheCarryingSocket(_State):
 class TheShimRowCarriesItsReadyState(unittest.TestCase):
     def test_declared_the_bundle_had_said_ready_and_the_kernel_had_answered(self):
         q, kinds, closes = _shim_close(DECLARED)
-        self.assertTrue(q.endswith("&reconnect=1&proto=1"), q)   # the redial names the acked ready's wire protocol too
+        self.assertTrue(q.endswith("&reconnect=1&proto=1&skeleton=1"), q)   # the redial names the acked ready's wire protocol too, and the
+        #                                                                      chat pane's diet rides every dial (2026-10-11)
         self.assertEqual(len(closes), 1)
         self.assertEqual(sorted(closes[0]["data"]), ROW_KEYS)
         self.assertEqual(_bits(closes[0]["data"]), (True, True, False))

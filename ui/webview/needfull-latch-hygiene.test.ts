@@ -113,5 +113,9 @@ test("the romp:hostRelayUp listener is where the per-host clear runs, inside the
   const m = RENDER.match(/window\.addEventListener\("romp:hostRelayUp", \(e\) => \{([\s\S]*?)\n\}\);/);
   assert.ok(m, "the romp:hostRelayUp listener exists");
   assert.match(m![1], /\n\s*clearAsksForHost\(h\);/, "the relay's open clears that host's parked asks (2026-09-19)");
-  assert.equal((RENDER.match(/clearAsksForHost\(/g) || []).length, 2, "the definition and the one call: no other event clears by host");
+  // …and the relay's CLOSE (2026-10-11): an ask sent on the socket that died is never answered, and latched it held the idle prefetch
+  // for every other machine's tabs (skeleton-tabs-wiring.test.ts pins that listener)
+  assert.equal((RENDER.match(/clearAsksForHost\(/g) || []).length, 3, "the definition and the two calls, the relay's open and its close: no other event clears by host");
+  assert.match(RENDER, /window\.addEventListener\("romp:hostRelayDown", \(e: Event\) => \{\s*\n\s*const h = [^\n]*\n\s*if \(!h\) return;\s*\n\s*clearAsksForHost\(h\);/,
+    "the close's call is in its own relay-down listener");
 });
