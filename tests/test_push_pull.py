@@ -37,6 +37,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+from urllib.parse import quote
 
 from romp_load import load_source
 
@@ -143,6 +144,7 @@ class _Base(unittest.TestCase):
         km._PUSH_GAPS.clear()
         km._PUSH_PULL_ANSWERED.clear()
         km._PUSH_PULL_LAST_OK.clear()
+        km._PUSH_GAP_TOLD.clear()
         with km._remotes_lock:
             km._remotes.clear()
         with km._known_lock:
@@ -372,6 +374,12 @@ class ServeEvents(_Base):
         km._set_notify_session(API, False)                   # a mute since: dropped at v2 too
         self.assertEqual(km._push_events_serve(self.cursor(n - 1), 0, 2)["events"], [])
         self.assertIs(km._push_events_serve("", 0, 2)["bellsOn"], False, "a reset answer says it too (the mute is no on)")
+        # whether this kernel detects card events at all: the Task tracking switch, on every protocol-2 answer
+        self.assertIs(km._push_events_serve("", 0, 2)["cardsOn"], True, "tracking on, the default")
+        with mock.patch.object(km, "_task_tracking_on", return_value=False):
+            self.assertIs(km._push_events_serve("", 0, 2)["cardsOn"], False)
+            self.assertIs(km._push_events_serve(self.cursor(n), 0, 2)["cardsOn"], False)
+        self.assertNotIn("cardsOn", km._push_events_serve(self.cursor(n), 0), "a v1 puller is served as before")
         st, raw = _serve("GET", "/push/events?wait=0&v=2&after=" + self.cursor(n))
         self.assertEqual((st, json.loads(raw)["caughtUp"]), (200, True))
         self.assertEqual(_serve("GET", "/push/events?wait=0&v=two")[0], 400)
@@ -444,7 +452,7 @@ class HubGate(_Base):
         self.assertEqual(len(calls), km.PUSH_PULL_BATCH_CAP + 1, "the cap, then one notification for the rest")
         (args, kw) = calls[-1]
         self.assertEqual(args, ("Romp: more notifications", "TESTHOST · 7 more: 3 sessions finished turns, 4 need you", ""))
-        self.assertEqual(kw, {"kind": "missed", "host": ROW})
+        self.assertEqual(kw, {"kind": "more", "host": ROW})
         self.assertIn("7 event(s) pulled from 'TESTHOST' in one answer were past the cap of 16 notifications; collapsed "
                       "into one", err)
 
@@ -575,7 +583,8 @@ class GapPolicy(_Base):
              mock.patch.object(km, "_self_host", return_value="boxa"), contextlib.redirect_stderr(self.err):
             return km._push_pull_once(ROW, dict(km._remotes[ROW]))
 
-    def fail(self):
+    def drop(self):
+        """The link drops: a call that gets no answer (named so as not to shadow unittest's fail)."""
         return self.once((0, {"error": "connection refused"}))
 
     SEQ = [10]
@@ -596,9 +605,14 @@ class GapPolicy(_Base):
 
     def answer(self, events=(), caught=False, boot="77.1", **kw):
         d = {"boot": boot, "next": max([e["seq"] for e in events] + [self.SEQ[0]]), "events": list(events),
-             "caughtUp": caught, "bellsOn": False}
+             "caughtUp": caught, "bellsOn": False, "cardsOn": False}
         d.update(kw)
         return (200, d)
+
+    def restarted(self, boot, bells=False, cards=False):
+        """The row's kernel restarted: its answer to the old cursor resets, and the events of its old life are gone."""
+        return (200, {"boot": boot, "next": 1, "events": [], "reset": "restarted", "skipped": 1, "bellsOn": bells,
+                      "cardsOn": cards})
 
     def summaries(self):
         return [(a, k) for a, k in self.pushed if k.get("kind") == "missed"]
@@ -618,27 +632,26 @@ class GapPolicy(_Base):
 
     def test_a_link_outage_is_one_summary_and_nothing_late(self):
         self.steady()
-        t0 = km._PUSH_PULL_LAST_OK[ROW]
-        self.fail()
+        km._PUSH_PULL_LAST_OK[ROW] = time.time() - 38 * 60  # its last answer, 38 minutes before it is back
+        self.drop()
         c = "efefefef-7171-4c4c-8e8e-0000000000c1"
         self.once(self.answer([self.turn(API), self.turn(WEB), self.turn(API), self.turn(c, current=False),
                                self.card(needs_you=True)]))
         self.assertEqual(self.pushed, [], "the backlog it missed is not delivered late")
-        back = km._PUSH_GAPS[ROW]["back"]
         self.once(self.answer(caught=True))
         ((args, kw),) = self.pushed
-        self.assertEqual(args, ("Romp: missed notifications", "TESTHOST was unreachable %s–%s · 3 sessions finished turns, "
-                                "1 needs you" % (km._hhmm(t0), km._hhmm(back)), ""))
-        self.assertEqual(kw, {"kind": "missed", "host": ROW}, "sid-less: a tap opens the dashboard")
+        self.assertEqual(args, ("Romp: missed notifications", "TESTHOST was unreachable for 38 min · 3 sessions finished "
+                                "turns, 1 needs you", ""), "a duration, never a clock time in the kernel's zone")
+        self.assertEqual(kw, {"kind": "missed", "host": ROW, "quiet": False}, "sid-less: a tap opens the dashboard; it sounds")
         self.once(self.answer([self.turn(API)], caught=True))
         self.assertEqual([k["kind"] for _, k in self.pushed], ["missed", "turn"], "then each event as it arrives again")
 
     def test_a_flapping_link_is_one_summary(self):
         self.steady()
         for _ in range(3):
-            self.fail()
+            self.drop()
             self.once(self.answer([self.turn(API), self.card(needs_you=False)]))
-        self.fail()
+        self.drop()
         self.once(self.answer(caught=True))
         self.assertEqual(len(self.summaries()), 1)
         self.assertEqual(self.singles(), [])
@@ -648,23 +661,24 @@ class GapPolicy(_Base):
         km._set_notify_all(False)
         km._set_notify_turns(False)
         self.steady()
-        self.fail()
+        self.drop()
         self.once(self.answer([self.turn(API), self.card()]))
         self.once(self.answer(caught=True))
         self.assertEqual(self.pushed, [])
         self.assertIn("nothing it may have missed would have reached the devices here, so no notification", self.err.getvalue())
-        self.fail()                                          # an armed session's turn end would have passed: said
+        self.drop()                                          # an armed session's turn end would have passed: said
         self.once(self.answer([self.turn(API, bell="on")]))
         self.once(self.answer(caught=True))
         self.assertTrue(self.summaries()[0][0][1].endswith("· 1 session finished a turn"))
 
     def test_the_rows_restart_says_notifications_may_have_been_missed_without_a_number(self):
         self.steady()
-        self.fail()
+        self.drop()
         self.once((200, {"boot": "78.2", "next": 3, "events": [], "reset": "restarted", "skipped": 3, "bellsOn": False}))
         self.once(self.answer(caught=True, boot="78.2"))
         self.assertEqual([a[1] for a, _ in self.summaries()], ["TESTHOST restarted · notifications may have been missed"])
         # nothing could have passed (this master off, no explicit on over there): no buzz
+        km._push_gap_seen()
         km._set_notify_all(False)
         self.pushed.clear()
         self.once((200, {"boot": "79.3", "next": 1, "events": [], "reset": "restarted", "skipped": 1, "bellsOn": False}))
@@ -676,13 +690,83 @@ class GapPolicy(_Base):
 
     def test_an_overflow_during_an_outage_has_no_number(self):
         self.steady()
-        t0 = km._PUSH_PULL_LAST_OK[ROW]
-        self.fail()
+        km._PUSH_PULL_LAST_OK[ROW] = time.time() - (2 * 3600 + 5 * 60)
+        self.drop()
         self.once((200, {"boot": "77.1", "next": 400, "events": [], "reset": "overflow", "skipped": 300, "bellsOn": False}))
-        back = km._PUSH_GAPS[ROW]["back"]
         self.once(self.answer(caught=True))
         self.assertEqual([a[1] for a, _ in self.summaries()],
-                         ["TESTHOST was unreachable %s–%s · notifications may have been missed" % (km._hhmm(t0), km._hhmm(back))])
+                         ["TESTHOST was unreachable for 2 h 5 min · notifications may have been missed"])
+
+    def test_an_unknown_count_is_said_only_when_something_could_have_passed(self):
+        # the review's reproduction: this master on, the turn switch off, no bell set anywhere, and card detection off
+        # over there (Task tracking off). Nothing the user's switches and bells allow could have been among the lost
+        # events, so a restart of that kernel (every deploy) must not buzz
+        km._set_notify_turns(False)
+        self.steady()
+        self.once(self.restarted("78.2"))
+        self.once(self.answer(caught=True, boot="78.2"))
+        self.assertEqual(self.pushed, [])
+        self.assertIn("nothing it may have missed would have reached the devices here", self.err.getvalue())
+        for why, kw, switches in (("card detection on over there, this master on", {"cards": True}, (True, False)),
+                                  ("an explicit on over there", {"bells": True}, (False, False)),
+                                  ("turn ends by default: this master and turn switch on", {}, (True, True))):
+            with self.subTest(why):
+                km._push_gap_seen()
+                km._set_notify_all(switches[0])
+                km._set_notify_turns(switches[1])
+                self.pushed.clear()
+                self.SEQ[0] += 1
+                boot = "9%d.1" % self.SEQ[0]
+                self.once(self.restarted(boot, **kw))
+                self.once(self.answer(caught=True, boot=boot))
+                self.assertEqual([a[1] for a, _ in self.summaries()], ["TESTHOST restarted · notifications may have been missed"])
+        km._push_gap_seen()
+        km._set_notify_all(False)
+        km._set_notify_turns(True)                           # the turn switch alone passes nothing: turn ends need the master
+        self.pushed.clear()
+        self.once(self.restarted("99.9", cards=True))
+        self.once(self.answer(caught=True, boot="99.9"))
+        self.assertEqual(self.pushed, [])
+
+    def test_a_crash_looping_kernel_buzzes_once_and_updates_the_summary_quietly_until_it_is_seen(self):
+        self.steady()
+        for i in range(3):                                   # three restarts, each surviving one long-poll
+            self.once(self.restarted("8%d.1" % i))
+            self.once(self.answer(caught=True, boot="8%d.1" % i))
+        self.assertEqual([(a[1], k.get("quiet", False)) for a, k in self.summaries()],
+                         [("TESTHOST restarted · notifications may have been missed", False),
+                          ("TESTHOST restarted 2 times · notifications may have been missed", True),
+                          ("TESTHOST restarted 3 times · notifications may have been missed", True)],
+                         "one sound; the same notification (its tag) updated without one after")
+        self.assertIn("folded into the summary not yet seen, updated without a sound", self.err.getvalue())
+        # the user brings a subscribed page forward (its GET /push/pending): seen, so the next restart is news
+        _serve("GET", "/push/pending?endpoint=" + quote("https://push.example/abc", safe=""))
+        self.pushed.clear()
+        self.once(self.restarted("84.1"))
+        self.once(self.answer(caught=True, boot="84.1"))
+        self.assertEqual([(a[1], k.get("quiet", False)) for a, k in self.summaries()],
+                         [("TESTHOST restarted · notifications may have been missed", False)])
+        # a notification delivered normally, outside any gap, is a steady row again: the next gap sounds too
+        self.once(self.answer([self.turn(API)], caught=True, boot="84.1"))
+        self.pushed.clear()
+        self.once(self.restarted("85.1"))
+        self.once(self.answer(caught=True, boot="85.1"))
+        self.assertEqual([k.get("quiet", False) for _, k in self.summaries()], [False])
+
+    def test_the_cap_note_and_the_summary_wear_different_tags(self):
+        cap = km._push_payload("Romp: more notifications", "b", "", kind="more", host=ROW)
+        gap = km._push_payload("Romp: missed notifications", "b", "", kind="missed", host=ROW)
+        self.assertNotEqual(cap["tag"], gap["tag"], "the cap's note never replaces a summary on the lock screen")
+        evs = [dict(HubGate.CARD, seq=i, bell="on", cardId="%s:g%d" % (WEB, i)) for i in range(1, 19)]
+        with mock.patch.object(km, "_push_notify", side_effect=lambda *a, **k: self.pushed.append((a, k))), \
+             contextlib.redirect_stderr(io.StringIO()):
+            km._push_pull_gate(ROW, evs)
+        self.assertEqual(self.pushed[-1][1], {"kind": "more", "host": ROW})
+
+    def test_durations_in_the_users_terms(self):
+        for secs, words in ((20, "under a minute"), (38 * 60 + 10, "38 min"), (3600, "1 h"), (2 * 3600 + 5 * 60, "2 h 5 min"),
+                            (86400 + 7200, "1 day"), (3 * 86400, "3 days")):
+            self.assertEqual(km._span_words(secs), words, secs)
 
     def test_this_kernels_restart_with_its_record_summarizes_what_fired_meanwhile(self):
         km._push_pull_cursor_set(ROW, "77.1:10")             # where the previous life had got to
@@ -708,7 +792,7 @@ class GapPolicy(_Base):
 
     def test_the_answer_that_closes_a_gap_delivers_its_own_events_after_the_summary(self):
         self.steady()
-        self.fail()
+        self.drop()
         self.once(self.answer([self.turn(API)]))
         self.once(self.answer([self.turn(WEB)], caught=True))   # fired while it listened: live
         self.assertEqual([k["kind"] for _, k in self.pushed], ["missed", "turn"])
@@ -716,7 +800,7 @@ class GapPolicy(_Base):
 
     def test_an_older_row_closes_a_gap_on_an_empty_handed_answer(self):
         self.steady()
-        self.fail()
+        self.drop()
         self.once((200, {"boot": "77.1", "next": 12, "events": [self.turn(API)]}))   # protocol 1: no caughtUp
         self.assertEqual(self.pushed, [])
         self.once((200, {"boot": "77.1", "next": 12, "events": []}))

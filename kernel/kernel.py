@@ -69635,8 +69635,8 @@ def _push_event_current(ev):
 
 def _push_bells_on():
     """Does any explicit "on" bell exist on this machine (a card's or a session's)? A puller that cannot count what it
-    missed (this kernel restarted, or its backlog overflowed) summarizes a gap only when something could have buzzed: its
-    own master, or an explicit "on" here (the gap policy)."""
+    missed (this kernel restarted, or its backlog overflowed) summarizes a gap only when something could have buzzed
+    (_push_gap_could_pass): an explicit "on" here is one way."""
     if any(v is True for k, v in _notify_cards().items() if k not in _NOTIFY_RESERVED):
         return True
     return any(isinstance(f, dict) and f.get("notify") is True for f in _session_flags().values())
@@ -69674,7 +69674,7 @@ def _push_events_serve(after, wait, proto=1):
             out = {"boot": _BOOT_ID, "next": newest, "events": [], "reset": reset,
                    "skipped": newest - cur[1] if reset == "overflow" else newest}
             if v2:
-                out["bellsOn"] = _push_bells_on()
+                out.update(_push_v2_facts())
             return out
         batch = [dict(e) for e in _PUSH_RING if e["seq"] > cur[1]]
     served = []
@@ -69691,8 +69691,15 @@ def _push_events_serve(after, wait, proto=1):
         out["stale"] = stale
     if v2:
         out["caughtUp"] = caught
-        out["bellsOn"] = _push_bells_on()
+        out.update(_push_v2_facts())
     return out
+
+
+def _push_v2_facts():
+    """What a protocol-2 puller needs to judge a gap it cannot count (_push_gap_could_pass): `bellsOn`, whether any explicit
+    "on" bell exists here; `cardsOn`, whether this kernel detects card events at all (the Task tracking switch: off, the
+    feed is not built and no card enters a notified column, so its default card bells can miss nothing)."""
+    return {"bellsOn": _push_bells_on(), "cardsOn": bool(_task_tracking_on())}
 
 
 # THE PULLER'S HALF (the hub, the kernel a phone subscribed at). One thread per TRUSTED row that has a port and a token
@@ -69723,10 +69730,15 @@ _PUSH_RELAY_IGNORED_SAID = set()     # origins whose relays this kernel ignored 
 # every pulled event is delivered as it arrives. Whenever this kernel knows it may have missed some (it restarted, with or
 # without its record of where it had got to; the row's kernel restarted; the link dropped; the row's backlog overflowed) it
 # delivers NONE of the missed events one by one, late: it counts those that would have passed its gate and says them in
-# ONE summary notification per gap per row ("TESTHOST was unreachable 14:02–14:40 · 3 sessions finished turns"), and none at
+# ONE summary notification per gap per row ("TESTHOST was unreachable for 38 min · 3 sessions finished turns"), and none at
 # all when nothing would have passed. When the count cannot be known (a restart or an overflow lost the events) the
-# summary says notifications may have been missed, without a number, and only if anything could have buzzed (this
-# kernel's master, or an explicit "on" bell on the row's kernel). A gap opens on the event that proves it (a failed call,
+# summary says notifications may have been missed, without a number, and only if anything could have passed
+# (_push_gap_could_pass: an explicit "on" bell on the row's kernel, this kernel's master and turn switch both on, or this
+# master on while the row's kernel detects card events at all). A summary already said for a row and not yet seen by the
+# user takes in the next gaps quietly (the same notification, updated without a sound) until the user brings a
+# subscribed page forward (/push/pending) or the row delivers a notification normally again (_PUSH_GAP_TOLD), so a
+# crash-looping kernel buzzes once, not at every restart. Times are said as durations, never clock times: the kernel's
+# clock zone is not the user's. A gap opens on the event that proves it (a failed call,
 # a reset answer, this life's first answer while holding a cursor), stays open across further failures (a flapping link
 # makes one summary, not one per flap), and closes on the first answer that found the puller caught up (protocol 2's
 # `caughtUp`: the request found its cursor at the row's newest, so the link held for a whole long-poll); that answer's
@@ -69736,6 +69748,7 @@ MISSED_TITLE_NAME = "missed notifications"   # the summary's title: _notify_titl
 _PUSH_GAPS = {}                      # row name -> its open gap (_push_gap_open); only that row's puller thread touches it
 _PUSH_PULL_ANSWERED = set()          # rows that have answered this kernel life (the first answer after a restart opens a gap)
 _PUSH_PULL_LAST_OK = {}              # row name -> when it last answered, this life (an outage's window starts there)
+_PUSH_GAP_TOLD = {}                  # row name -> the summary said for it and not yet seen (_push_gap_close), under _push_pull_lock
 
 
 def _push_pull_cursors_path():
@@ -69920,6 +69933,7 @@ def _push_pull_once(name, r):
         if gap["back"] is None:
             gap["back"] = now                            # the first answer since it went quiet: the outage's end
         gap["bells"] = gap["bells"] or j.get("bellsOn") is not False   # an older row does not say: assume it could
+        gap["cards"] = gap["cards"] or j.get("cardsOn") is not False
     if gap is not None and not caught:
         for ev in fresh:
             _push_gap_count(gap, ev)                     # missed: counted for the summary, never delivered late
@@ -69927,7 +69941,11 @@ def _push_pull_once(name, r):
     else:
         if gap is not None:
             _push_gap_close(name)                        # the summary first (the past), then what fired while it listened
-        _push_pull_gate(name, fresh, boot=boot)
+        if _push_pull_gate(name, fresh, boot=boot) and gap is None:
+            # a notification delivered normally, outside any gap: the row is steady again, so the next gap's summary is
+            # news and sounds (the coalescing above)
+            with _push_pull_lock:
+                _PUSH_GAP_TOLD.pop(name, None)
     _push_pull_cursor_set(name, "%s:%d" % (boot, nxt))
     _PUSH_PULL_LAST_OK[name] = now
     return True
@@ -69974,8 +69992,10 @@ def _push_gap_open(name, why, unknown=False):
     g = _PUSH_GAPS.get(name)
     if g is None:
         g = _PUSH_GAPS[name] = {"why": set(), "since": _PUSH_PULL_LAST_OK.get(name), "back": None, "turns": set(),
-                                "needs": 0, "done": 0, "unknown": False, "bells": False}
+                                "needs": 0, "done": 0, "unknown": False, "bells": False, "cards": False, "restarts": 0}
     g["why"].add(why)
+    if why == "restarted":
+        g["restarts"] += 1
     if why == "unreachable":
         g["back"] = None                                 # quiet again: the window runs to its next answer
     if unknown:
@@ -70009,27 +70029,68 @@ def _missed_counts_text(turn_sessions, needs, done):
     return ", ".join(parts)
 
 
-def _hhmm(t):
-    return time.strftime("%H:%M", time.localtime(t))
+def _span_words(secs):
+    """A duration in the user's terms ('under a minute', '38 min', '2 h 5 min', '3 days'): the summary says how long, never
+    a clock time, which the kernel would print in its own zone, not the user's."""
+    secs = max(0, int(secs))
+    if secs < 60:
+        return "under a minute"
+    mins = int(round(secs / 60.0))
+    if mins < 60:
+        return "%d min" % mins
+    if secs < 86400:
+        h, m = divmod(mins, 60)
+        return "%d h" % h + (" %d min" % m if m else "")
+    days = secs // 86400
+    return "1 day" if days == 1 else "%d days" % days
 
 
-def _push_gap_summary(name, g, now=None):
-    """The summary's body for row `name`'s gap `g`, or None when nothing it missed could have reached the devices here."""
-    counted = len(g["turns"]) + g["needs"] + g["done"]
-    if not counted and not (g["unknown"] and (g["bells"] or _notify_all_on())):
+def _push_gap_could_pass(g):
+    """Could anything this kernel's switches and bells would have let through be among events it cannot count? Decided from
+    facts it holds, never assumed (the user 2026-10-11, after a "may have been missed" on every restart of a linked kernel
+    whose turn switch was off, with no bell set and card detection off over there): an explicit "on" bell on the row's
+    kernel (`bellsOn`), or turn ends by default (this master AND this turn switch), or cards by default (this master) while
+    the row's kernel detects card events at all (`cardsOn`, its Task tracking switch)."""
+    return bool(g.get("bells") or (_notify_all_on() and (_notify_turns_on() or g.get("cards"))))
+
+
+def _push_gap_record(g, now=None):
+    """What a closed gap says, in the shape summaries merge in (_push_gap_merge): why, how long the row was quiet (`down`,
+    None when unknown), how many times its kernel restarted, the counts, whether some count is unknown, and whether an
+    unknown count could have held anything (_push_gap_could_pass, decided now)."""
+    down = None
+    if "unreachable" in g["why"] and g.get("since"):
+        down = max(0, (g.get("back") or (now if now is not None else time.time())) - g["since"])
+    return {"why": set(g["why"]), "down": down, "restarts": int(g.get("restarts") or 0), "turns": set(g["turns"]),
+            "needs": g["needs"], "done": g["done"], "unknown": bool(g["unknown"]),
+            "could": bool(g["unknown"]) and _push_gap_could_pass(g)}
+
+
+def _push_gap_merge(a, b):
+    """Two gaps' records as one: the summary already said, taking in the next gap."""
+    down = None if a["down"] is None and b["down"] is None else (a["down"] or 0) + (b["down"] or 0)
+    return {"why": a["why"] | b["why"], "down": down, "restarts": a["restarts"] + b["restarts"],
+            "turns": a["turns"] | b["turns"], "needs": a["needs"] + b["needs"], "done": a["done"] + b["done"],
+            "unknown": a["unknown"] or b["unknown"], "could": a["could"] or b["could"]}
+
+
+def _push_gap_summary(name, rec):
+    """The summary's body for row `name`'s gap record (_push_gap_record), or None when nothing it missed could have reached
+    the devices here."""
+    counted = len(rec["turns"]) + rec["needs"] + rec["done"]
+    if not counted and not (rec["unknown"] and rec["could"]):
         return None
-    why = g["why"]
-    counts = _missed_counts_text(len(g["turns"]), g["needs"], g["done"])
-    if g["unknown"]:
+    why = rec["why"]
+    counts = _missed_counts_text(len(rec["turns"]), rec["needs"], rec["done"])
+    if rec["unknown"] and rec["could"]:
         counts = (counts + "; more may have been missed") if counts else ""
     if "restarted" in why:
-        head = "%s restarted" % name
+        head = "%s restarted" % name + (" %d times" % rec["restarts"] if rec["restarts"] > 1 else "")
     elif "hub" in why:
         head = "%s restarted" % _self_host()
         return "%s · %s" % (head, ("%s: %s" % (name, counts)) if counts else "notifications from %s may have been missed" % name)
     elif "unreachable" in why:
-        since, back = g.get("since"), g.get("back") or (now if now is not None else time.time())
-        head = "%s was unreachable %s–%s" % (name, _hhmm(since), _hhmm(back)) if since else "%s was unreachable" % name
+        head = ("%s was unreachable for %s" % (name, _span_words(rec["down"]))) if rec["down"] is not None else "%s was unreachable" % name
     else:
         head = "%s had too many to keep" % name           # an overflow with no outage or restart known beside it
     return "%s · %s" % (head, counts or "notifications may have been missed")
@@ -70037,23 +70098,40 @@ def _push_gap_summary(name, g, now=None):
 
 def _push_gap_close(name):
     """Close row `name`'s gap: one summary notification when anything it missed could have reached the devices here,
-    else only a log line. The trust is re-read now, like the gate's. The gap is forgotten only once the summary has gone
-    out: a push that raises leaves it open, and the next caught-up answer says it."""
+    else only a log line. The trust is re-read now, like the gate's. A summary already said for this row and not yet seen
+    takes this gap in: the same notification (its tag) is replaced, quietly, never a second sound (_PUSH_GAP_TOLD). The
+    gap is forgotten only once the summary has gone out: a push that raises leaves it open, and the next caught-up answer
+    says it."""
     g = _PUSH_GAPS.get(name)
     if g is None:
         return False
     tier = _host_trust(name)
-    body = _push_gap_summary(name, g) if tier == "trusted" else None
-    if body is None:
+    rec = _push_gap_record(g)
+    if tier != "trusted" or _push_gap_summary(name, rec) is None:
         _PUSH_GAPS.pop(name, None)
         sys.stderr.write("romp: web push: '%s' is back after a gap (%s); nothing it may have missed would have reached the "
                          "devices here, so no notification\n" % (name, ", ".join(sorted(g["why"]))))
         return False
-    _push_notify(_notify_title(MISSED_TITLE_NAME), body, "", kind="missed", host=name)
+    with _push_pull_lock:
+        prev = _PUSH_GAP_TOLD.get(name)
+    told = _push_gap_merge(prev, rec) if prev is not None else rec
+    body = _push_gap_summary(name, told)
+    _push_notify(_notify_title(MISSED_TITLE_NAME), body, "", kind="missed", host=name, quiet=prev is not None)
+    with _push_pull_lock:
+        _PUSH_GAP_TOLD[name] = told
     _PUSH_GAPS.pop(name, None)
-    sys.stderr.write("romp: web push: '%s' is back after a gap (%s); said in one notification, none of the missed events "
-                     "delivered one by one: %s\n" % (name, ", ".join(sorted(g["why"])), body))
+    sys.stderr.write("romp: web push: '%s' is back after a gap (%s); %s, none of the missed events delivered one by one: "
+                     "%s\n" % (name, ", ".join(sorted(g["why"])),
+                               "folded into the summary not yet seen, updated without a sound" if prev is not None
+                               else "said in one notification", body))
     return True
+
+
+def _push_gap_seen():
+    """A page holding a device subscription came forward (its GET /push/pending, asked on every load, show and focus): the
+    user has the dashboard in front of them, so every summary said so far has been seen, and the next gap's sounds."""
+    with _push_pull_lock:
+        _PUSH_GAP_TOLD.clear()
 
 
 def _push_pull_gate(name, events, boot=None):
@@ -70118,7 +70196,7 @@ def _push_pull_gate(name, events, boot=None):
         body = "%s · %d more: %s" % (name, over["n"], _missed_counts_text(len(over["turns"]), over["needs"], over["done"]))
         sys.stderr.write("romp: web push: %d event(s) pulled from '%s' in one answer were past the cap of %d "
                          "notifications; collapsed into one: %s\n" % (over["n"], name, PUSH_PULL_BATCH_CAP, body))
-        _push_notify(_notify_title("more notifications"), body, "", kind="missed", host=name)
+        _push_notify(_notify_title("more notifications"), body, "", kind="more", host=name)   # its own tag: never replaces a summary
     if held["all"] or held["turn"]:
         sys.stderr.write("romp: web push: held %d event(s) pulled from '%s' — %d under this kernel's main notification "
                          "switch (off), %d turn-finished event(s) under its turn switch (off); the switches here decide "
@@ -82083,6 +82161,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the origin backfill (2026-09-10; _push_backfill_origin): this request names the device's own
                 # subscription and states where its page runs (its Referer — a same-origin GET carries no Origin)
                 _push_backfill_origin(_pep, _request_page_origin(self.headers))
+                _push_gap_seen()                         # the dashboard is in front of the user: summaries said so far are seen
                 return self._send(200, json.dumps(_push_pending(_pep)), "application/json", cache="no-cache")
             if p.startswith("/pane/"):
                 # a STATE-ROOT pane's page (plans/panes-as-data.md, section 3): /pane/<id>/ serves STATE/panes/<id>/index.html,

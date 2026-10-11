@@ -113,7 +113,8 @@ the self-declared name, which broke when the hub knew the host under a different
   the rest are said in ONE more notification ("TESTHOST · 7 more: 3 sessions finished turns, 4 need
   you", titled "Romp: more notifications") and one loud log line naming how many were collapsed, so an
   unexpected burst (a judge pass moving twenty cards at once, a bug) can never machine-gun the phone,
-  and nothing is dropped silently either. The old relay simply dropped everything past 16.
+  and nothing is dropped silently either. The old relay simply dropped everything past 16. The note
+  wears its own tag (kind `more`), so it never replaces a gap's summary on the lock screen.
 - **The hub owns the one-buzz-per-turn-end rule**, keyed on its own row name, the sid and the
   origin's turn-end key: `_buzz_claim` on the prefixed sid, with the turn key every candidate
   carries. A turn end and the card it raises buzz once between them, whichever arrives first; a card
@@ -210,8 +211,21 @@ both, for every gap this kernel knows of:
 - **Nothing would have passed: no buzz**, only a log line.
 - **The count cannot be known** (the row's kernel restarted and its ring went with it, or the
   backlog overflowed past the cursor): the summary says notifications may have been missed, with no
-  number, and only when something could have buzzed: this kernel's master is on, or the row's kernel
-  holds an explicit "on" bell (`bellsOn`, protocol 2).
+  number, and only when something the user's switches and bells allow could have been among the lost
+  events (`_push_gap_could_pass`), decided from facts the hub holds, never assumed: the row's kernel
+  holds an explicit "on" bell (`bellsOn`), or turn ends pass by default (this kernel's master AND its
+  turn switch on; the turn switch alone passes nothing), or cards pass by default (this master on)
+  while the row's kernel detects card events at all (`cardsOn`: its Task tracking switch; off, its
+  feed is not built and no card enters a notified column). Otherwise only a log line. (The first cut
+  said it whenever this kernel's master was on, so with the turn switch off, no bell set and Task
+  tracking off over there, every restart of the linked kernel, which is every deploy, buzzed for
+  nothing. The review reproduced it, 2026-10-11.)
+- **A summary not yet seen takes in the next gaps quietly.** Once a summary has gone out for a row,
+  the next gaps from that row fold into it: the same notification (its tag) is replaced with the
+  merged counts and reasons ("TESTHOST restarted 3 times · …"), without a sound, so a crash-looping
+  kernel buzzes once, not at every restart. The fold ends on one of two events: the user brings a page
+  holding a device subscription forward (its `GET /push/pending`, asked on every load, show and focus),
+  or the row delivers a notification normally, outside any gap. The next gap after either sounds.
 - **One summary per gap, however the link flaps.** A gap opens on the event that proves it: a failed
   call (`unreachable`), a reset answer (`restarted`, `overflow`), this kernel's first answer of a life
   while holding a cursor (`hub`: it restarted). It stays open across further failures and closes only
@@ -222,20 +236,23 @@ both, for every gap this kernel knows of:
 The summary is said in the user's terms, naming the machine by this kernel's name for the row and the
 reason it actually knows:
 
-    TESTHOST was unreachable 14:02–14:40 · 3 sessions finished turns, 1 needs you
-    TESTHOST was unreachable 14:02–14:40 · notifications may have been missed
+    TESTHOST was unreachable for 38 min · 3 sessions finished turns, 1 needs you
+    TESTHOST was unreachable for 2 h 5 min · notifications may have been missed
     TESTHOST restarted · notifications may have been missed
+    TESTHOST restarted 3 times · notifications may have been missed
     boxa restarted · TESTHOST: 1 session finished a turn
     boxa restarted · notifications from TESTHOST may have been missed
 
-(`boxa` is the hub's own name, `_self_host`; the outage window runs from the row's last answer to its
-first answer back, in the hub's local time.)
+(`boxa` is the hub's own name, `_self_host`. The outage is said as a duration, from the row's last
+answer to its first answer back, never as clock times: the kernel's clock zone is not the user's,
+and the first cut printed UTC times to a phone in another zone.)
 
 **Protocol 2** carries what the policy needs. A puller that asks `v=2` is told `caughtUp` (the
-request found its cursor at this life's newest) and `bellsOn`, and is served every event past its
-cursor, a stale one flagged `current: false` instead of dropped. A v1 puller is served exactly as
-before. A v1 origin (mid-update) sends neither field: the hub assumes its bells could be on, and
-closes a gap on an empty-handed, reset-free answer, which proves the same.
+request found its cursor at this life's newest), `bellsOn` and `cardsOn`, and is served every event
+past its cursor, a stale one flagged `current: false` instead of dropped. A v1 puller is served
+exactly as before. An origin that does not say `bellsOn` or `cardsOn` (a v1 origin mid-update, or the
+first protocol-2 build for `cardsOn`) is assumed to have them on, and a v1 origin's gap closes on an
+empty-handed, reset-free answer, which proves the same as `caughtUp`.
 
 **No record versus an unreadable one.** A hub with no cursor for a row in a readable record (or no
 record file at all) treats the row as new to it: it starts at the newest, says so in the log, and
@@ -281,6 +298,12 @@ The opener is persisted in the registry (`turnOpener`) at each open, so a sessio
 `lastStopAt` ("unknown" when no open was ever seen), and the kernel buzzes only for "human": anything
 else on an SDK registry is silent. A session with no SDK registry is a Codex session, whose every turn
 is a send through romp; its turn ends still read as the human's.
+
+One-time cost at the deploy that brought this in: a turn already running when the kernel restarted
+onto it has no saved opener (the registry's `turnOpener` did not exist yet), so its end is stamped
+"unknown" and stays silent, even when the user had started it. From the next turn on every turn's
+opener is recorded at its open. Accepted (the review, 2026-10-11): one missed buzz per session busy
+at that restart, against guessing.
 
 Checked against the big machine's own records, read-only (the turn ledger and the transcripts' queue
 and origin records, no message text): of 237 "human" turn ends in the 24 hours before the fix with no
