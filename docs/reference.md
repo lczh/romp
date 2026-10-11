@@ -7627,10 +7627,10 @@ it is in the bottom-right cluster. A small card opens with a main switch, two
 switches indented under it, and a button:
 
 - **Notifications** is the main switch. Off silences every device and the
-  desktop of every machine you have attached; the bells on individual sessions
-  and cards are mutes under it. While it is off, the two switches beneath it are
-  dimmed but still work, so you can set a phone up first and switch everything
-  on when you are ready.
+  desktop of every machine you have attached, except for the sessions and cards
+  you set to **Notify me** yourself. While it is off, the two switches beneath it
+  are dimmed but still work, so you can set a phone up first and switch
+  everything on when you are ready.
 - **This device**, under it, turns them on for the phone or browser you are
   holding. The first time, the browser asks for permission. If you refuse, the
   row goes grey and tells you where to allow it again (on an iPhone, Settings,
@@ -7648,6 +7648,15 @@ switches indented under it, and a button:
   quiet: nothing there was waiting on you. With many sessions running this is
   still a lot of buzzing, so it is off unless you want it. A turn that ends by
   asking you something buzzes once, not twice.
+
+A session's own bell, **Notify me** or **Stop notifying** in its tab menu and its
+timeline lane, is a choice you make for that session, and it beats the two
+switches: a session set to Notify me notifies when a turn you started ends, or
+when it needs you or finishes a task, even with the switches off, and one set to
+Stop notifying stays quiet with them on. A session you never set follows the
+switches, and its menu row says so ("default: …") beside what that means. So with
+**Also when a turn finishes** off, turning Notify me on for a few sessions hears
+just those.
 - **Send a test notification** sends one notification to the device you are
   holding, whatever the switches say, and prints the push service's answer under
   the button, so you can see at once whether the phone is set up or why it is
@@ -7660,7 +7669,9 @@ switches indented under it, and a button:
 A restart of the kernel (an update deploys one) announces nothing by itself.
 What Romp has told you about is written down beside its other state, so the
 cards already waiting on you or already finished when it comes back stay
-quiet. A card that stops needing you and then needs you again is announced
+quiet. Turn ends that would have notified you while it was down are not sent
+one by one when it is back: one notification, **Romp: missed notifications**,
+says how many sessions finished turns meanwhile. A card that stops needing you and then needs you again is announced
 once, not at every turn, unless you acted on the card in between (answered
 it, resolved it, crossed it off) or it finished in the meantime.
 
@@ -7673,12 +7684,21 @@ box's switches. On the dashboard, a linked machine's session and card bells
 show what reaches the devices set up on the machine you are looking at: a bell
 you set stays as you set it, on that machine, and one you never touched follows
 this machine's main switch. A linked machine running an older romp keeps its own
-switches, and its bells say so when you hover them. If the machine the phone is set up on
-restarts, what the linked machines raised meanwhile arrives when it is back,
-unless it is no longer current: the card was answered or moved on, or the
-session has finished another turn since. If a linked machine's kernel restarts,
-whatever it raised just before is skipped, and the log of the machine the phone
-is set up on says so and how many.
+switches, and its bells say so when you hover them.
+
+Notifications are never late and never silently lost. While the link holds, each
+arrives as it happens. When the machine the phone is set up on may have missed
+some (it restarted, a linked machine restarted, or the link dropped), none of
+the missed ones arrives late: one notification titled **Romp: missed
+notifications** says what you missed and why, for example "laptop was
+unreachable 14:02–14:40 · 3 sessions finished turns, 1 needs you", or that
+notifications may have been missed when the count cannot be known (a linked
+machine's restart takes its record with it). It counts only what your switches
+and bells would have let through, and when nothing would have, there is no
+notification, only a line in the kernel's log. A link that drops and comes back
+several times makes one such notification, sent once it holds again. In one
+burst, at most 16 notifications arrive one by one; the rest are said in one
+more.
 
 Tapping a notification brings Romp forward on the session it was about. On an
 iPhone with the app already open in the background, the switch happens as the

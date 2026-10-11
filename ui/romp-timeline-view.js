@@ -1131,13 +1131,27 @@ function offsetRect(rect, frames) {
 // notifies the devices subscribed at the kernel this page is served by, so its bell paints from that kernel's raw override
 // (`notifyRaw`: true, false, or null for none) and THIS kernel's master (the local notifySwitches frame): an override
 // stands, no override follows this master. A linked kernel too old to send the override paints as it reports it
-// (`legacy`, said in the row's sub-line). A local lane is untouched.
-let HUB_NOTIFY_ALL = null;   // this kernel's master, from setNotifySwitches (null until the first frame)
+// (`legacy`, said in the row's sub-line).
+// The session bell is a setting the user makes (2026-10-11; bell-follow.ts sessionBell states the rule, this is its twin):
+// on, off, or no choice of its own. The row reads on when the session notifies for everything a session can (`fullOn`:
+// its own setting on, or no setting under this kernel's master AND turn-finished switches), a click stores the opposite
+// as the session's own setting, and the sub-line says whether it is that setting or the defaults. The switches are this
+// kernel's for a local lane and a linked one alike. A lane whose kernel sends no setting keeps the bell it reports.
+let HUB_NOTIFY_ALL = null;     // this kernel's master, from setNotifySwitches (null until the first frame)
+let HUB_NOTIFY_TURNS = null;   // …and its turn-finished switch, from the same frame
+const BELL_ALL = 'when a turn you started ends, or it blocks on you or completes';
 function laneBell(s) {
   const id = String((s && s.id) || '');
-  if (id.indexOf(':') <= 0) return { on: !!(s && s.notify), legacy: false };
-  if (!s || s.notifyRaw === undefined) return { on: !!(s && s.notify), legacy: true };
-  return { on: s.notifyRaw === null ? HUB_NOTIFY_ALL === true : s.notifyRaw === true, legacy: false };
+  const raw = s ? s.notifyRaw : undefined;
+  if (raw === undefined) {
+    return { fullOn: !!(s && s.notify), explicit: false, legacy: id.indexOf(':') > 0,
+             sub: 'system notification when its work blocks on you or completes' };
+  }
+  if (raw === true) return { fullOn: true, explicit: true, legacy: false, sub: 'your setting: ' + BELL_ALL };
+  if (raw === false) return { fullOn: false, explicit: true, legacy: false, sub: 'your setting: no notifications' };
+  const all = HUB_NOTIFY_ALL === true, turns = HUB_NOTIFY_TURNS === true;
+  return { fullOn: all && turns, explicit: false, legacy: false,
+           sub: 'default: ' + (all && turns ? BELL_ALL : all ? 'when it blocks on you or completes' : 'no notifications') };
 }
 const LANE_TOGGLES = [
   { flag: 'hideFromFeed', label: 'Feed cards', icon: feedCheckIcon,
@@ -1147,8 +1161,8 @@ const LANE_TOGGLES = [
     enabled: (s) => !s.postalServiceOff, value: (enable) => !enable,
     desc: 'visible to peer sessions, can send and receive their messages; off = fully isolated' },
   { flag: 'notify', label: 'Notifications', icon: bellIcon,
-    enabled: (s) => laneBell(s).on, value: (enable) => enable,
-    desc: 'system notification when its work blocks on you or completes' },
+    enabled: (s) => laneBell(s).fullOn, value: (enable) => enable,
+    desc: (s) => laneBell(s).sub },   // its own setting or the defaults, and what that means
 ];
 // Model + effort choices come from the kernel's /models — the ONE list shared with the chat statusline picker
 // and the judge-tier settings (the user 2026-07-02: no hardcoded model list per surface). Populated in place
@@ -3781,6 +3795,9 @@ class TimelinePanel {
         const targets = [((this.data && this.data.sessions) || []).find((x) => x.id === sid),
                          this._laneMenu && this._laneMenu._sid === sid ? this._laneMenu._session : null];
         for (const s of targets) if (s) s[flag] = m.value;
+        // …and a refused bell's own setting (notifyRaw), which the row paints from (laneBell), when the frame carries it
+        const raw = flag === 'notify' && 'notifyRaw' in m ? m.notifyRaw : undefined;
+        if (raw === true || raw === false || raw === null) for (const s of targets) if (s && s.notifyRaw !== undefined) s.notifyRaw = raw;
       }
       this._laneRefusal = { sid, flag, text };
       if (this._laneMenu && this._laneMenu._sid === sid && this._laneMenuBuild) this._laneMenuBuild();
@@ -4090,12 +4107,11 @@ class TimelinePanel {
   // an ack for a write this page no longer tracks — its blob meets the gate like any other arrival,
   // and nothing is re-pinned (viewsAck).
   // this kernel's notification switches (the local kernel's notifySwitches frame; federation drops a linked kernel's): a
-  // linked lane with no bell override of its own follows the master (laneBell). The bell lives in the lane gear, which
-  // reads it as it builds, so nothing is drawn here.
+  // lane with no bell setting of its own follows the master and the turn-finished switch (laneBell). The bell lives in the
+  // lane gear, which reads them as it builds, so nothing is drawn here.
   setNotifySwitches(m) {
-    const next = !!(m && m.all === true);
-    if (HUB_NOTIFY_ALL === next) return;
-    HUB_NOTIFY_ALL = next;
+    HUB_NOTIFY_ALL = !!(m && m.all === true);
+    HUB_NOTIFY_TURNS = !!(m && m.turns === true);
   }
 
   setCaps(m) {
@@ -5601,7 +5617,7 @@ class TimelinePanel {
         const lab = body.createDiv({ text: t.label + ' — ' + (on ? 'on' : 'off') });
         lab.setAttribute('style', on ? '' : 'opacity:0.75;');
         const legacyBell = t.flag === 'notify' && laneBell(s).legacy;
-        const sub = body.createDiv({ text: t.desc + (legacyBell
+        const sub = body.createDiv({ text: (typeof t.desc === 'function' ? t.desc(s) : t.desc) + (legacyBell
           ? ' · follows ' + String(s.id).slice(0, String(s.id).indexOf(':')) + "'s own notification switch: that machine runs an older romp" : '') });
         sub.setAttribute('style', 'opacity:0.6;font-size:0.82em;');
         row.addEventListener('mouseenter', () => { row.style.background = HOVER_BG; });
@@ -5611,8 +5627,9 @@ class TimelinePanel {
           const next = t.value(!on);                 // the flag value that flips this toggle
           if (this._laneRefusal && this._laneRefusal.sid === s.id && this._laneRefusal.flag === t.flag) this._laneRefusal = null;   // a retry retires the last refusal
           const asGiven = t.flag === 'notify' && String(s.id).indexOf(':') > 0 && !laneBell(s).legacy;   // a linked kernel's bell: stored as given there
+          const rawBell = t.flag === 'notify' && s.notifyRaw !== undefined;   // a bell whose kernel sends the session's own setting
           s[t.flag] = next;                          // optimistic …
-          if (asGiven) s.notifyRaw = next;           // … its override too, which is what the bell paints from …
+          if (rawBell) s.notifyRaw = next;           // … the session's own setting too, which is what the bell paints from …
           (this._pendingFlags[s.id] = this._pendingFlags[s.id] || {})[t.flag] = next;   // … sticky until the kernel confirms
           this._setSessionFlag(s, t.flag, next, asGiven);
           this._reconcilePendingFlags();
@@ -5692,12 +5709,13 @@ class TimelinePanel {
     for (const s of (this.data && this.data.sessions) || []) {
       const p = pend[s.id]; if (!p) continue;
       for (const flag of Object.keys(p)) {
-        // a linked kernel's bell confirms on what it PAINTS (its override against this kernel's master, laneBell), and
-        // holds by its override: its kernel's own effective value can agree before the click has landed there
-        const remoteBell = flag === 'notify' && String(s.id).indexOf(':') > 0 && !laneBell(s).legacy;
-        const cur = remoteBell ? laneBell(s).on : s[flag];
+        // a bell click is the session's own setting (laneBell), so it confirms when the frame's setting (notifyRaw) is the
+        // clicked value, on a local lane and a linked one alike, and holds by it: the effective value can agree before the
+        // click has landed. A linked kernel too old to send the setting confirms on `notify`, as it always did
+        const rawBell = flag === 'notify' && s.notifyRaw !== undefined;
+        const cur = rawBell ? s.notifyRaw : s[flag];
         if (cur === p[flag]) delete p[flag];       // the kernel now agrees → stop overriding this flag
-        else { s[flag] = p[flag]; if (remoteBell) s.notifyRaw = p[flag]; }   // not yet confirmed → keep the optimistic value sticky
+        else { s[flag] = p[flag]; if (rawBell) s.notifyRaw = p[flag]; }   // not yet confirmed → keep the optimistic value sticky
       }
       if (!Object.keys(p).length) delete pend[s.id];
     }

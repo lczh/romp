@@ -6487,17 +6487,25 @@ class SdkSession:
         # _cli_working mirrors the last lifecycle state we persisted so the live stream can re-assert
         # 'working' if a stamp ever falls behind actual output, with no reliance on feed-vs-result counting.
         self._cli_working = False
-        # WHO OPENED the turn in flight — "human" (any fed text without the romp-injected marker: the
-        # composer's words, a queued message, a typed follow-up, a button's /command) or "injected" (romp's
-        # own feed — a nudge, a follow-up, a restart notice, relayed mail — or a turn the CLI opened by
-        # itself: a background task's notification, a scheduled prompt, a peer's channel message, told by
-        # the streamed record's origin stamp). None until an open is seen. Set at the two places a turn can
-        # open (the feeder's pop; _forward's stamped user atom while nothing romp fed is in flight, see
-        # _note_turn_opener), stamped
-        # beside lastStopAt by the Stop hook as lastTurnOpener, and read by the kernel's turn-finished push,
-        # which buzzes the phone for the human's turns only (the user 2026-09-10: ten buzzes in fifty minutes
-        # from one session reacting, turn after turn, to its own background subagents' completions).
-        self._turn_opener = None
+        # WHO OPENED the turn in flight — "human" (a fed text without the romp-injected marker: the composer's
+        # words, a queued message, a typed follow-up, a button's /command) or "injected" (romp's own feed — a
+        # nudge, a follow-up, a restart notice, relayed mail — or a turn the CLI opened by itself: a
+        # background task's notification, a scheduled prompt, a peer's message, a text it drained after the
+        # turn it was fed into ended). Decided at the moment the turn OPENS, from the event that opened it,
+        # never left over from an earlier turn (2026-10-11, see _open_turn_as): the feeder's pop from idle
+        # (the text it fed), and a turn frame the CLI streams while nothing romp fed is in flight
+        # (_on_message: the CLI opened it; "injected" unless the turn is the drain of a text romp fed, whose
+        # speaker it then takes). A human text the CLI takes into a turn already running claims it at the
+        # take (_note_turn_opener). Persisted in the registry as turnOpener at each open, so a session
+        # object born mid-turn (a kernel restart under a hosted CLI) reads the turn's opener back instead of
+        # guessing; None only when no open was ever seen. Stamped beside lastStopAt by the Stop hook as
+        # lastTurnOpener ("unknown" for None), and read by the kernel's turn-finished push, which buzzes the
+        # phone for the human's turns only (the user 2026-09-10: ten buzzes in fifty minutes from one session
+        # reacting, turn after turn, to its own background subagents' completions; 2026-10-11: half of one
+        # day's "human" turn ends had no text fed by romp at all, because a turn the CLI opened kept the
+        # previous turn's label).
+        _to = reg.get("turnOpener") if isinstance(reg, dict) else None
+        self._turn_opener = _to if _to in ("human", "injected") else None
         self._skill_tool_ids = set()   # Skill tool_use ids seen on THIS stream → classify their injected
         #                                instructions payload (parent_tool_use_id link) as a skillMd atom
         self.since = 0
@@ -9769,7 +9777,11 @@ class SdkSession:
                     self._intr_level = 0             #   ...and its escalation episode (a new stop starts polite)
                     self._first_out_t = None         # the turn's first output is still to come (turns.jsonl)
                     self._fed_t = time.time()        # the pop, at millisecond resolution (turns.jsonl fedT)
-                self._note_turn_opener(fed_text_opener(item), fresh)   # who this turn is for (the Stop hook stamps it)
+                if fresh:
+                    # fed from idle: this text OPENS the turn, so it says who the turn is for (the Stop hook stamps
+                    # it). A text fed mid-turn says so at its TAKE instead (_note_turn_opener's callers): the CLI may
+                    # splice it into the running turn or run it as its own once that turn ends
+                    self._note_turn_opener(fed_text_opener(item), True)
                 if item.startswith(RENAME_PING_HEAD):
                     self._ping_feeding = True       # hold feeds until this turn's first streamed message
                 self._mark_producing()              # the one gate: a text fed under a standing prompt leaves the prompt's state
@@ -10468,15 +10480,28 @@ class SdkSession:
             return ""
 
     def _note_turn_opener(self, opener: str, fresh: bool) -> None:
-        """Record who opened, or joined, the turn in flight (see _turn_opener in __init__). A HUMAN text
-        always makes the turn theirs: from idle it opens one; mid-turn the CLI splices it in at the next
-        tool boundary and answers it there, so the person asked during the turn and its end IS news to
-        them. An INJECTED opener counts only from idle (`fresh`): a nudge fed into the human's running turn,
-        or a task notification the CLI folds into it, does not take the turn from them. Never reset at the
-        settle: the next open overwrites, and the Stop hook (which runs BEFORE the ResultMessage) reads the
-        turn it is closing."""
+        """Record who opened, or joined, the turn in flight (see _turn_opener in __init__). `fresh`: this text
+        OPENS the turn (fed from idle, or a drained text the CLI took when no turn ran). Otherwise the CLI took
+        it into the turn already running (its lifecycle `started` for a hold whose turn had not ended, or the
+        landed record on a CLI without lifecycle frames): a HUMAN text makes that turn theirs, since the person
+        asked during it and is answered in it; an injected one (a nudge, relayed mail) does not take the turn
+        from whoever opened it. Never reset at the settle: every open sets it, and the Stop hook (which runs
+        BEFORE the ResultMessage) reads the turn it is closing."""
         if fresh or opener == "human":
-            self._turn_opener = opener
+            self._open_turn_as(opener)
+
+    def _open_turn_as(self, opener: str) -> None:
+        """Set the turn in flight's opener and persist it as the registry's turnOpener when it changed, so a session
+        object born mid-turn (a kernel restart while a hosted CLI runs the turn) reads it back (__init__)."""
+        if opener not in ("human", "injected"):
+            return
+        changed = getattr(self, "_turn_opener", None) != opener
+        self._turn_opener = opener
+        if changed:
+            try:
+                self.backend._update_reg(self.sid, turnOpener=opener)
+            except Exception:
+                pass
 
     def _turn_ledger_row(self, msg, usd=None, turn_u=None, now=None) -> dict:
         """The turns.jsonl row for the ResultMessage `msg` (see the ledger note by append_turn_row): the
@@ -11186,6 +11211,13 @@ class SdkSession:
             if u.get("settled") and getattr(self, "_inflight_texts", None) is not None:
                 with self._lock:
                     self._inflight_texts.append(u.get("item", u["text"]))
+                    opens = self.inflight == 0       # no turn counted yet: this text opens the one starting now
+                # the turn it joins is the one the CLI is starting: from idle the text opens it (and the turn frame that
+                # follows reads the same answer off the twin); behind a turn the CLI already opened, a human text claims it
+                self._note_turn_opener(fed_text_opener(u.get("text") or ""), opens)
+            elif not u.get("fresh"):
+                # fed mid-turn and taken while that turn still runs: spliced in at a tool boundary
+                self._note_turn_opener(fed_text_opener(u.get("text") or ""), False)
         else:
             self.backend._log("feed hold (%s): the CLI reports the held text %s without running it; the next queued text "
                               "goes in" % (self.name, cl.state))
@@ -11239,6 +11271,7 @@ class SdkSession:
             # init and a turn-less result, no query sent (_consume_move_settle), and counting that init
             # would leave an idle session busy (a reconnect deferred, a drive op parked) until its next
             # real turn; should a count slip through anyway, the move's result zeroes it.
+            opened = None
             with self._lock:
                 if self.inflight == 0:
                     self.inflight = 1
@@ -11252,6 +11285,17 @@ class SdkSession:
                         # (a CLI that writes lifecycle frames says when the text joins a turn: _on_command_lifecycle;
                         # the turn starting here may be a notification's, queued ahead of it)
                         self._inflight_texts.append(u.get("item", u["text"]))
+                    # WHO OPENED this turn, decided now, at the event that opened it (2026-10-11): the CLI did. Its
+                    # fed-turn twin holds what romp fed into it, which here can only be a text the CLI drained after
+                    # the turn it was fed into ended (appended just above, or by its lifecycle `started` a frame
+                    # earlier), and then the turn is that text's speaker's. With nothing romp fed it is the CLI's
+                    # own turn (a background task's notification, a peer's message, a scheduled prompt), never the
+                    # human's: before this, such a turn kept the previous turn's label, and a busy session's
+                    # notification turns buzzed the phone as if the person had asked for them
+                    texts = [x for x in (getattr(self, "_inflight_texts", None) or []) if isinstance(x, str)]
+                    opened = "human" if any(fed_text_opener(x) == "human" for x in texts) else "injected"
+            if opened:
+                self._open_turn_as(opened)          # outside the lock: it may write the registry
         if getattr(self, "_ping_feeding", False):   # getattr: __new__-built test doubles skip __init__
             # the ping's turn is streaming — the CLI demonstrably started it, so a message fed from
             # here on lands MID-TURN as its own record (the CLI's designed forward behavior); the
@@ -11270,6 +11314,11 @@ class SdkSession:
             # the CLI took the last fed text (_untaken_taken, the turn-boundary road): the next queued text can go
             # in as its own message now. Checked BEFORE the result settle below marks the turn ended, so a
             # result frame is read against the state the text was fed into.
+            u = self._untaken
+            if not (u.get("fresh") or u.get("settled") or u.get("fault")):
+                # its record LANDED inside the turn still running: a human text makes that turn theirs (a drained or
+                # fresh text was labelled at its turn's open, and a faulted scan says nothing about which turn took it)
+                self._note_turn_opener(fed_text_opener(u.get("text") or ""), False)
             self._release_untaken()
         if isinstance(msg, SystemMessage) and msg.subtype == "init":
             self._fire_boot_settled()   # the CLI is up and streaming — its transcript catch-up burst
@@ -12287,11 +12336,17 @@ class SdkSession:
         # rather than an inference from transcript mtimes — romp_cards' round keys on it). Beside it,
         # in the SAME write so a reader never pairs one turn's settle with another's opener, WHO opened
         # the turn (2026-09-10, see _turn_opener): the kernel's turn-finished push buzzes the phone for
-        # the human's turns only. No open seen (a session object born mid-turn at a kernel restart, a
-        # CLI that stamps no origin) reads "human" — fail OPEN on the buzz, never silently drop it.
+        # the human's turns only. No open ever seen (none recorded in the registry either) stamps "unknown",
+        # which buzzes nothing: only a turn a human opened may (2026-10-11; it used to read "human").
+        # lastHumanStopAt, in the same write, is the newest end of a turn a human opened: the kernel's boot
+        # reads it to tell whether one ended while no kernel was watching (the missed-notifications summary).
         try:
-            self.backend._update_reg(self.sid, lastStopAt=int(time.time()),
-                                     lastTurnOpener=getattr(self, "_turn_opener", None) or "human")
+            opener = getattr(self, "_turn_opener", None) or "unknown"
+            now_s = int(time.time())
+            stamp = {"lastStopAt": now_s, "lastTurnOpener": opener}
+            if opener == "human":
+                stamp["lastHumanStopAt"] = now_s
+            self.backend._update_reg(self.sid, **stamp)
         except Exception:
             pass
         # delete-while-busy: the turn this delete interrupted has ENDED — complete the arm here,
@@ -21472,21 +21527,11 @@ class SdkBackend:
             self._touch_live(sess.sid)
         if vanished:
             self._note_live_tail_race("_evict_live_overflow")
-        # A user atom the CLI streams while NOTHING ROMP FED is in flight, wearing an injected provenance
-        # stamp, is a turn the CLI opened by itself (a background task's notification, a scheduled prompt,
-        # a peer's channel message), never the composer's words: a fed text is not replayed on the stream
-        # (replay-user-messages stays off, see _options), so its opener was noted at the feeder's pop.
-        # Only the CLI's own stamp says so (atom["origin"], msg_to_atom); a stamp-less user atom (a tool
-        # result) or a "human" stamp says nothing. Judged BEFORE the working re-assert below, and against
-        # the fed-turn twin (_inflight_texts), not the turn count: _on_message counts the CLI's own turn
-        # from its first frame, ahead of this call, so `inflight` is already 1 when the stamped atom is
-        # judged and a count-based test never fired (the phone then buzzed for every notification turn).
-        # The twin holds what romp fed into the turn in flight: the same stamp arriving with a fed text in
-        # the twin is a splice into that turn, which keeps its opener (see SdkSession._note_turn_opener),
-        # and a drained mid-turn text rejoins the twin at the count, so its turn stays the human's.
-        okind = (atom.get("origin") or {}).get("kind") if atom.get("type") == "user" else None
-        if okind and okind != "human" and not getattr(sess, "_inflight_texts", None) and not sess._cli_working:
-            sess._note_turn_opener("injected", True)
+        # (Who opened the turn is NOT read here. Until 2026-10-11 a user atom the CLI streamed with an injected origin
+        # stamp marked a CLI-opened turn, but the CLI does not stream the prompt record of a turn it opens itself
+        # (replay-user-messages stays off), so the mark almost never fired: on one machine in one day, two turns were
+        # labelled injected while half the "human" turn ends had no text fed by romp. The turn's own open is the event
+        # now: the turn frame _on_message counts while nothing romp fed is in flight, see SdkSession._open_turn_as.)
         # The stream is the AUTHORITATIVE busy signal: a genuine WORK atom (streamed assistant/tool
         # output — not an input echo, not a /model-style command line) means the CLI is producing RIGHT
         # NOW, so re-assert 'working' if a prior state write settled ahead of it (e.g. a separate turn

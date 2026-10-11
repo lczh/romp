@@ -9,6 +9,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createRequire } from "node:module";
 
 const SRC = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "romp-timeline-view.js"), "utf8");
 
@@ -45,7 +46,10 @@ test("the menu lists all three toggles with icons, state words, and plain-langua
   assert.match(SRC, /system notification when its work blocks on you or completes/);
   // polarity is encoded per toggle: two off-flags, one on-flag
   assert.match(SRC, /enabled: \(s\) => !s\.hideFromFeed, value: \(enable\) => !enable,/);
-  assert.match(SRC, /enabled: \(s\) => laneBell\(s\)\.on, value: \(enable\) => enable,/);   // a local lane's own notify; a linked kernel's resolved (bell-follow.ts)
+  assert.match(SRC, /enabled: \(s\) => laneBell\(s\)\.fullOn, value: \(enable\) => enable,/);   // the session's own setting, else the defaults (bell-follow.ts sessionBell)
+  // the bell's sub-line is the session bell's own: its setting or the defaults, and what that means (executed below)
+  assert.match(SRC, /desc: \(s\) => laneBell\(s\)\.sub \},/);
+  assert.match(SRC, /const sub = body\.createDiv\(\{ text: \(typeof t\.desc === 'function' \? t\.desc\(s\) : t\.desc\) \+ \(legacyBell/);
 });
 
 test("menu rows toggle with the SAME optimistic + sticky + reconcile-before-draw treatment as the old icons", () => {
@@ -104,8 +108,9 @@ test("the Obsidian writer is the kernel's route, never a file of its own (2026-0
 test("the sticky-flag machinery survives: pendingFlags reconcile on every update (no flicker-back)", () => {
   assert.match(SRC, /this\._pendingFlags = \{\};/);
   assert.match(SRC, /this\.data = data;\s*\n(?:[^\n]*\n){0,4}\s*this\._reconcilePendingFlags\(\);/);
-  // a linked kernel's bell confirms on what it paints and holds by its override (laneBell); every other flag as it always did
-  assert.match(SRC, /_reconcilePendingFlags\(\) \{[\s\S]*?const cur = remoteBell \? laneBell\(s\)\.on : s\[flag\];\s*\n\s*if \(cur === p\[flag\]\) delete p\[flag\];[\s\S]*?else \{ s\[flag\] = p\[flag\];/);
+  // a bell click confirms on the session's own setting and holds by it (laneBell), local and linked alike; a legacy linked
+  // kernel's on notify, and every other flag as it always did
+  assert.match(SRC, /_reconcilePendingFlags\(\) \{[\s\S]*?const rawBell = flag === 'notify' && s\.notifyRaw !== undefined;\s*\n\s*const cur = rawBell \? s\.notifyRaw : s\[flag\];\s*\n\s*if \(cur === p\[flag\]\) delete p\[flag\];[\s\S]*?else \{ s\[flag\] = p\[flag\]; if \(rawBell\) s\.notifyRaw = p\[flag\]; \}/);
 });
 
 test("every timeline dot's white border is thin (0.75px) — romp + user dots alike (the user 2026-06-23)", () => {
@@ -124,4 +129,76 @@ test("the lane toggle hands the kernel a JSON boolean", () => {
   // extension build on a kernel edit that keeps the behaviour).
   const BOOT = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "timeline-boot.ts"), "utf8");
   assert.match(BOOT, /__rompTimelineSetFlag: \(id: string, flag: string, value: unknown, asGiven\?: unknown\) =>\s*\n\s*post\(asGiven === true \? \{ type: "setSessionFlag", id, flag, value: !!value, asGiven: true \} : \{ type: "setSessionFlag", id, flag, value: !!value \}\)/);
+});
+
+// ── the session bell (2026-10-11): the user's own setting beats the defaults ─────────────────────────────────────────
+// EXECUTED on the real view: laneBell (the twin of bell-follow.ts sessionBell), the pending reconcile and the refusal. The
+// gear's rows themselves are opened and clicked in timeline-views-ack.test.ts, which carries the fake DOM. Synthetic ids.
+const view = createRequire(__filename)(path.resolve(process.cwd(), "..", "ui", "romp-timeline-view.js"));
+const LOCAL = "11111111-2222-3333-4444-555555555555";
+const LINKED = "TESTHOST:" + LOCAL;
+const EVERYTHING = "when a turn you started ends, or it blocks on you or completes";
+
+test("executed: the gear's bell reads the session's own setting first, then this kernel's master and turn-finished switch", () => {
+  const { laneBell, TimelinePanel } = view;
+  const panel = Object.create(TimelinePanel.prototype);
+  panel.setNotifySwitches({ type: "notifySwitches", all: false, turns: false });
+  assert.deepEqual(laneBell({ id: LOCAL, notify: true, notifyRaw: true }), { fullOn: true, explicit: true, legacy: false, sub: "your setting: " + EVERYTHING }, "an explicit on stands with both switches off");
+  panel.setNotifySwitches({ type: "notifySwitches", all: true, turns: true });
+  assert.deepEqual(laneBell({ id: LINKED, notify: false, notifyRaw: false }), { fullOn: false, explicit: true, legacy: false, sub: "your setting: no notifications" }, "an explicit off stands with both on");
+  assert.deepEqual(laneBell({ id: LOCAL, notify: true, notifyRaw: null }), { fullOn: true, explicit: false, legacy: false, sub: "default: " + EVERYTHING });
+  panel.setNotifySwitches({ type: "notifySwitches", all: true, turns: false });
+  assert.deepEqual(laneBell({ id: LOCAL, notify: true, notifyRaw: null }), { fullOn: false, explicit: false, legacy: false, sub: "default: when it blocks on you or completes" },
+    "master on, turns off: not everything, so the row offers on and its click opts the session in");
+  panel.setNotifySwitches({ type: "notifySwitches", all: false, turns: true });
+  assert.equal(laneBell({ id: LOCAL, notify: false, notifyRaw: null }).sub, "default: no notifications");
+  // a linked kernel on an older romp sends no setting: the bell it reports, today's wording (the row adds whose switch)
+  assert.deepEqual(laneBell({ id: "boxb:" + LOCAL, notify: true }), { fullOn: true, explicit: false, legacy: true, sub: "system notification when its work blocks on you or completes" });
+});
+
+test("executed: a gear bell click is pending until the frame's own setting is the clicked value, for a local lane too", () => {
+  const { TimelinePanel } = view;
+  const panel = Object.create(TimelinePanel.prototype);
+  panel.setNotifySwitches({ type: "notifySwitches", all: true, turns: false });
+  // no setting under the master: the effective value is already on when the click stores on
+  panel._pendingFlags = { [LOCAL]: { notify: true } };
+  panel.data = { sessions: [{ id: LOCAL, notify: true, notifyRaw: null }] };
+  panel._reconcilePendingFlags();
+  assert.deepEqual(panel._pendingFlags, { [LOCAL]: { notify: true } }, "the effective value agreeing confirms nothing");
+  assert.equal(panel.data.sessions[0].notifyRaw, true, "the frame's copy carries the clicked setting meanwhile");
+  assert.equal(view.laneBell(panel.data.sessions[0]).fullOn, true);
+  panel.data = { sessions: [{ id: LOCAL, notify: true, notifyRaw: true }] };
+  panel._reconcilePendingFlags();
+  assert.deepEqual(panel._pendingFlags, {}, "the stored setting confirms it");
+  // a legacy linked lane (no setting) confirms on notify, as it always did
+  const OLD = "boxb:" + LOCAL;
+  panel._pendingFlags = { [OLD]: { notify: false } };
+  panel.data = { sessions: [{ id: OLD, notify: true }] };
+  panel._reconcilePendingFlags();
+  assert.deepEqual([panel._pendingFlags, panel.data.sessions[0].notify, "notifyRaw" in panel.data.sessions[0]], [{ [OLD]: { notify: false } }, false, false]);
+  panel.data = { sessions: [{ id: OLD, notify: false }] };
+  panel._reconcilePendingFlags();
+  assert.deepEqual(panel._pendingFlags, {});
+});
+
+test("executed: a refused gear bell takes its own setting back from the refusal frame when the frame carries it", () => {
+  const { TimelinePanel } = view;
+  const g: any = globalThis;
+  const prev = g.window;
+  g.window = { parent: { postMessage() {} } };
+  try {
+    const panel = Object.create(TimelinePanel.prototype);
+    panel._pendingFlags = { [LOCAL]: { notify: true } };
+    panel.data = { sessions: [{ id: LOCAL, notify: true, notifyRaw: true }] };   // the click's optimistic copy
+    panel._laneMenu = { _sid: LOCAL, _session: { id: LOCAL, notify: true, notifyRaw: true } };
+    panel._laneMenuBuild = () => {}; panel.draw = () => {};
+    panel.settingRefused({ type: "settingRefused", gesture: "flag", sid: LOCAL, flag: "notify", value: true, notifyRaw: null, text: "couldn't save that setting" });
+    assert.deepEqual(panel._pendingFlags, {});
+    assert.equal(panel.data.sessions[0].notifyRaw, null, "the frame's session: no setting, as the kernel still holds");
+    assert.equal(panel._laneMenu._session.notifyRaw, null, "…and the copy the open gear built from");
+    // a refusal frame without the setting leaves it alone
+    panel.data.sessions[0].notifyRaw = true;
+    panel.settingRefused({ type: "settingRefused", gesture: "flag", sid: LOCAL, flag: "notify", value: true, text: "x" });
+    assert.equal(panel.data.sessions[0].notifyRaw, true);
+  } finally { if (prev === undefined) delete g.window; else g.window = prev; }
 });

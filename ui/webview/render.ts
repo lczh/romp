@@ -69,7 +69,7 @@ import { tabStateClass, sectionPip, sectionPipMembers, sectionPipTitle } from ".
 import { composeTabWidgets, composeTabRing, applyTabBadgeMode, needsYouPhrase, ringSwitch, tabHotkey, miniChord, needsYouWidgetOn } from "./tab-widgets";   // the tab-title widgets (T379): the dot, the context bar and the hot-key keycap compose onto every tab from the registry, and the rings too, one class at a time; miniChord is the chord the strip signature reads; needsYouWidgetOn gates the keycap-room strip class
 import { titleWithKey, keyHint, chordOf, displayChord, editorKeepsKey, effectiveChord, loadOverrides, savedHolder, saveOverride, chatAnswers, CHAT_KEY_COMMANDS, KEYS_EVENT, type Bindings } from "./keybindings";
 import { hotkeyCommandId, loadTabKeys, rememberTabKey, forgetTabKey, goneTabKeys, renamedTabKeys } from "./tab-keys";   // per-tab hot keys (2026-09-10): the set and its bookkeeping; the keycap on the tab is the T379 widget, read from the same store
-import { notePendingFlag, dropPendingFlag, applyFrameFlags, type PendingFlags, type SessionFlag } from "./flag-pending";   // the per-session view flags' pending guard (review 2026-09-14)
+import { notePendingFlag, dropPendingFlag, applyFrameFlags, frameRaw, type PendingFlags, type SessionFlag } from "./flag-pending";   // the per-session view flags' pending guard (review 2026-09-14)
 import { DEFAULT_CHORDS } from "./commands";
 import { NavHistory } from "./nav-history";
 import { StagedStack, quoteReplyBody, stagedPosts, type StagedMsg } from "./staged-messages";
@@ -113,7 +113,7 @@ import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
 import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDialing, hostDownNote } from "./host-prefix";
 import { sessionLabelNodes } from "./host-prefix";   // the viewer's message bar names its session the strip's way (2026-09-30)
-import { bellState, bellClickFields, legacyBellNote, setHubSwitches, hubMaster } from "./bell-follow";   // a linked kernel's bells follow this kernel's switches
+import { bellState, bellClickFields, legacyBellNote, setHubSwitches, hubMaster, sessionBell } from "./bell-follow";   // a linked kernel's bells follow this kernel's switches; a session bell's own setting beats the defaults
 import { menuCard, addMenuItem, addMenuSep, showMenuCard, openContextMenu, closeContextMenu } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy)
 import { focusAfterDismiss, emptyStateParts } from "./pane-focus";   // where focus goes when a tab leaves, and the empty body's line (T357)
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
@@ -8052,15 +8052,18 @@ function setSessionFlag(id: string, flag: "hideFromFeed" | "postalServiceOff" | 
   const s = sessions.get(id);
   if (s) s[flag] = value;   // both flags are declared optional booleans on Session — no cast needed
   notePendingFlag(pendingFlags, id, flag, value);   // a frame built before the kernel applied this cannot flip the row back (flag-pending.ts)
-  // a LINKED kernel's bell (bell-follow.ts): sent as given, so that kernel stores it rather than judging it against its own
-  // master, and the copy carries the override it now holds (legacy is read off notifyRaw's presence, untouched above)
+  // the bell (bell-follow.ts sessionBell): a click is the session's own setting from now on, which the local kernel stores as
+  // sent and a LINKED kernel too, the click going as given there rather than judged against that kernel's own master; the
+  // copy carries it, so the menu paints it while the click stands. A linked kernel too old to send the setting (legacy, read
+  // off notifyRaw's presence) has none to carry
   const extra = flag === "notify" ? bellClickFields(id, s) : {};
-  if (s && "asGiven" in extra) s.notifyRaw = value;
+  if (s && flag === "notify" && s.notifyRaw !== undefined) s.notifyRaw = value;
   if (vscodeApi) vscodeApi.postMessage({ type: "setSessionFlag", id, flag, value, ...extra });
 }
-// THIS kernel's master moved, or the ready's first word on it (only the local kernel's frame reaches here; federation drops a
-// linked kernel's): a linked session with no override of its own follows it (bell-follow.ts). The copy's `notify` is
-// re-resolved, except under a click's pending guard, whose own echo settles it.
+// THIS kernel's switches moved, or the ready's first word on them (only the local kernel's frame reaches here; federation drops
+// a linked kernel's): a linked session with no override of its own follows the master (bell-follow.ts). The copy's `notify`
+// is re-resolved, except under a click's pending guard, whose own echo settles it. The session bell's row reads the master
+// and the turn-finished switch as the menu builds (sessionBell), so nothing else is repainted here.
 function onNotifySwitches(m: any): void {
   if (!setHubSwitches(m)) return;
   for (const [id, s] of sessions) {
@@ -8069,8 +8072,9 @@ function onNotifySwitches(m: any): void {
   }
 }
 // A frame's view flags with a LINKED kernel's bell resolved against THIS kernel's master (bell-follow.ts): `notify` on the
-// copy is the bell as the devices subscribed here hear it, so the tab menu, the bell command and the pending guard read
-// it unchanged. A local session, or a linked kernel too old to send its override, keeps the frame's own value.
+// copy is the card-level bell as the devices subscribed here hear it. A local session, or a linked kernel too old to send
+// its override, keeps the frame's own value. The tab menu's row and the bell command read the session's own setting
+// beside it (sessionBell), and the pending guard confirms a click on that setting when the frame carries it.
 function frameBell(id: string, msg: any, raw: boolean | null | undefined): any {
   if (!msg || !("notify" in msg) || !hostOf(id)) return msg;
   const st = bellState(id, { notify: msg.notify, notifyRaw: raw });
@@ -8524,7 +8528,8 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
   const s = sessions.get(id);
   const offFeed = !!(s && s.hideFromFeed);
   const offMail = !!(s && s.postalServiceOff);
-  const onBell = !!(s && s.notify);
+  const bell = sessionBell(id, s);   // the session's own setting, else the defaults (bell-follow.ts)
+  const onBell = bell.fullOn;        // on = it notifies for everything a session can: its turn ends, its blocks and completions
   const toggle = (kind: "feed" | "mail" | "bell", off: boolean, lab: string, sub: string, fn: () => void) => {
     addMenuItem(menu, { icon: ctxIcon(kind, off), label: lab, sub, pick: fn });
   };
@@ -8539,11 +8544,13 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
   // system-notification bell (the user 2026-07-28) — same flag the timeline lane bell toggles. NOTE the
   // inverted polarity vs the two above: `notify` true is the ENABLED state, so the icon slashes on !onBell.
   // the row's sub-line names the command's chord when one is bound (the user 2026-09-11: where is the key revealed?)
+  // Since 2026-10-11 the bell is a setting the user makes (bell-follow.ts sessionBell): the click stores the opposite of what
+  // the row shows as the session's own, and the sub-line says whether it is that setting or the defaults, and what it means.
   const bellKey = keyHint("session.notify");
-  const bellLegacy = !!s && bellState(id, s).legacy;   // an older linked kernel (bell-follow.ts)
+  const bellLegacy = bell.legacy;   // an older linked kernel (bell-follow.ts)
   toggle("bell", !onBell,
     onBell ? "Stop notifying" : "Notify me",
-    (onBell ? "no more system notifications for this session" : "system notification when its work blocks on you or completes")
+    bell.sub
       + (bellLegacy ? " · " + legacyBellNote(id) : "") + (bellKey ? " · " + bellKey : ""),
     () => setSessionFlag(id, "notify", !onBell));
   // (The hide-session mechanism is fully RETIRED, the user 2026-08-24 — the tag system covers
@@ -21131,8 +21138,7 @@ function chatTail(msg: any) {
   if (msg.status) s.status = msg.status;
   // the per-session view flags ride the tail beside the status (2026-09-11): a bell flipped in another column or
   // browser reaches this caught-up copy on the flip, not on the next full frame
-  applyFrameFlags(s, frameBell(msg.id, msg, ("notifyRaw" in msg) ? (msg.notifyRaw ?? null) : s.notifyRaw), pendingFlags, msg.id);   // under the click's pending guard (flag-pending.ts): a tail built before a click cannot flip its row back
-  if ("notifyRaw" in msg) s.notifyRaw = msg.notifyRaw ?? null;   // the bell's override alone rides the tail beside it (bell-follow.ts)
+  applyFrameFlags(s, frameBell(msg.id, msg, ("notifyRaw" in msg) ? (msg.notifyRaw ?? null) : s.notifyRaw), pendingFlags, msg.id);   // under the click's pending guard (flag-pending.ts): a tail built before a click cannot flip its row back; the bell's own setting (notifyRaw) rides beside it and lands there too
   // the background box's task set rides the tail whenever it moved (kernel _chat_bgt_digest, 2026-10-08): until then only a
   // full frame carried it, so a caught-up page kept the set it was last handed whole, and three agents that had finished
   // half an hour earlier still wore the running dot and Stop under a header that counted the one still working
@@ -22119,7 +22125,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   if (m.romp === "notifyToggle") {
     const s = activeId && !isProvisionalId(activeId) ? liveSession(activeId) : undefined;   // a skeleton's copy is stale: no flag blind
     if (s && activeId) {
-      const on = !s.notify;
+      const on = !sessionBell(activeId, s).fullOn;   // the tab menu's rule: flip what its row shows, stored as the session's own setting
       setSessionFlag(activeId, "notify", on);
       ephemeralNoteToast((on ? "Notifications enabled for " : "Notifications disabled for ") + (s.name || activeId.slice(0, 8)));
     }
@@ -22288,6 +22294,8 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       dropPendingFlag(pendingFlags, m.sid, m.flag as SessionFlag);   // the click's expectation ends here, not after three frames
       const s = sessions.get(m.sid);
       if (s && typeof m.value === "boolean") (s as any)[m.flag] = m.value;
+      // …and a refused bell's own setting (notifyRaw), which its row paints from (bell-follow.ts sessionBell), when the frame carries it
+      if (s && m.flag === "notify" && s.notifyRaw !== undefined && frameRaw(m) !== undefined) s.notifyRaw = frameRaw(m);
     }
     if (m.gesture === "command" && typeof m.sid === "string" && typeof m.flag === "string" && m.sid && m.flag) {
       // a refused setEffort or setFast pick (the kernel's catalog check on a Codex session, a dormant session's fast

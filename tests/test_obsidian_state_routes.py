@@ -158,7 +158,8 @@ class FlagRoute(_Routes):
         self.assertIs(km._session_flag_raw(SID, "notify"), True, "an override on the (off) master is stored")
         st, r = self._post("/flag", {"id": SID, "flag": "notify", "value": False})
         self.assertEqual((st, r["ok"]), (200, True))
-        self.assertIsNone(km._session_flag_raw(SID, "notify"), "back to the master's value: the override is dropped, not stored as false")
+        self.assertIs(km._session_flag_raw(SID, "notify"), False,
+                      "stored as clicked though it matches the (off) master: an explicit choice beats the defaults (2026-10-11)")
 
     def test_a_non_boolean_or_missing_value_is_a_400_that_writes_nothing(self):
         for value, needle in (("false", "'value' must be true or false"), (0, "'value' must be true or false"),

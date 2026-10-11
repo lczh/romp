@@ -318,6 +318,7 @@ OFF_FEED = (
     "_thread_turn_read",           # comment threads: forkOf
     "_turn_end_key",               # the post-loop notify pass, the checkpoints, the bell pass after the feed's loop: lastStopAt
     "_turn_opener",                # the post-loop notify pass: lastTurnOpener
+    "_turn_notify_tick",           # the post-loop notify pass's boot summary (turns ended while the kernel was down): lastHumanStopAt
     "jd._judge_auth",              # the judge's billing pick: auth, authLogin
     "jd._reg_spawned_at",          # the judge tiers' plan and close signatures: spawnedAt
     "jd._sdk_transcript_path",     # discovery's transcript resolve for a relocated worktree session (_discover_impl and the
