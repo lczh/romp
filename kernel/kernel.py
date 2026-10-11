@@ -9874,13 +9874,27 @@ def _notify_card_effective(cards, item_id, sid):
     return bool(cards.get(NOTIFY_ALL_KEY)) if v is None else bool(v)
 
 
-def _set_notify_card(item_id, value, sid=""):
+def _set_notify_card(item_id, value, sid="", as_given=False):
     """Persist a card-bell click. The value the user chose is stored as an override — UNLESS it
     matches what the card would inherit anyway (session override, else master), in which case the
     override is deleted: clicking a bell back to its default returns it to FOLLOWING the default,
-    rather than pinning today's default against tomorrow's master flip."""
+    rather than pinning today's default against tomorrow's master flip.
+
+    `as_given` (2026-10-10, bells follow the dashboard; plans/federated-push.md): the click came from a
+    dashboard on ANOTHER kernel that shows this card, whose bell it resolves against ITS own master, not
+    this one's. The value is stored exactly as sent, True or False, and None clears the override (the
+    user returning it to the default on purpose): judged against this machine's master, a mute clicked
+    while this master is off matched the default, was never stored, and the card still buzzed the phone
+    subscribed over there. A click on this kernel's own dashboard keeps the delete-if-default rule above."""
     with _ncards_lock:                               # read and publish as ONE step (the store's rule, above)
         cur = dict(_notify_cards_proved())           # PROVED: a read fault refuses rather than erasing bells
+        if as_given:
+            if value is None:
+                cur.pop(item_id, None)
+            else:
+                cur[item_id] = bool(value)
+            _write_state_json(jd.STATE / "notify-cards.json", json.dumps(cur, sort_keys=True))
+            return
         # the default this click is judged against comes from the OTHER store, and it must be PROVED too:
         # read through the display reader, a fault on session-flags.json folded the session's bell to
         # "unset" and the click was judged against the master instead -- a mute that matched the
@@ -9898,14 +9912,27 @@ def _set_notify_card(item_id, value, sid=""):
         _write_state_json(jd.STATE / "notify-cards.json", json.dumps(cur, sort_keys=True))
 
 
-def _set_notify_session(sid, value):
+def _set_notify_session(sid, value, as_given=False):
     """Persist a session-bell click (tab menu / timeline lane gear) — same delete-if-default
     discipline as _set_notify_card, against the master. Not _set_session_flag: that setter's
     pop-on-false is right for the on/off view flags, but here False is a real value (muted while
-    the master is on)."""
+    the master is on). `as_given`: a click from another kernel's dashboard, stored exactly as sent
+    (None clears), as _set_notify_card has it."""
     with _flags_lock:                                # read and publish as ONE step (the store's rule, above)
         cur = dict(_session_flags_proved())          # PROVED: a read fault refuses rather than erasing flags
         f = dict(cur.get(sid)) if isinstance(cur.get(sid), dict) else {}
+        if as_given:
+            if value is None:
+                f.pop("notify", None)
+            else:
+                f["notify"] = bool(value)
+            if f:
+                cur[sid] = f
+            else:
+                cur.pop(sid, None)
+            _write_state_json(jd.STATE / "session-flags.json", json.dumps(cur, sort_keys=True))
+            _flags_written(jd.STATE / "session-flags.json", cur)
+            return
         # the master this click is judged against lives in the OTHER store and must be PROVED too: read
         # through the display reader, a fault on notify-cards.json folded it to off, so a click matching
         # that fabricated master popped the session's stored override -- a mute erased under the success
@@ -47090,6 +47117,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             "hideFromFeed": _session_flag(sid, "hideFromFeed"),
             **_mail_off_fields(sid),                    # postalServiceOff (EFFECTIVE: a comment thread reads off until broken out, T356) and mailOffWhy (thread, isolation, an unreadable record) for the tab hover's words, from one derivation
             "notify": _notify_session_effective(sid),   # session-level bell, EFFECTIVE (override, else the master default): OS notification when its work blocks on you / completes (the user 2026-07-28)
+            "notifyRaw": _session_flag_raw(sid, "notify"),   # …and the override alone (true/false/null): a dashboard on ANOTHER kernel resolves it against its own master (bell-follow.ts)
             # NEVER `now`. This rides the chat payload, and _send_client dedups by comparing the
             # SERIALIZED payload against what that client last received — so a firstSeen that ticked
             # with the wall clock made every build differ, defeated the dedup entirely, and re-sent the
@@ -51564,6 +51592,9 @@ def build_feed(now, live_map=None):
     _ncards = _notify_cards()
     for _a in asks:
         _a["notify"] = True if _notify_card_effective(_ncards, _a["itemId"], str(_a.get("sid") or "")) else None
+        # the override alone (card, else session; true/false/null), without this machine's master: a dashboard on
+        # ANOTHER kernel resolves it against its own (bell-follow.ts; plans/federated-push.md, bells follow the dashboard)
+        _a["notifyRaw"] = _push_explicit_bell(str(_a.get("sid") or ""), _a["itemId"], _ncards)
     return {"type": "feed", "asks": asks, "now": now,
             **_views_payload(),   # the rendered views blob — the outline + feed tag mounts read it (2026-08-25); under a read fault its marker rides too, or alone (2026-09-08)
             # usage-limit-down latch (judge-limit.json): analysis is paused because the account
@@ -58132,7 +58163,8 @@ def build_timeline(now, live_map=None, with_bars=True, live_only=False):
             "comments": _comment_markers(sid),
             "hideFromFeed": _session_flag(sid, "hideFromFeed"),    # lane checkbox → mute from feed (timeline-only)
             "postalServiceOff": _postal_isolated(sid),  # lane mailbox → isolate from the Romp Postal Service (bin/romp-postal-service); EFFECTIVE, a thread's default included (T356)
-            "notify": _notify_session_effective(sid)})   # lane bell, EFFECTIVE (override, else the master default) → OS notification when this session's work blocks on you / completes (the user 2026-07-28)
+            "notify": _notify_session_effective(sid),   # lane bell, EFFECTIVE (override, else the master default) → OS notification when this session's work blocks on you / completes (the user 2026-07-28)
+            "notifyRaw": _session_flag_raw(sid, "notify")})   # the override alone, for a timeline on another kernel (bell-follow.ts)
     if with_bars and not live_only:
         # the live-lane memo releases the lanes that left the timeline here: a full build's lane set (live sessions
         # plus the dead lanes inside the 12 h window, dismissed dead lanes dropped) is the set this build read. A
@@ -58761,9 +58793,9 @@ def _chat_view_key(m, end):
     """The view a client holds of session `m` once a frame cut from it lands: `end` (the key the list's last event carries on
     the uuid wire, the list's length on the index wire), the status, the notify / hideFromFeed / postalServiceOff flags, the
     build's watermark and the background box's task set (_chat_bgt_digest), every field an empty-suffix tail carries besides
-    its anchor. A string, compared whole."""
+    its anchor, the bell's raw override (notifyRaw) among them. A string, compared whole."""
     return json.dumps([end, m.get("status"), m.get("notify"), m.get("hideFromFeed"), m.get("postalServiceOff"), m.get("wm"),
-                       _chat_bgt_digest(m)], sort_keys=True, default=str)
+                       _chat_bgt_digest(m), m.get("notifyRaw")], sort_keys=True, default=str)
 
 
 _BGT_MEMO = {}   # id(a build's bgTasks) -> (that object, its digest): one digest per build, however many clients and sends read it
@@ -60805,6 +60837,29 @@ def _broadcast_view_order():
         _send_view_order(c, fr)
 
 
+def _notify_switches_frame():
+    """{type: "notifySwitches", all, turns}: this kernel's master and turn switch, for the panes (2026-10-10, bells follow the
+    dashboard; plans/federated-push.md). A pane shows a LINKED kernel's session and card bells resolved against the switches
+    of the kernel it is served by, the one whose gate decides what reaches the devices subscribed here (bell-follow.ts);
+    the browser's federation keeps only the local kernel's frame, as it keeps only the local caps."""
+    return {"type": "notifySwitches", "all": _notify_all_on(), "turns": _notify_turns_on()}
+
+
+def _send_notify_switches(client=None):
+    """The switches frame to one client (its ready, after caps) or to every connected client (a switch flipped)."""
+    s = json.dumps(_notify_switches_frame())
+    if client is not None:
+        try:
+            client["send"](s)
+        except Exception:
+            pass
+        return
+    with _clients_lock:
+        targets = [c for c in _clients if c.get("ready")]   # a socket still connecting gets it at its own ready, after its pushes
+    for c in targets:
+        _client_send(c, s)
+
+
 def _send_caps(client, views_seq=None):
     """The caps frame, on the client's own socket: {type: "caps", caps, viewsSeq} (the comment on
     KERNEL_WS_CAPS has the field). Sent by the ready handler alone, AFTER its pushes, and both matter: the pane
@@ -61809,7 +61864,8 @@ def _send_chat_proto2(c, m, ms, change_from, led_changed, st, pc):
                             "events": evs[start:], "status": m.get("status"),
                             # the per-session view flags ride this delta as they ride the index client's (2026-09-11, the bell
                             # on a key): the empty-suffix tail a flag-only change sends is how another window learns the flip
-                            "notify": m.get("notify"), "hideFromFeed": m.get("hideFromFeed"), "postalServiceOff": m.get("postalServiceOff")}
+                            "notify": m.get("notify"), "hideFromFeed": m.get("hideFromFeed"), "postalServiceOff": m.get("postalServiceOff"),
+                            "notifyRaw": m.get("notifyRaw")}   # the bell's override alone, for a dashboard on another kernel (bell-follow.ts)
                     tail["wm"] = m.get("wm")          # what the build read (_chat_wm), for the page's own stale-build rule (2026-09-22)
                     # …and the base it assumes (2026-09-23): the keys of the events ending at the anchor, from the client's own
                     # first edge at most, so a page that holds anything else before the anchor refuses the delta and asks for the full
@@ -62022,7 +62078,8 @@ def _send_chat_locked(c, m, ms, change_from, led_changed):
                     # frame, so the other column of a split, or another browser, showed the old bell until something else
                     # changed. An empty suffix with the new flags is the frame a flag-only change rides (the dedup
                     # signature reads them, so the flip alone sends it)
-                    "notify": m.get("notify"), "hideFromFeed": m.get("hideFromFeed"), "postalServiceOff": m.get("postalServiceOff")}
+                    "notify": m.get("notify"), "hideFromFeed": m.get("hideFromFeed"), "postalServiceOff": m.get("postalServiceOff"),
+                    "notifyRaw": m.get("notifyRaw")}   # the bell's override alone, for a dashboard on another kernel (bell-follow.ts)
             tail["wm"] = m.get("wm")                  # what the build read (_chat_wm): the page's own copy of the stale-build rule reads it (2026-09-22)
             if led_changed:                           # the TOC only changed on a judge pass → usually omitted
                 tail["ledger"] = m.get("ledger")
@@ -69432,8 +69489,10 @@ def _push_events_serve(after, wait):
 # is. Its cursor is kept on disk per row (push-pull-cursors.json), so this kernel's restart resumes where it left off and
 # the events fired meanwhile are served if still current. The sids wear THIS kernel's name for the row (the dashboard's
 # tab address, host-prefix.ts), never the name the origin declares for itself. THE GATE here (_push_pull_gate) is this
-# kernel's: the master off holds every event, the turn switch off holds the turn events, a "default" bell resolves to the
-# master (on, past the first gate), and the one-buzz-per-turn-end rule is _buzz_claim keyed on the prefixed sid and the
+# kernel's, by the rules its own sessions follow with the origin's override standing in for a local one: a card buzzes
+# when its bell is "on", or "default" with this master on; a turn end needs this master and this turn switch on, and its
+# session's bell "on" or "default". The merged dashboard paints a linked kernel's bells by the same rules (bell-follow.ts),
+# so what a bell shows is what buzzes. The one-buzz-per-turn-end rule is _buzz_claim keyed on the prefixed sid and the
 # ORIGIN's turn-end key, so a turn end and the card it raises buzz once between them whichever lands first. Each event
 # passes the gate at most once, by (row, boot, seq), a backstop beside the cursor.
 PUSH_PULL_SEEN_CAP = 2048
@@ -69621,8 +69680,8 @@ def _push_pull_once(name, r):
 
 def _push_pull_gate(name, events):
     """THIS kernel's gate over events pulled from row `name` (the section comment): trust re-read now (a row lowered while
-    the call was parked buzzes nothing), the master and the turn switch, the bell, then the one buzz per turn end. Returns
-    how many buzzed. Held events are said in one line per batch, as the relay's are."""
+    the call was parked buzzes nothing), the bell resolved against this kernel's master and turn switch, then the one buzz
+    per turn end. Returns how many buzzed. Held events are said in one line per batch, as the relay's are."""
     tier = _host_trust(name)
     if tier != "trusted":
         _push_pull_say(name, "tier", "romp: web push: dropped %d event(s) pulled from '%s' (its trust here is '%s'; only a "
@@ -69633,9 +69692,14 @@ def _push_pull_gate(name, events):
     n = 0
     for ev in events:
         kind = "turn" if ev.get("kind") == "turn" else "card"
-        if ev.get("bell") not in ("on", "default"):
+        bell = ev.get("bell")
+        if bell not in ("on", "default"):
             continue                                     # an explicit mute never leaves its origin; anything else is unreadable
-        if not _notify_all_on():
+        # the rules a session of THIS kernel's own follows, with the origin's override standing in for the local one
+        # (bells follow the dashboard: the merged dashboard paints a linked kernel's bells by these same rules,
+        # bell-follow.ts). A card: its override, else this master. A turn end: this master AND this turn switch, and
+        # the session's override, else this master (_turn_notify_tick's gate)
+        if not _notify_all_on() and (kind == "turn" or bell == "default"):
             held["all"] += 1
             continue
         if kind == "turn" and not _notify_turns_on():
@@ -74657,6 +74721,7 @@ else if((m.type==="models"||m.type==="wsup")&&panel.refreshModels)panel.refreshM
 else if(m.type==="settingRefused"&&panel.settingRefused)panel.settingRefused(m);
 else if((m.type==="tagEditAck"||m.type==="viewsAck")&&panel.viewsAck)panel.viewsAck(m);
 else if(m.type==="caps"&&panel.setCaps)panel.setCaps(m);
+else if(m.type==="notifySwitches"&&panel.setNotifySwitches)panel.setNotifySwitches(m);
 else if(m.type==="unknownOp"&&panel.unknownOp)panel.unknownOp(m);
 else if(m.type==="liveStatus"&&panel.liveStatus)panel.liveStatus(m);   // a thinking stretch → the lane's "Thinking · 14s" (timeline-boot.ts's dispatchFrame, the pinned pair)
 else if(m.type==="tagEditFailed"&&panel.tagEditFailed)panel.tagEditFailed(m);
@@ -74679,7 +74744,7 @@ if(window.parent!==window)window.parent.postMessage({romp:"reveal",pane:"chat"},
 window.__rompTimelineWriteOrder=function(order){if(window.__rompWriteOrder)window.__rompWriteOrder(order);};
 window.__rompTimelineCompact=function(name){post({type:"compact",name:name});};
 window.__rompTimelineSendCommand=function(name,cmd,extra){post(Object.assign({type:"sendCommand",name:name,cmd:cmd},extra||{}));};
-window.__rompTimelineSetFlag=function(id,flag,value){post({type:"setSessionFlag",id:id,flag:flag,value:!!value});};
+window.__rompTimelineSetFlag=function(id,flag,value,asGiven){post(asGiven===true?{type:"setSessionFlag",id:id,flag:flag,value:!!value,asGiven:true}:{type:"setSessionFlag",id:id,flag:flag,value:!!value});};
 window.__rompTimelineSetViews=function(views,writeId,edited){post({type:"setTimelineViews",views:views,writeId:writeId,edited:edited||[]});};
 window.__rompTimelineTagEdit=function(writeId,edit){post({type:"tagEdit",writeId:writeId,edit:edit});};
 window.__rompTimelineEditTag=function(edit){post({type:"editTag",edit:edit});};
@@ -81903,6 +81968,7 @@ class Handler(BaseHTTPRequestHandler):
                         "error": "%s \u2014 the change did not land; try again" % e}), "application/json")
                 _mark_views_dirty()
                 _send_to_app("shell", {"type": "notifyAll", "on": _on})
+                _send_notify_switches()           # …and every pane: a linked kernel's bells resolve against it (bell-follow.ts)
                 return self._send(200, json.dumps({"ok": True, "on": _on}), "application/json")
             if u.path == "/notify-turns":
                 # the popover's turn-finished switch (2026-09-05): kernel-authoritative like the
@@ -81926,6 +81992,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, json.dumps({"ok": False,
                         "error": "%s \u2014 the change did not land; try again" % e}), "application/json")
                 _send_to_app("shell", {"type": "notifyTurns", "on": _on})
+                _send_notify_switches()
                 return self._send(200, json.dumps({"ok": True, "on": _on}), "application/json")
             if u.path == "/push/test":
                 # the popover's test button (2026-09-05): one notification to THIS device's
@@ -83624,6 +83691,7 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     views_seq = None
             _send_caps(client, views_seq=views_seq)
+            _send_notify_switches(client)   # after caps (the shim's gate latches on caps; nothing may precede the pushes)
             # From here the pane LISTENS and holds its frames (the push above): a tap that arrives now is sent
             # to it directly (_reveal_request targets panes with this stamp only, T312: a socket registered at
             # its handshake but still loading its bundle has no listener, and its own `ready` message counts
@@ -83644,8 +83712,11 @@ class Handler(BaseHTTPRequestHandler):
         elif msg and msg.get("type") == "setSessionFlag" and msg.get("id") and msg.get("flag"):
             # timeline lane gear → toggle a per-session view flag (e.g. hideFromFeed). Persisted +
             # re-broadcast so the feed drops/restores that session's cards immediately. The notify
-            # bell is tri-state (an override on the master default) → its own setter.
-            value, ferr = _as_bool(msg.get("value"), "value")
+            # bell is tri-state (an override on the master default) → its own setter. `asGiven` on the
+            # notify bell: another kernel's dashboard clicked it, against ITS master — stored as sent, and a
+            # null value is that dashboard returning the bell to its default (_set_notify_session)
+            _as_given = msg.get("asGiven") is True and str(msg["flag"]) == "notify"
+            value, ferr = (None, None) if (_as_given and msg.get("value") is None) else _as_bool(msg.get("value"), "value")
             if ferr:
                 # the lane gear's own refusal frame (settingRefused, which the timeline page renders and
                 # repaints from; a `warn` never reaches it), addressed like the store-fault refusal below
@@ -83655,7 +83726,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 if str(msg["flag"]) == "notify":
-                    _set_notify_session(str(msg["id"]), value)
+                    _set_notify_session(str(msg["id"]), value, as_given=_as_given)
                 else:
                     _set_session_flag(str(msg["id"]), str(msg["flag"]), value)
             except (_StateUnreadable, _StateUnwritable) as e:
@@ -83790,8 +83861,10 @@ class Handler(BaseHTTPRequestHandler):
             # feed card right-click → per-card bell (OS notification when THIS card blocks on you /
             # completes). Persisted to notify-cards.json; build_feed echoes it back as ask.notify.
             # sid rides so the override can be resolved against the card's own default (session, else
-            # the master) and deleted when it merely restates it.
-            value, ferr = _as_bool(msg.get("value"), "value")
+            # the master) and deleted when it merely restates it. `asGiven`: another kernel's dashboard
+            # clicked it, against ITS master — stored as sent, null clearing it (_set_notify_card)
+            _as_given = msg.get("asGiven") is True
+            value, ferr = (None, None) if (_as_given and msg.get("value") is None) else _as_bool(msg.get("value"), "value")
             if ferr:
                 # the bell's own refusal frame (settingRefused, which the feed page renders and repaints
                 # from; a `warn` never reaches it), addressed like the store-fault refusal below
@@ -83800,7 +83873,7 @@ class Handler(BaseHTTPRequestHandler):
                                 log="refused %s: %s" % (msg["type"], _flag_type_note("value", msg.get("value"))))
                 return
             try:
-                _set_notify_card(str(msg["itemId"]), value, str(msg.get("sid") or ""))
+                _set_notify_card(str(msg["itemId"]), value, str(msg.get("sid") or ""), as_given=_as_given)
             except (_StateUnreadable, _StateUnwritable) as e:
                 # the bells store could not be read, or its publish failed: refuse on the DELIVERING socket,
                 # addressed to the card (itemId) so the feed drops that bell's optimistic latch and says why

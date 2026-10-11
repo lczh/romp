@@ -94,20 +94,64 @@ the self-declared name, which broke when the hub knew the host under a different
   card's bell off, else its session's) drops the event before it is a candidate. An explicit arm
   rides as `bell: "on"`, and no override rides as `bell: "default"`. The origin's master and turn
   switch govern the origin's own devices only, never the candidates.
-- **The hub applies its own switches.** Its master off holds every pulled event, its turn switch off
-  holds the turn events, and a `"default"` bell resolves to its master (on, past the first gate). A
-  held batch is said in one line, as relayed events were.
+- **The hub applies its own switches**, by the rules its own sessions follow, with the origin's
+  override standing in for a local one. A card buzzes when its bell is `"on"`, or `"default"` with
+  the hub's master on (a card's override beats the master, as on a local card). A turn end needs the
+  hub's master and turn switch on, and its session's bell `"on"` or `"default"`. A held batch is said
+  in one line, as relayed events were.
 - **The hub owns the one-buzz-per-turn-end rule**, keyed on its own row name, the sid and the
   origin's turn-end key: `_buzz_claim` on the prefixed sid, with the turn key every candidate
   carries. A turn end and the card it raises buzz once between them, whichever arrives first; a card
   that yields replaces the turn notification quietly (the per-session tag). This removes the latent
   bug above, because the origin's own claim no longer decides what leaves it.
 
-An announcement is the card ENTERING the column, offered to the origin's devices (gated by its
-switches) and to every puller (gated by theirs). So the card diff marks a candidate announced
-whatever the origin's own switches say. A card that entered while the origin's master was off and
-comes back to the same column with nothing of the user's in between stays quiet, like the first
-boot's seed: it was on the board all along. Before the pull, an unarmed entry left no mark.
+**Announced when offered** (a change the pull made to the once-per-(card, column) rule, not in the
+original sketch). An announcement is the card ENTERING the column, offered to the origin's devices
+(gated by its switches) and to every puller (gated by theirs). So the card diff marks a candidate
+announced whatever the origin's own switches say; otherwise a card bouncing in and out of a column on
+an origin whose master is off would be re-offered, and buzz the hub, at every bounce. The cost: a
+card that entered while the origin's master was off and comes back to the same column with nothing of
+the user's in between stays quiet if that master is later turned on, like the first boot's seed (it
+was on the board all along). Before the pull, an unarmed entry left no mark.
+
+### Bells follow the dashboard
+
+The gating split only holds if the bells the user sees and clicks are the ones the hub's gate reads.
+Two things in the bell store stood in the way (found while building the pull, 2026-10-10, and decided
+by the user the same day):
+
+- the origin's setters (`_set_notify_card`, `_set_notify_session`) store a click only when it differs
+  from the ORIGIN's master, so a mute clicked while that master is off (the usual case: nobody opens
+  an attached machine's own popover) was never stored, the event still carried `"default"`, and the
+  hub buzzed;
+- the payloads carried each bell's EFFECTIVE value, resolved against the origin's master, so the
+  merged dashboard showed an attached machine's bells off while the phone was buzzed for them.
+
+So a linked kernel's bells now follow the dashboard they are shown on:
+
+- **The origin sends the raw override** beside the effective value: `notifyRaw` (true, false or null
+  for none) on every feed card (the card's override, else its session's), on every chat session frame
+  and chat tail (the session's override; the chat view key includes it, so an override-only change
+  still sends a tail), and on every timeline lane.
+- **The hub's switches reach the panes** in a `notifySwitches` frame (`{all, turns}`), sent to each
+  pane at its ready (after `caps`) and to every ready pane when a switch flips. The browser's
+  federation keeps only the LOCAL kernel's frame, as it keeps only the local `caps`.
+- **The browser paints a linked bell against the hub's master** (`ui/webview/bell-follow.ts`; the
+  timeline's plain-JS twin is `laneBell` in `ui/romp-timeline-view.js`): an override stands, and no
+  override follows the hub's master. The feed card bell, the chat tab menu's row, the bell command and
+  the timeline lane gear all read it, and their pending guards confirm a click on what the bell
+  paints, since the origin's own effective value can agree with a click before the click has landed.
+- **A click on a linked bell goes as given** (`asGiven: true` on `cardNotify` and `setSessionFlag`).
+  The origin stores it exactly as sent; a null value as given clears the override, the deliberate
+  "back to default" (the protocol carries it; no surface offers it yet).
+- **Local bells are unchanged.** A click on a kernel's own dashboard keeps the delete-if-default rule,
+  so a single machine behaves exactly as before. That is the choice made here: the as-given path is
+  taken only for a linked kernel's bell, decided in the browser by the host prefix.
+- **An older linked kernel falls back visibly.** A kernel that sends no `notifyRaw` serves no pull
+  either, and keeps its own rules (its legacy relay gates on its switches). Its bells paint as it
+  reports them, its clicks go out as before, and the bell's hover (the tab menu row, the lane gear
+  row) says it follows that machine's own switch because that machine runs an older romp. Nothing is
+  guessed.
 
 ### Staleness
 
@@ -164,17 +208,11 @@ Old and new kernels meet during an update, so both legs exist for now, and each 
 
 ## Known limits and follow-ups
 
-- **Card bells need a feed build.** The card diff runs on the origin's feed builds, which happen while
-  a client rides the feed (any dashboard socket, the hub's relay included). An origin no dashboard is
-  looking at detects turn ends but not card moves. This predates the pull and holds for a single
-  kernel too.
-- **Explicit bells and the origin's master.** The origin's bell setters store a click only when it
-  differs from the ORIGIN's master (a click matching it returns the bell to following the default),
-  and the merged dashboard paints a remote session's bell against the origin's master too. While an
-  origin's master is off, its sessions' bells read off on the merged dashboard and a mute click is
-  not stored, so the event still carries `"default"` and the hub's master decides. Viewer-relative
-  bells (the origin sends the raw override, the browser resolves against the hub's master and a click
-  sends on, off or default) close this; see the PR for the decision.
+- **Card buzzes need an open socket on the origin.** The card diff runs on the origin's feed builds,
+  and the pusher builds the feed only while a client rides it (any dashboard socket to that kernel,
+  the hub's relay included). An origin no dashboard is looking at still detects turn ends, which the
+  turn tick reads every cycle, but not card moves. This predates the pull, holds for a single kernel
+  too, and is left as it is for now: a headless feed build costs a build per cycle on every kernel.
 - **A merged badge** (optional, not built): each long-poll answer could carry the origin's needs-you
   count, for an icon count across every linked kernel.
 - **Cold-start precision for remote sids.** A tap that boots the app delivers its parked reveal on
@@ -189,7 +227,15 @@ Old and new kernels meet during an update, so both legs exist for now, and each 
   restart with its cursor (the missed event served once), a hub restart without it (resumes at the
   newest, says so, delivers nothing old) and an origin restart (resumes at the newest, the next turn
   end delivered once), and nothing twice throughout.
+  The user's bell scenario runs there too, over the hub's relay socket: with the hub's master on and
+  the origin's never set, the origin's card carries no override, a mute clicked as given is stored and
+  the next turn end stays on the origin, and an arm clicked as given buzzes.
 - `tests/test_push_pull.py`: the ring under each detector, the explicit-bell gate, the latent claim
   bug, the serve (long-poll release, each reset, staleness, the token gate), the hub's gate, the
-  puller (reset line, cursor on disk, dedupe, refusal), and the transition (the forward skips pullers,
-  the relay-ignore, the `/version` poll, an event offered both ways reaching the devices once).
+  puller (reset line, cursor on disk, dedupe, refusal), the transition (the forward skips pullers,
+  the relay-ignore, the `/version` poll, an event offered both ways reaching the devices once), and
+  the bells (as-given storage, local delete-if-default unchanged, the payload fields, the switches
+  frame, the gate's local rules).
+- `ui/webview/bell-follow.test.ts` and `feed-render-incremental.test.ts`: the paint rule, federation
+  keeping only the local switches frame, the timeline twin and its pending reconcile, and the feed's
+  card bell in the user's scenario, an older kernel's bell painted as reported with its hover note.

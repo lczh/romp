@@ -15,6 +15,9 @@ What the run pins, in order:
   * a turn end on the origin (session api) reaches the hub's gate exactly once: one ledger row, sid TESTHOST:<api>
     (the hub's name for the row, never the origin's own), kind turn, and one POST at the push service;
   * a needs-you card on the origin (session web) reaches it exactly once the same way, kind card;
+  * bells follow the dashboard, the user's scenario: the origin's card carries its raw override (none), a mute on api
+    clicked as the merged dashboard sends it (as given, over the hub's relay) is stored though the origin's own master is
+    off, and api's next turn end stays on the origin; an arm clicked the same way buzzes;
   * the HUB restarts with its cursor on disk while the origin fires a turn end: the event is served when the hub comes
     back (it is still that session's latest), once;
   * the hub restarts with NO cursor: it resumes at the origin's newest and says what it skipped, delivering nothing old;
@@ -123,6 +126,10 @@ class _Relay:
         self.alive = True
         self._send({"type": "ready"})
         threading.Thread(target=self._drain, daemon=True).start()
+
+    def send(self, obj):
+        """A frame from the merged dashboard to the origin (federation has already stripped the host prefix)."""
+        self._send(obj)
 
     def _send(self, obj):
         data = json.dumps(obj).encode()
@@ -347,14 +354,23 @@ class PushPullTwoKernels(unittest.TestCase):
         return [r for r in cls._ledger() if r.get("sid") == "%s:%s" % (ROW, sid) and r.get("kind") == kind]
 
     @classmethod
-    def _origin_baselined(cls):
-        """Wait until the origin's turn tick has run twice in this life (its /perf stage total for jobs.turnNotify moved
-        after it first appeared): the first sight of a session is a silent baseline, so a turn end stamped before the
-        tick has seen the session would be taken as that baseline and never announced."""
+    def _origin_baselined(cls, ticks=1):
+        """Wait until the origin's turn tick has run `ticks` more times after its first in this life (its /perf stage total
+        for jobs.turnNotify moving): the first sight of a session is a silent baseline, so a turn end stamped before the
+        tick has seen the session would be taken as that baseline and never announced. With a turn end just stamped, the
+        same wait is the proof that the tick has read it."""
         def ms():
             return (cls._call("origin", "GET", "/perf").get("stages_ms") or {}).get("jobs.turnNotify")
-        first = cls._wait("the origin's first turn tick", lambda: ms() is not None and [ms()])[0]
-        cls._wait("the origin's second turn tick", lambda: (ms() or 0) > first)
+        cur = cls._wait("the origin's first turn tick", lambda: ms() is not None and [ms()])[0]
+        for _ in range(ticks):
+            cur = cls._wait("the origin's next turn tick", lambda: (ms() or 0) > cur and [ms()])[0]
+
+    @classmethod
+    def _origin_bell(cls, sid):
+        try:
+            return (json.loads(Path(cls._state("origin"), "session-flags.json").read_text()).get(sid) or {}).get("notify", "absent")
+        except (OSError, ValueError):
+            return "absent"
 
     @classmethod
     def _end_turn(cls, sid, at):
@@ -391,6 +407,27 @@ class PushPullTwoKernels(unittest.TestCase):
         self.assertEqual(len(cards), 1, cards)
         self.assertEqual(cards[0]["cardId"], g)
 
+        # ── bells follow the dashboard, the user's scenario: the hub's master on, the origin's never set ──
+        ask = next(a for a in self._call("origin", "GET", "/feed.json")["asks"] if a.get("itemId") == g)
+        self.assertIn("notifyRaw", ask, "the origin's card carries its raw override for the merged dashboard")
+        self.assertIsNone(ask["notifyRaw"], "none: the merged dashboard paints it against the hub's master (on)")
+        # a click to off on api's bell, sent as the merged dashboard sends it over the relay: stored as given (the origin's
+        # own master is off, so judged against it the mute would not have been stored), and api's next turn end is quiet
+        self.relay.send({"type": "setSessionFlag", "id": API, "flag": "notify", "value": False, "asGiven": True})
+        self._wait("the mute stored on the origin", lambda: self._origin_bell(API) is False)
+        self._end_turn(API, t1 + 3)
+        self._origin_baselined(ticks=2)                   # the origin's tick has read that turn end
+        time.sleep(1.0)
+        self.assertEqual(len(self._pushed(API, "turn")), 1, "muted: the turn end never left the origin")
+        # a click back on: stored as an arm, and the next turn end buzzes
+        self.relay.send({"type": "setSessionFlag", "id": API, "flag": "notify", "value": True, "asGiven": True})
+        self._wait("the arm stored on the origin", lambda: self._origin_bell(API) is True)
+        self._end_turn(API, t1 + 5)
+        self._wait("the armed turn end at the hub", lambda: len(self._pushed(API, "turn")) == 2)
+        # and back to following the hub's master, on purpose (a null as given)
+        self.relay.send({"type": "setSessionFlag", "id": API, "flag": "notify", "value": None, "asGiven": True})
+        self._wait("the bell back at its default", lambda: self._origin_bell(API) == "absent")
+
         # ── the hub restarts with its cursor on disk; the origin fires meanwhile; the event is served on its return ──
         self.procs["hub"].kill(); self.procs["hub"].wait(timeout=10)
         self.assertTrue(json.loads(Path(self._state("hub"), "push-pull-cursors.json").read_text()).get(ROW), "the cursor is on disk")
@@ -398,7 +435,7 @@ class PushPullTwoKernels(unittest.TestCase):
         self._end_turn(API, t2)
         time.sleep(1.0)                                   # the origin's cycle files the candidate while the hub is down
         self._boot("hub")
-        self._wait("the missed turn end after the hub's restart", lambda: len(self._pushed(API, "turn")) == 2, secs=120)
+        self._wait("the missed turn end after the hub's restart", lambda: len(self._pushed(API, "turn")) == 3, secs=120)
         self.assertNotIn("resume at its newest", _text(self.logs["hub-1"]),
                          "a hub restarting with its cursor resumes from it, not from the newest")
 
@@ -409,9 +446,9 @@ class PushPullTwoKernels(unittest.TestCase):
         third = self.logs["hub-2"]
         self._wait("the no-cursor line", lambda: "resume at its newest — this kernel holds no record" in _text(third))
         m = re.search(r"holds no record of where it left off; (\d+) event\(s\) it fired meanwhile skipped", _text(third))
-        self.assertTrue(m and int(m.group(1)) >= 3, _text(third)[-1500:])
+        self.assertTrue(m and int(m.group(1)) >= 4, _text(third)[-1500:])
         time.sleep(2.0)
-        self.assertEqual(len(self._pushed(API, "turn")), 2, "nothing old is delivered after a lost cursor")
+        self.assertEqual(len(self._pushed(API, "turn")), 3, "nothing old is delivered after a lost cursor")
         self.assertEqual(len(self._pushed(WEB, "card")), 1)
 
         # ── the origin restarts (a new life): the hub resumes at the newest, loudly; the next turn end arrives once ──
@@ -421,11 +458,11 @@ class PushPullTwoKernels(unittest.TestCase):
                    secs=120)
         self._origin_baselined()                          # the new life's turn tick takes its baseline first
         self._end_turn(API, t2 + 7)
-        self._wait("the turn end after the origin's restart", lambda: len(self._pushed(API, "turn")) == 3, secs=120)
+        self._wait("the turn end after the origin's restart", lambda: len(self._pushed(API, "turn")) == 4, secs=120)
 
         # ── through all of it, nothing twice ──
         time.sleep(3.0)
-        self.assertEqual(len(self._pushed(API, "turn")), 3, self._ledger())
+        self.assertEqual(len(self._pushed(API, "turn")), 4, self._ledger())
         self.assertEqual(len(self._pushed(WEB, "card")), 1, self._ledger())
 
 

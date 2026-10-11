@@ -2462,3 +2462,41 @@ test("the focused section's copy leaves the registry when the focus moves on (th
   assert.equal(body.byId("feed-focus"), null, "the section is gone");
   assert.deepEqual({ g1: raw("g1").length, g2: raw("g2").length }, { g1: 1, g2: 1 }, "the section's removal took its copies out of the registry");
 });
+
+// Bells follow the dashboard (plans/federated-push.md, 2026-10-10). The user's scenario: this kernel's master on, the
+// linked kernel's never set, so that kernel's own reading of its card's bell is off (`notify` null) while the phone
+// subscribed HERE hears the card. The bell paints what reaches that phone: the linked kernel's raw override (none) against
+// THIS kernel's master (on). A click to off goes AS GIVEN (that kernel stores it rather than judging it against its own
+// master), the stored override then paints off, and a click back on goes as given too. A card from an older linked kernel
+// (no notifyRaw) paints as that kernel reports it and says so in its hover; its click is the message it always was.
+test("bells follow the dashboard: a linked kernel's card paints against THIS kernel's master and its click goes as given; an older one's paints as reported and says so", async () => {
+  const RA = "boxb:" + API, RT = "boxb:" + TESTS;
+  const r1 = cardOf("r1", RA, "boxb:api", "#cc6633", "Pick the notes-api error format", "needs_input", { notify: null, notifyRaw: null });
+  const r2 = cardOf("r2", RT, "boxb:tests", "#33cc66", "Choose the fixture loader", "needs_input", { notify: true });
+  await dispatch({ type: "notifySwitches", all: true, turns: false });
+  await dispatch(frame([g1, g2, g3, r1, r2]));
+  const b1 = card("r1")._bell, b2 = card("r2")._bell;
+  assert.equal(b1._bellOn, true, "no override over there: this kernel's master decides, and it is on");
+  const sent = posted.length;
+  b1.onclick(ev);
+  assert.equal(b1._bellOn, false, "acknowledged at once");
+  assert.deepEqual(posted.slice(sent).filter((m) => m.type === "cardNotify"),
+                   [{ type: "cardNotify", itemId: "r1", sid: RA, value: false, asGiven: true }], "stored there as given, never judged against its own master");
+  await dispatch(frame([g1, g2, g3, { ...r1, notifyRaw: false }, r2]));   // that kernel stored the mute
+  assert.equal(b1._bellOn, false, "the stored override paints off, and the latch is retired by it");
+  await dispatch({ type: "notifySwitches", all: false, turns: false });
+  assert.equal(b1._bellOn, false, "an override stands whatever this master says");
+  const sent2 = posted.length;
+  b1.onclick(ev);
+  assert.deepEqual(posted.slice(sent2).filter((m) => m.type === "cardNotify"),
+                   [{ type: "cardNotify", itemId: "r1", sid: RA, value: true, asGiven: true }], "a click back on goes as given too");
+  await dispatch(frame([g1, g2, g3, { ...r1, notify: true, notifyRaw: true }, r2]));
+  assert.equal(b1._bellOn, true);
+  // the older linked kernel: painted as it reports it, the hover says whose switch it follows, the click unchanged
+  assert.equal(b2._bellOn, true, "as that kernel reports it");
+  assert.match(String(b2.getAttribute("aria-label")), /follows boxb's own notification switch: that machine runs an older romp/);
+  const sent3 = posted.length;
+  b2.onclick(ev);
+  assert.deepEqual(posted.slice(sent3).filter((m) => m.type === "cardNotify"), [{ type: "cardNotify", itemId: "r2", sid: RT, value: false }]);
+  await dispatch(frame([g1, g2, g3]));   // the board back to three
+});

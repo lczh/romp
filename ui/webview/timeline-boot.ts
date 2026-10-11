@@ -65,6 +65,8 @@ export function dispatchFrame(panel: any, m: any): boolean {
   // what the kernel can do for this page, sent on every `ready` (a reconnect re-sends it); and the
   // kernel's answer to an op it does not know — a refusal of that write, and the cap is withdrawn
   if (m.type === "caps" && panel.setCaps) { panel.setCaps(m); return true; }
+  // this kernel's notification switches (the local kernel's frame only): a linked kernel's lane bell follows its master
+  if (m.type === "notifySwitches" && panel.setNotifySwitches) { panel.setNotifySwitches(m); return true; }
   if (m.type === "unknownOp" && panel.unknownOp) { panel.unknownOp(m); return true; }
   // what a session is doing this second (kernel _live_status_frame, 2026-10-08): a thinking stretch makes its lane's
   // working chip read "Thinking · 14s", counted by the view itself
@@ -156,7 +158,9 @@ export function bridgeFunctions(post: Post): Record<string, (...a: any[]) => voi
     // `extra` rides op flags beside the command text — the lane submenu's Latest row sends
     // `{ floating: true }` so the kernel forgets the family's remembered pin
     __rompTimelineSendCommand: (name: string, cmd: string, extra?: Record<string, unknown>) => post({ type: "sendCommand", name, cmd, ...(extra || {}) }),
-    __rompTimelineSetFlag: (id: string, flag: string, value: unknown) => post({ type: "setSessionFlag", id, flag, value: !!value }),
+    // `asGiven`: a linked kernel's bell, stored there as sent (bell-follow.ts); omitted, the message is as it always was
+    __rompTimelineSetFlag: (id: string, flag: string, value: unknown, asGiven?: unknown) =>
+      post(asGiven === true ? { type: "setSessionFlag", id, flag, value: !!value, asGiven: true } : { type: "setSessionFlag", id, flag, value: !!value }),
     // a whole-blob write; `edited` names the tag ids the gesture changed (a lens or order write: none), so
     // the kernel acks a refusal on an untouched tag as ok with the refusal listed
     __rompTimelineSetViews: (views: unknown, writeId?: unknown, edited?: unknown) =>

@@ -45,7 +45,8 @@ test("right-click still opens the labelled menu; both paths land on the ONE setC
   assert.match(SRC, /card\.addEventListener\("contextmenu", \(ev\) => \{\s*\n\s*if \(it\.provisional\) return;/);
   assert.match(SRC, /showCardMenu\(ev, card\);/);
   assert.match(SRC, /function setCardNotify\(card: HTMLElement, it: AskItem, value: boolean\): void \{/);
-  assert.match(SRC, /vscodeApi\?\.postMessage\(\{ type: "cardNotify", itemId: it\.itemId, sid: it\.sid, value \}\)/);
+  // …plus `asGiven` for a linked kernel's card, which that kernel stores as sent (bell-follow.ts)
+  assert.match(SRC, /vscodeApi\?\.postMessage\(\{ type: "cardNotify", itemId: it\.itemId, sid: it\.sid, value, \.\.\.bellClickFields\(String\(it\.sid \|\| ""\), it\) \}\)/);
   assert.match(SRC, /notify\?: boolean \| null;/);   // the kernel echoes the armed state back on the ask
 });
 
@@ -54,11 +55,12 @@ test("optimism is sticky until the kernel confirms, and the click acknowledges i
   assert.match(SRC, /pendingNotify\.set\(it\.itemId, value\);/);
   assert.match(SRC, /paintCardBell\(card, value\);\s*\/\/ acknowledge instantly/);
   // retired the moment the payload agrees (event-based), then whichever value stands renders
-  assert.match(SRC, /if \(pendingNotify\.has\(it\.itemId\) && !!it\.notify === pendingNotify\.get\(it\.itemId\)\) pendingNotify\.delete\(it\.itemId\);/);
+  // the payload's bell as it PAINTS (a linked kernel's resolved against this kernel's master, bell-follow.ts)
+  assert.match(SRC, /if \(pendingNotify\.has\(it\.itemId\) && bellState\(String\(it\.sid \|\| ""\), it\)\.on === pendingNotify\.get\(it\.itemId\)\) pendingNotify\.delete\(it\.itemId\);/);
 });
 
 test("repaints are state-gated so a routine push never churns the svg under a press (click-safety)", () => {
-  assert.match(SRC, /if \(\(btn as any\)\._bellOn === on\) return;/);
+  assert.match(SRC, /if \(\(btn as any\)\._bellOn === on && \(btn as any\)\._bellLegacy === legacy\) return;/);   // the legacy hover is a paint input too
 });
 
 test("a provisional placeholder hides its bell (no stable identity to arm)", () => {

@@ -174,7 +174,8 @@ test("the session bell is a command (the user 2026-09-11): the palette asks the 
   assert.match(RENDER, /\(\) => setSessionFlag\(id, "notify", !onBell\)\);/, "the tab menu's row still writes the same flag");
   // the other column (or browser) learns on the flip: the flags ride the tail frame and the tail handler applies them
   const tail = RENDER.split("function chatTail(msg: any) {")[1].split("\n}")[0];
-  assert.match(tail, /applyFrameFlags\(s, msg, pendingFlags, msg\.id\);/, "the tail's flags land under the click's pending guard (flag-pending.ts, review 2026-09-14)");
+  // (the frame handed over with a linked kernel's bell resolved against this kernel's master: frameBell, bell-follow.ts)
+  assert.match(tail, /applyFrameFlags\(s, frameBell\(msg\.id, msg, [^\n]*\), pendingFlags, msg\.id\);/, "the tail's flags land under the click's pending guard (flag-pending.ts, review 2026-09-14)");
 });
 
 test("palette-main is bundled for the shell page", () => {

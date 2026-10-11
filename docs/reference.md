@@ -7666,8 +7666,11 @@ trusted, the same machines whose sessions that machine's dashboard shows. Its
 kernel asks each linked kernel for its notifications over the link the dashboard
 already uses (`GET /push/events`, a long-poll), so a session on a laptop you
 attached from the always-on box buzzes the phone set up at the box, under the
-box's switches. A session or card you mute is muted on the machine it runs on,
-and its notifications stay there. If the machine the phone is set up on
+box's switches. On the dashboard, a linked machine's session and card bells
+show what reaches the devices set up on the machine you are looking at: a bell
+you set stays as you set it, on that machine, and one you never touched follows
+this machine's main switch. A linked machine running an older romp keeps its own
+switches, and its bells say so when you hover them. If the machine the phone is set up on
 restarts, what the linked machines raised meanwhile arrives when it is back,
 unless it is no longer current: the card was answered or moved on, or the
 session has finished another turn since. If a linked machine's kernel restarts,

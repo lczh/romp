@@ -35,7 +35,8 @@ class TabFlags(unittest.TestCase):
         self.assertIn('msg.get("type") == "setSessionFlag"', text)
         # the value is a checked boolean, never a bool() coercion: bool("false") is True (the string a
         # third-party client sent used to flip the flag ON)
-        self.assertIn('value, ferr = _as_bool(msg.get("value"), "value")', text)
+        # (a null value only beside asGiven on the bell: another kernel's dashboard returning it to its default)
+        self.assertIn('value, ferr = (None, None) if (_as_given and msg.get("value") is None) else _as_bool(msg.get("value"), "value")', text)
         self.assertIn("_set_session_flag(str(msg[\"id\"]), str(msg[\"flag\"]), value)", text)
 
     def test_set_session_flag_round_trips(self):

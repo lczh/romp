@@ -17,7 +17,8 @@ test("the flags ride on the session and are carried across pushes", () => {
 
 test("setSessionFlag posts the same message the timeline lane toggles send, and updates locally", () => {
   assert.match(SRC, /function setSessionFlag\(id: string, flag: "hideFromFeed" \| "postalServiceOff" \| "notify", value: boolean\)/);
-  assert.match(SRC, /vscodeApi\.postMessage\(\{ type: "setSessionFlag", id, flag, value \}\)/);
+  // (…plus `asGiven` for a linked kernel's bell, which that kernel stores as sent: bell-follow.ts)
+  assert.match(SRC, /vscodeApi\.postMessage\(\{ type: "setSessionFlag", id, flag, value, \.\.\.extra \}\)/);
 });
 
 test("the tab menu adds Feed + Mail toggle items with state-dependent labels", () => {
@@ -37,7 +38,7 @@ test("each toggle item carries an icon (slashed when off) and a sub-description"
 
 test("the menu adds the notification bell toggle — inverted polarity: `notify` true is the ENABLED state (the user 2026-07-28)", () => {
   assert.match(SRC, /notify\?: boolean;/);                          // rides Session like the other two flags
-  assert.match(SRC, /notify: \("notify" in msg\) \? !!msg\.notify/);  // absorbed + carried across pushes
+  assert.match(SRC, /notify: \("notify" in msg\) \? !!frameBell\(msg\.id, msg, /);  // absorbed + carried across pushes (a linked kernel's resolved, bell-follow.ts)
   assert.match(SRC, /const onBell = !!\(s && s\.notify\);/);
   // the icon slashes on !onBell (bell OFF), while feed/mail slash on their own off-flags being TRUE
   assert.match(SRC, /toggle\("bell", !onBell,\s*onBell \? "Stop notifying" : "Notify me"/);

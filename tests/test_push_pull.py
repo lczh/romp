@@ -19,7 +19,10 @@ over the row's port and token. What these pin, by layer (the two-kernel run is t
   * the puller — a reset is one loud line; the cursor lands on disk after the gate and survives a restart; an event
     passes the gate once by (row, boot, seq); a refusal is said once;
   * the transition — the legacy forward skips peers that pull, a relay from a kernel this one pulls is ignored, the
-    /version poll lifts the capability, and an event offered both ways reaches the devices once.
+    /version poll lifts the capability, and an event offered both ways reaches the devices once;
+  * bells follow the dashboard — a linked dashboard's click is stored as given (a mute recorded whatever the origin's
+    master says), a local click keeps delete-if-default, the payloads carry the raw override, the switches frame reaches
+    every ready pane, and the hub's gate follows the rules its own sessions follow.
 
 Synthetic only: invented hosts (TESTHOST, boxa, boxb), private placeholder sids, invented text.
 """
@@ -582,6 +585,104 @@ class Transition(_Base):
         self.assertEqual(started, ["boxa"])
         self.assertTrue(km._remote_public(km._remotes["boxa"])["pushPulled"])
         self.assertFalse(km._remote_public(km._remotes["boxb"])["pushPulled"])
+
+
+class BellsFollowTheDashboard(_Base):
+    """The merged dashboard paints a linked kernel's bells against the HUB's switches (bell-follow.ts) and sends a click on
+    one as given; the origin stores it exactly as sent, so an explicit mute is recorded whatever the origin's own master
+    says, and the hub's gate resolves no override against its own switches by the rules its own sessions follow. A click
+    on the origin's own dashboard keeps the delete-if-default rule."""
+
+    def ws(self, msg):
+        sent = []
+        client = {"app": "feed", "wid": "w1", "alive": True, "send": lambda raw: sent.append(json.loads(raw))}
+        with mock.patch.object(km, "_mark_views_dirty"):
+            km.Handler._dispatch_ws(None, msg, client)
+        return sent
+
+    def test_a_remote_click_is_stored_as_given_whatever_this_master_says(self):
+        self.assertFalse(km._notify_all_on(), "the origin's master never set: off")
+        self.assertEqual(self.ws({"type": "cardNotify", "itemId": WEB + ":g1", "sid": WEB, "value": False, "asGiven": True}), [])
+        self.assertIs(km._notify_cards().get(WEB + ":g1"), False, "a mute matching this master is stored all the same")
+        self.ws({"type": "setSessionFlag", "id": API, "flag": "notify", "value": False, "asGiven": True})
+        self.assertIs(km._session_flag_raw(API, "notify"), False)
+        self.ws({"type": "cardNotify", "itemId": WEB + ":g1", "sid": WEB, "value": None, "asGiven": True})
+        self.assertNotIn(WEB + ":g1", km._notify_cards(), "a null as given is the bell returned to its default on purpose")
+        self.ws({"type": "setSessionFlag", "id": API, "flag": "notify", "value": None, "asGiven": True})
+        self.assertIsNone(km._session_flag_raw(API, "notify"))
+
+    def test_a_local_click_keeps_delete_if_default(self):
+        km._set_notify_card(WEB + ":g1", False, WEB)          # matches the master (off): no override, as before
+        self.assertNotIn(WEB + ":g1", km._notify_cards())
+        km._set_notify_session(API, False)
+        self.assertIsNone(km._session_flag_raw(API, "notify"))
+        km._set_notify_card(WEB + ":g1", True, WEB)
+        self.assertIs(km._notify_cards().get(WEB + ":g1"), True)
+        self.ws({"type": "cardNotify", "itemId": WEB + ":g1", "sid": WEB, "value": None})
+        self.assertNotIn(WEB + ":g1", km._notify_cards(),
+                         "without asGiven a null keeps its old meaning (absent, so false), judged against this master: deleted")
+
+    def test_the_users_scenario_a_mute_stops_the_buzz_and_an_arm_buzzes(self):
+        # the hub's master on, the origin's never set. The merged dashboard paints the card on (no override, the hub's
+        # master); a click to off arrives as given and is stored; the card's next entry is no candidate, so nothing
+        # reaches the hub. A click to on is stored as an arm, and the hub buzzes for it.
+        self.ws({"type": "setSessionFlag", "id": WEB, "flag": "notify", "value": False, "asGiven": True})
+        self.block()
+        self.assertEqual(self.ring(), [], "muted on the origin: the event never leaves it")
+        km._NOTIFY_PREV[0] = None
+        self.ws({"type": "setSessionFlag", "id": WEB, "flag": "notify", "value": True, "asGiven": True})
+        self.block()
+        (ev,) = self.ring()
+        self.assertEqual(ev["bell"], "on")
+        _row()
+        with mock.patch.object(km, "_notify_all_on", return_value=True), mock.patch.object(km, "_push_notify") as pn:
+            km._push_pull_gate(ROW, [dict(ev)])
+        self.assertEqual(pn.call_count, 1, "the hub buzzes")
+
+    def test_the_hub_gate_follows_the_rules_its_own_sessions_follow(self):
+        _row()
+        card = {"seq": 1, "kind": "card", "sid": WEB, "title": "t", "body": "b", "name": "web", "cardId": WEB + ":g1",
+                "bell": "on", "turnKey": 0}
+        turn = {"seq": 2, "kind": "turn", "sid": API, "title": "t", "body": "b", "name": "api", "cardId": None,
+                "bell": "on", "turnKey": 1001}
+        with mock.patch.object(km, "_push_notify") as pn, contextlib.redirect_stderr(io.StringIO()):
+            km._push_pull_gate(ROW, [card, turn, dict(card, seq=3, bell="default", cardId=WEB + ":g2")])
+        self.assertEqual([c[1]["card_id"] for c in pn.call_args_list], [WEB + ":g1"],
+                         "master off: an armed card buzzes (a card's override beats the master, as on a local card); a turn "
+                         "end needs the master, and a card with no override follows it")
+
+    def test_the_payloads_carry_the_override_alone(self):
+        import inspect
+        self.assertIn('"notifyRaw": _session_flag_raw(sid, "notify")', inspect.getsource(km.build_session))
+        self.assertIn('_a["notifyRaw"] = _push_explicit_bell(str(_a.get("sid") or ""), _a["itemId"], _ncards)', inspect.getsource(km.build_feed))
+        self.assertIn('"notifyRaw": _session_flag_raw(sid, "notify")})', inspect.getsource(km.build_timeline))
+        src = open(os.path.join(BIN, "romp-kernel")).read()
+        self.assertEqual(src.count('"notifyRaw": m.get("notifyRaw")}'), 2, "both chat tails carry it")
+        key = json.loads(km._chat_view_key({"notify": True, "notifyRaw": None}, 1))
+        self.assertNotEqual(key, json.loads(km._chat_view_key({"notify": True, "notifyRaw": True}, 1)),
+                            "an override-only change (the effective value unchanged) still moves the view, so a tail goes")
+
+    def test_the_switches_frame_reaches_every_ready_pane_at_ready_and_on_a_flip(self):
+        self.assertEqual(km._notify_switches_frame(), {"type": "notifySwitches", "all": False, "turns": False})
+        sent = []
+        ready = {"app": "feed", "ready": True, "send": None}
+        early = {"app": "chat", "send": None}
+        with km._clients_lock:
+            saved = list(km._clients)
+            km._clients[:] = [ready, early]
+        try:
+            with mock.patch.object(km, "_client_send", side_effect=lambda c, raw, key=None: sent.append((c["app"], json.loads(raw)))):
+                st, raw = _serve("POST", "/notify-all", {"on": True})
+        finally:
+            with km._clients_lock:
+                km._clients[:] = saved
+        self.assertEqual(st, 200)
+        self.assertIn(("feed", {"type": "notifySwitches", "all": True, "turns": False}), sent)
+        self.assertNotIn("chat", [a for a, _ in sent], "a socket still connecting gets it at its own ready, after its pushes")
+        import inspect
+        src = inspect.getsource(km.Handler._dispatch_ws)
+        self.assertLess(src.index("_send_caps(client, views_seq=views_seq)"), src.index("_send_notify_switches(client)"),
+                        "at ready, after caps")
 
 
 if __name__ == "__main__":
