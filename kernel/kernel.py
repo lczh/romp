@@ -69550,16 +69550,19 @@ def _push_wire(d, sub):
     return json.dumps(d).encode()
 
 
-def _push_notify(title, body, sid="", badge=None, kind="card", card_id="", host="", quiet=False, name=""):
+def _push_notify(title, body, sid="", badge=None, kind="card", card_id="", host="", quiet=False, name="", endpoints=None):
     """_system_notify's sibling sink: the same (title, body) — the card's gist and nothing more —
     to every subscribed device, plus the ROUTING metadata _push_payload documents: sid, so
     tapping the notification lands on the session that fired (the user 2026-08-08); badge, the
     needs-you count for the app icon (None omits it — the mirrored federated shape,
     plans/federated-push.md); and kind/card_id/host, so the tap can also scroll the feed to the
-    card and name the origin of a relayed event. Runs on the pusher thread, so all network work
-    moves to a daemon thread and this never blocks or
+    card and name the origin of a relayed event. `endpoints` narrows the fan-out to those devices (a
+    gap's summary is said per device: _push_gap_close); None is every one. Runs on the pusher thread,
+    so all network work moves to a daemon thread and this never blocks or
     raises."""
     subs = _push_subs()
+    if endpoints is not None:
+        subs = {ep: sub for ep, sub in subs.items() if ep in endpoints}
     if not subs:
         return
     if not _push_crypto():
@@ -69829,10 +69832,12 @@ _PUSH_RELAY_IGNORED_SAID = set()     # origins whose relays this kernel ignored 
 # all when nothing would have passed. When the count cannot be known (a restart or an overflow lost the events) the
 # summary says notifications may have been missed, without a number, and only if anything could have passed
 # (_push_gap_could_pass: an explicit "on" bell on the row's kernel, this kernel's master and turn switch both on, or this
-# master on while the row's kernel detects card events at all). A summary already said for a row and not yet seen by the
-# user takes in the next gaps quietly (the same notification, updated without a sound) until the user brings a
-# subscribed page forward (/push/pending) or the row delivers a notification normally again (_PUSH_GAP_TOLD), so a
-# crash-looping kernel buzzes once, not at every restart. Times are said as durations, never clock times: the kernel's
+# master on while the row's kernel detects card events at all). The summary is said PER DEVICE (_PUSH_GAP_TOLD): a
+# device already holding an unseen summary for the row takes in the next gaps quietly (the same notification, updated
+# without a sound; an Apple device, which cannot replace one in place, is sent nothing and the fold waits for its next
+# summary: _push_tag_replaces) until a page holding THAT device's subscription comes forward (/push/pending) or the row
+# delivers a notification normally again, so a crash-looping kernel buzzes each device once, not at every restart, and a
+# desktop browser's focus re-arms no phone. Times are said as durations, never clock times: the kernel's
 # clock zone is not the user's. A gap opens on the event that proves it (a failed call,
 # a reset answer, this life's first answer while holding a cursor), stays open across further failures (a flapping link
 # makes one summary, not one per flap), and closes on the first answer that found the puller caught up (protocol 2's
@@ -69843,7 +69848,7 @@ MISSED_TITLE_NAME = "missed notifications"   # the summary's title: _notify_titl
 _PUSH_GAPS = {}                      # row name -> its open gap (_push_gap_open); only that row's puller thread touches it
 _PUSH_PULL_ANSWERED = set()          # rows that have answered this kernel life (the first answer after a restart opens a gap)
 _PUSH_PULL_LAST_OK = {}              # row name -> when it last answered, this life (an outage's window starts there)
-_PUSH_GAP_TOLD = {}                  # row name -> the summary said for it and not yet seen (_push_gap_close), under _push_pull_lock
+_PUSH_GAP_TOLD = {}                  # row name -> {endpoint -> {said, owed}}: what each device holds unseen (_push_gap_close), under _push_pull_lock
 
 
 def _push_pull_cursors_path():
@@ -70039,8 +70044,7 @@ def _push_pull_once(name, r):
         if _push_pull_gate(name, fresh, boot=boot) and gap is None:
             # a notification delivered normally, outside any gap: the row is steady again, so the next gap's summary is
             # news and sounds (the coalescing above)
-            with _push_pull_lock:
-                _PUSH_GAP_TOLD.pop(name, None)
+            _push_gap_rearm(name)
     _push_pull_cursor_set(name, "%s:%d" % (boot, nxt))
     _PUSH_PULL_LAST_OK[name] = now
     return True
@@ -70191,12 +70195,33 @@ def _push_gap_summary(name, rec):
     return "%s · %s" % (head, counts or "notifications may have been missed")
 
 
+def _push_tag_replaces(endpoint):
+    """Does the device behind `endpoint` put a new notification IN PLACE of a shown one wearing the same tag? Chrome and
+    Firefox do (the Notifications API's tag rule). Apple's user agents do not, by WebKit's own source (read 2026-10-11; not
+    tried on a device): webpushd's WebPushDaemon::showNotification (Source/WebKit/webpushd/WebPushDaemon.mm), which
+    displays every iOS web-app notification, declarative or shown by a worker, files it as a UNNotificationRequest whose
+    identifier is that notification's own fresh UUID (a declarative message's is minted per push by
+    WebPushMessage::notificationPayloadToCoreData), and reads the tag only to filter getNotifications, so a same-tag
+    notification lands BESIDE the old one. `silent` is honoured there (platformShouldPlaySound), so a quiet update would
+    arrive without a sound, but as a second notification lighting the lock screen again. The worker could close the old
+    one itself (getNotifications({tag}) then close() in the mutable push event, which runs before the user agent displays
+    the new one), but Notification::close refuses a persistent notification younger than 30 s
+    (s_persistentNotificationMinimumLifetime), and a crash loop's summaries can come closer together than that (the
+    pull's long-poll is 20 s), so it would fail exactly when it matters. Hence no update is sent to an Apple device: the
+    fold waits on the hub for its next summary (_push_gap_close). By the endpoint's host (_push_apple_endpoint), never a
+    user-agent guess."""
+    return not _push_apple_endpoint(endpoint)
+
+
 def _push_gap_close(name):
     """Close row `name`'s gap: one summary notification when anything it missed could have reached the devices here,
-    else only a log line. The trust is re-read now, like the gate's. A summary already said for this row and not yet seen
-    takes this gap in: the same notification (its tag) is replaced, quietly, never a second sound (_PUSH_GAP_TOLD). The
-    gap is forgotten only once the summary has gone out: a push that raises leaves it open, and the next caught-up answer
-    says it."""
+    else only a log line. The trust is re-read now, like the gate's. Said PER DEVICE (_PUSH_GAP_TOLD, row -> endpoint ->
+    {said, owed}): `said` is the record of the summary the device holds unseen, `owed` what it was never shown. A device
+    holding none hears this gap with a sound, together with anything it is owed. A device holding one takes this gap in:
+    its notification (the summary's tag) is replaced, quietly, never a second sound; or, on a device that cannot replace
+    one in place (_push_tag_replaces: Apple's), nothing is sent and the gap is folded into what it is owed, for its next
+    summary to say: kept, never dropped. The gap is forgotten only once the summaries have gone out: a push that raises
+    leaves it open, and the next caught-up answer says it."""
     g = _PUSH_GAPS.get(name)
     if g is None:
         return False
@@ -70207,26 +70232,82 @@ def _push_gap_close(name):
         sys.stderr.write("romp: web push: '%s' is back after a gap (%s); nothing it may have missed would have reached the "
                          "devices here, so no notification\n" % (name, ", ".join(sorted(g["why"]))))
         return False
-    with _push_pull_lock:
-        prev = _PUSH_GAP_TOLD.get(name)
-    told = _push_gap_merge(prev, rec) if prev is not None else rec
-    body = _push_gap_summary(name, told)
-    _push_notify(_notify_title(MISSED_TITLE_NAME), body, "", kind="missed", host=name, quiet=prev is not None)
-    with _push_pull_lock:
-        _PUSH_GAP_TOLD[name] = told
+    subs = _push_subs()
+    plan = {}                                            # (body, quiet) -> the devices it goes to, in endpoint order
+    held = 0
+    with _push_pull_lock:                                # decided and recorded in one hold: a device's page coming forward
+        prev = _PUSH_GAP_TOLD.get(name)                  # meanwhile is never overwritten by a decision made before it
+        told = {}
+        for ep in sorted(subs):
+            st = (prev or {}).get(ep) or {"said": None, "owed": None}
+            if st["said"] is None:
+                said = _push_gap_merge(st["owed"], rec) if st["owed"] else rec
+                told[ep] = {"said": said, "owed": None}
+                plan.setdefault((_push_gap_summary(name, said), False), []).append(ep)
+            elif _push_tag_replaces(ep):
+                said = _push_gap_merge(st["said"], rec)
+                told[ep] = {"said": said, "owed": None}
+                plan.setdefault((_push_gap_summary(name, said), True), []).append(ep)
+            else:
+                told[ep] = {"said": st["said"], "owed": _push_gap_merge(st["owed"], rec) if st["owed"] else rec}
+                held += 1
+        if told:
+            _PUSH_GAP_TOLD[name] = told                  # a device no longer subscribed leaves with this
+        else:
+            _PUSH_GAP_TOLD.pop(name, None)
+    try:
+        for (body, quiet), eps in plan.items():
+            _push_notify(_notify_title(MISSED_TITLE_NAME), body, "", kind="missed", host=name, quiet=quiet,
+                         endpoints=tuple(eps))
+    except Exception:
+        with _push_pull_lock:
+            if _PUSH_GAP_TOLD.get(name) is told:
+                if prev is None:
+                    _PUSH_GAP_TOLD.pop(name, None)
+                else:
+                    _PUSH_GAP_TOLD[name] = prev
+        raise
     _PUSH_GAPS.pop(name, None)
+    n_loud = sum(len(eps) for (_, q), eps in plan.items() if not q)
+    n_quiet = sum(len(eps) for (_, q), eps in plan.items() if q)
+    lead = ("said in one notification" if n_loud else "folded into the summary not yet seen, updated without a sound"
+            if n_quiet else "held for the next summary" if held else "said to no device (none subscribed)")
+    per = (["%d device(s) with a sound" % n_loud] if n_loud else []) + (
+        ["%d updated without a sound" % n_quiet] if n_quiet else []) + (
+        ["%d held for their next summary (they cannot replace a notification in place)" % held] if held else [])
     sys.stderr.write("romp: web push: '%s' is back after a gap (%s); %s, none of the missed events delivered one by one: "
-                     "%s\n" % (name, ", ".join(sorted(g["why"])),
-                               "folded into the summary not yet seen, updated without a sound" if prev is not None
-                               else "said in one notification", body))
+                     "%s%s\n" % (name, ", ".join(sorted(g["why"])), lead,
+                                 " | ".join(body for body, _ in plan) or _push_gap_summary(name, rec),
+                                 (" [%s]" % "; ".join(per)) if per else ""))
     return True
 
 
-def _push_gap_seen():
-    """A page holding a device subscription came forward (its GET /push/pending, asked on every load, show and focus): the
-    user has the dashboard in front of them, so every summary said so far has been seen, and the next gap's sounds."""
+def _push_gap_rearm(name):
+    """Row `name` delivered a notification normally, outside any gap: steady again, so its next gap's summary is news on
+    every device and sounds. What a device was never shown (`owed`) stays, for that summary to carry."""
     with _push_pull_lock:
-        _PUSH_GAP_TOLD.clear()
+        per = _PUSH_GAP_TOLD.get(name)
+        if not per:
+            return
+        kept = {ep: {"said": None, "owed": st["owed"]} for ep, st in per.items() if st.get("owed")}
+        if kept:
+            _PUSH_GAP_TOLD[name] = kept
+        else:
+            _PUSH_GAP_TOLD.pop(name, None)
+
+
+def _push_gap_seen(endpoint):
+    """A page holding the subscription `endpoint` came forward (its GET /push/pending, asked on every load, show and
+    focus): the user has the dashboard in front of them on THAT device, so every summary it holds, and anything it was
+    owed, is seen, and its next gap sounds. Every other device keeps its own state: a desktop browser's focus re-arms no
+    phone (the review of #220)."""
+    endpoint = str(endpoint or "")
+    with _push_pull_lock:
+        for name in list(_PUSH_GAP_TOLD):
+            per = _PUSH_GAP_TOLD[name]
+            per.pop(endpoint, None)
+            if not per:
+                _PUSH_GAP_TOLD.pop(name, None)
 
 
 def _push_pull_gate(name, events, boot=None):
@@ -82256,7 +82337,7 @@ class Handler(BaseHTTPRequestHandler):
                 # the origin backfill (2026-09-10; _push_backfill_origin): this request names the device's own
                 # subscription and states where its page runs (its Referer — a same-origin GET carries no Origin)
                 _push_backfill_origin(_pep, _request_page_origin(self.headers))
-                _push_gap_seen()                         # the dashboard is in front of the user: summaries said so far are seen
+                _push_gap_seen(_pep)                     # the dashboard is in front of the user on THIS device: its summaries are seen
                 return self._send(200, json.dumps(_push_pending(_pep)), "application/json", cache="no-cache")
             if p.startswith("/pane/"):
                 # a STATE-ROOT pane's page (plans/panes-as-data.md, section 3): /pane/<id>/ serves STATE/panes/<id>/index.html,

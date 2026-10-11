@@ -569,13 +569,29 @@ class GapPolicy(_Base):
     when nothing could have passed. A flapping link makes one summary: the gap closes only on an answer that found the
     puller caught up."""
 
+    EP = "https://push.example.net/send/desk"           # a browser that replaces a notification by its tag (FCM, Mozilla)
+    LAPTOP = "https://push.example.net/send/laptop"     # another such browser
+    PHONE = "https://web.push.apple.com/TESTPHONE0000"  # an iPhone's Home Screen app: Apple's push service, WebKit's webpushd
+
     def setUp(self):
         super().setUp()
         _row()
         km._set_notify_all(True)
         km._set_notify_turns(True)
+        self.subscribe(self.EP)
         self.pushed = []
         self.err = io.StringIO()
+
+    def subscribe(self, *eps):
+        km._save_push_subs({ep: {"endpoint": ep, "keys": {"p256dh": "k", "auth": "a"}} for ep in eps})
+
+    def sent(self):
+        """Each summary as (device, body, quiet), once per device it went to, in the order sent."""
+        return [(ep, a[1], k.get("quiet", False)) for a, k in self.summaries() for ep in k.get("endpoints", ())]
+
+    def comes_forward(self, ep):
+        """A page holding the subscription `ep` comes forward: its GET /push/pending, asked on every load, show and focus."""
+        _serve("GET", "/push/pending?endpoint=" + quote(ep, safe=""))
 
     def once(self, answer):
         with mock.patch.object(km, "_push_pull_get", return_value=answer), \
@@ -642,7 +658,8 @@ class GapPolicy(_Base):
         ((args, kw),) = self.pushed
         self.assertEqual(args, ("Romp: missed notifications", "TESTHOST was unreachable for 38 min · 3 sessions finished "
                                 "turns, 1 needs you", ""), "a duration, never a clock time in the kernel's zone")
-        self.assertEqual(kw, {"kind": "missed", "host": ROW, "quiet": False}, "sid-less: a tap opens the dashboard; it sounds")
+        self.assertEqual(kw, {"kind": "missed", "host": ROW, "quiet": False, "endpoints": (self.EP,)},
+                         "sid-less: a tap opens the dashboard; it sounds")
         self.once(self.answer([self.turn(API)], caught=True))
         self.assertEqual([k["kind"] for _, k in self.pushed], ["missed", "turn"], "then each event as it arrives again")
 
@@ -678,7 +695,7 @@ class GapPolicy(_Base):
         self.once(self.answer(caught=True, boot="78.2"))
         self.assertEqual([a[1] for a, _ in self.summaries()], ["TESTHOST restarted · notifications may have been missed"])
         # nothing could have passed (this master off, no explicit on over there): no buzz
-        km._push_gap_seen()
+        km._push_gap_seen(self.EP)
         km._set_notify_all(False)
         self.pushed.clear()
         self.once((200, {"boot": "79.3", "next": 1, "events": [], "reset": "restarted", "skipped": 1, "bellsOn": False}))
@@ -711,7 +728,7 @@ class GapPolicy(_Base):
                                   ("an explicit on over there", {"bells": True}, (False, False)),
                                   ("turn ends by default: this master and turn switch on", {}, (True, True))):
             with self.subTest(why):
-                km._push_gap_seen()
+                km._push_gap_seen(self.EP)
                 km._set_notify_all(switches[0])
                 km._set_notify_turns(switches[1])
                 self.pushed.clear()
@@ -720,7 +737,7 @@ class GapPolicy(_Base):
                 self.once(self.restarted(boot, **kw))
                 self.once(self.answer(caught=True, boot=boot))
                 self.assertEqual([a[1] for a, _ in self.summaries()], ["TESTHOST restarted · notifications may have been missed"])
-        km._push_gap_seen()
+        km._push_gap_seen(self.EP)
         km._set_notify_all(False)
         km._set_notify_turns(True)                           # the turn switch alone passes nothing: turn ends need the master
         self.pushed.clear()
@@ -740,7 +757,7 @@ class GapPolicy(_Base):
                          "one sound; the same notification (its tag) updated without one after")
         self.assertIn("folded into the summary not yet seen, updated without a sound", self.err.getvalue())
         # the user brings a subscribed page forward (its GET /push/pending): seen, so the next restart is news
-        _serve("GET", "/push/pending?endpoint=" + quote("https://push.example/abc", safe=""))
+        self.comes_forward(self.EP)
         self.pushed.clear()
         self.once(self.restarted("84.1"))
         self.once(self.answer(caught=True, boot="84.1"))
@@ -752,6 +769,93 @@ class GapPolicy(_Base):
         self.once(self.restarted("85.1"))
         self.once(self.answer(caught=True, boot="85.1"))
         self.assertEqual([k.get("quiet", False) for _, k in self.summaries()], [False])
+
+    def test_a_device_coming_forward_re_arms_its_own_summary_only(self):
+        # the review of #220: one device's page asking /push/pending (a desktop browser asks on every focus) re-armed the
+        # summary for every device, so a crash loop buzzed the phone at every restart while the user sat at the desktop
+        self.subscribe(self.EP, self.LAPTOP, self.PHONE)
+        self.steady()
+        self.once(self.restarted("81.1"))
+        self.once(self.answer(caught=True, boot="81.1"))
+        self.comes_forward(self.EP)
+        self.pushed.clear()
+        self.once(self.restarted("82.1"))
+        self.once(self.answer(caught=True, boot="82.1"))
+        self.assertEqual(self.sent(), [(self.EP, "TESTHOST restarted · notifications may have been missed", False),
+                                       (self.LAPTOP, "TESTHOST restarted 2 times · notifications may have been missed", True)],
+                         "the device that saw the dashboard hears the next one; the others still hold theirs unseen")
+        self.comes_forward("https://push.example.net/send/never-subscribed")   # no such device: re-arms nothing
+        self.pushed.clear()
+        self.once(self.restarted("83.1"))
+        self.once(self.answer(caught=True, boot="83.1"))
+        self.assertEqual([(ep, q) for ep, _, q in self.sent()], [(self.EP, True), (self.LAPTOP, True)],
+                         "every device holds an unseen summary; the phone's share waits on the hub")
+
+    def test_an_iphone_is_never_sent_an_update_it_would_add_beside_the_summary(self):
+        # WebKit's webpushd files every notification under its own fresh id, never under its tag, so on an iPhone an
+        # "update" is a second notification lighting the lock screen again (silent, but there). The devices that replace
+        # by tag get the quiet update; the iPhone's share is folded on the hub and said by the next summary it is sent
+        self.subscribe(self.EP, self.PHONE)
+        self.steady()
+        for i in range(3):
+            self.once(self.restarted("8%d.1" % i))
+            self.once(self.answer(caught=True, boot="8%d.1" % i))
+        self.assertEqual(self.sent(), [(self.EP, "TESTHOST restarted · notifications may have been missed", False),
+                                       (self.PHONE, "TESTHOST restarted · notifications may have been missed", False),
+                                       (self.EP, "TESTHOST restarted 2 times · notifications may have been missed", True),
+                                       (self.EP, "TESTHOST restarted 3 times · notifications may have been missed", True)])
+        self.assertIn("[1 updated without a sound; 1 held for their next summary (they cannot replace a notification in "
+                      "place)]", self.err.getvalue())
+        # real missed turn ends while the phone's summary is unseen (perhaps swiped away): folded into its count, not dropped
+        self.drop()
+        self.once(self.answer([self.turn(API), self.turn(WEB)], boot="82.1"))
+        self.once(self.answer(caught=True, boot="82.1"))
+        self.assertEqual(self.sent()[4:], [(self.EP, "TESTHOST restarted 3 times · 2 sessions finished turns; more may have "
+                                            "been missed", True)])
+        self.once(self.answer([self.turn(API)], caught=True, boot="82.1"))   # the row delivers normally: steady, re-armed
+        self.pushed.clear()
+        self.once(self.restarted("83.1"))
+        self.once(self.answer(caught=True, boot="83.1"))
+        self.assertEqual(self.sent(), [(self.EP, "TESTHOST restarted · notifications may have been missed", False),
+                                       (self.PHONE, "TESTHOST restarted 3 times · 2 sessions finished turns; more may have "
+                                        "been missed", False)],
+                         "the phone's next summary sounds and carries what it was never shown")
+        self.comes_forward(self.PHONE)                       # the dashboard is in front of the user on the phone
+        self.pushed.clear()
+        self.once(self.restarted("84.1"))
+        self.once(self.answer(caught=True, boot="84.1"))
+        self.assertEqual(self.sent(), [(self.EP, "TESTHOST restarted 2 times · notifications may have been missed", True),
+                                       (self.PHONE, "TESTHOST restarted · notifications may have been missed", False)])
+
+    def test_the_fan_out_reaches_only_the_devices_named(self):
+        self.subscribe(self.EP, self.LAPTOP, self.PHONE)
+        seen, done = [], threading.Event()
+
+        def fake_send(sub, payload):
+            seen.append(sub["endpoint"])
+            if sub["endpoint"] == self.LAPTOP:
+                done.set()
+            return True
+
+        with mock.patch.object(km, "_push_send_one", side_effect=fake_send), \
+             mock.patch.object(km, "_push_crypto", return_value=True):
+            km._push_notify("Romp: missed notifications", "TESTHOST restarted", "", kind="missed", host=ROW,
+                            endpoints=(self.LAPTOP,))
+            self.assertTrue(done.wait(5), "the send thread ran")
+        self.assertEqual(seen, [self.LAPTOP], "the store is read in key order, so an unfiltered fan-out reaches desk first")
+
+    def test_an_origin_that_does_not_say_cards_on_counts_as_detecting_cards(self):
+        # the safe side: an origin built before cardsOn (protocol 2's first build) may detect cards, so with this master on
+        # its restart could have lost one, and the summary says so; cardsOn false says nothing (the test above)
+        km._set_notify_turns(False)
+        self.steady()
+        st, r = self.restarted("78.2")
+        r.pop("cardsOn")
+        self.once((st, r))
+        st, a = self.answer(caught=True, boot="78.2")
+        a.pop("cardsOn")
+        self.once((st, a))
+        self.assertEqual([x[1] for x, _ in self.summaries()], ["TESTHOST restarted · notifications may have been missed"])
 
     def test_the_cap_note_and_the_summary_wear_different_tags(self):
         cap = km._push_payload("Romp: more notifications", "b", "", kind="more", host=ROW)

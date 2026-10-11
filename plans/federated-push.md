@@ -219,13 +219,39 @@ both, for every gap this kernel knows of:
   feed is not built and no card enters a notified column). Otherwise only a log line. (The first cut
   said it whenever this kernel's master was on, so with the turn switch off, no bell set and Task
   tracking off over there, every restart of the linked kernel, which is every deploy, buzzed for
-  nothing. The review reproduced it, 2026-10-11.)
-- **A summary not yet seen takes in the next gaps quietly.** Once a summary has gone out for a row,
-  the next gaps from that row fold into it: the same notification (its tag) is replaced with the
-  merged counts and reasons ("TESTHOST restarted 3 times · …"), without a sound, so a crash-looping
-  kernel buzzes once, not at every restart. The fold ends on one of two events: the user brings a page
-  holding a device subscription forward (its `GET /push/pending`, asked on every load, show and focus),
-  or the row delivers a notification normally, outside any gap. The next gap after either sounds.
+  nothing. The review reproduced it, 2026-10-11.) The rule is about what COULD have been lost, so a
+  linked machine that detects cards (a laptop with Task tracking on) makes a "may have been missed"
+  summary at each of its restarts, every deploy included, once the hub pulls from it and while the
+  hub's master is on: correct, since a card could have entered a notified column in the life that
+  ended. The fold below keeps a run of them to one sound per device. (A missing `cardsOn`, from an
+  origin built before it, counts as on: the safe side, pinned by a test.)
+- **A summary not yet seen takes in the next gaps quietly, per device.** Once a summary has gone out
+  for a row, the next gaps from that row fold into it on each device that holds it unseen: the same
+  notification (its tag) is replaced with the merged counts and reasons ("TESTHOST restarted 3 times ·
+  …"), without a sound, so a crash-looping kernel buzzes each device once, not at every restart. Each
+  device has its own state (`_PUSH_GAP_TOLD`, row, then endpoint): the fold ends for a device when a
+  page holding ITS subscription comes forward (its `GET /push/pending`, asked on every load, show and
+  focus), and for every device when the row delivers a notification normally, outside any gap. The
+  next gap after either sounds on that device. (The first cut kept one state for all devices, so a
+  desktop browser's subscription, whose page asks on every focus, re-armed the phone too, and a crash
+  loop buzzed the phone at every restart while the user sat at the desktop. The review of #220.)
+- **An iPhone is never sent the quiet update.** On Apple's user agents a same-tag notification lands
+  beside the old one, not in its place, so the update would leave one buzzed summary plus a silent
+  extra per restart, each lighting the lock screen. The evidence is WebKit's open source, read
+  2026-10-11 and not tried on a device: webpushd's `WebPushDaemon::showNotification`
+  (`Source/WebKit/webpushd/WebPushDaemon.mm`), which displays every iOS web-app notification,
+  declarative or shown by a worker, files each as a `UNNotificationRequest` whose identifier is that
+  notification's own fresh UUID (a declarative message's is minted per push in
+  `WebPushMessage::notificationPayloadToCoreData`); the tag is read only to filter
+  `getNotifications`. `silent` is honoured (`platformShouldPlaySound`). The worker could close the
+  old one itself (`getNotifications({tag})`, then `close()` in the mutable push event, which runs
+  before the user agent displays the new notification), but `Notification::close` refuses a
+  persistent notification younger than 30 s (`s_persistentNotificationMinimumLifetime`), and a crash
+  loop's summaries can come closer together than that (the pull's long-poll is 20 s). So a device
+  whose endpoint is Apple's (`_push_tag_replaces`) is sent nothing while it holds an unseen summary:
+  the gap is folded on the hub into what that device is owed, never dropped, and the next summary it
+  is sent (after the row delivers normally, it sounds) carries it, unless its page comes forward
+  first, when the dashboard does.
 - **One summary per gap, however the link flaps.** A gap opens on the event that proves it: a failed
   call (`unreachable`), a reset answer (`restarted`, `overflow`), this kernel's first answer of a life
   while holding a cursor (`hub`: it restarted). It stays open across further failures and closes only
