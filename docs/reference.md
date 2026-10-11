@@ -7699,9 +7699,11 @@ something they allow could have been lost; when nothing could have, there is no
 notification, only a line in the kernel's log. A link that drops and comes back
 several times makes one such notification, sent once it holds again, and a
 machine that keeps restarting updates that one notification without a sound
-("restarted 3 times") until you open Romp or its notifications flow normally
-again. In one burst, at most 16 notifications arrive one by one; the rest are
-said in one more.
+("restarted 3 times") until you open Romp on that device or its notifications
+flow normally again. Apple devices are not sent those updates, since an iPhone
+cannot replace a notification in place: what one missed is said by the next such
+notification it gets, or by Romp when you open it there. In one burst, at most 16 notifications arrive
+one by one; the rest are said in one more.
 
 Tapping a notification brings Romp forward on the session it was about. On an
 iPhone with the app already open in the background, the switch happens as the
