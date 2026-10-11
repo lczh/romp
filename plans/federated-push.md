@@ -118,8 +118,13 @@ the self-declared name, which broke when the hub knew the host under a different
 - **The hub owns the one-buzz-per-turn-end rule**, keyed on its own row name, the sid and the
   origin's turn-end key: `_buzz_claim` on the prefixed sid, with the turn key every candidate
   carries. A turn end and the card it raises buzz once between them, whichever arrives first; a card
-  that yields replaces the turn notification quietly (the per-session tag). This removes the latent
-  bug above, because the origin's own claim no longer decides what leaves it.
+  that yields is sent quietly, and takes the turn notification's place where the user agent honours
+  the per-session tag (Chrome, Firefox). Apple's does not (the iPhone item under "Gaps" has the
+  evidence): there it would land beside the turn's as a second, silent notification, and a pulled
+  card carries no badge (the origin's count is not ours), so an Apple device is not sent it. A quiet
+  push goes to an Apple device only when it carries the badge, the count a closed app learns only from
+  a push: the hub's own card after its own turn end (`_push_notify`; the review of #221). This removes
+  the latent bug above, because the origin's own claim no longer decides what leaves it.
 
 **Announced when offered** (a change the pull made to the once-per-(card, column) rule, not in the
 original sketch). An announcement is the card ENTERING the column, offered to the origin's devices
@@ -251,7 +256,22 @@ both, for every gap this kernel knows of:
   whose endpoint is Apple's (`_push_tag_replaces`) is sent nothing while it holds an unseen summary:
   the gap is folded on the hub into what that device is owed, never dropped, and the next summary it
   is sent (after the row delivers normally, it sounds) carries it, unless its page comes forward
-  first, when the dashboard does.
+  first, when the dashboard does: the `GET /push/pending` answer carries it as `missed` (the page asks
+  with `missed=1`, so a page from an older build, which would drop the words, re-arms its device and
+  leaves the share owed), and the page puts each in the Log as a **missed** entry, without a sound.
+  (The first cut cleared it when the page came forward, unsaid, and a phone whose next notification
+  came normally held its count until another gap that might never come. The review of #221.)
+- **What each device holds survives a restart of the hub.** `_PUSH_GAP_TOLD` is written to
+  `STATE/push-gap-told.json` (0600: its keys are endpoints, capability URLs) at every change and read
+  at the first touch of a life, so a restart, which every deploy is, neither drops what a device is
+  owed nor makes a summary it still holds unseen sound again. A device that unsubscribes, or whose
+  push service says it is gone, takes its record with it. (The first cut kept it in memory. The
+  review of #221.)
+- **The same fact on the push ledger.** A shown ack supersedes the older rows for the same session on
+  that device because the show replaced their notifications; on an Apple device it did not, and
+  superseding there made a tap on the older notification land nothing (its row was gone, the newer
+  one still on the screen). An Apple device supersedes nothing, at the kernel or at the page (the
+  `/push/pending` answer's `replaces`).
 - **One summary per gap, however the link flaps.** A gap opens on the event that proves it: a failed
   call (`unreachable`), a reset answer (`restarted`, `overflow`), this kernel's first answer of a life
   while holding a cursor (`hub`: it restarted). It stays open across further failures and closes only
