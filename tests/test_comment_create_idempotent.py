@@ -136,6 +136,11 @@ class _Harness(unittest.TestCase):
         self.client = {"send": lambda s: self.sent.append(json.loads(s)), "app": "chat"}
 
     def tearDown(self):
+        # …and they end empty too (review of PR 211, 2026-10-11): a drop no fake pane acknowledged stays on offer, and every
+        # module in the run shares this kernel, so another module's pane saying ready would be handed this test's dialog
+        with km._create_lock:
+            km._recent_creates.clear(); km._inflight_creates.clear(); km._parked_creates.clear()
+            km._dropped_creates.clear()
         (km._sdk, km.Sessions.backend_for, km._sdk_ready, km._sessions, km._reveal_chat_for,
          km._push_session_now, km._live_map, km._kernel_knows, km._comment_create_spawn) = self._saved_fns
         km.NAMES = self._saved_km_names
@@ -614,6 +619,204 @@ class ParkEndsInAnAnswer(_Harness):
         self._create(uuid="a9", create_id="g-unheard", text=WORDS)
         self.assertEqual([f["type"] for f in self.sent], ["commentCreateFailed"], "shown once")
         self.assertEqual(self._rows(), [])
+
+
+class _Pane(dict):
+    """A connected pane as the kernel holds it: its socket's frames land in `got`. `ok=False` is a socket whose sends fail."""
+    def __init__(self, app="chat", active=PARENT, ok=True):
+        super().__init__(app=app, alive=True, active=active)
+        self.got = []
+
+        def send(s):
+            if not ok:
+                raise OSError("the socket is gone")
+            self.got.append(json.loads(s))
+        self["send"] = send
+
+    def of(self, kind):
+        return [f for f in self.got if f.get("type") == kind]
+
+
+class _HandlerSelf:
+    """The handler's `self` for Handler._dispatch_ws: the ready arm's connect push is not under test here."""
+    def _push_one(self, client, only=None):
+        pass
+
+
+class OutcomeReachesThePageWhereverItIs(_Harness):
+    """A create's outcome reaches the page that holds it on whatever socket it holds now, and a drop's dialog counts as told
+    only once a page has drawn it (review of PR 211, 2026-10-11).
+
+    The door's create runs on a thread of its own and can take seconds (a large transcript's cut, the fork's start). A page
+    whose socket dropped and reopened meanwhile re-posted the create on the new socket and was answered busy, the transient
+    answer that keeps its mark; the job then answered the socket that SENT it, which was dead, so a refusal left the mark
+    pending until the next reconnect or a reload. A dropped park's dialog counted as told the moment a socket took the write,
+    so a stalled socket swallowed it and nothing showed it again; and with no pane connected at the drop, the words were in
+    undelivered.jsonl and the log alone, with no dialog and no Log entry anywhere."""
+
+    def setUp(self):
+        super().setUp()
+        with km._clients_lock:
+            saved = list(km._clients)
+            km._clients[:] = []
+
+        def restore():
+            with km._clients_lock:
+                km._clients[:] = saved
+        self.addCleanup(restore)
+        self.jobs = []
+        km._comment_create_spawn = lambda target, args: self.jobs.append((target, args))   # held: the page reconnects first
+
+    def _connect(self, *panes):
+        with km._clients_lock:
+            km._clients[:] = list(panes)
+
+    def _drive_on(self, client, msg):
+        with contextlib.redirect_stderr(io.StringIO()):
+            return km._drive(msg, client)
+
+    def _create_on(self, client, uuid, cid, text=WORDS):
+        return self._drive_on(client, {"type": "commentCreate", "id": PARENT, "uuid": uuid, "exact": "exponential backoff",
+                                       "text": text, "name": "", "createId": cid})
+
+    def _run_jobs(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            while self.jobs:
+                target, args = self.jobs.pop(0)
+                target(*args)
+
+    def _reconnect_mid_job(self, uuid, cid):
+        """The create is sent, its job starts, and the page's socket drops and reopens before the job ends: the shim's
+        romp:wsup re-posts the held create on the new socket, which the door answers busy while the job holds it."""
+        old = _Pane()
+        self._connect(old)
+        self._create_on(old, uuid, cid)
+        self.assertEqual(len(self.jobs), 1, "premise: the create's job is running")
+        old["alive"] = False                             # the socket dropped (Handler._ws's finally)
+        new = _Pane()
+        self._connect(new)
+        self._create_on(new, uuid, cid)                  # the page's re-post on the reopened socket
+        self.assertEqual([(f["transient"], f["createId"]) for f in new.of("commentCreateFailed")], [(True, cid)],
+                         "premise: answered busy, the mark kept while the job runs")
+        self._run_jobs()
+        return old, new
+
+    def test_a_thread_made_while_the_page_reconnected_reaches_it_on_the_new_socket(self):
+        old, new = self._reconnect_mid_job("a1", "g-mid-ok")
+        acks = new.of("commentCreated")
+        self.assertEqual([a["createId"] for a in acks], ["g-mid-ok"],
+                         "the thread's answer reaches the page on the socket it holds now: %r" % new.got)
+        self.assertEqual(acks[0]["tid"], self._rows()[0]["tid"])
+        self.assertEqual(len(self._rows()), 1)
+
+    def test_a_refusal_made_while_the_page_reconnected_reaches_it_with_the_reason(self):
+        self.be.streaming.clear()                        # the anchor is not coming: the job refuses it outright
+        old, new = self._reconnect_mid_job("a9", "g-mid-refused")
+        last = new.of("commentCreateFailed")[-1]
+        self.assertEqual((last["createId"], last["transient"], last["text"]), ("g-mid-refused", False, km.ANCHOR_GONE_ERR),
+                         "the refusal ends the page's hold on its new socket, its mark gone and the words back: %r" % new.got)
+        self.assertIs(last.get("say"), True, "and that page, sent no warn, is told to say the reason itself")
+        self.assertEqual(new.of("warn"), [], "no warn on a socket the create was not sent on")
+        self.assertEqual(km._parked_creates, [])
+
+    def test_a_refusal_reaches_the_sending_page_as_before_and_other_pages_hear_it_quietly(self):
+        sender, other = _Pane(), _Pane()
+        self._connect(sender, other)
+        self.be.streaming.clear()
+        self._create_on(sender, "a9", "g-refused")
+        self._run_jobs()
+        self.assertEqual([f["text"] for f in sender.of("warn")], [km.ANCHOR_GONE_ERR], "the sender is warned, as before")
+        self.assertNotIn("say", sender.of("commentCreateFailed")[-1], "…so its own copy carries no second telling")
+        self.assertIs(other.of("commentCreateFailed")[-1].get("say"), True,
+                      "another page holds no such create and ignores it; were it the holder, it would say why")
+
+    def _drop_unheard(self, cid="g-unseen"):
+        """A parked create dropped while no pane is connected (a phone asleep, the page reloaded): the dialog reaches no
+        one, and the page that held the create is gone, so no re-post will ever come."""
+        sender = _Pane()
+        self._connect(sender)
+        self._create_on(sender, "a9", cid)
+        self._run_jobs()
+        self.assertEqual(len(km._parked_creates), 1, "premise: parked while the reply streams")
+        sender["alive"] = False
+        self._connect()
+        self.be.streaming.clear()
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._retry_parked_creates()
+        self.assertEqual(km._parked_creates, [], "premise: dropped")
+        self.assertEqual(sender.of("err"), [], "premise: no pane drew it")
+
+    def _ready(self, pane):
+        self._connect(*[c for c in km._clients if c is not pane], pane)
+        with contextlib.redirect_stderr(io.StringIO()):
+            km.Handler._dispatch_ws(_HandlerSelf(), {"type": "ready"}, pane)
+
+    def test_a_drop_no_pane_heard_surfaces_on_the_next_pane_that_listens(self):
+        self._drop_unheard()
+        page = _Pane()
+        self._ready(page)                                # a page opens (the reload, the phone waking): its bundle says ready
+        errs = page.of("err")
+        self.assertEqual(len(errs), 1, "the drop's dialog reaches the next page that listens: %r" % page.got)
+        self.assertEqual((errs[0]["copy"], errs[0]["sid"], errs[0]["createId"]), (WORDS, PARENT, "g-unseen"),
+                         "with the words to copy back, for its session, naming the create its acknowledgement answers")
+        other = _Pane()
+        self._ready(other)
+        self.assertEqual(other.of("err"), [], "one pane at a time: a live pane holds it until it acknowledges or closes")
+
+    def test_a_drop_counts_as_told_only_once_a_pane_acknowledges_it(self):
+        stalled = _Pane()                                # its peer stopped reading: writes still enqueue, nothing is drawn
+        self._connect(stalled)
+        self._create_on(stalled, "a9", "g-stalled")
+        self._run_jobs()
+        self.be.streaming.clear()
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._retry_parked_creates()
+        self.assertEqual(len(stalled.of("err")), 1, "premise: the write went to the socket that sent the create")
+        self.assertFalse(km._dropped_creates[(PARENT, "g-stalled")]["told"], "a socket write is not a page seeing it")
+        stalled["alive"] = False                         # the page redials (_register_ws_client retires the twin socket)
+        page = _Pane()
+        self._connect(page)
+        self._create_on(page, "a9", "g-stalled")         # its re-post on the reopened socket
+        self.assertEqual([f["type"] for f in page.got], ["commentCreateFailed", "err"],
+                         "the re-post hears the drop and is shown the dialog the stalled socket swallowed")
+        self._create_on(page, "a9", "g-stalled")
+        self.assertEqual(len(page.of("err")), 1, "a live pane holds it: not shown twice while it is up")
+        with contextlib.redirect_stderr(io.StringIO()):
+            km.Handler._dispatch_ws(_HandlerSelf(), {"type": "commentDropSeen", "id": PARENT, "createId": "g-stalled"}, page)
+        self.assertTrue(km._dropped_creates[(PARENT, "g-stalled")]["told"], "the page drew it and said so: told")
+        page["alive"] = False
+        later = _Pane()
+        self._ready(later)
+        self.assertEqual(later.of("err"), [], "a drop a page acknowledged is offered to no one again")
+        self.assertEqual(self._rows(), [])
+
+    def test_a_pane_that_closes_without_acknowledging_hands_the_dialog_to_one_still_connected(self):
+        self._drop_unheard("g-handed-on")
+        first, second = _Pane(), _Pane(active="")
+        self._ready(first)
+        self._ready(second)
+        self.assertEqual((len(first.of("err")), len(second.of("err"))), (1, 0), "premise: one pane holds it")
+        first["alive"] = False                           # its socket closes before the page drew it (Handler._ws's finally)
+        self._connect(second)
+        km._reoffer_drops_of(first)
+        self.assertEqual([e["createId"] for e in second.of("err")], ["g-handed-on"],
+                         "the pane still connected is shown it; it never waits for a pane that may not come back")
+
+    def test_the_listen_events_offer_untold_drops_and_a_close_hands_them_on(self):
+        import inspect
+        src = inspect.getsource(km.Handler._dispatch_ws)
+        arm = src[src.find('msg.get("type") == "ready"'):]
+        self.assertLess(arm.index("_consume_pending_reveal(client)"), arm.index("_offer_untold_drops(client)"),
+                        "the ready arm offers them where it consumes a parked reveal: the pane listens from there")
+        mod = Path(km.__file__).read_text() if getattr(km, "__file__", None) else inspect.getsource(km)
+        for name in ("_push", "_push_session_now", "_confirm_close_now"):   # read from the file: the harness stubs one of them
+            i = mod.index("\ndef %s(" % name)
+            s = mod[i:mod.index("\ndef ", i + 1)]
+            self.assertLess(s.index('_consume_pending_reveal(c, why="the pane\'s redial")'), s.index("_offer_untold_drops(c)"),
+                            name + ": a redial's first strip, the ready a redial never posts")
+        s = inspect.getsource(km.Handler._ws)
+        self.assertLess(s.index("_clients.remove(client)"), s.index("_reoffer_drops_of(client)"),
+                        "a closed socket hands on what it held, once it is out of the pick")
 
 
 if __name__ == "__main__":

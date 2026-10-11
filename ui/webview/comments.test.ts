@@ -659,9 +659,11 @@ test("a create refused by parse lag holds its mark until the kernel answers it �
   // the kernel's typed nack: transient (the anchor record hasn't hit its parse yet) vs real
   const KERNELSRC = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
   assert.match(KERNELSRC, /ANCHOR_LAG_ERR = "that message isn't in the transcript yet; try again in a moment"/);
-  assert.match(KERNELSRC, /"transient": err == ANCHOR_LAG_ERR,/);
-  assert.match(KERNELSRC, /else:\s*\n\s*client\["send"\]\(json\.dumps\(\{"type": "warn", "text": err\}\)\)/,
+  assert.match(KERNELSRC, /if err == ANCHOR_LAG_ERR:[\s\S]{0,1600}"createId": cid, "transient": True, "text": err\}\)\)/, "the lag answer is transient");
+  assert.match(KERNELSRC, /else:\s*\n(?:\s*#[^\n]*\n)*\s*sys\.stderr\.write\("comment create refused[^\n]*\n\s*_answer_create_refused\(client, sid, str\(msg\["uuid"\]\), cid, err\)/,
     "no toast for plumbing the retry makes moot; real refusals stay loud");
+  assert.match(KERNELSRC, /def _answer_create_refused\([\s\S]{0,1200}client\["send"\]\(json\.dumps\(\{"type": "warn", "text": err\}\)\)/, "the warn, on the sending socket");
+  assert.match(KERNELSRC, /nack = \{"type": "commentCreateFailed", "id": sid, "uuid": anchor_uuid, "createId": cid, "transient": False, "text": err\}/);
   // …and the kernel PARKS the lag-refused create and retries it per pusher cycle (the file it is
   // waiting on is its own): a settled session emits no further frames, so the client-side re-post
   // alone starved — the park covers that, and ends in an answer to every page (2026-10-11)
@@ -850,10 +852,87 @@ test("a session frame re-posts nothing and drops no hold: the kernel's answer al
   for (const fn of ["upsert", "update"]) {
     assert.doesNotMatch(body(fn), /CmtCreate|cmtCreateInFlight/, fn + " touches no held create");
   }
-  // the hold leaves on exactly two answers: the thread (commentCreated) and a refusal that is not transient
+  // the hold leaves on the kernel's two answers, the thread (commentCreated) and a refusal that is not transient, and on the
+  // one event after which no answer can come: its host leaving the mesh, whose relay never reopens (review of PR 211)
   assert.equal((UI.match(/cmtCreateInFlight\.delete\(/g) || []).length, 2, "refuseCmtCreate and the commentCreated arm");
-  assert.equal((UI.match(/refuseCmtCreate\(/g) || []).length, 2, "its definition and the typed refusal's arm, nothing else");
+  assert.equal((UI.match(/refuseCmtCreate\(/g) || []).length, 3, "its definition, the typed refusal's arm and a detached host's holds, nothing else");
   assert.match(UI, /else if \(m\.type === "commentCreateFailed" && m\.id && m\.uuid\) \{[\s\S]{0,1200}if \(held && !m\.transient\) refuseCmtCreate\(held\);/);
+  assert.equal((UI.match(/loseCmtCreatesOf\(/g) || []).length, 2, "its definition and the host drop's dismissal alone");
+  assert.match(UI, /if \(why === "hostDrop"\) loseCmtCreatesOf\(id\);/);
+});
+
+// ── the outcome reaches the page wherever it is (review of PR 211, 2026-10-11) ──────────────────────
+
+test("a refusal sent while the page's socket reopened carries `say`, and the page holding the create toasts the reason", () => {
+  // the kernel's warn goes to the socket that sent the create; a page that re-posted on a new socket meanwhile is sent the
+  // typed refusal with `say`, and only the page holding that create (holdAnswered) reads it
+  assert.match(KERNEL, /c\["send"\]\(json\.dumps\(nack if c is client else dict\(nack, say=True\)\)\)/);
+  assert.match(UI, /if \(held && !m\.transient\) refuseCmtCreate\(held\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(held && !m\.transient && m\.say === true && typeof m\.text === "string" && m\.text\) warnToast\(m\.text\);/);
+});
+
+// ── executed: a dropped create's dialog is acknowledged, and drawn once per page (cmtDropDrawnBefore, lifted) ──
+function liftDropAck() {
+  const start = UI.indexOf("function cmtDropDrawnBefore(m: any): boolean {");
+  assert.ok(start > 0, "the acknowledgement lives in cmtDropDrawnBefore");
+  const src = UI.slice(start, UI.indexOf("\n}\n", start) + 3).replace("(m: any): boolean {", "(m) {");
+  const posted: any[] = [];
+  const drawnBefore = new Function("vscodeApi", "cmtDropsDrawn", src + "\nreturn cmtDropDrawnBefore;")(
+    { postMessage: (m: any) => posted.push(m) }, new Set<string>()) as (m: any) => boolean;
+  return { drawnBefore, posted };
+}
+
+test("a dropped create's dialog is acknowledged each time it arrives, and a page that drew it already does not draw it again", () => {
+  const { drawnBefore, posted } = liftDropAck();
+  const drop = { type: "err", op: "commentCreate", createId: "g-drop", sid: "TESTHOST:" + ANCHOR.sid, title: "t", text: "x", copy: "y" };
+  assert.equal(drawnBefore(drop), false, "the first arrival is drawn (the dialog arm below it)");
+  assert.equal(drawnBefore({ ...drop }), true, "the same drop again (an acknowledgement lost with a socket): not drawn twice");
+  assert.deepEqual(posted, [{ type: "commentDropSeen", id: drop.sid, createId: "g-drop" },
+                            { type: "commentDropSeen", id: drop.sid, createId: "g-drop" }],
+                   "acknowledged both times, to the kernel the session lives on (the id routes it, a remote host's included)");
+  posted.length = 0;
+  assert.equal(drawnBefore({ ...drop, createId: "g-other" }), false, "another drop is its own dialog");
+  for (const m of [{ type: "err", op: "sendMessage", sid: ANCHOR.sid, text: "x" }, { ...drop, createId: "" }, { ...drop, sid: "" }])
+    assert.equal(drawnBefore(m), false);
+  assert.equal(posted.length, 1, "only a frame naming a dropped create is acknowledged");
+  // the arm sits ahead of the err dialog's own, so a first arrival falls through to the dialog and a repeat stops there
+  const dedupe = UI.indexOf('else if (m.type === "err" && typeof m.text === "string" && m.text && cmtDropDrawnBefore(m)) {');
+  assert.ok(dedupe > 0 && dedupe < UI.indexOf('else if (m.type === "err" && typeof m.text === "string" && m.text) {'));
+  // the feed draws the same frame when no chat pane is connected, and acknowledges it the same way
+  const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
+  assert.match(FEED, /showErrDialog\(title, m\.text, copy\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(m\.op === "commentCreate" && typeof m\.createId === "string" && m\.createId && typeof m\.sid === "string" && m\.sid\)\s*\n\s*vscodeApi\?\.postMessage\(\{ type: "commentDropSeen", id: m\.sid, createId: m\.createId \}\);/);
+  assert.match(KERNEL, /if msg and msg\.get\("type"\) == "commentDropSeen":\s*\n(?:\s*#[^\n]*\n)*\s*_dropped_create_seen\(/, "the kernel takes it");
+});
+
+// ── executed: a host that left the mesh hands its unanswered creates back (loseCmtCreatesOf, lifted) ──
+test("a host leaving the mesh hands back its sessions' unanswered creates: words to the box, one dialog with them, a Log entry each", () => {
+  const start = UI.indexOf("function loseCmtCreatesOf(sid: string): void {");
+  assert.ok(start > 0, "the hand-back lives in loseCmtCreatesOf");
+  const src = UI.slice(start, UI.indexOf("\n}\n", start) + 3).replace("(sid: string): void {", "(sid) {");
+  const remote = "TESTHOST:" + ANCHOR.sid;
+  const a = newCommentCreate({ ...ANCHOR, sid: remote }, "Why ten percent?", "");
+  const b = newCommentCreate({ ...ANCHOR, sid: remote, uuid: "a2" }, "And the cap?", "");
+  const other = newCommentCreate(ANCHOR, "fix this", "");
+  const inFlight = new Map([a, b, other].map((c) => [c.createId, c] as [string, CommentCreate]));
+  const refused: string[] = [], logged: string[] = [], dialogs: { title: string; text: string; cb: (v: string) => void }[] = [], copied: string[] = [];
+  const hostOf = (sid: string) => { const i = sid.indexOf(":"); return i > 0 ? sid.slice(0, i) : ""; };
+  const lose = new Function("cmtCreateInFlight", "refuseCmtCreate", "notifyShell", "showConfirm", "hostOf", "navigator", src + "\nreturn loseCmtCreatesOf;")(
+    inFlight, (c: CommentCreate) => { inFlight.delete(c.createId); refused.push(c.text); },
+    (kind: string, text: string) => logged.push(kind + "|" + text),
+    (title: string, text: string, _b: unknown, cb: (v: string) => void) => dialogs.push({ title, text, cb }),
+    hostOf, { clipboard: { writeText: (t: string) => copied.push(t) } }) as (sid: string) => void;
+  lose(remote);
+  assert.deepEqual(refused, ["Why ten percent?", "And the cap?"], "that session's holds end, their words back in the comment box");
+  assert.deepEqual(Array.from(inFlight.keys()), [other.createId], "a hold on a session elsewhere is untouched");
+  assert.equal(dialogs.length, 1, "one dialog for the lot");
+  assert.equal(dialogs[0].title, "Those comments may not have started threads");
+  assert.match(dialogs[0].text, /TESTHOST/, "it names the machine");
+  assert.doesNotMatch(dialogs[0].text, /did not|weren't|was not/, "it claims no outcome: that machine may have started them");
+  dialogs[0].cb("copy");
+  assert.deepEqual(copied, ["Why ten percent?\n\nAnd the cap?"], "Copy my text carries every word");
+  assert.equal(logged.length, 2, "a not-sent Log entry per comment");
+  assert.ok(logged.every((l) => l.startsWith("undelivered|")));
+  lose(ANCHOR.sid + "-none");
+  assert.equal(dialogs.length, 1, "no hold, no dialog");
 });
 
 // ── a thread that became its own session (the user 2026-09-10, with a screenshot) ─────────────────
@@ -995,10 +1074,11 @@ test("bubbles and reply drafts are pruned against every session's threads, never
 
 test("every create answer echoes the gesture's createId; a create a remote host never got is refused by type (source pins)", () => {
   assert.match(KERNEL, /cid = str\(msg\.get\("createId"\) or ""\)\s*\n\s*key = _create_key\(sid, msg\["uuid"\], msg\["exact"\], msg\["text"\], cid\)/);
-  assert.equal((KERNEL.match(/"createId": cid/g) || []).length, 6,
-               "the busy, refused and dropped answers at the door, the parked copy, and the drop's broadcast and undelivered row");
+  assert.equal((KERNEL.match(/"createId": cid/g) || []).length, 8,
+               "the busy and dropped answers at the door, the job's lag and refused answers, the parked copy, and the drop's broadcast, dialog and undelivered row");
   assert.match(KERNEL, /_comment_create_spawn\(_answer_comment_created, \(\[client\], sid, again, str\(msg\["uuid"\]\), cid\)\)/, "the repeat's");
-  assert.match(KERNEL, /_answer_comment_created\(\[client\], sid, tid, str\(msg\["uuid"\]\), cid\)/, "the created answer's");
+  assert.match(KERNEL, /_answer_comment_created\(_create_answer_targets\(client\), sid, tid, str\(msg\["uuid"\]\), cid\)/,
+               "the created answer's, to the sending socket and every chat page (review of PR 211: a page that reconnected mid-job)");
   assert.match(KERNEL, /"createId": create_id or ""/, "the one answer both carry it in");
   assert.match(KERNEL, /_answer_comment_created\(targets, pk\["sid"\], tid, pk\["uuid"\], pk\.get\("createId"\) or ""\)/, "and the parked create's broadcast");
   const FED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "federation.ts"), "utf8");

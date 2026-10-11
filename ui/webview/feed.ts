@@ -6199,6 +6199,11 @@ listenForFrames(perfFrameHandler("feed", (m) => vscodeApi?.postMessage(m), (e: M
                                                    text: copy ? title + ": " + copy : title,
                                                    sid: typeof m.sid === "string" ? m.sid : "" }, "*");
     showErrDialog(title, m.text, copy);
+    // a dropped comment create's dialog is acknowledged to its kernel (review of PR 211, 2026-10-11): the kernel counts the
+    // drop as told only once a pane says it drew it, and hands it to the next pane that can hear it until then (render.ts
+    // cmtDropDrawnBefore, the chat page's side)
+    if (m.op === "commentCreate" && typeof m.createId === "string" && m.createId && typeof m.sid === "string" && m.sid)
+      vscodeApi?.postMessage({ type: "commentDropSeen", id: m.sid, createId: m.createId });
     const sid = typeof m.sid === "string" ? m.sid : typeof m.id === "string" ? m.id : "";
     // the kernel's reply IS the event, for the request it names (rearmLatches): a refused apiRetry releases
     // that session's Retry; a refused askFollowUp releases that card's Continue, and its predicted move yields
