@@ -7691,14 +7691,17 @@ arrives as it happens. When the machine the phone is set up on may have missed
 some (it restarted, a linked machine restarted, or the link dropped), none of
 the missed ones arrives late: one notification titled **Romp: missed
 notifications** says what you missed and why, for example "laptop was
-unreachable 14:02–14:40 · 3 sessions finished turns, 1 needs you", or that
+unreachable for 38 min · 3 sessions finished turns, 1 needs you", or that
 notifications may have been missed when the count cannot be known (a linked
 machine's restart takes its record with it). It counts only what your switches
-and bells would have let through, and when nothing would have, there is no
+and bells would have let through, and says "may have been missed" only when
+something they allow could have been lost; when nothing could have, there is no
 notification, only a line in the kernel's log. A link that drops and comes back
-several times makes one such notification, sent once it holds again. In one
-burst, at most 16 notifications arrive one by one; the rest are said in one
-more.
+several times makes one such notification, sent once it holds again, and a
+machine that keeps restarting updates that one notification without a sound
+("restarted 3 times") until you open Romp or its notifications flow normally
+again. In one burst, at most 16 notifications arrive one by one; the rest are
+said in one more.
 
 Tapping a notification brings Romp forward on the session it was about. On an
 iPhone with the app already open in the background, the switch happens as the
