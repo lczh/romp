@@ -21243,9 +21243,14 @@ _PARK_MAX_TRIES = 30
 # the drop on the wire (the page re-posts on a reconnect) or arrives after it is answered with the drop, never parked again
 # or created later, so the words the drop handed back cannot become a second thread beside the one the user sends again.
 # Stamped creates only: an unstamped frame keys on its words, and a memo on the words would refuse the user's own re-send.
-# Bounded (oldest out) and in memory, like _recent_creates. Each entry: {"why", "told"}, `told` whether the drop's dialog
-# reached a pane (a re-post on a page that never saw it shows it there).
-_dropped_creates = {}                      # (sid, createId) -> {"why": str, "told": bool}
+# Bounded (oldest out) and in memory, like _recent_creates. Each entry: {"why", "told", "frame", "offered"}: `frame` the
+# drop's dialog, `offered` the ONE pane it was last sent to, and `told` whether a pane ACKNOWLEDGED it (commentDropSeen,
+# posted by the bundle once it drew the dialog). A socket write is not a page seeing it (review of PR 211, 2026-10-11): a
+# stalled socket takes the write, and a drop counted told there was never shown anywhere. Until a pane acknowledges it, the
+# dialog goes to the next pane that can hear it whenever the one holding it is gone (_offer_dropped_create): the pane whose
+# page re-posts the create, a pane that starts listening (_offer_untold_drops), or another pane when the holder's socket
+# closes (_reoffer_drops_of). With no pane connected at the drop, that is how it surfaces at all.
+_dropped_creates = {}                      # (sid, createId) -> {"why", "told", "frame", "offered"}
 _DROPPED_CREATES_MAX = 256
 # A create's IDENTITY (T289): the client's createId, minted by the popover at the send gesture and carried
 # by every re-post of it, under the parent sid -> the thread it made. A lag-parked create is retried by
@@ -21377,15 +21382,70 @@ def _note_dropped_create(key, entry):
             _dropped_creates.pop(next(iter(_dropped_creates)), None)
 
 
+def _offer_dropped_create(entry, c):
+    """Send a dropped create's dialog (entry["frame"]) to pane `c`, unless a pane acknowledged it already (`told`) or a
+    LIVE pane holds it now (`offered`): one pane at a time, so the dialog is not drawn once per chat column, and a holder
+    that never acknowledges it (a stalled socket, a bundle that dropped the frame) hands it on when its socket closes.
+    The claim is made under _create_lock and the send outside it; a send that fails gives the claim back. Returns
+    whether it was sent."""
+    with _create_lock:
+        if entry.get("told") or not entry.get("frame") or c is None or not c.get("alive", True):
+            return False
+        held = entry.get("offered")
+        if held is not None and held.get("alive", True):
+            return False
+        entry["offered"] = c
+        frame = entry["frame"]
+    if _client_send(c, json.dumps(frame)):
+        return True
+    with _create_lock:
+        if entry.get("offered") is c:
+            entry["offered"] = None
+    return False
+
+
+def _offer_untold_drops(client):
+    """A pane that starts LISTENING (its bundle's ready, or a redial's first tab strip: the events that consume a parked
+    reveal, _consume_pending_reveal) is offered every drop no pane has acknowledged and no live pane holds (review of PR
+    211, 2026-10-11). A drop with no pane connected was in undelivered.jsonl and the log alone, with no dialog and no Log
+    entry, and the page that held the create had reloaded, so no re-post would ever come for the door to answer."""
+    if (client.get("app") or "") not in _ERR_FRAME_APPS:
+        return
+    with _create_lock:
+        untold = [e for e in _dropped_creates.values() if not e.get("told") and e.get("frame")]
+    for e in untold:
+        _offer_dropped_create(e, client)
+
+
+def _reoffer_drops_of(client):
+    """`client`'s socket closed (Handler._ws's finally): every drop it held unacknowledged goes to one pane still connected
+    (_one_err_pane, the not-delivered road's pick), else waits for the next pane that listens (_offer_untold_drops)."""
+    with _create_lock:
+        held = [e for e in _dropped_creates.values() if e.get("offered") is client and not e.get("told")]
+        for e in held:
+            e["offered"] = None
+    for e in held:
+        _offer_dropped_create(e, _one_err_pane(str((e.get("frame") or {}).get("sid") or "")))
+
+
+def _dropped_create_seen(sid, create_id):
+    """A pane acknowledged a drop's dialog (commentDropSeen): it was drawn, so the drop is told and offered no more."""
+    with _create_lock:
+        e = _dropped_creates.get((str(sid), str(create_id)))
+        if e is not None:
+            e["told"] = True
+            e["offered"] = None
+
+
 def _hand_back_dropped_create(pk, why, detail, entry):
     """Say a parked create's drop (2026-10-11, review of PR 209): the page may be long past the gesture, reloaded, or
     showing another session, so the drop takes the not-delivered road rather than a toast. undelivered.jsonl gets the
     words verbatim; the kernel log one line naming the session and the reason, never the words; the page that sent it, when
-    its socket still lives, else ONE pane watching the session (_send_to_one_chat), a dialog with the words in its copy
-    slot that also files a "not sent" entry in the Log; and every chat client the typed failure (commentCreateFailed,
+    its socket still lives, else ONE pane watching the session (_one_err_pane), a dialog with the words in its copy slot
+    that also files a "not sent" entry in the Log; and every chat client the typed failure (commentCreateFailed,
     `dropped`), so the page holding the create, on whatever socket it holds now, hands the words back to the comment box.
-    `why` is the user's reason, `detail` the log's. Records in `entry` whether a pane took the dialog (`told`) and the
-    dialog itself, so a re-post from a page that never saw it is shown it at the door."""
+    `why` is the user's reason, `detail` the log's. The dialog is kept in `entry` and counts as told only once a pane
+    acknowledges it (_dropped_creates): until then it goes to whichever pane can next hear it (_offer_dropped_create)."""
     sid, cid = pk["sid"], pk.get("createId") or ""
     name = _name_of(sid) or sid[:8]
     kept = ""
@@ -21401,8 +21461,9 @@ def _hand_back_dropped_create(pk, why, detail, entry):
             "started: %s. " % (name, why)
             + ("Your text is saved verbatim in undelivered.jsonl under romp's state directory." if not kept else
                "romp could not write undelivered.jsonl either (%s); the Copy button below is the one record of your text." % kept))
+    # `createId` names the drop the pane's acknowledgement answers (commentDropSeen)
     frame = {"type": "err", "title": "That comment did not start a thread", "text": text, "copy": pk["text"],
-             "sid": sid, "op": "commentCreate"}
+             "sid": sid, "op": "commentCreate", "createId": cid}
     nack = json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": pk["uuid"], "createId": cid,
                        "transient": False, "dropped": True, "text": why})
     with _clients_lock:
@@ -21412,14 +21473,12 @@ def _hand_back_dropped_create(pk, why, detail, entry):
             c["send"](nack)
         except Exception:
             pass
-    c = pk.get("client")
-    if c is not None and c.get("alive", True) and (c.get("app") or "") in _ERR_FRAME_APPS:
-        told = _client_send(c, json.dumps(frame))
-    else:
-        told = _send_to_one_chat(frame, sid)
     with _create_lock:
-        entry["told"] = bool(told)
         entry["frame"] = frame
+    c = pk.get("client")
+    if not (c is not None and c.get("alive", True) and (c.get("app") or "") in _ERR_FRAME_APPS):
+        c = _one_err_pane(sid)
+    _offer_dropped_create(entry, c)
 
 
 def _retry_parked_creates():
@@ -21535,10 +21594,39 @@ def _answer_comment_created(clients, sid, tid, anchor_uuid, create_id=""):
     _push_soon()
 
 
+def _create_answer_targets(client):
+    """Who hears a create's outcome: the socket that sent it and every chat page (review of PR 211, 2026-10-11). The job
+    can run for seconds (a large transcript's cut, the fork's start), and a page whose socket drops and reopens meanwhile
+    re-posts the create on the new socket, where the door answers busy: answered on the sending socket alone, the outcome
+    went to the dead one, and a refusal left the page's mark pending until its next reconnect. Each page resolves only the
+    create it holds, by the echoed createId (render.ts holdAnswered), as for the pusher's answers to a park."""
+    with _clients_lock:
+        others = [c for c in _clients if c is not client and c.get("app") == "chat" and c.get("alive", True)]
+    return [client] + others
+
+
+def _answer_create_refused(client, sid, anchor_uuid, cid, err):
+    """A create's real refusal, said: the warn on the socket that sent it, and the typed failure to every chat page
+    (_create_answer_targets), each send on its own so a dead socket cannot stop the rest. The copy to any OTHER page carries
+    `say`: that page was sent no warn, so the page holding the create (its own socket reopened meanwhile) toasts the reason
+    itself; pages that hold no such create ignore the frame."""
+    nack = {"type": "commentCreateFailed", "id": sid, "uuid": anchor_uuid, "createId": cid, "transient": False, "text": err}
+    try:
+        client["send"](json.dumps({"type": "warn", "text": err}))
+    except Exception:
+        pass                                     # a page gone meanwhile: the copies below carry the reason
+    for c in _create_answer_targets(client):
+        try:
+            c["send"](json.dumps(nack if c is client else dict(nack, say=True)))
+        except Exception:
+            pass
+
+
 def _comment_create_job(sid, msg, key, client):
     """The WS door's create, on a thread of its own (_drive hands it over with the identity `key` reserved): create, note,
-    release, then answer the creating page — the thread on success (_answer_comment_created), else the refusal, a lag
-    refusal parked for the pusher's retry while its anchor still streams, and refused out loud when it does not."""
+    release, then answer — the thread on success (_answer_comment_created), else the refusal (_answer_create_refused), to
+    every chat page as well as the creating socket (_create_answer_targets); a lag refusal is parked for the pusher's retry
+    while its anchor still streams, and refused out loud when it does not."""
     cid = str(msg.get("createId") or "")
     err = tid = None
     try:
@@ -21567,30 +21655,31 @@ def _comment_create_job(sid, msg, key, client):
         # Every real refusal stays loud (fail loudly). Parked ONCE per create identity (T289): the
         # client re-posts the same create on a reconnect while the nack stands. The park keeps the creating socket, so its
         # drop's dialog lands on the page that sent it while that page is still connected (_hand_back_dropped_create).
-        try:
-            if err == ANCHOR_LAG_ERR:
-                seen = _park_transcript_sig(sid)     # the transcript as the park found it: its budget counts writes past this
-                with _create_lock:
-                    if not any(_parked_key(pk) == key for pk in _parked_creates):
-                        _parked_creates.append({"sid": sid, "uuid": str(msg["uuid"]), "exact": str(msg["exact"]),
-                                                "text": str(msg["text"]), "name": str(msg.get("name") or ""),
-                                                "model": str(msg.get("model") or ""),
-                                                "effort": str(msg.get("effort") or ""),
-                                                "fast": str(msg.get("fast") or ""),
-                                                "color": str(msg.get("color") or ""),
-                                                "createId": cid, "tries": 0, "seen": seen, "client": client})
-            else:
-                client["send"](json.dumps({"type": "warn", "text": err}))
-                # the kernel log carries the refusal too (T289): a name refused at this door showed only
-                # as a toast on the viewer, and the refusing kernel's log held no trace of what the user saw
-                sys.stderr.write("comment create refused (%s, name %r): %s\n" % (sid[:8], str(msg.get("name") or "")[:80], err))
-            client["send"](json.dumps({"type": "commentCreateFailed", "id": sid,
-                                       "uuid": str(msg["uuid"]), "createId": cid, "transient": err == ANCHOR_LAG_ERR,
-                                       "text": err}))
-        except Exception:
-            pass                                 # a page gone meanwhile: nothing to tell it
+        # The transient nack goes to the creating socket alone: a page that re-posted on a new socket meanwhile was answered
+        # busy, the same transient nack, and the park's own answer reaches every page.
+        if err == ANCHOR_LAG_ERR:
+            seen = _park_transcript_sig(sid)         # the transcript as the park found it: its budget counts writes past this
+            with _create_lock:
+                if not any(_parked_key(pk) == key for pk in _parked_creates):
+                    _parked_creates.append({"sid": sid, "uuid": str(msg["uuid"]), "exact": str(msg["exact"]),
+                                            "text": str(msg["text"]), "name": str(msg.get("name") or ""),
+                                            "model": str(msg.get("model") or ""),
+                                            "effort": str(msg.get("effort") or ""),
+                                            "fast": str(msg.get("fast") or ""),
+                                            "color": str(msg.get("color") or ""),
+                                            "createId": cid, "tries": 0, "seen": seen, "client": client})
+            try:
+                client["send"](json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": str(msg["uuid"]),
+                                           "createId": cid, "transient": True, "text": err}))
+            except Exception:
+                pass                             # a page gone meanwhile: its re-post on the new socket is answered busy
+        else:
+            # the kernel log carries the refusal too (T289): a name refused at this door showed only
+            # as a toast on the viewer, and the refusing kernel's log held no trace of what the user saw
+            sys.stderr.write("comment create refused (%s, name %r): %s\n" % (sid[:8], str(msg.get("name") or "")[:80], err))
+            _answer_create_refused(client, sid, str(msg["uuid"]), cid, err)
         return
-    _answer_comment_created([client], sid, tid, str(msg["uuid"]), cid)
+    _answer_comment_created(_create_answer_targets(client), sid, tid, str(msg["uuid"]), cid)
 
 
 def _comment_default_model_effective():
@@ -24016,15 +24105,11 @@ def _drive(msg, client):
         if state == "dropped":
             # its park was dropped (_hand_back_dropped_create): the gesture's answer stands, never a park again or a thread
             # later beside the one the user sends from the words handed back. The page that re-posts it hears the drop;
-            # one that never saw the drop's dialog (its socket was down, no pane took it) is shown it now
-            with _create_lock:
-                frame = None if again.get("told") else again.get("frame")
-                if frame is not None:
-                    again["told"] = True
+            # one that never saw the drop's dialog (its socket was down, no pane took it) is shown it now, unless a pane
+            # acknowledged it or a live one holds it (_offer_dropped_create: told means acknowledged, never a socket write)
             client["send"](json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": str(msg["uuid"]),
                                        "createId": cid, "transient": False, "dropped": True, "text": again.get("why") or ""}))
-            if frame is not None:
-                client["send"](json.dumps(frame))
+            _offer_dropped_create(again, client)
             return True
         if state == "busy":
             # the other door holds this create (parked, or mid-create on the pusher): the typed transient
@@ -42267,14 +42352,21 @@ def _send_to_one_chat(msg, sid=""):
     no such pane connected the frame goes through the chat broadcast, which reaches nobody either; the undelivered file
     and the log are the record then. Returns whether a pane took it."""
     s = json.dumps(msg)
+    c = _one_err_pane(sid)
+    if c is None:
+        _send_to_app("chat", msg)
+        return False
+    return _client_send(c, s)
+
+
+def _one_err_pane(sid=""):
+    """The one pane _send_to_one_chat sends to (its docstring has the tiers and the pick), or None when no pane that
+    renders an err frame is connected. A dropped comment create's dialog takes the same pick (_hand_back_dropped_create)."""
     with _clients_lock:
         live = [c for c in _clients if (c.get("app") or "") in _ERR_FRAME_APPS and c.get("alive", True)]
     chat = [c for c in live if c.get("app") == "chat"]
     tier = [c for c in chat if sid and c.get("active") == sid] or chat or live
-    if not tier:
-        _send_to_app("chat", msg)
-        return False
-    return _client_send(max(tier, key=lambda c: c.get("lastIn", 0)), s)
+    return max(tier, key=lambda c: c.get("lastIn", 0)) if tier else None
 
 
 def _cancel_backend_queued(be, sid, idx, md, qid=None):
@@ -65491,6 +65583,7 @@ def _push(targets, connect=False, live_map=None, only=None):
                 _send_live_status(c, ls_frames[0], tab_set)   # what each tab is doing this second (thinking, its subagents' progress): no build
                 if redialed:                             # the redial's first strip stands in for the ready it never posts:
                     _consume_pending_reveal(c, why="the pane's redial")   # a reveal parked for its window lands behind the strip
+                    _offer_untold_drops(c)                 # …and a comment drop no pane has acknowledged (review of PR 211)
                     if only is not None:                 # …and a repair that is that first strip's sender is the first push to
                         only = None                      #  serve this socket at all: it serves the redial's whole view (the
                         want_feed = _feed_audience(targets)   # watched tab, the transcript-less ones, a status per skeleton)
@@ -66512,6 +66605,7 @@ def _push_session_now(sid):
             _send_tab_order(c, tab_order, tab_meta, live_map)   # gate below would read it as holding nothing and hand it a full
             if redialed:                                 # it never asked for; the strip goes before any full anyway
                 _consume_pending_reveal(c, why="the pane's redial")
+                _offer_untold_drops(c)                 # …and a comment drop no pane has acknowledged (review of PR 211)
         _path = next((s.get("path") or "" for s in chat_list if s["sid"] == sid), "")
         _light = (_light_status(sid, _path, live_map.get(sid), now) if sid not in _built_chat and _path and os.path.exists(_path)
                   and _held_as_skeleton_by_all(sid, targets) else None)
@@ -66683,6 +66777,7 @@ def _confirm_close_now(sid):
                 _send_tab_order(c, tab_order, tab_meta, live_map)
                 if redialed:                         # ...and then the sender that lands a reveal parked for its window
                     _consume_pending_reveal(c, why="the pane's redial")
+                    _offer_untold_drops(c)                 # …and a comment drop no pane has acknowledged (review of PR 211)
             except Exception:
                 c["alive"] = False
         return sid not in tab_order
@@ -84052,6 +84147,11 @@ class Handler(BaseHTTPRequestHandler):
         chat (the _session_list TypeError, the user 2026-06-22). A genuine socket error still propagates."""
         if _drive(msg, client):   # per-session drive ops (send/interrupt/ask/model/…) → the owning backend
             return
+        if msg and msg.get("type") == "commentDropSeen":
+            # a pane drew a dropped comment create's dialog (_dropped_creates): told, and offered to no other pane. Not a
+            # drive op: it acknowledges a frame and drives nothing, so no session check stands in its way
+            _dropped_create_seen(str(msg.get("id") or ""), str(msg.get("createId") or ""))
+            return
         if msg and msg.get("type") == "activeTab":
             client["active"] = msg.get("id")   # tab switch → next push builds the now-active tab first
             if msg.get("id"):
@@ -84283,6 +84383,8 @@ class Handler(BaseHTTPRequestHandler):
             # a push tap parked a reveal for this window's chat pane → deliver it now, AFTER the
             # ready push, so the tab it names already exists on the client (ordered socket)
             _consume_pending_reveal(client)
+            # …and every comment drop no pane has acknowledged: this pane listens now (review of PR 211, 2026-10-11)
+            _offer_untold_drops(client)
             # a shell that just connected paints the app-icon badge from the latest count — an
             # installed app relaunching is exactly when the icon's number needs truing up
             if client.get("app") == "shell" and _BADGE_LAST[0] is not None:
@@ -85573,6 +85675,10 @@ class Handler(BaseHTTPRequestHandler):
             with _clients_lock:
                 if client in _clients:
                     _clients.remove(client)
+            try:
+                _reoffer_drops_of(client)          # a comment drop's dialog it never acknowledged goes to a pane still here
+            except Exception:
+                sys.stderr.write("ws close: a comment drop's dialog could not be handed on\n%s" % traceback.format_exc())
             _board_pane_gone(client)               # the cold timeline build may be waiting on this board pane's first frame
             with _clients_lock:
                 _forget_active_chat_if_last(client)   # the window's focus record goes with its last pane (T347)

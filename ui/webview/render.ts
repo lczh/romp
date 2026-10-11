@@ -10779,6 +10779,41 @@ function refuseCmtCreate(c: CommentCreate): void {
     renderCommentPopover();                                // FULL rebuild: the sent box has no editable composer to refresh in place
   }
 }
+/** A remote host left the mesh (federation's closeRemote: its relay closes for good and its tabs go, each `closed` stamped
+ *  hostDrop) while comment creates on its session `sid` were still unanswered (review of PR 211, 2026-10-11). Their answer
+ *  travels on that relay, which never reopens, so each hold would pend forever: it is handed back now, its words in the
+ *  comment box on its passage (refuseCmtCreate) and in the dialog's copy slot, with a "not sent" Log entry. The dialog does
+ *  not claim the thread was never started: that machine's kernel may have started it before it left, which romp cannot see
+ *  from here. Its re-attach says the rest: a drop it made shows its own dialog then, a thread it made is in the next frame.
+ *  The one hold this cannot reach is a remote kernel from before that kernel answered every create (2026-10-11): its park
+ *  ends silently, and the mark pends until the page reloads (the hold lives in the page's memory). */
+function loseCmtCreatesOf(sid: string): void {
+  const lost = Array.from(cmtCreateInFlight.values()).filter((c) => c.sid === sid);
+  if (!lost.length) return;
+  const title = lost.length > 1 ? "Those comments may not have started threads" : "That comment may not have started a thread";
+  for (const c of lost) { refuseCmtCreate(c); notifyShell("undelivered", title + ": " + c.text, sid); }
+  const copy = lost.map((c) => c.text).join("\n\n");
+  showConfirm(title, "romp lost its connection to " + (hostOf(sid) || "that machine") + " before that machine answered, so romp can't tell whether "
+              + (lost.length > 1 ? "your comments started threads" : "your comment started a thread") + " there. "
+              + (lost.length > 1 ? "Your text is back in the comment box on each passage." : "Your text is back in the comment box on that passage."),
+              [{ label: "Copy my text", value: "copy" }, { label: "Dismiss", value: "ok" }],
+              (v) => { if (v === "copy") navigator.clipboard?.writeText(copy); });
+}
+// The dropped comment creates whose dialog this page drew (review of PR 211, 2026-10-11), by "<sid> <createId>". The kernel
+// counts a drop as told only once a pane acknowledges its dialog, and until then hands it to the next pane that can hear it
+// (a pane that starts listening, its answer to a re-post, another pane when the holder's socket closes), so the same frame
+// can reach this page again when an acknowledgement was lost with its socket: acknowledged again, never drawn twice.
+const cmtDropsDrawn = new Set<string>();
+/** Acknowledge a dropped comment create's dialog (an err frame naming op commentCreate and its createId) to the kernel that
+ *  sent it, and say whether this page drew it already. Any other frame posts nothing and answers false. */
+function cmtDropDrawnBefore(m: any): boolean {
+  if (m.op !== "commentCreate" || typeof m.createId !== "string" || !m.createId || typeof m.sid !== "string" || !m.sid) return false;
+  vscodeApi?.postMessage({ type: "commentDropSeen", id: m.sid, createId: m.createId });
+  const k = m.sid + " " + m.createId;
+  if (cmtDropsDrawn.has(k)) return true;
+  cmtDropsDrawn.add(k);
+  return false;
+}
 // the one busy answer for the mark + rail tick: an in-flight EXCHANGE (the gesture latch above), or
 // — after a reload lost the client latch — the exchange's own records still saying a reply is owed
 // (msgs ending with the user's message). A stuck/errored/closed thread never pulses: green would lie.
@@ -21974,6 +22009,7 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
   staleAnswerReasked.delete(id); forgetResync(resync, id);   // …and its base-check history (2026-09-23)
   liveAsks.delete(id);
   ledgers.delete(id);
+  if (why === "hostDrop") loseCmtCreatesOf(id);   // …and its comment creates still unanswered: their answer rode the relay that just closed for good
   if (why === "close" || why === "end") {
     // ALL of the closed session's composer context goes with it — the draft, the reply-context citation
     // chip, and any pending edit pill (the user 2026-08-04). Deleting from the maps is not enough when the
@@ -22372,6 +22408,10 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       }
     }
   }
+  // a dropped comment create's dialog is acknowledged to its kernel the moment it arrives, and one this page drew already
+  // (its acknowledgement lost with a socket) is not drawn again (cmtDropDrawnBefore); a first arrival falls through to the
+  // dialog below
+  else if (m.type === "err" && typeof m.text === "string" && m.text && cmtDropDrawnBefore(m)) { /* drawn here already */ }
   else if (m.type === "err" && typeof m.text === "string" && m.text) {
     const copy = typeof m.copy === "string" ? m.copy : "";
     const title = typeof m.title === "string" && m.title ? m.title : "That action was not delivered";
@@ -22774,6 +22814,9 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     // (holdAnswered; an older kernel, by the anchor turn).
     const held = holdAnswered(cmtCreateInFlight.values(), String(m.id), String(m.uuid), m.createId);
     if (held && !m.transient) refuseCmtCreate(held);
+    // `say` (review of PR 211, 2026-10-11): the kernel's warn went to the socket that sent the create, and this page's socket
+    // reopened while the create ran, so the reason rides this copy; a page that holds no such create ignores it
+    if (held && !m.transient && m.say === true && typeof m.text === "string" && m.text) warnToast(m.text);
   }
   else if (m.type === "commentCreated" && m.id && m.tid) {
     // the ack names the thread a create made and, by the echoed createId, WHICH create (holdAnswered). Only that send's
