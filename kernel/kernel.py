@@ -21250,8 +21250,14 @@ _PARK_MAX_TRIES = 30
 # dialog goes to the next pane that can hear it whenever the one holding it is gone (_offer_dropped_create): the pane whose
 # page re-posts the create, a pane that starts listening (_offer_untold_drops), or another pane when the holder's socket
 # closes (_reoffer_drops_of). With no pane connected at the drop, that is how it surfaces at all.
+# Kept on disk as well (review of PR 218, 2026-10-11): a drop with no page open and a kernel restart before one opened left
+# undelivered.jsonl and the log as its only record, with no dialog and no Log entry, and a page that still held the create
+# re-posted it to a kernel that no longer knew the drop. The file (_dropped_creates_save) mirrors this dict without the
+# words, which undelivered.jsonl holds; the next boot restores it and rebuilds each untold drop's dialog from that row
+# (_dropped_creates_load), for the next pane that listens.
 _dropped_creates = {}                      # (sid, createId) -> {"why", "told", "frame", "offered"}
 _DROPPED_CREATES_MAX = 256
+_dropped_creates_file_lock = threading.Lock()   # the file's writers, one at a time; taken BEFORE _create_lock, never inside it
 # A create's IDENTITY (T289): the client's createId, minted by the popover at the send gesture and carried
 # by every re-post of it, under the parent sid -> the thread it made. A lag-parked create is retried by
 # BOTH the pusher (above) and the client (its re-post on a reconnect), and a popover whose ack was lost sends
@@ -21404,37 +21410,134 @@ def _offer_dropped_create(entry, c):
     return False
 
 
-def _offer_untold_drops(client):
+def _offer_untold_drops(client, fresh=False):
     """A pane that starts LISTENING (its bundle's ready, or a redial's first tab strip: the events that consume a parked
     reveal, _consume_pending_reveal) is offered every drop no pane has acknowledged and no live pane holds (review of PR
     211, 2026-10-11). A drop with no pane connected was in undelivered.jsonl and the log alone, with no dialog and no Log
-    entry, and the page that held the create had reloaded, so no re-post would ever come for the door to answer."""
+    entry, and the page that held the create had reloaded, so no re-post would ever come for the door to answer.
+    `fresh` is the ready arm's: its bundle JUST evaluated, so the page holds nothing this socket was sent before (the
+    arm's _client_reset_chat_base, for the same reason), and a drop this pane holds goes to it again rather than being
+    refused because a live pane, itself, holds it (review of PR 218, 2026-10-11)."""
     if (client.get("app") or "") not in _ERR_FRAME_APPS:
         return
     with _create_lock:
         untold = [e for e in _dropped_creates.values() if not e.get("told") and e.get("frame")]
+        if fresh:
+            for e in untold:
+                if e.get("offered") is client:
+                    e["offered"] = None
     for e in untold:
         _offer_dropped_create(e, client)
 
 
 def _reoffer_drops_of(client):
     """`client`'s socket closed (Handler._ws's finally): every drop it held unacknowledged goes to one pane still connected
-    (_one_err_pane, the not-delivered road's pick), else waits for the next pane that listens (_offer_untold_drops)."""
+    whose bundle listens (_one_err_pane, the not-delivered road's pick), else waits for the next pane that listens
+    (_offer_untold_drops)."""
     with _create_lock:
         held = [e for e in _dropped_creates.values() if e.get("offered") is client and not e.get("told")]
         for e in held:
             e["offered"] = None
     for e in held:
-        _offer_dropped_create(e, _one_err_pane(str((e.get("frame") or {}).get("sid") or "")))
+        _offer_dropped_create(e, _one_err_pane(str((e.get("frame") or {}).get("sid") or ""), listening=True))
 
 
 def _dropped_create_seen(sid, create_id):
-    """A pane acknowledged a drop's dialog (commentDropSeen): it was drawn, so the drop is told and offered no more."""
+    """A pane acknowledged a drop's dialog (commentDropSeen): it was drawn, so the drop is told and offered no more, on
+    disk too, so a restart offers it to no one."""
     with _create_lock:
         e = _dropped_creates.get((str(sid), str(create_id)))
+        newly = e is not None and not e.get("told")
         if e is not None:
             e["told"] = True
             e["offered"] = None
+    if newly:
+        _dropped_creates_save()
+
+
+def _dropped_creates_path():
+    return jd.STATE / "comment-drops.json"
+
+
+def _dropped_creates_save():
+    """Publish the drop memo (_dropped_creates) to its file: each drop's session, createId, reason, and whether a pane
+    acknowledged its dialog, oldest first. Never the words: undelivered.jsonl has them, under the same createId. A write
+    that fails is filed by the state write door (_write_state_json: stderr and the error center, once per episode) and the
+    memo lives on in memory for this kernel's life. Never called under _create_lock (the file lock is taken first)."""
+    with _dropped_creates_file_lock:
+        with _create_lock:
+            rows = [{"sid": k[0], "createId": k[1], "why": e.get("why") or "", "told": bool(e.get("told"))}
+                    for k, e in _dropped_creates.items()]
+        try:
+            _write_state_json(_dropped_creates_path(), json.dumps({"drops": rows}))
+        except _StateUnwritable:
+            pass                                 # filed by the write door; a restart before it lands forgets these drops
+
+
+def _undelivered_comment_words(keys):
+    """The words of each dropped create in `keys` ((sid, createId) pairs), read back from undelivered.jsonl, where the drop
+    wrote them (_hand_back_dropped_create): ({key: text}, why) with `why` the reason the file could not be read, else ""."""
+    found = {}
+    try:
+        with (jd.STATE / "undelivered.jsonl").open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or row.get("op") != "commentCreate":
+                    continue
+                k = (str(row.get("sid") or ""), str(row.get("createId") or ""))
+                if k in keys and isinstance(row.get("text"), str):
+                    found[k] = row["text"]
+    except FileNotFoundError:
+        return found, "the file is missing"
+    except OSError as e:
+        return found, _errno_text(e)
+    return found, ""
+
+
+def _dropped_creates_load():
+    """At boot (main): restore the drop memo the last kernel kept (_dropped_creates_save), so a re-post of a dropped create
+    is answered with its drop, and rebuild each untold drop's dialog with its words from undelivered.jsonl, so the first
+    pane that listens is shown it (_offer_untold_drops). A drop whose words cannot be read back is still shown, saying so.
+    An unreadable file is filed (_note_state_fault) and restores nothing. Returns how many untold drops were restored."""
+    try:
+        raw = _read_state_json(_dropped_creates_path(), expect=dict)
+    except _StateUnreadable as exc:
+        _note_state_fault(exc)
+        return 0
+    rows = [r for r in ((raw or {}).get("drops") or []) if isinstance(r, dict) and r.get("sid") and r.get("createId")]
+    rows = rows[-_DROPPED_CREATES_MAX:]
+    untold = {(str(r["sid"]), str(r["createId"])) for r in rows if not r.get("told")}
+    words, unread = _undelivered_comment_words(untold) if untold else ({}, "")
+    with _create_lock:
+        for r in rows:
+            key = (str(r["sid"]), str(r["createId"]))
+            entry = {"why": str(r.get("why") or ""), "told": bool(r.get("told")), "offered": None}
+            if key in untold:
+                entry["frame"] = _dropped_create_frame(key[0], key[1], entry["why"], words.get(key),
+                                                       "" if key in words else (unread or "no row for it"))
+            _dropped_creates[key] = entry
+    return len(untold)
+
+
+def _dropped_create_frame(sid, cid, why, words, kept):
+    """A dropped create's dialog: the err frame with the words in its copy slot, its session, and the createId the pane's
+    acknowledgement answers (commentDropSeen). `kept` is why undelivered.jsonl holds no copy of the words ("" when it
+    does); `words` None is a restored drop whose words could not be read back from that file (_dropped_creates_load)."""
+    name = _name_of(sid) or sid[:8]
+    text = ("Your comment on %s waited for the message it quotes to reach the session's transcript, and no thread was "
+            "started: %s. " % (name, why))
+    if words is None:
+        text += ("romp restarted before any page showed this, and could not read your text back from undelivered.jsonl "
+                 "under romp's state directory (%s)." % kept)
+    elif not kept:
+        text += "Your text is saved verbatim in undelivered.jsonl under romp's state directory."
+    else:
+        text += "romp could not write undelivered.jsonl either (%s); the Copy button below is the one record of your text." % kept
+    return {"type": "err", "title": "That comment did not start a thread", "text": text, "copy": words or "",
+            "sid": sid, "op": "commentCreate", "createId": cid}
 
 
 def _hand_back_dropped_create(pk, why, detail, entry):
@@ -21445,7 +21548,10 @@ def _hand_back_dropped_create(pk, why, detail, entry):
     that also files a "not sent" entry in the Log; and every chat client the typed failure (commentCreateFailed,
     `dropped`), so the page holding the create, on whatever socket it holds now, hands the words back to the comment box.
     `why` is the user's reason, `detail` the log's. The dialog is kept in `entry` and counts as told only once a pane
-    acknowledges it (_dropped_creates): until then it goes to whichever pane can next hear it (_offer_dropped_create)."""
+    acknowledges it (_dropped_creates): until then it goes to whichever pane can next hear it (_offer_dropped_create), and
+    the memo goes to disk once the words are in undelivered.jsonl, so a restart rebuilds the dialog (_dropped_creates_load).
+    The fallback pick takes a pane whose bundle listens (_one_err_pane `listening`); the sending socket needs no such
+    check, since the create it sent came from its bundle."""
     sid, cid = pk["sid"], pk.get("createId") or ""
     name = _name_of(sid) or sid[:8]
     kept = ""
@@ -21456,14 +21562,9 @@ def _hand_back_dropped_create(pk, why, detail, entry):
                                  "name": pk.get("name") or "", "text": pk["text"]}) + "\n")
     except OSError as e:
         kept = _store_fault_copy(e)
+    _dropped_creates_save()                      # after the words' row: a restored drop finds them there
     sys.stderr.write("comment create dropped (%s, session %s, create %s): %s\n" % (sid[:8], name, cid or "-", detail))
-    text = ("Your comment on %s waited for the message it quotes to reach the session's transcript, and no thread was "
-            "started: %s. " % (name, why)
-            + ("Your text is saved verbatim in undelivered.jsonl under romp's state directory." if not kept else
-               "romp could not write undelivered.jsonl either (%s); the Copy button below is the one record of your text." % kept))
-    # `createId` names the drop the pane's acknowledgement answers (commentDropSeen)
-    frame = {"type": "err", "title": "That comment did not start a thread", "text": text, "copy": pk["text"],
-             "sid": sid, "op": "commentCreate", "createId": cid}
+    frame = _dropped_create_frame(sid, cid, why, pk["text"], kept)
     nack = json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": pk["uuid"], "createId": cid,
                        "transient": False, "dropped": True, "text": why})
     with _clients_lock:
@@ -21477,7 +21578,7 @@ def _hand_back_dropped_create(pk, why, detail, entry):
         entry["frame"] = frame
     c = pk.get("client")
     if not (c is not None and c.get("alive", True) and (c.get("app") or "") in _ERR_FRAME_APPS):
-        c = _one_err_pane(sid)
+        c = _one_err_pane(sid, listening=True)
     _offer_dropped_create(entry, c)
 
 
@@ -42359,14 +42460,27 @@ def _send_to_one_chat(msg, sid=""):
     return _client_send(c, s)
 
 
-def _one_err_pane(sid=""):
+def _one_err_pane(sid="", listening=False):
     """The one pane _send_to_one_chat sends to (its docstring has the tiers and the pick), or None when no pane that
-    renders an err frame is connected. A dropped comment create's dialog takes the same pick (_hand_back_dropped_create)."""
+    renders an err frame is connected. A dropped comment create's dialog takes the same pick (_hand_back_dropped_create)
+    with `listening`: only a pane whose bundle has a listener (_pane_listens) is a candidate. A socket exists from its
+    handshake and its page's bundle can still be loading; such a pane's lastIn could win the pick, the frame vanished into
+    a document with no listener, and the drop's claim on that pane then refused its own offer at its ready (review of PR
+    218, 2026-10-11, confirmed by a probe)."""
     with _clients_lock:
-        live = [c for c in _clients if (c.get("app") or "") in _ERR_FRAME_APPS and c.get("alive", True)]
+        live = [c for c in _clients if (c.get("app") or "") in _ERR_FRAME_APPS and c.get("alive", True)
+                and (not listening or _pane_listens(c))]
     chat = [c for c in live if c.get("app") == "chat"]
     tier = [c for c in chat if sid and c.get("active") == sid] or chat or live
     return max(tier, key=lambda c: c.get("lastIn", 0)) if tier else None
+
+
+def _pane_listens(c):
+    """Does pane `c`'s bundle hear a frame sent now? It said ready on this socket (`ready`, stamped by the ready arm), or
+    the socket is a redial (`redial`, the dial record _ws sets): the shim dials ?reconnect=1 only once the kernel's caps
+    frame answered its bundle's ready, so a redialed page listens from its handshake. A redial's `ready` waits for its
+    first tab strip only because a reveal must land behind the strip (_resolve_reconnect); a dialog needs no tab."""
+    return bool(c.get("ready") or c.get("redial"))
 
 
 def _cancel_backend_queued(be, sid, idx, md, qid=None):
@@ -84464,8 +84578,9 @@ class Handler(BaseHTTPRequestHandler):
             # a push tap parked a reveal for this window's chat pane → deliver it now, AFTER the
             # ready push, so the tab it names already exists on the client (ordered socket)
             _consume_pending_reveal(client)
-            # …and every comment drop no pane has acknowledged: this pane listens now (review of PR 211, 2026-10-11)
-            _offer_untold_drops(client)
+            # …and every comment drop no pane has acknowledged: this pane listens now (review of PR 211, 2026-10-11),
+            # one it was sent before its bundle listened included (`fresh`, review of PR 218)
+            _offer_untold_drops(client, fresh=True)
             # a shell that just connected paints the app-icon badge from the latest count — an
             # installed app relaunching is exactly when the icon's number needs truing up
             if client.get("app") == "shell" and _BADGE_LAST[0] is not None:
@@ -86788,6 +86903,12 @@ def main():
             sys.stderr.write("romp-kernel: freed %d comment thread(s) a relay left mid-flight\n" % _n)
     except Exception:
         sys.stderr.write("comment latch boot pass: %s\n" % traceback.format_exc())
+    try:                                                      # the comment drops the last kernel had not shown
+        _n = _dropped_creates_load()                          # any page: their dialogs wait for the first pane
+        if _n:                                                # that listens, before any socket can re-post one
+            sys.stderr.write("romp-kernel: %d dropped comment(s) still to show a page\n" % _n)
+    except Exception:
+        sys.stderr.write("comment drops boot load: %s\n" % traceback.format_exc())
     try:                                                      # a stored model pinned to a family's PRE-FIX seed
         _model_alias_boot_pass()                              # head (claude-fable-5) → the family alias, so the
     except Exception:                                         # next reconnect follows the CLI's newest.

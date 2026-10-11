@@ -1346,6 +1346,15 @@ body:has(#tt-off:not([hidden])) #feed-foot { display: none; }
 .pickdlg-opt:hover { background: rgba(255, 255, 255, 0.1); }
 .pickdlg-opt:focus { outline: 1px solid var(--vscode-focusBorder, #4daafc); }
 .pickdlg-cancel { color: var(--vscode-descriptionForeground, #999); }
+/* the comment drops' dialog (comment-drops.ts, the chat page's twin): an entry per drop, its words on one line beside its
+   own Copy; a long list scrolls inside the box */
+.cmt-drop-list { display: flex; flex-direction: column; gap: 14px; max-height: 50vh; overflow-y: auto; margin-bottom: 4px; }
+.cmt-drop { display: flex; flex-direction: column; gap: 6px; }
+.cmt-drop .pickdlg-detail { margin-bottom: 0; }
+.cmt-drop-words { display: flex; align-items: center; gap: 8px; }
+.cmt-drop-quote { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--vscode-foreground, #ccc); }
+.cmt-drop-words .pickdlg-opt { flex: 0 0 auto; }
 
 /* transient feed notice (the user 2026-06-30): surfaces an inconsistency — e.g. an optimistic follow-up move
    the kernel never confirmed — as a small toast at the bottom, then auto-dismisses. Amber left rule = "heads up,
