@@ -10723,29 +10723,30 @@ function cmtLatchReleased(t: CommentThread, base: CmtLatch): boolean {
 }
 // Creates in flight (T106 lab find, 2026-08-26): a comment made seconds after a reply lands can be
 // refused by the kernel's parse lag ("isn't in the transcript yet"). The payload holds here from the
-// send; a TRANSIENT nack keeps the optimistic mark + latch alive and the create RE-POSTS when the
-// next session frame for the sid arrives (frames are built from the kernel's parse — a new frame IS
-// the parse catching up). Bounded by attempts, not time; a real refusal or the ack drops the hold.
+// send; a TRANSIENT nack keeps the optimistic mark + latch alive while the KERNEL holds the create parked
+// and retries it, and the hold lives until the kernel's answer for it: the thread (commentCreated) or a
+// refusal (commentCreateFailed, not transient: refused at the door, or the park dropped). The page gives up on
+// nothing of its own (2026-10-11, review of PR 209): its bound counted the session's frames, so on a quiet
+// session the mark pended forever, and where frames did come it handed the words back while the kernel's
+// park could still make the thread later, beside the one the user sent again. What the kernel's answer
+// cannot survive is the kernel losing the create (a restart forgets the park) or the page missing the answer
+// (sent while its socket was down); both are a socket reopening, so that is when every hold re-posts
+// (repostCmtCreates), and the kernel answers with the thread it made, the drop it said, a busy nack while it
+// still holds the park, or a fresh attempt.
 // Keyed by the send gesture's createId (2026-10-01; it was the anchor turn, so two comments on one reply
 // shared a slot and the first answer retired the second's hold). The held create carries the id the send
 // gesture minted, and every re-post sends it again (commentCreateFrame): the kernel answers a repeat of a
 // create it completed with the same thread, tells a repeat from a fresh comment in the same words by that
 // id, and echoes it on every answer (holdAnswered), so an answer names exactly one send.
 const cmtCreateInFlight = new Map<string, CommentCreate>();
-const CMT_CREATE_MAX_TRIES = 12;
 
-function retryCmtCreates(sid: string): void {
-  for (const c of Array.from(cmtCreateInFlight.values())) {
-    if (c.sid !== sid || c.tries < 1) continue;            // tries starts counting after the first transient nack
-    if (c.tries > CMT_CREATE_MAX_TRIES) {                  // the can't-trap bound: give up honestly
-      refuseCmtCreate(c);
-      warnToast("couldn't anchor the comment — the message never appeared in the kernel's transcript.");
-      continue;
-    }
-    c.tries++;
-    vscodeApi?.postMessage(commentCreateFrame(c));         // the same gesture again: the same id
-  }
+/** Re-post every held create `mine` selects: the same gesture again, the same frame and id. */
+function repostCmtCreates(mine: (c: CommentCreate) => boolean): void {
+  for (const c of Array.from(cmtCreateInFlight.values()))
+    if (mine(c)) vscodeApi?.postMessage(commentCreateFrame(c));
 }
+// (called on the local socket's reopen, romp:wsup, for this kernel's holds, and on a remote host's relay reopen,
+// romp:hostRelayUp, for that host's: the listeners beside the other reconnect-class resets)
 
 /** Drop a create's optimistic synth thread + latch + mark — the honest retreat. */
 function dropSynthThread(sid: string, createId: string): void {
@@ -19213,6 +19214,7 @@ window.addEventListener("romp:hostRelayUp", (e) => {
   // make their one attempt here as well
   refreshSettledPreviews();
   reaskWaitingSubagents(h);   // …and that host's subagent viewers still waiting ask again (T355: a remote kernel's restart; an empty host is the local one)
+  if (h) repostCmtCreates((c) => hostOf(c.sid) === h);   // …and that host's comment creates still unanswered (2026-10-11): a restarted remote kernel forgot its park, and an answer sent while the relay was down never arrived
   reaskOutstandingGaps(Array.from(gapLoading), h);   // …and re-send every loadTurns still outstanding for that host: a relay drop fires no romp:wsdown, so gapLoading kept its keys and, with the guard now correct, the gap would stay suppressed until a reload (2026-09-15)
   if (h) forgetHeldWm(sessions, (sid) => hostOf(sid) === h);   // …and that host's held watermarks (frame-guard.ts, 2026-09-23): the remote kernel behind the reopened relay may be a fresh process whose live-tail revision restarted at 0, and a held revision would refuse its every frame for a session whose files have not moved (the local socket's twin rides the shim's wsup FRAME)
   if (h) onHostSocketUp(skeletonTabs, (sid) => hostOf(sid) === h);   // …and what loaded for that host on the dead relay socket (2026-09-23): a restarted remote kernel withholds those tabs as skeletons, and a page that still counted them as loaded refused its list, took status frames alone and froze their transcripts until clicked
@@ -20481,7 +20483,6 @@ function landingAfter(m: any, snap: LandSnap | null): void {
 }
 
 function upsert(msg: any) {
-  retryCmtCreates(String(msg.id || ""));   // a session frame = the kernel re-parsed → retry a lag-refused create (T106)
   // The LOCAL kernel's own machine name rides its session frames (the kernel's _self_host, as the tabOrder
   // and feed frames carry it): the chat reads a postal card's sender host against it (postalSenderHost). It
   // was learned only from the + picker's sessionList reply before, so that reading was inert in any chat
@@ -20841,7 +20842,6 @@ function upsert(msg: any) {
 }
 
 function update(msg: any) {
-  retryCmtCreates(String(msg.id || ""));   // ditto for the delta path (T106)
   if (skeletonTabs.ids.has(msg.id)) { requestFullSession(msg.id, "skeleton-delta"); return; }   // a delta for a tab held as skeleton: the kernel sends none (contract), and onto the stale base it could splice a suffix the outage changed — the no-base repair (2026-09-07)
   const s = sessions.get(msg.id);
   if (!s) { requestFullSession(msg.id, "nobase"); return; }   // a delta with no base is PROOF of desync (see chatTail)
@@ -20955,6 +20955,7 @@ function clearAsksForHost(h: string): void {
 window.addEventListener("romp:wsup", () => awaitingFull.clear());
 window.addEventListener("romp:wsup", () => { forgetResync(resync); staleAnswerReasked.clear(); });   // …and the base check's history: a fresh kernel-side client (2026-09-23)
 window.addEventListener("romp:wsup", () => pendingFullWhy.clear());   // …and the reasons parked with them
+window.addEventListener("romp:wsup", () => repostCmtCreates((c) => !hostOf(c.sid)));   // …and this kernel's comment creates still unanswered (2026-10-11): a restarted kernel forgot its park, and an answer sent while the socket was down never arrived. A remote host's re-post on its own relay's reopen (romp:hostRelayUp): sent here while that relay is down, federation would refuse it for good (dropWarn) while the remote's park could still make the thread
 // …and the same socket-open resets what this page learned on the dead one: the fulls it received there (so the
 // new socket's skeleton list may re-list them — they are stale after the outage; skeleton-tabs.ts) and the
 // one-per-reconnect diagnostic row noteSkeletonTabOrder posts.
@@ -22758,15 +22759,13 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   // leaves its sent words to resurface in the next composer on the same passage.
   else if (m.type === "commentCreateFailed" && m.id && m.uuid) {
     // the typed nack (T106): a TRANSIENT refusal (the kernel's parse hasn't caught the anchor
-    // record up yet) keeps the optimistic mark + latch and arms the frame-keyed retry — the next
-    // session frame for the sid IS the parse catching up (retryCmtCreates). A real refusal drops
-    // the synth honestly and hands the words back; the kernel's warn already said why. It names its
-    // create by the echoed createId (holdAnswered; an older kernel, by the anchor turn).
+    // record up yet) keeps the optimistic mark + latch: the kernel holds the create parked and answers it
+    // itself, to every page (cmtCreateInFlight). A real refusal drops the synth honestly and hands the words
+    // back: refused at the door, the kernel's warn already said why; a park the kernel dropped (`dropped`), its
+    // dialog did, on this page or the one watching the session. It names its create by the echoed createId
+    // (holdAnswered; an older kernel, by the anchor turn).
     const held = holdAnswered(cmtCreateInFlight.values(), String(m.id), String(m.uuid), m.createId);
-    if (held) {
-      if (m.transient) { if (held.tries === 0) held.tries = 1; }
-      else refuseCmtCreate(held);
-    }
+    if (held && !m.transient) refuseCmtCreate(held);
   }
   else if (m.type === "commentCreated" && m.id && m.tid) {
     // the ack names the thread a create made and, by the echoed createId, WHICH create (holdAnswered). Only that send's

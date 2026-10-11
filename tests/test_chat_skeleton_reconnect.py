@@ -883,6 +883,53 @@ class SkeletonReconnect(unittest.TestCase):
         body = arm[arm.index('msg.get("type") == "ready"'):][:3500]
         self.assertNotIn('client.pop("skeletonOnReady"', body)
 
+    def test_11_f_a_skeleton_redial_after_an_unanswered_ready_is_withheld_until_its_resent_ready_then_served_whole(self):
+        # The main chat pane dials skeleton=1 on EVERY dial of the load (RESTART_DIET), and a page whose ready the kernel
+        # never answered (its socket died before the caps frame came back) redials WITHOUT reconnect=1 (the shim's gate),
+        # so the handshake arms it as a fresh skeleton page: `skeletonOnReady`, which holds back every session frame until
+        # a ready on THIS socket pops it (_send_chat_or_status). The shim's onopen posts the bundle's ready again on such a
+        # redial (readyMsg, round 3 C, test_pane_shim_return.py), and that resend is the only ready this socket will ever
+        # carry: driven here through the real handshake, the withheld cycles and the arm, to the full frame. A comment in
+        # _ws said the page posted no further ready, which would leave the flag set for the socket's life (review of
+        # PR 209, 2026-10-11).
+        got = []
+        real_reg, real_recv = km._register_ws_client, km._ws_recv
+        km._register_ws_client = lambda cl: got.append(cl)
+        km._ws_recv = lambda rfile: (0x8, b"", True)              # the peer closes at once
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                km.Handler._ws(_fake_self("/ws?app=chat&delta=1&iid=page-11f&wid=W1&active=%s&skeleton=1" % S1))
+        finally:
+            km._register_ws_client, km._ws_recv = real_reg, real_recv
+        self.assertEqual(len(got), 1)
+        armed = {k: got[0][k] for k in ("reconnect", "skeletonOnReady", "dietSkeleton") if k in got[0]}
+        self.assertEqual(armed, {"reconnect": True, "skeletonOnReady": True, "dietSkeleton": True},
+                         "premise: a skeleton=1 dial with no reconnect term is armed as a fresh skeleton page")
+        c = self._client(active=S1, wid="W1", **armed)
+        # 1. the pusher's cycles before the ready: the strip and the statuses go, never a session frame, however many cycles
+        for _ in range(3):
+            km._push([c])
+        self.assertEqual(self._sessions(c), [], "every session frame is withheld while the flag stands")
+        self.assertIs(c.get("skeletonOnReady"), True, "no cycle lifts the flag: only a ready on this socket does")
+        self.assertNotIn("ready", c)
+        # 2. the shim's onopen re-sent the bundle's ready (the page's own, protocol and all): the arm pops the flag, serves
+        #    the session the page is looking at whole, and answers with the caps frame the next redial's gate latches on
+        c["_frames"].clear()
+        h = _Self(lambda cl, only=None: km._push([cl], connect=True, only=only))   # the real _push_one body
+        with contextlib.redirect_stderr(io.StringIO()):
+            km.Handler._dispatch_ws(h, {"type": "ready", "proto": 2}, c)
+        self.assertEqual(h.calls, [c])
+        self.assertNotIn("skeletonOnReady", c, "the re-sent ready popped the flag")
+        self.assertEqual(self._sessions(c), [S1, S4], "the full for the active tab (+ the transcript-less), the diet's one full")
+        self.assertEqual(self._tab_orders(c)[0]["skeleton"], [S3, S2], "still the diet: the other tabs are skeletons")
+        self.assertIs(c.get("ready"), True)
+        types = [f["type"] for f in c["_frames"]]
+        self.assertIn("caps", types, "the kernel's answer to the ready: the shim's redials declare themselves from here")
+        self.assertLess(types.index("session"), types.index("caps"), "sent after the pushes, as _send_caps always is")
+        # 3. the page half: the shim posts that ready again on the open of a socket whose ready went unanswered
+        src = inspect.getsource(km)
+        self.assertIn("if(bundleReady&&!readyAcked&&!readyQueued&&readyMsg)ws.send(readyMsg);", src)
+
     def test_11_c_a_later_columns_redial_is_stamped_by_its_first_strip_and_lands_a_parked_reveal(self):
         # The shim reads skeleton=1 off the address on EVERY dial of a later column, so its redial after a kernel restart
         # or a laptop sleep carries reconnect=1 AND skeleton=1. Armed with `skeletonOnReady`, that client was never stamped:

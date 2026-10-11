@@ -2,7 +2,7 @@
 """T289: a comment CREATE is idempotent on its own identity.
 
 A create parked for transcript lag is retried by BOTH the kernel (the pusher's _retry_parked_creates) and
-the client (its frame-keyed re-post), and a create whose ack was lost is sent again by the popover; before
+the client (its re-post on a reconnect), and a create whose ack was lost is sent again by the popover; before
 this the second copy either collided on its explicit name and was refused with the create toast the user
 saw, or, with the name now left to the kernel, would have minted a SECOND thread for one comment. The
 kernel remembers each create it completed and answers a repeat with the SAME thread's ack; a lag-parked
@@ -59,6 +59,12 @@ def aline(t, text, uuid, parent=None):
 class FakeBackend:
     def __init__(self):
         self.calls = []
+        # the live tail (2026-10-11): the lagging anchor these tests comment on is a reply that STREAMED and whose record the
+        # CLI has not written yet, so it is a work atom of the session's tail, the event a park waits on (_anchor_streaming)
+        self.streaming = {"a9"}
+
+    def live_atoms(self, sid):
+        return [{"type": "assistant", "uuid": u} for u in sorted(self.streaming)]
 
     def fork(self, name, parent_sid, cut_uuid="", bg="", fg="", sid=None, thread_of="", model="", effort="", fast=""):
         self.calls.append(("fork", name)); return sid
@@ -79,7 +85,7 @@ class FakeBackend:
         self.calls.append(("promote", name)); return True
 
 
-class CreateIsIdempotent(unittest.TestCase):
+class _Harness(unittest.TestCase):
     def setUp(self):
         self._saved = jd.STATE
         self._saved_proj = jd.PROJECTS
@@ -98,6 +104,7 @@ class CreateIsIdempotent(unittest.TestCase):
         # failing the next one too. Under the lock every writer of the three memos takes.
         with km._create_lock:
             km._recent_creates.clear(); km._inflight_creates.clear(); km._parked_creates.clear()
+            km._dropped_creates.clear()                  # a dropped gesture's answer (2026-10-11) is a memo of the same kind
         self.now = int(time.time())
         cdir = str(Path(self._td) / "work")
         self.proj = jd._proj_dir(cdir)
@@ -158,6 +165,8 @@ class CreateIsIdempotent(unittest.TestCase):
     def _acks(self):
         return [f for f in self.sent if f.get("type") == "commentCreated"]
 
+
+class CreateIsIdempotent(_Harness):
     def test_the_same_create_twice_yields_one_thread_and_two_acks_naming_it(self):
         self._create(); self._create()
         self.assertEqual(len(self._rows()), 1, "one comment, one thread")
@@ -240,9 +249,19 @@ class CreateIsIdempotent(unittest.TestCase):
         self.assertEqual(len(km._parked_creates), 1)
         self._write_unrelated(km._PARK_MAX_TRIES - 1, "a1")
         self.assertEqual(len(km._parked_creates), 1, "one write short of the budget: still parked")
-        self._write_unrelated(1, "w%02d" % (km._PARK_MAX_TRIES - 2))
+        with km._clients_lock:
+            saved_clients = list(km._clients)
+            km._clients[:] = [self.client]
+        try:
+            self._write_unrelated(1, "w%02d" % (km._PARK_MAX_TRIES - 2))
+        finally:
+            with km._clients_lock:
+                km._clients[:] = saved_clients
         self.assertEqual(km._parked_creates, [], "the budget's last write without the record: the record isn't coming")
         self.assertEqual(self._rows(), [])
+        last = [f for f in self.sent if f.get("type") == "commentCreateFailed"][-1]
+        self.assertEqual((last["transient"], last.get("dropped")), (False, True),
+                         "the drop is said to the page, never a silent loss (review of PR 209, 2026-10-11)")
 
     def test_a_repost_arriving_while_the_pushers_retry_creates_is_not_a_second_thread(self):
         # THE RACE (review, 2026-09-09): the pusher sends the chat frame before it retries parked creates,
@@ -460,6 +479,141 @@ class CreateIsIdempotent(unittest.TestCase):
         self.assertFalse(last("commentCreateFailed")["transient"])
         self._create(text="An older client", create_id=None)
         self.assertEqual(last("commentCreated")["createId"], "", "a frame with no id is answered with an empty one")
+
+
+
+WORDS = "Why a ten percent jitter and not a fixed delay?"
+
+
+class ParkEndsInAnAnswer(_Harness):
+    """A parked create ends in an answer every page hears, on the event it waits for (review of PR 209, 2026-10-11).
+
+    The park waits for its anchor's record, and that record comes while the anchor is a streamed message the CLI has not
+    written (a work atom of the session's live tail) or not at all: an atom leaves the tail only once its record is on disk
+    or its turn is over. Keyed on the transcript's writes alone, a quiet session's park (its turn over, nothing written)
+    waited forever, never dropped and never said, and the page's own give-up counted that session's frames, so its mark
+    pended forever too; where the page did give up, it handed the words back while the park could still make the thread
+    later, and a user who sent them again got two threads; after a reload nothing said the drop at all. Now the first retry
+    that finds the anchor gone from the tail and the record still missing drops the park, out loud: the typed failure to
+    every page, a dialog with the words to the page that sent it (else one watching the session), the words verbatim in
+    undelivered.jsonl, one log line without them. The drop is the gesture's one answer: nothing creates it later."""
+
+    def setUp(self):
+        super().setUp()
+        with km._clients_lock:
+            saved = list(km._clients)
+            km._clients[:] = [self.client]               # the page that sent it, connected
+
+        def restore():
+            with km._clients_lock:
+                km._clients[:] = saved
+        self.addCleanup(restore)
+
+    def _retry(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            km._retry_parked_creates()
+        return buf.getvalue()
+
+    def _undelivered(self):
+        p = jd.STATE / "undelivered.jsonl"
+        return [json.loads(ln) for ln in p.read_text().splitlines()] if p.exists() else []
+
+    @staticmethod
+    def _of(frames, kind, cid):
+        return [f for f in frames if f.get("type") == kind and (cid is None or f.get("createId") == cid)]
+
+    def test_a_quiet_sessions_park_ends_once_its_anchor_stops_streaming(self):
+        # on main: the park stood through every retry once the turn was over (a quiet transcript spends nothing), forever
+        self._create(uuid="a9", create_id="g-quiet", text=WORDS)
+        self.assertEqual(len(km._parked_creates), 1, "premise: parked while the reply streams and its record lags")
+        for _ in range(5):
+            self._retry()
+        self.assertEqual(len(km._parked_creates), 1, "the reply still streams: its record is coming, the park waits")
+        self.be.streaming.clear()                        # the turn ended: its atom retired, and no record was ever written
+        log = self._retry()
+        self.assertEqual(km._parked_creates, [], "the next retry ends the park, with not one write to the transcript")
+        nack = self._of(self.sent, "commentCreateFailed", "g-quiet")[-1]
+        self.assertEqual((nack["transient"], nack.get("dropped"), nack["text"]), (False, True, km.ANCHOR_GONE_ERR),
+                         "the page's hold ends on the kernel's answer: its mark goes and the words come back")
+        errs = self._of(self.sent, "err", None)
+        self.assertEqual(len(errs), 1, "one dialog, on the page that sent it")
+        self.assertEqual((errs[0]["copy"], errs[0]["sid"]), (WORDS, PARENT), "the words in its copy slot, for its session")
+        self.assertIn("web", errs[0]["text"], "it names the session")
+        self.assertIn("comment create dropped (aaaaaaaa, session web, create g-quiet)", log, "the kernel log says it")
+        self.assertNotIn(WORDS, log, "never the words in the log")
+        row = self._undelivered()[-1]
+        self.assertEqual((row["op"], row["sid"], row["createId"], row["text"]), ("commentCreate", PARENT, "g-quiet", WORDS),
+                         "the words verbatim in undelivered.jsonl")
+        self.assertEqual(self._rows(), [])
+
+    def test_a_lag_answer_for_an_anchor_that_is_not_streaming_is_refused_at_the_door(self):
+        # a passage between two /clears, a reply salvaged after the CLI discarded it, an unreadable first transcript: the
+        # record is not coming, so nothing is parked to wait on it (on main it parked, and on a quiet session for good)
+        self.be.streaming.clear()
+        self._create(uuid="a9", create_id="g-gone", text=WORDS)
+        self.assertEqual(km._parked_creates, [], "nothing to wait for: nothing parked")
+        nack = self._of(self.sent, "commentCreateFailed", "g-gone")[-1]
+        self.assertEqual((nack["transient"], nack["text"]), (False, km.ANCHOR_GONE_ERR))
+        self.assertIn(km.ANCHOR_GONE_ERR, self._warns(), "a real refusal, said at the gesture like any other")
+
+    def test_after_the_drop_nothing_makes_the_thread_later_and_the_words_sent_again_make_one(self):
+        # on main the page gave up on its own count while the park stood, and the park made the thread later: with the words
+        # sent again, two threads for one comment. The drop is the gesture's answer now, whatever turns up after it
+        self._create(uuid="a9", create_id="g-late", text=WORDS)
+        self.be.streaming.clear()
+        self._retry()
+        self.assertEqual(km._parked_creates, [], "premise: dropped, the words handed back")
+        p = Path(km._sessions(0)[0]["path"])
+        with p.open("a") as fh:                          # the record turns up after all
+            fh.write(json.dumps(aline(self.now - 300, "Add a jitter to the backoff.", "a9", parent="a1")) + "\n")
+        self._retry()
+        self._create(uuid="a9", create_id="g-late", text=WORDS)   # the page's re-post, crossing the drop on the wire
+        self.assertEqual(self._rows(), [], "no late thread, from the pusher or from the re-post")
+        nack = self._of(self.sent, "commentCreateFailed", "g-late")[-1]
+        self.assertEqual((nack["transient"], nack.get("dropped")), (False, True), "the re-post hears the drop again")
+        self.assertEqual(len(self._of(self.sent, "err", None)), 1, "…and is not shown its dialog a second time")
+        self._create(uuid="a9", create_id="g-again", text=WORDS)  # the user sends the handed-back words: a new gesture
+        self.assertEqual(len(self._rows()), 1, "exactly one thread")
+
+    def test_a_drop_reaches_the_page_open_after_a_reload_with_the_words(self):
+        # on main the drop said nothing to anyone: the reloaded page held no record of the create, and the park went silently
+        self._create(uuid="a9", create_id="g-reload", text=WORDS)
+        self.client["alive"] = False                     # the page reloads: the socket that sent the create is gone
+        fresh_sent = []
+        fresh = {"send": lambda s: fresh_sent.append(json.loads(s)), "app": "chat", "alive": True, "active": PARENT}
+        with km._clients_lock:
+            km._clients[:] = [self.client, fresh]
+        self.be.streaming.clear()
+        before = len(self.sent)
+        self._retry()
+        errs = self._of(fresh_sent, "err", None)
+        self.assertEqual(len(errs), 1, "the page open now is told: %r" % fresh_sent)
+        self.assertEqual((errs[0]["copy"], errs[0]["sid"], errs[0]["title"]), (WORDS, PARENT, "That comment did not start a thread"),
+                         "with the words to copy back, for its session")
+        self.assertEqual([f.get("dropped") for f in self._of(fresh_sent, "commentCreateFailed", "g-reload")], [True])
+        self.assertEqual(self.sent[before:], [], "the dead socket is sent nothing")
+        self.assertEqual(self._undelivered()[-1]["text"], WORDS)
+
+    def test_a_drop_no_pane_heard_is_shown_to_the_page_when_it_reposts(self):
+        # no page connected at the drop (a phone asleep): the reopened page re-posts the create it still holds, and the
+        # door shows it the dialog the drop could not deliver, once
+        self._create(uuid="a9", create_id="g-unheard", text=WORDS)
+        with km._clients_lock:
+            km._clients[:] = []
+        self.client["alive"] = False
+        self.be.streaming.clear()
+        self._retry()
+        self.assertEqual(km._parked_creates, [])
+        self.client["alive"] = True
+        self.sent.clear()
+        self._create(uuid="a9", create_id="g-unheard", text=WORDS)
+        self.assertEqual([f["type"] for f in self.sent], ["commentCreateFailed", "err"])
+        self.assertEqual((self.sent[0].get("dropped"), self.sent[1]["copy"]), (True, WORDS))
+        self.sent.clear()
+        self._create(uuid="a9", create_id="g-unheard", text=WORDS)
+        self.assertEqual([f["type"] for f in self.sent], ["commentCreateFailed"], "shown once")
+        self.assertEqual(self._rows(), [])
 
 
 if __name__ == "__main__":
