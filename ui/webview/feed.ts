@@ -13,6 +13,7 @@ import { distillText, distillInputs, applyDistillLine, distillPending, distillSt
 import { openContextMenu, CtxItem } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy): the card menu's card, dismissal and keys
 import { flipNeeded } from "./feed-flip";
 import { delegate } from "./actions";
+import { CmtDrops, cmtDropEntry } from "./comment-drops";   // a dropped comment create's dialog, shared with the chat page (review of PR 218)
 import { paintHeld, paintReleased, publishPaneHidden } from "./paint-gate";
 import { linkifyPrRefs, setLinkedText, installPrLinkOpener } from "./pr-links";
 import { cardInputsKey, cardNeedsUpdate, type GateEnv } from "./feed-card-gate";
@@ -6189,6 +6190,9 @@ listenForFrames(perfFrameHandler("feed", (m) => vscodeApi?.postMessage(m), (e: M
         restoreChecks.set(id, { host: h, sentBuild: seen, seq: typeof m.seq === "number" ? m.seq : undefined });
       }
     }
+  } else if (m.type === "err" && cmtDrops.take(m)) {
+    // a dropped comment create: its own dialog, listing every drop that arrives while it is up, each acknowledged to its
+    // kernel once drawn and drawn once per page (cmtDrops; the chat page's twin); any other err frame takes the arm below
   } else if (m.type === "err" && typeof m.text === "string" && m.text) {
     // the dialog interrupts; the bell KEEPS it (the user 2026-07-29) — dismissing the modal must not erase
     // the fact that a message never landed. Same {romp:'notify'} bridge the card-badge mirror below uses.
@@ -6199,11 +6203,6 @@ listenForFrames(perfFrameHandler("feed", (m) => vscodeApi?.postMessage(m), (e: M
                                                    text: copy ? title + ": " + copy : title,
                                                    sid: typeof m.sid === "string" ? m.sid : "" }, "*");
     showErrDialog(title, m.text, copy);
-    // a dropped comment create's dialog is acknowledged to its kernel (review of PR 211, 2026-10-11): the kernel counts the
-    // drop as told only once a pane says it drew it, and hands it to the next pane that can hear it until then (render.ts
-    // cmtDropDrawnBefore, the chat page's side)
-    if (m.op === "commentCreate" && typeof m.createId === "string" && m.createId && typeof m.sid === "string" && m.sid)
-      vscodeApi?.postMessage({ type: "commentDropSeen", id: m.sid, createId: m.createId });
     const sid = typeof m.sid === "string" ? m.sid : typeof m.id === "string" ? m.id : "";
     // the kernel's reply IS the event, for the request it names (rearmLatches): a refused apiRetry releases
     // that session's Retry; a refused askFollowUp releases that card's Continue, and its predicted move yields
@@ -6395,6 +6394,40 @@ function showPickerDialog(name: string, options: string[]) {
   overlay.appendChild(box);   // the box INTO the overlay (the verifier of PR 1967, 2026-09-21: built and never attached, so a refusal painted a bare dim sheet with no words and no button)
   document.body.appendChild(overlay);
   (box.querySelector("button") as HTMLElement | null)?.focus();
+}
+
+// The dropped comment creates' dialog (comment-drops.ts), on showErrDialog's chrome and in its slot (#err-dialog: a newer
+// err dialog replaces it, and it replaces an older one): every drop that arrives while it is up joins its list, each with
+// its own Copy, and is acknowledged to its kernel once drawn; a drop this page drew already is acknowledged again and not
+// drawn twice (review of PR 218, 2026-10-11: the feed drew it again on every offer). `cmtDropList` is the open list.
+let cmtDropList: HTMLElement | null = null;
+const cmtDrops = new CmtDrops({
+  isOpen: () => !!cmtDropList && cmtDropList.isConnected,
+  open: (title) => { cmtDropList = showCmtDropDialog(title); },
+  add: (d) => { cmtDropList!.appendChild(cmtDropEntry(d, el, { detail: "pickdlg-detail", button: "pickdlg-opt" },
+                                                      (t) => { navigator.clipboard?.writeText(t); })); },
+  retitle: (t) => { const h = cmtDropList?.parentElement?.querySelector(".pickdlg-title"); if (h) h.textContent = t; },
+  ack: (d) => vscodeApi?.postMessage({ type: "commentDropSeen", id: d.sid, createId: d.createId }),
+  // the bell keeps each drop, as it keeps every err frame (the arm below)
+  log: (d) => window.parent?.postMessage({ romp: "notify", kind: "undelivered", text: d.copy ? d.title + ": " + d.copy : d.title,
+                                           sid: d.sid }, "*"),
+});
+/** Open the drops dialog titled `title` and return its (empty) list. */
+function showCmtDropDialog(title: string): HTMLElement {
+  document.getElementById("err-dialog")?.remove();
+  const overlay = el("div", "pickdlg-overlay"); overlay.id = "err-dialog";
+  const box = el("div", "pickdlg-box");
+  const h = el("div", "pickdlg-title"); h.textContent = title;
+  const list = el("div", "cmt-drop-list");
+  const ok = el("button", "pickdlg-opt pickdlg-cancel");
+  ok.textContent = "Dismiss";
+  ok.onclick = () => overlay.remove();
+  box.append(h, list, ok);
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  ok.focus();
+  return list;
 }
 
 // The kernel's LOUD channel (the user 2026-07-29). The feed had no error surface at all: every failure here

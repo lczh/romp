@@ -870,38 +870,7 @@ test("a refusal sent while the page's socket reopened carries `say`, and the pag
   assert.match(UI, /if \(held && !m\.transient\) refuseCmtCreate\(held\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(held && !m\.transient && m\.say === true && typeof m\.text === "string" && m\.text\) warnToast\(m\.text\);/);
 });
 
-// ── executed: a dropped create's dialog is acknowledged, and drawn once per page (cmtDropDrawnBefore, lifted) ──
-function liftDropAck() {
-  const start = UI.indexOf("function cmtDropDrawnBefore(m: any): boolean {");
-  assert.ok(start > 0, "the acknowledgement lives in cmtDropDrawnBefore");
-  const src = UI.slice(start, UI.indexOf("\n}\n", start) + 3).replace("(m: any): boolean {", "(m) {");
-  const posted: any[] = [];
-  const drawnBefore = new Function("vscodeApi", "cmtDropsDrawn", src + "\nreturn cmtDropDrawnBefore;")(
-    { postMessage: (m: any) => posted.push(m) }, new Set<string>()) as (m: any) => boolean;
-  return { drawnBefore, posted };
-}
-
-test("a dropped create's dialog is acknowledged each time it arrives, and a page that drew it already does not draw it again", () => {
-  const { drawnBefore, posted } = liftDropAck();
-  const drop = { type: "err", op: "commentCreate", createId: "g-drop", sid: "TESTHOST:" + ANCHOR.sid, title: "t", text: "x", copy: "y" };
-  assert.equal(drawnBefore(drop), false, "the first arrival is drawn (the dialog arm below it)");
-  assert.equal(drawnBefore({ ...drop }), true, "the same drop again (an acknowledgement lost with a socket): not drawn twice");
-  assert.deepEqual(posted, [{ type: "commentDropSeen", id: drop.sid, createId: "g-drop" },
-                            { type: "commentDropSeen", id: drop.sid, createId: "g-drop" }],
-                   "acknowledged both times, to the kernel the session lives on (the id routes it, a remote host's included)");
-  posted.length = 0;
-  assert.equal(drawnBefore({ ...drop, createId: "g-other" }), false, "another drop is its own dialog");
-  for (const m of [{ type: "err", op: "sendMessage", sid: ANCHOR.sid, text: "x" }, { ...drop, createId: "" }, { ...drop, sid: "" }])
-    assert.equal(drawnBefore(m), false);
-  assert.equal(posted.length, 1, "only a frame naming a dropped create is acknowledged");
-  // the arm sits ahead of the err dialog's own, so a first arrival falls through to the dialog and a repeat stops there
-  const dedupe = UI.indexOf('else if (m.type === "err" && typeof m.text === "string" && m.text && cmtDropDrawnBefore(m)) {');
-  assert.ok(dedupe > 0 && dedupe < UI.indexOf('else if (m.type === "err" && typeof m.text === "string" && m.text) {'));
-  // the feed draws the same frame when no chat pane is connected, and acknowledges it the same way
-  const FEED = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "feed.ts"), "utf8");
-  assert.match(FEED, /showErrDialog\(title, m\.text, copy\);\s*\n(?:\s*\/\/[^\n]*\n)*\s*if \(m\.op === "commentCreate" && typeof m\.createId === "string" && m\.createId && typeof m\.sid === "string" && m\.sid\)\s*\n\s*vscodeApi\?\.postMessage\(\{ type: "commentDropSeen", id: m\.sid, createId: m\.createId \}\);/);
-  assert.match(KERNEL, /if msg and msg\.get\("type"\) == "commentDropSeen":\s*\n(?:\s*#[^\n]*\n)*\s*_dropped_create_seen\(/, "the kernel takes it");
-});
+// (a dropped create's dialog, drawn and acknowledged entry by entry on both pages: comment-drops.test.ts, review of PR 218)
 
 // ── executed: a host that left the mesh hands its unanswered creates back (loseCmtCreatesOf, lifted) ──
 test("a host leaving the mesh hands back its sessions' unanswered creates: words to the box, one dialog with them, a Log entry each", () => {

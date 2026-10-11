@@ -148,6 +148,7 @@ import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeB
 import { threadSettled, threadOnRail } from "./comments";   // a thread's look by status: only resolved dims; relayed stays on the rail, open (2026-09-30)
 import { isRelay, parseRelay, relayHtml, relayPlain } from "./relay-view";   // a relayed thread's expanded bubble: a small transcript (2026-10-06)
 import { threadTakesReplies, stageThreadReply, threadReply } from "./comments";   // a thread's reply box: its quote chips, its staged stack, its release (2026-10-07)
+import { CmtDrops, cmtDropEntry } from "./comment-drops";   // a dropped comment create's dialog, shared with the feed (review of PR 218)
 import { activeInput } from "./active-input";   // the one box typing, pasting and dictation from outside any box go to (2026-10-07)
 import { dragSlotIndex } from "./dragslot";
 import { acceptDragEnter } from "./drag-accept";
@@ -10501,7 +10502,8 @@ function reviveFailedLocal(id: string, name: string, text: string) {
 // One overlay at a time; Esc / backdrop click cancels (cb(null)). Buttons carry
 // a value handed to cb. Reuses the picker overlay's backdrop styling.
 let confirmCb: ((v: string | null) => void) | null = null;
-function showConfirm(title: string, detail: string, buttons: Array<{ label: string; value: string; danger?: boolean }>, cb: (v: string | null) => void) {
+function showConfirm(title: string, detail: string, buttons: Array<{ label: string; value: string; danger?: boolean }>, cb: (v: string | null) => void,
+                     body?: HTMLElement) {   // `body`: content of the caller's own under the detail (the comment drops' list)
   closeConfirm(null);   // a newer dialog replaces (and cancels) an older one
   confirmCb = cb;
   const overlay = el("div", "picker-overlay confirm-overlay"); overlay.id = "confirm";
@@ -10515,7 +10517,7 @@ function showConfirm(title: string, detail: string, buttons: Array<{ label: stri
     btn.addEventListener("click", () => closeConfirm(b.value));
     actions.appendChild(btn);
   }
-  box.appendChild(h); box.appendChild(d); box.appendChild(actions);
+  box.appendChild(h); if (detail) box.appendChild(d); if (body) box.appendChild(body); box.appendChild(actions);
   overlay.appendChild(box);
   overlay.addEventListener("click", (e) => { if (e.target === overlay) closeConfirm(null); });
   document.body.appendChild(overlay);
@@ -10799,21 +10801,23 @@ function loseCmtCreatesOf(sid: string): void {
               [{ label: "Copy my text", value: "copy" }, { label: "Dismiss", value: "ok" }],
               (v) => { if (v === "copy") navigator.clipboard?.writeText(copy); });
 }
-// The dropped comment creates whose dialog this page drew (review of PR 211, 2026-10-11), by "<sid> <createId>". The kernel
-// counts a drop as told only once a pane acknowledges its dialog, and until then hands it to the next pane that can hear it
-// (a pane that starts listening, its answer to a re-post, another pane when the holder's socket closes), so the same frame
-// can reach this page again when an acknowledgement was lost with its socket: acknowledged again, never drawn twice.
-const cmtDropsDrawn = new Set<string>();
-/** Acknowledge a dropped comment create's dialog (an err frame naming op commentCreate and its createId) to the kernel that
- *  sent it, and say whether this page drew it already. Any other frame posts nothing and answers false. */
-function cmtDropDrawnBefore(m: any): boolean {
-  if (m.op !== "commentCreate" || typeof m.createId !== "string" || !m.createId || typeof m.sid !== "string" || !m.sid) return false;
-  vscodeApi?.postMessage({ type: "commentDropSeen", id: m.sid, createId: m.createId });
-  const k = m.sid + " " + m.createId;
-  if (cmtDropsDrawn.has(k)) return true;
-  cmtDropsDrawn.add(k);
-  return false;
-}
+// The dropped comment creates' dialog (comment-drops.ts): one dialog on the confirm chrome lists every drop that arrives
+// while it is up, each with its own Copy, and each is acknowledged to its kernel once its entry is drawn; a drop this page
+// drew already is acknowledged again and not drawn twice (reviews of PR 211 and PR 218, 2026-10-11). `cmtDropList` is the
+// open dialog's list, while that dialog is on screen (a newer dialog replaces it, as any dialog here does).
+let cmtDropList: HTMLElement | null = null;
+const cmtDrops = new CmtDrops({
+  isOpen: () => !!cmtDropList && cmtDropList.isConnected,
+  open: (title) => {
+    cmtDropList = el("div", "cmt-drop-list");
+    showConfirm(title, "", [{ label: "Dismiss", value: "ok" }], () => {}, cmtDropList);
+  },
+  add: (d) => { cmtDropList!.appendChild(cmtDropEntry(d, el, { detail: "confirm-detail", button: "picker-action confirm-btn" },
+                                                      (t) => { navigator.clipboard?.writeText(t); })); },
+  retitle: (t) => { const h = cmtDropList?.parentElement?.querySelector(".confirm-title"); if (h) h.textContent = t; },
+  ack: (d) => vscodeApi?.postMessage({ type: "commentDropSeen", id: d.sid, createId: d.createId }),
+  log: (d) => notifyShell("undelivered", d.copy ? d.title + ": " + d.copy : d.title, d.sid),
+});
 // the one busy answer for the mark + rail tick: an in-flight EXCHANGE (the gesture latch above), or
 // — after a reload lost the client latch — the exchange's own records still saying a reply is owed
 // (msgs ending with the user's message). A stuck/errored/closed thread never pulses: green would lie.
@@ -22408,10 +22412,9 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
       }
     }
   }
-  // a dropped comment create's dialog is acknowledged to its kernel the moment it arrives, and one this page drew already
-  // (its acknowledgement lost with a socket) is not drawn again (cmtDropDrawnBefore); a first arrival falls through to the
-  // dialog below
-  else if (m.type === "err" && typeof m.text === "string" && m.text && cmtDropDrawnBefore(m)) { /* drawn here already */ }
+  // a dropped comment create: its own dialog, listing every drop that arrives while it is up, each acknowledged to its kernel
+  // once drawn (cmtDrops); any other err frame falls through to the dialog below
+  else if (m.type === "err" && cmtDrops.take(m)) { /* drawn in the drops dialog, or drawn here already */ }
   else if (m.type === "err" && typeof m.text === "string" && m.text) {
     const copy = typeof m.copy === "string" ? m.copy : "";
     const title = typeof m.title === "string" && m.title ? m.title : "That action was not delivered";
