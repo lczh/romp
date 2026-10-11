@@ -18,11 +18,14 @@ What the run pins, in order:
   * bells follow the dashboard, the user's scenario: the origin's card carries its raw override (none), a mute on api
     clicked as the merged dashboard sends it (as given, over the hub's relay) is stored though the origin's own master is
     off, and api's next turn end stays on the origin; an arm clicked the same way buzzes;
-  * the HUB restarts with its cursor on disk while the origin fires a turn end: the event is served when the hub comes
-    back (it is still that session's latest), once;
-  * the hub restarts with NO cursor: it resumes at the origin's newest and says what it skipped, delivering nothing old;
-  * the ORIGIN restarts (a new life, a new boot id): the hub resumes at the newest with its loud line, and the next turn
-    end is delivered once;
+  * the gap policy (never late, never silent; 2026-10-11): the HUB restarts with its cursor on disk while the origin fires
+    a turn end: on its return the missed turn end is NOT delivered late; one summary notification says it instead
+    ("hubhost restarted · TESTHOST: 1 session finished a turn");
+  * the hub restarts with NO cursor file at all (its first pull, or the record removed): it resumes at the origin's newest
+    and says what it skipped, delivering nothing old;
+  * the ORIGIN restarts (a new life, a new boot id): the hub resumes at the newest with its loud line, one summary says
+    notifications may have been missed (the events went with the origin's old life), and the next turn end is
+    delivered once, as it happens;
 and through all of it no event is delivered twice.
 
 Synthetic only: invented hosts (TESTHOST, boxa, hubhost), private placeholder sids, invented text.
@@ -428,16 +431,22 @@ class PushPullTwoKernels(unittest.TestCase):
         self.relay.send({"type": "setSessionFlag", "id": API, "flag": "notify", "value": None, "asGiven": True})
         self._wait("the bell back at its default", lambda: self._origin_bell(API) == "absent")
 
-        # ── the hub restarts with its cursor on disk; the origin fires meanwhile; the event is served on its return ──
+        # ── the hub restarts with its cursor on disk; the origin fires meanwhile; one summary on its return, nothing late ──
         self.procs["hub"].kill(); self.procs["hub"].wait(timeout=10)
         self.assertTrue(json.loads(Path(self._state("hub"), "push-pull-cursors.json").read_text()).get(ROW), "the cursor is on disk")
         t2 = t1 + 7
         self._end_turn(API, t2)
         time.sleep(1.0)                                   # the origin's cycle files the candidate while the hub is down
+        before = len(self.svc.posts)
         self._boot("hub")
-        self._wait("the missed turn end after the hub's restart", lambda: len(self._pushed(API, "turn")) == 3, secs=120)
+        self._wait("the summary after the hub's restart",
+                   lambda: "said in one notification, none of the missed events delivered one by one: hubhost restarted · "
+                           "TESTHOST: 1 session finished a turn" in _text(self.logs["hub-1"]), secs=120)
+        self._wait("the summary's POST", lambda: len(self.svc.posts) > before)
         self.assertNotIn("resume at its newest", _text(self.logs["hub-1"]),
                          "a hub restarting with its cursor resumes from it, not from the newest")
+        time.sleep(1.0)
+        self.assertEqual(len(self._pushed(API, "turn")), 2, "the missed turn end is never delivered late")
 
         # ── the hub restarts with NO cursor: it resumes at the newest, says what it skipped, delivers nothing old ──
         self.procs["hub"].kill(); self.procs["hub"].wait(timeout=10)
@@ -448,7 +457,7 @@ class PushPullTwoKernels(unittest.TestCase):
         m = re.search(r"holds no record of where it left off; (\d+) event\(s\) it fired meanwhile skipped", _text(third))
         self.assertTrue(m and int(m.group(1)) >= 4, _text(third)[-1500:])
         time.sleep(2.0)
-        self.assertEqual(len(self._pushed(API, "turn")), 3, "nothing old is delivered after a lost cursor")
+        self.assertEqual(len(self._pushed(API, "turn")), 2, "nothing old is delivered after a lost cursor")
         self.assertEqual(len(self._pushed(WEB, "card")), 1)
 
         # ── the origin restarts (a new life): the hub resumes at the newest, loudly; the next turn end arrives once ──
@@ -456,13 +465,15 @@ class PushPullTwoKernels(unittest.TestCase):
         self._boot("origin")
         self._wait("the origin-restarted line", lambda: "its kernel restarted since this kernel last heard from it" in _text(third),
                    secs=120)
+        self._wait("the origin-restarted summary",
+                   lambda: "TESTHOST restarted · notifications may have been missed" in _text(third), secs=120)
         self._origin_baselined()                          # the new life's turn tick takes its baseline first
         self._end_turn(API, t2 + 7)
-        self._wait("the turn end after the origin's restart", lambda: len(self._pushed(API, "turn")) == 4, secs=120)
+        self._wait("the turn end after the origin's restart", lambda: len(self._pushed(API, "turn")) == 3, secs=120)
 
         # ── through all of it, nothing twice ──
         time.sleep(3.0)
-        self.assertEqual(len(self._pushed(API, "turn")), 4, self._ledger())
+        self.assertEqual(len(self._pushed(API, "turn")), 3, self._ledger())
         self.assertEqual(len(self._pushed(WEB, "card")), 1, self._ledger())
 
 

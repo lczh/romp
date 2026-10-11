@@ -6632,9 +6632,14 @@ def _refuse_setting(client, exc, what, gesture, sid="", item_id="", flag="", val
     sys.stderr.write("romp-kernel: %s\n" % (log or text))
     if not client or not callable(client.get("send")):
         return
-    _reply(client, {"type": "settingRefused", "gesture": str(gesture), "sid": str(sid or ""),
-                    "itemId": str(item_id or ""), "flag": str(flag or ""),
-                    "value": value if isinstance(value, bool) else None, "text": text})
+    fr = {"type": "settingRefused", "gesture": str(gesture), "sid": str(sid or ""),
+          "itemId": str(item_id or ""), "flag": str(flag or ""),
+          "value": value if isinstance(value, bool) else None, "text": text}
+    if gesture == "flag" and flag == "notify" and sid:
+        # the session bell's own setting too (true, false, or null for none): the menus paint a bell from it and the
+        # switches, and say whether it is the session's own choice or the default (bell-follow.ts sessionBell)
+        fr["notifyRaw"] = _session_flag_raw(str(sid), "notify")
+    _reply(client, fr)
 
 
 def _painted_flag_value(sid, flag):
@@ -9913,32 +9918,18 @@ def _set_notify_card(item_id, value, sid="", as_given=False):
 
 
 def _set_notify_session(sid, value, as_given=False):
-    """Persist a session-bell click (tab menu / timeline lane gear) — same delete-if-default
-    discipline as _set_notify_card, against the master. Not _set_session_flag: that setter's
-    pop-on-false is right for the on/off view flags, but here False is a real value (muted while
-    the master is on). `as_given`: a click from another kernel's dashboard, stored exactly as sent
-    (None clears), as _set_notify_card has it."""
+    """Persist a session-bell click (tab menu / timeline lane gear / the bell command): the value is stored
+    EXACTLY as clicked, an explicit choice for this session, whatever the master says (2026-10-11, the user:
+    an explicit choice beats the defaults, as a card's override always has). Until then a click that matched
+    the master deleted the override, so with the master on and the turn-finished switch off no session could
+    be opted in to its turn ends: "Notify me" restated the master and was never stored. The menus now say
+    whether a session's bell is its own setting or the default (bell-follow.ts). Not _set_session_flag: that
+    setter's pop-on-false is right for the on/off view flags, but here False is a real value (muted). A None
+    value (only ever sent `as_given`) clears the override, returning the session to the defaults."""
     with _flags_lock:                                # read and publish as ONE step (the store's rule, above)
         cur = dict(_session_flags_proved())          # PROVED: a read fault refuses rather than erasing flags
         f = dict(cur.get(sid)) if isinstance(cur.get(sid), dict) else {}
-        if as_given:
-            if value is None:
-                f.pop("notify", None)
-            else:
-                f["notify"] = bool(value)
-            if f:
-                cur[sid] = f
-            else:
-                cur.pop(sid, None)
-            _write_state_json(jd.STATE / "session-flags.json", json.dumps(cur, sort_keys=True))
-            _flags_written(jd.STATE / "session-flags.json", cur)
-            return
-        # the master this click is judged against lives in the OTHER store and must be PROVED too: read
-        # through the display reader, a fault on notify-cards.json folded it to off, so a click matching
-        # that fabricated master popped the session's stored override -- a mute erased under the success
-        # path. A fault there refuses this write exactly like a fault on the flags file.
-        master = bool(_notify_cards_proved().get(NOTIFY_ALL_KEY))
-        if bool(value) == master:
+        if value is None:
             f.pop("notify", None)
         else:
             f["notify"] = bool(value)
@@ -39555,7 +39546,7 @@ def _feed_reg_sig(sid):
     live row (apiKeyAuth as the row's authLive, the bgTasks set, the auth fields the row carries: the `row`
     component) or read only off the feed path: lastStopAt by _settle_event_key (the nudge and compaction ticks) and
     _turn_end_key (_turn_notify_tick's post-loop pass, the checkpoints, the bell pass after the feed's loop);
-    lastTurnOpener by _turn_opener (the same pass); threadOf by _compact_suggest_tick, _thread_mail_off,
+    lastTurnOpener by _turn_opener (the same pass); lastHumanStopAt by _turn_notify_tick's boot summary; threadOf by _compact_suggest_tick, _thread_mail_off,
     _asker_row_alive and the backend's own live_sessions and thread_sessions views; bgLedgerEnded by _lift_decisions
     (the lift tick); forkOf and forkedFrom by the comment threads and the chat page's signature; spawnedAtCli by the
     SDK backend's host attach alone. lastSid IS read inside the body, by _session_stamp_read -> jd._sdk_last_sid
@@ -68428,7 +68419,7 @@ def _feed_notifications_diff(feed):
             title = _notify_title(a.get("name") or "session", needs_you)
             body = "%s: %s" % (what, txt[:140] if txt else "a task changed state")
             ring.append({"kind": "card", "sid": e["sid"], "title": title, "body": body, "name": str(a.get("name") or ""),
-                         "cardId": iid, "column": col, "at": now_t, "bell": "on" if bell else "default",
+                         "cardId": iid, "column": col, "at": now_t, "bell": "on" if bell else "default", "needsYou": needs_you,
                          "turnKey": _turn_end_key(e["sid"]) if e["sid"] else 0})
             if _notify_card_effective(cards, iid, e["sid"]):   # THIS machine's devices: card > session > its own master
                 out.append((title, body, e["sid"], iid))
@@ -69391,7 +69382,7 @@ def _push_payload(title, body, sid="", badge=None, kind="card", card_id="", host
         q = [("push-reveal", sid)] + ([("push-card", card_id)] if card_id else []) + ([("push-pid", pid)] if pid else [])
         url = "/?" + urllib.parse.urlencode(q)
     d = {"title": str(title), "body": str(body), "sid": sid,
-         "tag": "romp:" + (sid or kind),
+         "tag": "romp:" + (sid or (kind + ((":" + host) if host else ""))),   # a sid-less summary: one per machine
          "data": {"sid": sid, "host": host, "kind": kind, "cardId": card_id, "url": url,
                   "name": str(name or "") or _push_session_name(sid), "pid": pid}}
     if badge is not None:
@@ -69562,7 +69553,13 @@ def _push_forward(events):
 # sits in that column and the user has not acted on it since; a turn event only while that turn end is still the session's
 # latest. A cursor this life cannot serve from (no cursor, another life's, or one the ring has overflowed past) resumes at
 # the newest event: the answer says why and how many were skipped, and the puller says so in one loud line.
-PUSH_PULL_PROTO = 1          # advertised in /version as `pushPull`: a peer pulls from a kernel whose /version carries it
+# PROTOCOL 2 (2026-10-11, the gap policy: never late, never silent). A puller that asks `v=2` is also told whether its request
+# found it caught up (`caughtUp`: its cursor was this life's newest when the request arrived, so whatever the answer carries
+# fired while it was listening), whether any explicit "on" bell exists here (`bellsOn`), and is served every event past its
+# cursor, a stale one flagged `current: false` rather than dropped (an explicit mute set since is still dropped). The puller
+# delivers only current events one by one, and only while no gap is open; after a gap it counts every event the gap held,
+# stale or not, for ONE summary (what would have buzzed had it been listening). A v1 puller is served as before.
+PUSH_PULL_PROTO = 2          # advertised in /version as `pushPull`: a peer pulls from a kernel whose /version carries it
 PUSH_RING_CAP = 256          # candidates kept per kernel life; a puller further behind resumes at the newest, loudly
 PUSH_EVENTS_WAIT_MAX = 25.0  # the longest one GET /push/events parks before answering empty-handed
 PUSH_PULL_WAIT = 20          # what a puller asks for (the postal exchange's EXCHANGE_WAIT)
@@ -69570,7 +69567,7 @@ _PUSH_RING = collections.deque(maxlen=PUSH_RING_CAP)   # the candidates, oldest 
 _PUSH_RING_SEQ = [0]                                   # the newest seq this life issued (0 = none yet)
 _push_ring_cond = threading.Condition()                # guards both; a new candidate notifies every parked GET
 # what an event carries over the wire; the ring's other fields (column, at) are the origin's own staleness evidence
-_PUSH_EVENT_WIRE = ("seq", "kind", "sid", "title", "body", "name", "cardId", "bell", "turnKey")
+_PUSH_EVENT_WIRE = ("seq", "kind", "sid", "title", "body", "name", "cardId", "bell", "turnKey", "needsYou")
 
 
 def _push_pull_proto(v):
@@ -69611,30 +69608,46 @@ def _push_cursor_parse(s):
     return boot, int(seq)
 
 
-def _push_event_current(ev):
-    """Is a ring event still news, read at serve time from the stores that own the answer (no time limit)? A turn
-    event: that turn end is still the session's latest (_turn_end_key). A card event: the card still sits in the column
-    it entered (the notify snapshot, the last feed build's view) and the user has not acted on it since
-    (_notify_user_acted_since, the override journal). Either: the bell set on this machine is not now an explicit mute."""
+def _push_event_verdict(ev):
+    """Is a ring event still news, read at serve time from the stores that own the answer (no time limit)? "muted" when
+    the bell set on this machine is now an explicit mute (the user's own choice: never served); "stale" when it is no
+    longer news; "current" otherwise. A turn event is current while that turn end is still the session's latest
+    (_turn_end_key). A card event is current while the card still sits in the column it entered (the notify snapshot, the
+    last feed build's view) and the user has not acted on it since (_notify_user_acted_since, the override journal)."""
     sid = str(ev.get("sid") or "")
     if ev.get("kind") == "turn":
         if _push_explicit_bell(sid) is False:
-            return False
-        return bool(ev.get("turnKey")) and _turn_end_key(sid) == ev.get("turnKey")
+            return "muted"
+        return "current" if bool(ev.get("turnKey")) and _turn_end_key(sid) == ev.get("turnKey") else "stale"
     iid = str(ev.get("cardId") or "")
     if _push_explicit_bell(sid, iid) is False:
-        return False
+        return "muted"
     ent = (_NOTIFY_PREV[0] or {}).get(iid)
     if not ent or ent.get("column") != ev.get("column"):
-        return False
-    return not _notify_user_acted_since(sid, iid, ev.get("at"))
+        return "stale"
+    return "stale" if _notify_user_acted_since(sid, iid, ev.get("at")) else "current"
 
 
-def _push_events_serve(after, wait):
-    """One GET /push/events answer: {boot, next, events[, stale][, reset, skipped]}. `after` is the puller's cursor
-    ('<boot>:<seq>', '' for none); `wait` the seconds to park when nothing is newer (capped). A cursor of this life the
-    ring still covers parks until an event newer than it lands, then answers every newer event that is still current
-    (_push_event_current; `stale` counts the rest) and `next` = the newest seq examined. Anything else resets: `reset`
+def _push_event_current(ev):
+    """A ring event's verdict as a yes/no: current, or not (stale or muted)."""
+    return _push_event_verdict(ev) == "current"
+
+
+def _push_bells_on():
+    """Does any explicit "on" bell exist on this machine (a card's or a session's)? A puller that cannot count what it
+    missed (this kernel restarted, or its backlog overflowed) summarizes a gap only when something could have buzzed: its
+    own master, or an explicit "on" here (the gap policy)."""
+    if any(v is True for k, v in _notify_cards().items() if k not in _NOTIFY_RESERVED):
+        return True
+    return any(isinstance(f, dict) and f.get("notify") is True for f in _session_flags().values())
+
+
+def _push_events_serve(after, wait, proto=1):
+    """One GET /push/events answer: {boot, next, events[, stale][, reset, skipped]}, plus {caughtUp, bellsOn} for a
+    puller that asks protocol 2. `after` is the puller's cursor ('<boot>:<seq>', '' for none); `wait` the seconds to park
+    when nothing is newer (capped). A cursor of this life the ring still covers parks until an event newer than it lands,
+    then answers every newer event that is still current (_push_event_verdict; `stale` counts the rest; protocol 2 also
+    serves the stale ones, flagged `current: false`) and `next` = the newest seq examined. Anything else resets: `reset`
     is no-cursor (the puller holds none), restarted (another life's cursor, or one this life never issued) or overflow
     (the ring dropped events past it), `skipped` the events this answer passes over, and `next` the newest seq, so the
     puller resumes at the newest event. The wait is the only lock held across time, and nothing else takes it."""
@@ -69643,8 +69656,10 @@ def _push_events_serve(after, wait):
         wait = max(0.0, min(float(wait or 0), PUSH_EVENTS_WAIT_MAX))
     except (TypeError, ValueError):
         wait = 0.0
+    v2 = proto >= 2
     with _push_ring_cond:
-        if cur is not None and cur[0] == _BOOT_ID and cur[1] == _PUSH_RING_SEQ[0] and wait > 0:
+        caught = cur is not None and cur[0] == _BOOT_ID and cur[1] == _PUSH_RING_SEQ[0]
+        if caught and wait > 0:
             _push_ring_cond.wait_for(lambda: _PUSH_RING_SEQ[0] > cur[1], timeout=wait)
         newest = _PUSH_RING_SEQ[0]
         oldest = _PUSH_RING[0]["seq"] if _PUSH_RING else newest + 1
@@ -69656,27 +69671,42 @@ def _push_events_serve(after, wait):
         elif cur[1] < oldest - 1:
             reset = "overflow"
         if reset:
-            return {"boot": _BOOT_ID, "next": newest, "events": [], "reset": reset,
-                    "skipped": newest - cur[1] if reset == "overflow" else newest}
+            out = {"boot": _BOOT_ID, "next": newest, "events": [], "reset": reset,
+                   "skipped": newest - cur[1] if reset == "overflow" else newest}
+            if v2:
+                out["bellsOn"] = _push_bells_on()
+            return out
         batch = [dict(e) for e in _PUSH_RING if e["seq"] > cur[1]]
-    served = [{k: e.get(k) for k in _PUSH_EVENT_WIRE} for e in batch if _push_event_current(e)]
+    served = []
+    for e in batch:
+        verdict = _push_event_verdict(e)
+        if verdict == "current" or (v2 and verdict == "stale"):
+            w = {k: e.get(k) for k in _PUSH_EVENT_WIRE}
+            if v2 and verdict == "stale":
+                w["current"] = False
+            served.append(w)
     out = {"boot": _BOOT_ID, "next": batch[-1]["seq"] if batch else cur[1], "events": served}
-    if len(served) < len(batch):
-        out["stale"] = len(batch) - len(served)
+    stale = len(batch) - sum(1 for w in served if w.get("current", True))
+    if stale:
+        out["stale"] = stale
+    if v2:
+        out["caughtUp"] = caught
+        out["bellsOn"] = _push_bells_on()
     return out
 
 
 # THE PULLER'S HALF (the hub, the kernel a phone subscribed at). One thread per TRUSTED row that has a port and a token
 # and whose /version advertises pushPull, started by the supervisor's pass (_push_pull_reconcile) and gone when the row
-# is. Its cursor is kept on disk per row (push-pull-cursors.json), so this kernel's restart resumes where it left off and
-# the events fired meanwhile are served if still current. The sids wear THIS kernel's name for the row (the dashboard's
-# tab address, host-prefix.ts), never the name the origin declares for itself. THE GATE here (_push_pull_gate) is this
-# kernel's, by the rules its own sessions follow with the origin's override standing in for a local one: a card buzzes
-# when its bell is "on", or "default" with this master on; a turn end needs this master and this turn switch on, and its
-# session's bell "on" or "default". The merged dashboard paints a linked kernel's bells by the same rules (bell-follow.ts),
-# so what a bell shows is what buzzes. The one-buzz-per-turn-end rule is _buzz_claim keyed on the prefixed sid and the
-# ORIGIN's turn-end key, so a turn end and the card it raises buzz once between them whichever lands first. Each event
-# passes the gate at most once, by (row, boot, seq), a backstop beside the cursor.
+# is. Its cursor is kept on disk per row (push-pull-cursors.json), so this kernel's restart resumes where it left off, and
+# what the row fired meanwhile is a gap (the gap policy below: one summary, nothing late). The sids wear THIS kernel's name
+# for the row (the dashboard's tab address, host-prefix.ts), never the name the origin declares for itself. THE GATE here
+# (_push_pull_gate) is this kernel's, by the rules its own sessions follow with the origin's override standing in for a
+# local one: an explicit "on" buzzes whatever the switches say (2026-10-11); "default" follows them, a card this master,
+# a turn end this master AND this turn switch. The merged dashboard paints a linked kernel's bells by the same rules
+# (bell-follow.ts), so what a bell shows is what buzzes. The one-buzz-per-turn-end rule is _buzz_claim keyed on the
+# prefixed sid and the ORIGIN's turn-end key, so a turn end and the card it raises buzz once between them whichever lands
+# first. Each event passes the gate at most once, by (row, boot, seq), a backstop beside the cursor, marked only once the
+# gate (or a gap's count) has decided it.
 PUSH_PULL_SEEN_CAP = 2048
 _push_pullers = {}                   # row name -> its puller Thread
 _push_pull_wakes = {}                # row name -> Event: a puller in its retry backoff dials again the pass its row answers
@@ -69687,7 +69717,25 @@ _PUSH_PULL_CURSORS = [None]          # row name -> '<boot>:<seq>', loaded from d
 _push_pull_cursor_lock = threading.Lock()
 _PUSH_PULL_SAID = {}                 # row name -> the last fault said for it, so each distinct one is said once
 _PUSH_PULL_CURSOR_FAULT = [None]     # the cursor file's last write failure, said once per episode
+_PUSH_PULL_CURSOR_LOST = [False]     # the cursor file could not be read this life: a row with no cursor may have missed events
 _PUSH_RELAY_IGNORED_SAID = set()     # origins whose relays this kernel ignored (it pulls them), each said once a life
+# THE GAP POLICY (2026-10-11, the user: never late, never silent; plans/federated-push.md, "Gaps"). In continuous operation
+# every pulled event is delivered as it arrives. Whenever this kernel knows it may have missed some (it restarted, with or
+# without its record of where it had got to; the row's kernel restarted; the link dropped; the row's backlog overflowed) it
+# delivers NONE of the missed events one by one, late: it counts those that would have passed its gate and says them in
+# ONE summary notification per gap per row ("TESTHOST was unreachable 14:02–14:40 · 3 sessions finished turns"), and none at
+# all when nothing would have passed. When the count cannot be known (a restart or an overflow lost the events) the
+# summary says notifications may have been missed, without a number, and only if anything could have buzzed (this
+# kernel's master, or an explicit "on" bell on the row's kernel). A gap opens on the event that proves it (a failed call,
+# a reset answer, this life's first answer while holding a cursor), stays open across further failures (a flapping link
+# makes one summary, not one per flap), and closes on the first answer that found the puller caught up (protocol 2's
+# `caughtUp`: the request found its cursor at the row's newest, so the link held for a whole long-poll); that answer's
+# own events fired while it listened, and are delivered one by one after the summary.
+PUSH_PULL_BATCH_CAP = 16             # the most notifications one answer puts on the devices; the rest are said in one more
+MISSED_TITLE_NAME = "missed notifications"   # the summary's title: _notify_title's "Romp: <name>" shape
+_PUSH_GAPS = {}                      # row name -> its open gap (_push_gap_open); only that row's puller thread touches it
+_PUSH_PULL_ANSWERED = set()          # rows that have answered this kernel life (the first answer after a restart opens a gap)
+_PUSH_PULL_LAST_OK = {}              # row name -> when it last answered, this life (an outage's window starts there)
 
 
 def _push_pull_cursors_path():
@@ -69704,6 +69752,7 @@ def _push_pull_cursor(name):
             except _StateUnreadable as e:
                 sys.stderr.write("romp: web push: %s — every linked machine's events resume at its newest\n" % e)
                 raw = None
+                _PUSH_PULL_CURSOR_LOST[0] = True     # what each row fired meanwhile is a gap this kernel cannot count
             _PUSH_PULL_CURSORS[0] = {str(k): str(v) for k, v in (raw or {}).items()
                                      if isinstance(v, str) and _push_cursor_parse(v)}
         return _PUSH_PULL_CURSORS[0].get(name, "")
@@ -69822,84 +69871,254 @@ def _push_pull_get(r, path, timeout):
 
 
 def _push_pull_once(name, r):
-    """One long-poll of row `name`'s /push/events and the gate over what it answers. True when it answered (the loop asks
-    again at once), False when it did not (the loop backs off). The events pass the gate BEFORE the cursor moves on disk:
-    a crash between the two re-offers them to the next life, which the origin re-validates, rather than losing them."""
+    """One long-poll of row `name`'s /push/events and what follows: the gap bookkeeping (the policy above), then either the
+    gate over the events (no gap open, or the answer that closes one) or the count of them into the open gap. True when
+    it answered (the loop asks again at once), False when it did not (the loop backs off). Each event is marked passed
+    (the (row, boot, seq) backstop) only once the gate or the count has decided it, and the cursor moves on disk after
+    every event is decided: a crash in between re-offers the undecided ones to the next life rather than losing them."""
     cursor = _push_pull_cursor(name)
-    path = "/push/events?wait=%d" % PUSH_PULL_WAIT + (("&after=" + quote(cursor, safe="")) if cursor else "")
+    path = "/push/events?wait=%d&v=%d" % (PUSH_PULL_WAIT, PUSH_PULL_PROTO) + (("&after=" + quote(cursor, safe="")) if cursor else "")
     st, j = _push_pull_get(r, path, PUSH_PULL_WAIT + 10)
     if st == 0:
+        _push_gap_open(name, "unreachable")             # what it fires until it answers again is a gap
         return False                                     # unreachable: the row's own status says so on the panel
     boot, nxt, events = j.get("boot"), j.get("next"), j.get("events")
     if (st != 200 or not isinstance(boot, str) or not boot or not isinstance(nxt, int) or isinstance(nxt, bool) or nxt < 0
             or not isinstance(events, list)):
+        _push_gap_open(name, "unreachable")
         _push_pull_say(name, "http-%s" % st, "romp: web push: '%s' answered the event pull with HTTP %s%s — its events do "
                        "not reach this kernel's devices until it answers" % (name, st, (": %s" % j.get("error")) if j.get("error") else ""))
         return False
     _PUSH_PULL_SAID.pop(name, None)                      # it answers: the next fault is news again
-    if j.get("reset"):
+    now = time.time()
+    if name not in _PUSH_PULL_ANSWERED:
+        _PUSH_PULL_ANSWERED.add(name)
+        if cursor:
+            _push_gap_open(name, "hub")                  # this kernel restarted: what the row fired meanwhile is a gap
+    reset = j.get("reset")
+    if reset:
         sys.stderr.write("romp: web push: events from '%s' resume at its newest — %s; %d event(s) it fired meanwhile "
-                         "skipped\n" % (name, _PUSH_RESET_WHY.get(j.get("reset"), str(j.get("reset"))),
-                                        int(j.get("skipped") or 0)))
+                         "skipped\n" % (name, _PUSH_RESET_WHY.get(reset, str(reset)), int(j.get("skipped") or 0)))
+        if reset != "no-cursor" or _PUSH_PULL_CURSOR_LOST[0]:
+            # the events are gone (another life's ring, or overflowed past): a gap whose count cannot be known. A row with
+            # no cursor while this kernel's record is intact is a row new to it: nothing was missed
+            _push_gap_open(name, {"restarted": "restarted", "overflow": "overflow"}.get(reset, "hub"), unknown=True)
+    gap = _PUSH_GAPS.get(name)
     fresh = []
     for ev in events:
         seq = ev.get("seq") if isinstance(ev, dict) else None
         if not isinstance(seq, int) or isinstance(seq, bool):
             continue
-        k = (name, boot, seq)
         with _push_pull_lock:                            # one memo for every row's puller
-            if k in _PUSH_PULL_SEEN:
-                continue                                 # passed the gate once already (the backstop beside the cursor)
-            _PUSH_PULL_SEEN[k] = True
-            while len(_PUSH_PULL_SEEN) > PUSH_PULL_SEEN_CAP:
-                _PUSH_PULL_SEEN.popitem(last=False)
+            if (name, boot, seq) in _PUSH_PULL_SEEN:
+                continue                                 # decided once already (the backstop beside the cursor)
         fresh.append(ev)
-    if fresh:
-        _push_pull_gate(name, fresh)
+    # caught up: the request found the cursor at the row's newest, so this answer's events fired while it listened. An
+    # older row (protocol 1) does not say; an empty-handed, reset-free answer proves the same there
+    caught = j.get("caughtUp") is True if "caughtUp" in j else (not events and not reset)
+    if gap is not None:
+        if gap["back"] is None:
+            gap["back"] = now                            # the first answer since it went quiet: the outage's end
+        gap["bells"] = gap["bells"] or j.get("bellsOn") is not False   # an older row does not say: assume it could
+    if gap is not None and not caught:
+        for ev in fresh:
+            _push_gap_count(gap, ev)                     # missed: counted for the summary, never delivered late
+            _push_pull_seen_mark(name, boot, ev["seq"])
+    else:
+        if gap is not None:
+            _push_gap_close(name)                        # the summary first (the past), then what fired while it listened
+        _push_pull_gate(name, fresh, boot=boot)
     _push_pull_cursor_set(name, "%s:%d" % (boot, nxt))
+    _PUSH_PULL_LAST_OK[name] = now
     return True
 
 
-def _push_pull_gate(name, events):
+def _push_pull_seen_mark(name, boot, seq):
+    """Record that the event (row, boot, seq) has been decided: it never passes the gate or the count again."""
+    if boot is None:
+        return
+    with _push_pull_lock:
+        _PUSH_PULL_SEEN[(name, boot, seq)] = True
+        while len(_PUSH_PULL_SEEN) > PUSH_PULL_SEEN_CAP:
+            _PUSH_PULL_SEEN.popitem(last=False)
+
+
+def _push_gate_verdict(ev):
+    """Would a pulled event reach this kernel's devices, by the rules its own sessions follow with the origin's override
+    standing in for a local one? (True, None), or (False, why): "bell" (an explicit mute never leaves its origin, so an
+    unreadable bell), "all" (a default bell under this master, off), "turn" (a default turn end under this turn switch,
+    off). An explicit "on" beats both switches, for a card as for a turn end (2026-10-11, _turn_bell_passes); no override
+    follows this master, and a turn end also this turn switch."""
+    bell = ev.get("bell")
+    if bell not in ("on", "default"):
+        return False, "bell"
+    if bell == "on":
+        return True, None
+    if not _notify_all_on():
+        return False, "all"
+    if ev.get("kind") == "turn" and not _notify_turns_on():
+        return False, "turn"
+    return True, None
+
+
+def _push_event_needs_you(ev):
+    """A card event's kind for the counts: its `needsYou` (protocol 2), else the title's shape (_notify_title's two)."""
+    if isinstance(ev.get("needsYou"), bool):
+        return ev["needsYou"]
+    return str(ev.get("title") or "").startswith("Romp needs you")
+
+
+def _push_gap_open(name, why, unknown=False):
+    """Open row `name`'s gap, or widen the one open: `why` is what this kernel knows ("unreachable", "hub" = this kernel
+    restarted, "restarted" = the row's kernel did, "overflow"), `unknown` when the missed events themselves are gone."""
+    g = _PUSH_GAPS.get(name)
+    if g is None:
+        g = _PUSH_GAPS[name] = {"why": set(), "since": _PUSH_PULL_LAST_OK.get(name), "back": None, "turns": set(),
+                                "needs": 0, "done": 0, "unknown": False, "bells": False}
+    g["why"].add(why)
+    if why == "unreachable":
+        g["back"] = None                                 # quiet again: the window runs to its next answer
+    if unknown:
+        g["unknown"] = True
+    return g
+
+
+def _push_gap_count(gap, ev):
+    """Count one missed event into the gap when it would have passed the gate (stale or not: the summary says what would
+    have buzzed had this kernel been listening): a turn end by its session, a card by its kind."""
+    ok, _why = _push_gate_verdict(ev)
+    if not ok or not (ev.get("title") or ev.get("body")):
+        return
+    if ev.get("kind") == "turn":
+        gap["turns"].add(str(ev.get("sid") or ""))
+    elif _push_event_needs_you(ev):
+        gap["needs"] += 1
+    else:
+        gap["done"] += 1
+
+
+def _missed_counts_text(turn_sessions, needs, done):
+    """'3 sessions finished turns, 1 needs you, 2 completed' — the counts a summary says, in the user's terms."""
+    parts = []
+    if turn_sessions:
+        parts.append("1 session finished a turn" if turn_sessions == 1 else "%d sessions finished turns" % turn_sessions)
+    if needs:
+        parts.append("%d need%s you" % (needs, "s" if needs == 1 else ""))
+    if done:
+        parts.append("%d completed" % done)
+    return ", ".join(parts)
+
+
+def _hhmm(t):
+    return time.strftime("%H:%M", time.localtime(t))
+
+
+def _push_gap_summary(name, g, now=None):
+    """The summary's body for row `name`'s gap `g`, or None when nothing it missed could have reached the devices here."""
+    counted = len(g["turns"]) + g["needs"] + g["done"]
+    if not counted and not (g["unknown"] and (g["bells"] or _notify_all_on())):
+        return None
+    why = g["why"]
+    counts = _missed_counts_text(len(g["turns"]), g["needs"], g["done"])
+    if g["unknown"]:
+        counts = (counts + "; more may have been missed") if counts else ""
+    if "restarted" in why:
+        head = "%s restarted" % name
+    elif "hub" in why:
+        head = "%s restarted" % _self_host()
+        return "%s · %s" % (head, ("%s: %s" % (name, counts)) if counts else "notifications from %s may have been missed" % name)
+    elif "unreachable" in why:
+        since, back = g.get("since"), g.get("back") or (now if now is not None else time.time())
+        head = "%s was unreachable %s–%s" % (name, _hhmm(since), _hhmm(back)) if since else "%s was unreachable" % name
+    else:
+        head = "%s had too many to keep" % name           # an overflow with no outage or restart known beside it
+    return "%s · %s" % (head, counts or "notifications may have been missed")
+
+
+def _push_gap_close(name):
+    """Close row `name`'s gap: one summary notification when anything it missed could have reached the devices here,
+    else only a log line. The trust is re-read now, like the gate's. The gap is forgotten only once the summary has gone
+    out: a push that raises leaves it open, and the next caught-up answer says it."""
+    g = _PUSH_GAPS.get(name)
+    if g is None:
+        return False
+    tier = _host_trust(name)
+    body = _push_gap_summary(name, g) if tier == "trusted" else None
+    if body is None:
+        _PUSH_GAPS.pop(name, None)
+        sys.stderr.write("romp: web push: '%s' is back after a gap (%s); nothing it may have missed would have reached the "
+                         "devices here, so no notification\n" % (name, ", ".join(sorted(g["why"]))))
+        return False
+    _push_notify(_notify_title(MISSED_TITLE_NAME), body, "", kind="missed", host=name)
+    _PUSH_GAPS.pop(name, None)
+    sys.stderr.write("romp: web push: '%s' is back after a gap (%s); said in one notification, none of the missed events "
+                     "delivered one by one: %s\n" % (name, ", ".join(sorted(g["why"])), body))
+    return True
+
+
+def _push_pull_gate(name, events, boot=None):
     """THIS kernel's gate over events pulled from row `name` (the section comment): trust re-read now (a row lowered while
-    the call was parked buzzes nothing), the bell resolved against this kernel's master and turn switch, then the one buzz
-    per turn end. Returns how many buzzed. Held events are said in one line per batch, as the relay's are."""
+    the call was parked buzzes nothing), each event's bell resolved against this kernel's switches (_push_gate_verdict),
+    then the one buzz per turn end, and at most PUSH_PULL_BATCH_CAP notifications: past it the rest are said in ONE more
+    and one loud log line, so a burst can never machine-gun the phone. An event the origin served as no longer current
+    (protocol 2's `current: false`) is skipped: only a gap's summary counts those. With `boot`, each event is marked
+    decided right after its verdict (the backstop), never before. Returns how many buzzed. Held events are said in one
+    line per batch."""
     tier = _host_trust(name)
     if tier != "trusted":
         _push_pull_say(name, "tier", "romp: web push: dropped %d event(s) pulled from '%s' (its trust here is '%s'; only a "
                        "trusted host's events reach this kernel's devices — the network panel's per-host selector raises it)"
                        % (len(events), name, tier or "unknown"))
+        for ev in events:
+            _push_pull_seen_mark(name, boot, ev.get("seq"))
         return 0
     held = {"all": 0, "turn": 0}
+    over = {"turns": set(), "needs": 0, "done": 0, "n": 0}
+    sent = 0
     n = 0
     for ev in events:
         kind = "turn" if ev.get("kind") == "turn" else "card"
-        bell = ev.get("bell")
-        if bell not in ("on", "default"):
-            continue                                     # an explicit mute never leaves its origin; anything else is unreadable
-        # the rules a session of THIS kernel's own follows, with the origin's override standing in for the local one
-        # (bells follow the dashboard: the merged dashboard paints a linked kernel's bells by these same rules,
-        # bell-follow.ts). A card: its override, else this master. A turn end: this master AND this turn switch, and
-        # the session's override, else this master (_turn_notify_tick's gate)
-        if not _notify_all_on() and (kind == "turn" or bell == "default"):
-            held["all"] += 1
-            continue
-        if kind == "turn" and not _notify_turns_on():
-            held["turn"] += 1
-            continue
         t, b = str(ev.get("title") or ""), str(ev.get("body") or "")
-        if not (t or b):
-            continue
-        sid0 = str(ev.get("sid") or "")
-        sid = "%s:%s" % (name, sid0) if sid0 else ""
-        card_id = str(ev.get("cardId") or "") if kind == "card" else ""
-        sname = str(ev.get("name") or "")
-        if not _buzz_claim(sid, ev.get("turnKey") or 0, "bell" if kind == "card" else "turn"):
-            if kind == "card":                           # the turn end already buzzed: the card replaces its notification quietly
-                _push_notify(t, b, sid, kind="card", card_id=card_id, host=name, quiet=True, name=sname)
-            continue
-        _push_notify(t, b, sid, kind=kind, card_id=card_id, host=name, name=sname)   # badge omitted: the origin's count is not ours
-        n += 1
+        ok, why = _push_gate_verdict(ev)
+        if why in held:
+            held[why] += 1
+        if ok and ev.get("current") is not False and (t or b):
+            sid0 = str(ev.get("sid") or "")
+            sid = "%s:%s" % (name, sid0) if sid0 else ""
+            card_id = str(ev.get("cardId") or "") if kind == "card" else ""
+            sname = str(ev.get("name") or "")
+            if sent >= PUSH_PULL_BATCH_CAP:
+                over["n"] += 1                           # past the cap: said in the one notification after the loop
+                if kind == "turn":
+                    over["turns"].add(sid0)
+                elif _push_event_needs_you(ev):
+                    over["needs"] += 1
+                else:
+                    over["done"] += 1
+            else:
+                prior = _PUSH_BUZZED.get(sid) if sid else None
+                if not _buzz_claim(sid, ev.get("turnKey") or 0, "bell" if kind == "card" else "turn"):
+                    if kind == "card":                   # the turn end already buzzed: the card replaces its notification quietly
+                        _push_notify(t, b, sid, kind="card", card_id=card_id, host=name, quiet=True, name=sname)
+                        sent += 1
+                else:
+                    try:
+                        _push_notify(t, b, sid, kind=kind, card_id=card_id, host=name, name=sname)   # badge omitted: the origin's count is not ours
+                    except Exception:
+                        if sid:                          # not delivered: its claim must not make the re-offer yield to itself
+                            if prior is None:
+                                _PUSH_BUZZED.pop(sid, None)
+                            else:
+                                _PUSH_BUZZED[sid] = prior
+                        raise
+                    sent += 1
+                    n += 1
+        _push_pull_seen_mark(name, boot, ev.get("seq"))
+    if over["n"]:
+        body = "%s · %d more: %s" % (name, over["n"], _missed_counts_text(len(over["turns"]), over["needs"], over["done"]))
+        sys.stderr.write("romp: web push: %d event(s) pulled from '%s' in one answer were past the cap of %d "
+                         "notifications; collapsed into one: %s\n" % (over["n"], name, PUSH_PULL_BATCH_CAP, body))
+        _push_notify(_notify_title("more notifications"), body, "", kind="missed", host=name)
     if held["all"] or held["turn"]:
         sys.stderr.write("romp: web push: held %d event(s) pulled from '%s' — %d under this kernel's main notification "
                          "switch (off), %d turn-finished event(s) under its turn switch (off); the switches here decide "
@@ -69908,7 +70127,8 @@ def _push_pull_gate(name, events):
 
 
 # ── the turn-finished push (the bell popover's third row, 2026-09-05) ─────────────────────────────
-# With the master AND the turn switch on, every session's turn end buzzes the subscribed phones:
+# With the master AND the turn switch on, every session's turn end buzzes the subscribed phones (and an explicit session
+# "on" buzzes whatever the switches say, 2026-10-11: _turn_bell_passes):
 # {title: "Romp: <the session's name>" (_notify_title), body: the first line of what it said, sid}. The EVENT is the session's
 # recorded settle — the Stop hook's `lastStopAt` stamp (SDK sessions) or the states/ 'waiting'/'idle'
 # transition the backend writes at turn end — read per pusher cycle, which the very same settle wakes
@@ -69929,12 +70149,12 @@ def _push_pull_gate(name, events):
 # user-role turn per completion (the task notification — origin.kind "task-notification"), reacts to
 # it, and that reaction's Stop stamps lastStopAt like any other end — ten buzzes in fifty minutes from
 # one coordinating session, none about anything the user had asked at that moment. The Stop hook stamps
-# WHO opened the turn beside the settle (lastTurnOpener, sdk_backend `_stop_hook`, from the two places
-# a turn can open: the feeder's pop — a fed text, the human's unless it carries the romp-injected
-# marker — and a stamped user atom the CLI streams while idle), and the tick skips an end whose opener
-# is not the human WITHOUT spending the buzz claim, so a bell event that turn raises keeps its buzz. A
-# registry without the field (an older ledger) reads as the human's: a missing fact
-# never drops the user's buzz.
+# WHO opened the turn beside the settle (lastTurnOpener, sdk_backend `_stop_hook`), decided when the turn
+# OPENED (2026-10-11, SdkSession._open_turn_as: the feeder's pop from idle, by the text it fed; a turn
+# frame the CLI streams with nothing romp fed in flight, the CLI's own turn unless it drains a fed text),
+# and the tick skips an end whose opener is not the human WITHOUT spending the buzz claim, so a bell event
+# that turn raises keeps its buzz. Only "human" buzzes: an SDK registry with "unknown" (no open seen) or
+# without the field buzzes nothing (plans/federated-push.md, "Who opened the turn").
 _TURN_PREV = {}      # sid -> turn-end key at the last tick; absent = baseline pending
 _PUSH_BUZZED = {}    # sid -> (turn-end key, "turn"|"bell") of the last phone buzz filed for it
 _TURN_BODY_CAP = 120
@@ -69959,12 +70179,16 @@ def _turn_end_key(sid, reg=None):
 def _turn_opener(reg):
     """Who opened the turn `lastStopAt` closed, off the registry entry the Stop hook stamps it on
     beside the settle: "human" (the composer's words, a queued message, a typed follow-up) or
-    "injected" (a harness-injected task notification / scheduled prompt / peer message, or romp's own
-    nudge, follow-up, notice or relayed mail). Anything else — the field absent (an older ledger) or
-    a value the hook never writes — reads "human": a missing fact never drops the
-    user's buzz."""
-    v = (reg or {}).get("lastTurnOpener") if isinstance(reg, dict) else None
-    return v if v in ("human", "injected") else "human"
+    "injected" (a turn the CLI opened itself: a background task's notification, a peer's message, a
+    scheduled prompt; or romp's own nudge, follow-up, notice or relayed mail), decided when the turn
+    opened (SdkSession._open_turn_as). Only "human" may buzz (2026-10-11): an SDK registry entry with
+    anything else ("unknown", stamped when no open was seen, the field absent, a value the hook never
+    writes) reads "unknown". A session with NO SDK registry entry is a Codex session, whose every turn
+    is a send through romp (Codex never opens a turn itself), and reads "human"."""
+    if not isinstance(reg, dict) or not reg:
+        return "human"
+    v = reg.get("lastTurnOpener")
+    return v if v in ("human", "injected") else "unknown"
 
 
 
@@ -69993,13 +70217,80 @@ def _first_line(text, cap=_TURN_BODY_CAP):
     return ""
 
 
+# THE PREVIOUS LIFE'S MEMO (2026-10-11, the gap policy in plans/federated-push.md: never late, never silent). _TURN_PREV is
+# this life's memory of each live session's last turn-end key; a session's first sighting in a life is a baseline, so a turn
+# end that happened while no kernel was watching (a restart) used to vanish silently. The memo is now written to
+# STATE/turn-notify-memo.json whenever it moves (keys move at turn ends, not per cycle), and the FIRST tick of a life reads
+# the previous life's copy: a session whose newest end of a turn a HUMAN opened (lastHumanStopAt, the Stop hook's stamp) is
+# newer than the key the previous life last saw finished a turn while the kernel was down. Those turn ends are NOT buzzed
+# one by one, late; they are said in one summary notification ("<this machine> restarted · 2 sessions finished turns"),
+# counting only the sessions whose bell would have let the buzz through (an explicit "on", or the master and the turn
+# switch on). A memo that is missing (the first boot of this build) or unreadable summarizes nothing, said in the log.
+_TURN_BOOTED = [False]        # this life's first tick has run (the one that reads the previous life's memo)
+_TURN_MEMO_DISK = [None]      # what turn-notify-memo.json last held: a write happens only when the memo moved
+_TURN_MEMO_FAULT = [None]     # the last write failure's text, said once per episode
+
+
+def _turn_memo_path():
+    return jd.STATE / "turn-notify-memo.json"      # resolved per call: tests redirect jd.STATE
+
+
+def _turn_memo_load():
+    """The previous life's {sid: turn-end key}, or None when there is none to compare with (no file yet, or one that
+    cannot be read, said once)."""
+    try:
+        raw = _read_state_json(_turn_memo_path(), expect=dict)
+    except _StateUnreadable as e:
+        sys.stderr.write("romp: turn notifications: %s — turn ends while this kernel was down are not summarized "
+                         "this time\n" % e)
+        return None
+    if raw is None:
+        return None
+    return {str(k): int(v) for k, v in raw.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+
+
+def _turn_memo_write(snap):
+    """Record this tick's {sid: key} for the live sessions when it moved, atomically (the one write door)."""
+    if snap == _TURN_MEMO_DISK[0]:
+        return
+    try:
+        _write_state_json(_turn_memo_path(), json.dumps(snap, sort_keys=True), note=False)
+    except _StateUnwritable as e:
+        if _TURN_MEMO_FAULT[0] != str(e):
+            _TURN_MEMO_FAULT[0] = str(e)
+            sys.stderr.write("romp: turn notifications: %s — a restart of this kernel cannot tell which turns ended "
+                             "while it was down\n" % e)
+        return
+    _TURN_MEMO_DISK[0] = dict(snap)
+    _TURN_MEMO_FAULT[0] = None
+
+
+def _turn_bell_passes(bell):
+    """Would a human turn end with this session bell buzz the devices subscribed HERE? An explicit "on" beats the
+    defaults (2026-10-11, the user: with the turn-finished switch off, a session set to Notify me still notifies; the
+    rule a card's override always followed); an explicit off silences; no choice follows the master AND the turn switch.
+    `bell`: True/False for an explicit choice, None for none (_push_explicit_bell, or a pulled event's "on"/"default")."""
+    if bell is True:
+        return True
+    if bell is False:
+        return False
+    return _notify_all_on() and _notify_turns_on()
+
+
 def _turn_notify_tick(now, live_map):
     """One pusher-cycle pass over the live sessions: a session whose turn-end key MOVED since the
-    last pass finished a turn. Fires only with both switches on, the session unmuted, and the turn
-    the HUMAN's (_turn_opener — a subagent's task notification or a nudge opening a turn is not news
-    to them); every sighting advances the memo regardless, so switching the row on later never
-    replays old ends and a silent end is never replayed either."""
+    last pass finished a turn. Fires only for a turn the HUMAN opened (_turn_opener — a subagent's task
+    notification or a nudge opening a turn is not news to them) whose session bell lets it through
+    (_turn_bell_passes: an explicit on, or no choice with the master and the turn switch on); every
+    sighting advances the memo regardless, so switching the row on later never replays old ends and a
+    silent end is never replayed either. The first tick of a life summarizes the human turn ends the
+    previous life never saw (the memo block above) instead of baselining them silently."""
     fired = []
+    boot = not _TURN_BOOTED[0]
+    _TURN_BOOTED[0] = True
+    disk = _turn_memo_load() if boot else None
+    missed = []                                          # (sid, human end) the previous life never saw, gated as a buzz would be
+    snap = {}
     for s in _alive_sessions(now, live_map):
         sid = str(s.get("sid") or "")
         if not sid:
@@ -70008,12 +70299,22 @@ def _turn_notify_tick(now, live_map):
         key = _turn_end_key(sid, reg)
         prev = _TURN_PREV.get(sid)
         _TURN_PREV[sid] = key
+        if key:
+            snap[sid] = key
+        if prev is None and disk is not None and key and sid in disk and key != disk[sid]:
+            # first sight this life of a session whose turn ended while no kernel was watching: was one of those the
+            # human's? (a Codex session, with no SDK registry, has only turns sent through romp: its newest end counts)
+            human_end = int((reg or {}).get("lastHumanStopAt") or 0) if reg else key
+            if human_end > disk[sid] and _turn_bell_passes(_push_explicit_bell(sid)):
+                missed.append((sid, human_end))
+            continue
         if prev is None or key == prev or not key:
             continue                                     # baseline / nothing new / no settle evidence
         if _turn_opener(reg) != "human":
             continue                                     # the CLI or romp opened this turn (a subagent's task notification,
-            #                                              a scheduled prompt, a nudge): nobody asked the user anything, so
-            #                                              nothing to buzz about — and no claim spent, the bell event's is its own
+            #                                              a scheduled prompt, a nudge), or no open was seen: nobody asked
+            #                                              the user anything, so nothing to buzz about — and no claim spent,
+            #                                              the bell event's is its own
         bell = _push_explicit_bell(sid)
         if bell is False:
             continue                                     # the session's own bell is off on this machine: no device hears it
@@ -70024,12 +70325,21 @@ def _turn_notify_tick(now, live_map):
         # this one applies its own (plans/federated-push.md, the pull section)
         _push_ring_add([{"kind": "turn", "sid": sid, "title": title, "body": body, "name": sname,
                          "bell": "on" if bell else "default", "turnKey": key}])
-        if not (_notify_all_on() and _notify_turns_on() and _notify_session_effective(sid)):
+        if not _turn_bell_passes(bell):
             continue
         if not _buzz_claim(sid, key, "turn"):
             continue                                     # a bell event already buzzed for this turn end
         _push_notify(title, body, sid, kind="turn", name=sname)  # badge omitted: the count rides its own push; the routing block carries the name the title wears
         fired.append({"title": title, "body": body, "sid": sid, "kind": "turn"})   # the kind rides to peers too, so their tap lands the same way
+    _turn_memo_write(snap)
+    if boot and disk is None:
+        sys.stderr.write("romp: turn notifications: no record of the previous kernel life's turn ends — turns that "
+                         "ended while it was down are not summarized\n")
+    if missed:
+        body = "%s restarted · %s" % (_self_host(), _missed_counts_text(len(missed), 0, 0))
+        sys.stderr.write("romp: turn notifications: %d session(s) finished a turn while this kernel was down — said in "
+                         "one summary, not one by one\n" % len(missed))
+        _push_notify(_notify_title(MISSED_TITLE_NAME), body, "", kind="missed")
     if fired:
         _push_forward(fired)                             # the legacy leg, to peers that do not pull yet
     return fired
@@ -80277,13 +80587,16 @@ def _landing():
             # phone can be set up before anything is switched on.
             "<div id=rbell-back hidden><div id=rbell-pop role=dialog aria-label='Notification settings'>"
             "<div class=rbp-row data-act=all role=switch aria-checked=false><div class=rbp-head>Notifications<span class=rbp-sw></span></div>"
-            "<div class=rbp-sub>The main switch: off silences every device subscribed to this romp, and this desktop. "
-            "The bells on sessions and cards are mutes under it.</div></div>"
+            # (2026-10-11) a bell set on a session or card is the user's own choice and beats both switches, so the copy says so
+            # rather than calling those bells mutes under the master
+            "<div class=rbp-sub>The main switch: off silences every device subscribed to this romp, and this desktop, "
+            "except for sessions and cards you set to Notify me.</div></div>"
             "<div class=rbp-nest>"
             "<div class=rbp-row data-act=dev role=switch aria-checked=false><div class=rbp-head>This device<span class=rbp-sw></span></div>"
             "<div class=rbp-sub id=rbp-dev-sub>Turn on to get them on this device.</div></div>"
             "<div class=rbp-row data-act=turns role=switch aria-checked=false><div class=rbp-head>Also when a turn finishes<span class=rbp-sw></span></div>"
-            "<div class=rbp-sub>Buzzes every time any session finishes a turn. With many sessions running, that is a lot of buzzing.</div></div>"
+            "<div class=rbp-sub>Buzzes every time any session finishes a turn you started. With many sessions running, that is a "
+            "lot of buzzing; to hear only some, set those sessions to Notify me.</div></div>"
             "</div>"
             "<div class=rbp-div></div>"
             "<div class='rbp-row rbp-act'><button id=rbp-test data-act=test>Send a test notification</button>"
@@ -80634,7 +80947,10 @@ def _state_write_route(path, b):
             # the text the lane gear shows, and the value it repaints the toggle to
             text = _setting_refusal_text("that setting", e)
             sys.stderr.write("romp-kernel: POST /flag refused: %s\n" % e)
-            return 200, {"ok": False, "error": text, "value": _painted_flag_value(sid, flag)}
+            out = {"ok": False, "error": text, "value": _painted_flag_value(sid, flag)}
+            if flag == "notify":
+                out["notifyRaw"] = _session_flag_raw(sid, "notify")   # the bell's own setting, as the refusal frame carries it
+            return 200, out
         _mark_views_dirty()
         return 200, {"ok": True, "id": sid, "flag": flag, "value": value}
     if path == "/views":
@@ -81753,9 +82069,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, "bad cursor", "text/plain")
                 try:
                     _pw = float((q.get("wait") or ["0"])[0] or 0)
+                    _pv = int((q.get("v") or ["1"])[0] or 1)       # the protocol the puller speaks (2: the gap policy's fields)
                 except ValueError:
-                    return self._send(400, "bad wait", "text/plain")
-                return self._send(200, json.dumps(_push_events_serve(_pa, _pw)), "application/json", cache="no-cache")
+                    return self._send(400, "bad wait or v", "text/plain")
+                return self._send(200, json.dumps(_push_events_serve(_pa, _pw, _pv)), "application/json", cache="no-cache")
             if p == "/push/pending":
                 # the page's question on every coming-back (the ledger block above _push_ledger): every push to THIS
                 # device — its own subscription endpoint — that nobody has settled, newest first, each wearing its

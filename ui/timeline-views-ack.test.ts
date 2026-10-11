@@ -1157,3 +1157,55 @@ test("executed: the join menu's new-tag draft is keyed by the open [+], survives
   assert.equal(panel._tagNewDraft, null, "the draft died with the menu");
   assert.equal(panel._tagNewInput, null);
 });
+
+// THE SESSION BELL'S ROW (2026-10-11): the gear's Notifications row reads the session's own setting first, then this kernel's
+// master and turn-finished switch (laneBell, the twin of bell-follow.ts sessionBell); its sub-line says which, and what it
+// means; a click stores the opposite of what the row shows as the session's own setting, painted at once and held until a
+// frame carries that setting. Opened and clicked on the real panel over this file's fake DOM.
+test("executed: the gear's Notifications row says whose setting it is, and a click stores the opposite of what it shows", () => {
+  const sent: any[] = [];
+  g.__rompTimelineSetFlag = (...a: any[]) => sent.push(a);
+  try {
+    const lane = (id: string, name: string, raw: boolean | null | undefined, notify: boolean) =>
+      Object.assign(sess(id, name, "#f7768e"), raw === undefined ? { notify } : { notify, notifyRaw: raw });
+    const push = (panel: any, raw1: boolean | null) => panel.update({ now, sessions: [lane(SID1, "web", raw1, true), lane(SID2, "api", false, false)], views: copy(S0) });
+    const panel = new TimelinePanel(makeNode("div"));
+    panel.update({ now, sessions: [lane(SID1, "web", null, true), lane(SID2, "api", false, false)], turns: {}, messages: [], judging: [], views: copy(S0), palette: PALETTE.slice() });
+    panel.setNotifySwitches({ type: "notifySwitches", all: true, turns: false });
+    const anchor = makeNode("g"); anchor._rect = { left: 40, top: 60, right: 60, bottom: 76, width: 20, height: 16 };
+    const bellRow = () => {
+      const lab = walk(panel._laneMenu).find((n) => /^Notifications — /.test(n.textContent));
+      return { label: lab.textContent as string, sub: lab.parentNode.children[1].textContent as string, row: lab.parentNode.parentNode };
+    };
+    // web: no setting of its own, master on, turn-finished off. Its blocks and completions notify, its turn ends do not
+    panel._openLaneMenu(panel.data.sessions.find((x: any) => x.id === SID1), anchor);
+    assert.deepEqual([bellRow().label, bellRow().sub], ["Notifications — off", "default: when it blocks on you or completes"]);
+    push(panel, null);   // the routine push while the gear is open: the lane's copy is the frame's now, not the gear's
+    bellRow().row._listeners.click({ stopPropagation() {} });
+    assert.deepEqual(sent, [[SID1, "notify", true]], "the click opts the session in: its own setting, on");
+    assert.deepEqual([bellRow().label, bellRow().sub], ["Notifications — on", "your setting: when a turn you started ends, or it blocks on you or completes"], "painted at once");
+    assert.deepEqual(panel._pendingFlags, { [SID1]: { notify: true } }, "pending: the frame's setting is still none, though its effective value already agrees");
+    push(panel, null);   // a frame built before the click landed
+    assert.deepEqual(panel._pendingFlags, { [SID1]: { notify: true } }, "held");
+    assert.equal(panel.data.sessions.find((x: any) => x.id === SID1).notifyRaw, true, "…and the frame's copy paints the click");
+    push(panel, true);   // the stored setting
+    assert.deepEqual(panel._pendingFlags, {}, "confirmed");
+    // api: its own setting, off, with both switches on
+    panel.setNotifySwitches({ type: "notifySwitches", all: true, turns: true });
+    panel._closeLaneMenu();
+    panel._openLaneMenu(panel.data.sessions.find((x: any) => x.id === SID2), anchor);
+    assert.deepEqual([bellRow().label, bellRow().sub], ["Notifications — off", "your setting: no notifications"]);
+    bellRow().row._listeners.click({ stopPropagation() {} });
+    assert.deepEqual(sent[1], [SID2, "notify", true]);
+    // a linked kernel on an older romp (no setting sent): the bell it reports, the old wording and whose switch it follows
+    const OLD = "boxb:" + SID1;
+    panel.update({ now, sessions: [lane(OLD, "web", undefined, true)], views: copy(S0) });
+    panel._closeLaneMenu();
+    panel._openLaneMenu(panel.data.sessions[0], anchor);
+    assert.deepEqual([bellRow().label, bellRow().sub], ["Notifications — on",
+      "system notification when its work blocks on you or completes · follows boxb's own notification switch: that machine runs an older romp"]);
+    bellRow().row._listeners.click({ stopPropagation() {} });
+    assert.deepEqual(sent[2], [OLD, "notify", false], "its click is the message it always was (no asGiven)");
+    assert.equal("notifyRaw" in panel.data.sessions[0], false, "no setting is invented for it");
+  } finally { delete g.__rompTimelineSetFlag; }
+});
