@@ -26,6 +26,7 @@ test("Bypass is offered, and offered ONLY on an SDK session", () => {
   // Codex session has its own vocabulary and cannot express it. Listing it there would be a menu entry
   // that silently does nothing.
   assert.match(RENDER, /value: "bypassPermissions", sdkOnly: true/);
+  assert.match(RENDER, /\{ label: "Bypass permissions", value: "bypassPermissions", sdkOnly: true,/, "the Bypass row's label");
   assert.match(RENDER, /\.filter\(\(c\) => !c\.sdkOnly \|\| s\.status\.backend === "sdk"\)/);
 });
 
@@ -37,6 +38,19 @@ test("Bypass carries a sub-line saying what it costs", () => {
   const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
   assert.match(CSS, /\.meta-item-sub \{ font-size: 0\.82em; opacity: 0\.6; \}/,
     "one sub-line size across every romp menu — same as .ctx-item-sub");
+});
+
+test("a waiting bypass pick's Bypass row says what it waits for, in a line that wraps rather than widening the menu (2026-10-01)", () => {
+  // Which row draws the words, after its own lines, and only while the pick waits: EXECUTED in codex-meta-choices.test.ts
+  // (toggleMetaMenu lifted, the chat's menu and a comment thread's popover); WHAT they say in status-controls.test.ts
+  // (modeWaitText), with the badge's dots. That the line wraps inside the menu's width instead of widening it is read on the
+  // real page in tests/test_apply_now_browser.py. What stays here is the rule's shape: the wait line opts out of the rows'
+  // nowrap and takes no width of its own in the menu's sizing.
+  const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
+  const rule = CSS.match(/\.meta-item-sub\.meta-item-wait \{([^}]*)\}/);
+  assert.ok(rule, "the wait line's own rule");
+  assert.match(rule![1], /white-space: normal;/, "the menu's rows are nowrap: a several-part wait must wrap");
+  assert.match(rule![1], /contain: inline-size;/, "…inside the width the other rows set, never widening the menu");
 });
 
 test("every mode wears a tagline, and 'Accept edits' reads 'Accept' everywhere (T140)", () => {

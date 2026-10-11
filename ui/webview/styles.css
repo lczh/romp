@@ -1994,6 +1994,10 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 /* second line for a choice whose consequence its label doesn't carry (Bypass permissions). Same
    0.82em / 0.6 opacity as .ctx-item-sub — one sub-line size across every romp menu. */
 .meta-item-sub { font-size: 0.82em; opacity: 0.6; }
+/* a waiting bypass pick's words under its row (2026-10-01): the kernel's relaunchWaits can run to several parts, so the
+   line wraps rather than widening the menu (T117's fit rule). Inline-size containment gives it no width of its own in the
+   menu's sizing: the menu keeps the width its other rows set and the line wraps inside it. */
+.meta-item-sub.meta-item-wait { white-space: normal; contain: inline-size; }
 /* the version-submenu affordance on model families (the user 2026-08-25): a dim caret at the row's
    right, sitting left of the current-check slot; the submenu itself is a second .meta-menu beside it.
    SCOPED to menu rows (.meta-item is the position:relative anchor): the first cut wrote a bare

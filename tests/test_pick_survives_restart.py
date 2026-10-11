@@ -18,7 +18,8 @@ The fix, pinned here:
     can vouch for (a hello from a host older than the record), keeps its marks and its wait-for-quiet relaunch;
   * a kernel attaching to a surviving CLI seeds the background tasks it runs from the reg's mirror, and a re-attach to the
     same CLI inside one kernel's life keeps them, so the re-armed relaunch waits for them instead of cutting them;
-  * the fast badge wears its dots while the opt-in waits (fastPending) instead of flipping to Fast at the pick.
+  * the fast badge wears its dots while the opt-in waits (fastPending) instead of flipping to Fast at the pick, and a bypass
+    pick waits as the mode badge's mark (modePending) the same way, across the restart too.
 
 The REAL _amain runs against a stand-in SDK client (the harness of tests/test_reconnect_waits_for_work.py) and a stand-in
 host: the backend's _host_transport_for is replaced by one that plays a scripted host (a spawn or an attach, with the
@@ -72,6 +73,10 @@ class _SystemMessage:
 _TextBlock.__name__ = "TextBlock"; _AssistantMessage.__name__ = "AssistantMessage"
 _ResultMessage.__name__ = "ResultMessage"; _SystemMessage.__name__ = "SystemMessage"
 _EOF = object()   # pushed as a frame: the stream ends (the host closed its socket for a re-exec)
+class _Allow:                                   # the permission callback's results (_can_use_tool imports them at call time)
+    def __init__(self, **kw): self.behavior = kw.get("behavior")
+class _Deny:
+    def __init__(self, **kw): self.behavior = kw.get("behavior")
 
 
 class _Client:
@@ -159,6 +164,7 @@ class _Harness(unittest.TestCase):
         fake.ClaudeSDKClient, fake.ClaudeAgentOptions, fake.HookMatcher = _Client, _Options, (lambda **kw: types.SimpleNamespace(**kw))
         fake.AssistantMessage, fake.ResultMessage = _AssistantMessage, _ResultMessage
         fake.SystemMessage, fake.TextBlock = _SystemMessage, _TextBlock
+        fake.PermissionResultAllow, fake.PermissionResultDeny = _Allow, _Deny
         self._saved_sdk = sys.modules.get("claude_agent_sdk")
         sys.modules["claude_agent_sdk"] = fake
         async def _noop_refresh(self): pass
@@ -366,6 +372,316 @@ class APickWaitingAcrossAKernelRestart(_Harness):
         self._wait(lambda: len(_Client.instances) == 2 and _Client.instances[1] is s.client, "the relaunch")
         self._wait(lambda: not s.snapshot()["authPending"], "applied at the launch")
         self.assertNotIn("relaunchWait", self._reg())
+
+
+class ABypassPickWaitingAcrossARestart(_Harness):
+    """The bypass pick's mark (2026-10-01, tests/test_reconnect_waits_for_work.py) is a waiting pick: on
+    record (relaunchWait), standing from construction when a host keeps the CLI across a kernel restart, left up by an attach
+    to a CLI launched without the flag, and cleared by the launch that carries it. Construction seeds the confirmed mode
+    from the reg, which holds the pick, so the attach's reconcile takes the attached CLI's launch mode instead: the badge
+    reads the mode that CLI was launched with (until its next init reports any live switch since), not the pick beside its
+    own mark (a host too old to report that launch, or a launch record that names no mode, leaves the pick until the CLI's
+    next init). A change back after the attach withdraws the relaunch the reconcile raised for that pick alone when
+    SdkBackend._withdraw_mode_pick's other conditions hold, as in the test below. The attach mints no new process generation (the session keeps the one it was built with); the relaunch onto a fresh CLI takes a
+    new one."""
+
+    def test_the_mode_mark_survives_the_restart_and_the_relaunch_onto_a_fresh_cli_applies_it(self):
+        be1, s1 = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"}])
+        c1 = self._connect(s1, 1)
+        self._a_turn_that_leaves_a_monitor(s1, c1)
+        self.assertTrue(be1.set_mode(SID, "bypassPermissions"))
+        self._settle()
+        self.assertEqual(len(_Client.instances), 1, "the monitor holds the pick")
+        snap = s1.snapshot()
+        self.assertEqual((snap["mode"], snap.get("modePending")), ("acceptEdits", True), "CLI A's own mode, and the pick's mark")
+        self.assertEqual((self._reg().get("relaunchWait") or {}).get("picks"), {"mode": {"mode": "bypassPermissions"}})
+        self._end_kernel(s1)
+
+        be2, s2 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"},
+                                {"attach": False, "cli": CLI_B, "launch": "spec"}], survives=True)
+        self.assertEqual(getattr(s2, "_mode_pending", ""), "bypassPermissions", "the mark stands from construction")
+        gen = s2.proc_gen
+        c2 = self._connect(s2, 2)
+        self._settle()
+        self.assertEqual(len(_Client.instances), 2, "attached, not relaunched: the surviving monitor is still running")
+        self.assertEqual(s2.proc_gen, gen, "an attach mints no new generation: a timer CLI A arms in this kernel's life "
+                                           "stays its own to fire")
+        self.assertTrue(s2.snapshot().get("modePending"), "CLI A was launched without the flag: the pick still waits")
+        self.assertEqual(s2.snapshot()["mode"], "acceptEdits",
+                         "the mode CLI A was launched with, not the pick construction seeded from the reg")
+        ctx = types.SimpleNamespace(suggestions=None, title=None, description=None)
+        rows = [p["text"] for p in be2.problems()]       # what stands before the consult
+        res = asyncio.run_coroutine_threadsafe(s2._can_use_tool("Bash", {"command": "ls"}, ctx), s2.loop).result(5)
+        self.assertEqual(res.behavior, "allow", "a consult from CLI A before any init: the declared intent")
+        self.assertEqual([p["text"] for p in be2.problems()], rows,
+                         "never filed as CLI A breaking a bypass it was not launched with, nor as any other problem")
+        self._monitor_ends(c2)
+        self._wait(lambda: len(_Client.instances) == 3 and _Client.instances[2] is s2.client, "the relaunch onto CLI B")
+        self._wait(lambda: not s2.snapshot().get("modePending"), "applied at CLI B's launch")
+        self.assertEqual(s2.snapshot()["mode"], "bypassPermissions")
+        self.assertEqual(self.launched[CLI_B["pid"]]["mode"], "bypassPermissions", "CLI B carries the flag")
+        self.assertNotEqual(s2.proc_gen, gen, "CLI B is a fresh CLI: a new generation")
+        self.assertNotIn("relaunchWait", self._reg(), "nothing waits any more")
+
+    def test_a_change_back_after_the_restart_withdraws_the_relaunch_the_pick_waited_for_alone(self):
+        """The session object built at the restart did not raise the ask: the attach's reconcile did, for the bypass pick
+        alone."""
+        be1, s1 = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"}])
+        c1 = self._connect(s1, 1)
+        self._a_turn_that_leaves_a_monitor(s1, c1)
+        self.assertTrue(be1.set_mode(SID, "bypassPermissions"))
+        self._settle()
+        self._end_kernel(s1)
+        be2, s2 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"},
+                                {"attach": False, "cli": CLI_B, "launch": "spec"}], survives=True)
+        c2 = self._connect(s2, 2)
+        self._settle()
+        self.assertEqual((s2._mode_pending, s2._switch_wanted), ("bypassPermissions", "bypass mode"),
+                         "the premise: the reconcile raised the mark and the ask for the pick CLI A lacks")
+        s2.set_mode_live = lambda mode, prev="default": None
+        self.assertTrue(be2.set_mode(SID, "acceptEdits"))
+        self.assertEqual((s2._mode_pending, s2._switch_wanted), ("", ""), "the mark and the relaunch it waited for go")
+        self.assertNotIn("relaunchWait", self._reg())
+        self._monitor_ends(c2)                             # the event that would have carried the relaunch
+        self._wait(lambda: s2.live_work()[1] == 0, "the monitor's end handled")
+        self._settle()
+        self.assertEqual(len(_Client.instances), 2, "no relaunch: CLI A keeps running")
+        self.assertFalse(c2.torn_down)
+
+    def test_with_no_session_object_while_a_host_keeps_the_cli_the_row_reads_bypass_with_no_mark(self):
+        """A session with no session object is listed from its registry row (SdkBackend._live_row), which has no
+        modePending and reads the registry's mode, the waiting pick, while a session host still runs CLI A."""
+        be1, s1 = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"}])
+        c1 = self._connect(s1, 1)
+        self._a_turn_that_leaves_a_monitor(s1, c1)
+        self.assertTrue(be1.set_mode(SID, "bypassPermissions"))
+        self._settle()
+        self._end_kernel(s1)
+        me = {"pid": os.getpid(), "start": sb.proc_start(os.getpid())}
+        sb.write_lease(self.state, {"sid": SID, "fsid": FSID, "name": "web", "pid": me["pid"], "start": me["start"],
+                                    "holder": dict(me, kind="host"), "version": "v-test", "t": time.time()})
+        be2 = sb.SdkBackend(self.state, "/bin/true", lambda *a, **k: None, log=lambda m, **k: self.lines.append(str(m)))
+        self.assertTrue(be2._lease_survives(SID, if_unreadable=False), "the premise: a live host holds the CLI")
+        self.assertIsNone(be2.sessions.get(SID), "the premise: no session object yet")
+        self.assertEqual((self._reg().get("relaunchWait") or {}).get("picks"), {"mode": {"mode": "bypassPermissions"}},
+                         "the premise: the bypass pick still waits")
+        row = be2.live_sessions()[SID]
+        self.assertEqual((row["mode"], bool(row.get("modePending"))), ("bypassPermissions", False))
+
+
+class TheReconcileRaisesAndClearsTheModeMark(unittest.TestCase):
+    """The connect's reconcile (and, for one case, construction), called directly: a recorded bypass pick that the connected
+    CLI's launch lacks raises the mark and the wait-for-quiet ask even when construction raised none (no surviving lease at
+    construction), and a launch that carries it clears the mark and takes the launch's mode as the confirmed one."""
+
+    def test_a_recorded_bypass_pick_raises_the_mark_until_a_launch_carries_it(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        with open(os.path.join(d, "session-hosts"), "w") as f:
+            f.write("off")
+        be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None, log=lambda m, **k: None)
+        reg = {"sid": SID, "name": "web", "cwd": d, "alive": True, "mode": "bypassPermissions",
+               "relaunchWait": {"why": "bypass mode", "t": 1700000150, "picks": {"mode": {"mode": "bypassPermissions"}}}}
+        sb.write_reg(d, SID, reg)
+        s = sb.SdkSession(be, dict(reg))
+        self.assertEqual(getattr(s, "_mode_pending", ""), "", "no surviving lease at construction: no mark from the record")
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="acceptEdits"), False)
+        self.assertEqual((getattr(s, "_mode_pending", ""), s._switch_wanted), ("bypassPermissions", "bypass mode"),
+                         "the attached CLI was launched without the flag: the mark and the ask")
+        self.assertTrue(s.snapshot().get("modePending"))
+        self.assertEqual(s.snapshot()["mode"], "acceptEdits", "construction read the reg's bypass; the CLI's launch says acceptEdits")
+        s.perm_mode = "acceptEdits"                       # what that CLI's init reported
+        s._reconcile_waiting_picks(s.launch_values(), True)
+        self.assertEqual((s._mode_pending, s.perm_mode), ("", "bypassPermissions"), "a launch that carries the flag applies it")
+        self.assertNotIn("relaunchWait", sb.read_reg(d, SID) or {})
+
+    # -- the restart road's conditions, each on its own (a construction with a host keeping the CLI is _lease_survives) --
+    def _sess(self, mode, picks, why="bypass mode", survives=True, **extra):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        with open(os.path.join(d, "session-hosts"), "w") as f:
+            f.write("off")
+        be = sb.SdkBackend(d, "/bin/true", lambda *a, **k: None, log=lambda m, **k: None)
+        be._lease_survives = lambda sid, **_: survives
+        reg = dict({"sid": SID, "name": "web", "cwd": d, "alive": True, "mode": mode}, **extra)
+        if picks:
+            reg["relaunchWait"] = {"why": why, "t": 1700000150, "picks": picks}
+        sb.write_reg(d, SID, reg)
+        s = sb.SdkSession(be, dict(reg))
+        be.sessions[SID] = s
+        return be, s, d
+
+    def test_construction_raises_the_mark_only_for_a_recorded_pick_the_reg_still_calls_bypass(self):
+        # set_mode with no live object writes the reg's mode and leaves relaunchWait as it was, so the record can name a
+        # mode pick the reg has since moved off: no mark then, since the mark's words say Bypass applies
+        _, s, _ = self._sess("bypassPermissions", {"mode": {"mode": "bypassPermissions"}})
+        self.assertEqual(s._mode_pending, "bypassPermissions", "the control: a waiting bypass pick stands from construction")
+        _, s, _ = self._sess("plan", {"mode": {"mode": "bypassPermissions"}})
+        self.assertEqual(s._mode_pending, "", "the reg moved on to plan: no Bypass mark")
+
+    def test_the_reconcile_raises_no_mark_for_a_mode_left_that_is_not_bypass(self):
+        _, s, _ = self._sess("plan", {"mode": {"mode": "plan"}}, why="a settings change", survives=False)
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="acceptEdits"), False)
+        self.assertEqual(getattr(s, "_mode_pending", ""), "", "plan is no bypass pick: no mark")
+        self.assertTrue(s._switch_wanted, "…but the pick the attached CLI lacks still asks for its relaunch")
+        self.assertEqual(s.snapshot()["mode"], "plan", "no Bypass was seeded, so nothing is corrected")
+
+    def test_the_reconcile_clears_a_mark_the_record_lacks_once_a_launch_carries_it(self):
+        # a mark with no record (a pick made before the record existed, or a _note_pick_waits that failed)
+        _, s, d = self._sess("bypassPermissions", None, survives=False)
+        s._mode_pending, s.perm_mode = "bypassPermissions", "acceptEdits"
+        s._reconcile_waiting_picks(s.launch_values(), True)
+        self.assertEqual((s._mode_pending, s.perm_mode), ("", "bypassPermissions"), "the launch carried the flag: applied")
+
+    def test_after_a_restart_a_change_back_keeps_the_ask_a_pick_without_a_mark_still_needs(self):
+        # an env pick waits beside the bypass pick and has no mark of its own; the ask the reconcile raised stands for both,
+        # so a change back must not withdraw it
+        be, s, d = self._sess("bypassPermissions", {"env": {"env": "digest-the-cli-lacks"}, "mode": {"mode": "bypassPermissions"}})
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="acceptEdits", env="digest-it-was-launched-with"), False)
+        self.assertEqual((s._mode_pending, s._switch_wanted), ("bypassPermissions", "bypass mode"))
+        s.set_mode_live = lambda mode, prev="default": None
+        self.assertTrue(be.set_mode(SID, "acceptEdits"))
+        self.assertEqual(s._mode_pending, "", "the bypass pick is withdrawn")
+        self.assertEqual(s._switch_wanted, "bypass mode", "the env pick still needs the relaunch: the ask stands")
+        self.assertEqual(set(((sb.read_reg(d, SID) or {}).get("relaunchWait") or {}).get("picks") or {}), {"env"})
+
+    def test_after_a_restart_a_re_pick_and_a_change_back_keep_the_ask_a_pick_without_a_mark_still_needs(self):
+        # the same two picks, with Bypass picked again before the change back: that pick finds an ask it did not raise, so it
+        # does not take the ask as its own, whatever the ask is called
+        be, s, d = self._sess("bypassPermissions", {"env": {"env": "digest-the-cli-lacks"}, "mode": {"mode": "bypassPermissions"}})
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="acceptEdits", env="digest-it-was-launched-with"), False)
+        self.assertEqual((s._mode_pending, s._switch_wanted, s._mode_ask_alone), ("bypassPermissions", "bypass mode", False),
+                         "the premise: the reconcile raised the ask for both picks")
+        s.set_mode_live = lambda mode, prev="default": None
+        self.assertTrue(be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual((s._mode_pending, s._switch_wanted), ("bypassPermissions", "bypass mode"))
+        self.assertTrue(be.set_mode(SID, "acceptEdits"))
+        self.assertEqual((s._mode_pending, s._switch_wanted), ("", "bypass mode"), "the env pick still needs the relaunch")
+        self.assertEqual(set(((sb.read_reg(d, SID) or {}).get("relaunchWait") or {}).get("picks") or {}), {"env"})
+
+    def test_after_a_restart_a_change_back_withdraws_an_ask_the_reconcile_raised_for_the_bypass_pick_alone(self):
+        # only the bypass pick waits: the ask the reconcile raised is that pick's alone, so a change back withdraws it, as it
+        # does inside one kernel's life (ABypassPickWaitingAcrossARestart runs it through a stand-in host)
+        be, s, d = self._sess("bypassPermissions", {"mode": {"mode": "bypassPermissions"}})
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="acceptEdits"), False)
+        self.assertEqual((s._mode_pending, s._switch_wanted), ("bypassPermissions", "bypass mode"), "the premise")
+        s.set_mode_live = lambda mode, prev="default": None
+        self.assertTrue(be.set_mode(SID, "acceptEdits"))
+        self.assertEqual((s._mode_pending, s._switch_wanted), ("", ""))
+        self.assertNotIn("relaunchWait", sb.read_reg(d, SID) or {})
+
+    def test_after_a_restart_an_ask_raised_for_the_bypass_pick_alone_is_withdrawn_whichever_pick_wrote_the_record_last(self):
+        # the record's why names an effort pick made after Bypass, which the attached CLI's
+        # launch already carries. Only the bypass pick is left, so the ask the reconcile raises is that pick's alone and takes
+        # its name. Before, it took the record's "effort", which a change back does not withdraw, so the session still
+        # relaunched once quiet, replacing a CLI that already ran the mode picked last
+        be, s, d = self._sess("bypassPermissions", {"effort": {"effort": "medium"}, "mode": {"mode": "bypassPermissions"}},
+                              why="effort", effort="medium")
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="acceptEdits"), False)
+        self.assertEqual((s._effort_pending, s._mode_pending), ("", "bypassPermissions"),
+                         "the premise: the launch carried the effort pick, and the bypass pick waits")
+        self.assertEqual(s._switch_wanted, "bypass mode", "the ask is the bypass pick's, under its own name")
+        s.set_mode_live = lambda mode, prev="default": None
+        self.assertTrue(be.set_mode(SID, "acceptEdits"))
+        self.assertEqual((s._mode_pending, s._switch_wanted), ("", ""), "the mark and the relaunch it waited for go")
+        self.assertNotIn("relaunchWait", sb.read_reg(d, SID) or {})
+
+    @staticmethod
+    def _other_billing(want):
+        return "login" if want.get("auth") == "key" else "key"
+
+    def test_billing_alone_left_with_nothing_on_record_names_the_ask_billing(self):
+        # billing is compared at every connect, whether or not a pick waits
+        _, s, _ = self._sess("acceptEdits", None, survives=False)
+        want = s.launch_values()
+        s._reconcile_waiting_picks(dict(want, auth=self._other_billing(want)), False)
+        self.assertEqual(s._switch_wanted, "billing")
+        self.assertFalse(getattr(s, "_mode_ask_alone", False), "not marked the bypass pick's own")
+
+    def test_with_billing_left_beside_the_bypass_pick_the_ask_keeps_the_records_reason_unmarked(self):
+        # the ask is marked the bypass pick's own only when that pick alone is left
+        _, s, _ = self._sess("bypassPermissions", {"mode": {"mode": "bypassPermissions"}}, why="effort")
+        want = s.launch_values()
+        s._reconcile_waiting_picks(dict(want, mode="acceptEdits", auth=self._other_billing(want)), False)
+        self.assertEqual((s._mode_pending, s._auth_pending != ""), ("bypassPermissions", True), "the premise: both wait")
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("effort", False))
+
+    def test_a_reconcile_that_finds_an_ask_standing_leaves_its_ownership_as_the_pick_recorded_it(self):
+        # an env pick's ask stood when Bypass was picked, so the pick renamed an ask it did not raise. A reconcile that runs
+        # with that ask still standing (a host re-exec reattaching inside one kernel) raises no ask, so it must not record
+        # the standing one as the bypass pick's: a change back then keeps the relaunch
+        be, s, d = self._sess("acceptEdits", None, survives=False)
+        s.perm_mode = "acceptEdits"
+        s.set_mode_live = lambda mode, prev="default": None
+        s.request_reconnect = lambda *a, **k: setattr(s, "_switch_wanted", k.get("why") or "a settings change")
+        s._switch_wanted = "session env"                              # an env pick's ask, standing
+        self.assertTrue(be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual((s._mode_pending, s._switch_wanted, s._mode_ask_alone), ("bypassPermissions", "bypass mode", False),
+                         "the premise: the pick renamed an ask it did not raise")
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="acceptEdits"), False)
+        self.assertEqual((s._mode_pending, s._switch_wanted, s._mode_ask_alone), ("bypassPermissions", "bypass mode", False),
+                         "the reconcile raised nothing, so the ownership stands as the pick recorded it")
+        self.assertTrue(be.set_mode(SID, "acceptEdits"))
+        self.assertEqual((s._mode_pending, s._switch_wanted), ("", "bypass mode"), "the ask the pick did not raise stands")
+
+    def test_a_host_too_old_to_report_the_launch_leaves_the_seed_for_the_clis_next_init(self):
+        # no launch record vouches for any mode, so the seed stands (the CLI's next init reports the mode it runs)
+        _, s, _ = self._sess("bypassPermissions", {"mode": {"mode": "bypassPermissions"}})
+        s._reconcile_waiting_picks(None, False)
+        self.assertEqual((s._mode_pending, s.perm_mode), ("bypassPermissions", "bypassPermissions"))
+
+    def test_a_launch_record_that_names_no_mode_leaves_the_seed(self):
+        _, s, _ = self._sess("bypassPermissions", {"mode": {"mode": "bypassPermissions"}})
+        launch = s.launch_values()
+        launch.pop("mode")
+        s._reconcile_waiting_picks(launch, False)
+        self.assertEqual(s.perm_mode, "bypassPermissions", "a record that names no mode vouches for none")
+
+    def test_a_reattach_inside_one_kernel_keeps_the_mode_an_init_confirmed(self):
+        # a host re-exec reattaches to the same CLI: perm_mode is that CLI's own word from an init (a live switch after its
+        # launch included), never the pick, so the launch mode does not replace it
+        _, s, _ = self._sess("bypassPermissions", {"mode": {"mode": "bypassPermissions"}}, survives=False)
+        s._mode_pending, s.perm_mode = "bypassPermissions", "acceptEdits"
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="default"), False)
+        self.assertEqual((s._mode_pending, s.perm_mode), ("bypassPermissions", "acceptEdits"))
+
+    def test_the_correction_reads_the_attached_clis_own_launch_mode(self):
+        # the other correction cases launch the attached CLI in acceptEdits, the harness default too, so only another launch
+        # mode tells the launch record's own value from a constant
+        for launched in ("plan", "default"):
+            with self.subTest(launched=launched):
+                _, s, _ = self._sess("bypassPermissions", {"mode": {"mode": "bypassPermissions"}})
+                s._reconcile_waiting_picks(dict(s.launch_values(), mode=launched), False)
+                snap = s.snapshot()
+                self.assertEqual((snap["mode"], snap.get("modePending")), (launched, True),
+                                 "the mode the attached CLI was launched with, beside the pick's mark")
+
+    def test_with_no_mode_pick_on_record_the_seed_waits_for_the_clis_next_init(self):
+        # The correction belongs to a waiting bypass pick, whose mark says Bypass is still to apply. A reg that reads bypass
+        # with no mode pick on record (set_mode with no live object writes the reg's mode and no record) is the construction
+        # seed #70's review names: it stands, as before this change, until the attached CLI's next init reports its mode,
+        # with no mark raised for it. Here an effort pick waits beside it, so the reconcile runs its waiting-picks branch
+        _, s, _ = self._sess("bypassPermissions", {"effort": {"effort": "max"}}, why="effort", effort="max")
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="acceptEdits", effort="high"), False)
+        self.assertEqual((s._effort_pending, s._switch_wanted), ("max", "effort"), "the premise: the effort pick still waits")
+        self.assertEqual((getattr(s, "_mode_pending", ""), s.perm_mode), ("", "bypassPermissions"),
+                         "no mode pick waits: no mark, no correction")
+
+    def test_with_no_mode_pick_on_record_a_consult_from_a_cli_launched_in_another_mode_files_the_contract_row(self):
+        fake = types.ModuleType("claude_agent_sdk")
+        fake.PermissionResultAllow, fake.PermissionResultDeny = _Allow, _Deny
+        saved = sys.modules.get("claude_agent_sdk")
+        sys.modules["claude_agent_sdk"] = fake
+        self.addCleanup(lambda: sys.modules.__setitem__("claude_agent_sdk", saved) if saved is not None
+                        else sys.modules.pop("claude_agent_sdk", None))
+        be, s, _ = self._sess("bypassPermissions", {"effort": {"effort": "max"}}, why="effort", effort="max")
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="acceptEdits", effort="high"), False)
+        self.assertEqual((getattr(s, "_mode_pending", ""), s.perm_mode), ("", "bypassPermissions"),
+                         "the premise: the seed, no mark")
+        n = len(be.problems())
+        res = asyncio.run(asyncio.wait_for(s._can_use_tool("Bash", {"command": "ls"}, object()), 5))
+        self.assertEqual(res.behavior, "allow")
+        self.assertEqual(len([p for p in be.problems()[n:] if "contract" in p["text"]]), 1)
 
 
 class AReattachToTheSameCliInsideOneKernel(_Harness):
@@ -1497,6 +1813,57 @@ class AToggleWhileTheLaunchIsPrepared(_Harness):
         os.unlink(hold)
         self._wait(lambda: len(held[sid2]) > 1, "the second session's relaunch at _options once the read has ended")
         self._wait(lambda: connects == {SID: 2, sid2: 2}, "both relaunches")
+
+    def test_fast_mode_turned_back_on_beside_a_waiting_bypass_pick_keeps_the_relaunch_when_a_slow_click_during_the_version_read_reached_the_new_cli(self):
+        """A Restart's version read waits while the session's own fast pick is on; meanwhile bypass mode is picked and
+        Slow is clicked, and the click's literal '/fast off' reaches the new CLI, which was launched with the flag. Fast
+        mode is turned back on and the bypass pick changed back, and the CLI then reports that it lacks the opt-in: the
+        session relaunches once more, carrying the flag."""
+        cli, reading, hold = self._token_read_waits()
+        reg = self._reg()
+        reg.update(auth="login", fast=True)
+        sb.write_reg(self.state, SID, reg)
+        cli_c = {"pid": 4444, "start": "300.5", "spawnedAt": 1700000300}
+        be, s = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"},
+                              {"attach": False, "cli": CLI_B, "launch": "spec"},
+                              {"attach": False, "cli": cli_c, "launch": "spec"}], cli=cli)
+        be.login_ok = lambda: True
+        seen = self._spawns(be)
+        os.unlink(hold)
+        self._connect(s, 1)
+        self.assertTrue(s._fast_unlocked)
+        os.unlink(reading)
+        open(hold, "w").close()
+        versions = dict(sb._CLI_VERSIONS)
+        self.addCleanup(sb._CLI_VERSIONS.update, versions)
+        sb._CLI_VERSIONS.clear()
+        self.assertEqual(be.relaunch(SID), "")
+        self._wait(lambda: os.path.exists(reading), "the Restart's version read")
+        self.assertTrue(be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(be.set_fast(SID, "off"))
+        os.unlink(hold)
+        self._wait(lambda: len(_Client.instances) >= 2 and _Client.instances[1] is s.client, "connect 2")
+        c = _Client.instances[1]
+        self._wait(lambda: c.writes == ["/fast off"], "the Slow click's send reached the new CLI")
+        self.assertIs(self.launched[CLI_B["pid"]]["fast"], True, "the premise: the new CLI was launched with the flag")
+        self.assertEqual((s._switch_wanted, [l for l in self.lines if MOVED in l]), ("bypass mode", []),
+                         "the premise: the change of fast mode was set aside for the bypass pick's relaunch")
+        self.assertTrue(be.set_fast(SID, "on"))
+        self.assertTrue(be.set_mode(SID, "acceptEdits"))
+        lacks = {"model": "claude-x", "permissionMode": "acceptEdits", "session_id": FSID, "fast_mode_state": "off",
+                 "fast_mode_disabled_reason": "sdk_opt_in_required"}
+        for n, sent in ((1, ["/fast off"]), (2, ["/fast off", "/fast on"])):
+            self._wait(lambda: c.writes[:n] == sent, "turn %d fed" % n)
+            self._push(c, _SystemMessage("init", dict(lacks), uuid=self._uid()))
+            self._push(c, _result(uuid=self._uid(), subtype="success", is_error=False, num_turns=1, session_id=FSID,
+                                  duration_ms=1, duration_api_ms=1, total_cost_usd=0.01,
+                                  usage={"input_tokens": 1, "output_tokens": 1}, result="ok", parent_tool_use_id=None))
+        end = time.monotonic() + 4.0
+        while time.monotonic() < end and len(_Client.instances) < 3:
+            time.sleep(0.05)
+        self._settle(0.5)
+        self.assertEqual([x["fast"] for x in seen], [True, True, True],
+                         "the session relaunched once more, carrying the flag; log tail %r" % self.lines[-6:])
 
 
 class AReattachAtBoot(_Harness):

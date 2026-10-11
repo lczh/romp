@@ -91,7 +91,8 @@ test("the tooltip still shows the full path + mode/model/effort — path and bra
   assert.match(RENDER, /rows\.push\(\["⎇", s\.gitBranch\]\)/);
   assert.match(RENDER, /rows\.push\(\["Worktree", s\.workTree\.dir/);
   assert.doesNotMatch(RENDER, /tab-tip-path/, "the naked top path line is gone — the grid row replaced it");
-  assert.match(RENDER, /rows\.push\(\["Mode", prettyMode\(s\.status\.mode\)\]\)/);
+  // the row opens on the mode; what follows it while a bypass pick waits is executed in tab-tip-tones.test.ts (2026-10-01)
+  assert.match(RENDER, /rows\.push\(\["Mode", prettyMode\(s\.status\.mode\)/);
   // T372 (the user 2026-09-12): the model and effort VALUES wear the footer chip's colour, from the one helper the
   // footer calls (metaColor), as the row's third member; the labels stay dim
   assert.match(RENDER, /rows\.push\(\["Model", s\.status\.model, metaColor\("model", s\.status\)\]\)/);

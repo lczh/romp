@@ -23,6 +23,7 @@ The rules pinned here:
 The real _amain runs against the stand-in SDK client and scripted host of tests/test_pick_survives_restart.py, whose
 harness is reused here. Every id is synthetic, every text invented; every state root writes session-hosts off.
 """
+import ast
 import json
 import os
 import sys
@@ -333,6 +334,253 @@ class RelaunchesShareTheLaunchBudget(_Unit):
             s._switch_wanted = "billing"
         self.be.retry_model_upgrades(time.time())
         self.assertEqual(len(relaunched), sb.BOOT_RESUME_CONCURRENCY)
+
+
+class ABypassPickChangedBackLeavesTheLineForASlot(_Unit):
+    """A bypass pick whose relaunch waits in line for a launch slot, changed back before a slot frees on a session launched
+    in the mode the change back restores, with nothing else waiting or set aside: the relaunch is withdrawn with its place
+    in line (SdkBackend._withdraw_mode_pick)."""
+
+    def test_a_change_back_while_the_relaunch_waits_for_a_slot_leaves_the_line_and_the_freed_slot_relaunches_nothing(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, mode="default")   # launched in the mode the change back restores
+        slots = self.be._spawn_sem
+        while slots.acquire(blocking=False):
+            pass                                             # every slot held elsewhere
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(relaunched, [], "the premise: no slot is free")
+        self.assertTrue(slots.waiting(s), "the premise: the relaunch waits in line for a slot")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(s._switch_wanted, "", "the change back withdrew the relaunch the pick waited for alone")
+        self.assertFalse(slots.waiting(s), "and its place in line")
+        slots.release()
+        self.assertEqual(relaunched, [], "the freed slot relaunches nothing")
+
+    def test_a_record_from_an_older_host_that_lacks_a_key_a_launch_now_holds_at_its_default_reads_as_equal(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, mode="default")
+        s._cli_launch = {k: v for k, v in s._cli_launch.items() if k != "subagentStandard"}
+        self.assertEqual(s.launch_values()["subagentStandard"], sb.LAUNCH_KEY_DEFAULTS["subagentStandard"], "the premise")
+        slots = self.be._spawn_sem
+        while slots.acquire(blocking=False):
+            pass                                             # every slot held elsewhere
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(slots.waiting(s), "the premise: the relaunch waits in line for a slot")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(s._switch_wanted, "", "the change back withdrew the relaunch")
+        self.assertFalse(slots.waiting(s), "and its place in line")
+
+
+class AChangeBackBesideAnotherPickKeepsThePlaceForASlot(_Unit):
+    """A bypass pick changed back while the relaunch waits in line for a launch slot and another pick waits too: the ask
+    stands, the session keeps its place in line, and the freed slot relaunches it (SdkBackend._withdraw_mode_pick)."""
+
+    def _no_free_slot(self):
+        slots = self.be._spawn_sem
+        while slots.acquire(blocking=False):
+            pass                                             # every slot held elsewhere
+        return slots
+
+    def _launched_as_the_change_back_leaves_it(self, s):
+        self.assertEqual({k: v for k, v in s.launch_values().items() if sb.launch_value(s._cli_launch, k) != v}, {},
+                         "the premise: a launch now differs in nothing from the launch record")
+
+    def test_with_a_billing_pick_waiting_first_a_change_back_keeps_the_place_in_line_and_the_freed_slot_relaunches_it(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, auth="login")
+        slots = self._no_free_slot()
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self.assertTrue(slots.waiting(s), "the premise: the billing pick's relaunch waits in line for a slot")
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertFalse(getattr(s, "_mode_ask_alone", False), "the premise: the ask is not the bypass pick's alone")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(getattr(s, "_mode_pending", ""), "", "the premise: the change back withdrew the bypass pick")
+        self.assertTrue(s._switch_wanted, "the ask stands for the billing pick")
+        self.assertTrue(slots.waiting(s), "and keeps its place in line")
+        slots.release()
+        self.assertEqual(relaunched, [SID], "the freed slot relaunches it")
+
+    def test_with_an_effort_pick_waiting_too_a_change_back_keeps_the_place_in_line_and_the_freed_slot_relaunches_it(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched)
+        slots = self._no_free_slot()
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(slots.waiting(s), "the premise: the bypass pick's relaunch waits in line for a slot")
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        self.assertTrue(s._effort_pending, "the premise: the effort pick waits too")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(getattr(s, "_mode_pending", ""), "", "the premise: the change back withdrew the bypass pick")
+        self.assertTrue(s._switch_wanted, "the ask stands for the effort pick")
+        self.assertTrue(slots.waiting(s), "and keeps its place in line")
+        slots.release()
+        self.assertEqual(relaunched, [SID], "the freed slot relaunches it")
+
+    def test_with_an_env_pick_renaming_the_ask_a_change_back_keeps_the_place_in_line_and_the_freed_slot_relaunches_it(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, mode="default")   # launched in the mode the change back restores
+        slots = self._no_free_slot()
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(slots.waiting(s), "the premise: the bypass pick's relaunch waits in line for a slot")
+        self.assertTrue(self.be.set_env(SID, {"NOTES_API_MODE": "strict"}))
+        self.assertEqual(s._switch_wanted, "session env", "the premise: the env pick renamed the ask")
+        self.assertTrue(self.be.set_env(SID, {}))                  # the env goes back
+        self.assertEqual(s._switch_wanted, "session env", "the premise: the ask keeps the env pick's name")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(getattr(s, "_mode_pending", ""), "", "the premise: the change back withdrew the bypass pick")
+        self._launched_as_the_change_back_leaves_it(s)
+        self.assertTrue(s._switch_wanted, "the ask stands")
+        self.assertTrue(slots.waiting(s), "and keeps its place in line")
+        slots.release()
+        self.assertEqual(relaunched, [SID], "the freed slot relaunches it")
+
+    def test_with_bypass_picked_again_after_an_env_pick_a_change_back_keeps_the_place_in_line_and_the_freed_slot_relaunches_it(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, mode="default")   # launched in the mode the change back restores
+        slots = self._no_free_slot()
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(self.be.set_env(SID, {"NOTES_API_MODE": "strict"}))
+        self.assertTrue(self.be.set_env(SID, {}))                  # the env goes back
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual((s._switch_wanted, getattr(s, "_mode_ask_alone", None)), ("bypass mode", False),
+                         "the premise: the second bypass pick renamed the env pick's ask, so the ask is not its alone")
+        self.assertTrue(slots.waiting(s), "the premise: the relaunch waits in line for a slot")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(getattr(s, "_mode_pending", ""), "", "the premise: the change back withdrew the bypass pick")
+        self._launched_as_the_change_back_leaves_it(s)
+        self.assertTrue(s._switch_wanted, "the ask stands")
+        self.assertTrue(slots.waiting(s), "and keeps its place in line")
+        slots.release()
+        self.assertEqual(relaunched, [SID], "the freed slot relaunches it")
+
+    def test_with_an_effort_mark_up_and_no_ask_of_its_own_a_change_back_keeps_the_place_in_line_and_the_freed_slot_relaunches_it(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, mode="default")   # launched in the mode the change back restores
+        slots = self._no_free_slot()
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(slots.waiting(s), "the premise: the bypass pick's relaunch waits in line for a slot")
+        s._effort_pending = "high"                       # a mark with no ask of its own, set directly
+        self.assertEqual((s._switch_wanted, getattr(s, "_mode_ask_alone", None)), ("bypass mode", True),
+                         "the premise: the ask is the bypass pick's alone")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(getattr(s, "_mode_pending", ""), "", "the premise: the change back withdrew the bypass pick")
+        self._launched_as_the_change_back_leaves_it(s)
+        self.assertTrue(s._switch_wanted, "the ask stands")
+        self.assertTrue(slots.waiting(s), "and keeps its place in line")
+        slots.release()
+        self.assertEqual(relaunched, [SID], "the freed slot relaunches it")
+
+    def test_with_a_billing_mark_up_and_no_ask_of_its_own_a_change_back_keeps_the_place_in_line_and_the_freed_slot_relaunches_it(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, mode="default")   # launched in the mode the change back restores
+        slots = self._no_free_slot()
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(slots.waiting(s), "the premise: the bypass pick's relaunch waits in line for a slot")
+        s._auth_pending = "key"                          # a mark with no ask of its own, set directly
+        self.assertEqual((s._switch_wanted, getattr(s, "_mode_ask_alone", None)), ("bypass mode", True),
+                         "the premise: the ask is the bypass pick's alone")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(getattr(s, "_mode_pending", ""), "", "the premise: the change back withdrew the bypass pick")
+        self._launched_as_the_change_back_leaves_it(s)
+        self.assertTrue(s._switch_wanted, "the ask stands")
+        self.assertTrue(slots.waiting(s), "and keeps its place in line")
+        slots.release()
+        self.assertEqual(relaunched, [SID], "the freed slot relaunches it")
+
+    def test_with_a_fast_mark_up_and_no_ask_of_its_own_a_change_back_keeps_the_place_in_line_and_the_freed_slot_relaunches_it(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, mode="default")   # launched in the mode the change back restores
+        slots = self._no_free_slot()
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(slots.waiting(s), "the premise: the bypass pick's relaunch waits in line for a slot")
+        s._fast_pending = "on"                           # a mark with no ask of its own, set directly
+        self.assertEqual((s._switch_wanted, getattr(s, "_mode_ask_alone", None)), ("bypass mode", True),
+                         "the premise: the ask is the bypass pick's alone")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(getattr(s, "_mode_pending", ""), "", "the premise: the change back withdrew the bypass pick")
+        self._launched_as_the_change_back_leaves_it(s)
+        self.assertTrue(s._switch_wanted, "the ask stands")
+        self.assertTrue(slots.waiting(s), "and keeps its place in line")
+        slots.release()
+        self.assertEqual(relaunched, [SID], "the freed slot relaunches it")
+
+
+class AChangeBackThatKeepsTheRelaunchKeepsThePlaceForASlot(_Unit):
+    """A bypass pick whose relaunch waits in line for a launch slot, its ask the pick's alone, changed back before a slot
+    frees: when a reason was set aside for the relaunch, the launch now differs from the launch record, no launch record is
+    known, or a relaunch is on its way, the ask stands and the session keeps its place in line; with nothing on its way, the
+    freed slot relaunches it (SdkBackend._withdraw_mode_pick)."""
+
+    def _waits_in_line(self, relaunched, mode="default", record=True):
+        s = self._quiet(SID, "web", relaunched, mode=mode)
+        if not record:
+            s._cli_launch = None                                     # a host too old to report what its CLI was launched with
+        slots = self.be._spawn_sem
+        while slots.acquire(blocking=False):
+            pass                                                     # every slot held elsewhere
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the pick's own ask")
+        self.assertTrue(slots.waiting(s), "the premise: the relaunch waits in line for a slot")
+        return s, slots
+
+    def _a_change_back_keeps_the_place(self, s, slots, relaunched):
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(s._mode_pending, "", "the premise: the change back took the mark down")
+        self.assertEqual(s._switch_wanted, "bypass mode", "the ask stands")
+        self.assertTrue(slots.waiting(s), "and keeps its place in line")
+        slots.release()
+        self.assertEqual(relaunched, [SID], "the freed slot relaunches it")
+
+    def test_with_a_retry_set_aside_for_the_relaunch_a_change_back_keeps_the_place_in_line_and_the_freed_slot_relaunches_it(self):
+        relaunched = []
+        s, slots = self._waits_in_line(relaunched)
+        Path(self.d, sb.RETRY_UPGRADE_STORE).write_text("on\n")
+        s._upgrade_retry = {"from": "Opus 5", "to": "Sonnet 5", "pick": "opus", "since": 0, "next": 0, "attempts": 0}
+        self.be.retry_model_upgrades(time.time())                     # an ask stands: no attempt on top of it
+        self.assertEqual((s._upgrade_retry["attempts"], s._switch_riders), (0, {"retry upgrade"}),
+                         "the premise: the retry stood down to the pick's ask")
+        self._a_change_back_keeps_the_place(s, slots, relaunched)
+
+    def test_with_the_launch_record_in_another_mode_a_change_back_keeps_the_place_in_line_and_the_freed_slot_relaunches_it(self):
+        relaunched = []
+        s, slots = self._waits_in_line(relaunched, mode="acceptEdits")   # launched in a mode the change back does not restore
+        self._a_change_back_keeps_the_place(s, slots, relaunched)
+        self.assertEqual((s._cli_launch["mode"], s.launch_values()["mode"]), ("acceptEdits", "default"),
+                         "the premise: the launch now differs from the record in its mode")
+
+    def test_with_no_launch_record_a_change_back_keeps_the_place_in_line_and_the_freed_slot_relaunches_it(self):
+        relaunched = []
+        s, slots = self._waits_in_line(relaunched, record=False)
+        self._a_change_back_keeps_the_place(s, slots, relaunched)
+
+    def _a_restart(self, s):
+        recorded = s._do_request_reconnect
+        del s._do_request_reconnect                                  # the real arm, for the Restart
+        s.request_reconnect(cut=True, cause="restart")
+        s._do_request_reconnect = recorded
+
+    def test_with_a_restart_waiting_for_the_turns_end_a_change_back_keeps_the_place_in_line(self):
+        relaunched = []
+        s, slots = self._waits_in_line(relaunched)
+        s.inflight = 1                                               # a turn started while it waited
+        self._a_restart(s)
+        self.assertEqual((s._reconnect_when_idle, s._switch_wanted), (True, "bypass mode"),
+                         "the premise: the Restart waits for the turn's end, the pick's ask still standing")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(s._switch_wanted, "bypass mode", "a relaunch is on its way: the ask stands")
+        self.assertTrue(slots.waiting(s), "and keeps its place in line")
+
+    def test_with_a_restart_armed_and_bypass_picked_again_before_the_loop_runs_a_change_back_keeps_the_place_in_line(self):
+        relaunched = []
+        s, slots = self._waits_in_line(relaunched)
+        self._a_restart(s)                                           # quiet: armed at once
+        self.assertEqual((s._reconnect, s._switch_wanted), (True, ""), "the premise: the Restart's relaunch is armed")
+        s.loop = types.SimpleNamespace(is_closed=lambda: False, call_soon_threadsafe=lambda fn, *a: None)   # the loop not run
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the pick's own ask")
+        self.assertTrue(slots.waiting(s), "the premise: still in line")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(s._switch_wanted, "bypass mode", "a relaunch is on its way: the ask stands")
+        self.assertTrue(slots.waiting(s), "and keeps its place in line")
 
 
 class AReleaseNeverMissesAWaiter(unittest.TestCase):
@@ -691,6 +939,632 @@ class ANewerPickReplacesAnUnappliedOne(psr._Harness):
         be.retry_model_upgrades(time.time())
         self._settle()
         self.assertEqual(len(psr._Client.instances), 2, "one relaunch for three picks")
+
+
+# ── a change back withdraws the bypass pick's relaunch only when it would change nothing (SdkBackend._withdraw_mode_pick) ──
+
+LACKS_OPT_IN = {"fast_mode_state": "off", "fast_mode_disabled_reason": "sdk_opt_in_required"}   # the CLI's own report
+
+
+class _ABypassPickChangedBack(_Unit):
+    """A live session on the real relaunch road, the loop-side re-check included (the relaunch is armed, never run), launched
+    in the default mode, so changing a bypass pick back restores everything its launch record holds."""
+
+    def _session(self, queued=None, **reg):
+        s = self._live(SID, "web", **dict({"mode": "default"}, **reg))
+        del s.request_reconnect                                       # the real road
+        run = (lambda fn, *a: queued.append((fn, a))) if queued is not None else (lambda fn, *a: fn(*a))
+        s.loop = types.SimpleNamespace(is_closed=lambda: False, call_soon_threadsafe=run)
+        return s
+
+    @staticmethod
+    def _run(queued):
+        while queued:
+            fn, a = queued.pop(0)
+            fn(*a)
+
+    def _bypass_waits(self, s, queued=None):
+        s.inflight = 1                                                # a turn runs: the pick waits for quiet
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self._run(queued or [])
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the pick's own ask")
+
+    def _arm_retry(self, s):
+        Path(self.d, sb.RETRY_UPGRADE_STORE).write_text("on\n")
+        s._upgrade_retry = {"from": "Opus 5", "to": "Sonnet 5", "pick": "opus", "since": 0, "next": 0, "attempts": 0}
+
+    def _opt_in_lost(self, queued=None):
+        """Always fast on, an Opus session whose CLI was launched with the opt-in (its launch record says so) and lost it to
+        a literal '/fast off' since, so the record cannot show that a launch now would give it back."""
+        Path(self.d, sb.ALWAYS_FAST_STORE).write_text("on\n")
+        s = self._session(queued, model="opus")
+        self.assertTrue(s._cli_launch["fast"], "the premise: the launch record carries the opt-in")
+        s._fast_unlocked, s._fast_off_sent = False, True
+        return s
+
+    def _change_back(self, s):
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(s._mode_pending, "", "the premise: the change back took the mark down")
+
+    def _relaunched_at_quiet(self, s, queued=None):
+        s.inflight, s._cli_working = 0, False
+        s._try_switch_reconnect()
+        self._run(queued or [])
+        return s._reconnect
+
+
+class AWantSetAsideForThePicksRelaunchKeepsItOnAChangeBack(_ABypassPickChangedBack):
+    """A reason other than a pick that stood down to the bypass pick's relaunch, was folded into it, or was put off by its
+    carry, keeps that relaunch when the pick is changed back, and the relaunch is armed at the first quiet moment."""
+
+    def test_a_due_model_retry_that_stood_down_to_the_picks_ask(self):
+        s = self._session()
+        self._arm_retry(s)
+        self._bypass_waits(s)
+        self.be.retry_model_upgrades(time.time())                     # an ask stands: no attempt on top of it
+        self.assertEqual(s._upgrade_retry["attempts"], 0, "the premise: the retry stood down to the pick's ask")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the retry stood down to stands")
+        self.assertTrue(self._relaunched_at_quiet(s))
+
+    def test_a_retry_that_stood_down_to_the_armed_relaunch_a_veto_then_cut(self):
+        s = self._session()
+        self._bypass_waits(s)
+        self.assertTrue(self._relaunched_at_quiet(s), "the premise: the pick's relaunch is armed")
+        self._arm_retry(s)                                            # armed after the carry, due at this tick
+        self.assertEqual(s._switch_riders, set(), "the premise: nothing set aside yet")
+        self.be.retry_model_upgrades(time.time())
+        self.assertEqual(s._upgrade_retry["attempts"], 1, "the premise: the attempt stood down to the armed relaunch")
+        s.inflight = 1                                                # the CLI took a turn before the teardown
+        self.assertTrue(s._switch_teardown_check(), "the premise: the waker's last look cut the relaunch")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the retry stood down to stands")
+        self.assertTrue(self._relaunched_at_quiet(s))
+
+    def test_an_always_fast_ask_made_between_the_carry_and_the_arm_then_a_veto(self):
+        q = []
+        s = self._opt_in_lost(q)
+        self._bypass_waits(s, q)
+        s.inflight = 0
+        self.assertTrue(s._try_switch_reconnect(), "the premise: the pick's ask is carried, its arm not run yet")
+        self.assertEqual(self.be.apply_model_switches(), 1, "the premise: Always fast asks, no ask standing")
+        self._run(q)                                                  # the arm, then the Always fast ask's own carry
+        self.assertTrue(s._reconnect, "the premise: the pick's relaunch is armed")
+        s.inflight = 1
+        self.assertTrue(s._switch_teardown_check(), "the premise: the waker's last look cut the relaunch")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the opt-in was folded into stands")
+        self.assertTrue(self._relaunched_at_quiet(s, q))
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+    def test_a_retry_asked_after_the_arm_whose_carry_had_not_run_at_the_veto(self):
+        q = []
+        s = self._session(queued=q)
+        self._bypass_waits(s, q)
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the premise: the pick's relaunch is armed")
+        self._arm_retry(s)                                            # armed after the carry, due at this tick
+        self.assertEqual(s._switch_riders, set(), "the premise: nothing set aside yet")
+        self.be.retry_model_upgrades(time.time())                     # its ask's carry waits on the loop
+        s.inflight = 1
+        self.assertTrue(s._switch_teardown_check(), "the premise: the waker's last look cut the relaunch first")
+        self._run(q)
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the retry asked for stands")
+        self.assertTrue(self._relaunched_at_quiet(s, q))
+
+    def test_an_always_fast_ask_that_stood_down_to_the_picks_ask_whose_carry_a_busy_recheck_handed_back(self):
+        q = []
+        s = self._opt_in_lost(q)
+        self._bypass_waits(s, q)
+        self.assertEqual(self.be.apply_model_switches(), 0, "the premise: Always fast stood down to the pick's ask")
+        self.assertIsNone(getattr(s, "_upgrade_retry", None), "the premise: no upgrade retry is armed at the carry")
+        s.inflight = 0
+        self.assertTrue(s._try_switch_reconnect(), "the premise: the pick's ask is carried")
+        s._cli_working = True                                         # the CLI opened a turn itself before the arm ran
+        self._run(q)
+        self.assertEqual((s._reconnect, s._switch_wanted), (False, "bypass mode"), "the premise: the re-check handed it back")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the opt-in stood down to stands")
+        self.assertTrue(self._relaunched_at_quiet(s, q))
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+    def test_an_always_fast_ask_set_aside_keeps_the_relaunch_at_a_second_change_back(self):
+        q = []
+        s = self._opt_in_lost(q)
+        self._bypass_waits(s, q)
+        self.assertEqual(self.be.apply_model_switches(), 0, "the premise: Always fast stood down to the pick's ask")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the premise: the first change back kept the relaunch")
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the premise: carried and armed")
+        s.inflight = 1
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))   # picked again while the relaunch is armed
+        self.assertTrue(s._switch_teardown_check(), "the premise: the waker's last look cut the relaunch")
+        self._run(q)
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the pick's own ask")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the opt-in stood down to stands")
+        self.assertTrue(self._relaunched_at_quiet(s, q))
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+    def _the_carry_puts_the_retry_off_then_a_busy_recheck_hands_the_ask_back(self, due_in):
+        q = []
+        s = self._session(queued=q)
+        self._arm_retry(s)
+        s._upgrade_retry["next"] = time.time() + due_in if due_in else 0
+        self._bypass_waits(s, q)                                      # no retry tick while the pick's ask stands
+        s.inflight = 0
+        self.assertTrue(s._try_switch_reconnect(), "the premise: the pick's ask is carried")
+        self.assertGreater(s._upgrade_retry["next"], time.time() + 300, "the premise: the carry put the retry's attempt off")
+        s._cli_working = True                                         # the CLI opened a turn itself before the arm ran
+        self._run(q)
+        self.assertEqual((s._reconnect, s._switch_wanted), (False, "bypass mode"), "the premise: the re-check handed it back")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the carry put the retry off for stands")
+        self.assertTrue(self._relaunched_at_quiet(s, q))
+
+    def test_a_due_retry_put_off_by_the_carry_of_the_picks_ask_that_a_busy_recheck_handed_back(self):
+        self._the_carry_puts_the_retry_off_then_a_busy_recheck_hands_the_ask_back(0)
+
+    def test_a_retry_not_yet_due_put_off_by_the_carry_of_the_picks_ask_that_a_busy_recheck_handed_back(self):
+        self._the_carry_puts_the_retry_off_then_a_busy_recheck_hands_the_ask_back(200)
+
+    def test_a_retry_not_yet_due_put_off_by_the_carry_of_the_picks_ask_whose_armed_relaunch_a_veto_cut(self):
+        s = self._session()
+        self._arm_retry(s)
+        s._upgrade_retry["next"] = time.time() + 200                  # due in 200 s, and no retry tick runs here
+        self._bypass_waits(s)
+        self.assertTrue(self._relaunched_at_quiet(s), "the premise: the pick's relaunch is armed")
+        self.assertGreater(s._upgrade_retry["next"], time.time() + 300, "the premise: the carry put the retry's attempt off")
+        s.inflight = 1                                                # the CLI took a turn before the teardown
+        self.assertTrue(s._switch_teardown_check(), "the premise: the waker's last look cut the relaunch")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the carry put the retry off for stands")
+        self.assertTrue(self._relaunched_at_quiet(s))
+
+    def test_an_always_fast_ask_that_stood_down_to_the_picks_ask(self):
+        s = self._opt_in_lost()
+        self._bypass_waits(s)
+        self.assertEqual(self.be.apply_model_switches(), 0, "the premise: Always fast stood down to the pick's ask")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the opt-in stood down to stands")
+        self.assertTrue(self._relaunched_at_quiet(s))
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+    def test_the_clis_report_that_it_lacks_the_opt_in_stood_down_to_the_picks_ask(self):
+        s = self._opt_in_lost()
+        self._bypass_waits(s)
+        s._adopt_fast_state(dict(LACKS_OPT_IN))                       # this turn's init
+        self.assertEqual(s._switch_wanted, "bypass mode", "the premise: the opt-in's ask stood down to the pick's")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the opt-in stood down to stands")
+        self.assertTrue(self._relaunched_at_quiet(s))
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+    def test_a_model_change_that_wants_the_opt_in_stood_down_to_the_picks_ask(self):
+        s = self._opt_in_lost()
+        self._bypass_waits(s)
+        s._after_model_change("Sonnet 5", "Opus 5")
+        self.assertEqual(s._switch_wanted, "bypass mode", "the premise: the opt-in's ask stood down to the pick's")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the opt-in stood down to stands")
+        self.assertTrue(self._relaunched_at_quiet(s))
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+    def _a_report_on_a_cli_this_kernel_launched_with_the_opt_in(self, attach=False, fast_off=False, own=False):
+        """An Opus session whose CLI this kernel launched carrying the fast-mode opt-in (its own launch record), wanted by
+        Always fast or, with `own`, by the session's own Fast pick; the bypass pick's own ask, then the CLI's report that it
+        lacks the opt-in. The relaunch the opt-in's ask stood down to stands after the change back, with the opt-in."""
+        if not own:
+            Path(self.d, sb.ALWAYS_FAST_STORE).write_text("on\n")
+        s = self._session(model="opus", **({"fast": True} if own else {}))
+        s._launch_record = dict(s._cli_launch)
+        self.assertTrue(s._launch_record["fast"], "the premise: this kernel's launch record carries the opt-in")
+        s._host_is_attach, s._fast_unlocked, s._fast_off_sent = attach, False, fast_off
+        self._bypass_waits(s)
+        s._adopt_fast_state(dict(LACKS_OPT_IN))
+        self.assertEqual(s._switch_wanted, "bypass mode", "the premise: the opt-in's ask stood down to the pick's")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the opt-in stood down to stands")
+        self.assertTrue(self._relaunched_at_quiet(s))
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+    def test_the_report_of_a_cli_this_kernel_launched_with_the_opt_in_after_a_fast_off_went_to_it(self):
+        self._a_report_on_a_cli_this_kernel_launched_with_the_opt_in(fast_off=True)
+
+    def test_the_report_of_a_cli_this_kernel_launched_with_the_opt_in_at_an_attach_to_it(self):
+        self._a_report_on_a_cli_this_kernel_launched_with_the_opt_in(attach=True)
+
+    def test_the_report_of_a_cli_launched_with_the_opt_in_the_sessions_own_fast_pick_wants(self):
+        self._a_report_on_a_cli_this_kernel_launched_with_the_opt_in(fast_off=True, own=True)
+
+    def test_an_always_fast_ask_a_busy_recheck_dropped_beside_the_picks_ask_before_an_attach(self):
+        q = []
+        s = self._opt_in_lost(q)
+        s.inflight = 0
+        self.assertEqual(self.be.apply_model_switches(), 1, "the premise: Always fast asks")
+        fn, a = q.pop(0)
+        fn(*a)
+        self.assertEqual(s._switch_ask_pending, "always fast", "the premise: its ask is carried, its arm not run yet")
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        s._cli_working = True                                         # the CLI opened a turn itself before the arm ran
+        self._run(q)
+        self.assertEqual((s._switch_wanted, s._switch_ask_pending, s._reconnect), ("bypass mode", "", False),
+                         "the premise: the re-check dropped the carried ask, since the pick's stands")
+        s._cli_working = False
+        s._do_request_reconnect(defer=False)                          # a planned reconnect, as a host re-exec's
+        self.assertTrue(s._reconnect, "the premise: armed")
+        s._reconnect = False                                          # the kernel attaches to the same CLI again
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="default"), False)
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the reconcile's ask")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the dropped ask was set aside for stands")
+        self.assertTrue(self._relaunched_at_quiet(s, q))
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+
+class AChangeBackWithdrawsOnlyARelaunchThatWouldChangeNothing(_ABypassPickChangedBack):
+    """The change back withdraws the bypass pick's relaunch only when a launch now differs in nothing from the serving CLI's
+    launch record and nothing was set aside for it; Apply now and `romp apply` then report what still waits."""
+
+    def test_with_nothing_set_aside_and_nothing_different_the_relaunch_is_withdrawn(self):
+        s = self._session()
+        self._bypass_waits(s)
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "", "the relaunch would change nothing: withdrawn")
+        self.assertFalse(self._relaunched_at_quiet(s), "and nothing is armed at the first quiet moment")
+
+    def test_with_no_retry_armed_a_carry_that_a_busy_recheck_handed_back_sets_nothing_aside_so_the_relaunch_is_withdrawn(self):
+        q = []
+        s = self._session(queued=q)
+        self._bypass_waits(s, q)
+        self.assertIsNone(getattr(s, "_upgrade_retry", None), "the premise: no upgrade retry is armed")
+        s.inflight = 0
+        self.assertTrue(s._try_switch_reconnect(), "the premise: the pick's ask is carried")
+        s._cli_working = True                                         # the CLI opened a turn itself before the arm ran
+        self._run(q)
+        self.assertEqual((s._reconnect, s._switch_wanted), (False, "bypass mode"), "the premise: the re-check handed it back")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "", "nothing was set aside and the relaunch would change nothing: withdrawn")
+        self.assertFalse(self._relaunched_at_quiet(s, q), "and nothing is armed at the first quiet moment")
+
+    def _an_opt_in_that_cannot_take(self):
+        """Always fast on, an Opus session whose CLI this kernel launched with the opt-in and sent no '/fast off', and whose
+        first report said it lacks the opt-in: a relaunch would carry the same flag and hear the same."""
+        Path(self.d, sb.ALWAYS_FAST_STORE).write_text("on\n")
+        s = self._session(model="opus")
+        s._launch_record = dict(s._cli_launch)
+        s._host_is_attach, s._fast_unlocked, s._fast_off_sent = False, False, False
+        s._adopt_fast_state(dict(LACKS_OPT_IN))
+        self.assertEqual(s._switch_wanted, "", "the premise: nothing asked")
+        self.assertTrue(s._opt_in_cannot_take(), "the premise: the opt-in cannot take on this CLI")
+        return s
+
+    def test_always_fast_with_an_opt_in_that_cannot_take_sets_nothing_aside_so_the_relaunch_is_withdrawn(self):
+        s = self._an_opt_in_that_cannot_take()
+        self._bypass_waits(s)
+        self.assertEqual(self.be.apply_model_switches(), 0, "the premise: Always fast asks nothing")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "", "nothing was set aside and the relaunch would change nothing: withdrawn")
+
+    def test_a_model_change_with_an_opt_in_that_cannot_take_sets_nothing_aside_so_the_relaunch_is_withdrawn(self):
+        s = self._an_opt_in_that_cannot_take()
+        self._bypass_waits(s)
+        s._after_model_change("Sonnet 5", "Opus 5")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "", "nothing was set aside and the relaunch would change nothing: withdrawn")
+
+    def test_the_report_of_an_attached_cli_whose_opt_in_cannot_take_sets_nothing_aside_so_the_relaunch_is_withdrawn(self):
+        Path(self.d, sb.ALWAYS_FAST_STORE).write_text("on\n")
+        s = self._session(model="opus")
+        s._host = types.SimpleNamespace(hello={"cli": {"pid": 4242, "start": "1700000000"}})
+        self.be._update_reg(SID, fastOptInLacking="4242:1700000000")   # the launching kernel's word on this CLI
+        s._host_is_attach, s._fast_unlocked, s._fast_off_sent = True, False, False
+        self._bypass_waits(s)
+        self.assertTrue(s._opt_in_cannot_take(), "the premise: the opt-in cannot take on this CLI")
+        s._adopt_fast_state(dict(LACKS_OPT_IN))
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "", "nothing was set aside and the relaunch would change nothing: withdrawn")
+
+    def test_the_report_of_a_cli_this_kernel_launched_with_the_opt_in_and_sent_no_fast_off_sets_nothing_aside_so_the_relaunch_is_withdrawn(self):
+        Path(self.d, sb.ALWAYS_FAST_STORE).write_text("on\n")
+        s = self._session(model="opus")
+        s._launch_record = dict(s._cli_launch)
+        self.assertTrue(s._launch_record["fast"], "the premise: this kernel's launch record carries the opt-in")
+        s._host_is_attach, s._fast_unlocked, s._fast_off_sent = False, False, False
+        self._bypass_waits(s)
+        s._adopt_fast_state(dict(LACKS_OPT_IN))
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "", "nothing was set aside and the relaunch would change nothing: withdrawn")
+
+    def test_a_bypass_pick_made_while_another_picks_ask_was_carried_is_not_its_own_so_a_change_back_keeps_the_relaunch(self):
+        q = []
+        s = self._session(queued=q, auth="login")
+        s.inflight = 0
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        fn, a = q.pop(0)
+        fn(*a)
+        self.assertEqual(s._switch_ask_pending, "billing", "the premise: the billing pick's ask is carried, its arm not run yet")
+        self.assertTrue(self.be.set_auth(SID, "login"))                # the pick goes back to what the CLI runs
+        self.assertEqual(s._switch_wanted, "", "the premise: no ask stands")
+        s.inflight = 1
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(s._switch_wanted, "bypass mode", "the premise: the pick's ask stands")
+        s._cli_working = True                                         # the CLI opened a turn itself before the arm ran
+        self._run(q)
+        self.assertEqual((s._switch_wanted, s._switch_ask_pending, s._reconnect), ("bypass mode", "", False),
+                         "the premise: the re-check dropped the carried ask, since the pick's stands")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the ask is not the bypass pick's own: it stands")
+
+    def test_with_no_launch_record_the_relaunch_stands(self):
+        Path(self.d, sb.ALWAYS_FAST_STORE).write_text("on\n")
+        s = self._session(model="opus")
+        s._cli_launch = None                                          # a host too old to report what its CLI was launched with
+        self._bypass_waits(s)
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "nothing shows the relaunch would change nothing: it stands")
+        self.assertTrue(self._relaunched_at_quiet(s))
+        self.assertTrue(s.launch_values()["fast"], "and carries the opt-in Always fast wants")
+
+    def test_with_a_restart_waiting_for_the_turns_end_the_ask_stands_and_apply_now_runs_it(self):
+        s = self._session()
+        self._bypass_waits(s)
+        s.request_reconnect(cut=True, cause="restart")
+        self.assertTrue(s._reconnect_when_idle, "the premise: the Restart waits for the turn's end")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "a relaunch is on its way: the ask stands")
+        doors = []
+        self.be._relaunch = lambda sid, cause: doors.append(cause) or ""
+        self.assertEqual((self.be.apply_now(SID), doors), ("", ["apply"]), "and Apply now runs it")
+
+    def test_with_a_relaunch_armed_the_ask_stands_and_no_line_says_it_was_withdrawn(self):
+        q = []
+        s = self._session(queued=q)
+        s.inflight = 0
+        s.request_reconnect(cut=True, cause="restart")
+        self._run(q)
+        self.assertTrue(s._reconnect, "the premise: the Restart's relaunch is armed")
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the pick's own ask")
+        said = []
+        self.be._log = lambda msg, *a, **k: said.append(msg)
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "a relaunch is on its way: the ask stands")
+        self.assertEqual([m for m in said if "withdrawn" in m], [], "and no line says a relaunch was withdrawn")
+
+    def test_with_another_reasons_ask_carried_the_reconciles_ask_stands_and_no_line_says_it_was_withdrawn(self):
+        s = self._session()
+        s.inflight = 1
+        s.mode, s._mode_pending = "bypassPermissions", "bypassPermissions"   # a bypass pick recorded as waiting
+        self.be._note_pick_waits(s, "mode", "bypass mode")
+        s._switch_ask_pending = "always fast"                         # another reason's ask, carried, its arm not run yet
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="default"), False)   # an attach
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the reconcile's ask")
+        said = []
+        self.be._log = lambda msg, *a, **k: said.append(msg)
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "a relaunch is on its way: the ask stands")
+        self.assertEqual([m for m in said if "withdrawn" in m], [], "and no line says a relaunch was withdrawn")
+
+    def _always_fast_off_across_a_restart(self):
+        """Always fast is off now; the CLI a session host kept across a kernel restart was launched with the opt-in it
+        wanted then, in the default mode, and the bypass pick made before the restart still waits."""
+        sb.write_reg(self.d, SID, {"sid": SID, "name": "web", "cwd": self.d, "alive": True, "mode": "bypassPermissions",
+                                   "model": "opus", "relaunchWait": {"why": "bypass mode", "t": 1700000150,
+                                                                     "picks": {"mode": {"mode": "bypassPermissions"}}}})
+        self.be._lease_survives = lambda sid, **_: True
+        s = sb.SdkSession(self.be, sb.read_reg(self.d, SID))
+        s.thread = types.SimpleNamespace(is_alive=lambda: True, ident=None)
+        s.loop = types.SimpleNamespace(is_closed=lambda: False, call_soon_threadsafe=lambda fn, *a: fn(*a))
+        self.be.sessions[SID] = s
+        s.inflight = 1
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="default", fast=True), False)   # the attach
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the pick's own ask")
+        self.assertFalse(s.launch_values()["fast"], "the premise: a launch now carries no opt-in")
+        return s
+
+    def test_with_always_fast_turned_off_the_relaunch_that_drops_the_opt_in_stands(self):
+        s = self._always_fast_off_across_a_restart()
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch would take the opt-in away: it stands")
+        self.assertTrue(self._relaunched_at_quiet(s))
+
+    def test_apply_now_reports_the_relaunch_an_opt_in_ask_stood_down_to(self):
+        s = self._opt_in_lost()
+        self._bypass_waits(s)
+        s._adopt_fast_state(dict(LACKS_OPT_IN))
+        self._change_back(s)
+        doors = []
+        self.be._relaunch = lambda sid, cause: doors.append(cause) or ""
+        self.assertEqual((self.be.apply_now(SID), doors), ("", ["apply"]), "a relaunch waits, and Apply now runs it")
+
+    def test_romp_apply_reports_the_relaunch_that_drops_the_opt_in(self):
+        from unittest import mock
+        self._always_fast_off_across_a_restart()
+        self._change_back(self.be.sessions[SID])
+        doors = []
+        self.be._relaunch = lambda sid, cause: doors.append(cause) or ""
+        with mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: self.be)), \
+                mock.patch.object(km, "_kernel_knows", lambda sid: True):
+            detail = km._apply_now_detail(SID)                        # the answer of the /apply route `romp apply` posts to
+        self.assertEqual((detail, doors), ("", ["apply"]), "a relaunch waits, and romp apply runs it")
+
+    def test_a_change_back_to_a_mode_switched_to_live_since_the_launch_keeps_the_relaunch(self):
+        s = self._session()
+        s.set_mode_live = lambda mode, prev="default": None
+        self.assertTrue(self.be.set_mode(SID, "acceptEdits"))         # a live switch: no relaunch
+        self.assertEqual(s._cli_launch["mode"], "default", "the premise: the launch record holds the launch's mode")
+        self._bypass_waits(s)
+        self.assertTrue(self.be.set_mode(SID, "acceptEdits"))
+        self.assertEqual(s._switch_wanted, "bypass mode", "the launch now differs from the record in its mode: it stands")
+        self.assertTrue(self._relaunched_at_quiet(s))
+
+    def test_a_retry_set_aside_whose_arm_cleared_without_a_launch_still_keeps_the_relaunch(self):
+        s = self._session()
+        self._arm_retry(s)
+        self._bypass_waits(s)
+        self.be.retry_model_upgrades(time.time())                     # an ask stands: no attempt on top of it
+        s._note_model_served("Opus 5")                                # a parent turn served on the model it fell from
+        self.assertIsNone(s._upgrade_retry, "the premise: the retry's arm cleared")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the retry's reason is still set aside: the relaunch stands")
+        self.assertTrue(self._relaunched_at_quiet(s))
+
+
+class AReasonSetAsideClearsAtALaunchNotAtAnAttach(psr._Harness):
+    """The reasons set aside for a relaunch clear when a CLI is launched from the session's state, never at an attach to the
+    CLI already running, so a change back after a host re-exec still keeps the relaunch."""
+
+    def _bypass_waits_with_a_retry_set_aside(self, be, s, c):
+        self._a_turn_that_leaves_a_monitor(s, c)
+        self.assertTrue(be.set_mode(SID, "bypassPermissions"))
+        self._settle()
+        with open(os.path.join(self.state, sb.RETRY_UPGRADE_STORE), "w") as f:
+            f.write("on\n")
+        s._upgrade_retry = {"from": "Opus 5", "to": "Sonnet 5", "pick": "", "since": 0, "next": 0, "attempts": 0}
+        be.retry_model_upgrades(time.time())                          # an ask stands: the retry stands down to it
+        self.assertEqual((s._switch_wanted, s._upgrade_retry["attempts"]), ("bypass mode", 0), "the premise")
+
+    def test_a_launch_clears_them(self):
+        be, s = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"},
+                              {"attach": False, "cli": CLI_B, "launch": "spec"}])
+        c1 = self._connect(s, 1)
+        self._bypass_waits_with_a_retry_set_aside(be, s, c1)
+        self._monitor_ends(c1)
+        self._wait(lambda: len(psr._Client.instances) == 2 and psr._Client.instances[1] is s.client, "the relaunch onto CLI B")
+        self._wait(lambda: not s.snapshot().get("modePending"), "the pick applied at CLI B's launch")
+        self.assertEqual(s._switch_riders, set(), "CLI B was launched from the session's state, the retry's pick included")
+
+    def test_an_attach_keeps_them_so_a_change_back_keeps_the_relaunch(self):
+        be, s = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"},
+                              {"attach": True, "cli": CLI_A, "launch": "same"},
+                              {"attach": False, "cli": CLI_B, "launch": "spec"}])
+        c1 = self._connect(s, 1)
+        self._bypass_waits_with_a_retry_set_aside(be, s, c1)
+        s.loop.call_soon_threadsafe(be._on_host_reexec_now, s)
+        self._wait(lambda: s._reconnect, "the re-exec's planned reconnect")
+        self._push(c1, psr._EOF)                                      # the host closes the socket for its exec
+        self._wait(lambda: len(psr._Client.instances) == 2 and psr._Client.instances[1] is s.client, "re-attached to CLI A")
+        self._settle()
+        self.assertEqual(s._switch_wanted, "bypass mode", "the premise: the pick still waits for its relaunch")
+        s.set_mode_live = lambda mode, prev="default": None
+        self.assertTrue(be.set_mode(SID, "acceptEdits"))
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the retry stood down to stands")
+        self._monitor_ends(psr._Client.instances[1])
+        self._wait(lambda: len(psr._Client.instances) == 3 and psr._Client.instances[2] is s.client, "the relaunch onto CLI B")
+
+
+class ARestartBesideAWaitingBypassPickRuns(psr._Harness):
+    """A Restart's relaunch at the turn's end takes the ask standing into itself and sets nothing aside: it carries no switch
+    reason, so the waker's last look never cuts it and a change back never withdraws it."""
+
+    def test_a_change_back_leaves_the_restarts_relaunch_to_run_with_the_due_retrys_pick(self):
+        sb.write_reg(self.state, SID, dict(self._reg(), model="opus"))
+        be, s = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"},
+                              {"attach": False, "cli": CLI_B, "launch": "spec"}])
+        c1 = self._connect(s, 1)
+        s.enqueue("first turn")
+        self._wait(lambda: c1.writes == ["first turn"], "the turn fed")
+        self._push(c1, psr._SystemMessage("init", {"model": "claude-x", "permissionMode": "acceptEdits",
+                                                   "session_id": psr.FSID}, uuid=self._uid()))
+        self._push(c1, psr._SystemMessage("task_started", {"task_id": "t-mon", "description": "watch the spend",
+                                                           "task_type": "local_bash"}, uuid=self._uid()))
+        self._wait(lambda: s.live_work()[1] == 1, "the monitor registered")
+        self.assertTrue(be.set_mode(SID, "bypassPermissions"))
+        self._settle()
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the pick's own ask")
+        with open(os.path.join(self.state, sb.RETRY_UPGRADE_STORE), "w") as f:
+            f.write("on\n")
+        s._upgrade_retry = {"from": "Opus 5", "to": "Sonnet 5", "pick": "opus", "since": 0, "next": 0, "attempts": 0}
+        self.assertEqual(be._relaunch(SID, "restart"), "")
+        self._wait(lambda: s._reconnect_when_idle, "the Restart waits for the turn's end")
+        self._push(c1, psr._result(uuid=self._uid(), subtype="success", is_error=False, num_turns=1, session_id=psr.FSID,
+                                   duration_ms=1, duration_api_ms=1, total_cost_usd=0.01,
+                                   usage={"input_tokens": 1, "output_tokens": 1}, result="ok", parent_tool_use_id=None))
+        self._wait(lambda: len(psr._Client.instances) == 2 or (s._switch_wanted and not s._reconnect
+                                                               and not s._reconnect_when_idle), "the relaunch, or its veto")
+        s.set_mode_live = lambda mode, prev="default": None
+        self.assertTrue(be.set_mode(SID, "acceptEdits"))
+        self._wait(lambda: len(psr._Client.instances) == 2 and psr._Client.instances[1] is s.client, "the relaunch onto CLI B")
+        self.assertEqual(psr._Client.instances[1].options.model, "opus", "CLI B runs the pick the retry asks for")
+
+
+class EveryReasonSetAsideForARelaunchIsCounted(unittest.TestCase):
+    """Every function in kernel/ that writes the standing relaunch ask (_switch_wanted), or asks for a relaunch
+    (want_switch_reconnect) after reading whether one stands or is on its way, is classified below, and each place that sets
+    a reason other than a pick aside for that ask adds it to _switch_riders, which keeps the relaunch on a change back
+    (SdkBackend._withdraw_mode_pick). A new such function, or a _switch_riders.add or update call in kernel/ that is not
+    counted here, fails until it is classified."""
+
+    RIDERS = {   # one reason per _switch_riders.add or update call, in each function
+        "SdkBackend.retry_model_upgrades": ("a due retry stands down to the ask standing",),
+        "SdkSession._after_model_change": ("Always fast's ask after a model change stands down to the ask standing or armed",),
+        "SdkSession._ask_missing_opt_in": ("the opt-in's ask after the CLI's report stands down to the ask standing or armed",),
+        "SdkSession._amain": ("the fast-mode ask after a toggle during the version read stands down to the ask standing or armed",),
+        "SdkBackend.apply_model_switches": ("Always fast's ask after a flip stands down to the ask standing or armed",),
+        "SdkSession._try_switch_reconnect": ("the ask standing stands down to a relaunch already armed",
+                                             "the carry puts the upgrade retry's attempt off for the relaunch it carries"),
+        "SdkSession._do_request_reconnect": ("the arm clears the ask standing, and a veto raises only the carried one again",),
+        "SdkSession._switch_teardown_check": ("the veto replaces the ask standing with the armed relaunch's reason",),
+        "SdkSession._re_raise_switch_ask": ("the busy re-check drops the carried reason when another ask stands",),
+    }
+    EXEMPT = {
+        "SdkSession._on_message": "its turn-end cut relaunch carries no switch reason, so nothing vetoes or withdraws it",
+    }
+    OTHERS = {
+        "SdkSession.__init__": "the ask starts empty",
+        "SdkSession.want_switch_reconnect": "raises a reason, and a pick's never hides another",
+        "SdkSession._reconcile_waiting_picks": "raises a pick's reason, and only when no ask stands",
+        "SdkSession._drop_carried_ask": "drops an ask that picks alone made",
+        "SdkBackend._withdraw_mode_pick": "drops the bypass pick's own ask, and reads the riders",
+    }
+    STATE = ("_switch_wanted", "_switch_ask_pending", "_reconnect", "_reconnect_when_idle")
+
+    @staticmethod
+    def _is_rider_add(n):
+        return (isinstance(n, ast.Call) and getattr(n.func, "attr", "") in ("add", "update")
+                and getattr(n.func.value, "attr", "") == "_switch_riders")
+
+    def _scan(self):
+        """Each function and method of kernel/ that touches the ask: whether it writes or stands down to it, and how many
+        riders it adds; and every rider added in those files, inside a function or not."""
+        writers, adds, total = set(), {}, 0
+        for path in sorted(Path(os.path.dirname(HERE), "kernel").glob("*.py")):
+            text = path.read_text()
+            if not any(w in text for w in ("_switch_wanted", "want_switch_reconnect", "_switch_riders")):
+                continue
+            tree = ast.parse(text)
+            total += sum(1 for n in ast.walk(tree) if self._is_rider_add(n))
+            for top in tree.body:
+                defs = (ast.FunctionDef, ast.AsyncFunctionDef)
+                owned = ([(top.name + ".", f) for f in top.body if isinstance(f, defs)] if isinstance(top, ast.ClassDef)
+                         else [("", top)] if isinstance(top, defs) else [])
+                for prefix, f in owned:
+                    writes = reads = asks = False
+                    for n in ast.walk(f):
+                        if isinstance(n, ast.Attribute) and n.attr == "_switch_wanted" and isinstance(n.ctx, ast.Store):
+                            writes = True
+                        elif isinstance(n, ast.Attribute) and n.attr in self.STATE and isinstance(n.ctx, ast.Load):
+                            reads = True
+                        elif isinstance(n, ast.Call) and getattr(n.func, "attr", "") == "want_switch_reconnect":
+                            asks = True
+                        elif isinstance(n, ast.Call) and getattr(n.func, "id", "") == "getattr" and len(n.args) > 1 \
+                                and getattr(n.args[1], "value", None) in self.STATE:
+                            reads = True
+                    if writes or (asks and reads):
+                        writers.add(prefix + f.name)
+                    k = sum(1 for n in ast.walk(f) if self._is_rider_add(n))
+                    if k:
+                        adds[prefix + f.name] = adds.get(prefix + f.name, 0) + k
+        return writers, adds, total
+
+    def test_each_function_is_classified_and_each_rider_add_is_counted(self):
+        writers, adds, total = self._scan()
+        self.assertEqual(sorted(writers), sorted(dict(self.RIDERS, **self.EXEMPT, **self.OTHERS)),
+                         "a function writes the relaunch ask, or stands down to it, unclassified")
+        self.assertEqual(adds, {name: len(whys) for name, whys in self.RIDERS.items()},
+                         "a function adds a rider in a place not counted here, or a place counted here adds none")
+        self.assertEqual(total, sum(adds.values()), "a rider is added outside a function")
 
 
 if __name__ == "__main__":

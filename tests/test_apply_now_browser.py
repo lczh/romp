@@ -13,12 +13,18 @@ page, in the dark theme and in Yatharth light (the settings key `yatharth-light`
      ends and what the session keeps, two plain buttons); Cancel sends nothing;
   3. the confirm's own Apply now sends ONE applyNow op for web, the kernel takes it (its log names the door), and no
      refusal toast follows;
-  4. the effort badge's picker carries the same row behind its own rule.
+  4. the effort badge's picker carries the same row behind its own rule;
+  5. with a waiting bypass pick's mark on web's status (2026-10-01; a stand-in, below), the mode badge wears
+     switching-dots, and its picker keeps the check on web's mode, offers no Apply now row, and says under the Bypass row
+     alone what the relaunch waits for. Swapped in place for a four-part wait, the longest shape relaunchWaits takes, that
+     line wraps and the menu keeps its width.
 WHAT THE LAB STANDS IN FOR: these sessions are registered and alive with no CLI running this life, so the kernel's row for
 web is its dormant one, which carries the waiting picks' marks from the registry (authPending, effortPending, and the
 relaunchWait record apply_now reads) but not what holds them: that is a live session's snapshot (relaunchWaits, and
-relaunchCuts for the row). The driver adds those two fields to web's status as the frames pass the page's socket, and
-nothing else; the op goes to the real kernel, whose apply_now finds the recorded pick and takes the dormant road (the
+relaunchCuts for the row). The driver adds those two fields to web's status as the frames pass the page's socket, with
+the effort pick's mark (effortPending) and a bypass pick's mark (modePending), and nothing else. modePending is a stand-in
+like the first two: web's registry holds no bypass pick (its mode is auto, and its waiting record names the billing and
+effort picks). The op goes to the real kernel, whose apply_now finds the recorded pick and takes the dormant road (the
 connect is the relaunch). The live road, the notice the session gets and its words, run in
 tests/test_reconnect_waits_for_work.py; the row's rules in ui/webview/apply-now.test.ts.
 APPLY_NOW_DIST=<dir> serves another tree's UI bundle (the red run's before); APPLY_NOW_SHOTS=<dir> writes the flyout,
@@ -52,8 +58,19 @@ import test_ship_reship_served as _lab   # noqa: E402  the lab kernel's environm
 NAMES = ["web", "api"]
 SIDS = {"web": "ab1e0001-1111-2222-3333-444444444444", "api": "ab1e0002-1111-2222-3333-444444444444"}
 WAITS = "2 background tasks"          # what a live session's snapshot would say holds web's picks
+LONG_WAITS = "the running turn, your answer to its question, 2 subagents and 3 background tasks"   # relaunchWaits' longest shape
 CUTS = "2 background tasks"           # …and what pushing them through would end
 PALETTE = [("#9cd2ff", "#0c1a2e"), ("#54B204", "#ffffff")]
+
+
+def _mode_labels():
+    """The mode picker's row labels by value, read from this tree's render.ts MODE_CHOICES: the lab finds rows by value, and
+    mode-selector.test.ts owns the labels' spelling."""
+    with open(os.path.join(ROOT, "ui", "webview", "render.ts"), encoding="utf-8") as f:
+        src = f.read()
+    block = src[src.index("const MODE_CHOICES: MetaChoice[] = ["):]
+    block = block[:block.index("\n];\n")]
+    return {value: label for label, value in re.findall(r'\{ label: "([^"]+)", value: "([^"]+)"', block)}
 
 
 def _free_port():
@@ -81,12 +98,13 @@ const out = { themes: {} };
 const sent = [];
 // web's status as a live session's snapshot carries it: what holds its waiting picks, what pushing them through ends, and
 // its effort pick's pending mark (a kernel's boot heals a dormant session's effort mark as moot, since its next launch
-// carries the pick; a live session keeps it while the pick waits). Every frame naming web with a status object gets the
-// three fields; nothing else is touched, and web's billing mark is the kernel's own, from its registry row.
+// carries the pick; a live session keeps it while the pick waits), plus a bypass pick's mark that web's registry does not
+// hold. Every frame naming web with a status object gets the four fields; nothing else is touched, and web's billing mark
+// is the kernel's own, from its registry row.
 const patch = (o) => {
   if (Array.isArray(o)) { o.forEach(patch); return; }
   if (!o || typeof o !== "object") return;
-  if (o.id === cfg.sidWeb && o.status && typeof o.status === "object") Object.assign(o.status, { relaunchWaits: cfg.waits, relaunchCuts: cfg.cuts, effortPending: true });
+  if (o.id === cfg.sidWeb && o.status && typeof o.status === "object") Object.assign(o.status, { relaunchWaits: cfg.waits, relaunchCuts: cfg.cuts, effortPending: true, modePending: true });
   for (const v of Object.values(o)) if (v && typeof v === "object") patch(v);
 };
 const readFly = (page) => page.evaluate(() => {
@@ -177,6 +195,34 @@ for (const theme of ["dark", "light"]) {
     const x = Math.max(0, bb.x - 40), y = Math.max(0, bb.y - 40);
     await page.screenshot({ path: cfg.shots + "/effort-picker-" + theme + ".png", clip: { x, y, width: Math.min(1100 - x, bb.width + 80), height: Math.min(700 - y, bb.height + 120) } });
   }
+  await page.keyboard.press("Escape"); await page.waitForTimeout(150);
+  // 5. the mode picker on the active tab (web): its bypass pick waits as the badge's dots and the Bypass row's words; the
+  // stand-in relaunchWaits in them is then swapped in place for the longest wait to read the wrap rule on the real
+  // stylesheet. A failure here is test 6's alone: it is recorded, the menu closed, and step 3 still runs for the tests that
+  // read it
+  try {
+    await page.waitForSelector('#statusline .meta-btn[data-kind="mode"] .meta-dots', { timeout: 10000 });
+    await page.click('#statusline .meta-btn[data-kind="mode"]');
+    await page.waitForSelector(".meta-menu .meta-item-wait", { timeout: 5000 });
+    t.mode = await page.evaluate(([waits, long]) => {
+      const m = document.querySelector(".meta-menu");
+      const rows = Array.from(m.querySelectorAll(".meta-item"));
+      const head = (r) => r.firstElementChild.textContent.trim();
+      const wait = m.querySelector(".meta-item-wait");
+      const words = wait.textContent;
+      const w0 = m.getBoundingClientRect().width, h0 = wait.getBoundingClientRect().height;
+      wait.textContent = words.split(waits).join(long);
+      const w1 = m.getBoundingClientRect().width, h1 = wait.getBoundingClientRect().height;
+      return { apply: !!m.querySelector(".meta-apply"), current: rows.filter((r) => r.classList.contains("current")).map(head),
+               waitRows: rows.filter((r) => r.querySelector(".meta-item-wait")).map(head),
+               last: wait === wait.parentElement.lastElementChild, words, swapped: wait.textContent, w0, w1, lines: Math.round(h1 / h0) };
+    }, [cfg.waits, cfg.longWaits]);
+    if (cfg.shots) {
+      const box = await page.$(".meta-menu"); const bb = await box.boundingBox();
+      const x = Math.max(0, bb.x - 40), y = Math.max(0, bb.y - 40);
+      await page.screenshot({ path: cfg.shots + "/mode-picker-" + theme + ".png", clip: { x, y, width: Math.min(1100 - x, bb.width + 80), height: Math.min(700 - y, bb.height + 120) } });
+    }
+  } catch (e) { t.mode = { error: String(e).slice(0, 600) }; }
   await page.keyboard.press("Escape"); await page.waitForTimeout(150);
   if (theme === "dark") { darkPage = page; darkCtx = ctx; } else await ctx.close();
 }
@@ -322,7 +368,8 @@ class ServedApplyNow(unittest.TestCase):
             os.makedirs(shots, exist_ok=True)
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (cls.port, cls.token), "count": len(NAMES), "out": out,
-                       "sidWeb": SIDS["web"], "sidApi": SIDS["api"], "waits": WAITS, "cuts": CUTS, "klog": cls.klog, "shots": shots}, f)
+                       "sidWeb": SIDS["web"], "sidApi": SIDS["api"], "waits": WAITS, "cuts": CUTS, "longWaits": LONG_WAITS,
+                       "klog": cls.klog, "shots": shots}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -386,6 +433,23 @@ class ServedApplyNow(unittest.TestCase):
         r = self._run()
         for theme, t in r["themes"].items():
             self.assertEqual(t["effort"]["tail"], ["---", "[apply] Apply now | ends " + CUTS], theme + ": " + json.dumps(t["effort"]))
+
+    def test_6_the_mode_picker_says_what_the_bypass_pick_waits_for_and_its_line_wraps_inside_the_menu(self):
+        label = _mode_labels()
+        self.assertTrue({"auto", "bypassPermissions"} <= set(label), "the premise: MODE_CHOICES read: %r" % label)
+        r = self._run()
+        for theme, t in r["themes"].items():
+            m = t["mode"]
+            table = "\n  %s: %s" % (theme, json.dumps(m))
+            self.assertNotIn("error", m, "the driver's mode-picker step threw" + table)
+            self.assertEqual(m["current"], [label["auto"]], "the check stays on web's mode" + table)
+            self.assertFalse(m["apply"], "the mode picker offers no Apply now row" + table)
+            self.assertEqual((m["waitRows"], m["last"]), ([label["bypassPermissions"]], True),
+                             "the Bypass row alone, its last line" + table)
+            self.assertIn(WAITS, m["words"], "the stand-in relaunchWaits, as a live kernel would send it" + table)
+            self.assertIn(LONG_WAITS, m["swapped"], "the premise of the wrap check: the longest wait is in place" + table)
+            self.assertGreaterEqual(m["lines"], 2, "the longest wait wraps" + table)
+            self.assertAlmostEqual(m["w1"], m["w0"], delta=0.5, msg="…and the menu keeps its width" + table)
 
 
 if __name__ == "__main__":

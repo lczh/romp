@@ -19,6 +19,9 @@ export interface MetaStatus {
   mode?: string; model?: string; effort?: string; fast?: string;
   modelPending?: boolean; effortPending?: boolean;   // a /model switch resolving, an /effort switch reconnecting: the badge shows switching-dots
   fastPending?: boolean;   // the first fast-mode opt-in waiting for its relaunch (2026-10-01): the fast badge's dots, not an early "Fast"
+  modePending?: boolean;   // a bypass pick waiting for its relaunch (2026-10-01): the mode badge's dots; `mode` stays the mode the
+  //   running CLI confirmed (after a kernel restart that keeps the CLI, see the backend's _mode_pending)
+  relaunchWaits?: string;  // what that relaunch waits for ("2 background tasks"; "" when nothing holds it): the wait's words
   modelColor?: number[] | null; effortColor?: number[] | null;   // the kernel's classic colormap RGB by rank
   modelTone?: number[] | null; effortTone?: number[] | null;     // the single-hue tones the yatharth themes pick instead
   backend?: string;
@@ -101,9 +104,17 @@ export function prettyMode(m: string | undefined): string {
 }
 // the badge's word for a meta kind of the active session: its live value, or for a Codex session with no effort picked the
 // bare kind (effortBadgeText); callers compare it with itself (the pending check), never send it as a value
+// (while a bypass pick waits, the mode's word is that pick, so the pick and a change back each move it: 2026-10-01)
 export function metaCurrent(kind: MetaKind, st: MetaStatus): string {
   return (kind === "model" ? st.model : kind === "effort" ? effortBadgeText(st) : kind === "fast" ? st.fast
-    : st.mode) || "";
+    : st.modePending ? "bypassPermissions" : st.mode) || "";
+}
+/** A waiting bypass pick's words (2026-10-01): what the mode badge's dots stand for, said in the mode picker's Bypass row
+ *  and the tab's hover. A bypass pick relaunches the CLI with the flag, and that relaunch waits until nothing the session
+ *  runs would be cut; the words are the Billing sub-line's, from the kernel's relaunchWaits. "" when no bypass pick waits. */
+export function modeWaitText(st: MetaStatus): string {
+  if (!st.modePending) return "";
+  return st.relaunchWaits ? `applies after ${st.relaunchWaits}` : "applying…";
 }
 /** the effort badge's word: the session's effort, or the bare kind for a Codex session that has picked none yet.
  * A Codex session is born with no effort of its own (the registry holds "" and the engine applies its default; the
@@ -197,10 +208,13 @@ export function syncMetaControls(meta: HTMLElement, st: MetaStatus, forSid: stri
     // before the first server push (the user 2026-07-06).
     // …and the first fast-mode opt-in waits for its relaunch the same way (st.fastPending, 2026-10-01): dots until a launch
     // carries the flag, never "Fast" while the session still runs without it
+    // …and a bypass pick the same way (st.modePending, 2026-10-01): dots until the relaunch carrying the flag lands. A pick of
+    // the other modes switches live, so the mode badge wears dots only for that server flag, never for the click heuristic
     const pending = (kind === "model" && !!st.modelPending) || (kind === "effort" && !!st.effortPending)
-      || (kind === "fast" && !!st.fastPending)
+      || (kind === "fast" && !!st.fastPending) || (kind === "mode" && !!st.modePending)
       || !!(hooks.pending && hooks.pending(kind, st));   // the chat's sub-second heuristic, when the chat is the caller
-    const showDots = pending && (kind === "model" || kind === "effort" || kind === "fast");   // each applies via a resolve/relaunch the server tracks
+    const showDots = pending && (kind === "model" || kind === "effort" || kind === "fast"
+      || (kind === "mode" && !!st.modePending));   // each applies via a resolve/relaunch the server tracks
     if (label) {
       if (showDots) {
         if (!label.querySelector(".meta-dots")) label.replaceChildren(metaDots());

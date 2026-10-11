@@ -4,7 +4,9 @@ switching-dots and the chat shows a transient "Reloading session…" element whi
 both driven by an `effortPending` flag that mirrors `modelPending` end-to-end and clears when the new client
 connects. Source pins on build_session + the SDK backend."""
 import inspect
+import json
 import os
+import shutil
 import unittest
 from romp_load import load_source
 import tempfile
@@ -19,6 +21,7 @@ os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
 os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 km = load_source("romp_kernel_efr", os.path.join(BIN, "romp-kernel"))
 BACKEND_SRC = open(os.path.join(BIN, "romp_sdk_backend.py")).read()
+SDB = load_source("romp_sdk_backend_efr", os.path.join(BIN, "romp_sdk_backend.py"))
 
 
 class EffortReconnect(unittest.TestCase):
@@ -111,6 +114,116 @@ class EffortReconnect(unittest.TestCase):
 
     def test_backend_clears_pending_on_thread_death_so_the_dots_never_trap(self):
         self.assertIn('if sess._effort_pending:', BACKEND_SRC)
+
+
+class AWaitingBypassPickReachesThePage(unittest.TestCase):
+    """A bypass pick waits for its relaunch as a mark of its own (2026-10-01): the backend's snapshot carries modePending
+    beside the mode the running CLI confirmed, and the kernel carries both through the live row and into the tab's status,
+    where the mode badge draws its dots (ui/webview/status-controls.test.ts). The live row, the built tab's status and a
+    skeleton tab's status (_light_status) run through the REAL Sessions.live(), build_session and _light_status over a fake
+    backend and a synthetic transcript; the comment popover's mark through the REAL SdkBackend.session_meta and
+    _comment_frame_entry. The session loop's side is tests/test_reconnect_waits_for_work.py."""
+
+    SID_ON = "11111111-2222-3333-4444-0000000ab671"
+    SID_OFF = "11111111-2222-3333-4444-0000000ab672"
+
+    def _snap(self, pending):
+        return {"state": "waiting", "since": "1790000000", "model": "Opus 5", "effort": "high", "modelPending": False,
+                "effortPending": False, "retryCount": 0, "retryInfo": None, "ctx": 10, "mode": "acceptEdits",
+                "modePending": pending, "relaunchWaits": "1 background task" if pending else "", "subagents": [], "bgTasks": []}
+
+    def test_the_live_row_carries_the_mark_beside_the_confirmed_mode(self):
+        class _Fake:
+            def __init__(s, rows): s.rows = rows
+            def live_sessions(s): return {k: dict(v) for k, v in s.rows.items()}
+        fake = _Fake({self.SID_ON: self._snap(True), self.SID_OFF: self._snap(False)})
+        saved = (km._sdk, km._codex)
+        km._sdk, km._codex = (lambda: fake), (lambda: None)
+        try:
+            out = km.Sessions.live()
+        finally:
+            km._sdk, km._codex = saved
+            km._LIVE_LAST_ROWS.pop("sdk", None)
+        self.assertEqual((out[self.SID_ON]["mode"], out[self.SID_ON]["modePending"], out[self.SID_ON]["relaunchWaits"]),
+                         ("acceptEdits", True, "1 background task"))
+        self.assertIs(out[self.SID_OFF]["modePending"], False)
+
+    def _tabs(self):
+        """two synthetic tabs, one with a bypass pick waiting: their session rows and the live map a kernel would hold"""
+        td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, td, True)
+        rows = []
+        for sid in (self.SID_ON, self.SID_OFF):
+            leaf = os.path.join(td, sid + ".jsonl")
+            with open(leaf, "w") as f:
+                f.write(json.dumps({"type": "user", "uuid": "u-" + sid[-3:], "parentUuid": None, "timestamp": "2026-10-01T10:00:00.000Z",
+                                    "message": {"role": "user", "content": "tighten the notes-api search"}}) + "\n")
+            rows.append({"sid": sid, "name": "web", "path": leaf, "mtime": 1790000000, "anchor": sid})
+        live = {}
+        for sid, pending in ((self.SID_ON, True), (self.SID_OFF, False)):
+            live[sid] = dict(self._snap(pending), since=1790000000, context=None, compactPct=None, color=None, fast="", backend="sdk")
+        return rows, live
+
+    def test_the_tabs_status_carries_the_mark_for_the_badge(self):
+        rows, live = self._tabs()
+        saved = (km._sessions, km._live_map)
+        km._sessions, km._live_map = (lambda now, **kw: list(rows)), (lambda: live)
+        try:
+            on = km.build_session(self.SID_ON, 1790000100, live)["status"]
+            off = km.build_session(self.SID_OFF, 1790000100, live)["status"]
+        finally:
+            km._sessions, km._live_map = saved
+        self.assertEqual((on["mode"], on["modePending"], on["relaunchWaits"]), ("acceptEdits", True, "1 background task"),
+                         "the confirmed mode, the pick's mark, and what it waits on: the badge's dots and its words")
+        self.assertEqual((off["mode"], off["modePending"]), ("acceptEdits", False))
+
+    def test_a_skeleton_tabs_status_carries_the_mark_as_the_built_one_does(self):
+        # a tab no page has built yet carries _light_status, read from the live row
+        rows, live = self._tabs()
+        keys = ("mode", "modePending", "relaunchWaits")
+        saved = (km._sessions, km._live_map)
+        km._sessions, km._live_map = (lambda now, **kw: list(rows)), (lambda: live)
+        try:
+            for r in rows:
+                built = km.build_session(r["sid"], 1790000100, live)["status"]
+                light = km._light_status(r["sid"], r["path"], live[r["sid"]], 1790000100)
+                with self.subTest(sid=r["sid"]):
+                    self.assertTrue(light.get("provisional"), "the premise: the skeleton's own status, not a build")
+                    self.assertEqual({k: light.get(k, "<absent>") for k in keys}, {k: built[k] for k in keys})
+        finally:
+            km._sessions, km._live_map = saved
+        on = km._light_status(self.SID_ON, rows[0]["path"], live[self.SID_ON], 1790000100)
+        self.assertEqual((on["mode"], on["modePending"], on["relaunchWaits"]), ("acceptEdits", True, "1 background task"))
+
+    def test_the_comment_popover_reads_the_mark_through_session_meta(self):
+        # a comment thread's popover takes its mode from session_meta, never the tab's status: a bypass pick made in the
+        # popover wears the dots there too, and its picker's Bypass row has the words (ui/webview/codex-meta-choices.test.ts)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        with open(os.path.join(d, "session-hosts"), "w") as f:
+            f.write("off")
+        be = SDB.SdkBackend(d, "/bin/true", lambda *a, **k: None, log=lambda m, **k: None)
+        reg = {"sid": self.SID_ON, "name": "web", "cwd": d, "alive": True, "mode": "bypassPermissions"}
+        SDB.write_reg(d, self.SID_ON, reg)
+        s = SDB.SdkSession(be, dict(reg))
+        s.thread = type("T", (), {"is_alive": lambda self: True})()
+        be.sessions[self.SID_ON] = s
+        s.perm_mode, s._mode_pending = "acceptEdits", "bypassPermissions"
+        s.relaunch_waits = lambda: "1 background task"
+        meta = be.session_meta(self.SID_ON)
+        self.assertEqual((meta["mode"], meta["modePending"], meta["relaunchWaits"]), ("acceptEdits", True, "1 background task"))
+        s._mode_pending = ""
+        self.assertIs(be.session_meta(self.SID_ON)["modePending"], False)
+
+    def test_the_comments_frame_carries_the_mark_to_the_popover(self):
+        class _Be:
+            def session_state(self, sid): return ""
+            def session_meta(self, sid):
+                return {"mode": "acceptEdits", "fast": "", "modePending": True, "relaunchWaits": "1 background task"}
+        th = {"sid": self.SID_ON, "tid": "t-ab671", "status": "open", "createdT": 1790000000, "anchorUuid": "u-671",
+              "exact": "tighten the notes-api search"}
+        row = km._comment_frame_entry(th, _Be(), 1790000100)
+        self.assertEqual((row["mode"], row["modePending"], row["relaunchWaits"]), ("acceptEdits", True, "1 background task"))
 
 
 if __name__ == "__main__":

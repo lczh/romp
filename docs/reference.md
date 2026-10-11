@@ -336,6 +336,18 @@ turn running or queued, no subagent, no background task), and while it waits
 the chat line says on what, as in "Applying high effort after 2 background
 tasks…". Restart session applies a waiting change at once, ending that work.
 
+Picking **Bypass permissions** from the mode dropdown reloads the session too,
+since Claude Code takes bypass only at launch, and that reload waits in the
+same way. The chat shows no reloading line for it: until the reload completes,
+the mode badge shows switching-dots, and the dropdown's Bypass row and the
+tab's hover say what the reload waits for. Meanwhile the session's
+permission requests, other than approving a plan, are approved without asking,
+as bypass would approve them.
+Picking another mode before then applies that mode at once and cancels the
+bypass pick. After a kernel restart, a session whose bypass pick is still
+waiting shows Bypass with no switching-dots until the kernel reconnects to it,
+while a session host keeps its CLI running.
+
 ### What a session needs from you
 
 Above the composer, a box headed **Needs you** lists what the session you are reading needs from you.
@@ -1819,20 +1831,44 @@ touched work a session deliberately detached: a tmux server it started itself,
 A session's own CLI is also relaunched, with no kernel restart, to apply a
 setting it reads only at launch: billing, effort, the first fast-mode opt-in,
 bypass mode, the per-session environment, and the corrections after a refused
-fast mode or a login that landed on another credential. The subagents, timers
-and monitors inside that CLI would end with it, so the relaunch waits until the
+fast mode or a login that landed on another credential. The subagents and
+monitors inside that CLI would end with it, so the relaunch waits until the
 session is quiet: no turn running or queued, no subagent, no background task and
 no question waiting on you. It happens at the event that ends the last of that
-work, never on a timer, and the setting's pending mark stays up meanwhile,
-saying what it waits for. A relaunch is a CLI launch, so it waits as well for
-one of the machine-wide launch slots a boot's resumes and the other spawns
-share (three unless `ROMP_BOOT_RESUME_CONCURRENCY` says otherwise): a change of
-the machine default that re-targets hundreds of sessions relaunches them three
-at a time, each slot passed on as the CLI it launched comes up, and the old
-CLI keeps serving its session meanwhile. Restart session and editing or deleting an earlier
-message relaunch without waiting, and a setting still waiting to apply rides
-that relaunch; the session is then told which background tasks were cut off,
-with a request to check whether each is still running before relaunching it.
+work, never on a timer. Meanwhile four of these settings show that they are
+waiting: the Billing sub-line says what the relaunch waits for; the effort badge
+shows switching-dots and the chat line says what it waits for; for bypass mode,
+the mode badge shows switching-dots and the dropdown's Bypass row and the tab's
+hover say what it waits for; and the fast badge shows switching-dots for the
+opt-in. The per-session environment and the two corrections show no mark.
+A relaunch is a CLI launch, so it waits as well for one of the machine-wide
+launch slots a boot's resumes and the other spawns share (three unless
+`ROMP_BOOT_RESUME_CONCURRENCY` says otherwise): a change of the machine default
+that re-targets hundreds of sessions relaunches them three at a time, each slot
+passed on as the CLI it launched comes up, and the old CLI keeps serving its
+session meanwhile. A
+one-shot wakeup the session scheduled does not delay the relaunch, because a
+loop that schedules a new one every round would delay it forever. The relaunched
+CLI does not keep the wakeup, so the kernel sends the wakeup's prompt when it is
+due, unless the kernel's record of it holds a due time and the session stops its
+loop or schedules a new wakeup before then.
+A wakeup first recorded since the session was last revived or the kernel last
+restarted is dropped instead if the old CLI could already have sent it by the
+time the relaunched CLI starts, or if the kernel's record of it does not hold
+the minute Claude Code reported for it. A one-shot scheduled before
+then with no due time on record can be sent twice in some cases after a
+relaunch; for example, one on a daily schedule that the resumed CLI re-arms is
+sent twice when its time comes before the relaunched CLI's first turn end.
+Restart session and editing or deleting an earlier message relaunch without
+waiting, and a setting still waiting to apply rides that relaunch; the session
+is then told which background tasks were cut off, with a request to check
+whether each is still running before relaunching it. Editing or deleting an
+earlier message leaves to the relaunched CLI each pending wakeup first recorded
+since the session was last revived or the kernel last restarted, and the kernel
+sends none of their prompts, even for a wakeup scheduled in a turn the edit or
+deletion keeps. A comment thread's session gets none of these prompts from the
+kernel while it is a comment thread; a wakeup still waiting when the thread is
+promoted is sent once it is due.
 
 A session whose monitors never let it go quiet would keep its setting waiting
 indefinitely, so the control the setting came from offers **Apply now** while it
@@ -1842,9 +1878,13 @@ status payload's `relaunchCuts` (the running turn, a question waiting on you,
 subagents, background tasks; a queued message survives the relaunch, so it is
 not named). A click with something to end confirms first, in Restart session's
 dialog shape; the relaunch then happens on Restart session's road, and a refusal
-comes back as a toast. `romp apply <session>` is the same from the shell. A
-bypass-mode or environment change has no pending mark on a control, so only the
-command reaches it.
+comes back as a toast. `romp apply <session>` is the same from the shell. The
+mode dropdown offers no Apply now row for a waiting bypass-mode change, and an
+environment change has no control that shows it waiting. When either waits
+alone, `romp apply <session>`, Restart session, or editing or deleting an
+earlier message applies it now. While an
+effort or billing change, or the first fast-mode opt-in, also waits, that
+control's Apply now applies the bypass-mode or environment change too.
 
 The notice a session gets when a relaunch cut its background tasks says what
 the person did: "I restarted Claude Code", "I rewound the conversation and

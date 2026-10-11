@@ -220,7 +220,7 @@ class ApplyNowPrimitive(unittest.TestCase):
 
     def test_a_waiting_pick_takes_the_restart_road_named_apply(self):
         _reg(self.d)
-        for mark in ("_switch_wanted", "_effort_pending", "_auth_pending", "_fast_pending"):
+        for mark in ("_switch_wanted", "_effort_pending", "_auth_pending", "_fast_pending", "_mode_pending"):
             self.calls = []
             s = _Sess(self.calls, inflight=1)
             setattr(s, mark, "billing" if mark == "_switch_wanted" else "high")

@@ -63,8 +63,8 @@ const prettyFast = (f) => f; const metaCurrent = (kind, st) => kind === "model" 
 const metaDots = () => el("span", "meta-dots"); const isMetaPending = () => false;
 const needsYouPhrase = (n) => n > 1 ? n + " things need you" : n === 1 ? "1 thing needs you" : "needs you";
 `;
-const SRC = PRELUDE + liftMod("metaColor") + liftMod("effortBadgeText") + lift("showTabTip") + liftMod("metaButton") + liftMod("syncMetaControls")
-  + "\nreturn { showTabTip, metaButton, metaColor, syncMetaControls };";
+const SRC = PRELUDE + liftMod("metaColor") + liftMod("effortBadgeText") + liftMod("modeWaitText") + lift("showTabTip") + liftMod("metaButton") + liftMod("syncMetaControls")
+  + "\nreturn { showTabTip, metaButton, metaColor, syncMetaControls, modeWaitText };";
 const js = esbuild.transformSync(SRC, { loader: "ts", format: "cjs", target: "es2020" }).code;
 const mod = new Function("pickTone", "readableRgb", "document", "window", js)(pickTone, readableRgb, (globalThis as any).document, (globalThis as any).window);
 
@@ -200,4 +200,25 @@ test("the Needs-you row: showTabTip carries the count as a short untinted value 
   assert.equal(v0!.textContent, "", "no count: the value is empty (the key says the state)");
   assert.equal(v0!.style.color ?? "", "", "…untinted");
   assert.equal(v0!.getAttribute("aria-label"), null, "…and no inert aria-label");
+});
+
+test("a waiting bypass pick: the Mode row says the mode the CLI confirmed, then the pick and what it waits for (2026-10-01)", () => {
+  // the footer's mode badge wears dots meanwhile (status-controls.test.ts); the hover says it in the Billing sub-line's words.
+  // The words are modeWaitText's (status-controls.test.ts pins their wording); what the row adds is the pick, named once
+  const modeValue = (st: any) => {
+    mod.showTabTip(new El("div"), { ...session, status: st });
+    const tip = body.children[body.children.length - 1];
+    const row = tip.children.find((r) => r.className === "tab-tip-row" && r.children[0].textContent === "Mode");
+    return row ? row.children[1].textContent : null;
+  };
+  bodyClasses.clear();
+  const waiting = { ...status, mode: "acceptEdits", modePending: true, relaunchWaits: "2 background tasks" };
+  assert.ok(mod.modeWaitText(waiting).includes("2 background tasks"), "the premise: the words carry the kernel's relaunchWaits");
+  assert.equal(modeValue(waiting), `acceptEdits (Bypass ${mod.modeWaitText(waiting)})`, "the stand-in prettyMode is the identity");
+  const applying = { ...waiting, relaunchWaits: "" };
+  assert.equal(modeValue(applying), `acceptEdits (Bypass ${mod.modeWaitText(applying)})`);
+  assert.equal(modeValue({ ...status, mode: "bypassPermissions" }), "bypassPermissions", "applied: the mode alone");
+  // just after a kernel restart `mode` can read the pick itself (see the backend's _mode_pending): named once
+  const seeded = { ...status, mode: "bypassPermissions", modePending: true, relaunchWaits: "1 background task" };
+  assert.equal(modeValue(seeded), `bypassPermissions (${mod.modeWaitText(seeded)})`);
 });

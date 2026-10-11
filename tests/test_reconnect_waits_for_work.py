@@ -18,6 +18,14 @@ Apply now (the same day, later): a session whose monitors never let it go quiet 
 pick's control offers a way through, the Restart road with a cause of its own. The notice opens on what the person did
 (CUT_BY: a Restart, a rewind, an Apply now), and the snapshot says what pushing the pick through would end (relaunchCuts).
 
+The follow-up (the review of the first change, the same day): a waiting bypass pick keeps the CLI's confirmed mode and
+waits as a mark of its own (modePending), its old CLI's consults are allowed without a false contract-breach row, a change
+back withdraws it, and a pick made mid-turn is carried at that turn's result. A fresh CLI takes a new process generation
+when its stamp moves the armed timers (_fresh_cli_stamp), so after a pick's relaunch or a Restart a ScheduleWakeup
+one-shot on record with its due time and the minute the CLI named, which the old CLI could not yet have fired by the
+fresh CLI's start, is the kernel's to deliver, except while the session is a comment thread's (the lost-wakeup sweep
+skips those).
+
 The REAL _amain runs here against a stand-in SDK module whose client records what it was fed (the harness of
 tests/test_queued_sends_not_fused.py, trimmed to what these cases need). Every id is synthetic, every text invented.
 """
@@ -27,6 +35,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -42,9 +51,19 @@ os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XD
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 sb = load_source("romp_sdk_backend_waitsforwork", os.path.join(BIN, "romp_sdk_backend.py"))
+_KERNEL = []
+
+
+def _kernel():
+    """bin/romp-kernel, loaded on first use: the launch-ledger tests read its awaiting lift's _bg_ended_after"""
+    if not _KERNEL:
+        _KERNEL.append(load_source("romp_kernel_waitsforwork", os.path.join(BIN, "romp-kernel")))
+    return _KERNEL[0]
+
 
 SID = "11111111-2222-3333-4444-bbbbbbbbbb21"        # this module's own synthetic sid
 FSID = "11111111-2222-3333-4444-ffffffffff21"       # the CLI's own session id, announced by the init
+PARENT = "11111111-2222-3333-4444-aaaaaaaaaa21"     # a comment thread's parent session
 
 
 class _TextBlock:
@@ -62,6 +81,20 @@ class _SystemMessage:
         self.subtype, self.data, self.uuid = subtype, (data or {}), uuid
 _TextBlock.__name__ = "TextBlock"; _AssistantMessage.__name__ = "AssistantMessage"
 _ResultMessage.__name__ = "ResultMessage"; _SystemMessage.__name__ = "SystemMessage"
+class _Allow:                                   # the permission callback's results (_can_use_tool imports them at call time)
+    def __init__(self, **kw): self.behavior = kw.get("behavior")
+class _Deny:
+    def __init__(self, **kw): self.behavior = kw.get("behavior")
+
+
+def _wake_call(delay, prompt, reason=None, called=None):
+    """The PostToolUse input for a ScheduleWakeup call made at `called` (now by default), with the tool result's
+    scheduledFor: the minute at or after the call plus the delay, in epoch ms."""
+    t = time.time() if called is None else called
+    inp = dict({"delaySeconds": delay, "prompt": prompt}, **({"reason": reason} if reason else {}))
+    return {"tool_name": "ScheduleWakeup", "tool_input": inp,
+            "tool_response": {"scheduledFor": int(-(-(t + delay) // 60) * 60 * 1000), "clampedDelaySeconds": delay,
+                              "wasClamped": False}}
 
 
 def _iso(t):
@@ -118,6 +151,7 @@ class _Harness(unittest.TestCase):
         fake.ClaudeSDKClient, fake.ClaudeAgentOptions, fake.HookMatcher = self._Client, self._Options, (lambda **kw: types.SimpleNamespace(**kw))
         fake.AssistantMessage, fake.ResultMessage = _AssistantMessage, _ResultMessage
         fake.SystemMessage, fake.TextBlock = _SystemMessage, _TextBlock
+        fake.PermissionResultAllow, fake.PermissionResultDeny = _Allow, _Deny
         self._saved_sdk = sys.modules.get("claude_agent_sdk")
         sys.modules["claude_agent_sdk"] = fake
         async def _noop_refresh(self): pass
@@ -225,6 +259,37 @@ class _Harness(unittest.TestCase):
         self._wait(lambda: len(self._Client.instances) == 2 and self._Client.instances[1] is self.s.client,
                    "the relaunch")
         return self._Client.instances[1]
+
+    def _turn(self, c, text):
+        """One more turn on client `c`, written to the transcript and ended by its result"""
+        s = self.s
+        s.enqueue(text)
+        self._wait(lambda: text in c.writes, "the turn fed")
+        self._init(c)
+        self._push(c, _AssistantMessage([_TextBlock("on it")], uuid=self._uid()))
+        self._wait(lambda: s._untaken is None and s.inflight == 1, "the turn open")
+        self._transcript_append(text)
+        self._end_turn(c)
+
+    def _inside_the_hand_off(self, name, stand_in):
+        """sb.<name> runs `stand_in` instead when the fresh-CLI stamp's armed-timer step (_hand_one_shots_to) calls it;
+        every other caller gets the real one"""
+        real = getattr(sb, name)
+
+        def chosen(*a, **k):
+            return (stand_in if sys._getframe(1).f_code.co_name == "_hand_one_shots_to" else real)(*a, **k)
+        setattr(sb, name, chosen)
+        self.addCleanup(setattr, sb, name, real)
+
+    def _edit_reg(self, change):
+        """the session's reg read, changed by `change` and written back in one section under the registry lock, which the
+        session's own read-modify-writes of the reg hold too, so none of them lands between the read and the write"""
+        with self.be._reg_lock:
+            sb.write_reg(self.state, SID, change(sb.read_reg(self.state, SID)))
+
+    def _all_due(self):
+        """every armed timer on record past due"""
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[dict(c, dueEpoch=time.time() - 30) for c in reg["sessionCrons"]]))
 
 
 class APickWaitsForAQuietSession(_Harness):
@@ -378,6 +443,1640 @@ class ApplyNowPushesAWaitingPickThrough(_Harness):
         plain = sb.task_death_notice([{"desc": "tail the build log"}])
         self._wait(lambda: c3.writes == [plain], "the plain notice")
         self.assertIn("ended (a restart or crash): tail the build log.", plain)
+
+
+class ABypassPickWaitsAsAMarkOfItsOwn(_Harness):
+    """A bypass pick relaunches the CLI with the flag (the CLI refuses a live switch into bypass), and since the relaunch
+    waits for a quiet session, so does the pick (2026-10-01). Before, the pick set the CLI's confirmed mode at once: the
+    badge read Bypass, each consult of the old CLI was auto-allowed with a problem row saying it broke a bypass contract it
+    was never launched under, and the old CLI's next init put the mode back with no mark, after which its consults parked
+    as prompts that held the very relaunch the pick waited for. Now the confirmed mode stays the CLI's, the pick waits as a
+    mark of its own (modePending) that the old CLI's inits leave alone, those consults are auto-allowed per the declared
+    mode with a plain log line, and changing back withdraws the pick."""
+
+    def _consult(self):
+        ctx = types.SimpleNamespace(suggestions=None, title=None, description=None)
+        return asyncio.run_coroutine_threadsafe(self.s._can_use_tool("Bash", {"command": "uv run pytest -q"}, ctx), self.s.loop)
+
+    def _problem_rows(self):
+        return [p["text"] for p in self.be.problems()]
+
+    def _bypass_waiting_on_a_task(self):
+        c1 = self._first_turn()
+        self._with_a_background_task(c1)
+        self._end_turn(c1)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self._settle()
+        self.assertEqual(len(self._Client.instances), 1, "the relaunch waits for the background task")
+        return c1
+
+    def test_the_mark_outlasts_the_old_clis_init_its_consults_are_allowed_and_the_relaunch_applies_it(self):
+        s, c1 = self.s, self._bypass_waiting_on_a_task()
+        snap = s.snapshot()
+        self.assertEqual((snap["mode"], snap.get("modePending")), ("acceptEdits", True),
+                         "the mode the running CLI confirmed, and the pick's own mark")
+        self.assertTrue(snap["relaunchWaits"] and snap["relaunchWaits"] == s.relaunch_waits(),
+                        "…and what it waits on (WhatTheRelaunchWaitsFor owns the words): %r" % snap["relaunchWaits"])
+        rows = self._problem_rows()                        # what stands before the consults (the harness's own boot rows)
+        n = len(self.lines)
+        self.assertEqual(self._consult().result(5).behavior, "allow", "the declared intent: no prompt")
+        said = [l for l in self.lines[n:] if "Bash" in l]  # each consult's lines, found by the tool they name, in any wording
+        self._init(c1)                                     # the old CLI opens a turn of its own: its init reports its launch mode
+        self._push(c1, _AssistantMessage([_TextBlock("the build log shows a new warning")], uuid=self._uid()))
+        self._wait(lambda: s._cli_working, "the old CLI's own turn open")
+        snap = s.snapshot()
+        self.assertEqual((snap["mode"], snap.get("modePending")), ("acceptEdits", True), "the init leaves the mark alone")
+        n = len(self.lines)
+        self.assertEqual(self._consult().result(5).behavior, "allow", "still allowed after that init, never a parked prompt")
+        said2 = [l for l in self.lines[n:] if "Bash" in l]
+        self.assertIsNone(self.be._pending_ask.get(SID), "no prompt stands to hold the relaunch")
+        self.assertEqual(self._problem_rows(), rows, "that CLI was never launched in bypass: no problem row of any wording")
+        self.assertEqual((len(said), len(said2)), (1, 1), "each consult is said once, as a plain line: %r" % (said + said2))
+        self._result_frame(c1)
+        self._wait(lambda: not s._cli_working, "the old CLI's turn ended")
+        self._settle()
+        self.assertEqual(len(self._Client.instances), 1, "the task still holds the relaunch")
+        self._task(c1, "task_notification", status="completed")
+        c2 = self._relaunched()
+        self.assertEqual(c2.options.permission_mode, "bypassPermissions", "the relaunch carries the flag")
+        self._wait(lambda: not s.snapshot().get("modePending"), "applied at the connect")
+        self.assertEqual(s.snapshot()["mode"], "bypassPermissions", "the launch carried it: the badge reads Bypass now")
+        self.assertNotIn("relaunchWait", sb.read_reg(self.state, SID) or {}, "nothing waits any more")
+
+    def test_changing_back_before_it_applies_withdraws_the_mark_and_its_own_relaunch(self):
+        s, c1 = self.s, self._bypass_waiting_on_a_task()
+        self.assertEqual(s._switch_wanted, "bypass mode")
+        self.assertTrue(self.be.set_mode(SID, "acceptEdits"))
+        snap = s.snapshot()
+        self.assertEqual((snap["mode"], snap.get("modePending")), ("acceptEdits", False))
+        self.assertEqual(s._switch_wanted, "", "the pick raised the ask alone, so the ask goes with it")
+        self.assertNotIn("relaunchWait", sb.read_reg(self.state, SID) or {}, "…and the record a restart would re-raise it from")
+        self._task(c1, "task_notification", status="completed")   # the event that would have carried the relaunch
+        self._wait(lambda: s.live_work()[1] == 0, "the task's end handled")
+        self._settle()
+        self.assertEqual(len(self._Client.instances), 1, "no relaunch for a pick that was changed back")
+        self.assertFalse(c1.torn_down)
+
+    def test_changing_back_keeps_a_relaunch_another_pick_still_needs(self):
+        s, c1 = self.s, self._first_turn()
+        self._with_a_background_task(c1)
+        self._end_turn(c1)
+        self.assertTrue(self.be.set_auth(SID, "login"))     # a billing pick waits first: the ask is its own
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(s.snapshot().get("modePending"), "the premise: the bypass pick waits as a mark of its own")
+        self.assertEqual(set(((sb.read_reg(self.state, SID) or {}).get("relaunchWait") or {}).get("picks") or {}),
+                         {"billing", "mode"}, "…and on record beside the billing pick")
+        self.assertTrue(self.be.set_mode(SID, "acceptEdits"))
+        snap = s.snapshot()
+        self.assertEqual((snap.get("modePending"), snap["authPending"]), (False, True), "only the bypass pick is withdrawn")
+        self.assertTrue(s._switch_wanted, "the billing pick still needs its relaunch")
+        self.assertEqual(set(((sb.read_reg(self.state, SID) or {}).get("relaunchWait") or {}).get("picks") or {}), {"billing"})
+        self._task(c1, "task_notification", status="completed")
+        c2 = self._relaunched()
+        self.assertEqual(c2.options.permission_mode, "acceptEdits", "it carries the mode as it stands now")
+        self._wait(lambda: not s.snapshot()["authPending"], "the billing pick applied")
+
+    def test_a_bypass_pick_made_mid_turn_relaunches_at_that_turns_end(self):
+        """The turn's result carries a standing ask nothing else holds (the ResultMessage handler's switch arm). For a
+        bypass pick, which no kernel door parks, it is the only event road; the kernel's 30 s tick is the backstop, and
+        this harness has none."""
+        s, c1 = self.s, self._first_turn()
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self._settle()
+        self.assertEqual(len(self._Client.instances), 1, "mid-turn: the relaunch waits for the turn")
+        snap = s.snapshot()
+        self.assertEqual((snap["mode"], snap.get("modePending")), ("acceptEdits", True))
+        self.assertEqual((s.inflight, s.live_work()), (1, (0, 0)), "the premise: the open turn alone holds the relaunch")
+        self.assertTrue(snap["relaunchWaits"] and snap["relaunchWaits"] == s.relaunch_waits(), snap["relaunchWaits"])
+        self._end_turn(c1)
+        c2 = self._relaunched()
+        self.assertEqual(c2.options.permission_mode, "bypassPermissions")
+        self._wait(lambda: not s.snapshot().get("modePending"), "applied at the connect")
+        self.assertEqual(s.snapshot()["mode"], "bypassPermissions")
+
+
+class AWakeupSurvivesThePicksRelaunch(_Harness):
+    """A ScheduleWakeup one-shot lives in the CLI's memory, and a resumed CLI does not re-arm it. A pick on a quiet session
+    relaunches at once (an armed timer does not hold quiet(): a dynamic /loop re-arms one every round), and the session
+    object, with its process generation, survived the relaunch, so the kernel's lost-wakeup sweep read the record as the
+    live CLI's to fire and the fresh CLI's first Stop hook dropped it: the wakeup never fired. A fresh CLI now takes a new
+    generation when its stamp moves the armed timers (_fresh_cli_stamp), so a record with its due time and the minute the
+    CLI named, which the old CLI could not yet have fired, is the kernel's to deliver at that time, except while the
+    session is a comment thread's, which the sweep skips. A /loop's wakeup the kernel holds that way still follows the
+    loop: the fresh CLI's stop ends it, and its new arm replaces it."""
+
+    def _one_shots(self):
+        return [c for c in self._crons() if not c.get("recurring")]
+
+    def _crons(self):
+        return (sb.read_reg(self.state, SID) or {}).get("sessionCrons") or []
+
+    def test_a_quiet_sessions_wakeup_is_delivered_after_a_pick_relaunched_it(self):
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        self._on_loop(s._sched_tool_hook(_wake_call(600, "check the notes-api build again"), "tu-wake", None))
+        armed_by = s.proc_gen
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [armed_by], "armed by the running CLI's generation")
+        self.assertTrue(s.quiet(), "an armed timer does not hold the relaunch")
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self.assertNotEqual(s.proc_gen, armed_by, "the fresh CLI is a new generation")
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "not due yet: nothing delivered early")
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # the fresh CLI's first turn end
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [armed_by], "the record outlives the fresh CLI's Stop hook")
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1, "due, and no live CLI can fire it: the kernel delivers it")
+        self._wait(lambda: c2.writes == ["check the notes-api build again"], "the wakeup's prompt, fed to the fresh CLI")
+        self.assertEqual(self._one_shots(), [], "stripped first, so it is never delivered twice")
+
+    SENTINEL = "<<autonomous-loop-dynamic>>"                 # what an autonomous /loop passes to ScheduleWakeup
+
+    def test_after_a_quiet_picks_relaunch_the_kernel_sends_an_autonomous_loops_wakeup_as_its_placeholder_text(self):
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        self._on_loop(s._sched_tool_hook(_wake_call(600, self.SENTINEL), "tu-wake", None))
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # the fresh CLI's first turn end
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: c2.writes == [self.SENTINEL], "the placeholder text, fed to the fresh CLI")
+
+    def test_after_a_kernel_restart_the_kernel_sends_an_autonomous_loops_wakeup_as_its_placeholder_text(self):
+        entry = {"id": "toolhook-1", "cron": "", "prompt": self.SENTINEL, "kind": "", "recurring": False,
+                 "armedAt": time.time() - 660, "dueEpoch": time.time() - 60, "procGen": "gen-before-the-restart",
+                 "src": "toolhook"}
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[entry]))
+        c1 = self._first_turn()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self.SENTINEL in c1.writes, "the placeholder text, fed to the CLI")
+
+    def test_a_comment_threads_wakeup_armed_before_a_picks_relaunch_is_not_delivered_after_it(self):
+        """deliver_lost_wakeups skips a comment thread's session (threadOf), so it does not deliver the wakeup the old CLI
+        armed."""
+        self._edit_reg(lambda reg: dict(reg, threadOf=PARENT))
+        self.s.thread_of = PARENT
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        self._on_loop(s._sched_tool_hook(_wake_call(600, "check the notes-api build again"), "tu-wake", None))
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # the fresh CLI's first turn end
+        self.assertEqual(len(self._one_shots()), 1, "the premise: the record outlives the fresh CLI's Stop hook")
+        self.assertEqual((sb.read_reg(self.state, SID) or {}).get("threadOf"), PARENT, "the premise: a comment thread's session")
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._settle()
+        self.assertEqual(c2.writes, [])
+
+    def test_a_one_shot_the_fresh_cli_lists_is_left_to_that_cli(self):
+        """A one-shot cron this session object first recorded when the old CLI listed it has no due time, so the relaunch
+        hands it to the fresh CLI, whose Stop hook lists it too and keeps it as that CLI's: the kernel delivers nothing."""
+        s, c1 = self.s, self._first_turn()
+        cron = {"id": "job-1", "schedule": "30 14 * * *", "prompt": "post the notes-api status", "recurring": False}
+        self._on_loop(s._stop_hook({"session_crons": [cron], "background_tasks": []}, None, None))   # the old CLI lists it
+        self._end_turn(c1)
+        armed_by = s.proc_gen
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [armed_by])
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self._on_loop(s._stop_hook({"session_crons": [cron], "background_tasks": []}, None, None))   # …and it lists the entry too
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [s.proc_gen], "the CLI that lists it owns it")
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "due, but its CLI fires it: the kernel delivers nothing")
+        self.assertEqual(c2.writes, [])
+
+    def test_a_wakeup_an_earlier_session_object_recorded_is_left_to_the_cli_that_lists_it(self):
+        """An entry the CLI lists in its own Stop hook payload takes the live generation, whichever generation recorded it:
+        here a wakeup with its due time, recorded under an earlier session object's generation (a kernel restart that a
+        session host's CLI outlived), so the kernel does not deliver it beside that CLI."""
+        due = time.time() + 600
+        at = time.localtime(due)
+        entry = {"id": "a1b2c3d4", "cron": "%d %d * * *" % (at[4], at[3]), "prompt": "check the notes-api build again",
+                 "kind": "", "recurring": False, "armedAt": time.time() - 60, "dueEpoch": due, "procGen": "gen-before-the-restart"}
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[entry]))
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        listed = {"id": "a1b2c3d4", "schedule": entry["cron"], "prompt": entry["prompt"], "recurring": False}
+        self._on_loop(s._stop_hook({"session_crons": [listed], "background_tasks": []}, None, None))
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "due, but the CLI that lists it fires it")
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [s.proc_gen])
+
+    def test_a_one_shot_with_no_due_time_this_session_object_recorded_is_handed_to_the_fresh_cli_at_the_relaunch(self):
+        """A one-shot this session object recorded with no due time (a one-shot cron, as a Stop hook payload lists it) takes
+        the fresh CLI's generation at the relaunch, so the kernel does not deliver it before that CLI's first turn end, and
+        that turn end keeps it when the CLI lists it."""
+        s, c1 = self.s, self._first_turn()
+        cron = {"id": "job-1", "schedule": "30 14 * * *", "prompt": "post the notes-api status", "recurring": False}
+        self._on_loop(s._stop_hook({"session_crons": [cron], "background_tasks": []}, None, None))   # the old CLI lists it
+        self._end_turn(c1)
+        self.assertEqual([c.get("dueEpoch") for c in self._one_shots()], [None], "the premise: no due time on record")
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "due before the fresh CLI's first turn end: the kernel delivers nothing")
+        self._on_loop(s._stop_hook({"session_crons": [cron], "background_tasks": []}, None, None))   # the fresh CLI lists it
+        self.assertEqual([(c["id"], c["procGen"]) for c in self._one_shots()], [("job-1", s.proc_gen)])
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._settle()
+        self.assertEqual(c2.writes, [])
+
+    def test_a_one_shot_an_earlier_session_object_recorded_stays_the_kernels_after_the_first_connect(self):
+        """One recorded under a generation this session object never had (an earlier object's, before a kernel restart) is
+        left as it is by the first connect, and the kernel delivers it once it is past due."""
+        due = time.localtime(time.time() - 120)
+        entry = {"id": "job-2", "cron": "%d %d * * *" % (due[4], due[3]), "prompt": "post the notes-api status", "kind": "",
+                 "recurring": False, "armedAt": time.time() - 600, "dueEpoch": None, "procGen": "gen-before-the-restart"}
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[entry]))
+        c1 = self._first_turn()
+        self.assertEqual([c["procGen"] for c in self._one_shots()], ["gen-before-the-restart"], "the first connect leaves it")
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1, "past due, and no live CLI holds it: the kernel delivers it")
+        self._wait(lambda: "post the notes-api status" in c1.writes, "its prompt fed")
+
+    def test_a_recurring_cron_carrying_a_wakeups_due_time_survives_a_quiet_picks_relaunch(self):
+        """The Stop hook matches a listed entry to a call-time record by prompt, and a recurring schedule names no due
+        minute, so a recurring cron listed with a pending wakeup's prompt takes that wakeup's due time."""
+        s, c1 = self.s, self._first_turn()
+        self._on_loop(s._sched_tool_hook(_wake_call(600, "check the notes-api queue"), "tu-wake", None))
+        self._on_loop(s._stop_hook({"session_crons": [{"id": "cron-r", "schedule": "*/5 * * * *",
+                                                       "prompt": "check the notes-api queue", "recurring": True}],
+                                    "background_tasks": []}, None, None))
+        self._end_turn(c1)
+        self.assertEqual([(c["id"], c["recurring"], bool(c.get("dueEpoch"))) for c in self._crons()], [("cron-r", True, True)],
+                         "the premise: a recurring entry with a due time")
+        t = time.time()
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[dict(c, armedAt=t - 700, dueEpoch=t - 100, scheduledFor=t - 100)
+                                                           for c in reg["sessionCrons"]]))
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        self._relaunched()
+        self.assertEqual([c["id"] for c in self._crons()], ["cron-r"])
+
+    def _listed(self, prompt="check the notes-api build again", delay=600, cid="a1b2c3d4"):
+        due = time.localtime(time.time() + delay)
+        return {"id": cid, "schedule": "%d %d * * *" % (due[4], due[3]), "prompt": prompt, "recurring": False}
+
+    def test_a_wakeup_two_turn_ends_listed_is_delivered_after_a_quiet_picks_relaunch(self):
+        s, c1 = self.s, self._first_turn()
+        self._on_loop(s._sched_tool_hook(_wake_call(600, "check the notes-api build again"), "tu-wake", None))
+        self._on_loop(s._stop_hook({"session_crons": [self._listed()], "background_tasks": []}, None, None))
+        self._end_turn(c1)
+        self._turn(c1, "tighten the notes-api search")
+        self._on_loop(s._stop_hook({"session_crons": [self._listed()], "background_tasks": []}, None, None))
+        self.assertEqual([(c["id"], bool(c.get("dueEpoch"))) for c in self._one_shots()], [("a1b2c3d4", True)],
+                         "the premise: listed by both turn ends under the CLI's id")
+        armed_by = s.proc_gen
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self.assertNotEqual(s.proc_gen, armed_by, "the fresh CLI is a new generation")
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # the fresh CLI's turn end
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: "check the notes-api build again" in c2.writes, "its prompt fed")
+
+    def test_a_comment_threads_wakeup_kept_across_a_picks_relaunch_is_delivered_once_the_thread_is_promoted(self):
+        self._edit_reg(lambda reg: dict(reg, threadOf=PARENT))
+        self.s.thread_of = PARENT
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        self._on_loop(s._sched_tool_hook(_wake_call(600, "check the notes-api build again"), "tu-wake", None))
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # the fresh CLI's turn end
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "not while it is a comment thread's session")
+        self.assertTrue(self.be.promote_thread(SID, "web-search"))
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: "check the notes-api build again" in c2.writes, "its prompt fed")
+
+    def test_a_cron_listed_with_a_pending_wakeups_prompt_and_minute_leaves_both_to_the_fresh_cli(self):
+        """The turn end cannot tell which of the two listed entries is the wakeup, so the relaunch hands both to the fresh
+        CLI, as it hands a one-shot cron this session object recorded, and the kernel delivers neither; that CLI's turn end
+        drops the wakeup it does not list."""
+        s, c1 = self.s, self._first_turn()
+        self._on_loop(s._sched_tool_hook(_wake_call(600, "post the notes-api status"), "tu-wake", None))
+        self._on_loop(s._stop_hook({"session_crons": [self._listed("post the notes-api status", cid="wake-1"),
+                                                      self._listed("post the notes-api status", cid="job-9")],
+                                    "background_tasks": []}, None, None))
+        self._end_turn(c1)
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self.assertEqual(sorted((c["id"], c["procGen"]) for c in self._one_shots()),
+                         [("job-9", s.proc_gen), ("wake-1", s.proc_gen)])
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._on_loop(s._stop_hook({"session_crons": [self._listed("post the notes-api status", cid="job-9")],
+                                    "background_tasks": []}, None, None))   # the fresh CLI lists the cron alone
+        self.assertEqual([c["id"] for c in self._one_shots()], ["job-9"], "the wakeup dropped")
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._settle()
+        self.assertEqual(c2.writes, [])
+
+    def test_a_relaunch_hands_over_the_one_shots_beside_an_entry_that_is_not_a_record(self):
+        """Its premise is the relaunch's new generation; where the relaunch keeps the generation, the premise fails."""
+        s, c1 = self.s, self._first_turn()
+        cron = {"id": "job-1", "schedule": "30 14 * * *", "prompt": "post the notes-api status", "recurring": False}
+        self._on_loop(s._stop_hook({"session_crons": [cron], "background_tasks": []}, None, None))
+        self._end_turn(c1)
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=["not-a-record"] + reg["sessionCrons"]))
+        armed_by = s.proc_gen
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        self._relaunched()
+        self.assertNotEqual(s.proc_gen, armed_by, "the premise: the fresh CLI is a new generation")
+        crons = (sb.read_reg(self.state, SID) or {}).get("sessionCrons") or []
+        self.assertEqual([c if not isinstance(c, dict) else (c["id"], c["procGen"]) for c in crons],
+                         ["not-a-record", ("job-1", s.proc_gen)])
+
+    WAKE = "check the notes-api build again"
+
+    def _the_kernels_wakeup(self):
+        """a quiet session's CLI arms a wakeup 600 s out, then a quiet effort pick relaunches it: the fresh CLI's client"""
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        self._on_loop(s._sched_tool_hook(_wake_call(600, self.WAKE), "tu-wake", None))
+        armed_by = s.proc_gen
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [armed_by],
+                         "the premise: on record under the generation of the CLI that armed it")
+        return c2
+
+    def _sent(self, c):
+        """how many times the wakeup's prompt reached client `c`, fed or queued behind the first"""
+        self._settle(0.3)
+        return c.writes.count(self.WAKE) + sum(1 for p in self.s.pending() if self.WAKE in str(p))
+
+    def _a_sweep_inside(self, hook):
+        """the first registry read `hook` makes starts a lost-wakeup sweep on another thread, as the producer runs it, and
+        goes on once that sweep is done or a second has passed; what the sweeps send lands in the returned list"""
+        real, sweeps, sent = sb.read_reg_for_rmw, [], []
+
+        def read(*a, **k):
+            r = real(*a, **k)
+            if not sweeps and sys._getframe(1).f_code.co_name == hook:
+                sweeps.append(threading.Thread(target=lambda: sent.append(self.be.deliver_lost_wakeups()), daemon=True))
+                sweeps[0].start()
+                sweeps[0].join(1.0)
+            return r
+        sb.read_reg_for_rmw = read
+        self.addCleanup(setattr, sb, "read_reg_for_rmw", real)
+        return sweeps, sent
+
+    def _sent_once_beside(self, c2, sweeps, sent):
+        self.assertEqual(len(sweeps), 1, "the premise: a sweep ran inside the hook's record")
+        sweeps[0].join(10)
+        sent.append(self.be.deliver_lost_wakeups())
+        self.assertEqual(sum(sent), 1)
+        self.assertEqual(self._sent(c2), 1)
+        self.assertNotIn(self.WAKE, [c["prompt"] for c in self._one_shots()])
+
+    def test_a_wakeup_the_kernel_holds_is_sent_once_when_a_sweep_runs_inside_the_fresh_clis_cron_create_call(self):
+        c2 = self._the_kernels_wakeup()
+        self._on_loop(self.s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # its first turn end
+        self._all_due()
+        sweeps, sent = self._a_sweep_inside("_sched_tool_hook")
+        call = {"tool_name": "CronCreate", "tool_input": {"name": "nightly", "schedule": "0 3 * * *",
+                                                          "prompt": "post the notes-api status"}}
+        self._on_loop(self.s._sched_tool_hook(call, "tu-cron", None))
+        self._sent_once_beside(c2, sweeps, sent)
+
+    def test_a_wakeup_the_kernel_holds_is_sent_once_when_a_sweep_runs_inside_a_turn_end_that_lists_a_new_cron(self):
+        c2 = self._the_kernels_wakeup()
+        self._all_due()
+        sweeps, sent = self._a_sweep_inside("_stop_hook")
+        cron = {"id": "job-9", "schedule": "0 3 * * *", "prompt": "post the notes-api status", "recurring": False}
+        self._on_loop(self.s._stop_hook({"session_crons": [cron], "background_tasks": []}, None, None))   # its first turn end
+        self._sent_once_beside(c2, sweeps, sent)
+
+    def test_a_wakeup_an_earlier_session_object_recorded_is_sent_once_when_a_sweep_runs_inside_a_cron_create_call(self):
+        entry = {"id": "toolhook-1", "cron": "", "prompt": self.WAKE, "kind": "", "recurring": False,
+                 "armedAt": time.time() - 660, "dueEpoch": time.time() - 60, "procGen": "gen-before-the-restart",
+                 "src": "toolhook"}
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[entry]))
+        c1 = self._first_turn()
+        sweeps, sent = self._a_sweep_inside("_sched_tool_hook")
+        call = {"tool_name": "CronCreate", "tool_input": {"name": "nightly", "schedule": "0 3 * * *",
+                                                          "prompt": "post the notes-api status"}}
+        self._on_loop(self.s._sched_tool_hook(call, "tu-cron", None))
+        self._sent_once_beside(c1, sweeps, sent)
+
+    def _for_the_sweep(self, name, stand_in):
+        """sb.<name> runs `stand_in` instead when deliver_lost_wakeups calls it; every other caller gets the real one"""
+        real = getattr(sb, name)
+
+        def chosen(*a, **k):
+            return (stand_in if sys._getframe(1).f_code.co_name == "deliver_lost_wakeups" else real)(*a, **k)
+        setattr(sb, name, chosen)
+        self.addCleanup(setattr, sb, name, real)
+        return real
+
+    def test_a_sweep_whose_strip_fails_sends_nothing_and_a_later_sweep_sends_the_wakeup_once(self):
+        c2 = self._the_kernels_wakeup()
+        self._all_due()
+
+        def full(*a, **k):
+            raise OSError("no space left on device")
+        real = self._for_the_sweep("write_reg", full)
+        n = len(self.lines)
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        sb.write_reg = real
+        self.assertEqual(self._sent(c2), 0)
+        self.assertEqual(len([ln for ln in self.lines[n:] if "reg strip failed" in ln]), 1, self.lines[n:])
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self.assertEqual(self._sent(c2), 1)
+
+    def test_a_sweep_whose_reg_will_not_read_sends_nothing_and_logs_it(self):
+        c2 = self._the_kernels_wakeup()
+        self._all_due()
+        self._for_the_sweep("read_reg_for_rmw", lambda *a, **k: None)
+        n = len(self.lines)
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self.assertEqual(len([ln for ln in self.lines[n:] if "reg unreadable" in ln]), 1, self.lines[n:])
+        self.assertEqual(self._sent(c2), 0)
+
+    def test_a_sweep_from_a_listing_taken_before_the_session_was_marked_dead_sends_nothing(self):
+        c2 = self._the_kernels_wakeup()
+        self._all_due()
+        stale = sb.list_regs(self.state)
+        self._edit_reg(lambda reg: dict(reg, alive=False))
+        real = sb.list_regs
+        sb.list_regs = lambda *a, **k: stale
+        self.addCleanup(setattr, sb, "list_regs", real)
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        sb.list_regs = real
+        self.assertEqual(self._sent(c2), 0)
+
+    def _reads_by_a_sweep(self):
+        real, reads = sb.read_reg_for_rmw, []
+        self._for_the_sweep("read_reg_for_rmw", lambda *a, **k: reads.append(1) or real(*a, **k))
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        return len(reads)
+
+    def test_a_sweep_reads_no_reg_while_the_wakeup_the_kernel_holds_is_not_due(self):
+        self._the_kernels_wakeup()
+        self.assertEqual(self._reads_by_a_sweep(), 0)
+
+    def test_a_listed_wakeup_beside_an_entry_that_is_not_a_record_keeps_its_due_time_and_minute(self):
+        s, c1 = self.s, self._first_turn()
+        self._on_loop(s._sched_tool_hook(_wake_call(600, self.WAKE), "tu-wake", None))
+        self._on_loop(s._stop_hook({"session_crons": ["not-a-record", self._listed()], "background_tasks": []}, None, None))
+        self._end_turn(c1)
+        self.assertEqual([(c["id"], bool(c.get("dueEpoch")), bool(c.get("scheduledFor"))) for c in self._one_shots()],
+                         [("a1b2c3d4", True, True)])
+
+    def test_a_wakeup_a_picks_relaunch_left_to_the_kernel_is_delivered_once_after_a_later_stamp_that_cannot_read_it(self):
+        s = self.s
+        self._the_kernels_wakeup()
+        armed_by = self._one_shots()[0]["procGen"]
+        gen = s.proc_gen
+        self._inside_the_hand_off("read_reg_for_rmw", lambda *a, **k: None)
+        self.assertTrue(self.be.set_effort(SID, "medium"))
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the second relaunch")
+        c3 = self._Client.instances[2]
+        self.assertEqual(s.proc_gen, gen, "the premise: the second stamp could not read the armed timers")
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # that CLI's turn end
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [armed_by], "kept at that turn end")
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self.assertEqual(self._sent(c3), 1)
+
+    # -- the dynamic /loop's own semantics over a wakeup the kernel now owns: a stop ends it, a new arm replaces it --
+    LOOP = "run the next notes-api loop round"
+
+    def _a_loop_round_then_a_relaunch(self, also=()):
+        """A /loop round on the first CLI arms its next wakeup (the call-time record), and the turn's Stop hook lists it
+        under the CLI's own id, which drops the call-time mark (a session_crons entry carries id, schedule, recurring and
+        prompt, and no kind); `also` rides that payload. A quiet effort pick then relaunches the CLI."""
+        s, c1 = self.s, self._first_turn()
+        self._on_loop(s._sched_tool_hook(_wake_call(600, self.LOOP, "the next round"), "tu-wake", None))
+        due = time.localtime(time.time() + 600)
+        listed = {"id": "a1b2c3d4", "schedule": "%d %d * * *" % (due[4], due[3]), "prompt": self.LOOP, "recurring": False}
+        self._on_loop(s._stop_hook({"session_crons": [listed] + list(also), "background_tasks": []}, None, None))
+        self._end_turn(c1)
+        self.assertEqual(sorted((c["id"], c.get("src"), bool(c.get("dueEpoch"))) for c in self._one_shots()),
+                         sorted([("a1b2c3d4", None, True)] + [(c["id"], None, False) for c in also]),
+                         "the premise: the CLI's own ids, no call-time mark left, the wakeup's exact due kept")
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        return self._relaunched()
+
+    def test_a_loop_stopped_on_the_fresh_cli_ends_the_wakeup_the_old_cli_armed(self):
+        """ScheduleWakeup with stop ends the loop, and no further wakeup fires. After the relaunch the old CLI's wakeup is the
+        kernel's to deliver, so the stop has to end it there too. A one-shot cron that CLI armed is not the loop's: the stop
+        leaves it, and the fresh CLI's turn end drops it when that CLI does not list it."""
+        cron = {"id": "job-1", "schedule": "30 14 * * *", "prompt": "post the notes-api status", "recurring": False}
+        c2 = self._a_loop_round_then_a_relaunch(also=[cron])
+        hourly = {"name": "notes-api-hourly", "schedule": "0 * * * *", "prompt": "check the notes-api queue"}
+        self._on_loop(self.s._sched_tool_hook({"tool_name": "CronCreate", "tool_input": hourly}, "tu-cron", None))
+        self._on_loop(self.s._sched_tool_hook({"tool_name": "ScheduleWakeup", "tool_input": {"stop": True}}, "tu-stop", None))
+        self.assertEqual([c["id"] for c in (sb.read_reg(self.state, SID) or {}).get("sessionCrons") or []],
+                         ["job-1", "notes-api-hourly"], "the stop ends the loop's wakeup alone, never a cron")
+        self._on_loop(self.s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # that turn's end
+        self.assertEqual(self._one_shots(), [], "the loop's wakeup ended; the cron, not listed, dropped")
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._settle()
+        self.assertEqual(c2.writes, [], "neither prompt")
+
+    def test_a_loop_re_armed_on_the_fresh_cli_replaces_the_wakeup_the_old_cli_armed(self):
+        """Arming a wakeup replaces the one pending, so a loop round on the fresh CLI leaves one wakeup, that CLI's, and the
+        kernel sends no second round from the old CLI's record."""
+        c2 = self._a_loop_round_then_a_relaunch()
+        s = self.s
+        self._on_loop(s._sched_tool_hook(_wake_call(900, self.LOOP, "the next round"), "tu-wake-2", None))
+        due = time.localtime(time.time() + 900)
+        self._on_loop(s._stop_hook({"session_crons": [{"id": "e5f6a7b8", "schedule": "%d %d * * *" % (due[4], due[3]),
+                                                       "prompt": self.LOOP, "recurring": False}],
+                                    "background_tasks": []}, None, None))
+        self.assertEqual([(c["id"], c["procGen"]) for c in self._one_shots()], [("e5f6a7b8", s.proc_gen)],
+                         "one wakeup, the fresh CLI's")
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "the live CLI fires its own; nothing is the kernel's")
+        self.assertEqual(c2.writes, [])
+
+
+class AWakeupTheOldCliCouldHaveFiredIsDropped(_Harness):
+    """The kernel cannot see whether the old CLI fired a wakeup before a relaunch replaced it, so at the fresh CLI a wakeup
+    with a due time that a generation of this session object first recorded is dropped when the old CLI could have fired
+    it by then, or when its record does not hold the minute the CLI's tool result named (wakeup_earliest_fire)."""
+
+    WAKE = "check the notes-api build again"
+    SENTINEL = "<<autonomous-loop-dynamic>>"                 # what an autonomous /loop passes to ScheduleWakeup
+    EXPANDED = "# Autonomous loop check\n\nYou are running an autonomous loop. Review the notes-api work and decide the next step."
+
+    def _one_shots(self):
+        return [c for c in (sb.read_reg(self.state, SID) or {}).get("sessionCrons") or [] if not c.get("recurring")]
+
+    def _arm(self, c1, prompt, delay=600, listed=True):
+        """the first turn arms a wakeup; its Stop hook lists it under the CLI's id with the cron's minute (`listed`), or
+        the turn ends with no Stop hook"""
+        s = self.s
+        self._on_loop(s._sched_tool_hook(_wake_call(delay, prompt, "the next round"), "tu-wake", None))
+        if listed:
+            due = time.localtime(time.time() + delay)
+            self._on_loop(s._stop_hook({"session_crons": [{"id": "a1b2c3d4", "schedule": "%d %d * * *" % (due[4], due[3]),
+                                                           "prompt": prompt, "recurring": False}],
+                                        "background_tasks": []}, None, None))
+        self._end_turn(c1)
+        self.assertEqual([c["prompt"] for c in self._one_shots()], [prompt], "the premise: the wakeup on record")
+
+    @staticmethod
+    def _minute_start():
+        return float(int(time.time()) // 60 * 60)
+
+    def _as_armed(self, armed_at, delay, minute, cron=True):
+        """the wakeup on record as if the CLI had armed it for `minute` (its tool result's scheduledFor) and the call-time
+        hook had run at `armed_at` for `delay` s, with the cron's minute when the record has one (`cron`)"""
+        def armed(reg):
+            crons = []
+            for c in reg.get("sessionCrons") or []:
+                if not c.get("recurring"):
+                    c = dict(c, armedAt=armed_at, dueEpoch=armed_at + delay, scheduledFor=minute)
+                    if cron:
+                        at = time.localtime(minute)
+                        c["cron"] = "%d %d * * *" % (at[4], at[3])
+                crons.append(c)
+            return dict(reg, sessionCrons=crons)
+        self._edit_reg(armed)
+
+    def _fires(self, c, seen):
+        """the old CLI fires the wakeup: its prompt hook sees `seen`, and the CLI opens a turn of its own"""
+        self._on_loop(self.s._prompt_submit_hook({"prompt": seen}, None, None))
+        self._init(c)
+        self._push(c, _AssistantMessage([_TextBlock("running the scheduled check")], uuid=self._uid()))
+        self._wait(lambda: self.s._cli_working, "the CLI's own turn open")
+
+    def _restart_cutting(self, c1):
+        self.assertEqual(self.be.relaunch(SID), "")
+        self._result_frame(c1)
+        return self._relaunched()
+
+    def _delivered(self, fresh):
+        """how many wakeups the kernel delivers once every one-shot still on record is past due"""
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[dict(c, dueEpoch=time.time() - 30)
+                                                           for c in reg.get("sessionCrons") or []]))
+        n = self.be.deliver_lost_wakeups()
+        self._settle(0.3)
+        return n
+
+    def test_a_restart_cutting_a_turn_a_wakeup_started_delivers_nothing(self):
+        c1 = self._first_turn()
+        self._arm(c1, self.WAKE)
+        m0 = self._minute_start()
+        self._as_armed(m0 - 60, 60, m0)
+        self._fires(c1, self.WAKE)
+        c2 = self._restart_cutting(c1)
+        self.assertEqual(self._delivered(c2), 0)
+        self.assertNotIn(self.WAKE, c2.writes)
+
+    def test_a_stopped_wakeup_turn_then_a_quiet_pick_delivers_nothing(self):
+        c1 = self._first_turn()
+        self._arm(c1, self.WAKE)
+        m0 = self._minute_start()
+        self._as_armed(m0 - 60, 60, m0)
+        self._fires(c1, self.WAKE)
+        self._result_frame(c1)                   # stopped: the turn ends with no Stop hook
+        self._wait(lambda: not self.s._cli_working and self.s.inflight == 0, "the stopped turn ended")
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self.assertEqual(self._delivered(c2), 0)
+        self.assertNotIn(self.WAKE, c2.writes)
+
+    def test_a_restart_cutting_an_autonomous_loops_turn_delivers_nothing(self):
+        c1 = self._first_turn()
+        self._arm(c1, self.SENTINEL)
+        m0 = self._minute_start()
+        self._as_armed(m0 - 60, 60, m0)
+        self._fires(c1, self.EXPANDED)           # the hook sees the CLI's own text for the sentinel
+        c2 = self._restart_cutting(c1)
+        self.assertEqual(self._delivered(c2), 0)
+        self.assertEqual(c2.writes, [])
+
+    def test_a_wakeup_fired_before_its_due_time_then_a_restart_delivers_nothing(self):
+        c1 = self._first_turn()
+        self._arm(c1, self.WAKE, delay=300)
+        m0 = self._minute_start()
+        self._as_armed(m0 - 230, 300, m0)        # the cron's minute 70 s before the due time
+        self.assertGreater(self._one_shots()[0]["dueEpoch"], time.time(), "the premise: not yet due")
+        self._fires(c1, self.WAKE)
+        c2 = self._restart_cutting(c1)
+        self.assertEqual(self._delivered(c2), 0)
+        self.assertNotIn(self.WAKE, c2.writes)
+
+    def test_a_wakeup_with_no_stop_hook_record_fired_before_its_due_time_then_a_restart_delivers_nothing(self):
+        c1 = self._first_turn()
+        self._arm(c1, self.WAKE, delay=300, listed=False)
+        m0 = self._minute_start()
+        self._as_armed(m0 - 230, 300, m0, cron=False)   # the minute 70 s before the due time
+        self.assertEqual(self._one_shots()[0]["cron"], "", "the premise: no cron on record")
+        self.assertGreater(self._one_shots()[0]["dueEpoch"], time.time(), "the premise: not yet due")
+        self._fires(c1, self.WAKE)
+        c2 = self._restart_cutting(c1)
+        self.assertEqual(self._delivered(c2), 0)
+        self.assertNotIn(self.WAKE, c2.writes)
+
+    def test_a_past_due_wakeup_whose_prompt_the_hook_never_saw_is_dropped_at_a_quiet_picks_relaunch(self):
+        c1 = self._first_turn()
+        self._arm(c1, self.WAKE)
+        m0 = self._minute_start()
+        self._as_armed(m0 - 60, 60, m0)
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self.assertEqual(self._delivered(c2), 0)
+        self.assertNotIn(self.WAKE, c2.writes)
+
+    def test_a_restart_with_a_wakeup_not_yet_due_delivers_it_once(self):
+        c1 = self._first_turn()
+        self._arm(c1, self.WAKE)
+        self.assertEqual(self.be.relaunch(SID), "")
+        c2 = self._relaunched()
+        self.assertEqual(self._delivered(c2), 1)
+        self._wait(lambda: c2.writes == [self.WAKE], "the wakeup's prompt, fed to the fresh CLI")
+
+    def test_a_past_due_wakeup_an_earlier_session_object_recorded_is_delivered_after_the_first_connect(self):
+        entry = {"id": "toolhook-1", "cron": "", "prompt": self.WAKE, "kind": "", "recurring": False,
+                 "armedAt": time.time() - 660, "dueEpoch": time.time() - 60, "procGen": "gen-before-the-restart",
+                 "src": "toolhook"}
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[entry]))
+        c1 = self._first_turn()
+        self.assertEqual([c["procGen"] for c in self._one_shots()], ["gen-before-the-restart"], "the first connect leaves it")
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self.WAKE in c1.writes, "its prompt fed")
+
+    def test_a_past_due_wakeup_an_earlier_session_object_recorded_is_delivered_after_the_cli_fires_it_before_a_turn_end(self):
+        """the attached CLI fires it itself, and the sweep, run before any turn of that CLI ends, delivers it as well"""
+        t = time.time()
+        entry = {"id": "toolhook-1", "cron": "", "prompt": self.WAKE, "kind": "", "recurring": False,
+                 "armedAt": t - 610, "dueEpoch": t - 10, "scheduledFor": t - 10, "procGen": "gen-before-the-restart",
+                 "src": "toolhook"}
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[entry]))
+        s = self.s
+        s.start()
+        self._wait(lambda: s.client is not None, "the first connect")
+        c = self._Client.instances[0]
+        self._fires(c, self.WAKE)
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._result_frame(c)                    # the CLI's own turn ends
+        self._wait(lambda: c.writes == [self.WAKE], "the kernel's copy fed")
+
+    def test_a_wakeup_whose_call_time_hook_ran_late_fired_then_a_restart_delivers_nothing(self):
+        """The call-time hook ran 20 s after the CLI's call, so the due time it recorded is 20 s late; the bound comes from
+        the minute in the CLI's tool result."""
+        c1 = self._first_turn()
+        called = time.time() - 60.5                 # the CLI's call; it fired the wakeup at called + 60, half a second ago
+        self._on_loop(self.s._sched_tool_hook(_wake_call(60, self.WAKE, "the next round", called=called), "tu-wake", None))
+        self._end_turn(c1)
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[dict(c, armedAt=called + 20, dueEpoch=called + 80)
+                                                           for c in reg.get("sessionCrons") or []]))
+        self.assertGreater(self._one_shots()[0]["dueEpoch"], time.time() + 10, "the premise: the recorded due time is ahead")
+        self._fires(c1, self.WAKE)
+        c2 = self._restart_cutting(c1)
+        self.assertEqual(self._delivered(c2), 0)
+        self.assertNotIn(self.WAKE, c2.writes)
+
+    def test_an_unfired_wakeup_whose_minute_is_under_60_s_away_is_dropped_at_a_quiet_picks_relaunch(self):
+        c1 = self._first_turn()
+        self._arm(c1, self.WAKE, delay=60)
+        r = self._minute_start() + 60               # the next minute: under 60 s away, and the CLI has not fired it
+        self._as_armed(r - 61, 60, r)
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self.assertEqual(self._delivered(c2), 0)
+        self.assertNotIn(self.WAKE, c2.writes)
+
+    def test_a_wakeup_whose_tool_result_named_no_minute_is_dropped_at_a_quiet_picks_relaunch(self):
+        c1 = self._first_turn()
+        self._on_loop(self.s._sched_tool_hook({"tool_name": "ScheduleWakeup",
+                                               "tool_input": {"delaySeconds": 600, "prompt": self.WAKE}}, "tu-wake", None))
+        self._end_turn(c1)
+        self.assertNotIn("scheduledFor", self._one_shots()[0], "the premise: no minute on record")
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self.assertEqual(self._delivered(c2), 0)
+        self.assertNotIn(self.WAKE, c2.writes)
+
+    def test_a_listed_wakeup_whose_call_time_hook_ran_160_s_late_is_dropped_at_a_quiet_picks_relaunch(self):
+        """The turn end takes a listed wakeup's due time and minute from its call-time record only while the due time that
+        record holds is within 90 s of the listed minute."""
+        s, c1 = self.s, self._first_turn()
+        called = time.time() - 160
+        self._on_loop(s._sched_tool_hook(_wake_call(600, self.WAKE, "the next round", called=called), "tu-wake", None))
+        at = time.localtime(-(-(called + 600) // 60) * 60)
+        self._on_loop(s._stop_hook({"session_crons": [{"id": "a1b2c3d4", "schedule": "%d %d * * *" % (at[4], at[3]),
+                                                       "prompt": self.WAKE, "recurring": False}],
+                                    "background_tasks": []}, None, None))
+        self._end_turn(c1)
+        self.assertEqual([(c["id"], c.get("dueEpoch"), c.get("scheduledFor")) for c in self._one_shots()],
+                         [("a1b2c3d4", None, None)], "the premise: listed with neither")
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # the fresh CLI's turn end
+        self.assertEqual(self._delivered(c2), 0)
+        self.assertNotIn(self.WAKE, c2.writes)
+
+    def _a_fired_wakeup_then_a_restart_whose_stamp_fails(self, name, stand_in):
+        c1 = self._first_turn()
+        self._arm(c1, self.WAKE)
+        m0 = self._minute_start()
+        self._as_armed(m0 - 60, 60, m0)
+        s, gen = self.s, self.s.proc_gen
+        self._inside_the_hand_off(name, stand_in)
+        rows = len(self.be.problems())
+        self._fires(c1, self.WAKE)
+        c2 = self._restart_cutting(c1)
+        new = [p["text"] for p in self.be.problems()[rows:]]
+        self.assertEqual(len([t for t in new if "armed timers" in t]), 1, new)
+        self.assertEqual(s.proc_gen, gen, "the old generation kept")
+        self.assertEqual(self._delivered(c2), 0)
+        self.assertNotIn(self.WAKE, c2.writes)
+
+    def test_a_stamp_that_cannot_read_the_armed_timers_files_a_problem_row_keeps_the_old_generation_and_delivers_nothing(self):
+        self._a_fired_wakeup_then_a_restart_whose_stamp_fails("read_reg_for_rmw", lambda *a, **k: None)
+
+    def test_a_stamp_whose_armed_timer_write_fails_files_a_problem_row_keeps_the_old_generation_and_delivers_nothing(self):
+        def full(*a, **k):
+            raise OSError("no space left on device")
+        self._a_fired_wakeup_then_a_restart_whose_stamp_fails("write_reg", full)
+
+    def test_a_sweep_that_read_the_registry_before_a_restarts_stamp_sends_nothing_the_old_cli_fired(self):
+        c1 = self._first_turn()
+        self._arm(c1, self.WAKE)
+        r = time.time() - 30                        # the minute it fired at, 30 s ago
+        self._as_armed(r - 60, 60, r)
+        self._fires(c1, self.WAKE)
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "the premise: the running CLI's own")
+        stale = sb.list_regs(self.state)            # the sweep's read of every reg, taken before the stamp
+        self.assertEqual([c["prompt"] for r_ in stale if r_.get("sid") == SID for c in r_.get("sessionCrons") or []],
+                         [self.WAKE], "the premise: that read lists the wakeup")
+        c2 = self._restart_cutting(c1)
+        real, reads = sb.list_regs, []
+        sb.list_regs = lambda *a, **k: reads.append(1) or stale
+        self.addCleanup(setattr, sb, "list_regs", real)
+        n = self.be.deliver_lost_wakeups()
+        sb.list_regs = real
+        self.assertEqual(reads, [1], "the premise: the sweep went on from that read")
+        self.assertEqual(n, 0)
+        self._settle(0.3)
+        self.assertNotIn(self.WAKE, c2.writes)
+
+    CRON = "post the notes-api status"
+
+    def _a_cron_the_old_cli_fired(self):
+        """the old CLI listed a one-shot cron whose minute passed two minutes ago and fired it: its turn is open"""
+        s, c1 = self.s, self._first_turn()
+        t0 = time.localtime(time.time() - 120)
+        cron = {"id": "job-1", "schedule": "%d %d * * *" % (t0[4], t0[3]), "prompt": self.CRON, "recurring": False}
+        self._on_loop(s._stop_hook({"session_crons": [cron], "background_tasks": []}, None, None))
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[dict(c, armedAt=time.time() - 600) for c in reg["sessionCrons"]]))
+        self._end_turn(c1)
+        self._fires(c1, self.CRON)
+        return c1
+
+    def _sweep_once(self, sweeps, sent):
+        """a sweep on its own thread, as the producer runs it; the caller goes on once it is done or waiting"""
+        if not sweeps:
+            sweeps.append(threading.Thread(target=lambda: sent.append(self.be.deliver_lost_wakeups()), daemon=True))
+            sweeps[0].start()
+            sweeps[0].join(1.0)
+
+    def _nothing_sent_by(self, c2, sweeps, sent):
+        self.assertEqual(len(sweeps), 1, "the premise: _hand_one_shots_to's write started a sweep")
+        sweeps[0].join(10)
+        self.assertEqual(sent, [0])
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._settle(0.3)
+        self.assertNotIn(self.CRON, c2.writes)
+
+    def test_a_sweep_during_a_restarts_stamp_sends_nothing_the_old_cli_fired(self):
+        """the sweep starts right after the stamp writes the armed timers: _hand_one_shots_to's write starts it, so a stamp
+        with no such write starts none and fails the premise"""
+        c1 = self._a_cron_the_old_cli_fired()
+        real, sweeps, sent = sb.write_reg, [], []
+
+        def write_then_sweep(*a, **k):
+            real(*a, **k)
+            self._sweep_once(sweeps, sent)
+        self._inside_the_hand_off("write_reg", write_then_sweep)
+        self._nothing_sent_by(self._restart_cutting(c1), sweeps, sent)
+
+    def test_a_sweep_as_a_restarts_stamp_lets_go_of_the_registry_sends_nothing_the_old_cli_fired(self):
+        """the sweep starts as the stamp releases the registry lock it wrote the armed timers under: _hand_one_shots_to's
+        write arms it, so a stamp with no such write starts none and fails the premise"""
+        c1 = self._a_cron_the_old_cli_fired()
+        real, wrote, sweeps, sent = sb.write_reg, [], [], []
+        lock = self.be._reg_lock
+
+        def write(*a, **k):
+            real(*a, **k)
+            wrote.append(1)
+
+        class Released:
+            def __enter__(inner):
+                lock.acquire()
+
+            def __exit__(inner, *a):
+                lock.release()
+                if wrote:
+                    self._sweep_once(sweeps, sent)
+                return False
+        self._inside_the_hand_off("write_reg", write)
+        self.be._reg_lock = Released()
+        self.addCleanup(setattr, self.be, "_reg_lock", lock)
+        c2 = self._restart_cutting(c1)
+        self.be._reg_lock = lock
+        self._nothing_sent_by(c2, sweeps, sent)
+
+    def test_an_apply_now_with_a_wakeup_not_yet_due_delivers_it_once(self):
+        c1 = self._first_turn()
+        self._with_a_background_task(c1)
+        self._arm(c1, self.WAKE)
+        self.assertTrue(self.be.set_auth(SID, "login"))
+        self._settle()
+        self.assertEqual(len(self._Client.instances), 1, "the premise: the pick waits for the background task")
+        self.assertEqual(self.be.apply_now(SID), "")
+        c2 = self._relaunched()
+        self.assertEqual(self._delivered(c2), 1)
+        self._wait(lambda: self.WAKE in c2.writes or self.WAKE in self.s.pending(),
+                   "the wakeup's prompt, sent to the fresh CLI behind the notice of what was cut")
+
+
+class TheEarliestAWakeupCouldHaveFired(unittest.TestCase):
+    """wakeup_earliest_fire for each kind of entry on record"""
+
+    def test_it_is_60_s_before_the_minute_the_clis_tool_result_named(self):
+        r = 1790000040.0
+        self.assertEqual(sb.wakeup_earliest_fire({"cron": "", "armedAt": r - 300, "dueEpoch": r + 20, "scheduledFor": r}),
+                         r - 60)
+
+    def test_an_entry_without_that_minute_has_none(self):
+        t = 1790000000.0
+        self.assertIsNone(sb.wakeup_earliest_fire({"cron": "", "armedAt": t, "dueEpoch": t + 600}))
+        self.assertIsNone(sb.wakeup_earliest_fire({"cron": "30 14 * * *", "armedAt": t, "dueEpoch": None}))
+
+
+class ARewindLeavesItsWakeupsToTheFreshCli(_Harness):
+    """An edit or a delete relaunches the CLI on the rewind's own road (request_reconnect(cut=True, cause="rewind")), and
+    that fresh CLI takes the one-shots a generation of this session object recorded, a wakeup a pick's relaunch left to
+    the kernel included: the kernel delivers none of them, and the first Stop hook of the CLI holding them drops one it
+    does not list, whether the rewind removed or kept the turn that armed it, and also when another relaunch comes before
+    that Stop hook. A one-shot an earlier session object recorded is not handed over, also after the CLI listed it at a
+    turn end."""
+
+    WAKE = "check the notes-api build again"
+
+    def _one_shots(self):
+        return [c for c in (sb.read_reg(self.state, SID) or {}).get("sessionCrons") or [] if not c.get("recurring")]
+
+    def _records(self):
+        reg = sb.read_reg(self.state, SID) or {}
+        with open(sb.transcript_path(self.cwd, str(reg.get("lastSid") or SID))) as f:
+            return [json.loads(line)["uuid"] for line in f if line.strip()]
+
+    def _arm(self):
+        self._on_loop(self.s._sched_tool_hook(_wake_call(600, self.WAKE), "tu-wake", None))
+        self.assertEqual([c["prompt"] for c in self._one_shots()], [self.WAKE], "the premise: the wakeup on record")
+
+    def _stop(self, crons=()):
+        self._on_loop(self.s._stop_hook({"session_crons": list(crons), "background_tasks": []}, None, None))
+
+    def _listed(self):
+        """the wakeup as a Stop hook payload lists it, under the CLI's own id"""
+        due = time.localtime(time.time() + 600)
+        return {"id": "a1b2c3d4", "schedule": "%d %d * * *" % (due[4], due[3]), "prompt": self.WAKE, "recurring": False}
+
+    def _nothing_delivered(self, fresh):
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "due, and the live CLI holds it: the kernel delivers nothing")
+        self._stop()                             # that CLI's first turn end: it does not list the wakeup
+        self.assertEqual(self._one_shots(), [], "that Stop hook drops it")
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._settle()
+        self.assertNotIn(self.WAKE, fresh.writes)
+
+    def test_a_wakeup_armed_in_a_turn_a_delete_removes_is_not_delivered(self):
+        c1 = self._first_turn()
+        self._end_turn(c1)
+        kept = self._records()[-1]
+        self._turn(c1, "start the notes-api release loop")
+        self._arm()
+        self._stop([self._listed()])
+        self.assertEqual([(c["id"], bool(c.get("dueEpoch"))) for c in self._one_shots()], [("a1b2c3d4", True)],
+                         "the premise: listed under the CLI's id, with the wakeup's exact due")
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the turn that armed it")
+        c2 = self._relaunched()
+        self._nothing_delivered(c2)
+
+    def test_a_wakeup_armed_in_a_turn_an_edit_keeps_is_not_delivered(self):
+        c1 = self._first_turn()
+        self._arm()                              # armed in the first turn, which the edit keeps
+        self._end_turn(c1)
+        self._stop([self._listed()])
+        self.assertEqual([(c["id"], bool(c.get("dueEpoch"))) for c in self._one_shots()], [("a1b2c3d4", True)],
+                         "the premise: listed under the CLI's id, with the wakeup's exact due")
+        kept = self._records()[-1]
+        self._turn(c1, "summarize the notes-api changes")
+        self.assertEqual(self.be.rewind(SID, kept, "summarize the notes-api changes in one line"), (True, ""),
+                         "edit the second message")
+        c2 = self._relaunched()
+        self._wait(lambda: c2.writes == ["summarize the notes-api changes in one line"], "the edit fed to the rewind's CLI")
+        self._nothing_delivered(c2)
+
+    def test_a_wakeup_a_quiet_picks_relaunch_left_to_the_kernel_is_not_delivered_after_a_rewind(self):
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        kept = self._records()[-1]
+        self._arm()
+        armed_by = s.proc_gen
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self._turn(c2, "tighten the notes-api search")
+        self._stop()                             # the fresh CLI's turn end keeps the old CLI's wakeup as the kernel's
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [armed_by],
+                         "the premise: the wakeup is the kernel's, under the generation of the CLI that armed it")
+        self.assertNotEqual(s.proc_gen, armed_by)
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the second turn before the wakeup is due")
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the rewind's relaunch")
+        c3 = self._Client.instances[2]
+        self._nothing_delivered(c3)
+
+    def test_a_wakeup_a_quiet_picks_relaunch_left_to_the_kernel_is_not_delivered_after_a_delete_whose_stamp_cannot_read_it(self):
+        """Its premise is the quiet pick's relaunch leaving the wakeup to the kernel, as
+        test_a_quiet_sessions_wakeup_is_delivered_after_a_pick_relaunched_it pins; where that relaunch drops the wakeup, the
+        premise fails."""
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        kept = self._records()[-1]
+        self._turn(c1, "start the notes-api release loop")
+        self._arm()                              # armed in the turn the delete removes
+        armed_by = s.proc_gen
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c2 = self._relaunched()
+        self._stop()                             # the fresh CLI's turn end keeps the old CLI's wakeup as the kernel's
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [armed_by],
+                         "the premise: the wakeup is the kernel's, under the generation of the CLI that armed it")
+        self._inside_the_hand_off("read_reg_for_rmw", lambda *a, **k: None)
+        gen, rows = s.proc_gen, len(self.be.problems())
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the turn that armed it")
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the rewind's relaunch")
+        self.assertEqual((s.proc_gen, len([p for p in self.be.problems()[rows:] if "armed timers" in p["text"]])), (gen, 1),
+                         "the premise: the stamp could not read the armed timers")
+        self._nothing_delivered(self._Client.instances[2])
+
+    def test_a_wakeup_a_delete_removed_is_dropped_at_a_later_relaunch_when_the_deletes_stamp_could_not_read_it(self):
+        """the later relaunch comes before the delete's CLI ends a turn, after the wakeup's earliest fire"""
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        kept = self._records()[-1]
+        self._turn(c1, "start the notes-api release loop")
+        self._arm()                              # armed in the turn the delete removes
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        self._relaunched()
+        self._stop()                             # the fresh CLI's turn end keeps the old CLI's wakeup as the kernel's
+        real = sb.read_reg_for_rmw
+        self._inside_the_hand_off("read_reg_for_rmw", lambda *a, **k: None)
+        gen = s.proc_gen
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the turn that armed it")
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the rewind's relaunch")
+        self.assertEqual(s.proc_gen, gen, "the premise: the delete's stamp could not read the armed timers")
+        sb.read_reg_for_rmw = real
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[dict(c, scheduledFor=time.time() + 30) for c in reg["sessionCrons"]]))
+        self.assertTrue(self.be.set_effort(SID, "medium"))
+        self._wait(lambda: len(self._Client.instances) == 4 and self._Client.instances[3] is s.client, "the later relaunch")
+        self.assertEqual(self._one_shots(), [])
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._settle()
+        self.assertNotIn(self.WAKE, self._Client.instances[3].writes)
+
+    def test_after_a_delete_whose_stamp_failed_a_later_picks_relaunch_still_leaves_its_wakeup_to_the_kernel(self):
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        kept = self._records()[-1]
+        self._turn(c1, "start the notes-api release loop")
+        real = sb.read_reg_for_rmw
+        self._inside_the_hand_off("read_reg_for_rmw", lambda *a, **k: None)
+        gen = s.proc_gen
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the second turn")
+        c2 = self._relaunched()
+        self.assertEqual(s.proc_gen, gen, "the premise: the delete's stamp could not read the armed timers")
+        sb.read_reg_for_rmw = real
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "a pick's relaunch")
+        c3 = self._Client.instances[2]
+        self._arm()                              # armed on that CLI
+        armed_by = s.proc_gen
+        self.assertTrue(self.be.set_effort(SID, "medium"))
+        self._wait(lambda: len(self._Client.instances) == 4 and self._Client.instances[3] is s.client, "the next relaunch")
+        self.assertNotEqual(s.proc_gen, armed_by, "the premise: a new generation")
+        self._stop()                             # that CLI's turn end
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self.WAKE in self._Client.instances[3].writes, "its prompt fed")
+        self.assertNotIn(self.WAKE, c2.writes + c3.writes)
+
+    def _recorded_under(self, gen):
+        entry = {"id": "toolhook-1", "cron": "", "prompt": self.WAKE, "kind": "", "recurring": False,
+                 "armedAt": time.time() - 60, "dueEpoch": time.time() + 600, "scheduledFor": time.time() + 600,
+                 "procGen": gen, "src": "toolhook"}
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[entry]))
+
+    def _a_delete(self):
+        c1 = self._first_turn()
+        self._end_turn(c1)
+        kept = self._records()[-1]
+        self._turn(c1, "start the notes-api release loop")
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the second turn before the wakeup is due")
+        return self._relaunched()
+
+    def test_a_pending_wakeup_an_earlier_session_object_recorded_is_delivered_after_a_delete(self):
+        self._recorded_under("gen-before-the-restart")
+        c2 = self._a_delete()
+        self._stop()                             # the rewind's CLI's first turn end
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self.WAKE in c2.writes, "its prompt fed")
+
+    def test_a_wakeup_recorded_under_the_generation_the_session_object_was_born_with_is_not_delivered_after_a_delete(self):
+        self._recorded_under(self.s.proc_gen)
+        c2 = self._a_delete()
+        self._nothing_delivered(c2)
+
+    def _recorded_earlier_then_listed(self):
+        """an earlier session object's wakeup on record, which the CLI this object attached to lists at a turn end"""
+        self._recorded_under("gen-before-the-restart")
+        c1 = self._first_turn()
+        self._end_turn(c1)
+        self._stop([self._listed()])
+        self.assertEqual([c["id"] for c in self._one_shots()], ["a1b2c3d4"], "the premise: listed under the CLI's id")
+        return c1
+
+    def _delivered_once(self, fresh):
+        self._stop()                             # that CLI's first turn end lists nothing
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self.WAKE in fresh.writes, "its prompt fed")
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._settle()
+        self.assertEqual(fresh.writes.count(self.WAKE), 1)
+
+    def test_a_wakeup_an_earlier_session_object_recorded_and_the_cli_listed_is_delivered_once_after_a_delete(self):
+        c1 = self._recorded_earlier_then_listed()
+        kept = self._records()[-1]
+        self._turn(c1, "start the notes-api release loop")
+        self._stop([self._listed()])             # that turn's end lists it again
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the second turn before the wakeup is due")
+        self._delivered_once(self._relaunched())
+
+    def test_a_wakeup_an_earlier_session_object_recorded_and_the_cli_listed_is_delivered_once_after_an_edit(self):
+        c1 = self._recorded_earlier_then_listed()
+        kept = self._records()[-1]
+        self._turn(c1, "summarize the notes-api changes")
+        self._stop([self._listed()])             # that turn's end lists it again
+        edit = "summarize the notes-api changes in one line"
+        self.assertEqual(self.be.rewind(SID, kept, edit), (True, ""), "edit the second message")
+        c2 = self._relaunched()
+        self._wait(lambda: c2.writes == [edit], "the edit fed to the rewind's CLI")
+        self._init(c2)
+        self._push(c2, _AssistantMessage([_TextBlock("on it")], uuid=self._uid()))
+        self._wait(lambda: self.s._untaken is None and self.s.inflight == 1, "the edit's turn open")
+        self._end_turn(c2)
+        self._delivered_once(c2)
+
+    def test_a_wakeup_an_earlier_session_object_recorded_and_the_cli_listed_is_delivered_once_after_a_quiet_picks_relaunch(self):
+        self._recorded_earlier_then_listed()
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        self._delivered_once(self._relaunched())
+
+    def _earlier_listed_then(self, relaunch, due, minute, failing=False):
+        """an earlier session object's wakeup due at `due`, with the minute the CLI named (`minute`) or none on record,
+        which the CLI this object attached to lists at a turn end; then a quiet effort pick (`relaunch` "pick"), a Restart
+        or a delete of a second turn, whose stamp cannot read the armed timers when `failing`: the next CLI's client"""
+        entry = {"id": "toolhook-1", "cron": "", "prompt": self.WAKE, "kind": "", "recurring": False,
+                 "armedAt": due - 600, "dueEpoch": due, "procGen": "gen-before-the-restart", "src": "toolhook"}
+        if minute is not None:
+            entry["scheduledFor"] = minute
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[entry]))
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        at = time.localtime(due)
+        self._stop([{"id": "a1b2c3d4", "schedule": "%d %d * * *" % (at[4], at[3]), "prompt": self.WAKE, "recurring": False}])
+        self.assertEqual([c["id"] for c in self._one_shots()], ["a1b2c3d4"], "the premise: listed under the CLI's id")
+        kept = self._records()[-1]
+        if relaunch == "delete":
+            self._turn(c1, "start the notes-api release loop")
+        gen = s.proc_gen
+        if failing:
+            self._inside_the_hand_off("read_reg_for_rmw", lambda *a, **k: None)
+        if relaunch == "delete":
+            self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the second turn")
+        elif relaunch == "pick":
+            self.assertTrue(self.be.set_effort(SID, "high"))
+        else:
+            self.assertEqual(self.be.relaunch(SID), "")
+        fresh = self._relaunched()
+        if failing:
+            self.assertEqual(s.proc_gen, gen, "the premise: the stamp kept the old generation")
+        return fresh
+
+    def _in_the_minute(self, relaunch):
+        """the minute 40 s away: the old CLI could have sent the wakeup by the fresh CLI's start, and it has not"""
+        t = time.time() + 40
+        return self._earlier_listed_then(relaunch, t, t)
+
+    def _without_the_minute(self, relaunch):
+        return self._earlier_listed_then(relaunch, time.time() + 600, None)
+
+    def _with_a_stamp_that_cannot_read_it(self, relaunch):
+        t = time.time() + 600
+        return self._earlier_listed_then(relaunch, t, t, failing=True)
+
+    def test_a_wakeup_an_earlier_session_object_recorded_and_the_cli_listed_is_delivered_once_after_a_quiet_picks_relaunch_under_60_s_before_its_minute(self):
+        self._delivered_once(self._in_the_minute("pick"))
+
+    def test_a_wakeup_an_earlier_session_object_recorded_and_the_cli_listed_is_delivered_once_after_a_restart_under_60_s_before_its_minute(self):
+        self._delivered_once(self._in_the_minute("restart"))
+
+    def test_a_wakeup_an_earlier_session_object_recorded_and_the_cli_listed_is_delivered_once_after_a_delete_under_60_s_before_its_minute(self):
+        self._delivered_once(self._in_the_minute("delete"))
+
+    def test_a_wakeup_an_earlier_session_object_recorded_without_the_minute_and_the_cli_listed_is_delivered_once_after_a_quiet_picks_relaunch(self):
+        self._delivered_once(self._without_the_minute("pick"))
+
+    def test_a_wakeup_an_earlier_session_object_recorded_without_the_minute_and_the_cli_listed_is_delivered_once_after_a_restart(self):
+        self._delivered_once(self._without_the_minute("restart"))
+
+    def test_a_wakeup_an_earlier_session_object_recorded_without_the_minute_and_the_cli_listed_is_delivered_once_after_a_delete(self):
+        self._delivered_once(self._without_the_minute("delete"))
+
+    def test_a_wakeup_an_earlier_session_object_recorded_and_the_cli_listed_is_delivered_once_after_a_quiet_picks_relaunch_whose_stamp_cannot_read_it(self):
+        fresh = self._with_a_stamp_that_cannot_read_it("pick")
+        self._stop()                             # that CLI's first turn end lists nothing
+        self.assertEqual([(c["procGen"], "firstGen" in c) for c in self._one_shots()], [("gen-before-the-restart", False)],
+                         "the record back under the earlier session object's generation")
+        self._delivered_once(fresh)
+
+    def test_a_wakeup_an_earlier_session_object_recorded_and_the_cli_listed_is_delivered_once_after_a_delete_whose_stamp_cannot_read_it(self):
+        self._delivered_once(self._with_a_stamp_that_cannot_read_it("delete"))
+
+    def test_a_wakeup_an_earlier_session_object_recorded_and_the_cli_listed_is_delivered_once_due_before_the_first_turn_end_of_a_cli_whose_stamp_cannot_read_it(self):
+        fresh = self._with_a_stamp_that_cannot_read_it("pick")
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self.WAKE in fresh.writes, "its prompt fed")
+        self._stop()                             # that CLI's first turn end lists nothing
+        self.assertEqual(self._one_shots(), [])
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._settle()
+        self.assertEqual(fresh.writes.count(self.WAKE), 1)
+
+    def test_after_a_stamp_that_cannot_read_it_an_earlier_session_objects_wakeup_a_later_turn_end_lists_is_left_to_that_cli(self):
+        """the fresh CLI's first turn end does not list it; its next lists it under its id"""
+        fresh = self._with_a_stamp_that_cannot_read_it("pick")
+        self._stop()
+        due = time.localtime(time.time() + 600)
+        self._stop([{"id": "a1b2c3d4", "schedule": "%d %d * * *" % (due[4], due[3]), "prompt": self.WAKE, "recurring": False}])
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [self.s.proc_gen], "the CLI that lists it owns it")
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "due, but the CLI that lists it fires it")
+        self._settle()
+        self.assertNotIn(self.WAKE, fresh.writes)
+
+    def _earlier_no_due_listed_then(self, relaunch, failing=False, prompt=None, cid="a1b2c3d4"):
+        """an earlier session object's one-shot whose record holds no due time, which the CLI this object attached to lists
+        at a turn end; then a quiet effort pick (`relaunch` "pick"), a Restart, an Apply now, a delete of a later turn or an
+        edit of a later message, whose stamp cannot read the armed timers when `failing`: the next CLI's client"""
+        prompt = prompt or self.WAKE
+        at = time.localtime(time.time() + 600)
+        cron = "%d %d * * *" % (at[4], at[3])
+        entry = {"id": cid, "cron": cron, "prompt": prompt, "kind": "", "recurring": False,
+                 "armedAt": time.time() - 100, "dueEpoch": None, "procGen": "gen-before-the-restart"}
+        listed = {"id": cid, "schedule": cron, "prompt": prompt, "recurring": False}
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[entry]))
+        s, c1 = self.s, self._first_turn()
+        if relaunch == "apply":
+            self._with_a_background_task(c1)
+        self._end_turn(c1)
+        self._stop([listed])
+        self.assertEqual([(c["id"], c.get("dueEpoch")) for c in self._one_shots()], [(cid, None)],
+                         "the premise: listed, with no due time")
+        kept, edit = self._records()[-1], "start the notes-api release loop now"
+        if relaunch in ("delete", "edit"):
+            self._turn(c1, "start the notes-api release loop")
+            self._stop([listed])                 # that turn's end lists it again
+        gen = s.proc_gen
+        if failing:
+            self._inside_the_hand_off("read_reg_for_rmw", lambda *a, **k: None)
+        if relaunch == "pick":
+            self.assertTrue(self.be.set_effort(SID, "high"))
+        elif relaunch == "apply":
+            self.assertTrue(self.be.set_effort(SID, "high"))
+            self._settle()
+            self.assertEqual(len(self._Client.instances), 1, "the premise: the pick waits for the background task")
+            self.assertEqual(self.be.apply_now(SID), "")
+        elif relaunch == "restart":
+            self.assertEqual(self.be.relaunch(SID), "")
+        elif relaunch == "delete":
+            self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the second turn")
+        else:
+            self.assertEqual(self.be.rewind(SID, kept, edit), (True, ""), "edit the second message")
+        fresh = self._relaunched()
+        if relaunch == "edit":
+            self._wait(lambda: fresh.writes == [edit], "the edit fed to the rewind's CLI")
+            self._init(fresh)
+            self._push(fresh, _AssistantMessage([_TextBlock("on it")], uuid=self._uid()))
+            self._wait(lambda: s._untaken is None and s.inflight == 1, "the edit's turn open")
+            self._end_turn(fresh)
+        if failing:
+            self.assertEqual(s.proc_gen, gen, "the premise: the stamp kept the old generation")
+        return fresh
+
+    def _its_minute_passes(self):
+        """every one-shot on record past its minute, its record still holding no due time"""
+        now = time.time()
+        at = time.localtime(now - 120)
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[c if c.get("recurring") else
+                                                           dict(c, cron="%d %d * * *" % (at[4], at[3]), armedAt=now - 400)
+                                                           for c in reg.get("sessionCrons") or []]))
+
+    def _sweeps(self):
+        for _ in range(2):
+            self.be.deliver_lost_wakeups()
+            self._settle(0.3)
+
+    def _kernel_sent(self, prompt):
+        """the kernel's sends of `prompt`: fed to any of this session's CLIs, or still queued"""
+        return (sum(c.writes.count(prompt) for c in self._Client.instances)
+                + sum(1 for p in self.s.pending() if prompt in str(p)))
+
+    def _then_its_minute(self):
+        self._stop()                             # the next CLI's first turn end lists nothing
+        self._its_minute_passes()
+        self._sweeps()
+
+    def test_an_earlier_session_objects_listed_one_shot_with_no_due_time_is_sent_once_after_a_quiet_picks_relaunch_whose_cli_does_not_list_it(self):
+        self._earlier_no_due_listed_then("pick")
+        self._then_its_minute()
+        self.assertEqual(self._kernel_sent(self.WAKE), 1)
+
+    def test_an_earlier_session_objects_listed_one_shot_with_no_due_time_is_sent_once_after_a_restart_whose_cli_does_not_list_it(self):
+        self._earlier_no_due_listed_then("restart")
+        self._then_its_minute()
+        self.assertEqual(self._kernel_sent(self.WAKE), 1)
+
+    def test_an_earlier_session_objects_listed_one_shot_with_no_due_time_is_sent_once_after_an_apply_now_whose_cli_does_not_list_it(self):
+        self._earlier_no_due_listed_then("apply")
+        self._then_its_minute()
+        self.assertEqual(self._kernel_sent(self.WAKE), 1)
+
+    def test_an_earlier_session_objects_listed_one_shot_with_no_due_time_is_sent_once_after_a_delete_whose_cli_does_not_list_it(self):
+        self._earlier_no_due_listed_then("delete")
+        self._then_its_minute()
+        self.assertEqual(self._kernel_sent(self.WAKE), 1)
+
+    def test_an_earlier_session_objects_listed_one_shot_with_no_due_time_is_sent_once_after_an_edit_whose_cli_does_not_list_it(self):
+        self._earlier_no_due_listed_then("edit")
+        self._then_its_minute()
+        self.assertEqual(self._kernel_sent(self.WAKE), 1)
+
+    def test_an_earlier_session_objects_listed_one_shot_with_no_due_time_is_sent_once_after_a_quiet_picks_relaunch_whose_stamp_cannot_read_it(self):
+        self._earlier_no_due_listed_then("pick", failing=True)
+        self._then_its_minute()
+        self.assertEqual(self._kernel_sent(self.WAKE), 1)
+
+    def test_an_earlier_session_objects_listed_one_shot_with_no_due_time_is_sent_once_after_a_restart_whose_stamp_cannot_read_it(self):
+        self._earlier_no_due_listed_then("restart", failing=True)
+        self._then_its_minute()
+        self.assertEqual(self._kernel_sent(self.WAKE), 1)
+
+    def test_an_earlier_session_objects_listed_one_shot_with_no_due_time_is_sent_once_after_a_delete_whose_stamp_cannot_read_it(self):
+        self._earlier_no_due_listed_then("delete", failing=True)
+        self._then_its_minute()
+        self.assertEqual(self._kernel_sent(self.WAKE), 1)
+
+    def test_an_earlier_session_objects_listed_one_shot_with_no_due_time_is_sent_at_its_minute_before_the_first_turn_end_of_a_cli_whose_stamp_cannot_read_it(self):
+        self._earlier_no_due_listed_then("pick", failing=True)
+        self._its_minute_passes()
+        self._sweeps()
+        self.assertEqual(self._kernel_sent(self.WAKE), 1, "sent before that CLI ends a turn")
+        self._stop()                             # that CLI's first turn end lists nothing
+        self._sweeps()
+        self.assertEqual(self._kernel_sent(self.WAKE), 1)
+
+    def test_an_earlier_session_objects_daily_one_shot_cron_with_no_due_time_that_the_resumed_cli_re_arms_after_a_quiet_picks_relaunch_is_sent_twice_when_its_time_comes_before_the_fresh_clis_first_turn_end(self):
+        """the kernel's send and the resumed CLI's own fire, after a quiet pick's relaunch"""
+        cron = "post the notes-api status"
+        fresh = self._earlier_no_due_listed_then("pick", prompt=cron, cid="job-4")
+        self._its_minute_passes()                # its time comes, and the resumed CLI, which re-armed it, fires it
+        answer = self._on_loop(self.s._prompt_submit_hook({"prompt": cron}, None, None))
+        self.assertEqual(answer, {}, "the hook lets the resumed CLI's fire run")
+        self._init(fresh)
+        self._push(fresh, _AssistantMessage([_TextBlock("posting the status")], uuid=self._uid()))
+        self._sweeps()
+        self._result_frame(fresh)
+        self._stop()                             # that turn's end lists nothing: the one-shot fired
+        self._sweeps()
+        cli_fires = 1                            # the turn the resumed CLI ran for it, driven above
+        self.assertEqual(self._kernel_sent(cron) + cli_fires, 2, "the kernel's send and the resumed CLI's own fire")
+
+    def test_a_wakeup_an_earlier_session_object_recorded_is_not_delivered_once_the_cli_that_listed_it_leaves_it_out(self):
+        """no relaunch: that CLI's next turn end does not list it, as once it has sent it"""
+        c1 = self._recorded_earlier_then_listed()
+        self._turn(c1, "check the notes-api logs")
+        self._stop()
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "the CLI that listed it held it")
+        self.assertEqual(self._one_shots(), [])
+        self._settle()
+        self.assertNotIn(self.WAKE, c1.writes)
+
+    def _left_by_a_restart_then_listed(self):
+        """a wakeup this object armed, a Restart cutting the turn before its end, and the fresh CLI's turn end listing a
+        one-shot with the wakeup's prompt and minute; then a turn on that CLI"""
+        s, c1 = self.s, self._first_turn()
+        self._on_loop(s._sched_tool_hook(_wake_call(600, self.WAKE, "the next round"), "tu-wake", None))
+        self.assertEqual(self.be.relaunch(SID), "")
+        self._result_frame(c1)
+        c2 = self._relaunched()
+        due = time.localtime(time.time() + 600)
+        self._stop([{"id": "job-5", "schedule": "%d %d * * *" % (due[4], due[3]), "prompt": self.WAKE, "recurring": False}])
+        self.assertEqual([(c["id"], bool(c.get("dueEpoch"))) for c in self._one_shots()], [("job-5", True)],
+                         "the premise: the listed entry took the wakeup's due time")
+        self._turn(c2, "start the notes-api release loop")
+        return c2
+
+    def _third_client(self):
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is self.s.client, "the relaunch")
+        return self._Client.instances[2]
+
+    def test_a_wakeup_this_session_object_recorded_and_a_later_cli_listed_is_dropped_at_a_quiet_picks_relaunch_under_60_s_before_its_minute(self):
+        self._left_by_a_restart_then_listed()
+        soon = time.time() + 30
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[dict(c, dueEpoch=soon, scheduledFor=soon)
+                                                           for c in reg["sessionCrons"]]))
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        c3 = self._third_client()
+        self._stop()                             # that CLI's first turn end lists nothing
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "its minute was 30 s away at the relaunch")
+        self.assertEqual(self._one_shots(), [])
+        self._settle()
+        self.assertNotIn(self.WAKE, c3.writes)
+
+    def test_a_wakeup_this_session_object_recorded_and_a_later_cli_listed_and_fired_is_not_delivered_after_a_restart_whose_stamp_cannot_read_it(self):
+        c2 = self._left_by_a_restart_then_listed()
+        s, gen, now = self.s, self.s.proc_gen, time.time()
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=[dict(c, dueEpoch=now, scheduledFor=now)
+                                                           for c in reg["sessionCrons"]]))
+        self._on_loop(s._prompt_submit_hook({"prompt": self.WAKE}, None, None))   # its minute: that CLI fires it
+        self._init(c2)
+        self._push(c2, _AssistantMessage([_TextBlock("running the scheduled check")], uuid=self._uid()))
+        self._wait(lambda: s._cli_working, "the CLI's own turn open")
+        self._inside_the_hand_off("read_reg_for_rmw", lambda *a, **k: None)
+        self.assertEqual(self.be.relaunch(SID), "")
+        self._result_frame(c2)
+        c3 = self._third_client()
+        self.assertEqual(s.proc_gen, gen, "the premise: the stamp kept the old generation")
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "the CLI that listed it fired it")
+        self._stop()                             # the fresh CLI's first turn end lists nothing
+        self.assertEqual(self._one_shots(), [])
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._settle()
+        self.assertNotIn(self.WAKE, c3.writes)
+
+    def test_a_sweep_while_a_deletes_stamp_fails_delivers_nothing_a_quiet_picks_relaunch_left_to_the_kernel(self):
+        """the sweep runs inside the call that logs the stamp's problem"""
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        kept = self._records()[-1]
+        self._turn(c1, "start the notes-api release loop")
+        self._arm()                              # armed in the turn the delete removes
+        armed_by = s.proc_gen
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        self._relaunched()
+        self._stop()                             # the fresh CLI's turn end keeps the old CLI's wakeup as the kernel's
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [armed_by],
+                         "the premise: the wakeup is the kernel's, under the generation of the CLI that armed it")
+        self._all_due()
+        swept, log = [], self.be._log
+
+        def logging(msg, *a, **k):
+            if "armed timers were not moved" in str(msg) and not swept:
+                swept.append(self.be.deliver_lost_wakeups())
+            return log(msg, *a, **k)
+        self.be._log = logging
+        self.addCleanup(setattr, self.be, "_log", log)
+        self._inside_the_hand_off("read_reg_for_rmw", lambda *a, **k: None)
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the turn that armed it")
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the rewind's relaunch")
+        self.assertEqual(swept, [0])
+        self._nothing_delivered(self._Client.instances[2])
+
+    def test_a_wakeup_a_restart_left_to_the_kernel_and_the_next_clis_turn_end_listed_is_not_delivered_after_a_delete(self):
+        """a Restart cuts the turn that armed the wakeup before that turn's end; the fresh CLI's turn end lists a one-shot
+        with the wakeup's prompt and minute; then a delete"""
+        s, c1 = self.s, self._first_turn()
+        self._on_loop(s._sched_tool_hook(_wake_call(600, self.WAKE, "the next round"), "tu-wake", None))
+        kept = self._records()[-1]
+        self.assertEqual(self.be.relaunch(SID), "")
+        self._result_frame(c1)
+        c2 = self._relaunched()
+        due = time.localtime(time.time() + 600)
+        self._stop([{"id": "job-5", "schedule": "%d %d * * *" % (due[4], due[3]), "prompt": self.WAKE, "recurring": False}])
+        self.assertEqual([(c["id"], bool(c.get("dueEpoch"))) for c in self._one_shots()], [("job-5", True)],
+                         "the premise: the listed entry took the wakeup's due time")
+        self._turn(c2, "start the notes-api release loop")
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the second turn")
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the rewind's relaunch")
+        self._nothing_delivered(self._Client.instances[2])
+
+    def test_a_later_fresh_cli_no_rewind_asked_for_leaves_the_rewind_clis_wakeup_to_the_kernel(self):
+        c2 = self._a_delete()
+        self._arm()                              # armed on the rewind's CLI
+        gen = self.s.proc_gen
+        self.s._fresh_cli_stamp(int(time.time()), "", mark_echoes=False)   # a later fresh CLI, with no teardown between
+        self.assertNotEqual(self.s.proc_gen, gen, "the premise: a new generation")
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [gen], "left under the rewind CLI's generation")
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self.WAKE in c2.writes, "its prompt fed")
+
+    def _a_delete_then_a_relaunch_before_its_cli_ends_a_turn(self, armed_in, relaunch):
+        """a wakeup armed in the turn a delete removes (`armed_in` "removed") or keeps ("kept"), listed at that turn's end;
+        the delete; then, before the rewind's CLI ends a turn, a quiet effort pick (`relaunch` "pick") or a Restart: the
+        next CLI's client"""
+        s, c1 = self.s, self._first_turn()
+        if armed_in == "kept":
+            self._arm()
+        self._end_turn(c1)
+        if armed_in == "kept":
+            self._stop([self._listed()])
+        kept = self._records()[-1]
+        self._turn(c1, "start the notes-api release loop")
+        if armed_in == "removed":
+            self._arm()
+            self._stop([self._listed()])
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the second turn")
+        self._relaunched()
+        if relaunch == "pick":
+            self.assertTrue(self.be.set_effort(SID, "high"))
+        else:
+            self.assertEqual(self.be.relaunch(SID), "")
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the next relaunch")
+        return self._Client.instances[2]
+
+    def test_a_wakeup_armed_in_a_turn_a_delete_removes_is_not_delivered_after_a_quiet_picks_relaunch_before_its_cli_ends_a_turn(self):
+        self._nothing_delivered(self._a_delete_then_a_relaunch_before_its_cli_ends_a_turn("removed", "pick"))
+
+    def test_a_wakeup_armed_in_a_turn_a_delete_removes_is_not_delivered_after_a_restart_before_its_cli_ends_a_turn(self):
+        self._nothing_delivered(self._a_delete_then_a_relaunch_before_its_cli_ends_a_turn("removed", "restart"))
+
+    def test_a_wakeup_armed_in_a_turn_a_delete_keeps_is_not_delivered_after_a_quiet_picks_relaunch_before_its_cli_ends_a_turn(self):
+        self._nothing_delivered(self._a_delete_then_a_relaunch_before_its_cli_ends_a_turn("kept", "pick"))
+
+    def test_a_pending_wakeup_a_delete_removed_is_not_delivered_after_a_later_relaunch_when_the_deletes_stamp_could_not_read_it(self):
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        kept = self._records()[-1]
+        self._turn(c1, "start the notes-api release loop")
+        self._arm()                              # armed in the turn the delete removes, 600 s out
+        self._stop([self._listed()])
+        real = sb.read_reg_for_rmw
+        self._inside_the_hand_off("read_reg_for_rmw", lambda *a, **k: None)
+        gen = s.proc_gen
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the turn that armed it")
+        self._relaunched()
+        self.assertEqual(s.proc_gen, gen, "the premise: the delete's stamp could not read the armed timers")
+        sb.read_reg_for_rmw = real
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the later relaunch")
+        self._nothing_delivered(self._Client.instances[2])
+
+    def test_a_wakeup_the_rewind_clis_turn_end_lists_is_delivered_after_a_later_picks_relaunch(self):
+        s, c1 = self.s, self._first_turn()
+        self._arm()                              # armed in the first turn, which the delete keeps
+        self._end_turn(c1)
+        self._stop([self._listed()])
+        kept = self._records()[-1]
+        self._turn(c1, "summarize the notes-api changes")
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the second turn")
+        self._relaunched()
+        self._stop([self._listed()])             # the rewind's CLI's first turn end lists the wakeup
+        listed_by = s.proc_gen
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [listed_by], "the premise: that CLI's own")
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "a pick's relaunch")
+        c3 = self._Client.instances[2]
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [listed_by])
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self.WAKE in c3.writes, "its prompt fed")
+
+    def test_a_wakeup_armed_after_the_turn_end_of_a_delete_whose_stamp_failed_is_delivered_after_a_picks_relaunch(self):
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        kept = self._records()[-1]
+        self._turn(c1, "start the notes-api release loop")
+        real = sb.read_reg_for_rmw
+        self._inside_the_hand_off("read_reg_for_rmw", lambda *a, **k: None)
+        gen = s.proc_gen
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the second turn")
+        c2 = self._relaunched()
+        self.assertEqual(s.proc_gen, gen, "the premise: the delete's stamp could not read the armed timers")
+        sb.read_reg_for_rmw = real
+        self._turn(c2, "tighten the notes-api search")
+        self._stop()                             # that turn's end
+        self._arm()                              # armed on the delete's CLI after that turn end
+        self.assertTrue(self.be.set_effort(SID, "high"))
+        self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "a pick's relaunch")
+        c3 = self._Client.instances[2]
+        self._stop()                             # the next CLI's turn end
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self.WAKE in c3.writes, "its prompt fed")
+
+
+class ARelaunchLeavesTheLaunchLedgerAlone(_Harness):
+    """The launch ledger keeps the generation the session object was born with, never a fresh CLI's: a Monitor the old CLI
+    launched keeps its entry through a relaunch, so the fresh CLI's first Stop hook files no processDied tombstone for it,
+    and the kernel's awaiting lift finds no ending after a job stamp written before the relaunch."""
+
+    def _a_monitor_then(self, relaunch):
+        s, c1 = self.s, self._first_turn()
+        self._on_loop(s._ledger_tool_hook({"tool_name": "Monitor",
+                                           "tool_input": {"description": "watch the notes-api deploy log", "timeout_ms": 600000},
+                                           "tool_response": {"task_id": "m-1"}}, "tu-mon", None))
+        self._end_turn(c1)
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # the old CLI's turn end
+        self.assertEqual([e.get("tid") for e in (sb.read_reg(self.state, SID) or {}).get("bgLedger") or []], ["m-1"],
+                         "the premise: a Monitor absent from the payload keeps its entry")
+        stamp = time.time() - 5                  # a job stamp written before the relaunch
+        relaunch()
+        self._relaunched()
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # the fresh CLI's first turn end
+        reg = sb.read_reg(self.state, SID) or {}
+        tombs = reg.get("bgLedgerEnded") or []
+        self.assertEqual([e for e in tombs if e.get("why") == "processDied"], [], "no processDied tombstone")
+        self.assertEqual(_kernel()._bg_ended_after([], tombs, int(reg.get("spawnedAt") or 0), stamp, time.time(), kind="job"),
+                         0, "no ending after the job stamp")
+        self.assertEqual([e.get("tid") for e in reg.get("bgLedger") or []], ["m-1"], "the entry stands")
+
+    def test_a_quiet_picks_relaunch_files_no_processdied_tombstone_and_the_job_lift_finds_no_ending(self):
+        self._a_monitor_then(lambda: self.assertTrue(self.be.set_effort(SID, "high")))
+
+    def test_a_restart_files_no_processdied_tombstone_and_the_job_lift_finds_no_ending(self):
+        self._a_monitor_then(lambda: self.assertEqual(self.be.relaunch(SID), ""))
+
+    def test_a_task_adopted_from_a_stop_hook_payload_is_not_retired_as_processdied_at_that_clis_next_turn_end(self):
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        task = {"id": "task-zz99", "type": "shell", "status": "running", "description": "tail the notes-api log"}
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": [task]}, None, None))
+        self.assertEqual([(e.get("tid"), e.get("src")) for e in (sb.read_reg(self.state, SID) or {}).get("bgLedger") or []],
+                         [("task-zz99", "stopReconcile")], "the premise: adopted from the payload")
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # the same CLI's next turn end
+        tombs = (sb.read_reg(self.state, SID) or {}).get("bgLedgerEnded") or []
+        self.assertEqual([e for e in tombs if e.get("why") == "processDied"], [], "its CLI is the live one")
 
 
 class WhatTheRelaunchWaitsFor(unittest.TestCase):
