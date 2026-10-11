@@ -19772,7 +19772,7 @@ _cut_read_said = set()
 def _cut_first_unreadable(sid, how):
     """Name a failed read of the session's first transcript (`how`, "unreadable (<the error>)") on stderr once per session,
     under its own cause beside the cut walk's read causes. Until the file reads again, a message from before the clear is
-    answered as not on disk yet: a comment's create parks and is dropped after _PARK_MAX_TRIES pusher cycles, and an edit is
+    answered as not on disk yet: a comment's create parks and is dropped after _PARK_MAX_TRIES writes of the leaf, and an edit is
     told to try again (review round three). A row of the leaf behind a record linking into that file keeps the refusal
     that it cannot anchor a thread, at once (_cut_widen_linked), so the line names both effects (review round five)."""
     key = (str(sid), "unreadable")
@@ -21199,8 +21199,14 @@ ANCHOR_REWOUND_ERR = "that message is on a branch that was rewound away"   # the
 # The cut walk's refusal of a record with no prose record above it before a compaction or the graph's edge, named in review
 # round four so the comment cut can tell it apart (_cut_widen_linked).
 ANCHOR_NO_PROSE_ERR = "that message can't anchor a thread; try a passage from the conversation itself"
-_parked_creates = []                       # [{sid,uuid,exact,text,name,model,effort,fast,color,createId,tries}]
-_PARK_MAX_TRIES = 30                       # pusher cycles (~15-90s) — past this the record isn't coming
+_parked_creates = []                       # [{sid,uuid,exact,text,name,model,effort,fast,color,createId,tries,seen}]
+# The park's budget counts the event it waits for, the parent's transcript MOVING (2026-10-11): a retry spends a try only
+# when the transcript has been written since the last counted attempt (`seen`, its stat then), so past this many writes
+# that still lack the record, the record isn't coming. It counted pusher cycles (~15-90 s) before, and anything that ran
+# the retry spent one, so a page's idle prefetch (one repair per skeleton tab, each running the cycle's housekeeping)
+# could drop a create in seconds, before its anchor landed: a silent loss. A quiet transcript spends nothing, so a park
+# waits out an idle session for as long as it stays quiet, its retries reading no byte while the stat stands.
+_PARK_MAX_TRIES = 30
 # A create's IDENTITY (T289): the client's createId, minted by the popover at the send gesture and carried
 # by every re-post of it, under the parent sid -> the thread it made. A lag-parked create is retried by
 # BOTH the pusher (above) and the client (its frame-keyed re-post), and a popover whose ack was lost sends
@@ -21280,12 +21286,29 @@ def _release_create(key):
         _inflight_creates.discard(key)
 
 
+def _park_transcript_sig(sid):
+    """The parent transcript's stat as a parked create's budget reads it, (path, inode, size, mtime_ns), or None when the
+    session has no transcript row or the file cannot be stat'd: what the park's `seen` holds (_PARK_MAX_TRIES)."""
+    try:
+        row = _session_row(sid)
+        path = row.get("path") if row else None
+        if not path:
+            return None
+        st = os.stat(path)
+        return (str(path), st.st_ino, st.st_size, st.st_mtime_ns)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
 def _retry_parked_creates():
     """One pusher cycle's pass over lag-parked comment creates: re-run each against the (now
     possibly caught-up) transcript; success acks commentCreated, carrying the thread's row, to every
     chat client (the creating client's socket may be gone — the adopt keys on the createId, and clients
-    without a matching pending simply ignore it). Still lagging → keep, bounded; any OTHER error →
-    drop (the client's own attempt cap surfaces the failure honestly)."""
+    without a matching pending simply ignore it). Still lagging → keep, bounded by the transcript's writes
+    (_PARK_MAX_TRIES: a try is spent only when the transcript moved since the last counted one); any OTHER
+    error → drop (the client's own attempt cap surfaces the failure honestly). Every pass re-runs the create,
+    moved or not: a record can land in another of the session's files (the first transcript after a /clear,
+    or one that reads again after a failure) with the leaf unchanged, and an unmoved retry reads no byte."""
     if not _parked_creates:
         return
     for pk in list(_parked_creates):
@@ -21298,14 +21321,17 @@ def _retry_parked_creates():
             if key in _inflight_creates:           # the WS door is creating it this instant: not twice
                 continue
             _inflight_creates.add(key)
-        pk["tries"] += 1
         try:
+            sig = _park_transcript_sig(pk["sid"])  # BEFORE the attempt reads it: a write after this is the next pass's move
             err, tid = _comment_create(pk["sid"], pk["uuid"], pk["exact"], pk["text"], name=pk["name"],
                                        model=pk["model"], effort=pk["effort"], fast=pk.get("fast", ""),
                                        color=pk["color"])
             with _create_lock:                     # note BEFORE the park is dropped: no gap where the
                 if not err:                        # identity is neither parked nor noted
                     _note_create(key, tid)
+                if err == ANCHOR_LAG_ERR and sig != pk.get("seen"):
+                    pk["tries"] += 1               # the transcript was written and still lacks the record: one try spent
+                    pk["seen"] = sig
                 if err == ANCHOR_LAG_ERR and pk["tries"] < _PARK_MAX_TRIES:
                     continue
                 if pk in _parked_creates:
@@ -21396,6 +21422,7 @@ def _comment_create_job(sid, msg, key, client):
         # client re-posts the same create on every frame while the nack stands.
         try:
             if err == ANCHOR_LAG_ERR:
+                seen = _park_transcript_sig(sid)     # the transcript as the park found it: its budget counts writes past this
                 with _create_lock:
                     if not any(_parked_key(pk) == key for pk in _parked_creates):
                         _parked_creates.append({"sid": sid, "uuid": str(msg["uuid"]), "exact": str(msg["exact"]),
@@ -21404,7 +21431,7 @@ def _comment_create_job(sid, msg, key, client):
                                                 "effort": str(msg.get("effort") or ""),
                                                 "fast": str(msg.get("fast") or ""),
                                                 "color": str(msg.get("color") or ""),
-                                                "createId": cid, "tries": 0})
+                                                "createId": cid, "tries": 0, "seen": seen})
             else:
                 client["send"](json.dumps({"type": "warn", "text": err}))
                 # the kernel log carries the refusal too (T289): a name refused at this door showed only
@@ -65183,11 +65210,18 @@ def _push(targets, connect=False, live_map=None, only=None):
     deduped on their slots, and a tab that strip lists which the page holds in no form (a session created since its last
     push) is served with the asked ones, as any push that sends the strip serves it; a repair that turns out to send a
     redial's FIRST strip (_resolve_reconnect popped the flag here: no push has served the socket yet) serves the redial's
-    whole view, as a connect push does."""
+    whole view, as a connect push does. The asked tabs build FIRST, ahead of any new tab riding along (2026-10-11): a
+    click on a skeleton must not wait out the build of a session created meanwhile. And a repair runs none of the
+    pusher's per-cycle housekeeping (the thread keep set's swap, the fold and memo evictions keyed on it, the parked
+    comment creates' retry; 2026-10-11): those read "since the last cycle", and the page's prefetch fires one repair per
+    skeleton tab, so a repair that ran them handed the next cycle a keep set of one tab's threads and spent a parked
+    create's retries at the prefetch's pace."""
     if not targets:
         return
+    asked = None                                 # the tabs the needFull named, before any new tab joins them below
     if only is not None:
         only = {str(x) for x in only}
+        asked = set(only)
     now = int(time.time())
     # When the world this push reads was read: the pusher cycle's stamp, taken before its liveness read (_pusher_cycle), for
     # the map a cycle hands down; this push's own read otherwise. Two cold-lanes builds are ordered by it, and the cold lanes
@@ -65286,8 +65320,11 @@ def _push(targets, connect=False, live_map=None, only=None):
             # dots on a session that had been ready for all of it (the user 2026-08-08).
             build_order = sorted(chat_list, key=lambda s: 0 if s["sid"] in active or s["sid"] in first
                                  or not os.path.exists(s["path"]) else 1)
-            if only is not None:
-                build_order = [s for s in build_order if s["sid"] in only]   # a needFull's repair: the asked tabs alone
+            if only is not None:                         # a needFull's repair: the asked tabs alone, and the asked ones FIRST,
+                #                                          ahead of a new tab riding along (a large transcript built first
+                #                                          held the click behind it: the docstring)
+                build_order = [s for s in build_order if s["sid"] in asked] \
+                    + [s for s in build_order if s["sid"] in only and s["sid"] not in asked]
             # ONE key for every tab (_chat_build_sig): the watched tab and the background tabs alike are served
             # from _built_chat while the complete signature holds, and rebuilt when a component moved. The
             # watched tab used to have a second, exact key beside the background tabs' file-stat one, with a
@@ -65730,27 +65767,32 @@ def _push(targets, connect=False, live_map=None, only=None):
             # evicted once more in N+1 and a stopped thread lingered a cycle longer (review 2026-09-08). A
             # thread that stops being built (resolved, promoted, its parent closed) ages out of the set after
             # one cycle and is evicted as before.
-            _thread_fold_keep[0], _thread_fold_keep[1] = _thread_fold_keep[1], set()
-            keep = shown_sids | _thread_fold_keep[0]
-            with _chat_fold_lock:
-                for sid in list(_chat_fold):
+            # NOT in a needFull's repair (2026-10-11): its comments loop below builds the asked tab's threads alone, so
+            # the swap left the next cycle a keep set of those, and that cycle evicted every other thread's fold prefix
+            # (each changed thread then rebuilt cold), once per prefetched tab; and the parked creates' retry belongs to
+            # the cycles the park waits through (_retry_parked_creates). The pusher's next cycle runs all of it.
+            if only is None:
+                _thread_fold_keep[0], _thread_fold_keep[1] = _thread_fold_keep[1], set()
+                keep = shown_sids | _thread_fold_keep[0]
+                with _chat_fold_lock:
+                    for sid in list(_chat_fold):
+                        if sid not in keep:
+                            _chat_fold.pop(sid, None)
+                # …and the chat build's fixed-cost memos on the same keep set (2026-09-09), outside the lock the
+                # bumps take: the ledger walk and the task fold of a tab no longer shown (a thread this cycle built
+                # stays, like its fold prefix), and the live-merge sets of a sid neither kept nor alive (the feed
+                # and timeline merge every alive session, tab or not)
+                for sid in list(_ledger_memo):
                     if sid not in keep:
-                        _chat_fold.pop(sid, None)
-            # …and the chat build's fixed-cost memos on the same keep set (2026-09-09), outside the lock the
-            # bumps take: the ledger walk and the task fold of a tab no longer shown (a thread this cycle built
-            # stays, like its fold prefix), and the live-merge sets of a sid neither kept nor alive (the feed
-            # and timeline merge every alive session, tab or not)
-            for sid in list(_ledger_memo):
-                if sid not in keep:
-                    _ledger_memo.pop(sid, None)
-                    _chat_memo_bump(_ledger_memo_stats, "evict")
-            for sid in list(_task_fold_memo):
-                if sid not in keep:
-                    _task_fold_memo.pop(sid, None)
-            for sid in list(_merge_sets_memo):
-                if sid not in keep and sid not in live_map:
-                    _merge_sets_memo.pop(sid, None)
-            _retry_parked_creates()   # lag-parked comment creates ride every pusher cycle (T106)
+                        _ledger_memo.pop(sid, None)
+                        _chat_memo_bump(_ledger_memo_stats, "evict")
+                for sid in list(_task_fold_memo):
+                    if sid not in keep:
+                        _task_fold_memo.pop(sid, None)
+                for sid in list(_merge_sets_memo):
+                    if sid not in keep and sid not in live_map:
+                        _merge_sets_memo.pop(sid, None)
+                _retry_parked_creates()   # lag-parked comment creates ride every pusher cycle (T106)
             # COMMENT THREADS: one {type:"comments"} frame per session that has ever had one (its
             # comments/ store exists — an ~free stat for everyone else). Each frame rides its OWN
             # per-sid dedup slot, never the chat delta baseline (the 2026-07-28 stranded-delta rule):
@@ -72917,7 +72959,9 @@ var SKEL=new URLSearchParams(location.search).get("skeleton")==="1";
 // shape, so the kernel serves the strip with the skeleton set, ONE full for the active tab and a status per other tab, and the page's
 // idle prefetch fills the rest, one needFull at a time. The slot below is emitted for the chat app (every other pane's shim carries the
 // false); it consumes the reload core's durable record (romp:reloadReason) so the record never outlives its load. A column and a skeleton
-// view leave the record alone (their dials are the shell's statement); a redial carries the diet through reconnect=1.
+// view leave the record alone (their dials are the shell's statement). Every dial of the page states it, a redial's too (2026-10-11): a
+// redial before the kernel answered the page's ready (a kernel restart mid-load, a phone losing signal) is not reconnect=1, and gated on
+// the first socket it asked for the whole board, the slow case the diet removes; a reconnect=1 redial is served as any redial.
 %s
 // This PAGE's instance id — minted once per load, never stored: every connect of this page carries it, so the
 // kernel retires this page's previous socket on a reconnect, and never another page's (a duplicated tab copies
@@ -73102,7 +73146,7 @@ function connect(){if(ws&&(ws.readyState===0||ws.readyState===1))return;   // on
 if(returnAt)returnRedialed=true;   // a dial inside a return window (whatever path led here) → the return-fresh row says so
 connT=Date.now();var proto=location.protocol==="https:"?"wss://":"ws://";
 var active="";try{var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";}catch(e){}
-ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")+(COL?"&col="+encodeURIComponent(COL):"")+((SKEL||(RESTART_DIET&&!everConnected))?"&skeleton=1":"")+(APP==="fleet"?"&provrows=1":""));   // skeleton=1: a later chat column, or the main pane's FIRST dial of every page load (RESTART_DIET), served as a view of the session its ?active= names (above). reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
+ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")+(COL?"&col="+encodeURIComponent(COL):"")+((SKEL||RESTART_DIET)?"&skeleton=1":"")+(APP==="fleet"?"&provrows=1":""));   // skeleton=1: a later chat column, or the main pane on every dial of every page load (RESTART_DIET, its redials included: 2026-10-11), served as a view of the session its ?active= names (above). reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
 // onopen: flush the queue; a RECONNECT (after a drop) also PROMPTS a reload — the fresh socket resyncs live via
 // the kernel's next push, and the banner offers a full reload for anything a live push doesn't cover. This
 // replaced the old silent location.reload() (the user 2026-07-05: don't foist a reload; let me click). Since T265
@@ -73266,7 +73310,7 @@ last.rev=d.rev;last.msg=m;return m;}
 window.__rompLocalSend=send;window.__rompApp=APP;
 window.__rompDiag=function(what,data){try{send({type:"clientDiag",surface:"reload-core",what:what,data:data});}catch(e){}};   // the reload core's breadcrumb door: this pane's socket, the serving kernel (the core itself names no send route)   // federation.ts (the multi-kernel manager) routes local sends + knows the app through these
 var SK="romp-vscode-state-%s"+(COL?":"+COL:"");   // persist webview state to localStorage so UI prefs survive a refresh — per chat column (split screen 2026-09-08)
-window.__rompDialTerms=function(){var a="";try{var st=JSON.parse(localStorage.getItem(SK)||"null");a=(st&&st.activeId)||"";}catch(e){}return{app:APP,iid:IID,active:a,col:COL,skeleton:((SKEL||RESTART_DIET)?1:0),provrows:(APP==="fleet"?1:0),proto:readyProto,delta:1};};   // the page's live dial terms for federation.ts to carry to each remote socket (2026-09-15): the terms the local /ws dial above states, read fresh so a remote redial reflects current state; the reader namespaces iid and strips active per host. The skeleton term is the page's diet itself, not gated on THIS socket's history as the local dial's is (2026-10-10): the local socket has opened before federation dials any remote, so the gated term never reached a remote and every linked kernel built its whole board for the page; a remote's redial states reconnect=1 beside it, which the kernel serves as any redial
+window.__rompDialTerms=function(){var a="";try{var st=JSON.parse(localStorage.getItem(SK)||"null");a=(st&&st.activeId)||"";}catch(e){}return{app:APP,iid:IID,active:a,col:COL,skeleton:((SKEL||RESTART_DIET)?1:0),provrows:(APP==="fleet"?1:0),proto:readyProto,delta:1};};   // the page's live dial terms for federation.ts to carry to each remote socket (2026-09-15): the terms the local /ws dial above states, read fresh so a remote redial reflects current state; the reader namespaces iid and strips active per host. The skeleton term is the page's diet itself, never gated on a socket's history (2026-10-10; the local dial since 2026-10-11): the local socket has opened before federation dials any remote, so a term gated on the local socket's first dial never reached a remote and every linked kernel built its whole board for the page; a remote's redial states reconnect=1 beside it, which the kernel serves as any redial
 window.acquireVsCodeApi=function(){return{postMessage:function(m){if(window.__rompFed){window.__rompFed.outbound(m);}else{send(m);}},
 getState:function(){try{return JSON.parse(localStorage.getItem(SK)||"null");}catch(e){return null;}},
 setState:function(s){try{localStorage.setItem(SK,JSON.stringify(s));}catch(e){}}};};connect();
@@ -73321,7 +73365,9 @@ returnDiag("return",row);});/*end-shim-core*/})();   // filed AFTER the redial s
 # federated dials carry this term, __rompDialTerms). The reload core's durable record is still consumed here, read or not, so it never
 # outlives the load it was written for. A column (col=N) and a skeleton view (skeleton=1) leave the record alone: their dials are the
 # shell's statement, not this page's. A page with no watched tab (no ?active=) dials the term all the same, and the kernel serves such
-# a local page whole (_resolve_reconnect's fail-safe).
+# a local page whole (_resolve_reconnect's fail-safe). Its redials carry the term too (2026-10-11): a redial before the kernel answered
+# the page's ready dials without reconnect=1, and the kernel served it as a page that wants everything; the handshake already serves
+# skeleton=1 beside reconnect=1 as a plain redial (a later column's redial carries both).
 _RESTART_DIET_JS = "var RESTART_DIET=false;if(!COL&&!SKEL){try{sessionStorage.removeItem('romp:reloadReason');}catch(e){}RESTART_DIET=true;}"
 
 

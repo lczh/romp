@@ -250,6 +250,125 @@ class ConnectPushWork(unittest.TestCase):
             SIDS.remove(new)
             NAME.pop(new, None)
 
+    def _new_tab(self, sid, name, size, at):
+        """A session created since the page's last push, with a transcript of `size` bytes, at strip position `at`."""
+        p = os.path.join(self.tmp, sid + ".jsonl")
+        with open(p, "w") as f:
+            f.write("x" * size)
+        self.paths[sid] = p
+        NAME[sid] = name
+        SIDS.insert(at, sid)
+        self.live[sid] = dict(self.live[WATCHED])
+        self.addCleanup(lambda: (SIDS.remove(sid), NAME.pop(sid, None)))
+
+    def test_06_the_asked_tab_builds_before_a_new_tab_that_rides_the_repair(self):
+        # a click on a skeleton (or the prefetch's ask) must not wait out the build of a session created since the page's last
+        # push: the new tab rides the repair (test 05), and on the strip it sits AHEAD of the asked one, with a large transcript
+        c = self._client(reconnect=True, dietSkeleton=True, active=WATCHED)
+        km._clients[:] = [c]
+        self._connect(c)
+        asked = list(c.get("skeletonOrder") or [])[-1]
+        new = "11111111-2222-3333-4444-777777777798"
+        self._new_tab(new, "billing", 200000, 1)      # second on the strip, ahead of every skeleton
+        self._reset_calls()
+        n0 = len(self._sessions_of(c))
+        self._need_full(c, asked)
+        self.assertEqual(self.calls["build"], [asked, new], "the asked tab first, the new one behind it: %r" % self.calls["build"])
+        self.assertEqual([f["id"] for f in self._sessions_of(c)[n0:]], [asked, new], "…and its frame leaves first")
+
+    def test_07_a_repair_leaves_the_cycles_comment_thread_keep_set_alone(self):
+        # every tab has one comment thread; a cycle's comments loop builds them all (_thread_events adds each to the cycle's keep
+        # set), and the next cycle keeps their fold prefixes. A repair builds the asked tab's thread alone: when it swapped the
+        # keep set, the next cycle kept that one thread and evicted every other thread's prefix (rebuilt cold), per repair
+        thread = {sid: "22222222-3333-4444-5555-6666666666%02d" % i for i, sid in enumerate(SIDS)}
+
+        def frame(sid, live_map):
+            km._thread_fold_keep[1].add(thread[sid])  # what _thread_events does for each thread the frame builds
+            return None
+        km._comments_frame = frame
+        km._thread_fold_keep[0], km._thread_fold_keep[1] = set(), set()
+        self.addCleanup(lambda: (km._thread_fold_keep.__setitem__(0, set()), km._thread_fold_keep.__setitem__(1, set())))
+        c = self._client(reconnect=True, dietSkeleton=True, active=WATCHED)
+        km._clients[:] = [c]
+        self._connect(c)
+        _on_lane(lambda: km._push([c]))               # a pusher cycle: every thread built, the keep set full
+        with km._chat_fold_lock:
+            for t in thread.values():
+                km._chat_fold[t] = {"synthetic": t}   # each thread's fold prefix, as its build left it
+        self.addCleanup(lambda: [km._chat_fold.pop(t, None) for t in thread.values()])
+        for sid in list(c.get("skeletonOrder") or [])[:3]:   # the page's prefetch: a few repairs
+            self._need_full(c, sid)
+        _on_lane(lambda: km._push([c]))               # the next pusher cycle
+        with km._chat_fold_lock:
+            kept = sorted(t for t in thread.values() if t in km._chat_fold)
+        self.assertEqual(kept, sorted(thread.values()), "every thread the last cycle built keeps its fold prefix")
+
+    def test_08_repairs_never_run_the_parked_creates_retry_and_a_pusher_cycle_does(self):
+        # the retry's budget counts the transcript's writes (_PARK_MAX_TRIES), and it belongs to the cycles the park waits
+        # through: a burst of the prefetch's repairs (37 on the measured board) used to run it once each
+        ran = []
+        saved = km._retry_parked_creates
+        km._retry_parked_creates = lambda: ran.append(1)
+        self.addCleanup(setattr, km, "_retry_parked_creates", saved)
+        c = self._client(reconnect=True, dietSkeleton=True, active=WATCHED)
+        km._clients[:] = [c]
+        self._connect(c)
+        del ran[:]
+        for sid in list(c.get("skeletonOrder") or []):
+            self._need_full(c, sid)
+        self.assertEqual(ran, [], "no repair ran the retry")
+        _on_lane(lambda: km._push([c]))
+        self.assertEqual(ran, [1], "the pusher's cycle does, once")
+
+    def test_09_a_relay_client_with_no_watched_tab_is_dieted_whole_and_its_prefetch_fills_the_board(self):
+        # the hub pane's dial to a remote none of whose tabs it watches: skeleton=1, no active. The remote skeletons EVERY
+        # transcript-bearing tab (_resolve_reconnect's relay rule) and builds none for the connect push; the page's prefetch then
+        # fills the board one repair, one build, one frame at a time, ending with the board a page served whole receives
+        c = self._client(kind="relay", reconnect=True, dietSkeleton=True)
+        km._clients[:] = [c]
+        self._connect(c)
+        self.assertEqual(self.calls["build"], [], "nothing built for the connect push: %r" % self.calls["build"])
+        self.assertEqual(self._sessions_of(c), [], "no full frame")
+        skel = list(c.get("skeletonOrder") or [])
+        self.assertEqual(set(skel), set(SIDS), "every tab a skeleton")
+        statuses = {f["id"] for f in c["_frames"] if f["type"] == "status"}
+        self.assertEqual(statuses, set(SIDS), "a status per skeleton tab, the diet's contract")
+        for sid in skel:
+            self._reset_calls()
+            n0 = len(self._sessions_of(c))
+            self._need_full(c, sid)
+            self.assertEqual(self.calls["build"], [sid], "one build per repair: %r" % self.calls["build"])
+            self.assertEqual([f["id"] for f in self._sessions_of(c)[n0:]], [sid])
+        self.assertEqual(c.get("skeleton") or set(), set(), "every skeleton released")
+        whole = self._client(active=WATCHED)
+        km._clients[:] = [c, whole]
+        self._connect(whole)
+        self.assertEqual({f["id"] for f in self._sessions_of(c)}, {f["id"] for f in self._sessions_of(whole)})
+
+    def test_10_an_older_kernel_answering_needfull_with_the_whole_push_hands_the_page_the_same_frames(self):
+        # a linked kernel on code from before the repair push answers a needFull with the whole board push (the arm was
+        # _client_reset_chat_sid then _push_one with no `only`). The page's prefetch waits on the asked tab's full alone
+        # (render.ts awaitingFull), so what matters is that the old answer hands it the same session frames and leaves the same
+        # skeleton set: it does, at the whole board's cost
+        def old_arm(c, sid):
+            km._client_reset_chat_sid(c, sid)
+            km.Handler._push_one(self.handler, c)
+
+        def new_arm(c, sid):
+            self.handler._dispatch_ws({"type": "needFull", "id": sid, "why": "prefetch"}, c)
+        seen = {}
+        for name, arm in (("new", new_arm), ("old", old_arm)):
+            km._built_chat.clear(); km._prev_chat_events.clear(); km._prev_chat_ledger.clear()
+            c = self._client(reconnect=True, dietSkeleton=True, active=WATCHED)
+            km._clients[:] = [c]
+            self._connect(c)
+            skel = list(c.get("skeletonOrder") or [])
+            n0 = len(self._sessions_of(c))
+            _on_lane(lambda: arm(c, skel[0]))
+            seen[name] = ([f["id"] for f in self._sessions_of(c)[n0:]], sorted(c.get("skeleton") or ()), skel[0])
+        self.assertEqual(seen["old"], seen["new"], "the same frames and the same skeleton set: %r" % seen)
+        self.assertEqual(seen["new"][0], [seen["new"][2]], "one full, the asked tab's")
+
 
 class FirstDialDiet(unittest.TestCase):
     """The client half (2026-10-10): the main chat pane dials the first socket of EVERY page load as a skeleton client, and the
@@ -259,8 +378,10 @@ class FirstDialDiet(unittest.TestCase):
         chat = km._shim("chat")
         self.assertIn("var RESTART_DIET=false;if(!COL&&!SKEL){try{sessionStorage.removeItem('romp:reloadReason');}catch(e){}RESTART_DIET=true;}",
                       chat, "a main chat pane diets on every load, and consumes the reload record so it never outlives the load")
-        self.assertIn('((SKEL||(RESTART_DIET&&!everConnected))?"&skeleton=1":"")', chat,
-                      "the local dial states it on the page's first socket; a redial carries the diet through reconnect=1")
+        self.assertIn('((SKEL||RESTART_DIET)?"&skeleton=1":"")', chat,
+                      "the local dial states it on every socket of the load (2026-10-11): a redial before the ready was answered "
+                      "is not reconnect=1, and gated on the first socket it asked for the whole board")
+        self.assertNotIn("RESTART_DIET&&!everConnected", chat, "the term is not gated on the local socket's history")
         for other in ("feed", "fleet", "timeline", "files", "settings"):
             self.assertIn("var RESTART_DIET=false;", km._shim(other), other)
             self.assertNotIn("RESTART_DIET=true", km._shim(other), other)

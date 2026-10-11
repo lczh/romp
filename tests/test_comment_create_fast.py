@@ -1915,7 +1915,8 @@ class CreatesAfterAClear(CreateDoor):
                     self.assertEqual(len(km._parked_creates), 1, "parked for the pusher")
                     for n in range(3):
                         km._retry_parked_creates()
-                        self.assertEqual([pk["tries"] for pk in km._parked_creates], [n + 1], "still lagging, still parked")
+                        self.assertEqual([pk["tries"] for pk in km._parked_creates], [0],
+                                         "still lagging, still parked, and no try spent: the leaf was not written (2026-10-11)")
                     self.assertEqual(len(over_first), 0, "no graph over the first transcript for a target it lacks (%d)"
                                      % len(over_first))
                     self.assertLessEqual(read_of(first), os.path.getsize(first), "…which is read alone, once (%d bytes of %d)"
