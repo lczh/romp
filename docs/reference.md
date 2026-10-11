@@ -3668,7 +3668,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `stacks`: every live thread's stack, keyed `"<ident> <kind>"`. The kind
   is the thread's name up to the naming convention's colon (`sdk` and
   `sdk-intr`, `sdk-fbcause` (a session reading a standing fallback's cause off its transcript at an attach) for a session's threads, `codex` for a Codex session's worker,
-  `end-host` for a session's end hook, `port-up` for a dial's port watch, `peer` for a postal peer loop,
+  `end-host` for a session's end hook, `port-up` for a dial's port watch, `peer` for a postal peer loop, `push-pull` for a linked machine's notification puller,
   `romp-refused-mark` for the refused-echo mark a cut-off boot re-delivery writes aside), the
   target function for a thread the code left unnamed (`_ask_poll`,
   `_parent_watch`, `_update_check_loop`, `_tunnel_supervisor`,
@@ -7663,6 +7663,22 @@ cards already waiting on you or already finished when it comes back stay
 quiet. A card that stops needing you and then needs you again is announced
 once, not at every turn, unless you acted on the card in between (answered
 it, resolved it, crossed it off) or it finished in the meantime.
+
+A phone set up on one machine also hears every linked machine you marked
+trusted, the same machines whose sessions that machine's dashboard shows. Its
+kernel asks each linked kernel for its notifications over the link the dashboard
+already uses (`GET /push/events`, a long-poll), so a session on a laptop you
+attached from the always-on box buzzes the phone set up at the box, under the
+box's switches. On the dashboard, a linked machine's session and card bells
+show what reaches the devices set up on the machine you are looking at: a bell
+you set stays as you set it, on that machine, and one you never touched follows
+this machine's main switch. A linked machine running an older romp keeps its own
+switches, and its bells say so when you hover them. If the machine the phone is set up on
+restarts, what the linked machines raised meanwhile arrives when it is back,
+unless it is no longer current: the card was answered or moved on, or the
+session has finished another turn since. If a linked machine's kernel restarts,
+whatever it raised just before is skipped, and the log of the machine the phone
+is set up on says so and how many.
 
 Tapping a notification brings Romp forward on the session it was about. On an
 iPhone with the app already open in the background, the switch happens as the

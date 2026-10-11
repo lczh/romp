@@ -45,13 +45,13 @@ test("the menu lists all three toggles with icons, state words, and plain-langua
   assert.match(SRC, /system notification when its work blocks on you or completes/);
   // polarity is encoded per toggle: two off-flags, one on-flag
   assert.match(SRC, /enabled: \(s\) => !s\.hideFromFeed, value: \(enable\) => !enable,/);
-  assert.match(SRC, /enabled: \(s\) => !!s\.notify, value: \(enable\) => enable,/);
+  assert.match(SRC, /enabled: \(s\) => laneBell\(s\)\.on, value: \(enable\) => enable,/);   // a local lane's own notify; a linked kernel's resolved (bell-follow.ts)
 });
 
 test("menu rows toggle with the SAME optimistic + sticky + reconcile-before-draw treatment as the old icons", () => {
   assert.match(SRC, /const next = t\.value\(!on\);/);
   assert.match(SRC, /\(this\._pendingFlags\[s\.id\] = this\._pendingFlags\[s\.id\] \|\| \{\}\)\[t\.flag\] = next;/);
-  assert.match(SRC, /this\._setSessionFlag\(s, t\.flag, next\);\s*\n\s*this\._reconcilePendingFlags\(\);\s*\n\s*this\.draw\(\);/);
+  assert.match(SRC, /this\._setSessionFlag\(s, t\.flag, next, asGiven\);\s*\n\s*this\._reconcilePendingFlags\(\);\s*\n\s*this\.draw\(\);/);
   // the panel STAYS OPEN and repaints in place — it's a settings panel, not a command
   assert.match(SRC, /this\.draw\(\);\s*\n\s*build\(\);/);
   // inside clicks must not reach the document-level closer that dismisses the menu
@@ -73,7 +73,7 @@ test("the icon drawers survive (they render inside the menu now): ON = romp blue
 });
 
 test("setSessionFlag posts via the web host hook, and through the kernel's POST /flag in Obsidian", () => {
-  assert.match(SRC, /_setSessionFlag\(s, flag, value\)/);
+  assert.match(SRC, /_setSessionFlag\(s, flag, value, asGiven\)/);   // asGiven: a linked kernel's bell (bell-follow.ts)
   assert.match(SRC, /window\.__rompTimelineSetFlag === 'function'/);
   assert.match(SRC, /window\.__rompTimelineSetFlag\(s\.id, flag, value\)/);
   assert.match(SRC, /this\._kernelPost\('\/flag', \{ id: s\.id, flag, value: !!value \}\)/, "Obsidian: the kernel's setter, through its route");
@@ -88,7 +88,7 @@ test("the Obsidian writer is the kernel's route, never a file of its own (2026-0
   // lane gear already renders from. Kernel down → the gesture is refused and says so, never written to a
   // file the kernel cannot check. The writer is RUN from tests/test_kernel_session_flags.py
   // (TimelineFlagWriterPostsThroughTheKernel) and ui/timeline-kernel-post.test.ts.
-  const w = SRC.slice(SRC.indexOf("_setSessionFlag(s, flag, value) {"), SRC.indexOf("_kernelHost() {"));
+  const w = SRC.slice(SRC.indexOf("_setSessionFlag(s, flag, value, asGiven) {"), SRC.indexOf("_kernelHost() {"));
   assert.ok(w.length > 0 && w.length < 4000, "the writer's slice");
   assert.match(w, /if \(!this\._kernelHost\(\)\) return;/, "Electron-or-nothing, through the one shared guard");
   assert.match(w, /this\._kernelPost\('\/flag'/);
@@ -104,7 +104,8 @@ test("the Obsidian writer is the kernel's route, never a file of its own (2026-0
 test("the sticky-flag machinery survives: pendingFlags reconcile on every update (no flicker-back)", () => {
   assert.match(SRC, /this\._pendingFlags = \{\};/);
   assert.match(SRC, /this\.data = data;\s*\n(?:[^\n]*\n){0,4}\s*this\._reconcilePendingFlags\(\);/);
-  assert.match(SRC, /_reconcilePendingFlags\(\) \{[\s\S]*?if \(s\[flag\] === p\[flag\]\) delete p\[flag\];[\s\S]*?else s\[flag\] = p\[flag\];/);
+  // a linked kernel's bell confirms on what it paints and holds by its override (laneBell); every other flag as it always did
+  assert.match(SRC, /_reconcilePendingFlags\(\) \{[\s\S]*?const cur = remoteBell \? laneBell\(s\)\.on : s\[flag\];\s*\n\s*if \(cur === p\[flag\]\) delete p\[flag\];[\s\S]*?else \{ s\[flag\] = p\[flag\];/);
 });
 
 test("every timeline dot's white border is thin (0.75px) — romp + user dots alike (the user 2026-06-23)", () => {
@@ -122,5 +123,5 @@ test("the lane toggle hands the kernel a JSON boolean", () => {
   // reading kernel.py as text from here (review find, 2026-09-08: a cross-lane source pin fails the
   // extension build on a kernel edit that keeps the behaviour).
   const BOOT = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "timeline-boot.ts"), "utf8");
-  assert.match(BOOT, /__rompTimelineSetFlag: \(id: string, flag: string, value: unknown\) => post\(\{ type: "setSessionFlag", id, flag, value: !!value \}\)/);
+  assert.match(BOOT, /__rompTimelineSetFlag: \(id: string, flag: string, value: unknown, asGiven\?: unknown\) =>\s*\n\s*post\(asGiven === true \? \{ type: "setSessionFlag", id, flag, value: !!value, asGiven: true \} : \{ type: "setSessionFlag", id, flag, value: !!value \}\)/);
 });

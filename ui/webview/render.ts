@@ -113,6 +113,7 @@ import { pastedFilePath } from "./paste-path";
 import { insertAtCaret } from "./composer-insert";
 import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDialing, hostDownNote } from "./host-prefix";
 import { sessionLabelNodes } from "./host-prefix";   // the viewer's message bar names its session the strip's way (2026-09-30)
+import { bellState, bellClickFields, legacyBellNote, setHubSwitches, hubMaster } from "./bell-follow";   // a linked kernel's bells follow this kernel's switches
 import { menuCard, addMenuItem, addMenuSep, showMenuCard, openContextMenu, closeContextMenu } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy)
 import { focusAfterDismiss, emptyStateParts } from "./pane-focus";   // where focus goes when a tab leaves, and the empty body's line (T357)
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
@@ -445,7 +446,7 @@ interface BgTasks { count: number; tasks: BgTask[]; }
 // kernel ships only the last WIRE_TAIL events (headFrom > 0) to keep startup light; older history streams in
 // on scroll-back (loadOlder → chatHead prepends, lowering headFrom). headFrom 0 = the whole transcript is
 // resident. chatTail's `from` is GLOBAL and mapped through headFrom.
-interface Session { id: string; name: string; color: Color | null; events: ChatEvent[]; status: Status; firstSeen?: number; cwd?: string; gitBranch?: string; workTree?: { dir: string; branch: string } | null; githubRepo?: string | null; headFrom?: number; headTotal?: number | null; proto?: number; headKnown?: boolean; firstUuid?: string | null; lastUuid?: string | null; regions?: Region[]; pageTurns?: number; tailLo?: number | null; bgTasks?: BgTasks; hideFromFeed?: boolean; postalServiceOff?: boolean; mailOffWhy?: string; notify?: boolean; branch?: { fromSid: string; fromName: string; cut: string; t: number } | null; branches?: { sid: string; name: string; cut: string; t: number }[] | null; sub?: SubInfo;
+interface Session { id: string; name: string; color: Color | null; events: ChatEvent[]; status: Status; firstSeen?: number; cwd?: string; gitBranch?: string; workTree?: { dir: string; branch: string } | null; githubRepo?: string | null; headFrom?: number; headTotal?: number | null; proto?: number; headKnown?: boolean; firstUuid?: string | null; lastUuid?: string | null; regions?: Region[]; pageTurns?: number; tailLo?: number | null; bgTasks?: BgTasks; hideFromFeed?: boolean; postalServiceOff?: boolean; mailOffWhy?: string; notify?: boolean; notifyRaw?: boolean | null; branch?: { fromSid: string; fromName: string; cut: string; t: number } | null; branches?: { sid: string; name: string; cut: string; t: number }[] | null; sub?: SubInfo;
                     wm?: FrameWm; }   // the watermark of the newest frame applied (kernel.py _chat_wm; frame-guard.ts): what the build that produced the resident events had read
 // A SUBAGENT VIEWER pseudo-session (plans/subagent-transcripts.md): a read-only tab whose events are one
 // agent's own transcript, fed by {type:"subagent"} frames. Client-only — the kernel never lists it in
@@ -8051,7 +8052,29 @@ function setSessionFlag(id: string, flag: "hideFromFeed" | "postalServiceOff" | 
   const s = sessions.get(id);
   if (s) s[flag] = value;   // both flags are declared optional booleans on Session — no cast needed
   notePendingFlag(pendingFlags, id, flag, value);   // a frame built before the kernel applied this cannot flip the row back (flag-pending.ts)
-  if (vscodeApi) vscodeApi.postMessage({ type: "setSessionFlag", id, flag, value });
+  // a LINKED kernel's bell (bell-follow.ts): sent as given, so that kernel stores it rather than judging it against its own
+  // master, and the copy carries the override it now holds (legacy is read off notifyRaw's presence, untouched above)
+  const extra = flag === "notify" ? bellClickFields(id, s) : {};
+  if (s && "asGiven" in extra) s.notifyRaw = value;
+  if (vscodeApi) vscodeApi.postMessage({ type: "setSessionFlag", id, flag, value, ...extra });
+}
+// THIS kernel's master moved, or the ready's first word on it (only the local kernel's frame reaches here; federation drops a
+// linked kernel's): a linked session with no override of its own follows it (bell-follow.ts). The copy's `notify` is
+// re-resolved, except under a click's pending guard, whose own echo settles it.
+function onNotifySwitches(m: any): void {
+  if (!setHubSwitches(m)) return;
+  for (const [id, s] of sessions) {
+    if (!hostOf(id) || s.notifyRaw !== null || pendingFlags.get(id)?.has("notify")) continue;
+    s.notify = hubMaster() === true;
+  }
+}
+// A frame's view flags with a LINKED kernel's bell resolved against THIS kernel's master (bell-follow.ts): `notify` on the
+// copy is the bell as the devices subscribed here hear it, so the tab menu, the bell command and the pending guard read
+// it unchanged. A local session, or a linked kernel too old to send its override, keeps the frame's own value.
+function frameBell(id: string, msg: any, raw: boolean | null | undefined): any {
+  if (!msg || !("notify" in msg) || !hostOf(id)) return msg;
+  const st = bellState(id, { notify: msg.notify, notifyRaw: raw });
+  return st.legacy ? msg : { ...msg, notify: st.on };
 }
 // Override a session's identity color from the tab menu's swatches (the user 2026-06-29). Optimistically paint
 // the new color now (session + placeholder copies), then post to the kernel, which persists it to the names
@@ -8517,10 +8540,11 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
   // inverted polarity vs the two above: `notify` true is the ENABLED state, so the icon slashes on !onBell.
   // the row's sub-line names the command's chord when one is bound (the user 2026-09-11: where is the key revealed?)
   const bellKey = keyHint("session.notify");
+  const bellLegacy = !!s && bellState(id, s).legacy;   // an older linked kernel (bell-follow.ts)
   toggle("bell", !onBell,
     onBell ? "Stop notifying" : "Notify me",
     (onBell ? "no more system notifications for this session" : "system notification when its work blocks on you or completes")
-      + (bellKey ? " · " + bellKey : ""),
+      + (bellLegacy ? " · " + legacyBellNote(id) : "") + (bellKey ? " · " + bellKey : ""),
     () => setSessionFlag(id, "notify", !onBell));
   // (The hide-session mechanism is fully RETIRED, the user 2026-08-24 — the tag system covers
   // backgrounding; the kernel migrated existing hidden entries into the "archived" tag. revealIn
@@ -20662,7 +20686,8 @@ function upsert(msg: any) {
     hideFromFeed: ("hideFromFeed" in msg) ? !!msg.hideFromFeed : (prev ? prev.hideFromFeed : undefined),
     postalServiceOff: ("postalServiceOff" in msg) ? !!msg.postalServiceOff : (prev ? prev.postalServiceOff : undefined),
     mailOffWhy: ("mailOffWhy" in msg) ? String(msg.mailOffWhy || "") : (prev ? prev.mailOffWhy : undefined),   // why the mail is off (T356): thread, isolation, an unreadable record, the settings file unreadable (flags)
-    notify: ("notify" in msg) ? !!msg.notify : (prev ? prev.notify : undefined),
+    notify: ("notify" in msg) ? !!frameBell(msg.id, msg, ("notifyRaw" in msg) ? (msg.notifyRaw ?? null) : (prev ? prev.notifyRaw : undefined)).notify : (prev ? prev.notify : undefined),
+    notifyRaw: ("notifyRaw" in msg) ? (msg.notifyRaw ?? null) : (prev ? prev.notifyRaw : undefined),   // the override alone (bell-follow.ts); undefined = a kernel that never sent one
     wm: (msg.wm && typeof msg.wm === "object") ? (msg.wm as FrameWm) : (prev ? prev.wm : undefined),   // the newest frame's watermark (frame-guard.ts); a kept-resident refusal keeps the held one
   };
   sessions.set(msg.id, s);
@@ -20670,7 +20695,7 @@ function upsert(msg: any) {
   // watches transcript+states only) — the freshest tabOrder meta wins over it, pending guard included
   const tm = tabMeta.get(msg.id);
   if (tm) applyMetaToSession(s, tm, pendingTabMeta.get(msg.id));
-  applyFrameFlags(s, msg, pendingFlags, msg.id);   // the flags the frame carries, under the click's pending guard: a frame built before a click cannot revert them (flag-pending.ts)
+  applyFrameFlags(s, frameBell(msg.id, msg, s.notifyRaw), pendingFlags, msg.id);   // the flags the frame carries, under the click's pending guard: a frame built before a click cannot revert them (flag-pending.ts)
   reconcileRewind(s);       // pending-rewind overlay + the editable-bubble set, from the fresh payload
   reconcileHeldCopies(s);   // a queued copy the kernel no longer lists but has not landed keeps its slot (T262i)
   // A /clear ends its optimistic bubble at the CLEAR BOUNDARY, detected here (ahead of the reconcile, so it
@@ -21105,7 +21130,8 @@ function chatTail(msg: any) {
   if (msg.status) s.status = msg.status;
   // the per-session view flags ride the tail beside the status (2026-09-11): a bell flipped in another column or
   // browser reaches this caught-up copy on the flip, not on the next full frame
-  applyFrameFlags(s, msg, pendingFlags, msg.id);   // under the click's pending guard (flag-pending.ts): a tail built before a click cannot flip its row back
+  applyFrameFlags(s, frameBell(msg.id, msg, ("notifyRaw" in msg) ? (msg.notifyRaw ?? null) : s.notifyRaw), pendingFlags, msg.id);   // under the click's pending guard (flag-pending.ts): a tail built before a click cannot flip its row back
+  if ("notifyRaw" in msg) s.notifyRaw = msg.notifyRaw ?? null;   // the bell's override alone rides the tail beside it (bell-follow.ts)
   // the background box's task set rides the tail whenever it moved (kernel _chat_bgt_digest, 2026-10-08): until then only a
   // full frame carried it, so a caught-up page kept the set it was last handed whole, and three agents that had finished
   // half an hour earlier still wore the running dot and Stop under a header that counted the one still working
@@ -22421,6 +22447,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   // what the local kernel can do for this page (every `ready`, reconnects included); an op it does not know
   else if (m.type === "caps") onKernelCaps(m);
   else if (m.type === "unknownOp") onUnknownOp(m);
+  else if (m.type === "notifySwitches") onNotifySwitches(m);   // this kernel's switches: a linked kernel's bells follow them (bell-follow.ts)
   // The kernel's pick memory moved (a pin, a Latest un-pin, a refused pin dropped) or its catalog grew:
   // re-read /models so the family rows send the fresh default — the models-list twin of the palette frame.
   else if (m.type === "models") loadModelChoices();

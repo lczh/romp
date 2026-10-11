@@ -61,8 +61,10 @@ test("render.ts: the click notes its expectation, both frame roads apply the fla
   assert.match(RENDER, /import \{ notePendingFlag, dropPendingFlag, applyFrameFlags, type PendingFlags, type SessionFlag \} from "\.\/flag-pending";/);
   assert.match(RENDER, /const pendingFlags: PendingFlags = new Map\(\);[^\n]*\nfunction setSessionFlag/, "the store, declared beside its writer");
   assert.match(RENDER, /function setSessionFlag\(id: string, flag: "hideFromFeed" \| "postalServiceOff" \| "notify", value: boolean\) \{\n\s*const s = sessions\.get\(id\);\n\s*if \(s\) s\[flag\] = value;[^\n]*\n\s*notePendingFlag\(pendingFlags, id, flag, value\);/, "the click");
-  assert.match(RENDER, /if \(tm\) applyMetaToSession\(s, tm, pendingTabMeta\.get\(msg\.id\)\);\n\s*applyFrameFlags\(s, msg, pendingFlags, msg\.id\);/, "the full session frame, once the copy is built from it and the pushed meta re-applied");
-  assert.match(RENDER, /if \(msg\.status\) s\.status = msg\.status;\n[^\n]*\n[^\n]*\n\s*applyFrameFlags\(s, msg, pendingFlags, msg\.id\);/, "the chatTail (both wires carry the flags)");
+  // both roads hand the guard the frame with a LINKED kernel's bell resolved against this kernel's master (frameBell,
+  // bell-follow.ts); a local session's frame passes through it unchanged
+  assert.match(RENDER, /if \(tm\) applyMetaToSession\(s, tm, pendingTabMeta\.get\(msg\.id\)\);\n\s*applyFrameFlags\(s, frameBell\(msg\.id, msg, s\.notifyRaw\), pendingFlags, msg\.id\);/, "the full session frame, once the copy is built from it and the pushed meta re-applied");
+  assert.match(RENDER, /if \(msg\.status\) s\.status = msg\.status;\n[^\n]*\n[^\n]*\n\s*applyFrameFlags\(s, frameBell\(msg\.id, msg, [^\n]*\), pendingFlags, msg\.id\);/, "the chatTail (both wires carry the flags)");
   assert.doesNotMatch(RENDER, /for \(const f of \["notify", "hideFromFeed", "postalServiceOff"\] as const\)/, "no unguarded copy of the tail's flags remains");
   assert.match(RENDER, /if \(m\.gesture === "flag" && typeof m\.sid === "string" && typeof m\.flag === "string" && m\.sid && m\.flag\) \{[\s\S]*?dropPendingFlag\(pendingFlags, m\.sid, m\.flag as SessionFlag\);/, "the refusal ends the expectation on THIS event");
 });

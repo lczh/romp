@@ -140,7 +140,8 @@ test("feed: the card bell's latch drops, the card repaints, the reason toasts (s
   // repaint): cardNotifyOn — pendingNotify over the payload's notify — is the gate env's notifyOn input, and
   // the inputs key folds it in (feed-card-gate.ts cardInputsKey), so the released latch changes the key
   assert.ok(arm.indexOf("pendingNotify.delete") < arm.indexOf("render();"));
-  assert.match(FEED, /^function cardNotifyOn\(it: \{ itemId: string; notify\?: boolean \| null \}\): boolean \{\n\s+return pendingNotify\.has\(it\.itemId\) \? !!pendingNotify\.get\(it\.itemId\) : !!it\.notify;/m);
+  // (the payload's bell as it paints: a linked kernel's resolved against this kernel's master, bell-follow.ts)
+  assert.match(FEED, /^function cardNotifyOn\(it: \{ itemId: string; sid\?: string; notify\?: boolean \| null; notifyRaw\?: boolean \| null \}\): boolean \{\n\s+return pendingNotify\.has\(it\.itemId\) \? !!pendingNotify\.get\(it\.itemId\) : bellState\(String\(it\.sid \|\| ""\), it\)\.on;/m);
   assert.match(FEED, /notifyOn: cardNotifyOn,/, "the gate env reads the bell through the latch");
   assert.match(GATE, /env\.notifyOn\(it\) \? "n" : ""/, "the key carries the bell's effective state");
   // and the page still has NO warn handler: undelivered-err.test.ts pins that, and it stays true on purpose

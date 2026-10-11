@@ -1,0 +1,689 @@
+#!/usr/bin/env python3
+"""Federated push, the pull direction (plans/federated-push.md, 2026-10-10), in process.
+
+Push was the one cross-machine flow the ORIGIN started (POST /push/relay toward rows in its own table), and with
+ssh-attach only the attacher holds a row, so an attached machine's events never reached the phone subscribed at the
+attacher; the origin also gated on its OWN switches. Now the kernel holding a row PULLS: GET /push/events on the peer,
+over the row's port and token. What these pin, by layer (the two-kernel run is tests/test_push_pull_kernels.py):
+
+  * the origin's ring — both detectors (the card diff, the turn tick) file every detected event as a candidate whatever
+    the origin's master and turn switch say; an explicit card or session mute on the origin drops it, an explicit arm
+    rides as bell "on", no override as "default";
+  * the latent claim bug — the origin's own turn push claiming its one buzz no longer swallows the needs-you that
+    follows: the card is still a candidate, and the hub's gate decides;
+  * the serve — the long-poll returns the moment an event lands; a missing, foreign or overflowed cursor resets to the
+    newest with its reason and count; staleness is re-validated at serve time (a card still in its column and not acted
+    on, a turn end still the latest, no mute since); the route is token-gated;
+  * the hub's gate — its master and turn switch decide, a "default" bell resolves to its master, the sid wears the HUB's
+    name for the row, untrusted drops, and the one buzz per turn end is the hub's, keyed on the prefixed sid;
+  * the puller — a reset is one loud line; the cursor lands on disk after the gate and survives a restart; an event
+    passes the gate once by (row, boot, seq); a refusal is said once;
+  * the transition — the legacy forward skips peers that pull, a relay from a kernel this one pulls is ignored, the
+    /version poll lifts the capability, and an event offered both ways reaches the devices once;
+  * bells follow the dashboard — a linked dashboard's click is stored as given (a mute recorded whatever the origin's
+    master says), a local click keeps delete-if-default, the payloads carry the raw override, the switches frame reaches
+    every ready pane, and the hub's gate follows the rules its own sessions follow.
+
+Synthetic only: invented hosts (TESTHOST, boxa, boxb), private placeholder sids, invented text.
+"""
+import contextlib
+import io
+import json
+import os
+import tempfile
+import threading
+import time
+import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest import mock
+
+from romp_load import load_source
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+BIN = os.path.join(os.path.dirname(HERE), "bin")
+
+# Hermetic state BEFORE the loads: they resolve their state root at import time.
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+os.environ.pop("ROMP_STATE_DIR", None)
+load_source("romp_event_model", os.path.join(BIN, "romp-event-model"))
+jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
+_STATE_TD = tempfile.TemporaryDirectory()
+jd._rebind_state(Path(_STATE_TD.name))
+os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
+os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
+km = load_source("romp_kernel_push_pull", os.path.join(BIN, "romp-kernel"))
+
+WEB = "efefefef-7171-4c4c-8e8e-00000000bb01"   # private synthetic sids: no other module's journal reaches them
+API = "efefefef-7171-4c4c-8e8e-00000000bb02"
+ROW = "TESTHOST"
+
+
+def _card(iid, sid, col, text="Pick the parser's error format", name="web"):
+    return {"itemId": iid, "sid": sid, "name": name, "column": col, "text": text}
+
+
+def _feed(*cards, sessions=None, now=None):
+    d = {"type": "feed", "asks": [dict(c) for c in cards]}
+    if sessions is not None:
+        d["sessions"] = [{"sid": s, "name": "s"} for s in sessions]
+    if now is not None:
+        d["now"] = now
+    return d
+
+
+def _stamp_stop(sid, t, opener="human"):
+    d = jd.STATE / "sdk"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / (sid + ".json")).write_text(json.dumps({"lastStopAt": int(t), "lastTurnOpener": opener}))
+
+
+def _transcript(sid, text):
+    p = jd.STATE / ("transcript-%s.jsonl" % sid[-4:])
+    p.write_text(json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n"
+                 + json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}) + "\n")
+    return str(p)
+
+
+def _serve(method, path, body=None, token=True):
+    """Drive the REAL dispatcher over a fake socket: (status, body bytes)."""
+    raw = json.dumps(body).encode() if body is not None else b""
+    h = km.Handler.__new__(km.Handler)
+    h.client_address = ("127.0.0.1", 0)
+    h.headers = {"Content-Length": str(len(raw))}
+    if token:
+        h.headers["X-Romp-Token"] = km.TOKEN
+    h.path = path
+    h.command = method
+    h.request_version = "HTTP/1.1"
+    h.wfile = io.BytesIO()
+    h.rfile = io.BytesIO(raw)
+    h.close_connection = True
+    got = {}
+    h.send_response = lambda code, *a: got.__setitem__("status", code)
+    h.send_header = lambda k, v: None
+    h.end_headers = lambda: None
+    h.log_message = lambda *a: None
+    (h.do_GET if method == "GET" else h.do_POST)()
+    return got.get("status"), h.wfile.getvalue()
+
+
+def _row(host=ROW, trust="trusted", push_pull=1, **kw):
+    r = {"host": host, "kernel_port": 1, "local_port": 4242, "token": "tok-peer", "proc": None, "status": "up",
+         "trust": trust, "push_pull": push_pull}
+    r.update(kw)
+    with km._remotes_lock:
+        km._remotes[host] = r
+    return r
+
+
+class _Base(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.saved = jd.STATE
+        jd._rebind_state(Path(self.td.name))
+        km._notify_cards_cache.clear()
+        km._flags_cache.clear()
+        km._NOTIFY_PREV[0] = None
+        km._TURN_PREV.clear()
+        km._PUSH_BUZZED.clear()
+        with km._push_ring_cond:
+            km._PUSH_RING.clear()
+            km._PUSH_RING_SEQ[0] = 0
+        km._PUSH_PULL_SEEN.clear()
+        km._PUSH_PULL_CURSORS[0] = None
+        km._PUSH_PULL_SAID.clear()
+        km._PUSH_RELAY_IGNORED_SAID.clear()
+        with km._remotes_lock:
+            km._remotes.clear()
+        with km._known_lock:
+            km._known.clear()
+
+    def tearDown(self):
+        with km._remotes_lock:
+            km._remotes.clear()
+        with km._known_lock:
+            km._known.clear()
+        km._NOTIFY_PREV[0] = None
+        jd._rebind_state(self.saved)
+        self.td.cleanup()
+
+    def ring(self):
+        with km._push_ring_cond:
+            return [dict(e) for e in km._PUSH_RING]
+
+    def mute(self, setter, *args):
+        """An explicit mute on this machine. The setters store a click that differs from this machine's master (a
+        click matching it returns the bell to following the master), so the mute is clicked under the master on,
+        and the master then goes back off: the override stands either way."""
+        km._set_notify_all(True)
+        setter(*args)
+        km._set_notify_all(False)
+
+    def block(self, iid=WEB + ":g1", sid=WEB):
+        """A card that enters needs_input on this kernel: a seeded first build, then the block."""
+        km._feed_notifications(_feed(_card(iid, sid, "working"), sessions=[sid]))
+        return km._feed_notifications(_feed(_card(iid, sid, "needs_input"), sessions=[sid]))
+
+
+class OriginRing(_Base):
+    """Every detected event is a candidate; only an explicit bell on the origin gates it."""
+
+    def test_a_card_entering_needs_you_is_a_candidate_whatever_this_machines_switches_say(self):
+        self.assertFalse(km._notify_all_on(), "the origin's master is off")
+        out = self.block()
+        self.assertEqual(out, [], "this machine's own devices hear nothing: its master is off")
+        (ev,) = self.ring()
+        self.assertEqual((ev["kind"], ev["sid"], ev["cardId"], ev["column"], ev["bell"]),
+                         ("card", WEB, WEB + ":g1", "needs_input", "default"))
+        self.assertEqual(ev["title"], "Romp needs you: web")
+        self.assertTrue(ev["body"].startswith("Needs you: Pick the parser"), ev["body"])
+        self.assertEqual(ev["seq"], 1)
+
+    def test_an_explicit_card_mute_or_session_mute_on_the_origin_drops_it(self):
+        self.mute(km._set_notify_card, WEB + ":g1", False, WEB)
+        self.block()
+        self.assertEqual(self.ring(), [], "a card mute")
+        km._NOTIFY_PREV[0] = None
+        self.mute(km._set_notify_session, API, False)
+        self.block(API + ":g1", API)
+        self.assertEqual(self.ring(), [], "a session mute")
+
+    def test_an_explicit_arm_rides_as_on(self):
+        km._set_notify_card(WEB + ":g1", True, WEB)
+        out = self.block()
+        self.assertEqual(len(out), 1, "armed on this machine: its own devices hear it too")
+        self.assertEqual(self.ring()[0]["bell"], "on")
+
+    def test_a_human_turn_end_is_a_candidate_whatever_this_machines_switches_say(self):
+        path = _transcript(API, "The fixtures load cleanly now.\n\nDetails below.")
+        alive = [{"sid": API, "name": "api", "path": path}]
+        with mock.patch.object(km, "_alive_sessions", return_value=alive), \
+             mock.patch.object(km, "_push_notify") as pn, mock.patch.object(km, "_push_forward"):
+            _stamp_stop(API, 1000)
+            km._turn_notify_tick(time.time(), {API: {}})          # the first sight: a baseline
+            self.assertEqual(self.ring(), [])
+            _stamp_stop(API, 1001)
+            km._turn_notify_tick(time.time(), {API: {}})
+            pn.assert_not_called()                               # the origin's own switches are off: its devices hear nothing
+        (ev,) = self.ring()
+        self.assertEqual((ev["kind"], ev["sid"], ev["turnKey"], ev["bell"], ev["name"]), ("turn", API, 1001, "default", "api"))
+        self.assertEqual((ev["title"], ev["body"]), ("Romp: api", "The fixtures load cleanly now."))
+
+    def test_an_injected_turn_or_a_muted_session_is_no_candidate(self):
+        path = _transcript(API, "Noted.")
+        alive = [{"sid": API, "name": "api", "path": path}]
+        with mock.patch.object(km, "_alive_sessions", return_value=alive), \
+             mock.patch.object(km, "_push_notify"), mock.patch.object(km, "_push_forward"):
+            _stamp_stop(API, 1000)
+            km._turn_notify_tick(time.time(), {API: {}})
+            _stamp_stop(API, 1001, opener="injected")
+            km._turn_notify_tick(time.time(), {API: {}})
+            self.assertEqual(self.ring(), [], "a turn the user did not open")
+            self.mute(km._set_notify_session, API, False)
+            _stamp_stop(API, 1002)
+            km._turn_notify_tick(time.time(), {API: {}})
+            self.assertEqual(self.ring(), [], "the session's own bell off on this machine")
+
+
+class LatentClaimBug(_Base):
+    """Before the pull, the origin's own turn push claimed the turn end's one buzz (_buzz_claim), the card raised by the
+    same turn end then yielded locally, and only what buzzed locally was forwarded: a hub never heard that needs-you."""
+
+    def _turn_then_block(self):
+        km._set_notify_all(True)
+        km._set_notify_turns(True)                          # the ORIGIN's turn switch on: its own turn push claims
+        path = _transcript(WEB, "Which error format should the parser report?")
+        alive = [{"sid": WEB, "name": "web", "path": path}]
+        with mock.patch.object(km, "_alive_sessions", return_value=alive), \
+             mock.patch.object(km, "_push_notify") as pn, mock.patch.object(km, "_push_forward"):
+            _stamp_stop(WEB, 1000)
+            km._turn_notify_tick(time.time(), {WEB: {}})
+            _stamp_stop(WEB, 1001)
+            km._turn_notify_tick(time.time(), {WEB: {}})
+            self.assertEqual(pn.call_args[1].get("kind"), "turn", "the origin buzzed its own devices for the turn end")
+        self.assertFalse(km._buzz_claim(WEB, 1001, "bell"), "…and holds the turn end's claim, so its card push yields")
+        self.block()
+        return self.ring()
+
+    def test_the_needs_you_after_the_origins_own_turn_push_still_leaves_the_origin(self):
+        evs = self._turn_then_block()
+        self.assertEqual([(e["kind"], e["turnKey"]) for e in evs], [("turn", 1001), ("card", 1001)],
+                         "the card is a candidate like any other: the origin's claim governs its own devices only")
+
+    def test_the_hub_buzzes_it_once_by_its_own_switches(self):
+        evs = self._turn_then_block()
+        _row()
+        with mock.patch.object(km, "_push_notify") as pn, \
+             mock.patch.object(km, "_notify_turns_on", return_value=False), \
+             contextlib.redirect_stderr(io.StringIO()):
+            km._push_pull_gate(ROW, evs)                     # the HUB's turn switch off: the turn is held, the card buzzes
+        (args, kw), = pn.call_args_list
+        self.assertEqual((args[2], kw.get("kind"), kw.get("quiet", False)), (ROW + ":" + WEB, "card", False))
+        km._PUSH_BUZZED.clear()
+        with mock.patch.object(km, "_push_notify") as pn:
+            km._push_pull_gate(ROW, evs)                     # the hub's turn switch on: the turn buzzes, the card replaces it quietly
+        self.assertEqual([(c[1].get("kind"), c[1].get("quiet", False)) for c in pn.call_args_list],
+                         [("turn", False), ("card", True)])
+
+
+class ServeEvents(_Base):
+    def add(self, **ev):
+        e = {"kind": "turn", "sid": API, "title": "Romp: api", "body": "Done.", "name": "api", "bell": "default",
+             "turnKey": 1001}
+        e.update(ev)
+        km._push_ring_add([e])
+        return km._PUSH_RING_SEQ[0]
+
+    def cursor(self, seq, boot=None):
+        return "%s:%d" % (boot or km._BOOT_ID, seq)
+
+    def test_no_cursor_resumes_at_the_newest(self):
+        self.add(); self.add()
+        ans = km._push_events_serve("", 5)
+        self.assertEqual(ans, {"boot": km._BOOT_ID, "next": 2, "events": [], "reset": "no-cursor", "skipped": 2})
+
+    def test_the_answer_returns_the_moment_an_event_lands(self):
+        _stamp_stop(API, 1001)
+        n = self.add()
+        got = {}
+        t = threading.Thread(target=lambda: got.update(ans=km._push_events_serve(self.cursor(n), 10), at=time.monotonic()))
+        t0 = time.monotonic()
+        t.start()
+        time.sleep(0.3)
+        self.assertTrue(t.is_alive(), "nothing newer than the cursor: the request parks")
+        _stamp_stop(API, 1002)
+        self.add(turnKey=1002)
+        t.join(5)
+        self.assertLess(got["at"] - t0, 3, "released by the event, not the wait")
+        self.assertEqual([e["seq"] for e in got["ans"]["events"]], [n + 1])
+        self.assertEqual(got["ans"]["next"], n + 1)
+        self.assertEqual(set(got["ans"]["events"][0]), set(km._PUSH_EVENT_WIRE), "the wire form only")
+
+    def test_an_empty_handed_answer_keeps_the_cursor(self):
+        n = self.add()
+        self.assertEqual(km._push_events_serve(self.cursor(n), 0.1), {"boot": km._BOOT_ID, "next": n, "events": []})
+
+    def test_another_lifes_cursor_or_one_never_issued_resets_as_restarted(self):
+        self.add(); self.add(); self.add()
+        for cur in (self.cursor(1, boot="999.123"), self.cursor(9)):
+            ans = km._push_events_serve(cur, 0)
+            self.assertEqual((ans["reset"], ans["skipped"], ans["next"], ans["events"]), ("restarted", 3, 3, []), cur)
+
+    def test_a_cursor_the_ring_overflowed_past_resets_as_overflow(self):
+        for _ in range(km.PUSH_RING_CAP + 5):
+            self.add()
+        ans = km._push_events_serve(self.cursor(2), 0)
+        self.assertEqual((ans["reset"], ans["skipped"], ans["next"]), ("overflow", km.PUSH_RING_CAP + 3, km.PUSH_RING_CAP + 5))
+        # the oldest kept event's predecessor is still a cursor the ring covers
+        oldest = km._PUSH_RING[0]["seq"]
+        self.assertNotIn("reset", km._push_events_serve(self.cursor(oldest - 1), 0))
+
+    def test_a_turn_event_is_served_only_while_it_is_the_sessions_latest_end(self):
+        _stamp_stop(API, 1001)
+        n = self.add(turnKey=1001)
+        self.assertEqual(len(km._push_events_serve(self.cursor(n - 1), 0)["events"]), 1)
+        _stamp_stop(API, 1002)                               # a newer turn end since: the old one is no longer news
+        ans = km._push_events_serve(self.cursor(n - 1), 0)
+        self.assertEqual((ans["events"], ans["stale"], ans["next"]), ([], 1, n), "skipped, and the cursor passes it")
+
+    def test_a_card_event_is_served_only_while_in_its_column_and_not_acted_on(self):
+        self.block()
+        n = km._PUSH_RING_SEQ[0]
+        at = self.ring()[0]["at"]
+        self.assertEqual(len(km._push_events_serve(self.cursor(n - 1), 0)["events"]), 1)
+        # the user answered it on the card: a targeted reply in the override journal
+        d = jd._overrides_dir(); d.mkdir(parents=True, exist_ok=True)
+        (d / (WEB + ".jsonl")).write_text(json.dumps({"node": WEB + ":g1", "op": "followup", "t": at + 5}) + "\n")
+        self.assertEqual(km._push_events_serve(self.cursor(n - 1), 0)["stale"], 1, "acted on since")
+        (d / (WEB + ".jsonl")).unlink()
+        km._feed_notifications(_feed(_card(WEB + ":g1", WEB, "working"), sessions=[WEB]))
+        self.assertEqual(km._push_events_serve(self.cursor(n - 1), 0)["stale"], 1, "no longer in that column")
+
+    def test_a_mute_set_on_the_origin_since_drops_it_at_serve_time(self):
+        _stamp_stop(API, 1001)
+        n = self.add()
+        self.mute(km._set_notify_session, API, False)
+        self.assertEqual(km._push_events_serve(self.cursor(n - 1), 0)["stale"], 1)
+
+    def test_the_route_is_token_gated_and_checks_its_cursor(self):
+        self.assertEqual(_serve("GET", "/push/events?wait=0", token=False)[0], 403)
+        self.assertEqual(_serve("GET", "/push/events?after=nonsense&wait=0")[0], 400)
+        self.assertEqual(_serve("GET", "/push/events?wait=soon")[0], 400)
+        self.add()
+        st, raw = _serve("GET", "/push/events?wait=0")
+        self.assertEqual(st, 200)
+        self.assertEqual(json.loads(raw)["reset"], "no-cursor")
+
+    def test_version_advertises_the_pull(self):
+        self.assertEqual(km._version_info()["pushPull"], km.PUSH_PULL_PROTO)
+
+
+class HubGate(_Base):
+    def setUp(self):
+        super().setUp()
+        _row()
+        km._set_notify_all(True)
+        km._set_notify_turns(True)
+
+    def gate(self, evs):
+        with mock.patch.object(km, "_push_notify") as pn, contextlib.redirect_stderr(io.StringIO()) as err:
+            n = km._push_pull_gate(ROW, evs)
+        return n, pn.call_args_list, err.getvalue()
+
+    CARD = {"seq": 1, "kind": "card", "sid": WEB, "title": "Romp needs you: web", "body": "Needs you: pick a format",
+            "name": "web", "cardId": WEB + ":g1", "bell": "default", "turnKey": 0}
+    TURN = {"seq": 2, "kind": "turn", "sid": API, "title": "Romp: api", "body": "Done.", "name": "api",
+            "cardId": None, "bell": "default", "turnKey": 1001}
+
+    def test_both_kinds_buzz_under_the_hubs_name_for_the_row(self):
+        n, calls, _ = self.gate([self.CARD, self.TURN])
+        self.assertEqual(n, 2)
+        (a1, k1), (a2, k2) = calls
+        self.assertEqual(a1, ("Romp needs you: web", "Needs you: pick a format", ROW + ":" + WEB))
+        self.assertEqual(k1, {"kind": "card", "card_id": WEB + ":g1", "host": ROW, "name": "web"})
+        self.assertEqual(a2[2], ROW + ":" + API)
+        self.assertEqual(k2, {"kind": "turn", "card_id": "", "host": ROW, "name": "api"})
+        self.assertNotIn("badge", k1, "the origin's count is not this kernel's")
+
+    def test_the_hubs_master_and_turn_switch_decide(self):
+        km._set_notify_all(False)
+        n, calls, err = self.gate([self.CARD, self.TURN])
+        self.assertEqual((n, calls), (0, []))
+        self.assertIn("held 2 event(s) pulled from 'TESTHOST'", err)
+        km._set_notify_all(True)
+        km._set_notify_turns(False)
+        n, calls, err = self.gate([self.CARD, self.TURN])
+        self.assertEqual([c[1]["kind"] for c in calls], ["card"], "the turn switch holds the turn events only")
+        self.assertIn("1 turn-finished event(s) under its turn switch", err)
+
+    def test_default_and_on_pass_and_anything_else_does_not(self):
+        evs = [dict(self.CARD, seq=i, bell=b, cardId="%s:g%d" % (WEB, i)) for i, b in enumerate(("on", "default", "off", None, "?"))]
+        n, calls, _ = self.gate(evs)
+        self.assertEqual([c[1]["card_id"] for c in calls], [WEB + ":g0", WEB + ":g1"])
+
+    def test_a_row_below_trusted_buzzes_nothing(self):
+        _row(trust="directed")
+        n, calls, err = self.gate([self.CARD])
+        self.assertEqual((n, calls), (0, []))
+        self.assertIn("its trust here is 'directed'", err)
+
+    def test_one_buzz_per_turn_end_is_the_hubs_both_orders(self):
+        turn = dict(self.TURN, sid=WEB)
+        card = dict(self.CARD, turnKey=1001)
+        _, calls, _ = self.gate([turn, card])
+        self.assertEqual([(c[1]["kind"], c[1].get("quiet", False)) for c in calls], [("turn", False), ("card", True)])
+        km._PUSH_BUZZED.clear()
+        _, calls, _ = self.gate([card, turn])
+        self.assertEqual([c[1]["kind"] for c in calls], ["card"], "the card buzzed first: the turn end yields")
+        km._PUSH_BUZZED.clear()
+        _, calls, _ = self.gate([card, dict(card, cardId=WEB + ":g2")])
+        self.assertEqual(len(calls), 2, "two cards never suppress each other")
+
+
+class Puller(_Base):
+    def setUp(self):
+        super().setUp()
+        _row()
+        km._set_notify_all(True)
+        km._set_notify_turns(True)
+        _stamp_stop(API, 1001)
+
+    def once(self, answer):
+        asked = []
+
+        def fake_get(r, path, timeout):
+            asked.append(path)
+            return answer
+        with mock.patch.object(km, "_push_pull_get", side_effect=fake_get), \
+             mock.patch.object(km, "_push_notify") as pn, contextlib.redirect_stderr(io.StringIO()) as err:
+            ok = km._push_pull_once(ROW, dict(km._remotes[ROW]))
+        return ok, asked, pn.call_args_list, err.getvalue()
+
+    EV = {"seq": 4, "kind": "turn", "sid": API, "title": "Romp: api", "body": "Done.", "name": "api", "cardId": None,
+          "bell": "default", "turnKey": 1001}
+
+    def test_a_reset_is_one_loud_line_and_the_cursor_lands_on_disk(self):
+        ok, asked, calls, err = self.once((200, {"boot": "77.1", "next": 3, "events": [], "reset": "restarted", "skipped": 3}))
+        self.assertTrue(ok)
+        self.assertEqual(asked, ["/push/events?wait=%d" % km.PUSH_PULL_WAIT], "no cursor held: none sent")
+        self.assertEqual(err.count("\n"), 1)
+        self.assertIn("events from 'TESTHOST' resume at its newest — its kernel restarted since this kernel last heard from "
+                      "it; 3 event(s) it fired meanwhile skipped", err)
+        disk = json.loads((jd.STATE / "push-pull-cursors.json").read_text())
+        self.assertEqual(disk, {ROW: "77.1:3"})
+        self.assertEqual(oct((jd.STATE / "push-pull-cursors.json").stat().st_mode & 0o777), "0o600")
+
+    def test_the_next_ask_carries_the_cursor_and_it_survives_a_restart(self):
+        self.once((200, {"boot": "77.1", "next": 3, "events": []}))
+        km._PUSH_PULL_CURSORS[0] = None                      # a new kernel life: read back from disk
+        ok, asked, calls, _ = self.once((200, {"boot": "77.1", "next": 4, "events": [self.EV]}))
+        self.assertEqual(asked, ["/push/events?wait=%d&after=77.1%%3A3" % km.PUSH_PULL_WAIT])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(km._push_pull_cursor(ROW), "77.1:4")
+
+    def test_an_event_passes_the_gate_once(self):
+        ans = (200, {"boot": "77.1", "next": 4, "events": [self.EV]})
+        self.assertEqual(len(self.once(ans)[2]), 1)
+        self.assertEqual(len(self.once(ans)[2]), 0, "the same (row, boot, seq) again: the backstop holds it")
+        self.assertEqual(len(self.once((200, {"boot": "78.2", "next": 4, "events": [dict(self.EV, turnKey=1002)]}))[2]), 1,
+                         "another life's seq 4 is another event")
+
+    def test_a_refusal_is_said_once_and_moves_nothing(self):
+        km._push_pull_cursor_set(ROW, "77.1:3")
+        ok, _, _, err = self.once((403, {}))
+        self.assertFalse(ok)
+        self.assertIn("'TESTHOST' answered the event pull with HTTP 403", err)
+        self.assertEqual(self.once((403, {}))[3], "", "the same refusal again: said once")
+        self.assertEqual(km._push_pull_cursor(ROW), "77.1:3")
+        self.assertEqual(self.once((0, {"error": "refused"}))[:1], (False,), "unreachable: the loop backs off")
+
+    def test_the_gate_runs_before_the_cursor_moves(self):
+        order = []
+        with mock.patch.object(km, "_push_pull_gate", side_effect=lambda *a: order.append("gate")), \
+             mock.patch.object(km, "_push_pull_cursor_set", side_effect=lambda *a: order.append("cursor")), \
+             mock.patch.object(km, "_push_pull_get", return_value=(200, {"boot": "77.1", "next": 4, "events": [self.EV]})):
+            km._push_pull_once(ROW, dict(km._remotes[ROW]))
+        self.assertEqual(order, ["gate", "cursor"], "a crash between them re-offers the events rather than losing them")
+
+
+class Transition(_Base):
+    """Mixed versions: one mechanism per pair, and no event reaches the devices twice."""
+
+    def test_the_legacy_forward_skips_peers_that_pull(self):
+        _row("boxa", push_pull=0)
+        _row("boxb", push_pull=1)
+        calls, done = [], threading.Event()
+
+        def fake(r, method, path, body=None, timeout=8):
+            calls.append(r["host"]); done.set()
+            return 200, {}
+        with mock.patch.object(km, "_peer_call", side_effect=fake):
+            km._push_forward([{"title": "Romp: web", "body": "Done.", "sid": WEB, "kind": "turn"}])
+            done.wait(5)
+            time.sleep(0.2)
+        self.assertEqual(calls, ["boxa"])
+
+    def relay(self, origin):
+        km._set_notify_all(True)
+        body = {"origin": origin, "events": [{"title": "Romp: web", "body": "Done.", "sid": WEB, "kind": "turn"}]}
+        km._set_notify_turns(True)
+        with mock.patch.object(km, "_push_notify") as pn, contextlib.redirect_stderr(io.StringIO()) as err:
+            st, raw = _serve("POST", "/push/relay", body)
+        return st, json.loads(raw), pn.call_count, err.getvalue()
+
+    def test_a_relay_from_a_kernel_this_one_pulls_is_ignored(self):
+        _row(ROW, self_name="boxa")                          # the row's key and the name that kernel declares differ
+        st, ans, n, err = self.relay("boxa")
+        self.assertEqual((st, ans, n), (200, {"ok": True, "mirrored": 0, "pulled": True}, 0))
+        self.assertIn("ignoring events relayed by 'boxa'", err)
+        self.assertEqual(self.relay("boxa")[3], "", "said once")
+
+    def test_a_relay_from_a_kernel_that_does_not_serve_the_pull_still_lands(self):
+        _row(ROW, push_pull=0)
+        st, ans, n, _ = self.relay(ROW)
+        self.assertEqual((ans["mirrored"], n), (1, 1))
+
+    def test_an_event_offered_both_ways_reaches_the_devices_once(self):
+        # stage one: the hub has not yet seen the origin advertise; the origin relays, the hub does not pull
+        _row(ROW, push_pull=0)
+        self.assertFalse(km._push_pull_eligible(dict(km._remotes[ROW])))
+        self.assertEqual(self.relay(ROW)[2], 1)
+        # stage two: the hub's poll learned the capability: the relay of the next event is ignored, the pull delivers it
+        km._remotes[ROW]["push_pull"] = 1
+        self.assertEqual(self.relay(ROW)[2], 0)
+        km._set_notify_turns(True)
+        _stamp_stop(WEB, 1001)
+        ev = {"seq": 1, "kind": "turn", "sid": WEB, "title": "Romp: web", "body": "Done.", "name": "web", "cardId": None,
+              "bell": "default", "turnKey": 1001}
+        with mock.patch.object(km, "_push_pull_get", return_value=(200, {"boot": "5.5", "next": 1, "events": [ev]})), \
+             mock.patch.object(km, "_push_notify") as pn, contextlib.redirect_stderr(io.StringIO()):
+            km._push_pull_once(ROW, dict(km._remotes[ROW]))
+            km._push_pull_once(ROW, dict(km._remotes[ROW]))   # the same answer twice (a retried call): still once
+        self.assertEqual(pn.call_count, 1)
+
+    def test_the_version_poll_lifts_the_capability(self):
+        answers = {}
+
+        class V(BaseHTTPRequestHandler):
+            def do_GET(self):
+                b = json.dumps(answers["v"]).encode()
+                self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers()
+                self.wfile.write(b)
+
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), V)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            r = {"host": ROW, "local_port": srv.server_address[1], "token": "tok"}
+            answers["v"] = {"kernel_sha": "abc1234", "pushPull": 1}
+            self.assertEqual(km._poll_remote_version(r)["pushPull"], 1)
+            answers["v"] = {"kernel_sha": "abc1234"}         # an older build
+            self.assertEqual(km._poll_remote_version(r)["pushPull"], 0)
+            answers["v"] = {"kernel_sha": "abc1234", "pushPull": True}
+            self.assertEqual(km._poll_remote_version(r)["pushPull"], 0, "a bool is not a protocol number")
+        finally:
+            srv.shutdown(); srv.server_close()
+
+    def test_the_supervisor_stores_it_and_reconciles_the_pullers(self):
+        import inspect
+        src = inspect.getsource(km._tunnel_supervisor)
+        self.assertIn('r["push_pull"] = (rver or {}).get("pushPull") or 0', src)
+        self.assertIn("_push_pull_reconcile()", src)
+
+    def test_pullers_start_for_eligible_rows_only(self):
+        _row("boxa")                                         # trusted, advertising: pulled
+        _row("boxb", push_pull=0)                            # an older build
+        _row("boxc", trust="directed")                       # below trusted
+        _row("boxd", token="")                               # no credentials
+        started = []
+        with mock.patch.object(km, "_push_pull_loop", side_effect=lambda name: started.append(name)):
+            km._push_pull_reconcile()
+            for t in list(km._push_pullers.values()):
+                t.join(2)
+        self.assertEqual(started, ["boxa"])
+        self.assertTrue(km._remote_public(km._remotes["boxa"])["pushPulled"])
+        self.assertFalse(km._remote_public(km._remotes["boxb"])["pushPulled"])
+
+
+class BellsFollowTheDashboard(_Base):
+    """The merged dashboard paints a linked kernel's bells against the HUB's switches (bell-follow.ts) and sends a click on
+    one as given; the origin stores it exactly as sent, so an explicit mute is recorded whatever the origin's own master
+    says, and the hub's gate resolves no override against its own switches by the rules its own sessions follow. A click
+    on the origin's own dashboard keeps the delete-if-default rule."""
+
+    def ws(self, msg):
+        sent = []
+        client = {"app": "feed", "wid": "w1", "alive": True, "send": lambda raw: sent.append(json.loads(raw))}
+        with mock.patch.object(km, "_mark_views_dirty"):
+            km.Handler._dispatch_ws(None, msg, client)
+        return sent
+
+    def test_a_remote_click_is_stored_as_given_whatever_this_master_says(self):
+        self.assertFalse(km._notify_all_on(), "the origin's master never set: off")
+        self.assertEqual(self.ws({"type": "cardNotify", "itemId": WEB + ":g1", "sid": WEB, "value": False, "asGiven": True}), [])
+        self.assertIs(km._notify_cards().get(WEB + ":g1"), False, "a mute matching this master is stored all the same")
+        self.ws({"type": "setSessionFlag", "id": API, "flag": "notify", "value": False, "asGiven": True})
+        self.assertIs(km._session_flag_raw(API, "notify"), False)
+        self.ws({"type": "cardNotify", "itemId": WEB + ":g1", "sid": WEB, "value": None, "asGiven": True})
+        self.assertNotIn(WEB + ":g1", km._notify_cards(), "a null as given is the bell returned to its default on purpose")
+        self.ws({"type": "setSessionFlag", "id": API, "flag": "notify", "value": None, "asGiven": True})
+        self.assertIsNone(km._session_flag_raw(API, "notify"))
+
+    def test_a_local_click_keeps_delete_if_default(self):
+        km._set_notify_card(WEB + ":g1", False, WEB)          # matches the master (off): no override, as before
+        self.assertNotIn(WEB + ":g1", km._notify_cards())
+        km._set_notify_session(API, False)
+        self.assertIsNone(km._session_flag_raw(API, "notify"))
+        km._set_notify_card(WEB + ":g1", True, WEB)
+        self.assertIs(km._notify_cards().get(WEB + ":g1"), True)
+        self.ws({"type": "cardNotify", "itemId": WEB + ":g1", "sid": WEB, "value": None})
+        self.assertNotIn(WEB + ":g1", km._notify_cards(),
+                         "without asGiven a null keeps its old meaning (absent, so false), judged against this master: deleted")
+
+    def test_the_users_scenario_a_mute_stops_the_buzz_and_an_arm_buzzes(self):
+        # the hub's master on, the origin's never set. The merged dashboard paints the card on (no override, the hub's
+        # master); a click to off arrives as given and is stored; the card's next entry is no candidate, so nothing
+        # reaches the hub. A click to on is stored as an arm, and the hub buzzes for it.
+        self.ws({"type": "setSessionFlag", "id": WEB, "flag": "notify", "value": False, "asGiven": True})
+        self.block()
+        self.assertEqual(self.ring(), [], "muted on the origin: the event never leaves it")
+        km._NOTIFY_PREV[0] = None
+        self.ws({"type": "setSessionFlag", "id": WEB, "flag": "notify", "value": True, "asGiven": True})
+        self.block()
+        (ev,) = self.ring()
+        self.assertEqual(ev["bell"], "on")
+        _row()
+        with mock.patch.object(km, "_notify_all_on", return_value=True), mock.patch.object(km, "_push_notify") as pn:
+            km._push_pull_gate(ROW, [dict(ev)])
+        self.assertEqual(pn.call_count, 1, "the hub buzzes")
+
+    def test_the_hub_gate_follows_the_rules_its_own_sessions_follow(self):
+        _row()
+        card = {"seq": 1, "kind": "card", "sid": WEB, "title": "t", "body": "b", "name": "web", "cardId": WEB + ":g1",
+                "bell": "on", "turnKey": 0}
+        turn = {"seq": 2, "kind": "turn", "sid": API, "title": "t", "body": "b", "name": "api", "cardId": None,
+                "bell": "on", "turnKey": 1001}
+        with mock.patch.object(km, "_push_notify") as pn, contextlib.redirect_stderr(io.StringIO()):
+            km._push_pull_gate(ROW, [card, turn, dict(card, seq=3, bell="default", cardId=WEB + ":g2")])
+        self.assertEqual([c[1]["card_id"] for c in pn.call_args_list], [WEB + ":g1"],
+                         "master off: an armed card buzzes (a card's override beats the master, as on a local card); a turn "
+                         "end needs the master, and a card with no override follows it")
+
+    def test_the_payloads_carry_the_override_alone(self):
+        import inspect
+        self.assertIn('"notifyRaw": _session_flag_raw(sid, "notify")', inspect.getsource(km.build_session))
+        self.assertIn('_a["notifyRaw"] = _push_explicit_bell(str(_a.get("sid") or ""), _a["itemId"], _ncards)', inspect.getsource(km.build_feed))
+        self.assertIn('"notifyRaw": _session_flag_raw(sid, "notify")})', inspect.getsource(km.build_timeline))
+        src = open(os.path.join(BIN, "romp-kernel")).read()
+        self.assertEqual(src.count('"notifyRaw": m.get("notifyRaw")}'), 2, "both chat tails carry it")
+        key = json.loads(km._chat_view_key({"notify": True, "notifyRaw": None}, 1))
+        self.assertNotEqual(key, json.loads(km._chat_view_key({"notify": True, "notifyRaw": True}, 1)),
+                            "an override-only change (the effective value unchanged) still moves the view, so a tail goes")
+
+    def test_the_switches_frame_reaches_every_ready_pane_at_ready_and_on_a_flip(self):
+        self.assertEqual(km._notify_switches_frame(), {"type": "notifySwitches", "all": False, "turns": False})
+        sent = []
+        ready = {"app": "feed", "ready": True, "send": None}
+        early = {"app": "chat", "send": None}
+        with km._clients_lock:
+            saved = list(km._clients)
+            km._clients[:] = [ready, early]
+        try:
+            with mock.patch.object(km, "_client_send", side_effect=lambda c, raw, key=None: sent.append((c["app"], json.loads(raw)))):
+                st, raw = _serve("POST", "/notify-all", {"on": True})
+        finally:
+            with km._clients_lock:
+                km._clients[:] = saved
+        self.assertEqual(st, 200)
+        self.assertIn(("feed", {"type": "notifySwitches", "all": True, "turns": False}), sent)
+        self.assertNotIn("chat", [a for a, _ in sent], "a socket still connecting gets it at its own ready, after its pushes")
+        import inspect
+        src = inspect.getsource(km.Handler._dispatch_ws)
+        self.assertLess(src.index("_send_caps(client, views_seq=views_seq)"), src.index("_send_notify_switches(client)"),
+                        "at ready, after caps")
+
+
+if __name__ == "__main__":
+    unittest.main()

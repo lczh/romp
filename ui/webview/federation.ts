@@ -1289,6 +1289,10 @@ export class FederationManager {
     // a kernel's `caps` frame describes THAT kernel; the panes hold only the LOCAL kernel's (its views
     // store is the one they write). A remote's would read as the local kernel's — dropped here.
     if (m && m.type === "caps" && host !== LOCAL) return;
+    // …and the same for its notification switches: a linked kernel's bells paint against the switches of the kernel this
+    // page is served by, whose gate decides what reaches the devices subscribed here (bell-follow.ts). A linked kernel's
+    // own master would read as this one's.
+    if (m && m.type === "notifySwitches" && host !== LOCAL) return;
     // The ARRANGEMENT the kernel keeps for this viewer (2026-09-23), served on connect and pushed on every
     // change — the event the other devices converge on. Only the LOCAL kernel's counts: a remote kernel's
     // store is whatever dashboard sits in front of THAT machine, and taking it would let one viewer's drag
