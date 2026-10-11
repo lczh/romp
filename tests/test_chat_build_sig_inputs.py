@@ -161,6 +161,7 @@ CENSUS = {
     "_session_chip": ("pure", "over classified inputs: the parse and live tail, the row, the backend brackets, the clock booleans, the live task rows, the watches, the states overlay, the store and the downtime list"),
     "_session_cwd": ("sig", "cwd", "the names entry's cwd, else the transcript's stamp"),
     "_session_flag": ("sig", "flags"),
+    "_session_flag_raw": ("sig", "flags", "the bell's override alone (notifyRaw), for a dashboard on another kernel (bell-follow.ts)"),
     "_task_tracking_on": ("sig", "flags", "the Task tracking switch (T404): its file's identity rides the flags component beside session-flags.json; off blanks the ledger's judge output as a mute does"),
     "_mail_off_fields": ("sig", "flags", "the effective mail state and its reason from ONE derivation (postalServiceOff, mailOffWhy): the record's readability and threadOf through _thread_reg (reg), then the mailbox flag with its legacy twin (flags) (T356)"),
     "_session_meta": ("pure", "over the transcript's records, memoized by record identity (transcript)"),

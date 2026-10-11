@@ -85,8 +85,9 @@ class TabsFirst(unittest.TestCase):
         # own (living sessions only), and the client closes every tab a later frame omits without affirming it
         # live, so every read-only reopened tab the push had just listed went down at each ready.
         types, slots = self._ready("chat")
-        # …and the viewer's arrangement between them (2026-09-23): its own frame on its own slot, never a strip
-        self.assertEqual(types, ["_pushed", "viewOrder", "caps"],
+        # …and the viewer's arrangement between them (2026-09-23): its own frame on its own slot, never a strip; and this
+        # kernel's notification switches after caps, for a linked kernel's bells (plans/federated-push.md, 2026-10-10)
+        self.assertEqual(types, ["_pushed", "viewOrder", "caps", "notifySwitches"],
                          "the connect push, the arrangement, then the caps frame: no strip from the handler itself")
         self.assertNotIn(("taborder",), slots, "and none attempted through the strip's dedup slot")
 
@@ -96,13 +97,13 @@ class TabsFirst(unittest.TestCase):
         # arrangement (federation.ts absorbHostReport), so a strip for a feed client would prune the kept-open
         # tabs from that store again, and the chat case above would not notice.
         types, slots = self._ready("feed")
-        self.assertEqual(types, ["_pushed", "viewOrder", "caps"],
+        self.assertEqual(types, ["_pushed", "viewOrder", "caps", "notifySwitches"],
                          "a feed client's ready: the connect push, the arrangement, then caps, no strip")
         self.assertNotIn(("taborder",), slots)
 
     def test_a_timeline_clients_ready_yields_no_tab_order_frame(self):
         types, slots = self._ready("timeline")
-        self.assertEqual(types, ["_pushed", "viewOrder", "caps"],
+        self.assertEqual(types, ["_pushed", "viewOrder", "caps", "notifySwitches"],
                          "a timeline client's ready: the connect push, the arrangement, then caps, no strip")
         self.assertNotIn(("taborder",), slots)
 
