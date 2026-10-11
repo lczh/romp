@@ -1730,6 +1730,10 @@ class ThreadFrameReadsOwnTails(Base):
 class FakeBackend:
     def __init__(self):
         self.calls = []
+        self.streaming = set()      # anchors that streamed and whose records the CLI has not written: the live tail's work atoms
+
+    def live_atoms(self, sid):
+        return [{"type": "assistant", "uuid": u} for u in sorted(self.streaming)]
 
     def fork(self, name, parent_sid, cut_uuid="", bg="", fg="", sid=None, thread_of="", model="", effort="", fast=""):
         self.calls.append(("fork", name, cut_uuid))
@@ -1868,6 +1872,12 @@ class CreatesAfterAClear(CreateDoor):
     first transcript alone, into a list nobody keeps, never the leaf, and leaves the record cache's entry for it as it was;
     the session's uuid set of that file answers later targets while its stat stands, and is kept only after a read that
     succeeded."""
+
+    def setUp(self):
+        super().setUp()
+        # the post-clear replies these tests comment on before their records land STREAMED (2026-10-11): a lag answer parks
+        # only while its anchor is a work atom of the live tail (_anchor_streaming); a pre-clear message is on disk, not live
+        self.be.streaming = {"cz1", "cz2", "cz9"}
 
     def _cleared(self):
         first, leaf, last, t = cleared(self)
@@ -2016,14 +2026,15 @@ class CreatesAfterAClear(CreateDoor):
         st1 = os.stat(first)
         self.assertEqual((st1.st_ino, st1.st_mtime_ns, st1.st_size), (st0.st_ino, st0.st_mtime_ns, st0.st_size),
                          "premise: the stat the set keys on is unchanged")
-        self.assertEqual([f.get("transient") for f in failed], [True], "the first create could not tell: lag, parked")
+        # the first create could not tell (lag), and its message is not streaming, so nothing will bring the record: refused,
+        # never parked on a read that may not come (it parked before 2026-10-11, and on a quiet session waited forever)
+        self.assertEqual([(f.get("transient"), f.get("text")) for f in failed], [(False, km.ANCHOR_GONE_ERR)], self.sent)
+        self.assertEqual(km._parked_creates, [], "nothing parked")
         remembered = PARENT in getattr(km, "_CUT_FIRST_UUIDS", {})
         failed = self._job("ka5", "g-pre-2")
         self.assertEqual([f.get("transient") for f in failed], [False], self.sent)
-        self.assertIn("rewound away", failed[0].get("text") or "")
-        self.assertEqual([pk["createId"] for pk in km._parked_creates], ["g-pre-1"], "the second create parked nothing")
-        km._retry_parked_creates()
-        self.assertEqual(km._parked_creates, [], "the first create, retried, is refused too and leaves the park")
+        self.assertIn("rewound away", failed[0].get("text") or "", "the file reads again: the refusal it always got")
+        self.assertEqual(km._parked_creates, [], "the second create parked nothing either")
         self.assertEqual(self.be.calls, [], "no fork")
         self.assertFalse(remembered, "nothing was remembered from the failed read")
         self.assertIn(PARENT, getattr(km, "_CUT_FIRST_UUIDS", {}), "the set is kept from the read that succeeded")

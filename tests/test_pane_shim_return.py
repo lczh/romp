@@ -581,9 +581,9 @@ class ReconnectFlag(unittest.TestCase):
     that the page was served, and the shim latches it (readyAcked) for the page's life. A keepalive back is no
     answer, and neither is a pushed view frame: the pusher serves a socket from its registration at accept, ahead
     of the ready's processing. A page whose caps frame never comes (the socket died between the pushes and the
-    frame) dials fresh for its life, since the bundle posts ready once and no later socket carries one: every
-    redial of it is served whole, the cost before 2026-09-07, never a false skeleton. The twin-retire at
-    registration was rejected as the signal: it misses a socket the kernel already dropped."""
+    frame) dials fresh until one does: each such dial posts the bundle's ready again on its open, so the kernel
+    serves that socket whole, answers the ready, and the redials after declare themselves; never a false skeleton.
+    The twin-retire at registration was rejected as the signal: it misses a socket the kernel already dropped."""
 
     def test_the_first_dial_has_no_flag_and_a_redial_after_the_kernel_answered_the_bundles_ready_carries_it_after_iid_and_active(self):
         r = _run(r"""
@@ -730,21 +730,22 @@ out({first:first,firstState:firstState,connecting:connecting,opened:opened,desig
         # everConnected&&bundleReady&&!readyQueued the redial declared itself and was served skeletons for sessions the
         # page had never received. The kernel's ready arm answers every ready it processes with a caps frame, sent
         # after its pushes (_send_caps, the one sender), so the shim latches on that frame (readyAcked): no caps, no
-        # flag. Once set the latch holds for the page's life; never set, it stays clear for the page's life, since
-        # the bundle posts ready once and no later socket carries one: every redial of such a page is served whole.
+        # flag. Once set the latch holds for the page's life; never set, it stays clear until a caps frame comes, and
+        # every redial of such a page is served whole (each posts the ready again on its open: the round-3 C test).
+        # The harness answers no ready, so here the page keeps dialling fresh.
         r = _run(r"""
 function redial(){var live=timers.filter(function(t){return t.live&&t.fn.name==="connect";});live[live.length-1].fn();}
 localStorage.getItem=function(){return JSON.stringify({activeId:"S1"});};
 open();window.__rompLocalSend({type:"ready"});recv({type:"ka"});sock().readyState=3;sock().onclose();redial();var unanswered=sock().url;   // the ready left on an open socket; a keepalive came back, never the caps frame, and the socket died
-open();recv({type:"ka"});sock().readyState=3;sock().onclose();redial();var stillFresh=sock().url;                                    // no later socket carries a ready, so no caps frame comes: the page keeps dialling fresh
-open();caps();sock().readyState=3;sock().onclose();redial();var answered=sock().url;                                                 // harness only (a kernel answers no socket that carried no ready): the frame, and the frame alone, arms the gate
+open();recv({type:"ka"});sock().readyState=3;sock().onclose();redial();var stillFresh=sock().url;                                    // the ready posted again on that open goes unanswered too: the page keeps dialling fresh
+open();caps();sock().readyState=3;sock().onclose();redial();var answered=sock().url;                                                 // the kernel answers the ready re-posted on this open: the frame, and the frame alone, arms the gate
 out({unanswered:unanswered,stillFresh:stillFresh,answered:answered,n:sockets.length});""")
         self.assertEqual(r["n"], 4)
         self.assertNotIn("reconnect", r["unanswered"],
                          "the kernel never answered the ready, so it never served the page: the redial dials as a fresh page: " + r["unanswered"])
         self.assertTrue(r["unanswered"].endswith("&active=S1"), "the active hint still rides: " + r["unanswered"])
         self.assertNotIn("reconnect", r["stillFresh"],
-                         "no later socket carries a ready and no caps frame comes: the page dials fresh for its life: " + r["stillFresh"])
+                         "no caps frame comes: the page dials fresh until one does: " + r["stillFresh"])
         self.assertTrue(r["answered"].endswith("&active=S1&reconnect=1&proto=1"),
                         "the caps frame is the latch, on whichever socket of the page it arrives: " + r["answered"])
 

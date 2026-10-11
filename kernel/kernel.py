@@ -19772,9 +19772,10 @@ _cut_read_said = set()
 def _cut_first_unreadable(sid, how):
     """Name a failed read of the session's first transcript (`how`, "unreadable (<the error>)") on stderr once per session,
     under its own cause beside the cut walk's read causes. Until the file reads again, a message from before the clear is
-    answered as not on disk yet: a comment's create parks and is dropped after _PARK_MAX_TRIES writes of the leaf, and an edit is
-    told to try again (review round three). A row of the leaf behind a record linking into that file keeps the refusal
-    that it cannot anchor a thread, at once (_cut_widen_linked), so the line names both effects (review round five)."""
+    answered as not on disk yet: a comment's create on it is refused, as its message is not streaming (_anchor_streaming,
+    2026-10-11; it parked before, waiting on a read that might never come), and an edit is told to try again (review round
+    three). A row of the leaf behind a record linking into that file keeps the refusal that it cannot anchor a thread, at
+    once (_cut_widen_linked), so the line names both effects (review round five)."""
     key = (str(sid), "unreadable")
     if key not in _cut_read_said:
         if len(_cut_read_said) > 4096:
@@ -19885,7 +19886,8 @@ def _comment_cut_resolve(path, sid, anchor_uuid):
     (review round five). On a restored entry, whose pre-cut spine gives its root no parent, a walk that ends at that root
     counts as stopped at the parent its document recorded for it, so a root whose record names none reads nothing either
     (review round six). A comment in the conversation a second /clear's card expands (the file between the two clears) is
-    in neither file and still parks as lag, as it did before."""
+    in neither file and still answers lag, which the create door now refuses, its message not streaming (_anchor_streaming,
+    2026-10-11: it parked before, and on a quiet session waited forever)."""
     facts = {}
     got = _comment_cut_from_parse(path, sid, anchor_uuid, facts=facts)
     how = facts.get("how")
@@ -19923,9 +19925,10 @@ def _cut_widen_lag(path, sid, anchor_uuid, dangling):
     """(answer, how) for the display parse's lag answer on `anchor_uuid` (review round two, 2026-10-03). The parse of a
     /clear's leaf leaves the session's first file out (_cut_unread_anchor), so its graph holds no message from before the
     clear. Decided from that file by membership (_cut_first_uuids), the leaf never read: a target it does not hold (a reply
-    not flushed yet), or a file that cannot be read, keeps the lag answer (answer None: parked, its retries reading no byte
-    while the file's stat stands). A target it holds is off the leaf's chain when no record of the display graph links into
-    that file (`dangling`, the parent targets the display graph names and lacks, meets none of its uuids), and gets
+    not flushed yet), or a file that cannot be read, keeps the lag answer (answer None: parked while its message streams,
+    its retries reading no byte while the file's stat stands). A target it holds is off the leaf's chain when no record of
+    the display graph links into that file (`dangling`, the parent targets the display graph names and lacks, meets none
+    of its uuids), and gets
     ANCHOR_REWOUND_ERR, the refusal the walk over both files gave before the leaf parsed alone, with no graph built. When one
     does (a CLI that links a post-clear record into the old file, outside the transcript model), the walk over both files
     answers (_cut_wide_walk), for the linked record and every record behind it alike. `how`: how the first file was looked
@@ -21192,24 +21195,40 @@ def _comment_markers(sid):
 # kernel's (fresh) file read genuinely lacks the record for a second or two. The ws handler parks
 # the create HERE and the pusher retries it each cycle until the file catches up (the kernel owns
 # the file it is waiting on — a settled session emits no further frames, so a client-side retry
-# alone starves; the client's frame-keyed re-post stays as the belt for a kernel restart that loses
-# this in-memory park). The typed transient nack keeps the client's optimistic mark alive meanwhile.
+# alone starves). The typed transient nack keeps the client's optimistic mark alive meanwhile, and the
+# park ends in an answer every chat client hears: the thread (commentCreated) or the drop
+# (_hand_back_dropped_create). The page waits for that answer and gives up on nothing of its own.
 ANCHOR_LAG_ERR = "that message isn't in the transcript yet; try again in a moment"
+# The lag answer for a record that is not coming (2026-10-11): it is not streaming either (_anchor_streaming), so whatever the
+# page showed it from is on disk somewhere the cut cannot read (between two /clears, an unreadable first transcript, a reply
+# salvaged after the CLI discarded it) or was never written. A real refusal, said at the door, and the drop's reason in a park.
+ANCHOR_GONE_ERR = "that message can't be found in the session's transcript, so a thread can't start from it"
 ANCHOR_REWOUND_ERR = "that message is on a branch that was rewound away"   # the cut walk's refusal for a record off the active chain
 # The cut walk's refusal of a record with no prose record above it before a compaction or the graph's edge, named in review
 # round four so the comment cut can tell it apart (_cut_widen_linked).
 ANCHOR_NO_PROSE_ERR = "that message can't anchor a thread; try a passage from the conversation itself"
-_parked_creates = []                       # [{sid,uuid,exact,text,name,model,effort,fast,color,createId,tries,seen}]
+_parked_creates = []                       # [{sid,uuid,exact,text,name,model,effort,fast,color,createId,tries,seen,client}]
 # The park's budget counts the event it waits for, the parent's transcript MOVING (2026-10-11): a retry spends a try only
 # when the transcript has been written since the last counted attempt (`seen`, its stat then), so past this many writes
 # that still lack the record, the record isn't coming. It counted pusher cycles (~15-90 s) before, and anything that ran
 # the retry spent one, so a page's idle prefetch (one repair per skeleton tab, each running the cycle's housekeeping)
-# could drop a create in seconds, before its anchor landed: a silent loss. A quiet transcript spends nothing, so a park
-# waits out an idle session for as long as it stays quiet, its retries reading no byte while the stat stands.
+# could drop a create in seconds, before its anchor landed: a silent loss. A quiet transcript spends nothing. The budget
+# only matters while the anchor still streams: a park lives exactly as long as its anchor is a work atom of the session's
+# live tail (_anchor_streaming), and the first retry that finds it gone and the record still missing drops it, so a quiet
+# session's park (its turn over, its atoms retired) resolves on the next cycle instead of waiting forever (review of
+# PR 209, 2026-10-11).
 _PARK_MAX_TRIES = 30
+# A dropped create's OUTCOME, kept so the gesture keeps one answer (2026-10-11): a re-post of the same createId that crosses
+# the drop on the wire (the page re-posts on a reconnect) or arrives after it is answered with the drop, never parked again
+# or created later, so the words the drop handed back cannot become a second thread beside the one the user sends again.
+# Stamped creates only: an unstamped frame keys on its words, and a memo on the words would refuse the user's own re-send.
+# Bounded (oldest out) and in memory, like _recent_creates. Each entry: {"why", "told"}, `told` whether the drop's dialog
+# reached a pane (a re-post on a page that never saw it shows it there).
+_dropped_creates = {}                      # (sid, createId) -> {"why": str, "told": bool}
+_DROPPED_CREATES_MAX = 256
 # A create's IDENTITY (T289): the client's createId, minted by the popover at the send gesture and carried
 # by every re-post of it, under the parent sid -> the thread it made. A lag-parked create is retried by
-# BOTH the pusher (above) and the client (its frame-keyed re-post), and a popover whose ack was lost sends
+# BOTH the pusher (above) and the client (its re-post on a reconnect), and a popover whose ack was lost sends
 # its create again; the second copy used to collide on its explicit name and come back as the create
 # door's refusal toast (the user 2026-09-09, on a remote session), or, with the name now left to the
 # kernel's default, would mint a SECOND thread for one comment. The memo answers a repeat with the SAME
@@ -21217,9 +21236,10 @@ _PARK_MAX_TRIES = 30
 # uuid, passage, text), and so also answered a DELIBERATE second comment in the same words on the same
 # passage with the first thread: two acks, the second name nowhere on disk (review, 2026-09-09). The id
 # keys on the gesture instead; a frame from a client that sends none still keys on its words. A comment
-# the user posts again by hand while the first is still parked (after a viewer reload, or after the viewer
-# gave up at its own attempt bound) is a new gesture and lands as a second thread: a visible duplicate
-# the user can delete, where the words key lost the second comment silently. Bounded (oldest out), in
+# the user posts again by hand while the first is still parked (after a viewer reload) is a new gesture and
+# lands as a second thread: a visible duplicate the user can delete, where the words key lost the second
+# comment silently. The viewer no longer gives up on its own (2026-10-11): the words come back only with the
+# park's drop, which ends it, so a re-send from them is never beside a late first thread. Bounded (oldest out), in
 # memory: a kernel restart forgets it, and the client's re-post after one creates exactly once.
 _recent_creates = {}                       # (sid, createId) or (sid, uuid, exact, text) -> tid
 _RECENT_CREATES_MAX = 256
@@ -21269,12 +21289,16 @@ def _repeat_create_tid(key):
 
 def _reserve_create(key):
     """Claim one create's identity for the caller, atomically: ("repeat", tid) when the same comment was
-    already made and its thread is open; ("busy", None) when another door is creating or holding it parked
-    right now; ("free", None) after marking it in flight — the caller must _release_create in a finally."""
+    already made and its thread is open; ("dropped", entry) when its park was dropped (_dropped_creates: the
+    gesture's one answer stands); ("busy", None) when another door is creating or holding it parked right now;
+    ("free", None) after marking it in flight — the caller must _release_create in a finally."""
     with _create_lock:
         again = _repeat_create_tid(key)
         if again:
             return "repeat", again
+        gone = _dropped_creates.get(key)
+        if gone is not None:
+            return "dropped", gone
         if key in _inflight_creates or any(_parked_key(pk) == key for pk in _parked_creates):
             return "busy", None
         _inflight_creates.add(key)
@@ -21300,15 +21324,94 @@ def _park_transcript_sig(sid):
         return None
 
 
+def _anchor_streaming(sid, anchor_uuid):
+    """Is `anchor_uuid` a message the session streamed and the CLI has not written yet: a WORK atom of its live tail (a
+    stream message; an input echo's id is the kernel's own and command feedback may never get a record, so neither
+    promises a record under that uuid)? The event a lag-parked create waits on (2026-10-11): a work atom leaves the tail
+    only once its record is on disk (prune_live, by uuid) or at the turn boundary, after the CLI wrote what the turn
+    keeps (retire_live_work), so asked BEFORE an attempt reads the transcript, False means the record, if it ever comes,
+    was on disk before that read. A backend with no live tail streams nothing; a tail that cannot be read is said on
+    stderr and answers False, so the create is refused or dropped out loud rather than parked on a guess."""
+    if not anchor_uuid:
+        return False
+    try:
+        be = Sessions.backend_for(sid)
+        atoms = be.live_atoms(str(sid)) if hasattr(be, "live_atoms") else []
+    except Exception:
+        sys.stderr.write("comment create (%s): the session's live tail could not be read, so a message that has not reached "
+                         "its transcript yet counts as not coming\n%s" % (str(sid)[:8], traceback.format_exc()))
+        return False
+    return any(isinstance(a, dict) and a.get("uuid") == anchor_uuid and not a.get("_echo_text") and not a.get("command")
+               for a in atoms or ())
+
+
+def _note_dropped_create(key, entry):
+    """Remember a dropped stamped create's outcome (_dropped_creates), under _create_lock (an RLock: the retry calls this
+    inside the locked step that removes the park, so no instant has the identity neither parked nor dropped)."""
+    if len(key) != 2:                          # an unstamped create keys on its words: the user's own re-send is not a repeat
+        return
+    with _create_lock:
+        _dropped_creates[key] = entry
+        while len(_dropped_creates) > _DROPPED_CREATES_MAX:
+            _dropped_creates.pop(next(iter(_dropped_creates)), None)
+
+
+def _hand_back_dropped_create(pk, why, detail, entry):
+    """Say a parked create's drop (2026-10-11, review of PR 209): the page may be long past the gesture, reloaded, or
+    showing another session, so the drop takes the not-delivered road rather than a toast. undelivered.jsonl gets the
+    words verbatim; the kernel log one line naming the session and the reason, never the words; the page that sent it, when
+    its socket still lives, else ONE pane watching the session (_send_to_one_chat), a dialog with the words in its copy
+    slot that also files a "not sent" entry in the Log; and every chat client the typed failure (commentCreateFailed,
+    `dropped`), so the page holding the create, on whatever socket it holds now, hands the words back to the comment box.
+    `why` is the user's reason, `detail` the log's. Records in `entry` whether a pane took the dialog (`told`) and the
+    dialog itself, so a re-post from a page that never saw it is shown it at the door."""
+    sid, cid = pk["sid"], pk.get("createId") or ""
+    name = _name_of(sid) or sid[:8]
+    kept = ""
+    try:
+        with (jd.STATE / "undelivered.jsonl").open("a") as fh:
+            fh.write(json.dumps({"at": int(time.time()), "op": "commentCreate", "sid": sid, "what": "comment",
+                                 "createId": cid, "uuid": pk["uuid"], "passage": str(pk.get("exact") or "")[:2000],
+                                 "name": pk.get("name") or "", "text": pk["text"]}) + "\n")
+    except OSError as e:
+        kept = _store_fault_copy(e)
+    sys.stderr.write("comment create dropped (%s, session %s, create %s): %s\n" % (sid[:8], name, cid or "-", detail))
+    text = ("Your comment on %s waited for the message it quotes to reach the session's transcript, and no thread was "
+            "started: %s. " % (name, why)
+            + ("Your text is saved verbatim in undelivered.jsonl under romp's state directory." if not kept else
+               "romp could not write undelivered.jsonl either (%s); the Copy button below is the one record of your text." % kept))
+    frame = {"type": "err", "title": "That comment did not start a thread", "text": text, "copy": pk["text"],
+             "sid": sid, "op": "commentCreate"}
+    nack = json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": pk["uuid"], "createId": cid,
+                       "transient": False, "dropped": True, "text": why})
+    with _clients_lock:
+        targets = [c for c in _clients if c.get("app") == "chat" and c.get("alive", True)]
+    for c in targets:
+        try:
+            c["send"](nack)
+        except Exception:
+            pass
+    c = pk.get("client")
+    if c is not None and c.get("alive", True) and (c.get("app") or "") in _ERR_FRAME_APPS:
+        told = _client_send(c, json.dumps(frame))
+    else:
+        told = _send_to_one_chat(frame, sid)
+    with _create_lock:
+        entry["told"] = bool(told)
+        entry["frame"] = frame
+
+
 def _retry_parked_creates():
     """One pusher cycle's pass over lag-parked comment creates: re-run each against the (now
     possibly caught-up) transcript; success acks commentCreated, carrying the thread's row, to every
     chat client (the creating client's socket may be gone — the adopt keys on the createId, and clients
-    without a matching pending simply ignore it). Still lagging → keep, bounded by the transcript's writes
-    (_PARK_MAX_TRIES: a try is spent only when the transcript moved since the last counted one); any OTHER
-    error → drop (the client's own attempt cap surfaces the failure honestly). Every pass re-runs the create,
-    moved or not: a record can land in another of the session's files (the first transcript after a /clear,
-    or one that reads again after a failure) with the leaf unchanged, and an unmoved retry reads no byte."""
+    without a matching pending simply ignore it). Still lagging while its anchor streams → keep, bounded by the
+    transcript's writes (_PARK_MAX_TRIES: a try is spent only when the transcript moved since the last counted one).
+    Still lagging with the anchor no longer streaming (_anchor_streaming, read BEFORE the attempt: a work atom leaves the
+    live tail only once its record is on disk or its turn is over), past the budget, or any OTHER error → drop, said
+    out loud with the words handed back (_hand_back_dropped_create) and remembered as the gesture's answer
+    (_dropped_creates). Every pass re-runs the create, moved or not: a record can land in another of the session's
+    files (the first transcript after a /clear) with the leaf unchanged, and an unmoved retry reads no byte."""
     if not _parked_creates:
         return
     for pk in list(_parked_creates):
@@ -21321,27 +21424,44 @@ def _retry_parked_creates():
             if key in _inflight_creates:           # the WS door is creating it this instant: not twice
                 continue
             _inflight_creates.add(key)
+        dropped = None
         try:
             sig = _park_transcript_sig(pk["sid"])  # BEFORE the attempt reads it: a write after this is the next pass's move
+            streaming = _anchor_streaming(pk["sid"], pk["uuid"])   # BEFORE the attempt too (see the docstring)
             err, tid = _comment_create(pk["sid"], pk["uuid"], pk["exact"], pk["text"], name=pk["name"],
                                        model=pk["model"], effort=pk["effort"], fast=pk.get("fast", ""),
                                        color=pk["color"])
             with _create_lock:                     # note BEFORE the park is dropped: no gap where the
                 if not err:                        # identity is neither parked nor noted
                     _note_create(key, tid)
-                if err == ANCHOR_LAG_ERR and sig != pk.get("seen"):
+                if err == ANCHOR_LAG_ERR and streaming and sig != pk.get("seen"):
                     pk["tries"] += 1               # the transcript was written and still lacks the record: one try spent
                     pk["seen"] = sig
-                if err == ANCHOR_LAG_ERR and pk["tries"] < _PARK_MAX_TRIES:
+                if err == ANCHOR_LAG_ERR and streaming and pk["tries"] < _PARK_MAX_TRIES:
                     continue
                 if pk in _parked_creates:
                     _parked_creates.remove(pk)
+                    if err:
+                        if err != ANCHOR_LAG_ERR:
+                            dropped = (err, "refused on retry: %s" % err)
+                        elif not streaming:
+                            dropped = (ANCHOR_GONE_ERR, "its message left the live stream without reaching the transcript")
+                        else:
+                            dropped = (ANCHOR_GONE_ERR, "the transcript was written %d times without its message" % pk["tries"])
+                        entry = {"why": dropped[0], "told": False}
+                        _note_dropped_create(key, entry)    # in the same step as the removal (_note_dropped_create)
+                        dropped += (entry,)
         finally:
             _release_create(key)
         if not err:
             with _clients_lock:
                 targets = [c for c in _clients if c.get("app") == "chat"]
             _answer_comment_created(targets, pk["sid"], tid, pk["uuid"], pk.get("createId") or "")
+        elif dropped:
+            try:
+                _hand_back_dropped_create(pk, *dropped)
+            except Exception:
+                sys.stderr.write("comment create (%s): its drop could not be said\n%s" % (pk["sid"][:8], traceback.format_exc()))
 
 
 _comments_send_lock = threading.RLock()   # a comments frame's check-and-send, and a create's answer: one at a time (2026-10-01)
@@ -21397,11 +21517,14 @@ def _answer_comment_created(clients, sid, tid, anchor_uuid, create_id=""):
 def _comment_create_job(sid, msg, key, client):
     """The WS door's create, on a thread of its own (_drive hands it over with the identity `key` reserved): create, note,
     release, then answer the creating page — the thread on success (_answer_comment_created), else the refusal, a lag
-    refusal parked for the pusher's retry exactly as before."""
+    refusal parked for the pusher's retry while its anchor still streams, and refused out loud when it does not."""
     cid = str(msg.get("createId") or "")
     err = tid = None
     try:
         try:
+            # asked BEFORE the attempt reads the transcript (_anchor_streaming): an anchor that is not streaming now had its
+            # record on disk before the read, if it ever gets one, so a lag answer for it is final
+            streaming = _anchor_streaming(sid, str(msg["uuid"]))
             err, tid = _comment_create(sid, str(msg["uuid"]), str(msg["exact"]), str(msg["text"]),
                                        name=str(msg.get("name") or ""),
                                        model=str(msg.get("model") or ""), effort=str(msg.get("effort") or ""),
@@ -21409,6 +21532,8 @@ def _comment_create_job(sid, msg, key, client):
                                        color=str(msg.get("color") or ""))
             if not err:
                 _note_create(key, tid)
+            elif err == ANCHOR_LAG_ERR and not streaming:
+                err = ANCHOR_GONE_ERR            # not coming: a real refusal, said now, never a park that waits on nothing
         finally:
             _release_create(key)
     except Exception as e:                       # the handler thread's own crash used to carry this; now it is said here
@@ -21419,7 +21544,8 @@ def _comment_create_job(sid, msg, key, client):
         # the pusher retries it each cycle until the transcript catches up — and the typed nack
         # keeps the client's optimistic mark alive; no toast for plumbing the retry makes moot.
         # Every real refusal stays loud (fail loudly). Parked ONCE per create identity (T289): the
-        # client re-posts the same create on every frame while the nack stands.
+        # client re-posts the same create on a reconnect while the nack stands. The park keeps the creating socket, so its
+        # drop's dialog lands on the page that sent it while that page is still connected (_hand_back_dropped_create).
         try:
             if err == ANCHOR_LAG_ERR:
                 seen = _park_transcript_sig(sid)     # the transcript as the park found it: its budget counts writes past this
@@ -21431,7 +21557,7 @@ def _comment_create_job(sid, msg, key, client):
                                                 "effort": str(msg.get("effort") or ""),
                                                 "fast": str(msg.get("fast") or ""),
                                                 "color": str(msg.get("color") or ""),
-                                                "createId": cid, "tries": 0, "seen": seen})
+                                                "createId": cid, "tries": 0, "seen": seen, "client": client})
             else:
                 client["send"](json.dumps({"type": "warn", "text": err}))
                 # the kernel log carries the refusal too (T289): a name refused at this door showed only
@@ -23866,9 +23992,22 @@ def _drive(msg, client):
                              % (sid[:8], str(again)[:8]))   # a collapse is visible, never silent
             _comment_create_spawn(_answer_comment_created, ([client], sid, again, str(msg["uuid"]), cid))
             return True
+        if state == "dropped":
+            # its park was dropped (_hand_back_dropped_create): the gesture's answer stands, never a park again or a thread
+            # later beside the one the user sends from the words handed back. The page that re-posts it hears the drop;
+            # one that never saw the drop's dialog (its socket was down, no pane took it) is shown it now
+            with _create_lock:
+                frame = None if again.get("told") else again.get("frame")
+                if frame is not None:
+                    again["told"] = True
+            client["send"](json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": str(msg["uuid"]),
+                                       "createId": cid, "transient": False, "dropped": True, "text": again.get("why") or ""}))
+            if frame is not None:
+                client["send"](json.dumps(frame))
+            return True
         if state == "busy":
             # the other door holds this create (parked, or mid-create on the pusher): the typed transient
-            # nack keeps the popover's mark alive, and the pusher's success acks every chat client
+            # nack keeps the popover's mark alive, and the pusher's success acks every chat client, as its drop tells them
             client["send"](json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": str(msg["uuid"]),
                                        "createId": cid, "transient": True, "text": ANCHOR_LAG_ERR}))
             return True
@@ -60125,8 +60264,9 @@ def _resolve_reconnect(c, chat_list):
         fresh = bool(c.get("skeletonOnReady"))
         if not fresh:
             # The redial's stamp (2026-09-10): the page listens (the shim dials ?reconnect=1 only once the kernel's caps
-            # frame has answered its bundle's ready), and the bundle posts ready once, so nothing else would ever stamp
-            # this socket; without the stamp a tap for this window parked for the rest of the page's life.
+            # frame has answered its bundle's ready), and the shim posts no ready again after one the kernel answered, so
+            # nothing else would ever stamp this socket; without the stamp a tap for this window parked for the rest of
+            # the page's life.
             c["ready"] = True
         act = c.get("active")
         held = c.get("echat") or {}
@@ -73146,7 +73286,7 @@ function connect(){if(ws&&(ws.readyState===0||ws.readyState===1))return;   // on
 if(returnAt)returnRedialed=true;   // a dial inside a return window (whatever path led here) → the return-fresh row says so
 connT=Date.now();var proto=location.protocol==="https:"?"wss://":"ws://";
 var active="";try{var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";}catch(e){}
-ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")+(COL?"&col="+encodeURIComponent(COL):"")+((SKEL||RESTART_DIET)?"&skeleton=1":"")+(APP==="fleet"?"&provrows=1":""));   // skeleton=1: a later chat column, or the main pane on every dial of every page load (RESTART_DIET, its redials included: 2026-10-11), served as a view of the session its ?active= names (above). reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page, the last for the page's life, since the bundle posts ready once and no later socket carries one for a caps frame to answer (2026-09-10)
+ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")+(COL?"&col="+encodeURIComponent(COL):"")+((SKEL||RESTART_DIET)?"&skeleton=1":"")+(APP==="fleet"?"&provrows=1":""));   // skeleton=1: a later chat column, or the main pane on every dial of every page load (RESTART_DIET, its redials included: 2026-10-11), served as a view of the session its ?active= names (above). reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page (2026-09-10), the last until a caps frame answers: its onopen posts the bundle's ready again (below), so the kernel serves the socket whole and answers
 // onopen: flush the queue; a RECONNECT (after a drop) also PROMPTS a reload — the fresh socket resyncs live via
 // the kernel's next push, and the banner offers a full reload for anything a live push doesn't cover. This
 // replaced the old silent location.reload() (the user 2026-07-05: don't foist a reload; let me click). Since T265
@@ -84466,9 +84606,14 @@ class Handler(BaseHTTPRequestHandler):
             # ready arm's pushes, so the frame is the kernel's word that the page was served whole). A caps frame
             # that never arrives (the socket died between the pushes and the frame, the ready itself lost on a
             # half-dead socket, or the ready arm raised into the dispatch loop's except below) leaves the page
-            # dialling fresh for its life: the bundle posts ready once, so no later socket carries one and no caps
-            # frame follows. Every redial of such a page is served whole, the cost before 2026-09-07, never a
-            # false skeleton.
+            # dialling fresh until one does: each such redial's onopen posts the bundle's ready AGAIN (the shim's
+            # readyMsg, sent when bundleReady&&!readyAcked&&!readyQueued; round 3, C), so the kernel serves that socket
+            # as the fresh page it is, processes the ready and answers it with the caps frame, and the redials after
+            # declare themselves. That re-sent ready is also what lifts `skeletonOnReady` from such a redial when it
+            # dials skeleton=1 (the main pane does on every dial, a later column too): armed below as for a fresh
+            # skeleton dial, the flag holds back every session frame (_send_chat_or_status) until a ready on THIS
+            # socket pops it, and without the resend no ready would ever come. A ready lost again repeats the round on
+            # the next redial. Never a false skeleton (test_chat_skeleton_reconnect.py drives the redial to its full).
             # The dial record the clientDiag handler stamps rows with: set here alone, never consumed, and the same
             # value _note_ws_open files on this socket's wsopen row below (`reconnect` is its consumable twin).
             client["redial"] = True

@@ -250,14 +250,13 @@ export function prunePending(pending: { text: string; t: number }[], msgs: Comme
 }
 
 /** A comment create as the client holds it from the send gesture until the kernel answers it: the
- *  anchor, the words, the dialog's picks, the gesture's own id and how many times a transient refusal
- *  has had it re-posted. The kernel answers a repeat of a create it completed with the same thread's
- *  ack (a lost ack, a lag-parked copy that landed before the client's re-post reached it), and it tells
- *  a repeat from a fresh comment by this id: two gestures in the same words on the same passage are
- *  two comments, and a memo keyed on the words alone answered the second with the first thread and
- *  wrote its name nowhere (review, 2026-09-09). */
+ *  anchor, the words, the dialog's picks and the gesture's own id. The kernel answers a repeat of a
+ *  create it completed with the same thread's ack (a lost ack, a lag-parked copy that landed before the
+ *  client's re-post reached it), and it tells a repeat from a fresh comment by this id: two gestures in
+ *  the same words on the same passage are two comments, and a memo keyed on the words alone answered the
+ *  second with the first thread and wrote its name nowhere (review, 2026-09-09). */
 export type CommentCreate = { sid: string; uuid: string; exact: string; text: string; name: string;
-  model: string; effort: string; fast: string; color: string; createId: string; tries: number;
+  model: string; effort: string; fast: string; color: string; createId: string;
   /** the thread ids the page knew on the session at the send: a thread on this passage that is NOT among them is
    *  the one this create made (synthSuperseded) */
   prior?: string[] };
@@ -269,13 +268,13 @@ export function mintCreateId(): string {
 }
 
 /** The create a send gesture holds: stamped with a fresh id, picks defaulted to "" (the kernel's
- *  default-comment settings, then the parent's), the retry count at zero. */
+ *  default-comment settings, then the parent's). */
 export function newCommentCreate(anchor: { sid: string; uuid: string; exact: string; model?: string; effort?: string;
                                            fast?: string; color?: string },
                                  text: string, name: string): CommentCreate {
   return { sid: anchor.sid, uuid: anchor.uuid, exact: anchor.exact, text, name, model: anchor.model || "",
            effort: anchor.effort || "", fast: anchor.fast || "", color: anchor.color || "",
-           createId: mintCreateId(), tries: 0 };
+           createId: mintCreateId() };
 }
 
 /** The held create an ack or a refusal answers. The kernel echoes the gesture's createId, so the answer names exactly
