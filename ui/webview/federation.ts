@@ -133,7 +133,8 @@ export const BOOKKEEPING: ReadonlyMap<string, (m: any) => string | null> = new M
   ["loadEpisode",    (m) => "loadEpisode" + K + m.id],             // render.ts noticeOpened: a clear notice's conversation on first expand
   ["imgRequest",     (m) => "imgRequest" + K + m.id + K + m.path], // render.ts: an inline image's bytes, asked on render
   ["commentSeen",    (m) => "commentSeen" + K + m.id + K + m.tid], // render.ts: a thread's read watermark as its popover opens or a reply lands in it
-  ["commentDropSeen", (m) => "commentDropSeen" + K + m.id + K + m.createId],   // render.ts / feed.ts: a dropped comment create's dialog, drawn
+  ["commentDropSeen", (m) => "commentDropSeen" + K + m.id + K + m.createId],   // render.ts / feed.ts: a dropped comment create's dialog, seen
+  ["commentDropHidden", (m) => "commentDropHidden" + K + m.id + K + m.createId],   // render.ts / feed.ts: whether anyone can see the page a drop was offered to (its last word wins)
   ["dotHover",       ()  => "dotHover"],                           // render.ts: the chat's hovered dot (a bare dotHover is the leave)
   ["hoverHighlight", ()  => "hoverHighlight"],                     // feed.ts: the hovered card's rows on the timeline
   ["showAskPath",    (m) => (m.jump ? null : "showAskPath")],      // feed.ts: the hovered / pinned card's path glow (`off` clears); `jump` is the click
