@@ -285,17 +285,21 @@ both, for every gap this kernel knows of:
   superseding there made a tap on the older notification land nothing (its row was gone, the newer
   one still on the screen). An Apple device supersedes nothing, at the kernel or at the page (the
   `/push/pending` answer's `replaces`). Without the superseding, a notification swiped away unopened
-  and a later one tapped for the same session are two gone at once, and on a live iPhone, which
-  tells the page of neither, that lands nothing: two or more gone with no tap seen land nothing,
-  whatever their sessions, since each could have been swiped. A tap some road did see (the link,
-  the worker's click) lands by that road, on the tapped one's own card, and any tap a road landed
-  in the same visit, a link by popstate and the worker's message included, is the newer word, so
-  nothing gone lands over it; going out of view ends the visit. (#225 landed gone ones that were
-  all about one session, by the newest of them: clearing several of a session's notifications
-  without opening any then moved the app there, past the one-swipe trade-off, and a tap on the older
-  one scrolled to the newer one's card. A tap landed by the worker's message or by popstate did not
-  count, so an older notification swiped away for another session could land over it. The review
-  of #225.)
+  and a later one tapped for the same session are two gone at once, and a live iPhone tells the page
+  of neither. Gone notifications that are all about one session land on it, once, by the newest of
+  them (its card: which one was tapped is unknown), whether one is gone or several; gone ones about
+  two or more sessions land nothing. Clearing several of one session's notifications without opening
+  any therefore lands on that session at the next opening: the user's call (2026-10-12), the same
+  trade as the one swipe of 2026-09-10, a working tap over a false move. (#225 landed them; the
+  review of #225 took that out in #227, and the user put it back.) A tap some road did see (the
+  link, the worker's click) lands by that road, on the tapped one's own card, and any tap a road
+  landed in the same visit, a link by popstate and the worker's message included, is the newer word,
+  so nothing gone lands over it; going out of view ends the visit. (A tap landed by the worker's
+  message or by popstate did not count, so an older notification swiped away for another session
+  could land over it. The review of #225.) A tap that reaches the page AFTER a check spent its
+  notification still lands: the page keeps the pushes it landed apart from the ones it spent, and
+  only a second road for a landed push is a duplicate. (One record for both made such a tap a
+  duplicate, lost. The review of #227.)
 - **One summary per gap, however the link flaps.** A gap opens on the event that proves it: a failed
   call (`unreachable`), a reset answer (`restarted`, `overflow`), this kernel's first answer of a life
   while holding a cursor (`hub`: it restarted). It stays open across further failures and closes only

@@ -1953,7 +1953,7 @@ class LandingRevealPins(unittest.TestCase):
         self.assertIn("diag('push-test',{sidAttached:!!at.sid,host:at.host,why:at.why,tabs:at.tabs});", km._LANDING_PUSH_JS)
         for row in ("diag('deeplink',{via:via,hasSid:!!pr,hasCard:!!pc,hasPid:!!pp,dup:!first,controlled:", "diag('sw-message',{shape:m.romp,hasSid:!!m.sid,",
                     "diag('reveal-post',{status:r.status,via:via,boot:!!boot});", "diag('tap-pending',row)", "diag('tap-pending-land',{sid8:r.sid.slice(0,8),ageS:r.ageS,dup:!first})",
-                    "diag('tap-vanish-land',{sid8:v.sid.slice(0,8),ageS:v.ageS})"):
+                    "lr={sid8:v.sid.slice(0,8),ageS:v.ageS};if(vanished.length>1)lr.gone=vanished.length;", "diag('tap-vanish-land',lr)"):
             self.assertIn(row, km._LANDING_REVEAL_JS)
         import inspect
         self.assertIn('msg.get("type") == "clientDiag"', inspect.getsource(km.Handler._dispatch_ws))
@@ -2245,8 +2245,8 @@ const R = (pid, sid, stage, ageS, extra) => Object.assign({ pid, sid, host: '', 
   await flip('visible');
   out.older = snap();
   reset();
-  // BOTH GONE, ONE SESSION, NO TAP SEEN: the user may have cleared both without opening either (the review of #225), so
-  // nothing lands, as for any two gone at once; a tap some road saw lands by that road (bothGoneTapSeen below)
+  // BOTH GONE, ONE SESSION, NO TAP SEEN: one swiped and one tapped, or both cleared unopened: whichever was tapped, if any,
+  // was about S52, so the session lands, by the newest gone one's own record (the user 2026-10-12), and the older is spent
   PENDING = { rows: [R('PID-newer-00000003', 'S52', 'shown', 2, { kind: 'card', cardId: 'S52:g2' }), R('PID-older-00000003', 'S52', 'shown', 60)], missed: [], replaces: false };
   DISPLAYED = [];
   await flip('visible');
@@ -2324,6 +2324,45 @@ const R = (pid, sid, stage, ageS, extra) => Object.assign({ pid, sid, host: '', 
   PENDING = { rows: [R('PID-later-0000000075', 'S75', 'shown', 5)] };
   await flip('visible');
   out.laterVisit = snap();
+  console.log(JSON.stringify(out));
+})();
+"""
+# a tap that reaches the page AFTER a ledger check settled its notification without a landing is new evidence and lands
+# (the review of #227); only a second road for a push already landed is a duplicate
+_LATE_TAP_DRIVER = _REVEAL_LIB + r"""
+const R = (pid, sid, stage, ageS, extra) => Object.assign({ pid, sid, host: '', kind: 'turn', cardId: '', name: 'web', stage, ageS }, extra || {});
+(async () => {
+  const out = {};
+  await settle();
+  winMsg({ romp: 'ready', app: 'feed' });
+  winMsg({ romp: 'wsState', app: 'chat', state: 'up' });
+  await flip('hidden');
+  reset();
+  // two gone, about two sessions: the check spends both and lands nothing
+  PENDING = { rows: [R('PID-late-a-00000080', 'S80', 'shown', 5), R('PID-late-b-00000081', 'S81', 'shown', 9)] };
+  DISPLAYED = [];
+  await flip('visible');
+  out.check = snap();
+  reset();
+  // …then the worker's message for the first arrives: the tap was on it
+  swMsg({ romp: 'notificationClick', sid: 'S80', host: '', kind: 'turn', cardId: '', pid: 'PID-late-a-00000080' });
+  await settle();
+  out.lateSw = snap();
+  reset();
+  // …and a link by popstate for the second
+  global.location.href = 'http://localhost:7777/?push-reveal=S81&push-card=S81%3Ag1&push-pid=PID-late-b-00000081';
+  POPSTATE.forEach((f) => f()); await settle();
+  out.latePop = snap();
+  await flip('hidden');
+  reset();
+  // A GENUINE DUPLICATE: the one gone lands by the vanish road, and the worker's message for the same push lands nothing more
+  PENDING = { rows: [R('PID-late-c-00000082', 'S82', 'shown', 3)] };
+  await flip('visible');
+  out.vanished = snap();
+  reset();
+  swMsg({ romp: 'notificationClick', sid: 'S82', host: '', kind: 'turn', cardId: '', pid: 'PID-late-c-00000082' });
+  await settle();
+  out.dupSw = snap();
   console.log(JSON.stringify(out));
 })();
 """
@@ -2544,18 +2583,20 @@ class LandingRevealSaysWhatThisDeviceMissed(unittest.TestCase):
         self.assertEqual(self.out["older"]["fetches"], [["/push/superseded", {"pid": "PID-older-00000002"}]],
                          "an answer without the word (an older kernel) keeps the rule it had")
 
-    def test_two_gone_for_one_session_land_only_by_a_tap_some_road_saw(self):
-        # the review of #225: #225 landed gone notifications that were all about one session, so clearing several of one
-        # session's notifications without opening any moved the app there on its next opening, an unrequested move past the
-        # one-swipe trade-off the user accepted. Two or more gone with no tap seen land nothing, whatever their sessions; a
-        # tap the worker or the link saw lands by its own road, on the tapped one's card
-        for key, newer, older in (("bothGone", "PID-newer-00000003", "PID-older-00000003"),
-                                  ("bothGoneTag", "PID-newer-00000004", "PID-older-00000004")):
+    def test_gone_ones_all_for_one_session_land_there_and_gone_ones_for_several_land_nothing(self):
+        # the user's call (2026-10-12), after #227 had made two or more gone land nothing: on a live iPhone, which tells the
+        # page of neither a swipe nor a tap, one notification swiped and one tapped for the same session are two gone at
+        # once, and they chose a working tap over a false move after clearing several unopened, as they did for one swipe on
+        # 2026-09-10. Every gone notification's own record names the session, so the session lands, by the newest gone one
+        # (which was tapped is unknown); the others are spent. Gone ones about several sessions still land nothing
+        for key, sid, newer, older, card in (("bothGone", "S52", "PID-newer-00000003", "PID-older-00000003", "S52:g2"),
+                                             ("bothGoneTag", "S53", "PID-newer-00000004", "PID-older-00000004", "")):
             g = self.out[key]
-            self.assertEqual(g["fetches"], [["/push/dropped", {"pid": newer}], ["/push/dropped", {"pid": older}]], key)
-            self.assertEqual(g["posted"], [], key)
+            self.assertEqual(g["fetches"], [["/reveal", {"sid": sid, "wid": "W-test", "via": "vanish"}], ["/push/landed", {"pid": newer}],
+                                            ["/push/dropped", {"pid": older}]], key)
+            self.assertEqual(g["posted"], [{"romp": "revealCard", "itemId": card, "sid": sid, "gesture": True}] if card else [], key)
             self.assertEqual(_rows(g, "tap-pending"), [{"via": "visible", "sub": True, "rows": 2, "getNotifications": True, "displayed": 0, "vanished": 2}], key)
-            self.assertEqual(_rows(g, "tap-vanish-land"), [], key)
+            self.assertEqual(_rows(g, "tap-vanish-land"), [{"sid8": sid, "ageS": 2, "gone": 2}], key)
             self.assertEqual(g["notes"], [], key)
         k = self.out["bothGoneTapSeen"]
         self.assertEqual(k["fetches"], [["/reveal", {"sid": "S56", "wid": "W-test", "via": "ack"}], ["/push/landed", {"pid": "PID-older-00000006"}],
@@ -2611,6 +2652,33 @@ class LandingRevealCountsEveryTapAsTheVisitsLanding(unittest.TestCase):
     def test_the_next_visit_starts_over(self):
         v = self.out["laterVisit"]
         self.assertEqual(v["fetches"], [["/reveal", {"sid": "S75", "wid": "W-test", "via": "vanish"}], ["/push/landed", {"pid": "PID-later-0000000075"}]])
+
+
+class LandingRevealLandsATapThatComesAfterTheCheck(unittest.TestCase):
+    """The review of #227: the page kept one record for the pushes it landed and the ones it spent, so a tap the worker's
+    message or a popstate link brought after a ledger check had dropped that notification read as a duplicate: no /reveal,
+    and the row reported dropped. It is new evidence. Only a second road for a push this page LANDED is a duplicate."""
+    EP = "https://push.example.net/send/this-device"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = _run_reveal(_LATE_TAP_DRIVER, href="http://localhost:7777/", endpoint=cls.EP, pending={"rows": []})
+
+    def test_a_late_workers_message_or_popstate_link_lands_the_tap_the_check_had_spent(self):
+        self.assertEqual(self.out["check"]["fetches"], [["/push/dropped", {"pid": "PID-late-a-00000080"}], ["/push/dropped", {"pid": "PID-late-b-00000081"}]],
+                         "gone about two sessions: spent, nothing landed")
+        s = self.out["lateSw"]
+        self.assertEqual(s["fetches"], [["/reveal", {"sid": "S80", "wid": "W-test", "via": "sw"}], ["/push/landed", {"pid": "PID-late-a-00000080"}]])
+        self.assertEqual([d["dup"] for d in _rows(s, "sw-message")], [False])
+        p = self.out["latePop"]
+        self.assertEqual(p["fetches"], [["/reveal", {"sid": "S81", "wid": "W-test", "via": "link"}], ["/push/landed", {"pid": "PID-late-b-00000081"}]])
+        self.assertEqual(p["posted"], [{"romp": "revealCard", "itemId": "S81:g1", "sid": "S81", "gesture": True}])
+
+    def test_a_second_road_for_a_push_already_landed_is_still_a_duplicate(self):
+        self.assertEqual(self.out["vanished"]["fetches"], [["/reveal", {"sid": "S82", "wid": "W-test", "via": "vanish"}], ["/push/landed", {"pid": "PID-late-c-00000082"}]])
+        d = self.out["dupSw"]
+        self.assertEqual(d["fetches"], [])
+        self.assertEqual([r["dup"] for r in _rows(d, "sw-message")], [True])
 
 
 class LandingRevealReadsTheLinkLater(unittest.TestCase):

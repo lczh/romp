@@ -69368,15 +69368,17 @@ def _push_send_one(sub, payload):
 # the push event the mutable declarative message dispatches) and 'clicked' (the first thing the click handler does,
 # on a browser that dispatches one) — while the page asks GET /push/pending?endpoint=<its own subscription> for
 # EVERY row to THIS device nobody has settled, newest first, on boot / visible / pageshow / focus, and holds the
-# shown ones against the notifications still displayed. A clicked row lands (/reveal via 'ack'); EXACTLY ONE
-# vanished row lands, silently (/reveal via 'vanish'), unless a tap some road saw landed in the same visit; anything
-# else — two or more gone at once, about one session or several (the review of #225: each could have been swiped),
-# everything still displayed, rows never acked shown, a screen the page cannot read — shows NOTHING: no prompt, ever
-# (the user 2026-09-09). The page settles each row it is done with: POST /push/landed (the push landed, by whichever road —
+# shown ones against the notifications still displayed. A clicked row lands (/reveal via 'ack'); vanished rows land
+# once, silently (/reveal via 'vanish'), when they are all about ONE session and no tap some road saw landed in the
+# same visit (the user 2026-10-12, who chose a working tap over a false move after a swipe, as on 2026-09-10); anything
+# else — gone rows about two or more sessions, everything still displayed, rows never acked shown, a screen the page
+# cannot read — shows NOTHING: no prompt, ever (the user 2026-09-09). The page settles each row it is done with: POST /push/landed (the push landed, by whichever road —
 # the worker's message 'sw', the deep link 'link', 'ack', 'vanish'), /push/superseded (a NEWER notification for
 # the same session is still displayed — the notification tag is per session, so on a device that honours it the show
-# REPLACED this one's on the screen: gone without a tap) or /push/dropped (vanished beside a tap that landed, or one
-# of several gone at once: spent, never a landing, and never left to inflate the next check's count). The kernel
+# REPLACED this one's on the screen: gone without a tap) or /push/dropped (vanished beside a tap that landed, an older
+# one gone beside the newest that landed for its session, or one of several gone about different sessions: spent,
+# never a landing, and never left to inflate the next check's count; a tap that reaches the page for it later still
+# lands). The kernel
 # supersedes at the shown ack too — the event itself: a shown ack for a session retires that session's older
 # unsettled, untapped rows on that device, with a line. Neither supersedes on an Apple device, whose notifications
 # stand side by side whatever their tag (_push_tag_replaces; /push/pending's `replaces` tells the page): there an
@@ -79094,8 +79096,9 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 #  - 'ack': the kernel's own ledger — GET /push/pending?endpoint=<this page's subscription> lists every unsettled
 #    push to this device; the ones the worker acked clicked (a tap whose message and link reached no page) land.
 #    Asked on the events a page that came forward produces: boot, visible, pageshow, focus.
-#  - 'vanish': the same list's SHOWN rows, held against registration.getNotifications() — exactly ONE shown push
-#    whose notification is gone from the screen lands, silently, when no other road landed a tap in the same visit.
+#  - 'vanish': the same list's SHOWN rows, held against registration.getNotifications() — the shown pushes whose
+#    notifications are gone from the screen land, silently and once, when they are all about one session and no other
+#    road landed a tap in the same visit.
 #    The one thing a LIVE iOS app leaves for the page: no event reaches the worker or the page, only these events and
 #    the screen (the fromLedger comment below has the decision table and the trade-off the user accepted).
 #  The pid rides all four, so one push lands ONCE: the first road to land it settles the kernel's row (POST
@@ -79123,7 +79126,7 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 # hasCard, hasPid, dup, controlled} at every boot and every later arrival of the params; 'sw-message' {shape,
 # hasSid, kind, dup, sw: the worker's own diag block} when a worker's message arrives; 'tap-pending' {via, sub,
 # rows[, getNotifications, displayed, vanished][, superseded][, err]}, 'tap-pending-land' {sid8, ageS, dup} and
-# 'tap-vanish-land' {sid8, ageS} for the ledger check; 'reveal-post' {status, via, boot} with /reveal's answer.
+# 'tap-vanish-land' {sid8, ageS[, gone]} for the ledger check; 'reveal-post' {status, via, boot} with /reveal's answer.
 # Structure and clipped ids only, never text or a session id whole.
 # Its own <script>, like every shell behaviour (test_kernel_mobile's count pin): a throw in the
 # bell's script must not strand a tap, and a bell that bails where the Push API is missing must
@@ -79165,8 +79168,12 @@ if(sid&&kind==='card'&&cardId)revealCard(cardId,sid);}
 // nothing gone from the screen lands on top of it. Before, only a link read with that very check or a clicked row it
 // landed itself counted: a tap the worker's message or a popstate link had landed did not, and a notification swiped
 // earlier for another session landed over it. The visit ends when the page goes out of view (visibilitychange), the
-// event that begins the next coming-forward
-var swc=('serviceWorker' in navigator)&&navigator.serviceWorker||null,seen={},tapped=false;
+// event that begins the next coming-forward.
+// LANDED AND SPENT ARE TWO RECORDS (the review of #227): `seen` holds the pids this page LANDED, the only ones a later road
+// is a duplicate of; `spent` holds the ones it settled without a landing (superseded, dropped), which the ledger checks
+// skip from then on but a tap road does not. Both were one record, so a tap the worker's message or a popstate link
+// brought AFTER a check had dropped its notification read as a duplicate and was lost: it is new evidence, and lands
+var swc=('serviceWorker' in navigator)&&navigator.serviceWorker||null,seen={},spent={},tapped=false;
 function fresh(pid){if(!pid)return true;if(seen[pid])return false;seen[pid]=1;return true;}
 function settle(what,pid){if(pid)fetch('/push/'+what,{method:'POST',body:JSON.stringify({pid:pid})})['catch'](function(){});}
 // THE LINK (the block above — on Apple the OS's own tap callback): the params this page opened on, or gained without
@@ -79198,13 +79205,15 @@ function displayed(){if(!(swc&&typeof swc.getRegistration==='function'))return P
 return swc.getRegistration('/').then(function(r){if(!(r&&typeof r.getNotifications==='function'))return null;
 return r.getNotifications().then(function(ns){var d={};(ns||[]).forEach(function(n){var pid=n&&n.data&&n.data.pid;if(pid)d[String(pid)]=1;});return d;});})['catch'](function(){return null;});}
 // THE DECISION TABLE, per row of the kernel's list: 'clicked' → a tap the worker saw: lands via 'ack', once by pid;
-// 'shown' and still displayed → untouched; 'shown' and GONE → tapped, as far as this page can tell: EXACTLY ONE such row
-// lands via 'vanish', silently; two or more gone at once → each of them could have been swiped rather than tapped,
-// whatever their sessions: all spent (/push/dropped), nothing lands, nothing shows. (The review of #225: #225 landed gone
-// rows that were all about one session, so clearing several of a session's notifications without opening any moved the
-// app there at its next opening, an unrequested move past the one-swipe trade-off below. A tap on one of several lands by
-// the road that saw it, the link or the worker's click, on the tapped one's own card; on a live iPhone, which shows the
-// page neither, one swiped and one tapped land nothing.) A displayed notification for the SAME session as an older gone row superseded it, on a
+// 'shown' and still displayed → untouched; 'shown' and GONE → tapped, as far as this page can tell: the gone rows land via
+// 'vanish', silently, ONCE, when every one of them is about the same session: whichever was tapped, its own record names
+// that session, so the session lands, by the newest gone row (its card, if a card: which one was tapped is unknown), and
+// the others are spent (/push/dropped). Gone rows about several sessions → the tap could have been about any of them:
+// all spent, nothing lands, nothing shows. THE USER'S CALL (2026-10-12): clearing several of one session's notifications
+// without opening any then lands on that session at the next opening, the same trade as the one swipe below, and they
+// took it so that one swiped and one tapped for a session still land on a live iPhone, which tells the page of neither
+// (#227 had made two or more gone land nothing; #225 had made them land). A tap some road saw lands by that road, on the
+// tapped one's own card. A displayed notification for the SAME session as an older gone row superseded it, on a
 // device that honours the per-session tag (it replaced the older notification: /push/superseded, never a tap); an Apple
 // device's notifications stand side by side whatever their tag (the kernel's answer says replaces:false), so there the
 // older one gone was tapped or swiped like any other; 'sent' → nothing known displayed, so nothing of it can have vanished. A tap some road landed in
@@ -79248,13 +79257,16 @@ diag('tap-pending-land',{sid8:r.sid.slice(0,8),ageS:r.ageS,dup:!first});
 if(first){tapped=true;land(r.sid,String(r.kind||''),String(r.cardId||''),via==='boot','ack');settle('landed',r.pid);landed=true;}});
 if(gn){   // 2. the shown rows against the screen
 var front={};rows.forEach(function(r,i){if(d[r.pid]&&!(r.sid in front))front[r.sid]=i;});   // per session, the newest row still displayed (rows are newest first)
-rows.forEach(function(r,i){if(r.stage!=='shown'||seen[r.pid]||d[r.pid])return;   // clicked: above; sent: nothing known displayed; displayed: untouched; seen: landed or spent already
-if(p.replaces!==false&&(r.sid in front)&&front[r.sid]<i){seen[r.pid]=1;superseded++;settle('superseded',r.pid);return;}   // a newer notification for the same session is on the screen: the tag replaced this one's — gone without a tap (never on an Apple device: replaces:false)
+rows.forEach(function(r,i){if(r.stage!=='shown'||seen[r.pid]||spent[r.pid]||d[r.pid])return;   // clicked: above; sent: nothing known displayed; displayed: untouched; seen, spent: landed or spent already
+if(p.replaces!==false&&(r.sid in front)&&front[r.sid]<i){spent[r.pid]=1;superseded++;settle('superseded',r.pid);return;}   // a newer notification for the same session is on the screen: the tag replaced this one's — gone without a tap (never on an Apple device: replaces:false)
 vanished.push(r);});}   // acked shown, gone from the screen: tapped, as far as this page can tell (or swiped — the accepted trade-off above)
 row.vanished=vanished.length;if(superseded)row.superseded=superseded;diag('tap-pending',row);
-if(landed||vanished.length!==1){vanished.forEach(function(x){seen[x.pid]=1;settle('dropped',x.pid);});return;}   // a tap landed this visit, or more than one gone at once: spent, silently
-var v=vanished[0];seen[v.pid]=1;diag('tap-vanish-land',{sid8:v.sid.slice(0,8),ageS:v.ageS});
-land(v.sid,String(v.kind||''),String(v.cardId||''),via==='boot','vanish');settle('landed',v.pid);});});}
+var one=vanished.length>0&&vanished.every(function(x){return x.sid===vanished[0].sid;});   // every gone row is about one session: whichever was tapped lands there
+if(landed||!one){vanished.forEach(function(x){spent[x.pid]=1;settle('dropped',x.pid);});return;}   // a tap landed this visit, or gone rows about several sessions: spent, silently
+var v=vanished[0],lr={sid8:v.sid.slice(0,8),ageS:v.ageS};if(vanished.length>1)lr.gone=vanished.length;   // the newest gone row (rows are newest first)
+seen[v.pid]=1;diag('tap-vanish-land',lr);
+land(v.sid,String(v.kind||''),String(v.cardId||''),via==='boot','vanish');settle('landed',v.pid);
+vanished.slice(1).forEach(function(x){spent[x.pid]=1;settle('dropped',x.pid);});});});}   // its older ones, gone too: the one landing is theirs
 // the worker's message (a browser that dispatches notificationclick: the tap focused this window, or opened it): its
 // shape, the worker's own trail, and whether the pid already landed by another road
 if(swc&&swc.addEventListener)swc.addEventListener('message',function(ev){var m=ev&&ev.data;
