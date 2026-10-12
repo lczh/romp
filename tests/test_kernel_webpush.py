@@ -1953,7 +1953,7 @@ class LandingRevealPins(unittest.TestCase):
         self.assertIn("diag('push-test',{sidAttached:!!at.sid,host:at.host,why:at.why,tabs:at.tabs});", km._LANDING_PUSH_JS)
         for row in ("diag('deeplink',{via:via,hasSid:!!pr,hasCard:!!pc,hasPid:!!pp,dup:!first,controlled:", "diag('sw-message',{shape:m.romp,hasSid:!!m.sid,",
                     "diag('reveal-post',{status:r.status,via:via,boot:!!boot});", "diag('tap-pending',row)", "diag('tap-pending-land',{sid8:r.sid.slice(0,8),ageS:r.ageS,dup:!first})",
-                    "diag('tap-vanish-land',{sid8:v.sid.slice(0,8),ageS:v.ageS})"):
+                    "lr={sid8:v.sid.slice(0,8),ageS:v.ageS};if(vanished.length>1)lr.gone=vanished.length;", "diag('tap-vanish-land',lr)"):
             self.assertIn(row, km._LANDING_REVEAL_JS)
         import inspect
         self.assertIn('msg.get("type") == "clientDiag"', inspect.getsource(km.Handler._dispatch_ws))
@@ -2223,7 +2223,7 @@ const R = (pid, sid, stage, ageS, extra) => Object.assign({ pid, sid, host: '', 
 # and never showed it, and the page says each in the Log; and an Apple device's answer says replaces:false, where an older
 # notification gone from the screen beside a newer one for the same session was tapped (or swiped), not replaced
 _MISSED_DRIVER = _REVEAL_LIB + r"""
-const R = (pid, sid, stage, ageS) => ({ pid, sid, host: '', kind: 'turn', cardId: '', name: 'web', stage, ageS });
+const R = (pid, sid, stage, ageS, extra) => Object.assign({ pid, sid, host: '', kind: 'turn', cardId: '', name: 'web', stage, ageS }, extra || {});
 (async () => {
   const out = {};
   await settle();
@@ -2244,6 +2244,36 @@ const R = (pid, sid, stage, ageS) => ({ pid, sid, host: '', kind: 'turn', cardId
   DISPLAYED = ['PID-newer-00000002'];
   await flip('visible');
   out.older = snap();
+  reset();
+  // BOTH GONE, ONE SESSION (the review of #222): the older one swiped away without opening Romp, then the newer one tapped.
+  // Whichever of the two was tapped, it was about S52: the session lands, by the newest gone one's own record, and the
+  // older is spent
+  PENDING = { rows: [R('PID-newer-00000003', 'S52', 'shown', 2, { kind: 'card', cardId: 'S52:g2' }), R('PID-older-00000003', 'S52', 'shown', 60)], missed: [], replaces: false };
+  DISPLAYED = [];
+  await flip('visible');
+  out.bothGone = snap();
+  reset();
+  // …and the same on a device that replaces by tag
+  PENDING = { rows: [R('PID-newer-00000004', 'S53', 'shown', 2), R('PID-older-00000004', 'S53', 'shown', 60)], missed: [] };
+  DISPLAYED = [];
+  await flip('visible');
+  out.bothGoneTag = snap();
+  reset();
+  // GONE FROM TWO SESSIONS: no one session the tap was about, so nothing lands, as before
+  PENDING = { rows: [R('PID-newer-00000005', 'S54', 'shown', 2), R('PID-older-00000005', 'S54', 'shown', 30), R('PID-other-00000005', 'S55', 'shown', 60)], missed: [], replaces: false };
+  DISPLAYED = [];
+  await flip('visible');
+  out.twoSessionsGone = snap();
+  reset();
+  // WHAT IT MISSED, WITH IDS: each entry drawn, then the page's word that it drew them (POST /push/missed-logged), which is
+  // what ends the kernel's debt; an answer whose word was lost hands the same ids again: acknowledged again, never drawn twice
+  PENDING = { rows: [], missed: [{ host: 'TESTHOST', text: 'TESTHOST restarted - 1 session finished a turn', id: 'MISSED-id-000000000001' },
+                                 { host: 'boxb', text: 'boxb restarted - notifications may have been missed', id: 'MISSED-id-000000000002' }], replaces: false };
+  await flip('visible');
+  out.missedIds = snap();
+  reset();
+  await flip('visible');
+  out.missedIdsAgain = snap();
   console.log(JSON.stringify(out));
 })();
 """
@@ -2461,6 +2491,38 @@ class LandingRevealSaysWhatThisDeviceMissed(unittest.TestCase):
         self.assertEqual(_rows(a, "tap-pending"), [{"via": "visible", "sub": True, "rows": 2, "getNotifications": True, "displayed": 1, "vanished": 1}])
         self.assertEqual(self.out["older"]["fetches"], [["/push/superseded", {"pid": "PID-older-00000002"}]],
                          "an answer without the word (an older kernel) keeps the rule it had")
+
+    def test_two_gone_for_one_session_land_on_that_session_whichever_was_tapped(self):
+        # the review of #222: since an Apple device stopped retiring the older of two notifications for a session, a
+        # notification swiped away unopened and a later one tapped for the same session were TWO gone at once, and nothing
+        # landed, where before #222 the tap landed. Every gone notification's own record names the session, so the tap
+        # lands there, by the newest gone one; the others are spent
+        for key, sid, newer, older, card in (("bothGone", "S52", "PID-newer-00000003", "PID-older-00000003", "S52:g2"),
+                                             ("bothGoneTag", "S53", "PID-newer-00000004", "PID-older-00000004", "")):
+            g = self.out[key]
+            self.assertEqual(g["fetches"], [["/reveal", {"sid": sid, "wid": "W-test", "via": "vanish"}], ["/push/landed", {"pid": newer}],
+                                            ["/push/dropped", {"pid": older}]], key)
+            self.assertEqual(g["posted"], [{"romp": "revealCard", "itemId": card, "sid": sid, "gesture": True}] if card else [], key)
+            self.assertEqual(_rows(g, "tap-pending"), [{"via": "visible", "sub": True, "rows": 2, "getNotifications": True, "displayed": 0, "vanished": 2}], key)
+            self.assertEqual(_rows(g, "tap-vanish-land"), [{"sid8": sid, "ageS": 2, "gone": 2}], key)
+            self.assertEqual(g["notes"], [], key)
+        t = self.out["twoSessionsGone"]
+        self.assertEqual(t["fetches"], [["/push/dropped", {"pid": p}] for p in ("PID-newer-00000005", "PID-older-00000005", "PID-other-00000005")],
+                         "gone from two sessions: the tap could have been about either, so nothing lands")
+        self.assertEqual(_rows(t, "tap-vanish-land"), [])
+
+    def test_each_missed_entry_is_drawn_once_and_then_acknowledged(self):
+        # the review of #222: the kernel stops owing an entry only on the page's word that it is in the Log
+        ids = ["MISSED-id-000000000001", "MISSED-id-000000000002"]
+        m = self.out["missedIds"]
+        self.assertEqual(m["notes"], [["missed", "TESTHOST restarted - 1 session finished a turn"],
+                                      ["missed", "boxb restarted - notifications may have been missed"]])
+        self.assertEqual(m["fetches"], [["/push/missed-logged", {"endpoint": self.PHONE, "ids": ids}]], "drawn, then said so")
+        a = self.out["missedIdsAgain"]
+        self.assertEqual(a["notes"], [], "the same ids again (the word lost on the way): never drawn twice")
+        self.assertEqual(a["fetches"], [["/push/missed-logged", {"endpoint": self.PHONE, "ids": ids}]], "…but said again")
+        self.assertEqual([f for f in self.out["missed"]["fetches"] if f[0] == "/push/missed-logged"], [],
+                         "an entry without an id has nothing to acknowledge")
 
 
 class LandingRevealReadsTheLinkLater(unittest.TestCase):

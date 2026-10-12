@@ -6431,6 +6431,11 @@ _STATE_REPLACED = "replaced meanwhile; the new bytes get their own read"   # _st
 # which are not settings (review find, 2026-09-08: its notice called them that); the flags, order and
 # bell stores are settings, the default.
 _STATE_FILE_HOLDS = {"timeline-views.json": "the tags and lenses", "timeline-dismissed.json": "the cleared lanes"}
+# A file whose reset is nothing the user sets again: the notice's whole tail, saying what is lost. push-gap-told.json holds
+# what each device is owed by the missed-notification summaries and which of them it still holds unseen (_PUSH_GAP_TOLD);
+# its notice said "the settings it held start over empty until you set them again" (the review of #222).
+_STATE_FILE_RESET = {"push-gap-told.json": "what each device was still owed by the missed-notification summaries is lost, "
+                                           "and the next such summary sounds on every device"}
 
 
 def _state_quarantine(p, st, reason):
@@ -6477,7 +6482,8 @@ def _state_quarantine(p, st, reason):
             tail = ("the flags it held (mail isolation included) are unknown: the last cleanly read ones stand, and with "
                     "none known mail is held for every session and flag changes are refused until the file is written again")
         else:
-            tail = "%s it held start over empty until you set them again" % _STATE_FILE_HOLDS.get(p.name, "the settings")
+            tail = _STATE_FILE_RESET.get(p.name) or ("%s it held start over empty until you set them again"
+                                                     % _STATE_FILE_HOLDS.get(p.name, "the settings"))
         _sync_notice("%s could not be parsed and was moved aside to %s; %s" % (p.name, aside.name, tail), ok=False, kind="refused")
     except Exception:
         pass
@@ -69084,7 +69090,9 @@ def _set_push_sub(sub):
         _save_push_subs(cur)
 
 
-def _del_push_sub(endpoint):
+def _del_push_sub(endpoint, keep_owed=False):
+    """Remove one subscription, its ledger rows and what the gap summaries owe it. `keep_owed`: the page turning This device
+    off was just handed that share (POST /push/unsubscribe), which stays until it says it drew it (_push_gap_forget)."""
     with _PUSH_SUBS_LOCK:
         cur = dict(_push_subs())
         gone = cur.pop(endpoint, None) is not None
@@ -69092,7 +69100,8 @@ def _del_push_sub(endpoint):
             _save_push_subs(cur)
     if gone:
         _push_ledger_forget(endpoint)          # the device's rows go with its subscription (the ledger block below)
-        _push_gap_forget(endpoint)             # …and what the gap summaries owe it (_PUSH_GAP_TOLD)
+        if not keep_owed:
+            _push_gap_forget(endpoint)         # …and what the gap summaries owe it (_PUSH_GAP_TOLD)
 
 
 def _request_page_origin(headers):
@@ -69287,14 +69296,16 @@ def _push_send_one(sub, payload):
 # the push event the mutable declarative message dispatches) and 'clicked' (the first thing the click handler does,
 # on a browser that dispatches one) — while the page asks GET /push/pending?endpoint=<its own subscription> for
 # EVERY row to THIS device nobody has settled, newest first, on boot / visible / pageshow / focus, and holds the
-# shown ones against the notifications still displayed. A clicked row lands (/reveal via 'ack'); EXACTLY ONE
-# vanished row lands, silently (/reveal via 'vanish'); anything else — two or more gone at once, everything still
+# shown ones against the notifications still displayed. A clicked row lands (/reveal via 'ack'); vanished rows land
+# once, silently (/reveal via 'vanish'), when they are all about ONE session (whichever was tapped, its own row names
+# that session: the review of #222); anything else — gone rows about two or more sessions, everything still
 # displayed, rows never acked shown, a screen the page cannot read — shows NOTHING: no prompt, ever (the user
 # 2026-09-09). The page settles each row it is done with: POST /push/landed (the push landed, by whichever road —
 # the worker's message 'sw', the deep link 'link', 'ack', 'vanish'), /push/superseded (a NEWER notification for
 # the same session is still displayed — the notification tag is per session, so on a device that honours it the show
-# REPLACED this one's on the screen: gone without a tap) or /push/dropped (vanished beside another landing, or one of
-# several vanished at once: spent, never a landing, and never left to inflate the next check's count). The kernel
+# REPLACED this one's on the screen: gone without a tap) or /push/dropped (vanished beside another landing, an older
+# one gone beside the newest that landed for its session, or one of several gone about different sessions: spent,
+# never a landing, and never left to inflate the next check's count). The kernel
 # supersedes at the shown ack too — the event itself: a shown ack for a session retires that session's older
 # unsettled, untapped rows on that device, with a line. Neither supersedes on an Apple device, whose notifications
 # stand side by side whatever their tag (_push_tag_replaces; /push/pending's `replaces` tells the page): there an
@@ -69985,7 +69996,7 @@ MISSED_TITLE_NAME = "missed notifications"   # the summary's title: _notify_titl
 _PUSH_GAPS = {}                      # row name -> its open gap (_push_gap_open); only that row's puller thread touches it
 _PUSH_PULL_ANSWERED = set()          # rows that have answered this kernel life (the first answer after a restart opens a gap)
 _PUSH_PULL_LAST_OK = {}              # row name -> when it last answered, this life (an outage's window starts there)
-_PUSH_GAP_TOLD = {}                  # row name -> {endpoint -> {said, owed}}: what each device holds unseen (_push_gap_close), under _push_pull_lock
+_PUSH_GAP_TOLD = {}                  # row name -> {endpoint -> {said, owed, oid}}: what each device holds unseen (_push_gap_close), under _push_pull_lock
 _PUSH_GAP_TOLD_LOADED = [False]      # this life has read the previous one's copy (_push_gap_told_load)
 _PUSH_GAP_TOLD_FAULT = [None]        # the last write failure's text, said once per episode
 
@@ -70037,8 +70048,9 @@ def _push_gap_told_load():
         for ep, st in per.items():
             if isinstance(st, dict):
                 said, owed = _push_gap_rec_in(st.get("said")), _push_gap_rec_in(st.get("owed"))
+                oid = st.get("oid") if owed and isinstance(st.get("oid"), str) and _PID_RE.match(st.get("oid")) else None
                 if said or owed:
-                    kept[str(ep)] = {"said": said, "owed": owed}
+                    kept[str(ep)] = {"said": said, "owed": owed, "oid": oid}
         if kept:
             _PUSH_GAP_TOLD[str(name)] = kept
 
@@ -70046,7 +70058,8 @@ def _push_gap_told_load():
 def _push_gap_told_save():
     """Under _push_pull_lock, after every change: publish _PUSH_GAP_TOLD, 0600 (its keys are endpoints, capability URLs:
     the subscription store's rule), through the one atomic write door. A failed write is said once per episode."""
-    snap = {name: {ep: {"said": _push_gap_rec_out(st.get("said")), "owed": _push_gap_rec_out(st.get("owed"))}
+    snap = {name: {ep: {"said": _push_gap_rec_out(st.get("said")), "owed": _push_gap_rec_out(st.get("owed")),
+                        "oid": st.get("oid")}
                    for ep, st in per.items()} for name, per in _PUSH_GAP_TOLD.items()}
     try:
         _write_state_json(_push_gap_told_path(), json.dumps(snap, sort_keys=True), note=False, mode=0o600)
@@ -70455,14 +70468,15 @@ def _push_gap_close(name):
             st = (prev or {}).get(ep) or {"said": None, "owed": None}
             if st["said"] is None:
                 said = _push_gap_merge(st["owed"], rec) if st["owed"] else rec
-                told[ep] = {"said": said, "owed": None}
+                told[ep] = {"said": said, "owed": None, "oid": None}
                 plan.setdefault((_push_gap_summary(name, said), False), []).append(ep)
             elif _push_tag_replaces(ep):
                 said = _push_gap_merge(st["said"], rec)
-                told[ep] = {"said": said, "owed": None}
+                told[ep] = {"said": said, "owed": None, "oid": None}
                 plan.setdefault((_push_gap_summary(name, said), True), []).append(ep)
-            else:
-                told[ep] = {"said": st["said"], "owed": _push_gap_merge(st["owed"], rec) if st["owed"] else rec}
+            else:                                        # a share that grows is a new one (no oid): a word about the old clears nothing
+                owed = _push_gap_merge(st["owed"], rec) if st["owed"] else rec
+                told[ep] = {"said": st["said"], "owed": owed, "oid": None}
                 held += 1
         if told:
             _PUSH_GAP_TOLD[name] = told                  # a device no longer subscribed leaves with this
@@ -70505,29 +70519,12 @@ def _push_gap_rearm(name):
         per = _PUSH_GAP_TOLD.get(name)
         if not per:
             return
-        kept = {ep: {"said": None, "owed": st["owed"]} for ep, st in per.items() if st.get("owed")}
+        kept = {ep: {"said": None, "owed": st["owed"], "oid": st.get("oid")} for ep, st in per.items() if st.get("owed")}
         if kept:
             _PUSH_GAP_TOLD[name] = kept
         else:
             _PUSH_GAP_TOLD.pop(name, None)
         _push_gap_told_save()
-
-
-def _push_gap_take(endpoint):
-    """Under _push_pull_lock: take device `endpoint`'s state off every row, saved when there was any. [(row, {said, owed})]."""
-    endpoint = str(endpoint or "")
-    _push_gap_told_load()
-    out = []
-    for name in sorted(_PUSH_GAP_TOLD):
-        per = _PUSH_GAP_TOLD[name]
-        st = per.pop(endpoint, None)
-        if st is not None:
-            out.append((name, st))
-        if not per:
-            _PUSH_GAP_TOLD.pop(name, None)
-    if out:
-        _push_gap_told_save()
-    return out
 
 
 def _push_gap_seen(endpoint, say=False):
@@ -70537,42 +70534,87 @@ def _push_gap_seen(endpoint, say=False):
 
     What the device was owed (an Apple device's share of the gaps that came while it held a summary unseen, which it could
     not be sent in place: _push_gap_close) is said NOW, by the dashboard in front of the user, without a sound: returned as
-    [{host, text}], one per row, in the summary's own words, for the /push/pending answer's `missed`, which the page puts
+    [{host, text, id}], one per row, in the summary's own words, for the /push/pending answer's `missed`, which the page puts
     in its Log. Before, this cleared it unsaid, and a device whose next notification came normally waited for another gap
     that might never come (the review of #221). Only when the page says it reads them (`say`: this build's page asks with
-    missed=1): a page loaded before this build, open across a deploy, re-arms its device as before and the share waits."""
+    missed=1): a page loaded before this build, open across a deploy, re-arms its device as before and the share waits.
+
+    Handing a share over does not clear it: the page's word that it drew the entry does (POST /push/missed-logged, by the
+    `id`: _push_gap_logged). Until then it stays owed, on disk, and is handed again, under the same id, so an answer lost on
+    the way loses nothing and a page that did draw it can tell (the review of #222: it was cleared at the answer, and a
+    lost answer lost the count unsaid). A share that grows meanwhile (_push_gap_close) is a new one, under a new id."""
     out = []
     with _push_pull_lock:
-        if say:
-            for name, st in _push_gap_take(endpoint):
-                text = _push_gap_summary(name, st["owed"]) if st.get("owed") else None
-                if text:
-                    out.append({"host": name, "text": text})
-            return out
         _push_gap_told_load()
         endpoint = str(endpoint or "")
         changed = False
-        for name in list(_PUSH_GAP_TOLD):
+        for name in sorted(_PUSH_GAP_TOLD):
             per = _PUSH_GAP_TOLD[name]
             st = per.get(endpoint)
-            if st is None or (st.get("said") is None and st.get("owed")):
-                continue                                 # nothing here, or already re-armed with its share kept
-            changed = True
-            if st.get("owed"):
-                per[endpoint] = {"said": None, "owed": st["owed"]}
-            else:
+            if st is None:
+                continue
+            owed = st.get("owed")
+            text = _push_gap_summary(name, owed) if owed else None
+            if text is None:                             # its summary seen, nothing owed to say: the device's state goes
                 per.pop(endpoint)
                 if not per:
                     _PUSH_GAP_TOLD.pop(name, None)
+                changed = True
+                continue
+            new = {"said": None, "owed": owed, "oid": st.get("oid")}
+            if say:
+                if not new["oid"]:
+                    new["oid"] = secrets.token_urlsafe(16)   # the shape the routes admit (_PID_RE)
+                out.append({"host": name, "text": text, "id": new["oid"]})
+            if new != st:
+                per[endpoint] = new
+                changed = True
         if changed:
             _push_gap_told_save()
     return out
 
 
-def _push_gap_forget(endpoint):
-    """The device unsubscribed, or its push service said it is gone: its record goes with it (the ledger's rule)."""
+def _push_gap_logged(endpoint, ids):
+    """The page holding `endpoint` put the `missed` entries named by `ids` in its Log (POST /push/missed-logged): only now
+    is each share it was handed (_push_gap_seen) said, and cleared. An id this device's current share does not wear (a word
+    about a share since said by a summary, or grown since) clears nothing. Returns the rows cleared."""
+    endpoint, ids = str(endpoint or ""), {str(i) for i in ids}
+    done = []
     with _push_pull_lock:
-        _push_gap_take(endpoint)
+        _push_gap_told_load()
+        for name in sorted(_PUSH_GAP_TOLD):
+            per = _PUSH_GAP_TOLD[name]
+            st = per.get(endpoint)
+            if not (st and st.get("owed") and st.get("oid") in ids):
+                continue
+            done.append(name)
+            if st.get("said") is None:
+                per.pop(endpoint)
+                if not per:
+                    _PUSH_GAP_TOLD.pop(name, None)
+            else:
+                per[endpoint] = {"said": st["said"], "owed": None, "oid": None}
+        if done:
+            _push_gap_told_save()
+    return done
+
+
+def _push_gap_forget(endpoint):
+    """The device unsubscribed, or its push service said it is gone: its record goes with it (the ledger's rule). A page
+    that turns This device off itself is first handed what the device is owed (POST /push/unsubscribe with missed:1), and
+    that share stays until the page's word (_push_gap_logged) or the row's next summary, which leaves a device no longer
+    subscribed out (_push_gap_close)."""
+    endpoint = str(endpoint or "")
+    with _push_pull_lock:
+        _push_gap_told_load()
+        gone = False
+        for name in list(_PUSH_GAP_TOLD):
+            per = _PUSH_GAP_TOLD[name]
+            gone = per.pop(endpoint, None) is not None or gone
+            if not per:
+                _PUSH_GAP_TOLD.pop(name, None)
+        if gone:
+            _push_gap_told_save()
 
 
 def _push_pull_gate(name, events, boot=None):
@@ -76216,8 +76258,9 @@ refused:"a setting that could not be saved, or a state file that could not be re
 // on the other two; the dialog that came with the entry carries the cause, so the chip points at it
 undelivered:"something you sent never reached a session, and nothing was delivered; the dialog that reported it said why. Your text is kept verbatim in undelivered.jsonl under ~/.local/state/romp",
 // 'missed' (the review of #221): what a gap summary owed this device and never showed it, said when Romp is next in front
-// of the user here (the reveal script's fromLedger, from the kernel's /push/pending answer)
-missed:"notifications this device was not sent while a machine restarted or a link was down, counted the way your switches and bells would have let them through. A device holding an earlier such summary unseen that cannot update it in place, as on an iPhone, is told here when you next open Romp on it, unless its next summary said it first"};
+// of the user here (the reveal script's fromLedger, from the kernel's /push/pending answer), or when This device is turned
+// off here (the bell's script, from the /push/unsubscribe answer: the review of #222)
+missed:"notifications this device was not sent while a machine restarted or a link was down, counted the way your switches and bells would have let them through. A device holding an earlier such summary unseen that cannot update it in place, as on an iPhone, is told here when you next open Romp on it or turn This device off there, unless its next summary said it first"};
 // the toggles ARE the chips (same pill, same colours) — lit = shown, dimmed = muted. Built once on a
 // STABLE container; only classes flip on click, so the buttons stay click-safe.
 if(filtBar)KINDS.forEach(function(k){var b=document.createElement('span');
@@ -78869,8 +78912,17 @@ if(!r.ok)return r.text().then(function(t){throw new Error(t||'no server key');})
 }).then(function(k){return navigator.serviceWorker.ready.then(function(reg){
 return reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64u(k.key)});});
 }).then(function(s){var j=s.toJSON();j.origin=String(location.origin||'');return post('/push/subscribe',j);});}   // origin (2026-09-10): the page this device runs, for the ABSOLUTE navigate URL an Apple endpoint's declarative message needs (_push_declarative)
+// turning it off (the review of #222): the kernel hands over what this device is still owed (missed:1), as its /push/pending
+// answer does; each goes into the Log as a "missed" entry, then the page says it drew them (POST /push/missed-logged), the
+// word the kernel waits for before it lets go. Before, the share went with the subscription unsaid. The reveal script's
+// sayMissed is the same, with the same record of ids already drawn (window.__rompMissedSaid)
+function sayMissed(ep,list){var said=window.__rompMissedSaid=window.__rompMissedSaid||{},ids=[];
+(Array.isArray(list)?list:[]).forEach(function(m){if(!(m&&typeof m==='object'&&m.text))return;var id=m.id?String(m.id):'';
+if(!(id&&said[id])){if(!window.__rompNotify)return;window.__rompNotify('missed',String(m.text));}
+if(id){said[id]=1;ids.push(id);}});
+if(ep&&ids.length)fetch('/push/missed-logged',{method:'POST',body:JSON.stringify({endpoint:ep,ids:ids})})['catch'](function(){});}
 function devUnsubscribe(){return sub().then(function(s){var ep=s?s.endpoint:'';
-return (s?s.unsubscribe():Promise.resolve()).then(function(){return ep?post('/push/unsubscribe',{endpoint:ep}):null;});});}
+return (s?s.unsubscribe():Promise.resolve()).then(function(){return ep?post('/push/unsubscribe',{endpoint:ep,missed:1}).then(function(d){sayMissed(ep,d&&d.missed);}):null;});});}
 // the session the user is LOOKING AT: the chat pane's active tab, read off the same-origin iframe's DOM — the very
 // nodes the mobile header's current-session chip mirrors (_CHAT_MOBILE_JS reads #tabs .tab.active), so one truth and
 // no second channel. A federated tab's id is already host-prefixed (host:sid); the host rides along as the payload's
@@ -78949,10 +79001,10 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 #  - 'ack': the kernel's own ledger — GET /push/pending?endpoint=<this page's subscription> lists every unsettled
 #    push to this device; the ones the worker acked clicked (a tap whose message and link reached no page) land.
 #    Asked on the events a page that came forward produces: boot, visible, pageshow, focus.
-#  - 'vanish': the same list's SHOWN rows, held against registration.getNotifications() — exactly ONE shown push
-#    whose notification is gone from the screen lands, silently. The one thing a LIVE iOS app leaves for the page:
-#    no event reaches the worker or the page, only these events and the screen (the fromLedger comment below has
-#    the decision table and the trade-off the user accepted).
+#  - 'vanish': the same list's SHOWN rows, held against registration.getNotifications() — the shown pushes whose
+#    notifications are gone from the screen land, silently and once, when they are all about one session. The one
+#    thing a LIVE iOS app leaves for the page: no event reaches the worker or the page, only these events and the
+#    screen (the fromLedger comment below has the decision table and the trade-off the user accepted).
 #  The pid rides all four, so one push lands ONCE: the first road to land it settles the kernel's row (POST
 #  /push/landed) and the rest are dups. A card kind ALSO scrolls the feed to its card: {romp:'revealCard'} into the
 #  feed iframe — the same message the Log's bell entries post — but only once the feed has its cards, which it
@@ -78978,7 +79030,7 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 # hasCard, hasPid, dup, controlled} at every boot and every later arrival of the params; 'sw-message' {shape,
 # hasSid, kind, dup, sw: the worker's own diag block} when a worker's message arrives; 'tap-pending' {via, sub,
 # rows[, getNotifications, displayed, vanished][, superseded][, err]}, 'tap-pending-land' {sid8, ageS, dup} and
-# 'tap-vanish-land' {sid8, ageS} for the ledger check; 'reveal-post' {status, via, boot} with /reveal's answer.
+# 'tap-vanish-land' {sid8, ageS[, gone]} for the ledger check; 'reveal-post' {status, via, boot} with /reveal's answer.
 # Structure and clipped ids only, never text or a session id whole.
 # Its own <script>, like every shell behaviour (test_kernel_mobile's count pin): a throw in the
 # bell's script must not strand a tap, and a bell that bails where the Push API is missing must
@@ -79047,9 +79099,13 @@ function displayed(){if(!(swc&&typeof swc.getRegistration==='function'))return P
 return swc.getRegistration('/').then(function(r){if(!(r&&typeof r.getNotifications==='function'))return null;
 return r.getNotifications().then(function(ns){var d={};(ns||[]).forEach(function(n){var pid=n&&n.data&&n.data.pid;if(pid)d[String(pid)]=1;});return d;});})['catch'](function(){return null;});}
 // THE DECISION TABLE, per row of the kernel's list: 'clicked' → a tap the worker saw: lands via 'ack', once by pid;
-// 'shown' and still displayed → untouched; 'shown' and GONE → tapped, as far as this page can tell: EXACTLY ONE such row
-// lands via 'vanish', silently; two or more gone at once → the tap could have been on any of them: spent (/push/dropped),
-// nothing lands, nothing shows; a displayed notification for the SAME session as an older gone row superseded it, on a
+// 'shown' and still displayed → untouched; 'shown' and GONE → tapped, as far as this page can tell: the gone rows land via
+// 'vanish', silently, ONCE, when every one of them is about the same session: whichever was tapped, its own record names
+// that session, so the session lands, by the newest gone row (its card, if a card), and the others are spent
+// (/push/dropped). Gone rows about two or more sessions → the tap could have been about any of them: all spent, nothing
+// lands, nothing shows. (The review of #222: once an Apple device stopped retiring the older of two notifications for a
+// session, one swiped away unopened and a later one tapped for the same session were two gone, and nothing landed where
+// the tap had landed before.) A displayed notification for the SAME session as an older gone row superseded it, on a
 // device that honours the per-session tag (it replaced the older notification: /push/superseded, never a tap); an Apple
 // device's notifications stand side by side whatever their tag (the kernel's answer says replaces:false), so there the
 // older one gone was tapped or swiped like any other; 'sent' → nothing known displayed, so nothing of it can have vanished. A link this page landed at the same time (linkSid — a killed app, navigated by iOS) or a
@@ -79065,13 +79121,21 @@ return r.getNotifications().then(function(ns){var d={};(ns||[]).forEach(function
 // WHAT THIS DEVICE MISSED (the review of #221): the answer's `missed` is what the kernel's gap summaries owed this device and
 // never showed it (an Apple device holding a summary unseen when later gaps came: it cannot replace a notification in
 // place, so they were not sent). This answer is the moment the dashboard is in front of the user on this device, so each
-// goes into the Log now, without a sound. missed=1 tells the kernel this page says them; it hands each one over once.
+// goes into the Log now, without a sound. missed=1 tells the kernel this page says them. The kernel keeps owing each until
+// this page says it drew it (POST /push/missed-logged, by id: the review of #222), so an answer lost on the way loses
+// nothing; an id this page already drew (its word lost) is said again to the kernel, never drawn twice. No Log, no word.
+// The bell's script turning This device off does the same with its own copy (the two scripts stand alone).
+function sayMissed(ep,list){var said=window.__rompMissedSaid=window.__rompMissedSaid||{},ids=[];
+list.forEach(function(m){var id=m.id?String(m.id):'';
+if(!(id&&said[id])){if(!window.__rompNotify)return;window.__rompNotify('missed',String(m.text));}
+if(id){said[id]=1;ids.push(id);}});
+if(ep&&ids.length)fetch('/push/missed-logged',{method:'POST',body:JSON.stringify({endpoint:ep,ids:ids})})['catch'](function(){});}
 function fromLedger(via,linkSid){endpoint().then(function(e){if(!e)return {sub:false};
-return fetch('/push/pending?endpoint='+encodeURIComponent(e)+'&missed=1').then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}).then(function(p){p=(p&&typeof p==='object')?p:{};p.sub=true;return p;})['catch'](function(){return {sub:true,err:true};});}).then(function(p){
+return fetch('/push/pending?endpoint='+encodeURIComponent(e)+'&missed=1').then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}).then(function(p){p=(p&&typeof p==='object')?p:{};p.sub=true;p.ep=e;return p;})['catch'](function(){return {sub:true,err:true};});}).then(function(p){
 var rows=(Array.isArray(p.rows)?p.rows:[]).filter(function(r){return r&&typeof r==='object'&&r.sid&&r.pid&&r.stage;});
 rows.forEach(function(r){r.pid=String(r.pid);r.sid=String(r.sid);});
 var missed=(Array.isArray(p.missed)?p.missed:[]).filter(function(m){return m&&typeof m==='object'&&m.text;});
-missed.forEach(function(m){if(window.__rompNotify)window.__rompNotify('missed',String(m.text));});
+sayMissed(p.ep,missed);
 var row={via:via,sub:!!p.sub,rows:rows.length};if(p.err)row.err=true;if(missed.length)row.missed=missed.length;
 if(!rows.length){if(p.sub||via==='boot')diag('tap-pending',row);return;}
 displayed().then(function(d){
@@ -79086,9 +79150,12 @@ rows.forEach(function(r,i){if(r.stage!=='shown'||seen[r.pid]||d[r.pid])return;  
 if(p.replaces!==false&&(r.sid in front)&&front[r.sid]<i){seen[r.pid]=1;superseded++;settle('superseded',r.pid);return;}   // a newer notification for the same session is on the screen: the tag replaced this one's — gone without a tap (never on an Apple device: replaces:false)
 vanished.push(r);});}   // acked shown, gone from the screen: tapped, as far as this page can tell (or swiped — the accepted trade-off above)
 row.vanished=vanished.length;if(superseded)row.superseded=superseded;diag('tap-pending',row);
-if(landed||vanished.length!==1){vanished.forEach(function(v){seen[v.pid]=1;settle('dropped',v.pid);});return;}   // another road landed, or more than one gone at once: spent, silently
-var v=vanished[0];seen[v.pid]=1;diag('tap-vanish-land',{sid8:v.sid.slice(0,8),ageS:v.ageS});
-land(v.sid,String(v.kind||''),String(v.cardId||''),via==='boot','vanish');settle('landed',v.pid);});});}
+var one=vanished.length>0&&vanished.every(function(x){return x.sid===vanished[0].sid;});   // every gone row is about one session: whichever was tapped lands there
+if(landed||!one){vanished.forEach(function(x){seen[x.pid]=1;settle('dropped',x.pid);});return;}   // another road landed, or gone rows about several sessions: spent, silently
+var v=vanished[0],lr={sid8:v.sid.slice(0,8),ageS:v.ageS};if(vanished.length>1)lr.gone=vanished.length;   // the newest gone row (rows are newest first)
+seen[v.pid]=1;diag('tap-vanish-land',lr);
+land(v.sid,String(v.kind||''),String(v.cardId||''),via==='boot','vanish');settle('landed',v.pid);
+vanished.slice(1).forEach(function(x){seen[x.pid]=1;settle('dropped',x.pid);});});});}   // its older ones, gone too: the one landing is theirs
 // the worker's message (a browser that dispatches notificationclick: the tap focused this window, or opened it): its
 // shape, the worker's own trail, and whether the pid already landed by another road
 if(swc&&swc.addEventListener)swc.addEventListener('message',function(ev){var m=ev&&ev.data;
@@ -83094,12 +83161,37 @@ class Handler(BaseHTTPRequestHandler):
                                                         "auth": str(keys["auth"])}, "origin": origin})
                 return self._send(200, json.dumps({"ok": True}), "application/json")
             if u.path == "/push/unsubscribe":
+                # This device turned off. The page doing it is the dashboard in front of the user on that device, so with
+                # missed:1 (this build's page) it is handed what the device is still owed, as /push/pending's `missed`, and
+                # that share stays until the page says it drew it (/push/missed-logged): before, it went with the
+                # subscription unsaid, and turning the device back on (a new subscription) could not bring it back (the
+                # review of #222). A page from an older build reads no `missed`: the share goes, as it did
                 try:
-                    ep = str(json.loads(raw_body or b"{}").get("endpoint") or "")
+                    _ub = json.loads(raw_body or b"{}")
+                    ep = str(_ub.get("endpoint") or "")
+                    _usay = _ub.get("missed") in (1, True, "1")
                 except (ValueError, AttributeError):
                     return self._send(400, "bad json", "text/plain")
-                _del_push_sub(ep)
-                return self._send(200, json.dumps({"ok": True}), "application/json")
+                _missed = _push_gap_seen(ep, say=True) if (_usay and ep) else []
+                _del_push_sub(ep, keep_owed=bool(_missed))
+                return self._send(200, json.dumps({"ok": True, "missed": _missed}), "application/json")
+            if u.path == "/push/missed-logged":
+                # the page's word that it put these `missed` entries in its Log (_push_gap_logged): the event that ends what
+                # the device is owed, never the answer that handed them over (the review of #222)
+                try:
+                    _mb = json.loads(raw_body or b"{}")
+                    _mep, _mids = str(_mb.get("endpoint") or ""), _mb.get("ids")
+                except (ValueError, AttributeError):
+                    return self._send(400, "bad json", "text/plain")
+                if not _mep:
+                    return self._send(400, "missing endpoint", "text/plain")
+                if not isinstance(_mids, list) or not all(isinstance(i, str) and _PID_RE.match(i) for i in _mids):
+                    return self._send(400, "bad ids", "text/plain")
+                _mdone = _push_gap_logged(_mep, _mids)
+                if _mdone:
+                    print("[push] missed said in the Log rows=%s endpoint=%s" % (",".join(_mdone), urlparse(_mep).netloc or "?"),
+                          file=sys.stderr)
+                return self._send(200, json.dumps({"ok": True, "cleared": len(_mdone)}), "application/json")
             if u.path in ("/push/landed", "/push/superseded", "/push/dropped"):
                 # the page settling a ledger row (the ledger block above _push_ledger; _PUSH_SETTLE_STAGES): it
                 # landed the push, by whichever road — the deep link, the worker's message, the kernel's own clicked

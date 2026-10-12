@@ -261,6 +261,14 @@ both, for every gap this kernel knows of:
   leaves the share owed), and the page puts each in the Log as a **missed** entry, without a sound.
   (The first cut cleared it when the page came forward, unsaid, and a phone whose next notification
   came normally held its count until another gap that might never come. The review of #221.)
+  Handing it over does not clear it: each entry carries an id, and the hub keeps the share owed, on
+  disk, until the page says it drew the entry (`POST /push/missed-logged`), so an answer lost on the
+  way loses nothing; until then the share is handed again under the same id, which the page draws
+  once. A share that grows meanwhile is a new one under a new id, so a late word about the old one
+  clears nothing. Turning **This device** off hands the share over the same way (`POST
+  /push/unsubscribe` with `missed: 1`; a page from an older build sends no flag and the share goes
+  with the subscription, as before). (The first cut cleared it at the answer and at the unsubscribe.
+  The review of #222.)
 - **What each device holds survives a restart of the hub.** `_PUSH_GAP_TOLD` is written to
   `STATE/push-gap-told.json` (0600: its keys are endpoints, capability URLs) at every change and read
   at the first touch of a life, so a restart, which every deploy is, neither drops what a device is
@@ -271,7 +279,11 @@ both, for every gap this kernel knows of:
   that device because the show replaced their notifications; on an Apple device it did not, and
   superseding there made a tap on the older notification land nothing (its row was gone, the newer
   one still on the screen). An Apple device supersedes nothing, at the kernel or at the page (the
-  `/push/pending` answer's `replaces`).
+  `/push/pending` answer's `replaces`). Without the superseding, a notification swiped away unopened
+  and a later one tapped for the same session are two gone at once, and the page landed nothing
+  where it had landed before. Gone notifications that are all about one session now land on it,
+  once, by the newest of them: whichever was tapped, its own record names that session. Gone ones
+  about two or more sessions still land nothing. (The review of #222.)
 - **One summary per gap, however the link flaps.** A gap opens on the event that proves it: a failed
   call (`unreachable`), a reset answer (`restarted`, `overflow`), this kernel's first answer of a life
   while holding a cursor (`hub`: it restarted). It stays open across further failures and closes only

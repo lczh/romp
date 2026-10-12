@@ -867,8 +867,9 @@ class GapPolicy(_Base):
         self.phone_holds_a_share()
         self.once(self.answer([self.turn(API)], caught=True, boot="81.1"))   # the row delivers normally: re-armed, still owed
         self.assertEqual(self.comes_forward(self.EP)["missed"], [], "the desk was shown everything: nothing to say there")
-        self.assertEqual(self.comes_forward(self.PHONE)["missed"], [{"host": ROW, "text": self.OWED}],
-                         "said by the dashboard on the phone, in the summary's own words")
+        (m,) = self.comes_forward(self.PHONE)["missed"]
+        self.assertEqual((m["host"], m["text"]), (ROW, self.OWED), "said by the dashboard on the phone, in the summary's own words")
+        self.assertEqual(self.logged(self.PHONE, [m["id"]])["cleared"], 1, "the page put it in its Log")
         self.assertEqual(self.comes_forward(self.PHONE)["missed"], [], "said once")
         self.pushed.clear()
         self.once(self.restarted("82.1"))
@@ -902,9 +903,49 @@ class GapPolicy(_Base):
         self.assertEqual([(ep, q) for ep, _, q in self.sent()], [(self.EP, True)],
                          "the desk still holds its summary unseen: updated without a sound; the phone's share grows on disk")
         self.hub_restarts()
-        self.assertEqual(self.comes_forward(self.PHONE)["missed"],
-                         [{"host": ROW, "text": "boxa restarted · TESTHOST: 2 sessions finished turns"}],
+        self.assertEqual([(m["host"], m["text"]) for m in self.comes_forward(self.PHONE)["missed"]],
+                         [(ROW, "boxa restarted · TESTHOST: 2 sessions finished turns")],
                          "two lives later, the phone's dashboard says what it was never shown: both gaps, merged")
+
+    def logged(self, ep, ids):
+        """The page holding `ep` put those `missed` entries in its Log: POST /push/missed-logged, its word that it drew them.
+        Returns the answer."""
+        st, body = _serve("POST", "/push/missed-logged", {"endpoint": ep, "ids": list(ids)})
+        self.assertEqual(st, 200, body)
+        return json.loads(body)
+
+    def test_what_a_device_is_owed_stays_owed_until_its_page_says_it_drew_the_entry(self):
+        # the review of #222: the share was cleared the moment the kernel answered, so an answer lost on the way (the phone
+        # leaving the network mid-request, the app suspended before it read the reply) lost the count unsaid. It is cleared
+        # now on the page's word that the entry is in its Log (POST /push/missed-logged), and handed again until then
+        self.phone_holds_a_share()
+        (m,) = self.comes_forward(self.PHONE)["missed"]
+        self.assertEqual((m["host"], m["text"]), (ROW, self.OWED))
+        self.assertEqual(self.comes_forward(self.PHONE)["missed"], [m],
+                         "that answer never reached the page: handed again, under the same id, so a page that did draw it can tell")
+        self.hub_restarts()
+        self.assertEqual(self.comes_forward(self.PHONE)["missed"], [m], "kept on disk across a restart, id and all")
+        self.assertEqual(self.logged(self.EP, [m["id"]])["cleared"], 0, "another device's word clears nothing here")
+        self.assertEqual(self.logged(self.PHONE, ["x" * 22])["cleared"], 0, "nor an id this device was never handed")
+        self.assertEqual(self.logged(self.PHONE, [m["id"]])["cleared"], 1)
+        self.assertEqual(self.comes_forward(self.PHONE)["missed"], [], "said once")
+        self.assertNotIn(self.PHONE, (jd.STATE / "push-gap-told.json").read_text(), "nothing left on file for the device")
+        for bad in ({"endpoint": self.PHONE, "ids": "x" * 22}, {"endpoint": self.PHONE, "ids": ["no spaces allowed here"]},
+                    {"ids": [m["id"]]}):
+            self.assertEqual(_serve("POST", "/push/missed-logged", bad)[0], 400, bad)
+
+    def test_a_late_word_never_clears_a_share_that_was_said_and_grew_again_since(self):
+        self.phone_holds_a_share()
+        (m,) = self.comes_forward(self.PHONE)["missed"]      # handed; the page's word is slow to come
+        self.once(self.restarted("82.1"))                    # the phone came forward, so the next gap sounds there, its share inside
+        self.once(self.answer(caught=True, boot="82.1"))
+        self.assertEqual(self.sent()[-1], (self.PHONE, "TESTHOST restarted · 2 sessions finished turns; more may have been missed", False))
+        self.once(self.restarted("83.1"))                    # …and the one after is held for it
+        self.once(self.answer(caught=True, boot="83.1"))
+        self.assertEqual(self.logged(self.PHONE, [m["id"]])["cleared"], 0, "the word is about a share since said and replaced")
+        (n,) = self.comes_forward(self.PHONE)["missed"]
+        self.assertNotEqual(n["id"], m["id"])
+        self.assertEqual(n["text"], "TESTHOST restarted · notifications may have been missed", "the newer share still owed")
 
     def test_a_device_that_unsubscribes_takes_its_record_with_it(self):
         self.phone_holds_a_share()
@@ -912,6 +953,39 @@ class GapPolicy(_Base):
         km._del_push_sub(self.PHONE)
         self.assertNotIn(self.PHONE, (jd.STATE / "push-gap-told.json").read_text())
         self.assertEqual(self.comes_forward(self.PHONE)["missed"], [])
+
+    def test_turning_this_device_off_says_what_it_was_owed_in_its_log(self):
+        # the review of #222: turning This device off took the record with it, so what the device was still owed was dropped
+        # unsaid, and turning it back on (a new subscription, a new endpoint) could not bring it back. The page turning it
+        # off is the dashboard in front of the user on that device: its answer hands the share over as /push/pending's does,
+        # kept until the page says it drew it
+        self.phone_holds_a_share()
+        st, body = _serve("POST", "/push/unsubscribe", {"endpoint": self.PHONE, "missed": 1})
+        self.assertEqual(st, 200, body)
+        (m,) = json.loads(body)["missed"]
+        self.assertEqual((m["host"], m["text"]), (ROW, self.OWED))
+        self.assertNotIn(self.PHONE, km._push_subs(), "unsubscribed")
+        self.assertIn(m["id"], (jd.STATE / "push-gap-told.json").read_text(), "kept until the page's word")
+        self.assertEqual(self.logged(self.PHONE, [m["id"]])["cleared"], 1)
+        self.assertNotIn(self.PHONE, (jd.STATE / "push-gap-told.json").read_text())
+        st, body = _serve("POST", "/push/unsubscribe", {"endpoint": self.EP})   # a page from an older build: forgotten, as before
+        self.assertEqual((st, json.loads(body)["missed"]), (200, []))
+        self.assertNotIn(self.EP, (jd.STATE / "push-gap-told.json").read_text())
+
+    def test_a_torn_record_is_named_for_what_it_held(self):
+        # the review of #222: a torn push-gap-told.json was announced as "the settings it held start over empty until you
+        # set them again", but it holds no setting: it holds what each device is owed
+        (jd.STATE / "push-gap-told.json").write_text("{torn")
+        notices = []
+        with mock.patch.object(km, "_sync_notice", side_effect=lambda text, ok=True, kind="sync": notices.append((text, ok, kind))), \
+             contextlib.redirect_stderr(io.StringIO()):
+            km._push_gap_told_load()
+        ((text, ok, kind),) = notices
+        self.assertEqual((ok, kind), (False, "refused"))
+        self.assertIn("push-gap-told.json could not be parsed and was moved aside to push-gap-told.json.corrupt-", text)
+        self.assertIn("what each device was still owed by the missed-notification summaries is lost, and the next such "
+                      "summary sounds on every device", text)
+        self.assertNotIn("settings", text)
 
     def test_the_fan_out_reaches_only_the_devices_named(self):
         self.subscribe(self.EP, self.LAPTOP, self.PHONE)

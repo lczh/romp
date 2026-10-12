@@ -1595,5 +1595,60 @@ class LandingPushDeviceRowExecutes(unittest.TestCase):
         self.assertEqual(r["notes"], [])
 
 
+# Turning This device off (the review of #222): the subscription's record went with it, so what the device was still owed
+# by the missed-notification summaries was dropped unsaid, and turning it back on (a new subscription) could not bring it
+# back. The page asks the kernel to hand it over (missed:1), as GET /push/pending does, puts each in the Log as a "missed"
+# entry, and then says it drew them (POST /push/missed-logged), the word the kernel waits for before it lets go.
+_DEV_OFF_DRIVER = r"""
+const tick = () => new Promise((r) => setTimeout(r, 0));
+const base = global.fetch;
+let UNSUB_ANSWER = { ok: true, missed: [{ host: 'TESTHOST', text: 'TESTHOST restarted - 1 session finished a turn', id: 'MISSED-id-000000000009' }, { host: 'boxb', text: '' }, 'junk'] };
+global.fetch = (path, init) => {
+  if (path === '/push/unsubscribe') { FETCHES.push([path, JSON.parse(init.body)]); return Promise.resolve({ ok: true, json: () => Promise.resolve(UNSUB_ANSWER) }); }
+  return base(path, init);
+};
+const UNSUBBED = [];
+SUB = { endpoint: 'https://push.example.net/send/dev-1', unsubscribe: () => { UNSUBBED.push(1); SUB = null; return Promise.resolve(true); } };
+async function tapDev() {
+  NOTES.length = 0; FETCHES.length = 0;
+  pop._h.click({ target: devRow });
+  for (let i = 0; i < 8; i++) await tick();
+  return { fetches: FETCHES.slice(), notes: NOTES.slice(), checked: devRow.getAttribute('aria-checked') };
+}
+(async () => {
+  await tick(); await tick();                                    // boot: the switches read, this device subscribed
+  const out = { boot: devRow.getAttribute('aria-checked') };
+  out.off = await tapDev();
+  out.unsubscribed = UNSUBBED.length;
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+class LandingPushDeviceOffSaysWhatItWasOwed(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(_PUSH_HARNESS + km._LANDING_PUSH_JS + _DEV_OFF_DRIVER)
+            path = f.name
+        try:
+            r = subprocess.run(["node", path], capture_output=True, text=True, timeout=30)
+        finally:
+            os.unlink(path)
+        assert r.returncode == 0, "the bell's script threw: " + r.stderr[:800]
+        cls.out = json.loads(r.stdout.strip().splitlines()[-1])
+
+    EP = "https://push.example.net/send/dev-1"
+
+    def test_turning_this_device_off_puts_what_it_was_owed_in_the_log_and_says_so(self):
+        r = self.out["off"]
+        self.assertEqual((self.out["boot"], r["checked"], self.out["unsubscribed"]), ("true", "false", 1))
+        self.assertEqual(r["fetches"], [["/push/unsubscribe", {"endpoint": self.EP, "missed": 1}],
+                                        ["/push/missed-logged", {"endpoint": self.EP, "ids": ["MISSED-id-000000000009"]}]],
+                         "the page asks for what the device was owed, draws it, then says it did")
+        self.assertEqual(r["notes"], [["missed", "TESTHOST restarted - 1 session finished a turn"]], "an entry without words is nobody's")
+
+
 if __name__ == "__main__":
     unittest.main()
