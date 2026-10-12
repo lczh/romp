@@ -7702,8 +7702,16 @@ machine that keeps restarting updates that one notification without a sound
 ("restarted 3 times") until you open Romp on that device or its notifications
 flow normally again. Apple devices are not sent those updates, since an iPhone
 cannot replace a notification in place: what one missed is said by the next such
-notification it gets, or by Romp when you open it there. In one burst, at most 16 notifications arrive
-one by one; the rest are said in one more.
+notification it gets, or, if you open Romp there first, as a **missed** entry in
+the Log. The machine keeps that record on disk, so a restart of it (every
+update) neither loses it nor makes a notification you have not seen sound
+again. In one burst, at most 16 notifications arrive one by one; the rest are
+said in one more.
+
+A notification that replaces an earlier one without a sound (the card that
+follows a turn end's notification for the same session) takes the earlier one's
+place on Chrome and Firefox. An iPhone would show it beside the earlier one, so
+it is sent there only when it carries the app icon's needs-you count.
 
 Tapping a notification brings Romp forward on the session it was about. On an
 iPhone with the app already open in the background, the switch happens as the
@@ -7744,7 +7752,8 @@ notification went to. A report on a valid id stamps that row's shown or tapped
 time, where the first stamp stands so a repeated report changes nothing, and
 records the worker's build string, which every report rewrites. A shown report
 also marks the older unsettled, untapped pushes for the same session on that
-device superseded, since the show replaced their notifications. And the
+device superseded, since the show replaced their notifications; on an Apple
+device, which shows each notification beside the last, it marks none. And the
 request's origin, read from its `Origin` header, else its `Referer`, else the
 forwarded headers or `Host`, is recorded on that device's subscription when
 none is on file; a recorded origin stands, and a different one is logged as a

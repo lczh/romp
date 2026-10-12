@@ -1294,6 +1294,23 @@ class PushLedger(unittest.TestCase):
         self.assertEqual(km._push_ledger_supersede(row), [], "nothing left to supersede: idempotent")
         self.assertEqual(km._push_ledger_supersede({"pid": "never-issued-pid-0001", "endpoint": self.EP_A, "sid": "SID-web"}), [])
 
+    def test_an_apple_device_supersedes_nothing_since_its_notifications_stand_side_by_side(self):
+        # the review of #221: WebKit's webpushd files every notification under its own fresh id and reads the tag only to
+        # filter getNotifications (_push_tag_replaces), so on an iPhone a newer push for the same session lands BESIDE the
+        # older one. Superseding the older row then made a tap on the older notification land nothing (it was gone from
+        # the list, and the newer one was still on the screen). There the older row stays, for the page to hold against the
+        # screen like any other; the answer to the page says which kind of device it is
+        apple = "https://web.push.apple.com/TESTPHONE0000"
+        old_web = km._push_ledger_add(apple, "SID-web", kind="turn", name="web")
+        new_web = km._push_ledger_add(apple, "SID-web", kind="card", card_id="SID-web:g1", name="web")
+        km._push_ledger_stamp(old_web, "shown")
+        self.assertEqual(km._push_ledger_supersede(km._push_ledger_stamp(new_web, "shown")), [])
+        self.assertEqual(self._pending(apple), [(new_web, "shown"), (old_web, "shown")])
+        for ep, replaces in ((apple, False), (self.EP_A, True)):
+            import urllib.parse
+            st, body = _serve_get("/push/pending?endpoint=" + urllib.parse.quote(ep, safe=""), headers={"X-Romp-Token": km.TOKEN})
+            self.assertEqual((st, json.loads(body)["replaces"]), (200, replaces), ep)
+
     def test_the_ledger_is_read_from_disk_every_time_so_a_restart_loses_nothing(self):
         pid = km._push_ledger_add(self.EP_A, "SID-web", kind="turn", name="web")
         # another process (the kernel before a restart) stamped the row: this one sees it without any cache to invalidate
@@ -1762,7 +1779,9 @@ class PushLedgerRoutes(unittest.TestCase):
         code, body = self._req("GET", q)
         self.assertEqual(code, 200)
         d = json.loads(body)
-        self.assertEqual(list(d), ["rows"])
+        self.assertEqual(list(d), ["rows", "missed", "replaces"], "the rows; what the gap summaries owed this device "
+                         "(_push_gap_seen); whether a newer notification takes an older one's place there (_push_tag_replaces)")
+        self.assertEqual((d["missed"], d["replaces"]), ([], True))
         self.assertEqual([(r["pid"], r["stage"]) for r in d["rows"]], [(p3, "sent"), (p2, "sent"), (p1, "sent")], "every unsettled row, newest first, three in flight")
         self.assertEqual({k: d["rows"][1][k] for k in ("sid", "name", "kind", "cardId")}, {"sid": "SID-api", "name": "api", "kind": "card", "cardId": "SID-api:g2"})
         buf = io.StringIO()
@@ -1787,7 +1806,7 @@ class PushLedgerRoutes(unittest.TestCase):
             code, _ = self._req("POST", "/push/landed", {"pid": "x"})
             self.assertEqual(code, 400)
         code, body = self._req("GET", q)
-        self.assertEqual(json.loads(body), {"rows": []}, "every row settled: nothing left to inflate a later count")
+        self.assertEqual(json.loads(body)["rows"], [], "every row settled: nothing left to inflate a later count")
         self.assertEqual((self._row(p3)["supersededAt"] > 0, self._row(p1)["droppedAt"] > 0, self._row(p3)["landedAt"], self._row(p1)["landedAt"]), (True, True, 0, 0), "each settle stamps its own field, never landedAt")
         self.assertEqual([l for l in buf.getvalue().splitlines() if l.startswith("[push]")],
                          ["[push] ack stage=shown sid=SID-web endpoint=push.example.net",
@@ -2200,6 +2219,34 @@ const R = (pid, sid, stage, ageS, extra) => Object.assign({ pid, sid, host: '', 
   console.log(JSON.stringify(out));
 })();
 """
+# what this device missed (the review of #221): the kernel's answer carries `missed`, what the gap summaries owed this device
+# and never showed it, and the page says each in the Log; and an Apple device's answer says replaces:false, where an older
+# notification gone from the screen beside a newer one for the same session was tapped (or swiped), not replaced
+_MISSED_DRIVER = _REVEAL_LIB + r"""
+const R = (pid, sid, stage, ageS) => ({ pid, sid, host: '', kind: 'turn', cardId: '', name: 'web', stage, ageS });
+(async () => {
+  const out = {};
+  await settle();
+  out.boot = snap();
+  winMsg({ romp: 'ready', app: 'feed' });
+  winMsg({ romp: 'wsState', app: 'chat', state: 'up' });
+  reset();
+  PENDING = { rows: [], missed: [{ host: 'TESTHOST', text: 'TESTHOST restarted - 2 sessions finished turns' }, { host: 'boxb', text: '' }, 'junk', null], replaces: false };
+  await flip('visible');
+  out.missed = snap();
+  reset();
+  PENDING = { rows: [R('PID-newer-00000001', 'S50', 'shown', 2), R('PID-older-00000001', 'S50', 'shown', 60)], missed: [], replaces: false };
+  DISPLAYED = ['PID-newer-00000001'];
+  await flip('visible');
+  out.apple = snap();
+  reset();
+  PENDING = { rows: [R('PID-newer-00000002', 'S51', 'shown', 2), R('PID-older-00000002', 'S51', 'shown', 60)], missed: [] };   // an older kernel: no replaces
+  DISPLAYED = ['PID-newer-00000002'];
+  await flip('visible');
+  out.older = snap();
+  console.log(JSON.stringify(out));
+})();
+"""
 # a boot and nothing else: the rows the boot alone files
 _BOOT_DRIVER = _REVEAL_LIB + r"""
 (async () => { await settle(); console.log(JSON.stringify({ boot: snap() })); })();
@@ -2389,6 +2436,33 @@ class LandingRevealWithTheFeedPaneOffHere(unittest.TestCase):
         self.assertIn("function revealCard(itemId,sid){if(window.__rompPaneEnabled&&!window.__rompPaneEnabled('feed'))return;", km._LANDING_REVEAL_JS)
 
 
+class LandingRevealSaysWhatThisDeviceMissed(unittest.TestCase):
+    """The review of #221: an iPhone holding a gap summary unseen is not sent the later gaps (it cannot replace a
+    notification in place), and opening Romp there used to clear what it was owed unsaid. The page asks with missed=1 and
+    puts each summary the answer carries in the Log, the moment the dashboard is in front of the user on that device.
+    And since an Apple device's notifications stand side by side whatever their tag, its answer's replaces:false keeps the
+    superseded rule off: an older notification gone beside a newer one for the same session lands like any one tap."""
+    PHONE = "https://web.push.apple.com/TESTPHONE0000"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = _run_reveal(_MISSED_DRIVER, href="http://localhost:7777/", endpoint=cls.PHONE, pending={"rows": []})
+
+    def test_the_page_asks_with_missed_and_logs_each_summary_once(self):
+        self.assertEqual(self.out["boot"]["gets"], ["/push/pending?endpoint=https%3A%2F%2Fweb.push.apple.com%2FTESTPHONE0000&missed=1"])
+        m = self.out["missed"]
+        self.assertEqual(m["notes"], [["missed", "TESTHOST restarted - 2 sessions finished turns"]], "an entry without words is nobody's")
+        self.assertEqual(_rows(m, "tap-pending"), [{"via": "visible", "sub": True, "rows": 0, "missed": 1}])
+        self.assertEqual(self.out["apple"]["notes"], [], "an answer with none logs nothing")
+
+    def test_on_an_apple_device_an_older_notification_gone_beside_a_newer_one_is_a_tap(self):
+        a = self.out["apple"]
+        self.assertEqual(a["fetches"], [["/reveal", {"sid": "S50", "wid": "W-test", "via": "vanish"}], ["/push/landed", {"pid": "PID-older-00000001"}]])
+        self.assertEqual(_rows(a, "tap-pending"), [{"via": "visible", "sub": True, "rows": 2, "getNotifications": True, "displayed": 1, "vanished": 1}])
+        self.assertEqual(self.out["older"]["fetches"], [["/push/superseded", {"pid": "PID-older-00000002"}]],
+                         "an answer without the word (an older kernel) keeps the rule it had")
+
+
 class LandingRevealReadsTheLinkLater(unittest.TestCase):
     """2026-09-10: on Apple the deep link IS the tap — the declarative message's navigate — and iOS may navigate the EXISTING
     Home Screen window to it rather than open one. So the params are read not only at boot but whenever the page shows
@@ -2443,7 +2517,7 @@ class LandingRevealAsksTheLedger(unittest.TestCase):
     /push/dropped, so none is left to inflate a later count."""
     EP = "https://push.example.net/send/this-device"
     LONG = "66666666-1111-2222-3333-444444444444"   # a uuid-shaped sid, so the clipped form differs from the whole
-    PENDING_GET = "/push/pending?endpoint=" + "https%3A%2F%2Fpush.example.net%2Fsend%2Fthis-device"
+    PENDING_GET = "/push/pending?endpoint=" + "https%3A%2F%2Fpush.example.net%2Fsend%2Fthis-device" + "&missed=1"   # missed=1: this page says what its device missed (LandingRevealSaysWhatThisDeviceMissed)
 
     @classmethod
     def setUpClass(cls):

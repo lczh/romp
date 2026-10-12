@@ -165,7 +165,7 @@ test("the shell's bell knows the `refused` kind: listed, labelled, explained, an
   // KINDS drives the filter row, KINDLBL the chip, DESC the tooltip -- a kind missing from any of the three
   // renders as an unlabelled entry with no way to mute it. Its own kind, so muting `warn` (the judge's
   // anomaly stamp) never mutes a change of yours that did not land
-  assert.match(KERNEL, /var KINDS=\[[^\]]*'refused','undelivered'\]/);
+  assert.match(KERNEL, /var KINDS=\[[^\]]*'refused','undelivered'[,\]]/);   // later kinds may follow (missed, 2026-10-11)
   assert.match(KERNEL, /refused:'not saved'/);
   // the tooltip covers BOTH things filed under the kind (review find, 2026-09-08): a change that did not
   // save (a read OR a write fault), and a state file that could not be read or was moved aside

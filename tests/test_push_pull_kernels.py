@@ -23,9 +23,11 @@ What the run pins, in order:
     ("hubhost restarted · TESTHOST: 1 session finished a turn");
   * the hub restarts with NO cursor file at all (its first pull, or the record removed): it resumes at the origin's newest
     and says what it skipped, delivering nothing old;
-  * the ORIGIN restarts (a new life, a new boot id): the hub resumes at the newest with its loud line, one summary says
-    notifications may have been missed (the events went with the origin's old life), and the next turn end is
-    delivered once, as it happens;
+  * the ORIGIN restarts (a new life, a new boot id): the hub resumes at the newest with its loud line, and the summary the
+    device still holds unseen from the hub's first restart takes in that notifications may have been missed (the events
+    went with the origin's old life), updated without a sound: what each device holds is on the hub's disk, so the hub's
+    own restarts in between did not make it sound again (the review of #221); the next turn end is delivered once, as it
+    happens;
 and through all of it no event is delivered twice.
 
 Synthetic only: invented hosts (TESTHOST, boxa, hubhost), private placeholder sids, invented text.
@@ -465,8 +467,12 @@ class PushPullTwoKernels(unittest.TestCase):
         self._boot("origin")
         self._wait("the origin-restarted line", lambda: "its kernel restarted since this kernel last heard from it" in _text(third),
                    secs=120)
-        self._wait("the origin-restarted summary",
-                   lambda: "TESTHOST restarted · notifications may have been missed" in _text(third), secs=120)
+        # the device still holds the summary of the hub's first restart unseen (no page came forward, nothing delivered
+        # normally since), and that record survived the hub's restarts on disk: the gap folds into it without a sound
+        self._wait("the origin-restarted summary, folded into the one the device holds unseen",
+                   lambda: "folded into the summary not yet seen, updated without a sound, none of the missed events delivered "
+                           "one by one: TESTHOST restarted · 1 session finished a turn; more may have been missed"
+                           in _text(third), secs=120)
         self._origin_baselined()                          # the new life's turn tick takes its baseline first
         self._end_turn(API, t2 + 7)
         self._wait("the turn end after the origin's restart", lambda: len(self._pushed(API, "turn")) == 3, secs=120)

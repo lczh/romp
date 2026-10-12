@@ -145,6 +145,7 @@ class _Base(unittest.TestCase):
         km._PUSH_PULL_ANSWERED.clear()
         km._PUSH_PULL_LAST_OK.clear()
         km._PUSH_GAP_TOLD.clear()
+        km._PUSH_GAP_TOLD_LOADED[0] = False                 # this test's life reads its own (empty) state root
         with km._remotes_lock:
             km._remotes.clear()
         with km._known_lock:
@@ -589,9 +590,25 @@ class GapPolicy(_Base):
         """Each summary as (device, body, quiet), once per device it went to, in the order sent."""
         return [(ep, a[1], k.get("quiet", False)) for a, k in self.summaries() for ep in k.get("endpoints", ())]
 
-    def comes_forward(self, ep):
-        """A page holding the subscription `ep` comes forward: its GET /push/pending, asked on every load, show and focus."""
-        _serve("GET", "/push/pending?endpoint=" + quote(ep, safe=""))
+    def comes_forward(self, ep, says_missed=True):
+        """A page holding the subscription `ep` comes forward: its GET /push/pending, asked on every load, show and focus.
+        `says_missed`: the page says what its device missed (this build's page asks with missed=1; a page loaded from an
+        older build does not). Returns the answer."""
+        with mock.patch.object(km, "_self_host", return_value="boxa"):
+            st, body = _serve("GET", "/push/pending?endpoint=" + quote(ep, safe="") + ("&missed=1" if says_missed else ""))
+        self.assertEqual(st, 200)
+        return json.loads(body)
+
+    def hub_restarts(self):
+        """This kernel restarts: every in-memory record of the life that ended goes, and what is on disk stays."""
+        km._PUSH_GAP_TOLD.clear()
+        km._PUSH_GAP_TOLD_LOADED[0] = False
+        km._PUSH_PULL_CURSORS[0] = None
+        km._PUSH_PULL_SEEN.clear()
+        km._PUSH_GAPS.clear()
+        km._PUSH_PULL_ANSWERED.clear()
+        km._PUSH_PULL_LAST_OK.clear()
+        km._PUSH_BUZZED.clear()
 
     def once(self, answer):
         with mock.patch.object(km, "_push_pull_get", return_value=answer), \
@@ -827,6 +844,75 @@ class GapPolicy(_Base):
         self.assertEqual(self.sent(), [(self.EP, "TESTHOST restarted 2 times · notifications may have been missed", True),
                                        (self.PHONE, "TESTHOST restarted · notifications may have been missed", False)])
 
+    def phone_holds_a_share(self):
+        """The desk and the phone each hold an unseen summary; a later outage misses two turn ends: the desk's summary is
+        updated in place, and the phone's share is held on the hub (it cannot replace a notification in place)."""
+        self.subscribe(self.EP, self.PHONE)
+        self.steady()
+        self.once(self.restarted("81.1"))
+        self.once(self.answer(caught=True, boot="81.1"))
+        self.drop()
+        self.once(self.answer([self.turn(API), self.turn(WEB)], boot="81.1"))
+        self.once(self.answer(caught=True, boot="81.1"))
+        self.assertEqual([(ep, q) for ep, _, q in self.sent()], [(self.EP, False), (self.PHONE, False), (self.EP, True)])
+        self.pushed.clear()
+
+    OWED = "TESTHOST was unreachable for under a minute · 2 sessions finished turns"
+
+    def test_what_an_iphone_was_never_shown_is_said_on_its_dashboard_when_romp_opens_there(self):
+        # the review of #221: the phone's summary swiped away unopened, a later gap's count held for it, and the next normal
+        # notification re-armed the phone without carrying the count, which then waited for another gap that might never
+        # come, and opening Romp on the phone only cleared it. The count now reaches the user the moment Romp is in front
+        # of them on that device, in the dashboard, without a sound
+        self.phone_holds_a_share()
+        self.once(self.answer([self.turn(API)], caught=True, boot="81.1"))   # the row delivers normally: re-armed, still owed
+        self.assertEqual(self.comes_forward(self.EP)["missed"], [], "the desk was shown everything: nothing to say there")
+        self.assertEqual(self.comes_forward(self.PHONE)["missed"], [{"host": ROW, "text": self.OWED}],
+                         "said by the dashboard on the phone, in the summary's own words")
+        self.assertEqual(self.comes_forward(self.PHONE)["missed"], [], "said once")
+        self.pushed.clear()
+        self.once(self.restarted("82.1"))
+        self.once(self.answer(caught=True, boot="82.1"))
+        self.assertEqual(self.sent(), [(self.EP, "TESTHOST restarted · notifications may have been missed", False),
+                                       (self.PHONE, "TESTHOST restarted · notifications may have been missed", False)],
+                         "the phone's next summary carries only what it has not been told")
+
+    def test_a_page_from_an_older_build_re_arms_its_device_and_keeps_what_it_is_owed(self):
+        # a page loaded before this build (open across a deploy until it reloads) asks without missed=1 and would drop the
+        # words on the floor: the device is re-armed as before, and its share waits for a page that says it, or its next
+        # summary
+        self.phone_holds_a_share()
+        self.assertEqual(self.comes_forward(self.PHONE, says_missed=False)["missed"], [])
+        self.once(self.restarted("82.1"))
+        self.once(self.answer(caught=True, boot="82.1"))
+        self.assertEqual([(ep, q) for ep, _, q in self.sent()], [(self.EP, True), (self.PHONE, False)],
+                         "re-armed: the phone's next summary sounds")
+        self.assertEqual(self.sent()[1][1], "TESTHOST restarted · 2 sessions finished turns; more may have been missed",
+                         "…and carries what it was owed")
+
+    def test_what_each_device_holds_survives_a_restart_of_this_kernel(self):
+        # the review of #221: the record was in memory only, so every restart of this kernel (every deploy) dropped what a
+        # device was owed, and made a summary still unseen on a device sound again
+        self.phone_holds_a_share()
+        p = jd.STATE / "push-gap-told.json"
+        self.assertEqual(p.stat().st_mode & 0o777, 0o600, "its keys are endpoints, capability URLs: the subscription store's rule")
+        self.hub_restarts()
+        self.once(self.answer([self.turn(API)], boot="81.1"))   # this life's first answer: what fired while it was down
+        self.once(self.answer(caught=True, boot="81.1"))
+        self.assertEqual([(ep, q) for ep, _, q in self.sent()], [(self.EP, True)],
+                         "the desk still holds its summary unseen: updated without a sound; the phone's share grows on disk")
+        self.hub_restarts()
+        self.assertEqual(self.comes_forward(self.PHONE)["missed"],
+                         [{"host": ROW, "text": "boxa restarted · TESTHOST: 2 sessions finished turns"}],
+                         "two lives later, the phone's dashboard says what it was never shown: both gaps, merged")
+
+    def test_a_device_that_unsubscribes_takes_its_record_with_it(self):
+        self.phone_holds_a_share()
+        self.assertIn(self.PHONE, (jd.STATE / "push-gap-told.json").read_text())
+        km._del_push_sub(self.PHONE)
+        self.assertNotIn(self.PHONE, (jd.STATE / "push-gap-told.json").read_text())
+        self.assertEqual(self.comes_forward(self.PHONE)["missed"], [])
+
     def test_the_fan_out_reaches_only_the_devices_named(self):
         self.subscribe(self.EP, self.LAPTOP, self.PHONE)
         seen, done = [], threading.Event()
@@ -909,6 +995,56 @@ class GapPolicy(_Base):
         self.assertEqual(self.pushed, [])
         self.once((200, {"boot": "77.1", "next": 12, "events": []}))
         self.assertEqual(len(self.summaries()), 1)
+
+
+class _SyncThread:
+    """Stands in for threading.Thread inside the kernel module only: _push_notify's send runs before the call returns."""
+
+    def __init__(self, target=None, daemon=None, **kw):
+        self.target = target
+
+    def start(self):
+        self.target()
+
+
+class QuietFollowUps(_Base):
+    """A quiet push REPLACES a notification already shown, without a sound: the card that yields the buzz to the turn end
+    that already sounded (#937), the update of a gap's summary. A device that cannot replace one in place (Apple's:
+    _push_tag_replaces) would show it BESIDE the old one, a second notification for news the device already had (the
+    review of #221). It goes there only when it carries the needs-you badge, which a closed app learns only from a push."""
+
+    DESK = "https://push.example.net/send/desk"
+    PHONE = "https://web.push.apple.com/TESTPHONE0000"
+
+    def setUp(self):
+        super().setUp()
+        _row()
+        km._save_push_subs({ep: {"endpoint": ep, "keys": {"p256dh": "k", "auth": "a"}} for ep in (self.DESK, self.PHONE)})
+
+    def sends(self, **kw):
+        seen = []
+        with mock.patch.object(km, "threading", mock.Mock(Thread=_SyncThread)), \
+             mock.patch.object(km, "_push_send_one", side_effect=lambda sub, payload: seen.append(sub["endpoint"]) or True), \
+             mock.patch.object(km, "_push_crypto", return_value=True), contextlib.redirect_stderr(io.StringIO()):
+            km._push_notify("Romp needs you: web", "Needs you: pick", "%s:%s" % (ROW, WEB), kind="card", host=ROW, **kw)
+        return seen
+
+    def test_a_quiet_push_without_a_badge_goes_only_where_it_replaces(self):
+        self.assertEqual(self.sends(quiet=True), [self.DESK], "the pulled card after its turn end: nothing for the iPhone")
+        self.assertEqual(self.sends(quiet=True, badge=2), [self.DESK, self.PHONE], "the local card carries the count: sent")
+        self.assertEqual(self.sends(), [self.DESK, self.PHONE], "a push with a sound goes everywhere")
+
+    def test_the_pulled_card_after_its_turn_end_is_quiet_and_carries_no_badge(self):
+        turn = dict(HubGate.TURN, sid=WEB, name="web", turnKey=77)
+        card = dict(HubGate.CARD, seq=3, turnKey=77)
+        pushed = []
+        km._set_notify_all(True)
+        km._set_notify_turns(True)
+        with mock.patch.object(km, "_push_notify", side_effect=lambda *a, **k: pushed.append(k)), \
+             contextlib.redirect_stderr(io.StringIO()):
+            km._push_pull_gate(ROW, [turn, card])
+        self.assertEqual([(k["kind"], k.get("quiet", False), "badge" in k) for k in pushed],
+                         [("turn", False, False), ("card", True, False)])
 
 
 class LocalRestart(_Base):
