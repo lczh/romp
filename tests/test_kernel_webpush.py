@@ -1880,7 +1880,7 @@ class LandingRevealPins(unittest.TestCase):
         self.assertIn("fromLedger('boot',fromLink('boot'));", js)   # the link first, and the ledger check knows what it landed (the newer word)
         self.assertIn("window.addEventListener('pageshow',function(){fromLedger('pageshow',fromLink('pageshow'));});", js)
         self.assertIn("window.addEventListener('popstate',function(){fromLink('popstate');});", js)
-        self.assertIn("document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')fromLedger('visible');});", js)
+        self.assertIn("document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')fromLedger('visible');else tapped=false;});", js)   # out of view ends the visit and its tap (the review of #225)
         self.assertIn("window.addEventListener('focus',function(){fromLedger('focus');});", js)
         self.assertLess(js.index("if(swc&&swc.addEventListener)swc.addEventListener('message'"), js.index("window.addEventListener('pageshow'"))
         self.assertNotIn("if(swc&&swc.addEventListener){", js, "the link listeners are not gated on a worker")
@@ -1953,7 +1953,7 @@ class LandingRevealPins(unittest.TestCase):
         self.assertIn("diag('push-test',{sidAttached:!!at.sid,host:at.host,why:at.why,tabs:at.tabs});", km._LANDING_PUSH_JS)
         for row in ("diag('deeplink',{via:via,hasSid:!!pr,hasCard:!!pc,hasPid:!!pp,dup:!first,controlled:", "diag('sw-message',{shape:m.romp,hasSid:!!m.sid,",
                     "diag('reveal-post',{status:r.status,via:via,boot:!!boot});", "diag('tap-pending',row)", "diag('tap-pending-land',{sid8:r.sid.slice(0,8),ageS:r.ageS,dup:!first})",
-                    "lr={sid8:v.sid.slice(0,8),ageS:v.ageS};if(vanished.length>1)lr.gone=vanished.length;", "diag('tap-vanish-land',lr)"):
+                    "diag('tap-vanish-land',{sid8:v.sid.slice(0,8),ageS:v.ageS})"):
             self.assertIn(row, km._LANDING_REVEAL_JS)
         import inspect
         self.assertIn('msg.get("type") == "clientDiag"', inspect.getsource(km.Handler._dispatch_ws))
@@ -2245,9 +2245,8 @@ const R = (pid, sid, stage, ageS, extra) => Object.assign({ pid, sid, host: '', 
   await flip('visible');
   out.older = snap();
   reset();
-  // BOTH GONE, ONE SESSION (the review of #222): the older one swiped away without opening Romp, then the newer one tapped.
-  // Whichever of the two was tapped, it was about S52: the session lands, by the newest gone one's own record, and the
-  // older is spent
+  // BOTH GONE, ONE SESSION, NO TAP SEEN: the user may have cleared both without opening either (the review of #225), so
+  // nothing lands, as for any two gone at once; a tap some road saw lands by that road (bothGoneTapSeen below)
   PENDING = { rows: [R('PID-newer-00000003', 'S52', 'shown', 2, { kind: 'card', cardId: 'S52:g2' }), R('PID-older-00000003', 'S52', 'shown', 60)], missed: [], replaces: false };
   DISPLAYED = [];
   await flip('visible');
@@ -2265,6 +2264,13 @@ const R = (pid, sid, stage, ageS, extra) => Object.assign({ pid, sid, host: '', 
   await flip('visible');
   out.twoSessionsGone = snap();
   reset();
+  // BOTH GONE, ONE SESSION, THE TAP SEEN (the worker acked the older one clicked): it lands by that road, on its own card,
+  // and the newer one gone beside it is spent
+  PENDING = { rows: [R('PID-newer-00000006', 'S56', 'shown', 2, { kind: 'card', cardId: 'S56:g2' }), R('PID-older-00000006', 'S56', 'clicked', 60, { kind: 'card', cardId: 'S56:g1' })], missed: [], replaces: false };
+  DISPLAYED = [];
+  await flip('visible');
+  out.bothGoneTapSeen = snap();
+  reset();
   // WHAT IT MISSED, WITH IDS: each entry drawn, then the page's word that it drew them (POST /push/missed-logged), which is
   // what ends the kernel's debt; an answer whose word was lost hands the same ids again: acknowledged again, never drawn twice
   PENDING = { rows: [], missed: [{ host: 'TESTHOST', text: 'TESTHOST restarted - 1 session finished a turn', id: 'MISSED-id-000000000001' },
@@ -2274,6 +2280,50 @@ const R = (pid, sid, stage, ageS, extra) => Object.assign({ pid, sid, host: '', 
   reset();
   await flip('visible');
   out.missedIdsAgain = snap();
+  console.log(JSON.stringify(out));
+})();
+"""
+# a tap the worker's message or a popstate link landed is the newer word for the ledger checks of the same visit (the review of
+# #225): what else is gone from the screen is spent, never landed on top of it; the next visit starts over
+_TAP_FIRST_DRIVER = _REVEAL_LIB + r"""
+const R = (pid, sid, stage, ageS, extra) => Object.assign({ pid, sid, host: '', kind: 'turn', cardId: '', name: 'web', stage, ageS }, extra || {});
+(async () => {
+  const out = {};
+  await settle();
+  winMsg({ romp: 'ready', app: 'feed' });
+  winMsg({ romp: 'wsState', app: 'chat', state: 'up' });
+  await flip('hidden');
+  reset();
+  // THE WORKER'S MESSAGE (Chrome: the tap focused this window), then the coming-forward check, the kernel still listing the
+  // tapped row clicked (the landed POST in flight) beside one swiped away earlier for another session
+  swMsg({ romp: 'notificationClick', sid: 'S70', host: '', kind: 'turn', cardId: '', pid: 'PID-tap-00000000070' });
+  PENDING = { rows: [R('PID-tap-00000000070', 'S70', 'clicked', 1), R('PID-swiped-0000000071', 'S71', 'shown', 60)] };
+  DISPLAYED = [];
+  await flip('visible');
+  out.swThenLedger = snap();
+  await flip('hidden');
+  reset();
+  // …and with the tapped row already settled: the swiped one alone is listed
+  swMsg({ romp: 'notificationClick', sid: 'S72', host: '', kind: 'turn', cardId: '', pid: 'PID-tap-00000000072' });
+  PENDING = { rows: [R('PID-swiped-0000000073', 'S73', 'shown', 60)] };
+  await flip('visible');
+  out.swSettledThenLedger = snap();
+  await flip('hidden');
+  reset();
+  // THE LINK BY POPSTATE (iOS navigating the open window to the tapped notification's link): the OLDER of two for S74 was
+  // tapped, and the newer one is gone too. The landing stays on the tapped one's card
+  global.location.href = 'http://localhost:7777/?push-reveal=S74&push-card=S74%3Ag1&push-pid=PID-older-0000000074';
+  POPSTATE.forEach((f) => f()); await settle();
+  PENDING = { rows: [R('PID-newer-0000000074', 'S74', 'shown', 2, { kind: 'card', cardId: 'S74:g2' }),
+                     R('PID-older-0000000074', 'S74', 'shown', 60, { kind: 'card', cardId: 'S74:g1' })], replaces: false };
+  await flip('visible');
+  out.popThenLedger = snap();
+  await flip('hidden');
+  reset();
+  // A LATER VISIT starts over: one gone and no tap seen, the vanish road as ever
+  PENDING = { rows: [R('PID-later-0000000075', 'S75', 'shown', 5)] };
+  await flip('visible');
+  out.laterVisit = snap();
   console.log(JSON.stringify(out));
 })();
 """
@@ -2468,7 +2518,7 @@ class LandingRevealWithTheFeedPaneOffHere(unittest.TestCase):
 
 class LandingRevealSaysWhatThisDeviceMissed(unittest.TestCase):
     """The review of #221: an iPhone holding a gap summary unseen is not sent the later gaps (it cannot replace a
-    notification in place), and opening Romp there used to clear what it was owed unsaid. The page asks with missed=1 and
+    notification in place), and opening Romp there used to clear what it was owed unsaid. The page asks with missed=2 and
     puts each summary the answer carries in the Log, the moment the dashboard is in front of the user on that device.
     And since an Apple device's notifications stand side by side whatever their tag, its answer's replaces:false keeps the
     superseded rule off: an older notification gone beside a newer one for the same session lands like any one tap."""
@@ -2479,7 +2529,9 @@ class LandingRevealSaysWhatThisDeviceMissed(unittest.TestCase):
         cls.out = _run_reveal(_MISSED_DRIVER, href="http://localhost:7777/", endpoint=cls.PHONE, pending={"rows": []})
 
     def test_the_page_asks_with_missed_and_logs_each_summary_once(self):
-        self.assertEqual(self.out["boot"]["gets"], ["/push/pending?endpoint=https%3A%2F%2Fweb.push.apple.com%2FTESTPHONE0000&missed=1"])
+        # missed=2 (the review of #225): this page draws each entry once by its id and says it did, so the kernel may keep
+        # the share until that word; missed=1 is a page that never says it, handed each share once
+        self.assertEqual(self.out["boot"]["gets"], ["/push/pending?endpoint=https%3A%2F%2Fweb.push.apple.com%2FTESTPHONE0000&missed=2"])
         m = self.out["missed"]
         self.assertEqual(m["notes"], [["missed", "TESTHOST restarted - 2 sessions finished turns"]], "an entry without words is nobody's")
         self.assertEqual(_rows(m, "tap-pending"), [{"via": "visible", "sub": True, "rows": 0, "missed": 1}])
@@ -2492,20 +2544,23 @@ class LandingRevealSaysWhatThisDeviceMissed(unittest.TestCase):
         self.assertEqual(self.out["older"]["fetches"], [["/push/superseded", {"pid": "PID-older-00000002"}]],
                          "an answer without the word (an older kernel) keeps the rule it had")
 
-    def test_two_gone_for_one_session_land_on_that_session_whichever_was_tapped(self):
-        # the review of #222: since an Apple device stopped retiring the older of two notifications for a session, a
-        # notification swiped away unopened and a later one tapped for the same session were TWO gone at once, and nothing
-        # landed, where before #222 the tap landed. Every gone notification's own record names the session, so the tap
-        # lands there, by the newest gone one; the others are spent
-        for key, sid, newer, older, card in (("bothGone", "S52", "PID-newer-00000003", "PID-older-00000003", "S52:g2"),
-                                             ("bothGoneTag", "S53", "PID-newer-00000004", "PID-older-00000004", "")):
+    def test_two_gone_for_one_session_land_only_by_a_tap_some_road_saw(self):
+        # the review of #225: #225 landed gone notifications that were all about one session, so clearing several of one
+        # session's notifications without opening any moved the app there on its next opening, an unrequested move past the
+        # one-swipe trade-off the user accepted. Two or more gone with no tap seen land nothing, whatever their sessions; a
+        # tap the worker or the link saw lands by its own road, on the tapped one's card
+        for key, newer, older in (("bothGone", "PID-newer-00000003", "PID-older-00000003"),
+                                  ("bothGoneTag", "PID-newer-00000004", "PID-older-00000004")):
             g = self.out[key]
-            self.assertEqual(g["fetches"], [["/reveal", {"sid": sid, "wid": "W-test", "via": "vanish"}], ["/push/landed", {"pid": newer}],
-                                            ["/push/dropped", {"pid": older}]], key)
-            self.assertEqual(g["posted"], [{"romp": "revealCard", "itemId": card, "sid": sid, "gesture": True}] if card else [], key)
+            self.assertEqual(g["fetches"], [["/push/dropped", {"pid": newer}], ["/push/dropped", {"pid": older}]], key)
+            self.assertEqual(g["posted"], [], key)
             self.assertEqual(_rows(g, "tap-pending"), [{"via": "visible", "sub": True, "rows": 2, "getNotifications": True, "displayed": 0, "vanished": 2}], key)
-            self.assertEqual(_rows(g, "tap-vanish-land"), [{"sid8": sid, "ageS": 2, "gone": 2}], key)
+            self.assertEqual(_rows(g, "tap-vanish-land"), [], key)
             self.assertEqual(g["notes"], [], key)
+        k = self.out["bothGoneTapSeen"]
+        self.assertEqual(k["fetches"], [["/reveal", {"sid": "S56", "wid": "W-test", "via": "ack"}], ["/push/landed", {"pid": "PID-older-00000006"}],
+                                        ["/push/dropped", {"pid": "PID-newer-00000006"}]])
+        self.assertEqual(k["posted"], [{"romp": "revealCard", "itemId": "S56:g1", "sid": "S56", "gesture": True}], "the tapped one's card, not the newest's")
         t = self.out["twoSessionsGone"]
         self.assertEqual(t["fetches"], [["/push/dropped", {"pid": p}] for p in ("PID-newer-00000005", "PID-older-00000005", "PID-other-00000005")],
                          "gone from two sessions: the tap could have been about either, so nothing lands")
@@ -2523,6 +2578,39 @@ class LandingRevealSaysWhatThisDeviceMissed(unittest.TestCase):
         self.assertEqual(a["fetches"], [["/push/missed-logged", {"endpoint": self.PHONE, "ids": ids}]], "…but said again")
         self.assertEqual([f for f in self.out["missed"]["fetches"] if f[0] == "/push/missed-logged"], [],
                          "an entry without an id has nothing to acknowledge")
+
+
+class LandingRevealCountsEveryTapAsTheVisitsLanding(unittest.TestCase):
+    """The review of #225: the ledger check treated only a link read in the same call, or a clicked row it landed itself, as
+    the newer word. A tap the worker's message landed, or a link iOS delivered by popstate, did not count, so a notification
+    swiped away earlier for another session was the one gone and landed on top of the tap, and the newer notification of
+    the tapped session moved the feed off the tapped card onto its own. Any tap a road landed counts as the landing of that
+    visit; going out of view ends the visit."""
+    EP = "https://push.example.net/send/this-device"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.out = _run_reveal(_TAP_FIRST_DRIVER, href="http://localhost:7777/", endpoint=cls.EP, pending={"rows": []})
+
+    def test_a_tap_the_workers_message_landed_is_the_landing_and_what_else_is_gone_is_spent(self):
+        a = self.out["swThenLedger"]
+        self.assertEqual(a["fetches"], [["/reveal", {"sid": "S70", "wid": "W-test", "via": "sw"}], ["/push/landed", {"pid": "PID-tap-00000000070"}],
+                                        ["/push/dropped", {"pid": "PID-swiped-0000000071"}]])
+        self.assertEqual(_rows(a, "tap-vanish-land"), [])
+        b = self.out["swSettledThenLedger"]
+        self.assertEqual(b["fetches"], [["/reveal", {"sid": "S72", "wid": "W-test", "via": "sw"}], ["/push/landed", {"pid": "PID-tap-00000000072"}],
+                                        ["/push/dropped", {"pid": "PID-swiped-0000000073"}]], "the row settled already: the tap still counts")
+
+    def test_a_link_by_popstate_is_the_landing_and_the_feed_stays_on_the_tapped_card(self):
+        p = self.out["popThenLedger"]
+        self.assertEqual(p["fetches"], [["/reveal", {"sid": "S74", "wid": "W-test", "via": "link"}], ["/push/landed", {"pid": "PID-older-0000000074"}],
+                                        ["/push/dropped", {"pid": "PID-newer-0000000074"}]])
+        self.assertEqual(p["posted"], [{"romp": "revealCard", "itemId": "S74:g1", "sid": "S74", "gesture": True}], "the tapped one's card, never the newest's")
+        self.assertEqual(_rows(p, "tap-vanish-land"), [])
+
+    def test_the_next_visit_starts_over(self):
+        v = self.out["laterVisit"]
+        self.assertEqual(v["fetches"], [["/reveal", {"sid": "S75", "wid": "W-test", "via": "vanish"}], ["/push/landed", {"pid": "PID-later-0000000075"}]])
 
 
 class LandingRevealReadsTheLinkLater(unittest.TestCase):
@@ -2579,7 +2667,7 @@ class LandingRevealAsksTheLedger(unittest.TestCase):
     /push/dropped, so none is left to inflate a later count."""
     EP = "https://push.example.net/send/this-device"
     LONG = "66666666-1111-2222-3333-444444444444"   # a uuid-shaped sid, so the clipped form differs from the whole
-    PENDING_GET = "/push/pending?endpoint=" + "https%3A%2F%2Fpush.example.net%2Fsend%2Fthis-device" + "&missed=1"   # missed=1: this page says what its device missed (LandingRevealSaysWhatThisDeviceMissed)
+    PENDING_GET = "/push/pending?endpoint=" + "https%3A%2F%2Fpush.example.net%2Fsend%2Fthis-device" + "&missed=2"   # missed=2: this page says what its device missed and acknowledges it (LandingRevealSaysWhatThisDeviceMissed)
 
     @classmethod
     def setUpClass(cls):

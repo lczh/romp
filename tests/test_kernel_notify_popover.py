@@ -1597,8 +1597,9 @@ class LandingPushDeviceRowExecutes(unittest.TestCase):
 
 # Turning This device off (the review of #222): the subscription's record went with it, so what the device was still owed
 # by the missed-notification summaries was dropped unsaid, and turning it back on (a new subscription) could not bring it
-# back. The page asks the kernel to hand it over (missed:1), as GET /push/pending does, puts each in the Log as a "missed"
-# entry, and then says it drew them (POST /push/missed-logged), the word the kernel waits for before it lets go.
+# back. The page asks the kernel to hand it over (missed:2, as GET /push/pending does: the value that says this page
+# acknowledges, the review of #225), puts each in the Log as a "missed" entry, and then says it drew them (POST
+# /push/missed-logged), the word the kernel waits for before it lets go.
 _DEV_OFF_DRIVER = r"""
 const tick = () => new Promise((r) => setTimeout(r, 0));
 const base = global.fetch;
@@ -1644,7 +1645,7 @@ class LandingPushDeviceOffSaysWhatItWasOwed(unittest.TestCase):
     def test_turning_this_device_off_puts_what_it_was_owed_in_the_log_and_says_so(self):
         r = self.out["off"]
         self.assertEqual((self.out["boot"], r["checked"], self.out["unsubscribed"]), ("true", "false", 1))
-        self.assertEqual(r["fetches"], [["/push/unsubscribe", {"endpoint": self.EP, "missed": 1}],
+        self.assertEqual(r["fetches"], [["/push/unsubscribe", {"endpoint": self.EP, "missed": 2}],
                                         ["/push/missed-logged", {"endpoint": self.EP, "ids": ["MISSED-id-000000000009"]}]],
                          "the page asks for what the device was owed, draws it, then says it did")
         self.assertEqual(r["notes"], [["missed", "TESTHOST restarted - 1 session finished a turn"]], "an entry without words is nobody's")

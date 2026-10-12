@@ -7717,9 +7717,9 @@ it is sent there only when it carries the app icon's needs-you count.
 Tapping a notification brings Romp forward on the session it was about. On an
 iPhone with the app already open in the background, the switch happens as the
 app comes forward; a notification you swipe away instead is read the same way,
-so the next time you open the app it may land on that session. When several are
-gone by then, it lands only if they were all about the same session. With the
-app in front, nothing moves until you next come back to it.
+so the next time you open the app it may land on that session. When more than
+one is gone by then, it stays where it was. With the app in front, nothing moves
+until you next come back to it.
 
 The bell itself shows the state of the device you are looking at: lit when the
 main switch is on and this device is set up, and crossed out otherwise. Its
