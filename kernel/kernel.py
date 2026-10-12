@@ -79102,7 +79102,7 @@ return r.getNotifications().then(function(ns){var d={};(ns||[]).forEach(function
 // 'shown' and still displayed → untouched; 'shown' and GONE → tapped, as far as this page can tell: the gone rows land via
 // 'vanish', silently, ONCE, when every one of them is about the same session: whichever was tapped, its own record names
 // that session, so the session lands, by the newest gone row (its card, if a card), and the others are spent
-// (/push/dropped). Gone rows about two or more sessions → the tap could have been about any of them: all spent, nothing
+// (/push/dropped). Gone rows about several sessions → the tap could have been about any of them: all spent, nothing
 // lands, nothing shows. (The review of #222: once an Apple device stopped retiring the older of two notifications for a
 // session, one swiped away unopened and a later one tapped for the same session were two gone, and nothing landed where
 // the tap had landed before.) A displayed notification for the SAME session as an older gone row superseded it, on a
