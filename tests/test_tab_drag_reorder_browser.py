@@ -210,8 +210,27 @@ const waitTags = async (sid, before) => {
   }
   return false;
 };
+// THE STRIP HAS FILLED IN BEFORE IT IS MEASURED (2026-10-12). Every page load dials the skeleton diet (2026-10-10): the
+// open session arrives whole, every other tab rests as a skeleton, and the idle prefetch fills them one at a time. While
+// a tab's ask is out it is a PLACEHOLDER (the kernel has released it and its frame is on the way), which by design offers
+// selection and nothing else (tabs-first.test.ts: no ✕, no drag), so a gesture measured on a strip still filling in
+// grabbed an undraggable tab in six runs of twenty: the one tab loading at that moment, after any of the page loads,
+// measured as a placeholder or measured as a skeleton whose ask went out before the press. A
+// press on a tab that HAS a drag keeps it through any frame that lands later (the strip holds its rebuild from
+// pointerdown to dragend: the push-mid-drag case below), so the wait is for the event that closes the window, no
+// skeleton and no placeholder left in #tabs. Bounded: a wait that expires is spent, later measurements stop waiting,
+// and every measurement names the tabs still loading (`loading`), so a tab that never loads fails its case by name.
+const LOADING = /\btab-(skeleton|placeholder)\b/;
+let fillWait = 30000;
 // the strip's layout: every #tabs child with its rect in the bar's own space, the tabs grouped into rows by top
-const layout = async () => { const L = await pageLayout(); L.tags = tagsOf(); return L; };
+const layout = async () => {
+  const filled = await page.waitForFunction(() => !document.querySelector("#tabs .tab-skeleton, #tabs .tab-placeholder"), null, { timeout: fillWait })
+    .then(() => true).catch(() => false);
+  if (!filled) fillWait = 1;
+  const L = await pageLayout(); L.tags = tagsOf();
+  L.loading = L.items.filter((i) => i.id && LOADING.test(i.cls)).map((i) => i.name + " (" + i.cls + ")");
+  return L;
+};
 const pageLayout = () => page.evaluate(() => {
   const bar = document.getElementById("tabs"); const b = bar.getBoundingClientRect();
   const r1 = (v) => Math.round(v * 10) / 10;
@@ -252,7 +271,8 @@ async function record(label, pre, src, tgt, tx, ty, extra) {
   const landed = post.tabs.find((t) => t.id === src.id);
   const count = (k) => log.filter((e) => e.k === k).length;
   cases.push({ label, theme: post.theme, gap: post.bar.gap,
-               from: { name: src.name, id: src.id, index: pre.order.indexOf(src.id), draggable: src.draggable },
+               from: { name: src.name, id: src.id, index: pre.order.indexOf(src.id), draggable: src.draggable, cls: src.cls },
+               loading: pre.loading,   // the tabs the strip still showed loading when the gesture was measured: none, after layout's wait
                over: tgt ? { name: tgt.name, id: tgt.id || null, left: tgt.left, w: tgt.w, top: tgt.top } : null,   // a header: id null
                release: { x: cx, y: cy }, expected, actual, ok: expected === actual,
                landed: landed ? { left: landed.left, right: r1(landed.left + landed.w), top: landed.top,
@@ -838,7 +858,8 @@ class ServedTabDragReorder(unittest.TestCase):
 
     def _assert_landed_under_cursor(self, c):
         table = self._table(c)
-        self.assertTrue(c["from"]["draggable"], "the tab must be draggable (a page without its federation manager offers no drag)" + table)
+        self.assertTrue(c["from"]["draggable"], "the tab must be draggable (a page without its federation manager offers no drag, nor does a "
+                        "tab still loading: still loading when measured %r)" % (c.get("loading"),) + table)
         self.assertGreater(c["ev"]["dragstart"], 0, "no dragstart reached the strip: the mouse gesture began no drag" + table)
         self.assertGreater(c["ev"]["drop"], 0, "%s: no drop reached the strip; the browser refused the release and the drag was cancelled" % c["label"] + table)
         self.assertEqual(c["actual"], c["expected"],
