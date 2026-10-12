@@ -6471,7 +6471,11 @@ def _state_quarantine(p, st, reason):
     # speaks exactly once. Guarded like _note_state_fault: a notice never turns a successful move
     # into a raise.
     try:
-        if p.name == "session-flags.json":
+        if p.name == "comment-drops.json":
+            # not settings: romp's memory of the comments it could not turn into threads (review of PR 223, 2026-10-11)
+            tail = ("romp no longer remembers which comments it could not turn into threads before this, so a page still "
+                    "holding one could send it again")
+        elif p.name == "session-flags.json":
             # the flags carry DENY boundaries (postal isolation): a quarantine does not reset them to empty (2026-09-14,
             # the lows PR's round two); the readers keep the last cleanly read flags, or hold mail when none are known
             tail = ("the flags it held (mail isolation included) are unknown: the last cleanly read ones stand, and with "
@@ -21255,9 +21259,19 @@ _PARK_MAX_TRIES = 30
 # re-posted it to a kernel that no longer knew the drop. The file (_dropped_creates_save) mirrors this dict without the
 # words, which undelivered.jsonl holds; the next boot restores it and rebuilds each untold drop's dialog from that row
 # (_dropped_creates_load), for the next pane that listens.
-_dropped_creates = {}                      # (sid, createId) -> {"why", "told", "frame", "offered"}
+# A pane that nobody can see hands its offer back (review of PR 223, 2026-10-11): after a restart with an unshown drop, a
+# background tab or a hidden pane could say ready first, draw the dialog off screen and acknowledge it, or merely hold it
+# away from the page the user was looking at for as long as its socket lived. Such a pane now says so (commentDropHidden),
+# the drop goes on to a pane that has not said so (`blind`: the panes that cannot show it now), and the pane asks for it
+# again once someone can see it (_dropped_create_hidden). A pane acknowledges only a dialog someone saw (comment-drops.ts).
+_dropped_creates = {}                      # (sid, createId) -> {"why", "told", "frame", "offered", "blind"}
 _DROPPED_CREATES_MAX = 256
 _dropped_creates_file_lock = threading.Lock()   # the file's writers, one at a time; taken BEFORE _create_lock, never inside it
+# The boot's read of comment-drops.json failed (_dropped_creates_load): [the fault, else None; whether the log said the
+# file is left alone]. The file is then never written over in this kernel's life (review of PR 223, 2026-10-11): the next
+# drop's save replaced it, so the drops it listed were lost for good, and a page still holding one of those comments could
+# re-post it as a second thread.
+_dropped_creates_unread = [None, False]
 # A create's IDENTITY (T289): the client's createId, minted by the popover at the send gesture and carried
 # by every re-post of it, under the parent sid -> the thread it made. A lag-parked create is retried by
 # BOTH the pusher (above) and the client (its re-post on a reconnect), and a popover whose ack was lost sends
@@ -21397,6 +21411,8 @@ def _offer_dropped_create(entry, c):
     with _create_lock:
         if entry.get("told") or not entry.get("frame") or c is None or not c.get("alive", True):
             return False
+        if any(b is c for b in entry.get("blind") or ()):
+            return False                         # it said nobody can see it (_dropped_create_hidden): it asks again when someone can
         held = entry.get("offered")
         if held is not None and held.get("alive", True):
             return False
@@ -21426,6 +21442,8 @@ def _offer_untold_drops(client, fresh=False):
             for e in untold:
                 if e.get("offered") is client:
                     e["offered"] = None
+                if any(b is client for b in e.get("blind") or ()):   # its new bundle says again whether anyone can see it
+                    e["blind"] = [b for b in e["blind"] if b is not client]
     for e in untold:
         _offer_dropped_create(e, client)
 
@@ -21439,7 +21457,32 @@ def _reoffer_drops_of(client):
         for e in held:
             e["offered"] = None
     for e in held:
-        _offer_dropped_create(e, _one_err_pane(str((e.get("frame") or {}).get("sid") or ""), listening=True))
+        _offer_dropped_create(e, _drop_pane(e))
+
+
+def _drop_pane(entry):
+    """The pane a drop's dialog goes to when the one holding it let it go: the not-delivered road's pick (_one_err_pane)
+    among the panes whose bundle listens, past every pane that said nobody can see it (`blind`)."""
+    return _one_err_pane(str((entry.get("frame") or {}).get("sid") or ""), listening=True,
+                         skip=tuple(entry.get("blind") or ()))
+
+
+def _dropped_create_hidden(client, sid, create_id, hidden):
+    """Pane `client` says whether anyone can see it, about one drop (commentDropHidden; review of PR 223, 2026-10-11).
+    `hidden`: it was offered the drop while its tab was in the background or the pane was off screen, so it drew nothing
+    and hands it back; the drop goes on to a pane that listens and has not said the same (_drop_pane), else waits. Not
+    hidden: someone can see it now, so it is offered the drop again, unless a pane acknowledged it or a live one holds it."""
+    with _create_lock:
+        e = _dropped_creates.get((str(sid), str(create_id)))
+        if e is None or e.get("told"):
+            return
+        blind = [b for b in e.get("blind") or () if b is not client and b.get("alive", True)]
+        if hidden:
+            blind.append(client)
+            if e.get("offered") is client:
+                e["offered"] = None
+        e["blind"] = blind
+    _offer_dropped_create(e, _drop_pane(e) if hidden else client)
 
 
 def _dropped_create_seen(sid, create_id):
@@ -21451,6 +21494,7 @@ def _dropped_create_seen(sid, create_id):
         if e is not None:
             e["told"] = True
             e["offered"] = None
+            e["blind"] = []
     if newly:
         _dropped_creates_save()
 
@@ -21463,8 +21507,16 @@ def _dropped_creates_save():
     """Publish the drop memo (_dropped_creates) to its file: each drop's session, createId, reason, and whether a pane
     acknowledged its dialog, oldest first. Never the words: undelivered.jsonl has them, under the same createId. A write
     that fails is filed by the state write door (_write_state_json: stderr and the error center, once per episode) and the
-    memo lives on in memory for this kernel's life. Never called under _create_lock (the file lock is taken first)."""
+    memo lives on in memory for this kernel's life. Never called under _create_lock (the file lock is taken first).
+    A file the boot could not read (_dropped_creates_unread) is left as it is, said once in the log: the boot's notice
+    told the user."""
     with _dropped_creates_file_lock:
+        if _dropped_creates_unread[0] is not None:
+            if not _dropped_creates_unread[1]:
+                _dropped_creates_unread[1] = True
+                sys.stderr.write("romp-kernel: comment-drops.json is left as it is: the boot could not read it, so this kernel "
+                                 "keeps its comment drops in memory only\n")
+            return
         with _create_lock:
             rows = [{"sid": k[0], "createId": k[1], "why": e.get("why") or "", "told": bool(e.get("told"))}
                     for k, e in _dropped_creates.items()]
@@ -21501,13 +21553,33 @@ def _dropped_creates_load():
     """At boot (main): restore the drop memo the last kernel kept (_dropped_creates_save), so a re-post of a dropped create
     is answered with its drop, and rebuild each untold drop's dialog with its words from undelivered.jsonl, so the first
     pane that listens is shown it (_offer_untold_drops). A drop whose words cannot be read back is still shown, saying so.
-    An unreadable file is filed (_note_state_fault) and restores nothing. Returns how many untold drops were restored."""
+    An unreadable file is filed (_note_state_fault), restores nothing, and is never written over in this kernel's life
+    (_dropped_creates_unread). Bytes this kernel never writes (torn JSON, or any shape but a list of rows naming a session
+    and a createId as strings) are moved aside and said (_state_quarantine), as the other state files' are, never raised
+    into the log alone (review of PR 223, 2026-10-11). Returns how many untold drops were restored."""
+    p = _dropped_creates_path()
+    _dropped_creates_unread[:] = [None, False]
     try:
-        raw = _read_state_json(_dropped_creates_path(), expect=dict)
+        try:
+            st = p.stat()
+        except FileNotFoundError:
+            return 0
+        except OSError as e:
+            raise _StateUnreadable(p, "stat failed: %s" % _errno_text(e))
+        raw = _read_state_json(p, st, expect=dict)
+        rows = (raw or {}).get("drops", [])
+        if not (isinstance(rows, list) and all(isinstance(r, dict) and isinstance(r.get("sid"), str) and r["sid"]
+                                               and isinstance(r.get("createId"), str) and r["createId"] for r in rows)):
+            why = _state_quarantine(p, st, "wrong shape: drops is not a list of rows naming a session and a createId")
+            if why is not None:
+                raise _StateUnreadable(p, "wrong shape; %s" % why)
+            rows = []
     except _StateUnreadable as exc:
+        exc.remedy = ("the dropped comments it lists are not restored, and the file is left as it is until romp restarts and "
+                      "can read it")
+        _dropped_creates_unread[0] = exc.fault
         _note_state_fault(exc)
         return 0
-    rows = [r for r in ((raw or {}).get("drops") or []) if isinstance(r, dict) and r.get("sid") and r.get("createId")]
     rows = rows[-_DROPPED_CREATES_MAX:]
     untold = {(str(r["sid"]), str(r["createId"])) for r in rows if not r.get("told")}
     words, unread = _undelivered_comment_words(untold) if untold else ({}, "")
@@ -42460,16 +42532,16 @@ def _send_to_one_chat(msg, sid=""):
     return _client_send(c, s)
 
 
-def _one_err_pane(sid="", listening=False):
+def _one_err_pane(sid="", listening=False, skip=()):
     """The one pane _send_to_one_chat sends to (its docstring has the tiers and the pick), or None when no pane that
     renders an err frame is connected. A dropped comment create's dialog takes the same pick (_hand_back_dropped_create)
     with `listening`: only a pane whose bundle has a listener (_pane_listens) is a candidate. A socket exists from its
     handshake and its page's bundle can still be loading; such a pane's lastIn could win the pick, the frame vanished into
     a document with no listener, and the drop's claim on that pane then refused its own offer at its ready (review of PR
-    218, 2026-10-11, confirmed by a probe)."""
+    218, 2026-10-11, confirmed by a probe). `skip`: panes that are not candidates (a drop's `blind` panes, _drop_pane)."""
     with _clients_lock:
         live = [c for c in _clients if (c.get("app") or "") in _ERR_FRAME_APPS and c.get("alive", True)
-                and (not listening or _pane_listens(c))]
+                and (not listening or _pane_listens(c)) and not any(c is s for s in skip)]
     chat = [c for c in live if c.get("app") == "chat"]
     tier = [c for c in chat if sid and c.get("active") == sid] or chat or live
     return max(tier, key=lambda c: c.get("lastIn", 0)) if tier else None
@@ -84346,6 +84418,13 @@ class Handler(BaseHTTPRequestHandler):
             # a pane drew a dropped comment create's dialog (_dropped_creates): told, and offered to no other pane. Not a
             # drive op: it acknowledges a frame and drives nothing, so no session check stands in its way
             _dropped_create_seen(str(msg.get("id") or ""), str(msg.get("createId") or ""))
+            return
+        if msg and msg.get("type") == "commentDropHidden":
+            # a pane was offered a drop's dialog while nobody could see it (`hidden`), or can be seen again after it handed one
+            # back: the drop goes on to a pane someone can see, or comes back to this one (_dropped_create_hidden, review of
+            # PR 223)
+            _dropped_create_hidden(client, str(msg.get("id") or ""), str(msg.get("createId") or ""),
+                                   msg.get("hidden") is not False)
             return
         if msg and msg.get("type") == "activeTab":
             client["active"] = msg.get("id")   # tab switch → next push builds the now-active tab first

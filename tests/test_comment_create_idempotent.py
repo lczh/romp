@@ -957,5 +957,156 @@ class DropsReachAPageThatListens(_PaneHarness):
                         "restored before any socket can re-post a dropped create")
 
 
+class DropsGoToAPaneSomeoneCanSee(_PaneHarness):
+    """A pane that is offered a drop while nobody can see it hands it back, and the drop goes on to a pane someone can see
+    (review of PR 223, 2026-10-11).
+
+    The kernel offers a drop to one pane at a time and stops once that pane acknowledges it. After a restart with a drop no
+    page had shown, a background tab or a hidden pane (the phone layout, a feed pane switched off) could say ready first:
+    it drew the dialog off screen and acknowledged it, and even a page that did not acknowledge kept the drop from every
+    other pane for as long as its socket lived. Now such a pane says it cannot be seen (commentDropHidden, `hidden`), and
+    says so again with `hidden` false once it can be, to be offered the drop back if no pane holds it."""
+
+    def _hidden(self, pane, cid, hidden):
+        with contextlib.redirect_stderr(io.StringIO()):
+            km.Handler._dispatch_ws(_HandlerSelf(), {"type": "commentDropHidden", "id": PARENT, "createId": cid,
+                                                     "hidden": hidden}, pane)
+
+    def test_a_pane_nobody_can_see_hands_the_drop_on_to_the_pane_someone_can(self):
+        self._drop_unheard("g-background")
+        background, front = _Pane(), _Pane(active="")
+        self._ready(background)                          # a background tab says ready first, after the restart
+        self._ready(front)
+        self.assertEqual((len(background.of("err")), front.of("err")), (1, []), "premise: one pane at a time")
+        self._hidden(background, "g-background", True)
+        self.assertEqual([e["createId"] for e in front.of("err")], ["g-background"],
+                         "the pane the user can see is shown it: %r" % front.got)
+        self.assertFalse(km._dropped_creates[(PARENT, "g-background")]["told"], "and it is untold until that pane says so")
+        self._hidden(background, "g-background", False)  # the user switches to the background tab
+        self.assertEqual(len(background.of("err")), 1, "the pane showing it holds it: not drawn in two places")
+
+    def test_a_drop_handed_back_with_no_other_pane_comes_back_once_the_pane_can_be_seen(self):
+        self._drop_unheard("g-alone")
+        tab = _Pane()
+        self._ready(tab)
+        self._hidden(tab, "g-alone", True)
+        self.assertIsNone(km._dropped_creates[(PARENT, "g-alone")]["offered"], "nobody holds it: it waits")
+        self.assertEqual(len(tab.of("err")), 1, "not sent straight back to the pane that cannot show it")
+        later = _Pane(active="")
+        later["ready"] = True
+        self._connect(tab, later)
+        km._reoffer_drops_of(_Pane())                    # an unrelated socket closing changes nothing
+        self._hidden(tab, "g-alone", False)
+        self.assertEqual([e["createId"] for e in tab.of("err")], ["g-alone", "g-alone"],
+                         "offered to it again once someone can see it")
+        self.assertEqual(later.of("err"), [])
+
+    def test_a_pane_that_said_it_cannot_be_seen_is_skipped_when_the_holder_closes(self):
+        self._drop_unheard("g-skip")
+        hidden, holder = _Pane(), _Pane(active="")
+        hidden["lastIn"], holder["ready"], holder["lastIn"] = 200, True, 100
+        self._connect(holder)
+        self._ready(hidden)
+        self._hidden(hidden, "g-skip", True)
+        self.assertEqual([e["createId"] for e in holder.of("err")], ["g-skip"], "premise: handed on")
+        holder["alive"] = False                          # it closes before the user saw it
+        self._connect(hidden)
+        km._reoffer_drops_of(holder)
+        self.assertEqual(len(hidden.of("err")), 1, "the pick skips the pane that said it cannot be seen")
+        self._hidden(hidden, "g-skip", False)
+        self.assertEqual(len(hidden.of("err")), 2, "…until it says it can be")
+
+    def test_a_ready_on_the_same_socket_forgets_that_the_pane_could_not_be_seen(self):
+        self._drop_unheard("g-fresh")
+        page = _Pane()
+        self._ready(page)
+        self._hidden(page, "g-fresh", True)
+        self._ready(page)                                # its bundle evaluated again: it decides afresh
+        self.assertEqual(len(page.of("err")), 2)
+
+
+class TheDropsFileIsNeverOverwrittenUnread(_PaneHarness):
+    """comment-drops.json that cannot be read, or holds a shape this kernel never writes, is a fault the user hears about,
+    and is never written over (review of PR 223, 2026-10-11).
+
+    An unreadable file was reported at boot, then replaced by the next drop's save, so the drops it listed were lost for
+    good and a page still holding one of those comments could re-post it as a second thread. A `drops` value that was not
+    a list raised out of the boot load, and only the kernel log said so."""
+
+    def setUp(self):
+        super().setUp()
+        self.notices = []
+        saved = km._sync_notice
+        km._sync_notice = lambda text, ok=True, kind="sync": self.notices.append(text)
+        self.addCleanup(lambda: setattr(km, "_sync_notice", saved))
+        self.addCleanup(lambda: km._dropped_creates_unread.__setitem__(slice(None), [None, False]))
+        self.path = jd.STATE / "comment-drops.json"
+
+    def _drop_another(self, cid):
+        self.be.streaming.add("a9")                      # the next comment's anchor streams again
+        self._drop_unheard(cid)
+
+    def _load(self):
+        with km._create_lock:
+            km._dropped_creates.clear()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            n = km._dropped_creates_load()
+        return n, err.getvalue()
+
+    def test_a_file_the_boot_could_not_read_is_left_as_it_is_for_the_kernels_life(self):
+        self.path.write_text(json.dumps({"drops": [{"sid": PARENT, "createId": "g-before", "why": "x", "told": False}]}))
+        before = self.path.read_bytes()
+        real = km._read_state_json
+
+        def eio(path, *a, **k):
+            if Path(path) == self.path:
+                raise km._StateUnreadable(path, "read failed: [Errno 5] Input/output error")
+            return real(path, *a, **k)
+        km._read_state_json = eio
+        try:
+            n, _ = self._load()
+        finally:
+            km._read_state_json = real
+        self.assertEqual(n, 0)
+        self.assertTrue(any("comment-drops.json could not be read" in t and "left as it is" in t for t in self.notices),
+                        "the user hears it, with what it means: %r" % self.notices)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            km._dropped_creates_save()
+            km._dropped_creates_save()
+        self.assertEqual(err.getvalue().count("comment-drops.json is left as it is"), 1, "said once in the log, not per save")
+        self._drop_another("g-after")                    # a new drop's save
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._dropped_create_seen(PARENT, "g-after")   # …and an acknowledgement's
+        self.assertEqual(self.path.read_bytes(), before, "never written over: the drops it lists are still there")
+        self.assertIn((PARENT, "g-after"), km._dropped_creates, "the new drop lives on in memory for this kernel")
+
+    def test_a_drops_value_of_the_wrong_shape_is_moved_aside_and_said_not_raised(self):
+        for bad in ({"drops": 5}, {"drops": {"sid": PARENT, "createId": "g"}}, {"drops": ["g", {"sid": PARENT}]},
+                    {"drops": [{"sid": PARENT, "createId": 7}]}):
+            self.notices.clear()
+            self.path.write_text(json.dumps(bad))
+            n, log = self._load()                        # raised a TypeError for a number, before
+            self.assertEqual(n, 0, bad)
+            self.assertFalse(self.path.exists(), "moved aside, never read as if it were ours: %r" % (bad,))
+            asides = list(self.path.parent.glob("comment-drops.json.corrupt-*"))
+            self.assertEqual(len(asides), 1, "the bytes kept for a look: %r" % (bad,))
+            self.assertEqual(json.loads(asides[0].read_text()), bad)
+            asides[0].unlink()
+            self.assertTrue(any("comment-drops.json" in t and "send it again" in t for t in self.notices),
+                            "said to the user in their terms: %r" % self.notices)
+            self.assertIn("comment-drops.json", log)
+            self.assertIsNone(km._dropped_creates_unread[0], "a file moved aside is not one to leave alone: the next save writes")
+
+    def test_a_drops_file_that_reads_cleanly_is_written_as_before(self):
+        self._drop_unheard("g-clean")
+        n, _ = self._load()
+        self.assertEqual(n, 1)
+        self._drop_another("g-clean-2")
+        self.assertIn("g-clean-2", self.path.read_text())
+        self.assertEqual(self.notices, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -164,7 +164,7 @@ import { turnWorkedSecs as workedSecsOf, workedFooterPlan } from "./worked-foote
 import { contentHash, firstReplaced, sameUnit, sameUnits, unitEvents, unitLastEvent } from "./unit-diff";   // the keyed paint: a frame repaints only the units whose inputs changed (2026-09-23)
 import { reconcileRewindPass, type RewindEvent } from "./rewind-reconcile";
 import { watchChatVisibility, browserChatVisibilityDeps } from "./chat-visibility";
-import type { PaneHiddenHost } from "./paint-gate";
+import { paneSight, type PaneHiddenHost } from "./paint-gate";
 import { gistOf, collapseWs, postalHead } from "./gist";   // the shared gist rule + the postal head (T294)
 import { kindLabel, deliveryOf, deliveryTitle, DELIVERY_GLYPHS, type PostalDelivery, type PostalReceipt } from "./postal-state";   // the postal card's kind word + delivery state (T302), the marks' drawings (T337)
 
@@ -10501,11 +10501,26 @@ function reviveFailedLocal(id: string, name: string, text: string) {
 // ---- in-webview confirm dialog (replaces the host's native modals) ----
 // One overlay at a time; Esc / backdrop click cancels (cb(null)). Buttons carry
 // a value handed to cb. Reuses the picker overlay's backdrop styling.
+// A PINNED dialog (the comment drops' list, review of PR 223, 2026-10-11) leaves the screen only by the user's own answer
+// (dismissConfirm): a newer dialog waits behind it (`confirmHeld`, the newest only, a newer one cancelling an older one as
+// on screen) and opens once the user dismisses it, and a caller's closeConfirm then means the dialog IT opened, the held
+// one. Replaced at once, the drops left the screen unseen, acknowledged to their kernel and offered to no other page.
 let confirmCb: ((v: string | null) => void) | null = null;
-function showConfirm(title: string, detail: string, buttons: Array<{ label: string; value: string; danger?: boolean }>, cb: (v: string | null) => void,
-                     body?: HTMLElement) {   // `body`: content of the caller's own under the detail (the comment drops' list)
+let confirmPinned = false;
+type ConfirmButton = { label: string; value: string; danger?: boolean };
+let confirmHeld: { title: string; detail: string; buttons: ConfirmButton[]; cb: (v: string | null) => void; body?: HTMLElement } | null = null;
+function showConfirm(title: string, detail: string, buttons: ConfirmButton[], cb: (v: string | null) => void,
+                     body?: HTMLElement,   // `body`: content of the caller's own under the detail (the comment drops' list)
+                     pinned = false) {
+  if (confirmPinned) {   // the pinned dialog stays up: this one waits behind it
+    const was = confirmHeld;
+    confirmHeld = { title, detail, buttons, cb, body };
+    if (was) was.cb(null);
+    return;
+  }
   closeConfirm(null);   // a newer dialog replaces (and cancels) an older one
   confirmCb = cb;
+  confirmPinned = pinned;
   const overlay = el("div", "picker-overlay confirm-overlay"); overlay.id = "confirm";
   const box = el("div", "picker-box confirm-box");
   const h = el("div", "confirm-title"); h.textContent = title;
@@ -10514,17 +10529,26 @@ function showConfirm(title: string, detail: string, buttons: Array<{ label: stri
   for (const b of buttons) {
     const btn = el("button", "picker-action confirm-btn" + (b.danger ? " danger" : ""));
     btn.textContent = b.label;
-    btn.addEventListener("click", () => closeConfirm(b.value));
+    btn.addEventListener("click", () => dismissConfirm(b.value));
     actions.appendChild(btn);
   }
   box.appendChild(h); if (detail) box.appendChild(d); if (body) box.appendChild(body); box.appendChild(actions);
   overlay.appendChild(box);
-  overlay.addEventListener("click", (e) => { if (e.target === overlay) closeConfirm(null); });
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) dismissConfirm(null); });
   document.body.appendChild(overlay);
-  const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); closeConfirm(null); } };
+  const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); dismissConfirm(null); } };
   (overlay as any)._key = onKey;
   document.addEventListener("keydown", onKey, true);
   (actions.firstElementChild as HTMLElement | null)?.focus();
+}
+/** The user's own answer to the open dialog (a button, the backdrop, Esc): the one way a pinned dialog closes, and then
+ *  the dialog held behind it opens. */
+function dismissConfirm(value: string | null) {
+  confirmPinned = false;
+  closeConfirm(value);
+  const h = confirmHeld;
+  confirmHeld = null;
+  if (h) showConfirm(h.title, h.detail, h.buttons, h.cb, h.body);
 }
 // ---- move session (the user 2026-09-01) ----
 // "Move to folder…" on the tab menu: the session's working directory follows a subproject that became
@@ -10801,23 +10825,32 @@ function loseCmtCreatesOf(sid: string): void {
               [{ label: "Copy my text", value: "copy" }, { label: "Dismiss", value: "ok" }],
               (v) => { if (v === "copy") navigator.clipboard?.writeText(copy); });
 }
-// The dropped comment creates' dialog (comment-drops.ts): one dialog on the confirm chrome lists every drop that arrives
-// while it is up, each with its own Copy, and each is acknowledged to its kernel once its entry is drawn; a drop this page
-// drew already is acknowledged again and not drawn twice (reviews of PR 211 and PR 218, 2026-10-11). `cmtDropList` is the
-// open dialog's list, while that dialog is on screen (a newer dialog replaces it, as any dialog here does).
+// The dropped comment creates' dialog (comment-drops.ts): one PINNED dialog on the confirm chrome lists every drop that
+// arrives while it is up, each with its own Copy, and each is acknowledged to its kernel once someone saw it (this page on
+// screen and focused, or the user's dismissal); a drop that arrives while nobody can see this page is handed back to its
+// kernel for a page someone can see, and a drop this page drew already is not drawn twice (reviews of PR 211, PR 218 and
+// PR 223, 2026-10-11). `cmtDropList` is the open dialog's list, while that dialog is on screen: pinned, it leaves only by
+// the user's dismissal, and a newer dialog waits behind it (showConfirm).
 let cmtDropList: HTMLElement | null = null;
 const cmtDrops = new CmtDrops({
   isOpen: () => !!cmtDropList && cmtDropList.isConnected,
   open: (title) => {
     cmtDropList = el("div", "cmt-drop-list");
-    showConfirm(title, "", [{ label: "Dismiss", value: "ok" }], () => {}, cmtDropList);
+    showConfirm(title, "", [{ label: "Dismiss", value: "ok" }], () => cmtDrops.dismissed(), cmtDropList, true);
   },
   add: (d) => { cmtDropList!.appendChild(cmtDropEntry(d, el, { detail: "confirm-detail", button: "picker-action confirm-btn" },
                                                       (t) => { navigator.clipboard?.writeText(t); })); },
   retitle: (t) => { const h = cmtDropList?.parentElement?.querySelector(".confirm-title"); if (h) h.textContent = t; },
+  sight: () => paneSight(),
   ack: (d) => vscodeApi?.postMessage({ type: "commentDropSeen", id: d.sid, createId: d.createId }),
+  hidden: (d, hidden) => vscodeApi?.postMessage({ type: "commentDropHidden", id: d.sid, createId: d.createId, hidden }),
   log: (d) => notifyShell("undelivered", d.copy ? d.title + ": " + d.copy : d.title, d.sid),
 });
+// the events that change who can see this page (paint-gate.ts paneSight): a drop drawn while nobody was looking is
+// acknowledged once someone is, and one handed back is asked for again (the observer's return edge: paneReturned, below)
+window.addEventListener("focus", () => cmtDrops.settle());
+window.addEventListener("resize", () => cmtDrops.settle());
+document.addEventListener("visibilitychange", () => cmtDrops.settle());
 // the one busy answer for the mark + rail tick: an in-flight EXCHANGE (the gesture latch above), or
 // — after a reload lost the client latch — the exchange's own records still saying a reply is owed
 // (msgs ending with the user's message). A stuck/errored/closed thread never pulses: green would lie.
@@ -12652,6 +12685,12 @@ function loadMcpPanel(sid: string, body: HTMLElement): void {
 }
 
 function closeConfirm(value: string | null) {
+  if (confirmPinned) {   // a pinned dialog closes only by the user's answer (dismissConfirm): the caller's dialog is the held one
+    const h = confirmHeld;
+    confirmHeld = null;
+    if (h) h.cb(null);
+    return;
+  }
   const o = document.getElementById("confirm");
   if (o) {
     const k = (o as any)._key;
@@ -24781,8 +24820,11 @@ setupSettings();
   });
 })();
 // The chat page's hidden word for the kernel's pane shim (chat-visibility.ts): the chat gates no paint, so this
-// is the one place it measures its own visibility. Once, at top level, over the page's body.
-watchChatVisibility(document.body, { ...browserChatVisibilityDeps(), onShown: renderNoticeDisclosures });   // the pane's return re-measures the box's disclosures (the post-merge review of PR 1967)
+// is the one place it measures its own visibility. Once, at top level, over the page's body. The pane's return
+// re-measures the box's disclosures (the post-merge review of PR 1967) and settles the comment drops' dialog (a drop
+// handed back while the pane was hidden is asked for again; review of PR 223).
+function paneReturned(): void { renderNoticeDisclosures(); cmtDrops.settle(); }
+watchChatVisibility(document.body, { ...browserChatVisibilityDeps(), onShown: paneReturned });
 window.addEventListener("resize", renderNoticeDisclosures);   // Firefox's observer never reports the hidden pane, so its return fires no edge: the pane's resize on the way back re-measures instead (the second contributor's post-merge note on PR 2018)
 // right-click a selection in the transcript → Reply (quote it) / Copy
 document.getElementById("content")?.addEventListener("contextmenu", showSelectionMenu);
