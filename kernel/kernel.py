@@ -69368,16 +69368,15 @@ def _push_send_one(sub, payload):
 # the push event the mutable declarative message dispatches) and 'clicked' (the first thing the click handler does,
 # on a browser that dispatches one) — while the page asks GET /push/pending?endpoint=<its own subscription> for
 # EVERY row to THIS device nobody has settled, newest first, on boot / visible / pageshow / focus, and holds the
-# shown ones against the notifications still displayed. A clicked row lands (/reveal via 'ack'); vanished rows land
-# once, silently (/reveal via 'vanish'), when they are all about ONE session (whichever was tapped, its own row names
-# that session: the review of #222); anything else — gone rows about two or more sessions, everything still
-# displayed, rows never acked shown, a screen the page cannot read — shows NOTHING: no prompt, ever (the user
-# 2026-09-09). The page settles each row it is done with: POST /push/landed (the push landed, by whichever road —
+# shown ones against the notifications still displayed. A clicked row lands (/reveal via 'ack'); EXACTLY ONE
+# vanished row lands, silently (/reveal via 'vanish'), unless a tap some road saw landed in the same visit; anything
+# else — two or more gone at once, about one session or several (the review of #225: each could have been swiped),
+# everything still displayed, rows never acked shown, a screen the page cannot read — shows NOTHING: no prompt, ever
+# (the user 2026-09-09). The page settles each row it is done with: POST /push/landed (the push landed, by whichever road —
 # the worker's message 'sw', the deep link 'link', 'ack', 'vanish'), /push/superseded (a NEWER notification for
 # the same session is still displayed — the notification tag is per session, so on a device that honours it the show
-# REPLACED this one's on the screen: gone without a tap) or /push/dropped (vanished beside another landing, an older
-# one gone beside the newest that landed for its session, or one of several gone about different sessions: spent,
-# never a landing, and never left to inflate the next check's count). The kernel
+# REPLACED this one's on the screen: gone without a tap) or /push/dropped (vanished beside a tap that landed, or one
+# of several gone at once: spent, never a landing, and never left to inflate the next check's count). The kernel
 # supersedes at the shown ack too — the event itself: a shown ack for a session retires that session's older
 # unsettled, untapped rows on that device, with a line. Neither supersedes on an Apple device, whose notifications
 # stand side by side whatever their tag (_push_tag_replaces; /push/pending's `replaces` tells the page): there an
@@ -70599,22 +70598,37 @@ def _push_gap_rearm(name):
         _push_gap_told_save()
 
 
-def _push_gap_seen(endpoint, say=False):
+PUSH_MISSED_ONCE = 1                 # the page draws every `missed` entry it is handed and never says so: hand each share once
+PUSH_MISSED_KEPT = 2                 # the page draws each entry once by its id and says it did (POST /push/missed-logged)
+
+
+def _push_missed_mode(v):
+    """How a page says what its device missed, from the `missed` it sent (the query's or the body's): 0, it reads none (a
+    page older than the entries); PUSH_MISSED_ONCE, it draws each entry it is handed and never acknowledges one (a page
+    built at #222, which already asked with missed=1); PUSH_MISSED_KEPT, it acknowledges by id, so the share may be kept
+    until it does. Its own value, never a reading of 1 (the review of #225: keeping a share across answers for a page that
+    never acknowledges put the same entry in its Log again at every coming forward, until a reload)."""
+    return {"1": PUSH_MISSED_ONCE, "2": PUSH_MISSED_KEPT}.get(str(v), 0)
+
+
+def _push_gap_seen(endpoint, say=0):
     """A page holding the subscription `endpoint` came forward (its GET /push/pending, asked on every load, show and
     focus): the user has the dashboard in front of them on THAT device, so every summary it holds is seen, and its next gap
     sounds. Every other device keeps its own state: a desktop browser's focus re-arms no phone (the review of #220).
 
     What the device was owed (an Apple device's share of the gaps that came while it held a summary unseen, which it could
     not be sent in place: _push_gap_close) is said NOW, by the dashboard in front of the user, without a sound: returned as
-    [{host, text, id}], one per row, in the summary's own words, for the /push/pending answer's `missed`, which the page puts
-    in its Log. Before, this cleared it unsaid, and a device whose next notification came normally waited for another gap
-    that might never come (the review of #221). Only when the page says it reads them (`say`: this build's page asks with
-    missed=1): a page loaded before this build, open across a deploy, re-arms its device as before and the share waits.
+    [{host, text[, id]}], one per row, in the summary's own words, for the /push/pending answer's `missed`, which the page
+    puts in its Log. Before, this cleared it unsaid, and a device whose next notification came normally waited for another
+    gap that might never come (the review of #221). Only when the page says it reads them (`say`, _push_missed_mode): a page
+    loaded before the entries existed, open across a deploy, re-arms its device as before and the share waits.
 
-    Handing a share over does not clear it: the page's word that it drew the entry does (POST /push/missed-logged, by the
-    `id`: _push_gap_logged). Until then it stays owed, on disk, and is handed again, under the same id, so an answer lost on
-    the way loses nothing and a page that did draw it can tell (the review of #222: it was cleared at the answer, and a
-    lost answer lost the count unsaid). A share that grows meanwhile (_push_gap_close) is a new one, under a new id."""
+    With PUSH_MISSED_KEPT, handing a share over does not clear it: the page's word that it drew the entry does (POST
+    /push/missed-logged, by the `id`: _push_gap_logged). Until then it stays owed, on disk, and is handed again, under the
+    same id, so an answer lost on the way loses nothing and a page that did draw it can tell (the review of #222: it was
+    cleared at the answer, and a lost answer lost the count unsaid). A share that grows meanwhile (_push_gap_close) is a new
+    one, under a new id. With PUSH_MISSED_ONCE (a page that never says it drew one) the share is handed over, without an
+    id, and goes with this answer, the rule that page was built for (the review of #225)."""
     out = []
     with _push_pull_lock:
         _push_gap_told_load()
@@ -70633,8 +70647,15 @@ def _push_gap_seen(endpoint, say=False):
                     _PUSH_GAP_TOLD.pop(name, None)
                 changed = True
                 continue
+            if say == PUSH_MISSED_ONCE:                  # said by this answer, and done
+                out.append({"host": name, "text": text})
+                per.pop(endpoint)
+                if not per:
+                    _PUSH_GAP_TOLD.pop(name, None)
+                changed = True
+                continue
             new = {"said": None, "owed": owed, "oid": st.get("oid")}
-            if say:
+            if say == PUSH_MISSED_KEPT:
                 if not new["oid"]:
                     new["oid"] = secrets.token_urlsafe(16)   # the shape the routes admit (_PID_RE)
                 out.append({"host": name, "text": text, "id": new["oid"]})
@@ -70673,7 +70694,7 @@ def _push_gap_logged(endpoint, ids):
 
 def _push_gap_forget(endpoint):
     """The device unsubscribed, or its push service said it is gone: its record goes with it (the ledger's rule). A page
-    that turns This device off itself is first handed what the device is owed (POST /push/unsubscribe with missed:1), and
+    that turns This device off itself is first handed what the device is owed (POST /push/unsubscribe with missed:2), and
     that share stays until the page's word (_push_gap_logged) or the row's next summary, which leaves a device no longer
     subscribed out (_push_gap_close)."""
     endpoint = str(endpoint or "")
@@ -78984,7 +79005,7 @@ if(!r.ok)return r.text().then(function(t){throw new Error(t||'no server key');})
 }).then(function(k){return navigator.serviceWorker.ready.then(function(reg){
 return reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64u(k.key)});});
 }).then(function(s){var j=s.toJSON();j.origin=String(location.origin||'');return post('/push/subscribe',j);});}   // origin (2026-09-10): the page this device runs, for the ABSOLUTE navigate URL an Apple endpoint's declarative message needs (_push_declarative)
-// turning it off (the review of #222): the kernel hands over what this device is still owed (missed:1), as its /push/pending
+// turning it off (the review of #222): the kernel hands over what this device is still owed (missed:2), as its /push/pending
 // answer does; each goes into the Log as a "missed" entry, then the page says it drew them (POST /push/missed-logged), the
 // word the kernel waits for before it lets go. Before, the share went with the subscription unsaid. The reveal script's
 // sayMissed is the same, with the same record of ids already drawn (window.__rompMissedSaid)
@@ -78994,7 +79015,7 @@ if(!(id&&said[id])){if(!window.__rompNotify)return;window.__rompNotify('missed',
 if(id){said[id]=1;ids.push(id);}});
 if(ep&&ids.length)fetch('/push/missed-logged',{method:'POST',body:JSON.stringify({endpoint:ep,ids:ids})})['catch'](function(){});}
 function devUnsubscribe(){return sub().then(function(s){var ep=s?s.endpoint:'';
-return (s?s.unsubscribe():Promise.resolve()).then(function(){return ep?post('/push/unsubscribe',{endpoint:ep,missed:1}).then(function(d){sayMissed(ep,d&&d.missed);}):null;});});}
+return (s?s.unsubscribe():Promise.resolve()).then(function(){return ep?post('/push/unsubscribe',{endpoint:ep,missed:2}).then(function(d){sayMissed(ep,d&&d.missed);}):null;});});}
 // the session the user is LOOKING AT: the chat pane's active tab, read off the same-origin iframe's DOM — the very
 // nodes the mobile header's current-session chip mirrors (_CHAT_MOBILE_JS reads #tabs .tab.active), so one truth and
 // no second channel. A federated tab's id is already host-prefixed (host:sid); the host rides along as the payload's
@@ -79073,10 +79094,10 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 #  - 'ack': the kernel's own ledger — GET /push/pending?endpoint=<this page's subscription> lists every unsettled
 #    push to this device; the ones the worker acked clicked (a tap whose message and link reached no page) land.
 #    Asked on the events a page that came forward produces: boot, visible, pageshow, focus.
-#  - 'vanish': the same list's SHOWN rows, held against registration.getNotifications() — the shown pushes whose
-#    notifications are gone from the screen land, silently and once, when they are all about one session. The one
-#    thing a LIVE iOS app leaves for the page: no event reaches the worker or the page, only these events and the
-#    screen (the fromLedger comment below has the decision table and the trade-off the user accepted).
+#  - 'vanish': the same list's SHOWN rows, held against registration.getNotifications() — exactly ONE shown push
+#    whose notification is gone from the screen lands, silently, when no other road landed a tap in the same visit.
+#    The one thing a LIVE iOS app leaves for the page: no event reaches the worker or the page, only these events and
+#    the screen (the fromLedger comment below has the decision table and the trade-off the user accepted).
 #  The pid rides all four, so one push lands ONCE: the first road to land it settles the kernel's row (POST
 #  /push/landed) and the rest are dups. A card kind ALSO scrolls the feed to its card: {romp:'revealCard'} into the
 #  feed iframe — the same message the Log's bell entries post — but only once the feed has its cards, which it
@@ -79102,7 +79123,7 @@ if(!isOn)testOut.textContent+=" Real notifications won't arrive until the main s
 # hasCard, hasPid, dup, controlled} at every boot and every later arrival of the params; 'sw-message' {shape,
 # hasSid, kind, dup, sw: the worker's own diag block} when a worker's message arrives; 'tap-pending' {via, sub,
 # rows[, getNotifications, displayed, vanished][, superseded][, err]}, 'tap-pending-land' {sid8, ageS, dup} and
-# 'tap-vanish-land' {sid8, ageS[, gone]} for the ledger check; 'reveal-post' {status, via, boot} with /reveal's answer.
+# 'tap-vanish-land' {sid8, ageS} for the ledger check; 'reveal-post' {status, via, boot} with /reveal's answer.
 # Structure and clipped ids only, never text or a session id whole.
 # Its own <script>, like every shell behaviour (test_kernel_mobile's count pin): a throw in the
 # bell's script must not strand a tap, and a bell that bails where the Push API is missing must
@@ -79139,7 +79160,13 @@ if(sid&&kind==='card'&&cardId)revealCard(cardId,sid);}
 // push-pid, the worker's message, the kernel's clicked and shown rows — and the first road to land it settles the
 // kernel's row (POST /push/landed); the rest are dups. A landing without a pid (a link from a kernel of an older build)
 // has nothing to dedupe on and lands. settle: 'landed' | 'superseded' | 'dropped' — a row this page is done with
-var swc=('serviceWorker' in navigator)&&navigator.serviceWorker||null,seen={};
+// A TAP LANDED THIS VISIT (the review of #225): any road that lands a tap (the link, at boot, pageshow or popstate; the
+// worker's message; a clicked row) marks `tapped`, and the ledger checks of the same visit take it as the newer word, so
+// nothing gone from the screen lands on top of it. Before, only a link read with that very check or a clicked row it
+// landed itself counted: a tap the worker's message or a popstate link had landed did not, and a notification swiped
+// earlier for another session landed over it. The visit ends when the page goes out of view (visibilitychange), the
+// event that begins the next coming-forward
+var swc=('serviceWorker' in navigator)&&navigator.serviceWorker||null,seen={},tapped=false;
 function fresh(pid){if(!pid)return true;if(seen[pid])return false;seen[pid]=1;return true;}
 function settle(what,pid){if(pid)fetch('/push/'+what,{method:'POST',body:JSON.stringify({pid:pid})})['catch'](function(){});}
 // THE LINK (the block above — on Apple the OS's own tap callback): the params this page opened on, or gained without
@@ -79156,7 +79183,7 @@ if(pc&&!/^[A-Za-z0-9_.:-]{1,128}$/.test(pc))pc='';
 if(pp&&!/^[A-Za-z0-9_-]{16,64}$/.test(pp))pp='';
 var first=fresh(pp);
 diag('deeplink',{via:via,hasSid:!!pr,hasCard:!!pc,hasPid:!!pp,dup:!first,controlled:!!(swc&&swc.controller)});
-if(first){land(pr||'',pc?'card':'',pc||'',via==='boot','link');settle('landed',pp);}
+if(first){tapped=true;land(pr||'',pc?'card':'',pc||'',via==='boot','link');settle('landed',pp);}
 u.searchParams['delete']('push-reveal');u.searchParams['delete']('push-card');u.searchParams['delete']('push-pid');
 try{history.replaceState(null,'',u.pathname+(u.searchParams.toString()?'?'+u.searchParams.toString():'')+u.hash);}catch(e){}
 return first?(pr||''):'';}
@@ -79171,17 +79198,18 @@ function displayed(){if(!(swc&&typeof swc.getRegistration==='function'))return P
 return swc.getRegistration('/').then(function(r){if(!(r&&typeof r.getNotifications==='function'))return null;
 return r.getNotifications().then(function(ns){var d={};(ns||[]).forEach(function(n){var pid=n&&n.data&&n.data.pid;if(pid)d[String(pid)]=1;});return d;});})['catch'](function(){return null;});}
 // THE DECISION TABLE, per row of the kernel's list: 'clicked' → a tap the worker saw: lands via 'ack', once by pid;
-// 'shown' and still displayed → untouched; 'shown' and GONE → tapped, as far as this page can tell: the gone rows land via
-// 'vanish', silently, ONCE, when every one of them is about the same session: whichever was tapped, its own record names
-// that session, so the session lands, by the newest gone row (its card, if a card), and the others are spent
-// (/push/dropped). Gone rows about several sessions → the tap could have been about any of them: all spent, nothing
-// lands, nothing shows. (The review of #222: once an Apple device stopped retiring the older of two notifications for a
-// session, one swiped away unopened and a later one tapped for the same session were two gone, and nothing landed where
-// the tap had landed before.) A displayed notification for the SAME session as an older gone row superseded it, on a
+// 'shown' and still displayed → untouched; 'shown' and GONE → tapped, as far as this page can tell: EXACTLY ONE such row
+// lands via 'vanish', silently; two or more gone at once → each of them could have been swiped rather than tapped,
+// whatever their sessions: all spent (/push/dropped), nothing lands, nothing shows. (The review of #225: #225 landed gone
+// rows that were all about one session, so clearing several of a session's notifications without opening any moved the
+// app there at its next opening, an unrequested move past the one-swipe trade-off below. A tap on one of several lands by
+// the road that saw it, the link or the worker's click, on the tapped one's own card; on a live iPhone, which shows the
+// page neither, one swiped and one tapped land nothing.) A displayed notification for the SAME session as an older gone row superseded it, on a
 // device that honours the per-session tag (it replaced the older notification: /push/superseded, never a tap); an Apple
 // device's notifications stand side by side whatever their tag (the kernel's answer says replaces:false), so there the
-// older one gone was tapped or swiped like any other; 'sent' → nothing known displayed, so nothing of it can have vanished. A link this page landed at the same time (linkSid — a killed app, navigated by iOS) or a
-// clicked row landed here is the newer word: whatever else vanished is dropped. A screen this page cannot read (no
+// older one gone was tapped or swiped like any other; 'sent' → nothing known displayed, so nothing of it can have vanished. A tap some road landed in
+// this visit (`tapped`, above: a link at boot, pageshow or popstate, the worker's message, a clicked row; linkSid, the
+// link read with this very check) is the newer word: whatever else vanished is dropped. A screen this page cannot read (no
 // getNotifications, or it throws) decides nothing. No prompt, no timer: a tap lands or nothing happens.
 // THE KNOWN CONFLATION, AND THE USER'S CALL (2026-09-10): iOS fires neither notificationclick nor notificationclose for
 // a live Home Screen web app, so a notification the user SWIPED AWAY leaves exactly what a tapped one leaves — gone from
@@ -79193,9 +79221,11 @@ return r.getNotifications().then(function(ns){var d={};(ns||[]).forEach(function
 // WHAT THIS DEVICE MISSED (the review of #221): the answer's `missed` is what the kernel's gap summaries owed this device and
 // never showed it (an Apple device holding a summary unseen when later gaps came: it cannot replace a notification in
 // place, so they were not sent). This answer is the moment the dashboard is in front of the user on this device, so each
-// goes into the Log now, without a sound. missed=1 tells the kernel this page says them. The kernel keeps owing each until
-// this page says it drew it (POST /push/missed-logged, by id: the review of #222), so an answer lost on the way loses
-// nothing; an id this page already drew (its word lost) is said again to the kernel, never drawn twice. No Log, no word.
+// goes into the Log now, without a sound. missed=2 tells the kernel this page says them AND acknowledges each by id (a
+// page that sends missed=1, built before the word, is handed each once: the review of #225). The kernel keeps owing each
+// until this page says it drew it (POST /push/missed-logged, by id: the review of #222), so an answer lost on the way
+// loses nothing; an id this page already drew (its word lost) is said again to the kernel, never drawn twice. No Log, no
+// word.
 // The bell's script turning This device off does the same with its own copy (the two scripts stand alone).
 function sayMissed(ep,list){var said=window.__rompMissedSaid=window.__rompMissedSaid||{},ids=[];
 list.forEach(function(m){var id=m.id?String(m.id):'';
@@ -79203,7 +79233,7 @@ if(!(id&&said[id])){if(!window.__rompNotify)return;window.__rompNotify('missed',
 if(id){said[id]=1;ids.push(id);}});
 if(ep&&ids.length)fetch('/push/missed-logged',{method:'POST',body:JSON.stringify({endpoint:ep,ids:ids})})['catch'](function(){});}
 function fromLedger(via,linkSid){endpoint().then(function(e){if(!e)return {sub:false};
-return fetch('/push/pending?endpoint='+encodeURIComponent(e)+'&missed=1').then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}).then(function(p){p=(p&&typeof p==='object')?p:{};p.sub=true;p.ep=e;return p;})['catch'](function(){return {sub:true,err:true};});}).then(function(p){
+return fetch('/push/pending?endpoint='+encodeURIComponent(e)+'&missed=2').then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}).then(function(p){p=(p&&typeof p==='object')?p:{};p.sub=true;p.ep=e;return p;})['catch'](function(){return {sub:true,err:true};});}).then(function(p){
 var rows=(Array.isArray(p.rows)?p.rows:[]).filter(function(r){return r&&typeof r==='object'&&r.sid&&r.pid&&r.stage;});
 rows.forEach(function(r){r.pid=String(r.pid);r.sid=String(r.sid);});
 var missed=(Array.isArray(p.missed)?p.missed:[]).filter(function(m){return m&&typeof m==='object'&&m.text;});
@@ -79212,30 +79242,27 @@ var row={via:via,sub:!!p.sub,rows:rows.length};if(p.err)row.err=true;if(missed.l
 if(!rows.length){if(p.sub||via==='boot')diag('tap-pending',row);return;}
 displayed().then(function(d){
 var gn=d!==null;row.getNotifications=gn;row.displayed=gn?Object.keys(d).length:-1;
-var landed=!!linkSid,vanished=[],superseded=0;
+var landed=!!linkSid||tapped,vanished=[],superseded=0;   // read when the screen is, so a tap that landed while the kernel answered counts
 rows.forEach(function(r){if(r.stage!=='clicked')return;var first=fresh(r.pid);   // 1. the taps the worker saw: a jump, once by pid, newest first
 diag('tap-pending-land',{sid8:r.sid.slice(0,8),ageS:r.ageS,dup:!first});
-if(first){land(r.sid,String(r.kind||''),String(r.cardId||''),via==='boot','ack');settle('landed',r.pid);landed=true;}});
+if(first){tapped=true;land(r.sid,String(r.kind||''),String(r.cardId||''),via==='boot','ack');settle('landed',r.pid);landed=true;}});
 if(gn){   // 2. the shown rows against the screen
 var front={};rows.forEach(function(r,i){if(d[r.pid]&&!(r.sid in front))front[r.sid]=i;});   // per session, the newest row still displayed (rows are newest first)
 rows.forEach(function(r,i){if(r.stage!=='shown'||seen[r.pid]||d[r.pid])return;   // clicked: above; sent: nothing known displayed; displayed: untouched; seen: landed or spent already
 if(p.replaces!==false&&(r.sid in front)&&front[r.sid]<i){seen[r.pid]=1;superseded++;settle('superseded',r.pid);return;}   // a newer notification for the same session is on the screen: the tag replaced this one's — gone without a tap (never on an Apple device: replaces:false)
 vanished.push(r);});}   // acked shown, gone from the screen: tapped, as far as this page can tell (or swiped — the accepted trade-off above)
 row.vanished=vanished.length;if(superseded)row.superseded=superseded;diag('tap-pending',row);
-var one=vanished.length>0&&vanished.every(function(x){return x.sid===vanished[0].sid;});   // every gone row is about one session: whichever was tapped lands there
-if(landed||!one){vanished.forEach(function(x){seen[x.pid]=1;settle('dropped',x.pid);});return;}   // another road landed, or gone rows about several sessions: spent, silently
-var v=vanished[0],lr={sid8:v.sid.slice(0,8),ageS:v.ageS};if(vanished.length>1)lr.gone=vanished.length;   // the newest gone row (rows are newest first)
-seen[v.pid]=1;diag('tap-vanish-land',lr);
-land(v.sid,String(v.kind||''),String(v.cardId||''),via==='boot','vanish');settle('landed',v.pid);
-vanished.slice(1).forEach(function(x){seen[x.pid]=1;settle('dropped',x.pid);});});});}   // its older ones, gone too: the one landing is theirs
+if(landed||vanished.length!==1){vanished.forEach(function(x){seen[x.pid]=1;settle('dropped',x.pid);});return;}   // a tap landed this visit, or more than one gone at once: spent, silently
+var v=vanished[0];seen[v.pid]=1;diag('tap-vanish-land',{sid8:v.sid.slice(0,8),ageS:v.ageS});
+land(v.sid,String(v.kind||''),String(v.cardId||''),via==='boot','vanish');settle('landed',v.pid);});});}
 // the worker's message (a browser that dispatches notificationclick: the tap focused this window, or opened it): its
 // shape, the worker's own trail, and whether the pid already landed by another road
 if(swc&&swc.addEventListener)swc.addEventListener('message',function(ev){var m=ev&&ev.data;
 if(!(m&&m.romp==='notificationClick'))return;
 var pid=String(m.pid||''),first=fresh(pid);
 diag('sw-message',{shape:m.romp,hasSid:!!m.sid,kind:String(m.kind||''),dup:!first,sw:m.diag||null});
-if(first){land(String(m.sid||''),String(m.kind||''),String(m.cardId||''),false,'sw');settle('landed',pid);}});
-document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')fromLedger('visible');});
+if(first){tapped=true;land(String(m.sid||''),String(m.kind||''),String(m.cardId||''),false,'sw');settle('landed',pid);}});
+document.addEventListener('visibilitychange',function(){if(document.visibilityState==='visible')fromLedger('visible');else tapped=false;});   // out of view: the visit, and its tap, are over
 window.addEventListener('pageshow',function(){fromLedger('pageshow',fromLink('pageshow'));});
 window.addEventListener('popstate',function(){fromLink('popstate');});
 window.addEventListener('focus',function(){fromLedger('focus');});
@@ -82756,8 +82783,8 @@ class Handler(BaseHTTPRequestHandler):
                 # subscription and states where its page runs (its Referer — a same-origin GET carries no Origin)
                 _push_backfill_origin(_pep, _request_page_origin(self.headers))
                 # the dashboard is in front of the user on THIS device: its summaries are seen, and what it was owed is
-                # said here, in the answer's `missed`, when the page says it reads them (missed=1: _push_gap_seen)
-                _missed = _push_gap_seen(_pep, say=(q.get("missed") or [""])[0] == "1")
+                # said here, in the answer's `missed`, when the page says it reads them (missed=1 or 2: _push_missed_mode)
+                _missed = _push_gap_seen(_pep, say=_push_missed_mode((q.get("missed") or [""])[0]))
                 _pend = _push_pending(_pep)
                 _pend["missed"] = _missed
                 _pend["replaces"] = _push_tag_replaces(_pep)   # whether a newer notification takes an older one's place there
@@ -83234,18 +83261,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"ok": True}), "application/json")
             if u.path == "/push/unsubscribe":
                 # This device turned off. The page doing it is the dashboard in front of the user on that device, so with
-                # missed:1 (this build's page) it is handed what the device is still owed, as /push/pending's `missed`, and
+                # missed:2 (this build's page) it is handed what the device is still owed, as /push/pending's `missed`, and
                 # that share stays until the page says it drew it (/push/missed-logged): before, it went with the
                 # subscription unsaid, and turning the device back on (a new subscription) could not bring it back (the
-                # review of #222). A page from an older build reads no `missed`: the share goes, as it did
+                # review of #222). missed:1 means what it means on /push/pending, handed over once and gone (the review of
+                # #225); a page from an older build reads no `missed`: the share goes, as it did
                 try:
                     _ub = json.loads(raw_body or b"{}")
                     ep = str(_ub.get("endpoint") or "")
-                    _usay = _ub.get("missed") in (1, True, "1")
+                    _usay = _push_missed_mode(_ub.get("missed"))
                 except (ValueError, AttributeError):
                     return self._send(400, "bad json", "text/plain")
-                _missed = _push_gap_seen(ep, say=True) if (_usay and ep) else []
-                _del_push_sub(ep, keep_owed=bool(_missed))
+                _missed = _push_gap_seen(ep, say=_usay) if (_usay and ep) else []
+                _del_push_sub(ep, keep_owed=_usay == PUSH_MISSED_KEPT and bool(_missed))
                 return self._send(200, json.dumps({"ok": True, "missed": _missed}), "application/json")
             if u.path == "/push/missed-logged":
                 # the page's word that it put these `missed` entries in its Log (_push_gap_logged): the event that ends what

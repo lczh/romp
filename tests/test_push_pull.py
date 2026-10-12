@@ -590,12 +590,13 @@ class GapPolicy(_Base):
         """Each summary as (device, body, quiet), once per device it went to, in the order sent."""
         return [(ep, a[1], k.get("quiet", False)) for a, k in self.summaries() for ep in k.get("endpoints", ())]
 
-    def comes_forward(self, ep, says_missed=True):
+    def comes_forward(self, ep, missed="2"):
         """A page holding the subscription `ep` comes forward: its GET /push/pending, asked on every load, show and focus.
-        `says_missed`: the page says what its device missed (this build's page asks with missed=1; a page loaded from an
-        older build does not). Returns the answer."""
+        `missed`: how the page says what its device missed. "2": this build's page, which draws each entry once by its id
+        and says it did (POST /push/missed-logged); "1": a page built before that word existed, which draws every entry it
+        is handed and never says so; None: a page older still, which reads no `missed`. Returns the answer."""
         with mock.patch.object(km, "_self_host", return_value="boxa"):
-            st, body = _serve("GET", "/push/pending?endpoint=" + quote(ep, safe="") + ("&missed=1" if says_missed else ""))
+            st, body = _serve("GET", "/push/pending?endpoint=" + quote(ep, safe="") + ("&missed=" + missed if missed else ""))
         self.assertEqual(st, 200)
         return json.loads(body)
 
@@ -879,11 +880,11 @@ class GapPolicy(_Base):
                          "the phone's next summary carries only what it has not been told")
 
     def test_a_page_from_an_older_build_re_arms_its_device_and_keeps_what_it_is_owed(self):
-        # a page loaded before this build (open across a deploy until it reloads) asks without missed=1 and would drop the
-        # words on the floor: the device is re-armed as before, and its share waits for a page that says it, or its next
-        # summary
+        # a page loaded before the missed entries existed (open across a deploy until it reloads) asks without missed= and
+        # would drop the words on the floor: the device is re-armed as before, and its share waits for a page that says it,
+        # or its next summary
         self.phone_holds_a_share()
-        self.assertEqual(self.comes_forward(self.PHONE, says_missed=False)["missed"], [])
+        self.assertEqual(self.comes_forward(self.PHONE, missed=None)["missed"], [])
         self.once(self.restarted("82.1"))
         self.once(self.answer(caught=True, boot="82.1"))
         self.assertEqual([(ep, q) for ep, _, q in self.sent()], [(self.EP, True), (self.PHONE, False)],
@@ -947,6 +948,19 @@ class GapPolicy(_Base):
         self.assertNotEqual(n["id"], m["id"])
         self.assertEqual(n["text"], "TESTHOST restarted · notifications may have been missed", "the newer share still owed")
 
+    def test_a_page_that_never_says_it_drew_an_entry_is_handed_each_share_once(self):
+        # the review of #225: a page built before POST /push/missed-logged (#222's) already asks with missed=1, draws every
+        # entry it is handed without looking at an id, and never says it drew one. Handed the share again on every coming
+        # forward, under keep-until-acknowledged, it put the same summary in the Log again each time the app came forward,
+        # until a reload. Keeping the share until the page's word is what missed=2 asks for; missed=1 keeps #222's rule:
+        # handed once, and gone with that answer
+        self.phone_holds_a_share()
+        (m,) = self.comes_forward(self.PHONE, missed="1")["missed"]
+        self.assertEqual(m, {"host": ROW, "text": self.OWED}, "said once, in the summary's own words; no id, since no word will come")
+        self.assertEqual(self.comes_forward(self.PHONE, missed="1")["missed"], [], "never handed to that page again")
+        self.assertEqual(self.comes_forward(self.PHONE)["missed"], [], "nor to a page of this build on the same device")
+        self.assertNotIn(self.PHONE, (jd.STATE / "push-gap-told.json").read_text(), "nothing left on file for the device")
+
     def test_a_device_that_unsubscribes_takes_its_record_with_it(self):
         self.phone_holds_a_share()
         self.assertIn(self.PHONE, (jd.STATE / "push-gap-told.json").read_text())
@@ -960,7 +974,7 @@ class GapPolicy(_Base):
         # off is the dashboard in front of the user on that device: its answer hands the share over as /push/pending's does,
         # kept until the page says it drew it
         self.phone_holds_a_share()
-        st, body = _serve("POST", "/push/unsubscribe", {"endpoint": self.PHONE, "missed": 1})
+        st, body = _serve("POST", "/push/unsubscribe", {"endpoint": self.PHONE, "missed": 2})
         self.assertEqual(st, 200, body)
         (m,) = json.loads(body)["missed"]
         self.assertEqual((m["host"], m["text"]), (ROW, self.OWED))
@@ -971,6 +985,16 @@ class GapPolicy(_Base):
         st, body = _serve("POST", "/push/unsubscribe", {"endpoint": self.EP})   # a page from an older build: forgotten, as before
         self.assertEqual((st, json.loads(body)["missed"]), (200, []))
         self.assertNotIn(self.EP, (jd.STATE / "push-gap-told.json").read_text())
+
+    def test_turning_this_device_off_with_the_one_shot_flag_hands_the_share_over_once(self):
+        # missed:1 means what it means on GET /push/pending (the review of #225): handed over with that answer and gone with
+        # the subscription, nothing kept for a word that may not come
+        self.phone_holds_a_share()
+        st, body = _serve("POST", "/push/unsubscribe", {"endpoint": self.PHONE, "missed": 1})
+        self.assertEqual(st, 200, body)
+        self.assertEqual(json.loads(body)["missed"], [{"host": ROW, "text": self.OWED}])
+        self.assertNotIn(self.PHONE, km._push_subs(), "unsubscribed")
+        self.assertNotIn(self.PHONE, (jd.STATE / "push-gap-told.json").read_text(), "nothing kept on file")
 
     def test_a_torn_record_is_named_for_what_it_held(self):
         # the review of #222: a torn push-gap-told.json was announced as "the settings it held start over empty until you
