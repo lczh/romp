@@ -7702,10 +7702,11 @@ machine that keeps restarting updates that one notification without a sound
 ("restarted 3 times") until you open Romp on that device or its notifications
 flow normally again. Apple devices are not sent those updates, since an iPhone
 cannot replace a notification in place: what one missed is said by the next such
-notification it gets, or, if you open Romp there first, as a **missed** entry in
-the Log. The machine keeps that record on disk, so a restart of it (every
-update) neither loses it nor makes a notification you have not seen sound
-again. In one burst, at most 16 notifications arrive one by one; the rest are
+notification it gets, or, if you open Romp there first or turn **This device**
+off there, as a **missed** entry in the Log. The machine keeps that record on
+disk until the dashboard confirms the entry is in its Log, so neither a reply
+lost on the way nor a restart of the machine (every update) loses it, and a
+restart does not make a notification you have not seen sound again. In one burst, at most 16 notifications arrive one by one; the rest are
 said in one more.
 
 A notification that replaces an earlier one without a sound (the card that
@@ -7716,8 +7717,9 @@ it is sent there only when it carries the app icon's needs-you count.
 Tapping a notification brings Romp forward on the session it was about. On an
 iPhone with the app already open in the background, the switch happens as the
 app comes forward; a notification you swipe away instead is read the same way,
-so the next time you open the app it may land on that session. With the app in
-front, nothing moves until you next come back to it.
+so the next time you open the app it may land on that session. When several are
+gone by then, it lands only if they were all about the same session. With the
+app in front, nothing moves until you next come back to it.
 
 The bell itself shows the state of the device you are looking at: lit when the
 main switch is on and this device is set up, and crossed out otherwise. Its
