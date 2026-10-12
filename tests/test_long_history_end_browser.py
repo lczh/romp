@@ -10,11 +10,12 @@ and climbs back eight history pages with the wheel, once. Then each class in tur
 is cleared (the selection, focus, the message box's text and quote chips, opened tool rows, and the page's last press, set outside the
 transcript by a press on a spot the lab adds for it and removes), the reader goes back far by scroll writes into the run the climb
 loaded (the family's first class stands where the climb left it, far back already, as each class alone did), the class's own road runs
-(below), the page goes quiet (an idle period, with no task over 50 ms ended in the last 400 ms), and End is pressed once and read. Each
-class's tests read its own readings from where it stood before its road on, the family's drop and the first END_PAGES steps of its
-climb, and three runs of page errors: those raised before the family's first class starts (its boot, its drop and climb, and the lab's
-setup after them), those raised in the class's own window (from its start to its last reading), and those raised after the family's
-last class. A road that throws fails its own class's tests, and the family's run goes on with the next class.
+(below), the page goes quiet (an idle period, with no task over 50 ms ended in the last 400 ms) or 3 s pass, whichever comes first,
+and End is pressed once and read. Each class's tests read its own readings from where it stood before its road on, the family's drop
+and the first END_PAGES steps of its climb, and three runs of page errors: those raised before the family's first class starts (its
+boot, its drop and climb, and the lab's setup after them), those raised in the class's own window (from its start to its last
+reading), and those raised after the family's last class. A road that throws fails its own class's tests, and the family's run goes on
+with the next class.
 
 Why the press waits for a quiet page, and the first class makes no go-back: with the page's End handler gone, End is the browser's
 smooth scroll, which the page's first re-window cuts short of the bottom, so these tests fail; work left over from the road or the
