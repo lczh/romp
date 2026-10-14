@@ -9,7 +9,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { threadSettled, threadOnRail, type CommentThread } from "./comments";
+import { threadSettled, threadOnRail, threadNeedsYou, threadCued, type CommentThread } from "./comments";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
@@ -32,7 +32,7 @@ function styled(status: CommentThread["status"]): { classes: Set<string>; title:
   const m = { classList: { toggle(c: string, on: boolean) { if (on) classes.add(c); else classes.delete(c); } }, title: "" };
   const th = { tid: "t1", anchorUuid: "a1", exact: "the passage", status, createdT: 0, state: "", unread: false,
                promotedName: "", msgs: [] } as CommentThread;
-  new Function("m", "th", "threadSettled", "commentInFlight", src + "\nstyleCommentMark(m, th);")(m, th, threadSettled, () => false);
+  new Function("m", "th", "threadSettled", "commentInFlight", "threadNeedsYou", "threadCued", src + "\nstyleCommentMark(m, th);")(m, th, threadSettled, () => false, threadNeedsYou, threadCued);
   return { classes, title: m.title };
 }
 

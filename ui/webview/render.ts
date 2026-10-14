@@ -147,6 +147,8 @@ import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAn
 import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
 import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
 import { threadSettled, threadOnRail } from "./comments";   // a thread's look by status: only resolved dims; relayed stays on the rail, open (2026-09-30)
+import { chipStops } from "./status-chip";   // the bar's stop rule, which the comment popover's stop shares (thread-live-1)
+import { threadChipState, threadNeedsYou, threadCued } from "./comments";   // a thread's chip, and its wait on you: the popover's statusline and the passage's cue (thread-live-1)
 import { isRelay, parseRelay, relayHtml, relayPlain } from "./relay-view";   // a relayed thread's expanded bubble: a small transcript (2026-10-06)
 import { threadTakesReplies, stageThreadReply, threadReply } from "./comments";   // a thread's reply box: its quote chips, its staged stack, its release (2026-10-07)
 import { CmtDrops, cmtDropEntry } from "./comment-drops";   // a dropped comment create's dialog, shared with the feed (review of PR 218)
@@ -3922,7 +3924,7 @@ let railStickyPending = false;
 function scheduleRailSticky(): void {
   if (railStickyPending) return;
   railStickyPending = true;
-  requestAnimationFrame(() => { railStickyPending = false; paintRailSticky(); paintScrollMarks(); updateCommentRail(); if (activeId && hasUnreadOpenThread(activeId)) paintCommentOutlines(activeId); });
+  requestAnimationFrame(() => { railStickyPending = false; paintRailSticky(); paintScrollMarks(); updateCommentRail(); if (activeId && hasCuedOpenThread(activeId)) paintCommentOutlines(activeId); });
 }
 
 // The rail's MINUTE TICK (T406): today's labels age. ONE page-level timer, re-armed to fire just past each clock-minute
@@ -11028,7 +11030,7 @@ function reopenCommentForReload(sid: string): void {
  *  comments frame), on the rail's rAF scheduler (a re-render, the view's resize observer, every scroll in the pane, inner
  *  containers' included through the capture-phase listener) and on window resize (which can carry a passage across the
  *  two-row line: that hook is what swaps the shape) — those two only while the session has an unread open thread
- *  (hasUnreadOpenThread: a store read, so a scroll frame with nothing to move walks no DOM). The row rule added no hook
+ *  (hasCuedOpenThread: a store read, so a scroll frame with nothing to move walks no DOM). The row rule added no hook
  *  and no layout read: one pass over the rects the union already needs (the user 2026-09-12: zero new machinery). The
  *  same measure-then-write pass either way, writing only what changed. pointer-events: none on the box, so hover and
  *  click land on the marks beneath. Both shapes go with the unread bit (styleCommentMark drops the class, and the ring
@@ -11038,16 +11040,16 @@ function reopenCommentForReload(sid: string): void {
  *  resize): a session with no unread open thread has no box to move, so those paths never walk its DOM (review find,
  *  T310). Read from the thread store, no DOM. The marks pass calls the painter unconditionally: it is the removal path
  *  (the last unread thread read, resolved or deleted takes its box with it on that pass). */
-function hasUnreadOpenThread(sid: string): boolean {
-  return (commentThreads.get(sid) || []).some((t) => !!t.unread && t.status === "open");
+function hasCuedOpenThread(sid: string): boolean {
+  return (commentThreads.get(sid) || []).some((t) => threadCued(t));   // an unread reply, or a thread waiting on you (thread-live-1)
 }
 
 function paintCommentOutlines(sid: string): void {
   const v = views.get(sid);
   if (!v) return;
-  const want = new Map<string, HTMLElement[]>();          // tid -> its unread fragments, document order
+  const want = new Map<string, HTMLElement[]>();          // tid -> its cued fragments (unread, or waiting on you), document order
   if (v.el.style.display !== "none") {
-    for (const m of Array.from(v.el.querySelectorAll("mark.cmt-hl.unread")) as HTMLElement[]) {
+    for (const m of Array.from(v.el.querySelectorAll("mark.cmt-hl.unread, mark.cmt-hl.needs")) as HTMLElement[]) {
       const tid = m.dataset.tid || "";
       const list = want.get(tid);
       if (list) list.push(m); else want.set(tid, [m]);
@@ -11220,7 +11222,7 @@ function updateCommentRail(): void {
   }
   const sig = activeId + "|" + Math.round(r.top) + "," + Math.round(r.right) + "," + Math.round(r.height)
     + "|" + ticks.map((t) => t.th.tid + ":" + t.y + ":" + t.th.status + ":" + (t.th.unread ? 1 : 0)
-                            + ":" + (commentInFlight(t.th) ? 1 : 0)).join(",");
+                            + ":" + (threadNeedsYou(t.th) ? 1 : 0) + ":" + (commentInFlight(t.th) ? 1 : 0)).join(",");
   if (sig === cmtRailSig && rail) return;
   cmtRailSig = sig;
   if (!rail) { rail = el("div", "cmt-rail"); rail.id = "cmt-rail"; document.body.appendChild(rail); }
@@ -11229,8 +11231,9 @@ function updateCommentRail(): void {
   rail.style.height = r.height + "px";
   const cls = (th: CommentThread) => "cmt-tick" + (threadSettled(th.status) ? " resolved" : "")
     + (th.unread && th.status === "open" ? " unread" : "")
+    + (threadNeedsYou(th) ? " needs" : "")   // waiting on your answer: the unread tick's needs-you halo (thread-live-1)
     + (commentInFlight(th) ? " busy" : "");   // green while working OR a reply is owed (2026-08-24)
-  const pads = railPads(ticks.map((t) => ({ y: t.y, h: t.th.unread && t.th.status === "open" ? 6 : 4 })), TICK_PAD, r.height);
+  const pads = railPads(ticks.map((t) => ({ y: t.y, h: threadCued(t.th) ? 6 : 4 })), TICK_PAD, r.height);
   const dress = (tick: HTMLElement, t: typeof ticks[number], i: number) => {
     tick.style.top = t.y + "px";
     tick.className = cls(t.th);
@@ -11253,7 +11256,7 @@ function updateCommentRail(): void {
     return tick;
   }));
 }
-window.addEventListener("resize", () => { updateCommentRail(); if (activeId && hasUnreadOpenThread(activeId)) paintCommentOutlines(activeId); });
+window.addEventListener("resize", () => { updateCommentRail(); if (activeId && hasCuedOpenThread(activeId)) paintCommentOutlines(activeId); });
 
 // (The per-turn count badge is GONE — the user 2026-08-17: the highlight does the speaking, and
 // the scroll-rail tick already covers a thread whose rendered text drifted beyond re-matching.)
@@ -11326,9 +11329,15 @@ function ensureCommentMark(turn: HTMLElement, th: CommentThread): void {
 function styleCommentMark(m: HTMLElement, th: CommentThread): void {
   m.classList.toggle("resolved", threadSettled(th.status));   // a RELAYED thread is still open: it keeps the open look (the user 2026-09-30)
   m.classList.toggle("unread", !!th.unread && th.status === "open");
-  if (!(th.unread && th.status === "open")) m.classList.toggle("cmt-ring", false);   // the ring is the painter's call on an UNREAD mark (paintCommentOutlines, by row count): it goes with the bit, on this same pass
+  // NEEDS YOU (thread-live-1, 2026-10-14): the thread is stopped on a question or a permission prompt, answerable in its
+  // popover. Its passage wears the needs-you cue an unread reply wears (the painter's ring or box, by row count), and the
+  // cue goes the moment the question is answered (the frame's chip leaves needsInput): an event, never a timer
+  const needs = threadNeedsYou(th);
+  m.classList.toggle("needs", needs);
+  if (!threadCued(th)) m.classList.toggle("cmt-ring", false);   // the ring is the painter's call on a CUED mark (paintCommentOutlines, by row count): it goes with the bits, on this same pass
   m.classList.toggle("busy", commentInFlight(th));
-  m.title = th.status === "promoted" ? "thread, now the session '" + th.promotedName + "'"
+  m.title = needs ? "thread: waiting on your answer — click to open"
+    : th.status === "promoted" ? "thread, now the session '" + th.promotedName + "'"
     : th.status === "merged" ? "relayed thread: its discussion was sent back into the session"
     : th.status === "resolved" ? "resolved thread: closed — click to read; a new comment continues the conversation"
     : "thread: click to open";
@@ -11348,7 +11357,7 @@ function markChain(start: HTMLElement, sid: string): { el: HTMLElement; tid: str
     const tid = m.dataset.tid;
     if (!tid) continue;
     const th = threads.find((t) => t.tid === tid);
-    out.push({ el: m, tid, unread: !!th?.unread && th.status === "open" });
+    out.push({ el: m, tid, unread: !!th && threadCued(th) });   // the cue's predicate: the ring under the pointer is the thread that opens
   }
   return out;
 }
@@ -11655,11 +11664,9 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
   // (the typing dots that rendered here while the thread was busy are RETIRED — the user 2026-08-24:
   // the await-green highlight carries the in-flight signal, and the reply's arrival is announced by
   // the green→yellow settle; the pending bubble still acknowledges the user's own send)
-  if (th.status === "open" && threadStuck(th.state)) {
-    const note = el("div", "cmt-note");
-    note.textContent = "This thread hit a prompt it can't answer from here. Break it out to continue.";
-    list.appendChild(note);
-  }
+  // (a thread stopped on a question or a permission prompt shows the chat's own card under this list now, in the popover's
+  // .cmt-ask host, answerable here: renderThreadAsk, thread-live-1. The note that sent the reader to break the thread
+  // out instead is gone.)
   if (th.status === "open" && th.error) {
     // the CLI behind this thread could not start — dots pulsing forever would be a lie
     const note = el("div", "cmt-note cmt-err");
@@ -11685,8 +11692,7 @@ function refillOpenCommentPop(): void {
  *  element set (mode · model · effort · fast; the user 2026-08-25) through the one code path.
  *  metaPending's switching-dots ride the same keys, sid-scoped. */
 function threadMetaStatus(th: CommentThread): Status {
-  const stuck = threadStuck(th.state);
-  return { state: stuck ? "needsInput" : (threadBusy(th.state) ? "working" : "ready"),
+  return { state: threadChipState(th) as ChipState,   // the chat's chip for a running thread (thread-live-1), the raw state's reading otherwise
            sinceEpoch: th.sinceEpoch || null, mode: th.mode || "", model: th.model || "",
            effort: th.effort || "default", fast: th.fast || "", backend: "sdk",
            modelFallback: th.modelFallback ?? null,   // the popover's picker wears the requested-model mark too (2026-09-17)
@@ -11703,7 +11709,10 @@ function cmtStateChip(th: CommentThread): HTMLElement {
   const wrap = el("span", "cmt-state");
   wrap.id = "cmt-state";
   if (th.status !== "open") return wrap;                    // closed threads carry their status in the title
-  const st = th.state || "";
+  // the chat's own chip for the thread (thread-live-1, 2026-10-14): the kernel derives it from the thread's live row with
+  // the chat's _session_chip, so the popover says Needs you on a question, API error on a dead turn, and offers the stop
+  // exactly where the chat's bar does (chipStops); a dormant thread's raw state reads as before (threadChipState)
+  const st = threadChipState(th);
   // the stop square, exactly the chat statusline's affordance owner-scoped to the THREAD (T138,
   // the user 2026-08-27: threads couldn't be interrupted from the UI at all — the popover chip
   // rendered working/retrying with no stop). data-act rides the stable document.body delegate
@@ -11728,24 +11737,19 @@ function cmtStateChip(th: CommentThread): HTMLElement {
     const timer = el("span", "status-timer");
     timer.id = "cmt-work-timer";
     timer.textContent = elapsedMs(th.sinceEpoch || null);
-    wrap.append(chip, timer, stopBtn());
+    wrap.append(chip, timer);
   } else if (st === "retrying") {
     const chip = el("span", "chip chip-retrying");
     chip.textContent = CHIP_LABEL.retrying;
-    wrap.append(chip, stopBtn());
+    wrap.appendChild(chip);
   } else if (st === "compacting") {
     const c = el("span", "compacting-line");
     c.textContent = "⟳ Compacting context…";
     wrap.appendChild(c);
-  } else if (threadStuck(st)) {
-    const chip = el("span", "chip chip-needsInput");
-    chip.textContent = CHIP_LABEL.needsInput;
-    wrap.appendChild(chip);
   } else {
-    const chip = el("span", "chip chip-ready");
-    chip.textContent = CHIP_LABEL.ready;
-    wrap.appendChild(chip);
+    wrap.appendChild(statusChip(chipWords({ state: st })));   // the shared chip (status-chip.ts): Needs you, API error, Ready, …
   }
+  if (chipStops(st)) wrap.appendChild(stopBtn());   // the chat bar's rule, one predicate: working, compacting, retrying, blocked
   return wrap;
 }
 
@@ -11942,6 +11946,18 @@ function commentSendFromPop(pop: HTMLElement): void {
   }
   const cur = openCommentThread();
   if (!cur) return;
+  // The thread's question takes free text and the box is its "add your own" field (thread-live-1, the message box's rule,
+  // boxAnswersAsk): the typed words answer it, through the chat's own frames by the thread's sid, and nothing else goes.
+  // A staged stack waits for the next reply, as the message box's does.
+  const asid = cur.th.sid || cur.th.tid;   // the thread's session: its question and the box's draft stamp key on it
+  const askRoute = text ? boxAnswersAsk(asid) : null;
+  if (askRoute) {
+    if (askRoute === "custom") addCustomLiveAsk(threadAsk, text); else sendTextLiveAsk(threadAsk, text);
+    commentDrafts.delete(cur.th.tid); draftStartedAt.delete(asid); persistDrafts();
+    box.value = "";
+    syncCmtBoxAskMode(asid);
+    return;
+  }
   // ONE reply for the run (2026-10-07): the thread's staged items in stage order, then the typed words with the box's quote
   // chips, composed by the chat's own staged-run body (comments.ts threadReply). An empty Enter with a stack sends the
   // stack; with nothing staged and no chip it is the plain reply it always was.
@@ -12150,7 +12166,7 @@ function renderCommentPopover(): void {
   // interactive control or selectable text, and never the bottom-right resize corner
   pop.addEventListener("pointerdown", (ev: PointerEvent) => {
     const t = ev.target as HTMLElement;
-    if (t.closest(".cmt-x, .cmt-name, .cmt-input, .cmt-msgs, .cmt-quote, .cmt-staged, .cmt-chips, button, input, textarea, .meta-btn, .meta-menu")) return;   // the staged strip's rows and label are its own clicks (2026-10-07)
+    if (t.closest(".cmt-x, .cmt-name, .cmt-input, .cmt-msgs, .cmt-quote, .cmt-staged, .cmt-chips, .cmt-ask, button, input, textarea, .meta-btn, .meta-menu")) return;   // the staged strip's rows and label are its own clicks (2026-10-07); so are the question card's options (thread-live-1: a captured press retargeted their click to the box)
     const pr = pop.getBoundingClientRect();
     if (ev.clientX > pr.right - 18 && ev.clientY > pr.bottom - 18) return;   // the resize handle's corner
     ev.preventDefault();
@@ -12204,6 +12220,13 @@ function renderCommentPopover(): void {
     const list = el("div", "cmt-msgs");
     fillCommentMsgs(list, th, sid);
     pop.appendChild(list);
+    if (th.status === "open") {
+      // the thread's question, when it stops on one: the chat's card, painted once the popover is in the page
+      // (renderThreadAsk, below and on every askLive for the thread); out of the list, so a frame's refill never rebuilds it
+      const ask = el("div", "cmt-ask");
+      ask.style.display = "none";
+      pop.appendChild(ask);
+    }
   }
   if (sent) {
     // THE SENT VIEW (2026-10-01): the moment Enter is pressed, the box shows what happened, in the thread's own boot
@@ -12351,7 +12374,18 @@ function renderCommentPopover(): void {
     // the sent view keeps the composer row where the thread's will be, read-only: the words are the bubble above
     box.readOnly = !!sent;
     box.value = sent ? "" : (commentDrafts.get(dk) || "");
-    box.addEventListener("input", () => { if (!sent) commentDrafts.set(dk, box.value); });
+    box.addEventListener("input", () => {
+      if (sent) return;
+      commentDrafts.set(dk, box.value);
+      if (th) {
+        // the message box's draft stamp, kept for the thread's box (thread-live-1): a reply begun BEFORE the thread's
+        // question arrived stays a reply; one begun after it answers the question (boxAnswersAsk)
+        const asid = th.sid || th.tid;
+        if (box.value) { if (!draftStartedAt.has(asid)) draftStartedAt.set(asid, Date.now()); }
+        else draftStartedAt.delete(asid);
+        syncCmtBoxAskMode(asid);
+      }
+    });
     const stageable = cmtStageable(th);
     box.addEventListener("keydown", (ev) => {
       if (ev.key === "Enter" && (ev.isComposing || ev.keyCode === 229)) return;   // an IME's commit Enter is the composition's, never a send
@@ -12493,6 +12527,7 @@ function renderCommentPopover(): void {
   }
   document.body.appendChild(pop);
   if (cmtStageable(th)) { paintCmtStaged(); paintCmtChips(); }   // the thread's stack and chips, from state (2026-10-07)
+  if (th && th.status === "open") renderThreadAsk();              // the thread's question, if it waits on one (thread-live-1)
   if (typeof ResizeObserver === "function") {
     // resizing the BOX (resize: both) hands the extra room to the quoted context: the .sized class
     // unlocks the quote's clamp; armed only after a real user resize, so the natural size stays tight
@@ -17893,17 +17928,35 @@ function setLiveAsk(id: string, ask: ParsedAsk | null) {
   if (!liveAsks.has(id)) askArrivedAt.set(id, Date.now());   // ARRIVED now — not a re-render of the same question
   liveAsks.set(id, ask);
   if (id === activeId) renderLiveAsk();
+  if (id === threadAsk.sid()) renderThreadAsk();   // a comment thread's question, in its open popover (thread-live-1)
 }
 function clearLiveAsk(id: string) {
   askArrivedAt.delete(id);
   if (liveAsks.delete(id) && id === activeId) renderLiveAsk();
+  if (id === threadAsk.sid()) renderThreadAsk();
 }
 
-let sendingTimer: ReturnType<typeof setTimeout> | undefined;
-// Local UI highlight for the single-select card (↑/↓); the actual selection is the
-// delta send on confirm. Keyed so incidental re-posts of the same prompt keep it.
-let liveAskFocus = 0;
-let liveAskFocusKey = "";
+// ── the question card's SURFACES (thread-live-1, 2026-10-14) ──────────────────────────────────────────────────────────
+// ONE card implementation (the single, multi and review cards below, their keys, preview and answer posts) paints into a
+// surface: the chat's #live-ask for the active tab's session, and the comment popover's .cmt-ask for the open thread,
+// whose question rides the same askLive frames by the thread's own sid (the kernel's thread live map). Each surface holds
+// its own keyboard highlight (focus, keyed so an incidental re-post of the same prompt keeps it; the actual selection is
+// the answer sent on confirm) and its own in-flight guard, so a question in the chat and one in a thread never share a
+// highlight or a dim. The answers post the chat's own frames (answerAsk & co.) with the surface's sid.
+interface AskSurface {
+  host(): HTMLElement | null;          // the element the card paints into
+  sid(): string | null;                // whose question it shows (and whose the answers are)
+  focus: number; focusKey: string;     // the keyboard highlight, and the screen it belongs to
+  guard: boolean; timer?: ReturnType<typeof setTimeout>;   // one answer in flight at a time (dimSending)
+}
+const chatAsk: AskSurface = { host: () => document.getElementById("live-ask"), sid: () => activeId, focus: 0, focusKey: "", guard: false };
+const threadAsk: AskSurface = { host: () => document.querySelector("#cmt-pop .cmt-ask") as HTMLElement | null,
+                                sid: () => openThreadSid(), focus: 0, focusKey: "", guard: false };
+// The open thread's own session id: the frame's `sid`, which is its tid for every thread romp makes (null with no thread open).
+function openThreadSid(): string | null {
+  const cur = openCommentThread();
+  return cur ? (cur.th.sid || cur.th.tid) : (openCommentKey ? openCommentKey.tid : null);
+}
 
 // True on a phone/tablet (a coarse pointer) — the mobile signal we gate touch affordances on. NOT viewport
 // width (desktop chat panes are narrow too). Reused by the composer's Enter behavior, its resting
@@ -18007,9 +18060,15 @@ function syncComposerPh(): void {
 //              answer immediately; multi-select adds it as a checked custom row (then the card's Submit sends).
 //   "text"   → a raw free-text prompt the panel couldn't structure (askText).
 function composerAnswersAsk(): "custom" | "text" | null {
-  if (!activeId || !liveAsks.has(activeId)) return null;
-  if (draftPredatesAsk(activeId)) return null;   // already writing it when the question landed → it's a message
-  const ask = liveAsks.get(activeId) ?? null;
+  return activeId ? boxAnswersAsk(activeId) : null;
+}
+// …the same answer for ANY box that writes to one session (the message box for the active tab, a comment popover's box
+// for its thread: thread-live-1): the question `id` waits on, if it takes free text, and a draft that began before it
+// arrived is a message (draftStartedAt keys by the box's session, a thread's tid included).
+function boxAnswersAsk(id: string): "custom" | "text" | null {
+  if (!liveAsks.has(id)) return null;
+  if (draftPredatesAsk(id)) return null;   // already writing it when the question landed → it's a message
+  const ask = liveAsks.get(id) ?? null;
   if (!ask) return "text";
   if ((ask.kind === "single" || ask.kind === "multi")
       && ask.options.some((o) => isTypeSomething(o.label))) return "custom";
@@ -18057,9 +18116,7 @@ function renderLiveAsk() {
   // appended after it (e.g. switching to a never-seen session while a picker is up).
   if (content && host.parentNode === content && host !== content.lastChild) content.appendChild(host);
   host.replaceChildren();
-  host.classList.remove("sending");
-  if (sendingTimer) { clearTimeout(sendingTimer); sendingTimer = undefined; }
-  sendingGuard = false; // a fresh render = the previous action resolved; re-enable
+  askSurfaceReset(chatAsk, host);   // a fresh render = the previous action resolved; re-enable
   const cur = activeId ? liveAsks.get(activeId) : undefined;
   if (cur) liveTextValue = ""; // leaving the free-text field (a structured screen is up)
   // The footer (statusline: working chip / interrupt / model selector + the message box) stays VISIBLE
@@ -18077,14 +18134,60 @@ function renderLiveAsk() {
   const ask = liveAsks.get(activeId) ?? null;
   setComposerAskMode();   // picker with a free-text path → the composer becomes "add your own answer…"
   if (!ask) { host.style.display = "none"; setComposerAskMode(); return; }   // no typed ask (the kernel clears instead): nothing to draw
-  if (ask.kind === "multi") renderMultiCard(ask);
-  else if (ask.kind === "submit") renderSubmitCard(ask);
-  else renderSingleCard(ask);
-  renderAskPreview();   // focus-aware: the FOCUSED option's own preview
+  paintAskCard(chatAsk, ask);
   // Reveal the picker if the user is parked at the bottom — it's part of the scroll flow now, so new/taller
   // pickers would otherwise land below the fold. Never yank a user who has scrolled UP to read context.
   const v = activeId ? views.get(activeId) : undefined;
   if (content && (!v || v.stick)) writeScroll(content, content.scrollHeight, "liveask-reveal", true, topBefore);
+}
+
+// The card for one surface's question: the kind's card, then its focus-aware preview (the FOCUSED option's own).
+function paintAskCard(s: AskSurface, ask: ParsedAsk) {
+  if (ask.kind === "multi") renderMultiCard(s, ask);
+  else if (ask.kind === "submit") renderSubmitCard(s, ask);
+  else renderSingleCard(s, ask);
+  renderAskPreview(s);
+}
+// A surface repainting: the previous action resolved, so its dim and guard lift.
+function askSurfaceReset(s: AskSurface, host: HTMLElement) {
+  host.classList.remove("sending");
+  if (s.timer) { clearTimeout(s.timer); s.timer = undefined; }
+  s.guard = false;
+}
+
+// THE OPEN THREAD'S QUESTION, in its comment popover (thread-live-1, 2026-10-14): a thread stopped on an AskUserQuestion
+// or a permission prompt shows the chat's own card in the popover's .cmt-ask host, between its conversation and its box,
+// answered through the chat's own frames by the thread's sid. Repainted by the same events as the chat's (the question
+// arriving or clearing, setLiveAsk / clearLiveAsk) and by the popover's full build; the host survives the popover's
+// in-place refreshes, so a frame never rebuilds the card under a click. The popover's box doubles as the "add your own"
+// field exactly as the message box does (boxAnswersAsk), relabelled while it does.
+function renderThreadAsk() {
+  const host = threadAsk.host();
+  const sid = threadAsk.sid();
+  if (!host || !sid) return;
+  host.replaceChildren();
+  askSurfaceReset(threadAsk, host);
+  const ask = liveAsks.get(sid) ?? null;
+  syncCmtBoxAskMode(sid);
+  if (!ask) { host.style.display = "none"; return; }
+  host.style.display = "";
+  paintAskCard(threadAsk, ask);
+  const list = host.parentElement?.querySelector(".cmt-msgs") as HTMLElement | null;
+  if (list) list.scrollTop = list.scrollHeight;   // the question follows the conversation's tail, as the chat's does
+}
+// The popover box in "answer this question" mode, the message box's own placeholder and tint (setComposerAskMode); the
+// box's own words otherwise. Called from the card's repaint and the box's typing, the two events that change it.
+function syncCmtBoxAskMode(sid: string) {
+  const box = document.querySelector("#cmt-pop .cmt-input") as HTMLTextAreaElement | null;
+  if (!box || box.readOnly || openThreadSid() !== sid) return;
+  const answers = !!boxAnswersAsk(sid);
+  if (answers) {
+    if (!box.classList.contains("answering")) box.dataset.restPh = box.placeholder;
+    box.placeholder = "add your own answer…  (⏎ submit)";
+  } else if (box.classList.contains("answering")) {
+    box.placeholder = box.dataset.restPh || box.placeholder;
+  }
+  box.classList.toggle("answering", answers);
 }
 
 // The focused option's side-by-side preview box, reproduced VERBATIM in a monospace block (the user
@@ -18094,14 +18197,15 @@ function renderLiveAsk() {
 // instantly, from the option's OWN preview (the SDK sends one per option; ParsedAsk.preview stands in only
 // for an older kernel's single preview). REPLACES rather than appends, so stepping never stacks
 // duplicates. textContent, never innerHTML: the preview is untrusted tool output.
-function renderAskPreview() {
-  const host = document.getElementById("live-ask"); if (!host) return;
+function renderAskPreview(s: AskSurface) {
+  const host = s.host(); if (!host) return;
   const card = host.querySelector(".ask-card") as HTMLElement | null; if (!card) return;
-  const ask = activeId ? liveAsks.get(activeId) : null;
+  const sid = s.sid();
+  const ask = sid ? liveAsks.get(sid) : null;
   let preview: string | undefined;
   if (ask && ask.kind === "single") {
     const opts = singleOptions(ask);
-    const o = opts[Math.max(0, Math.min(liveAskFocus, opts.length - 1))];
+    const o = opts[Math.max(0, Math.min(s.focus, opts.length - 1))];
     preview = (o && o.preview) || ask.preview || undefined;
   } else {
     preview = ask?.preview || undefined;
@@ -18133,9 +18237,9 @@ function diffLineEl(line: string): HTMLElement {
   return row;
 }
 
-function askCard(extraClass = ""): HTMLElement {
+function askCard(s: AskSurface, extraClass = ""): HTMLElement {
   const card = el("div", "ask-card ask-live" + (extraClass ? " " + extraClass : ""));
-  document.getElementById("live-ask")!.appendChild(card);
+  s.host()!.appendChild(card);
   return card;
 }
 function qline(card: HTMLElement, text?: string) {
@@ -18154,35 +18258,35 @@ function singleOptions(ask: ParsedAsk) {
 // SINGLE-select: clickable radio rows; ↑/↓ highlight, Enter/number confirm.
 // Also each question tab of the multi-QUESTION wizard (Enter picks + advances);
 // its "Type something." slot is driven by the inline custom-answer field.
-function renderSingleCard(ask: ParsedAsk) {
-  const card = askCard();
+function renderSingleCard(s: AskSurface, ask: ParsedAsk) {
+  const card = askCard(s);
   qline(card, ask.question || ask.header);
   const opts = singleOptions(ask);
-  const key = (activeId || "") + "§" + opts.map((o) => `${o.n}:${o.label}`).join("|");
-  if (key !== liveAskFocusKey) { liveAskFocusKey = key; const sel = opts.findIndex((o) => o.selected); liveAskFocus = sel >= 0 ? sel : 0; }
-  liveAskFocus = Math.max(0, Math.min(liveAskFocus, opts.length - 1));
+  const key = (s.sid() || "") + "§" + opts.map((o) => `${o.n}:${o.label}`).join("|");
+  if (key !== s.focusKey) { s.focusKey = key; const sel = opts.findIndex((o) => o.selected); s.focus = sel >= 0 ? sel : 0; }
+  s.focus = Math.max(0, Math.min(s.focus, opts.length - 1));
   opts.forEach((o, i) => {
-    const row = el("div", "ask-live-opt" + (i === liveAskFocus ? " focus" : ""));
+    const row = el("div", "ask-live-opt" + (i === s.focus ? " focus" : ""));
     const lab = el("span", "ask-optlabel"); lab.textContent = `${o.n}. ${o.label}`; row.appendChild(lab);
     if (o.desc) { const d = el("span", "ask-optdesc"); d.textContent = o.desc; row.appendChild(d); }
-    row.addEventListener("click", () => answerLiveAsk(o.n));
-    row.addEventListener("mousemove", () => { if (liveAskFocus !== i) { liveAskFocus = i; paintLiveAskFocus(); } });
+    row.addEventListener("click", () => answerLiveAsk(s, o.n));
+    row.addEventListener("mousemove", () => { if (s.focus !== i) { s.focus = i; paintLiveAskFocus(s); } });
     card.appendChild(row);
   });
-  if (ask.options.some((o) => isTypeSomething(o.label))) card.appendChild(customHintRow());
+  if (ask.options.some((o) => isTypeSomething(o.label))) card.appendChild(customHintRow(s));
   card.tabIndex = 0;
-  card.addEventListener("keydown", onSingleKey);
+  card.addEventListener("keydown", (e) => onSingleKey(s, e));
   focusCardUnlessTyping(card);
 }
 
 // The "+ add your own" affordance is no longer an inline input — it points at the NORMAL message box below,
 // which now doubles as the free-text answer field (the user 2026-07-09). A static, non-interactive hint so
 // the option is still discoverable on the card; the actual typing happens in the composer.
-function customHintRow(): HTMLElement {
+function customHintRow(s: AskSurface): HTMLElement {
   const row = el("div", "ask-custom ask-custom-hint");
   const plus = el("span", "ask-custom-plus"); plus.textContent = "+"; row.appendChild(plus);
   const lab = el("span", "ask-custom-hint-text");
-  lab.textContent = "add your own — type it in the message box below";
+  lab.textContent = s === threadAsk ? "add your own — type it in the reply box below" : "add your own — type it in the message box below";
   row.appendChild(lab);
   return row;
 }
@@ -18191,7 +18295,13 @@ function customHintRow(): HTMLElement {
 // focus from a user typing in the composer or any input — the footer stays visible now, so a re-mirror must
 // not steal the caret mid-word (the user 2026-07-09).
 function focusCardUnlessTyping(card: HTMLElement) {
-  if (!isTypingTarget(document.activeElement)) card.focus({ preventScroll: true });
+  if (!isTypingTarget(document.activeElement) && !askCardElsewhere(card)) card.focus({ preventScroll: true });
+}
+// …nor from the OTHER surface's card (thread-live-1): the chat's picker repainting under an open popover must not pull
+// the keys away from the thread's picker the reader is stepping through, nor the other way round.
+function askCardElsewhere(card: HTMLElement): boolean {
+  const at = (document.activeElement as HTMLElement | null)?.closest?.(".ask-card") as HTMLElement | null;
+  return !!at && at !== card && at.parentElement !== card.parentElement;
 }
 
 // "Type something" is the inline free-text slot (handled by the +custom field) and "Submit" is the dedicated
@@ -18207,8 +18317,8 @@ function isMetaOption(label: string): boolean { return /^\s*(type something|subm
 function multiOptions(ask: ParsedAsk) {
   return ask.options.filter((o) => o.checked !== undefined && !isMetaOption(o.label));
 }
-function renderMultiCard(ask: ParsedAsk) {
-  const card = askCard("ask-live-multi");
+function renderMultiCard(s: AskSurface, ask: ParsedAsk) {
+  const card = askCard(s, "ask-live-multi");
   qline(card, ask.question || ask.header);
   // A custom answer that's already been typed shows up as a normal checked option
   // (its label is the text, no longer "Type something"), so it renders as a checkbox.
@@ -18218,72 +18328,74 @@ function renderMultiCard(ask: ParsedAsk) {
   // Cancel when the highlight is on a button) — you arrow DOWN past the checkboxes to Submit, then Enter to
   // submit. Reset the highlight only when the screen actually changes, so a re-mirror keeps your place.
   const navCount = checkOpts.length + 2;   // checkboxes + Submit + Cancel
-  const key = (activeId || "") + "§multi§" + checkOpts.map((o) => `${o.n}:${o.label}`).join("|");
-  if (key !== liveAskFocusKey) { liveAskFocusKey = key; const sel = checkOpts.findIndex((o) => o.selected); liveAskFocus = sel >= 0 ? sel : 0; }
-  liveAskFocus = Math.max(0, Math.min(liveAskFocus, navCount - 1));
+  const key = (s.sid() || "") + "§multi§" + checkOpts.map((o) => `${o.n}:${o.label}`).join("|");
+  if (key !== s.focusKey) { s.focusKey = key; const sel = checkOpts.findIndex((o) => o.selected); s.focus = sel >= 0 ? sel : 0; }
+  s.focus = Math.max(0, Math.min(s.focus, navCount - 1));
   checkOpts.forEach((o, i) => {
-    const row = el("label", "ask-check" + (i === liveAskFocus ? " focus" : ""));
+    const row = el("label", "ask-check" + (i === s.focus ? " focus" : ""));
     const box = document.createElement("input"); box.type = "checkbox"; box.checked = !!o.checked;
-    box.addEventListener("change", () => toggleLiveAsk(o.n));
+    box.addEventListener("change", () => toggleLiveAsk(s, o.n));
     row.appendChild(box);
     const lab = el("span", "ask-optlabel"); lab.textContent = o.label; row.appendChild(lab);
     if (o.desc && o.desc.toLowerCase() !== "submit") { const d = el("span", "ask-optdesc"); d.textContent = o.desc; row.appendChild(d); }
-    row.addEventListener("mousemove", () => { if (liveAskFocus !== i) { liveAskFocus = i; paintMultiFocus(); } });
+    row.addEventListener("mousemove", () => { if (s.focus !== i) { s.focus = i; paintMultiFocus(s); } });
     card.appendChild(row);
   });
   // "add your own" is served by the message box below (see customHintRow) — type there + ⏎ to add a checked
   // custom row, then Submit. Only while the TUI still offers a Type-something slot.
-  if (ask.options.some((o) => isTypeSomething(o.label))) card.appendChild(customHintRow());
+  if (ask.options.some((o) => isTypeSomething(o.label))) card.appendChild(customHintRow(s));
   const actions = el("div", "ask-actions");
   const sIdx = checkOpts.length, cIdx = checkOpts.length + 1;   // Submit / Cancel positions in the combined nav list
-  const submit = el("button", "ask-btn ask-btn-primary" + (liveAskFocus === sIdx ? " focus" : "")); submit.textContent = "Submit";
-  submit.addEventListener("click", () => submitLiveAsk());
-  submit.addEventListener("mousemove", () => { if (liveAskFocus !== sIdx) { liveAskFocus = sIdx; paintMultiFocus(); } });
+  const submit = el("button", "ask-btn ask-btn-primary" + (s.focus === sIdx ? " focus" : "")); submit.textContent = "Submit";
+  submit.addEventListener("click", () => submitLiveAsk(s));
+  submit.addEventListener("mousemove", () => { if (s.focus !== sIdx) { s.focus = sIdx; paintMultiFocus(s); } });
   actions.appendChild(submit);
-  const cancel = el("button", "ask-btn" + (liveAskFocus === cIdx ? " focus" : "")); cancel.textContent = "Cancel";
-  cancel.addEventListener("click", () => cancelLiveAsk());
-  cancel.addEventListener("mousemove", () => { if (liveAskFocus !== cIdx) { liveAskFocus = cIdx; paintMultiFocus(); } });
+  const cancel = el("button", "ask-btn" + (s.focus === cIdx ? " focus" : "")); cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => cancelLiveAsk(s));
+  cancel.addEventListener("mousemove", () => { if (s.focus !== cIdx) { s.focus = cIdx; paintMultiFocus(s); } });
   actions.appendChild(cancel);
   card.appendChild(actions);
   card.tabIndex = 0;
-  card.addEventListener("keydown", onMultiKey);
+  card.addEventListener("keydown", (e) => onMultiKey(s, e));
   focusCardUnlessTyping(card);
 }
 // MULTI-select keyboard: ↑/↓ move the highlight, Space toggles the focused checkbox, Enter submits, a digit
 // jumps to + toggles its row. The actual toggle is still the optimistic toggleLiveAsk (host re-mirrors).
-function paintMultiFocus() {
-  const checks = document.querySelectorAll("#live-ask .ask-live-multi .ask-check");
-  const btns = document.querySelectorAll("#live-ask .ask-live-multi .ask-actions .ask-btn");
+function paintMultiFocus(s: AskSurface) {
+  const host = s.host(); if (!host) return;
+  const checks = host.querySelectorAll(".ask-live-multi .ask-check");
+  const btns = host.querySelectorAll(".ask-live-multi .ask-actions .ask-btn");
   const nC = checks.length;
-  checks.forEach((r, i) => r.classList.toggle("focus", i === liveAskFocus));   // checkboxes are 0..nC-1
-  btns.forEach((b, j) => b.classList.toggle("focus", nC + j === liveAskFocus)); // Submit = nC, Cancel = nC+1
+  checks.forEach((r, i) => r.classList.toggle("focus", i === s.focus));   // checkboxes are 0..nC-1
+  btns.forEach((b, j) => b.classList.toggle("focus", nC + j === s.focus)); // Submit = nC, Cancel = nC+1
 }
-function onMultiKey(e: KeyboardEvent) {
-  const ask = activeId ? liveAsks.get(activeId) : null;
+function onMultiKey(s: AskSurface, e: KeyboardEvent) {
+  const sid = s.sid();
+  const ask = sid ? liveAsks.get(sid) : null;
   if (!ask || ask.kind !== "multi") return;
   const opts = multiOptions(ask);
   const n = opts.length; if (!n) return;
   const navCount = n + 2;   // checkboxes + Submit + Cancel — arrow keys walk the whole list
-  if (e.key === "ArrowDown") { e.preventDefault(); liveAskFocus = (liveAskFocus + 1) % navCount; paintMultiFocus(); }
-  else if (e.key === "ArrowUp") { e.preventDefault(); liveAskFocus = (liveAskFocus - 1 + navCount) % navCount; paintMultiFocus(); }
-  else if (e.key === " " || e.key === "Spacebar") { e.preventDefault(); if (liveAskFocus < n) toggleLiveAsk(opts[liveAskFocus].n); }
+  if (e.key === "ArrowDown") { e.preventDefault(); s.focus = (s.focus + 1) % navCount; paintMultiFocus(s); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); s.focus = (s.focus - 1 + navCount) % navCount; paintMultiFocus(s); }
+  else if (e.key === " " || e.key === "Spacebar") { e.preventDefault(); if (s.focus < n) toggleLiveAsk(s, opts[s.focus].n); }
   else if (e.key === "Enter") {
     e.preventDefault();
     // Enter TOGGLES the focused checkbox (the user 2026-06-27) — NOT submit. Arrow down to the Submit button
     // and Enter there to submit; on Cancel, Enter cancels.
-    if (liveAskFocus < n) toggleLiveAsk(opts[liveAskFocus].n);
-    else if (liveAskFocus === n) submitLiveAsk();
-    else cancelLiveAsk();
+    if (s.focus < n) toggleLiveAsk(s, opts[s.focus].n);
+    else if (s.focus === n) submitLiveAsk(s);
+    else cancelLiveAsk(s);
   }
-  else if (/^[1-9]$/.test(e.key)) { const idx = opts.findIndex((o) => o.n === parseInt(e.key, 10)); if (idx >= 0) { liveAskFocus = idx; paintMultiFocus(); toggleLiveAsk(opts[idx].n); } }
+  else if (/^[1-9]$/.test(e.key)) { const idx = opts.findIndex((o) => o.n === parseInt(e.key, 10)); if (idx >= 0) { s.focus = idx; paintMultiFocus(s); toggleLiveAsk(s, opts[idx].n); } }
 }
 
 // Review screen: show chosen answers + the Submit answers / Cancel options as
 // buttons (each is just an option pick, reusing answerLiveAsk). A multi-question
 // wizard reviews every question→answer pair here; a single question keeps the
 // flat "Selected: …" line.
-function renderSubmitCard(ask: ParsedAsk) {
-  const card = askCard("ask-live-submit");
+function renderSubmitCard(s: AskSurface, ask: ParsedAsk) {
+  const card = askCard(s, "ask-live-submit");
   if (ask.pairs && ask.pairs.length > 1) {
     qline(card, "Review your answers");
     for (const p of ask.pairs) {
@@ -18302,7 +18414,7 @@ function renderSubmitCard(ask: ParsedAsk) {
   for (const o of ask.options) {
     const b = el("button", "ask-btn" + (/submit/i.test(o.label) ? " ask-btn-primary" : ""));
     b.textContent = o.label;
-    b.addEventListener("click", () => answerLiveAsk(o.n));
+    b.addEventListener("click", () => answerLiveAsk(s, o.n));
     actions.appendChild(b);
   }
   card.appendChild(actions);
@@ -18346,66 +18458,72 @@ function insertClipboardText(text: string) {
   inp.dispatchEvent(new Event("input", { bubbles: true })); // keep liveTextValue/draft sync
   inp.focus();
 }
-function paintLiveAskFocus() {
-  const rows = document.querySelectorAll("#live-ask .ask-live-opt");
-  rows.forEach((r, i) => r.classList.toggle("focus", i === liveAskFocus));
-  renderAskPreview();   // step the preview to the newly-focused option (instant: every option carries its own)
+function paintLiveAskFocus(s: AskSurface) {
+  const rows = s.host()?.querySelectorAll(".ask-live-opt") || [];
+  rows.forEach((r, i) => r.classList.toggle("focus", i === s.focus));
+  renderAskPreview(s);   // step the preview to the newly-focused option (instant: every option carries its own)
 }
 
 // Single-select keyboard: ↑/↓ highlight (preview follows), Enter confirms, number jumps to + confirms.
-function onSingleKey(e: KeyboardEvent) {
-  const ask = activeId ? liveAsks.get(activeId) : null;
+function onSingleKey(s: AskSurface, e: KeyboardEvent) {
+  const sid = s.sid();
+  const ask = sid ? liveAsks.get(sid) : null;
   if (!ask || ask.kind !== "single") return;
   const opts = singleOptions(ask); // same rows the card renders
   const n = opts.length;
-  if (e.key === "ArrowDown") { e.preventDefault(); liveAskFocus = (liveAskFocus + 1) % n; paintLiveAskFocus(); }
-  else if (e.key === "ArrowUp") { e.preventDefault(); liveAskFocus = (liveAskFocus - 1 + n) % n; paintLiveAskFocus(); }
-  else if (e.key === "Enter") { e.preventDefault(); answerLiveAsk(opts[liveAskFocus].n); }
+  if (e.key === "ArrowDown") { e.preventDefault(); s.focus = (s.focus + 1) % n; paintLiveAskFocus(s); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); s.focus = (s.focus - 1 + n) % n; paintLiveAskFocus(s); }
+  else if (e.key === "Enter") { e.preventDefault(); answerLiveAsk(s, opts[s.focus].n); }
   else if (/^[1-9]$/.test(e.key)) {
     const idx = opts.findIndex((o) => o.n === parseInt(e.key, 10));
-    if (idx >= 0) { liveAskFocus = idx; answerLiveAsk(opts[idx].n); }
+    if (idx >= 0) { s.focus = idx; answerLiveAsk(s, opts[idx].n); }
   }
 }
 
-// One terminal-bound action in flight at a time (prevents double-submit); a short
+// One terminal-bound action in flight at a time per surface (prevents double-submit); a short
 // safety un-dim re-enables the card if a click aborted host-side (no-op) instead
 // of hanging dimmed. Reset on every re-render (a new screen = the action resolved).
-let sendingGuard = false;
-function dimSending() {
-  const host = document.getElementById("live-ask");
+function dimSending(s: AskSurface) {
+  const host = s.host();
   if (!host) return;
-  sendingGuard = true;
+  s.guard = true;
   host.classList.add("sending");
-  if (sendingTimer) clearTimeout(sendingTimer);
-  sendingTimer = setTimeout(() => { host.classList.remove("sending"); sendingTimer = undefined; sendingGuard = false; }, 700);
+  if (s.timer) clearTimeout(s.timer);
+  s.timer = setTimeout(() => { host.classList.remove("sending"); s.timer = undefined; s.guard = false; }, 700);
 }
-function answerLiveAsk(target: number) {
-  if (!activeId || sendingGuard) return;
-  if (vscodeApi) vscodeApi.postMessage({ type: "answerAsk", id: activeId, target });
-  dimSending();
+function answerLiveAsk(s: AskSurface, target: number) {
+  const sid = s.sid();
+  if (!sid || s.guard) return;
+  if (vscodeApi) vscodeApi.postMessage({ type: "answerAsk", id: sid, target });
+  dimSending(s);
 }
-function toggleLiveAsk(target: number) { // optimistic; host toggles + re-mirrors. NOT guarded — rapid toggles allowed.
-  if (activeId && vscodeApi) vscodeApi.postMessage({ type: "toggleAsk", id: activeId, target });
+function toggleLiveAsk(s: AskSurface, target: number) { // optimistic; host toggles + re-mirrors. NOT guarded — rapid toggles allowed.
+  const sid = s.sid();
+  if (sid && vscodeApi) vscodeApi.postMessage({ type: "toggleAsk", id: sid, target });
 }
-function addCustomLiveAsk(text: string) { // fills the TUI's Type-something slot inline; re-mirror shows it as a checked option
-  if (activeId && vscodeApi) vscodeApi.postMessage({ type: "addCustomAsk", id: activeId, text });
-  liveTextValue = "";
+function addCustomLiveAsk(s: AskSurface, text: string) { // fills the TUI's Type-something slot inline; re-mirror shows it as a checked option
+  const sid = s.sid();
+  if (sid && vscodeApi) vscodeApi.postMessage({ type: "addCustomAsk", id: sid, text });
+  if (s === chatAsk) liveTextValue = "";
 }
-function submitLiveAsk() {
-  if (!activeId || sendingGuard) return;
-  if (vscodeApi) vscodeApi.postMessage({ type: "submitAsk", id: activeId });
-  dimSending();
+function submitLiveAsk(s: AskSurface) {
+  const sid = s.sid();
+  if (!sid || s.guard) return;
+  if (vscodeApi) vscodeApi.postMessage({ type: "submitAsk", id: sid });
+  dimSending(s);
 }
-function cancelLiveAsk() {
-  if (!activeId || sendingGuard) return;
-  if (vscodeApi) vscodeApi.postMessage({ type: "cancelAsk", id: activeId });
-  dimSending();
+function cancelLiveAsk(s: AskSurface) {
+  const sid = s.sid();
+  if (!sid || s.guard) return;
+  if (vscodeApi) vscodeApi.postMessage({ type: "cancelAsk", id: sid });
+  dimSending(s);
 }
-function sendTextLiveAsk(text: string) {
-  if (!activeId || sendingGuard) return;
-  if (vscodeApi) vscodeApi.postMessage({ type: "askText", id: activeId, text });
-  liveTextValue = "";
-  dimSending();
+function sendTextLiveAsk(s: AskSurface, text: string) {
+  const sid = s.sid();
+  if (!sid || s.guard) return;
+  if (vscodeApi) vscodeApi.postMessage({ type: "askText", id: sid, text });
+  if (s === chatAsk) liveTextValue = "";
+  dimSending(s);
 }
 
 // Animated Claude-Code-style "working" line (sparkle + rotating gerund).
@@ -19149,8 +19267,7 @@ function updateStatusline() {
   // AND while stuck retrying / blocked, where it doubles as the per-thread auto-retry off-switch (the
   // user 2026-07-06). Omitted in idle states (nothing to interrupt, the user 2026-06-19) and while
   // INTERRUPTING (the stop is already in flight; re-pressing it is a lie, the user 2026-07-02).
-  if (s.status.state === "working" || s.status.state === "compacting"
-      || s.status.state === "retrying" || s.status.state === "blocked") left.appendChild(stopButton(s.status.state));
+  if (chipStops(s.status.state)) left.appendChild(stopButton(s.status.state));   // the rule the comment popover shares (status-chip.ts)
   pruneTip();   // a rebuilt statusline tears tip anchors (the stop button) out mid-hover — drop the orphan (PR #763 item 8; the feed's render does the same)
 }
 
@@ -23296,7 +23413,7 @@ function setupComposer() {
     // this returns before deliver's flushStaged, so the staged items go with the next ordinary message, after it.
     const askRoute = typed ? composerAnswersAsk() : null;
     if (askRoute) {
-      if (askRoute === "custom") addCustomLiveAsk(typed); else sendTextLiveAsk(typed);
+      if (askRoute === "custom") addCustomLiveAsk(chatAsk, typed); else sendTextLiveAsk(chatAsk, typed);
       drafts.delete(activeId); draftStartedAt.delete(activeId); persistDrafts();
       clearBox();
       return;

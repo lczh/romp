@@ -282,7 +282,7 @@ class ColdTabGate(unittest.TestCase):
         # slots sent to a chat client from _push/_ask_poll that are NOT on the reset list, each with why it is safe:
         EXEMPT = {"timeline": "the ('timeline',) frame goes to timeline-app clients (for c in tl_clients), never a chat client"}
         # scan INLINE _send_client sends in either function: any client identifier, a key with digits or underscores, across a line break
-        sent = set(re.findall(r'_send_client\(\s*\w+\s*,\s*\(\s*"([A-Za-z0-9_]+)"', inspect.getsource(km._push) + inspect.getsource(km._ask_poll), re.S))
+        sent = set(re.findall(r'_send_client\(\s*\w+\s*,\s*\(\s*"([A-Za-z0-9_]+)"', inspect.getsource(km._push) + inspect.getsource(km._ask_poll) + inspect.getsource(km._ask_poll_pass), re.S))   # the poll's one pass (thread-live-1)
         for k in sorted(sent):
             self.assertTrue(k in RESET or k in EXEMPT,
                             "slot %r is sent from _push/_ask_poll but is neither on the ready reset's list nor exempt with a stated reason" % k)

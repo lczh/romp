@@ -19252,6 +19252,34 @@ class SdkBackend:
         return {sid: {"state": self.thread_state(sid), "threadOf": parent}
                 for sid, parent in self._rows_table()["threads"].items()}
 
+    def thread_live_sessions(self, parents=None) -> dict[str, dict]:
+        """{sid: live row} for every RUNNING comment thread: the row live_sessions would report for it (its running
+        snapshot) plus "threadOf", its parent. These are exactly the rows live_sessions leaves out, served apart so that a
+        thread never joins the map that drives tabs, lanes and the feed; the kernel keeps them in a map of their own
+        (kernel _thread_live) and feeds the chat's live channels from it, the question and permission poll first
+        (thread-live-1, 2026-10-14). `parents`: only threads whose parent is in this set (the kernel asks for the open
+        tabs' threads). A dormant thread has no process and so no live row: it is absent, as it raises no question and
+        runs no agent. The set is the registry's rows table (thread_sessions' own); one thread whose snapshot raises is
+        left out, said on stderr, and the others stay."""
+        out, retry_on = {}, None
+        for sid, parent in self._rows_table()["threads"].items():
+            if parents is not None and parent not in parents:
+                continue
+            with self._lock:
+                s = self.sessions.get(sid)
+            if not (s and s.thread.is_alive()):
+                continue
+            if retry_on is None:
+                retry_on = retry_upgrade_on(self.state_dir)   # once per listing, as live_sessions reads it
+            try:
+                row = dict(s.snapshot(retry_on=retry_on))
+            except Exception:
+                sys.stderr.write("thread_live_sessions: row for %s failed (left out): %s\n" % (sid, traceback.format_exc()))
+                continue
+            row["threadOf"] = parent
+            out[str(sid)] = row
+        return out
+
     def thread_state(self, sid: str) -> str:
         """A comment thread's live state for the listing: its running session's state (SdkSession.live_state, the state
         half of snapshot(), so a read of every running thread per cycle costs the state alone), else "waiting" (no process:

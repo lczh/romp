@@ -17,6 +17,7 @@ export type CommentThread = {
   /** messages waiting in its postal box (they land when it is broken out) */
   heldMail?: number;
   tid: string;
+  sid?: string;               // the thread's own session (the same id as tid for every thread romp makes): its question's askLive frames and answers key on it (thread-live-1)
   name?: string;              // the thread's editable name (<session>-comment-<N> by default)
   color?: string;             // the comment's identity color — picked distinct from its parent's
   anchorUuid: string;
@@ -24,6 +25,10 @@ export type CommentThread = {
   status: "open" | "resolved" | "promoting" | "promoted" | "merging" | "merged";   // merging/merged: folded back into the parent (the user 2026-08-23)
   createdT: number;
   state: string;              // the thread session's live state ("working"/"waiting"/…, "" when dormant)
+  /** the CHAT's state chip for a running thread (the kernel's _session_chip over the thread's live row: needsInput,
+   *  blocked, compacting, retrying, working, awaitingBg, ready, interrupting), "" for a dormant thread or an older kernel
+   *  (thread-live-1, 2026-10-14). Read through threadChipState, never alone. */
+  chip?: string;
   error?: string;             // the thread CLI's launch error, when it could not start
   unread: boolean;            // a FINISHED agent reply newer than the read watermark — yellow (kernel truth, T237)
   replyOwed?: boolean;        // a reply is still owed (no exchange yet / user's message newest / turn in progress / a send held) — the green wash (kernel truth, T237; absent on an older kernel)
@@ -137,6 +142,30 @@ export function agentCount(th: CommentThread): number {
 }
 export function threadStuck(state: string): boolean {
   return state === "permission" || state === "picker";
+}
+
+/** The thread's state as the chat's chip says it (status-chip.ts ChipState): the kernel's chip for a running thread, the
+ *  same derivation a tab's statusline wears (thread-live-1, 2026-10-14); for a thread with no chip (dormant, or an older
+ *  kernel), its raw backend state read the way the popover always read it: a question or permission prompt is
+ *  needsInput, working, retrying and compacting are themselves, anything else is ready. */
+export function threadChipState(th: Pick<CommentThread, "chip" | "state">): string {
+  if (th.chip) return th.chip;
+  const st = th.state || "";
+  if (threadStuck(st)) return "needsInput";
+  return st === "working" || st === "retrying" || st === "compacting" ? st : "ready";
+}
+
+/** The thread waits on the person: open, able to run, and stopped on a question or a permission prompt. Its picker shows
+ *  in the popover, and its passage and rail tick wear the needs-you cue (threadCued). */
+export function threadNeedsYou(th: Pick<CommentThread, "chip" | "state" | "status" | "error">): boolean {
+  return th.status === "open" && !th.error && threadChipState(th) === "needsInput";
+}
+
+/** The passage's needs-you cue (the dashed ring or box, and the rail tick's halo): an unread reply on an open thread, or
+ *  an open thread waiting on the person (threadNeedsYou). One predicate for the mark, the painter's gate, the rail and
+ *  the click's pick, so they never disagree. */
+export function threadCued(th: Pick<CommentThread, "chip" | "state" | "status" | "error" | "unread">): boolean {
+  return (!!th.unread && th.status === "open") || threadNeedsYou(th);
 }
 
 // ── exact-text re-anchoring ────────────────────────────────────────────────────────────────────

@@ -21,7 +21,7 @@ test("the ring is the painter's call: only mark.cmt-hl.unread.cmt-ring carries a
   const marks = CSS.match(/^mark\.cmt-hl[^{]*\{[^}]*\}/gms) || [];
   assert.ok(marks.length >= 7, "the mark rules are found");
   for (const rule of marks) {
-    if (rule.startsWith("mark.cmt-hl.unread.cmt-ring ")) continue;
+    if (rule.startsWith("mark.cmt-hl.unread.cmt-ring ") || rule.startsWith("mark.cmt-hl.needs.cmt-ring ")) continue;   // .needs: waiting on your answer, the same cue (thread-live-1)
     assert.doesNotMatch(rule, /outline/, "an outline on an inline mark paints per line fragment — only the painter's .cmt-ring may, on one or two rows: " + rule);
   }
   assert.match(RENDER, /m\.classList\.toggle\("cmt-ring", ring\);/, "the painter toggles it");
@@ -33,7 +33,7 @@ test("read marks wear no box, and the fill tiers are byte-untouched — the colo
   assert.match(CSS, /mark\.cmt-hl\.resolved \{ background: var\(--cmt-hl-resolved\); \}/);
   assert.match(CSS, /mark\.cmt-hl:hover \{ background: color-mix\(in srgb, var\(--cmt-hl\) 58%, transparent\); \}/);
   // the painter draws a box for UNREAD marks only: a read mark has no box to wear
-  assert.match(RENDER, /v\.el\.querySelectorAll\("mark\.cmt-hl\.unread"\)/);
+  assert.match(RENDER, /v\.el\.querySelectorAll\("mark\.cmt-hl\.unread, mark\.cmt-hl\.needs"\)/);
 });
 
 test("the yellow corner dot stays gone root and branch", () => {

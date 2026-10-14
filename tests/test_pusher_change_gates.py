@@ -195,7 +195,7 @@ class CommentsStoreMemo(unittest.TestCase):
     def test_a_store_whose_stat_fails_is_an_error_frame_and_no_squares(self):
         km._save_comments(SID, {"threads": self.TWO})
         with mock.patch.object(km, "_sdk", lambda: None), \
-                mock.patch.object(km, "_comment_frame_entry", lambda th, be, now, live_map=None: {"tid": th["tid"]}):
+                mock.patch.object(km, "_comment_frame_entry", lambda th, be, now, live_map=None, thread_live=None: {"tid": th["tid"]}):
             for code in (errno.EIO, errno.EACCES, errno.ENOTDIR):
                 for caller in ("markers", "frame"):
                     with self.subTest(code=errno.errorcode[code], caller=caller):
@@ -220,7 +220,7 @@ class CommentsStoreMemo(unittest.TestCase):
         km._comments_path(SID).unlink(missing_ok=True)
         err = io.StringIO()
         with mock.patch.object(km, "_sdk", lambda: None), \
-                mock.patch.object(km, "_comment_frame_entry", lambda th, be, now, live_map=None: {"tid": th["tid"]}):
+                mock.patch.object(km, "_comment_frame_entry", lambda th, be, now, live_map=None, thread_live=None: {"tid": th["tid"]}):
             with self._stat_fault(errno.EIO), contextlib.redirect_stderr(err):
                 self.assertEqual(km._comment_markers(SID), [])
             self.assertEqual(km._comment_markers(SID), [], "the stat finds no store")
@@ -235,7 +235,7 @@ class CommentsStoreMemo(unittest.TestCase):
     def test_an_unreadable_store_is_an_error_frame_said_once_on_stderr(self):
         real, reads = km._read_comments, []
         with mock.patch.object(km, "_sdk", lambda: None), \
-                mock.patch.object(km, "_comment_frame_entry", lambda th, be, now, live_map=None: {"tid": th["tid"]}), \
+                mock.patch.object(km, "_comment_frame_entry", lambda th, be, now, live_map=None, thread_live=None: {"tid": th["tid"]}), \
                 mock.patch.object(km, "_read_comments", lambda sid: (reads.append(sid), real(sid))[1]):
             for kind in ("emfile", "corrupt"):
                 with self.subTest(kind=kind):
@@ -366,7 +366,7 @@ class CommentsStoreMemo(unittest.TestCase):
         self.assertEqual([t["tid"] for t in km._load_comments_cached(SID)["threads"]], ["t1", "t2"])
         err = io.StringIO()
         with mock.patch.object(km, "_sdk", lambda: None), \
-                mock.patch.object(km, "_comment_frame_entry", lambda th, be, now, live_map=None: {"tid": th["tid"]}), \
+                mock.patch.object(km, "_comment_frame_entry", lambda th, be, now, live_map=None, thread_live=None: {"tid": th["tid"]}), \
                 self._read_fault("emfile", times=10 ** 6) as fired, contextlib.redirect_stderr(err):
             frame = km._comments_frame(SID)
             squares = [m["tid"] for m in km._comment_markers(SID)]
@@ -416,7 +416,7 @@ class CommentsStoreMemo(unittest.TestCase):
                         mock.patch.object(km, "_sdk", lambda: None), \
                         mock.patch.object(km, "build_session", lambda sid, now, live_map=None, **kw: dict(frame)), \
                         mock.patch.object(km, "_cached_feed", lambda *a, **k: {"working": [], "awaiting": [], "asks": []}), \
-                        mock.patch.object(km, "_comment_frame_entry", lambda th, be, now, live_map=None: {"tid": th["tid"]}), \
+                        mock.patch.object(km, "_comment_frame_entry", lambda th, be, now, live_map=None, thread_live=None: {"tid": th["tid"]}), \
                         mock.patch.object(km, "_push_subagents", lambda *a, **k: subagents.append(1)), \
                         mock.patch.object(km, "_send_client",
                                           lambda c, key, msg, pre=None, sig=None, kind="full": sent.append((key, msg))):

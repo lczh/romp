@@ -193,5 +193,6 @@ class ModelPickerFlashSuppression(unittest.TestCase):
 
     def test_ask_poll_wires_the_suppression(self):
         import inspect
-        src = inspect.getsource(km._ask_poll)
+        src = inspect.getsource(km._ask_poll_pass)   # the poll's one pass (thread-live-1), which _ask_poll runs each tick
         self.assertIn("_suppress_kernel_driven_ask(sid, ask)", src)
+        self.assertIn("_ask_poll_pass(chat_clients, threads_prev)", inspect.getsource(km._ask_poll))

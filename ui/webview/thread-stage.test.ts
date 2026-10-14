@@ -102,7 +102,7 @@ test("the popover wires the chips, the strip and the release through these rules
   // only a thread that takes replies (open or relayed) gets them; a resolved thread keeps its plain reply
   assert.match(RENDER, /function cmtStageable\(th: CommentThread \| null \| undefined\): boolean \{ return !!th && threadTakesReplies\(th\.status\); \}/);
   // the strips are exempt from the whole-box drag, so their clicks land
-  assert.match(RENDER, /\.cmt-quote, \.cmt-staged, \.cmt-chips, button,/);
+  assert.match(RENDER, /\.cmt-quote, \.cmt-staged, \.cmt-chips, \.cmt-ask, button,/);
   assert.match(CSS, /\.cmt-chips \{ flex: 0 0 auto; display: flex; flex-flow: row wrap;/);
   assert.match(CSS, /\.cmt-staged \{ flex: 0 0 auto; flex-direction: column;/);
 });

@@ -21,6 +21,10 @@ invented reply text, placeholder uuids, hostname TESTHOST.
 Environment knobs (read by the client, set by the lab):
   ROMP_FAKE_SDK_REPLY   the assistant reply text for a plain message (default a synthetic line)
   ROMP_FAKE_SDK_GATE    a file path the /clear turn waits to exist before it runs (the lab creates it to release the in-flight clear)
+  ROMP_FAKE_SDK_ASKS    a JSON list of {"when", "tool", "input"}: a plain turn whose text contains `when` asks through the
+                        options' can_use_tool before it replies, exactly as the CLI consults the SDK's permission callback
+                        (tool AskUserQuestion: a question; any other tool: a permission prompt for it), and its reply names
+                        the outcome: the answers given, or that the tool was allowed or denied (the thread-ask lab)
 """
 import asyncio
 import json
@@ -123,6 +127,32 @@ class MessageOrigin:
     pass
 
 
+class _ToolContext:
+    """The context the CLI hands can_use_tool: no title or reason, no permission suggestions."""
+    title = display_name = decision_reason = None
+    suggestions = None
+    signal = None
+
+
+def _scripted_asks(text):
+    """The ROMP_FAKE_SDK_ASKS entries whose `when` this turn's text contains, in order."""
+    try:
+        rows = json.loads(os.environ.get("ROMP_FAKE_SDK_ASKS") or "[]")
+    except ValueError:
+        raise RuntimeError("fake claude_agent_sdk: ROMP_FAKE_SDK_ASKS is not valid JSON")
+    return [r for r in rows if isinstance(r, dict) and r.get("when") and r["when"] in (text or "")]
+
+
+def _ask_outcome(tool, res):
+    """The reply's words for one consult's result: the answers for a question, allowed or denied for a permission."""
+    answers = ((getattr(res, "updated_input", None) or {}).get("answers") if tool == "AskUserQuestion" else None)
+    if answers:
+        return "You chose " + "; ".join("%s" % v for v in answers.values()) + "."
+    if isinstance(res, PermissionResultDeny):
+        return "Denied, so I left %s alone." % tool if tool != "AskUserQuestion" else "You cancelled the question."
+    return "Allowed, so I ran %s." % tool
+
+
 def _iso(t):
     return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -159,6 +189,35 @@ def _leaf(cwd, fsid):
             return last
     except (OSError, RuntimeError):   # no transcript yet; an unset CLAUDE_CONFIG_DIR still refuses at the first write
         return None
+
+
+def _fork_copy(options, cwd, fsid):
+    """A FORK launch (fork_session with resume, the backend's comment-thread and copied-session launches): the CLI copies the
+    resumed conversation into the new session's file before its first turn, up to and including the --resume-session-at
+    record when one is given, each record verbatim but for its sessionId; a file already there (a reconnect) is kept.
+    Without this the fork's file held only its own turns, so a thread's opening message had no branch point to hang on."""
+    src_id = getattr(options, "resume", None)
+    if not (getattr(options, "fork_session", False) and src_id and fsid and src_id != fsid):
+        return
+    dst = _transcript(cwd, fsid)
+    if os.path.exists(dst):
+        return
+    cut = ((getattr(options, "extra_args", None) or {}).get("resume-session-at")) or ""
+    try:
+        with open(_transcript(cwd, src_id)) as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    for ln in lines:
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        _append(dst, dict(rec, sessionId=fsid) if "sessionId" in rec else rec)
+        if cut and rec.get("uuid") == cut:
+            break
 
 
 def _append(path, record):
@@ -200,6 +259,7 @@ class ClaudeSDKClient:
         self._fsid = (getattr(options, "session_id", None) or getattr(options, "resume", None) or "fsid")
         self._cwd = getattr(options, "cwd", None)
         self._init_sent = False
+        _fork_copy(options, self._cwd, self._fsid)    # a fork launch copies the resumed conversation first, as the CLI does
         self._parent = _leaf(self._cwd, self._fsid)   # parentUuid chain within the current episode, resumed from its last record
 
     async def __aenter__(self):
@@ -295,9 +355,17 @@ class ClaudeSDKClient:
             _append(path, {"type": "user", "timestamp": _iso(now), "uuid": u_uuid, "parentUuid": self._parent,
                            "promptSource": "sdk", "sessionId": self._fsid,
                            "message": {"role": "user", "content": text}})
-            reply = os.environ.get("ROMP_FAKE_SDK_REPLY") or "Rebuilt the search index; 3 shards refreshed."
+            self._parent = u_uuid
+            # a scripted consult (ROMP_FAKE_SDK_ASKS): the turn waits on the backend's permission callback, as the CLI
+            # does while a question or a permission prompt is up, and the reply says what came back
+            outcomes = []
+            for ask in _scripted_asks(text):
+                res = await self.options.can_use_tool(ask.get("tool") or "AskUserQuestion", dict(ask.get("input") or {}), _ToolContext())
+                outcomes.append(_ask_outcome(ask.get("tool") or "AskUserQuestion", res))
+            now = int(time.time())
+            reply = " ".join(outcomes) or os.environ.get("ROMP_FAKE_SDK_REPLY") or "Rebuilt the search index; 3 shards refreshed."
             a_uuid = "a-" + _uuid.uuid4().hex[:10]
-            _append(path, {"type": "assistant", "timestamp": _iso(now + 1), "uuid": a_uuid, "parentUuid": u_uuid,
+            _append(path, {"type": "assistant", "timestamp": _iso(now + 1), "uuid": a_uuid, "parentUuid": self._parent,
                            "sessionId": self._fsid,
                            "message": {"role": "assistant", "model": "claude-fable-5-1", "stop_reason": "end_turn",
                                        "content": [{"type": "text", "text": reply}]}})

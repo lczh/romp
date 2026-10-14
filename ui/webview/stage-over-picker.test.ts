@@ -75,8 +75,9 @@ function page() {
     const pendingShips = new Map(), sendOnShip = new Set(), histWalk = new Map(), lastSent = new Map();
     let shipGateSid = null;
     const hostIsDown = () => false, isProvisionalId = () => false, provisionalId = null, provisionalQueue = [];
-    const addCustomLiveAsk = (text) => { W.answers.push({ route: "custom", text }); };
-    const sendTextLiveAsk = (text) => { W.answers.push({ route: "text", text }); };
+    const chatAsk = { surface: "chat" };   // the message box's question surface (thread-live-1): the box answers the active tab's
+    const addCustomLiveAsk = (s, text) => { if (s !== chatAsk) throw new Error("the message box answers on the chat's surface"); W.answers.push({ route: "custom", text }); };
+    const sendTextLiveAsk = (s, text) => { if (s !== chatAsk) throw new Error("the message box answers on the chat's surface"); W.answers.push({ route: "text", text }); };
     const flushStaged = (sid, typed) => { const run = stagedMsgs.takeAll(sid); W.flushed.push(typed ? { sid, run: run.map((s) => s.text), typed: typed.text } : { sid, run: run.map((s) => s.text) }); return run.length; };
     const persistDrafts = () => {};
     const clearBox = () => { ta.value = ""; };
@@ -205,10 +206,10 @@ test("render.ts: no picker refusal on the stage path, and clicking an option or 
     "the stage path ends by repainting the box's answer mode");
   // the question's own answer paths (an option's click, a checkbox, Submit, Cancel, the free-text answer) post to the
   // question and nothing else
-  const answers = RENDER.split("function answerLiveAsk(target: number) {")[1].split("// Animated Claude-Code-style")[0];
+  const answers = RENDER.split("function answerLiveAsk(s: AskSurface, target: number) {")[1].split("// Animated Claude-Code-style")[0];
   assert.doesNotMatch(answers, /stagedMsgs|flushStaged|renderStagedStrip/, "no answer path releases or drops a staged item");
   // the box's answer branch returns before deliver's flushStaged
   const send = RENDER.split("const sendComposer = (")[1].split("const deliver = () => {")[0];
-  assert.match(send, /if \(askRoute\) \{\n\s*if \(askRoute === "custom"\) addCustomLiveAsk\(typed\); else sendTextLiveAsk\(typed\);\n[^\n]*\n\s*clearBox\(\);\n\s*return;\n\s*\}/);
+  assert.match(send, /if \(askRoute\) \{\n\s*if \(askRoute === "custom"\) addCustomLiveAsk\(chatAsk, typed\); else sendTextLiveAsk\(chatAsk, typed\);\n[^\n]*\n\s*clearBox\(\);\n\s*return;\n\s*\}/);
   assert.doesNotMatch(send.split("if (askRoute) {")[1].split("return;")[0], /flushStaged|stagedMsgs/);
 });

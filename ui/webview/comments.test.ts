@@ -116,10 +116,10 @@ test("an unread thread wears ONE outline box around its whole passage and a shou
   assert.doesNotMatch(CSS, /mark\.cmt-hl\.unread \{ outline/, "no outline on the mark by unread alone: it would paint per line fragment");
   assert.match(CSS, /\.cmt-outline \{ position: absolute; pointer-events: none;[^}]*outline: 1\.5px dashed var\(--st-awaiting-bg\);/s, "one box, the needs-you ring");
   assert.match(CSS, /mark\.cmt-hl\.unread\.cmt-ring \{ outline: 1\.5px dashed var\(--st-awaiting-bg\); outline-offset: 1px; \}/, "the one- or two-row ring, the same stroke");
-  assert.match(CSS, /\.cmt-tick\.unread \{[^}]*0 0 0 3px var\(--st-awaiting-bg\); \}/s, "the tick's halo agrees by colour");
+  assert.match(CSS, /\.cmt-tick\.unread, \.cmt-tick\.needs \{[^}]*0 0 0 3px var\(--st-awaiting-bg\); \}/s, "the tick's halo agrees by colour (and a thread waiting on you wears it too, thread-live-1)");
   assert.match(UI, /function paintCommentOutlines\(sid: string\): void \{/);
   assert.doesNotMatch(CSS, /mark\.cmt-hl \{[^}]*position: relative;/s, "nothing left for the mark to anchor");
-  assert.match(CSS, /\.cmt-tick\.unread \{ width: 16px; height: 6px; right: 0; opacity: 1;/);   // 10px until the comment-forward rail (2026-09-24, rail-comment-forward.test.ts)
+  assert.match(CSS, /\.cmt-tick\.unread, \.cmt-tick\.needs \{ width: 16px; height: 6px; right: 0; opacity: 1;/);   // 10px until the comment-forward rail (2026-09-24, rail-comment-forward.test.ts)
   // the clearing story is the existing machinery, untouched: optimistic on open + kernel watermark
   assert.match(UI, /if \(th\) th\.unread = false;\s*\/\/ optimistic; the kernel's watermark reconciles/);
 });
@@ -261,7 +261,7 @@ test("the projection never reads the parent transcript pre-fork", () => {
 
 test("a promoted thread whose session ended drops off the frame entirely", () => {
   assert.match(KERNEL, /if status == "promoted" and not _thread_reg\(tsid\)\.get\("alive"\):\s*\n\s*return None/);
-  assert.match(KERNEL, /row = _comment_frame_entry\(th, be, now, live_map\)\s*\n\s*if row is not None:\s*\n\s*threads\.append\(row\)/);
+  assert.match(KERNEL, /row = _comment_frame_entry\(th, be, now, live_map, thread_live\)\s*\n\s*if row is not None:\s*\n\s*threads\.append\(row\)/);
 });
 
 test("promote latches the row before seeding; racing ops refuse through the CAS", () => {
@@ -463,7 +463,7 @@ test("while the thread is WRITING the passage holds the await-green tint and NOT
 test("the popover renders the thread with the CHAT's own renderer from the branch point", () => {
   assert.match(UI, /renderingSid = th\.tid;/);
   assert.match(UI, /const node = renderEvent\(ev, prev, turnWorkedSecs\(evs, it\.index, thWorking\)\);\s*\n\s*list\.appendChild\(node\);/);   // + the chat's worked footers (the parity bundle, 2026-08-26)
-  assert.match(KERNEL, /def _thread_events\(tsid, cut_uuid, now, live_map\):/);
+  assert.match(KERNEL, /def _thread_events\(tsid, cut_uuid, now, live_map, tm=None, out=None\):/);   // tm: the thread's live row (thread-live-1)
   assert.match(KERNEL, /evs = evs\[at \+ 1:\]/, "sliced to AFTER the branch point — the head system card never rides");
   // the thread's own statusline posts the chat's own ops through the SHARED menu, keyed to the
   // thread sid (toggleMetaMenu's opSid — 2026-08-25 parity: one builder, sid-scoped)
@@ -717,8 +717,10 @@ test("the thread's running turn offers the chat's stop affordance, owner-scoped 
   const chip = UI.slice(at, UI.indexOf("\n}", at));
   assert.match(chip, /b\.dataset\.act = "cmtinterrupt";/);
   assert.match(chip, /b\.dataset\.sid = th\.tid;/, "the thread's OWN sid rides the button");
-  assert.match(chip, /wrap\.append\(chip, timer, stopBtn\(\)\);/, "working offers it");
-  assert.match(chip, /wrap\.append\(chip, stopBtn\(\)\);/, "retrying offers it");
+  // since thread-live-1 (2026-10-14) the chat bar's own rule decides, through the one predicate: working, compacting,
+  // retrying and an API error (blocked) offer it; a question or permission prompt does not (the picker answers that)
+  assert.match(chip, /const st = threadChipState\(th\);/, "the chat's chip for the thread");
+  assert.match(chip, /if \(chipStops\(st\)\) wrap\.appendChild\(stopBtn\(\)\);/, "the chat bar's stop rule");
 });
 
 test("the popover interrupt posts the THREAD sid, clears the send-latch on the gesture, and acks instantly", () => {
