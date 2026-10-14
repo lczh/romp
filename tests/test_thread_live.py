@@ -433,6 +433,94 @@ class FrameChip(unittest.TestCase):
         self.assertIs(getattr(km._live_scope, "snapshot", None), before, "the scope it found is back")
 
 
+    # ── the review of PR 240: a background command's output tail rides its own slot, read fresh, never the frame ─────────
+
+    def _seed_bg(self, out_file):
+        """A thread that started a background command whose launch ack names its output file, then went quiet on it."""
+        self._seed([
+            {"type": "assistant", "timestamp": iso(self.now - 380), "uuid": "ca1", "parentUuid": "cu1",
+             "message": {"role": "assistant", "stop_reason": "tool_use", "content": [
+                 {"type": "text", "text": "Starting the export in the background."},
+                 {"type": "tool_use", "id": "tu-export", "name": "Bash",
+                  "input": {"run_in_background": True, "command": "make export", "description": "export the notes table"}}]}},
+            {"type": "user", "timestamp": iso(self.now - 379), "uuid": "cr1", "parentUuid": "ca1",
+             "toolUseResult": {"status": "async_launched", "outputFile": out_file},
+             "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu-export",
+                                                      "content": "Command running in background."}]}},
+            aline(self.now - 378, "The export runs in the background; I'll pick up when it lands.", "ca2", parent="cr1")])
+
+    def test_a_background_commands_tail_rides_its_own_slot_fresh_and_never_the_comments_frame(self):
+        of = Path(self._td) / "export.output"
+        of.write_text("exported 120 rows\n")
+        self._seed_bg(str(of))
+        row = {"state": "waiting", "bgTasks": [{"desc": "export the notes table", "type": "local_bash", "since": self.now - 379,
+                                                "toolUseId": "tu-export", "lastTool": ""}]}
+        th = self._live_frame(row)
+        tasks = th["live"]["bgTasks"]["tasks"]
+        self.assertEqual([t["id"] for t in tasks], ["tu-export"], "the box's row rides the frame: %r" % tasks)
+        self.assertNotIn("output", tasks[0], "…without its output tail")
+        self.assertEqual(km._thread_bg_out_frame(THREAD),
+                         {"type": "threadBgOut", "id": THREAD, "out": {"tu-export": "exported 120 rows"}}, "the tail, on its own frame")
+        # the command writes on: the tail is read fresh, with no rebuild, and the comments frame does not move for it
+        with open(of, "a") as f:
+            f.write("exported 240 rows\n")
+        tl = {THREAD: dict(km._sdk_live_norm(dict({"model": "Opus 5", "effort": "high"}, **row)), threadOf=PARENT)}
+        real = km.build_session
+        calls = []
+        km.build_session = lambda *a, **k: calls.append(a) or real(*a, **k)
+        try:
+            again = km._comments_frame(PARENT, {}, thread_live=tl)["threads"][0]
+        finally:
+            km.build_session = real
+        self.assertEqual(calls, [], "the thread's build is served: the output is not part of its key")
+        self.assertEqual(json.dumps(again["live"], sort_keys=True), json.dumps(th["live"], sort_keys=True),
+                         "the comments frame is unchanged, so the push does not resend it for the tail")
+        self.assertEqual(km._thread_bg_out_frame(THREAD)["out"], {"tu-export": "exported 120 rows\nexported 240 rows"})
+
+    def test_an_agent_rows_transcript_is_never_read_as_a_tail(self):
+        real = km._bg_scan_cached
+        km._bg_scan_cached = lambda path: [{"id": "tu-agent", "outputFile": "/tmp/TESTHOST/agent.output"},
+                                           {"id": "tu-export", "outputFile": "/tmp/TESTHOST/export.output"}]
+        try:
+            files = km._thread_bg_files("/tmp/TESTHOST/thread.jsonl", {"count": 2, "tasks": [
+                {"id": "tu-agent", "agentId": "a0123456789abcdef"}, {"id": "tu-export"}]})
+        finally:
+            km._bg_scan_cached = real
+        self.assertEqual(files, {"tu-export": "/tmp/TESTHOST/export.output"}, "the box shows no output on an agent's row")
+
+    def test_the_push_sends_each_running_threads_tail_on_its_slot_for_the_framed_tabs_only(self):
+        of = Path(self._td) / "export.output"
+        of.write_text("exported 120 rows\n")
+        saved = km._thread_live[0]
+        km._thread_out_files.clear()
+        try:
+            km._thread_out_files_set(THREAD, {"tu-export": str(of)})
+            km._thread_out_files_set(OTHER_THREAD, {"tu-sync": str(of)})
+            km._thread_live[0] = {THREAD: {"state": "waiting", "threadOf": PARENT},
+                                  OTHER_THREAD: {"state": "waiting", "threadOf": OTHER_PARENT}}
+            sent = []
+            c = {"app": "chat", "send": sent.append, "sent": {}}
+            km._send_thread_bg_out([c], {PARENT})
+            self.assertEqual([json.loads(x) for x in sent], [{"type": "threadBgOut", "id": THREAD, "out": {"tu-export": "exported 120 rows"}}],
+                             "the framed tab's thread alone")
+            km._send_thread_bg_out([c], {PARENT})
+            self.assertEqual(len(sent), 1, "an unchanged tail costs a comparison, nothing on the wire")
+            with open(of, "a") as f:
+                f.write("exported 240 rows\n")
+            km._send_thread_bg_out([c], {PARENT})
+            self.assertEqual(json.loads(sent[-1])["out"], {"tu-export": "exported 120 rows\nexported 240 rows"}, "a moving tail goes")
+            km._thread_out_files_set(THREAD, {})
+            self.assertIsNone(km._thread_bg_out_frame(THREAD), "a build with no output file sends nothing")
+        finally:
+            km._thread_live[0] = saved
+            km._thread_out_files.clear()
+        import inspect
+        src = inspect.getsource(km._push)
+        self.assertLess(src.index('_send_comments_frame(chat_clients, s["sid"], fr, gen)'),
+                        src.index('_send_thread_bg_out(chat_clients, {s["sid"] for s in _frame_tabs})'),
+                        "sent after the comments frames whose builds name the files")
+
+
 class LiveStatusForThreads(unittest.TestCase):
     """A thread's thinking line and its subagents' progress ride the chat's liveStatus frames, sent with the tabs'."""
 

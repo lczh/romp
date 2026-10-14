@@ -73,9 +73,11 @@ test("appendActive snaps only when the user is already near the bottom of OVERFL
   // slack writes in place and grows the scrollbar, and the stick engages only once overflowing
   assert.match(RENDER, /const stick = content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\);[\s\S]*?if \(stick && followTail\(distBefore, heightBefore, content\.scrollHeight\)\) writeScroll\(content, content\.scrollHeight, "append-stick", true, before\)/,   // …and only when there is new content to follow (T262 followTail)
     "tail-append follows the live edge only if content overflows AND the reader was at the bottom");
-  // the popover's thread list speaks the same rule
-  assert.match(RENDER, /const overflowed = list\.scrollHeight > list\.clientHeight \+ 2;/);
-  assert.match(RENDER, /const atTail = overflowed && list\.scrollTop >= list\.scrollHeight - list\.clientHeight - 8;/);
+  // the popover's thread list speaks the same rule (cmtFollowing: the refill's follow and the box's resize rule, keepCmtTail)
+  assert.match(RENDER, /function cmtFollowing\(list: HTMLElement\): boolean \{\s*\n\s*return list\.scrollHeight > list\.clientHeight \+ 2 && cmtAtTail\(list\);/);
+  assert.match(RENDER, /return list\.scrollHeight - list\.scrollTop - list\.clientHeight <= CMT_TAIL_PX;/);
+  assert.match(RENDER, /const CMT_TAIL_PX = 8;/);
+  assert.match(RENDER, /const atTail = cmtFollowing\(list\);/);
 });
 
 // Scrolled-up re-renders anchor on a TURN, not a pixel offset (the user 2026-07-05): chatTail deep-fills

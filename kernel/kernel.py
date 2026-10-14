@@ -20855,6 +20855,7 @@ def _thread_events(tsid, cut_uuid, now, live_map, tm=None, out=None):
         _PERF_STATS.build("thread", False, time.monotonic() - _t0)
         evs = (m or {}).get("events") or []
         live = _thread_build_live(m)
+        _thread_out_files_set(tsid, _thread_bg_files(tpath, (m or {}).get("bgTasks")))   # inside the serve: its own scan
         if out is not None:
             out.update(live)
         if cut_uuid:
@@ -20920,11 +20921,75 @@ class _lend_thread_row(object):
 def _thread_build_live(m):
     """What a thread's popover paints from its chat build `m` (build_session's dict, None for a build that made nothing):
     {"chip", "status", "bgTasks"}, the build's state chip, its status projected to _THREAD_LIVE_STATUS_KEYS, and its
-    background tasks (the chat's own bgTasks block). Cached with the build's events (_built_thread)."""
+    background tasks (the chat's own bgTasks block) WITHOUT their output tails. Cached with the build's events
+    (_built_thread). The tails ride their own slot, read fresh on every push (_thread_bg_out_frame, the review of PR 240):
+    the build is served while its key stands and that key does not watch the output files, so a tail in the comments frame
+    went stale between rebuilds, and every rebuild that moved it resent the parent's whole frame to every chat page."""
     st = (m or {}).get("status") or {}
+    bg = (m or {}).get("bgTasks")
+    if isinstance(bg, dict) and isinstance(bg.get("tasks"), list):
+        bg = dict(bg, tasks=[{k: v for k, v in t.items() if k != "output"} if isinstance(t, dict) else t for t in bg["tasks"]])
     return {"chip": str(st.get("state") or ""),
             "status": {k: st[k] for k in _THREAD_LIVE_STATUS_KEYS if k in st},
-            "bgTasks": (m or {}).get("bgTasks")}
+            "bgTasks": bg}
+
+
+# THE RUNNING THREADS' BACKGROUND OUTPUT (the review of PR 240, 2026-10-14). The chat's background box shows each command's
+# output tail (_read_task_output, ~4 KB) in the row's fold. A tab's build watches those files (its dependency record), so a
+# tab's tail is fresh; a thread's build is served while its key stands and records no dependencies (_thread_events), so a
+# tail carried in the comments frame was stale between rebuilds, and each rebuild resent the parent's whole frame for it.
+# The tails leave the frame instead: each build notes which file each of its rows writes (_thread_out_files), and every push
+# reads those files through the memo (a stat each, the content re-read only when the file moved) into one small frame per
+# running thread on its own per-client slot, so an unchanged tail costs a comparison and a moving one only its own bytes.
+_thread_out_files = {}   # thread sid -> {row id: output file}, from its last build; bounded like _built_thread
+
+
+def _thread_bg_files(tpath, bg):
+    """{row id: output file} for the background-task rows a thread's build shows (`bg`, its bgTasks block), from the
+    transcript's cached task scan, the one the build's box read (_bg_scan_cached; called inside the build's record serve, so
+    it is the thread's own). Rows with no file yet (a launch whose ack has not landed) are left out, and so are agent rows
+    (an agentId): the box never shows their output (render.ts taskRowSpec), and an agent's output file is its transcript,
+    which moves with every step it takes."""
+    ids = {t.get("id") for t in ((bg or {}).get("tasks") or []) if isinstance(t, dict) and t.get("id") and not t.get("agentId")}
+    if not ids or not tpath:
+        return {}
+    return {tk["id"]: tk["outputFile"] for tk in _bg_scan_cached(tpath) if tk.get("id") in ids and tk.get("outputFile")}
+
+
+def _thread_out_files_set(tsid, files):
+    """Record a thread build's output files (_thread_bg_files), bounded by the thread count: oldest-inserted out first."""
+    if files:
+        if tsid not in _thread_out_files and len(_thread_out_files) > 256:
+            _thread_out_files.pop(next(iter(_thread_out_files)))
+        _thread_out_files[tsid] = files
+    else:
+        _thread_out_files.pop(tsid, None)
+
+
+def _thread_bg_out_frame(tsid):
+    """The thread's background output frame, {"type": "threadBgOut", "id": tsid, "out": {row id: tail}}, every tail read now
+    (_read_task_output, memoized on the file's (mtime, size)); None when its last build showed no row with a file."""
+    files = _thread_out_files.get(tsid) or {}
+    if not files:
+        return None
+    return {"type": "threadBgOut", "id": tsid, "out": {rid: _read_task_output(of) for rid, of in sorted(files.items())}}
+
+
+def _send_thread_bg_out(clients, parents):
+    """Each running thread's background output frame (_thread_bg_out_frame) to the chat `clients`, on its own
+    ("threadBgOut", sid) slot, for the threads of the tabs in `parents` (this push's framed tabs) that the thread live map
+    lists. A fault in one thread's frame is said and skips that thread alone."""
+    for tsid, row in list(_thread_live_map().items()):
+        if not isinstance(row, dict) or row.get("threadOf") not in parents:
+            continue
+        try:
+            fr = _thread_bg_out_frame(tsid)
+        except Exception:
+            sys.stderr.write("thread background output failed for %s: %s\n" % (tsid, traceback.format_exc()))
+            continue
+        if fr:
+            for c in clients:
+                _send_client(c, ("threadBgOut", tsid), fr)
 
 
 def _thread_opener_shown(evs):
@@ -66581,6 +66646,8 @@ def _push(targets, connect=False, live_map=None, only=None):
                     continue
                 if fr:
                     _send_comments_frame(chat_clients, s["sid"], fr, gen)   # dropped when the store moved meanwhile
+            # …and the running threads' background output tails, each on its own slot, read fresh (_send_thread_bg_out)
+            _send_thread_bg_out(chat_clients, {s["sid"] for s in _frame_tabs})
             # THE GLOSSARY (T351 stage 2): one {type:"glossary"} frame per session whose group has a file, on its own
             # per-sid dedup slot like the comments frame: the file is stat'd here (the event), parsed once per mtime, and
             # an unchanged index costs nothing on the wire
