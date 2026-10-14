@@ -1164,6 +1164,35 @@ class OpeningMessage(unittest.TestCase):
         self.assertEqual(km._comment_first_message("placement", "Why?", context="An unrelated line."), plain,
                          "a sentence that does not hold the words is not this passage's")
 
+    # ── review of #231 (2026-10-14): the opening message holds the message box's 4,000-character cap, with the cut marked,
+    # and quotes the passage as the page read it, its controls, labels and closed folds left out ──────────────────────
+    LONG = " ".join("Sentence number %d talks about item %d." % (i, i) for i in range(400))   # about 16,500 characters
+
+    def _quote(self, sent):
+        return sent.split(km._COMMENT_FRAME_HEAD + "\n\n", 1)[1]
+
+    def test_a_passage_longer_than_the_cap_is_quoted_cut_there_with_the_cut_marked(self):
+        cut = "> " + self.LONG[:3999].rstrip() + "…"
+        self.assertEqual(self._quote(km._comment_opener_parts(self.LONG, "Thoughts?")[0]), cut, "the passage itself")
+        self.assertEqual(self._quote(km._comment_opener_parts(self.LONG, "Thoughts?", shown=self.LONG)[0]), cut,
+                         "the passage as the page read it")
+        self.assertEqual(len(km._cap_quote(self.LONG)), 4000)
+        self.assertEqual(km._cap_quote("short"), "short")
+        body = km._comment_first_message(self.LONG, "Thoughts?")
+        self.assertEqual(km._comment_opener_split(body), km._comment_opener_parts(self.LONG, "Thoughts?"), "it splits back")
+
+    def test_lines_that_leave_out_the_pages_labels_and_folds_are_the_passages(self):
+        exact = "x = refill(cache)Copy\nMore detailText inside the closed fold.\nThe paragraph after the fold."   # the range's text
+        shown = "x = refill(cache)\n\nMore detail\n\nThe paragraph after the fold."                            # as it reads
+        sent, _ = km._comment_opener_parts(exact, "Why?", shown=shown)
+        self.assertEqual(self._quote(sent), "> x = refill(cache)\n>\n> More detail\n>\n> The paragraph after the fold.")
+        # a chip's passage, cut at the cap with labels in it: its text as it reads runs on past where the cut words end
+        raw = km._cap_quote("List the files1 line " + self.LONG)
+        sent, _ = km._comment_opener_parts(raw, "Why?", shown=km._cap_quote(self.LONG))
+        self.assertEqual(self._quote(sent), "> " + km._cap_quote(self.LONG), "compared as far as the cut passage goes")
+        self.assertEqual(km._comment_opener_parts(raw, "Why?", shown="Words that were never in it.")[0],
+                         km._comment_opener_parts(raw, "Why?")[0], "text that is not the passage's is still left out")
+
     # ── what romp sent, read back from a stored opening message (the popover's note, the user 2026-09-30) ──────────
     def test_the_split_gives_back_exactly_what_romp_added_and_the_users_words(self):
         for prior, frame in (("", None), (self.PRIOR, None), (self.PRIOR, km._FORK_FRAME)):

@@ -126,7 +126,7 @@ test("highlighting transcript text seeds a QUOTE chip — the same chip, reply-c
   // seeding NEVER focuses the composer — a focus steal would collapse the selection mid-drag
   const seeder = RENDER.split("function seedTranscriptQuote(")[1].split("\n}")[0];
   assert.doesNotMatch(seeder, /focusComposer/);
-  assert.match(RENDER, /quote: quote\.slice\(0, QUOTE_CAP\)/);   // mkQuoteCitation bounds every chip
+  assert.match(RENDER, /quote: capQuote\(quote\)/);   // mkQuoteCitation bounds every chip (the cut marked, quote-context.ts capQuote)
 });
 
 test("⌘-selecting another piece of text ADDS a context below the held ones (the user 2026-08-04)", () => {

@@ -10,7 +10,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
-import { quoteContext, codeLineContext, QUOTE_CONTEXT_CAP, QUOTE_WORDS_MAX } from "./quote-context";
+import { quoteContext, codeLineContext, capQuote, QUOTE_CAP, QUOTE_CONTEXT_CAP, QUOTE_WORDS_MAX } from "./quote-context";
 import { quoteLeadIn, quoteReplyBody, stagedRunBody, stagedPosts } from "./staged-messages";
 import { splitQuoteReplyBody } from "./queued-rescind";
 
@@ -132,19 +132,45 @@ const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview"
 const requireCjs = createRequire(path.join(process.cwd(), "package.json"));
 
 test("render.ts reads what goes out from the selection's own range in its message, for the message box and a thread's box", () => {
-  const fn = RENDER.split("function selectionQuoteView(")[1].split("\n}")[0];
+  const view = RENDER.split("function selectionQuoteView(")[1].split("\n}")[0];
+  assert.match(view, /const said = quoteText\(r\);\s*\n\s*const ctx = said\.replace\(\/\\s\+\/g, " "\) === words\.replace\(\/\\s\+\/g, " "\)\.trim\(\) \? fewWordsContext\(r, said\) : null;/,
+    "the passage as it reads, then a few words' context when the range's text is those words");
+  assert.match(view, /const shown = capQuote\(said\);\s*\n\s*return shown && shown !== capQuote\(words\) \? \{ shown \} : null;/,
+    "the passage as it reads goes out when it is not the range's own text");
+  const fn = RENDER.split("function fewWordsContext(")[1].split("\n}")[0];
+  assert.match(fn, /w\.length > QUOTE_WORDS_MAX \|\| w\.includes\("\\n"\)\) return null;/, "nothing is read for a longer passage");
   assert.match(fn, /closest\("\.md"\)/, "the rendered message the range starts in");
   assert.match(fn, /body\.contains\(r\.endContainer\)/, "and ends in");
-  assert.match(fn, /closest\("pre"\)[\s\S]*codeBlockLines\(pre, r\)[\s\S]*codeLineContext\(/, "a code block: its rows, a code line");
-  assert.match(fn, /closest\("code"\)[\s\S]*codeLineContext\(code\.textContent/, "inline code: its own text");
-  assert.match(fn, /blockQuoteText\(scope, r\)[\s\S]*quoteContext\(t\.text, t\.start, t\.end, words\)/, "prose: its block, as it reads");
-  assert.match(RENDER, /const QUOTE_SKIP = "button, select, input, textarea, svg, \.code-copy";/, "never a control's text");
+  assert.match(fn, /closest\("pre"\)[\s\S]*codeLineAt\(pre, r, from, lastText\)[\s\S]*codeLineContext\(/, "a code block: its row, a code line");
+  // an inline code span is prose (review of #231): `max_retries` alone said nothing of where it was
+  assert.doesNotMatch(fn, /closest\("code"\)/, "no rule of its own for inline code: its sentence, as any few words'");
+  assert.match(fn, /blockQuoteText\(scope, r\)[\s\S]*quoteContext\(t\.text, t\.start, t\.end, w\)/, "prose: its block, as it reads");
+  assert.match(RENDER, /const QUOTE_CHROME = "button, select, input, textarea, svg, \.code-copy, /, "never a control's text");
+  const block = RENDER.split("function blockQuoteText(")[1].split("\n}")[0];
+  assert.match(block, /if \(e !== block && quoteSkips\(e\)\) return;/, "a sentence leaves out what the quote does");
   const seeder = RENDER.split("function seedTranscriptQuote(")[1].split("\n}")[0];
   assert.match(seeder, /mkQuoteCitation\(quote, uuid, undefined, liveQuoteView\(quote\)\)/);
   const thread = RENDER.split("function seedThreadQuote(")[1].split("\n}")[0];
   assert.match(thread, /mkQuoteCitation\(quote, uuid, undefined, liveQuoteView\(quote\)\)/);
-  // the chip keeps the 4,000-character quote cap for the lines it shows too
-  assert.match(RENDER, /view\?\.shown \? \{ shown: view\.shown\.slice\(0, QUOTE_CAP\) \}/);
+  // the chip keeps the 4,000-character quote cap, the cut marked, for the text it shows too
+  assert.match(RENDER, /quote: capQuote\(quote\), uuid, src: src \|\| undefined,/);
+  assert.match(RENDER, /view\?\.shown \? \{ shown: capQuote\(view\.shown\) \}/);
+});
+
+test("a quote longer than the cap is cut there and says so; the kernel holds the same figure", () => {
+  assert.equal(QUOTE_CAP, 4000);
+  assert.equal(capQuote("short"), "short");
+  const at = "x".repeat(QUOTE_CAP);
+  assert.equal(capQuote(at), at, "at the cap: whole");
+  const long = Array.from({ length: 1000 }, (_, i) => "w" + i).join(" ");
+  const cut = capQuote(long);
+  assert.ok(cut.length <= QUOTE_CAP && cut.endsWith("\u2026"), "cut, and marked: " + cut.length);
+  assert.equal(cut, long.slice(0, QUOTE_CAP - 1).trimEnd() + "\u2026");
+  // a cut inside a surrogate pair keeps the pair whole, outside the quote
+  const pair = "a".repeat(QUOTE_CAP - 2) + "\u{1F600}" + "tail";
+  assert.equal(capQuote(pair), "a".repeat(QUOTE_CAP - 2) + "\u2026");
+  const kernel = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
+  assert.match(kernel, /\n_QUOTE_CAP = 4000 /, "the kernel's comment opener holds the message box's cap");
 });
 
 test("a comment carries what the gesture read off the selection, or what its chip kept", () => {

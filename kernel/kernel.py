@@ -20124,13 +20124,53 @@ _FORK_FRAME = ("I've split this conversation off from the original at this point
                "tasks or background work.")
 
 
+_QUOTE_CAP = 4000   # the longest passage a quote carries (ui/webview/quote-context.ts QUOTE_CAP, the message box's own)
+
+
+def _cap_quote(text):
+    """`text` within _QUOTE_CAP characters: a longer one is cut there and ends in "…", so the agent can see it was cut
+    (quote-context.ts capQuote; review of #231, 2026-10-14: a 16,600-character selection went whole into a thread's
+    opening message, where the message box sends at most 4,000)."""
+    text = str(text or "")
+    return text if len(text) <= _QUOTE_CAP else text[:_QUOTE_CAP - 1].rstrip() + "…"
+
+
+def _shown_is_passage(shown, exact):
+    """Whether `shown`, the passage as the page read it, is the passage `exact` (the range's own text, which the thread's
+    highlight is found by): its characters, whitespace aside, are `exact`'s in order. The page leaves out what is not the
+    message's content (a code block's Copy button, a tool row's label, a closed fold's contents) and breaks a code block's
+    lines where the code does, so `shown` may have fewer characters but never others, and what it leaves out is a few
+    stretches, one per thing left out: the in-order match may skip over `exact` at most once per four characters it
+    matches (text from elsewhere, matched character by character, skips at nearly every one). A "…" that marks a cut at
+    the cap is not part of either; where `exact` itself was cut (a quote chip's passage), `shown` is compared as far as
+    `exact` goes, and half of `exact` matched that way is the same passage."""
+    s, e = re.sub(r"\s+", "", str(shown or "")), re.sub(r"\s+", "", str(exact or ""))
+    cut = e.endswith("…")
+    s, e = s[:-1] if s.endswith("…") else s, e[:-1] if cut else e
+    if not s:
+        return False
+    at, skips, k = 0, 0, 0
+    for k, ch in enumerate(s):
+        found = e.find(ch, at)
+        if found < 0:
+            if not (cut and 2 * k >= len(e)):
+                return False
+            break
+        skips += found > at
+        at = found + 1
+    else:
+        k = len(s)
+    return skips <= max(4, k // 4)
+
+
 def _comment_quote_parts(exact, context="", shown=""):
     """(head, quote) for a thread's passage: the quote head and the ">" block under it, from what the page read off the
     selection (ui/webview/render.ts selectionQuoteView), never rebuilt here. A few words (_COMMENT_WORDS_MAX) whose
     `context` (their sentence, or their line of code) holds them, the ** the page may have put around the highlighted one
-    aside, get a head naming them and the context quoted. A passage over several lines of a code block whose `shown` (its
-    lines with their line breaks) is the passage, line breaks aside, is quoted as those lines. Every other passage: today's
-    head and the passage itself. A context or lines that are not this passage's are left out and said in the log."""
+    aside, get a head naming them and the context quoted. A passage whose `shown` (the passage as it reads, without the
+    page's controls, labels and closed folds, a code block's lines with their line breaks) is this passage's
+    (_shown_is_passage) is quoted as that. Every other passage: today's head and the passage itself. Either is held to the
+    message box's cap (_cap_quote). A context or text that is not this passage's is left out and said in the log."""
     words = " ".join(str(exact or "").split())
     ctx = str(context or "").strip()[:2000]
     if ctx and words and len(words) <= _COMMENT_WORDS_MAX:
@@ -20139,10 +20179,10 @@ def _comment_quote_parts(exact, context="", shown=""):
         sys.stderr.write("comment opener: the sentence sent with a passage does not hold its words; quoting the passage alone\n")
     lines = str(shown or "").rstrip()
     if lines.strip():
-        if re.sub(r"\s+", "", lines) == re.sub(r"\s+", "", str(exact or "")):
-            return _COMMENT_FRAME_HEAD, "\n".join(("> " + ln).rstrip() for ln in lines.splitlines())
-        sys.stderr.write("comment opener: the lines sent with a passage are not the passage; quoting the passage alone\n")
-    q = "\n".join("> " + ln for ln in str(exact or "").splitlines()).strip() or "> …"
+        if _shown_is_passage(lines, exact):
+            return _COMMENT_FRAME_HEAD, "\n".join(("> " + ln).rstrip() for ln in _cap_quote(lines).splitlines())
+        sys.stderr.write("comment opener: the text sent with a passage is not the passage; quoting the passage alone\n")
+    q = "\n".join("> " + ln for ln in _cap_quote(str(exact or "")).splitlines()).strip() or "> …"
     return _COMMENT_FRAME_HEAD, q
 
 

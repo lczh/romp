@@ -74,7 +74,7 @@ import { DEFAULT_CHORDS } from "./commands";
 import { NavHistory } from "./nav-history";
 import { StagedStack, quoteReplyBody, stagedPosts, type StagedMsg } from "./staged-messages";
 import { isSlashCommand } from "./staged-messages";   // the viewer's message bar refuses a slash command (2026-09-30)
-import { quoteContext, codeLineContext } from "./quote-context";   // a few words go out named, with their sentence or code line (2026-10-14)
+import { quoteContext, codeLineContext, capQuote, QUOTE_CAP, QUOTE_WORDS_MAX } from "./quote-context";   // a few words go out named, with their sentence or code line (2026-10-14); every quote within the cap
 import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, isKernelEchoUuid, newPending, mintQid, reconcilePending, clearBoundarySeen, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody, refusedRestoreText } from "./send-pending";
 import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, mergeTombstones, pendingFromKept, resendable, resendWire, restoreKept,
          restoreTombstones, type Tombstone } from "./send-acks";
@@ -20135,20 +20135,25 @@ function setCitation(id: string, cite: Citation): void {
 // composer to type collapses the selection, and must not eat the chip it just made — dismissal stays the
 // ✕ / Backspace-at-start. Unlike setCitation this never focuses the composer: stealing focus mid-drag
 // would collapse the very selection being made (the focusCardUnlessTyping lesson).
-const QUOTE_CAP = 4000;   // a selection can be huge; the send stays bounded
 function mkQuoteCitation(quote: string, uuid: string | null, src?: string, view?: QuoteView | null): Citation {
-  const snip = quote.replace(/\s+/g, " ").trim();
+  // the chip shows what goes out: a passage's text as it reads when the page read one (view.shown), else the quote
+  const snip = (view?.shown || quote).replace(/\s+/g, " ").trim();
   // an editor highlight leads its chip with where it came from (file:lines), then the snippet
   const title = (src ? src + " — " + snip : snip).slice(0, 140);
-  return { title, quote: quote.slice(0, QUOTE_CAP), uuid, src: src || undefined,
-           ...(view?.ctx ? { ctx: view.ctx } : view?.shown ? { shown: view.shown.slice(0, QUOTE_CAP) } : {}) };   // bounded as the quote is
+  return { title, quote: capQuote(quote), uuid, src: src || undefined,
+           ...(view?.ctx ? { ctx: view.ctx } : view?.shown ? { shown: capQuote(view.shown) } : {}) };   // bounded as the quote is
 }
 // WHAT GOES OUT FOR A TRANSCRIPT PASSAGE (the user 2026-10-14, who approved the wording; staged-messages.ts quoteLeadIn):
-// a few words, shorter than their sentence or code line, are named over that sentence or line (`ctx`); a passage over
-// several lines of a code block is its lines with their line breaks (`shown`), which the rendered rows join with none.
-// Read here from the rendered message the selection was made in, never reconstructed later, and never from a control in
-// it: a code block's text is its rows (the Copy button sits beside them), a paragraph's skips any button. Code is never a
-// sentence (review of #229: a block read as one line, Copy and all, became the "sentence" of a word in it).
+// a few words, shorter than their sentence or code line, are named over that sentence or line (`ctx`); any other passage
+// goes out as it reads (`shown`, when that differs from the range's own text). Read here from the rendered messages the
+// selection was made in, never reconstructed later. The QUOTE is the range's own text, every text node's data: what the
+// chip keys on and a comment's highlight is found by (comments.ts findAnchorRange matches it against the same data). What
+// GOES OUT is the content's text (review of #231, 2026-10-14): without the page's controls and labels and without what is
+// not shown, which the range's text holds (a triple-click on a code block's last line sent "x = refill(cache)Copy"; a
+// selection across two replies sent a collapsed tool row's label and its folded input and output), and with a code
+// block's lines broken where the code breaks them (its rendered rows join with none). Code BLOCKS are never a sentence
+// (review of #229: a block read as one line, Copy and all, became the "sentence" of a word in it); an inline code span is
+// part of its sentence (review of #231: `max_retries` went out alone, saying nothing of where it was).
 type QuoteView = { ctx?: string; shown?: string };
 /** A view off a stored or posted shape: its one string field, or null. */
 function quoteViewOf(v: unknown): QuoteView | null {
@@ -20159,8 +20164,121 @@ function quoteViewOf(v: unknown): QuoteView | null {
   return null;
 }
 const QUOTE_BLOCKS = "p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, figcaption, summary, blockquote";
-const QUOTE_SKIP = "button, select, input, textarea, svg, .code-copy";
+// What a quote leaves out (quoteSkips): the page's controls, and the transcript's labels and markers, which describe the
+// conversation rather than say any of it: a turn's dot, rail and time, a day's divider, the fork spot, a tool row's head
+// (its label and fold toggle), a tool group's summary, a notice's glyph, source, meta and actions, a reply's thinking
+// count, a sent message's romp tag, a follow-up's tag and a nudge's caret, a send's undelivered label, a gap's glyph.
+// Anything else marked user-select: none is left out with them: that is how the page marks chrome a selection must copy
+// clean without (fold heads, the tool rows' IN and OUT, diff gutters).
+const QUOTE_CHROME = "button, select, input, textarea, svg, .code-copy, .dot, .rail-hit, .time-marker, .day-divider, .fork-spot, "
+  + ".tool-head, .toolgroup-head, .notice-glyph, .notice-src, .notice-meta, .notice-acts, .think-tokens, .romp-tag, .followup-tag, "
+  + ".nudge-caret, .undelivered-label, .tx-gap-glyph";
 const QUOTE_BREAKS = /^(P|LI|UL|OL|DL|DD|DT|DIV|PRE|TABLE|THEAD|TBODY|TR|TD|TH|BLOCKQUOTE|H[1-6]|FIGURE|FIGCAPTION|SECTION|DETAILS|SUMMARY|HR)$/;
+const QUOTE_PARAS = /^(P|PRE|UL|OL|DL|TABLE|BLOCKQUOTE|H[1-6]|FIGURE|DETAILS|HR)$/;   // a blank line around, in a quote
+/** Whether a quote leaves out the element `e` and all it holds: a control, a label or marker (QUOTE_CHROME), a closed fold's
+ *  contents, or what is not shown (display none, visibility hidden) or marked as chrome (user-select: none). `styled`
+ *  false skips the style read, for the rows of a code block, which hold nothing of the kind. */
+function quoteSkips(e: Element, styled = true): boolean {
+  if (e.matches(QUOTE_CHROME)) return true;
+  const up = e.parentElement;
+  if (up && up.tagName === "DETAILS" && !(up as HTMLDetailsElement).open && e.tagName !== "SUMMARY") return true;
+  if (!styled) return false;
+  const cs = getComputedStyle(e);
+  return cs.display === "none" || cs.visibility === "hidden" || (cs.userSelect || (cs as any).webkitUserSelect) === "none";
+}
+/** The text of the selection `r` as it reads: the content it covers, without what quoteSkips leaves out; a block on its
+ *  own line and a paragraph or a message a blank line apart, a code block's rows as its lines, a table's cells a tab apart,
+ *  a <br> a line break, and other whitespace as the page shows it. Read from the range's start and stopped once longer
+ *  than `cap`, so a drag over a long transcript costs what a quote can hold, not the transcript (review of #231). */
+function quoteText(r: Range, cap = QUOTE_CAP + 1): string {
+  let out = "", owed = 0, pre = 0;           // owed: the line breaks due before the next text; pre: depth inside <pre>
+  const brk = (e: Element): number => (e.tagName === "TD" || e.tagName === "TH" ? 0   // a cell: a tab before the next (enter)
+    : e.classList.contains("turn") || QUOTE_PARAS.test(e.tagName) ? 2
+    : QUOTE_BREAKS.test(e.tagName) || (pre > 0 && e.classList.contains("ct")) ? 1 : 0);
+  const put = (s: string): void => {
+    if (!pre) s = s.replace(/\s+/g, " ");
+    if (!s) return;
+    if (owed && out) {
+      out = out.replace(/[ \t]+$/, "");
+      const have = /\n*$/.exec(out)![0].length;
+      if (owed > have) out += "\n".repeat(owed - have);
+    }
+    owed = 0;
+    if (!pre && (!out || /[\s]$/.test(out))) s = s.replace(/^ /, "");
+    out += s;
+  };
+  const enter = (e: Element): void => {
+    if (e.tagName === "BR") { if (out) out = out.replace(/[ \t]+$/, "") + "\n"; owed = 0; return; }
+    if ((e.tagName === "TD" || e.tagName === "TH") && e.previousElementSibling && out && !owed && !out.endsWith("\n")) out = out.replace(/ +$/, "") + "\t";
+    owed = Math.max(owed, brk(e));
+    if (e.tagName === "PRE") pre++;
+  };
+  const exit = (e: Element): void => {
+    if (e.tagName === "PRE") pre--;
+    owed = Math.max(owed, brk(e));
+  };
+  const start = r.startContainer, end = r.endContainer;
+  const stop = end.nodeType === Node.TEXT_NODE ? null : end.childNodes[r.endOffset] || null;   // the node the range ends before
+  // the next node to read, or null to go on after `from`: the start's text, the node after the start's point, or (a start
+  // at an element's end) whatever follows that element
+  let node: Node | null = start.nodeType === Node.TEXT_NODE ? start : start.childNodes[r.startOffset] || null;
+  let from: Node = start;
+  // what the walk starts inside: a <pre> keeps its whitespace, and a label or a closed fold around the start leaves out
+  // everything in it (the walk then starts at the outermost such element, which it leaves out whole)
+  const inside = (n: Node): number => { let k = 0; for (let a = n.parentElement; a; a = a.parentElement) if (a.tagName === "PRE") k++; return k; };
+  let outer: Element | null = null;
+  for (let a: Element | null = node ? node.parentElement : (start as Element); a && a !== document.body; a = a.parentElement) {
+    if (quoteSkips(a)) outer = a;
+    if (a.classList.contains("turn")) break;
+  }
+  if (outer) { node = outer; pre = inside(outer); }
+  else if (node) pre = inside(node);
+  else { pre = inside(start) + ((start as Element).tagName === "PRE" ? 1 : 0); exit(start as Element); }   // on after it
+  for (;;) {
+    if (!node) {                                                 // go on after `from`, leaving the elements it closes
+      let x: Node = from;
+      while (!x.nextSibling) {
+        const up = x.parentNode;
+        if (!up || up === document.body || up.nodeType !== Node.ELEMENT_NODE) return quoteTextTrim(out);
+        exit(up as Element);
+        if (up === end) return quoteTextTrim(out);              // the range ends at the end of this element
+        x = up;
+      }
+      node = x.nextSibling;
+      continue;
+    }
+    if (node === stop) break;
+    if (node.nodeType === Node.TEXT_NODE) {
+      const t = node as Text, up = t.parentElement;
+      if (!(up && up.tagName === "DETAILS" && !(up as HTMLDetailsElement).open)) {   // a closed fold's own text is not shown
+        put(t.data.slice(t === start ? r.startOffset : 0, t === end ? r.endOffset : t.data.length));
+        if (out.length > cap) break;
+      }
+      if (t === end) break;
+      from = t; node = null;
+      continue;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) { from = node; node = null; continue; }
+    const e = node as Element;
+    if (quoteSkips(e, pre === 0)) {
+      if (e === end || e.contains(end)) break;                 // the range ends inside what is left out
+      from = e; node = null;
+      continue;
+    }
+    enter(e);
+    if (e.firstChild) { node = e.firstChild; continue; }
+    exit(e);
+    if (e === end) break;
+    from = e; node = null;
+  }
+  return quoteTextTrim(out);
+}
+/** quoteText's result: no blank lines before it, no whitespace after it, and a single line trimmed (a code row's indent
+ *  only means something beside the rows under it). */
+function quoteTextTrim(out: string): string {
+  const t = out.replace(/^(?:[ \t]*\n)+/, "").trimEnd();
+  return t.includes("\n") ? t : t.trim();
+}
 /** The offset of the point (node, offset) in `el`'s text, or -1 when it lies outside it. */
 function textOffsetIn(el: Element, node: Node, offset: number): number {
   const whole = document.createRange();
@@ -20179,23 +20297,45 @@ function clampedOffsetIn(el: Element, node: Node, offset: number): number {
   return c < 0 ? 0 : c > 0 ? (el.textContent || "").length : textOffsetIn(el, node, offset);
 }
 /** The first and last text nodes the range selects characters of: a drag or a double-click can leave an end at the edge
- *  of the node beside the words (the end of "Call " before a code span), which is not where the words are. */
+ *  of the node beside the words (the end of "Call " before a code span), which is not where the words are. Read from the
+ *  range's two ends inward, never across what lies between them (review of #231: a walk of every text node under the
+ *  range's common ancestor cost a selection in a 4,000-line code block about 100 ms per update). */
 function selectedTextEnds(r: Range): [Node, Node] {
   const root = r.commonAncestorContainer;
   if (root.nodeType === Node.TEXT_NODE) return [root, root];
-  let first: Node | null = null, last: Node | null = null;
-  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
-    if (!r.intersectsNode(n)) continue;
+  const has = (n: Node): boolean => {
     const a = n === r.startContainer ? r.startOffset : 0, b = n === r.endContainer ? r.endOffset : (n as Text).data.length;
-    if (b <= a) continue;
-    if (!first) first = n;
-    last = n;
+    return b > a && r.intersectsNode(n);
+  };
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const deepest = (n: Node): Node => { while (n.lastChild) n = n.lastChild; return n; };
+  // forward from the start: the start's own text node, else the first text at or after the start's point
+  let first: Node | null;
+  const sc = r.startContainer, at = sc.childNodes[r.startOffset];
+  if (sc.nodeType === Node.TEXT_NODE) first = sc;
+  else if (at) { walk.currentNode = at; first = at.nodeType === Node.TEXT_NODE ? at : walk.nextNode(); }
+  else { walk.currentNode = deepest(sc); first = walk.nextNode(); }
+  if (first) walk.currentNode = first;
+  while (first && !has(first)) {
+    if (r.comparePoint(first, 0) > 0) { first = null; break; }   // past the range's end: none selected
+    first = walk.nextNode();
+  }
+  // backward from the end: the end's own text node, else the last text before the end's point
+  let last: Node | null;
+  const ec = r.endContainer, before = r.endOffset > 0 ? ec.childNodes[r.endOffset - 1] : null;
+  if (ec.nodeType === Node.TEXT_NODE) last = ec;
+  else if (before) { const d = deepest(before); walk.currentNode = d; last = d.nodeType === Node.TEXT_NODE ? d : walk.previousNode(); }
+  else { walk.currentNode = ec; last = walk.previousNode(); }
+  if (last) walk.currentNode = last;
+  while (last && !has(last)) {
+    if (r.comparePoint(last, (last as Text).data.length) < 0) { last = null; break; }   // before the range's start
+    last = walk.previousNode();
   }
   return first && last ? [first, last] : [r.startContainer, r.endContainer];
 }
 /** A prose block's text as it reads: a source line break inside a paragraph is a space, a <br> or a nested block a line
- *  break, a control nothing; and the range's offsets in it (-1 for an end in a control or outside). */
+ *  break, what a quote leaves out nothing (quoteSkips); and the range's offsets in it (-1 for an end in something left out
+ *  or outside). */
 function blockQuoteText(block: Element, r: Range): { text: string; start: number; end: number } {
   let text = "", start = -1, end = -1;
   const brk = () => { if (text && !text.endsWith("\n")) text += "\n"; };
@@ -20213,7 +20353,7 @@ function blockQuoteText(block: Element, r: Range): { text: string; start: number
     }
     if (n.nodeType !== Node.ELEMENT_NODE) return;
     const e = n as Element;
-    if (e.matches(QUOTE_SKIP)) return;
+    if (e !== block && quoteSkips(e)) return;
     if (e.tagName === "BR") { text += "\n"; return; }
     const breaks = e !== block && QUOTE_BREAKS.test(e.tagName);
     if (breaks) brk();
@@ -20224,44 +20364,29 @@ function blockQuoteText(block: Element, r: Range): { text: string; start: number
   visit(block);
   return { text, start, end };
 }
-/** A code block's lines as the code holds them (its rows' text, never the Copy button beside them), and the range's
- *  [line, column] ends in them; null when an end is outside the code. */
-function codeBlockLines(pre: Element, r: Range): { lines: string[]; a: [number, number]; b: [number, number] } | null {
-  const code = pre.querySelector("code") || pre;
-  const rows = Array.from(code.querySelectorAll(".ct"));
-  if (rows.length) {
-    const at = (node: Node, offset: number): [number, number] | null => {
-      const own = (node instanceof Element ? node : node.parentElement)?.closest(".ct");   // the usual case: a point in a row's text
-      const k = own ? rows.indexOf(own) : -1;
-      if (k >= 0) { const o = textOffsetIn(rows[k], node, offset); if (o >= 0) return [k, o]; }
-      for (let i = 0; i < rows.length; i++) {
-        const o = textOffsetIn(rows[i], node, offset);
-        if (o >= 0) return [i, o];
-        const whole = document.createRange();
-        whole.selectNodeContents(rows[i]);
-        if (whole.comparePoint(node, offset) < 0) return [i, 0];   // between rows: the start of the next one
-      }
-      return null;
-    };
-    const a = at(r.startContainer, r.startOffset), b = at(r.endContainer, r.endOffset);
-    if (!a || !b) return null;
-    const lines = rows.map((x) => x.textContent || "");
-    // an end at the edge of the row beside the words belongs to the words' row
-    if (a[0] < b[0] && a[1] >= lines[a[0]].length) { a[0]++; a[1] = 0; }
-    if (b[0] > a[0] && b[1] === 0) { b[0]--; b[1] = lines[b[0]].length; }
-    return { lines, a, b };
+/** The line of a code block a few words sit in, and their offsets in it: the row they are in (the rows' own text, never the
+ *  Copy button beside them), or in a block with no rows the line of its text around them; null when they are not on one
+ *  line. Reads that one row or line, never the block's others. */
+function codeLineAt(pre: Element, r: Range, from: Element, lastText: Node): { line: string; s: number; e: number } | null {
+  const row = from.closest(".ct");
+  if (row && pre.contains(row)) {
+    if (!row.contains(lastText)) return null;
+    return { line: row.textContent || "", s: clampedOffsetIn(row, r.startContainer, r.startOffset), e: clampedOffsetIn(row, r.endContainer, r.endOffset) };
   }
-  // an unwrapped block (no rows): its text keeps its own line breaks
+  const code = pre.querySelector("code") || pre;
+  if (!code.contains(lastText)) return null;
   const raw = code.textContent || "";
-  const s = textOffsetIn(code, r.startContainer, r.startOffset), e = textOffsetIn(code, r.endContainer, r.endOffset);
-  if (s < 0 || e < 0) return null;
-  const pos = (o: number): [number, number] => { const before = raw.slice(0, o).split("\n"); return [before.length - 1, before[before.length - 1].length]; };
-  return { lines: raw.replace(/\n$/, "").split("\n"), a: pos(s), b: pos(e) };
+  const s = clampedOffsetIn(code, r.startContainer, r.startOffset), e = clampedOffsetIn(code, r.endContainer, r.endOffset);
+  if (raw.slice(s, e).includes("\n")) return null;
+  const a = raw.lastIndexOf("\n", s - 1) + 1, b = raw.indexOf("\n", e);
+  return { line: raw.slice(a, b < 0 ? raw.length : b), s: s - a, e: e - a };
 }
-/** What goes out for the selection `r` whose text is `words`: a few words' sentence (prose) or line (code), or a code
- *  passage's lines; null when the passage goes out as it always did (a whole sentence or line or more of prose, a passage
- *  over several blocks, or one that does not lie in one rendered message). */
-function selectionQuoteView(r: Range, words: string): QuoteView | null {
+/** The sentence (prose, an inline code span in it included) or the line of a code block that a few words `words` of the
+ *  selection `r` sit in; null when they are more than a few or not in one rendered message. Nothing is read for a longer
+ *  passage, so a long drag costs this nothing. */
+function fewWordsContext(r: Range, words: string): string | null {
+  const w = words.trim();
+  if (!w || w.length > QUOTE_WORDS_MAX || w.includes("\n")) return null;   // only a few words on one line are ever named
   const el0 = (n: Node): Element | null => (n instanceof Element ? n : n.parentElement);
   const body = el0(r.startContainer)?.closest(".md");
   if (!body || !body.contains(r.endContainer)) return null;           // the words must lie in one rendered message
@@ -20270,22 +20395,8 @@ function selectionQuoteView(r: Range, words: string): QuoteView | null {
   if (!from || !body.contains(from)) return null;
   const pre = from.closest("pre");
   if (pre && body.contains(pre)) {
-    if (!pre.contains(lastText)) return null;
-    const c = codeBlockLines(pre, r);
-    if (!c) return null;
-    const [[la, ca], [lb, cb]] = [c.a, c.b];
-    if (la === lb) { const ctx = codeLineContext(c.lines[la], ca, cb, words); return ctx ? { ctx } : null; }
-    if (lb < la) return null;
-    const sel = [c.lines[la].slice(ca), ...c.lines.slice(la + 1, lb), c.lines[lb].slice(0, cb)];
-    const shown = sel.join("\n").replace(/^(?:[ \t]*\n)+/, "").trimEnd();
-    // the rows joined with no line break are the selection's own text: anything else is not this selection's
-    return shown && shown.replace(/\s+/g, "") === words.replace(/\s+/g, "") ? { shown } : null;
-  }
-  const code = from.closest("code");
-  if (code && body.contains(code) && code.contains(lastText)) {
-    const s = clampedOffsetIn(code, r.startContainer, r.startOffset), e = clampedOffsetIn(code, r.endContainer, r.endOffset);
-    const ctx = s >= 0 && e >= 0 ? codeLineContext(code.textContent || "", s, e, words) : null;
-    return ctx ? { ctx } : null;
+    const c = codeLineAt(pre, r, from, lastText);
+    return c ? codeLineContext(c.line, c.s, c.e, w) : null;
   }
   const block = from.closest(QUOTE_BLOCKS);
   const scope = block && body.contains(block) ? block : body;
@@ -20296,8 +20407,18 @@ function selectionQuoteView(r: Range, words: string): QuoteView | null {
   whole.selectNodeContents(scope);
   if (t.start < 0 && whole.comparePoint(r.startContainer, r.startOffset) < 0) t.start = 0;
   if (t.end < 0 && whole.comparePoint(r.endContainer, r.endOffset) > 0) t.end = t.text.length;
-  const ctx = t.start >= 0 && t.end > t.start ? quoteContext(t.text, t.start, t.end, words) : null;
-  return ctx ? { ctx } : null;
+  return t.start >= 0 && t.end > t.start ? quoteContext(t.text, t.start, t.end, w) : null;
+}
+/** What goes out for the selection `r` whose own text is `words` (the range's text, trimmed): a few words' sentence or
+ *  code line (`ctx`); else the passage as it reads (`shown`, quoteText within the cap) when that is not `words` itself;
+ *  null when the passage goes out as its own text. Words are named only when the range's text is the words as they read
+ *  (whitespace aside): the lead-in, and a comment's opening message, name the range's text. */
+function selectionQuoteView(r: Range, words: string): QuoteView | null {
+  const said = quoteText(r);
+  const ctx = said.replace(/\s+/g, " ") === words.replace(/\s+/g, " ").trim() ? fewWordsContext(r, said) : null;
+  if (ctx) return { ctx };
+  const shown = capQuote(said);
+  return shown && shown !== capQuote(words) ? { shown } : null;
 }
 /** The view of the ACTIVE range of the live selection (the newest, transcriptSelection's and threadSelection's rule), the
  *  range whose text every seed of a transcript or thread chip was just handed. */
