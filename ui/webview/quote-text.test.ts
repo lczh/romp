@@ -153,7 +153,8 @@ test("across two replies: a collapsed tool row's label, toggle and folded input 
 test("a tool group's caret and totals stay out, and an opened diff's line numbers; a diff row keeps its sign", () => {
   const ns = { userSelect: "none" };
   const row = (o: string, n: string, sign: string, code: string) =>
-    h("div.diff-row", h("span.diff-gut.diff-gut-old", ns, o), h("span.diff-gut.diff-gut-new", ns, n), h("span.diff-sign", ns, sign), h("span.diff-code", code));
+    h("div.diff-row." + (sign === "-" ? "diff-del" : sign === "+" ? "diff-add" : "diff-ctx"),
+      h("span.diff-gut.diff-gut-old", ns, o), h("span.diff-gut.diff-gut-new", ns, n), h("span.diff-sign", ns, sign), h("span.diff-code", code));
   const group = h("div.turn.turn-toolgroup", h("span.dot"),
     h("div.toolgroup-line", h("span.toolgroup-caret", "\u25b8"), " ", h("span.toolgroup-head", "Ran a command, edited a file"), " ",
       h("span.tool-totals", h("span.tool-plus", "+1"), " ", h("span.tool-minus", "-1"))));
@@ -163,8 +164,31 @@ test("a tool group's caret and totals stay out, and an opened diff's line number
   const root = h("div.thread", h("div.turn.turn-assistant", h("div.md", h("p", "The first reply ends here."))), group, edit,
     h("div.turn.turn-assistant", h("div.md", h("p", "The second reply starts here."))));
   assert.equal(read(root, [textOf(root, "The first reply"), 0], [textOf(root, "The second reply"), 23]),
-    "The first reply ends here.\n\na = 1\n-b = 2\n+b = 3\n\nThe second reply starts");
-  assert.equal(read(root, [textOf(root, "a = 1"), 0], [textOf(root, "b = 3"), 5]), "a = 1\n-b = 2\n+b = 3");
+    "The first reply ends here.\n\n a = 1\n-b = 2\n+b = 3\n\nThe second reply starts");
+  assert.equal(read(root, [textOf(root, "a = 1"), 0], [textOf(root, "b = 3"), 5]), " a = 1\n-b = 2\n+b = 3");
+});
+
+// review of #239 (2026-10-14): the walk writes each diff row's marker as it reads the row's code, so a selection that starts
+// inside a row's code (past its sign, which the page marks user-select: none) still says what the row is; a context row's
+// marker is the unified diff's leading space, kept on a line alone; a row the range only touches at an edge says nothing
+test("a diff row's marker comes with its code wherever the selection starts in it; a context row's is a space", () => {
+  const ns = { userSelect: "none" };
+  const row = (cls: string, sign: string, code: string) =>
+    h("div.diff-row." + cls, h("span.diff-gut.diff-gut-old", ns, "7"), h("span.diff-gut.diff-gut-new", ns, "7"), h("span.diff-sign", ns, sign), h("span.diff-code", code));
+  const blank = h("div.diff-row.diff-add", h("span.diff-gut", ns, ""), h("span.diff-gut", ns, "9"), h("span.diff-sign", ns, "+"), h("span.diff-code"));
+  const fold = h("pre.io-pre.fold-pre.diff-fold", h("div.diff-row.diff-hunk", h("span.diff-gut", ns, ""), h("span.diff-gut", ns, ""),
+    h("span.diff-sign", ns, ""), h("span.diff-code", "@@ -7 +7 @@")), row("diff-ctx", "", "- keep this item"),
+    row("diff-del", "-", "    rate = 0.1"), row("diff-add", "+", "    rate = 0.25"), blank, row("diff-add", "+", "done()"));
+  const root = h("div.thread", h("div.turn.turn-tool.fold-open", h("span.dot"), fold));
+  const del = textOf(root, "rate = 0.1"), add = textOf(root, "rate = 0.25"), ctx = textOf(root, "- keep");
+  assert.equal(read(root, [del, 4], [add, 15]), "-    rate = 0.1\n+    rate = 0.25", "a drag from the row's first word");
+  assert.equal(read(root, [del, 11], [add, 15]), "-           0.1\n+    rate = 0.25", "from mid-row: the code before it a blank");
+  assert.equal(read(root, [add, 0], [add, 15]), "+    rate = 0.25", "a triple-click's range, the row's code alone");
+  assert.equal(read(root, [ctx, 0], [ctx, 16]), " - keep this item", "a context line alone keeps its space");
+  assert.equal(read(root, [textOf(root, "@@"), 0], [textOf(root, "done()"), 6]),
+    "@@ -7 +7 @@\n - keep this item\n-    rate = 0.1\n+    rate = 0.25\n+\n+done()", "the hunk header as it reads; a blank row's marker alone");
+  assert.equal(read(root, [del, 14], [add, 15]), "+    rate = 0.25", "a start at a row's end: that row says nothing");
+  assert.equal(read(root, [del, 0], [add, 0]), "-    rate = 0.1", "an end at a row's start: that row says nothing");
 });
 
 test("a closed fold shows its summary alone; an open one its contents too", () => {
