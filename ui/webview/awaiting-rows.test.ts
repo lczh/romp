@@ -182,7 +182,7 @@ test("per-kind affordances on ONE row shape: agent → arrow + Stop; command →
 });
 
 test("Cancel rides the box's stable delegate, acknowledges, and reaches the kernel's one cancel_watch", () => {
-  assert.match(RENDER, /"bg-cancel-watch": \(el\) => \{[\s\S]*?btn\.disabled = true; btn\.textContent = "Cancelling…";[\s\S]*?vscodeApi\?\.postMessage\(\{ type: "cancelWatch", id: activeId, watchId: id \}\);/);
+  assert.match(RENDER, /"bg-cancel-watch": \(el\) => \{[\s\S]*?btn\.disabled = true; btn\.textContent = "Cancelling…";[\s\S]*?vscodeApi\?\.postMessage\(\{ type: "cancelWatch", id: sid, watchId: id \}\);/);   // the box's own session (installBgBox: its host's data-sid), the chat's or an open thread's
   // kernel: the SAME cancel_watch `romp watch --cancel` and POST /watch {"cancel"} reach; LOUD on a miss
   assert.match(KERNEL, /if msg and msg\.get\("type"\) == "cancelWatch" and msg\.get\("watchId"\):/);
   assert.match(KERNEL, /if not cancel_watch\(str\(msg\["watchId"\]\)\.strip\(\)\):\s*\n\s*client\["send"\]\(json\.dumps\(\{"type": "warn",/);
@@ -248,7 +248,7 @@ test("ONE renderer: the grouped rows render whenever rows exist, idle or not; th
   assert.doesNotMatch(RENDER, /"Background task · "/);
   // the render gate is CONTENT: rows (awaitingItems, shipped in both states), a wait's why, or tracked tasks
   assert.match(body, /const items = \(\(s && s\.status\.awaitingItems\) \|\| \[\]\)\.filter\(\(it\) => it && it\.kind\);/);
-  assert.match(body, /if \(!s \|\| !activeId \|\| \(!why && !items\.length && !tasks\.length\)\) \{ host\.style\.display = "none"; host\.classList\.remove\("bg-awaited"\); return; \}/);
+  assert.match(body, /if \(!s \|\| !sid \|\| \(!why && !items\.length && !tasks\.length\)\) \{ host\.style\.display = "none"; host\.classList\.remove\("bg-awaited"\); return; \}/);
   // the same row renderer for every row in either state — tracked tasks still lend the command rows their
   // output tail and Stop handle (awaitRowSpec's `tracked`), and list on their own when the wait names none
   assert.match(body, /const taskById = new Map<string, BgTask>\(tasks\.map\(\(t\) => \[t\.id, t\]\)\);/);

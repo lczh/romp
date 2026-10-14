@@ -6674,6 +6674,15 @@ Break out. The thread's
 stop button shows where the chat's does: while it works, compacts or retries, and after its turn
 ends on an API error.
 
+### What a comment thread is doing
+
+An open thread's box shows what the chat shows for a session at work, each from the same parts: the
+"Thinking · 14s" line under its messages while it thinks, each running subagent's progress on its
+agent row, the background box with the commands, agents and watches it waits on, the context
+gauge beside its model and effort, and the API retry card while the API backs off. A thread that
+finished its turn but waits on a background command reads **Awaiting command**, never **Ready**.
+A click on the gauge compacts the thread; Stop on a background row stops that task in the thread.
+
 ### Where typing, pasting and dictation go
 
 With no box holding the caret, as after selecting a passage, what you type, paste or dictate goes
