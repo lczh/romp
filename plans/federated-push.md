@@ -410,7 +410,13 @@ buzzed late, as a fresh turn end. Now:
   the restart's own count: a v3 answer also says `listening` (the request found the cursor at the newest),
   and what fires while the hub listens is delivered as it comes, gap open or not; only gap events, and what
   fired while the hub was not listening, wait for the summary. (Until the review of #233 a catch-up held open
-  folded every new notification into a summary that had not been sent.) The turn tick
+  folded every new notification into a summary that had not been sent.) Whether an event fired while the hub
+  listened is judged by WHEN it fired, not by whether a request was open (the review of #235: one filed between
+  two requests went into the pending summary): each event wears the moment the origin filed it (`filed`) and
+  each answer the origin's own moment (`now`), both on the origin's clock, and an event filed at or after the
+  hub's previous answer, with no failed call since, is delivered. A comment thread (`threadOf`) is left out of
+  the catch-up altogether: it notifies nothing, so its re-attach is not waited on and its loss is no "may have
+  been missed". The turn tick
   reads the readiness before it reads the turn ends and declares the catch-up after filing them, so nothing
   it vouched for comes after. The first cut also stopped waiting `BOOT_ROW_BACKSTOP_S` (30 s) after the
   reconcile and called the count incomplete; the big machine's re-attaches take 22 to 39 s (once 82), so 9
@@ -419,7 +425,11 @@ buzzed late, as a fresh turn end. Now:
   lease's beat (`HostTransport.alive`, every `HELLO_PROBE_S`) and ends when the lease no longer names a live,
   beating host, the frozen host the review of #233 found holding the catch-up open for good (the session then
   stands down from the host, never the crash heal, and its count is its own unknown); ending the session ends
-  the wait too (`abort_connect`, and the kill sends `end` by the lease). A host that beats and still never
+  the wait too (`abort_connect`, and the kill sends `end` by the lease). A deliberate end the host cannot
+  confirm (no hello within 5 s, a `busy` answer, no exit after the `end`, a lease whose host no longer beats)
+  ends the CLI itself, by the exact process the lease names (its pid and start time, never a pattern) with
+  its process tree, said as a `host.end-forced` problem row (the review of #235: the CLI ran on, spending,
+  until the host's idle bound). A host that beats and still never
   answers can hold it; when those are all the catch-up waits on (`catchup_stuck`: two probes found the host
   alive and silent), the user is told once, in the error center (`push.catchup-held`), and ending that session
   lets the summary go. A boot reconcile that fails closes the catch-up at once with the count unknown
@@ -437,7 +447,8 @@ buzzed late, as a fresh turn end. Now:
   the rest with "; more may have been missed". If the turn tick itself fails, or the readiness check does,
   the catch-up is closed at once with the count unknown, loudly, rather than left open while the hub counts
   everything into a summary it never sends. So is a session whose held Stop hook ends without its stamp (it
-  raised or was cancelled: `_stop_hook`'s guard). A session that gave up its re-attach still owes its held
+  raised or was cancelled, or its registry would not read and `_update_reg` skipped the stamp:
+  `_stop_hook`'s guard). A session that gave up its re-attach still owes its held
   requests (`_unwatched_owed`): the attach a later send makes counts them into a summary, never late.
 - **The origin's own devices follow the same rule** (`_turn_missed_say`): its summary carries the exact
   count, adds "may have been missed" only when a session it cannot vouch for would have buzzed here (that

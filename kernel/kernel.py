@@ -70155,10 +70155,13 @@ def _push_ring_add(events):
         return
     with _push_ring_cond:
         _push_feed_ensure_locked()
+        filed = time.time()
         for ev in events:
             _PUSH_RING_SEQ[0] += 1
             e = dict(ev)
             e["seq"] = _PUSH_RING_SEQ[0]
+            e.setdefault("filed", filed)            # when this kernel filed it, on its own clock: a puller tells by it
+            #                                         whether the event fired while it was listening (_push_pull_once)
             _PUSH_RING.append(e)
         _push_feed_save_locked()
         _push_ring_cond.notify_all()
@@ -70328,9 +70331,12 @@ def _push_catchup_ready(now):
     failed = getattr(be, "catchup_failed", lambda: None)() if be else None
     if failed:
         return True, [("", failed)]                  # the re-attaches it would wait on may never start: unknown, at once
-    if not _BOOT_ATTACHED.is_set():
+    # the boot re-attaches of sessions that can notify and have not settled (a comment thread's never holds the catch-up:
+    # it notifies nothing, the review of #235); None before the reconcile names them, when attachDone is the whole answer
+    attaching = getattr(be, "catchup_attaching", lambda: None)() if be else None
+    if not _BOOT_ATTACHED.is_set() and attaching != []:
         stuck = sorted(str(x) for x in (getattr(be, "catchup_stuck", lambda: [])() or [])) if be else []
-        pending = int(getattr(be, "_boot_attach_pending", 0) or 0) if be else 0
+        pending = len(attaching) if attaching is not None else (int(getattr(be, "_boot_attach_pending", 0) or 0) if be else 0)
         if stuck and len(stuck) >= pending and not _PUSH_CATCHUP.get("said"):
             # every other re-attach is accounted for, and what is left waits on hosts that beat yet never answer: the
             # restart's summary waits on them, said to the user once, in the error center (the review of #233); new
@@ -70484,6 +70490,7 @@ def _push_events_serve(after, wait, proto=1):
         # caught up: listening, and (protocol 3) this life has caught up on its restart, read in the same hold as the batch,
         # so every gap event of the restart is in this answer or behind it and the puller may close its gap
         caught = at_newest and (_PUSH_CATCHUP["done"] or not v3)
+        answered_at = time.time()                    # in the same hold as the batch: every event filed before it is in it
         newest = _PUSH_RING_SEQ[0]
         oldest = _PUSH_RING[0]["seq"] if _PUSH_RING else newest + 1
         reset = None
@@ -70498,6 +70505,7 @@ def _push_events_serve(after, wait, proto=1):
                    "skipped": newest - cur[1] if reset == "overflow" else newest - (0 if v3 else _PUSH_FEED["after"])}
             if v3:
                 out["feed"] = fid
+                out["now"] = answered_at
             if v2:
                 out.update(_push_v2_facts())
             return out
@@ -70521,6 +70529,8 @@ def _push_events_serve(after, wait, proto=1):
                 w["current"] = False
             if v3 and e.get("gap"):
                 w["gap"] = True
+            if v3 and isinstance(e.get("filed"), (int, float)):
+                w["filed"] = e["filed"]
             served.append(w)
     out = {"boot": ns, "next": batch[-1]["seq"] if batch else cur[1], "events": served}
     stale = shown - sum(1 for w in served if w.get("current", True))
@@ -70530,6 +70540,8 @@ def _push_events_serve(after, wait, proto=1):
         out["feed"] = fid
         out["listening"] = at_newest                 # its events fired while the puller listened: delivered as they come,
         #                                              even while the restart's gap waits for the catch-up (caughtUp false)
+        out["now"] = answered_at                     # the origin's moment of this answer: the next answer's events filed at or
+        #                                              after it fired while the puller listened (_push_pull_once)
         if since:
             out["restarts"] = since
     if v2:
@@ -70595,6 +70607,8 @@ MISSED_TITLE_NAME = "missed notifications"   # the summary's title: _notify_titl
 _PUSH_GAPS = {}                      # row name -> its open gap (_push_gap_open); only that row's puller thread touches it
 _PUSH_PULL_ANSWERED = set()          # rows that have answered this kernel life (the first answer after a restart opens a gap)
 _PUSH_PULL_LAST_OK = {}              # row name -> when it last answered, this life (an outage's window starts there)
+_PUSH_PULL_HEARD = {}                # row name -> the row's own moment of its last answer (protocol 3's `now`), while every call
+#                                      since has answered: an event the row filed at or after it fired while this kernel listened
 _PUSH_GAP_TOLD = {}                  # row name -> {endpoint -> {said, owed, oid}}: what each device holds unseen (_push_gap_close), under _push_pull_lock
 _PUSH_GAP_TOLD_LOADED = [False]      # this life has read the previous one's copy (_push_gap_told_load)
 _PUSH_GAP_TOLD_FAULT = [None]        # the last write failure's text, said once per episode
@@ -70813,11 +70827,13 @@ def _push_pull_once(name, r):
     path = "/push/events?wait=%d&v=%d" % (PUSH_PULL_WAIT, PUSH_PULL_PROTO) + (("&after=" + quote(cursor, safe="")) if cursor else "")
     st, j = _push_pull_get(r, path, PUSH_PULL_WAIT + 10)
     if st == 0:
+        _PUSH_PULL_HEARD.pop(name, None)                 # not listening since its last answer
         _push_gap_open(name, "unreachable")             # what it fires until it answers again is a gap
         return False                                     # unreachable: the row's own status says so on the panel
     boot, nxt, events = j.get("boot"), j.get("next"), j.get("events")
     if (st != 200 or not isinstance(boot, str) or not boot or not isinstance(nxt, int) or isinstance(nxt, bool) or nxt < 0
             or not isinstance(events, list)):
+        _PUSH_PULL_HEARD.pop(name, None)
         _push_gap_open(name, "unreachable")
         _push_pull_say(name, "http-%s" % st, "romp: web push: '%s' answered the event pull with HTTP %s%s — its events do "
                        "not reach this kernel's devices until it answers" % (name, st, (": %s" % j.get("error")) if j.get("error") else ""))
@@ -70880,24 +70896,36 @@ def _push_pull_once(name, r):
     # fires is delivered as it comes and only the restart's own gap events wait for its summary (the review of #233: a
     # catch-up held open folded every new notification into a summary that had not been sent). An older row: caughtUp
     listening = j.get("listening") is True if "listening" in j else caught
-    if gap is not None and not listening:
-        for ev in fresh:
-            _push_gap_count(gap, ev)                     # missed: counted for the summary, never delivered late
-            _push_pull_seen_mark(name, key, ev["seq"])
-    else:
-        if gap is not None:
-            for ev in past:
-                _push_gap_count(gap, ev)                 # the row's downtime, said in the summary
-                _push_pull_seen_mark(name, key, ev["seq"])
-            if caught:
-                _push_gap_close(name)                    # the summary first (the past), then what fired while it listened
-        now_evs = [ev for ev in fresh if ev.get("gap") is not True]
-        if _push_pull_gate(name, now_evs, boot=key) and gap is None:
+    # Each event is judged by WHEN it fired (the review of #235: judged by whether a request was open, one that fired
+    # between two requests went into a restart's pending summary). A protocol-3 row stamps each event with the moment it
+    # filed it and each answer with its own moment, both on its clock: an event filed at or after this row's previous
+    # answer fired while this kernel was listening (it asks again the moment an answer lands), unless a call failed since
+    # (then the previous moment is forgotten). Without those stamps, the request's own `listening` says it for them all
+    since = _PUSH_PULL_HEARD.get(name)
+
+    def live(ev):
+        f = ev.get("filed")
+        if since is not None and isinstance(f, (int, float)) and not isinstance(f, bool):
+            return f >= since
+        return listening
+    if gap is None:
+        if _push_pull_gate(name, fresh, boot=key):
             # a notification delivered normally, outside any gap: the row is steady again, so the next gap's summary is
             # news and sounds (the coalescing above)
             _push_gap_rearm(name)
+    else:
+        for ev in fresh:
+            if ev.get("gap") is True or not live(ev):
+                _push_gap_count(gap, ev)                 # missed (or the row's downtime): counted, never delivered late
+                _push_pull_seen_mark(name, key, ev["seq"])
+        if caught:
+            _push_gap_close(name)                        # the summary first (the past), then what fired while it listened
+        _push_pull_gate(name, [ev for ev in fresh if ev.get("gap") is not True and live(ev)], boot=key)
     _push_pull_cursor_set(name, "%s:%d" % (boot, nxt))
     _PUSH_PULL_LAST_OK[name] = now
+    heard = j.get("now")
+    if isinstance(heard, (int, float)) and not isinstance(heard, bool):
+        _PUSH_PULL_HEARD[name] = float(heard)
     return True
 
 

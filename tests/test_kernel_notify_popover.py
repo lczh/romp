@@ -1173,7 +1173,8 @@ class UnwatchedTurnEnd(unittest.TestCase):
             with self.assertRaises(OSError):
                 asyncio.run(self.sess._stop_hook({sb.UNWATCHED_STOP_KEY: "req-held"}, None, None))
         self.assertEqual(self.be.unwatched_pending(), 0, "the catch-up does not wait on it")
-        self.assertEqual(self.be.catchup_lost()[SID_WEB], "the hook of a finished turn its host held failed before recording it")
+        self.assertEqual(self.be.catchup_lost()[SID_WEB], "a finished turn its host held could not be recorded (its hook "
+                                                          "failed, or its registry would not read)")
         self.assertTrue(any("was not recorded; its count is unknown" in m and k.get("problem") for m, k in logged), logged)
 
     def test_a_session_that_gave_up_reconnecting_owes_its_held_turn_end_to_the_next_attach(self):
@@ -1223,6 +1224,79 @@ class UnwatchedTurnEnd(unittest.TestCase):
         self.assertEqual(self.be.catchup_stuck(), [], "one probe: an answer may still come")
         self.sess._host.hello_probes = 2
         self.assertEqual(self.be.catchup_stuck(), [SID_WEB])
+
+    def _cli_and_lease(self, start=None):
+        """A stand-in CLI (a sleeping process of its own) and a host lease naming it by pid and start time, held by a live,
+        beating host (this process)."""
+        import subprocess
+        cli = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(lambda: (cli.poll() is None and cli.kill(), cli.wait()))
+        lease = {"sid": SID_WEB, "fsid": SID_WEB, "name": "web", "pid": cli.pid,
+                 "start": start or sb.proc_start(cli.pid),
+                 "holder": {"pid": os.getpid(), "start": sb.proc_start(os.getpid()), "kind": "host"}, "t": time.time()}
+        sb.write_lease(jd.STATE, lease)
+        self.addCleanup(lambda: sb.lease_path(jd.STATE, SID_WEB).unlink(missing_ok=True))
+        return cli, lease
+
+    def test_an_end_its_host_cannot_confirm_ends_the_cli_itself_by_its_exact_identity(self):
+        # the review of #235: ending a session whose host answered `busy` (its hung reconnect not yet noticed) or stayed
+        # stalled past the 5 s bound left the CLI running, still spending if mid-turn, until the host's idle bound
+        import socket
+        import threading as th
+        cli, lease = self._cli_and_lease()
+        path = str(sb._ht().host_sock(jd.STATE, SID_WEB))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path)
+        srv.listen(1)
+        self.addCleanup(lambda: (srv.close(), os.path.exists(path) and os.unlink(path)))
+
+        def busy():                                      # a host that thinks another kernel is still attached
+            c, _ = srv.accept()
+            c.recv(65536)
+            c.sendall(sb._ht().sh.encode_frame({"t": "busy", "kernel": {"pid": 7}}))
+            c.close()
+        th.Thread(target=busy, daemon=True).start()
+        said = []
+        with mock.patch.object(self.be, "_log", side_effect=lambda m, **k: said.append(m)):
+            self.be._end_host_or_cli(SID_WEB)
+            self.be._end_threads[SID_WEB].join(20)
+        self.assertIsNotNone(cli.wait(10), "the CLI is ended")
+        self.assertTrue(any("did not confirm the end" in m and "was ended directly" in m for m in said), said)
+
+    def test_a_direct_end_never_hits_a_process_the_lease_does_not_name_exactly(self):
+        cli, lease = self._cli_and_lease(start="not its start time")   # a reused pid: the start time differs
+        with mock.patch.object(self.be, "_log"):
+            self.assertFalse(self.be._end_cli_directly(SID_WEB, lease, "no answer within 5 s"))
+        self.assertIsNone(cli.poll(), "never signaled")
+
+    def test_a_held_turn_end_the_registry_would_not_take_is_uncountable(self):
+        # the review of #235: a registry that would not read made the stamp a silent skip, and the held id was retired
+        # as if the turn end were on record
+        self.hello(["req-held"])
+        sb._reg_path(jd.STATE, SID_WEB).write_text("{ torn")
+        with mock.patch.object(self.be, "_log"):
+            asyncio.run(self.sess._stop_hook({sb.UNWATCHED_STOP_KEY: "req-held"}, None, None))
+        self.assertEqual(self.be.unwatched_pending(), 0)
+        self.assertIn("could not be recorded", self.be.catchup_lost()[SID_WEB])
+
+    def test_a_comment_thread_is_left_out_of_the_catch_up(self):
+        # it notifies nothing (the kernel's turn tick and card diff never read one): its re-attach is not waited on, its
+        # held requests hold nothing, and its loss is not a "may have been missed" (the review of #235)
+        thread = "11111111-2222-4333-8444-555555555577"
+        sb.write_reg(jd.STATE, thread, {"sid": thread, "name": "web: a comment", "cwd": "/tmp", "alive": True,
+                                        "threadOf": SID_WEB})
+        t = sb.SdkSession(self.be, sb.read_reg(jd.STATE, thread))
+        t._unwatched_rids = {"req-thread"}
+        self.be.sessions[thread] = t
+        self.be._boot_attach_set = {SID_WEB, thread}
+        self.be._boot_attach_frozen = True
+        self.be._catchup_lost[thread] = "its session ended before this kernel had recorded a finished turn its host held"
+        self.assertEqual(self.be.unwatched_pending(), 0)
+        self.assertEqual(sorted(self.be.catchup_lost()), [SID_WEB])
+        self.assertEqual(self.be.catchup_attaching(), [SID_WEB])
+        self.be._boot_attach_settled_sids.add(SID_WEB)
+        self.assertEqual(self.be.catchup_attaching(), [], "the thread's re-attach holds nothing")
 
     def test_end_to_end_the_kernel_never_buzzes_it_late_and_files_it_as_a_gap_event(self):
         km._set_notify_all(True)
