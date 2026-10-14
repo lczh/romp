@@ -1225,9 +1225,22 @@ class _HeldStops:
         self.held = 0
         self.lost = {}
         self.unreported = {}
+        self.failed = None
+        self.stuck = []
+        self._boot_attach_pending = 0
+        self.problems = []
 
     def unwatched_pending(self):
         return self.held
+
+    def catchup_failed(self):
+        return self.failed
+
+    def catchup_stuck(self):
+        return list(self.stuck)
+
+    def catchup_problem(self, text, **fields):
+        self.problems.append(text)
 
     def catchup_lost(self):
         return dict(self.lost)
@@ -1300,6 +1313,25 @@ class OriginRestart(_Base):
              mock.patch.object(km, "_push_notify", side_effect=lambda *a, **k: self.pushed.append((a, k))), \
              mock.patch.object(km, "_self_host", return_value="hubhost"), contextlib.redirect_stderr(self.err):
             return km._push_pull_once(ROW, dict(km._remotes[ROW]))
+
+    def pull_listening(self, during):
+        """One long-poll the hub has PARKED at the row's newest (it is listening) while `during` runs on the origin: the
+        answer comes when what `during` files lands."""
+        def get(r, path, timeout):
+            q = parse_qs(urlparse(path).query)
+            return 200, json.loads(json.dumps(km._push_events_serve((q.get("after") or [""])[0], 5, int(q["v"][0]))))
+        with mock.patch.object(km, "_push_pull_get", side_effect=get), \
+             mock.patch.object(km, "_self_host", return_value="hubhost"), contextlib.redirect_stderr(self.err):
+            notify = mock.patch.object(km, "_push_notify", side_effect=lambda *a, **k: self.pushed.append((a, k)))
+            notify.start()
+            try:
+                t = threading.Thread(target=km._push_pull_once, args=(ROW, dict(km._remotes[ROW])))
+                t.start()
+                time.sleep(0.3)
+                during()
+                t.join(10)
+            finally:
+                notify.stop()
 
     def drop(self):
         """The hub's call while the origin is down: no answer."""
@@ -1512,6 +1544,54 @@ class OriginRestart(_Base):
         self.assertEqual([k for _, k in self.pushed if not k.get("host")], [], "nor on the origin's own devices")
         self.assertIn("nothing it may have missed would have reached the devices here", self.err.getvalue())
         self.assertNotIn("cannot be counted", self.err.getvalue())
+
+    def test_a_reattach_stuck_on_a_frozen_host_never_holds_new_notifications_and_ends_uncountable(self):
+        # the review of #233: one re-attach to a host that took the connection and never said hello held the catch-up
+        # open for good, and the hub folded EVERY notification the row pulled meanwhile, new ones included, into a
+        # summary that never went out. Now what fires while the hub listens is delivered as it comes; the user is told,
+        # once, in the error center, when only hosts that beat yet never answer remain; and once that host's lease stops
+        # (the transport's wait ends: tests/test_host_transport.py), the session's count is its own unknown
+        km._set_notify_session(API, True)
+        km._set_notify_session(WEB, True)
+        self.origin_restarts()
+        self.drop()
+        km._BOOT_ATTACHED.clear()                        # web's re-attach waits on its host's hello
+        self.stops._boot_attach_pending = 1
+        self.end_turn(API, unwatched=True)               # api re-attached: a turn its host held across the restart
+        self.tick()
+        self.pull()
+        self.pull()
+        self.pull_listening(lambda: (self.end_turn(API), self.tick()))   # a NEW turn end, after the boot, while the hub listens
+        self.assertEqual([(a[2], k["kind"]) for a, k in self.from_hub()], [(ROW + ":" + API, "turn")],
+                         "delivered as it happened, while the restart's summary still waits")
+        self.assertEqual(self.summaries(), [])
+        self.stops.stuck = [WEB]                         # its host beats and never answers: all that is left
+        self.tick()
+        self.tick()
+        self.assertEqual(len(self.stops.problems), 1, "said once, in the error center")
+        self.assertIn("is waiting on %s" % WEB[:8], self.stops.problems[0])
+        # its lease goes stale: the wait ends, the attach settles without a hello, and the catch-up closes
+        self.stops.stuck = []
+        self.stops._boot_attach_pending = 0
+        self.stops.lost = {WEB: "its session could not be reconnected after the restart"}
+        km._BOOT_ATTACHED.set()
+        self.tick()
+        self.pull()
+        self.pull()
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn; more may have been missed"])
+        self.assertEqual(len(self.from_hub("turn")), 1, "the held turn end was never delivered late")
+
+    def test_a_failed_boot_reconcile_closes_the_catch_up_at_once_as_unknown(self):
+        km._set_notify_session(WEB, True)
+        self.origin_restarts()
+        self.drop()
+        km._BOOT_ATTACHED.clear()                        # the reconcile failed before its re-attach phase: none settles
+        self.stops.failed = "the boot reconcile failed (RuntimeError)"
+        self.tick()
+        self.pull()
+        self.pull()
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · notifications may have been missed"])
+        self.assertIn("this restart cannot be counted: the boot reconcile failed (RuntimeError)", self.err.getvalue())
 
     def test_a_slow_reconnect_still_counts_a_held_turn_end_exactly(self):
         km._set_notify_session(API, True)

@@ -406,13 +406,24 @@ buzzed late, as a fresh turn end. Now:
   has caught up on its restart (`_push_catchup_ready`: every boot re-attach to a live host has settled, the
   boot milestone `attachDone`, each by its hello or its session's end, and no session still holds a
   request its CLI sent before the attach, the backend's `unwatched_pending`), no v3 answer says `caughtUp`,
-  so the hub's gap stays open; a request parked meanwhile is released when it catches up. The turn tick
+  so the hub's gap stays open; a request parked meanwhile is released when it catches up. The gap holds only
+  the restart's own count: a v3 answer also says `listening` (the request found the cursor at the newest),
+  and what fires while the hub listens is delivered as it comes, gap open or not; only gap events, and what
+  fired while the hub was not listening, wait for the summary. (Until the review of #233 a catch-up held open
+  folded every new notification into a summary that had not been sent.) The turn tick
   reads the readiness before it reads the turn ends and declares the catch-up after filing them, so nothing
   it vouched for comes after. The first cut also stopped waiting `BOOT_ROW_BACKSTOP_S` (30 s) after the
   reconcile and called the count incomplete; the big machine's re-attaches take 22 to 39 s (once 82), so 9
   of 74 boots since 2026-09-24 would have said "may have been missed" with nothing missed (the review of
-  #230). A re-attach that neither says hello nor ends holds the catch-up open; that is said once, loudly,
-  when the boot row records the attach as not settled.
+  #230). A re-attach ends one way or the other: the wait for a host's hello asks the host's liveness at its
+  lease's beat (`HostTransport.alive`, every `HELLO_PROBE_S`) and ends when the lease no longer names a live,
+  beating host, the frozen host the review of #233 found holding the catch-up open for good (the session then
+  stands down from the host, never the crash heal, and its count is its own unknown); ending the session ends
+  the wait too (`abort_connect`, and the kill sends `end` by the lease). A host that beats and still never
+  answers can hold it; when those are all the catch-up waits on (`catchup_stuck`: two probes found the host
+  alive and silent), the user is told once, in the error center (`push.catchup-held`), and ending that session
+  lets the summary go. A boot reconcile that fails closes the catch-up at once with the count unknown
+  (`catchup_failed`), since the re-attaches it would wait on may never start.
 - **A session whose count cannot be vouched for is said on its own.** The catch-up returns `(sid, why)` for
   each: a boot re-attach that ended without a hello, a session that ended before it had stamped a Stop its
   host held (`SdkBackend.catchup_lost`), and a session whose host runs code older than the `selfAnswered`
@@ -425,7 +436,9 @@ buzzed late, as a fresh turn end. Now:
   would have let a turn end through (a muted session files none), and its summary keeps the exact count of
   the rest with "; more may have been missed". If the turn tick itself fails, or the readiness check does,
   the catch-up is closed at once with the count unknown, loudly, rather than left open while the hub counts
-  everything into a summary it never sends.
+  everything into a summary it never sends. So is a session whose held Stop hook ends without its stamp (it
+  raised or was cancelled: `_stop_hook`'s guard). A session that gave up its re-attach still owes its held
+  requests (`_unwatched_owed`): the attach a later send makes counts them into a summary, never late.
 - **The origin's own devices follow the same rule** (`_turn_missed_say`): its summary carries the exact
   count, adds "may have been missed" only when a session it cannot vouch for would have buzzed here (that
   session's bell, or for a failure naming no session the turn switches or any session's explicit on), and is
