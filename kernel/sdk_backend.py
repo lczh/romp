@@ -3806,6 +3806,14 @@ def fed_text_opener(text: str) -> str:
     return "injected" if "<!-- romp-injected -->" in (text or "") else "human"
 
 
+# A turn that ended while no kernel was listening (2026-10-14; plans/federated-push.md, "The feed across a restart"): a
+# hosted CLI keeps running across a kernel restart, and the Stop hook of a turn it ends meanwhile waits at its host until
+# a kernel attaches and answers it. The transport marks such a hook's input with this key (host_transport's
+# UNWATCHED_STOP_KEY, pinned equal by a test: the request's id), the hook stamps `lastStopUnwatched` beside the settle,
+# and the kernel's turn tick counts that turn end into its restart's summary instead of buzzing it late.
+UNWATCHED_STOP_KEY = "rompUnwatched"
+
+
 # The bus banner's per-message marker, event_model's one detector (its POSTAL_RE; the fallback is the same pattern
 # for a stand-in event_model in tests).
 _POSTAL_MID_RE = getattr(_em, "POSTAL_RE", None) or re.compile(r"<!--\s*romp-msg-id:\s*(\S+?)\s*-->")
@@ -6451,6 +6459,10 @@ class SdkSession:
         # detach (the kernel leaving, the host keeping the CLI) so _on_session_gone never reads it as a crash;
         # `_host_end_grace` is the bound the next `end` carries (kill sets the short one)
         self._host = None
+        self._hello_seen = False           # a host's hello has reached this session object (this kernel life) at least once
+        self._unwatched_rids = set()       # request ids its CLI sent before this kernel life first attached to it (the first
+        #                                    hello's `parked`), until each is handed over, a Stop hook among them until it
+        #                                    has stamped its turn end (the transport's `unwatched`; unwatched_pending)
         self._host_intent = False          # set before the host attach or spawn begins, so a drain mid-attach detaches
         self._host_is_attach = False       # the current host connect is an ATTACH (a replay-bearing hello)
         self._deliberate_connect = False   # this connect is a deliberate reconnect inside a live thread: a fresh CLI marks no echoes
@@ -9660,6 +9672,8 @@ class SdkSession:
         finally:
             self._fire_boot_settled()   # a dead thread must free its boot-stagger slot (first, so
             #                             a raising _on_session_gone can never leak the slot)
+            getattr(self, "_unwatched_rids", set()).clear()   # this object answers no held request now: the restart
+            #                             catch-up must not wait on it (a next object's first hello names them again)
             self._release_launch_slot()   # …and a relaunch's launch slot, and its place in line for one
             if self._launch_slots() is not None:
                 self._launch_slots().unwait(self)
@@ -12221,6 +12235,10 @@ class SdkSession:
         (see _on_task_event), terminal-status-cleared, no overlay records needed. So this hook still
         ignores inp['background_tasks'] and just clears any stale awaiting:true — keeping the overlay
         channel available for signals that need durability across a backend restart."""
+        # a Stop its CLI sent before this kernel life first attached to it (the transport's mark, the request's id): the turn
+        # ended while no kernel was listening, stamped so below (lastStopUnwatched), and retired from the session's set
+        # once stamped, so the kernel's restart catch-up knows every such turn end is on record (unwatched_pending)
+        unwatched = inp.pop(UNWATCHED_STOP_KEY, None) if isinstance(inp, dict) else None
         self._record_transcript_path(inp)   # where the CLI writes, for discovery (see the helper)
         append_awaiting(self.backend.state_dir, self.sid, False)
         # Record the ARMED TIMER SET (the hook payload's session_crons: CronCreate crons, ScheduleWakeup
@@ -12346,9 +12364,15 @@ class SdkSession:
             stamp = {"lastStopAt": now_s, "lastTurnOpener": opener}
             if opener == "human":
                 stamp["lastHumanStopAt"] = now_s
+            if unwatched:
+                # the turn end the settle names happened while no kernel was listening: keyed on the settle itself, so a
+                # later turn's stamp (another lastStopAt) needs no write to clear it
+                stamp["lastStopUnwatched"] = now_s
             self.backend._update_reg(self.sid, **stamp)
         except Exception:
             pass
+        if unwatched:
+            getattr(self, "_unwatched_rids", set()).discard(str(unwatched))
         # delete-while-busy: the turn this delete interrupted has ENDED — complete the arm here,
         # on the same turn-end fact that stamps lastStopAt (never a sleep)
         if getattr(self, "_rewind_wait", False):
@@ -14745,6 +14769,24 @@ class SdkBackend:
         whose CLI therefore predates this kernel; its identity is recorded and nothing else moves. No CLI
         identity at all (a hello older than the identity itself): nothing stamped, said in the log, never a
         raise out of the connect."""
+        # the requests this CLI sent before this kernel life first attached to it (its first hello's `parked`; a later hello
+        # adds its own only while that set is still open, a reconnect before the catch-up finished): handed to the transport,
+        # which marks a Stop hook among them as a turn that ended while no kernel listened (host_transport._mark_unwatched).
+        # Set BEFORE the boot attach is counted settled below, so the kernel's restart catch-up never sees an attach done
+        # with its held Stop hooks not yet known (_push_catchup_ready)
+        try:
+            parked = {str(x) for x in (hello.get("parked") or []) if x}
+            rids = getattr(sess, "_unwatched_rids", None)
+            if rids is None:
+                rids = sess._unwatched_rids = set()
+            if parked and (not getattr(sess, "_hello_seen", False) or rids):
+                rids |= parked
+            sess._hello_seen = True
+            t_now = getattr(sess, "_host", None)
+            if t_now is not None:
+                t_now.unwatched = rids
+        except Exception as e:
+            self._log("host (%s): the held requests of the attach were not read: %s" % (sess.name, e))
         boot = sess.sid in self._boot_attach_sids
         self._boot_attach_sids.discard(sess.sid)
         h, c, j = hello.get("host") or {}, hello.get("cli") or {}, hello.get("journal") or {}
@@ -15829,6 +15871,12 @@ class SdkBackend:
                 self._boot_phase(kind)
         except Exception as e:
             self._log("boot milestone %s: %s" % (kind, e))
+
+    def unwatched_pending(self) -> int:
+        """How many sessions still hold a request their CLI sent before this kernel life first attached to it: not yet
+        handed over, or a Stop hook among them that has not stamped its turn end. The kernel's restart catch-up waits on
+        zero (_push_catchup_ready), so every turn that ended while it was down is on record before it says it has caught up."""
+        return sum(1 for s in list(self.sessions.values()) if getattr(s, "_unwatched_rids", None))
 
     def _boot_attach_count_down(self) -> None:
         with self._boot_attach_lock:

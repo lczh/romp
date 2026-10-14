@@ -1053,6 +1053,101 @@ class TurnOpenerStamp(unittest.TestCase):
         self.assertEqual([f["body"] for f in tick()], ["Folded the report in."])
 
 
+class UnwatchedTurnEnd(unittest.TestCase):
+    """A turn that ended while no kernel was listening (2026-10-14; plans/federated-push.md, "The feed across a restart").
+    A hosted CLI keeps running across a kernel restart; the Stop hook of a turn it ends meanwhile waits at its host, and the
+    host's hello names it among the requests still open when the restarted kernel attaches. The first hello of a session
+    object hands those ids to the transport (which marks the Stop among them), the hook stamps the settle as unwatched
+    (lastStopUnwatched beside lastStopAt) and retires the id, and the backend reports how many sessions still hold one
+    (unwatched_pending: the kernel's restart catch-up waits on zero). The kernel's tick then counts that turn end into its
+    restart's summary and files it as a gap event for a kernel pulling from it; before, it read as a fresh turn end and
+    buzzed late. Synthetic: the notes-api demo session, invented reply text."""
+
+    def setUp(self):
+        _reset_store()
+        for p in (jd.STATE / "sdk", jd.STATE / "states"):
+            for f in p.glob("*") if p.exists() else []:
+                f.unlink()
+        self.be = sb.SdkBackend(str(jd.STATE), "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
+        sb.write_reg(jd.STATE, SID_WEB, {"sid": SID_WEB, "name": "web", "cwd": "/tmp", "alive": True})
+        self.sess = sb.SdkSession(self.be, sb.read_reg(jd.STATE, SID_WEB))
+        self.be.sessions[SID_WEB] = self.sess
+        km._TURN_MISSED.clear()                              # nothing another case's restart left for the summary
+
+    def hello(self, parked):
+        """A host's hello for this session (an attach to the CLI it kept), naming the requests still open."""
+        import types
+        self.sess._host_is_attach = True
+        self.sess._host = types.SimpleNamespace(exit_info=None, ack_offset=0, end_grace=120.0, hello=None,
+                                                _init_pending=False, detach_mode=False, unwatched=None)
+        self.be._on_host_hello(self.sess, {"host": {"pid": 9000, "start": "1.0", "version": self.be.code_version},
+                                           "cli": {"pid": 11, "start": "c", "fsid": SID_WEB}, "journal": {"next": 0},
+                                           "parked": list(parked), "inflight": 1})
+
+    def stop_at(self, t, rid=None):
+        inp = {sb.UNWATCHED_STOP_KEY: rid} if rid else {}
+        with mock.patch("time.time", return_value=float(t)):
+            asyncio.run(self.sess._stop_hook(inp, None, None))
+        return sb.read_reg(jd.STATE, SID_WEB) or {}
+
+    def test_the_first_attach_watches_what_its_cli_held_and_the_stop_hook_stamps_it(self):
+        self.hello(["req-held", "req-perm"])
+        self.assertIs(self.sess._host.unwatched, self.sess._unwatched_rids, "one set, shared with the transport")
+        self.assertEqual(self.be.unwatched_pending(), 1)
+        self.sess._unwatched_rids.discard("req-perm")        # the transport handed the prompt over
+        self.sess._note_turn_opener("human", True)
+        reg = self.stop_at(3000, "req-held")
+        self.assertEqual((reg["lastStopAt"], reg["lastStopUnwatched"], reg["lastHumanStopAt"]), (3000, 3000, 3000))
+        self.assertEqual(self.be.unwatched_pending(), 0, "stamped: the restart's catch-up no longer waits on it")
+        reg = self.stop_at(3009)
+        self.assertEqual((reg["lastStopAt"], reg["lastStopUnwatched"]), (3009, 3000),
+                         "the next turn's settle is an ordinary one: the mark names the settle it was stamped with")
+
+    def test_only_the_first_attach_of_a_life_watches(self):
+        self.hello(["req-held"])
+        self.hello(["req-held"])                             # a reconnect before the catch-up finished: still watched
+        self.assertEqual(self.sess._unwatched_rids, {"req-held"})
+        self.sess._unwatched_rids.clear()                    # handed over and stamped
+        self.hello(["req-new"])                              # a later attach (a host's re-exec): a request held a moment
+        self.assertEqual(self.sess._unwatched_rids, set())   # by a handover is not one the restart missed
+        self.assertEqual(self.be.unwatched_pending(), 0)
+
+    def test_end_to_end_the_kernel_never_buzzes_it_late_and_files_it_as_a_gap_event(self):
+        km._set_notify_all(True)
+        km._set_notify_turns(True)
+        self.addCleanup(lambda: (km._set_notify_all(False), km._set_notify_turns(False)))
+        alive = [{"sid": SID_WEB, "name": "web", "path": _transcript(SID_WEB, "Folded the report in.")}]
+
+        def tick():
+            pushed = []
+            with mock.patch.object(km, "_alive_sessions", return_value=alive), \
+                 mock.patch.object(km, "_push_notify", side_effect=lambda *a, **k: pushed.append((a, k))), \
+                 mock.patch.object(km, "_push_forward"), mock.patch.object(km, "_self_host", return_value="boxa"), \
+                 mock.patch.dict(km._PUSH_CATCHUP, {"done": True}), io.StringIO() as sink, \
+                 mock.patch.object(km.sys, "stderr", sink):
+                return km._turn_notify_tick(time.time(), {SID_WEB: {"state": "waiting"}}), pushed
+
+        self.sess._note_turn_opener("human", True)
+        self.stop_at(4000)
+        tick()                                               # the baseline sighting
+        self.hello(["req-held"])                             # the restarted kernel attaches; the host held a finished turn
+        self.stop_at(4007, "req-held")
+        fired, pushed = tick()
+        self.assertEqual(fired, [], "not buzzed one by one, late")
+        self.assertEqual(pushed, [(("Romp: missed notifications", "boxa restarted · 1 session finished a turn", ""),
+                                   {"kind": "missed"})])
+        with km._push_ring_cond:
+            ev = dict(km._PUSH_RING[-1])
+        self.assertEqual((ev["kind"], ev["sid"], ev["turnKey"], ev.get("gap")), ("turn", SID_WEB, 4007, True))
+
+    def test_the_constants_shared_across_modules_agree(self):
+        ht = sb._ht()
+        self.assertEqual(sb.UNWATCHED_STOP_KEY, ht.UNWATCHED_STOP_KEY)
+        self.assertEqual(km.UNWATCHED_SELF_ANSWER_S, ht.sh.HOOK_SELF_ANSWER_S,
+                         "the kernel vouches for a restart's count only within the bound after which a host answers a "
+                         "held Stop hook itself")
+
+
 class FirstLine(unittest.TestCase):
     def test_first_non_empty_line_clipped(self):
         self.assertEqual(km._first_line("\n\n  Shipped it.  \nmore"), "Shipped it.")

@@ -6700,7 +6700,7 @@ _atomic_lock = threading.Lock()
 _atomic_seq = [0]
 
 
-def _write_state_json(path, text, note=True, mode=None):
+def _write_state_json(path, text, note=True, mode=None, fsync=False):
     """The ONE write door for the small JSON state files (session-flags, session-order, notify-cards,
     timeline-views): _atomic_write, with the publish's OSError turned into
     _StateUnwritable and the fault filed ONCE per episode on the path's registry (_note_state_fault, the
@@ -6713,10 +6713,14 @@ def _write_state_json(path, text, note=True, mode=None):
     for a write that is housekeeping rather than a gesture (the views reader's re-stamp on read), where
     a failure is a log line the caller writes itself and the first GESTURE that fails is what the user
     hears about (the views store's 2026-09-05 rule; the flags, order and bell stores never pass it).
-    `mode` reaches _atomic_write: the notified-cards snapshot (notify-prev.json) publishes at 0600."""
+    `mode` reaches _atomic_write: the notified-cards snapshot (notify-prev.json) publishes at 0600. `fsync` too: a store
+    that must survive a power cut as written (the push event feed, push-feed.json) is on disk before the call returns."""
     path = Path(path)
     try:
-        _atomic_write(path, text, mode=mode)
+        if fsync:
+            _atomic_write(path, text, mode=mode, fsync=True)
+        else:
+            _atomic_write(path, text, mode=mode)         # the call every other store has always made
     except OSError as e:
         exc = _StateUnwritable(path, "write failed: %s" % _errno_text(e))
         if note:
@@ -6725,7 +6729,7 @@ def _write_state_json(path, text, note=True, mode=None):
     _state_write_fault_seen.pop(str(path), None)     # a landed write ends the write-fault episode
 
 
-def _atomic_write(path, text, mode=None):
+def _atomic_write(path, text, mode=None, fsync=False):
     """Atomically publish `text` to `path` via a UNIQUELY-named temp + os.replace. The temp name is unique
     per (pid, thread, call): two kernel THREADS writing the SAME state file — the pusher, producer, and WS
     handlers all do — must not share a temp path. With the old pid-only name they did, so the loser renamed
@@ -6735,7 +6739,10 @@ def _atomic_write(path, text, mode=None):
     `mode` (e.g. 0o600) is applied to the TEMP before the replace, so the published file is never briefly
     world-readable — required for any file holding a CREDENTIAL. Without it the temp inherits the umask
     (usually 0644): remotes.json stores every attached host's serve token, so at 0644 any other local user
-    could read those tokens and drive the REMOTE kernels, defeating the loopback token gate for federation."""
+    could read those tokens and drive the REMOTE kernels, defeating the loopback token gate for federation.
+
+    `fsync`: the temp's bytes reach the disk before the publish, and the directory's entry after it, so the file survives
+    a power cut as written (the push event feed); off by default, as every other store has always been written."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with _atomic_lock:
@@ -6743,10 +6750,26 @@ def _atomic_write(path, text, mode=None):
         n = _atomic_seq[0]
     tmp = path.with_name("%s.tmp.%d.%d.%d" % (path.name, os.getpid(), threading.get_ident(), n))
     try:
-        tmp.write_text(text)
+        if fsync:
+            with open(tmp, "w") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+        else:
+            tmp.write_text(text)
         if mode is not None:
             os.chmod(tmp, mode)                          # before the publish — never a world-readable window
         os.replace(tmp, path)                            # atomic publish (overwrites; cross-platform)
+        if fsync:
+            try:
+                dfd = os.open(str(path.parent), os.O_RDONLY)
+                try:
+                    os.fsync(dfd)                        # the rename itself on disk
+                finally:
+                    os.close(dfd)
+            except OSError:
+                pass                                     # a filesystem that cannot fsync a directory: the file's own
+                #                                          bytes are on disk all the same
     except Exception:
         try:
             tmp.unlink()
@@ -68650,6 +68673,8 @@ def _feed_notifications_diff(feed):
     """The diff itself, under the snapshot's lock (see _notify_prev_lock)."""
     prev = _NOTIFY_PREV[0]
     first_boot = False
+    first_build = prev is None                       # the first build of this life: what it finds moved, moved while no
+    #                                                  build was watching (the restart), a GAP event for a puller
     if prev is None:                                 # the first build of this kernel life
         prev = _notify_prev_load()
         first_boot = prev is None
@@ -68710,6 +68735,9 @@ def _feed_notifications_diff(feed):
             ring.append({"kind": "card", "sid": e["sid"], "title": title, "body": body, "name": str(a.get("name") or ""),
                          "cardId": iid, "column": col, "at": now_t, "bell": "on" if bell else "default", "needsYou": needs_you,
                          "turnKey": _turn_end_key(e["sid"]) if e["sid"] else 0})
+            if first_build:
+                ring[-1]["gap"] = True               # it entered while no build of this kernel was watching: a puller counts
+                #                                      it into this restart's summary, never delivers it late
             if _notify_card_effective(cards, iid, e["sid"]):   # THIS machine's devices: card > session > its own master
                 out.append((title, body, e["sid"], iid))
     _NOTIFY_PREV[0] = nxt
@@ -69876,14 +69904,37 @@ def _push_forward(events):
 # cursor, a stale one flagged `current: false` rather than dropped (an explicit mute set since is still dropped). The puller
 # delivers only current events one by one, and only while no gap is open; after a gap it counts every event the gap held,
 # stale or not, for ONE summary (what would have buzzed had it been listening). A v1 puller is served as before.
-PUSH_PULL_PROTO = 2          # advertised in /version as `pushPull`: a peer pulls from a kernel whose /version carries it
-PUSH_RING_CAP = 256          # candidates kept per kernel life; a puller further behind resumes at the newest, loudly
+# PROTOCOL 3 (2026-10-14, the feed across a restart). The ring and its identity live on disk (STATE/push-feed.json, 0600:
+# the events carry session text; fsynced at every change) and are read back at the first touch of a life, so the sequence
+# numbers continue and a restart of this kernel is no longer a reset whose missed events are gone. A v3 puller's cursor is
+# '<feed>/<boot>:<seq>': the feed's id (which outlives a restart) and the life that served it, so an answer can say how
+# many times this kernel restarted since (`restarts`). What this kernel detects about the time it was DOWN is filed as a
+# GAP event (`gap`): a turn end whose Stop hook its CLI sent before this life attached to it (the hook stamps
+# lastStopUnwatched), or one the previous life stamped and never ticked (the turn memo), and a card the first feed build
+# of a life finds moved. A v3 puller never delivers a gap event one by one: it counts it into the restart's ONE summary
+# ("TESTHOST restarted · 1 session finished a turn"), and says nothing when none would pass its gate. Until this life has
+# caught up on its restart (_push_catchup_ready: every boot re-attach has said hello and every Stop hook a CLI held has
+# stamped its turn end) no v3 answer says `caughtUp`, so the puller's gap stays open until the count is complete. When the
+# count cannot be vouched for, a `lost` gap event says so, and the puller says that notifications may have been missed,
+# as before: the previous life left no exit record or was down long enough for a session host to answer a held Stop hook
+# itself (UNWATCHED_SELF_ANSWER_S), or the re-attaches never settled (BOOT_ROW_BACKSTOP_S). A file that is missing (the
+# first boot of this build) or cannot be read starts a new feed, loudly when it could not be read: every puller's cursor
+# then resets, the unknown count of before. A v1 or v2 puller is served this life's events as before, gap events never.
+PUSH_PULL_PROTO = 3          # advertised in /version as `pushPull`: a peer pulls from a kernel whose /version carries it
+PUSH_RING_CAP = 256          # candidates kept (across lives, on disk); a puller further behind resumes at the newest, loudly
 PUSH_EVENTS_WAIT_MAX = 25.0  # the longest one GET /push/events parks before answering empty-handed
 PUSH_PULL_WAIT = 20          # what a puller asks for (the postal exchange's EXCHANGE_WAIT)
+PUSH_FEED_LIVES_CAP = 64     # the kernel lives the feed remembers (a v3 answer's `restarts` counts those after a cursor's)
+UNWATCHED_SELF_ANSWER_S = 480.0   # session_host's HOOK_SELF_ANSWER_S (pinned equal by a test): a Stop hook held this long
+#                                   with no kernel attached is answered by its host, and that turn end never reaches a kernel
 _PUSH_RING = collections.deque(maxlen=PUSH_RING_CAP)   # the candidates, oldest first, each {seq, kind, sid, ...}
-_PUSH_RING_SEQ = [0]                                   # the newest seq this life issued (0 = none yet)
-_push_ring_cond = threading.Condition()                # guards both; a new candidate notifies every parked GET
-# what an event carries over the wire; the ring's other fields (column, at) are the origin's own staleness evidence
+_PUSH_RING_SEQ = [0]                                   # the newest seq the feed issued (0 = none yet)
+_push_ring_cond = threading.Condition()                # guards both and _PUSH_FEED; a new candidate notifies every parked GET
+_PUSH_FEED = {"id": None, "after": 0, "lives": [], "fault": None}   # the feed's id (None: not read yet this life), the seq
+#                                                      this life began after, the lives it remembers, the last write fault
+_PUSH_CATCHUP = {"done": False}                        # this life has caught up on its restart (_push_catchup_tick)
+# what an event carries over the wire; the ring's other fields (column, at, gap) are the origin's own evidence (a v3
+# puller is also told `gap`)
 _PUSH_EVENT_WIRE = ("seq", "kind", "sid", "title", "body", "name", "cardId", "bell", "turnKey", "needsYou")
 
 
@@ -69905,16 +69956,211 @@ def _push_explicit_bell(sid, item_id="", cards=None):
 
 
 def _push_ring_add(events):
-    """File detected candidates in the ring (each a dict; the seq is assigned here) and release every parked GET."""
+    """File detected candidates in the ring (each a dict; the seq is assigned here), write the feed to disk, and release
+    every parked GET."""
     if not events:
         return
     with _push_ring_cond:
+        _push_feed_ensure_locked()
         for ev in events:
             _PUSH_RING_SEQ[0] += 1
             e = dict(ev)
             e["seq"] = _PUSH_RING_SEQ[0]
             _PUSH_RING.append(e)
+        _push_feed_save_locked()
         _push_ring_cond.notify_all()
+
+
+def _push_feed_path():
+    return jd.STATE / "push-feed.json"              # resolved per call: tests redirect jd.STATE
+
+
+def _push_feed_parse(raw):
+    """A feed read back from disk as {id, seq, events, lives}, or None for anything that is not one this build wrote."""
+    if not isinstance(raw, dict):
+        return None
+    fid, seq, evs, lives = raw.get("feed"), raw.get("seq"), raw.get("events"), raw.get("lives")
+    if (not isinstance(fid, str) or not fid or "/" in fid or ":" in fid or not isinstance(seq, int) or isinstance(seq, bool)
+            or seq < 0 or not isinstance(evs, list) or not isinstance(lives, list)):
+        return None
+    kept, last = [], 0
+    for e in evs:
+        s = e.get("seq") if isinstance(e, dict) else None
+        if not isinstance(s, int) or isinstance(s, bool) or s <= last or s > seq:
+            return None                              # out of order, or past the feed's own count: not this build's file
+        kept.append(dict(e))
+        last = s
+    ls = [{"boot": str(x["boot"]), "after": int(x.get("after") or 0), "at": int(x.get("at") or 0)}
+          for x in lives if isinstance(x, dict) and isinstance(x.get("boot"), str) and x["boot"]
+          and isinstance(x.get("after", 0), int) and isinstance(x.get("at", 0), (int, float))]
+    return {"id": fid, "seq": seq, "events": kept[-PUSH_RING_CAP:], "lives": ls[-PUSH_FEED_LIVES_CAP:]}
+
+
+def _push_feed_ensure():
+    with _push_ring_cond:
+        _push_feed_ensure_locked()
+
+
+def _push_feed_ensure_locked():
+    """Under _push_ring_cond, at the first touch of a life: read the feed the previous life left (push-feed.json), so the
+    ring, its sequence and its id carry on, and record this life in it. A file that is missing (the first boot of this
+    build) starts a new feed, said in one line; one that cannot be read, or holds no feed, starts a new feed LOUDLY and
+    never stops the kernel: every puller's cursor then names another feed and resets, the unknown count of before
+    (plans/federated-push.md, "The feed across a restart"). A restart whose count this life cannot vouch for files a
+    `lost` gap event (_push_restart_unvouched)."""
+    if _PUSH_FEED["id"] is not None:
+        return
+    try:
+        _push_feed_read_locked()
+    except Exception:                                # a bug in the read must never stop the kernel or the pusher
+        sys.stderr.write("romp: web push: reading the event feed failed — starting a new event feed: a linked machine "
+                         "pulling from this one says notifications may have been missed\n%s" % traceback.format_exc())
+        _PUSH_FEED.update(id=secrets.token_hex(8), after=_PUSH_RING_SEQ[0],
+                          lives=[{"boot": _BOOT_ID, "after": _PUSH_RING_SEQ[0], "at": int(_STARTED)}])
+
+
+def _push_feed_read_locked():
+    """_push_feed_ensure_locked's read, which may raise only on a bug (the caller starts a new feed then, loudly)."""
+    path = _push_feed_path()
+    existed = os.path.lexists(str(path))
+    why, feed = None, None
+    try:
+        raw = _read_state_json(path, expect=dict)
+    except _StateUnreadable as e:
+        raw, why = None, str(e)
+    if raw is not None:
+        feed = _push_feed_parse(raw)
+        if feed is None:
+            why = "%s holds no event feed this build can read" % path
+            try:
+                _state_quarantine(path, path.stat(), why)  # kept aside, as a torn file is, before the new feed's write
+            except OSError:
+                pass
+    elif existed and why is None:
+        why = "%s could not be parsed (moved aside)" % path
+    if feed is None:
+        _PUSH_FEED.update(id=secrets.token_hex(8), lives=[])
+        if why:
+            sys.stderr.write("romp: web push: %s — starting a new event feed: a linked machine pulling from this one "
+                             "cannot know what this kernel fired before, and says notifications may have been missed\n" % why)
+        else:
+            sys.stderr.write("romp: web push: no event feed on disk (%s) — starting a new one\n" % path)
+        _PUSH_FEED["after"] = _PUSH_RING_SEQ[0]
+    else:
+        _PUSH_RING.clear()
+        _PUSH_RING.extend(feed["events"])
+        _PUSH_RING_SEQ[0] = feed["seq"]
+        _PUSH_FEED.update(id=feed["id"], lives=feed["lives"])
+        _PUSH_FEED["after"] = _PUSH_RING_SEQ[0]
+        lost = _push_restart_unvouched(feed["lives"][-1] if feed["lives"] else None)
+        sys.stderr.write("romp: web push: event feed %s read back from disk: %d event(s) kept, the newest #%d%s\n"
+                         % (feed["id"], len(feed["events"]), feed["seq"],
+                            ("; this restart's missed notifications cannot be counted: %s" % lost) if lost else ""))
+        if lost:
+            _PUSH_RING_SEQ[0] += 1
+            _PUSH_RING.append({"seq": _PUSH_RING_SEQ[0], "kind": "lost", "gap": True, "why": lost})
+    _PUSH_FEED["lives"] = (_PUSH_FEED["lives"] + [{"boot": _BOOT_ID, "after": _PUSH_FEED["after"],
+                                                   "at": int(_STARTED)}])[-PUSH_FEED_LIVES_CAP:]
+    _push_feed_save_locked()
+
+
+def _push_feed_save_locked():
+    """Under _push_ring_cond: write the feed (its id, the newest seq, the kept events, the lives), 0600 and fsynced, through
+    the one atomic write door. A failed write is said once per episode; the ring in memory serves on."""
+    snap = {"v": 1, "feed": _PUSH_FEED["id"], "seq": _PUSH_RING_SEQ[0], "events": list(_PUSH_RING),
+            "lives": _PUSH_FEED["lives"]}
+    try:
+        _write_state_json(_push_feed_path(), json.dumps(snap, sort_keys=True), note=False, mode=0o600, fsync=True)
+    except _StateUnwritable as e:
+        if _PUSH_FEED["fault"] != str(e):
+            _PUSH_FEED["fault"] = str(e)
+            sys.stderr.write("romp: web push: %s — a restart of this kernel cannot tell a linked machine what it fired "
+                             "meanwhile\n" % e)
+        return
+    _PUSH_FEED["fault"] = None
+
+
+def _push_prev_exit_t(prev):
+    """When the life `prev` ({boot, at}) began its exit, from the restart ledger's cut row (restart-cuts.jsonl, written at
+    the start of every orderly exit), or None when it wrote none (killed, crashed) or the ledger cannot be read."""
+    try:
+        pid = int(str(prev.get("boot") or "").split(".", 1)[0])
+    except ValueError:
+        return None
+    try:
+        lines = RESTART_CUTS_FILE.read_text(encoding="utf-8").splitlines()[-400:]
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(r, dict) and "cutTurns" in r and r.get("pid") == pid and isinstance(r.get("t"), (int, float))
+                and r["t"] >= int(prev.get("at") or 0)):
+            return float(r["t"])
+    return None
+
+
+def _push_restart_unvouched(prev):
+    """Why the turn ends this restart missed cannot all be counted, or None when they can. A session host answers a Stop
+    hook it has held for UNWATCHED_SELF_ANSWER_S with no kernel attached, and that turn end then never reaches a kernel;
+    so the count is vouched for only when the previous life `prev` recorded its exit and this life began within that
+    bound of it. A killed or crashed life records none."""
+    if not prev:
+        return "the feed names no previous kernel life"
+    t = _push_prev_exit_t(prev)
+    if t is None:
+        return "the previous kernel life left no exit record (it was killed or crashed)"
+    down = max(0.0, float(_STARTED) - t)
+    if down >= UNWATCHED_SELF_ANSWER_S:
+        return ("this kernel was down %s, long enough for a session's host to answer a finished turn's hook itself"
+                % _span_words(down))
+    return None
+
+
+def _push_catchup_ready(now):
+    """Has this life caught up on its restart? (ready, lost): every boot re-attach to a live session host has said hello
+    (attachDone) and no session still holds a request its CLI sent before this life attached to it (the backend's
+    unwatched_pending: a Stop hook among them has not stamped its turn end yet), or there is no session backend at all.
+    Past BOOT_ROW_BACKSTOP_S after the reconcile it is declared caught up regardless, with `lost` saying why the count
+    is incomplete, so a wedged attach never holds a puller's gap open for good."""
+    be = _sdk_backend
+    if be is False:
+        return True, None                            # no session backend: nothing re-attaches
+    if _BOOT_ATTACHED.is_set():
+        held = 0
+        try:
+            held = int(getattr(be, "unwatched_pending", lambda: 0)() or 0) if be else 0
+        except Exception:
+            held = 0
+        if not held:
+            return True, None
+        why = "%d session(s) still held a finished turn this kernel had not recorded" % held
+    else:
+        why = "the sessions' re-attaches after the restart did not all settle"
+    rd = _BOOT_MARKS.get("reconcileDone")
+    if isinstance(rd, float) and now - rd >= BOOT_ROW_BACKSTOP_S:
+        return True, why
+    return False, None
+
+
+def _push_catchup_tick(ready):
+    """The turn tick's last step, until this life has caught up on its restart: `ready` is _push_catchup_ready as the tick
+    read it BEFORE it read the sessions' turn ends, so every turn end on record by then has been filed. Returns True on
+    the tick that completes it, after which the v3 answers say `caughtUp` again; parked GETs are released so a puller
+    hears it at once. An incomplete count files a `lost` gap event first, loudly."""
+    if _PUSH_CATCHUP["done"] or not ready or not ready[0]:
+        return False
+    lost = ready[1]
+    if lost:
+        sys.stderr.write("romp: web push: caught up on this restart with an incomplete count — %s; a linked machine "
+                         "says notifications may have been missed\n" % lost)
+        _push_ring_add([{"kind": "lost", "gap": True, "why": lost}])
+    with _push_ring_cond:
+        _PUSH_CATCHUP["done"] = True
+        _push_ring_cond.notify_all()
+    return True
 
 
 def _push_cursor_parse(s):
@@ -69930,8 +70176,11 @@ def _push_event_verdict(ev):
     the bell set on this machine is now an explicit mute (the user's own choice: never served); "stale" when it is no
     longer news; "current" otherwise. A turn event is current while that turn end is still the session's latest
     (_turn_end_key). A card event is current while the card still sits in the column it entered (the notify snapshot, the
-    last feed build's view) and the user has not acted on it since (_notify_user_acted_since, the override journal)."""
+    last feed build's view) and the user has not acted on it since (_notify_user_acted_since, the override journal). A
+    `lost` marker (a restart whose count is incomplete) is a fact about the past, always current."""
     sid = str(ev.get("sid") or "")
+    if ev.get("kind") == "lost":
+        return "current"
     if ev.get("kind") == "turn":
         if _push_explicit_bell(sid) is False:
             return "muted"
@@ -69967,45 +70216,88 @@ def _push_events_serve(after, wait, proto=1):
     serves the stale ones, flagged `current: false`) and `next` = the newest seq examined. Anything else resets: `reset`
     is no-cursor (the puller holds none), restarted (another life's cursor, or one this life never issued) or overflow
     (the ring dropped events past it), `skipped` the events this answer passes over, and `next` the newest seq, so the
-    puller resumes at the newest event. The wait is the only lock held across time, and nothing else takes it."""
+    puller resumes at the newest event. The wait is the only lock held across time, and nothing else takes it.
+
+    PROTOCOL 3 (the feed across a restart, the section comment): the cursor is '<feed>/<boot>:<seq>' and `boot` in the
+    answer is this life's form of it. A cursor of this FEED stays valid across this kernel's restarts; `restarts` says how
+    many lives began after the one that served it, `feed` names the feed, and gap events are served flagged `gap` (a
+    `lost` one bare). `caughtUp` also needs this life to have caught up on its restart (_PUSH_CATCHUP), and a request
+    parked before it had is released when it does. A v1 or v2 cursor names a LIFE as before, and is served that life's
+    events only, gap events never: an older puller resets at a restart and summarizes it as it always did."""
     cur = _push_cursor_parse(after) if after else None
     try:
         wait = max(0.0, min(float(wait or 0), PUSH_EVENTS_WAIT_MAX))
     except (TypeError, ValueError):
         wait = 0.0
-    v2 = proto >= 2
+    v2, v3 = proto >= 2, proto >= 3
     with _push_ring_cond:
-        caught = cur is not None and cur[0] == _BOOT_ID and cur[1] == _PUSH_RING_SEQ[0]
-        if caught and wait > 0:
-            _push_ring_cond.wait_for(lambda: _PUSH_RING_SEQ[0] > cur[1], timeout=wait)
+        _push_feed_ensure_locked()
+        fid = _PUSH_FEED["id"]
+        ns = "%s/%s" % (fid, _BOOT_ID) if v3 else _BOOT_ID
+        since = 0
+        if cur is None:
+            ours = False
+        elif v3:
+            feed, sep, life = cur[0].partition("/")
+            ours = bool(sep) and feed == fid
+            if ours and life != _BOOT_ID:
+                boots = [x["boot"] for x in _PUSH_FEED["lives"]]
+                since = (len(boots) - 1 - boots.index(life) if life in boots
+                         else sum(1 for x in _PUSH_FEED["lives"] if x["after"] >= cur[1]) or 1)
+        else:
+            ours = cur[0] == _BOOT_ID and cur[1] >= _PUSH_FEED["after"]   # an older puller: this life's events only
+        done0 = _PUSH_CATCHUP["done"]
+        at_newest = ours and cur[1] == _PUSH_RING_SEQ[0]
+        caught = at_newest and (done0 or not v3)
+        if at_newest and wait > 0:
+            _push_ring_cond.wait_for(lambda: _PUSH_RING_SEQ[0] > cur[1] or (v3 and not done0 and _PUSH_CATCHUP["done"]),
+                                     timeout=wait)
+            if v3 and not caught and _PUSH_CATCHUP["done"] and _PUSH_RING_SEQ[0] == cur[1]:
+                caught = True                        # it listened from the newest until this life caught up, and nothing
+                #                                      landed meanwhile: the restart's count is all behind it
         newest = _PUSH_RING_SEQ[0]
         oldest = _PUSH_RING[0]["seq"] if _PUSH_RING else newest + 1
         reset = None
         if cur is None:
             reset = "no-cursor"
-        elif cur[0] != _BOOT_ID or cur[1] > newest:
+        elif not ours or cur[1] > newest:
             reset = "restarted"
         elif cur[1] < oldest - 1:
             reset = "overflow"
         if reset:
-            out = {"boot": _BOOT_ID, "next": newest, "events": [], "reset": reset,
-                   "skipped": newest - cur[1] if reset == "overflow" else newest}
+            out = {"boot": ns, "next": newest, "events": [], "reset": reset,
+                   "skipped": newest - cur[1] if reset == "overflow" else newest - (0 if v3 else _PUSH_FEED["after"])}
+            if v3:
+                out["feed"] = fid
             if v2:
                 out.update(_push_v2_facts())
             return out
         batch = [dict(e) for e in _PUSH_RING if e["seq"] > cur[1]]
     served = []
+    shown = 0                                        # the events an older puller is shown at all (no gap events)
     for e in batch:
+        if e.get("gap") and not v3:
+            continue                                 # an older puller resets at a restart instead of counting its gap
+        shown += 1
+        if e.get("kind") == "lost":
+            served.append({"seq": e["seq"], "kind": "lost", "gap": True})
+            continue
         verdict = _push_event_verdict(e)
         if verdict == "current" or (v2 and verdict == "stale"):
             w = {k: e.get(k) for k in _PUSH_EVENT_WIRE}
             if v2 and verdict == "stale":
                 w["current"] = False
+            if v3 and e.get("gap"):
+                w["gap"] = True
             served.append(w)
-    out = {"boot": _BOOT_ID, "next": batch[-1]["seq"] if batch else cur[1], "events": served}
-    stale = len(batch) - sum(1 for w in served if w.get("current", True))
+    out = {"boot": ns, "next": batch[-1]["seq"] if batch else cur[1], "events": served}
+    stale = shown - sum(1 for w in served if w.get("current", True))
     if stale:
         out["stale"] = stale
+    if v3:
+        out["feed"] = fid
+        if since:
+            out["restarts"] = since
     if v2:
         out["caughtUp"] = caught
         out.update(_push_v2_facts())
@@ -70310,16 +70602,28 @@ def _push_pull_once(name, r):
             # the events are gone (another life's ring, or overflowed past): a gap whose count cannot be known. A row with
             # no cursor while this kernel's record is intact is a row new to it: nothing was missed
             _push_gap_open(name, {"restarted": "restarted", "overflow": "overflow"}.get(reset, "hub"), unknown=True)
-    gap = _PUSH_GAPS.get(name)
+    # the backstop's namespace: a protocol-3 row names its FEED, which outlives its restarts (its `boot`, the cursor's
+    # namespace, also names the life); an older row's boot is its life
+    key = j.get("feed") if isinstance(j.get("feed"), str) and j.get("feed") else boot
+    restarts = j.get("restarts")
+    if isinstance(restarts, int) and not isinstance(restarts, bool) and restarts > 0:
+        # its kernel restarted since this kernel's cursor, and its feed survived: what it missed meanwhile is COUNTED, from
+        # the gap events it detects (a turn that ended while it was down), so the gap's summary has an exact number
+        _push_gap_open(name, "restarted", restarts=restarts)
     fresh = []
     for ev in events:
         seq = ev.get("seq") if isinstance(ev, dict) else None
         if not isinstance(seq, int) or isinstance(seq, bool):
             continue
         with _push_pull_lock:                            # one memo for every row's puller
-            if (name, boot, seq) in _PUSH_PULL_SEEN:
+            if (name, key, seq) in _PUSH_PULL_SEEN:
                 continue                                 # decided once already (the backstop beside the cursor)
         fresh.append(ev)
+    past = [ev for ev in fresh if ev.get("gap") is True]   # what the row detected about its own downtime: never delivered
+    for ev in past:                                      # one by one, always counted into its restart's summary (a gap
+        # opened here when none is: a session that re-attached after the row had caught up)
+        _push_gap_open(name, "restarted", restarts=0, unknown=ev.get("kind") == "lost")
+    gap = _PUSH_GAPS.get(name)
     # caught up: the request found the cursor at the row's newest, so this answer's events fired while it listened. An
     # older row (protocol 1) does not say; an empty-handed, reset-free answer proves the same there
     caught = j.get("caughtUp") is True if "caughtUp" in j else (not events and not reset)
@@ -70331,11 +70635,15 @@ def _push_pull_once(name, r):
     if gap is not None and not caught:
         for ev in fresh:
             _push_gap_count(gap, ev)                     # missed: counted for the summary, never delivered late
-            _push_pull_seen_mark(name, boot, ev["seq"])
+            _push_pull_seen_mark(name, key, ev["seq"])
     else:
         if gap is not None:
+            for ev in past:
+                _push_gap_count(gap, ev)                 # the row's downtime, said in the summary
+                _push_pull_seen_mark(name, key, ev["seq"])
             _push_gap_close(name)                        # the summary first (the past), then what fired while it listened
-        if _push_pull_gate(name, fresh, boot=boot) and gap is None:
+        now_evs = [ev for ev in fresh if ev.get("gap") is not True]
+        if _push_pull_gate(name, now_evs, boot=key) and gap is None:
             # a notification delivered normally, outside any gap: the row is steady again, so the next gap's summary is
             # news and sounds (the coalescing above)
             _push_gap_rearm(name)
@@ -70379,16 +70687,17 @@ def _push_event_needs_you(ev):
     return str(ev.get("title") or "").startswith("Romp needs you")
 
 
-def _push_gap_open(name, why, unknown=False):
+def _push_gap_open(name, why, unknown=False, restarts=None):
     """Open row `name`'s gap, or widen the one open: `why` is what this kernel knows ("unreachable", "hub" = this kernel
-    restarted, "restarted" = the row's kernel did, "overflow"), `unknown` when the missed events themselves are gone."""
+    restarted, "restarted" = the row's kernel did, "overflow"), `unknown` when the missed events themselves are gone.
+    `restarts`: how many times the row's kernel restarted, when its answer says (protocol 3); one when it does not."""
     g = _PUSH_GAPS.get(name)
     if g is None:
         g = _PUSH_GAPS[name] = {"why": set(), "since": _PUSH_PULL_LAST_OK.get(name), "back": None, "turns": set(),
                                 "needs": 0, "done": 0, "unknown": False, "bells": False, "cards": False, "restarts": 0}
     g["why"].add(why)
     if why == "restarted":
-        g["restarts"] += 1
+        g["restarts"] += 1 if restarts is None else int(restarts)
     if why == "unreachable":
         g["back"] = None                                 # quiet again: the window runs to its next answer
     if unknown:
@@ -70884,7 +71193,17 @@ def _first_line(text, cap=_TURN_BODY_CAP):
 # one by one, late; they are said in one summary notification ("<this machine> restarted · 2 sessions finished turns"),
 # counting only the sessions whose bell would have let the buzz through (an explicit "on", or the master and the turn
 # switch on). A memo that is missing (the first boot of this build) or unreadable summarizes nothing, said in the log.
+# THE TURNS A HOST HELD (2026-10-14). A hosted CLI keeps running across the restart, and the Stop hook of a turn it ends
+# meanwhile waits at its host until this kernel attaches and answers it, so that turn end is stamped AFTER the boot, with
+# lastStopUnwatched beside it (sdk_backend's Stop hook): read as an ordinary turn end it buzzed late. It joins the same
+# summary, and the summary waits until this life has caught up on its restart (_push_catchup_ready), so it counts every
+# such turn end once. Both kinds are also filed for a kernel that pulls from this one as GAP events, which it counts into
+# its own summary of this restart (the pull section). One that arrives after the catch-up (a session that re-attached
+# late) is said in a summary of its own, never buzzed one by one.
 _TURN_BOOTED = [False]        # this life's first tick has run (the one that reads the previous life's memo)
+_TURN_MISSED = set()          # sessions whose turn end, while this kernel was down, would have buzzed here: said at the catch-up
+_TURN_MEMO_PREV_LIFE = [None] # the previous life's memo as this life's first tick read it (None: none on record), kept for
+#                               the life: every first sight of a session is judged against it
 _TURN_MEMO_DISK = [None]      # what turn-notify-memo.json last held: a write happens only when the memo moved
 _TURN_MEMO_FAULT = [None]     # the last write failure's text, said once per episode
 
@@ -70935,6 +71254,19 @@ def _turn_bell_passes(bell):
     return _notify_all_on() and _notify_turns_on()
 
 
+def _push_turn_gap(s, sid, key, bell):
+    """A human turn end that happened while this kernel was down (the memo's, or one a host held: the block above). Filed
+    as a GAP event for a kernel that pulls from this one, which counts it into its summary of this restart, and kept for
+    this machine's own summary (_TURN_MISSED) when its bell would have let the buzz through here. Never buzzed one by one,
+    and no buzz claim is spent: a card the same turn raises keeps its own."""
+    body = _first_line(_last_assistant_text(s.get("path") or "")) or "finished a turn"
+    sname = str(s.get("name") or _name_of(sid) or sid[:8])
+    _push_ring_add([{"kind": "turn", "sid": sid, "title": _notify_title(sname), "body": body, "name": sname,
+                     "bell": "on" if bell else "default", "turnKey": key, "gap": True}])
+    if _turn_bell_passes(bell):
+        _TURN_MISSED.add(sid)
+
+
 def _turn_notify_tick(now, live_map):
     """One pusher-cycle pass over the live sessions: a session whose turn-end key MOVED since the
     last pass finished a turn. Fires only for a turn the HUMAN opened (_turn_opener — a subagent's task
@@ -70942,12 +71274,18 @@ def _turn_notify_tick(now, live_map):
     (_turn_bell_passes: an explicit on, or no choice with the master and the turn switch on); every
     sighting advances the memo regardless, so switching the row on later never replays old ends and a
     silent end is never replayed either. The first tick of a life summarizes the human turn ends the
-    previous life never saw (the memo block above) instead of baselining them silently."""
+    previous life never saw (the memo block above) instead of baselining them silently, and so does every
+    tick for a turn end a session's host held while this kernel was down (lastStopUnwatched): one summary,
+    once this life has caught up on its restart (_push_catchup_ready, read before the sessions are)."""
     fired = []
+    ready = None if _PUSH_CATCHUP["done"] else _push_catchup_ready(now)   # BEFORE the turn ends are read: every stamp
+    #                                                                       on record by then is filed by this tick
     boot = not _TURN_BOOTED[0]
     _TURN_BOOTED[0] = True
-    disk = _turn_memo_load() if boot else None
-    missed = []                                          # (sid, human end) the previous life never saw, gated as a buzz would be
+    if boot:
+        _TURN_MEMO_PREV_LIFE[0] = _turn_memo_load()
+    disk = _TURN_MEMO_PREV_LIFE[0]
+    window = boot or not _PUSH_CATCHUP["done"]          # this life is still catching up on its restart
     snap = {}
     for s in _alive_sessions(now, live_map):
         sid = str(s.get("sid") or "")
@@ -70959,12 +71297,19 @@ def _turn_notify_tick(now, live_map):
         _TURN_PREV[sid] = key
         if key:
             snap[sid] = key
-        if prev is None and disk is not None and key and sid in disk and key != disk[sid]:
-            # first sight this life of a session whose turn ended while no kernel was watching: was one of those the
-            # human's? (a Codex session, with no SDK registry, has only turns sent through romp: its newest end counts)
-            human_end = int((reg or {}).get("lastHumanStopAt") or 0) if reg else key
-            if human_end > disk[sid] and _turn_bell_passes(_push_explicit_bell(sid)):
-                missed.append((sid, human_end))
+        if prev is None and key:
+            # first sight this life: a turn end the previous life never saw happened while no kernel was watching. Known
+            # by the memo while this life catches up on its restart, and at any time by the stamp of a Stop hook its host
+            # held (a session re-attached late); the memo keeps a turn end the previous life already filed from being
+            # filed again. Was it the human's? (a Codex session, with no SDK registry, has only turns sent through romp:
+            # its newest end counts)
+            known = disk.get(sid) if disk is not None else None
+            held = bool(reg) and reg.get("lastStopUnwatched") == key
+            if key != known and ((window and known is not None) or held):
+                human_end = int((reg or {}).get("lastHumanStopAt") or 0) if reg else key
+                bell = _push_explicit_bell(sid)
+                if human_end > (known or 0) and bell is not False:
+                    _push_turn_gap(s, sid, key, bell)
             continue
         if prev is None or key == prev or not key:
             continue                                     # baseline / nothing new / no settle evidence
@@ -70976,6 +71321,9 @@ def _turn_notify_tick(now, live_map):
         bell = _push_explicit_bell(sid)
         if bell is False:
             continue                                     # the session's own bell is off on this machine: no device hears it
+        if reg and reg.get("lastStopUnwatched") == key:
+            _push_turn_gap(s, sid, key, bell)            # its host held the Stop while this kernel was down: never buzzed late
+            continue
         body = _first_line(_last_assistant_text(s.get("path") or "")) or "finished a turn"
         sname = str(s.get("name") or _name_of(sid) or sid[:8])
         title = _notify_title(sname)                             # a turn end is never a needs-you
@@ -70993,10 +71341,13 @@ def _turn_notify_tick(now, live_map):
     if boot and disk is None:
         sys.stderr.write("romp: turn notifications: no record of the previous kernel life's turn ends — turns that "
                          "ended while it was down are not summarized\n")
-    if missed:
-        body = "%s restarted · %s" % (_self_host(), _missed_counts_text(len(missed), 0, 0))
+    _push_catchup_tick(ready)                            # after the turn ends it vouched for are filed
+    if _TURN_MISSED and _PUSH_CATCHUP["done"]:
+        n = len(_TURN_MISSED)
+        _TURN_MISSED.clear()
+        body = "%s restarted · %s" % (_self_host(), _missed_counts_text(n, 0, 0))
         sys.stderr.write("romp: turn notifications: %d session(s) finished a turn while this kernel was down — said in "
-                         "one summary, not one by one\n" % len(missed))
+                         "one summary, not one by one\n" % n)
         _push_notify(_notify_title(MISSED_TITLE_NAME), body, "", kind="missed")
     if fired:
         _push_forward(fired)                             # the legacy leg, to peers that do not pull yet
@@ -82780,7 +83131,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(400, "bad cursor", "text/plain")
                 try:
                     _pw = float((q.get("wait") or ["0"])[0] or 0)
-                    _pv = int((q.get("v") or ["1"])[0] or 1)       # the protocol the puller speaks (2: the gap policy's fields)
+                    _pv = int((q.get("v") or ["1"])[0] or 1)       # the protocol the puller speaks (2: the gap policy's fields; 3: the feed across a restart)
                 except ValueError:
                     return self._send(400, "bad wait or v", "text/plain")
                 return self._send(200, json.dumps(_push_events_serve(_pa, _pw, _pv)), "application/json", cache="no-cache")
@@ -87321,6 +87672,8 @@ def main():
     _remotes_load()                                            # re-attach remote kernels from a prior run
     _pr_watches_load()                                         # re-arm PR-landing watches (same intent rule)
     _watches_load()                                            # …and the generic watches (T121 part 2)
+    _push_feed_ensure()                                        # the push event feed the last life left, read back now so a
+    #                                                            linked machine's first pull finds it, and this life on record
     _consume_update_report()                                   # last self-update's outcome → the Log, once
     threading.Thread(target=_update_check_loop, daemon=True).start()   # newer release? boot + every 6h (mode-gated inside)
     threading.Thread(target=_ensure_postal_bus, daemon=True).start()   # a sessionless machine still needs its bus

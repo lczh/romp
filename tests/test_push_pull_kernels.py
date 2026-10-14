@@ -23,11 +23,12 @@ What the run pins, in order:
     ("hubhost restarted · TESTHOST: 1 session finished a turn");
   * the hub restarts with NO cursor file at all (its first pull, or the record removed): it resumes at the origin's newest
     and says what it skipped, delivering nothing old;
-  * the ORIGIN restarts (a new life, a new boot id): the hub resumes at the newest with its loud line, and the summary the
-    device still holds unseen from the hub's first restart takes in that notifications may have been missed (the events
-    went with the origin's old life), updated without a sound: what each device holds is on the hub's disk, so the hub's
-    own restarts in between did not make it sound again (the review of #221); the next turn end is delivered once, as it
-    happens;
+  * the ORIGIN restarts (an orderly exit, a new life) while web's turn ends: its event feed is on its disk, so the hub's
+    cursor stays valid (no reset), and the turn end it missed is counted: the summary the device still holds unseen from
+    the hub's first restart takes it in ("TESTHOST restarted · 2 sessions finished turns"), updated without a sound, never
+    "may have been missed" (2026-10-14): what each device holds is on the hub's disk, so the hub's own restarts in between
+    did not make it sound again (the review of #221); the next turn end is delivered once, as it happens;
+  * the origin restarts again with nothing finishing meanwhile: no notification at all, only the hub's log line;
 and through all of it no event is delivered twice.
 
 Synthetic only: invented hosts (TESTHOST, boxa, hubhost), private placeholder sids, invented text.
@@ -378,14 +379,22 @@ class PushPullTwoKernels(unittest.TestCase):
             return "absent"
 
     @classmethod
-    def _end_turn(cls, sid, at):
+    def _end_turn(cls, sid, at, wake=True):
         """A turn the user opened ends on the origin: the Stop hook's stamps on the session's registration, then the
-        hook's wake (/tick), as the real hook does."""
+        hook's wake (/tick), as the real hook does. `wake=False`: the origin is down, nothing to wake."""
         p = Path(cls._state("origin"), "sdk", sid + ".json")
         reg = json.loads(p.read_text())
-        reg.update(lastStopAt=at, lastTurnOpener="human")
+        reg.update(lastStopAt=at, lastTurnOpener="human", lastHumanStopAt=at)
         _publish(p, reg)
-        cls._call("origin", "POST", "/tick", {})
+        if wake:
+            cls._call("origin", "POST", "/tick", {})
+
+    @classmethod
+    def _stop_origin(cls):
+        """The origin's orderly exit (SIGTERM, as its supervisor stops it for a deploy): its exit records itself in the
+        restart ledger, which is how its next life knows how long it was down."""
+        cls.procs["origin"].terminate()
+        cls.procs["origin"].wait(timeout=60)
 
     def test_the_pull_end_to_end(self):
         # ── a turn end on the origin: exactly once at the hub's gate, under the HUB's name for the row ──
@@ -462,20 +471,36 @@ class PushPullTwoKernels(unittest.TestCase):
         self.assertEqual(len(self._pushed(API, "turn")), 2, "nothing old is delivered after a lost cursor")
         self.assertEqual(len(self._pushed(WEB, "card")), 1)
 
-        # ── the origin restarts (a new life): the hub resumes at the newest, loudly; the next turn end arrives once ──
-        self.procs["origin"].kill(); self.procs["origin"].wait(timeout=10)
+        # ── the origin restarts (a new life) while a turn ends: its feed survives, so the hub's cursor stays valid and the
+        # turn end it missed is COUNTED (2026-10-14); the next turn end arrives once ──
+        self._stop_origin()
+        self.assertTrue(json.loads(Path(self._state("origin"), "push-feed.json").read_text()).get("feed"),
+                        "the origin's event feed is on its disk")
+        self._end_turn(WEB, t2 + 6, wake=False)           # web's turn ends while the origin is down
         self._boot("origin")
-        self._wait("the origin-restarted line", lambda: "its kernel restarted since this kernel last heard from it" in _text(third),
-                   secs=120)
         # the device still holds the summary of the hub's first restart unseen (no page came forward, nothing delivered
-        # normally since), and that record survived the hub's restarts on disk: the gap folds into it without a sound
+        # normally since), and that record survived the hub's restarts on disk: the gap folds into it without a sound,
+        # with web's turn end counted beside api's, and no "may have been missed"
         self._wait("the origin-restarted summary, folded into the one the device holds unseen",
                    lambda: "folded into the summary not yet seen, updated without a sound, none of the missed events delivered "
-                           "one by one: TESTHOST restarted · 1 session finished a turn; more may have been missed"
-                           in _text(third), secs=120)
-        self._origin_baselined()                          # the new life's turn tick takes its baseline first
+                           "one by one: TESTHOST restarted · 2 sessions finished turns" in _text(third), secs=120)
+        self.assertNotIn("its kernel restarted since this kernel last heard from it", _text(third),
+                         "the origin's feed survived its restart: the hub's cursor stayed valid, no reset")
+        self.assertIn("read back from disk", self._log("origin"))
+        self.assertEqual(self._pushed(WEB, "turn"), [], "the missed turn end is never delivered late")
+        self._origin_baselined()                          # the new life's turn tick has run
         self._end_turn(API, t2 + 7)
         self._wait("the turn end after the origin's restart", lambda: len(self._pushed(API, "turn")) == 3, secs=120)
+
+        # ── the origin restarts again with nothing finishing meanwhile: no notification at all, only the hub's log line ──
+        posts = len(self.svc.posts)
+        said = _text(third).count("nothing it may have missed would have reached the devices here")
+        self._stop_origin()
+        self._boot("origin")
+        self._wait("the quiet gap's log line",
+                   lambda: _text(third).count("nothing it may have missed would have reached the devices here") > said,
+                   secs=120)
+        self.assertEqual(len(self.svc.posts), posts, "nothing reached the push service")
 
         # ── through all of it, nothing twice ──
         time.sleep(3.0)
