@@ -1209,6 +1209,17 @@ class OpeningMessage(unittest.TestCase):
         self.assertFalse(km._shown_is_passage("Done.", sentence))
         self.assertTrue(km._shown_is_passage("Helloworld", "HelloLABELworld"), "a word with one thing left out inside it")
 
+    def test_a_diff_passage_that_starts_inside_a_row_keeps_the_rows_sign(self):
+        # review of #239 (2026-10-14): a drag that starts inside a removed row's code leaves the row's sign out of the range
+        # (the page marks it user-select: none), and the page writes it back ahead of the line; the range's text, the
+        # gutters and the next row's sign included, is what the browser test reads off the real page
+        exact = "rate = 0.111+    rate = 0.25"
+        shown = "-    rate = 0.1\n+    rate = 0.25"
+        sent, _ = km._comment_opener_parts(exact, "Why?", shown=shown)
+        self.assertEqual(self._quote(sent), "> -    rate = 0.1\n> +    rate = 0.25")
+        self.assertTrue(km._shown_is_passage("-           0.1\n+    rate = 0.25", "0.111+    rate = 0.25"), "from mid-row")
+        self.assertFalse(km._shown_is_passage("-    rate = 0.1\n-    rate = 0.25", exact), "only the first line's sign is free")
+
     # ── what romp sent, read back from a stored opening message (the popover's note, the user 2026-09-30) ──────────
     def test_the_split_gives_back_exactly_what_romp_added_and_the_users_words(self):
         for prior, frame in (("", None), (self.PRIOR, None), (self.PRIOR, km._FORK_FRAME)):

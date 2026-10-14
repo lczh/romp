@@ -20147,11 +20147,15 @@ def _shown_is_passage(shown, exact):
     left out inside it, or text from elsewhere) is matched a letter at a time, and those skips stay bounded: at most one
     per four characters matched (text from elsewhere, matched letter by letter, skips at nearly every one). A "…" that
     marks a cut at the cap is not part of either; where `exact` itself was cut (a quote chip's passage), `shown` is
-    compared as far as `exact` goes, and half of `exact` matched that way is the same passage."""
+    compared as far as `exact` goes, and half of `exact` matched that way is the same passage. One character `exact` may
+    lack: a diff row's sign opening `shown`'s first line. The page writes every diff row's marker ahead of its line, and
+    a selection that starts inside the first row's code holds that row's sign nowhere (the page marks it user-select:
+    none; review of #239), while every later row's sign lies inside the range."""
     e = re.sub(r"\s+", "", str(exact or ""))
     cut = e.endswith("…")
     e = e[:-1] if cut else e
-    words = str(shown or "").split()
+    shown = str(shown or "")
+    words = (shown[1:] if shown[:1] in ("+", "-") else shown).split()
     if words and words[-1].endswith("…"):
         words[-1] = words[-1][:-1]
     words = [w for w in words if w]

@@ -118,14 +118,14 @@ async function select(page: any, words: string, nth = 0, pick: Pick = {}): Promi
 }
 
 // the selection a real double-click (2) or triple-click (3) on the middle of `words` makes
-async function clickSelect(page: any, words: string, clicks: 2 | 3, label: string, nth = 0): Promise<void> {
+async function clickSelect(page: any, words: string, clicks: 2 | 3, label: string, nth = 0, scope = "#content .turn-assistant .md"): Promise<void> {
   const at = await page.evaluate(([fn, spec]: [string, object]) => {
     const r = (0, eval)(fn)(spec) as Range | null;
     if (!r) return null;
     (r.startContainer.parentElement as HTMLElement).scrollIntoView({ block: "center" });
     const b = Array.from(r.getClientRects()).find((x) => x.width > 0)!;
     return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
-  }, [RANGE_OF, { words, nth, scope: "#content .turn-assistant .md" }] as [string, object]);
+  }, [RANGE_OF, { words, nth, scope }] as [string, object]);
   assert.ok(at, "premise: the reply shows " + JSON.stringify(words));
   await page.mouse.click(at.x, at.y, { clickCount: clicks });
   await chipShows(page, label);
@@ -385,11 +385,66 @@ test("a tool group's caret and totals and a diff's line numbers stay out of a qu
     await page.waitForSelector("#content .diff-fold .diff-row", { state: "visible", timeout: 5000 });
     await select(page, "a = 1", 0, { to: "b = 3", scope: "#content", label: "a = 1 -b = 2 +b = 3" });
     assert.equal(await sendWith(page, "Why three?"),
-      "Replying to this part of the conversation:\n> a = 1\n> -b = 2\n> +b = 3\n\nWhy three?");
+      "Replying to this part of the conversation:\n>  a = 1\n> -b = 2\n> +b = 3\n\nWhy three?", "a context row opens with a space (review of #239)");
     await select(page, "The first reply ends here.", 0, { ...across, label: "The first reply ends here. a = 1 -b = 2 +b = 3 The second reply starts" });
     assert.equal(await sendWith(page, "And all of it?"),
-      "Replying to this part of the conversation:\n> The first reply ends here.\n> \n> a = 1\n> -b = 2\n> +b = 3\n> \n"
+      "Replying to this part of the conversation:\n> The first reply ends here.\n> \n>  a = 1\n> -b = 2\n> +b = 3\n> \n"
       + "> The second reply starts\n\nAnd all of it?", "the open group's caret, the rows' heads and the closed fold stay out");
     assert.deepEqual(errors, [], "no page errors");
   }, GROUPED);
+});
+
+
+// ── review of #239 (2026-10-14): every diff row in a quote says what it is, wherever the selection starts ───────────────
+// the page marks a row's sign user-select: none, so a drag that starts inside the first row's code, or a triple-click on a
+// row, leaves the sign out of the range: "rate = 0.1 / +    rate = 0.25" read the removed line as unchanged. And a context
+// row had no marker at all, so a context line that begins with "-" read as removed. Every row now opens with its marker
+// ("-", "+", or the unified diff's leading space for context); the hunk header keeps its own "@@" line.
+const DIFFED = [
+  { kind: "assistant", md: "The rate changes below.", uuid: U(11) },
+  { kind: "tool", name: "Edit", file: "notes.txt", input: "edit", uuid: U(12),
+    diffRows: [{ oldNo: null, newNo: null, sign: "@", text: "@@ -10 +10 @@" }, { oldNo: 10, newNo: 10, sign: " ", text: "- keep this item" },
+               { oldNo: 11, newNo: null, sign: "-", text: "    rate = 0.1" }, { oldNo: null, newNo: 11, sign: "+", text: "    rate = 0.25" }] },
+  { kind: "assistant", md: "The rate is set.", uuid: U(13) },
+];
+async function openDiff(page: any): Promise<void> {
+  await page.locator("#content .tool-fold-toggle", { hasText: "+1 -1" }).click();
+  await page.waitForSelector("#content .diff-fold .diff-row", { state: "visible", timeout: 5000 });
+}
+
+test("a diff row keeps its sign when the selection starts inside it: a drag from mid-row, a triple-click", { timeout: 90000 }, async (t) => {
+  await inChat(t, async (page, errors) => {
+    await openDiff(page);
+    const lead = "Replying to this part of the conversation:\n";
+    await select(page, "rate = 0.1", 0, { to: "rate = 0.25", scope: "#content", label: "- rate = 0.1 + rate = 0.25" });
+    assert.equal(await sendWith(page, "Why the change?"), lead + "> -    rate = 0.1\n> +    rate = 0.25\n\nWhy the change?",
+      "the removed row read as unchanged when the drag started after its sign");
+    // from the middle of the row's code: the code before the start is a blank of its width, so the sign stays apart
+    await select(page, "0.1", 0, { to: "rate = 0.25", scope: "#content", label: "- 0.1 + rate = 0.25" });
+    assert.equal(await sendWith(page, "And this?"), lead + "> -           0.1\n> +    rate = 0.25\n\nAnd this?");
+    await clickSelect(page, "rate = 0.25", 3, "+ rate = 0.25", 0, "#content");
+    assert.equal(await sendWith(page, "Why 0.25?"), lead + "> +    rate = 0.25\n\nWhy 0.25?");
+    await clickSelect(page, "rate = 0.1", 3, "- rate = 0.1", 0, "#content");
+    assert.equal(await sendWith(page, "Why drop it?"), lead + "> -    rate = 0.1\n\nWhy drop it?");
+    // a comment's opening message quotes the same lines; the passage it anchors on, the range's own text, has no first sign
+    await select(page, "rate = 0.1", 0, { to: "rate = 0.25", scope: "#content", label: "- rate = 0.1 + rate = 0.25" });
+    const create = await commentWith(page, "Why?");
+    assert.equal(create.exact, "rate = 0.111+    rate = 0.25", "premise: the range's text holds the gutters and the second sign only");
+    assert.equal(create.shown, "-    rate = 0.1\n+    rate = 0.25");
+    assert.deepEqual(errors, [], "no page errors");
+  }, DIFFED);
+});
+
+test("a context row opens with the unified diff's space, so a context line that begins with \"-\" never reads as removed", { timeout: 90000 }, async (t) => {
+  await inChat(t, async (page, errors) => {
+    await openDiff(page);
+    const lead = "Replying to this part of the conversation:\n";
+    await select(page, "- keep this item", 0, { scope: "#content" });
+    assert.equal(await sendWith(page, "Is this kept?"), lead + ">  - keep this item\n\nIs this kept?");
+    // the whole hunk: its header keeps its line numbers (where in the file the change sits), the rows their markers
+    await select(page, "@@ -10 +10 @@", 0, { to: "rate = 0.25", scope: "#content", label: "@@ -10 +10 @@ - keep this item - rate = 0.1 + rate = 0.25" });
+    assert.equal(await sendWith(page, "Looks right?"),
+      lead + "> @@ -10 +10 @@\n>  - keep this item\n> -    rate = 0.1\n> +    rate = 0.25\n\nLooks right?");
+    assert.deepEqual(errors, [], "no page errors");
+  }, DIFFED);
 });

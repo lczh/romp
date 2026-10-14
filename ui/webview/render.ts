@@ -20372,12 +20372,16 @@ const QUOTE_BLOCKS = "p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, figcaption,
 // follow-up's tag and a nudge's caret, a send's undelivered label, a gap's glyph. Anything else marked user-select: none
 // is left out with them: that is how the page marks chrome a selection must copy clean without (fold heads, the tool
 // rows' IN and OUT). Inside a <pre> that style is not read (quoteSkips' `styled`), so chrome a code or diff block holds is
-// named here: the gutters (review of #234: an opened edit's rows went out as "1010a = 1"). A diff row's +/- sign stays,
-// though the page marks it user-select: none for a clean copy: it says what the row is, removed or added, and without it
-// a quote of a change reads as two versions of the same line.
+// named here: the gutters (review of #234: an opened edit's rows went out as "1010a = 1"). A diff row's sign is named too,
+// because the walk writes every row's marker itself as it reads the row's code (quoteText's diffMark): "-" removed, "+"
+// added, and the unified diff's leading space for context. Read off the sign's own text, a selection that started inside
+// a row's code left that row's sign out ("rate = 0.1" over "+    rate = 0.25" read the removed line as unchanged), and a
+// context row, which shows no sign, read as removed when its line began with "-" (review of #239). A hunk header
+// ("@@ -10 +10 @@") stays as it reads: it is the diff's own text and says where in the file the change sits, where a
+// gutter only numbers each row again.
 const QUOTE_CHROME = "button, select, input, textarea, svg, .code-copy, .dot, .rail-hit, .time-marker, .day-divider, .fork-spot, "
-  + ".tool-head, .toolgroup-line, .diff-gut, .notice-glyph, .notice-src, .notice-meta, .notice-acts, .think-tokens, .romp-tag, "
-  + ".followup-tag, .nudge-caret, .undelivered-label, .tx-gap-glyph";
+  + ".tool-head, .toolgroup-line, .diff-gut, .diff-sign, .notice-glyph, .notice-src, .notice-meta, .notice-acts, .think-tokens, "
+  + ".romp-tag, .followup-tag, .nudge-caret, .undelivered-label, .tx-gap-glyph";
 const QUOTE_BREAKS = /^(P|LI|UL|OL|DL|DD|DT|DIV|PRE|TABLE|THEAD|TBODY|TR|TD|TH|BLOCKQUOTE|H[1-6]|FIGURE|FIGCAPTION|SECTION|DETAILS|SUMMARY|HR)$/;
 const QUOTE_PARAS = /^(P|PRE|UL|OL|DL|TABLE|BLOCKQUOTE|H[1-6]|FIGURE|DETAILS|HR)$/;   // a blank line around, in a quote
 /** Whether a quote leaves out the element `e` and all it holds: a control, a label or marker (QUOTE_CHROME), a closed fold's
@@ -20394,9 +20398,15 @@ function quoteSkips(e: Element, styled = true): boolean {
 /** The text of the selection `r` as it reads: the content it covers, without what quoteSkips leaves out; a block on its
  *  own line and a paragraph or a message a blank line apart, a code block's rows as its lines, a table's cells a tab apart,
  *  a <br> a line break, and other whitespace as the page shows it. Read from the range's start and stopped once longer
- *  than `cap`, so a drag over a long transcript costs what a quote can hold, not the transcript (review of #231). */
+ *  than `cap`, so a drag over a long transcript costs what a quote can hold, not the transcript (review of #231). A diff
+ *  row's line opens with its marker (diffMark), wherever in the row the selection starts. */
 function quoteText(r: Range, cap = QUOTE_CAP + 1): string {
   let out = "", owed = 0, pre = 0;           // owed: the line breaks due before the next text; pre: depth inside <pre>
+  // mark: a diff row's marker, owed before the first text read from its code; lead: the quote opens with one, whose
+  // leading space (a context row's) a single line keeps
+  let mark = "", lead = false;
+  const diffMark = (row: Element | null): string => !row ? "" : row.classList.contains("diff-del") ? "-"
+    : row.classList.contains("diff-add") ? "+" : row.classList.contains("diff-ctx") ? " " : "";
   const brk = (e: Element): number => (e.tagName === "TD" || e.tagName === "TH" ? 0   // a cell: a tab before the next (enter)
     : e.classList.contains("turn") || QUOTE_PARAS.test(e.tagName) ? 2
     : QUOTE_BREAKS.test(e.tagName) || (pre > 0 && e.classList.contains("ct")) ? 1 : 0);
@@ -20410,17 +20420,25 @@ function quoteText(r: Range, cap = QUOTE_CAP + 1): string {
     }
     owed = 0;
     if (!pre && (!out || /[\s]$/.test(out))) s = s.replace(/^ /, "");
-    out += s;
+    if (!out) lead = mark !== "";
+    out += mark + s;
+    mark = "";
   };
   const enter = (e: Element): void => {
     if (e.tagName === "BR") { if (out) out = out.replace(/[ \t]+$/, "") + "\n"; owed = 0; return; }
     if ((e.tagName === "TD" || e.tagName === "TH") && e.previousElementSibling && out && !owed && !out.endsWith("\n")) out = out.replace(/ +$/, "") + "\t";
     owed = Math.max(owed, brk(e));
     if (e.tagName === "PRE") pre++;
+    if (e.classList.contains("diff-code")) mark = diffMark(e.parentElement);
   };
   const exit = (e: Element): void => {
     if (e.tagName === "PRE") pre--;
     owed = Math.max(owed, brk(e));
+    if (mark && e.classList.contains("diff-code")) {   // nothing read from the row's code: a blank line's marker alone
+      const m = mark;
+      mark = "";
+      if (!e.firstChild) put(m);
+    }
   };
   const start = r.startContainer, end = r.endContainer;
   const stop = end.nodeType === Node.TEXT_NODE ? null : end.childNodes[r.endOffset] || null;   // the node the range ends before
@@ -20439,14 +20457,20 @@ function quoteText(r: Range, cap = QUOTE_CAP + 1): string {
   if (outer) { node = outer; pre = inside(outer); }
   else if (node) pre = inside(node);
   else { pre = inside(start) + ((start as Element).tagName === "PRE" ? 1 : 0); exit(start as Element); }   // on after it
+  // a start inside a diff row's code: the row's marker is owed all the same, and the code before the start is a blank as
+  // wide, so the marker stands apart from what was selected ("-           0.1", never "-0.1")
+  const code = !outer && node && node.nodeType === Node.TEXT_NODE ? node.parentElement : null;
+  if (code && code.classList.contains("diff-code")) {
+    mark = diffMark(code.parentElement) + (node === start ? (start as Text).data.slice(0, r.startOffset).replace(/[^\t]/g, " ") : "");
+  }
   for (;;) {
     if (!node) {                                                 // go on after `from`, leaving the elements it closes
       let x: Node = from;
       while (!x.nextSibling) {
         const up = x.parentNode;
-        if (!up || up === document.body || up.nodeType !== Node.ELEMENT_NODE) return quoteTextTrim(out);
+        if (!up || up === document.body || up.nodeType !== Node.ELEMENT_NODE) return quoteTextTrim(out, lead);
         exit(up as Element);
-        if (up === end) return quoteTextTrim(out);              // the range ends at the end of this element
+        if (up === end) return quoteTextTrim(out, lead);        // the range ends at the end of this element
         x = up;
       }
       node = x.nextSibling;
@@ -20476,13 +20500,14 @@ function quoteText(r: Range, cap = QUOTE_CAP + 1): string {
     if (e === end) break;
     from = e; node = null;
   }
-  return quoteTextTrim(out);
+  return quoteTextTrim(out, lead);
 }
 /** quoteText's result: no blank lines before it, no whitespace after it, and a single line trimmed (a code row's indent
- *  only means something beside the rows under it). */
-function quoteTextTrim(out: string): string {
+ *  only means something beside the rows under it), unless it opens with a diff row's marker (`lead`): a context row's
+ *  leading space is what says the line is unchanged. */
+function quoteTextTrim(out: string, lead = false): string {
   const t = out.replace(/^(?:[ \t]*\n)+/, "").trimEnd();
-  return t.includes("\n") ? t : t.trim();
+  return t.includes("\n") || lead ? t : t.trim();
 }
 /** The offset of the point (node, offset) in `el`'s text, or -1 when it lies outside it. */
 function textOffsetIn(el: Element, node: Node, offset: number): number {
