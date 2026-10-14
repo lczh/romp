@@ -74,7 +74,7 @@ import { DEFAULT_CHORDS } from "./commands";
 import { NavHistory } from "./nav-history";
 import { StagedStack, quoteReplyBody, stagedPosts, type StagedMsg } from "./staged-messages";
 import { isSlashCommand } from "./staged-messages";   // the viewer's message bar refuses a slash command (2026-09-30)
-import { quoteContext } from "./quote-context";   // a highlight shorter than a sentence goes out with its sentence (2026-10-14)
+import { quoteContext, codeLineContext } from "./quote-context";   // a few words go out named, with their sentence or code line (2026-10-14)
 import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, isKernelEchoUuid, newPending, mintQid, reconcilePending, clearBoundarySeen, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody, refusedRestoreText } from "./send-pending";
 import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, mergeTombstones, pendingFromKept, resendable, resendWire, restoreKept,
          restoreTombstones, type Tombstone } from "./send-acks";
@@ -5522,7 +5522,7 @@ function rescindQueued(el: HTMLElement, toComposer: boolean): void {
     const goal = (el as any)._qgoal as { itemId: string; title: string } | null | undefined;
     const armedCites: string[] = [], armedFiles: string[] = [];   // what THIS press puts into the box, by identity: the refusal takes exactly these back
     if (goal && goal.itemId) { setCitation(sidQ, { itemId: goal.itemId, title: goal.title }); armedCites.push("g:" + goal.itemId); }
-    else if (back.cites.length) { composerCitations.set(sidQ, back.cites.map((c) => ({ title: c.quote.split("\n")[0].slice(0, 80), quote: c.quote, src: c.src, ...(c.ctx ? { ctx: c.ctx } : {}), ...(c.kind ? { kind: c.kind, path: c.path, lines: c.lines } : {}) }))); persistDrafts(); renderComposerChips(sidQ); for (const c of back.cites) armedCites.push("q:" + c.quote + "\n" + (c.src || "")); }
+    else if (back.cites.length) { composerCitations.set(sidQ, back.cites.map((c) => ({ title: c.quote.split("\n")[0].slice(0, 80), quote: c.quote, src: c.src, ...(c.ctx ? { ctx: c.ctx } : {}), ...(c.kind ? { kind: c.kind, path: c.path, lines: c.lines } : {}) }))); persistDrafts(); renderComposerChips(sidQ); for (const c of composerCitations.get(sidQ) || []) armedCites.push(citeKey(c)); }
     for (const f of back.files) { addComposerFile(sidQ, f); armedFiles.push(f); }
     restoreToComposer(back.text);
     // a provisional rescind gets no cancelResult (nothing was posted) — no stash to consume, none kept
@@ -5549,7 +5549,11 @@ function rescindQueued(el: HTMLElement, toComposer: boolean): void {
 // never touched — the toast alone covers it.
 const pendingCancelRestores = new Map<string, { before: string; after: string; cites: Citation[]; files: string[]; armedCites: string[]; armedFiles: string[] }>();   // + the chips as they stood and what the press armed, by identity (T373 fold, medium 2; round two, low 1)
 /** A citation's identity for the refusal's bookkeeping: a goal by its item, a quote by its words and source. */
-function citeKey(c: Citation): string { return c.itemId ? "g:" + c.itemId : "q:" + (c.quote || "") + "\n" + (c.src || ""); }
+// a quote chip is its words, where they came from, and what goes out for them (its sentence or its lines, 2026-10-14): the
+// same words from two sentences are two chips, and a refused un-send puts back only the one it armed
+function citeKey(c: Citation): string {
+  return c.itemId ? "g:" + c.itemId : "q:" + JSON.stringify([c.quote || "", c.src || "", c.ctx || "", c.shown || ""]);
+}
 
 // The refusal card's remedy line, ONE string: renderApiError's initial write and apiRetryTick's
 // per-second re-assert both read it, so the card and the tick can never drift into different words.
@@ -7853,7 +7857,7 @@ function showSelectionMenu(e: MouseEvent) {
   // with no Ctrl, Alt or Meta it names on every page, though only the shell's dispatcher runs one.
   const aim = commentAim();
   if (typeof aim === "object") {
-    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY, aim.at), commentKeyHint() || undefined);
+    mk("Comment", () => openCommentComposer(aim.sid, aim.uuid, aim.text, e.clientX, e.clientY, aim.at, false, aim.view), commentKeyHint() || undefined);
   }
   // "Quote" is the CHIP, and only the chip (the user 2026-08-23, consolidating the three verbs —
   // Comment / Quote / Stage — by removal): the selection already seeded it (selectionchange), so
@@ -7865,7 +7869,7 @@ function showSelectionMenu(e: MouseEvent) {
 
 // Comment on the selection from the keyboard or the palette (chat.commentSelection, the user 2026-09-30, who wanted a key
 // for it): exactly what the menu's Comment opens, through the same gate (commentAim) and the same openCommentComposer.
-type CommentAim = { sid: string; uuid: string; text: string; x: number; y: number; at?: PassageAt; ctx?: string };   // ctx: a chip's sentence (chipCommentTarget)
+type CommentAim = { sid: string; uuid: string; text: string; x: number; y: number; at?: PassageAt; view?: QuoteView };   // view: read off the selection (selectionQuoteView) or kept by a chip
 /** Where a selection range sits in a turn's rendered prose (the text turnProse joins): its [start, end) offsets, clamped to
  *  the turn's prose and trimmed of edge whitespace; null when the session's view holds no .md body for the turn, or when
  *  nothing of its prose is left after the clamp and the trim. openCommentComposer hands it to holdForPassage and
@@ -7905,8 +7909,12 @@ function commentAim(): CommentAim | "none" | "session" {
   if (!r || !views.get(activeId)?.el.contains(r.startContainer)) return "none";
   const b = r.getBoundingClientRect();
   const at = selectionAt(activeId, q.uuid, r);
-  return at ? { sid: activeId, uuid: q.uuid, text: q.text, x: b.left, y: b.bottom + 6, at }
+  // a few words' sentence or code line, or a code passage's lines, read off the selection now: the palette's run has none
+  const view = selectionQuoteView(r, q.text);
+  const aim: CommentAim = at ? { sid: activeId, uuid: q.uuid, text: q.text, x: b.left, y: b.bottom + 6, at }
     : { sid: activeId, uuid: q.uuid, text: q.text, x: b.left, y: b.bottom + 6 };
+  if (view) aim.view = view;
+  return aim;
 }
 /** The command's run. `held` is the aim the palette captured as it opened (its input took the focus since, which may
  *  have moved the selection); absent, the live selection is read. A held aim whose tab is no longer the one shown, or
@@ -7917,7 +7925,7 @@ function commentOnSelection(held?: CommentAim | "none" | "session"): void {
   else if (typeof aim === "object" && (isProvisionalId(aim.sid) || !liveSession(aim.sid))) aim = "session";
   if (aim === "none") { ephemeralWarnToast("Select some text in the chat to comment on it."); return; }
   if (aim === "session") { ephemeralWarnToast("This session isn't ready for comments yet."); return; }
-  openCommentComposer(aim.sid, aim.uuid, aim.text, aim.x, aim.y, aim.at, false, aim.ctx);
+  openCommentComposer(aim.sid, aim.uuid, aim.text, aim.x, aim.y, aim.at, false, aim.view);
 }
 /** A held aim off the shell's message, checked field by field: anything malformed reads as nothing selected. Its `at` is
  *  optional; when present it must be a pair of integers. */
@@ -7926,10 +7934,13 @@ function heldCommentAim(v: unknown): CommentAim | "none" | "session" {
   const a = v as Partial<CommentAim> | null;
   if (!(a && typeof a === "object" && typeof a.sid === "string" && typeof a.uuid === "string" && typeof a.text === "string"
         && Number.isFinite(a.x) && Number.isFinite(a.y))) return "none";
-  if (a.at === undefined) return { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y! };
+  const view = quoteViewOf(a.view);   // a view that is not one is no view: the passage goes out as it always did
+  const held: CommentAim = { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y! };
+  if (view) held.view = view;
+  if (a.at === undefined) return held;
   const at = a.at as Partial<PassageAt> | null;
   return at && typeof at === "object" && Number.isInteger(at.start) && Number.isInteger(at.end)
-    ? { sid: a.sid, uuid: a.uuid, text: a.text, x: a.x!, y: a.y!, at: { start: at.start!, end: at.end! } } : "none";
+    ? { ...held, at: { start: at.start!, end: at.end! } } : "none";
 }
 (window as any).__rompCommentAim = commentAim;
 // The chat's own commands whose capture handler (the nav trail's or the jump moves', below) answers chord `ch`: those
@@ -8002,14 +8013,15 @@ window.addEventListener("keydown", (e) => {
 /** The passage the chip row's Comment opens on: the NEWEST quote chip that holds a passage of a transcript turn (a ⌘-select
  *  stacks its chips oldest first; an editor highlight holds no turn, and a card's follow-up holds no passage). commentAim's
  *  two refusals over that anchor: "none" when no chip holds one, "session" when the session cannot take a comment yet. */
-function chipCommentTarget(id: string | null): { sid: string; uuid: string; text: string; ctx?: string } | "none" | "session" {
+function chipCommentTarget(id: string | null): { sid: string; uuid: string; text: string; view?: QuoteView } | "none" | "session" {
   const cites = (id && composerCitations.get(id)) || [];
   let c: Citation | undefined;
   for (let i = cites.length - 1; i >= 0 && !c; i--) if (cites[i].quote && cites[i].uuid) c = cites[i];
   if (!id || !c) return "none";
   if (isProvisionalId(id) || !liveSession(id)) return "session";
-  // the sentence the chip's words sit in, when they are shorter than one: the selection that read it is gone by now
-  return c.ctx ? { sid: id, uuid: c.uuid!, text: c.quote!, ctx: c.ctx } : { sid: id, uuid: c.uuid!, text: c.quote! };
+  // the sentence or code line the chip's words sit in, or its code lines: the selection that read them is gone by now
+  const view = quoteViewOf(c);
+  return view ? { sid: id, uuid: c.uuid!, text: c.quote!, view } : { sid: id, uuid: c.uuid!, text: c.quote! };
 }
 /** Where a passage of a turn is on screen: the box of its text in the view's rendering of the turn, found the way its
  *  highlight will be (findAnchorRange: the text, or its longest prefix in the turn); null when the turn is not rendered or
@@ -10896,7 +10908,8 @@ let openCommentKey: { sid: string; tid: string } | null = null;     // the open 
 // in an editable composer with a dimmed arrow for the whole kernel round-trip, seconds on a long session, and a second
 // Enter sent the same comment again as a second thread.
 let pendingCommentAnchor: { sid: string; uuid: string; exact: string;
-  context?: string | null;   // the sentence a passage shorter than one sits in, which the thread's first message quotes (2026-10-14)
+  context?: string | null;   // a few words' sentence or code line, which the thread's first message names them over (2026-10-14)
+  shown?: string | null;     // a code passage's lines with their line breaks, which it quotes in place of the passage
   model?: string; effort?: string; fast?: string; color?: string;
   sent?: { createId: string; text: string; name: string } } | null = null;
 let pendingAdopt: { tid: string; createId: string } | null = null;  // commentCreated ack that beat its frame
@@ -10908,7 +10921,7 @@ let commentPopPos: { x: number; y: number } | null = null;
 let cmtPopPosMine = false;
 // the selection a Comment gesture was redirected from to the thread already on its passage (the user 2026-10-01): the
 // thread's box offers "New thread instead", which opens the comment box on exactly this selection
-let cmtRedirect: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number; at?: PassageAt | null; ctx?: string | null } | null = null;
+let cmtRedirect: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number; at?: PassageAt | null; view?: QuoteView | null } | null = null;
 // the size WE set on the open popover (its open geometry, a stored preference, maximize/restore) — the
 // ResizeObserver tells our own sizing from the user's pull by it, so only a pull is remembered (2026-09-10)
 let cmtPopApplied: { w: number; h: number } | null = null;
@@ -11378,14 +11391,12 @@ function turnProse(sid: string, uuid: string): string | null {
 }
 
 /** Comment on a passage. `at`: where in the turn's prose the selection sits, when the gesture knows it (selectionAt).
- *  `fresh`: the "New thread instead" action, which asks for a new thread on a passage that has one. `ctx`: the sentence a
- *  chip's words sit in, for the gesture that has no selection left to read (chipCommentTarget). */
+ *  `fresh`: the "New thread instead" action, which asks for a new thread on a passage that has one. `view`: what the
+ *  thread's first message quotes for the passage (the user 2026-10-14): a few words' sentence or code line, named over,
+ *  or a code passage's lines; read off the selection by the gesture (selectionQuoteView) or kept by the chip it came from. */
 function openCommentComposer(sid: string, uuid: string, exact: string, x: number, y: number, at?: PassageAt | null, fresh = false,
-                             ctx?: string | null): void {
+                             view?: QuoteView | null): void {
   const prose = turnProse(sid, uuid);
-  // a passage shorter than a sentence: the thread's first message names its words and quotes the sentence (the user
-  // 2026-10-14), read from the turn's rendered text at the selection's offsets, or kept by the chip it was made from
-  const context = at ? (prose ? quoteContext(prose, at.start, at.end, exact) : null) : (ctx || null);
   // the passage's own send still unanswered (its mark still the optimistic one): the box re-opens ON that send, never as a
   // fresh composer, so a click outside and a second Comment on the passage cannot send the same words twice (2026-10-01).
   // "The passage" is the same turn with overlapping text (samePassage)
@@ -11397,7 +11408,7 @@ function openCommentComposer(sid: string, uuid: string, exact: string, x: number
   commentPopPos = { x, y };
   cmtPopPosMine = false;                       // a selection point, not the user's placement (the thread layout ignores it)
   if (existing) {
-    openCommentPopover(sid, existing.tid, undefined, undefined, { sid, tid: existing.tid, uuid, exact, x, y, at, ctx });
+    openCommentPopover(sid, existing.tid, undefined, undefined, { sid, tid: existing.tid, uuid, exact, x, y, at, view });
     // …with the caret in its reply box, so the next keys go there and not to the chat's message box. Once, here, and not
     // in renderCommentPopover's focus line: a clause there would take the caret back on every full rebuild while the box
     // is open, and a box already open is refreshed in place, which returns before that line.
@@ -11406,16 +11417,16 @@ function openCommentComposer(sid: string, uuid: string, exact: string, x: number
   }
   cmtRedirect = null;
   pendingCommentAnchor = held && live
-    ? { sid, uuid, exact: held.exact, context: held.context, model: held.model, effort: held.effort, fast: held.fast, color: held.color,
+    ? { sid, uuid, exact: held.exact, context: held.context, shown: held.shown, model: held.model, effort: held.effort, fast: held.fast, color: held.color,
         sent: { createId: held.createId, text: held.text,
                 name: (commentThreads.get(sid) || []).find((t) => t.tid === "pending:" + held.createId)?.name || "" } }
-    : { sid, uuid, exact, context, color: pickThreadColor(sid) };
+    : { sid, uuid, exact, context: view?.ctx || null, shown: view?.shown || null, color: pickThreadColor(sid) };
   openCommentKey = null;
   renderCommentPopover();
 }
 
 function openCommentPopover(sid: string, tid: string, _x?: number, _y?: number,
-                            redirect?: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number; at?: PassageAt | null; ctx?: string | null }): void {
+                            redirect?: { sid: string; tid: string; uuid: string; exact: string; x: number; y: number; at?: PassageAt | null; view?: QuoteView | null }): void {
   openCommentKey = { sid, tid };
   pendingCommentAnchor = null;
   cmtRedirect = redirect && redirect.tid === tid ? redirect : null;   // only a Comment gesture's redirect offers "New thread instead"
@@ -11999,7 +12010,7 @@ function seedThreadQuote(quote: string, uuid: string | null): void {
   const box = document.querySelector("#cmt-pop .cmt-input") as HTMLTextAreaElement | null;
   if (!cur || !box || box.readOnly || !cmtStageable(cur.th)) return;
   const list = (cmtCites.get(cur.th.tid) || []).slice();
-  seedGestureChip(list, mkQuoteCitation(quote, uuid, undefined, liveQuoteContext(quote)));
+  seedGestureChip(list, mkQuoteCitation(quote, uuid, undefined, liveQuoteView(quote)));
   cmtCites.set(cur.th.tid, list);
   paintCmtChips();
 }
@@ -19179,7 +19190,7 @@ const drafts = new Map<string, string>();
 // follows). A plain select still replaces, as before. Flavors never mix: the send routes goal XOR quotes, so
 // a goal chip always rides alone — any quote seed drops it, and a goal seed (feed card click) drops the
 // quotes. Each chip keeps its own ✕; Backspace-at-start eats the newest first.
-interface Citation { itemId?: string; title: string; quote?: string; uuid?: string | null; src?: string; ctx?: string;   // src = a VS Code editor highlight's origin, workspace-relative file:lines (the user 2026-07-13); ctx = a short highlight's sentence (staged-messages.ts QuoteCite)
+interface Citation { itemId?: string; title: string; quote?: string; uuid?: string | null; src?: string; ctx?: string; shown?: string;   // src = a VS Code editor highlight's origin, workspace-relative file:lines (the user 2026-07-13); ctx / shown = a few words' sentence or code line / a code passage's lines (staged-messages.ts QuoteCite)
                    kind?: "file"; path?: string; lines?: [number, number] | null }   // a passage of a file the viewer shows (staged-messages.ts FileQuote, 2026-09-30)
 const composerCitations = new Map<string, Citation[]>();
 let fireStage: () => void = () => { /* assigned by the composer closure */ };
@@ -19408,7 +19419,7 @@ try {
                       quote: typeof c.quote === "string" ? c.quote : undefined,
                       uuid: typeof c.uuid === "string" ? c.uuid : null,
                       src: typeof c.src === "string" ? c.src : undefined,
-                      ...(typeof c.ctx === "string" && c.ctx ? { ctx: c.ctx } : {}),
+                      ...(quoteViewOf(c) || {}),
                       ...(c.kind === "file" && typeof c.path === "string" ? { kind: "file" as const, path: c.path, lines: Array.isArray(c.lines) && c.lines.length === 2 ? [Number(c.lines[0]), Number(c.lines[1])] as [number, number] : null } : {}) });
       }
       if (list.length) composerCitations.set(k, list);
@@ -20125,33 +20136,174 @@ function setCitation(id: string, cite: Citation): void {
 // ✕ / Backspace-at-start. Unlike setCitation this never focuses the composer: stealing focus mid-drag
 // would collapse the very selection being made (the focusCardUnlessTyping lesson).
 const QUOTE_CAP = 4000;   // a selection can be huge; the send stays bounded
-function mkQuoteCitation(quote: string, uuid: string | null, src?: string, ctx?: string | null): Citation {
+function mkQuoteCitation(quote: string, uuid: string | null, src?: string, view?: QuoteView | null): Citation {
   const snip = quote.replace(/\s+/g, " ").trim();
   // an editor highlight leads its chip with where it came from (file:lines), then the snippet
   const title = (src ? src + " — " + snip : snip).slice(0, 140);
-  return { title, quote: quote.slice(0, QUOTE_CAP), uuid, src: src || undefined, ...(ctx ? { ctx } : {}) };
+  return { title, quote: quote.slice(0, QUOTE_CAP), uuid, src: src || undefined,
+           ...(view?.ctx ? { ctx: view.ctx } : view?.shown ? { shown: view.shown.slice(0, QUOTE_CAP) } : {}) };   // bounded as the quote is
 }
-// A transcript highlight shorter than a sentence goes out with the sentence it sits in (the user 2026-10-14, who approved
-// the wording; staged-messages.ts quoteLeadIn): read here from the rendered message the selection was made in, its text
-// and the range's offsets in it, never reconstructed later. rangeQuoteContext reads one range; liveQuoteContext the
-// ACTIVE range of the live selection (the newest, transcriptSelection's and threadSelection's rule), which is the range
-// whose text every seed of a transcript or thread chip was just handed.
-function rangeQuoteContext(r: Range, words: string): string | null {
-  const from = r.startContainer instanceof Element ? r.startContainer : r.startContainer.parentElement;
-  const body = from?.closest(".md");
-  if (!body || !body.contains(r.endContainer)) return null;        // the words must lie in one rendered message
+// WHAT GOES OUT FOR A TRANSCRIPT PASSAGE (the user 2026-10-14, who approved the wording; staged-messages.ts quoteLeadIn):
+// a few words, shorter than their sentence or code line, are named over that sentence or line (`ctx`); a passage over
+// several lines of a code block is its lines with their line breaks (`shown`), which the rendered rows join with none.
+// Read here from the rendered message the selection was made in, never reconstructed later, and never from a control in
+// it: a code block's text is its rows (the Copy button sits beside them), a paragraph's skips any button. Code is never a
+// sentence (review of #229: a block read as one line, Copy and all, became the "sentence" of a word in it).
+type QuoteView = { ctx?: string; shown?: string };
+/** A view off a stored or posted shape: its one string field, or null. */
+function quoteViewOf(v: unknown): QuoteView | null {
+  const o = v as { ctx?: unknown; shown?: unknown } | null;
+  if (!o || typeof o !== "object") return null;
+  if (typeof o.ctx === "string" && o.ctx) return { ctx: o.ctx };
+  if (typeof o.shown === "string" && o.shown) return { shown: o.shown };
+  return null;
+}
+const QUOTE_BLOCKS = "p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, figcaption, summary, blockquote";
+const QUOTE_SKIP = "button, select, input, textarea, svg, .code-copy";
+const QUOTE_BREAKS = /^(P|LI|UL|OL|DL|DD|DT|DIV|PRE|TABLE|THEAD|TBODY|TR|TD|TH|BLOCKQUOTE|H[1-6]|FIGURE|FIGCAPTION|SECTION|DETAILS|SUMMARY|HR)$/;
+/** The offset of the point (node, offset) in `el`'s text, or -1 when it lies outside it. */
+function textOffsetIn(el: Element, node: Node, offset: number): number {
   const whole = document.createRange();
-  whole.selectNodeContents(body);
-  const prose = whole.toString();
+  whole.selectNodeContents(el);
+  if (whole.comparePoint(node, offset) !== 0) return -1;
   const head = document.createRange();
-  head.setStart(body, 0);
-  head.setEnd(r.startContainer, r.startOffset);
-  const start = head.toString().length;
-  return quoteContext(prose, start, start + r.toString().length, words);
+  head.setStart(el, 0);
+  head.setEnd(node, offset);
+  return head.toString().length;
 }
-function liveQuoteContext(words: string): string | null {
+/** The offset of the point (node, offset) in `el`'s text, clamped to it: 0 before it, its length after it. */
+function clampedOffsetIn(el: Element, node: Node, offset: number): number {
+  const whole = document.createRange();
+  whole.selectNodeContents(el);
+  const c = whole.comparePoint(node, offset);
+  return c < 0 ? 0 : c > 0 ? (el.textContent || "").length : textOffsetIn(el, node, offset);
+}
+/** The first and last text nodes the range selects characters of: a drag or a double-click can leave an end at the edge
+ *  of the node beside the words (the end of "Call " before a code span), which is not where the words are. */
+function selectedTextEnds(r: Range): [Node, Node] {
+  const root = r.commonAncestorContainer;
+  if (root.nodeType === Node.TEXT_NODE) return [root, root];
+  let first: Node | null = null, last: Node | null = null;
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    if (!r.intersectsNode(n)) continue;
+    const a = n === r.startContainer ? r.startOffset : 0, b = n === r.endContainer ? r.endOffset : (n as Text).data.length;
+    if (b <= a) continue;
+    if (!first) first = n;
+    last = n;
+  }
+  return first && last ? [first, last] : [r.startContainer, r.endContainer];
+}
+/** A prose block's text as it reads: a source line break inside a paragraph is a space, a <br> or a nested block a line
+ *  break, a control nothing; and the range's offsets in it (-1 for an end in a control or outside). */
+function blockQuoteText(block: Element, r: Range): { text: string; start: number; end: number } {
+  let text = "", start = -1, end = -1;
+  const brk = () => { if (text && !text.endsWith("\n")) text += "\n"; };
+  const mark = (node: Node, i: number) => {
+    if (start < 0 && r.startContainer === node && r.startOffset === i) start = text.length;
+    if (end < 0 && r.endContainer === node && r.endOffset === i) end = text.length;
+  };
+  const visit = (n: Node): void => {
+    if (n.nodeType === Node.TEXT_NODE) {
+      const t = n as Text;
+      if (start < 0 && r.startContainer === t) start = text.length + r.startOffset;
+      if (end < 0 && r.endContainer === t) end = text.length + r.endOffset;
+      text += t.data.replace(/\n/g, " ");
+      return;
+    }
+    if (n.nodeType !== Node.ELEMENT_NODE) return;
+    const e = n as Element;
+    if (e.matches(QUOTE_SKIP)) return;
+    if (e.tagName === "BR") { text += "\n"; return; }
+    const breaks = e !== block && QUOTE_BREAKS.test(e.tagName);
+    if (breaks) brk();
+    e.childNodes.forEach((c, i) => { mark(e, i); visit(c); });
+    mark(e, e.childNodes.length);
+    if (breaks) brk();
+  };
+  visit(block);
+  return { text, start, end };
+}
+/** A code block's lines as the code holds them (its rows' text, never the Copy button beside them), and the range's
+ *  [line, column] ends in them; null when an end is outside the code. */
+function codeBlockLines(pre: Element, r: Range): { lines: string[]; a: [number, number]; b: [number, number] } | null {
+  const code = pre.querySelector("code") || pre;
+  const rows = Array.from(code.querySelectorAll(".ct"));
+  if (rows.length) {
+    const at = (node: Node, offset: number): [number, number] | null => {
+      const own = (node instanceof Element ? node : node.parentElement)?.closest(".ct");   // the usual case: a point in a row's text
+      const k = own ? rows.indexOf(own) : -1;
+      if (k >= 0) { const o = textOffsetIn(rows[k], node, offset); if (o >= 0) return [k, o]; }
+      for (let i = 0; i < rows.length; i++) {
+        const o = textOffsetIn(rows[i], node, offset);
+        if (o >= 0) return [i, o];
+        const whole = document.createRange();
+        whole.selectNodeContents(rows[i]);
+        if (whole.comparePoint(node, offset) < 0) return [i, 0];   // between rows: the start of the next one
+      }
+      return null;
+    };
+    const a = at(r.startContainer, r.startOffset), b = at(r.endContainer, r.endOffset);
+    if (!a || !b) return null;
+    const lines = rows.map((x) => x.textContent || "");
+    // an end at the edge of the row beside the words belongs to the words' row
+    if (a[0] < b[0] && a[1] >= lines[a[0]].length) { a[0]++; a[1] = 0; }
+    if (b[0] > a[0] && b[1] === 0) { b[0]--; b[1] = lines[b[0]].length; }
+    return { lines, a, b };
+  }
+  // an unwrapped block (no rows): its text keeps its own line breaks
+  const raw = code.textContent || "";
+  const s = textOffsetIn(code, r.startContainer, r.startOffset), e = textOffsetIn(code, r.endContainer, r.endOffset);
+  if (s < 0 || e < 0) return null;
+  const pos = (o: number): [number, number] => { const before = raw.slice(0, o).split("\n"); return [before.length - 1, before[before.length - 1].length]; };
+  return { lines: raw.replace(/\n$/, "").split("\n"), a: pos(s), b: pos(e) };
+}
+/** What goes out for the selection `r` whose text is `words`: a few words' sentence (prose) or line (code), or a code
+ *  passage's lines; null when the passage goes out as it always did (a whole sentence or line or more of prose, a passage
+ *  over several blocks, or one that does not lie in one rendered message). */
+function selectionQuoteView(r: Range, words: string): QuoteView | null {
+  const el0 = (n: Node): Element | null => (n instanceof Element ? n : n.parentElement);
+  const body = el0(r.startContainer)?.closest(".md");
+  if (!body || !body.contains(r.endContainer)) return null;           // the words must lie in one rendered message
+  const [firstText, lastText] = selectedTextEnds(r);
+  const from = el0(firstText);
+  if (!from || !body.contains(from)) return null;
+  const pre = from.closest("pre");
+  if (pre && body.contains(pre)) {
+    if (!pre.contains(lastText)) return null;
+    const c = codeBlockLines(pre, r);
+    if (!c) return null;
+    const [[la, ca], [lb, cb]] = [c.a, c.b];
+    if (la === lb) { const ctx = codeLineContext(c.lines[la], ca, cb, words); return ctx ? { ctx } : null; }
+    if (lb < la) return null;
+    const sel = [c.lines[la].slice(ca), ...c.lines.slice(la + 1, lb), c.lines[lb].slice(0, cb)];
+    const shown = sel.join("\n").replace(/^(?:[ \t]*\n)+/, "").trimEnd();
+    // the rows joined with no line break are the selection's own text: anything else is not this selection's
+    return shown && shown.replace(/\s+/g, "") === words.replace(/\s+/g, "") ? { shown } : null;
+  }
+  const code = from.closest("code");
+  if (code && body.contains(code) && code.contains(lastText)) {
+    const s = clampedOffsetIn(code, r.startContainer, r.startOffset), e = clampedOffsetIn(code, r.endContainer, r.endOffset);
+    const ctx = s >= 0 && e >= 0 ? codeLineContext(code.textContent || "", s, e, words) : null;
+    return ctx ? { ctx } : null;
+  }
+  const block = from.closest(QUOTE_BLOCKS);
+  const scope = block && body.contains(block) ? block : body;
+  if (!scope.contains(lastText)) return null;
+  const t = blockQuoteText(scope, r);
+  // an end left just outside the block, at the edge of its neighbour, is the block's edge
+  const whole = document.createRange();
+  whole.selectNodeContents(scope);
+  if (t.start < 0 && whole.comparePoint(r.startContainer, r.startOffset) < 0) t.start = 0;
+  if (t.end < 0 && whole.comparePoint(r.endContainer, r.endOffset) > 0) t.end = t.text.length;
+  const ctx = t.start >= 0 && t.end > t.start ? quoteContext(t.text, t.start, t.end, words) : null;
+  return ctx ? { ctx } : null;
+}
+/** The view of the ACTIVE range of the live selection (the newest, transcriptSelection's and threadSelection's rule), the
+ *  range whose text every seed of a transcript or thread chip was just handed. */
+function liveQuoteView(words: string): QuoteView | null {
   const sel = window.getSelection();
-  return sel && sel.rangeCount ? rangeQuoteContext(sel.getRangeAt(sel.rangeCount - 1), words) : null;
+  return sel && sel.rangeCount ? selectionQuoteView(sel.getRangeAt(sel.rangeCount - 1), words) : null;
 }
 
 // One selection GESTURE owns one chip (the user 2026-08-04). selectionchange fires dozens of times as a
@@ -20176,7 +20328,7 @@ document.addEventListener("mousedown", (e) => {
 
 // Gesture-aware seed for TRANSCRIPT selections (the selectionchange listener + the Enter-to-reply shortcut).
 function seedTranscriptQuote(id: string, quote: string, uuid: string | null): void {
-  const chip = mkQuoteCitation(quote, uuid, undefined, liveQuoteContext(quote));
+  const chip = mkQuoteCitation(quote, uuid, undefined, liveQuoteView(quote));
   // a quote seed drops a goal chip (flavors never mix — the send routes goal XOR quotes)
   const list = (composerCitations.get(id) || []).filter((c) => !c.itemId);
   seedGestureChip(list, chip);
@@ -20199,7 +20351,7 @@ function seedGestureChip(list: Citation[], chip: Citation): void {
   // killed the selection — the OTHER copy collapses and the gesture's own chip survives. The same word in
   // ANOTHER sentence is another passage (its ctx differs, 2026-10-14), and stacks.
   for (let i = list.length - 1; i >= 0; i--) {
-    if (i !== idx && list[i].quote === chip.quote && (list[i].ctx || "") === (chip.ctx || "")) {
+    if (i !== idx && citeKey(list[i]) === citeKey(chip)) {
       list.splice(i, 1);
       if (i < idx) idx--;
     }
@@ -24457,7 +24609,7 @@ setupSettings();
     },
     cmtclose: () => closeCommentPop(),
     // "New thread instead" in a thread a Comment gesture was redirected to: the comment box, on the selection the gesture had
-    cmtnewthread: () => { const r = cmtRedirect; if (r) openCommentComposer(r.sid, r.uuid, r.exact, r.x, r.y, r.at, true, r.ctx); },
+    cmtnewthread: () => { const r = cmtRedirect; if (r) openCommentComposer(r.sid, r.uuid, r.exact, r.x, r.y, r.at, true, r.view); },
     cmtmax: () => toggleCommentPopMax(),   // maximize ⇄ restore; the head's double-click lands in the same function
     // Interrupt the THREAD's own turn (T138): the sid rides the button (the thread's session),
     // never activeId — the exact owner-scoping class queued-x/Retry were fixed for. The gesture

@@ -202,6 +202,19 @@ class ShortPassageSentence(_Harness):
         self.assertIn('About "jitter" in this part of the conversation:\n\n> \u2026Add a jitter to the backoff\u2026',
                       self._rows()[0]["sent"])
 
+    def test_a_code_passages_lines_reach_the_opener_and_survive_the_park(self):
+        lines = "def refill(cache):\n    return cache.load()"
+        msg = {"type": "commentCreate", "id": PARENT, "uuid": "a9", "exact": "def refill(cache):    return cache.load()",
+               "text": "Why load?", "name": "", "createId": "c-lines", "shown": lines}
+        self._drive(msg)
+        self.assertEqual(len(km._parked_creates), 1)
+        p = Path(km._sessions(0)[0]["path"])
+        with p.open("a") as fh:
+            fh.write(json.dumps(aline(self.now - 300, "def refill(cache): return cache.load()", "a9", parent="a1")) + "\n")
+        km._retry_parked_creates()
+        self.assertTrue(self._rows()[0]["sent"].endswith(km._COMMENT_FRAME_HEAD + "\n\n> def refill(cache):\n>     return cache.load()"),
+                        self._rows()[0]["sent"])
+
     def test_a_frame_without_one_quotes_the_passage_as_before(self):
         self._create_with("a1", "Use exponential backoff with a jitter of ten percent.", None)
         self.assertTrue(self._rows()[0]["sent"].endswith(km._COMMENT_FRAME_HEAD + "\n\n> " + self.SENTENCE))

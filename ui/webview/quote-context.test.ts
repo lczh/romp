@@ -9,7 +9,8 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { quoteContext, QUOTE_CONTEXT_CAP } from "./quote-context";
+import { createRequire } from "node:module";
+import { quoteContext, codeLineContext, QUOTE_CONTEXT_CAP, QUOTE_WORDS_MAX } from "./quote-context";
 import { quoteLeadIn, quoteReplyBody, stagedRunBody, stagedPosts } from "./staged-messages";
 import { splitQuoteReplyBody } from "./queued-rescind";
 
@@ -128,22 +129,104 @@ test("the lead-in speaks as the person: no word only the tracking system knows",
 // ── the page's wiring, pinned ─────────────────────────────────────────────────────────────────────────────────────────
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+const requireCjs = createRequire(path.join(process.cwd(), "package.json"));
 
-test("render.ts reads the context from the selection's own range in its message, for the message box and a thread's box", () => {
-  const fn = RENDER.split("function rangeQuoteContext(")[1].split("\n}")[0];
+test("render.ts reads what goes out from the selection's own range in its message, for the message box and a thread's box", () => {
+  const fn = RENDER.split("function selectionQuoteView(")[1].split("\n}")[0];
   assert.match(fn, /closest\("\.md"\)/, "the rendered message the range starts in");
   assert.match(fn, /body\.contains\(r\.endContainer\)/, "and ends in");
-  assert.match(fn, /return quoteContext\(prose, start, start \+ r\.toString\(\)\.length, words\);/);
+  assert.match(fn, /closest\("pre"\)[\s\S]*codeBlockLines\(pre, r\)[\s\S]*codeLineContext\(/, "a code block: its rows, a code line");
+  assert.match(fn, /closest\("code"\)[\s\S]*codeLineContext\(code\.textContent/, "inline code: its own text");
+  assert.match(fn, /blockQuoteText\(scope, r\)[\s\S]*quoteContext\(t\.text, t\.start, t\.end, words\)/, "prose: its block, as it reads");
+  assert.match(RENDER, /const QUOTE_SKIP = "button, select, input, textarea, svg, \.code-copy";/, "never a control's text");
   const seeder = RENDER.split("function seedTranscriptQuote(")[1].split("\n}")[0];
-  assert.match(seeder, /mkQuoteCitation\(quote, uuid, undefined, liveQuoteContext\(quote\)\)/);
+  assert.match(seeder, /mkQuoteCitation\(quote, uuid, undefined, liveQuoteView\(quote\)\)/);
   const thread = RENDER.split("function seedThreadQuote(")[1].split("\n}")[0];
-  assert.match(thread, /mkQuoteCitation\(quote, uuid, undefined, liveQuoteContext\(quote\)\)/);
-  assert.match(RENDER, /function mkQuoteCitation\(quote: string, uuid: string \| null, src\?: string, ctx\?: string \| null\): Citation \{/);
+  assert.match(thread, /mkQuoteCitation\(quote, uuid, undefined, liveQuoteView\(quote\)\)/);
+  // the chip keeps the 4,000-character quote cap for the lines it shows too
+  assert.match(RENDER, /view\?\.shown \? \{ shown: view\.shown\.slice\(0, QUOTE_CAP\) \}/);
 });
 
-test("a comment carries the context from the page: the selection's offsets in the message, else the chip's", () => {
+test("a comment carries what the gesture read off the selection, or what its chip kept", () => {
+  const aim = RENDER.split("function commentAim(")[1].split("\n}")[0];
+  assert.match(aim, /const view = selectionQuoteView\(r, q\.text\);/);
+  assert.match(RENDER, /function chipCommentTarget\(id: string \| null\): \{ sid: string; uuid: string; text: string; view\?: QuoteView \} \| "none" \| "session" \{/);
+  assert.match(RENDER, /openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, aim\.x, aim\.y, aim\.at, false, aim\.view\);/);
   const open = RENDER.split("function openCommentComposer(")[1].split("\n}")[0];
-  assert.match(open, /const context = at \? \(prose \? quoteContext\(prose, at\.start, at\.end, exact\) : null\) : \(ctx \|\| null\);/);
-  assert.match(RENDER, /function chipCommentTarget\(id: string \| null\): \{ sid: string; uuid: string; text: string; ctx\?: string \} \| "none" \| "session" \{/);
-  assert.match(RENDER, /openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, aim\.x, aim\.y, aim\.at, false, aim\.ctx\);/);
+  assert.match(open, /context: view\?\.ctx \|\| null, shown: view\?\.shown \|\| null/);
+  assert.doesNotMatch(open, /quoteContext\(prose/, "never the turn's joined prose, whose code rows and soft line breaks read wrong");
+});
+
+// ── review of #229 (2026-10-14): code, the cap, abbreviations, the joins, the chip's identity ───────────────────────────
+
+test("a word in a line of code: that line, never a sentence and never bold", () => {
+  const line = "    x = refill(cache)";
+  assert.equal(codeLineContext(line, ...at(line, "refill"), "refill"), "x = refill(cache)");
+  const twin = "cache = refill(cache)";
+  assert.equal(codeLineContext(twin, ...at(twin, "cache", 5)), "cache = refill(cache)", "no ** in code: it is an operator");
+  assert.equal(codeLineContext(line, ...at(line, "x = refill(cache)")), null, "the whole line: the words say it all");
+  assert.equal(codeLineContext("a\nb", 0, 1), null, "one line only");
+  const long = "result = " + Array.from({ length: 80 }, (_, i) => "arg" + i).join(", ") + ", refill(cache), " + Array.from({ length: 80 }, (_, i) => "tail" + i).join(", ");
+  const c = codeLineContext(long, ...at(long, "refill"))!;
+  assert.ok(c.length <= QUOTE_CONTEXT_CAP + 2 && c.includes("refill(cache)") && c.startsWith("\u2026") && c.endsWith("\u2026"), c);
+});
+
+test("only a few words are named: a long selection, with or without a full stop, goes out as before", () => {
+  const p = "word ".repeat(3000) + "end";                   // no full stop anywhere
+  assert.equal(quoteContext(p, 0, 14850), null, "a 14,850-character selection has no sentence context");
+  assert.equal(quoteContext(p, 0, QUOTE_WORDS_MAX + 5), null, "nor does one just over the few-words bound");
+  assert.ok(quoteContext(p, 100, 120), "a few words of it do, cut to the window");
+  assert.ok(quoteContext(p, 100, 120)!.length <= QUOTE_CONTEXT_CAP + 6, "the window, two cuts and a twin's bold marks");
+  // the lead-in never repeats a long quote, whatever a cite carries
+  const big = { quote: "x".repeat(500), ctx: "\u2026" + "x".repeat(500) + " y\u2026" };
+  assert.equal(quoteLeadIn(big), "Replying to this part of the conversation:");
+  assert.equal(quoteReplyBody([big], ""), "Replying to this part of the conversation:\n> " + big.quote);
+});
+
+test("a code passage over several lines is quoted as its lines, line breaks and all, under the usual lead-in", () => {
+  const cite = { quote: "def refill(cache):    return cache.load()", shown: "def refill(cache):\n    return cache.load()" };
+  assert.equal(quoteReplyBody([cite], "Why load?"),
+    "Replying to this part of the conversation:\n> def refill(cache):\n>     return cache.load()\n\nWhy load?");
+  assert.equal(quoteReplyBody([{ ...cite, src: "src/a.py:1-2" }], ""), "Replying to this highlighted code (src/a.py:1-2):\n> " + cite.quote,
+    "an editor quote shows what it selected");
+});
+
+test("abbreviations, initials and a trailing-off ellipsis do not end a sentence", () => {
+  for (const [p, w] of [
+    ["Ask Dr. Shaw about the placement of the legend first.", "placement"],
+    ["Ship it to the U.S. office after the placement review.", "placement"],
+    ["Fix the legend, the axes, etc. and then the placement too.", "placement"],
+    ["We tried \u2026 then the placement moved again.", "placement"],
+    ["We tried... then the placement moved again.", "placement"],
+    ["The fix from J. Smith covers the placement as well.", "placement"],
+  ] as Array<[string, string]>) assert.equal(quoteContext(p, ...at(p, w)), p, p);
+  const two = "Fix the axes etc. Then the placement goes last.";
+  assert.equal(quoteContext(two, ...at(two, "placement")), "\u2026Then the placement goes last.", "etc. before a capital ends one");
+});
+
+test("the joins: a ? or ! keeps its mark and a spaced cut; an ellipsis is never doubled", () => {
+  const q = "Should the placement change? I think so.";
+  assert.equal(quoteContext(q, ...at(q, "placement")), "Should the placement change? \u2026");
+  const e = "First line. Then the placement drifts\u2026 Later we fix it.";
+  assert.equal(quoteContext(e, ...at(e, "placement")), "\u2026Then the placement drifts\u2026");
+  const d = "First line. ...and the placement drifts. Done.";
+  assert.equal(quoteContext(d, ...at(d, "placement")), "...and the placement drifts\u2026", "an opening ellipsis takes no second one");
+  for (const t of [q, e, d]) assert.ok(!/\u2026\u2026|\.\.\.\u2026|\u2026\.\.\.|\?\u2026/.test(quoteContext(t, ...at(t, "placement"))!), t);
+});
+
+test("a chip is its words and what goes out for them: the same word from two sentences is two chips", () => {
+  const fn = RENDER.slice(RENDER.indexOf("function citeKey("), RENDER.indexOf("\n}\n", RENDER.indexOf("function citeKey(")) + 3);
+  const citeKey = new Function(requireCjs("esbuild").transformSync(fn, { loader: "ts" }).code + "\nreturn citeKey;")() as (c: object) => string;
+  const a = { title: "placement", quote: "placement", ctx: "\u2026We should revisit the placement of the legend\u2026" };
+  const b = { title: "placement", quote: "placement", ctx: "Keep the placement as it is." };
+  assert.notEqual(citeKey(a), citeKey(b));
+  assert.equal(citeKey(a), citeKey({ ...a }));
+  assert.notEqual(citeKey({ title: "x", quote: "x" }), citeKey({ title: "x", quote: "x", shown: "x" }));
+  // a refused un-send puts back the chip the box held and takes away the one it armed (render.ts's own lines, run)
+  const block = RENDER.split("if (stash.armedCites.length || stash.armedFiles.length) {")[1].split("const beforeF")[0];
+  const run = new Function("stash", "composerCitations", "m", "citeKey", block + "\nreturn composerCitations.get(m.id);");
+  const held = new Map([["s", [b]]]);   // the box after the un-send: the rescinded message's chip in place of the user's
+  const out = run({ cites: [a], armedCites: [citeKey(b)] }, held, { id: "s" }, citeKey) as Array<{ ctx: string }>;
+  assert.deepEqual(out.map((c) => c.ctx), [a.ctx], "the user's own chip is back, the armed one gone");
+  assert.match(RENDER, /for \(const c of composerCitations\.get\(sidQ\) \|\| \[\]\) armedCites\.push\(citeKey\(c\)\);/, "the un-send arms its chips by the same key");
 });

@@ -10,6 +10,8 @@
 // staged-messages.test.ts EXECUTES the rules instead of regexing render.ts (the repo's
 // extract-for-execution idiom). The DOM strip and the send routing live in render.ts.
 
+import { QUOTE_WORDS_MAX } from "./quote-context";
+
 export interface StagedMsg { text: string; cites: unknown[] }
 
 /** A passage quoted from a file shown in romp's file viewer (the user 2026-09-30, who wanted the chat's select-and-stage
@@ -18,15 +20,23 @@ export interface StagedMsg { text: string; cites: unknown[] }
  *  none from a rendered document, which has no lines. Marked apart from the VS Code editor's `src` flavour so each keeps
  *  its own lead-in. */
 export interface FileQuote { kind: "file"; path: string; lines?: [number, number] | null }
-/** `ctx`: for a transcript passage shorter than a sentence, the sentence it sits in (quote-context.ts quoteContext, read
- *  from the rendered message at the selection), which the section quotes in place of the bare words. */
+/** `ctx`: for a few words of a transcript passage, shorter than their sentence or code line, that sentence or line
+ *  (quote-context.ts, read from the rendered message at the selection), which the section quotes in place of the words
+ *  and names them over. `shown`: a passage over several lines of a code block, as its lines with their line breaks, which
+ *  the section quotes in place of `quote` (the selection's text, which the rendered rows join with none). */
 export type QuoteCite = { quote?: string; src?: string | null; kind?: string; path?: string; lines?: [number, number] | null;
-  ctx?: string | null };
+  ctx?: string | null; shown?: string | null };
 
-/** The sentence a transcript passage's section quotes in place of its words, when it was shorter than one (the user
- *  2026-10-14); null for every other quote, the file viewer's and the editor's included, which quote what was selected. */
+/** The sentence or code line a transcript passage's section quotes in place of its words, when they were a few words of
+ *  it (the user 2026-10-14); null for every other quote, the file viewer's and the editor's included. A long quote is never
+ *  named, whatever it carries (QUOTE_WORDS_MAX): the lead-in does not repeat a selection. */
 function quoteSentence(c: QuoteCite): string | null {
-  return !c.src && c.kind !== "file" && c.quote && c.ctx ? c.ctx : null;
+  return !c.src && c.kind !== "file" && c.quote && c.ctx && c.quote.trim().length <= QUOTE_WORDS_MAX ? c.ctx : null;
+}
+/** What a transcript passage's quote block shows: its sentence (quoteSentence), else its lines as the code holds them
+ *  (`shown`), else the quote. */
+function quoteShown(c: QuoteCite): string {
+  return quoteSentence(c) ?? (!c.src && c.kind !== "file" && c.shown ? c.shown : null) ?? c.quote ?? "";
 }
 
 /** A quote's lead-in: the words that tell the agent what the quote block under it is. A file from the viewer names the file
@@ -52,7 +62,7 @@ export function quoteLeadIn(c: QuoteCite): string {
  *  No quote at all is the text alone. */
 export function quoteReplyBody(cites: QuoteCite[], text: string): string {
   const sections = cites.map((c) => {
-    const q = (quoteSentence(c) ?? c.quote ?? "").split("\n").map((l) => "> " + l).join("\n");
+    const q = quoteShown(c).split("\n").map((l) => "> " + l).join("\n");
     return quoteLeadIn(c) + "\n" + q;
   });
   const quoted = sections.join("\n\n");

@@ -7415,15 +7415,27 @@ Replying to "placement" in this part of the conversation:
 ```
 
 A comment thread's opening message does the same under its first line:
-`About "placement" in this part of the conversation:`, then the sentence. The
-sentence is read from the message as the chat shows it, at the moment you select:
-it runs from the end of the sentence before the words to the end of the one they
-are in, within one paragraph, list item, heading or line of code. A `…` marks
-where that line goes on before or after it, a sentence longer than about 280
-characters is cut to the words around the highlight, and when the words occur
-more than once in what is quoted, the one you highlighted is in bold. A
-highlight of a whole sentence or more, a quote from the file viewer and a
-highlight in the editor go out as before, the passage alone. What the quote
+`About "placement" in this part of the conversation:`, then the sentence.
+
+This applies to a few words (up to 100 characters) that are less than their
+sentence. The sentence is read from the message as the chat shows it, at the
+moment you select, without any button's text: it runs from the end of the
+sentence before the words to the end of the one they are in, within one
+paragraph, list item, heading or table cell. A line break in the message's source
+inside a paragraph counts as a space. A period after an abbreviation, an initial
+or an acronym (`Dr.`, `J.`, `U.S.`), and one or an ellipsis followed by a
+lowercase word (`etc. and`, `tried … then`), do not end a sentence. A `…` marks
+where the paragraph goes on before or after the sentence (after a `?` or `!` it
+follows a space, and an ellipsis already there is not doubled), a sentence longer
+than about 280 characters is cut to the words around the highlight, and when the
+words occur more than once in what is quoted, the one you highlighted is in bold.
+
+Code is not prose. A few words of a line of a code block, or of an inline code
+span, are named over that line or span, never a sentence and never in bold. A
+passage over several lines of a code block is quoted as those lines, with their
+line breaks, under the usual lead-in. A longer highlight, a whole sentence or
+more, a quote from the file viewer and a highlight in the editor go out as
+before, the passage alone (in the message box, under its 4,000-character cap). What the quote
 chip's preview shows is what is sent.
 
 ## What a relay sends
