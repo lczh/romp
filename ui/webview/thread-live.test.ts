@@ -101,8 +101,8 @@ test("every answer posts the chat's own frame with the SURFACE's session, never 
 test("the popover hosts the card beside its conversation, keeps it across refills, and lets its clicks through", () => {
   const pop = fn("renderCommentPopover");
   assert.match(pop, /const ask = el\("div", "cmt-ask"\);/, "a host of its own, outside .cmt-msgs: a frame's refill never rebuilds the card under a click");
-  assert.match(pop, /if \(th && th\.status === "open"\) renderThreadAsk\(\);/, "painted once the popover is in the page");
-  assert.match(pop, /\.cmt-chips, \.cmt-ask, button, input,/, "the box's drag lets the card's presses through (a captured press retargeted the option's click)");
+  assert.match(pop, /if \(th && th\.status === "open"\) \{\s*\n\s*renderThreadAsk\(\);/, "painted once the popover is in the page");
+  assert.match(pop, /\.cmt-chips, \.cmt-ask, \.cmt-bg, button, input,/, "the box's drag lets the card's and the background box's presses through (a captured press retargeted their clicks)");
   // the note that points at Break out shows only where the thread's kernel serves no thread question (the comments
   // frame's caps), never beside the card (the review of #232: a page newer than its kernel showed the cue and nothing)
   assert.match(fn("fillCommentMsgs"), /if \(th\.status === "open" && threadStuck\(th\.state\) && !commentThreadAsks\.get\(sid\)\) \{/);
@@ -120,7 +120,58 @@ test("the popover's box is the question's 'add your own' field, by the message b
 test("the popover's chip and stop are the chat bar's: its chip state, and the one stop rule", () => {
   const chip = fn("cmtStateChip");
   assert.match(chip, /const st = threadChipState\(th\);/);
-  assert.match(chip, /wrap\.appendChild\(statusChip\(chipWords\(\{ state: st \}\)\)\);/, "Needs you, API error and the rest from the shared chip");
+  assert.match(chip, /wrap\.appendChild\(statusChip\(chipWords\(threadMetaStatus\(th\)\)\)\);/, "Needs you, API error, Awaiting command and the rest from the shared chip");
   assert.match(chip, /if \(chipStops\(st\)\) wrap\.appendChild\(stopBtn\(\)\);/);
   assert.match(fn("threadMetaStatus"), /state: threadChipState\(th\) as ChipState,/);
+});
+
+// ── thread-live-2: the thinking line, the subagents' progress, the background box and the context gauge ─────────────────
+
+test("the thread's status is its build's: the gauge's fields, the box's rows and the Awaiting chip's words", () => {
+  assert.match(fn("threadMetaStatus"), /return \{ \.\.\.\(\(th\.live && th\.live\.status\) \|\| \{\}\),/, "the build's status projection first, the chip and the badges over it");
+  assert.match(fn("cmtStateChip"), /statusChip\(chipWords\(threadMetaStatus\(th\)\)\)/, "Awaiting command, not Awaiting alone");
+});
+
+test("the thinking line: the chat's own painter, in the popover's fixed-height foot, ticked by the one clock", () => {
+  assert.match(fn("paintLiveThinking"), /paintThinkingLine\(n, th\);/);
+  const thread = fn("paintThreadThinking");
+  assert.match(thread, /document\.querySelector\("#cmt-pop \.cmt-live-status"\)/);
+  assert.match(thread, /const th = thinkingShown\(openThreadSid\(\)\);/, "the same gate: only while the thread works");
+  assert.match(thread, /paintThinkingLine\(n, th\);/, "the one painter");
+  assert.match(fn("thinkingShown"), /\?\? openThreadState\(id\)/, "a thread's working state is its chat chip");
+  assert.match(fn("liveStatusTick"), /paintLiveThinking\(\);\s*\n\s*paintThreadThinking\(\);/);
+  assert.match(fn("applyLiveStatus"), /if \(id === openThreadSid\(\)\) paintThreadThinking\(\);/);
+  assert.match(fn("renderCommentPopover"), /pop\.appendChild\(el\("div", "cmt-live-status"\)\);/);
+});
+
+test("a thread's subagents' progress reads the THREAD's frame and repaints in its popover", () => {
+  assert.match(RENDER, /liveStatus\.get\(\(renderingIntoThread \? renderingSid : renderingOwnerSid \|\| renderingSid\) \|\| ""\)\?\.tasks\[ev\.toolUseId\]/);
+  assert.match(fn("paintTaskProgress"), /const list = id === openThreadSid\(\) \? document\.querySelector\("#cmt-pop \.cmt-msgs"\)/);
+});
+
+test("ONE background box painter: the chat's #bg-tasks, or the thread's .cmt-bg from its build, the presses on each stable host", () => {
+  const box = fn("renderBgTasks");
+  assert.match(box, /const host = target \? target\.host : document\.getElementById\("bg-tasks"\);/);
+  assert.match(box, /host\.dataset\.sid = sid \|\| "";/, "whose box: its rows' Stop and Cancel post for this session");
+  const install = fn("installBgBox");
+  for (const t of ["stopTask", "cancelWatch"]) assert.match(install, new RegExp('type: "' + t + '", id: sid,'), t + " by the box's own session");
+  assert.doesNotMatch(install, /activeId/, "never the active tab's");
+  assert.match(RENDER, /\(\(\) => \{ const host = document\.getElementById\("bg-tasks"\); if \(host\) installBgBox\(host\); \}\)\(\);/);
+  const thread = fn("renderThreadBg");
+  assert.match(thread, /renderBgTasks\(\{ host, sid: cur \? threadSidOf\(cur\.th\) : null,/);
+  assert.match(fn("renderCommentPopover"), /const bg = el\("div", "cmt-bg"\);[\s\S]{0,200}installBgBox\(bg\);/, "installed once per popover, on its stable host");
+  assert.match(fn("renderCommentPopover"), /if \(th\) renderThreadBg\(\);\s+\/\/ the background box, from this frame/, "repainted by each frame");
+});
+
+test("the context gauge: the chat's battery over the thread's status, a click compacting the THREAD", () => {
+  const pop = fn("renderCommentPopover");
+  assert.match(pop, /const ctx = buildCtxBar\(\(bar\) => compactSessionOf\(bar, threadSidOf\(th\), threadMetaStatus\(th\)\.state\)\);/);
+  assert.match(fn("paintThreadCtx"), /setCtxBar\(bar, st\.ctx, st\.state === "compacting", pickTone\(st\.ctxColor, st\.ctxTone\), st\.ctxOver\);/);
+  assert.match(fn("compactSessionOf"), /vscodeApi\.postMessage\(\{ type: "compactSession", id: sid \}\);/);
+  assert.match(fn("compactActiveSession"), /compactSessionOf\(bar, activeId, s\.status\.state\);/, "the chat's battery through the same post");
+});
+
+test("a broken-out thread's Open the session names the session as the strip does (host-prefixed on a linked machine)", () => {
+  assert.match(fn("renderCommentPopover"), /open\.dataset\.sid = threadSidOf\(th\);/);
+  assert.match(RENDER, /cmtopensession: \(elx\) => \{\s*\n\s*const sid = elx\.dataset\.sid;\s*\n\s*closeCommentPop\(\);\s*\n\s*if \(sid\) setActive\(sid\);/);
 });

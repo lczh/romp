@@ -24,7 +24,13 @@ Environment knobs (read by the client, set by the lab):
   ROMP_FAKE_SDK_ASKS    a JSON list of {"when", "tool", "input"}: a plain turn whose text contains `when` asks through the
                         options' can_use_tool before it replies, exactly as the CLI consults the SDK's permission callback
                         (tool AskUserQuestion: a question; any other tool: a permission prompt for it), and its reply names
-                        the outcome: the answers given, or that the tool was allowed or denied (the thread-ask lab)
+                        the outcome: the answers given, or that the tool was allowed or denied (the thread-ask lab).
+                        An entry may also script what the turn streams before any consult (thread-live-2's labs), in
+                        this order: "thinking" (a thinking stretch: the CLI's system/thinking_tokens frame),
+                        "background" (a background task's system/task_started fields: task_id, description,
+                        tool_use_id, task_type; left running), "hold" (the turn stays open, working, until the
+                        client's interrupt(), which ends it as the CLI does: its "[Request interrupted by user]"
+                        record and an error result). "tool" may be omitted: no consult.
 """
 import asyncio
 import json
@@ -273,7 +279,10 @@ class ClaudeSDKClient:
             await self._turnq.put(turn)
 
     async def interrupt(self):
-        pass
+        # a held turn (ROMP_FAKE_SDK_ASKS "hold") ends on the stop, as the CLI's does; anything else has nothing to stop
+        ev = getattr(self, "_stop", None)
+        if ev is not None:
+            ev.set()
 
     async def set_model(self, model=None):
         pass
@@ -359,9 +368,35 @@ class ClaudeSDKClient:
             # a scripted consult (ROMP_FAKE_SDK_ASKS): the turn waits on the backend's permission callback, as the CLI
             # does while a question or a permission prompt is up, and the reply says what came back
             outcomes = []
+            stopped = False
             for ask in _scripted_asks(text):
-                res = await self.options.can_use_tool(ask.get("tool") or "AskUserQuestion", dict(ask.get("input") or {}), _ToolContext())
-                outcomes.append(_ask_outcome(ask.get("tool") or "AskUserQuestion", res))
+                if ask.get("thinking"):
+                    yield SystemMessage("thinking_tokens", {"estimated_tokens": 40})   # a stretch of thinking, streaming now
+                bg = ask.get("background")
+                if isinstance(bg, dict):
+                    yield SystemMessage("task_started", dict({"task_type": "local_bash"}, **bg))   # a background task, left running
+                if ask.get("hold"):
+                    self._stop = asyncio.Event()
+                    try:
+                        await asyncio.wait_for(self._stop.wait(), timeout=120)   # bounded: a lab that never stops still ends
+                    except asyncio.TimeoutError:
+                        pass
+                    self._stop = None
+                    stopped = True
+                    break
+                if ask.get("tool") or ask.get("input"):
+                    res = await self.options.can_use_tool(ask.get("tool") or "AskUserQuestion", dict(ask.get("input") or {}), _ToolContext())
+                    outcomes.append(_ask_outcome(ask.get("tool") or "AskUserQuestion", res))
+            if stopped:
+                # the CLI's own stop record ends the turn (event_model is_interrupt_record), then its result
+                i_uuid = "u-" + _uuid.uuid4().hex[:10]
+                _append(path, {"type": "user", "timestamp": _iso(int(time.time())), "uuid": i_uuid, "parentUuid": self._parent,
+                               "sessionId": self._fsid,
+                               "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}})
+                self._parent = i_uuid
+                yield ResultMessage(subtype="error_during_execution", is_error=True, num_turns=1, session_id=self._fsid,
+                                    total_cost_usd=0.0)
+                continue
             now = int(time.time())
             reply = " ".join(outcomes) or os.environ.get("ROMP_FAKE_SDK_REPLY") or "Rebuilt the search index; 3 shards refreshed."
             a_uuid = "a-" + _uuid.uuid4().hex[:10]

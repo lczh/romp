@@ -4910,6 +4910,7 @@ function applyLiveStatus(m: { id?: unknown; thinking?: unknown; tasks?: unknown 
   if (!ls.thinking && !Object.keys(ls.tasks).length) liveStatus.delete(id); else liveStatus.set(id, ls);
   paintTabThinking(id);
   if (id === activeId) paintLiveThinking();
+  if (id === openThreadSid()) paintThreadThinking();   // an open comment thread's own line (thread-live-2)
   paintTaskProgress(id);
 }
 
@@ -4940,8 +4941,13 @@ function liveStatusEl(): HTMLElement | null {
 // on over an idle session (the second review of #171, 2026-10-08). An unreachable host's session shows none either.
 function thinkingShown(id: string | null | undefined): ThinkingLive | null {
   if (!id || hostIsDown(id)) return null;
-  const st = (liveSession(id) || sessions.get(id))?.status?.state;
+  const st = (liveSession(id) || sessions.get(id))?.status?.state ?? openThreadState(id);
   return st === "working" ? liveStatus.get(id)?.thinking || null : null;
+}
+// …and for the open comment thread, which is no session of the strip's: its chat chip (thread-live-2), else nothing known
+function openThreadState(id: string): string | undefined {
+  const cur = openCommentThread();
+  return cur && threadSidOf(cur.th) === id && cur.th.status === "open" ? threadChipState(cur.th) : undefined;
 }
 
 function paintLiveThinking(): void {
@@ -4949,6 +4955,18 @@ function paintLiveThinking(): void {
   if (!th) { const have = document.getElementById("live-status"); if (have?.firstChild) have.replaceChildren(); return; }
   const n = liveStatusEl();
   if (!n) return;
+  paintThinkingLine(n, th);
+}
+// The open comment thread's "Thinking · 14s", the same line in the popover's fixed-height .cmt-live-status (thread-live-2)
+function paintThreadThinking(): void {
+  const n = document.querySelector("#cmt-pop .cmt-live-status") as HTMLElement | null;
+  if (!n) return;
+  const th = thinkingShown(openThreadSid());
+  if (!th) { if (n.firstChild) n.replaceChildren(); return; }
+  paintThinkingLine(n, th);
+}
+// The one line, painted into its host in place: the loader dots, the words, the quiet mark and the tip.
+function paintThinkingLine(n: HTMLElement, th: ThinkingLive): void {
   const now = Date.now() / 1000;
   let line = n.firstElementChild as HTMLElement | null;
   if (!line) {
@@ -4988,10 +5006,13 @@ function paintTabThinking(id: string): void {
 // A session's running subagent rows: each progress span (renderTool's .agent-live, keyed by the spawning call's id)
 // rewritten from the latest frame, in place.
 function paintTaskProgress(id: string): void {
+  const roots: HTMLElement[] = [];
   const v = views.get(id);
-  if (!v) return;
+  if (v) roots.push(v.el);
+  const list = id === openThreadSid() ? document.querySelector("#cmt-pop .cmt-msgs") as HTMLElement | null : null;
+  if (list) roots.push(list);   // an open comment thread's agent rows, in its popover (thread-live-2)
   const tasks = liveStatus.get(id)?.tasks || {};
-  for (const n of Array.from(v.el.querySelectorAll<HTMLElement>(".agent-live[data-tu]"))) {
+  for (const n of roots.flatMap((r) => Array.from(r.querySelectorAll<HTMLElement>(".agent-live[data-tu]")))) {
     const t = taskProgressText(tasks[n.dataset.tu || ""], n.dataset.brief === "1");
     setLiveText(n, t);
   }
@@ -5001,6 +5022,7 @@ function paintTaskProgress(id: string): void {
 // where its text moved.
 function liveStatusTick(): void {
   paintLiveThinking();
+  paintThreadThinking();
   for (const [id, ls] of liveStatus) if (ls.thinking) paintTabThinking(id);
   const now = Date.now() / 1000;
   for (const n of Array.from(document.querySelectorAll<HTMLElement>(".tool-elapsed[data-since]"))) {
@@ -5766,7 +5788,7 @@ function renderTool(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement {
     // a row that lists the agent's steps already counts its calls (the fold label) and names its latest tool (the
     // preview): the span then carries only the tokens, so no figure is said twice on one row
     if (ev.agentGist || ev.stepsTotal || ev.agentSteps?.length) p.dataset.brief = "1";
-    p.textContent = taskProgressText(liveStatus.get(renderingOwnerSid || renderingSid || "")?.tasks[ev.toolUseId], p.dataset.brief === "1");
+    p.textContent = taskProgressText(liveStatus.get((renderingIntoThread ? renderingSid : renderingOwnerSid || renderingSid) || "")?.tasks[ev.toolUseId], p.dataset.brief === "1");   // a thread's rows read the THREAD's frame (thread-live-2), never its parent's
     liveBits.push(p);
   }
   // An edit's totals are the diff fold's toggle below (+A -R), printed once per row (round two, medium 1); a FAILED edit's error fold
@@ -11714,7 +11736,8 @@ function refillOpenCommentPop(): void {
  *  element set (mode · model · effort · fast; the user 2026-08-25) through the one code path.
  *  metaPending's switching-dots ride the same keys, sid-scoped. */
 function threadMetaStatus(th: CommentThread): Status {
-  return { state: threadChipState(th) as ChipState,   // the chat's chip for a running thread (thread-live-1), the raw state's reading otherwise
+  return { ...((th.live && th.live.status) || {}),   // a running thread's build status (thread-live-2): the gauge's and the box's fields, the Awaiting chip's words
+           state: threadChipState(th) as ChipState,   // the chat's chip for a running thread (thread-live-1), the raw state's reading otherwise
            sinceEpoch: th.sinceEpoch || null, mode: th.mode || "", model: th.model || "",
            effort: th.effort || "default", fast: th.fast || "", backend: "sdk",
            modelFallback: th.modelFallback ?? null,   // the popover's picker wears the requested-model mark too (2026-09-17)
@@ -11770,7 +11793,7 @@ function cmtStateChip(th: CommentThread): HTMLElement {
     c.textContent = "⟳ Compacting context…";
     wrap.appendChild(c);
   } else {
-    wrap.appendChild(statusChip(chipWords({ state: st })));   // the shared chip (status-chip.ts): Needs you, API error, Ready, …
+    wrap.appendChild(statusChip(chipWords(threadMetaStatus(th))));   // the shared chip (status-chip.ts): Needs you, API error, Awaiting command, Ready, …
   }
   if (chipStops(st)) wrap.appendChild(stopBtn());   // the chat bar's rule, one predicate: working, compacting, retrying, blocked
   return wrap;
@@ -12119,6 +12142,9 @@ function renderCommentPopover(): void {
     if (th && cs) cs.replaceWith(cmtStateChip(th));   // state chip + timer track every frame, in place
     const cm = prev.querySelector("#cmt-meta") as HTMLElement | null;
     if (th && cm) syncMetaControls(cm, threadMetaStatus(th), threadSidOf(th));   // same in-place refresh as the chat's tick
+    const cg = prev.querySelector(".cmt-ctx") as HTMLElement | null;
+    if (th && cg) paintThreadCtx(cg, th);               // the gauge's fill, from this frame (thread-live-2)
+    if (th) renderThreadBg();                           // the background box, from this frame
     return;
   }
   const hadFocus = !!prev?.querySelector(".cmt-input:focus-within, .cmt-input:focus");
@@ -12189,7 +12215,7 @@ function renderCommentPopover(): void {
   // interactive control or selectable text, and never the bottom-right resize corner
   pop.addEventListener("pointerdown", (ev: PointerEvent) => {
     const t = ev.target as HTMLElement;
-    if (t.closest(".cmt-x, .cmt-name, .cmt-input, .cmt-msgs, .cmt-quote, .cmt-staged, .cmt-chips, .cmt-ask, button, input, textarea, .meta-btn, .meta-menu")) return;   // the staged strip's rows and label are its own clicks (2026-10-07); so are the question card's options (thread-live-1: a captured press retargeted their click to the box)
+    if (t.closest(".cmt-x, .cmt-name, .cmt-input, .cmt-msgs, .cmt-quote, .cmt-staged, .cmt-chips, .cmt-ask, .cmt-bg, button, input, textarea, .meta-btn, .meta-menu")) return;   // the staged strip's rows and label are its own clicks (2026-10-07); so are the question card's options (thread-live-1: a captured press retargeted their click to the box)
     const pr = pop.getBoundingClientRect();
     if (ev.clientX > pr.right - 18 && ev.clientY > pr.bottom - 18) return;   // the resize handle's corner
     ev.preventDefault();
@@ -12244,11 +12270,20 @@ function renderCommentPopover(): void {
     fillCommentMsgs(list, th, sid);
     pop.appendChild(list);
     if (th.status === "open") {
+      // the thread's thinking line under its conversation, the chat's foot line (paintThreadThinking, thread-live-2): a
+      // fixed height whether or not it shows anything, so a stretch starting and ending moves nothing in the box
+      pop.appendChild(el("div", "cmt-live-status"));
       // the thread's question, when it stops on one: the chat's card, painted once the popover is in the page
       // (renderThreadAsk, below and on every askLive for the thread); out of the list, so a frame's refill never rebuilds it
       const ask = el("div", "cmt-ask");
       ask.style.display = "none";
       pop.appendChild(ask);
+      // the thread's background box, the chat's own (renderBgTasks over the thread's build): its clicks on this stable
+      // host, installed once per popover, so a frame's repaint never drops a press (thread-live-2)
+      const bg = el("div", "cmt-bg");
+      bg.style.display = "none";
+      installBgBox(bg);
+      pop.appendChild(bg);
     }
   }
   if (sent) {
@@ -12478,6 +12513,12 @@ function renderCommentPopover(): void {
       metaBox.id = "cmt-meta";                      // mono/0.92em/dim dress is where the font lives
       syncMetaControls(metaBox, threadMetaStatus(th), threadSidOf(th));   // the thread's session: a pick routes to the kernel that runs it
       right.appendChild(metaBox);
+      // the context gauge, the chat's own battery (thread-live-2): the thread's fill from its build's status, a click
+      // compacts the THREAD (compactSessionOf), kept across in-place refreshes and refilled by each frame
+      const ctx = buildCtxBar((bar) => compactSessionOf(bar, threadSidOf(th), threadMetaStatus(th).state));
+      ctx.classList.add("cmt-ctx");
+      paintThreadCtx(ctx, th);
+      right.appendChild(ctx);
       mrow.appendChild(right);
       pop.appendChild(mrow);
     }
@@ -12544,13 +12585,17 @@ function renderCommentPopover(): void {
     open.textContent = "Open the session";
     open.title = "Switch to that session";
     open.dataset.act = "cmtopensession";
-    open.dataset.tid = th.tid;
+    open.dataset.sid = threadSidOf(th);   // the session it became, as the strip names its tab: host-prefixed on a linked machine (the review of #237)
     row.appendChild(open);
     pop.appendChild(row);
   }
   document.body.appendChild(pop);
   if (cmtStageable(th)) { paintCmtStaged(); paintCmtChips(); }   // the thread's stack and chips, from state (2026-10-07)
-  if (th && th.status === "open") renderThreadAsk();              // the thread's question, if it waits on one (thread-live-1)
+  if (th && th.status === "open") {
+    renderThreadAsk();              // the thread's question, if it waits on one (thread-live-1)
+    paintThreadThinking();          // its thinking line and its background box (thread-live-2)
+    renderThreadBg();
+  }
   if (typeof ResizeObserver === "function") {
     // resizing the BOX (resize: both) hands the extra room to the quoted context: the .sized class
     // unlocks the quote's clamp; armed only after a real user resize, so the natural size stays tight
@@ -17651,8 +17696,11 @@ function renderNoticeDisclosures(): void {
   for (const r of Array.from(host.querySelectorAll<HTMLElement>(".ntc-row"))) noticeMoreButton(r, noticeLineOf(r));
 }
 
-function renderBgTasks() {
-  const host = document.getElementById("bg-tasks");
+// THE BACKGROUND BOX's one painter: the chat's #bg-tasks for the active tab's session, or, given a `target`, another host for
+// another session's status and tracked tasks: a comment popover's .cmt-bg for its open thread (renderThreadBg, thread-live-2)
+interface BgBoxSource { bgTasks?: { tasks: BgTask[] } | null; status: Status; }
+function renderBgTasks(target?: { host: HTMLElement; sid: string | null; src: BgBoxSource | null }) {
+  const host = target ? target.host : document.getElementById("bg-tasks");
   if (!host) return;
   // THE HEADER KEEPS THE KEYBOARD (the box arc's round three, the second contributor's post-merge review of PR 2105): this render empties the box
   // and builds a new header on every call, the one its own click makes included, so Enter toggled the rows and dropped focus to the body (a
@@ -17662,7 +17710,9 @@ function renderBgTasks() {
   const refocusHead = !!document.activeElement && document.activeElement.classList.contains("bg-fold-head") && host.contains(document.activeElement)
     && document.activeElement.matches(":focus-visible");
   host.replaceChildren();
-  const s = activeId && !snapView ? liveSession(activeId) : null;   // (snapView: the pane shows a section, not this session)
+  const sid = target ? target.sid : (activeId && !snapView ? activeId : null);   // (snapView: the pane shows a section, not this session)
+  const s: BgBoxSource | null = target ? target.src : (sid ? liveSession(activeId) || null : null);   // the chat's: the active tab's gated session
+  host.dataset.sid = sid || "";   // whose box: the rows' Stop and Cancel post for this session (installBgBox)
   const tasks: BgTask[] = (s && s.bgTasks && s.bgTasks.tasks) || [];
   // Keyed on CONTENT, never the chip state (the user 2026-08-30, paraphrased: even while working, anything
   // the session has in flight shows at the chat bottom). The rows ride awaitingItems in both turn states;
@@ -17671,9 +17721,8 @@ function renderBgTasks() {
   // and list on their own when the wait does not name them (a service the session keeps around).
   const why = (s && (s.status.awaitingWhy || "").trim()) || "";
   const items = ((s && s.status.awaitingItems) || []).filter((it) => it && it.kind);
-  if (!s || !activeId || (!why && !items.length && !tasks.length)) { host.style.display = "none"; host.classList.remove("bg-awaited"); return; }
+  if (!s || !sid || (!why && !items.length && !tasks.length)) { host.style.display = "none"; host.classList.remove("bg-awaited"); return; }
   host.style.display = "";
-  const sid = activeId;
   // the AWAITED outline (the user 2026-08-19): the box wears the chip's await-green while the session waits
   // on its rows (the wait IS the box), and whenever the kernel names tracked tasks as awaited
   // (awaitingTaskIds — an exact launch-id match; the ids' PRESENCE, never the chip state); the status DOT
@@ -18789,11 +18838,21 @@ function setCtxBar(bar: HTMLElement, ctxStr: string | undefined, compacting = fa
 }
 function compactActiveSession(bar: HTMLElement): void {
   const s = activeId ? liveSession(activeId) : null;
-  if (!s || !vscodeApi) return;
+  if (!s || !activeId) return;
+  compactSessionOf(bar, activeId, s.status.state);
+}
+// The battery's /compact for one session, the chat's or an open comment thread's (thread-live-2): its own id and state.
+function compactSessionOf(bar: HTMLElement, sid: string, state: string): void {
+  if (!vscodeApi) return;
   // awaiting: the pane's keyboard belongs to the prompt; compacting/closed: nothing to do
-  if (s.status.state === "needsInput" || s.status.state === "awaiting" || s.status.state === "compacting" || s.status.state === "closed") return;
-  vscodeApi.postMessage({ type: "compactSession", id: activeId });
+  if (state === "needsInput" || state === "awaiting" || state === "compacting" || state === "closed") return;
+  vscodeApi.postMessage({ type: "compactSession", id: sid });
   bar.classList.add("ctx-clicked");   // immediate cue; the real compacting state takes over via the poll
+}
+// A thread's gauge: the chat's setCtxBar over the thread's build status (its fill, tint and over-the-window mark).
+function paintThreadCtx(bar: HTMLElement, th: CommentThread): void {
+  const st = threadMetaStatus(th);
+  setCtxBar(bar, st.ctx, st.state === "compacting", pickTone(st.ctxColor, st.ctxTone), st.ctxOver);
 }
 
 
@@ -24741,36 +24800,50 @@ setupSettings();
     ...sectionActs(noticeSectionEnv, (el) => el.closest(".ntc-row") as HTMLElement | null),   // the shared builder's clicks (the badges, the line and its paragraphs, the awaited peers, the sub-goal triangles and texts): one binding on this stable root, since the rows' nodes are rebuilt on every frame (ui/CLAUDE.md)
   });
 })();
-// Background-task rows toggle open/closed — delegated to the stable #bg-tasks container (installed once),
-// not the per-task rows that renderBgTasks() rebuilds on every push, so the click always lands.
-(() => {
-  const host = document.getElementById("bg-tasks");
-  if (!host) return;
+// Background-task rows toggle open/closed — delegated to the box's stable container (installed once per host: the chat's
+// #bg-tasks at load, a comment popover's .cmt-bg as the popover is built), not the per-task rows that renderBgTasks()
+// rebuilds on every push, so the click always lands. The session a press acts on is the box's own (its host's data-sid,
+// renderBgTasks), never the active tab's: a thread's box stops the thread's tasks (thread-live-2).
+function installBgBox(host: HTMLElement): void {
+  const boxSid = (): string => host.dataset.sid || "";
   delegate(host, {
     "bg-fold": (el) => {   // the count header → show/hide the task list
       const id = el.dataset.id; if (!id) return;
       if (openFolds.has("bgfold:" + id)) openFolds.delete("bgfold:" + id); else openFolds.add("bgfold:" + id);
-      renderBgTasks();
+      repaintBgBoxes();
     },
     "bg-toggle": (el) => {   // a task row → show/hide its command + output
       const id = el.dataset.id; if (!id) return;
       if (openFolds.has("bgrow:" + id)) openFolds.delete("bgrow:" + id); else openFolds.add("bgrow:" + id);
-      renderBgTasks();
+      repaintBgBoxes();
     },
     "bg-stop": (el) => {   // stop this ONE task; the row disappears on its terminal lifecycle event
-      const id = el.dataset.id; if (!id || !activeId) return;
+      const id = el.dataset.id; const sid = boxSid(); if (!id || !sid) return;
       const btn = el as HTMLButtonElement;
       btn.disabled = true; btn.textContent = "Stopping…";   // immediate acknowledgement, before the round-trip
-      vscodeApi?.postMessage({ type: "stopTask", id: activeId, taskId: id });
+      vscodeApi?.postMessage({ type: "stopTask", id: sid, taskId: id });
     },
     "bg-cancel-watch": (el) => {   // retire this ONE armed watch (kernel cancel_watch — the `romp watch --cancel` path); the row goes when the registry drops it
-      const id = el.dataset.id; if (!id || !activeId) return;
+      const id = el.dataset.id; const sid = boxSid(); if (!id || !sid) return;
       const btn = el as HTMLButtonElement;
       btn.disabled = true; btn.textContent = "Cancelling…";   // immediate acknowledgement, before the round-trip
-      vscodeApi?.postMessage({ type: "cancelWatch", id: activeId, watchId: id });
+      vscodeApi?.postMessage({ type: "cancelWatch", id: sid, watchId: id });
     },
   });
-})();
+}
+(() => { const host = document.getElementById("bg-tasks"); if (host) installBgBox(host); })();
+// Every box on the page, after a fold changed (the fold keys are per session and per row, so each box reads its own)
+function repaintBgBoxes(): void { renderBgTasks(); renderThreadBg(); }
+// The open thread's background box (thread-live-2): the chat's painter over the thread's build status and tracked tasks,
+// repainted by each comments frame (the popover's refresh) and by its own folds
+function renderThreadBg(): void {
+  const host = document.querySelector("#cmt-pop .cmt-bg") as HTMLElement | null;
+  const cur = openCommentThread();
+  if (!host) return;
+  const live = cur && cur.th.status === "open" ? cur.th.live : null;
+  renderBgTasks({ host, sid: cur ? threadSidOf(cur.th) : null,
+                  src: live ? { bgTasks: (live.bgTasks as { tasks: BgTask[] } | null) || null, status: threadMetaStatus(cur!.th) } : null });
+}
 (() => {
   // The statusline's Awaiting chip (slice 2, 2026-09-05): a click opens the awaiting box and brings it
   // into view. Delegated to the stable #statusline (updateStatusline rebuilds its children on every
@@ -24935,9 +25008,9 @@ setupSettings();
       closeCommentPop();
     },
     cmtopensession: (elx) => {
-      const tid = elx.dataset.tid;
+      const sid = elx.dataset.sid;
       closeCommentPop();
-      if (tid) setActive(tid);
+      if (sid) setActive(sid);
     },
     // a branch divider (child side) or branch chip (parent side): jump to the other end of the
     // branch, landing on the branch-point turn via the deep-link anchor machinery. The refusal

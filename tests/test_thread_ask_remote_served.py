@@ -45,10 +45,15 @@ REPLY = ("Keep the retry cap at two minutes on every sync path. Longer caps only
 PASSAGE = "Keep the retry cap at two minutes"
 COMMENT = "Which cap should the sync use?"
 QUESTION = "Which retry cap should the notes-api sync use?"
+P_WORK = "the header is written once per export"
+C_WORK = "Run the long export now"
 ASKS = [{"when": COMMENT, "tool": "AskUserQuestion",
          "input": {"questions": [{"question": QUESTION, "header": "Retry cap", "multiSelect": False,
                                   "options": [{"label": "Two minutes", "description": "the cap the sync has today"},
-                                              {"label": "Five minutes", "description": "rides out a longer outage"}]}]}}]
+                                              {"label": "Five minutes", "description": "rides out a longer outage"}]}]}},
+        # thread-live-2: a turn that thinks, starts a background command and stays working until the stop ends it
+        {"when": C_WORK, "thinking": True, "hold": True,
+         "background": {"task_id": "bg-export", "description": "export the notes table", "tool_use_id": "tu-export"}}]
 
 
 def _free_port():
@@ -77,12 +82,16 @@ const done = async (why) => { if (why) out.died = why; fs.writeSync(1, "RESULT:"
 const page = await browser.newPage({ viewport: { width: 1200, height: 860 } });
 const errs = [];
 page.on("pageerror", (e) => errs.push(String(e && e.stack || e).slice(0, 600)));
-// every question frame the page sends, with the socket it left on (and sent on: the linked kernel answers the thread)
+// every question frame the page sends, and every thread op the second case makes, with the socket it left on (and sent on:
+// the linked kernel acts on the thread)
 await page.addInitScript(() => {
-  window.__asks = [];
+  window.__asks = []; window.__ops = [];
+  const OPS = ["interrupt", "setEffort", "setModel", "compactSession", "stopTask"];
   const send = WebSocket.prototype.send;
   WebSocket.prototype.send = function (d) {
-    try { const m = JSON.parse(d); if (m && /Ask$/.test(m.type || "")) window.__asks.push({ url: this.url, type: m.type, id: m.id, target: m.target }); } catch (e) {}
+    try { const m = JSON.parse(d);
+      if (m && /Ask$/.test(m.type || "")) window.__asks.push({ url: this.url, type: m.type, id: m.id, target: m.target });
+      if (m && OPS.includes(m.type)) window.__ops.push({ url: this.url, type: m.type, id: m.id, value: m.value }); } catch (e) {}
     return send.call(this, d);
   };
 });
@@ -123,6 +132,54 @@ out.answered = await page.waitForFunction(() => /You chose Five minutes/.test((d
 out.frames = await page.evaluate((n) => window.__asks.slice(n), before);
 out.cardAfter = await page.evaluate(() => !!document.querySelector("#cmt-pop .cmt-ask .ask-card"));
 out.toasts = await page.evaluate(() => Array.from(document.querySelectorAll(".warn-toast-msg, .warn-toast")).map((t) => t.textContent));
+await page.evaluate(() => document.querySelector("#cmt-pop .cmt-x")?.click());
+await page.waitForFunction(() => !document.getElementById("cmt-pop"), null, { timeout: 5000 }).catch(() => {});
+
+// 2. a working thread on the linked machine (thread-live-2): its thinking line, its background box, its context gauge, a pick
+// of its effort and its stop, each read from or sent to TESTHOST's kernel for this thread
+const sent = () => page.evaluate(() => window.__ops.slice());
+await page.evaluate((text) => {
+  const turn = Array.from(document.querySelectorAll("#content .turn")).reverse().find((n) => (n.textContent || "").includes(text));
+  const walker = document.createTreeWalker(turn, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node && !(node.textContent || "").includes(text)) node = walker.nextNode();
+  const at = node.textContent.indexOf(text);
+  const sel = window.getSelection(); sel.removeAllRanges();
+  const r = document.createRange(); r.setStart(node, at); r.setEnd(node, at + text.length); sel.addRange(r);
+}, cfg.pWork);
+await page.keyboard.press("Control+/");
+await page.waitForSelector("#cmt-pop .cmt-input", { timeout: 8000 });
+await page.focus("#cmt-pop .cmt-input");
+await page.keyboard.type(cfg.cWork);
+await page.keyboard.press("Enter");
+await page.waitForFunction(() => document.getElementById("cmt-pop")?.dataset.mode === "thread", null, { timeout: 60000 }).catch(() => {});
+out.working = await page.waitForFunction(() => !!document.querySelector("#cmt-pop #cmt-state .chip-working") && !!document.querySelector("#cmt-pop .cmt-stop")
+  && /Thinking/.test((document.querySelector("#cmt-pop .cmt-live-status") || {}).textContent || "")
+  && /background/i.test((document.querySelector("#cmt-pop .cmt-bg .bg-fold-label") || {}).textContent || ""), null, { timeout: 60000 }).then(() => true, () => false);
+out.live = await page.evaluate(() => ({
+  chip: (document.querySelector("#cmt-pop #cmt-state .chip") || {}).textContent || "",
+  stop: !!document.querySelector("#cmt-pop .cmt-stop"),
+  thinking: (document.querySelector("#cmt-pop .cmt-live-status") || {}).textContent || "",
+  bg: (document.querySelector("#cmt-pop .cmt-bg .bg-fold-label") || {}).textContent || "",
+  bgShown: (document.querySelector("#cmt-pop .cmt-bg") || { style: {} }).style.display !== "none",
+  ctx: (document.querySelector("#cmt-pop .cmt-ctx .ctx-text") || {}).textContent || "",
+  ctxShown: (document.querySelector("#cmt-pop .cmt-ctx") || { style: {} }).style.display !== "none",
+  tid: (document.getElementById("cmt-pop") || {}).dataset?.tid || "",
+}));
+const before2 = (await sent()).length;
+// the effort badge's own picker: a choice other than the current one
+await page.click("#cmt-pop #cmt-meta .meta-btn[data-kind='effort']");
+await page.waitForSelector(".meta-menu .meta-item", { timeout: 5000 }).catch(() => {});
+out.effortPicked = await page.evaluate(() => { const it = Array.from(document.querySelectorAll(".meta-menu .meta-item")).find((i) => !i.classList.contains("current")); if (!it) return null; const t = (it.firstChild && it.firstChild.textContent) || it.textContent; it.click(); return t; });
+await page.waitForTimeout(300);
+// the stop: the turn ends on TESTHOST, and the thread, its background command still running, reads Awaiting, never Ready
+await page.click("#cmt-pop .cmt-stop");
+out.stopped = await page.waitForFunction(() => !document.querySelector("#cmt-pop #cmt-state .chip-working") && !document.querySelector("#cmt-pop .cmt-stop")
+  && /Awaiting/.test((document.querySelector("#cmt-pop #cmt-state .chip") || {}).textContent || ""), null, { timeout: 60000 }).then(() => true, () => false);
+out.after = await page.evaluate(() => ({ chip: (document.querySelector("#cmt-pop #cmt-state .chip") || {}).textContent || "",
+                                          bg: (document.querySelector("#cmt-pop .cmt-bg .bg-fold-label") || {}).textContent || "",
+                                          thinking: (document.querySelector("#cmt-pop .cmt-live-status") || {}).textContent || "" }));
+out.ops = (await sent()).slice(before2);
 out.errs = errs;
 await done();
 """
@@ -233,7 +290,8 @@ class ServedThreadAskRemote(unittest.TestCase):
     def test_a_linked_machines_thread_question_is_answered_from_the_hub_and_reaches_its_thread(self):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
-            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.hport, self.htoken), "passage": PASSAGE, "comment": COMMENT}, f)
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.hport, self.htoken), "passage": PASSAGE, "comment": COMMENT,
+                       "pWork": P_WORK, "cWork": C_WORK}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -265,6 +323,26 @@ class ServedThreadAskRemote(unittest.TestCase):
         self.assertTrue(r["answered"], "the linked machine's thread answered with the option picked%s" % logs)
         self.assertFalse(r["cardAfter"], "the card left with the question")
         self.assertFalse([t for t in r["toasts"] if "not delivered" in (t or "")], "nothing was refused: %r" % r["toasts"])
+
+        # 2. a working thread on the linked machine (thread-live-2): the hub's popover paints its live state from TESTHOST
+        lv = r["live"]
+        self.assertTrue(r["working"], "the thread's working chip, stop, thinking line and background box: %r%s" % (lv, logs))
+        self.assertIn("Thinking", lv["thinking"], "the chat's thinking line, for the thread: %r" % lv)
+        self.assertTrue(lv["bgShown"] and "1 command" in lv["bg"], "the chat's background box, for the thread: %r" % lv)
+        self.assertTrue(lv["ctxShown"] and lv["ctx"].endswith("%"), "the chat's context gauge, for the thread: %r" % lv)
+        wtid = lv["tid"]
+        ops = {o["type"]: o for o in r["ops"]}
+        self.assertIn("setEffort", ops, "the effort pick left the page: %r" % r["ops"])
+        self.assertIn("/remote/TESTHOST/ws", ops["setEffort"]["url"], "…for the linked machine: %r" % ops["setEffort"])
+        self.assertEqual(ops["setEffort"]["id"], wtid, "…naming the thread as its kernel knows it")
+        reg = json.loads(Path(self.lab, "testhost", "xdg", "romp", "sdk", wtid + ".json").read_text())
+        self.assertEqual(reg.get("effort"), ops["setEffort"]["value"], "TESTHOST's kernel set the THREAD's effort: %r" % reg.get("effort"))
+        self.assertIn("interrupt", ops, "the stop left the page: %r" % r["ops"])
+        self.assertIn("/remote/TESTHOST/ws", ops["interrupt"]["url"], "…for the linked machine")
+        self.assertEqual(ops["interrupt"]["id"], wtid)
+        self.assertTrue(r["stopped"], "TESTHOST stopped the thread's turn: %r%s" % (r["after"], logs))
+        self.assertIn("Awaiting", r["after"]["chip"], "its background command still runs, so it waits on it, never Ready: %r" % r["after"])
+        self.assertNotIn("Thinking", r["after"]["thinking"], "no thinking line once the turn is over")
 
 
 if __name__ == "__main__":

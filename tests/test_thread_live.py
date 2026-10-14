@@ -160,7 +160,9 @@ class PusherKeepsTheMap(unittest.TestCase):
     def test_the_comments_loop_refreshes_the_map_for_the_open_tabs_and_each_frame_reads_it(self):
         import inspect
         src = inspect.getsource(km._push)
-        self.assertIn('_thread_live_refresh(s["sid"] for s in chat_list)', src, "the open tabs' threads, once per full push")
+        self.assertIn("_thread_live_refresh(tab_order)", src, "the open tabs' threads, once per full push, at the tab strip")
+        self.assertLess(src.index("_thread_live_refresh("), src.index("_send_live_status(c, ls_chat, ls_allowed)"),
+                        "refreshed before the live-status send that carries the threads' frames (thread-live-2)")
         self.assertLess(src.index("_thread_live_refresh("), src.index("fr = _comments_frame(s[\"sid\"], live_map)"),
                         "refreshed before the frames that read it")
         self.assertIn("thread_live = _thread_live_map() if thread_live is None else thread_live", inspect.getsource(km._comments_frame))
@@ -369,6 +371,89 @@ class FrameChip(unittest.TestCase):
         self.assertIn(THREAD, km._built_thread)
         second = km._comments_frame(PARENT, {}, thread_live=tl)["threads"][0]
         self.assertEqual((first["chip"], second["chip"]), ("needsInput", "needsInput"))
+
+    # ── thread-live-2: the popover's live painters read the build's own status and background tasks ──────────────────
+
+    def _live_frame(self, row):
+        km._sdk = lambda: _ThreadBackend(row.get("state") or "")
+        km._built_thread.clear(); km._parse_cache.clear(); jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+        tl = {THREAD: dict(km._sdk_live_norm(dict({"model": "Opus 5", "effort": "high"}, **row)), threadOf=PARENT)}
+        return km._comments_frame(PARENT, {}, thread_live=tl)["threads"][0]
+
+    def test_a_thread_waiting_on_a_background_command_reads_awaiting_with_its_rows_never_ready(self):
+        self._seed([aline(self.now - 380, "The export runs in the background; I'll pick up when it lands.", "ca1", parent="cu1")])
+        th = self._live_frame({"state": "waiting", "ctx": 41,
+                               "bgTasks": [{"desc": "export the notes table", "type": "local_bash", "since": self.now - 300,
+                                            "toolUseId": "tu-export", "lastTool": ""}]})
+        self.assertEqual(th["chip"], "awaitingBg", "the chat's chip: Awaiting, not Ready")
+        st = th["live"]["status"]
+        self.assertEqual(st["state"], "awaitingBg")
+        self.assertIn("export the notes table", st["awaitingWhy"])
+        self.assertEqual([i["label"] for i in st["awaitingItems"]], ["export the notes table"], "the box's rows")
+        self.assertEqual(st["awaitingTaskIds"], ["tu-export"])
+        self.assertEqual(st["ctx"], "41", "the context gauge's fill, as the chat's status carries it")
+        self.assertEqual(set(st) - set(km._THREAD_LIVE_STATUS_KEYS), set(), "a projection of the tab's status, no more")
+        self.assertIsNotNone(th["live"]["bgTasks"], "the box's tracked tasks ride too")
+
+    def test_a_retrying_thread_carries_the_chats_live_retry_card(self):
+        self._seed([aline(self.now - 380, "Checking the sync loop first.", "ca1", parent="cu1", stop="tool_use")])
+        th = self._live_frame({"state": "retrying", "retryCount": 3,
+                               "retryInfo": {"attempt": 3, "max": 10, "error": "overloaded", "nextAt": self.now + 20}})
+        self.assertEqual(th["chip"], "retrying")
+        cards = [e for e in th["events"] if e.get("kind") == "retrying"]
+        self.assertEqual(len(cards), 1, "the chat's inline retry card, in the thread's own events: %r" % [e.get("kind") for e in th["events"]])
+        self.assertEqual(cards[0]["retries"], 3)
+
+    def test_a_dormant_thread_ships_no_live_view(self):
+        self._seed([aline(self.now - 380, "Done.", "ca1", parent="cu1")])
+        km._sdk = lambda: _ThreadBackend("")
+        km._built_thread.clear()
+        th = km._comments_frame(PARENT, {}, thread_live={})["threads"][0]
+        self.assertIsNone(th["live"])
+
+    def test_the_lent_row_is_the_threads_alone_and_the_scope_comes_back(self):
+        seen = {}
+        real = km._session_awaiting
+
+        def spy(sid, path, idle, stamp=False):
+            seen[sid] = (km._live_map().get(sid) or {}).get("state"), sorted(km._live_map())
+            return real(sid, path, idle, stamp=stamp)
+        self._seed([aline(self.now - 380, "Done for now.", "ca1", parent="cu1")])
+        km._session_awaiting = spy
+        before = getattr(km._live_scope, "snapshot", None)
+        try:
+            km._sdk = lambda: _ThreadBackend("waiting")
+            km._built_thread.clear()
+            tl = {THREAD: dict(km._sdk_live_norm({"state": "waiting"}), threadOf=PARENT)}
+            km._comments_frame(PARENT, {OTHER_PARENT: {"state": "working"}}, thread_live=tl)
+        finally:
+            km._session_awaiting = real
+        self.assertEqual(seen.get(THREAD), ("waiting", sorted([OTHER_PARENT, THREAD])),
+                         "inside the thread's build its row is read where a tab's is, beside every other session's")
+        self.assertIs(getattr(km._live_scope, "snapshot", None), before, "the scope it found is back")
+
+
+class LiveStatusForThreads(unittest.TestCase):
+    """A thread's thinking line and its subagents' progress ride the chat's liveStatus frames, sent with the tabs'."""
+
+    def test_the_threads_frames_join_the_tabs_in_one_set(self):
+        tab_frames = {PARENT: ({"type": "liveStatus", "id": PARENT}, "{}")}
+        thread_map = {THREAD: {"state": "working", "threadOf": PARENT, "thinkingLive": {"t": 100.0},
+                               "bgTasks": [{"toolUseId": "tu-agent", "lastTool": "Grep", "agentProgress": {"calls": 4, "tokens": 900}}]}}
+        frames, allowed = km._chat_live_status_set(tab_frames, {PARENT}, thread_map)
+        self.assertEqual(set(frames), {PARENT, THREAD})
+        self.assertEqual(allowed, {PARENT, THREAD}, "the thread's frame may go to the chat clients, beside its parent's")
+        f = frames[THREAD][0]
+        self.assertEqual(f["thinking"], {"t": 100.0})
+        self.assertEqual(f["tasks"], {"tu-agent": {"calls": 4, "tokens": 900, "tool": "Grep"}})
+        self.assertIs(km._chat_live_status_set(tab_frames, {PARENT}, {})[0], tab_frames, "no thread running: the tabs' own set")
+
+    def test_the_push_sends_the_one_set(self):
+        import inspect
+        src = inspect.getsource(km._push)
+        self.assertIn("ls_chat, ls_allowed = _chat_live_status_set(ls_frames[0], tab_set, _thread_live_map())", src)
+        self.assertIn("_send_live_status(c, ls_chat, ls_allowed)", src)
+        self.assertNotIn("_send_live_status(c, ls_frames[0], tab_set)", src, "never a second send that would clear the threads'")
 
 
 if __name__ == "__main__":

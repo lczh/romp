@@ -20754,7 +20754,7 @@ def _thread_sent_fields(th, tsid, status):
     return {"sent": sent, "sentBeforeSummary": bool(th.get("beforeSummary"))}
 
 
-_built_thread = {}       # thread sid -> (key, cut_uuid, events, build_started_at, chip): the popover's chat build,
+_built_thread = {}       # thread sid -> (key, cut_uuid, events, build_started_at, live): the popover's chat build,
 #                          served while the thread's exact change key stands (the active tab's own idiom)
 _thread_fold_keep = [set(), set()]   # [last cycle's thread sids, this cycle's]: _push's fold eviction keeps them
 
@@ -20783,8 +20783,10 @@ def _thread_events(tsid, cut_uuid, now, live_map, tm=None, out=None):
 
     `tm`: the thread's own live row from the thread live map (_thread_live), None for a dormant thread. The build reads
     it as a tab's build reads its row from live_map (the signature keys on it, and build_session gets a live map that
-    carries it under the thread's sid alone, so no other session's reading moves). `out`, when given, receives the
-    build's state chip as "chip" (served from the cache with the events)."""
+    carries it under the thread's sid alone, so no other session's reading moves). `out`, when given, receives what the
+    popover's live painters read off the build, served from the cache with the events (_thread_build_live): "chip", the
+    build's state chip; "status", the status fields they read (_THREAD_LIVE_STATUS_KEYS); "bgTasks", the build's
+    background tasks (thread-live-2)."""
     reg = _thread_reg(tsid)
     if reg.get("forkOf"):
         return []
@@ -20794,10 +20796,14 @@ def _thread_events(tsid, cut_uuid, now, live_map, tm=None, out=None):
     floor_t = 0 if cut_uuid else int(_comment_thread_row_created(tsid) or 0)
     tpath = sess.get("path") if isinstance(sess, dict) else None
     own = _thread_own_records(tsid, tpath, cut_uuid, floor_t) if tpath else None
+    tm = tm if tm is not None else live_map.get(tsid)
+    if tm is not None and live_map.get(tsid) is not tm:
+        live_map = dict(live_map)
+        live_map[tsid] = tm                              # the thread's own row, under its own sid only
     # every fold the signature and the build make of the transcript (the session meta, the background tasks) reads the
-    # thread's own records too, never the copied history (2026-10-01): served on this thread for the build's duration
-    with em.serve_records({str(tpath): own} if own is not None else {}):
-        tm = tm if tm is not None else live_map.get(tsid)
+    # thread's own records too, never the copied history (2026-10-01): served on this thread for the build's duration;
+    # and every liveness read they make sees the thread's own row (_lend_thread_row, thread-live-2)
+    with em.serve_records({str(tpath): own} if own is not None else {}), _lend_thread_row(live_map if tm is not None else None):
         key = None
         try:
             sig = _chat_build_sig(sess, tm, now, live_map=live_map, deps=False)
@@ -20823,13 +20829,10 @@ def _thread_events(tsid, cut_uuid, now, live_map, tm=None, out=None):
         if key is not None and hit is not None and hit[0] == key and hit[1] == cut_uuid and not _dirty_since(hit[3]):
             _PERF_STATS.build("thread", True)
             if out is not None:
-                out["chip"] = hit[4] if len(hit) > 4 else ""
+                out.update(hit[4] if len(hit) > 4 and isinstance(hit[4], dict) else {})
             return list(hit[2])
         started = time.time()
         _t0 = time.monotonic()
-        if tm is not None and live_map.get(tsid) is not tm:
-            live_map = dict(live_map)
-            live_map[tsid] = tm                          # the thread's own row, under its own sid only
         try:
             m = build_session(tsid, now, live_map, thread_cut=(cut_uuid, floor_t))
         except Exception:
@@ -20838,9 +20841,9 @@ def _thread_events(tsid, cut_uuid, now, live_map, tm=None, out=None):
         _chat_dep_scope.deps = None
         _PERF_STATS.build("thread", False, time.monotonic() - _t0)
         evs = (m or {}).get("events") or []
-        chip = str(((m or {}).get("status") or {}).get("state") or "")
+        live = _thread_build_live(m)
         if out is not None:
-            out["chip"] = chip
+            out.update(live)
         if cut_uuid:
             at = next((i for i, e in enumerate(evs)
                        if e.get("uuid") == cut_uuid or e.get("resultUuid") == cut_uuid), None)
@@ -20864,8 +20867,51 @@ def _thread_events(tsid, cut_uuid, now, live_map, tm=None, out=None):
         if key is not None:
             if len(_built_thread) > 256:               # bounded by the thread count; evict oldest-inserted, never clear
                 _built_thread.pop(next(iter(_built_thread)))
-            _built_thread[tsid] = (key, cut_uuid, evs, started, chip)
+            _built_thread[tsid] = (key, cut_uuid, evs, started, live)
         return list(evs)
+
+
+# The status fields a comment thread's popover paints from its chat build (thread-live-2, 2026-10-14): the state chip and its
+# clock, the context gauge, and what the background box and the Awaiting chip read (the chat's own renderBgTasks and
+# chipWords). A projection of the very status a tab's build makes, never a second derivation: the rest of a tab's status
+# (billing, notices, the needs-you verdicts) is a tab's, and would only grow the comments frame.
+_THREAD_LIVE_STATUS_KEYS = ("state", "sinceEpoch", "ctx", "ctxOver", "ctxColor", "ctxTone",
+                            "awaitingWhy", "awaitingKind", "awaitingPeers", "awaitingCount", "awaitingItems",
+                            "awaitingTasks", "awaitingTaskIds", "bgServiceIds")
+
+
+class _lend_thread_row(object):
+    """For one comment thread's chat build (thread-live-2, 2026-10-14): serve `live_map`, the caller's liveness map with
+    the thread's own row added under its sid (_thread_events), to every _live_map() read on this thread for the block, as
+    the pusher's cycle serves its one snapshot (_live_scope). A tab's build finds its own row wherever it reads the
+    liveness map, the nested readers included (the awaiting sources, the background-task rows: _session_awaiting,
+    _bg_live_norm); a thread's row lives in the thread live map instead, so without this its build read every one of
+    them as a session with no live CLI, and a thread waiting on a background command read Ready. Only the thread's sid is
+    added: every other session reads exactly as before. The previous scope comes back on exit; None lends nothing."""
+    def __init__(self, live_map):
+        self.live_map, self.prev, self.set = live_map, None, False
+
+    def __enter__(self):
+        if self.live_map is not None:
+            self.prev = getattr(_live_scope, "snapshot", None)
+            _live_scope.snapshot = self.live_map
+            self.set = True
+        return self
+
+    def __exit__(self, *exc):
+        if self.set:
+            _live_scope.snapshot = self.prev
+        return False
+
+
+def _thread_build_live(m):
+    """What a thread's popover paints from its chat build `m` (build_session's dict, None for a build that made nothing):
+    {"chip", "status", "bgTasks"}, the build's state chip, its status projected to _THREAD_LIVE_STATUS_KEYS, and its
+    background tasks (the chat's own bgTasks block). Cached with the build's events (_built_thread)."""
+    st = (m or {}).get("status") or {}
+    return {"chip": str(st.get("state") or ""),
+            "status": {k: st[k] for k in _THREAD_LIVE_STATUS_KEYS if k in st},
+            "bgTasks": (m or {}).get("bgTasks")}
 
 
 def _thread_opener_shown(evs):
@@ -21200,6 +21246,9 @@ def _comment_frame_entry(th, be, now, live_map=None, thread_live=None):
     built = {}
     events = [] if status == "promoted" else _thread_events(tsid, str(th.get("cutUuid") or ""), now, live_map, tm=trow, out=built)
     chip = str(built.get("chip") or "") if trow is not None else ""
+    # what the popover's live painters read for a RUNNING thread (thread-live-2): its build's status projection and its
+    # background tasks, the very fields a tab's statusline, context gauge and background box read; None for a dormant one
+    live_view = ({"status": built.get("status") or {}, "bgTasks": built.get("bgTasks")} if trow is not None else None)
     reg = _thread_reg(tsid)
     # the backend's queue (persisted for a dormant thread) is read BEFORE the turn read: a machine cut
     # stays open only while something is still queued behind it or a process is on it (T237b C)
@@ -21284,6 +21333,7 @@ def _comment_frame_entry(th, be, now, live_map=None, thread_live=None):
                     "exact": str(th.get("exact") or "")[:500], "status": status,
                     "createdT": th.get("createdT") or 0, "state": state, "error": err,
                     "chip": chip,                                  # the chat's state chip for a running thread, "" for a dormant one
+                    "live": live_view,                             # its status projection and background tasks, None when dormant (thread-live-2)
                     "unread": unread, "replyOwed": reply_owed,   # yellow / green — see the docstring (T237)
                     "queued": queued,                              # sends the backend holds or has fed, not yet in the transcript
                     "lastUuid": last_uuid,                         # the newest record shown/held — the client's cap-proof "transcript moved" datum
@@ -60875,6 +60925,19 @@ def _live_status_frames(live_map):
     return chat, pane
 
 
+def _chat_live_status_set(tab_frames, tab_set, thread_map):
+    """A chat client's liveStatus frames and the sids it may be sent, as ONE set for _send_live_status: the tabs' (the
+    push's once-built `tab_frames`, `tab_set`) and the open tabs' running comment threads' (thread-live-2, 2026-10-14:
+    `thread_map`, the thread live map, whose rows build their frames by the same _live_status_frames), so a thread's
+    popover shows its thinking line and its subagents' progress. One set because the send's clearing pass clears every
+    shown sid that is not in it: two sends would clear each other's. With no running thread, the tabs' own set."""
+    if not thread_map:
+        return tab_frames, tab_set
+    frames = dict(tab_frames)
+    frames.update(_live_status_frames(thread_map)[0])
+    return frames, set(tab_set) | set(thread_map)
+
+
 def _send_live_status(c, frames, allowed=None):
     """This push's liveStatus frames (_live_status_frames, built once) to one client, each on its own ("liveStatus", sid)
     slot, deduped like every slot, so an unchanged status costs a comparison and a moving one ~100 bytes and no build.
@@ -65972,13 +66035,24 @@ def _push(targets, connect=False, live_map=None, only=None):
             # session fills the placeholder in when it arrives below.
             tab_meta = [{"id": s["sid"], "name": s.get("name", ""), "color": _name_color(s["sid"])} for s in chat_list]
             tab_set = set(tab_order)
+            # THE THREAD LIVE MAP (_thread_live): the open tabs' running threads, read once per full push for everything
+            # below that reads it, never merged into live_map. Their liveStatus frames (a thread's thinking line, its
+            # subagents' progress: thread-live-2) ride each chat client's ONE live-status send beside the tabs', so neither
+            # set's clearing pass clears the other's; the comments frames read the map further down. A repair push serves
+            # the map the last full push read.
+            if only is None and chat_clients:
+                try:
+                    _thread_live_refresh(tab_order)
+                except Exception:                  # a fault here keeps the last map, said, and the push goes on
+                    sys.stderr.write("thread live map refresh failed: %s\n" % traceback.format_exc())
+            ls_chat, ls_allowed = _chat_live_status_set(ls_frames[0], tab_set, _thread_live_map())
             for c in chat_clients:                       # tab strip first → the shell paints before any build
                 _send_client(c, ("globalRetryPaused",), {"type": "globalRetryPaused", "value": _retry_paused_on(),
                                                          "resumeAt": _retry_resume_at(),   # limit reset epoch → the card counts down to the real retry
                                                          "reason": _retry_pause_reason()})   # "spend" → the card says 'raise your cap', no countdown
                 redialed = _resolve_reconnect(c, chat_list)   # a redialing page: fix its skeleton set BEFORE any strip
                 _send_tab_order(c, tab_order, tab_meta, live_map)
-                _send_live_status(c, ls_frames[0], tab_set)   # what each tab is doing this second (thinking, its subagents' progress): no build
+                _send_live_status(c, ls_chat, ls_allowed)   # what each tab, and each of its running threads, is doing this second (thinking, its subagents' progress): no build
                 if redialed:                             # the redial's first strip stands in for the ready it never posts:
                     _consume_pending_reveal(c, why="the pane's redial")   # a reveal parked for its window lands behind the strip
                     _offer_untold_drops(c)                 # …and a comment drop no pane has acknowledged (review of PR 211)
@@ -66484,14 +66558,7 @@ def _push(targets, connect=False, live_map=None, only=None):
             # per-sid dedup slot, never the chat delta baseline (the 2026-07-28 stranded-delta rule):
             # an unchanged frame costs nothing on the wire and the chatTail stream stays untouched.
             _frame_tabs = [s for s in chat_list if only is None or s["sid"] in only] if chat_clients else []   # a repair: its tabs
-            # THE THREAD LIVE MAP (_thread_live): the open tabs' running threads, read once here for every frame below (each
-            # reads the map, _comments_frame) and for the question poll, never merged into live_map. A repair push frames
-            # with the map the last full push read.
-            if only is None and chat_clients:
-                try:
-                    _thread_live_refresh(s["sid"] for s in chat_list)
-                except Exception:                  # a fault here keeps the last map, said, and the push goes on
-                    sys.stderr.write("thread live map refresh failed: %s\n" % traceback.format_exc())
+            # (each frame below reads the thread live map, refreshed at this push's tab strip: _comments_frame)
             for s in _frame_tabs:
                 gen = _comments_gen.get(s["sid"], 0)   # BEFORE the build reads the store (_send_comments_frame)
                 try:

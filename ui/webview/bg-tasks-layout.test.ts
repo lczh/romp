@@ -51,7 +51,7 @@ test("each RUNNING task row has a Stop button riding the stable delegate (the us
   assert.match(RENDER, /stop\.dataset\.act = "bg-stop"; stop\.dataset\.id = t\.stopId;/);
   // click-safe: handled on the SAME delegate as the fold toggles, never a per-render listener…
   assert.match(RENDER, /"bg-stop": \(el\) => \{/);
-  assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "stopTask", id: activeId, taskId: id \}\);/);
+  assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "stopTask", id: sid, taskId: id \}\);/);
   // …and the click acknowledges IMMEDIATELY, before any round-trip; the row's disappearance (the task's
   // own terminal lifecycle event) is the real confirmation, and a re-render restores a live task's button
   assert.match(RENDER, /btn\.disabled = true; btn\.textContent = "Stopping…";/);
