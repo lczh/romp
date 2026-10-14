@@ -41,7 +41,7 @@ class FakeEl {
   getBoundingClientRect() { return { left: 300, top: 760, bottom: 777 }; }
 }
 
-type Cite = { itemId?: string; title: string; quote?: string; uuid?: string | null; src?: string };
+type Cite = { itemId?: string; title: string; quote?: string; uuid?: string | null; src?: string; ctx?: string };
 type World = {
   cites?: Cite[];
   provisional?: boolean;                                  // the tab is still being created
@@ -61,6 +61,7 @@ const quote = (text: string, uuid: string | null, src?: string): Cite => ({ titl
 function chat(w: World) {
   const strip = new FakeEl("div");
   const opened: Array<[string, string, string, number, number]> = [];
+  const ctxs: unknown[] = [];   // the sentence each open was handed (2026-10-14)
   const toasts: string[] = [];
   const ts = ["renderComposerChipsInner", "chipCommentTarget", "commentOnChip", "commentAim", "commentOnSelection"].map(lift).join("\n");
   const src = requireCjs("esbuild").transformSync(ts, { loader: "ts", target: "es2020" }).code;   // the types go, the logic runs as shipped
@@ -77,7 +78,8 @@ function chat(w: World) {
     window: { getSelection: () => ({ rangeCount: 0 }) },
     views: new Map(),
     passageBox: () => (w.passage === undefined ? { left: 80, bottom: 193 } : w.passage),
-    openCommentComposer: (s: string, u: string, exact: string, x: number, y: number) => { opened.push([s, u, exact, x, y]); },
+    openCommentComposer: (s: string, u: string, exact: string, x: number, y: number, _at?: unknown, _fresh?: unknown, ctx?: unknown) => {
+      opened.push([s, u, exact, x, y]); ctxs.push(ctx); },
     ephemeralWarnToast: (msg: string) => { toasts.push(msg); },
     noop: () => {},
   };
@@ -93,7 +95,7 @@ function chat(w: World) {
   api.renderComposerChipsInner(sid);
   const row = strip.children.map((c) => c.className.split(" ").includes("composer-chip") ? "chip" : c.className + ":" + c.textContent);
   const button = strip.children.find((c) => c.className === "composer-comment-btn") || null;
-  return { ...api, strip, row, button, opened, toasts };
+  return { ...api, strip, row, button, opened, ctxs, toasts };
 }
 
 // ── when it shows ────────────────────────────────────────────────────────────────────────────────
@@ -134,6 +136,17 @@ test("stacked chips: one Comment, on the NEWEST chip that holds a passage of a t
 });
 
 // ── what it opens ────────────────────────────────────────────────────────────────────────────────
+test("a chip of a few words opens the box with the sentence it captured, which the thread's first message quotes (2026-10-14)", () => {
+  const ctx = "\u2026The retry cap stays at two minutes\u2026";
+  const c = chat({ cites: [{ ...quote("retry cap", U1), ctx }] });
+  assert.deepEqual(c.chipCommentTarget(SID), { sid: SID, uuid: U1, text: "retry cap", ctx });
+  c.commentOnChip(c.button!);
+  assert.deepEqual([c.opened.map((o) => o[2]), c.ctxs], [["retry cap"], [ctx]], "the selection is gone; the chip's sentence goes");
+  const whole = chat({ cites: [quote(PASSAGE, U1)] });
+  whole.commentOnChip(whole.button!);
+  assert.deepEqual(whole.ctxs, [undefined], "a whole-sentence chip has none");
+});
+
 test("the press opens the box through commentOnSelection with the chip's captured sid, turn and text, under the passage", () => {
   const c = chat({ cites: [quote(OLDER, U2), quote(PASSAGE, U1)], passage: { left: 80, bottom: 193 } });
   c.commentOnChip(c.button!);
