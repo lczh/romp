@@ -20074,6 +20074,7 @@ _COMMENT_FRAME_HEAD = "About this part of the conversation:"
 # quote under it is the sentence they sit in, which the PAGE read from the rendered message at the selection and sent with
 # the create (`context`; ui/webview/quote-context.ts). One word ("placement") quoted alone said nothing about where it was.
 _COMMENT_WORDS_HEAD = 'About "%s" in this part of the conversation:'
+_COMMENT_WORDS_MAX = 100   # "a few words" (quote-context.ts QUOTE_WORDS_MAX): a longer passage is never repeated in the head
 _COMMENT_WORDS_HEAD_RE = re.compile(r'About ".+" in this part of the conversation:')
 
 # WHAT A FORK IS, told to the fork itself in the first message it receives (the user 2026-09-24). A fork
@@ -20100,33 +20101,40 @@ _FORK_FRAME = ("I've split this conversation off from the original at this point
                "tasks or background work.")
 
 
-def _comment_quote_parts(exact, context=""):
-    """(head, quote) for a thread's passage: the quote head and the ">" block under it. A passage shorter than a sentence
-    whose `context` (the sentence the page read around it) holds its words, the ** the page may have put around the
-    highlighted one aside, has a head naming the words and the sentence quoted; every other passage, today's head and the
-    passage itself. A sentence that does not hold the words is not this passage's: it is left out and said in the log."""
+def _comment_quote_parts(exact, context="", shown=""):
+    """(head, quote) for a thread's passage: the quote head and the ">" block under it, from what the page read off the
+    selection (ui/webview/render.ts selectionQuoteView), never rebuilt here. A few words (_COMMENT_WORDS_MAX) whose
+    `context` (their sentence, or their line of code) holds them, the ** the page may have put around the highlighted one
+    aside, get a head naming them and the context quoted. A passage over several lines of a code block whose `shown` (its
+    lines with their line breaks) is the passage, line breaks aside, is quoted as those lines. Every other passage: today's
+    head and the passage itself. A context or lines that are not this passage's are left out and said in the log."""
     words = " ".join(str(exact or "").split())
     ctx = str(context or "").strip()[:2000]
-    if ctx and words:
+    if ctx and words and len(words) <= _COMMENT_WORDS_MAX:
         if words.lower() in " ".join(ctx.replace("**", "").split()).lower():
             return (_COMMENT_WORDS_HEAD % words), "\n".join("> " + ln for ln in ctx.splitlines())
         sys.stderr.write("comment opener: the sentence sent with a passage does not hold its words; quoting the passage alone\n")
+    lines = str(shown or "").rstrip()
+    if lines.strip():
+        if re.sub(r"\s+", "", lines) == re.sub(r"\s+", "", str(exact or "")):
+            return _COMMENT_FRAME_HEAD, "\n".join(("> " + ln).rstrip() for ln in lines.splitlines())
+        sys.stderr.write("comment opener: the lines sent with a passage are not the passage; quoting the passage alone\n")
     q = "\n".join("> " + ln for ln in str(exact or "").splitlines()).strip() or "> …"
     return _COMMENT_FRAME_HEAD, q
 
 
-def _comment_opener_parts(exact, comment, prior="", frame=None, context=""):
+def _comment_opener_parts(exact, comment, prior="", frame=None, context="", shown=""):
     """(sent, comment) for a thread's opening message, which is exactly sent + "\n\n" + comment: `sent` is everything
     romp adds around the user's words (the identity line, the quote head and the quote, and for a passage from before
     the last compaction the context block and the _COMMENT_ASK_HEAD label), `comment` the user's own words. The
-    thread row keeps `sent` so the popover can show the user, word for word, what went with their comment. `context`:
-    the sentence a passage shorter than one sits in, from the page (_comment_quote_parts)."""
-    head, q = _comment_quote_parts(exact, context)
+    thread row keeps `sent` so the popover can show the user, word for word, what went with their comment. `context` /
+    `shown`: a few words' sentence or code line / a code passage's lines, from the page (_comment_quote_parts)."""
+    head, q = _comment_quote_parts(exact, context, shown)
     parts = [frame or _THREAD_FRAME, head, q] + ([prior, _COMMENT_ASK_HEAD] if prior else [])
     return "\n\n".join(parts), str(comment or "").strip()
 
 
-def _comment_first_message(exact, comment, prior="", frame=None, context=""):
+def _comment_first_message(exact, comment, prior="", frame=None, context="", shown=""):
     """The thread's opening message — romp-authored FRAMING around the user's own words, read by an
     agent that has the conversation up to the highlight and no idea it is being tracked, so it
     speaks as the person it works for quoting the conversation back (test_injected_voice scans it;
@@ -20135,9 +20143,9 @@ def _comment_first_message(exact, comment, prior="", frame=None, context=""):
     _precompact_block) rides between the quote and the comment, which then wears the _COMMENT_ASK_HEAD
     label: what surrounded the passage, which the thread's own history holds only as a summary.
     `frame` replaces the identity line: _FORK_FRAME for a dispatched thread (raw_opener) that has a
-    passage to quote. `context`: a passage shorter than a sentence is named in the head and its sentence quoted
-    (_comment_quote_parts)."""
-    return "%s\n\n%s" % _comment_opener_parts(exact, comment, prior, frame, context)
+    passage to quote. `context`: a few words are named in the head over their sentence or code line; `shown`: a code
+    passage is quoted as its lines (_comment_quote_parts)."""
+    return "%s\n\n%s" % _comment_opener_parts(exact, comment, prior, frame, context, shown)
 
 
 def _strip_fork_opener(text):
@@ -21711,7 +21719,7 @@ def _retry_parked_creates():
             streaming = _anchor_streaming(pk["sid"], pk["uuid"])   # BEFORE the attempt too (see the docstring)
             err, tid = _comment_create(pk["sid"], pk["uuid"], pk["exact"], pk["text"], name=pk["name"],
                                        model=pk["model"], effort=pk["effort"], fast=pk.get("fast", ""),
-                                       color=pk["color"], context=pk.get("context", ""))
+                                       color=pk["color"], context=pk.get("context", ""), shown=pk.get("shown", ""))
             with _create_lock:                     # note BEFORE the park is dropped: no gap where the
                 if not err:                        # identity is neither parked nor noted
                     _note_create(key, tid)
@@ -21840,7 +21848,7 @@ def _comment_create_job(sid, msg, key, client):
                                        model=str(msg.get("model") or ""), effort=str(msg.get("effort") or ""),
                                        fast=str(msg.get("fast") or ""),
                                        color=str(msg.get("color") or ""),
-                                       context=str(msg.get("context") or ""))
+                                       context=str(msg.get("context") or ""), shown=str(msg.get("shown") or ""))
             if not err:
                 _note_create(key, tid)
             elif err == ANCHOR_LAG_ERR and not streaming:
@@ -21870,6 +21878,7 @@ def _comment_create_job(sid, msg, key, client):
                                             "fast": str(msg.get("fast") or ""),
                                             "color": str(msg.get("color") or ""),
                                             "context": str(msg.get("context") or ""),
+                                            "shown": str(msg.get("shown") or ""),
                                             "createId": cid, "tries": 0, "seen": seen, "client": client})
             try:
                 client["send"](json.dumps({"type": "commentCreateFailed", "id": sid, "uuid": str(msg["uuid"]),
@@ -21928,7 +21937,7 @@ def _comment_launch_prefs(model="", effort="", fast=""):
 
 
 def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", effort="", fast="", color="",
-                    now=None, raw_opener=False, meta=None, context=""):
+                    now=None, raw_opener=False, meta=None, context="", shown=""):
     """Anchor a new comment thread: fork the parent at the highlighted message (inclusive) as a
     threadOf fork — no names/ entry, so no judge seeding is needed until promotion — and send the
     opening message. Returns (error, tid): error is the warn-toast string (tid None), success is
@@ -21958,9 +21967,10 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
     the opening message adds what surrounded the passage and where the transcript is saved. Every row keeps what
     romp added around the user's words verbatim (sent) for the popover's note.
 
-    `context` (the user 2026-10-14): for a passage shorter than a sentence, the sentence it sits in, as the page read it
-    from the rendered message at the selection; the opening message names the words and quotes it (_comment_quote_parts).
-    Taken as sent, never reconstructed here."""
+    `context` (the user 2026-10-14): for a few words, their sentence or line of code, as the page read it from the rendered
+    message at the selection; the opening message names the words and quotes it. `shown`: for a passage over several lines
+    of a code block, those lines with their line breaks, quoted in its place (_comment_quote_parts). Taken as sent, never
+    reconstructed here."""
     be = Sessions.backend_for(parent_sid)
     if not (hasattr(be, "fork") and _sdk_ready()):
         return "threads need a Claude Code session; this one runs on another backend, so there is nothing to fork.", None
@@ -22017,7 +22027,8 @@ def _comment_create(parent_sid, anchor_uuid, exact, text, name="", model="", eff
     if raw_opener and not prior:
         sent, said = _FORK_FRAME, str(text)
     else:
-        sent, said = _comment_opener_parts(exact, text, prior, frame=_FORK_FRAME if raw_opener else None, context=context)
+        sent, said = _comment_opener_parts(exact, text, prior, frame=_FORK_FRAME if raw_opener else None, context=context,
+                                           shown=shown)
     row["sent"] = sent                # VERBATIM what romp added around the user's words: the popover's note shows it (the
     #                                   user 2026-09-30: they can always see exactly what was sent on their behalf)
     if prior:

@@ -165,7 +165,7 @@ const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kern
 const BACKEND = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "sdk_backend.py"), "utf8");
 
 test("the selection menu offers Comment, gated on a real transcript turn (commentAim: the gate the comment key shares)", () => {
-  assert.match(UI, /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY, aim\.at\)/,
+  assert.match(UI, /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY, aim\.at, false, aim\.view\)/,
                "the menu's Comment hands on the selection's live range (test_comment_layout_existing_served.py runs it: the menu "
                + "road of its repeated-phrase test, repeatInsideMenu)");
   assert.match(UI, /if \(!q\?\.uuid\) return "none";\n\s*if \(!activeId \|\| isProvisionalId\(activeId\) \|\| !liveSession\(activeId\)\) return "session";/);
@@ -1214,12 +1214,12 @@ test("a Comment on a passage with a thread opens it, and its box offers New thre
   assert.match(body, /const existing = !live && !fresh \? existingThreadFor\(commentThreads\.get\(sid\) \|\| \[\], uuid, exact, prose, at\) : null;/,
                "the thread lookup reads the live range (executed by the test 'New thread instead carries the selection's live "
                + "range' and by test_comment_layout_existing_served.py's repeated-phrase, tie, next-turn and rail-stamp tests)");
-  assert.match(body, /openCommentPopover\(sid, existing\.tid, undefined, undefined, \{ sid, tid: existing\.tid, uuid, exact, x, y, at, ctx \}\);/,
+  assert.match(body, /openCommentPopover\(sid, existing\.tid, undefined, undefined, \{ sid, tid: existing\.tid, uuid, exact, x, y, at, view \}\);/,
                "the redirect keeps the live range for New thread instead (the test 'New thread instead carries the selection's live range' runs it)");
   const pop = UI.slice(UI.indexOf("function renderCommentPopover("));
   const popBody = pop.slice(0, pop.indexOf("\nfunction ", 10));
   assert.match(popBody, /if \(th && cmtRedirect && cmtRedirect\.tid === th\.tid\) \{[\s\S]{0,700}nb\.textContent = "New thread instead";[\s\S]{0,200}nb\.dataset\.act = "cmtnewthread";/);
-  assert.match(UI, /cmtnewthread: \(\) => \{ const r = cmtRedirect; if \(r\) openCommentComposer\(r\.sid, r\.uuid, r\.exact, r\.x, r\.y, r\.at, true, r\.ctx\); \},/,
+  assert.match(UI, /cmtnewthread: \(\) => \{ const r = cmtRedirect; if \(r\) openCommentComposer\(r\.sid, r\.uuid, r\.exact, r\.x, r\.y, r\.at, true, r\.view\); \},/,
                "delegated on the body (click-safe), onto the selection the gesture had and its live range (the test 'New thread instead carries the selection's live range' runs r.at)");
   assert.match(UI, /cmtRedirect = redirect && redirect\.tid === tid \? redirect : null;/, "a mark click or a rail jump offers no such action");
 });
@@ -1258,15 +1258,16 @@ test("New thread instead carries the selection's live range, so it opens the com
     + "let commentPopPos = null, cmtPopPosMine = false, cmtRedirect = null, pendingCommentAnchor = null, openCommentKey = null;\n"
     + "const renderCommentPopover = () => { env.shown.push({ open: openCommentKey, anchor: pendingCommentAnchor }); };\n"
     + src + "\nreturn { openCommentComposer, cmtnewthread };")(env) as { openCommentComposer: (...args: unknown[]) => void; cmtnewthread: () => void };
-  page.openCommentComposer(SID, "a3", "the cache", 100, 200, inside);
+  const view = { ctx: "\u2026Each export then refills the cache from the database, and the worker drains the queue\u2026" };
+  page.openCommentComposer(SID, "a3", "the cache", 100, 200, inside, false, view);
   assert.deepEqual([shown[0]?.open, shown[0]?.anchor], [{ sid: SID, tid: "t-b" }, null], "the Comment opens b's thread");
   page.cmtnewthread();
   const box = shown[1]?.anchor;
   assert.deepEqual([shown.length, box?.exact, box?.sent], [2, "the cache", undefined],
                    "New thread instead opens the comment box on the selection, not a's sent box: " + JSON.stringify(box));
-  // a few words of a sentence (2026-10-14): the box holds the sentence they sit in, read from the turn's prose at the live
-  // range, which the create carries to the thread's first message
-  assert.equal(box?.context, "\u2026Each export then refills the cache from the database, and the worker drains the queue\u2026");
+  // a few words of a sentence (2026-10-14): the box holds the sentence the gesture read off the selection, through New thread
+  // instead too, and the create carries it to the thread's first message
+  assert.deepEqual([box?.context, box?.shown], [view.ctx, null]);
 });
 
 test("the create carries the sentence a short passage sits in, and a frame without one is unchanged (2026-10-14)", () => {

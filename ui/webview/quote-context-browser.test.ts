@@ -30,9 +30,13 @@ try { pw = requireCjs("playwright"); } catch { pw = null; }
 
 const SID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const UUID = "11111111-2222-4333-8444-555555555555";
+const LONG = Array.from({ length: 1000 }, (_, i) => "w" + i).join(" ");   // a paragraph with no full stop, ~5,900 characters
 const REPLY = ["The chart reads well now. We should revisit the **placement** of the legend before shipping the deck. "
   + "The colours are fine.", "", "- Move the legend below the chart, and keep the legend's font small.",
-  "- Rerun the build."].join("\n");
+  "- Rerun the build.", "",
+  "The axes look fine. We should revisit the", "spacing of the labels. Then rerun it.", "",   // a source line break mid-sentence
+  "Call `refill(cache)` before the load.", "",
+  "```python", "def refill(cache):", "    return cache.load()", "x = refill(cache)", "```", "", LONG].join("\n");
 
 async function inChat(t: any, body: (page: any, errors: string[]) => Promise<void>): Promise<void> {
   if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it (CI installs no browsers)"); return; }
@@ -88,9 +92,9 @@ async function select(page: any, words: string, nth = 0): Promise<void> {
     return true;
   }, [words, nth] as [string, number]);
   assert.ok(ok, "premise: the reply shows " + JSON.stringify(words));
-  // selectionchange seeded the quote chip: its label is the words
+  // selectionchange seeded the quote chip: its label is the words' first 140 characters
   await page.waitForFunction((w: string) => Array.from(document.querySelectorAll("#composer-chips .composer-chip-label"))
-    .some((n) => n.textContent === w), words, { timeout: 5000 });
+    .some((n) => n.textContent === w), words.replace(/\s+/g, " ").trim().slice(0, 140), { timeout: 5000 });
 }
 
 async function sendWith(page: any, text: string): Promise<string> {
@@ -116,6 +120,57 @@ test("the message box: a few words go out named, with their sentence; a twin is 
     await select(page, "We should revisit the placement of the legend before shipping the deck.");
     assert.equal(await sendWith(page, "Agreed."),
       "Replying to this part of the conversation:\n> We should revisit the placement of the legend before shipping the deck.\n\nAgreed.");
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
+// ── review of #229 (2026-10-14): code is not prose, the cap holds, a source line break is a space ─────────────────────────
+test("code: a word in a code block names its line and never the Copy button; a word in inline code its span; several lines keep their breaks", { timeout: 90000 }, async (t) => {
+  await inChat(t, async (page, errors) => {
+    await select(page, "refill", 2);                    // x = refill(cache), the block's third line
+    assert.equal(await sendWith(page, "Why here?"),
+      "Replying to \"refill\" in this part of the conversation:\n> x = refill(cache)\n\nWhy here?");
+    await select(page, "refill", 0);                    // the inline code span in the prose
+    assert.equal(await sendWith(page, "And here?"),
+      "Replying to \"refill\" in this part of the conversation:\n> refill(cache)\n\nAnd here?");
+    await select(page, "def refill(cache):    return cache.load()");   // two rows: the rendered rows join with no break
+    assert.equal(await sendWith(page, "Why load?"),
+      "Replying to this part of the conversation:\n> def refill(cache):\n>     return cache.load()\n\nWhy load?");
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
+test("a long selection with no full stop goes out as before, under the 4,000-character cap and never named", { timeout: 90000 }, async (t) => {
+  await inChat(t, async (page, errors) => {
+    const words = LONG.slice(0, LONG.indexOf(" w900"));
+    await select(page, words);
+    const body = await sendWith(page, "Thoughts?");
+    assert.equal(body, "Replying to this part of the conversation:\n> " + words.slice(0, 4000) + "\n\nThoughts?");
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
+test("a source line break inside a paragraph is a space: the sentence is whole, its cut before it kept", { timeout: 90000 }, async (t) => {
+  await inChat(t, async (page, errors) => {
+    await select(page, "spacing");
+    assert.equal(await sendWith(page, "How much?"),
+      "Replying to \"spacing\" in this part of the conversation:\n> \u2026We should revisit the spacing of the labels\u2026\n\nHow much?");
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
+test("a comment on a word in a code block names its line: the review's refill example", { timeout: 90000 }, async (t) => {
+  await inChat(t, async (page, errors) => {
+    await select(page, "refill", 2);
+    await page.evaluate(() => { (window as any).__posted.length = 0; });
+    await page.keyboard.press("Control+/");
+    await page.waitForSelector("#cmt-pop .cmt-input", { timeout: 5000 });
+    await page.focus("#cmt-pop .cmt-input");
+    await page.keyboard.type("Why call it here?");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => (window as any).__posted.some((m: any) => m && m.type === "commentCreate"), null, { timeout: 5000 });
+    const create = await page.evaluate(() => (window as any).__posted.find((m: any) => m && m.type === "commentCreate"));
+    assert.deepEqual([create.exact, create.context, create.shown], ["refill", "x = refill(cache)", undefined]);
     assert.deepEqual(errors, [], "no page errors");
   });
 });

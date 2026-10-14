@@ -41,7 +41,7 @@ class FakeEl {
   getBoundingClientRect() { return { left: 300, top: 760, bottom: 777 }; }
 }
 
-type Cite = { itemId?: string; title: string; quote?: string; uuid?: string | null; src?: string; ctx?: string };
+type Cite = { itemId?: string; title: string; quote?: string; uuid?: string | null; src?: string; ctx?: string; shown?: string };
 type World = {
   cites?: Cite[];
   provisional?: boolean;                                  // the tab is still being created
@@ -61,9 +61,9 @@ const quote = (text: string, uuid: string | null, src?: string): Cite => ({ titl
 function chat(w: World) {
   const strip = new FakeEl("div");
   const opened: Array<[string, string, string, number, number]> = [];
-  const ctxs: unknown[] = [];   // the sentence each open was handed (2026-10-14)
+  const ctxs: unknown[] = [];   // what goes out for the passage, as each open was handed it (2026-10-14)
   const toasts: string[] = [];
-  const ts = ["renderComposerChipsInner", "chipCommentTarget", "commentOnChip", "commentAim", "commentOnSelection"].map(lift).join("\n");
+  const ts = ["renderComposerChipsInner", "chipCommentTarget", "commentOnChip", "commentAim", "commentOnSelection", "quoteViewOf"].map(lift).join("\n");
   const src = requireCjs("esbuild").transformSync(ts, { loader: "ts", target: "es2020" }).code;   // the types go, the logic runs as shipped
   const sid = w.activeId ?? SID;
   const env = {
@@ -89,7 +89,7 @@ function chat(w: World) {
     + "let activeId = env.activeId;\n" + src
     + "\nreturn { renderComposerChipsInner, chipCommentTarget, commentOnChip };")(env) as {
     renderComposerChipsInner: (id: string | null) => void;
-    chipCommentTarget: (id: string | null) => { sid: string; uuid: string; text: string } | "none" | "session";
+    chipCommentTarget: (id: string | null) => { sid: string; uuid: string; text: string; view?: object } | "none" | "session";
     commentOnChip: (btn: FakeEl) => void;
   };
   api.renderComposerChipsInner(sid);
@@ -139,9 +139,13 @@ test("stacked chips: one Comment, on the NEWEST chip that holds a passage of a t
 test("a chip of a few words opens the box with the sentence it captured, which the thread's first message quotes (2026-10-14)", () => {
   const ctx = "\u2026The retry cap stays at two minutes\u2026";
   const c = chat({ cites: [{ ...quote("retry cap", U1), ctx }] });
-  assert.deepEqual(c.chipCommentTarget(SID), { sid: SID, uuid: U1, text: "retry cap", ctx });
+  assert.deepEqual(c.chipCommentTarget(SID), { sid: SID, uuid: U1, text: "retry cap", view: { ctx } });
   c.commentOnChip(c.button!);
-  assert.deepEqual([c.opened.map((o) => o[2]), c.ctxs], [["retry cap"], [ctx]], "the selection is gone; the chip's sentence goes");
+  assert.deepEqual([c.opened.map((o) => o[2]), c.ctxs], [["retry cap"], [{ ctx }]], "the selection is gone; the chip's sentence goes");
+  const lines = "def refill(cache):\n    return cache.load()";
+  const code = chat({ cites: [{ ...quote("def refill(cache):    return cache.load()", U1), shown: lines }] });
+  code.commentOnChip(code.button!);
+  assert.deepEqual(code.ctxs, [{ shown: lines }], "a code passage's lines go too");
   const whole = chat({ cites: [quote(PASSAGE, U1)] });
   whole.commentOnChip(whole.button!);
   assert.deepEqual(whole.ctxs, [undefined], "a whole-sentence chip has none");

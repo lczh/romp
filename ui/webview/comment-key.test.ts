@@ -308,7 +308,7 @@ function chatDocument(platform: string, overrides: Record<string, string> = {}, 
 // from that world; the globals are set to the same world for a line that calls keyHint instead (a keybindings function
 // that reads them), as the line did at #39
 const MENU_HINT = (() => {
-  const m = /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY, aim\.at\), (.+?) \|\| undefined\);/.exec(RENDER);
+  const m = /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY, aim\.at, false, aim\.view\), (.+?) \|\| undefined\);/.exec(RENDER);
   assert.ok(m, "the menu's Comment line");
   return m[1];
 })();
@@ -914,7 +914,7 @@ test("the palette's chips: Comment's goes blank while its chord runs another com
 
 // ── the command, executed from render.ts's own source ─────────────────────────────────────────────
 const lift = (name: string): string => liftFrom(RENDER, name);
-type Aim = { sid: string; uuid: string; text: string; x: number; y: number; at?: { start: number; end: number } };
+type Aim = { sid: string; uuid: string; text: string; x: number; y: number; at?: { start: number; end: number }; view?: { ctx?: string; shown?: string } };
 type World = {
   activeId: string | null;
   sel: { text: string; uuid: string | null } | null;            // what transcriptSelection returns
@@ -922,12 +922,14 @@ type World = {
   rect?: { left: number; bottom: number };                       // the selection's box
   elsewhere?: boolean;                                           // the selection sits in another tab's (hidden) view
   at?: { start: number; end: number } | null;                    // what selectionAt reads off the live range (none: null)
+  view?: { ctx?: string; shown?: string } | null;                // what selectionQuoteView reads off it (2026-10-14)
 };
 function chat(w: World) {
   const opened: Array<[string, string, string, number, number]> = [];
   const ats: unknown[] = [];                                     // the live range each open was handed
+  const viewsOpened: unknown[] = [];                             // and what goes out for the passage
   const toasts: string[] = [];
-  const ts = [lift("commentAim"), lift("commentOnSelection"), lift("heldCommentAim")].join("\n");
+  const ts = [lift("commentAim"), lift("commentOnSelection"), lift("heldCommentAim"), lift("quoteViewOf")].join("\n");
   const src = requireCjs("esbuild").transformSync(ts, { loader: "ts", target: "es2020" }).code;   // the types go, the logic runs as shipped
   const env = {
     activeId: w.activeId,
@@ -936,14 +938,16 @@ function chat(w: World) {
     liveSession: (id: string) => (w.live === false ? undefined : { id }),
     window: { getSelection: () => ({ rangeCount: 1, getRangeAt: () => ({ startContainer: "the passage", getBoundingClientRect: () => w.rect || { left: 0, bottom: 0 } }) }) },
     views: new Map([[w.activeId, { el: { contains: (n: unknown) => n === "the passage" && !w.elsewhere } }]]),
-    openCommentComposer: (sid: string, uuid: string, exact: string, x: number, y: number, at?: unknown) => { opened.push([sid, uuid, exact, x, y]); ats.push(at); },
+    openCommentComposer: (sid: string, uuid: string, exact: string, x: number, y: number, at?: unknown, _fresh?: unknown, view?: unknown) => {
+      opened.push([sid, uuid, exact, x, y]); ats.push(at); viewsOpened.push(view); },
     ephemeralWarnToast: (msg: string) => { toasts.push(msg); },
     selectionAt: () => w.at ?? null,
+    selectionQuoteView: () => w.view ?? null,
   };
-  const api = new Function("env", "const { transcriptSelection, isProvisionalId, liveSession, window, views, openCommentComposer, ephemeralWarnToast, selectionAt } = env;\n"
+  const api = new Function("env", "const { transcriptSelection, isProvisionalId, liveSession, window, views, openCommentComposer, ephemeralWarnToast, selectionAt, selectionQuoteView } = env;\n"
     + "let activeId = env.activeId;\n" + src + "\nreturn { commentAim, commentOnSelection, heldCommentAim };")(env) as {
     commentAim: () => Aim | "none" | "session"; commentOnSelection: (held?: unknown) => void; heldCommentAim: (v: unknown) => Aim | "none" | "session" };
-  return { ...api, opened, ats, toasts };
+  return { ...api, opened, ats, viewsOpened, toasts };
 }
 const SID = "11111111-2222-3333-4444-555555555555", UUID = "22222222-3333-4444-5555-666666666666";
 const PASSAGE = "The notes-api export streams rows through a bounded buffer.";
@@ -1010,11 +1014,28 @@ test("the aim carries where in the turn the selection sits, through the palette'
     assert.equal(c.heldCommentAim({ ...(captured as Aim), at: bad }), "none", "malformed at: " + JSON.stringify(bad));
 });
 
+test("the aim carries what goes out for the passage (2026-10-14), through the palette's message too; a malformed one is dropped", () => {
+  const view = { ctx: "x = refill(cache)" };
+  const k = chat({ activeId: SID, sel: { text: "refill", uuid: UUID }, rect: { left: 90, bottom: 210 }, view });
+  k.commentOnSelection();
+  assert.deepEqual(k.viewsOpened, [view], "the key's run hands it on");
+  const captured = k.commentAim();
+  assert.deepEqual((captured as Aim).view, view);
+  const c = chat({ activeId: SID, sel: null });
+  c.commentOnSelection(c.heldCommentAim(JSON.parse(JSON.stringify(captured))));
+  assert.deepEqual(c.viewsOpened, [view], "the palette's held aim hands it on");
+  for (const bad of [{ ctx: 7 }, "x", { other: "y" }]) {
+    const held = c.heldCommentAim({ ...(captured as Aim), view: bad });
+    assert.ok(typeof held === "object" && !("view" in held), "a view that is not one: " + JSON.stringify(bad));
+  }
+  assert.ok(!("view" in (chat({ activeId: SID, sel: { text: PASSAGE, uuid: UUID } }).commentAim() as Aim)), "a whole sentence: none");
+});
+
 test("a selection in a turn with no .md body gives an aim with no live range, and no range is made", () => {
   // commentAim with the real selectionAt and cssEscape (the harness above stubs selectionAt): the view holds no .md body
   // for the turn, and the document stand-in fails the test if selectionAt makes a range
   const asked: string[] = [];
-  const ts = [lift("commentAim"), lift("selectionAt"), lift("cssEscape")].join("\n");
+  const ts = [lift("commentAim"), lift("selectionAt"), lift("cssEscape")].join("\n") + "\nfunction selectionQuoteView() { return null; }";
   const src = requireCjs("esbuild").transformSync(ts, { loader: "ts", target: "es2020" }).code;
   const env = {
     activeId: SID,
@@ -1040,7 +1061,7 @@ test("the wiring: the menu's Comment names the key, the chat's capture handler a
   // expression, is executed by the menu test above and end to end in the served comment-key lab (cases 5, 6, 11, 13, 14, 17)
   assert.ok(MENU_HINT.length > 0);
   const h = listenerSrc(COMMENT_KEY).src;
-  assert.match(RENDER, /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY, aim\.at\), /, "the menu's pick hands on where the selection sits");
+  assert.match(RENDER, /mk\("Comment", \(\) => openCommentComposer\(aim\.sid, aim\.uuid, aim\.text, e\.clientX, e\.clientY, aim\.at, false, aim\.view\), /, "the menu's pick hands on where the selection sits, and what goes out for it");
   assert.match(h, /if \(!\(e\.ctrlKey \|\| e\.altKey \|\| e\.metaKey\) \|\| e\.repeat \|\| e\.isComposing\) return;/);
   // what the handler takes, that it listens in the capture phase (keyHandler asserts the flag it registers with) and that
   // it reads the store per press are executed on its own lifted source above (keyHandler and the tests that use it)

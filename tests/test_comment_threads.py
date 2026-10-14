@@ -1133,6 +1133,30 @@ class OpeningMessage(unittest.TestCase):
                 self.assertIn('About "placement" in this part of the conversation:\n\n> ' + self.SENTENCE, sent)
                 self.assertEqual(km._comment_opener_split(sent + "\n\n" + said), (sent, "> quoting myself\n\nWhy?"))
 
+    # ── review of #229 (2026-10-14): code is named over its line, a code passage keeps its line breaks, and only a few
+    # words are ever named ─────────────────────────────────────────────────────────────────────────────────────────────
+    def test_a_word_in_a_line_of_code_is_named_over_that_line(self):
+        body = km._comment_first_message("refill", "Why call it here?", context="x = refill(cache)")
+        self.assertEqual(body, km._THREAD_FRAME + "\n\n"
+                         'About "refill" in this part of the conversation:\n\n> x = refill(cache)\n\nWhy call it here?')
+
+    def test_a_code_passage_over_several_lines_is_quoted_as_its_lines(self):
+        exact = "def refill(cache):    return cache.load()"          # the rendered rows join with no line break
+        lines = "def refill(cache):\n    return cache.load()\n\nx = 1"
+        exact2 = exact + "x = 1"
+        body = km._comment_first_message(exact2, "Why load?", shown=lines)
+        self.assertEqual(body, km._THREAD_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD + "\n\n"
+                         "> def refill(cache):\n>     return cache.load()\n>\n> x = 1\n\nWhy load?")
+        sent, said = km._comment_opener_parts(exact2, "Why load?", shown=lines)
+        self.assertEqual(km._comment_opener_split(body), (sent, said), "the note shows it verbatim, the comment splits off")
+        self.assertEqual(km._comment_first_message(exact, "Why?", shown="something else entirely"),
+                         km._comment_first_message(exact, "Why?"), "lines that are not the passage are not used")
+
+    def test_a_long_passage_is_never_named_whatever_comes_with_it(self):
+        exact = " ".join("w%d" % i for i in range(40))           # 150 characters, no full stop
+        body = km._comment_first_message(exact, "Why?", context="\u2026" + exact + " w40\u2026")
+        self.assertEqual(body, km._comment_first_message(exact, "Why?"), "the head never repeats a long selection")
+
     def test_no_sentence_or_one_without_the_words_is_the_plain_opener(self):
         plain = km._comment_first_message("placement", "Why?")
         self.assertIn("\n\n" + km._COMMENT_FRAME_HEAD + "\n\n> placement\n\n", plain, "a whole-sentence passage, as before")
