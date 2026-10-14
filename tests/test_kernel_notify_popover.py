@@ -1053,6 +1053,13 @@ class TurnOpenerStamp(unittest.TestCase):
         self.assertEqual([f["body"] for f in tick()], ["Folded the report in."])
 
 
+def _kill_quietly(pid):
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+
+
 class UnwatchedTurnEnd(unittest.TestCase):
     """A turn that ended while no kernel was listening (2026-10-14; plans/federated-push.md, "The feed across a restart").
     A hosted CLI keeps running across a kernel restart; the Stop hook of a turn it ends meanwhile waits at its host, and the
@@ -1225,11 +1232,13 @@ class UnwatchedTurnEnd(unittest.TestCase):
         self.sess._host.hello_probes = 2
         self.assertEqual(self.be.catchup_stuck(), [SID_WEB])
 
-    def _cli_and_lease(self, start=None):
-        """A stand-in CLI (a sleeping process of its own) and a host lease naming it by pid and start time, held by a live,
-        beating host (this process)."""
+    def _cli_and_lease(self, start=None, tag=None, argv=None):
+        """A stand-in CLI (a process of its own, carrying a state tag in its environment as every session CLI does: this
+        kernel's unless `tag` says otherwise) and a host lease naming it by pid and start time, held by a live, beating host
+        (this process)."""
         import subprocess
-        cli = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        env = dict(os.environ, **{sb.STATE_TAG_ENV: tag or sb.state_tag_of(jd.STATE)})
+        cli = subprocess.Popen(argv or ["sleep", "60"], start_new_session=True, env=env)
         self.addCleanup(lambda: (cli.poll() is None and cli.kill(), cli.wait()))
         lease = {"sid": SID_WEB, "fsid": SID_WEB, "name": "web", "pid": cli.pid,
                  "start": start or sb.proc_start(cli.pid),
@@ -1238,37 +1247,110 @@ class UnwatchedTurnEnd(unittest.TestCase):
         self.addCleanup(lambda: sb.lease_path(jd.STATE, SID_WEB).unlink(missing_ok=True))
         return cli, lease
 
-    def test_an_end_its_host_cannot_confirm_ends_the_cli_itself_by_its_exact_identity(self):
-        # the review of #235: ending a session whose host answered `busy` (its hung reconnect not yet noticed) or stayed
-        # stalled past the 5 s bound left the CLI running, still spending if mid-turn, until the host's idle bound
+    def _host(self, answer):
+        """The session's host socket, served on a thread: `answer(conn)` is what the host does with one connection."""
         import socket
         import threading as th
-        cli, lease = self._cli_and_lease()
         path = str(sb._ht().host_sock(jd.STATE, SID_WEB))
         os.makedirs(os.path.dirname(path), exist_ok=True)
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         srv.bind(path)
-        srv.listen(1)
+        srv.listen(4)
         self.addCleanup(lambda: (srv.close(), os.path.exists(path) and os.unlink(path)))
 
-        def busy():                                      # a host that thinks another kernel is still attached
-            c, _ = srv.accept()
-            c.recv(65536)
-            c.sendall(sb._ht().sh.encode_frame({"t": "busy", "kernel": {"pid": 7}}))
-            c.close()
-        th.Thread(target=busy, daemon=True).start()
+        def serve():
+            try:
+                while True:
+                    c, _ = srv.accept()
+                    answer(c)
+            except OSError:
+                return
+        th.Thread(target=serve, daemon=True).start()
+
+    def _end(self):
         said = []
         with mock.patch.object(self.be, "_log", side_effect=lambda m, **k: said.append(m)):
             self.be._end_host_or_cli(SID_WEB)
-            self.be._end_threads[SID_WEB].join(20)
+            self.be._end_threads[SID_WEB].join(30)
+        return said
+
+    def test_an_end_its_host_cannot_confirm_ends_the_cli_itself_by_its_exact_identity(self):
+        # the review of #235: ending a session whose host stayed stalled past the 5 s bound left the CLI running, still
+        # spending if mid-turn, until the host's idle bound
+        cli, lease = self._cli_and_lease()
+        self._host(lambda c: c.recv(65536))              # takes the attach, never answers
+        said = self._end()
         self.assertIsNotNone(cli.wait(10), "the CLI is ended")
         self.assertTrue(any("did not confirm the end" in m and "was ended directly" in m for m in said), said)
+
+    def test_a_copied_state_kernels_end_kills_nothing_and_refuses_loudly(self):
+        # the review of #238: a lab kernel over a COPIED state directory holds the live session's lease, pid and start time
+        # included, so the lease alone would have it end the live kernel's CLI (the 2026-09-23 incident class). The CLI's
+        # own state tag must be this kernel's, the rule every reaper keeps
+        for tag in ("0123456789abcdef", None):
+            with self.subTest(tag=tag):
+                cli, lease = self._cli_and_lease(tag=tag or "not-a-tag")
+                said = []
+                with mock.patch.object(self.be, "_log", side_effect=lambda m, **k: said.append(m)):
+                    self.assertFalse(self.be._end_cli_directly(SID_WEB, lease, "no answer within 5 s"))
+                self.assertIsNone(cli.poll(), "never signaled")
+                self.assertTrue(any("was NOT ended" in m and "cannot prove it started it" in m for m in said), said)
 
     def test_a_direct_end_never_hits_a_process_the_lease_does_not_name_exactly(self):
         cli, lease = self._cli_and_lease(start="not its start time")   # a reused pid: the start time differs
         with mock.patch.object(self.be, "_log"):
             self.assertFalse(self.be._end_cli_directly(SID_WEB, lease, "no answer within 5 s"))
         self.assertIsNone(cli.poll(), "never signaled")
+
+    def test_a_second_end_waits_for_this_kernels_own_instead_of_forcing(self):
+        # the review of #238: a thread resolved and its parent ended within the first end's grace (or two end requests)
+        # met a host still attached to THIS kernel's own ending connection: its `busy` was taken for a host that could not
+        # confirm the end, and the CLI's tree was killed mid-shutdown with a false host.end-forced row
+        import threading as th
+        cli, lease = self._cli_and_lease()
+        me = self.be._kernel_identity()
+        self._host(lambda c: (c.recv(65536), c.sendall(sb._ht().sh.encode_frame({"t": "busy", "kernel": me})), c.close()))
+
+        def own_end():                                   # this kernel's first end, under way: the host ends its CLI
+            time.sleep(0.5)
+            sb.lease_path(jd.STATE, SID_WEB).unlink(missing_ok=True)
+        first = th.Thread(target=own_end, daemon=True)
+        first.start()
+        self.be._ending_threads = {SID_WEB: first}
+        said = self._end()
+        self.assertIsNone(cli.poll(), "nothing forced: the first end carries it")
+        self.assertTrue(any("this kernel's own end of the session carried it" in m for m in said), said)
+        self.assertFalse(any("was ended directly" in m for m in said), said)
+
+    def test_a_host_held_by_another_kernel_is_never_forced(self):
+        cli, lease = self._cli_and_lease()
+        self._host(lambda c: (c.recv(65536), c.sendall(sb._ht().sh.encode_frame({"t": "busy", "kernel": {"pid": 7}})),
+                              c.close()))
+        said = self._end()
+        self.assertIsNone(cli.poll(), "another kernel's session: its own end applies")
+        self.assertTrue(any("another kernel (pid 7) is attached" in m for m in said), said)
+
+    def test_a_forced_end_ends_exactly_the_cli_as_a_normal_end_would(self):
+        # the review of #238: the forced end reused the orphan reaper, which stops the CLI's whole scope and tree, so a job
+        # the session had started with nohup or setsid died with it, which a normal end (stdin closed, the CLI killed after
+        # its grace) never does
+        import sys
+        kid = os.path.join(str(jd.STATE), "kid.pid")
+        code = ("import os, subprocess, sys, time\n"
+                "p = subprocess.Popen(['sleep', '60'], start_new_session=True)\n"
+                "open(sys.argv[1], 'w').write(str(p.pid))\n"
+                "time.sleep(60)\n")
+        cli, lease = self._cli_and_lease(argv=[sys.executable, "-c", code, kid])
+        for _ in range(200):                             # loop-ok: the stand-in writes its child's pid once it has one
+            if os.path.exists(kid) and open(kid).read().strip():
+                break
+            time.sleep(0.02)
+        child = int(open(kid).read())
+        self.addCleanup(lambda: _kill_quietly(child))
+        with mock.patch.object(self.be, "_log"):
+            self.assertTrue(self.be._end_cli_directly(SID_WEB, lease, "no answer within 5 s"))
+        self.assertIsNotNone(cli.wait(10), "the CLI is ended")
+        os.kill(child, 0)                                # raises if the setsid job was killed with it
 
     def test_a_held_turn_end_the_registry_would_not_take_is_uncountable(self):
         # the review of #235: a registry that would not read made the stamp a silent skip, and the held id was retired
