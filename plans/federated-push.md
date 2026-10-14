@@ -426,10 +426,16 @@ buzzed late, as a fresh turn end. Now:
   beating host, the frozen host the review of #233 found holding the catch-up open for good (the session then
   stands down from the host, never the crash heal, and its count is its own unknown); ending the session ends
   the wait too (`abort_connect`, and the kill sends `end` by the lease). A deliberate end the host cannot
-  confirm (no hello within 5 s, a `busy` answer, no exit after the `end`, a lease whose host no longer beats)
-  ends the CLI itself, by the exact process the lease names (its pid and start time, never a pattern) with
-  its process tree, said as a `host.end-forced` problem row (the review of #235: the CLI ran on, spending,
-  until the host's idle bound). A host that beats and still never
+  confirm (no hello within 5 s, no exit after the `end`, a lease whose host no longer beats) ends the CLI
+  itself, said as a `host.end-forced` problem row (the review of #235: the CLI ran on, spending, until the
+  host's idle bound), under three rules from the review of #238: only a CLI this kernel can prove it started,
+  by the lease's pid and start time AND the state tag in the process's own environment (a copied lease proves
+  nothing: a lab kernel over a copied state directory would otherwise end the live kernel's CLI), else it
+  refuses loudly (`host.end-refused`) and signals nothing; exactly what a normal end ends, the CLI process
+  with the host's kill grace (SIGTERM, then SIGKILL after `END_GRACE_KILL_S`), never its scope or tree, so a
+  nohup or setsid job outlives it as it outlives a normal end; and a `busy` answer forces nothing: one naming
+  another kernel leaves the end to that kernel, and one naming this kernel (its own end already under way, or
+  the attach it interrupted) waits for that end and sends `end` again only if the host still lives. A host that beats and still never
   answers can hold it; when those are all the catch-up waits on (`catchup_stuck`: two probes found the host
   alive and silent), the user is told once, in the error center (`push.catchup-held`), and ending that session
   lets the summary go. A boot reconcile that fails closes the catch-up at once with the count unknown

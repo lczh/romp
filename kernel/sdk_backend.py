@@ -19343,6 +19343,8 @@ class SdkBackend:
             if s._host is not None:                # a kill is not graceful today: the host's `end` gets the short bound (T315)
                 s._host.end_grace = _ht().sh.END_GRACE_KILL_S
             hung = s._host is not None and getattr(s._host, "hello", None) is None
+            if s.thread is not None:             # this kernel's own end of the session, under way: a second end waits for it
+                self.__dict__.setdefault("_ending_threads", {})[sid] = s.thread
             s.shutdown()
             if hung:
                 # its attach never heard the host: the host still runs the CLI the user is ending, so `end` goes the
@@ -19357,6 +19359,19 @@ class SdkBackend:
         self._poke()
         return True
 
+    def _is_own_kernel(self, ident) -> bool:
+        """Does a `busy` answer's kernel identity name THIS kernel process (its pid and start time)?"""
+        me = self._kernel_identity()
+        return (isinstance(ident, dict) and str(ident.get("pid")) == str(me.get("pid"))
+                and str(ident.get("start") or "") == str(me.get("start") or ""))
+
+    def _await_own_end(self, sid: str) -> None:
+        """Block (an end thread's executor) until this kernel's own in-flight end of `sid` is over: the session thread
+        a kill shut down (kill() records it), bounded by the host's kill grace and the transport's exit wait."""
+        own = self.__dict__.get("_ending_threads", {}).get(sid)
+        if own is not None and own is not threading.current_thread():
+            own.join(float(_ht().sh.END_GRACE_KILL_S) + 10.0)
+
     def _end_host_or_cli(self, sid: str) -> None:
         """A deliberate end with no attached session object to carry it: `end` through the host (_end_host_by_lease), or,
         when the lease names a host that no longer beats (frozen or gone) while its CLI still runs, the CLI ended directly
@@ -19368,29 +19383,59 @@ class SdkBackend:
             threading.Thread(target=self._end_cli_directly, args=(sid, lease, "its session host no longer beats"),
                              name="end-cli:" + sid[:8], daemon=True).start()
 
-    def _end_cli_directly(self, sid: str, lease, why: str) -> bool:
-        """A deliberate end its host could not confirm (no hello within the bound, a `busy` answer, no exit after the
-        `end`, a host that no longer beats): the CLI the lease names is ended by this kernel, by its exact identity (the
-        lease's pid AND start time, so a reused pid is never hit; never a pattern), with the process tree it leads
-        (_end_cli_tree: SIGTERM, then SIGKILL after TREE_KILL_GRACE), and said loudly. Before, the CLI ran on, still
-        spending if mid-turn, until the host's idle bound ended it (the review of #235). False when the lease names no
-        CLI that still runs."""
+    def _end_cli_directly(self, sid: str, lease, why: str, kill=None, alive=None, sleep=None, now=None) -> bool:
+        """A deliberate end its host could not confirm (no hello within the bound, no exit after the `end`, a host that
+        no longer beats): the CLI the lease names is ended by this kernel, said loudly. Before, the CLI ran on, still
+        spending if mid-turn, until the host's idle bound ended it (the review of #235).
+
+        Only a CLI this kernel can PROVE it started (the review of #238): the lease's pid AND start time (a reused pid is
+        never hit; never a pattern), and the state tag in the process's own environment equal to this kernel's
+        (proc_state_tag, the rule every reaper keeps), since a copied lease proves nothing: a lab kernel over a copied state
+        directory holds the live session's lease, pid and start time included, and would end the live kernel's CLI. A tag
+        that differs, or that cannot be read, refuses the end, loudly, and nothing is signaled.
+
+        Exactly what a normal end ends (the review of #238): the CLI process alone, SIGTERM and then SIGKILL after the
+        host's own kill grace (END_GRACE_KILL_S), never its scope or its process tree, so a job the session started with
+        nohup or setsid outlives a forced end exactly as it outlives a normal one. `kill`, `alive`, `sleep` and `now` are
+        test seams. False when nothing was signaled."""
+        kill = kill or os.kill
+        sleep = sleep or time.sleep
+        now = now or time.time
         try:
             pid, start = int((lease or {}).get("pid")), str((lease or {}).get("start") or "")
         except (TypeError, ValueError):
             pid, start = 0, ""
         name = str((lease or {}).get("name") or sid[:8])
-        if not pid or not start or proc_start(pid) != start:
+        same = (lambda: proc_start(pid) == start) if alive is None else alive
+        if not pid or not start or not same():
             self._log("host (%s): the end was not confirmed (%s), and the lease names no CLI that still runs" % (name, why))
             return False
+        tag, own = proc_state_tag(pid), state_tag_of(self.state_dir)
+        if tag != own:
+            problem_row(self.state_dir, "session %s: its session host did not confirm the end (%s), and its CLI (pid %d) "
+                        "was NOT ended: %s, so this kernel cannot prove it started it (a copied state directory carries "
+                        "another kernel's lease); end it from the kernel that runs it" % (
+                            name, why, pid, ("it carries another kernel's state tag" if tag else
+                                             "its state tag cannot be read")),
+                        "host.end-refused", sid=sid, name=name, log=self._log, pid=pid)
+            return False
         try:
-            ps_lines = subprocess.run(PS_ARGV, capture_output=True, text=True, timeout=10).stdout.splitlines()
-        except Exception:
-            ps_lines = []
-        res = self._end_cli_tree(pid, ps_lines)
+            kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return False
+        deadline = now() + float(_ht().sh.END_GRACE_KILL_S)
+        while now() < deadline and same():
+            sleep(0.05)
+        forced = False
+        if same():
+            try:
+                kill(pid, signal.SIGKILL)
+                forced = True
+            except ProcessLookupError:
+                pass
         problem_row(self.state_dir, "session %s: its session host did not confirm the end (%s), so its CLI (pid %d) was "
                     "ended directly" % (name, why, pid), "host.end-forced", sid=sid, name=name, log=self._log, pid=pid,
-                    forced=int((res or {}).get("forced") or 0))
+                    forced=int(forced))
         return True
 
     def _end_host_by_lease(self, sid: str) -> bool:
@@ -19426,9 +19471,35 @@ class SdkBackend:
                 return
             except Exception as e:
                 self._log("host (%s): end by lease failed: %s: %s" % (sid[:8], type(e).__name__, e))
-                if lease:
+                busy = getattr(t, "busy_with", None)
+                if isinstance(busy, dict):
+                    if not self._is_own_kernel(busy):
+                        # another kernel is attached: the session is that kernel's to end (its own kill road applies), and
+                        # this one forces nothing on it
+                        self._log("host (%s): another kernel (pid %s) is attached to this session's host; the end is that "
+                                  "kernel's to make, nothing is forced from here" % (sid[:8], busy.get("pid")), problem=True)
+                        return
+                    # THIS kernel's own connection holds the host (the review of #238): an end already under way (a
+                    # thread resolved and its parent ended within its grace, two end requests), or the attach the end
+                    # interrupted, which the host has not yet seen go. Wait for that one; force nothing while it runs
+                    await asyncio.get_running_loop().run_in_executor(None, self._await_own_end, sid)
+                    if self._host_lease(sid, if_unreadable="unreadable")[1] != "attach":
+                        self._log("host (%s): this kernel's own end of the session carried it" % sid[:8])
+                        return
+                    t = ht.HostTransport(str(sock), kernel=ident, ack=-1, end_grace=ht.sh.END_GRACE_KILL_S)
+                    try:
+                        await asyncio.wait_for(t.connect(), timeout=5.0)
+                    except Exception as e2:
+                        why2 = ("still attached to this kernel's earlier connection"
+                                if isinstance(getattr(t, "busy_with", None), dict) else "%s: %s" % (type(e2).__name__, e2))
+                        if lease:
+                            self._end_cli_directly(sid, lease, why2)
+                        return
+                elif lease:
                     self._end_cli_directly(sid, lease, "%s: %s" % (type(e).__name__, e))
-                return
+                    return
+                else:
+                    return
             await t.end_and_close()             # `end` with the kill bound, whatever the initialize gate says
             if getattr(t, "exit_info", None) is None and lease:
                 self._end_cli_directly(sid, lease, "no exit after the end")   # the host took the end and did not confirm it
