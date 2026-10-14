@@ -69938,16 +69938,18 @@ def _push_forward(events):
 # '<feed>/<boot>:<seq>': the feed's id (which outlives a restart) and the life that served it, so an answer can say how
 # many times this kernel restarted since (`restarts`). What this kernel detects about the time it was DOWN is filed as a
 # GAP event (`gap`): a turn end whose Stop hook its CLI sent before this life attached to it (the hook stamps
-# lastStopUnwatched), or one the previous life stamped and never ticked (the turn memo), and a card the first feed build
-# of a life finds moved. A v3 puller never delivers a gap event one by one: it counts it into the restart's ONE summary
+# lastStopUnwatched), or one its host answered itself while no kernel was attached (the host reports it in its hello, and
+# the attach stamps it so), or one the previous life stamped and never ticked (the turn memo), and a card the first feed
+# build of a life finds moved. A v3 puller never delivers a gap event one by one: it counts it into the restart's ONE summary
 # ("TESTHOST restarted · 1 session finished a turn"), and says nothing when none would pass its gate. Until this life has
-# caught up on its restart (_push_catchup_ready: every boot re-attach has said hello and every Stop hook a CLI held has
-# stamped its turn end) no v3 answer says `caughtUp`, so the puller's gap stays open until the count is complete. When the
-# count cannot be vouched for, a `lost` gap event says so, and the puller says that notifications may have been missed,
-# as before: the previous life left no exit record or was down long enough for a session host to answer a held Stop hook
-# itself (UNWATCHED_SELF_ANSWER_S), or the re-attaches never settled (BOOT_ROW_BACKSTOP_S). A file that is missing (the
-# first boot of this build) or cannot be read starts a new feed, loudly when it could not be read: every puller's cursor
-# then resets, the unknown count of before. A v1 or v2 puller is served this life's events as before, gap events never.
+# caught up on its restart (_push_catchup_ready, events only: every boot re-attach has said hello or ended, and every Stop
+# hook a CLI held has stamped its turn end) no v3 answer says `caughtUp`, so the puller's gap stays open until the count is
+# complete. When one session's count cannot be vouched for (its re-attach or its session ended first, or its host runs
+# code too old to report what it answered itself after a long enough wait, UNWATCHED_SELF_ANSWER_S), a `lost` gap event
+# wearing that session's bell says so, and the puller adds that notifications may have been missed when that bell would
+# have let its turn end through. A file that is missing (the first boot of this build) or cannot be read starts a new
+# feed, loudly when it could not be read, and a failed write disowns the file (_push_feed_disown_locked): every puller's
+# cursor then resets, the unknown count of before. A v1 or v2 puller is served this life's events as before, gap events never.
 PUSH_PULL_PROTO = 3          # advertised in /version as `pushPull`: a peer pulls from a kernel whose /version carries it
 PUSH_RING_CAP = 256          # candidates kept (across lives, on disk); a puller further behind resumes at the newest, loudly
 PUSH_EVENTS_WAIT_MAX = 25.0  # the longest one GET /push/events parks before answering empty-handed
@@ -70034,8 +70036,7 @@ def _push_feed_ensure_locked():
     ring, its sequence and its id carry on, and record this life in it. A file that is missing (the first boot of this
     build) starts a new feed, said in one line; one that cannot be read, or holds no feed, starts a new feed LOUDLY and
     never stops the kernel: every puller's cursor then names another feed and resets, the unknown count of before
-    (plans/federated-push.md, "The feed across a restart"). A restart whose count this life cannot vouch for files a
-    `lost` gap event (_push_restart_unvouched)."""
+    (plans/federated-push.md, "The feed across a restart")."""
     if _PUSH_FEED["id"] is not None:
         return
     try:
@@ -70080,13 +70081,8 @@ def _push_feed_read_locked():
         _PUSH_RING_SEQ[0] = feed["seq"]
         _PUSH_FEED.update(id=feed["id"], lives=feed["lives"])
         _PUSH_FEED["after"] = _PUSH_RING_SEQ[0]
-        lost = _push_restart_unvouched(feed["lives"][-1] if feed["lives"] else None)
-        sys.stderr.write("romp: web push: event feed %s read back from disk: %d event(s) kept, the newest #%d%s\n"
-                         % (feed["id"], len(feed["events"]), feed["seq"],
-                            ("; this restart's missed notifications cannot be counted: %s" % lost) if lost else ""))
-        if lost:
-            _PUSH_RING_SEQ[0] += 1
-            _PUSH_RING.append({"seq": _PUSH_RING_SEQ[0], "kind": "lost", "gap": True, "why": lost})
+        sys.stderr.write("romp: web push: event feed %s read back from disk: %d event(s) kept, the newest #%d\n"
+                         % (feed["id"], len(feed["events"]), feed["seq"]))
     _PUSH_FEED["lives"] = (_PUSH_FEED["lives"] + [{"boot": _BOOT_ID, "after": _PUSH_FEED["after"],
                                                    "at": int(_STARTED)}])[-PUSH_FEED_LIVES_CAP:]
     _push_feed_save_locked()
@@ -70094,27 +70090,49 @@ def _push_feed_read_locked():
 
 def _push_feed_save_locked():
     """Under _push_ring_cond: write the feed (its id, the newest seq, the kept events, the lives), 0600 and fsynced, through
-    the one atomic write door. A failed write is said once per episode; the ring in memory serves on."""
+    the one atomic write door. The ring in memory serves on whatever the disk does. A failed write starts an episode,
+    said once, that DISOWNS the feed on disk (_push_feed_disown_locked): it no longer holds what this kernel fired, and a
+    restart reading it back would issue the same numbers again for other events, so a puller could pass over some without
+    knowing (the review of #230). A landed write ends the episode: the disk holds the whole feed again."""
     snap = {"v": 1, "feed": _PUSH_FEED["id"], "seq": _PUSH_RING_SEQ[0], "events": list(_PUSH_RING),
             "lives": _PUSH_FEED["lives"]}
     try:
         _write_state_json(_push_feed_path(), json.dumps(snap, sort_keys=True), note=False, mode=0o600, fsync=True)
     except _StateUnwritable as e:
-        if _PUSH_FEED["fault"] != str(e):
+        if _PUSH_FEED["fault"] is None:
             _PUSH_FEED["fault"] = str(e)
-            sys.stderr.write("romp: web push: %s — a restart of this kernel cannot tell a linked machine what it fired "
-                             "meanwhile\n" % e)
+            _push_feed_disown_locked(e)
         return
     _PUSH_FEED["fault"] = None
 
 
-def _push_prev_exit_t(prev):
-    """When the life `prev` ({boot, at}) began its exit, from the restart ledger's cut row (restart-cuts.jsonl, written at
-    the start of every orderly exit), or None when it wrote none (killed, crashed) or the ledger cannot be read."""
+def _push_feed_disown_locked(e):
+    """Under _push_ring_cond, at the first failed write of an episode: make sure no later life reads back a feed that lacks
+    what this one fired. The stale file is removed, so a restart before the next landed write starts a new feed (every
+    puller resets and says notifications may have been missed); when it cannot be removed either, this kernel's feed takes
+    a new identity now, which the file on disk no longer names, with the same effect on a restart and a reset at once."""
+    path = _push_feed_path()
     try:
-        pid = int(str(prev.get("boot") or "").split(".", 1)[0])
-    except ValueError:
-        return None
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as u:
+        _PUSH_FEED["id"] = secrets.token_hex(8)
+        sys.stderr.write("romp: web push: %s, and the old event feed could not be removed (%s) — this kernel's event feed "
+                         "takes a new identity now: a linked machine pulling from it resets and says notifications may "
+                         "have been missed, rather than pass over events after a restart\n" % (e, _errno_text(u)))
+        return
+    sys.stderr.write("romp: web push: %s — the event feed on disk is removed until a write lands again: a restart meanwhile "
+                     "starts a new feed, and a linked machine says notifications may have been missed rather than pass "
+                     "over what this kernel fired\n" % e)
+
+
+def _push_prev_exit():
+    """When the last orderly exit before this kernel started began: the restart ledger's newest cut row
+    (restart-cuts.jsonl, written at the start of every orderly exit) at or before _STARTED, or None when there is none,
+    or the ledger cannot be read. A session host's wait without a kernel began no earlier than that exit: at it, or at a
+    later life's kill (a killed life writes no row, but it dies after the newest row), so the span from it to the host's
+    re-attach bounds how long the host held a finished turn's hook."""
     try:
         lines = RESTART_CUTS_FILE.read_text(encoding="utf-8").splitlines()[-400:]
     except OSError:
@@ -70124,67 +70142,74 @@ def _push_prev_exit_t(prev):
             r = json.loads(line)
         except ValueError:
             continue
-        if (isinstance(r, dict) and "cutTurns" in r and r.get("pid") == pid and isinstance(r.get("t"), (int, float))
-                and r["t"] >= int(prev.get("at") or 0)):
+        if isinstance(r, dict) and "cutTurns" in r and isinstance(r.get("t"), (int, float)) and r["t"] <= float(_STARTED):
             return float(r["t"])
     return None
 
 
-def _push_restart_unvouched(prev):
-    """Why the turn ends this restart missed cannot all be counted, or None when they can. A session host answers a Stop
-    hook it has held for UNWATCHED_SELF_ANSWER_S with no kernel attached, and that turn end then never reaches a kernel;
-    so the count is vouched for only when the previous life `prev` recorded its exit and this life began within that
-    bound of it. A killed or crashed life records none."""
-    if not prev:
-        return "the feed names no previous kernel life"
-    t = _push_prev_exit_t(prev)
-    if t is None:
-        return "the previous kernel life left no exit record (it was killed or crashed)"
-    down = max(0.0, float(_STARTED) - t)
-    if down >= UNWATCHED_SELF_ANSWER_S:
-        return ("this kernel was down %s, long enough for a session's host to answer a finished turn's hook itself"
-                % _span_words(down))
-    return None
-
-
 def _push_catchup_ready(now):
-    """Has this life caught up on its restart? (ready, lost): every boot re-attach to a live session host has said hello
-    (attachDone) and no session still holds a request its CLI sent before this life attached to it (the backend's
-    unwatched_pending: a Stop hook among them has not stamped its turn end yet), or there is no session backend at all.
-    Past BOOT_ROW_BACKSTOP_S after the reconcile it is declared caught up regardless, with `lost` saying why the count
-    is incomplete, so a wedged attach never holds a puller's gap open for good."""
+    """Has this life caught up on its restart? (ready, lost), from events only, never a clock (the review of #230: a
+    30-second bound declared the count incomplete on every boot whose re-attaches took longer, 9 of 74 on the big
+    machine). Ready when every boot re-attach to a live session host has settled (attachDone: each said hello or its
+    session thread ended) and no session still holds a request its CLI sent before this life attached to it (the
+    backend's unwatched_pending: a Stop hook among them has not stamped its turn end yet), or when there is no session
+    backend at all. `lost` lists (sid, why) for each session whose count this life cannot vouch for, so the summary says
+    those may have been missed and still counts the rest exactly: a re-attach that ended without a hello, a session that
+    ended before its held turn end was recorded (the backend's catchup_lost), and a session whose host runs code too old
+    to report the finished turns it answered itself (catchup_unreported) when it was left without a kernel long enough
+    for that (UNWATCHED_SELF_ANSWER_S from the last orderly exit, _push_prev_exit). A re-attach that neither says hello
+    nor ends holds the catch-up open: said once, loudly, when the boot row records it as not settled."""
     be = _sdk_backend
     if be is False:
-        return True, None                            # no session backend: nothing re-attaches
-    if _BOOT_ATTACHED.is_set():
-        held = 0
-        try:
-            held = int(getattr(be, "unwatched_pending", lambda: 0)() or 0) if be else 0
-        except Exception:
-            held = 0
-        if not held:
-            return True, None
-        why = "%d session(s) still held a finished turn this kernel had not recorded" % held
-    else:
-        why = "the sessions' re-attaches after the restart did not all settle"
-    rd = _BOOT_MARKS.get("reconcileDone")
-    if isinstance(rd, float) and now - rd >= BOOT_ROW_BACKSTOP_S:
-        return True, why
-    return False, None
+        return True, []                              # no session backend: nothing re-attaches
+    if not _BOOT_ATTACHED.is_set():
+        if not _PUSH_CATCHUP.get("said") and _BOOT_MARKS.get("_row") and "attachDone" not in _BOOT_MARKS:
+            _PUSH_CATCHUP["said"] = True
+            pend = sorted(str(x)[:8] for x in (getattr(be, "_boot_attach_unsettled", None) or ()))
+            sys.stderr.write("romp: web push: still catching up on this restart: the re-attach of %s has not settled; a "
+                             "linked machine holds this kernel's notifications for its summary of the restart until it "
+                             "does\n" % (", ".join(pend) or "a session"))
+        return False, None
+    if be is None:
+        return True, []
+    if int(getattr(be, "unwatched_pending", lambda: 0)() or 0):
+        return False, None
+    lost = [(str(sid), str(why)) for sid, why in sorted((getattr(be, "catchup_lost", lambda: {})() or {}).items())]
+    unrep = getattr(be, "catchup_unreported", lambda: {})() or {}
+    if unrep:
+        prev = _push_prev_exit()
+        for sid, at in sorted(unrep.items()):
+            if prev is None or float(at) - prev >= UNWATCHED_SELF_ANSWER_S:
+                lost.append((str(sid), "its session host runs code too old to report a finished turn it answered itself, "
+                             "and %s" % ("no orderly exit of the last kernel is on record" if prev is None else
+                                         "it was without a kernel for up to %s" % _span_words(float(at) - prev))))
+    return True, lost
 
 
 def _push_catchup_tick(ready):
-    """The turn tick's last step, until this life has caught up on its restart: `ready` is _push_catchup_ready as the tick
-    read it BEFORE it read the sessions' turn ends, so every turn end on record by then has been filed. Returns True on
-    the tick that completes it, after which the v3 answers say `caughtUp` again; parked GETs are released so a puller
-    hears it at once. An incomplete count files a `lost` gap event first, loudly."""
+    """The turn tick's step that completes the catch-up: `ready` is _push_catchup_ready as the tick read it BEFORE it read
+    the sessions' turn ends, so every turn end on record by then has been filed. Returns True on the tick that completes
+    it, after which the v3 answers say `caughtUp` again; parked GETs are released so a puller hears it at once. Each
+    session whose count is incomplete is said loudly and filed as a `lost` gap event wearing that session's bell (a
+    puller counts it as missed only if that bell would have let the turn end through; a muted session files none), and
+    a failure with no session to name as one bare `lost` event."""
     if _PUSH_CATCHUP["done"] or not ready or not ready[0]:
         return False
-    lost = ready[1]
-    if lost:
-        sys.stderr.write("romp: web push: caught up on this restart with an incomplete count — %s; a linked machine "
-                         "says notifications may have been missed\n" % lost)
-        _push_ring_add([{"kind": "lost", "gap": True, "why": lost}])
+    lost = list(ready[1] or [])
+    evs, general = [], []
+    for sid, why in lost:
+        sys.stderr.write("romp: web push: caught up on this restart, but %s cannot be counted: %s; a linked machine says "
+                         "notifications may have been missed\n" % (("session %s" % (_name_of(sid) or sid[:8])) if sid
+                                                                    else "this restart", why))
+        if not sid:
+            general.append(why)
+            continue
+        bell = _push_explicit_bell(sid)
+        if bell is not False:
+            evs.append({"kind": "lost", "gap": True, "sid": sid, "bell": "on" if bell else "default", "why": why})
+    if general:
+        evs.append({"kind": "lost", "gap": True, "why": "; ".join(general)})
+    _push_ring_add(evs)
     with _push_ring_cond:
         _PUSH_CATCHUP["done"] = True
         _push_ring_cond.notify_all()
@@ -70308,7 +70333,10 @@ def _push_events_serve(after, wait, proto=1):
             continue                                 # an older puller resets at a restart instead of counting its gap
         shown += 1
         if e.get("kind") == "lost":
-            served.append({"seq": e["seq"], "kind": "lost", "gap": True})
+            w = {"seq": e["seq"], "kind": "lost", "gap": True}
+            if e.get("bell") in ("on", "default"):
+                w["bell"] = e["bell"]                # one session's count is lost: whether it could have buzzed
+            served.append(w)
             continue
         verdict = _push_event_verdict(e)
         if verdict == "current" or (v2 and verdict == "stale"):
@@ -70650,7 +70678,16 @@ def _push_pull_once(name, r):
     past = [ev for ev in fresh if ev.get("gap") is True]   # what the row detected about its own downtime: never delivered
     for ev in past:                                      # one by one, always counted into its restart's summary (a gap
         # opened here when none is: a session that re-attached after the row had caught up)
-        _push_gap_open(name, "restarted", restarts=0, unknown=ev.get("kind") == "lost")
+        if ev.get("kind") != "lost":
+            _push_gap_open(name, "restarted", restarts=0)
+        elif ev.get("bell") in ("on", "default"):
+            # one session's count is lost: unknown only if its bell would have let a turn end through here, and then
+            # said whatever the row's other facts are (its turn end could have passed)
+            could = _push_gate_verdict({"kind": "turn", "bell": ev["bell"]})[0]
+            g = _push_gap_open(name, "restarted", restarts=0, unknown=could)
+            g["sure"] = g.get("sure") or could
+        else:
+            _push_gap_open(name, "restarted", restarts=0, unknown=True)
     gap = _PUSH_GAPS.get(name)
     # caught up: the request found the cursor at the row's newest, so this answer's events fired while it listened. An
     # older row (protocol 1) does not say; an empty-handed, reset-free answer proves the same there
@@ -70793,7 +70830,7 @@ def _push_gap_record(g, now=None):
         down = max(0, (g.get("back") or (now if now is not None else time.time())) - g["since"])
     return {"why": set(g["why"]), "down": down, "restarts": int(g.get("restarts") or 0), "turns": set(g["turns"]),
             "needs": g["needs"], "done": g["done"], "unknown": bool(g["unknown"]),
-            "could": bool(g["unknown"]) and _push_gap_could_pass(g)}
+            "could": bool(g["unknown"]) and bool(g.get("sure") or _push_gap_could_pass(g))}
 
 
 def _push_gap_merge(a, b):
@@ -71295,6 +71332,29 @@ def _push_turn_gap(s, sid, key, bell):
         _TURN_MISSED.add(sid)
 
 
+def _turn_missed_say(lost):
+    """This machine's own summary of the turn ends it missed while it was down (_TURN_MISSED, the block above), once it has
+    caught up on its restart, and of the sessions whose count it cannot vouch for (`lost`, (sid, why) from
+    _push_catchup_ready: "" for no one session). The same rule as a pulled row's summary (the review of #230): an exact
+    count when it has one, "may have been missed" only when something this machine's bells and switches would have let
+    through could be among what it cannot count (a lost session's own bell; for a failure naming no session, the turn
+    switches or any session's explicit on), and nothing at all otherwise."""
+    n = len(_TURN_MISSED)
+    _TURN_MISSED.clear()
+    could = any(sid and _turn_bell_passes(_push_explicit_bell(sid)) for sid, _ in lost)
+    if not could and any(not sid for sid, _ in lost):
+        could = _turn_bell_passes(None) or any(isinstance(f, dict) and f.get("notify") is True
+                                               for f in _session_flags().values())
+    if not n and not could:
+        return
+    counts = _missed_counts_text(n, 0, 0)
+    if could:
+        counts = (counts + "; more may have been missed") if counts else "notifications may have been missed"
+    sys.stderr.write("romp: turn notifications: %d session(s) finished a turn while this kernel was down%s — said in one "
+                     "summary, not one by one\n" % (n, "; more may have been missed" if could else ""))
+    _push_notify(_notify_title(MISSED_TITLE_NAME), "%s restarted · %s" % (_self_host(), counts), "", kind="missed")
+
+
 def _turn_notify_tick(now, live_map):
     """One pusher-cycle pass over the live sessions: a session whose turn-end key MOVED since the
     last pass finished a turn. Fires only for a turn the HUMAN opened (_turn_opener — a subagent's task
@@ -71306,77 +71366,90 @@ def _turn_notify_tick(now, live_map):
     tick for a turn end a session's host held while this kernel was down (lastStopUnwatched): one summary,
     once this life has caught up on its restart (_push_catchup_ready, read before the sessions are)."""
     fired = []
-    ready = None if _PUSH_CATCHUP["done"] else _push_catchup_ready(now)   # BEFORE the turn ends are read: every stamp
-    #                                                                       on record by then is filed by this tick
-    boot = not _TURN_BOOTED[0]
-    _TURN_BOOTED[0] = True
-    if boot:
-        _TURN_MEMO_PREV_LIFE[0] = _turn_memo_load()
-    disk = _TURN_MEMO_PREV_LIFE[0]
-    window = boot or not _PUSH_CATCHUP["done"]          # this life is still catching up on its restart
-    snap = {}
-    for s in _alive_sessions(now, live_map):
-        sid = str(s.get("sid") or "")
-        if not sid:
-            continue
-        reg = _thread_reg(sid)                           # one read: the settle and its opener are one Stop-hook write
-        key = _turn_end_key(sid, reg)
-        prev = _TURN_PREV.get(sid)
-        _TURN_PREV[sid] = key
-        if key:
-            snap[sid] = key
-        if prev is None and key:
-            # first sight this life: a turn end the previous life never saw happened while no kernel was watching. Known
-            # by the memo while this life catches up on its restart, and at any time by the stamp of a Stop hook its host
-            # held (a session re-attached late); the memo keeps a turn end the previous life already filed from being
-            # filed again. Was it the human's? (a Codex session, with no SDK registry, has only turns sent through romp:
-            # its newest end counts)
-            known = disk.get(sid) if disk is not None else None
-            held = bool(reg) and reg.get("lastStopUnwatched") == key
-            if key != known and ((window and known is not None) or held):
-                human_end = int((reg or {}).get("lastHumanStopAt") or 0) if reg else key
-                bell = _push_explicit_bell(sid)
-                if human_end > (known or 0) and bell is not False:
-                    _push_turn_gap(s, sid, key, bell)
-            continue
-        if prev is None or key == prev or not key:
-            continue                                     # baseline / nothing new / no settle evidence
-        if _turn_opener(reg) != "human":
-            continue                                     # the CLI or romp opened this turn (a subagent's task notification,
-            #                                              a scheduled prompt, a nudge), or no open was seen: nobody asked
-            #                                              the user anything, so nothing to buzz about — and no claim spent,
-            #                                              the bell event's is its own
-        bell = _push_explicit_bell(sid)
-        if bell is False:
-            continue                                     # the session's own bell is off on this machine: no device hears it
-        if reg and reg.get("lastStopUnwatched") == key:
-            _push_turn_gap(s, sid, key, bell)            # its host held the Stop while this kernel was down: never buzzed late
-            continue
-        body = _first_line(_last_assistant_text(s.get("path") or "")) or "finished a turn"
-        sname = str(s.get("name") or _name_of(sid) or sid[:8])
-        title = _notify_title(sname)                             # a turn end is never a needs-you
-        # a pull candidate whatever THIS machine's switches say: they govern its own devices, and a kernel pulling from
-        # this one applies its own (plans/federated-push.md, the pull section)
-        _push_ring_add([{"kind": "turn", "sid": sid, "title": title, "body": body, "name": sname,
-                         "bell": "on" if bell else "default", "turnKey": key}])
-        if not _turn_bell_passes(bell):
-            continue
-        if not _buzz_claim(sid, key, "turn"):
-            continue                                     # a bell event already buzzed for this turn end
-        _push_notify(title, body, sid, kind="turn", name=sname)  # badge omitted: the count rides its own push; the routing block carries the name the title wears
-        fired.append({"title": title, "body": body, "sid": sid, "kind": "turn"})   # the kind rides to peers too, so their tap lands the same way
-    _turn_memo_write(snap)
-    if boot and disk is None:
-        sys.stderr.write("romp: turn notifications: no record of the previous kernel life's turn ends — turns that "
-                         "ended while it was down are not summarized\n")
-    _push_catchup_tick(ready)                            # after the turn ends it vouched for are filed
-    if _TURN_MISSED and _PUSH_CATCHUP["done"]:
-        n = len(_TURN_MISSED)
-        _TURN_MISSED.clear()
-        body = "%s restarted · %s" % (_self_host(), _missed_counts_text(n, 0, 0))
-        sys.stderr.write("romp: turn notifications: %d session(s) finished a turn while this kernel was down — said in "
-                         "one summary, not one by one\n" % n)
-        _push_notify(_notify_title(MISSED_TITLE_NAME), body, "", kind="missed")
+    try:
+        ready = None if _PUSH_CATCHUP["done"] else _push_catchup_ready(now)   # BEFORE the turn ends are read: every stamp
+        #                                                                       on record by then is filed by this tick
+    except Exception as e:                               # a check that cannot say must not hold the catch-up open for good
+        sys.stderr.write("romp: turn notifications: the restart catch-up check failed (%s: %s) — closing the catch-up "
+                         "with its count unknown\n" % (type(e).__name__, e))
+        ready = (True, [("", "the restart catch-up check failed (%s)" % type(e).__name__)])
+    try:
+        boot = not _TURN_BOOTED[0]
+        _TURN_BOOTED[0] = True
+        if boot:
+            _TURN_MEMO_PREV_LIFE[0] = _turn_memo_load()
+        disk = _TURN_MEMO_PREV_LIFE[0]
+        window = boot or not _PUSH_CATCHUP["done"]          # this life is still catching up on its restart
+        snap = {}
+        for s in _alive_sessions(now, live_map):
+            sid = str(s.get("sid") or "")
+            if not sid:
+                continue
+            reg = _thread_reg(sid)                           # one read: the settle and its opener are one Stop-hook write
+            key = _turn_end_key(sid, reg)
+            prev = _TURN_PREV.get(sid)
+            _TURN_PREV[sid] = key
+            if key:
+                snap[sid] = key
+            if prev is None and key:
+                # first sight this life: a turn end the previous life never saw happened while no kernel was watching. Known
+                # by the memo while this life catches up on its restart, and at any time by the stamp of a Stop hook its host
+                # held (a session re-attached late); the memo keeps a turn end the previous life already filed from being
+                # filed again. Was it the human's? (a Codex session, with no SDK registry, has only turns sent through romp:
+                # its newest end counts)
+                known = disk.get(sid) if disk is not None else None
+                held = bool(reg) and reg.get("lastStopUnwatched") == key
+                if key != known and ((window and known is not None) or held):
+                    human_end = int((reg or {}).get("lastHumanStopAt") or 0) if reg else key
+                    bell = _push_explicit_bell(sid)
+                    if human_end > (known or 0) and bell is not False:
+                        _push_turn_gap(s, sid, key, bell)
+                continue
+            if prev is None or key == prev or not key:
+                continue                                     # baseline / nothing new / no settle evidence
+            if _turn_opener(reg) != "human":
+                continue                                     # the CLI or romp opened this turn (a subagent's task notification,
+                #                                              a scheduled prompt, a nudge), or no open was seen: nobody asked
+                #                                              the user anything, so nothing to buzz about — and no claim spent,
+                #                                              the bell event's is its own
+            bell = _push_explicit_bell(sid)
+            if bell is False:
+                continue                                     # the session's own bell is off on this machine: no device hears it
+            if reg and reg.get("lastStopUnwatched") == key:
+                _push_turn_gap(s, sid, key, bell)            # its host held the Stop while this kernel was down: never buzzed late
+                continue
+            body = _first_line(_last_assistant_text(s.get("path") or "")) or "finished a turn"
+            sname = str(s.get("name") or _name_of(sid) or sid[:8])
+            title = _notify_title(sname)                             # a turn end is never a needs-you
+            # a pull candidate whatever THIS machine's switches say: they govern its own devices, and a kernel pulling from
+            # this one applies its own (plans/federated-push.md, the pull section)
+            _push_ring_add([{"kind": "turn", "sid": sid, "title": title, "body": body, "name": sname,
+                             "bell": "on" if bell else "default", "turnKey": key}])
+            if not _turn_bell_passes(bell):
+                continue
+            if not _buzz_claim(sid, key, "turn"):
+                continue                                     # a bell event already buzzed for this turn end
+            _push_notify(title, body, sid, kind="turn", name=sname)  # badge omitted: the count rides its own push; the routing block carries the name the title wears
+            fired.append({"title": title, "body": body, "sid": sid, "kind": "turn"})   # the kind rides to peers too, so their tap lands the same way
+        _turn_memo_write(snap)
+        if boot and disk is None:
+            sys.stderr.write("romp: turn notifications: no record of the previous kernel life's turn ends — turns that "
+                             "ended while it was down are not summarized\n")
+    except Exception as e:
+        # the check failed (it will likely fail again at every cycle): a restart's catch-up it was to complete would never
+        # close, and a linked machine would count everything into a summary it never sends. Close it now, loudly, with the
+        # count unknown (the review of #230)
+        if ready and ready[0] and not _PUSH_CATCHUP["done"]:
+            sys.stderr.write("romp: turn notifications: the turn-end check failed (%s: %s) — closing this restart's "
+                             "catch-up with its count unknown\n" % (type(e).__name__, e))
+            ready = (True, list(ready[1] or []) + [("", "the turn-end check failed (%s)" % type(e).__name__)])
+            if _push_catchup_tick(ready):
+                _turn_missed_say(ready[1])
+        raise
+    if _push_catchup_tick(ready):                        # after the turn ends it vouched for are filed
+        _turn_missed_say(ready[1])
+    elif _TURN_MISSED and _PUSH_CATCHUP["done"]:
+        _turn_missed_say([])                             # a session that re-attached after the catch-up
     if fired:
         _push_forward(fired)                             # the legacy leg, to peers that do not pull yet
     return fired

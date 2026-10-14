@@ -6459,7 +6459,6 @@ class SdkSession:
         # detach (the kernel leaving, the host keeping the CLI) so _on_session_gone never reads it as a crash;
         # `_host_end_grace` is the bound the next `end` carries (kill sets the short one)
         self._host = None
-        self._hello_seen = False           # a host's hello has reached this session object (this kernel life) at least once
         self._unwatched_rids = set()       # request ids its CLI sent before this kernel life first attached to it (the first
         #                                    hello's `parked`), until each is handed over, a Stop hook among them until it
         #                                    has stamped its turn end (the transport's `unwatched`; unwatched_pending)
@@ -9672,8 +9671,15 @@ class SdkSession:
         finally:
             self._fire_boot_settled()   # a dead thread must free its boot-stagger slot (first, so
             #                             a raising _on_session_gone can never leak the slot)
-            getattr(self, "_unwatched_rids", set()).clear()   # this object answers no held request now: the restart
-            #                             catch-up must not wait on it (a next object's first hello names them again)
+            held = getattr(self, "_unwatched_rids", None)
+            if held:                    # this object answers no held request now: the restart catch-up must not wait on it,
+                #                         and a finished turn its host held is one this life cannot count (the review of #230)
+                try:
+                    self.backend._catchup_lost.setdefault(self.sid, "its session ended before this kernel had recorded a "
+                                                                    "finished turn its host held")
+                except Exception:
+                    pass
+                held.clear()
             self._release_launch_slot()   # …and a relaunch's launch slot, and its place in line for one
             if self._launch_slots() is not None:
                 self._launch_slots().unwait(self)
@@ -13800,6 +13806,14 @@ class SdkBackend:
         #                                               writes (lease_census reports a skew as lease.version-skew)
         self._leases: dict = {}            # sid -> (session, lease dict): the leases this kernel holds (T305)
         self._boot_attach_sids: set = set()   # sids the boot reconcile attached to a live host (T315)
+        # THE RESTART CATCH-UP's per-session facts (plans/federated-push.md, "The feed across a restart"; the review of
+        # #230): the kernel's _push_catchup_ready reads them through catchup_lost / catchup_unreported / unwatched_pending
+        self._boot_attach_set: set = set()    # the boot's re-attaches, frozen with their count (the catch-up waits on each)
+        self._hello_sids: set = set()         # sids a host's hello reached in this kernel life (a session object rebuilt
+        #                                       mid-life is not a first attach: its held requests are no restart's)
+        self._catchup_lost: dict = {}         # sid -> why its count cannot be vouched for (its session ended first)
+        self._catchup_unreported: dict = {}   # sid -> when its first hello came, from a host too old to report the
+        #                                       finished turns it answered itself (the kernel judges the wait it bounds)
         self._lease_deferred: dict = {}       # sid -> a boot decision an unreadable lease could not settle (_lease_defer)
         self._lease_listing_failed = False    # the deferral's process listing is failing: said once per episode (_lease_rejudge)
         self._lease_watch_thread = None       # the thread taking those decisions again as their leases settle
@@ -14769,22 +14783,30 @@ class SdkBackend:
         whose CLI therefore predates this kernel; its identity is recorded and nothing else moves. No CLI
         identity at all (a hello older than the identity itself): nothing stamped, said in the log, never a
         raise out of the connect."""
-        # the requests this CLI sent before this kernel life first attached to it (its first hello's `parked`; a later hello
-        # adds its own only while that set is still open, a reconnect before the catch-up finished): handed to the transport,
-        # which marks a Stop hook among them as a turn that ended while no kernel listened (host_transport._mark_unwatched).
-        # Set BEFORE the boot attach is counted settled below, so the kernel's restart catch-up never sees an attach done
-        # with its held Stop hooks not yet known (_push_catchup_ready)
+        # the requests this CLI sent before this kernel life first attached to it (the first hello of the SID in this life,
+        # whichever session object it reaches: one rebuilt mid-life is not a restart's, the review of #230; a later hello
+        # adds its own only while that set is still open, a reconnect before the catch-up finished): handed to the
+        # transport, which marks a Stop hook among them as a turn that ended while no kernel listened
+        # (host_transport._mark_unwatched). The finished turns the host answered itself meanwhile (its hello's
+        # `selfAnswered`) are stamped here (_stamp_self_answered). All of it BEFORE the boot attach is counted settled below,
+        # so the kernel's restart catch-up never sees an attach done with its held turn ends not yet known
         try:
+            first = sess.sid not in self._hello_sids
+            self._hello_sids.add(sess.sid)
             parked = {str(x) for x in (hello.get("parked") or []) if x}
             rids = getattr(sess, "_unwatched_rids", None)
             if rids is None:
                 rids = sess._unwatched_rids = set()
-            if parked and (not getattr(sess, "_hello_seen", False) or rids):
+            if parked and (first or rids):
                 rids |= parked
-            sess._hello_seen = True
             t_now = getattr(sess, "_host", None)
             if t_now is not None:
                 t_now.unwatched = rids
+            told = hello.get("selfAnswered")
+            if isinstance(told, list):
+                self._stamp_self_answered(sess, told)
+            elif first and getattr(sess, "_host_is_attach", False):
+                self._catchup_unreported[sess.sid] = time.time()   # a host older than the report: the kernel judges it
         except Exception as e:
             self._log("host (%s): the held requests of the attach were not read: %s" % (sess.name, e))
         boot = sess.sid in self._boot_attach_sids
@@ -15562,6 +15584,7 @@ class SdkBackend:
             # hello discard its sid from _boot_attach_sids, and a per-iteration membership test then saw no attach, parked no
             # callback, and the count never reached zero (two boots of 2026-09-11 said attachTimedOut with every hello landed)
             attach_set = {s for s in to_start if s in self._boot_attach_sids}
+            self._boot_attach_set = set(attach_set)   # the restart catch-up's roster: each says hello, or its count is lost
             with self._boot_attach_lock:
                 self._boot_attach_pending = len(attach_set)
             if not self._boot_attach_pending:
@@ -15871,6 +15894,50 @@ class SdkBackend:
                 self._boot_phase(kind)
         except Exception as e:
             self._log("boot milestone %s: %s" % (kind, e))
+
+    def _stamp_self_answered(self, sess, told) -> None:
+        """The finished turns `sess`'s host answered itself while no kernel was attached (its hello's `selfAnswered`: Stop
+        hooks it held past HOOK_SELF_ANSWER_S, each with the moment it began holding it). No kernel ran their Stop hook,
+        so their turn end was never stamped and the restart's summary could not count it (the review of #230: the
+        kernel compared clocks instead, from its own start, while the host's wait ran from its detach to the re-attach).
+        Stamped here as the hook would have, with lastStopUnwatched, at the newest one's moment: the turn tick counts it
+        into the summary like a Stop the host still held. A report repeats in every hello; a moment the registry's settle
+        has already passed stamps nothing, so a second hearing counts nothing twice."""
+        ends = [int(x["t"]) for x in told if isinstance(x, dict) and x.get("event") == "Stop"
+                and isinstance(x.get("t"), (int, float)) and not isinstance(x.get("t"), bool)]
+        if not ends:
+            return
+        t = max(ends)
+        reg = read_reg(self.state_dir, sess.sid) or {}
+        try:
+            settled = int(reg.get("lastStopAt") or 0)
+        except (TypeError, ValueError):
+            settled = 0
+        if t <= settled:
+            return
+        opener = getattr(sess, "_turn_opener", None) or "unknown"
+        stamp = {"lastStopAt": t, "lastTurnOpener": opener, "lastStopUnwatched": t}
+        if opener == "human":
+            stamp["lastHumanStopAt"] = t
+        self._update_reg(sess.sid, **stamp)
+        self._log("host (%s): its host answered %d finished turn's hook itself while no kernel was attached; the newest is "
+                  "counted as a turn that ended while the kernel was down" % (sess.name, len(ends)))
+
+    def catchup_lost(self) -> dict:
+        """sid -> why this kernel life cannot vouch for that session's count of the turn ends it missed during the restart:
+        a boot re-attach that ended without a hello (its thread died, or it was never started), or a session that ended
+        before it had stamped a finished turn its host held (_run's exit). The kernel says those may have been missed."""
+        out = dict(self._catchup_lost)
+        for sid in self._boot_attach_set:
+            if sid not in self._hello_sids and sid not in out:
+                out[sid] = "its session could not be reconnected after the restart"
+        return out
+
+    def catchup_unreported(self) -> dict:
+        """sid -> when its first hello of this life came, for each session whose host runs code older than the
+        `selfAnswered` report: whether it answered a finished turn's hook itself is unknown, and the kernel bounds it by
+        how long that host could have been without a kernel."""
+        return dict(self._catchup_unreported)
 
     def unwatched_pending(self) -> int:
         """How many sessions still hold a request their CLI sent before this kernel life first attached to it: not yet

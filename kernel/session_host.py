@@ -18,7 +18,8 @@ hook table (the T303 probe).
 The socket protocol is newline-delimited JSON frames, field `t` naming the frame:
   kernel → host: attach {kernel:{pid,start,version}, ack:N}, in {data}, ack {offset}, signal {sig},
                  end {grace}, detach, ping
-  host → kernel: hello {host, cli:{pid, start, fsid, spawnedAt, login, launch}, journal:{next}, parked:[ids], inflight, inflightScope},
+  host → kernel: hello {host, cli:{pid, start, fsid, spawnedAt, login, launch}, journal:{next}, parked:[ids],
+                        selfAnswered:[{rid, event, t}], inflight, inflightScope},
                  out {offset, data}, stderr {line},
                  exit {code, signal, cause}, fault {kind, text}, busy {kernel}, pong
 One kernel is attached at a time. Connection loss without `detach` is a kernel death to the host; a
@@ -59,6 +60,7 @@ EXIT_FLUSH_S = 2.0               # how long the exiting host waits for an attach
 REEXEC_DRAIN_S = 5.0        # the handover waits this long for an attached kernel to drain its socket backlog, else defers
 GAP_TYPE = "romp-journal-gap"     # a record the journal could not write: a marker keeps the numbering, readers skip it
 UNREADABLE = (None, 0)    # an index entry whose segment is gone (acknowledged and deleted): read_from skips it
+SELF_ANSWERED_KEPT = 16   # the Stop hooks this host answered itself that every hello reports (the newest; a kernel stamps each once)
 END_SENTINEL = object()          # on the stdin pump: close the CLI's stdin after everything queued before it
 
 # The neutral answer the host gives a parked hook callback when no kernel returned in time, PER EVENT
@@ -430,6 +432,12 @@ class Parked:
         self.self_answer_s = float(self_answer_s)
         self.open: dict[str, dict] = {}        # request id -> {kind, offset, t, callback_id, event, record, unattached_since}
         self.answered: set[str] = set()
+        # the Stop hooks this host answered itself, each {rid, event, t: when it began holding it}, newest last: every hello
+        # reports them (`selfAnswered`), so the kernel that attaches stamps those finished turns, which no kernel's hook
+        # ran for, as turns that ended while it was down (its restart's summary counts them; the review of #230). Kept, not
+        # cleared at a hello: a kernel that dies before stamping hears them again, and a moment its registry's settle has
+        # passed stamps nothing, so a repeat counts nothing twice
+        self.self_answered: list[dict] = []
 
     def park(self, request: dict, offset: int, now: float, attached: bool) -> None:
         rid = str(request.get("request_id") or "")
@@ -782,6 +790,7 @@ class SessionHost:
                 except Exception:
                     pass
             self.parked.answered.update(str(x) for x in (h.get("answered") or []))
+            self.parked.self_answered = [dict(x) for x in (h.get("self_answered") or []) if isinstance(x, dict)][-SELF_ANSWERED_KEPT:]
 
     # ── host.log: never a spec field, never an environment value ──
     def log(self, kind: str, **fields) -> None:
@@ -928,7 +937,8 @@ class SessionHost:
                        "fds": fds, "read_count": self._read_count, "inflight": self.inflight, "main_turns": self.main_turns,
                        "acked": self.journal.acked,
                        "parked": [{"offset": v["offset"], "t": v["t"], "record": v["record"]} for v in self.parked.open.values()],
-                       "answered": sorted(self.parked.answered), "version_from": self.version, "t": self.now()}
+                       "answered": sorted(self.parked.answered), "self_answered": list(self.parked.self_answered),
+                       "version_from": self.version, "t": self.now()}
             hpath = self.dir / "reexec.json"
             fd = os.open(str(hpath), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w") as f:
@@ -1144,6 +1154,9 @@ class SessionHost:
                     continue
                 since = entry.get("unattached_since") or self.now()
                 self.parked.answer(rid)
+                if event == "Stop":
+                    self.parked.self_answered.append({"rid": rid, "event": event, "t": float(entry.get("t") or since)})
+                    del self.parked.self_answered[:-SELF_ANSWERED_KEPT]
                 self.log("hook-self-answered", requestId=rid, event=event, callbackId=str(entry.get("callback_id") or ""),
                          toolUseId=str(entry.get("tool_use_id") or ""), parkedS=round(self.now() - float(since), 1))
 
@@ -1302,6 +1315,7 @@ class SessionHost:
                                     # the launch record the spec carried (None from a spec written before the record)
                                     "launch": self.spec.get("launch") if isinstance(self.spec.get("launch"), dict) else None},
                             "journal": {"next": read_at_attach}, "parked": self.parked.ids(),
+                            "selfAnswered": list(self.parked.self_answered),   # the finished turns it answered itself
                             # the MAIN conversation's open turns, so an attaching kernel knows it is mid-turn (a backgrounded
                             # subagent's output keeps the host's own count open, never this one); inflightScope says so, and a
                             # hello without it comes from a host older than the main count
