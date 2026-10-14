@@ -7430,13 +7430,36 @@ follows a space, and an ellipsis already there is not doubled), a sentence longe
 than about 280 characters is cut to the words around the highlight, and when the
 words occur more than once in what is quoted, the one you highlighted is in bold.
 
-Code is not prose. A few words of a line of a code block, or of an inline code
-span, are named over that line or span, never a sentence and never in bold. A
-passage over several lines of a code block is quoted as those lines, with their
+Code is not prose. A few words of a line of a code block are named over that
+line, never a sentence and never in bold. An inline code span is part of the
+sentence it sits in: double-clicking `max_retries` in "Set `max_retries` to 5
+before the next run." sends
+
+```
+Replying to "max_retries" in this part of the conversation:
+> Set max_retries to 5 before the next run.
+```
+
+A passage over several lines of a code block is quoted as those lines, with their
 line breaks, under the usual lead-in. A longer highlight, a whole sentence or
 more, a quote from the file viewer and a highlight in the editor go out as
-before, the passage alone (in the message box, under its 4,000-character cap). What the quote
-chip's preview shows is what is sent.
+before, the passage alone. What the quote chip's preview shows is what is sent.
+
+## What a quote of the chat holds
+
+A quote of a passage of the chat holds the passage's text as the chat shows it,
+read at the moment you select. What is not the conversation's text is left out:
+a code block's Copy button and any other control, a tool row's label and its
+folded input and output, the IN and OUT labels of an open one, a notice's
+source label, a message's time, the contents of a closed fold (its summary
+stays), and anything the chat marks as unselectable. A block
+starts a new line and a paragraph or a message is a blank line apart; a code
+block's lines keep their line breaks; a table's cells are a tab apart.
+
+A quote longer than 4,000 characters is cut there and ends in `…`, in the
+message box, in a comment thread's reply box and in a comment thread's opening
+message alike. A comment's highlight is still found by the selection's own text,
+whole, so the cut changes only what is sent.
 
 ## What a relay sends
 

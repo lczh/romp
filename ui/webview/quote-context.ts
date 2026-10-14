@@ -6,9 +6,11 @@
 //   Replying to "placement" in this part of the conversation:
 //   > …we should revisit the placement of the legend before shipping the deck…
 //
-// Code is not prose (review of #229, 2026-10-14): a few words of a line of code are named over that LINE, never a
-// sentence, and never marked in bold, which is an operator in most languages. A longer highlight, a whole sentence or
-// line, goes out as it always did; one over several lines of a code block keeps its line breaks (render.ts reads them).
+// Code is not prose (review of #229, 2026-10-14): a few words of a line of a code BLOCK are named over that LINE, never a
+// sentence, and never marked in bold, which is an operator in most languages. An inline code span is part of the prose
+// around it (review of #231): `max_retries` in "Set `max_retries` to 5 before the next run." is named over that sentence,
+// which says what it is about; the span alone did not. A longer highlight, a whole sentence or line, goes out as it always
+// did; one over several lines of a code block keeps its line breaks (render.ts reads them).
 // Pure: render.ts reads the message's text and the selection's offsets from the DOM (controls such as a code block's Copy
 // button left out) and hands them here; the kernel never reconstructs any of this.
 
@@ -16,6 +18,18 @@
 export const QUOTE_CONTEXT_CAP = 280;
 /** "A few words": a longer highlight goes out as it always did, so the lead-in never repeats a long selection. */
 export const QUOTE_WORDS_MAX = 100;
+/** The longest quote that goes out, in the message box and in a comment's opening message alike (the kernel's _QUOTE_CAP
+ *  holds the same figure): a selection can be huge, the send stays bounded. */
+export const QUOTE_CAP = 4000;
+
+/** `text` within QUOTE_CAP: a longer one is cut there and ends in "…", so the reader can see it was cut (review of #231,
+ *  2026-10-14: a quote cut mid-word with no mark reads as the whole passage). Never splits a surrogate pair. */
+export function capQuote(text: string): string {
+  if (text.length <= QUOTE_CAP) return text;
+  let end = QUOTE_CAP - 1;
+  if (/[\uDC00-\uDFFF]/.test(text[end])) end--;          // the cut falls inside a pair: keep the pair whole, outside
+  return text.slice(0, end).trimEnd() + "…";
+}
 
 // a sentence's end: its stop (a run of . ! ? or an ellipsis), any closing quote or bracket, then whitespace
 const STOP = /(?:[.!?]|…)+["'”’)\]»]*\s+/g;
@@ -128,8 +142,8 @@ export function quoteContext(text: string, start: number, end: number, words?: s
   return joinCuts(t, line.slice(0, a).trim() !== "", line.slice(b).trim() !== "", b > e);
 }
 
-/** The context for a few words of CODE at [start, end) of `line` (one line of a code block, or an inline code span, as
- *  the code's own text): the line itself, edge whitespace trimmed, cut to a window around the words when it is longer than
+/** The context for a few words of CODE at [start, end) of `line` (one line of a code block, as the code's own text; an
+ *  inline code span is prose's, quoteContext's): the line itself, edge whitespace trimmed, cut to a window around the words when it is longer than
  *  the cap. Never a sentence and never bold. Null when the words are more than a few, the whole line, or not `words`. */
 export function codeLineContext(line: string, start: number, end: number, words?: string): string | null {
   if (line.includes("\n")) return null;

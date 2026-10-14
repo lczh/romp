@@ -17,6 +17,7 @@ import { StagedStack, quoteReplyBody, quoteLeadIn, stagedRunBody, stagedPosts, i
 import { splitQuoteReplyBody } from "./queued-rescind";
 import { mintQid } from "./send-pending";
 import { isClearCmd } from "./clear-confirm";
+import { capQuote } from "./quote-context";
 
 const requireCjs = createRequire(__filename);
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
@@ -106,7 +107,7 @@ class FakeEl {
 }
 type Posted = { type: string; [k: string]: unknown };
 type Hooks = {
-  FakeEl: typeof FakeEl; StagedStack: typeof StagedStack; quoteReplyBody: typeof quoteReplyBody; stagedPosts: typeof stagedPosts; mintQid: typeof mintQid;
+  FakeEl: typeof FakeEl; StagedStack: typeof StagedStack; capQuote: typeof capQuote; quoteReplyBody: typeof quoteReplyBody; stagedPosts: typeof stagedPosts; mintQid: typeof mintQid;
   isClearCmd: typeof isClearCmd; isSlashCommand: typeof isSlashCommand; posted: Posted[]; optimistic: { sid: string; text: string }[];
   toasts: string[]; strips: (string | null)[]; down: Set<string>; activeId: string | null; mkQuote: string;
 };
@@ -116,7 +117,7 @@ type Api = { mountViewerBar: (host: FakeEl, sid: string, path: string) => Bar; s
 function lift(): (hooks: Hooks) => Api {
   const a = RENDER.indexOf("function routeUserMessage("), b = RENDER.indexOf("\nfunction beginComposerEdit(");
   assert.ok(a > 0 && b > a && RENDER.slice(a, b).includes("function mountViewerBar("), "the bar sits in the staging block, before beginComposerEdit; re-anchor");
-  const mq = RENDER.slice(RENDER.indexOf("const QUOTE_CAP = "), RENDER.indexOf("\n}\n", RENDER.indexOf("function mkQuoteCitation(")) + 3);
+  const mq = RENDER.slice(RENDER.indexOf("function mkQuoteCitation("), RENDER.indexOf("\n}\n", RENDER.indexOf("function mkQuoteCitation(")) + 3);
   const js = requireCjs("esbuild").transformSync(mq + RENDER.slice(a, b), { loader: "ts" }).code;
   const prelude = `
     const H = HOOKS;
@@ -124,6 +125,7 @@ function lift(): (hooks: Hooks) => Api {
     const document = { createTextNode: (t) => { const n = new H.FakeEl("#text"); n.textContent = t; return n; }, getElementById: () => null, activeElement: null };
     const stagedMsgs = new H.StagedStack();
     const stagedOpen = new Set(), stagedCollapsed = new Set(), stagedScroll = new Map();
+    const capQuote = H.capQuote;
     const quoteReplyBody = H.quoteReplyBody, stagedPosts = H.stagedPosts, mintQid = H.mintQid, isClearCmd = H.isClearCmd, isSlashCommand = H.isSlashCommand;
     const liveSession = () => ({ status: { backend: "sdk" } });
     const vscodeApi = { postMessage: (m) => { const { qid, ...frame } = m; H.posted.push(frame); } };
@@ -146,7 +148,7 @@ function lift(): (hooks: Hooks) => Api {
 }
 const SID = "web-sid";
 function world(active: string | null = SID) {
-  const H: Hooks = { FakeEl, StagedStack, quoteReplyBody, stagedPosts, mintQid, isClearCmd, isSlashCommand, posted: [], optimistic: [], toasts: [], strips: [],
+  const H: Hooks = { FakeEl, StagedStack, capQuote, quoteReplyBody, stagedPosts, mintQid, isClearCmd, isSlashCommand, posted: [], optimistic: [], toasts: [], strips: [],
                      down: new Set(), activeId: active, mkQuote: "" };
   const api = lift()(H);
   const root = new FakeEl("root");
