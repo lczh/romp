@@ -13,9 +13,9 @@
 // the relay lists the folder in the pane, a picked file opens over the listing and enters Recent, Escape peels
 // one layer at a time, and the pane tells the shell once, when nothing is left up. The shell's own arm runs
 // under node in the Python lane (tests/test_files_pane.py BrowseRelay); nothing here reads the kernel. The
-// browser legs skip, and say why, without the playwright package or a browser it can launch (the extension
-// CI job installs the package with its dependencies and downloads a browser only after its test step, for the
-// pane bench). Synthetic values only: the notes-api demo world, placeholder session ids.
+// browser legs skip, and say why, without the playwright package or a browser it can launch; CI installs Chromium
+// before its test step and requires that leg, and the Firefox leg is an optional skip there (browser-leg.ts).
+// Synthetic values only: the notes-api demo world, placeholder session ids.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -23,6 +23,7 @@ import * as path from "node:path";
 import { createRequire } from "node:module";
 import { browseRoute, fileLinkRoute, type BrowseRoute } from "./file-route";
 import { asIdentity } from "./files-recent";
+import { launchLeg } from "./browser-leg";
 
 const requireCjs = createRequire(__filename);
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
@@ -607,8 +608,6 @@ const FILE_TEXT = "# notes-api\n\nTwo services.\n";
 
 let pw: any = null;
 try { pw = requireCjs("playwright"); } catch { pw = null; }
-const NO_PACKAGE = "playwright is not installed under vscode-extension: the browser legs need it";
-const noBrowser = (name: string, e: unknown) => "no playwright " + name + " on this machine: this leg needs one (the extension CI job downloads a browser only after its test step): " + String((e as Error).message).split("\n")[0];
 
 type PaneState = {
   up: string[]; posted: Array<Record<string, unknown>>; browser: boolean; viewer: boolean; emptyHidden: boolean;
@@ -665,10 +664,8 @@ async function paneHarness(browser: any, routes: Record<string, string>, extraCs
 
 for (const name of ["firefox", "chromium"]) {
   test(`in ${name}: a folder relayed into the Files pane lists there, a picked file opens over the listing with the relayed identity and enters Recent, Escape peels one layer at a time, and the shell hears one close and no restore`, async (t) => {
-    if (!pw) { t.skip(NO_PACKAGE); return; }
-    let browser: any;
-    try { browser = await pw[name].launch(); }
-    catch (e) { t.skip(noBrowser(name, e)); return; }
+    const browser = await launchLeg(t, pw, name);
+    if (!browser) return;
     try {
       const h = await paneHarness(browser, { "/dist/files.js": bundle("files.ts") });
       let s = await h.state();
@@ -719,10 +716,8 @@ for (const name of ["firefox", "chromium"]) {
   });
 
   test(`in ${name}: a viewer with unsaved edits in the Files pane stands a relayed browse down whole, with and without a listing beneath`, async (t) => {
-    if (!pw) { t.skip(NO_PACKAGE); return; }
-    let browser: any;
-    try { browser = await pw[name].launch(); }
-    catch (e) { t.skip(noBrowser(name, e)); return; }
+    const browser = await launchLeg(t, pw, name);
+    if (!browser) return;
     try {
       const h = await paneHarness(browser, { "/dist/files.js": bundle("files.ts"), "/dist/editor-chunk.js": bundle("editor-chunk.ts") });   // the on-demand editor bundle the viewer loads at the first Edit
       const editing = () => h.page.evaluate(() => {

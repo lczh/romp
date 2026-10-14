@@ -3,12 +3,13 @@
 // wrapper already capped at 72%, the wrapper's block flow put the tag on the LEFT, and the wrapper-anchored ✕
 // floated 100px+ off the bubble on the tag's row. Measured with a real browser against the real stylesheet:
 // the queued nudge must be the landed nudge's width, right-aligned like it, with the ✕ in the bubble's corner
-// and a one-line gist staying one line. Runs only where a Playwright browser exists (CI installs none) — it
-// SKIPS LOUDLY there; the CI-safe source pins live in queued-indicator.test.ts.
+// and a one-line gist staying one line. Runs only where a Playwright browser exists — it SKIPS
+// LOUDLY elsewhere, failing where CI requires the leg (browser-leg.ts); the source pins live in queued-indicator.test.ts.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { measuredSkip } from "./browser-leg";
 
 const CSS_PATH = path.resolve(process.cwd(), "..", "ui", "webview", "styles.css");
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
@@ -83,7 +84,7 @@ function measure(): Measured | null {
 }
 
 const m = measure();
-const skip = m ? false : "no Playwright browser here — the layout pin needs one (CI installs none); the CI-safe source pins live in queued-indicator.test.ts";
+const skip = measuredSkip("chromium", m ? false : "no Playwright chromium here (its driver could not load playwright or launch the browser; npx playwright install chromium under vscode-extension): the layout pin needs one; the source pins live in queued-indicator.test.ts");
 
 test("a queued nudge is the landed nudge's width and stands on the landed side (T243b)", { skip }, () => {
   const L = m!["landed-long"], Q = m!["q-long"];

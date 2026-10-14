@@ -2,13 +2,14 @@
 // one quote is 50px, so the list's 209px cap shows four whole items and a fifth starts the scroll; fewer
 // than four and the list is its content's height; the head sits above the list, outside the scroll; an
 // expanded label wraps an unbroken token instead of widening the list; the caret's hit target is the
-// chip ✕'s, not the glyph's. Runs only where a Playwright browser exists (CI installs none) and SKIPS LOUDLY
-// there; the CI-safe pins on the cap's inputs live in staged-list-cap.test.ts, which also executes the
+// chip ✕'s, not the glyph's. Runs only where a Playwright browser exists and SKIPS LOUDLY elsewhere,
+// failing where CI requires the leg (browser-leg.ts); the browserless pins on the cap's inputs live in staged-list-cap.test.ts, which also executes the
 // renderer whose markup this page mirrors (the last test here checks the mirror).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { measuredSkip } from "./browser-leg";
 
 const CSS_PATH = path.resolve(process.cwd(), "..", "ui", "webview", "styles.css");
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
@@ -94,7 +95,7 @@ function measure(): Measured | null {
 }
 
 const m = measure();
-const skip = m ? false : "no Playwright browser here (CI installs none); the CI-safe pins on the cap's inputs live in staged-list-cap.test.ts";
+const skip = measuredSkip("chromium", m ? false : "no Playwright chromium here (its driver could not load playwright or launch the browser; npx playwright install chromium under vscode-extension); the pins on the cap's inputs live in staged-list-cap.test.ts");
 
 test("a staged item with one quote is 50px, a bare note about half that, and the list's 209px cap shows exactly four whole items with the rest scrolling", { skip }, () => {
   for (const h of m!.chips.slice(0, 4)) assert.ok(Math.abs(h - 50) < 0.5, `a one-quote item is 50px (the arithmetic behind the cap), measured ${h}`);

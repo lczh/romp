@@ -5,14 +5,15 @@
 // anything. This is the leg no stand-in can stand in for: the browser decides where a press-drag-release sends its
 // click; DOMPurify decides which Markdown targets survive; hljs decides where a substitution span cuts a path. A
 // second page runs the chat's own capture-phase anchor opener (its source, lifted from render.ts and installed over
-// the same bundle) so both documents' routing is exercised, not pinned. Skips LOUDLY without a playwright browser
-// (CI installs none), as queued-romp-layout.test.ts does. Synthetic values only: the notes-api world under
+// the same bundle) so both documents' routing is exercised, not pinned. Skips LOUDLY without a playwright browser,
+// and fails where CI requires the leg (browser-leg.ts). Synthetic values only: the notes-api world under
 // /tmp/TESTHOST, a placeholder session id, example.invalid addresses.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { launchLeg } from "./browser-leg";
 
 const requireCjs = createRequire(__filename);
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
@@ -134,10 +135,8 @@ type Harness = {
   centerOffset: (sel: string) => Promise<{ d: number; h: number } | null>;
 };
 async function inBrowser(t: any, host: "viewer" | "chat", body: (h: Harness) => Promise<void>): Promise<void> {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension: the browser leg needs it (CI installs no browsers)"); return; }
-  let browser: any;
-  try { browser = await pw.chromium.launch(); }
-  catch (e) { t.skip("no playwright browser on this machine, and the browser leg needs one (CI installs none): " + String((e as Error).message).split("\n")[0]); return; }
+  const browser = await launchLeg(t, pw, "chromium");
+  if (!browser) return;
   const errors: string[] = [];
   const served: string[] = [];
   const opened: any[] = [];

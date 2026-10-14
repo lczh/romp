@@ -3,8 +3,7 @@
 // real Range selects a few words of it, and what the page posts is read off a recording acquireVsCodeApi: the message
 // box's send (the quote chip seeded by selectionchange, composed by quoteReplyBody) and a comment's create (the key's box,
 // its frame's `context`). A whole sentence selected goes out as it always did. Skips with a stated reason when no
-// playwright browser is installed (CI installs none; md-sanitize-chat-fragment-browser.test.ts is the precedent).
-// Synthetic prose only.
+// playwright browser is installed, and fails with it where CI requires the leg (browser-leg.ts). Synthetic prose only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -12,6 +11,7 @@ import * as path from "node:path";
 import { createRequire } from "node:module";
 import { chatBody, ATTACH_TITLE_WEB } from "../../vscode-extension/src/page-skeleton";
 import { capQuote } from "./quote-context";
+import { launchLeg } from "./browser-leg";
 
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
 const requireCjs = createRequire(path.join(EXT, "package.json"));
@@ -52,10 +52,8 @@ const AROUND = [
 ];
 
 async function inChat(t: any, body: (page: any, errors: string[]) => Promise<void>, events?: object[]): Promise<void> {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it (CI installs no browsers)"); return; }
-  let browser: any;
-  try { browser = await pw.chromium.launch(); }
-  catch (e) { t.skip("no playwright browser on this machine; the browser leg needs one (CI installs none): " + String((e as Error).message).split("\n")[0]); return; }
+  const browser = await launchLeg(t, pw, "chromium");
+  if (!browser) return;
   const errors: string[] = [];
   try {
     const renderJs = requireCjs("esbuild").buildSync({ ...BUILD, entryPoints: [path.join(UI, "render.ts")] }).outputFiles[0].text;

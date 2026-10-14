@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { createRequire } from "node:module";
 import { addRestartRow, restartInFlight, restartInterrupts, restartConfirmTitle, settleRestart, RESTART_INTERRUPTS } from "./restart-row";
 import { restartConfirmDetail, RESTART_LABEL, RESTART_BUSY_LABEL, RESTART_STANDING } from "./clear-confirm";
+import { launchLeg } from "./browser-leg";
 
 // "Restart session" (the user 2026-09-23): ONE action that relaunches a session's own CLI process in place,
 // where End then Revive was the only way to get a long-lived session onto a newly installed CLI — two
@@ -270,10 +271,8 @@ test("the kernel answers the op off the request thread, advertises it, and never
 let pw: any = null;
 try { pw = requireCjs("playwright"); } catch { pw = null; }
 async function inChromium(t: any, body: (browser: any) => Promise<void>): Promise<void> {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it"); return; }
-  let browser: any;
-  try { browser = await pw.chromium.launch(); }
-  catch (e) { t.skip("no playwright Chromium on this machine (npx playwright install chromium): " + String((e as Error).message).split("\n")[0]); return; }
+  const browser = await launchLeg(t, pw, "chromium");
+  if (!browser) return;
   try { await body(browser); } finally { await browser.close(); }
 }
 
