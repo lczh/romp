@@ -42,14 +42,14 @@ class EffortReconnect(unittest.TestCase):
         self.assertIn('"effortPending": bool(tm.get("effortPending")),', src)
 
     def test_sessions_live_passes_effortPending_through_from_the_sdk_backend(self):
-        src = inspect.getsource(km.Sessions.live)
+        src = inspect.getsource(km._sdk_live_norm)
         self.assertIn('"effortPending": bool(st.get("effortPending")),', src)
 
     def test_what_a_pending_relaunch_waits_for_reaches_the_status_and_the_chat(self):
         # 2026-10-01: a pick waits for a quiet session instead of cutting its subagents and background tasks, so the
         # pending marks say what holds them: the backend's snapshot → the live row → the tab's status (the Billing
         # row's sub-line) and the reconnecting event (the effort change's line), tests/test_reconnect_waits_for_work.py
-        self.assertIn('"relaunchWaits": st.get("relaunchWaits") or "",', inspect.getsource(km.Sessions.live))
+        self.assertIn('"relaunchWaits": st.get("relaunchWaits") or "",', inspect.getsource(km._sdk_live_norm))
         src = inspect.getsource(km.build_session)
         self.assertIn('"relaunchWaits": tm.get("relaunchWaits") or "",', src)
         self.assertIn('"waits": (tm0 or {}).get("relaunchWaits") or ""', src)
@@ -58,7 +58,7 @@ class EffortReconnect(unittest.TestCase):
     def test_what_applying_now_would_end_reaches_the_status(self):
         # 2026-10-01, Apply now: the row a waiting pick's control offers says what pushing it through ends, and its confirm
         # names it; the backend's snapshot → the live row → the tab's status, beside relaunchWaits
-        self.assertIn('"relaunchCuts": st.get("relaunchCuts") or "",', inspect.getsource(km.Sessions.live))
+        self.assertIn('"relaunchCuts": st.get("relaunchCuts") or "",', inspect.getsource(km._sdk_live_norm))
         self.assertIn('"relaunchCuts": tm.get("relaunchCuts") or "",', inspect.getsource(km.build_session))
         self.assertIn('"relaunchCuts": self.relaunch_cuts(),', BACKEND_SRC)
 

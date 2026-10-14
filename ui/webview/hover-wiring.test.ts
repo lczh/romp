@@ -53,7 +53,7 @@ test("landOn top-aligns the target (block:'start'), never centers", () => {
 // (per option; ParsedAsk.preview only from an older kernel). Rendered as a monospace <pre> via
 // textContent (NEVER innerHTML: the pane text is untrusted terminal output), and REPLACED not appended.
 test("the live ask card renders the focused option's preview as a monospace pre via textContent", () => {
-  assert.match(RENDER, /renderAskPreview\(\);/);
+  assert.match(RENDER, /renderAskPreview\(s\);/, "on the card's own surface (the chat's, or a comment popover's: thread-live-1)");
   const fn = RENDER.slice(RENDER.indexOf("function renderAskPreview("));
   const body = fn.slice(0, fn.indexOf("\n}\n"));
   assert.match(body, /preview = \(o && o\.preview\) \|\| ask\.preview/, "focused option's own preview, else the scraped one");

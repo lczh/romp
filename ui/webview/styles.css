@@ -2780,7 +2780,7 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 .ask-preview-diff .diff-del { color: #ff9492; background: rgba(248, 81, 73, 0.15); }
 .ask-preview-diff .diff-hunk { color: var(--accent); opacity: 0.85; }
 .ask-preview-diff .diff-ctx { color: var(--vscode-foreground, #ddd); opacity: 0.75; }
-#live-ask.sending { opacity: 0.5; pointer-events: none; }
+#live-ask.sending, .cmt-ask.sending { opacity: 0.5; pointer-events: none; }
 /* multi-select checkboxes */
 /* the "+ add your own" row — a static hint pointing at the message box below (the inline input moved into
    the normal composer, the user 2026-07-09); the composer doubles as the free-text answer field now */
@@ -4153,6 +4153,10 @@ mark.cmt-hl.unread { background: color-mix(in srgb, var(--cmt-hl) 45%, transpare
 .cmt-outline { position: absolute; pointer-events: none; user-select: none; box-sizing: border-box;
   outline: 1.5px dashed var(--st-awaiting-bg); border-radius: 3px; }
 mark.cmt-hl.unread.cmt-ring { outline: 1.5px dashed var(--st-awaiting-bg); outline-offset: 1px; }
+/* NEEDS YOU (thread-live-1, 2026-10-14): a thread stopped on a question or a permission prompt wears the same cue on its
+   passage, ring or box by the same row count (paintCommentOutlines takes .needs beside .unread); the dashed red is also
+   the tab strip's ring for a session stopped on a live prompt. Its fill stays the read 30%: the reply has not landed */
+mark.cmt-hl.needs.cmt-ring { outline: 1.5px dashed var(--st-awaiting-bg); outline-offset: 1px; }
 /* the turn's rail segment shouts an unread thread (the user 2026-08-23): the identity line's own
    segment tints the comment yellow — wider and fully opaque so it reads from across the pane — and
    the rail-hit strip over it opens the thread on click. applyCommentMarks clears the class the
@@ -4355,6 +4359,15 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
   font: inherit;
 }
 .cmt-input:focus { outline: none; border-color: var(--accent); }
+/* the popover box doubles as a question's "add your own" field exactly as the message box does (render.ts syncCmtBoxAskMode,
+   thread-live-1): the same accent border, wash and placeholder tint */
+.cmt-input.answering { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--vscode-input-background, rgba(255, 255, 255, 0.05))); }
+.cmt-input.answering::placeholder { color: color-mix(in srgb, var(--accent) 65%, var(--dim)); }
+/* THE OPEN THREAD'S QUESTION (thread-live-1, 2026-10-14): the chat's own question card (.ask-card.ask-live), painted by the
+   chat's painter into this host between the conversation and the box (render.ts renderThreadAsk). It never squeezes the
+   conversation away: past half the box it scrolls within itself, and the card's chat-column margins fall to the popover's */
+.cmt-ask { flex: 0 1 auto; min-height: 0; max-height: 50%; overflow-y: auto; cursor: auto; }
+.cmt-ask .ask-live { max-width: none; margin: 0; }
 .cmt-actions { display: flex; gap: 6px; align-items: center; }
 .cmt-actions:empty { display: none; }
 /* the chat's under-bubble button family, exactly (the composer-stage-btn dress — the user
@@ -4445,8 +4458,8 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
    pattern as .cmt-tick.busy wearing the await green. It also stacks ABOVE its read siblings: two
    threads on one passage share a `top`, and the later-painted read tick covered the unread one
    (the user 2026-09-10) */
-.cmt-tick.unread { width: 16px; height: 6px; right: 0; opacity: 1; z-index: 1;
-  box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--st-awaiting-bg); }
+.cmt-tick.unread, .cmt-tick.needs { width: 16px; height: 6px; right: 0; opacity: 1; z-index: 1;
+  box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--st-awaiting-bg); }   /* .needs: waiting on your answer (thread-live-1) */
 /* a WRITING thread's tick wears the same await-green as the passage (the user 2026-08-24: the
    marching-ants crawl — the "spinning dots" — is retired; the state COLOR is the in-flight cue,
    here as everywhere on the rail) */

@@ -18,6 +18,8 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 
 const RULE = /\.cmt-outline \{ position: absolute; pointer-events: none; user-select: none; box-sizing: border-box;\s*\n\s*outline: 1\.5px dashed var\(--st-awaiting-bg\); border-radius: 3px; \}/;
 const RING = /mark\.cmt-hl\.unread\.cmt-ring \{ outline: 1\.5px dashed var\(--st-awaiting-bg\); outline-offset: 1px; \}/;
+// …and a thread waiting on your answer wears the same cue (thread-live-1, 2026-10-14): its own rule, the same stroke
+const NEEDS_RING = /mark\.cmt-hl\.needs\.cmt-ring \{ outline: 1\.5px dashed var\(--st-awaiting-bg\); outline-offset: 1px; \}/;
 const painter = () => {
   const at = RENDER.indexOf("function paintCommentOutlines(sid: string): void {");
   assert.ok(at > 0, "the painter exists");
@@ -44,16 +46,17 @@ test("the box: one DASHED outline in the needs-you red — the tab strip's idiom
 
 test("the ring: the unread marks of a one- or two-row passage wear the per-fragment dashed ring — the only mark rule with an outline", () => {
   assert.match(CSS, RING);
+  assert.match(CSS, NEEDS_RING);
   const marks = CSS.match(/^mark\.cmt-hl[^{]*\{[^}]*\}/gms) || [];
   assert.ok(marks.length >= 7, "the mark rules are found");
-  assert.deepEqual(marks.filter((r) => /outline/.test(r)).map((r) => r.split(" {")[0]), ["mark.cmt-hl.unread.cmt-ring"],
-    "plain .unread carries none: which cue a thread wears is the painter's call, by row count");
+  assert.deepEqual(marks.filter((r) => /outline/.test(r)).map((r) => r.split(" {")[0]), ["mark.cmt-hl.unread.cmt-ring", "mark.cmt-hl.needs.cmt-ring"],
+    "plain .unread and .needs carry none: which cue a thread wears is the painter's call, by row count");
 });
 
 test("the notch keeps its own ink; its UNREAD halo agrees with the box by colour (a 10×6 tick cannot show a dash)", () => {
   assert.match(CSS, /\.cmt-tick \{[^}]*background: var\(--cmt-hl-outline\);/s, "the fill stays the comment ink: 'a comment here'");
-  assert.match(CSS, /\.cmt-tick\.unread \{[^}]*box-shadow: 0 0 0 1\.5px var\(--bg\), 0 0 0 3px var\(--st-awaiting-bg\); \}/s, "the halo: 'waits on you', the box's red, past the same 1.5px gap");
-  assert.doesNotMatch(CSS.match(/\.cmt-tick\.unread \{[^}]*\}/s)![0], /cmt-hl-outline|color-mix/, "no yellow halo left");
+  assert.match(CSS, /\.cmt-tick\.unread, \.cmt-tick\.needs \{[^}]*box-shadow: 0 0 0 1\.5px var\(--bg\), 0 0 0 3px var\(--st-awaiting-bg\); \}/s, "the halo: 'waits on you', the box's red, past the same 1.5px gap (a thread waiting on your answer wears it too)");
+  assert.doesNotMatch(CSS.match(/\.cmt-tick\.unread, \.cmt-tick\.needs \{[^}]*\}/s)![0], /cmt-hl-outline|color-mix/, "no yellow halo left");
   const dark = CSS.split("body.theme-light {")[0];
   const light = CSS.split("body.theme-light {")[1].split("\n}")[0];
   assert.match(dark, /--cmt-hl-outline: #ffd54a;/, "dark: the notch's ink IS the fill's yellow");
@@ -75,7 +78,7 @@ test("a fragment inside a scrolling container counts only where it shows: cut to
 
 test("the painter: one box per unread thread of three rows or more, a child of the turn, sized to the union of the fragments' client rects", () => {
   const fn = painter();
-  assert.match(fn, /querySelectorAll\("mark\.cmt-hl\.unread"\)/, "unread marks only");
+  assert.match(fn, /querySelectorAll\("mark\.cmt-hl\.unread, mark\.cmt-hl\.needs"\)/, "cued marks only: an unread reply, or a thread waiting on your answer");
   assert.match(fn, /want\.get\(tid\)/, "grouped by thread: one box per tid");
   assert.match(fn, /m\.getClientRects\(\)/, "every line fragment of every mark of the thread");
   assert.match(fn, /l = Math\.min\(l, ql\); t = Math\.min\(t, qt\); r = Math\.max\(r, qr\); b = Math\.max\(b, qb\);/, "the union of the CLIPPED fragments");
@@ -108,7 +111,8 @@ test("the row rule: line rows counted from the rects the painter already reads; 
   assert.equal((RENDER.match(/paintCommentOutlines\(/g) || []).length, 5, "the definition and its four call sites: the marks pass (twice), the rail's rAF scheduler, the window resize hook");
   // the ring goes with the unread bit exactly where the box does: styleCommentMark drops it on the pass that drops unread
   // (the popover opening, a resolve); a deleted thread's or a windowed-out turn's marks leave the DOM, class and all
-  assert.match(RENDER, /m\.classList\.toggle\("unread", !!th\.unread && th\.status === "open"\);\s*\n\s*if \(!\(th\.unread && th\.status === "open"\)\) m\.classList\.toggle\("cmt-ring", false\);/);
+  assert.match(RENDER, /m\.classList\.toggle\("unread", !!th\.unread && th\.status === "open"\);/);
+  assert.match(RENDER, /m\.classList\.toggle\("needs", needs\);\s*\n\s*if \(!threadCued\(th\)\) m\.classList\.toggle\("cmt-ring", false\);/);
 });
 
 test("the box follows the marks: repainted after every marks pass, on the rail's rAF scheduler and on window resize — no timers", () => {
@@ -116,13 +120,13 @@ test("the box follows the marks: repainted after every marks pass, on the rail's
   const pass = RENDER.slice(at, RENDER.indexOf("\n}\n", at));
   assert.match(pass, /if \(!threads\.length\) \{ paintCommentOutlines\(sid\);/, "the last thread gone: its box goes on the same pass");
   assert.match(pass, /for \(const th of list\) ensureCommentMark\(turn, th\);[\s\S]*paintCommentOutlines\(sid\);/, "after the marks are placed");
-  assert.match(RENDER, /requestAnimationFrame\(\(\) => \{ railStickyPending = false; paintRailSticky\(\); paintScrollMarks\(\); updateCommentRail\(\); if \(activeId && hasUnreadOpenThread\(activeId\)\) paintCommentOutlines\(activeId\); \}\);/,
+  assert.match(RENDER, /requestAnimationFrame\(\(\) => \{ railStickyPending = false; paintRailSticky\(\); paintScrollMarks\(\); updateCommentRail\(\); if \(activeId && hasCuedOpenThread\(activeId\)\) paintCommentOutlines\(activeId\); \}\);/,
     "the notches' and ticks' own repaint path (a re-render, the view's resize observer, every scroll frame) — gated");
-  assert.match(RENDER, /window\.addEventListener\("resize", \(\) => \{ updateCommentRail\(\); if \(activeId && hasUnreadOpenThread\(activeId\)\) paintCommentOutlines\(activeId\); \}\);/,
+  assert.match(RENDER, /window\.addEventListener\("resize", \(\) => \{ updateCommentRail\(\); if \(activeId && hasCuedOpenThread\(activeId\)\) paintCommentOutlines\(activeId\); \}\);/,
     "a resize can carry a passage across the two-row line; this hook is what flips it");
   // the gate is a store read, never a DOM walk: a scroll frame on a session with nothing unread costs a Map lookup
-  assert.match(RENDER, /function hasUnreadOpenThread\(sid: string\): boolean \{\s*\n\s*return \(commentThreads\.get\(sid\) \|\| \[\]\)\.some\(\(t\) => !!t\.unread && t\.status === "open"\);\s*\n\}/);
+  assert.match(RENDER, /function hasCuedOpenThread\(sid: string\): boolean \{\s*\n\s*return \(commentThreads\.get\(sid\) \|\| \[\]\)\.some\(\(t\) => threadCued\(t\)\);/);
   // …while the marks pass stays ungated: it is the removal path (the last unread thread gone takes its box with it)
-  assert.doesNotMatch(pass, /hasUnreadOpenThread/);
+  assert.doesNotMatch(pass, /hasCuedOpenThread/);
   assert.doesNotMatch(painter(), /setTimeout|setInterval/);
 });

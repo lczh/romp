@@ -7,6 +7,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { chipStops } from "./status-chip";
 
 const R = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 
@@ -16,7 +17,8 @@ test("Status carries the per-session retrySuppressed flag", () => {
 
 test("the stop/interrupt button is now reachable on a retrying / blocked thread (so you can interrupt it)", () => {
   // it renders for working/compacting AND the stuck states — that's where it doubles as the per-thread off-switch
-  assert.match(R, /state === "retrying" \|\| s\.status\.state === "blocked"\) left\.appendChild\(stopButton\(s\.status\.state\)\)/);
+  assert.match(R, /if \(chipStops\(s\.status\.state\)\) left\.appendChild\(stopButton\(s\.status\.state\)\);/);
+  assert.ok(chipStops("retrying") && chipStops("blocked"), "the shared rule (status-chip.ts) holds both stuck states");
   // the button adapts its label/tip for the stuck states (styled tip since 2026-08-28 — label line + explanation)
   assert.match(R, /const stuck = state === "retrying" \|\| state === "blocked"/);
   assert.match(R, /Stop retrying\\ninterrupt this thread/);

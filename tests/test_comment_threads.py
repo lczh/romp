@@ -2032,7 +2032,7 @@ class ThreadProjection(CommentBase):
     def test_the_built_events_are_not_edited_in_place(self):
         recs = self._seed_precompact_thread()
         self._frame_thread(recs, state="")
-        _key, _cut, cached, _t = km._built_thread[THREAD]
+        cached = km._built_thread[THREAD][2]   # (key, cut, events, started, chip)
         opener = next(e for e in cached if e.get("kind") == "user")
         self.assertEqual(opener["md"], "Why jitter at all?", "the cache holds the shown copy")
         ev = {"kind": "user", "md": km._comment_first_message("q", "c")}

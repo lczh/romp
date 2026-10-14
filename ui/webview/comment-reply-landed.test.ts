@@ -17,7 +17,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { threadSettled, type CommentThread } from "./comments";
+import { threadSettled, threadNeedsYou, threadCued, type CommentThread } from "./comments";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const COMMENTS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "comments.ts"), "utf8");
@@ -110,7 +110,7 @@ function markFor(th: CommentThread, latched = false): Set<string> {
     const commentInFlight_ = null;`;
   const classes = new Set<string>();
   const m = { classList: { toggle(c: string, on: boolean) { if (on) classes.add(c); else classes.delete(c); } }, title: "" };
-  new Function("m", "th", "threadSettled", prelude + "\n" + inflightSrc + "\n" + styleSrc + "\nstyleCommentMark(m, th);")(m, th, threadSettled);
+  new Function("m", "th", "threadSettled", "threadNeedsYou", "threadCued", prelude + "\n" + inflightSrc + "\n" + styleSrc + "\nstyleCommentMark(m, th);")(m, th, threadSettled, threadNeedsYou, threadCued);
   return classes;
 }
 const base = (over: Partial<CommentThread>): CommentThread => ({

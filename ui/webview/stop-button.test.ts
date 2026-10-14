@@ -6,6 +6,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { chipStops } from "./status-chip";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
@@ -23,7 +24,10 @@ test("the stop button posts the same interrupt message as the composer's Ctrl+C"
 test("the button renders while busy (working/compacting) AND while stuck retrying/blocked, never when idle", () => {
   // retrying/blocked were added (the user 2026-07-06): there the interrupt doubles as the per-thread
   // auto-retry off-switch. Still omitted in ready/idle/awaiting/interrupting — nothing to stop.
-  assert.match(RENDER, /s\.status\.state === "working" \|\| s\.status\.state === "compacting"\s*\n\s*\|\| s\.status\.state === "retrying" \|\| s\.status\.state === "blocked"\) left\.appendChild\(stopButton\(s\.status\.state\)\)/);
+  // one rule, chipStops (status-chip.ts), which the comment popover's stop reads too (thread-live-1, 2026-10-14)
+  assert.match(RENDER, /if \(chipStops\(s\.status\.state\)\) left\.appendChild\(stopButton\(s\.status\.state\)\);/);
+  for (const st of ["working", "compacting", "retrying", "blocked"]) assert.ok(chipStops(st), st);
+  for (const st of ["ready", "idle", "awaitingBg", "needsInput", "interrupting", "opening", "closed", ""]) assert.ok(!chipStops(st), st);
   // no busy/idle CLASS toggle — it's drawn only when there's something to stop, so the bare .stop-btn is the live look
   assert.ok(!/"stop-btn" \+ \(busy \? " active" : ""\)/.test(RENDER), "no idle variant — omitted, not grayed");
 });

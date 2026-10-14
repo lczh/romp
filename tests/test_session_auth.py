@@ -1177,7 +1177,7 @@ class Availability(unittest.TestCase):
         self.assertNotIn("authTail", src, "the status payload carries the choice, never key material")
         # …and the live map the push reads from carries the backend's per-session fields (authLive was
         # read off this map from the start and never merged into it — found 2026-09-08)
-        src = inspect.getsource(km.Sessions.live)
+        src = inspect.getsource(km._sdk_live_norm)
         self.assertIn('"authLive": st.get("authLive", "")', src)
         self.assertIn('"authPickUnavailable": st.get("authPickUnavailable", "")', src)
 

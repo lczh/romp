@@ -6658,6 +6658,19 @@ strip's **Send now** sends it alone. **Esc** first drops the chips, then closes 
 replies are kept per thread through a reload, and deleting the thread drops them. A resolved
 thread keeps its plain reply, and the new-comment box sends its comment on either key.
 
+### A comment thread that asks you something
+
+When a thread stops on a question or on a permission prompt, its box shows the same card the chat
+shows for a session's question, between the thread's messages and its reply box, and you answer it
+there: pick an option, or Allow or Deny a command. A question that takes your own answer turns the
+thread's reply box into its "add your own answer" field, as the message box does for a session's
+question; a reply you had started before the question arrived stays a reply. The thread's status
+line says **Needs you** meanwhile, and its highlight and its tick on the scroll rail wear the
+dashed needs-you ring an unread reply wears, until the question is answered. The question comes
+back after a reload, and the thread still gets no tab, no lane and no card of its own. The thread's
+stop button shows where the chat's does: while it works, compacts or retries, and after its turn
+ends on an API error.
+
 ### Where typing, pasting and dictation go
 
 With no box holding the caret, as after selecting a passage, what you type, paste or dictate goes

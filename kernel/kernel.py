@@ -20754,12 +20754,12 @@ def _thread_sent_fields(th, tsid, status):
     return {"sent": sent, "sentBeforeSummary": bool(th.get("beforeSummary"))}
 
 
-_built_thread = {}       # thread sid -> (key, cut_uuid, events, build_started_at): the popover's chat build,
+_built_thread = {}       # thread sid -> (key, cut_uuid, events, build_started_at, chip): the popover's chat build,
 #                          served while the thread's exact change key stands (the active tab's own idiom)
 _thread_fold_keep = [set(), set()]   # [last cycle's thread sids, this cycle's]: _push's fold eviction keeps them
 
 
-def _thread_events(tsid, cut_uuid, now, live_map):
+def _thread_events(tsid, cut_uuid, now, live_map, tm=None, out=None):
     """The thread rendered with the CHAT's own builder (the user 2026-08-17: the popover shows the
     same thing the chat shows), sliced to AFTER the branch point: build_session on the thread sid
     (reachable via _sdk_sess's reg fallback — no names/ entry), events after the cut record's, the
@@ -20779,7 +20779,12 @@ def _thread_events(tsid, cut_uuid, now, live_map):
     stderr with the traceback and as a refused bell row, the chat loop's rule for the same signature
     (_chat_sig_fault; a signature that is taken ends the episode, _chat_sig_ok), and the thread is
     built uncached until a signature is taken: before this, the fault was swallowed into an uncached
-    build and left no trace anywhere."""
+    build and left no trace anywhere.
+
+    `tm`: the thread's own live row from the thread live map (_thread_live), None for a dormant thread. The build reads
+    it as a tab's build reads its row from live_map (the signature keys on it, and build_session gets a live map that
+    carries it under the thread's sid alone, so no other session's reading moves). `out`, when given, receives the
+    build's state chip as "chip" (served from the cache with the events)."""
     reg = _thread_reg(tsid)
     if reg.get("forkOf"):
         return []
@@ -20792,7 +20797,7 @@ def _thread_events(tsid, cut_uuid, now, live_map):
     # every fold the signature and the build make of the transcript (the session meta, the background tasks) reads the
     # thread's own records too, never the copied history (2026-10-01): served on this thread for the build's duration
     with em.serve_records({str(tpath): own} if own is not None else {}):
-        tm = live_map.get(tsid)
+        tm = tm if tm is not None else live_map.get(tsid)
         key = None
         try:
             sig = _chat_build_sig(sess, tm, now, live_map=live_map, deps=False)
@@ -20817,9 +20822,14 @@ def _thread_events(tsid, cut_uuid, now, live_map):
         hit = _built_thread.get(tsid)
         if key is not None and hit is not None and hit[0] == key and hit[1] == cut_uuid and not _dirty_since(hit[3]):
             _PERF_STATS.build("thread", True)
+            if out is not None:
+                out["chip"] = hit[4] if len(hit) > 4 else ""
             return list(hit[2])
         started = time.time()
         _t0 = time.monotonic()
+        if tm is not None and live_map.get(tsid) is not tm:
+            live_map = dict(live_map)
+            live_map[tsid] = tm                          # the thread's own row, under its own sid only
         try:
             m = build_session(tsid, now, live_map, thread_cut=(cut_uuid, floor_t))
         except Exception:
@@ -20828,6 +20838,9 @@ def _thread_events(tsid, cut_uuid, now, live_map):
         _chat_dep_scope.deps = None
         _PERF_STATS.build("thread", False, time.monotonic() - _t0)
         evs = (m or {}).get("events") or []
+        chip = str(((m or {}).get("status") or {}).get("state") or "")
+        if out is not None:
+            out["chip"] = chip
         if cut_uuid:
             at = next((i for i, e in enumerate(evs)
                        if e.get("uuid") == cut_uuid or e.get("resultUuid") == cut_uuid), None)
@@ -20851,7 +20864,7 @@ def _thread_events(tsid, cut_uuid, now, live_map):
         if key is not None:
             if len(_built_thread) > 256:               # bounded by the thread count; evict oldest-inserted, never clear
                 _built_thread.pop(next(iter(_built_thread)))
-            _built_thread[tsid] = (key, cut_uuid, evs, started)
+            _built_thread[tsid] = (key, cut_uuid, evs, started, chip)
         return list(evs)
 
 
@@ -21084,7 +21097,7 @@ def _echo_landing_atoms(turns, live):
             if a.get("type") == "user" and float(a.get("t") or 0) >= since]
 
 
-def _comments_frame(sid, live_map=None):
+def _comments_frame(sid, live_map=None, thread_live=None):
     """The chat pane's {type:"comments"} frame for parent session `sid`, or None when the stat of its
     store finds none (FileNotFoundError), as for a session that has never had a thread. Built in full
     per push only for sessions whose store the stat finds (few); _send_client's dedup keeps an
@@ -21118,18 +21131,25 @@ def _comments_frame(sid, live_map=None):
         return {"type": "comments", "id": sid, "error": getattr(e, "strerror", None) or str(e) or type(e).__name__}
     be = _sdk()
     now = int(time.time())
+    thread_live = _thread_live_map() if thread_live is None else thread_live   # the pusher hands its cycle's map down
     threads = []
     for th in rows:
-        row = _comment_frame_entry(th, be, now, live_map)
+        row = _comment_frame_entry(th, be, now, live_map, thread_live)
         if row is not None:
             threads.append(row)
     return {"type": "comments", "id": sid, "threads": threads}
 
 
-def _comment_frame_entry(th, be, now, live_map=None):
+def _comment_frame_entry(th, be, now, live_map=None, thread_live=None):
     """One thread row of the comments frame (_comments_frame's per-thread read, see its docstring for the two colour
     bits), or None for a promoted thread whose session ended (dropped from the frame). The create's answer carries the
-    new thread's row built here (commentCreated `thread`), the same row the next frame lists."""
+    new thread's row built here (commentCreated `thread`), the same row the next frame lists.
+
+    `thread_live`: the thread live map (_thread_live). A RUNNING thread's row there is handed to its chat build as a tab's
+    build gets its own (_thread_events), and the row's `chip` is that build's state chip, the chat's own derivation
+    (_session_chip: needsInput on a question or permission prompt, blocked on an API error, compacting, retrying,
+    working, awaitingBg, ready), which the popover's statusline and the passage's needs-you cue read (thread-live-1,
+    2026-10-14). A dormant thread has no live row and ships chip "": the page reads its raw `state` as before."""
     tsid = str(th.get("sid") or "")
     status = th.get("status") or "open"
     _comment_created_memo[tsid] = int(th.get("createdT") or 0)
@@ -21171,7 +21191,10 @@ def _comment_frame_entry(th, be, now, live_map=None):
         except Exception as e:
             live = []
             _thread_backend_shout(tsid, "live_atoms", e)
-    events = [] if status == "promoted" else _thread_events(tsid, str(th.get("cutUuid") or ""), now, live_map)
+    trow = (thread_live or {}).get(tsid) if status == "open" else None   # its live row, when its process runs
+    built = {}
+    events = [] if status == "promoted" else _thread_events(tsid, str(th.get("cutUuid") or ""), now, live_map, tm=trow, out=built)
+    chip = str(built.get("chip") or "") if trow is not None else ""
     reg = _thread_reg(tsid)
     # the backend's queue (persisted for a dormant thread) is read BEFORE the turn read: a machine cut
     # stays open only while something is still queued behind it or a process is on it (T237b C)
@@ -21250,10 +21273,12 @@ def _comment_frame_entry(th, be, now, live_map=None):
             meta = {}
     mail_why = _mail_off_why_k(tsid)
     return {"tid": th.get("tid"), "anchorUuid": th.get("anchorUuid"),
+                    "sid": tsid,                                   # the thread's session: its askLive frames and answers key on it
                     "relayedT": th.get("relayedT") or 0,   # the persistent sent-back indicator's stamp (T145)
                     "name": th.get("name") or "", "color": th.get("color") or "",
                     "exact": str(th.get("exact") or "")[:500], "status": status,
                     "createdT": th.get("createdT") or 0, "state": state, "error": err,
+                    "chip": chip,                                  # the chat's state chip for a running thread, "" for a dormant one
                     "unread": unread, "replyOwed": reply_owed,   # yellow / green — see the docstring (T237)
                     "queued": queued,                              # sends the backend holds or has fed, not yet in the transcript
                     "lastUuid": last_uuid,                         # the newest record shown/held — the client's cap-proof "transcript moved" datum
@@ -25153,6 +25178,67 @@ def _backend_rows(name, be):
     return rows
 
 
+def _sdk_live_norm(st):
+    """One SDK backend row (live_sessions' running snapshot or dormant row, or thread_live_sessions' row for a comment
+    thread) in the shape the live map carries: the ONE normalization Sessions.live() applies to every SDK row, shared with
+    the thread live map (_thread_live) so a thread's row reads exactly as a tab's does (thread-live-1, 2026-10-14)."""
+    ctx = st.get("ctx")   # SDK context-fill % from usage (None until a turn lands / while dormant)
+    return {"state": st.get("state", ""), "since": _num(str(st.get("since") or "")),
+            "model": st.get("model", ""), "effort": st.get("effort", ""),
+            "modelPending": bool(st.get("modelPending")),   # a /model switch resolving → badge shows switching-dots
+            "effortPending": bool(st.get("effortPending")),   # an /effort switch reconnecting → effort-badge dots + "Reloading session…"
+            "retryCount": int(st.get("retryCount") or 0),   # api_retry backoff attempts → the chat's "API retrying — attempt N…" element
+            "retryInfo": st.get("retryInfo") or None,   # the attempt's detail (attempt/max, error, next-attempt epoch) → the retrying element's context lines (the user 2026-07-10)
+            "connected": bool(st.get("connected")),   # SDK handshake up → the opening-chip override stands down (fresh sessions have no transcript yet)
+            "spawning": bool(st.get("spawning")),   # spawn/handshake in flight NOW — the ONLY window the opening chip covers (a dormant created session must read ready, the user 2026-08-13)
+            "context": ctx if isinstance(ctx, (int, float)) else None, "compactPct": None,
+            "ctxOver": bool(st.get("ctxOver")),   # context% is CLAMPED at 100 — this says the CLI
+            #   reported 100+ (tokens exceed the CURRENT model's window, e.g. after a 1M→200k switch)
+            "ctxTokens": st.get("ctxTokens"),   # raw totalTokens (SDK only) — the
+            #   compaction-suggestion thresholds key on true tokens (2026-08-30)
+            "fast": st.get("fast", ""),   # fast-mode state from the CLI's init ("on"/"off"/"cooldown"; "" = unknown → no badge)
+            "fastPending": bool(st.get("fastPending")),   # a fast opt-in waiting for its relaunch → the badge's dots
+            # Subagents at standard speed (experimental): the switch, whether the fast menu offers it, its line
+            "subagentStandard": bool(st.get("subagentStandard")),
+            "subagentStandardOffered": bool(st.get("subagentStandardOffered")),
+            "subagentStandardRetry": bool(st.get("subagentStandardRetry")),   # the fast menu's Check again
+            "subagentSpeed": st.get("subagentSpeed", ""),
+            "modelFallback": st.get("modelFallback"),   # the picker's requested-model mark while the live model sits below the pick (2026-09-17)
+            "fastReason": st.get("fastReason", ""),   # init's disabled_reason — non-empty hides the chat toggle
+            "auth": st.get("auth", ""),   # which account this session bills ('login'|'key') → gear badge
+            "authOwn": bool(st.get("authOwn")),   # its own pick (an override), else it follows the machine default
+            # the CLI's own init report ('key'|'login', "" until one lands): the
+            # Billing row's live truth. Merged since 2026-09-08 — the status push read
+            # it off this map from the start, and nothing had ever put it here
+            "authLive": st.get("authLive", ""),
+            # WHICH login a login pick bills (T346): the stored login's record id and its
+            # display label, "" for the machine's own
+            "authLogin": st.get("authLogin", ""),
+            "authLabel": st.get("authLabel", ""),
+            "authLoginLive": st.get("authLoginLive"),   # the init's evidence of which login answered
+            # the explicit pick this box cannot bill ("login"|"key"|""): the launch
+            # fell to the other side, the Billing menu says so (2026-09-08)
+            "authPickUnavailable": st.get("authPickUnavailable", ""),
+            "authPending": bool(st.get("authPending")),   # an /auth switch reconnecting → badge dots
+            # when the session's CLI came up on a new billing (0 = never on record): a spend-cap
+            # record older than it describes an account the session left (_spend_record_stands)
+            "authSwitchedAt": st.get("authSwitchedAt") or 0,
+            "relaunchWaits": st.get("relaunchWaits") or "",   # what a pick's relaunch waits for ("2 background tasks"), "" when nothing
+            "relaunchCuts": st.get("relaunchCuts") or "",   # …and what Apply now would end to push it through ("" when nothing)
+            "color": (st.get("color") or None), "mode": st.get("mode", ""), "backend": "sdk",
+            "subagents": st.get("subagents") or [],   # live Task subagents (SDK only) → lane pill
+            # a thinking stretch streaming now ({"t", "quiet"?}, sdk_backend _thinking_row) → the
+            # liveStatus frame's "Thinking · 14s" label only; no build reads it (_CHAT_ROW_UNKEYED)
+            "thinkingLive": st.get("thinkingLive") or None,
+            # live BACKGROUND TASKS (the CLI's task lifecycle stream) — the awaiting
+            # source 0.5, the #bg-tasks live gate, and the nudge gate all read this off
+            # the merged map. Omitting it here was the 2026-07-11 nimbus bug: the
+            # snapshot carried the watcher but every consumer saw None, so the session
+            # never read awaiting, the auto-nudge fired on a genuinely-waiting session,
+            # and the failed nudge hard-blocked its card.
+            "bgTasks": st.get("bgTasks") or []}
+
+
 class Sessions:
     """The kernel's backend-agnostic session API. backend_for(sid) routes a per-sid op to whichever backend
     drives the sid: the SDK backend if it owns sid, else the Codex backend if it does, else the unowned
@@ -25183,61 +25269,7 @@ class Sessions:
         if be:
             try:
                 for sid, st in _backend_rows("sdk", be).items():
-                    ctx = st.get("ctx")   # SDK context-fill % from usage (None until a turn lands / while dormant)
-                    out[sid] = {"state": st.get("state", ""), "since": _num(str(st.get("since") or "")),
-                                "model": st.get("model", ""), "effort": st.get("effort", ""),
-                                "modelPending": bool(st.get("modelPending")),   # a /model switch resolving → badge shows switching-dots
-                                "effortPending": bool(st.get("effortPending")),   # an /effort switch reconnecting → effort-badge dots + "Reloading session…"
-                                "retryCount": int(st.get("retryCount") or 0),   # api_retry backoff attempts → the chat's "API retrying — attempt N…" element
-                                "retryInfo": st.get("retryInfo") or None,   # the attempt's detail (attempt/max, error, next-attempt epoch) → the retrying element's context lines (the user 2026-07-10)
-                                "connected": bool(st.get("connected")),   # SDK handshake up → the opening-chip override stands down (fresh sessions have no transcript yet)
-                                "spawning": bool(st.get("spawning")),   # spawn/handshake in flight NOW — the ONLY window the opening chip covers (a dormant created session must read ready, the user 2026-08-13)
-                                "context": ctx if isinstance(ctx, (int, float)) else None, "compactPct": None,
-                                "ctxOver": bool(st.get("ctxOver")),   # context% is CLAMPED at 100 — this says the CLI
-                                #   reported 100+ (tokens exceed the CURRENT model's window, e.g. after a 1M→200k switch)
-                                "ctxTokens": st.get("ctxTokens"),   # raw totalTokens (SDK only) — the
-                                #   compaction-suggestion thresholds key on true tokens (2026-08-30)
-                                "fast": st.get("fast", ""),   # fast-mode state from the CLI's init ("on"/"off"/"cooldown"; "" = unknown → no badge)
-                                "fastPending": bool(st.get("fastPending")),   # a fast opt-in waiting for its relaunch → the badge's dots
-                                # Subagents at standard speed (experimental): the switch, whether the fast menu offers it, its line
-                                "subagentStandard": bool(st.get("subagentStandard")),
-                                "subagentStandardOffered": bool(st.get("subagentStandardOffered")),
-                                "subagentStandardRetry": bool(st.get("subagentStandardRetry")),   # the fast menu's Check again
-                                "subagentSpeed": st.get("subagentSpeed", ""),
-                                "modelFallback": st.get("modelFallback"),   # the picker's requested-model mark while the live model sits below the pick (2026-09-17)
-                                "fastReason": st.get("fastReason", ""),   # init's disabled_reason — non-empty hides the chat toggle
-                                "auth": st.get("auth", ""),   # which account this session bills ('login'|'key') → gear badge
-                                "authOwn": bool(st.get("authOwn")),   # its own pick (an override), else it follows the machine default
-                                # the CLI's own init report ('key'|'login', "" until one lands): the
-                                # Billing row's live truth. Merged since 2026-09-08 — the status push read
-                                # it off this map from the start, and nothing had ever put it here
-                                "authLive": st.get("authLive", ""),
-                                # WHICH login a login pick bills (T346): the stored login's record id and its
-                                # display label, "" for the machine's own
-                                "authLogin": st.get("authLogin", ""),
-                                "authLabel": st.get("authLabel", ""),
-                                "authLoginLive": st.get("authLoginLive"),   # the init's evidence of which login answered
-                                # the explicit pick this box cannot bill ("login"|"key"|""): the launch
-                                # fell to the other side, the Billing menu says so (2026-09-08)
-                                "authPickUnavailable": st.get("authPickUnavailable", ""),
-                                "authPending": bool(st.get("authPending")),   # an /auth switch reconnecting → badge dots
-                                # when the session's CLI came up on a new billing (0 = never on record): a spend-cap
-                                # record older than it describes an account the session left (_spend_record_stands)
-                                "authSwitchedAt": st.get("authSwitchedAt") or 0,
-                                "relaunchWaits": st.get("relaunchWaits") or "",   # what a pick's relaunch waits for ("2 background tasks"), "" when nothing
-                                "relaunchCuts": st.get("relaunchCuts") or "",   # …and what Apply now would end to push it through ("" when nothing)
-                                "color": (st.get("color") or None), "mode": st.get("mode", ""), "backend": "sdk",
-                                "subagents": st.get("subagents") or [],   # live Task subagents (SDK only) → lane pill
-                                # a thinking stretch streaming now ({"t", "quiet"?}, sdk_backend _thinking_row) → the
-                                # liveStatus frame's "Thinking · 14s" label only; no build reads it (_CHAT_ROW_UNKEYED)
-                                "thinkingLive": st.get("thinkingLive") or None,
-                                # live BACKGROUND TASKS (the CLI's task lifecycle stream) — the awaiting
-                                # source 0.5, the #bg-tasks live gate, and the nudge gate all read this off
-                                # the merged map. Omitting it here was the 2026-07-11 nimbus bug: the
-                                # snapshot carried the watcher but every consumer saw None, so the session
-                                # never read awaiting, the auto-nudge fired on a genuinely-waiting session,
-                                # and the failed nudge hard-blocked its card.
-                                "bgTasks": st.get("bgTasks") or []}
+                    out[sid] = _sdk_live_norm(st)
             except Exception:
                 sys.stderr.write("sdk live_sessions merge: %s\n" % traceback.format_exc())
         cx = _codex()
@@ -25253,6 +25285,27 @@ class Sessions:
                                 "mode": st.get("mode", ""), "backend": "codex"}
             except Exception:
                 sys.stderr.write("codex live_sessions merge: %s\n" % traceback.format_exc())
+        _unify_model_labels(out)
+        return out
+
+    @staticmethod
+    def thread_live(parents=None):
+        """The live rows of the RUNNING comment threads whose parent is in `parents` (every one for None), keyed by thread
+        sid, each normalized exactly as live() normalizes a tab's row (_sdk_live_norm) plus "threadOf": the rows live()
+        leaves out, never merged into it, so no thread gains a tab, a lane, a feed card or a notification of its own. The
+        pusher keeps this as the thread live map (_thread_live). Only the SDK backend runs threads; a backend whose read
+        raises is said on stderr and reads as no running thread, which is what every thread showed before this map."""
+        be = _sdk()
+        if not be or not hasattr(be, "thread_live_sessions"):
+            return {}
+        try:
+            rows = be.thread_live_sessions(parents)
+        except Exception:
+            sys.stderr.write("sdk thread_live_sessions: %s\n" % traceback.format_exc())
+            return {}
+        out = {}
+        for sid, st in rows.items():
+            out[sid] = dict(_sdk_live_norm(st), threadOf=str(st.get("threadOf") or ""))
         _unify_model_labels(out)
         return out
 
@@ -25378,6 +25431,31 @@ def _live_map():
     is served instead. (Named _tmux_sessions until the tmux backend's removal, 2026-09-11.)"""
     snap = getattr(_live_scope, "snapshot", None)
     return snap if snap is not None else Sessions.live()
+
+
+# THE THREAD LIVE MAP (thread-live-1, 2026-10-14): the comment threads' own live rows, kept APART from the map above, which
+# drives tabs, lanes, the feed and its notifications. A thread is a running session like any other, but live_sessions leaves
+# it out on purpose (no tab, lane or card of its own), so every live channel that reads the live map skipped it and the
+# comment popover showed none of the chat's live indicators: a thread stopped on a question or a permission prompt could not
+# be answered from its popover at all. The pusher refreshes this map with the running threads of the sessions open as tabs
+# (_thread_live_refresh, the comments loop of _push), and the existing channels read it beside the live map: the question
+# and permission poll (_ask_poll) and the thread's own chat build (_thread_events, which hands the thread its row exactly as
+# a tab's build gets its own). Replaced whole, never mutated, so a reader on another thread (the ask poll) holds a
+# consistent map.
+_thread_live = [{}]
+
+
+def _thread_live_map():
+    """{thread sid: its live row (live()'s shape plus threadOf)} for the running threads of the open tabs, as the pusher's
+    last refresh read them. A dormant thread is absent (no process: no question, no agent, no live state)."""
+    return _thread_live[0]
+
+
+def _thread_live_refresh(parents):
+    """Read the running threads of `parents` (the sessions open as tabs) into the thread live map and return it."""
+    m = Sessions.thread_live(set(parents))
+    _thread_live[0] = m
+    return m
 
 
 # ── tunnel concierge: attach a remote kernel over SSH for the FEDERATED dashboard ────────────────
@@ -37539,6 +37617,28 @@ def _suppress_kernel_driven_ask(sid, ask, now=None):
                 and "model" in str(ask).lower())
 
 
+def _ask_poll_pass(chat_clients, threads_prev):
+    """ONE pass of the question poll (_ask_poll's body, a function of its own so a test can run one): every live session's
+    current ask, then every running comment thread's from the thread live map (_thread_live), each to every chat client on
+    its own ("asklive", sid) slot, askLiveClear for none; then one askLiveClear to each thread in `threads_prev` (the last
+    pass's thread set) that has left the map. Returns this pass's thread set, the next pass's `threads_prev`."""
+    threads = set(_thread_live_map())
+    for sid in list(_live_map()) + sorted(threads):
+        # the owning backend resolves the live ask (the SDK reads the ask it stored in _emit_ask;
+        # the Codex backend its own). One uniform call — no backend fork here.
+        ask = Sessions.backend_for(sid).current_ask(sid)
+        if _suppress_kernel_driven_ask(sid, ask):
+            ask = None                     # romp's own /model picker mid-switch — not the human's
+        payload = ({"type": "askLive", "id": sid, "ask": ask} if ask
+                   else {"type": "askLiveClear", "id": sid})
+        for c in chat_clients:
+            _send_client(c, ("asklive", sid), payload)
+    for sid in threads_prev - threads:     # a thread gone from the map: its last picker, if any, goes too
+        for c in chat_clients:
+            _send_client(c, ("asklive", sid), {"type": "askLiveClear", "id": sid})
+    return threads
+
+
 @_stage_marked("ask-poll")
 def _ask_poll():
     """Surface each live session's in-flight AskUserQuestion/permission prompt to chat. ONE check per session
@@ -37547,22 +37647,21 @@ def _ask_poll():
     existed, the scrape returned nothing for an SDK session and we pushed askLiveClear, clobbering a
     blocked SDK session's prompt every tick (the user 2026-06-24). Per-client
     dedup (_send_client) means an unchanged picker isn't re-sent and a fresh client gets the current one; the
-    webview renders the active tab. (Queued messages are the owning backend's pending_queued.)"""
+    webview renders the active tab, and the comment popover the open thread's.
+
+    COMMENT THREADS ride the same poll (thread-live-1, 2026-10-14): the running threads of the open tabs, from the thread
+    live map the pusher keeps (_thread_live), each on its own ("asklive", thread sid) slot, so a thread stopped on a
+    question or a permission prompt shows its picker in the popover and replays it to a page that connects later, the
+    chat's own durable replay. The answer comes back on the chat's own path (answerAsk & co. by the thread's sid,
+    _drive). A thread that leaves the map (its process ended, its parent's tab closed) gets one askLiveClear, so no
+    page keeps a picker nothing can answer. (Queued messages are the owning backend's pending_queued.)"""
+    threads_prev = set()
     while True:
         try:
             with _clients_lock:
                 chat_clients = [c for c in _clients if c["app"] == "chat"]
             if chat_clients:
-                for sid in list(_live_map()):
-                    # the owning backend resolves the live ask (the SDK reads the ask it stored in _emit_ask;
-                    # the Codex backend its own). One uniform call — no backend fork here.
-                    ask = Sessions.backend_for(sid).current_ask(sid)
-                    if _suppress_kernel_driven_ask(sid, ask):
-                        ask = None                     # romp's own /model picker mid-switch — not the human's
-                    payload = ({"type": "askLive", "id": sid, "ask": ask} if ask
-                               else {"type": "askLiveClear", "id": sid})
-                    for c in chat_clients:
-                        _send_client(c, ("asklive", sid), payload)
+                threads_prev = _ask_poll_pass(chat_clients, threads_prev)
                 with _clients_lock:
                     _clients[:] = [c for c in _clients if c.get("alive", True)]
         except Exception:
@@ -66380,6 +66479,14 @@ def _push(targets, connect=False, live_map=None, only=None):
             # per-sid dedup slot, never the chat delta baseline (the 2026-07-28 stranded-delta rule):
             # an unchanged frame costs nothing on the wire and the chatTail stream stays untouched.
             _frame_tabs = [s for s in chat_list if only is None or s["sid"] in only] if chat_clients else []   # a repair: its tabs
+            # THE THREAD LIVE MAP (_thread_live): the open tabs' running threads, read once here for every frame below (each
+            # reads the map, _comments_frame) and for the question poll, never merged into live_map. A repair push frames
+            # with the map the last full push read.
+            if only is None and chat_clients:
+                try:
+                    _thread_live_refresh(s["sid"] for s in chat_list)
+                except Exception:                  # a fault here keeps the last map, said, and the push goes on
+                    sys.stderr.write("thread live map refresh failed: %s\n" % traceback.format_exc())
             for s in _frame_tabs:
                 gen = _comments_gen.get(s["sid"], 0)   # BEFORE the build reads the store (_send_comments_frame)
                 try:
