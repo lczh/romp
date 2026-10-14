@@ -8,12 +8,13 @@
 // (tests/test_login_signed_in_served.py, the real kernel and a fake CLI) this covers what that lab cannot stage: a read in
 // flight across "Sign in again…" still carrying the previous flow's "done" (the dialog must not announce a sign-in that has
 // not happened), and a second machine's kernel connected (the row names which machine it is about). Skips with a stated reason
-// without a playwright browser (CI installs none). Synthetic values only: dev@example.com, Example Org, TESTHOST.
+// without a playwright browser, and fails with it where CI requires the leg (browser-leg.ts). Synthetic values only: dev@example.com, Example Org, TESTHOST.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { launchLeg } from "./browser-leg";
 
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
 const requireCjs = createRequire(path.join(EXT, "package.json"));
@@ -73,10 +74,8 @@ const readDialog = (page: any) => page.evaluate(() => {
 });
 
 test("a successful login says so in the dialog and on the Account row, a stale read never fakes it, and the row names the machine beside others", async (t) => {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it (CI installs no browsers)"); return; }
-  let browser: any;
-  try { browser = await pw.chromium.launch(); }
-  catch (e) { t.skip("no playwright browser on this machine; the browser leg needs one (CI installs none): " + String((e as Error).message).split("\n")[0]); return; }
+  const browser = await launchLeg(t, pw, "chromium");
+  if (!browser) return;
   const errors: string[] = [];
   const k: Fake = { acct: "", login: { state: "", url: "", err: "", n: 0 }, keyHelper: true, hold: 0, pendingStart: false, tunnels: [] };
   const start = () => { k.login = { state: "url", url: URL_, err: "", n: k.login.n + 1 }; };

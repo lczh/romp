@@ -284,7 +284,8 @@ jobs:
 
   # The extension's required check is three jobs (2026-09-30). The browser-backed served-page tests were 45 of the one
   # job's 50 minutes, in a single pytest process, so a flaky lab cost the whole 50 again on a rerun. Now:
-  #  - vscode-extension-unit runs the typecheck, the node tests, the build and the pane bench, once.
+  #  - vscode-extension-unit runs the typecheck, the node tests (their Chromium legs included), the build and the pane
+  #    bench, once.
   #  - vscode-extension-served runs the served-page tests as parallel shards, each on its own runner, dealt by
   #    recorded per-file duration: scripts/ci/shard_tests.py reads scripts/ci/served-durations.json, and its
   #    docstring says how to refresh that file from a run's reports. A lab the file does not list still runs, and
@@ -317,10 +318,6 @@ jobs:
         run: npm ci
       - name: Typecheck
         run: npm run typecheck
-      - name: Test
-        run: npm test
-      - name: Build
-        run: npm run build
       - name: Cache Playwright's browsers
         # Keyed on the lockfile, so the download below runs once per playwright version.
         uses: actions/cache@v4
@@ -328,9 +325,10 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-chromium-${{ runner.os }}-${{ hashFiles('vscode-extension/package-lock.json') }}
       - name: Install the pinned Playwright Chromium
-        # The pane bench below needs a browser. It is playwright's own download for the version
-        # package-lock pins (1.62.x fetches its matching Chromium build, about 150 MB, cached above), NOT
-        # the runner image's Google Chrome: the image's browser is unpinned and auto-updated, so a Chrome
+        # The node tests' browser legs and the pane bench below need a browser, so this comes before the
+        # Test step (until 2026-10-14 it came after, and every one of those legs skipped here). It is
+        # playwright's own download for the version package-lock pins (1.62.x fetches its matching
+        # Chromium build, about 150 MB, cached above), NOT the runner image's Google Chrome: the image's browser is unpinned and auto-updated, so a Chrome
         # release the pinned driver cannot speak, or an image without one, would have turned this REQUIRED
         # check red with no change in the repo (review find, 2026-09-08). The same stance as the node pin
         # above: the step never rides whatever the image has. No --with-deps: that runs apt, which the bats
@@ -339,6 +337,17 @@ jobs:
         # which one ran ("browser: playwright chromium").
         timeout-minutes: 5
         run: npx playwright install chromium
+      - name: Test
+        # ROMP_BROWSER_TESTS_REQUIRE turns a browser leg's skip into a failure that carries the skip's reason
+        # (ui/webview/browser-leg.ts), the stance of ROMP_UI_BENCH_REQUIRE below: a runner that lost the browser turns
+        # the check red instead of green with the coverage gone. ROMP_BROWSER_TESTS_ENGINES names the one engine this
+        # job installs; the Firefox legs stay skips here, marked optional.
+        env:
+          ROMP_BROWSER_TESTS_REQUIRE: "1"
+          ROMP_BROWSER_TESTS_ENGINES: chromium
+        run: npm test
+      - name: Build
+        run: npm run build
       - name: Dashboard pane bench (node --test)
         # tools/ui-bench.mjs replays a synthetic frame stream into the real feed and timeline pages in the
         # headless Chromium installed above, served by the kernel's own page route from the dist the Build

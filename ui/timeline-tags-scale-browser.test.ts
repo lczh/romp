@@ -25,12 +25,13 @@
 //     dialog is adopted into the top document and the popover is placed by the dot's rect there, on screen,
 //     untranslated.
 // Skips LOUDLY per leg without a playwright browser (`npx playwright install chromium firefox` under
-// vscode-extension puts them on a machine). Synthetic names and ids only.
+// vscode-extension puts them on a machine); CI requires the Chromium leg (browser-leg.ts). Synthetic names and ids only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { launchLeg } from "./webview/browser-leg";
 const requireCjs = createRequire(__filename);
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
 const VIEW = fs.readFileSync(path.resolve(EXT, "..", "ui", "romp-timeline-view.js"), "utf8");
@@ -281,11 +282,7 @@ const tgridScrolls = (page: any) => page.evaluate(() => (window as any).__tgridS
 const lastOrder = (page: any) => page.evaluate(() => { const w = (window as any).__writes || []; return w.length ? w[w.length - 1].tagOrder as string[] : null; });
 
 for (const name of ["chromium", "firefox"]) {
-  const launch = async (t: any) => {
-    if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser legs need it"); return null; }
-    try { return await pw[name].launch(); }
-    catch (e) { t.skip("no playwright " + name + " on this machine; this leg needs it (npx playwright install " + name + "): " + String((e as Error).message).split("\n")[0]); return null; }
-  };
+  const launch = (t: any) => launchLeg(t, pw, name);
 
   test(`in ${name}, the dialog across pages: 1300, 800 and 700px tall and a phone held sideways, folded and with the matrix open`, async (t) => {
     const browser = await launch(t);

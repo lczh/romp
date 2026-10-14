@@ -8,14 +8,15 @@
 // The first test states the delegate's contract over the markup the sanitizer produces; the second runs the
 // chat's own pipeline (marked + sanitizeMd, as md() runs them) on a message with a `#` link and clicks it; the
 // third posts a session frame so render.ts's own md() renders the reply, and clicks there. Skips with a stated
-// reason when no playwright browser is installed (CI installs none; tests/test_spend_modal_headless_served.py is the
-// precedent, skipping without a playwright install). Synthetic values only.
+// reason when no playwright browser is installed, and fails with it where CI requires the leg (browser-leg.ts).
+// Synthetic values only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { chatBody, ATTACH_TITLE_WEB } from "../../vscode-extension/src/page-skeleton";
+import { launchLeg } from "./browser-leg";
 
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
 // resolve playwright and esbuild from the extension, not from wherever this bundle was written
@@ -54,10 +55,8 @@ let pw: any = null;
 try { pw = requireCjs("playwright"); } catch { pw = null; }
 
 async function inChat(t: any, probe: boolean, body: (page: any, errors: string[]) => Promise<void>): Promise<void> {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it (CI installs no browsers)"); return; }
-  let browser: any;
-  try { browser = await pw.chromium.launch(); }
-  catch (e) { t.skip("no playwright browser on this machine; the browser leg needs one (CI installs none): " + String((e as Error).message).split("\n")[0]); return; }
+  const browser = await launchLeg(t, pw, "chromium");
+  if (!browser) return;
   const errors: string[] = [];
   try {
     const renderJs = bundle("render.ts");

@@ -6,12 +6,14 @@
 // pattern: a source pin cannot measure a box. The gear is opened against a fake kernel (/models, /version answered
 // with synthetic payloads) and the two rows are measured; then a /models payload with two declared gateway families
 // is fed through a models frame and the line is shown, taller row and all, so the test proves the rule hides only
-// an EMPTY line. Skips with a stated reason without a playwright browser (CI installs none). Synthetic values only.
+// an EMPTY line. Skips with a stated reason without a playwright browser, and fails with it where CI requires
+// the leg (browser-leg.ts). Synthetic values only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { launchLeg } from "./browser-leg";
 
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
 const requireCjs = createRequire(path.join(EXT, "package.json"));
@@ -62,10 +64,8 @@ const measure = (page: any): Promise<Rows> => page.evaluate(() => {
 });
 
 test("the Extra models row stands as tall as Conserve memory's while its status line is empty, and grows only when the line says something", async (t) => {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it (CI installs no browsers)"); return; }
-  let browser: any;
-  try { browser = await pw.chromium.launch(); }
-  catch (e) { t.skip("no playwright browser on this machine; the browser leg needs one (CI installs none): " + String((e as Error).message).split("\n")[0]); return; }
+  const browser = await launchLeg(t, pw, "chromium");
+  if (!browser) return;
   const errors: string[] = [];
   let models: unknown = MODELS_STOCK;
   try {

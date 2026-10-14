@@ -10,14 +10,15 @@
 // note through openFileView and reads the rendered DOM: styles resolved, boxes measured, elementFromPoint at the
 // close button's centre. Content wider than the column is measured too: under containment the body cannot scroll
 // to it, so an inline svg, canvas or video is capped at the column and a table scrolls sideways on its own. Skips
-// with a stated reason when no playwright browser is installed (CI installs none; tests/test_spend_modal_headless_served.py
-// is the precedent, skipping without a playwright install). Synthetic values only: an invented note under a
+// with a stated reason when no playwright browser is installed, and fails with it where CI requires the leg
+// (browser-leg.ts). Synthetic values only: an invented note under a
 // TESTHOST path, a placeholder sid.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { launchLeg } from "./browser-leg";
 
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
 // resolve playwright and esbuild from the extension, not from wherever this bundle was written
@@ -62,10 +63,8 @@ try { pw = requireCjs("playwright"); } catch { pw = null; }
 type Seen = { navigations: string[]; foreignRequests: string[] };
 
 async function withNote(t: any, note: string, body: (page: any, errors: string[], seen: Seen) => Promise<void>, via: "file" | "url" = "file"): Promise<void> {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it (CI installs no browsers)"); return; }
-  let browser: any;
-  try { browser = await pw.chromium.launch(); }
-  catch (e) { t.skip("no playwright browser on this machine; the browser leg needs one (CI installs none): " + String((e as Error).message).split("\n")[0]); return; }
+  const browser = await launchLeg(t, pw, "chromium");
+  if (!browser) return;
   const errors: string[] = [];
   const seen: Seen = { navigations: [], foreignRequests: [] };
   try {

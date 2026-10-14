@@ -3,6 +3,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { launchLeg } from "./browser-leg";
 
 // The Sessions pane's row menu (the user 2026-09-16): Rename and Delete on the tab strip's own roads, through the shared
 // builder. These pins hold the wiring's shape; the served lab (tests/test_sessions_menu_served.py) drives it.
@@ -122,12 +123,11 @@ const COMPOSER = "TEXTAREA#composer-input";
 let pw: any = null;
 try { pw = requireCjs("playwright"); } catch { pw = null; }
 /** Headless Firefox, or a LOUD skip: playwright's Firefox build is installed by hand (npx playwright install firefox under
- *  vscode-extension); CI installs Chromium alone, after npm test, so this leg skips there and the served lab carries the CI read. */
+ *  vscode-extension); CI installs Chromium alone, so this leg is an optional skip there (browser-leg.ts) and the served lab
+ *  carries the CI read. */
 async function inFirefox(t: any, body: (browser: any) => Promise<void>): Promise<void> {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it"); return; }
-  let browser: any;
-  try { browser = await pw.firefox.launch(); }
-  catch (e) { t.skip("no playwright Firefox on this machine; this leg needs that engine (npx playwright install firefox): " + String((e as Error).message).split("\n")[0]); return; }
+  const browser = await launchLeg(t, pw, "firefox");
+  if (!browser) return;
   try { await body(browser); } finally { await browser.close(); }
 }
 /** `n` animation frames of `frame`, so the page's own rAF work (the pane's render) has run. */

@@ -9,13 +9,14 @@
 // hints, and posts nothing for them; picking Opus again ungreys them with the hints back; a checked box on a capable
 // model whose last fast ask the CLI declined shows the refusal; ticking a box posts its op; pinning Distilling to
 // Opus keeps its box live under a Sonnet triage.
-// Skips with a stated reason without a playwright browser (CI installs none), the md-sanitize-browser.test.ts
-// pattern. Synthetic values only.
+// Skips with a stated reason without a playwright browser, and fails with it where CI requires the leg
+// (browser-leg.ts). Synthetic values only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { launchLeg } from "./browser-leg";
 
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
 const requireCjs = createRequire(path.join(EXT, "package.json"));
@@ -57,10 +58,8 @@ type Snap = { disabled: Record<string, boolean>; off: Record<string, boolean>; o
   hintFade: Record<string, string>; wordColor: Record<string, string>; checked: Record<string, boolean>; hint: Record<string, string> };
 
 async function withGear(t: any, body: (page: any, errors: string[]) => Promise<void>): Promise<void> {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it (CI installs no browsers)"); return; }
-  let browser: any;
-  try { browser = await pw.chromium.launch(); }
-  catch (e) { t.skip("no playwright browser on this machine; the browser leg needs one (CI installs none): " + String((e as Error).message).split("\n")[0]); return; }
+  const browser = await launchLeg(t, pw, "chromium");
+  if (!browser) return;
   const errors: string[] = [];
   try {
     const js = bundle();

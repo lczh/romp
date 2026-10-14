@@ -3,12 +3,13 @@
 // standing taller than its own rule says (#tabs stretches every item on a row to the tallest). So a real browser
 // lays out the strip and the panel markup render.ts builds (planStrip, renderBgTasks, bgRow) against the real
 // stylesheet, with body.dense-chrome off, on, on with a row's details open, and off again, and the numbers the
-// stylesheet's block comment states are asserted here. Runs only where a Playwright browser exists (CI installs
-// none) and SKIPS LOUDLY there, the queued-romp-layout.test.ts pattern; the CI-safe pins live in dense-chrome.test.ts.
+// stylesheet's block comment states are asserted here. Runs only where a Playwright browser exists and SKIPS
+// LOUDLY elsewhere, failing where CI requires the leg (browser-leg.ts); the browserless pins live in dense-chrome.test.ts.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { measuredSkip } from "./browser-leg";
 
 const CSS_PATH = path.resolve(process.cwd(), "..", "ui", "webview", "styles.css");
 
@@ -127,7 +128,7 @@ function measure(): Measured | null {
 }
 
 const m = measure();
-const skip = m ? false : "no Playwright browser here: the layout measurement needs one (CI installs none); the CI-safe source pins live in dense-chrome.test.ts";
+const skip = measuredSkip("chromium", m ? false : "no Playwright chromium here (its driver could not load playwright or launch the browser; npx playwright install chromium under vscode-extension): the layout measurement needs one; the source pins live in dense-chrome.test.ts");
 const near = (got: number, want: number, what: string, tol = 0.5) =>
   assert.ok(Math.abs(got - want) <= tol, what + ": " + got.toFixed(2) + "px, wanted about " + want + "px");
 
