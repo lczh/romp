@@ -1074,15 +1074,19 @@ class UnwatchedTurnEnd(unittest.TestCase):
         self.be.sessions[SID_WEB] = self.sess
         km._TURN_MISSED.clear()                              # nothing another case's restart left for the summary
 
-    def hello(self, parked):
-        """A host's hello for this session (an attach to the CLI it kept), naming the requests still open."""
+    def hello(self, parked, told=()):
+        """A host's hello for this session (an attach to the CLI it kept), naming the requests still open and the finished
+        turns it answered itself (`told`; None: a host older than that report says nothing of them)."""
         import types
         self.sess._host_is_attach = True
         self.sess._host = types.SimpleNamespace(exit_info=None, ack_offset=0, end_grace=120.0, hello=None,
                                                 _init_pending=False, detach_mode=False, unwatched=None)
-        self.be._on_host_hello(self.sess, {"host": {"pid": 9000, "start": "1.0", "version": self.be.code_version},
-                                           "cli": {"pid": 11, "start": "c", "fsid": SID_WEB}, "journal": {"next": 0},
-                                           "parked": list(parked), "inflight": 1})
+        hello = {"host": {"pid": 9000, "start": "1.0", "version": self.be.code_version},
+                 "cli": {"pid": 11, "start": "c", "fsid": SID_WEB}, "journal": {"next": 0},
+                 "parked": list(parked), "inflight": 1}
+        if told is not None:
+            hello["selfAnswered"] = list(told)
+        self.be._on_host_hello(self.sess, hello)
 
     def stop_at(self, t, rid=None):
         inp = {sb.UNWATCHED_STOP_KEY: rid} if rid else {}
@@ -1111,6 +1115,53 @@ class UnwatchedTurnEnd(unittest.TestCase):
         self.hello(["req-new"])                              # a later attach (a host's re-exec): a request held a moment
         self.assertEqual(self.sess._unwatched_rids, set())   # by a handover is not one the restart missed
         self.assertEqual(self.be.unwatched_pending(), 0)
+
+    def test_a_session_object_rebuilt_mid_life_is_no_restarts(self):
+        # the review of #230: "first attach" was per session OBJECT, so a session rebuilt mid-run (its thread ended, a new
+        # object attached to the same host) took a Stop the host held for those seconds for a turn that ended during a
+        # restart, and the summary said "restarted" with no restart. It is per session for the kernel's life now
+        self.hello([])                                       # this life's first hello for the session
+        self.sess = sb.SdkSession(self.be, sb.read_reg(jd.STATE, SID_WEB))
+        self.be.sessions[SID_WEB] = self.sess
+        self.hello(["req-held"])
+        self.assertEqual((self.sess._unwatched_rids, self.be.unwatched_pending()), (set(), 0),
+                         "an ordinary turn end, a few seconds late, as before")
+
+    def test_a_finished_turn_its_host_answered_itself_is_stamped_from_the_hello(self):
+        # the host answers a Stop hook it held past its bound with no kernel attached, so no kernel ran that hook and the
+        # turn end was never stamped; the first cut compared clocks (the old exit against the new process's start) to
+        # guess whether that could have happened. The host now reports each in its hello, and the attach stamps it
+        self.sess._note_turn_opener("human", True)
+        self.stop_at(5000)
+        told = [{"rid": "req-1", "event": "Stop", "t": 5400.5}, {"rid": "req-0", "event": "SubagentStop", "t": 5500}]
+        self.hello([], told=told)
+        reg = sb.read_reg(jd.STATE, SID_WEB)
+        self.assertEqual((reg["lastStopAt"], reg["lastStopUnwatched"], reg["lastHumanStopAt"], reg["lastTurnOpener"]),
+                         (5400, 5400, 5400, "human"), "the Stop's own moment, as a turn that ended while no kernel listened")
+        self.stop_at(5600)
+        self.hello([], told=told)                            # every hello repeats the report
+        self.assertEqual(sb.read_reg(jd.STATE, SID_WEB)["lastStopAt"], 5600, "a moment the settle has passed stamps nothing")
+        self.assertEqual(self.be.catchup_unreported(), {}, "a host that reports needs no clock")
+
+    def test_a_host_too_old_to_report_is_named_for_the_kernel_to_judge(self):
+        with mock.patch("time.time", return_value=7000.0):
+            self.hello([], told=None)
+        self.assertEqual(self.be.catchup_unreported(), {SID_WEB: 7000.0})
+
+    def test_a_reattach_that_ends_without_a_hello_or_a_session_that_ends_holding_one_is_lost(self):
+        self.be._boot_attach_set = {SID_WEB, SID_API}
+        self.hello(["req-held"])
+        self.assertEqual(self.be.catchup_lost(), {SID_API: "its session could not be reconnected after the restart"})
+        self.assertEqual(self.be.unwatched_pending(), 1)
+
+        async def ends():
+            raise RuntimeError("the connection dropped")
+        with mock.patch.object(self.sess, "_amain", ends), mock.patch.object(self.sess, "_release_hold_at_exit"), \
+             mock.patch.object(self.be, "_on_session_gone"):
+            self.sess._run()                                 # its thread ends before the held Stop was answered
+        self.assertEqual(self.be.unwatched_pending(), 0, "the catch-up does not wait on a session that is gone")
+        self.assertEqual(self.be.catchup_lost()[SID_WEB],
+                         "its session ended before this kernel had recorded a finished turn its host held")
 
     def test_end_to_end_the_kernel_never_buzzes_it_late_and_files_it_as_a_gap_event(self):
         km._set_notify_all(True)

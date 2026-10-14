@@ -7738,12 +7738,15 @@ state directory), so its own restart, every update included, is counted like
 an outage: "laptop restarted · 1 session finished a turn", or nothing at all
 when nothing finished that would have reached you. The notification says that
 notifications may have been missed, without a number, when the count cannot be
-known: that record could not be read (the kernel says so in its log and starts
-a new one), the linked machine was stopped without its orderly exit (killed or
-crashed) or was down for eight minutes or more (a session's own process then
-answers a finished turn's hook itself, and that turn's end never reaches
-romp), its reconnection to its sessions never finished, or more notifications
-came than it keeps (256) while the link was gone. It counts only what your switches
+known: that record could not be read or written (the kernel says so in its log
+and starts a new one), or more notifications came than it keeps (256) while the
+link was gone. A session it cannot count is said on its own, after the count of
+the rest ("1 session finished a turn; more may have been missed"): one whose
+reconnection after the restart failed, or one whose session process is too old
+to report a finished turn it answered by itself (it does after eight minutes
+without romp) when the machine may have been down that long. The notification
+waits until the restarted machine has reconnected to every session it found
+running, however long that takes. It counts only what your switches
 and bells would have let through, and says "may have been missed" only when
 something they allow could have been lost; when nothing could have, there is no
 notification, only a line in the kernel's log. A link that drops and comes back

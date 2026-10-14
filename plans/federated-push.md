@@ -367,7 +367,11 @@ buzzed late, as a fresh turn end. Now:
   id carry on. A file that is missing (the first boot of this build) starts a new feed, said in one line;
   one that cannot be read or holds no feed starts a new feed loudly (a corrupt file is moved aside by the
   strict reader) and never stops the kernel: every puller's cursor then names another feed, resets, and
-  summarizes the restart as before, with no number.
+  summarizes the restart as before, with no number. A write that fails disowns the file
+  (`_push_feed_disown_locked`): it is removed, so a restart before the next landed write starts a new feed,
+  or, when it cannot be removed either, the feed takes a new identity at once. Before (the review of #230),
+  the next life read the older file back and issued the same numbers again for other events, and a puller
+  whose cursor was past them passed over them without saying the count was unknown.
 - **Protocol 3: the cursor names the feed and the life.** A v3 cursor is `<feed>/<boot>:<seq>`. One of
   this feed stays valid across restarts; the answer's `boot` is this life's form of it, `feed` names the
   feed (the hub's backstop is `(row, feed, seq)`), and `restarts` says how many lives began after the one
@@ -378,11 +382,18 @@ buzzed late, as a fresh turn end. Now:
   opening a gap for it if none is open (a session that re-attached late), and the gap's ordinary rules
   decide whether that summary sounds (the per-device fold, the iPhone's share). They are:
   - a turn end whose Stop hook the session's CLI sent while no kernel was attached. The session's host
-    holds the hook until a kernel attaches; its hello lists the open requests (`parked`), the first hello
-    a session object gets in a life hands them to the transport (`HostTransport.unwatched`), the transport
-    marks the Stop hook's input (`UNWATCHED_STOP_KEY`), and the hook stamps `lastStopUnwatched` beside
-    `lastStopAt` with the same value. The turn tick reads that stamp as a turn end that happened while it
-    was down, whenever it first sees it;
+    holds the hook until a kernel attaches; its hello lists the open requests (`parked`), the session's
+    first hello in a kernel life (per session, not per session object: one rebuilt mid-life is no restart's,
+    the review of #230) hands them to the transport (`HostTransport.unwatched`), the transport marks the Stop
+    hook's input (`UNWATCHED_STOP_KEY`), and the hook stamps `lastStopUnwatched` beside `lastStopAt` with the
+    same value. The turn tick reads that stamp as a turn end that happened while it was down, whenever it
+    first sees it;
+  - a turn end whose Stop hook the host answered itself: past `HOOK_SELF_ANSWER_S` (480 s) with no kernel
+    attached it answers the hook neutrally, and no kernel ever runs it. The host keeps the newest 16 such
+    answers (`selfAnswered`: the request, the event and when it began holding it) and reports them in every
+    hello; the attach stamps the newest as the Stop hook would have, with `lastStopUnwatched`, unless the
+    registry's settle has passed it already, so a report heard twice counts once
+    (`SdkBackend._stamp_self_answered`);
   - a turn end the previous life stamped and never ticked, which the turn memo shows (above), judged at
     a session's first sight while this life catches up; the memo also keeps a turn end the previous life
     already filed from being filed again;
@@ -391,21 +402,34 @@ buzzed late, as a fresh turn end. Now:
 
   The origin's own devices get the turn ends in its own summary ("boxa restarted · …", above); its own
   card announcements at the first build are unchanged (a known limit, below).
-- **The count is complete before the puller closes its gap.** Until the origin has caught up on its
-  restart (`_push_catchup_ready`: every boot re-attach to a live host has said hello, the boot milestone
-  `attachDone`, and no session still holds a request its CLI sent before the attach, the backend's
-  `unwatched_pending`), no v3 answer says `caughtUp`, so the hub's gap stays open; a request parked
-  meanwhile is released when it catches up. The turn tick reads the readiness before it reads the turn
-  ends and declares the catch-up after filing them, so nothing it vouched for comes after.
-- **When the origin cannot vouch for the count, it says so.** A session's host answers a Stop hook it has
-  held for 480 s with no kernel attached (`HOOK_SELF_ANSWER_S`, the kernel's `UNWATCHED_SELF_ANSWER_S`,
-  pinned equal), and that turn end then never reaches a kernel. So the restart's count is vouched for only
-  when the previous life recorded its orderly exit (its cut row in the restart ledger) and this life began
-  within that bound of it; a killed or crashed life records none. Past `BOOT_ROW_BACKSTOP_S` after the
-  reconcile with the catch-up still open (an attach that never settles), the catch-up is declared done
-  regardless. Either way the origin files a `lost` gap event, and the hub says the restart's count with
-  "more may have been missed", or "notifications may have been missed" when it counted nothing, and only
-  when something could have passed (`_push_gap_could_pass`).
+- **The count is complete before the puller closes its gap, decided by events alone.** Until the origin
+  has caught up on its restart (`_push_catchup_ready`: every boot re-attach to a live host has settled, the
+  boot milestone `attachDone`, each by its hello or its session's end, and no session still holds a
+  request its CLI sent before the attach, the backend's `unwatched_pending`), no v3 answer says `caughtUp`,
+  so the hub's gap stays open; a request parked meanwhile is released when it catches up. The turn tick
+  reads the readiness before it reads the turn ends and declares the catch-up after filing them, so nothing
+  it vouched for comes after. The first cut also stopped waiting `BOOT_ROW_BACKSTOP_S` (30 s) after the
+  reconcile and called the count incomplete; the big machine's re-attaches take 22 to 39 s (once 82), so 9
+  of 74 boots since 2026-09-24 would have said "may have been missed" with nothing missed (the review of
+  #230). A re-attach that neither says hello nor ends holds the catch-up open; that is said once, loudly,
+  when the boot row records the attach as not settled.
+- **A session whose count cannot be vouched for is said on its own.** The catch-up returns `(sid, why)` for
+  each: a boot re-attach that ended without a hello, a session that ended before it had stamped a Stop its
+  host held (`SdkBackend.catchup_lost`), and a session whose host runs code older than the `selfAnswered`
+  report (`catchup_unreported`) when the span from the newest orderly exit in the restart ledger to its
+  re-attach reaches the 480 s bound (a killed life writes no exit row, but the host's wait began at the
+  kill, after the newest row, so the newest row still bounds it). The first cut compared the old exit with
+  the new process's start, which falls short of the host's wait by the re-attach's length, so a 7 to 8
+  minute outage could lose a turn end and still call the count exact. Each such session is said loudly and
+  filed as a `lost` gap event wearing that session's bell; the hub counts it as missed only if that bell
+  would have let a turn end through (a muted session files none), and its summary keeps the exact count of
+  the rest with "; more may have been missed". If the turn tick itself fails, or the readiness check does,
+  the catch-up is closed at once with the count unknown, loudly, rather than left open while the hub counts
+  everything into a summary it never sends.
+- **The origin's own devices follow the same rule** (`_turn_missed_say`): its summary carries the exact
+  count, adds "may have been missed" only when a session it cannot vouch for would have buzzed here (that
+  session's bell, or for a failure naming no session the turn switches or any session's explicit on), and is
+  not sent when there is neither.
 - **Older pullers are served as before.** A v1 or v2 cursor names a life; it is served that life's events
   only and never a gap event, so an older hub resets at a restart and summarizes it as it always did. The
   one-time cost at the deploy that brings this in: the hub's cursor names the old build's life, so that
@@ -536,10 +560,19 @@ Old and new kernels meet during an update, so both legs exist for now, and each 
   the unknown count); a killed origin, a long outage and an attach that never settles (the `lost` event);
   an overflow; the sequence carried across the restart; an older puller never served a gap event; a card
   the first build finds moved.
+  Since the review of #230: a slow re-attach with nothing belled finishing is silent and with a held turn
+  end is exact; a session whose re-attach failed is its own unknown (the hub's summary and the origin's own
+  device's, and exact when that session's bell would not have passed); a killed origin is counted exactly; a
+  host too old to report is vouched for by its wait from the newest exit row; a failing turn-end check
+  closes the catch-up as unknown, loudly; a failed feed write makes the next boot a new feed (or the
+  identity new at once).
 - `tests/test_host_transport.py` and `tests/test_kernel_notify_popover.py`'s `UnwatchedTurnEnd`: the
-  transport marks a Stop hook its CLI sent before the attach, the first hello of a life watches the held
-  requests and a later one does not, the hook stamps `lastStopUnwatched` and retires the id, the tick files
-  it as a gap event and never buzzes it late, and the constants shared across the modules agree.
+  transport marks a Stop hook its CLI sent before the attach, the first hello of a session in a life
+  watches the held requests and a later one does not (a session object rebuilt mid-life included), the hook
+  stamps `lastStopUnwatched` and retires the id, a host's `selfAnswered` report is stamped once, a host too
+  old to report is named, a re-attach without a hello and a session that ends holding a Stop are lost, the
+  tick files it as a gap event and never buzzes it late, and the constants shared across the modules agree.
+- `tests/test_session_host.py`: a Stop hook the host answered itself is reported in every later hello.
 - `tests/test_kernel_notify_popover.py`: who opened the turn, decided at its open (a turn the CLI
   opens itself, a message it runs as its own turn, a human text spliced in or drained, a session born
   mid-turn, no open seen) and end to end through the Stop hook to the kernel's tick; an explicit

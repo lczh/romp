@@ -1216,14 +1216,24 @@ class LocalRestart(_Base):
 
 
 class _HeldStops:
-    """The SDK backend as the restart catch-up reads it: the boot's re-attaches have all said hello, and `held` sessions
-    still hold a Stop hook their CLI sent while no kernel was attached (unwatched_pending)."""
+    """The SDK backend as the restart catch-up reads it: `held` sessions still hold a Stop hook their CLI sent while no
+    kernel was attached (unwatched_pending), `lost` names the sessions whose count it cannot vouch for (catchup_lost), and
+    `unreported` the sessions whose host is too old to report the finished turns it answered itself, with when their
+    first hello came (catchup_unreported)."""
 
     def __init__(self):
         self.held = 0
+        self.lost = {}
+        self.unreported = {}
 
     def unwatched_pending(self):
         return self.held
+
+    def catchup_lost(self):
+        return dict(self.lost)
+
+    def catchup_unreported(self):
+        return dict(self.unreported)
 
 
 class OriginRestart(_Base):
@@ -1312,6 +1322,7 @@ class OriginRestart(_Base):
         """The origin exits (its cut row in the restart ledger, unless killed) and comes back `down` seconds later: its
         memory is gone, its disk is what it left. `feed_bytes` replaces its feed file meanwhile (a corrupt one)."""
         self.clock += 60
+        self.exited = self.clock
         if exit_recorded:
             km._append_restart_cut(km._restart_cut_row({}, now=self.clock, sample={}))
         if feed_bytes is not None:
@@ -1470,37 +1481,153 @@ class OriginRestart(_Base):
         ans = km._push_events_serve(km._push_pull_cursor(ROW), 0, km.PUSH_PULL_PROTO)
         self.assertEqual(ans["reset"], "restarted")
 
-    def test_a_killed_origin_or_a_long_outage_cannot_be_counted(self):
-        # a session's host answers a held Stop hook itself after UNWATCHED_SELF_ANSWER_S with no kernel attached, and that
-        # turn end never reaches a kernel: without an exit record (killed, crashed) or past that bound, the count says so
+    def restart_slowly(self, sid=None, unwatched=True, attach=None, exit_recorded=True):
+        """The origin restarts and its sessions' re-attaches take longer than the 30 s the first cut waited (22-39 s on the
+        big machine, once 82): its ticks and the hub's pulls run while they settle; then they do (attachDone) and `attach`
+        runs (what the backend learned meanwhile), the held Stop is answered, and the origin catches up."""
+        self.origin_restarts(exit_recorded=exit_recorded)
+        self.drop()
+        km._BOOT_ATTACHED.clear()
+        self.stops.held = 1
+        with mock.patch.dict(km._BOOT_MARKS, {"reconcileDone": time.time() - 40.0}):
+            for _ in range(3):
+                self.tick()
+                self.pull()
+            km._BOOT_ATTACHED.set()
+            if attach:
+                attach()
+            if sid:
+                self.end_turn(sid, unwatched=unwatched)
+            self.stops.held = 0
+            self.tick()
+            self.pull()
+            self.pull()
+
+    def test_a_slow_reconnect_with_nothing_belled_finishing_is_silent(self):
+        # the review of #230: the catch-up stopped waiting 30 s after the reconcile and called the count incomplete, so a
+        # slow boot (9 of 74 on the big machine) said "may have been missed" with web's bell on and nothing finished
+        km._set_notify_session(WEB, True)
+        self.restart_slowly()
+        self.assertEqual(self.summaries(), [])
+        self.assertEqual([k for _, k in self.pushed if not k.get("host")], [], "nor on the origin's own devices")
+        self.assertIn("nothing it may have missed would have reached the devices here", self.err.getvalue())
+        self.assertNotIn("cannot be counted", self.err.getvalue())
+
+    def test_a_slow_reconnect_still_counts_a_held_turn_end_exactly(self):
         km._set_notify_session(API, True)
-        for exit_recorded, down in ((False, 5.0), (True, km.UNWATCHED_SELF_ANSWER_S + 60)):
-            with self.subTest(exit_recorded=exit_recorded, down=down):
+        self.restart_slowly(API)
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn"])
+
+    def test_a_session_whose_reconnect_failed_is_its_own_unknown(self):
+        # its count is unknown, loudly, and the rest is still counted: the summary adds "more may have been missed" only
+        # when that session's bell would have let its turn end through
+        km._set_notify_session(API, True)
+        km._set_notify_session(WEB, True)
+        self.restart_slowly(API, attach=lambda: self.stops.lost.update({WEB: "its session could not be reconnected"}))
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn; more may have been missed"])
+        self.assertIn("caught up on this restart, but session %s cannot be counted: its session could not be reconnected"
+                      % WEB[:8], self.err.getvalue())
+        own = [a[1] for a, k in self.pushed if not k.get("host")]
+        self.assertEqual(own, ["boxa restarted · 1 session finished a turn; more may have been missed"],
+                         "the origin's own devices are told the same way")
+        # the lost session's bell would not have let a turn end through (its default, the hub's turn switch off): exact
+        km._push_gap_seen(self.EP)
+        self.pushed.clear()
+        km._set_notify_session(WEB, None)
+        self.stops.lost = {}
+        self.restart_slowly(API, attach=lambda: self.stops.lost.update({WEB: "its session could not be reconnected"}))
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn"])
+
+    def test_a_killed_origin_is_counted_exactly_its_hosts_say_what_they_answered(self):
+        # a session's host answers a held Stop hook itself after UNWATCHED_SELF_ANSWER_S with no kernel attached, and now
+        # reports it at the re-attach (the backend stamps it as a turn that ended while the kernel was down): no clock is
+        # compared, and a kill, which leaves no exit record, costs the count nothing
+        km._set_notify_session(API, True)
+        self.origin_restarts(exit_recorded=False, down=km.UNWATCHED_SELF_ANSWER_S + 60)
+        self.drop()
+        self.tick()
+        self.end_turn(API, unwatched=True)               # the stamp the hello's report makes (tests/test_kernel_notify_popover.py)
+        self.tick()
+        self.pull()
+        self.pull()
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn"])
+
+    def test_a_host_too_old_to_report_is_vouched_for_by_how_long_it_waited(self):
+        # a host running code older than the report cannot say whether it answered a finished turn's hook itself: within
+        # the bound from the last orderly exit to its re-attach it cannot have; past it, or with no exit on record, that
+        # session's count is unknown (the first cut compared the old exit with the new process's start, which is up to a
+        # re-attach's length short of the host's wait, so a 7-8 minute outage could lose a turn end and still say exact)
+        # A kill writes no exit row, but the host's wait began at the kill, after the newest row, so the newest row still
+        # bounds it; only a ledger with no orderly exit at all leaves the wait unbounded
+        km._set_notify_session(API, True)
+        for ledger, wait, said in (
+                (True, km.UNWATCHED_SELF_ANSWER_S - 30, "TESTHOST restarted · 1 session finished a turn"),
+                (True, km.UNWATCHED_SELF_ANSWER_S + 1, "TESTHOST restarted · 1 session finished a turn; more may have been missed"),
+                (False, 5.0, "TESTHOST restarted · 1 session finished a turn; more may have been missed")):
+            with self.subTest(ledger=ledger, wait=wait):
                 km._push_gap_seen(self.EP)
                 self.pushed.clear()
-                self.origin_restarts(exit_recorded=exit_recorded, down=down)
-                self.drop()
-                self.tick()
-                self.end_turn(API, unwatched=True)
-                self.tick()
-                self.pull()
-                self.pull()
-                self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn; more may have been missed"])
+                if not ledger:
+                    km.RESTART_CUTS_FILE.unlink()
+                self.restart_slowly(API, attach=lambda: self.stops.unreported.update({API: self.exited + wait}),
+                                    exit_recorded=ledger)
+                self.assertEqual(self.summaries(), [said])
+                self.stops.unreported = {}
 
-    def test_an_attach_that_never_settles_is_caught_up_by_the_backstop_with_the_count_incomplete(self):
+    def test_a_turn_end_check_that_fails_closes_the_catch_up_as_unknown_loudly(self):
         km._set_notify_session(WEB, True)
         self.origin_restarts()
         self.drop()
-        self.stops.held = 1                                  # a host's held Stop is never answered
-        self.tick()
+        with mock.patch.object(km, "_alive_sessions", side_effect=RuntimeError("the session list fell over")), \
+             contextlib.redirect_stderr(self.err):
+            for _ in range(2):
+                with self.assertRaises(RuntimeError):
+                    km._turn_notify_tick(time.time(), {})
+        self.assertIn("the turn-end check failed (RuntimeError: the session list fell over) — closing this restart's "
+                      "catch-up with its count unknown", self.err.getvalue())
         self.pull()
-        self.assertEqual(self.summaries(), [], "still catching up: the hub's gap stays open")
-        with mock.patch.dict(km._BOOT_MARKS, {"reconcileDone": time.time() - km.BOOT_ROW_BACKSTOP_S - 1}):
-            self.tick()
-        self.assertIn("caught up on this restart with an incomplete count", self.err.getvalue())
         self.pull()
-        self.pull()
-        self.assertEqual(self.summaries(), ["TESTHOST restarted · notifications may have been missed"])
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · notifications may have been missed"],
+                         "the gap closes, as an unknown count, rather than holding every event for a summary never sent")
+
+    def test_a_failed_feed_write_makes_the_next_boot_a_new_feed(self):
+        # the review of #230: a write that failed left the older feed on disk, the next life read it back and issued the
+        # same numbers again for other events, and a puller whose cursor was past them passed over them without a word
+        km._set_notify_session(API, True)
+        boom = km._StateUnwritable(jd.STATE / "push-feed.json", "write failed: No space left on device")
+        for unlink_fails in (False, True):
+            with self.subTest(unlink_fails=unlink_fails):
+                km._push_gap_seen(self.EP)
+                self.pushed.clear()
+                old_feed = km._PUSH_FEED["id"]
+                unlinker = (mock.patch.object(Path, "unlink", side_effect=PermissionError(13, "Permission denied"))
+                            if unlink_fails else contextlib.nullcontext())
+                with mock.patch.object(km, "_write_state_json", side_effect=boom), unlinker, \
+                     contextlib.redirect_stderr(self.err):
+                    self.end_turn(API)
+                    self.tick()                          # filed in memory; the write fails
+                self.pull()
+                if unlink_fails:                         # nothing on disk can be fixed: a new identity at once, so the hub
+                    #                                      resets now and says the count is unknown
+                    self.assertNotEqual(km._PUSH_FEED["id"], old_feed)
+                    self.assertIn("takes a new identity now", self.err.getvalue())
+                    self.pull()
+                    self.assertEqual(self.summaries(), ["TESTHOST restarted · notifications may have been missed"])
+                else:                                    # delivered: the hub's cursor is past what the disk held
+                    self.assertEqual(len(self.from_hub("turn")), 1)
+                    self.assertFalse((jd.STATE / "push-feed.json").exists(), "the stale feed is removed")
+                    self.assertIn("the event feed on disk is removed until a write lands again", self.err.getvalue())
+                self.origin_restarts()
+                self.drop()
+                self.tick()
+                self.end_turn(API)                       # after the boot: under the old file it would reuse a number
+                self.tick()
+                self.pull()
+                self.pull()
+                self.assertIn("events from 'TESTHOST' resume at its newest — its kernel restarted since",
+                              self.err.getvalue())
+                self.assertTrue(self.summaries() and self.summaries()[-1].endswith("notifications may have been missed"),
+                                "never a silent pass over events: the count is said to be unknown")
 
     def test_an_overflow_while_the_hub_was_away_has_no_number(self):
         km._set_notify_session(WEB, True)
