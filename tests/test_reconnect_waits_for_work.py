@@ -843,7 +843,7 @@ class AWakeupSurvivesThePicksRelaunch(_Harness):
     def test_a_wakeup_the_kernel_holds_is_sent_once_when_a_sweep_runs_inside_a_turn_end_that_lists_a_new_cron(self):
         c2 = self._the_kernels_wakeup()
         self._all_due()
-        sweeps, sent = self._a_sweep_inside("_stop_hook")
+        sweeps, sent = self._a_sweep_inside("_stop_hook_run")   # the turn-end body since #235 split _stop_hook
         cron = {"id": "job-9", "schedule": "0 3 * * *", "prompt": "post the notes-api status", "recurring": False}
         self._on_loop(self.s._stop_hook({"session_crons": [cron], "background_tasks": []}, None, None))   # its first turn end
         self._sent_once_beside(c2, sweeps, sent)
