@@ -70173,13 +70173,27 @@ def _push_catchup_ready(now):
     be = _sdk_backend
     if be is False:
         return True, []                              # no session backend: nothing re-attaches
+    failed = getattr(be, "catchup_failed", lambda: None)() if be else None
+    if failed:
+        return True, [("", failed)]                  # the re-attaches it would wait on may never start: unknown, at once
     if not _BOOT_ATTACHED.is_set():
-        if not _PUSH_CATCHUP.get("said") and _BOOT_MARKS.get("_row") and "attachDone" not in _BOOT_MARKS:
+        stuck = sorted(str(x) for x in (getattr(be, "catchup_stuck", lambda: [])() or [])) if be else []
+        pending = int(getattr(be, "_boot_attach_pending", 0) or 0) if be else 0
+        if stuck and len(stuck) >= pending and not _PUSH_CATCHUP.get("said"):
+            # every other re-attach is accounted for, and what is left waits on hosts that beat yet never answer: the
+            # restart's summary waits on them, said to the user once, in the error center (the review of #233); new
+            # notifications are delivered meanwhile, so what waits is only the count of what was missed
             _PUSH_CATCHUP["said"] = True
-            pend = sorted(str(x)[:8] for x in (getattr(be, "_boot_attach_unsettled", None) or ()))
-            sys.stderr.write("romp: web push: still catching up on this restart: the re-attach of %s has not settled; a "
-                             "linked machine holds this kernel's notifications for its summary of the restart until it "
-                             "does\n" % (", ".join(pend) or "a session"))
+            pend = stuck
+            names = ", ".join(_name_of(x) or x[:8] for x in pend) or "a session"
+            text = ("The restart's summary of missed notifications is waiting on %s: its session host is running but has "
+                    "not answered the reconnect. New notifications arrive as usual; ending that session lets the summary go"
+                    % names)
+            sys.stderr.write("romp: web push: %s\n" % text)
+            try:
+                getattr(be, "catchup_problem", lambda *a, **k: None)(text, sessions=[x[:8] for x in pend])
+            except Exception as e:
+                sys.stderr.write("romp: web push: the problem row was not filed: %s\n" % e)
         return False, None
     if be is None:
         return True, []
@@ -70311,14 +70325,13 @@ def _push_events_serve(after, wait, proto=1):
         else:
             ours = cur[0] == _BOOT_ID and cur[1] >= _PUSH_FEED["after"]   # an older puller: this life's events only
         done0 = _PUSH_CATCHUP["done"]
-        at_newest = ours and cur[1] == _PUSH_RING_SEQ[0]
-        caught = at_newest and (done0 or not v3)
+        at_newest = ours and cur[1] == _PUSH_RING_SEQ[0]   # it was listening: what this answer carries fired since
         if at_newest and wait > 0:
             _push_ring_cond.wait_for(lambda: _PUSH_RING_SEQ[0] > cur[1] or (v3 and not done0 and _PUSH_CATCHUP["done"]),
                                      timeout=wait)
-            if v3 and not caught and _PUSH_CATCHUP["done"] and _PUSH_RING_SEQ[0] == cur[1]:
-                caught = True                        # it listened from the newest until this life caught up, and nothing
-                #                                      landed meanwhile: the restart's count is all behind it
+        # caught up: listening, and (protocol 3) this life has caught up on its restart, read in the same hold as the batch,
+        # so every gap event of the restart is in this answer or behind it and the puller may close its gap
+        caught = at_newest and (_PUSH_CATCHUP["done"] or not v3)
         newest = _PUSH_RING_SEQ[0]
         oldest = _PUSH_RING[0]["seq"] if _PUSH_RING else newest + 1
         reset = None
@@ -70363,6 +70376,8 @@ def _push_events_serve(after, wait, proto=1):
         out["stale"] = stale
     if v3:
         out["feed"] = fid
+        out["listening"] = at_newest                 # its events fired while the puller listened: delivered as they come,
+        #                                              even while the restart's gap waits for the catch-up (caughtUp false)
         if since:
             out["restarts"] = since
     if v2:
@@ -70708,7 +70723,12 @@ def _push_pull_once(name, r):
             gap["back"] = now                            # the first answer since it went quiet: the outage's end
         gap["bells"] = gap["bells"] or j.get("bellsOn") is not False   # an older row does not say: assume it could
         gap["cards"] = gap["cards"] or j.get("cardsOn") is not False
-    if gap is not None and not caught:
+    # listening: the request found the cursor at the row's newest, so the answer's events fired while this kernel listened.
+    # A protocol-3 row says so apart from caughtUp, which also waits for its restart's catch-up: while that runs, what
+    # fires is delivered as it comes and only the restart's own gap events wait for its summary (the review of #233: a
+    # catch-up held open folded every new notification into a summary that had not been sent). An older row: caughtUp
+    listening = j.get("listening") is True if "listening" in j else caught
+    if gap is not None and not listening:
         for ev in fresh:
             _push_gap_count(gap, ev)                     # missed: counted for the summary, never delivered late
             _push_pull_seen_mark(name, key, ev["seq"])
@@ -70717,7 +70737,8 @@ def _push_pull_once(name, r):
             for ev in past:
                 _push_gap_count(gap, ev)                 # the row's downtime, said in the summary
                 _push_pull_seen_mark(name, key, ev["seq"])
-            _push_gap_close(name)                        # the summary first (the past), then what fired while it listened
+            if caught:
+                _push_gap_close(name)                    # the summary first (the past), then what fired while it listened
         now_evs = [ev for ev in fresh if ev.get("gap") is not True]
         if _push_pull_gate(name, now_evs, boot=key) and gap is None:
             # a notification delivered normally, outside any gap: the row is steady again, so the next gap's summary is

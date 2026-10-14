@@ -7461,6 +7461,10 @@ class SdkSession:
         self.ended = True
         if self.loop:
             self.loop.call_soon_threadsafe(self._wake_set)   # break the receive loop even if idle (no msg coming)
+            t = self._host
+            if t is not None and getattr(t, "hello", None) is None and hasattr(t, "abort_connect"):
+                # an attach still waiting for its host's hello: ending the session ends that wait (the review of #233)
+                self.loop.call_soon_threadsafe(t.abort_connect, "the session was ended")
         if self.loop and self.client and not self.detached:
             # stop an in-flight turn promptly. NOT for a detached session (T315): the interrupt is a control
             # request the SDK writes to the transport, and under a host that reaches the CLI's stdin before the
@@ -9673,10 +9677,12 @@ class SdkSession:
             #                             a raising _on_session_gone can never leak the slot)
             held = getattr(self, "_unwatched_rids", None)
             if held:                    # this object answers no held request now: the restart catch-up must not wait on it,
-                #                         and a finished turn its host held is one this life cannot count (the review of #230)
+                #                         and a finished turn its host held is one this life cannot count (the review of #230);
+                #                         a later attach of the same session owes them still (the review of #233)
                 try:
                     self.backend._catchup_lost.setdefault(self.sid, "its session ended before this kernel had recorded a "
                                                                     "finished turn its host held")
+                    self.backend._unwatched_owed.setdefault(self.sid, set()).update(held)
                 except Exception:
                     pass
                 held.clear()
@@ -10095,6 +10101,16 @@ class SdkSession:
                     # while the attach-failed marker names this host (see _ensure)
                     self._host_stand_down(e)
                     break
+                if not connected and isinstance(e, _ht().HostHelloLost):
+                    # the host accepted the attach and never said hello, and its lease no longer says it lives (or the
+                    # session was ended meanwhile): its CLI may still be there, so never the crash heal; stand down
+                    # as an attach that did not complete does (the review of #233)
+                    if not self.ended:
+                        self._host_stand_down(e, said="session %s: its session host accepted the reconnect and never "
+                                                      "answered (%s); the next message tries again" % (self.name, e))
+                    else:
+                        self.detached = True
+                    break
                 if not connected:
                     # The CLI never came up. RECORD why, where the user can see it: this thread is about
                     # to die, and everything downstream of it (_on_session_gone settling 'waiting') is
@@ -10120,15 +10136,16 @@ class SdkSession:
             if self.ended or not self._reconnect:
                 break        # drain ended on its own (process exit) or we're shutting down → done
 
-    def _host_stand_down(self, exc) -> None:
+    def _host_stand_down(self, exc, said=None) -> None:
         """Four attaches reached a live host and none completed (the initialize timed out each time: a wedged
         host, or a CLI that never answers): the host keeps the CLI, and this session stands down from it: a
         `host.attach-failed` problem row, the state settled `waiting` (on its host; the next send connects and
         tries the attach again), the thread's exit marked a detach so the session-gone path neither heals nor
         settles, and no crash-resume nudge: the CLI never died (the commit-8 review's item 3)."""
         st = self.backend.state_dir
-        problem_row(st, "session %s: could not complete an attach to its live session host after %d tries (%s); the host keeps "
-                    "the CLI; the next message tries again" % (self.name, self._host_attach_retries, type(exc).__name__),
+        problem_row(st, said or ("session %s: could not complete an attach to its live session host after %d tries (%s); the "
+                                 "host keeps the CLI; the next message tries again"
+                                 % (self.name, self._host_attach_retries, type(exc).__name__)),
                     "host.attach-failed", sid=self.sid, name=self.name, log=self.backend._log, tries=self._host_attach_retries)
         lease, lstate = self.backend._host_lease(self.sid, if_unreadable="unreadable")
         if lstate == "attach":
@@ -12233,6 +12250,28 @@ class SdkSession:
         return {}
 
     async def _stop_hook(self, inp, tool_use_id, context):
+        """The Stop hook as the CLI calls it: _stop_hook_run, and for a Stop its CLI sent before this kernel life first
+        attached to it (the transport's mark, the request's id) the guarantee that it does not hold the restart's
+        catch-up open: a hook that ends without having stamped the turn end (it raised, or was cancelled) leaves that
+        session's count unknown, loudly, instead of a held id nothing retires (the review of #233)."""
+        unwatched = inp.pop(UNWATCHED_STOP_KEY, None) if isinstance(inp, dict) else None
+        if not unwatched:
+            return await self._stop_hook_run(inp, tool_use_id, context, None)
+        try:
+            return await self._stop_hook_run(inp, tool_use_id, context, unwatched)
+        finally:
+            rids = getattr(self, "_unwatched_rids", set())
+            if str(unwatched) in rids:                   # the stamp never landed: this turn end is not on record
+                rids.discard(str(unwatched))
+                try:
+                    self.backend._catchup_lost.setdefault(self.sid, "the hook of a finished turn its host held failed "
+                                                                    "before recording it")
+                except Exception:
+                    pass
+                self.backend._log("stop hook (%s): a finished turn its host held across the restart was not recorded; "
+                                  "its count is unknown" % self.name, problem=True)
+
+    async def _stop_hook_run(self, inp, tool_use_id, context, unwatched):
         """At turn-end, CLEAR the awaiting overlay (awaiting:false). Background SHELL tasks don't ride
         this overlay: they were excluded from awaiting entirely on 2026-07-07 (a leftover dev server /
         `tail -f` pinned an idle session to a working flavor off a lossy transcript scrape), and when the
@@ -12241,10 +12280,9 @@ class SdkSession:
         (see _on_task_event), terminal-status-cleared, no overlay records needed. So this hook still
         ignores inp['background_tasks'] and just clears any stale awaiting:true — keeping the overlay
         channel available for signals that need durability across a backend restart."""
-        # a Stop its CLI sent before this kernel life first attached to it (the transport's mark, the request's id): the turn
-        # ended while no kernel was listening, stamped so below (lastStopUnwatched), and retired from the session's set
-        # once stamped, so the kernel's restart catch-up knows every such turn end is on record (unwatched_pending)
-        unwatched = inp.pop(UNWATCHED_STOP_KEY, None) if isinstance(inp, dict) else None
+        # `unwatched`: a Stop its CLI sent before this kernel life first attached to it (the request's id, _stop_hook): the
+        # turn ended while no kernel was listening, stamped so below (lastStopUnwatched), and retired from the session's
+        # set once the stamp has landed, so the kernel's restart catch-up knows every such turn end is on record
         self._record_transcript_path(inp)   # where the CLI writes, for discovery (see the helper)
         append_awaiting(self.backend.state_dir, self.sid, False)
         # Record the ARMED TIMER SET (the hook payload's session_crons: CronCreate crons, ScheduleWakeup
@@ -12375,10 +12413,10 @@ class SdkSession:
                 # later turn's stamp (another lastStopAt) needs no write to clear it
                 stamp["lastStopUnwatched"] = now_s
             self.backend._update_reg(self.sid, **stamp)
+            if unwatched:
+                getattr(self, "_unwatched_rids", set()).discard(str(unwatched))   # on record: retired (only now)
         except Exception:
             pass
-        if unwatched:
-            getattr(self, "_unwatched_rids", set()).discard(str(unwatched))
         # delete-while-busy: the turn this delete interrupted has ENDED — complete the arm here,
         # on the same turn-end fact that stamps lastStopAt (never a sleep)
         if getattr(self, "_rewind_wait", False):
@@ -13814,6 +13852,8 @@ class SdkBackend:
         self._catchup_lost: dict = {}         # sid -> why its count cannot be vouched for (its session ended first)
         self._catchup_unreported: dict = {}   # sid -> when its first hello came, from a host too old to report the
         #                                       finished turns it answered itself (the kernel judges the wait it bounds)
+        self._catchup_failed = None           # why the boot reconcile failed: the catch-up closes with its count unknown
+        self._unwatched_owed: dict = {}       # sid -> held request ids a session ended still owing (a later attach owes them)
         self._lease_deferred: dict = {}       # sid -> a boot decision an unreadable lease could not settle (_lease_defer)
         self._lease_listing_failed = False    # the deferral's process listing is failing: said once per episode (_lease_rejudge)
         self._lease_watch_thread = None       # the thread taking those decisions again as their leases settle
@@ -14385,7 +14425,15 @@ class SdkBackend:
                                 on_exit=lambda ex, s=sess: self._host_ended(s, ex),
                                 on_reexec=lambda f, s=sess: self._on_host_reexec_now(s),
                                 on_lost=lambda t, s=sess: self._on_host_socket_lost(s, t),
-                                on_fault=lambda f, s=sess: self._on_host_fault(s, f))
+                                on_fault=lambda f, s=sess: self._on_host_fault(s, f),
+                                alive=lambda s=sess: self._host_alive_why(s.sid))
+
+    def _host_alive_why(self, sid: str):
+        """While a hello is awaited: None as long as `sid`'s lease names a live host that beats (or cannot be read, and so
+        may), else why not. A frozen or dead host's beat stops and its lease goes stale within LEASE_TTL_S, so the wait
+        ends on that event rather than never (HostTransport.connect)."""
+        _lease, state = self._host_lease(sid, if_unreadable="attach")
+        return None if state == "attach" else "its lease no longer names a live host (%s)" % state
 
     def _on_host_fault(self, sess, f: dict) -> None:
         """A host's `fault` frame: a problem line, and for a handover that failed after the host had accepted it (`reexec-failed`:
@@ -14797,8 +14845,13 @@ class SdkBackend:
             rids = getattr(sess, "_unwatched_rids", None)
             if rids is None:
                 rids = sess._unwatched_rids = set()
+            owed = self._unwatched_owed.pop(sess.sid, set())
             if parked and (first or rids):
                 rids |= parked
+            elif parked & owed:
+                # an earlier attach of this life ended still holding them (it gave up): they ended during the restart, so
+                # this later attach (a send's) counts them into a summary, never delivers them late (the review of #233)
+                rids |= parked & owed
             t_now = getattr(sess, "_host", None)
             if t_now is not None:
                 t_now.unwatched = rids
@@ -15610,8 +15663,11 @@ class SdkBackend:
                         self._boot_attach_count_down()
                     self._log("boot reconcile: spawn %s failed (sweep continues): %s"
                               % (sid, traceback.format_exc()))
-        except Exception:
+        except Exception as e:
             self._log("boot reconcile failed: %s" % traceback.format_exc())
+            # the restart catch-up waits on the re-attaches this pass starts: closed now, with the count unknown, rather
+            # than waiting on attaches that may never be started (the review of #233)
+            self._catchup_failed = "the boot reconcile failed (%s)" % type(e).__name__
         # the sessions a lease could not settle are decided again when it can, watched from here on: after the boot's own
         # starts, so a settled lease's start never jumps the stagger
         self._lease_watch_start()
@@ -15932,6 +15988,26 @@ class SdkBackend:
             if sid not in self._hello_sids and sid not in out:
                 out[sid] = "its session could not be reconnected after the restart"
         return out
+
+    def catchup_failed(self):
+        """Why the restart catch-up cannot wait on the boot's re-attaches (the boot reconcile failed), or None."""
+        return self._catchup_failed
+
+    def catchup_stuck(self) -> list:
+        """The boot re-attaches waiting for a hello from a host that still beats: their transport's liveness probe has
+        found the host alive at least twice with no hello (a live host answers in milliseconds). The kernel tells the
+        user when these are all the restart's catch-up still waits on (_push_catchup_ready)."""
+        out = []
+        for sid in list(self._boot_attach_set):
+            s = self.sessions.get(sid)
+            t = getattr(s, "_host", None) if s is not None else None
+            if t is not None and getattr(t, "hello", None) is None and int(getattr(t, "hello_probes", 0) or 0) >= 2:
+                out.append(sid)
+        return out
+
+    def catchup_problem(self, text: str, **fields) -> None:
+        """The restart catch-up held open by re-attaches stuck on a live but silent host: one row in the error center."""
+        problem_row(self.state_dir, text, "push.catchup-held", log=self._log, **fields)
 
     def catchup_unreported(self) -> dict:
         """sid -> when its first hello of this life came, for each session whose host runs code older than the
@@ -19230,7 +19306,12 @@ class SdkBackend:
             _note_ended(s)                         # #1735: register the ended session; the controller measures cyclicity at the idle tick
             if s._host is not None:                # a kill is not graceful today: the host's `end` gets the short bound (T315)
                 s._host.end_grace = _ht().sh.END_GRACE_KILL_S
+            hung = s._host is not None and getattr(s._host, "hello", None) is None
             s.shutdown()
+            if hung:
+                # its attach never heard the host: the host still runs the CLI the user is ending, so `end` goes the
+                # road a session with no object takes, bounded the same way (the review of #233)
+                self._end_host_by_lease(sid)
         else:
             # no object (a session that stood down from its host, or one never started this life) while a live
             # host still holds the CLI under its lease: the user's end must end it. The host gets `end` with the

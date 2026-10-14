@@ -7746,7 +7746,11 @@ reconnection after the restart failed, or one whose session process is too old
 to report a finished turn it answered by itself (it does after eight minutes
 without romp) when the machine may have been down that long. The notification
 waits until the restarted machine has reconnected to every session it found
-running, however long that takes. It counts only what your switches
+running, however long that takes; notifications from after the restart arrive
+as usual meanwhile. A session whose own process stopped responding counts as
+one it cannot count, and if one is running but never answers the reconnect,
+the error center says the summary is waiting on it (ending that session lets it
+go). It counts only what your switches
 and bells would have let through, and says "may have been missed" only when
 something they allow could have been lost; when nothing could have, there is no
 notification, only a line in the kernel's log. A link that drops and comes back
