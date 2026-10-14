@@ -167,6 +167,14 @@ const read = (passage) => page.evaluate((passage) => {
     liveAsk: !!document.querySelector("#live-ask .ask-card"),
   };
 }, passage);
+// the thread's comments frame carrying its chip (the frame rides the pusher's cycle, the card the ask's own push): the chip
+// says Needs you and the passage's marks wear the cue, then the rail's rAF pass; an event to wait on, bounded, never a clock
+const waitCued = async (passage) => {
+  await page.waitForFunction((passage) => /Needs you/.test((document.querySelector("#cmt-pop #cmt-state .chip") || {}).textContent || "")
+    && Array.from(document.querySelectorAll("#content mark.cmt-hl")).some((m) => passage.includes((m.textContent || "").trim()) && m.classList.contains("needs")),
+    passage, { timeout: 30000 }).catch(() => {});
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(null)))));
+};
 const closePop = async () => { await page.evaluate(() => document.querySelector("#cmt-pop .cmt-x")?.click()); await page.waitForFunction(() => !document.getElementById("cmt-pop"), null, { timeout: 5000 }).catch(() => {}); };
 
 try { await open(); } catch (e) { await done("the chat never showed the replies: " + String(e).split("\n")[0]); }
@@ -174,8 +182,7 @@ try { await open(); } catch (e) { await done("the chat never showed the replies:
 // 1. a comment whose thread asks a question
 await comment(cfg.pAsk, cfg.cAsk);
 out.askShown = await card();
-await page.waitForFunction(() => /Needs you/.test((document.querySelector("#cmt-pop #cmt-state .chip") || {}).textContent || ""), null, { timeout: 30000 }).catch(() => {});
-await page.waitForTimeout(400);   // the rail's rAF pass after the marks pass
+await waitCued(cfg.pAsk);
 out.ask = await read(cfg.pAsk);
 if (cfg.shots) { fs.mkdirSync(cfg.shots, { recursive: true }); await page.screenshot({ path: cfg.shots + "/thread-ask-question.png" }); }
 
@@ -203,6 +210,7 @@ await closePop();
 // 4. a comment whose thread asks permission for a command: Deny, from the popover
 await comment(cfg.pPerm, cfg.cPerm);
 out.permShown = await card();
+await waitCued(cfg.pPerm);
 out.perm = await read(cfg.pPerm);
 const permBefore = await page.evaluate(() => window.__asks.length);
 await page.evaluate(() => Array.from(document.querySelectorAll("#cmt-pop .cmt-ask .ask-live-opt")).find((o) => /Deny/.test(o.textContent || ""))?.click());
