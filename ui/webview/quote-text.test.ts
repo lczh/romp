@@ -191,6 +191,23 @@ test("a diff row's marker comes with its code wherever the selection starts in i
   assert.equal(read(root, [del, 0], [add, 0]), "-    rate = 0.1", "an end at a row's start: that row says nothing");
 });
 
+// review of #242 (2026-10-14): the lead before a mid-row start was a blank per character, unbounded; a long lead is " …"
+test("the code before a mid-row start: blanks when short or only indent, a short mark when long", () => {
+  const ns = { userSelect: "none" };
+  const row = (sign: string, code: string) => h("div.diff-row." + (sign === "+" ? "diff-add" : "diff-ctx"),
+    h("span.diff-gut", ns, "3"), h("span.diff-gut", ns, "3"), h("span.diff-sign", ns, sign), h("span.diff-code", code));
+  const long = "a".repeat(5000) + " Token 140 marks the gadget field.";
+  const deep = " ".repeat(24) + "return total";
+  const root = h("div.thread", h("div.turn.turn-tool.fold-open", h("pre.io-pre.fold-pre.diff-fold",
+    row("+", long), row("+", deep), row(" ", "x".repeat(17) + " kept"), row(" ", "y".repeat(15) + " kept"))));
+  const at = (data: string, words: string): Point => { const t = textOf(root, data); return [t, t.data.indexOf(words)]; };
+  const end = (data: string): Point => { const t = textOf(root, data); return [t, t.data.length]; };
+  assert.equal(read(root, at("Token 140", "Token 140"), end("Token 140")), "+ \u2026Token 140 marks the gadget field.");
+  assert.equal(read(root, at("return total", "return"), end("return total")), "+" + " ".repeat(24) + "return total", "an indent is kept");
+  assert.equal(read(root, at("x".repeat(17), " kept"), end("x".repeat(17))), "  \u2026 kept", "17 characters: the mark");
+  assert.equal(read(root, at("y".repeat(15), " kept"), end("y".repeat(15))), " " + " ".repeat(15) + " kept", "15: blanks");
+});
+
 test("a closed fold shows its summary alone; an open one its contents too", () => {
   const root = chat();
   const a: Point = [textOf(root, "x = refill"), 0], b: Point = [textOf(root, "latency"), 7];

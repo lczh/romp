@@ -448,3 +448,38 @@ test("a context row opens with the unified diff's space, so a context line that 
     assert.deepEqual(errors, [], "no page errors");
   }, DIFFED);
 });
+
+// review of #242 (2026-10-14): the code before a mid-row start was a blank per character, unbounded, so a sentence at
+// column 4,650 of a long added row went out as "> +…" (its blanks alone, cut at the cap) and one at column 1,640 as 1,673
+// characters, nearly all spaces. A short lead keeps its blanks (the double-click "-           0.1" case above); a long one
+// is " …", and the selected text follows it whole
+const LONG_ROWS = [
+  { kind: "assistant", md: "Now the docs edit.", uuid: U(21) },
+  { kind: "tool", name: "Edit", file: "guide.md", input: "edit", uuid: U(22),
+    diffRows: [{ oldNo: null, newNo: null, sign: "@", text: "@@ -3 +3 @@" }, { oldNo: 3, newNo: null, sign: "-", text: "Old paragraph line." },
+               { oldNo: null, newNo: 3, sign: "+", text: Array.from({ length: 60 }, (_, i) => `Clause ${i} names the widget part.`).join(" ") },
+               { oldNo: null, newNo: 4, sign: "+", text: Array.from({ length: 150 }, (_, i) => `Token ${i} marks the gadget field.`).join(" ") }] },
+  { kind: "assistant", md: "The docs edit is in.", uuid: U(23) },
+];
+
+test("a selection far into a long diff row keeps its text and the row's sign, its lead a short mark, never a column of blanks", { timeout: 90000 }, async (t) => {
+  await inChat(t, async (page, errors) => {
+    await page.locator("#content .tool-fold-toggle", { hasText: "+2 -1" }).click();
+    await page.waitForSelector("#content .diff-fold .diff-row", { state: "visible", timeout: 5000 });
+    const lead = "Replying to this part of the conversation:\n";
+    const col = await page.evaluate(() => Array.from(document.querySelectorAll("#content .diff-add .diff-code"))
+      .map((c) => (c.textContent || "").indexOf("Token 140") + (c.textContent || "").indexOf("Clause 50") + 1));
+    assert.deepEqual(col, [1640, 4650], "premise: the sentences start at columns 1,640 and 4,650 of their rows");
+    await select(page, "Token 140 marks the gadget field.", 0, { scope: "#content", label: "+ …Token 140 marks the gadget field." });
+    const sent = await sendWith(page, "Why this one?");
+    assert.equal(sent, lead + "> + …Token 140 marks the gadget field.\n\nWhy this one?", "the selection was lost to the cap");
+    await select(page, "Clause 50 names the widget part.", 0, { scope: "#content", label: "+ …Clause 50 names the widget part." });
+    const mid = await sendWith(page, "And this?");
+    assert.equal(mid, lead + "> + …Clause 50 names the widget part.\n\nAnd this?", "1,673 characters, nearly all spaces");
+    // a comment's opening message: the same line, whose sign and mark the range's own text does not hold
+    await select(page, "Token 140 marks the gadget field.", 0, { scope: "#content", label: "+ …Token 140 marks the gadget field." });
+    const create = await commentWith(page, "Why?");
+    assert.deepEqual([create.exact, create.shown], ["Token 140 marks the gadget field.", "+ …Token 140 marks the gadget field."]);
+    assert.deepEqual(errors, [], "no page errors");
+  }, LONG_ROWS);
+});
