@@ -18,17 +18,27 @@ export interface StagedMsg { text: string; cites: unknown[] }
  *  none from a rendered document, which has no lines. Marked apart from the VS Code editor's `src` flavour so each keeps
  *  its own lead-in. */
 export interface FileQuote { kind: "file"; path: string; lines?: [number, number] | null }
-export type QuoteCite = { quote?: string; src?: string | null; kind?: string; path?: string; lines?: [number, number] | null };
+/** `ctx`: for a transcript passage shorter than a sentence, the sentence it sits in (quote-context.ts quoteContext, read
+ *  from the rendered message at the selection), which the section quotes in place of the bare words. */
+export type QuoteCite = { quote?: string; src?: string | null; kind?: string; path?: string; lines?: [number, number] | null;
+  ctx?: string | null };
+
+/** The sentence a transcript passage's section quotes in place of its words, when it was shorter than one (the user
+ *  2026-10-14); null for every other quote, the file viewer's and the editor's included, which quote what was selected. */
+function quoteSentence(c: QuoteCite): string | null {
+  return !c.src && c.kind !== "file" && c.quote && c.ctx ? c.ctx : null;
+}
 
 /** A quote's lead-in: the words that tell the agent what the quote block under it is. A file from the viewer names the file
  *  and, when it has them, the lines; the editor's highlight names its workspace-relative file:lines; a transcript passage
- *  is part of the conversation. */
+ *  is part of the conversation, and one shorter than a sentence names its words there, the sentence quoted under it. */
 export function quoteLeadIn(c: QuoteCite): string {
   if (c.kind === "file" && c.path) {
     const ln = c.lines && c.lines[0] > 0 ? c.lines : null;
     const where = !ln ? "" : ln[1] > ln[0] ? " (lines " + ln[0] + "\u2013" + ln[1] + ")" : " (line " + ln[0] + ")";
     return "Replying to this part of " + c.path + where + ":";
   }
+  if (quoteSentence(c)) return "Replying to \"" + c.quote!.replace(/\s+/g, " ").trim() + "\" in this part of the conversation:";
   return c.src ? "Replying to this highlighted code (" + c.src + "):" : "Replying to this part of the conversation:";
 }
 
@@ -38,10 +48,11 @@ export function quoteLeadIn(c: QuoteCite): string {
  *  become one section each, in the order they sit in the strip. `src` (the VS Code editor flavor,
  *  2026-07-13) names where a highlight came from, a workspace-relative file:lines, so that section's
  *  lead-in points the agent at the code, not the conversation; a file viewer's quote names its file and lines
- *  (quoteLeadIn). No quote at all is the text alone. */
+ *  (quoteLeadIn); a transcript passage shorter than a sentence is named in its lead-in and its sentence quoted (ctx).
+ *  No quote at all is the text alone. */
 export function quoteReplyBody(cites: QuoteCite[], text: string): string {
   const sections = cites.map((c) => {
-    const q = (c.quote || "").split("\n").map((l) => "> " + l).join("\n");
+    const q = (quoteSentence(c) ?? c.quote ?? "").split("\n").map((l) => "> " + l).join("\n");
     return quoteLeadIn(c) + "\n" + q;
   });
   const quoted = sections.join("\n\n");

@@ -11,6 +11,7 @@ import { threadsByAnchor, threadBusy, threadStuck, replyOwed, agentCount, findEx
          threadTakesReplies,
          type CommentThread, type CommentCreate } from "./comments";
 import { compactDisplay } from "./compact";
+import { quoteContext } from "./quote-context";
 
 const requireCjs = createRequire(__filename);
 
@@ -1213,12 +1214,12 @@ test("a Comment on a passage with a thread opens it, and its box offers New thre
   assert.match(body, /const existing = !live && !fresh \? existingThreadFor\(commentThreads\.get\(sid\) \|\| \[\], uuid, exact, prose, at\) : null;/,
                "the thread lookup reads the live range (executed by the test 'New thread instead carries the selection's live "
                + "range' and by test_comment_layout_existing_served.py's repeated-phrase, tie, next-turn and rail-stamp tests)");
-  assert.match(body, /openCommentPopover\(sid, existing\.tid, undefined, undefined, \{ sid, tid: existing\.tid, uuid, exact, x, y, at \}\);/,
+  assert.match(body, /openCommentPopover\(sid, existing\.tid, undefined, undefined, \{ sid, tid: existing\.tid, uuid, exact, x, y, at, ctx \}\);/,
                "the redirect keeps the live range for New thread instead (the test 'New thread instead carries the selection's live range' runs it)");
   const pop = UI.slice(UI.indexOf("function renderCommentPopover("));
   const popBody = pop.slice(0, pop.indexOf("\nfunction ", 10));
   assert.match(popBody, /if \(th && cmtRedirect && cmtRedirect\.tid === th\.tid\) \{[\s\S]{0,700}nb\.textContent = "New thread instead";[\s\S]{0,200}nb\.dataset\.act = "cmtnewthread";/);
-  assert.match(UI, /cmtnewthread: \(\) => \{ const r = cmtRedirect; if \(r\) openCommentComposer\(r\.sid, r\.uuid, r\.exact, r\.x, r\.y, r\.at, true\); \},/,
+  assert.match(UI, /cmtnewthread: \(\) => \{ const r = cmtRedirect; if \(r\) openCommentComposer\(r\.sid, r\.uuid, r\.exact, r\.x, r\.y, r\.at, true, r\.ctx\); \},/,
                "delegated on the body (click-safe), onto the selection the gesture had and its live range (the test 'New thread instead carries the selection's live range' runs r.at)");
   assert.match(UI, /cmtRedirect = redirect && redirect\.tid === tid \? redirect : null;/, "a mark click or a rail jump offers no such action");
 });
@@ -1250,10 +1251,10 @@ test("New thread instead carries the selection's live range, so it opens the com
   const env = {
     turnProse: () => REPEATS, holdForPassage, existingThreadFor, cmtCreateInFlight: new Map([[a.createId, a], [b.createId, b]]),
     commentThreads: new Map([[SID, threads]]), pickThreadColor: () => "#888", applyCommentMarks: () => {}, vscodeApi: undefined,
-    document: { querySelector: () => null }, shown,
+    document: { querySelector: () => null }, shown, quoteContext,
   };
   const page = new Function("env", "const { turnProse, holdForPassage, existingThreadFor, cmtCreateInFlight, commentThreads, pickThreadColor, "
-    + "applyCommentMarks, vscodeApi, document } = env;\n"
+    + "applyCommentMarks, vscodeApi, document, quoteContext } = env;\n"
     + "let commentPopPos = null, cmtPopPosMine = false, cmtRedirect = null, pendingCommentAnchor = null, openCommentKey = null;\n"
     + "const renderCommentPopover = () => { env.shown.push({ open: openCommentKey, anchor: pendingCommentAnchor }); };\n"
     + src + "\nreturn { openCommentComposer, cmtnewthread };")(env) as { openCommentComposer: (...args: unknown[]) => void; cmtnewthread: () => void };
@@ -1263,6 +1264,18 @@ test("New thread instead carries the selection's live range, so it opens the com
   const box = shown[1]?.anchor;
   assert.deepEqual([shown.length, box?.exact, box?.sent], [2, "the cache", undefined],
                    "New thread instead opens the comment box on the selection, not a's sent box: " + JSON.stringify(box));
+  // a few words of a sentence (2026-10-14): the box holds the sentence they sit in, read from the turn's prose at the live
+  // range, which the create carries to the thread's first message
+  assert.equal(box?.context, "\u2026Each export then refills the cache from the database, and the worker drains the queue\u2026");
+});
+
+test("the create carries the sentence a short passage sits in, and a frame without one is unchanged (2026-10-14)", () => {
+  const ctx = "\u2026Each export then refills the cache from the database\u2026";
+  const held = newCommentCreate({ sid: SID, uuid: "a3", exact: "the cache", context: ctx }, "why refill?", "");
+  assert.equal(commentCreateFrame(held).context, ctx);
+  assert.deepEqual(commentCreateFrame(held), commentCreateFrame(held), "a re-post carries it too");
+  const plain = commentCreateFrame(newCommentCreate({ sid: SID, uuid: "a3", exact: "the cache", context: null }, "why?", ""));
+  assert.ok(!("context" in plain), "no sentence, no field: the plain quote, as an older kernel reads it");
 });
 
 test("renderCommentPopover's focus line has no redirect clause (source pin)", () => {

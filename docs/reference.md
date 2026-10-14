@@ -6652,7 +6652,8 @@ box's rules: selecting again replaces the chip, holding ⌘ (Ctrl elsewhere) whi
 one, and the same text never lists twice. **⌘⏎** stages what is typed, with its chips, in a staged
 strip inside the thread's box (the message box's own strip, over the thread's own list); **⏎** sends
 everything staged and then what is in the box as one reply to the thread, each quote under
-`Replying to this part of the conversation:`. **⏎** on an empty box sends what is staged, and the
+`Replying to this part of the conversation:` (a few words of a sentence the way the message box sends
+them, [named, with their sentence](#a-highlight-shorter-than-a-sentence)). **⏎** on an empty box sends what is staged, and the
 strip's **Send now** sends it alone. **Esc** first drops the chips, then closes the box. The staged
 replies are kept per thread through a reload, and deleting the thread drops them. A resolved
 thread keeps its plain reply, and the new-comment box sends its comment on either key.
@@ -7395,11 +7396,35 @@ mark. Hovering a mark gives the state and when it was reached.
 A comment thread's opening message wraps your comment in text written for the
 thread's agent: a line saying the thread was split off from the main
 conversation to ask about one part of it, then the passage you highlighted,
-quoted. Under your comment, the thread's box shows a one-line note, "What romp
+quoted, or for a few words of a sentence the words and the sentence they sit in.
+Under your comment, the thread's box shows a one-line note, "What romp
 sent with your comment"; opening it shows that text exactly as it was sent. It
 is read from the thread's record, or for a thread made before the record kept
 it, from the opening message itself, so it is there after a reload too. A thread
 whose opening message romp added nothing to shows no note.
+
+## A highlight shorter than a sentence
+
+A quote of a few words alone ("placement") does not say where they were, so a
+highlight shorter than a sentence goes out named, with the sentence it sits in.
+In the message box, and in a comment thread's reply box:
+
+```
+Replying to "placement" in this part of the conversation:
+> …We should revisit the placement of the legend before shipping the deck…
+```
+
+A comment thread's opening message does the same under its first line:
+`About "placement" in this part of the conversation:`, then the sentence. The
+sentence is read from the message as the chat shows it, at the moment you select:
+it runs from the end of the sentence before the words to the end of the one they
+are in, within one paragraph, list item, heading or line of code. A `…` marks
+where that line goes on before or after it, a sentence longer than about 280
+characters is cut to the words around the highlight, and when the words occur
+more than once in what is quoted, the one you highlighted is in bold. A
+highlight of a whole sentence or more, a quote from the file viewer and a
+highlight in the editor go out as before, the passage alone. What the quote
+chip's preview shows is what is sent.
 
 ## What a relay sends
 

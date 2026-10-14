@@ -171,6 +171,42 @@ class _Harness(unittest.TestCase):
         return [f for f in self.sent if f.get("type") == "commentCreated"]
 
 
+class ShortPassageSentence(_Harness):
+    """A passage shorter than a sentence (the user 2026-10-14): the page sends the sentence it sits in with the create
+    (`context`), read from the rendered message at the selection, and the thread's opener names the words and quotes it.
+    The kernel takes the page's sentence; it never reconstructs one. Synthetic prose."""
+    SENTENCE = "Use exponential backoff with a jitter of ten percent."
+
+    def _create_with(self, uuid, exact, context):
+        msg = {"type": "commentCreate", "id": PARENT, "uuid": uuid, "exact": exact, "text": "Why ten?", "name": "",
+               "createId": "c-" + uuid}
+        if context is not None:
+            msg["context"] = context
+        return self._drive(msg)
+
+    def test_the_create_carries_the_pages_sentence_into_the_opener(self):
+        self._create_with("a1", "jitter", self.SENTENCE)
+        row = self._rows()[0]
+        self.assertTrue(row["sent"].endswith('About "jitter" in this part of the conversation:\n\n> ' + self.SENTENCE),
+                        row["sent"])
+        self.assertEqual(row["exact"], "jitter", "the passage stays the highlighted words")
+
+    def test_a_parked_create_keeps_the_sentence_when_it_lands(self):
+        self._create_with("a9", "jitter", "\u2026Add a jitter to the backoff\u2026")
+        self.assertEqual(len(km._parked_creates), 1)
+        p = Path(km._sessions(0)[0]["path"])
+        with p.open("a") as fh:
+            fh.write(json.dumps(aline(self.now - 300, "Then add a jitter to the backoff. Cap it too.", "a9", parent="a1")) + "\n")
+        km._retry_parked_creates()
+        self.assertEqual(km._parked_creates, [])
+        self.assertIn('About "jitter" in this part of the conversation:\n\n> \u2026Add a jitter to the backoff\u2026',
+                      self._rows()[0]["sent"])
+
+    def test_a_frame_without_one_quotes_the_passage_as_before(self):
+        self._create_with("a1", "Use exponential backoff with a jitter of ten percent.", None)
+        self.assertTrue(self._rows()[0]["sent"].endswith(km._COMMENT_FRAME_HEAD + "\n\n> " + self.SENTENCE))
+
+
 class CreateIsIdempotent(_Harness):
     def test_the_same_create_twice_yields_one_thread_and_two_acks_naming_it(self):
         self._create(); self._create()

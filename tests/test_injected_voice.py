@@ -170,6 +170,9 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # the user's own words; the quoting frame around them is romp-authored and scanned here
             "comment thread opener": km._comment_first_message(
                 "Cap the retry delay at two minutes.", "Why two minutes and not five?"),
+            # …on a few words of a sentence (the user 2026-10-14): the head names the words, the quote is their sentence
+            "comment thread opener (a few words)": km._comment_first_message(
+                "delay", "Which delay?", context="\u2026Cap the retry **delay** at two minutes, whatever the first delay was\u2026"),
             # …on a passage from before the last compaction (the user 2026-09-30): the opener adds what surrounded
             # the passage and where the transcript is saved, and labels the comment as the ask, rendered by the REAL
             # builders so the scan reads the words the code emits; the excerpts are the conversation's own words,
@@ -376,7 +379,7 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
             # telling, not asking; so does the context a thread on a passage from before a summary carries
             if name in ("typed follow-up on a summary",
                         "debt reminder (question)", "debt reminder (handoff)",
-                        "debt reminder (several)", "comment thread opener", "edit trace",
+                        "debt reminder (several)", "comment thread opener", "comment thread opener (a few words)", "edit trace",
                         "comment thread opener (from before a summary)",
                         "comment thread opener (from before a summary, neither side)",
                         "the context from before a summary, with only the passage's other side before it",

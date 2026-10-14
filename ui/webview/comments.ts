@@ -257,6 +257,9 @@ export function prunePending(pending: { text: string; t: number }[], msgs: Comme
  *  second with the first thread and wrote its name nowhere (review, 2026-09-09). */
 export type CommentCreate = { sid: string; uuid: string; exact: string; text: string; name: string;
   model: string; effort: string; fast: string; color: string; createId: string;
+  /** the sentence a passage shorter than one sits in, read by the page at the selection (render.ts openCommentComposer):
+   *  the thread's first message names the words and quotes it (the kernel's _comment_opener_parts, 2026-10-14) */
+  context?: string;
   /** the thread ids the page knew on the session at the send: a thread on this passage that is NOT among them is
    *  the one this create made (synthSuperseded) */
   prior?: string[] };
@@ -270,11 +273,11 @@ export function mintCreateId(): string {
 /** The create a send gesture holds: stamped with a fresh id, picks defaulted to "" (the kernel's
  *  default-comment settings, then the parent's). */
 export function newCommentCreate(anchor: { sid: string; uuid: string; exact: string; model?: string; effort?: string;
-                                           fast?: string; color?: string },
+                                           fast?: string; color?: string; context?: string | null },
                                  text: string, name: string): CommentCreate {
   return { sid: anchor.sid, uuid: anchor.uuid, exact: anchor.exact, text, name, model: anchor.model || "",
            effort: anchor.effort || "", fast: anchor.fast || "", color: anchor.color || "",
-           createId: mintCreateId() };
+           createId: mintCreateId(), ...(anchor.context ? { context: anchor.context } : {}) };
 }
 
 /** The held create an ack or a refusal answers. The kernel echoes the gesture's createId, so the answer names exactly
@@ -409,7 +412,8 @@ export function synthSuperseded(threads: CommentThread[], held: CommentCreate): 
 /** The commentCreate frame for a held create: the send and every re-post of it build the same one, so
  *  the kernel sees one id for one gesture. */
 export function commentCreateFrame(c: CommentCreate): { type: "commentCreate"; id: string; uuid: string; exact: string;
-    text: string; name: string; model: string; effort: string; fast: string; color: string; createId: string } {
+    text: string; name: string; model: string; effort: string; fast: string; color: string; createId: string; context?: string } {
   return { type: "commentCreate", id: c.sid, uuid: c.uuid, exact: c.exact, text: c.text, name: c.name,
-           model: c.model, effort: c.effort, fast: c.fast, color: c.color, createId: c.createId };
+           model: c.model, effort: c.effort, fast: c.fast, color: c.color, createId: c.createId,
+           ...(c.context ? { context: c.context } : {}) };   // only when there is one: a frame without it is the plain quote
 }

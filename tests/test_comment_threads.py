@@ -1106,6 +1106,40 @@ class OpeningMessage(unittest.TestCase):
         self.assertTrue(body.startswith(km._FORK_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD))
         self.assertEqual(km._comment_strip_frame(body), "Review the cap.")
 
+    # ── a passage shorter than a sentence (the user 2026-10-14, who approved the wording): the opener names the words
+    # and quotes the sentence they sit in, which the page read from the rendered message at the selection ────────────
+    SENTENCE = "\u2026We should revisit the placement of the legend before shipping the deck\u2026"
+
+    def test_a_short_passage_names_its_words_and_quotes_its_sentence(self):
+        body = km._comment_first_message("placement", "Where would it go instead?", context=self.SENTENCE)
+        self.assertEqual(body, km._THREAD_FRAME + "\n\n"
+                         'About "placement" in this part of the conversation:\n\n'
+                         "> \u2026We should revisit the placement of the legend before shipping the deck\u2026\n\n"
+                         "Where would it go instead?")
+        self.assertEqual(km._comment_strip_frame(body), "Where would it go instead?", "the bubble shows the comment alone")
+        sent, said = km._comment_opener_parts("placement", "Where would it go instead?", context=self.SENTENCE)
+        self.assertEqual(km._comment_opener_split(body), (sent, said), "the note shows what romp added, verbatim")
+
+    def test_a_short_passages_marked_occurrence_rides_as_the_page_marked_it(self):
+        ctx = "Move the legend below the chart, and keep the **legend**'s font small."
+        body = km._comment_first_message("legend", "Which one moves?", context=ctx)
+        self.assertIn('About "legend" in this part of the conversation:\n\n> ' + ctx + "\n\n", body)
+
+    def test_a_short_passage_on_every_layout_splits_back(self):
+        for prior, frame in (("", None), ("", km._FORK_FRAME), (self.PRIOR, None), (self.PRIOR, km._FORK_FRAME)):
+            with self.subTest(prior=bool(prior), frame=bool(frame)):
+                sent, said = km._comment_opener_parts("placement", "> quoting myself\n\nWhy?", prior, frame,
+                                                      context=self.SENTENCE)
+                self.assertIn('About "placement" in this part of the conversation:\n\n> ' + self.SENTENCE, sent)
+                self.assertEqual(km._comment_opener_split(sent + "\n\n" + said), (sent, "> quoting myself\n\nWhy?"))
+
+    def test_no_sentence_or_one_without_the_words_is_the_plain_opener(self):
+        plain = km._comment_first_message("placement", "Why?")
+        self.assertIn("\n\n" + km._COMMENT_FRAME_HEAD + "\n\n> placement\n\n", plain, "a whole-sentence passage, as before")
+        self.assertEqual(km._comment_first_message("placement", "Why?", context=""), plain)
+        self.assertEqual(km._comment_first_message("placement", "Why?", context="An unrelated line."), plain,
+                         "a sentence that does not hold the words is not this passage's")
+
     # ── what romp sent, read back from a stored opening message (the popover's note, the user 2026-09-30) ──────────
     def test_the_split_gives_back_exactly_what_romp_added_and_the_users_words(self):
         for prior, frame in (("", None), (self.PRIOR, None), (self.PRIOR, km._FORK_FRAME)):
