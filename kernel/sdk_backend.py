@@ -16075,7 +16075,7 @@ class SdkBackend:
             fired.append(1)
             getattr(self, "_boot_attach_unsettled", set()).discard(sid)
             if sid is not None:
-                self._boot_attach_settled_sids.add(sid)
+                getattr(self, "_boot_attach_settled_sids", set()).add(sid)
             if release:
                 try:
                     release()

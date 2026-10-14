@@ -3668,7 +3668,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `stacks`: every live thread's stack, keyed `"<ident> <kind>"`. The kind
   is the thread's name up to the naming convention's colon (`sdk` and
   `sdk-intr`, `sdk-fbcause` (a session reading a standing fallback's cause off its transcript at an attach) for a session's threads, `codex` for a Codex session's worker,
-  `end-host` for a session's end hook, `port-up` for a dial's port watch, `peer` for a postal peer loop, `push-pull` for a linked machine's notification puller,
+  `end-host` for a session's end hook, `end-cli` for the direct end of a CLI whose host could not confirm an end, `port-up` for a dial's port watch, `peer` for a postal peer loop, `push-pull` for a linked machine's notification puller,
   `romp-refused-mark` for the refused-echo mark a cut-off boot re-delivery writes aside), the
   target function for a thread the code left unnamed (`_ask_poll`,
   `_parent_watch`, `_update_check_loop`, `_tunnel_supervisor`,
