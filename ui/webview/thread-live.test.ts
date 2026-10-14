@@ -159,17 +159,38 @@ test("ONE background box painter: the chat's #bg-tasks, or the thread's .cmt-bg 
   assert.doesNotMatch(install, /activeId/, "never the active tab's");
   assert.match(RENDER, /\(\(\) => \{ const host = document\.getElementById\("bg-tasks"\); if \(host\) installBgBox\(host\); \}\)\(\);/);
   const thread = fn("renderThreadBg");
-  assert.match(thread, /renderBgTasks\(\{ host, sid: cur \? threadSidOf\(cur\.th\) : null,/);
+  assert.match(thread, /const sid = cur \? threadSidOf\(cur\.th\) : null;\s*\n\s*renderBgTasks\(\{ host, sid,/);
   assert.match(fn("renderCommentPopover"), /const bg = el\("div", "cmt-bg"\);[\s\S]{0,200}installBgBox\(bg\);/, "installed once per popover, on its stable host");
   assert.match(fn("renderCommentPopover"), /if \(th\) renderThreadBg\(\);\s+\/\/ the background box, from this frame/, "repainted by each frame");
 });
 
-test("the context gauge: the chat's battery over the thread's status, a click compacting the THREAD", () => {
+test("the context gauge: the chat's battery over the thread's status, a click compacting the THREAD by its state at the click", () => {
   const pop = fn("renderCommentPopover");
-  assert.match(pop, /const ctx = buildCtxBar\(\(bar\) => compactSessionOf\(bar, threadSidOf\(th\), threadMetaStatus\(th\)\.state\)\);/);
+  assert.match(pop, /const ctx = buildCtxBar\(compactOpenThread\);/, "never a state read when the popover was built (the review of #240)");
+  const click = fn("compactOpenThread");
+  assert.match(click, /const cur = openCommentThread\(\);/, "the open thread as it stands now");
+  assert.match(click, /compactSessionOf\(bar, threadSidOf\(cur\.th\), threadMetaStatus\(cur\.th\)\.state\);/, "the chat's own rules over its current state");
   assert.match(fn("paintThreadCtx"), /setCtxBar\(bar, st\.ctx, st\.state === "compacting", pickTone\(st\.ctxColor, st\.ctxTone\), st\.ctxOver\);/);
   assert.match(fn("compactSessionOf"), /vscodeApi\.postMessage\(\{ type: "compactSession", id: sid \}\);/);
   assert.match(fn("compactActiveSession"), /compactSessionOf\(bar, activeId, s\.status\.state\);/, "the chat's battery through the same post");
+});
+
+// ── the review of #240: the conversation keeps its bottom, and the box's output tails ride their own frame ──────────────
+
+test("ONE rule keeps a following reader on the conversation's bottom whatever part of the box takes its room", () => {
+  const keep = fn("keepCmtTail");
+  assert.match(keep, /new ResizeObserver\(/, "the list's own size, observed: every part of the box that changes it at once");
+  assert.match(keep, /list\.addEventListener\("scroll", \(\) => \{ following = cmtFollowing\(list\); \}/, "the record: the list's scroll events");
+  assert.match(keep, /if \(lastH >= 0 && \(w !== lastW \|\| h !== lastH\) && wasFollowing\) list\.scrollTop = sh;/);
+  assert.match(fn("fillCommentMsgs"), /const atTail = cmtFollowing\(list\);/, "the refill's follow reads the same predicate");
+  assert.match(fn("renderCommentPopover"), /if \(msgs\) \{ msgs\.scrollTop = msgs\.scrollHeight; keepCmtTail\(msgs\); \}/, "installed once per popover");
+});
+
+test("a running thread's output tails: their own frame, merged into the box's rows by row id", () => {
+  assert.match(RENDER, /else if \(m\.type === "threadBgOut"\) applyThreadBgOut\(m\);/);
+  assert.match(fn("applyThreadBgOut"), /if \(m\.id === openThreadSid\(\)\) renderThreadBg\(\);/, "the open thread's box repaints at once");
+  assert.match(fn("renderThreadBg"), /withThreadBgOut\(/);
+  assert.match(fn("withThreadBgOut"), /typeof out\[t\.id\] === "string" \? \{ \.\.\.t, output: out\[t\.id\] \} : t/, "a row the frame names takes its tail");
 });
 
 test("a broken-out thread's Open the session names the session as the strip does (host-prefixed on a linked machine)", () => {

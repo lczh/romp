@@ -6682,6 +6682,8 @@ agent row, the background box with the commands, agents and watches it waits on,
 gauge beside its model and effort, and the API retry card while the API backs off. A thread that
 finished its turn but waits on a background command reads **Awaiting command**, never **Ready**.
 A click on the gauge compacts the thread; Stop on a background row stops that task in the thread.
+Reading at the bottom of the thread's messages, you stay at the bottom as these parts come and go,
+so a reply streams into view; scrolled up, you keep your place.
 
 ### Where typing, pasting and dictation go
 

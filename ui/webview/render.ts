@@ -11572,9 +11572,8 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
   const prevScroll = list.scrollTop;
   // the slack rule (the user 2026-08-25, same word as the chat's appendActive): while the thread's
   // content hasn't overflowed the fixed box, streaming writes in place — no follow, no jump; once
-  // overflowing, the at-tail stick behaves as before
-  const overflowed = list.scrollHeight > list.clientHeight + 2;
-  const atTail = overflowed && list.scrollTop >= list.scrollHeight - list.clientHeight - 8;
+  // overflowing, the at-tail stick behaves as before (cmtFollowing, the same reading the box's own resize rule keeps)
+  const atTail = cmtFollowing(list);
   list.replaceChildren();
   // pruned against BOTH projections (T106 lab, screenshot: the follow-up double-showed — its
   // landed user TURN rendered from th.events while the echo, pruned only against th.msgs, waited
@@ -11728,6 +11727,42 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
     list.appendChild(note);
   }
   list.scrollTop = atTail ? list.scrollHeight : prevScroll;
+}
+
+// THE CONVERSATION KEEPS ITS BOTTOM (the review of PR 240, 2026-10-14). The popover's box has a fixed size and its
+// conversation list flexes inside it, so every other part of the box takes its height from the list: the thinking line, the
+// question card, the background box, the staged strip, the composer as it grows. A list that loses height keeps its
+// scrollTop, so a reader on the bottom is silently that much above it, and the next frame's refill (fillCommentMsgs) follows
+// only from within CMT_TAIL_PX of the bottom: after a send in a long thread, the reply streamed out of sight once the thread
+// began thinking. One rule for every part, the chat's rule for its boxes below the transcript (followBoxBelow with
+// atBottomBeforeGrowth): the list's own size is observed, and a reader who was following the conversation is written back
+// to its bottom at every change. Following is the refill's own reading (cmtFollowing: overflowing, and at the bottom; the
+// slack rule leaves a conversation that fits where it is), taken two ways, either of which re-pins: as RECORDED by the
+// list's scroll events (the reader's scrolls and every write the page makes; a change of size moves no scroll, so the
+// record still holds the truth from before it, and a refill that ran between the change and this pass and measured the
+// reader off the bottom cannot unseat it), and from the geometry with the lost height added back (a scroll event from an
+// earlier write, landing after the change, records the reader as off the bottom). A reader scrolled up is never moved.
+// (The question card also brings the bottom into view when it arrives, renderThreadAsk: that is its reveal, for any reader.)
+const CMT_TAIL_PX = 8;
+function cmtAtTail(list: HTMLElement): boolean {
+  return list.scrollHeight - list.scrollTop - list.clientHeight <= CMT_TAIL_PX;
+}
+function cmtFollowing(list: HTMLElement): boolean {
+  return list.scrollHeight > list.clientHeight + 2 && cmtAtTail(list);
+}
+function keepCmtTail(list: HTMLElement): void {
+  if (typeof ResizeObserver !== "function") return;
+  let following = cmtFollowing(list);
+  let lastW = -1, lastH = -1;
+  list.addEventListener("scroll", () => { following = cmtFollowing(list); }, { passive: true });
+  const ro = new ResizeObserver(() => {
+    if (!list.isConnected) { ro.disconnect(); return; }   // the popover closed or rebuilt: this list is gone
+    const w = list.clientWidth, h = list.clientHeight, sh = list.scrollHeight;
+    const wasFollowing = following || (lastH > h && sh > lastH + 2 && sh - list.scrollTop - lastH <= CMT_TAIL_PX);
+    if (lastH >= 0 && (w !== lastW || h !== lastH) && wasFollowing) list.scrollTop = sh;
+    lastW = w; lastH = h;
+  });
+  ro.observe(list);
 }
 
 // Refill the OPEN popover's conversation in place (leg C, the user 2026-08-24): the popover renders
@@ -12521,8 +12556,8 @@ function renderCommentPopover(): void {
       syncMetaControls(metaBox, threadMetaStatus(th), threadSidOf(th));   // the thread's session: a pick routes to the kernel that runs it
       right.appendChild(metaBox);
       // the context gauge, the chat's own battery (thread-live-2): the thread's fill from its build's status, a click
-      // compacts the THREAD (compactSessionOf), kept across in-place refreshes and refilled by each frame
-      const ctx = buildCtxBar((bar) => compactSessionOf(bar, threadSidOf(th), threadMetaStatus(th).state));
+      // compacts the THREAD (compactOpenThread), kept across in-place refreshes and refilled by each frame
+      const ctx = buildCtxBar(compactOpenThread);
       ctx.classList.add("cmt-ctx");
       paintThreadCtx(ctx, th);
       right.appendChild(ctx);
@@ -12667,7 +12702,7 @@ function renderCommentPopover(): void {
   pop.style.top = py + "px";
   syncCmtMaxState(pop);                              // a stored cap-sized preference opens reading "Restore"
   const msgs = pop.querySelector(".cmt-msgs") as HTMLElement | null;
-  if (msgs) msgs.scrollTop = msgs.scrollHeight;
+  if (msgs) { msgs.scrollTop = msgs.scrollHeight; keepCmtTail(msgs); }   // opens on the bottom, and keeps it while the box's other parts change (keepCmtTail)
   // …and the caret, EXCEPT while a reload is putting the reader's thread back (restoringCommentPop): nobody asked
   // for this popover on this page-load, so a reader who started typing in the composer the instant the transcript
   // landed must not have the caret pulled out from under them (the user 2026-09-23)
@@ -18856,6 +18891,15 @@ function compactSessionOf(bar: HTMLElement, sid: string, state: string): void {
   vscodeApi.postMessage({ type: "compactSession", id: sid });
   bar.classList.add("ctx-clicked");   // immediate cue; the real compacting state takes over via the poll
 }
+// The thread gauge's click: the open thread and its state as they stand AT THE CLICK, by the chat's own rules (compactSessionOf).
+// The gauge outlives the frame it was built on (the popover refreshes in place), so a state read when the popover opened went
+// stale: opened while the thread worked, a click during its question compacted it anyway; opened while it compacted, every
+// later click did nothing (the review of PR 240, 2026-10-14). Read fresh, as the chat's battery reads its tab (compactActiveSession).
+function compactOpenThread(bar: HTMLElement): void {
+  const cur = openCommentThread();
+  if (!cur || cur.th.status !== "open") return;
+  compactSessionOf(bar, threadSidOf(cur.th), threadMetaStatus(cur.th).state);
+}
 // A thread's gauge: the chat's setCtxBar over the thread's build status (its fill, tint and over-the-window mark).
 function paintThreadCtx(bar: HTMLElement, th: CommentThread): void {
   const st = threadMetaStatus(th);
@@ -22819,6 +22863,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "update") update(m);
   else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
   else if (m.type === "status") statusOnly(m);
+  else if (m.type === "threadBgOut") applyThreadBgOut(m);   // a running comment thread's command output tails, for its popover's box
   else if (m.type === "liveStatus") applyLiveStatus(m);   // what a session is doing this second (thinking, its subagents' progress): no chat build behind it
   else if (m.type === "glossary" && typeof m.id === "string") {   // the session's glossary index (T351 stage 2): a new one re-links the view
     glossaries.set(m.id, m as GlossaryIndex);
@@ -24870,15 +24915,33 @@ function installBgBox(host: HTMLElement): void {
 (() => { const host = document.getElementById("bg-tasks"); if (host) installBgBox(host); })();
 // Every box on the page, after a fold changed (the fold keys are per session and per row, so each box reads its own)
 function repaintBgBoxes(): void { renderBgTasks(); renderThreadBg(); }
+// A running thread's command output tails (the review of PR 240, 2026-10-14): the comments frame carries the box's rows without
+// them, and the kernel sends each thread's tails on a frame of their own, read fresh on every push and sent only when one
+// moved (kernel _send_thread_bg_out). Kept per thread sid for the page's life: a slot that did not move is not resent, so a
+// popover reopened later still finds the tails it last got. A row's own output (a kernel from before the split) stands
+// until a frame names the row.
+const threadBgOut = new Map<string, Record<string, string>>();
 // The open thread's background box (thread-live-2): the chat's painter over the thread's build status and tracked tasks,
-// repainted by each comments frame (the popover's refresh) and by its own folds
+// repainted by each comments frame (the popover's refresh), by its own folds and by each of its output frames
 function renderThreadBg(): void {
   const host = document.querySelector("#cmt-pop .cmt-bg") as HTMLElement | null;
   const cur = openCommentThread();
   if (!host) return;
   const live = cur && cur.th.status === "open" ? cur.th.live : null;
-  renderBgTasks({ host, sid: cur ? threadSidOf(cur.th) : null,
-                  src: live ? { bgTasks: (live.bgTasks as { tasks: BgTask[] } | null) || null, status: threadMetaStatus(cur!.th) } : null });
+  const sid = cur ? threadSidOf(cur.th) : null;
+  renderBgTasks({ host, sid,
+                  src: live ? { bgTasks: withThreadBgOut((live.bgTasks as { count: number; tasks: BgTask[] } | null) || null, sid), status: threadMetaStatus(cur!.th) } : null });
+}
+function withThreadBgOut(bg: { count: number; tasks: BgTask[] } | null, sid: string | null): { count: number; tasks: BgTask[] } | null {
+  const out = sid ? threadBgOut.get(sid) : undefined;
+  if (!bg || !out || !Array.isArray(bg.tasks)) return bg;
+  return { ...bg, tasks: bg.tasks.map((t) => (typeof out[t.id] === "string" ? { ...t, output: out[t.id] } : t)) };
+}
+function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
+  if (typeof m.id !== "string" || !m.id) return;
+  const out = m.out && typeof m.out === "object" ? m.out as Record<string, string> : {};
+  threadBgOut.set(m.id, out);
+  if (m.id === openThreadSid()) renderThreadBg();
 }
 (() => {
   // The statusline's Awaiting chip (slice 2, 2026-09-05): a click opens the awaiting box and brings it
