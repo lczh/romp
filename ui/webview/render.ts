@@ -20501,11 +20501,15 @@ function quoteText(r: Range, cap = QUOTE_CAP + 1): string {
   if (outer) { node = outer; pre = inside(outer); }
   else if (node) pre = inside(node);
   else { pre = inside(start) + ((start as Element).tagName === "PRE" ? 1 : 0); exit(start as Element); }   // on after it
-  // a start inside a diff row's code: the row's marker is owed all the same, and the code before the start is a blank as
-  // wide, so the marker stands apart from what was selected ("-           0.1", never "-0.1")
+  // a start inside a diff row's code: the row's marker is owed all the same, and the code before the start stands apart
+  // from what was selected: as blanks as wide when it is short or only the row's indent, so the line keeps its place
+  // beside the rows under it ("-           0.1", never "-0.1"), else as " …". Blanks for a long lead were unbounded: a
+  // sentence at column 4,650 of a long row went out as its blanks alone, cut at the cap (review of #242)
   const code = !outer && node && node.nodeType === Node.TEXT_NODE ? node.parentElement : null;
   if (code && code.classList.contains("diff-code")) {
-    mark = diffMark(code.parentElement) + (node === start ? (start as Text).data.slice(0, r.startOffset).replace(/[^\t]/g, " ") : "");
+    const before = node === start ? (start as Text).data.slice(0, r.startOffset) : "";
+    const blank = before.length <= 16 || (before.length <= 80 && !/\S/.test(before));
+    mark = diffMark(code.parentElement) + (blank ? before.replace(/[^\t]/g, " ") : " \u2026");
   }
   for (;;) {
     if (!node) {                                                 // go on after `from`, leaving the elements it closes

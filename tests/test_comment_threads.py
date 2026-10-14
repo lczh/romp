@@ -1219,6 +1219,11 @@ class OpeningMessage(unittest.TestCase):
         self.assertEqual(self._quote(sent), "> -    rate = 0.1\n> +    rate = 0.25")
         self.assertTrue(km._shown_is_passage("-           0.1\n+    rate = 0.25", "0.111+    rate = 0.25"), "from mid-row")
         self.assertFalse(km._shown_is_passage("-    rate = 0.1\n-    rate = 0.25", exact), "only the first line's sign is free")
+        # review of #242: a long lead before the start is " …" after the sign, which the range's text holds nowhere either
+        sent, _ = km._comment_opener_parts("Token 140 marks the gadget field.", "Why?", shown="+ …Token 140 marks the gadget field.")
+        self.assertEqual(self._quote(sent), "> + …Token 140 marks the gadget field.")
+        self.assertTrue(km._shown_is_passage("  …kept", "kept"), "a context row's")
+        self.assertFalse(km._shown_is_passage("+ …Token 140\n+ …Token 141", "Token 140 x Token 141"), "on the first line only")
 
     # ── what romp sent, read back from a stored opening message (the popover's note, the user 2026-09-30) ──────────
     def test_the_split_gives_back_exactly_what_romp_added_and_the_users_words(self):
