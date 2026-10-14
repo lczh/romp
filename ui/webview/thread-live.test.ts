@@ -103,7 +103,10 @@ test("the popover hosts the card beside its conversation, keeps it across refill
   assert.match(pop, /const ask = el\("div", "cmt-ask"\);/, "a host of its own, outside .cmt-msgs: a frame's refill never rebuilds the card under a click");
   assert.match(pop, /if \(th && th\.status === "open"\) renderThreadAsk\(\);/, "painted once the popover is in the page");
   assert.match(pop, /\.cmt-chips, \.cmt-ask, button, input,/, "the box's drag lets the card's presses through (a captured press retargeted the option's click)");
-  assert.doesNotMatch(RENDER, /Break it out to continue/, "the dead end is gone");
+  // the note that points at Break out shows only where the thread's kernel serves no thread question (the comments
+  // frame's caps), never beside the card (the review of #232: a page newer than its kernel showed the cue and nothing)
+  assert.match(fn("fillCommentMsgs"), /if \(th\.status === "open" && threadStuck\(th\.state\) && !commentThreadAsks\.get\(sid\)\) \{/);
+  assert.match(RENDER, /commentThreadAsks\.set\(sid, Array\.isArray\(m\.caps\) && m\.caps\.includes\("threadAsks"\)\);/);
 });
 
 test("the popover's box is the question's 'add your own' field, by the message box's own rule", () => {

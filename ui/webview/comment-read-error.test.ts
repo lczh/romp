@@ -27,7 +27,7 @@ function liftCommentArms(): string {
 
 const NAMES = ["m", "commentThreads", "commentReadError", "commentPending", "commentDrafts", "cmtAwaitBase", "cmtCreateInFlight",
   "synthSuperseded", "cmtLatchReleased", "pendingAdopt", "pendingCommentAnchor", "adoptCommentThread", "openCommentKey",
-  "vscodeApi", "applyCommentMarks", "renderCommentPopover", "warnToast", "ephemeralWarnToast", "tabName"];
+  "vscodeApi", "applyCommentMarks", "renderCommentPopover", "warnToast", "ephemeralWarnToast", "tabName", "commentThreadAsks"];
 const thread = (tid: string) => ({ tid, anchorUuid: "u-" + tid, exact: "the passage", status: "open", createdT: 1, state: "",
   unread: false, promotedName: "", msgs: [] });
 
@@ -46,7 +46,7 @@ function page() {
   const deliver = (m: object) => {
     st.open = arms(m, st.threads, st.readError, st.pending, st.drafts, new Map(), new Map(),
       () => false, () => false, null, null, () => {}, st.open, null, () => {}, () => {},
-      (t: string) => st.replayed.push(t), (t: string) => st.toasts.push(t), (sid: string) => (sid === SID ? "web" : undefined));
+      (t: string) => st.replayed.push(t), (t: string) => st.toasts.push(t), (sid: string) => (sid === SID ? "web" : undefined), new Map());
   };
   return { st, deliver };
 }

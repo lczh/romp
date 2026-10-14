@@ -230,7 +230,24 @@ export function prefixInbound(host: string, msg: any): any {
   if (out.type === "data" && out.data && typeof out.data === "object") out.data = prefixTimelineData(host, out.data);
   else if (out.type === "bars") return { ...out, ..._prefixTimelineDetail(host, out) };
   if (out.activeChat && typeof out.activeChat === "object") out.activeChat = _prefixActiveChat(host, out.activeChat);
+  // A COMMENT THREAD is a session of its own, and its `sid` is a session id like every other (thread-live-1, 2026-10-14): the
+  // kernel's question frames (askLive) and its live statuses name the thread by it, and the page answers, stops and sets the
+  // thread's model by it, so a linked machine's thread arrives with its host's prefix here, on the comments frame and on a
+  // create's answer (commentCreated's `thread` row), exactly as the frames that name it do. Unprefixed, a linked machine's
+  // thread showed its Needs you cue with no question to answer (the popover looked the question up by the bare id while
+  // its frame arrived prefixed), and its Stop went to this machine's kernel. A kernel from before the frame carried `sid`
+  // names the thread by its tid, which is the thread's session id. The tid itself stays bare: the thread ops address it
+  // under its parent's id, which carries the host.
+  if (out.type === "comments" && Array.isArray(out.threads)) out.threads = out.threads.map((t: any) => _prefixThreadSid(host, t));
+  if (out.type === "commentCreated" && out.thread && typeof out.thread === "object") out.thread = _prefixThreadSid(host, out.thread);
   return out;
+}
+
+/** A comments-frame thread row with its session id (`sid`, else its tid) wearing `host`'s prefix, on a copy. */
+function _prefixThreadSid(host: string, t: any): any {
+  if (!t || typeof t !== "object") return t;
+  const own = typeof t.sid === "string" && t.sid ? t.sid : (typeof t.tid === "string" ? t.tid : "");
+  return own ? { ...t, sid: prefixId(host, own) } : t;
 }
 
 /** The delegation origin and the awaiting peers of a card OR a chat-box row, rewritten in place on a copy the caller owns.
