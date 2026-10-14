@@ -1163,6 +1163,67 @@ class UnwatchedTurnEnd(unittest.TestCase):
         self.assertEqual(self.be.catchup_lost()[SID_WEB],
                          "its session ended before this kernel had recorded a finished turn its host held")
 
+    def test_a_held_turn_ends_hook_that_fails_before_recording_it_is_uncountable_loudly(self):
+        # the review of #233: the hook raising before its stamp (here: the awaiting overlay's write) left the id held, so
+        # the restart's catch-up waited on it for good, with no line anywhere
+        self.hello(["req-held"])
+        logged = []
+        with mock.patch.object(sb, "append_awaiting", side_effect=OSError(28, "No space left on device")), \
+             mock.patch.object(self.be, "_log", side_effect=lambda m, **k: logged.append((m, k))):
+            with self.assertRaises(OSError):
+                asyncio.run(self.sess._stop_hook({sb.UNWATCHED_STOP_KEY: "req-held"}, None, None))
+        self.assertEqual(self.be.unwatched_pending(), 0, "the catch-up does not wait on it")
+        self.assertEqual(self.be.catchup_lost()[SID_WEB], "the hook of a finished turn its host held failed before recording it")
+        self.assertTrue(any("was not recorded; its count is unknown" in m and k.get("problem") for m, k in logged), logged)
+
+    def test_a_session_that_gave_up_reconnecting_owes_its_held_turn_end_to_the_next_attach(self):
+        # the review of #233: an attach that reached the host and then gave up (its initialize never answered, or its
+        # thread ended) left the session's first hello spent, so the attach a later send makes read the same held Stop
+        # as an ordinary one and buzzed that downtime turn end late. The held ids are owed to the next attach of the life
+        self.hello(["req-held", "req-perm"])
+
+        async def ends():
+            raise RuntimeError("the initialize was never answered")
+        with mock.patch.object(self.sess, "_amain", ends), mock.patch.object(self.sess, "_release_hold_at_exit"), \
+             mock.patch.object(self.be, "_on_session_gone"):
+            self.sess._run()
+        self.assertIn(SID_WEB, self.be.catchup_lost(), "this restart's count is unknown for it")
+        self.sess = sb.SdkSession(self.be, sb.read_reg(jd.STATE, SID_WEB))   # a send revives it
+        self.be.sessions[SID_WEB] = self.sess
+        self.hello(["req-held", "req-perm", "req-new"])
+        self.assertEqual(self.sess._unwatched_rids, {"req-held", "req-perm"},
+                         "still owed: the Stop among them is counted into a summary, never delivered late")
+        self.assertIs(self.sess._host.unwatched, self.sess._unwatched_rids)
+
+    def test_a_failed_boot_reconcile_closes_the_catch_up_at_once(self):
+        # the review of #233: the reconcile failing before its re-attach phase left nothing to settle, and the catch-up
+        # waited for attaches that never started
+        self.assertIsNone(self.be.catchup_failed())
+        with mock.patch.object(sb, "_OurIds", side_effect=RuntimeError("the census fell over")), \
+             mock.patch.object(self.be, "_lease_watch_start"), mock.patch.object(self.be, "_start_test_root_sweep"):
+            self.be._boot_reconcile([sb.read_reg(jd.STATE, SID_WEB)])
+        self.assertEqual(self.be.catchup_failed(), "the boot reconcile failed (RuntimeError)")
+
+    def test_ending_a_session_interrupts_an_attach_still_waiting_for_its_hello(self):
+        # the review of #233: the kill shut the session down but never interrupted its hung connect, and the host kept the
+        # CLI the user was ending
+        import types
+        aborted = []
+        self.sess._host = types.SimpleNamespace(hello=None, abort_connect=lambda why: aborted.append(why), end_grace=120.0)
+        self.sess.loop = types.SimpleNamespace(call_soon_threadsafe=lambda f, *a: f(*a))
+        with mock.patch.object(self.be, "_end_host_by_lease") as end:
+            self.be.kill(SID_WEB)
+        self.assertEqual(aborted, ["the session was ended"])
+        end.assert_called_once_with(SID_WEB)
+
+    def test_a_reattach_stuck_on_a_live_silent_host_is_named(self):
+        import types
+        self.be._boot_attach_set = {SID_WEB}
+        self.sess._host = types.SimpleNamespace(hello=None, hello_probes=1)
+        self.assertEqual(self.be.catchup_stuck(), [], "one probe: an answer may still come")
+        self.sess._host.hello_probes = 2
+        self.assertEqual(self.be.catchup_stuck(), [SID_WEB])
+
     def test_end_to_end_the_kernel_never_buzzes_it_late_and_files_it_as_a_gap_event(self):
         km._set_notify_all(True)
         km._set_notify_turns(True)

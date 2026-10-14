@@ -417,6 +417,41 @@ class TransportOverSocket(unittest.TestCase):
             fh.close()
         run(go())
 
+    def test_a_frozen_host_ends_the_hello_wait_when_its_lease_stops_and_an_end_interrupts_it(self):
+        # the review of #233: a host whose loop is frozen accepts the connection from its backlog and never says hello,
+        # and the wait had no end, so one such re-attach held the restart's catch-up open for good. The wait now asks the
+        # host's liveness (its lease's beat) at each probe: while it beats the wait goes on, counted; once it stops, the
+        # connect raises HostHelloLost. Ending the session ends the wait too
+        async def frozen(reader, writer):
+            await reader.read(65536)                     # takes the attach, answers nothing
+            await asyncio.sleep(30)
+
+        async def go():
+            path = self._path()
+            srv = await asyncio.start_unix_server(frozen, path=path)
+            beats = ["alive", "alive", "alive"]
+
+            def alive():
+                return None if beats and beats.pop() else "its lease no longer names a live host (stale-heartbeat)"
+            with mock.patch.object(ht, "HELLO_PROBE_S", 0.05):
+                t = ht.HostTransport(path, kernel={"pid": 1}, alive=alive)
+                with self.assertRaises(ht.HostHelloLost) as cm:
+                    await asyncio.wait_for(t.connect(), 5)
+                self.assertIn("stale-heartbeat", str(cm.exception))
+                self.assertEqual(t.hello_probes, 3, "it waited while the host beat, and counted each probe")
+                self.assertTrue(issubclass(ht.HostHelloLost, ht.CLIConnectionError))
+                t2 = ht.HostTransport(path, kernel={"pid": 1}, alive=lambda: None)   # beats on: only an end stops it
+                waiting = asyncio.ensure_future(t2.connect())
+                await asyncio.sleep(0.2)
+                self.assertFalse(waiting.done())
+                self.assertGreaterEqual(t2.hello_probes, 2)
+                t2.abort_connect("the session was ended")
+                with self.assertRaises(ht.HostHelloLost) as cm:
+                    await asyncio.wait_for(waiting, 5)
+                self.assertIn("the session was ended", str(cm.exception))
+            srv.close()
+        run(go())
+
     def test_the_unwatched_key_is_the_backends(self):
         self.assertEqual(ht.UNWATCHED_STOP_KEY, sb.UNWATCHED_STOP_KEY)
 
