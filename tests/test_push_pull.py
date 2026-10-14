@@ -37,7 +37,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlparse
 
 from romp_load import load_source
 
@@ -136,6 +136,9 @@ class _Base(unittest.TestCase):
         with km._push_ring_cond:
             km._PUSH_RING.clear()
             km._PUSH_RING_SEQ[0] = 0
+            km._PUSH_FEED.update(id=None, after=0, lives=[], fault=None)   # this test's life reads its own (empty) state root
+            km._PUSH_CATCHUP["done"] = True                 # caught up on its restart (PersistedFeed drives the catch-up)
+        km._TURN_MISSED.clear()
         km._PUSH_PULL_SEEN.clear()
         km._PUSH_PULL_CURSORS[0] = None
         km._PUSH_PULL_CURSOR_LOST[0] = False
@@ -506,7 +509,7 @@ class Puller(_Base):
     def test_a_reset_is_one_loud_line_and_the_cursor_lands_on_disk(self):
         ok, asked, calls, err = self.once((200, {"boot": "77.1", "next": 3, "events": [], "reset": "restarted", "skipped": 3}))
         self.assertTrue(ok)
-        self.assertEqual(asked, ["/push/events?wait=%d&v=2" % km.PUSH_PULL_WAIT], "no cursor held: none sent")
+        self.assertEqual(asked, ["/push/events?wait=%d&v=%d" % (km.PUSH_PULL_WAIT, km.PUSH_PULL_PROTO)], "no cursor held: none sent")
         self.assertEqual(err.count("\n"), 1)
         self.assertIn("events from 'TESTHOST' resume at its newest — its kernel restarted since this kernel last heard from "
                       "it; 3 event(s) it fired meanwhile skipped", err)
@@ -519,7 +522,7 @@ class Puller(_Base):
         km._PUSH_PULL_CURSORS[0] = None                      # a new kernel life: read back from disk
         km._PUSH_PULL_ANSWERED.clear()
         ok, asked, calls, _ = self.once((200, {"boot": "77.1", "next": 4, "events": [self.EV], "caughtUp": True}))
-        self.assertEqual(asked, ["/push/events?wait=%d&v=2&after=77.1%%3A3" % km.PUSH_PULL_WAIT])
+        self.assertEqual(asked, ["/push/events?wait=%d&v=%d&after=77.1%%3A3" % (km.PUSH_PULL_WAIT, km.PUSH_PULL_PROTO)])
         self.assertEqual(len(calls), 1, "nothing fired while it was down (it found its cursor at the newest): the event "
                                         "that fired while it listened is delivered as it arrives")
         self.assertEqual(km._push_pull_cursor(ROW), "77.1:4")
@@ -1210,6 +1213,373 @@ class LocalRestart(_Base):
         self.assertEqual(self.tick(), [])
         self.assertEqual(self.pushed, [])
         self.assertIn("no record of the previous kernel life's turn ends", self.err.getvalue())
+
+
+class _HeldStops:
+    """The SDK backend as the restart catch-up reads it: the boot's re-attaches have all said hello, and `held` sessions
+    still hold a Stop hook their CLI sent while no kernel was attached (unwatched_pending)."""
+
+    def __init__(self):
+        self.held = 0
+
+    def unwatched_pending(self):
+        return self.held
+
+
+class OriginRestart(_Base):
+    """The ORIGIN's event feed survives its own restart (plans/federated-push.md, "The feed across a restart", 2026-10-14).
+
+    Before, the ring lived in memory only: a restart of the origin lost it, so the hub could only say "TESTHOST restarted ·
+    notifications may have been missed", and said it at every restart (every deploy) once any session over there had its
+    bell on, whether or not anything had finished. Now the feed is on disk, its sequence continues, the hub's cursor stays
+    valid, and what the origin detects about its downtime (a turn end whose Stop hook a session's host held until the
+    origin attached again) is a GAP event the hub counts into ONE summary with an exact number, or no summary at all.
+
+    One process plays both kernels: the origin's turn tick and serve, and the hub's puller over them (each answer is the
+    origin's own _push_events_serve). The hub's master is on and its turn switch off, the user's setup: sessions are opted
+    in by their bells. A restart of the origin is its exit row in the restart ledger (an orderly exit), everything in its
+    memory gone, and a new life id; time runs on a clock the test moves."""
+
+    EP = "https://push.example.net/send/desk"
+
+    def setUp(self):
+        super().setUp()
+        _row(push_pull=km.PUSH_PULL_PROTO)
+        km._set_notify_all(True)
+        km._set_notify_turns(False)
+        km._save_push_subs({self.EP: {"endpoint": self.EP, "keys": {"p256dh": "k", "auth": "a"}}})
+        self.alive = [{"sid": s, "name": n, "path": _transcript(s, "The %s fixtures load cleanly now." % n)}
+                      for s, n in ((WEB, "web"), (API, "api"))]
+        self.pushed, self.err = [], io.StringIO()
+        self.clock = time.time()
+        self.stops = _HeldStops()
+        self.lives = 0
+        for name, value in (("_BOOT_ID", "%d.%d" % (os.getpid(), int(self.clock))), ("_STARTED", self.clock),
+                            ("RESTART_CUTS_FILE", jd.STATE / "restart-cuts.jsonl"), ("_sdk_backend", self.stops)):
+            p = mock.patch.object(km, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.addCleanup(km._BOOT_ATTACHED.clear)
+        km._BOOT_ATTACHED.set()
+        km._TURN_BOOTED[0] = False
+        km._TURN_PREV.clear()
+        km._TURN_MEMO_DISK[0] = None
+        self.t = int(self.clock)
+        _stamp_stop(WEB, self.t)
+        _stamp_stop(API, self.t)
+        self.tick()                                          # the origin's first sight of both: a baseline, on disk
+        self.pull()                                          # the hub's first pull: new to it, resumes at the newest
+        self.pull()                                          # …and caught up: a steady link
+        self.err = io.StringIO()                             # what the cases below say, from here
+
+    # ── the two halves ───────────────────────────────────────────────────────────────────────────────────────────────
+    def tick(self):
+        """The origin's turn tick (its pusher cycle)."""
+        with mock.patch.object(km, "_alive_sessions", return_value=self.alive), \
+             mock.patch.object(km, "_push_notify", side_effect=lambda *a, **k: self.pushed.append((a, k))), \
+             mock.patch.object(km, "_push_forward"), mock.patch.object(km, "_self_host", return_value="boxa"), \
+             contextlib.redirect_stderr(self.err):
+            return km._turn_notify_tick(time.time(), {WEB: {}, API: {}})
+
+    def pull(self):
+        """One long-poll of the hub's puller, answered by the origin's own serve (no wait: the test drives the order)."""
+        def get(r, path, timeout):
+            q = parse_qs(urlparse(path).query)
+            return 200, json.loads(json.dumps(km._push_events_serve((q.get("after") or [""])[0], 0, int(q["v"][0]))))
+        with mock.patch.object(km, "_push_pull_get", side_effect=get), \
+             mock.patch.object(km, "_push_notify", side_effect=lambda *a, **k: self.pushed.append((a, k))), \
+             mock.patch.object(km, "_self_host", return_value="hubhost"), contextlib.redirect_stderr(self.err):
+            return km._push_pull_once(ROW, dict(km._remotes[ROW]))
+
+    def drop(self):
+        """The hub's call while the origin is down: no answer."""
+        with mock.patch.object(km, "_push_pull_get", return_value=(0, {"error": "connection refused"})), \
+             contextlib.redirect_stderr(self.err):
+            return km._push_pull_once(ROW, dict(km._remotes[ROW]))
+
+    def end_turn(self, sid, unwatched=False):
+        """A turn the user opened ends on the origin: the Stop hook's stamps. `unwatched`: its CLI sent the hook while the
+        origin was down, and the host held it until the origin attached again (the stamp says so)."""
+        self.t += 7
+        _stamp_stop(sid, self.t)
+        if unwatched:
+            p = jd.STATE / "sdk" / (sid + ".json")
+            reg = json.loads(p.read_text())
+            reg["lastStopUnwatched"] = self.t
+            p.write_text(json.dumps(reg))
+
+    def origin_restarts(self, exit_recorded=True, down=5.0, feed_bytes=None):
+        """The origin exits (its cut row in the restart ledger, unless killed) and comes back `down` seconds later: its
+        memory is gone, its disk is what it left. `feed_bytes` replaces its feed file meanwhile (a corrupt one)."""
+        self.clock += 60
+        if exit_recorded:
+            km._append_restart_cut(km._restart_cut_row({}, now=self.clock, sample={}))
+        if feed_bytes is not None:
+            (jd.STATE / "push-feed.json").write_bytes(feed_bytes)
+        with km._push_ring_cond:
+            km._PUSH_RING.clear()
+            km._PUSH_RING_SEQ[0] = 0
+            if hasattr(km, "_PUSH_FEED"):
+                km._PUSH_FEED.update(id=None, after=0, lives=[], fault=None)
+                km._PUSH_CATCHUP["done"] = False
+        km._TURN_BOOTED[0] = False
+        km._TURN_PREV.clear()
+        km._TURN_MEMO_DISK[0] = None
+        if hasattr(km, "_TURN_MISSED"):
+            km._TURN_MISSED.clear()
+        km._NOTIFY_PREV[0] = None
+        self.lives += 1
+        self.clock += down
+        km._BOOT_ID = "%d.%d" % (os.getpid(), int(self.clock))
+        km._STARTED = self.clock
+
+    # ── what the devices got ─────────────────────────────────────────────────────────────────────────────────────────
+    def from_hub(self, kind=None):
+        """What the HUB put on its devices for the row (everything it pushes for a pulled row names the row's host)."""
+        return [(a, k) for a, k in self.pushed if k.get("host") == ROW and (kind is None or k.get("kind") == kind)]
+
+    def summaries(self):
+        return [a[1] for a, _ in self.from_hub("missed")]
+
+    def restart_with_a_held_turn(self, sid, unwatched=True):
+        """The origin restarts while `sid`'s host holds a finished turn's Stop hook; the hub's call fails meanwhile; the
+        origin re-attaches, its first tick runs with the hook still held, the hub's first answer comes, then the hook is
+        answered (stamped as a turn that ended while the origin was down) and the origin catches up; the hub pulls until
+        it is caught up again."""
+        self.origin_restarts()
+        self.drop()
+        self.stops.held = 1
+        self.tick()
+        self.pull()
+        if sid:
+            self.end_turn(sid, unwatched=unwatched)
+        self.stops.held = 0
+        self.tick()
+        self.pull()
+        self.pull()
+
+    # ── the user's cases ─────────────────────────────────────────────────────────────────────────────────────────────
+    def test_a_restart_with_nothing_belled_finishing_buzzes_nothing(self):
+        # web's bell is on (an explicit "on" over there), so before, the hub's unknown count could have passed: every
+        # restart said "notifications may have been missed". During this one only api, on its default bell, finished a
+        # turn, and with the hub's turn switch off that would not have buzzed
+        km._set_notify_session(WEB, True)
+        self.restart_with_a_held_turn(API)
+        self.assertEqual(self.summaries(), [])
+        self.assertEqual(self.from_hub(), [])
+        self.assertIn("'TESTHOST' is back after a gap (restarted, unreachable); nothing it may have missed would have "
+                      "reached the devices here, so no notification", self.err.getvalue())
+        # and nothing at all finishing during a restart is silent the same way
+        self.restart_with_a_held_turn(None)
+        self.assertEqual(self.from_hub(), [])
+
+    def test_one_belled_turn_end_during_the_restart_is_one_summary_with_its_count(self):
+        km._set_notify_session(API, True)
+        self.restart_with_a_held_turn(API)
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn"])
+        self.assertEqual(self.from_hub("turn"), [], "never delivered one by one, late")
+        self.assertEqual(self.from_hub()[0][1], {"kind": "missed", "host": ROW, "quiet": False, "endpoints": (self.EP,)},
+                         "one sound, sid-less: a tap opens the dashboard")
+        # the origin's own devices are told the same way, once it has caught up: one summary, not a late buzz
+        own = [(a, k) for a, k in self.pushed if not k.get("host")]
+        self.assertEqual(own, [(("Romp: missed notifications", "boxa restarted · 1 session finished a turn", ""),
+                                {"kind": "missed"})])
+        self.assertNotIn("resume at its newest", self.err.getvalue(), "the cursor stayed valid: no reset")
+
+    def test_a_turn_end_after_the_boot_is_delivered_as_it_happens(self):
+        km._set_notify_session(API, True)
+        self.restart_with_a_held_turn(None)
+        self.end_turn(API)                                   # after the boot, while the hub listens
+        self.tick()
+        self.pull()
+        ((args, kw),) = self.from_hub()
+        self.assertEqual((args[0], args[2], kw.get("kind")), ("Romp: api", ROW + ":" + API, "turn"))
+
+    def test_a_session_that_re_attaches_after_the_catch_up_is_still_a_summary(self):
+        # a session whose host the boot did not attach (its lease unreadable until later): its held turn end is stamped
+        # after the origin had caught up and the hub's gap had closed, silently. Still never a late buzz
+        km._set_notify_session(API, True)
+        self.restart_with_a_held_turn(None)
+        self.end_turn(API, unwatched=True)
+        self.tick()
+        self.pull()
+        self.pull()
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn"])
+        self.assertEqual(self.from_hub("turn"), [])
+
+    def test_a_session_first_seen_after_the_catch_up_with_a_held_turn_is_counted_once(self):
+        # the origin lists api only once the catch-up is over (its registry came alive late): the first sight of a session
+        # is otherwise a silent baseline, but a settle its host held is a turn end no kernel saw. And the life after that,
+        # which sees the same stamp at its own first sight, finds it in the memo: filed already, never twice
+        km._set_notify_session(API, True)
+        everyone = self.alive
+        self.alive = [s for s in everyone if s["sid"] != API]
+        self.restart_with_a_held_turn(None)
+        self.end_turn(API, unwatched=True)
+        self.alive = everyone
+        self.tick()
+        self.pull()
+        self.pull()
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn"])
+        self.restart_with_a_held_turn(None)
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn"], "nothing new the second time")
+        self.assertEqual(self.from_hub("turn"), [])
+
+    def test_the_hub_restarting_too_still_counts_exactly(self):
+        # a deploy restarts both machines: the hub's own restart (its first answer while holding a cursor) and the
+        # origin's are one gap, and the origin's count holds
+        km._set_notify_session(API, True)
+        self.origin_restarts()
+        self.drop()
+        self.stops.held = 1
+        self.tick()
+        km._PUSH_PULL_ANSWERED.clear()                       # the hub restarted: its cursor is on disk, its memory gone
+        km._PUSH_PULL_CURSORS[0] = None
+        km._PUSH_GAPS.clear()
+        self.pull()
+        self.end_turn(API, unwatched=True)
+        self.stops.held = 0
+        self.tick()
+        self.pull()
+        self.pull()
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn"])
+
+    # ── when the count cannot be vouched for: as before ───────────────────────────────────────────────────────────────
+    def test_a_corrupt_feed_never_stops_the_kernel_and_the_hub_cannot_count(self):
+        km._set_notify_session(WEB, True)                    # something could have passed: the unknown count is said
+        self.origin_restarts(feed_bytes=b'{"feed": "abc", "seq": ')
+        with contextlib.redirect_stderr(self.err):
+            km._push_feed_ensure()                           # the boot's read: never raises
+        self.assertIn("starting a new event feed: a linked machine pulling from this one cannot know what this kernel "
+                      "fired before", self.err.getvalue())
+        self.assertTrue(list(jd.STATE.glob("push-feed.json.corrupt-*")), "the bad bytes are kept aside")
+        self.drop()
+        self.tick()
+        self.pull()
+        self.pull()
+        self.assertIn("events from 'TESTHOST' resume at its newest — its kernel restarted since", self.err.getvalue())
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · notifications may have been missed"])
+
+    def test_an_unreadable_feed_is_the_same_loud_new_feed(self):
+        self.origin_restarts()
+        with mock.patch.object(km, "_read_state_json", side_effect=km._StateUnreadable(jd.STATE / "push-feed.json",
+                                                                                         "read failed: EIO")), \
+             contextlib.redirect_stderr(self.err):
+            km._push_feed_ensure()
+        self.assertIn("could not be read (read failed: EIO) — starting a new event feed", self.err.getvalue())
+        ans = km._push_events_serve(km._push_pull_cursor(ROW), 0, km.PUSH_PULL_PROTO)
+        self.assertEqual(ans["reset"], "restarted")
+
+    def test_a_killed_origin_or_a_long_outage_cannot_be_counted(self):
+        # a session's host answers a held Stop hook itself after UNWATCHED_SELF_ANSWER_S with no kernel attached, and that
+        # turn end never reaches a kernel: without an exit record (killed, crashed) or past that bound, the count says so
+        km._set_notify_session(API, True)
+        for exit_recorded, down in ((False, 5.0), (True, km.UNWATCHED_SELF_ANSWER_S + 60)):
+            with self.subTest(exit_recorded=exit_recorded, down=down):
+                km._push_gap_seen(self.EP)
+                self.pushed.clear()
+                self.origin_restarts(exit_recorded=exit_recorded, down=down)
+                self.drop()
+                self.tick()
+                self.end_turn(API, unwatched=True)
+                self.tick()
+                self.pull()
+                self.pull()
+                self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn; more may have been missed"])
+
+    def test_an_attach_that_never_settles_is_caught_up_by_the_backstop_with_the_count_incomplete(self):
+        km._set_notify_session(WEB, True)
+        self.origin_restarts()
+        self.drop()
+        self.stops.held = 1                                  # a host's held Stop is never answered
+        self.tick()
+        self.pull()
+        self.assertEqual(self.summaries(), [], "still catching up: the hub's gap stays open")
+        with mock.patch.dict(km._BOOT_MARKS, {"reconcileDone": time.time() - km.BOOT_ROW_BACKSTOP_S - 1}):
+            self.tick()
+        self.assertIn("caught up on this restart with an incomplete count", self.err.getvalue())
+        self.pull()
+        self.pull()
+        self.assertEqual(self.summaries(), ["TESTHOST restarted · notifications may have been missed"])
+
+    def test_an_overflow_while_the_hub_was_away_has_no_number(self):
+        km._set_notify_session(WEB, True)
+        self.drop()
+        for _ in range(km.PUSH_RING_CAP + 3):
+            km._push_ring_add([{"kind": "turn", "sid": API, "title": "Romp: api", "body": "Done.", "name": "api",
+                                "bell": "default", "turnKey": 1}])
+        self.pull()
+        self.pull()
+        self.assertIn("it fired more than it keeps while this kernel was away", self.err.getvalue())
+        self.assertEqual(self.summaries(), ["TESTHOST was unreachable for under a minute · notifications may have been missed"])
+
+    # ── the feed itself ──────────────────────────────────────────────────────────────────────────────────────────────
+    def test_the_feed_on_disk_carries_its_sequence_across_the_restart(self):
+        km._set_notify_session(API, True)
+        self.end_turn(API)
+        self.tick()
+        (ev,) = [e for e in self.ring() if e["kind"] == "turn"]
+        p = jd.STATE / "push-feed.json"
+        self.assertEqual(oct(p.stat().st_mode & 0o777), "0o600", "the events carry session text")
+        cursor = km._push_pull_cursor(ROW)
+        self.assertTrue(cursor.startswith(json.loads(p.read_text())["feed"] + "/"), cursor)
+        self.origin_restarts()
+        with contextlib.redirect_stderr(self.err):
+            km._push_feed_ensure()
+        self.assertEqual([e["seq"] for e in self.ring()], [ev["seq"]], "the kept event, under its own number")
+        self.assertIn("read back from disk: 1 event(s) kept", self.err.getvalue())
+        ans = km._push_events_serve(cursor, 0, km.PUSH_PULL_PROTO)
+        self.assertNotIn("reset", ans)
+        self.assertEqual((ans["restarts"], ans["caughtUp"], ans["next"]), (1, False, ev["seq"]),
+                         "one restart since the cursor's life; not caught up until the restart's catch-up is done")
+        self.assertEqual(ans["boot"], "%s/%s" % (ans["feed"], km._BOOT_ID), "the next cursor names this life")
+        self.end_turn(API)
+        self.stops.held = 0
+        self.tick()
+        self.assertEqual([e["seq"] for e in self.ring()][-1], ev["seq"] + 1, "the sequence continues")
+
+    def test_a_long_poll_parked_while_the_origin_catches_up_returns_when_it_has(self):
+        self.origin_restarts()
+        self.stops.held = 1
+        self.tick()
+        first = km._push_events_serve(km._push_pull_cursor(ROW), 0, km.PUSH_PULL_PROTO)
+        self.assertEqual((first["restarts"], first["caughtUp"]), (1, False), "at the newest, but still catching up")
+        cursor = "%s:%d" % (first["boot"], first["next"])
+        got = {}
+        t = threading.Thread(target=lambda: got.update(ans=km._push_events_serve(cursor, 10, km.PUSH_PULL_PROTO),
+                                                       at=time.monotonic()))
+        t0 = time.monotonic()
+        t.start()
+        time.sleep(0.3)
+        self.assertTrue(t.is_alive(), "nothing newer: the request parks")
+        self.stops.held = 0                                  # the held Stop is answered (nothing of the user's in it)
+        self.tick()
+        t.join(5)
+        self.assertLess(got["at"] - t0, 3, "released by the catch-up, not the wait")
+        self.assertEqual((got["ans"]["events"], got["ans"]["caughtUp"]), ([], True),
+                         "it listened from the newest until the count was complete")
+
+    def test_an_older_puller_is_never_served_a_gap_event(self):
+        km._set_notify_session(API, True)
+        self.origin_restarts()
+        self.stops.held = 0
+        self.end_turn(API, unwatched=True)
+        self.tick()
+        (gap,) = [e for e in self.ring() if e.get("gap")]
+        ans = km._push_events_serve("%s:%d" % (km._BOOT_ID, gap["seq"] - 1), 0, 2)
+        self.assertEqual((ans["events"], ans.get("stale")), ([], None), "a v2 puller resets at a restart instead")
+        self.assertEqual(km._push_events_serve("77.1:3", 0, 2)["reset"], "restarted")
+        v3 = km._push_events_serve(km._push_pull_cursor(ROW), 0, km.PUSH_PULL_PROTO)
+        self.assertEqual([(e["seq"], e.get("gap")) for e in v3["events"]], [(gap["seq"], True)])
+
+    def test_a_card_the_first_build_of_a_life_finds_moved_is_a_gap_event(self):
+        km._feed_notifications(_feed(_card(WEB + ":g1", WEB, "working"), sessions=[WEB]))
+        self.origin_restarts()
+        km._feed_notifications(_feed(_card(WEB + ":g1", WEB, "needs_input"), sessions=[WEB]))
+        (ev,) = [e for e in self.ring() if e["kind"] == "card"]
+        self.assertTrue(ev.get("gap"), "it moved while no build of this kernel was watching")
+        km._feed_notifications(_feed(_card(WEB + ":g2", WEB, "needs_input"), sessions=[WEB]))
+        self.assertFalse(self.ring()[-1].get("gap"), "the next build's news is news")
 
 
 class Transition(_Base):

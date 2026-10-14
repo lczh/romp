@@ -7696,7 +7696,11 @@ What Romp has told you about is written down beside its other state, so the
 cards already waiting on you or already finished when it comes back stay
 quiet. Turn ends that would have notified you while it was down are not sent
 one by one when it is back: one notification, **Romp: missed notifications**,
-says how many sessions finished turns meanwhile. A card that stops needing you and then needs you again is announced
+says how many sessions finished turns meanwhile. That includes a turn a session
+finished while the kernel was down whose end the kernel only learns when it
+reconnects to the session (the session's own process kept running and held
+it), so the notification waits until the kernel has reconnected to every
+session it found running. A card that stops needing you and then needs you again is announced
 once, not at every turn, unless you acted on the card in between (answered
 it, resolved it, crossed it off) or it finished in the meantime.
 
@@ -7716,9 +7720,18 @@ arrives as it happens. When the machine the phone is set up on may have missed
 some (it restarted, a linked machine restarted, or the link dropped), none of
 the missed ones arrives late: one notification titled **Romp: missed
 notifications** says what you missed and why, for example "laptop was
-unreachable for 38 min · 3 sessions finished turns, 1 needs you", or that
-notifications may have been missed when the count cannot be known (a linked
-machine's restart takes its record with it). It counts only what your switches
+unreachable for 38 min · 3 sessions finished turns, 1 needs you". A linked
+machine keeps the notifications it offers on disk (`push-feed.json` in its
+state directory), so its own restart, every update included, is counted like
+an outage: "laptop restarted · 1 session finished a turn", or nothing at all
+when nothing finished that would have reached you. The notification says that
+notifications may have been missed, without a number, when the count cannot be
+known: that record could not be read (the kernel says so in its log and starts
+a new one), the linked machine was stopped without its orderly exit (killed or
+crashed) or was down for eight minutes or more (a session's own process then
+answers a finished turn's hook itself, and that turn's end never reaches
+romp), its reconnection to its sessions never finished, or more notifications
+came than it keeps (256) while the link was gone. It counts only what your switches
 and bells would have let through, and says "may have been missed" only when
 something they allow could have been lost; when nothing could have, there is no
 notification, only a line in the kernel's log. A link that drops and comes back

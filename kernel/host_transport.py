@@ -53,6 +53,10 @@ _HOST_SCOPE_RE = re.compile(r"romp-host-([0-9a-fA-F]{1,8})-(\d+)\.scope\Z")
 ACK_BATCH = 64            # acknowledge at least every this many records…
 ACK_INTERVAL_S = 0.1      # …or this often
 SOCKET_WAIT_S = 20.0      # how long a spawn waits for the host's socket before it is a launch failure
+# The key a Stop hook's input wears when its CLI sent it before this kernel life first attached (HostTransport.unwatched):
+# the turn ended while no kernel was listening, and the Stop hook stamps it so (sdk_backend's UNWATCHED_STOP_KEY, pinned
+# equal by a test). The value is the request's id, which the hook retires from the session's set once it has stamped.
+UNWATCHED_STOP_KEY = "rompUnwatched"
 
 
 def _setting(state_dir, name: str, default: str) -> str:
@@ -260,6 +264,10 @@ class HostTransport(_Base):
         self._my_requests: set = set()  # control_request ids this transport wrote (the Query's initialize first)
         self._hold: list = []           # replayed records held until the initialize's answer has been yielded
         self._init_pending = True       # live mode: the Query's initialize has not been answered yet
+        self.unwatched = None           # the session's set of request ids its CLI sent before this kernel life first attached
+        #                                 to it (the hello's `parked`), shared with the session (SdkBackend._on_host_hello);
+        #                                 None when not watching. A Stop hook among them ended a turn while no kernel was
+        #                                 listening: its input is marked (_mark_unwatched), and the hook stamps it so
 
     @classmethod
     def from_journal(cls, journal_dir, ack=sh.ACK_NONE, **kw):
@@ -423,7 +431,27 @@ class HostTransport(_Base):
     def _take(self, out: dict):
         self._advance(out)
         self._tag(out.get("offset"), out["data"])
+        self._mark_unwatched(out["data"])
         return out["data"]
+
+    def _mark_unwatched(self, data) -> None:
+        """A record handed over while the session's set of requests held from before this kernel life first attached is
+        open (`unwatched`): a Stop hook callback among them has its input marked with UNWATCHED_STOP_KEY (the request's id),
+        and stays in the set until the hook has stamped the turn end; any other request leaves the set as it is handed
+        over. The kernel's restart catch-up waits on the set emptying (SdkBackend.unwatched_pending), so a turn that ended
+        while the kernel was down is counted into the restart's summary rather than delivered late."""
+        w = getattr(self, "unwatched", None)            # getattr: a transport built without __init__ (a test's) watches nothing
+        if not w or not isinstance(data, dict) or data.get("type") != "control_request":
+            return
+        rid = str(data.get("request_id") or "")
+        if rid not in w:
+            return
+        req = data.get("request") if isinstance(data.get("request"), dict) else {}
+        inp = req.get("input") if isinstance(req.get("input"), dict) else None
+        if req.get("subtype") == "hook_callback" and inp is not None and inp.get("hook_event_name") == "Stop":
+            inp[UNWATCHED_STOP_KEY] = rid
+        else:
+            w.discard(rid)
 
     def _tag(self, offset, data, replay=None) -> None:
         """A RESULT record's own offset, queued for the spend fold (T354): the consumer pops one per result it handles,

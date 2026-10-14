@@ -4,7 +4,9 @@ Status: the PULL direction is the design of record (2026-10-10). It replaces pus
 (2026-08-08), which stays only as a transition leg with a written removal condition (below). The
 follow-ups from its review (2026-10-11) are folded in: who opened a turn is decided when it opens, an
 explicit session bell beats the switches, one policy for every gap ("never late, never silent"), a
-per-batch cap, and an event is marked passed only once the gate has decided it.
+per-batch cap, and an event is marked passed only once the gate has decided it. Since 2026-10-14 the
+origin's feed survives its own restart, so a restart is counted like any other gap ("The feed across a
+restart" below).
 
 The ask (the user 2026-08-08, minutes after installing the home-screen app): with kernels linked,
 having to think about WHICH kernel a notification comes from is exactly the mechanics romp exists
@@ -60,11 +62,13 @@ Push was the only flow the ORIGIN started. The fix is to turn it round like the 
 
 ### The origin's half
 
-Every event the origin DETECTS lands in an in-memory ring as a candidate. Detection stays where it
+Every event the origin DETECTS lands in a ring as a candidate. Detection stays where it
 was, reading the origin's own stores: the card diff (`_feed_notifications_diff`, a card entering a
 notified column) and the turn tick (`_turn_notify_tick`, a turn the user opened ending; "Who opened
 the turn" below says how that is known). The ring is
-keyed `(bootId, seq)`, the boot id being this kernel life's `_BOOT_ID`, and holds the newest 256.
+keyed `(feed, seq)` and holds the newest 256; it is kept on disk and outlives a restart ("The feed across
+a restart" below). A puller older than protocol 3 sees it keyed `(bootId, seq)`, the boot id being this
+kernel life's `_BOOT_ID`, as before.
 
 `GET /push/events?after=<bootId>:<seq>&wait=<s>` serves it, behind the serve token like every route a
 row's holder calls. It is a long-poll in the postal `/peer-exchange` shape: with nothing newer than
@@ -72,8 +76,8 @@ the cursor it parks on a condition variable, and the first new candidate release
 request. No polling cadence anywhere. The answer is `{boot, next, events[, stale]}`, with
 `{reset, skipped}` when it resets (below). `next` is the newest seq examined, the puller's next cursor.
 
-The origin advertises the capability in `/version` as `pushPull: 2` (protocol 2, the gap policy's
-fields: below).
+The origin advertises the capability in `/version` as `pushPull: 3` (protocol 2, the gap policy's
+fields, and protocol 3, the feed across a restart: below).
 
 ### The hub's half
 
@@ -214,9 +218,9 @@ both, for every gap this kernel knows of:
   moved on): the summary says what would have buzzed had this kernel been listening. An explicit mute
   set since is still dropped at the origin.
 - **Nothing would have passed: no buzz**, only a log line.
-- **The count cannot be known** (the row's kernel restarted and its ring went with it, or the
-  backlog overflowed past the cursor): the summary says notifications may have been missed, with no
-  number, and only when something the user's switches and bells allow could have been among the lost
+- **The count cannot be known** (the row's kernel restarted and its feed could not be read, or it
+  cannot vouch for that restart's count, or the backlog overflowed past the cursor: "The feed across a
+  restart" below): the summary says notifications may have been missed, with no number, and only when something the user's switches and bells allow could have been among the lost
   events (`_push_gap_could_pass`), decided from facts the hub holds, never assumed: the row's kernel
   holds an explicit "on" bell (`bellsOn`), or turn ends pass by default (this kernel's master AND its
   turn switch on; the turn switch alone passes nothing), or cards pass by default (this master on)
@@ -312,6 +316,7 @@ reason it actually knows:
 
     TESTHOST was unreachable for 38 min · 3 sessions finished turns, 1 needs you
     TESTHOST was unreachable for 2 h 5 min · notifications may have been missed
+    TESTHOST restarted · 1 session finished a turn
     TESTHOST restarted · notifications may have been missed
     TESTHOST restarted 3 times · notifications may have been missed
     boxa restarted · TESTHOST: 1 session finished a turn
@@ -342,7 +347,69 @@ newest end of a turn a HUMAN opened (`lastHumanStopAt`, which the Stop hook stam
 watching. Those are said in one summary ("boxa restarted · 2 sessions finished turns"), counting only
 the sessions whose bell would have let the buzz through, and never buzzed one by one. Before, a
 session's first sighting in a life was a silent baseline, so they vanished. With no memo on disk (the
-first boot of this build) the first tick is a silent baseline, said in the log.
+first boot of this build) the first tick is a silent baseline, said in the log. Since 2026-10-14 the summary
+also counts a turn a session's host held across the restart (below), and waits until this kernel has caught
+up on its restart, so it is one summary with every such turn end in it.
+
+### The feed across a restart
+
+The ring lived in memory until 2026-10-14, so a restart of the origin (every deploy) took it along: the
+hub's cursor named a life that was gone, the reset said `restarted`, and the hub could only say "TESTHOST
+restarted · notifications may have been missed", which it did at every deploy once a single session over
+there had its bell on, whether or not anything had finished. Session hosts made it worse: a hosted CLI keeps
+running across the restart, and a turn it ended meanwhile was noticed after the kernel re-attached and
+buzzed late, as a fresh turn end. Now:
+
+- **The feed is on disk.** `STATE/push-feed.json` (0600: the events carry session text) holds the feed's
+  id, the newest seq, the kept events (the ring's 256) and the lives it has seen (the newest 64), written
+  through the one atomic write door at every change and fsynced (`_push_feed_save_locked`). The first touch
+  of a life reads it back (`_push_feed_ensure_locked`, called at boot), so the ring, its sequence and its
+  id carry on. A file that is missing (the first boot of this build) starts a new feed, said in one line;
+  one that cannot be read or holds no feed starts a new feed loudly (a corrupt file is moved aside by the
+  strict reader) and never stops the kernel: every puller's cursor then names another feed, resets, and
+  summarizes the restart as before, with no number.
+- **Protocol 3: the cursor names the feed and the life.** A v3 cursor is `<feed>/<boot>:<seq>`. One of
+  this feed stays valid across restarts; the answer's `boot` is this life's form of it, `feed` names the
+  feed (the hub's backstop is `(row, feed, seq)`), and `restarts` says how many lives began after the one
+  in the cursor (the feed's list of lives). The hub opens its gap as `restarted` by that count, not as a
+  reset: what the origin missed meanwhile comes as counted events.
+- **Gap events: what the origin learns about its own downtime.** The origin files them in the feed
+  flagged `gap`, and a v3 puller never delivers one by one: it counts each into the restart's summary,
+  opening a gap for it if none is open (a session that re-attached late), and the gap's ordinary rules
+  decide whether that summary sounds (the per-device fold, the iPhone's share). They are:
+  - a turn end whose Stop hook the session's CLI sent while no kernel was attached. The session's host
+    holds the hook until a kernel attaches; its hello lists the open requests (`parked`), the first hello
+    a session object gets in a life hands them to the transport (`HostTransport.unwatched`), the transport
+    marks the Stop hook's input (`UNWATCHED_STOP_KEY`), and the hook stamps `lastStopUnwatched` beside
+    `lastStopAt` with the same value. The turn tick reads that stamp as a turn end that happened while it
+    was down, whenever it first sees it;
+  - a turn end the previous life stamped and never ticked, which the turn memo shows (above), judged at
+    a session's first sight while this life catches up; the memo also keeps a turn end the previous life
+    already filed from being filed again;
+  - a card the first feed build of a life finds moved into a notified column: it moved while no build of
+    this kernel was watching.
+
+  The origin's own devices get the turn ends in its own summary ("boxa restarted · …", above); its own
+  card announcements at the first build are unchanged (a known limit, below).
+- **The count is complete before the puller closes its gap.** Until the origin has caught up on its
+  restart (`_push_catchup_ready`: every boot re-attach to a live host has said hello, the boot milestone
+  `attachDone`, and no session still holds a request its CLI sent before the attach, the backend's
+  `unwatched_pending`), no v3 answer says `caughtUp`, so the hub's gap stays open; a request parked
+  meanwhile is released when it catches up. The turn tick reads the readiness before it reads the turn
+  ends and declares the catch-up after filing them, so nothing it vouched for comes after.
+- **When the origin cannot vouch for the count, it says so.** A session's host answers a Stop hook it has
+  held for 480 s with no kernel attached (`HOOK_SELF_ANSWER_S`, the kernel's `UNWATCHED_SELF_ANSWER_S`,
+  pinned equal), and that turn end then never reaches a kernel. So the restart's count is vouched for only
+  when the previous life recorded its orderly exit (its cut row in the restart ledger) and this life began
+  within that bound of it; a killed or crashed life records none. Past `BOOT_ROW_BACKSTOP_S` after the
+  reconcile with the catch-up still open (an attach that never settles), the catch-up is declared done
+  regardless. Either way the origin files a `lost` gap event, and the hub says the restart's count with
+  "more may have been missed", or "notifications may have been missed" when it counted nothing, and only
+  when something could have passed (`_push_gap_could_pass`).
+- **Older pullers are served as before.** A v1 or v2 cursor names a life; it is served that life's events
+  only and never a gap event, so an older hub resets at a restart and summarizes it as it always did. The
+  one-time cost at the deploy that brings this in: the hub's cursor names the old build's life, so that
+  restart is summarized with no number, once.
 
 ### Who opened the turn
 
@@ -421,10 +488,11 @@ Old and new kernels meet during an update, so both legs exist for now, and each 
   with all background judging off (the Task tracking switch) no card enters a notified column, so only
   turn ends travel. When it is on, card events reach the phone under the hub's master and the explicit
   bells, by the gating split above.
-- **A card that entered a notified column while its kernel was down is still announced late**, at the
-  first build after the restart (the once-per-(card, column) rule's "it entered while no kernel was
-  watching"). The gap policy covers turn ends across a restart (the memo) but not this; folding it in
-  needs an event that says the restart's catch-up is complete, since sessions revive one at a time.
+- **A card that entered a notified column while its kernel was down is still announced late on that
+  kernel's own devices**, at the first build after the restart (the once-per-(card, column) rule's "it
+  entered while no kernel was watching"). A kernel pulling from it counts it into the restart's summary
+  (a gap event, since 2026-10-14). The origin's own devices could follow once the first build is known to
+  fall within the catch-up: the feed is built only while a client rides it.
 - **A send romp injects into a Codex session reads as the human's**: Codex has no Stop-hook stamp, and
   every Codex turn is a send through romp.
 
@@ -445,9 +513,10 @@ Old and new kernels meet during an update, so both legs exist for now, and each 
   shape), a loopback push service, the hub's ledger as the record. A turn end and a needs-you card on
   the origin each reach the hub's gate exactly once, under the hub's name for the row. Then a hub
   restart with its cursor (the missed turn end is not delivered late; one summary says it), a hub
-  restart with no record file (resumes at the newest, says so, delivers nothing old) and an origin
-  restart (one "may have been missed" summary, then the next turn end delivered once), and nothing
-  twice throughout.
+  restart with no record file (resumes at the newest, says so, delivers nothing old), an origin
+  restart by its orderly exit while a turn ends (no reset: the missed turn end is counted into the summary
+  the device holds unseen, then the next turn end delivered once), and an origin restart with nothing
+  finishing (no notification at all), and nothing twice throughout.
   The user's bell scenario runs there too, over the hub's relay socket: with the hub's master on and
   the origin's never set, the origin's card carries no override, a mute clicked as given is stored and
   the next turn end stays on the origin, and an arm clicked as given buzzes.
@@ -459,6 +528,18 @@ Old and new kernels meet during an update, so both legs exist for now, and each 
   restart, an overflow, this kernel's restart with and without its record, a v1 row), the hub's own
   sessions across its restart, the transition, and the bells (as-given storage, a session click
   stored as clicked, the payload fields, the switches frame, a refusal's setting, the gate's rules).
+- `tests/test_push_pull.py`'s `OriginRestart`: the feed across a restart, both kernels in one process. A
+  restart with nothing belled finishing buzzes nothing (before: "may have been missed" at every restart);
+  one belled turn end that a host held across it is one summary with its count and no late buzz; a turn
+  end after the boot is delivered as it happens; a session re-attached or first seen after the catch-up is
+  still a summary, and never twice; the hub restarting too; a corrupt or unreadable feed (a loud new feed,
+  the unknown count); a killed origin, a long outage and an attach that never settles (the `lost` event);
+  an overflow; the sequence carried across the restart; an older puller never served a gap event; a card
+  the first build finds moved.
+- `tests/test_host_transport.py` and `tests/test_kernel_notify_popover.py`'s `UnwatchedTurnEnd`: the
+  transport marks a Stop hook its CLI sent before the attach, the first hello of a life watches the held
+  requests and a later one does not, the hook stamps `lastStopUnwatched` and retires the id, the tick files
+  it as a gap event and never buzzes it late, and the constants shared across the modules agree.
 - `tests/test_kernel_notify_popover.py`: who opened the turn, decided at its open (a turn the CLI
   opens itself, a message it runs as its own turn, a human text spliced in or drained, a session born
   mid-turn, no open seen) and end to end through the Stop hook to the kernel's tick; an explicit
