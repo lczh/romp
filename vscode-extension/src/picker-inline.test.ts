@@ -44,7 +44,8 @@ test("'Chat about this' is a selectable answer again (only Type-something / Subm
 });
 
 test("the picker card still owns the keyboard (focus + keydown), so inline-ness doesn't lose keyboard control", () => {
-  assert.match(SRC, /card\.addEventListener\("keydown", onSingleKey\);/);
-  assert.match(SRC, /card\.addEventListener\("keydown", onMultiKey\);/);
+  // (on the card's own surface since thread-live-1: the chat's, or a comment popover's)
+  assert.match(SRC, /card\.addEventListener\("keydown", \(e\) => onSingleKey\(s, e\)\);/);
+  assert.match(SRC, /card\.addEventListener\("keydown", \(e\) => onMultiKey\(s, e\)\);/);
   assert.match(SRC, /querySelector\("#live-ask \.ask-card"\)/);   // Enter from a tab still focuses the card
 });
