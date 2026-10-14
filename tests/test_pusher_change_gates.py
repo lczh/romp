@@ -437,7 +437,7 @@ class CommentsStoreMemo(unittest.TestCase):
                     self.assertEqual(squares, [[[]]], "the timeline frame went out, with no squares on the lane")
                     self.assertTrue(owed[0].is_set(), "and the push reached its timeline ask: the cold build is owed")
                     keys, comments, squares = cycle()
-                    self.assertEqual(comments, [{"type": "comments", "id": SID, "threads": [{"tid": "t1"}, {"tid": "t2"}]}],
+                    self.assertEqual(comments, [{"type": "comments", "id": SID, "threads": [{"tid": "t1"}, {"tid": "t2"}], "caps": list(km.COMMENT_FRAME_CAPS)}],
                                      "the next cycle sends the threads")
                     self.assertEqual(squares, [[["t1", "t2"]]], "and the squares")
 

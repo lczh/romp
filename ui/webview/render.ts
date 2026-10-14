@@ -9169,7 +9169,11 @@ function typeFromAnywhereTarget(e: Event): HTMLTextAreaElement | null {
   if (document.querySelector("#rsettings:not([hidden]), #ranalytics-back:not([hidden]), #rkeys-back, .meta-menu")) return null;   // the pane's own modals (settings, its Token usage panel) + meta menus own their keys (a letter typed there must never land in the draft)
   const box = activeInputBox();
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
-  if (box !== ta) return box;   // a comment popover's reply box or a viewer's bar; null while the topmost surface takes no input
+  // a comment popover's reply box takes the message box's own question gate (thread-live-1): while the open thread's
+  // question card is up the card owns the keys (digits are its number keys), and the box takes them once clicked into
+  const pop = document.getElementById("cmt-pop");
+  if (box && pop && box === pop.querySelector(".cmt-input")) { const tsid = openThreadSid(); return tsid && liveAsks.has(tsid) ? null : box; }
+  if (box !== ta) return box;   // a viewer's bar; null while the topmost surface takes no input
   // the message box's own gates
   if (!ta || ta.disabled || document.activeElement === ta) return null;   // no box / read-only session / already in the box
   if (activeId && liveAsks.has(activeId)) return null;   // the live-ask card owns input while it is up (digits are its number keys)
@@ -10890,6 +10894,7 @@ const commentInFlight = (th: CommentThread): boolean => {
   return owed && !cmtInterrupted.has(th.tid);
 };
 const commentDrafts = new Map<string, string>();                    // draft key → unsent popover text
+const commentThreadAsks = new Map<string, boolean>();               // parent sid → its kernel answers thread questions in the popover (the comments frame's caps)
 // The popover-boot hold (fillCommentMsgs): tid → when the loader first held the list. Held until the
 // thread's events land (event-based) or the backstop expires (never trap); a backstop timer refills
 // the open popover so the fall-through actually paints.
@@ -11531,7 +11536,7 @@ function cmtSentNote(th: CommentThread): HTMLElement | null {
 }
 
 function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): void {
-  list.dataset.session = th.tid;   // the THREAD owns its queue/errors — in-turn controls resolve to it
+  list.dataset.session = threadSidOf(th);   // the THREAD owns its queue/errors — in-turn controls resolve to it (its session id, host-prefixed on a linked machine)
   const prevScroll = list.scrollTop;
   // the slack rule (the user 2026-08-25, same word as the chat's appendActive): while the thread's
   // content hasn't overflowed the fixed box, streaming writes in place — no follow, no jump; once
@@ -11579,7 +11584,7 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
     // the folds per thread, exactly as a chat tab would.
     const saved = renderingSid;
     const savedOwner = renderingOwnerSid;
-    renderingSid = th.tid;
+    renderingSid = threadSidOf(th);   // the thread's session id: its fold keys, and the session its rendered controls act on
     renderingOwnerSid = sid;   // fold keys are per-thread; file/preview URLs belong to the thread's SESSION
     renderingIntoThread = true;   // same renderer, minus the transcript-coupled hover chrome (see the flag)
     let prev: number | null = null;       // the rail's raw previous epoch (the same-minute rule)
@@ -11676,8 +11681,14 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
   // the await-green highlight carries the in-flight signal, and the reply's arrival is announced by
   // the green→yellow settle; the pending bubble still acknowledges the user's own send)
   // (a thread stopped on a question or a permission prompt shows the chat's own card under this list now, in the popover's
-  // .cmt-ask host, answerable here: renderThreadAsk, thread-live-1. The note that sent the reader to break the thread
-  // out instead is gone.)
+  // .cmt-ask host, answerable here: renderThreadAsk, thread-live-1.) A kernel from before that serves no thread question,
+  // so its stuck thread keeps the old way out: the note that points at Break out (the review of #232: a page newer than
+  // its kernel showed the cue with no card and no note)
+  if (th.status === "open" && threadStuck(th.state) && !commentThreadAsks.get(sid)) {
+    const note = el("div", "cmt-note");
+    note.textContent = "This thread hit a prompt it can't answer from here. Break it out to continue.";
+    list.appendChild(note);
+  }
   if (th.status === "open" && th.error) {
     // the CLI behind this thread could not start — dots pulsing forever would be a lie
     const note = el("div", "cmt-note cmt-err");
@@ -11735,7 +11746,8 @@ function cmtStateChip(th: CommentThread): HTMLElement {
     b.title = "Stop — interrupt this thread's turn";
     b.setAttribute("aria-label", "Interrupt this thread");
     b.dataset.act = "cmtinterrupt";
-    b.dataset.sid = th.tid;
+    b.dataset.sid = threadSidOf(th);   // the thread's session (host-prefixed on a linked machine: the stop routes to its kernel)
+    b.dataset.tid = th.tid;            // …and the thread, whose exchange latches the stop clears
     b.appendChild(el("span", "stop-icon"));
     return b;
   };
@@ -11960,7 +11972,7 @@ function commentSendFromPop(pop: HTMLElement): void {
   // The thread's question takes free text and the box is its "add your own" field (thread-live-1, the message box's rule,
   // boxAnswersAsk): the typed words answer it, through the chat's own frames by the thread's sid, and nothing else goes.
   // A staged stack waits for the next reply, as the message box's does.
-  const asid = cur.th.sid || cur.th.tid;   // the thread's session: its question and the box's draft stamp key on it
+  const asid = threadSidOf(cur.th);   // the thread's session: its question and the box's draft stamp key on it
   const askRoute = text ? boxAnswersAsk(asid) : null;
   if (askRoute) {
     if (askRoute === "custom") addCustomLiveAsk(threadAsk, text); else sendTextLiveAsk(threadAsk, text);
@@ -12106,7 +12118,7 @@ function renderCommentPopover(): void {
     const cs = prev.querySelector("#cmt-state");
     if (th && cs) cs.replaceWith(cmtStateChip(th));   // state chip + timer track every frame, in place
     const cm = prev.querySelector("#cmt-meta") as HTMLElement | null;
-    if (th && cm) syncMetaControls(cm, threadMetaStatus(th), th.tid);   // same in-place refresh as the chat's tick
+    if (th && cm) syncMetaControls(cm, threadMetaStatus(th), threadSidOf(th));   // same in-place refresh as the chat's tick
     return;
   }
   const hadFocus = !!prev?.querySelector(".cmt-input:focus-within, .cmt-input:focus");
@@ -12391,7 +12403,7 @@ function renderCommentPopover(): void {
       if (th) {
         // the message box's draft stamp, kept for the thread's box (thread-live-1): a reply begun BEFORE the thread's
         // question arrived stays a reply; one begun after it answers the question (boxAnswersAsk)
-        const asid = th.sid || th.tid;
+        const asid = threadSidOf(th);
         if (box.value) { if (!draftStartedAt.has(asid)) draftStartedAt.set(asid, Date.now()); }
         else draftStartedAt.delete(asid);
         syncCmtBoxAskMode(asid);
@@ -12464,7 +12476,7 @@ function renderCommentPopover(): void {
       const right = el("span", "sl-right");
       const metaBox = el("span", "spinner-meta");   // the SAME wrapper the chat's badges wear — its
       metaBox.id = "cmt-meta";                      // mono/0.92em/dim dress is where the font lives
-      syncMetaControls(metaBox, threadMetaStatus(th), th.tid);
+      syncMetaControls(metaBox, threadMetaStatus(th), threadSidOf(th));   // the thread's session: a pick routes to the kernel that runs it
       right.appendChild(metaBox);
       mrow.appendChild(right);
       pop.appendChild(mrow);
@@ -17966,8 +17978,12 @@ const threadAsk: AskSurface = { host: () => document.querySelector("#cmt-pop .cm
 // The open thread's own session id: the frame's `sid`, which is its tid for every thread romp makes (null with no thread open).
 function openThreadSid(): string | null {
   const cur = openCommentThread();
-  return cur ? (cur.th.sid || cur.th.tid) : (openCommentKey ? openCommentKey.tid : null);
+  return cur ? threadSidOf(cur.th) : (openCommentKey ? openCommentKey.tid : null);
 }
+// A thread's SESSION id, the one its question frames, its answers, its stop and its settings name: the frame's `sid`, which
+// the federation prefixes with the thread's host on a linked machine (federation.ts _prefixThreadSid), so every one of
+// those routes to the kernel that runs the thread; the tid on a kernel from before the frame carried it.
+function threadSidOf(th: CommentThread): string { return th.sid || th.tid; }
 
 // True on a phone/tablet (a coarse pointer) — the mobile signal we gate touch affordances on. NOT viewport
 // width (desktop chat panes are narrow too). Reused by the composer's Enter behavior, its resting
@@ -18398,7 +18414,7 @@ function onMultiKey(s: AskSurface, e: KeyboardEvent) {
     else if (s.focus === n) submitLiveAsk(s);
     else cancelLiveAsk(s);
   }
-  else if (/^[1-9]$/.test(e.key)) { const idx = opts.findIndex((o) => o.n === parseInt(e.key, 10)); if (idx >= 0) { s.focus = idx; paintMultiFocus(s); toggleLiveAsk(s, opts[idx].n); } }
+  else if (/^[1-9]$/.test(e.key)) { const idx = opts.findIndex((o) => o.n === parseInt(e.key, 10)); if (idx >= 0) { e.preventDefault(); s.focus = idx; paintMultiFocus(s); toggleLiveAsk(s, opts[idx].n); } }   // the number is the card's: consumed, so no box takes it as typing
 }
 
 // Review screen: show chosen answers + the Submit answers / Cancel options as
@@ -18487,7 +18503,9 @@ function onSingleKey(s: AskSurface, e: KeyboardEvent) {
   else if (e.key === "Enter") { e.preventDefault(); answerLiveAsk(s, opts[s.focus].n); }
   else if (/^[1-9]$/.test(e.key)) {
     const idx = opts.findIndex((o) => o.n === parseInt(e.key, 10));
-    if (idx >= 0) { s.focus = idx; answerLiveAsk(s, opts[idx].n); }
+    // the number answers the card, and is CONSUMED: unclaimed, it bubbled to the type-anywhere default, which dropped it
+    // into the open comment thread's reply box as the answer went (the review of #232)
+    if (idx >= 0) { e.preventDefault(); s.focus = idx; answerLiveAsk(s, opts[idx].n); }
   }
 }
 
@@ -23207,6 +23225,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     const sid = String(m.id);
     commentReadError.delete(sid);
     const threads = (m.threads || []) as CommentThread[];
+    commentThreadAsks.set(sid, Array.isArray(m.caps) && m.caps.includes("threadAsks"));   // its kernel answers thread questions in the popover
     // an OPTIMISTIC synth thread (a create still in flight) survives the frame rebuild until the
     // frame lists the thread that create made, or its create fails — the frame used to wipe it, so
     // every create's mark BLINKED between the gesture and the thread's first frame, and a
@@ -24857,10 +24876,11 @@ setupSettings();
     // Interrupting… and the timer + button go; the next comments frame rebuilds this statusline.
     cmtinterrupt: (elx) => {
       const sid = (elx as HTMLElement).dataset.sid;
-      if (!sid || !vscodeApi) return;
-      vscodeApi.postMessage({ type: "interrupt", id: sid });
-      cmtAwaitBase.delete(sid);
-      cmtInterrupted.add(sid);
+      const tid = (elx as HTMLElement).dataset.tid || sid;
+      if (!sid || !tid || !vscodeApi) return;
+      vscodeApi.postMessage({ type: "interrupt", id: sid });   // the thread's session: the federation routes it to the kernel that runs it
+      cmtAwaitBase.delete(tid);
+      cmtInterrupted.add(tid);
       const wrap = document.getElementById("cmt-state");
       if (wrap) {
         const chip = el("span", "chip chip-interrupting");

@@ -352,6 +352,14 @@ class FrameChip(unittest.TestCase):
         self.assertEqual(dormant["chip"], "", "no live row: the page reads the raw state, as before")
         self.assertEqual(dormant["state"], "")
 
+    def test_the_frame_says_this_kernel_answers_thread_questions(self):
+        # the capability a page newer than its kernel reads to keep the old Break out note (the review of #232)
+        self._seed([aline(self.now - 380, "Let me ask which cap you want.", "ca1", parent="cu1", stop="tool_use")])
+        km._sdk = lambda: _ThreadBackend("picker")
+        km._built_thread.clear()
+        fr = km._comments_frame(PARENT, {}, thread_live={})
+        self.assertIn("threadAsks", fr["caps"])
+
     def test_the_served_build_serves_its_chip_too(self):
         self._seed([aline(self.now - 380, "Let me ask which cap you want.", "ca1", parent="cu1", stop="tool_use")])
         km._sdk = lambda: _ThreadBackend("picker")

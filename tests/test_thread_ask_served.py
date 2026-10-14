@@ -51,10 +51,13 @@ A2 = ("Keep the retry cap at two minutes on every sync path. Longer caps only de
 P_ASK = "Keep the retry cap at two minutes"
 P_PERM = "the build folder can be cleaned"
 P_OWN = "keyed by the query string"
+P_KEY = "a write clears the cache for its folder"
 C_ASK = "Which cap should the sync use?"
 C_PERM = "Clean the build folder please"
 C_OWN = "How long should the cache hold?"
 OWN = "Ninety seconds"
+C_KEY0 = "What does the folder's cache lock guard?"   # the keyboard thread's first exchange, answered plainly
+C_KEY = "How long should the export lock hold?"
 QUESTION = "Which retry cap should the notes-api sync use?"
 ASKS = [{"when": C_ASK, "tool": "AskUserQuestion",
          "input": {"questions": [{"question": QUESTION, "header": "Retry cap", "multiSelect": False,
@@ -64,7 +67,11 @@ ASKS = [{"when": C_ASK, "tool": "AskUserQuestion",
         {"when": C_OWN, "tool": "AskUserQuestion",
          "input": {"questions": [{"question": "How long should the list cache hold?", "header": "Cache", "multiSelect": False,
                                   "options": [{"label": "Thirty seconds", "description": "today's window"},
-                                              {"label": "A minute", "description": "fewer list calls"}]}]}}]
+                                              {"label": "A minute", "description": "fewer list calls"}]}]}},
+        {"when": C_KEY, "tool": "AskUserQuestion",
+         "input": {"questions": [{"question": "How long should the export lock hold?", "header": "Lock", "multiSelect": False,
+                                  "options": [{"label": "Ten seconds", "description": "the export's usual length"},
+                                              {"label": "A minute", "description": "covers the slowest export"}]}]}}]
 
 
 def _free_port():
@@ -231,6 +238,26 @@ await page.keyboard.press("Enter");
 out.ownAnswered = await page.waitForFunction((own) => new RegExp("You chose " + own).test((document.querySelector("#cmt-pop .cmt-msgs") || {}).textContent || ""), cfg.own, { timeout: 60000 }).then(() => true, () => false);
 out.ownFrames = await page.evaluate((n) => window.__asks.slice(n), ownBefore);
 out.ownAfter = await page.evaluate(() => { const b = document.querySelector("#cmt-pop .cmt-input"); return { value: b.value, answering: b.classList.contains("answering") }; });
+await closePop();
+
+// 6. the keyboard: a thread with an exchange behind it, opened from its highlight, puts the keys on its card (the box takes
+// the caret only for a thread with nothing said yet), and a number answers the card, typing nothing
+await comment(cfg.pKey, cfg.cKey0);
+await page.waitForFunction(() => (document.querySelector("#cmt-pop .cmt-msgs") || {}).textContent?.includes("Rebuilt the search index"), null, { timeout: 60000 }).catch(() => {});
+await page.focus("#cmt-pop .cmt-input");
+await page.keyboard.type(cfg.cKey);
+await page.keyboard.press("Enter");
+out.keyShown = await card();
+await closePop();
+await page.evaluate((passage) => Array.from(document.querySelectorAll("#content mark.cmt-hl")).find((m) => passage.includes((m.textContent || "").trim()))?.click(), cfg.pKey);
+await card();
+out.keyFocus = await page.evaluate(() => ({ onCard: !!(document.activeElement && document.activeElement.closest && document.activeElement.closest("#cmt-pop .cmt-ask .ask-card")),
+                                            tid: (document.getElementById("cmt-pop") || {}).dataset?.tid || "" }));
+const keyBefore = await page.evaluate(() => window.__asks.length);
+await page.keyboard.press("2");
+out.keyAnswered = await page.waitForFunction(() => /You chose A minute/.test((document.querySelector("#cmt-pop .cmt-msgs") || {}).textContent || ""), null, { timeout: 60000 }).then(() => true, () => false);
+out.keyFrames = await page.evaluate((n) => window.__asks.slice(n), keyBefore);
+out.keyBox = await page.evaluate(() => (document.querySelector("#cmt-pop .cmt-input") || {}).value);
 out.errs = errs;
 await done();
 """
@@ -313,7 +340,7 @@ class ServedThreadAsk(unittest.TestCase):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "sid": WEB,
-                       "pAsk": P_ASK, "pPerm": P_PERM, "cAsk": C_ASK, "cPerm": C_PERM, "pOwn": P_OWN, "cOwn": C_OWN, "own": OWN,
+                       "pAsk": P_ASK, "pPerm": P_PERM, "cAsk": C_ASK, "cPerm": C_PERM, "pOwn": P_OWN, "cOwn": C_OWN, "own": OWN, "pKey": P_KEY, "cKey0": C_KEY0, "cKey": C_KEY,
                        "shots": os.environ.get("THREAD_ASK_SHOTS", "")}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -386,6 +413,14 @@ class ServedThreadAsk(unittest.TestCase):
         self.assertEqual(own[0]["id"], r["own"]["tid"], "…of the thread's own question")
         self.assertTrue(r["ownAnswered"], "the thread's reply names the typed answer\nkernel:\n%s" % klog)
         self.assertEqual(r["ownAfter"], {"value": "", "answering": False}, "the box empties and is a reply box again: %r" % r["ownAfter"])
+
+        # 6. the keyboard: the reopened thread's card holds the keys, "2" answers it, and the reply box stays empty
+        self.assertTrue(r["keyShown"])
+        self.assertTrue(r["keyFocus"]["onCard"], "a thread opened from its highlight puts the keys on its question card: %r" % r["keyFocus"])
+        keyed = [f for f in r["keyFrames"] if f["type"] == "answerAsk"]
+        self.assertEqual([(f["id"], f["target"]) for f in keyed], [(r["keyFocus"]["tid"], 2)], r["keyFrames"])
+        self.assertTrue(r["keyAnswered"], "the thread's reply names the option the key picked\nkernel:\n%s" % klog)
+        self.assertEqual(r["keyBox"], "", "the number answered the card and typed nothing into the reply box")
 
         # the listing: the threads are no session of the board's; only ?threads=1 names them
         ids = [row.get("id") for row in self._sessions()]

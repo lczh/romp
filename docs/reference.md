@@ -6667,7 +6667,10 @@ thread's reply box into its "add your own answer" field, as the message box does
 question; a reply you had started before the question arrived stays a reply. The thread's status
 line says **Needs you** meanwhile, and its highlight and its tick on the scroll rail wear the
 dashed needs-you ring an unread reply wears, until the question is answered. The question comes
-back after a reload, and the thread still gets no tab, no lane and no card of its own. The thread's
+back after a reload, and the thread still gets no tab, no lane and no card of its own. A thread on a
+linked machine is answered the same way from this machine's dashboard: the answer, the stop and a model or effort pick go
+to the kernel that runs it. A linked machine whose kernel predates thread questions keeps the old note, which points at
+Break out. The thread's
 stop button shows where the chat's does: while it works, compacts or retries, and after its turn
 ends on an API error.
 

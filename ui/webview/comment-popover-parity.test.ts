@@ -33,7 +33,7 @@ test("the popover's bottom row IS a statusline: the chat's chip anatomy + counti
   // wasn't enough — the popover copy drifted in dress, font, and element set): syncMetaControls
   // builds the FULL set (mode · model · effort · fast) into .sl-right, sid-scoped at the thread
   assert.match(RENDER, /const metaBox = el\("span", "spinner-meta"\);/);
-  assert.match(RENDER, /syncMetaControls\(metaBox, threadMetaStatus\(th\), th\.tid\);/);
+  assert.match(RENDER, /syncMetaControls\(metaBox, threadMetaStatus\(th\), threadSidOf\(th\)\);/);   // the thread's session id: host-prefixed on a linked machine, so a pick routes to its kernel
   const tms = RENDER.split("function threadMetaStatus(")[1].split("\nfunction ")[0];
   assert.ok(tms.includes("mode: th.mode ||"), "the mode badge's source rides the frame");
   assert.ok(tms.includes("fast: th.fast ||"), "the fast badge's source rides the frame");

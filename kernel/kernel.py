@@ -21137,7 +21137,12 @@ def _comments_frame(sid, live_map=None, thread_live=None):
         row = _comment_frame_entry(th, be, now, live_map, thread_live)
         if row is not None:
             threads.append(row)
-    return {"type": "comments", "id": sid, "threads": threads}
+    # caps: what this kernel serves for its threads, so a page newer than the kernel keeps its old fallbacks (the review of
+    # #232): "threadAsks", the question poll answers a thread's question and permission prompt in its popover (thread-live-1)
+    return {"type": "comments", "id": sid, "threads": threads, "caps": list(COMMENT_FRAME_CAPS)}
+
+
+COMMENT_FRAME_CAPS = ("threadAsks",)   # the comments frame's capabilities (_comments_frame's caps, read by the page per kernel)
 
 
 def _comment_frame_entry(th, be, now, live_map=None, thread_live=None):

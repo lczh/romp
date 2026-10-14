@@ -368,7 +368,7 @@ test("picking a model/effort never reads as an outside press — the box stays p
   // the shared menu's click arms the sid-scoped pending dots, and the frame-driven refresh re-runs
   // syncMetaControls on the popover's row exactly as the chat's tick does
   assert.match(UI, /metaPending\.set\(`\$\{opSid\}:\$\{kind\}`, \{ was, until: Date\.now\(\) \+ 20_000 \}\);/);
-  assert.match(UI, /if \(th && cm\) syncMetaControls\(cm, threadMetaStatus\(th\), th\.tid\);/);
+  assert.match(UI, /if \(th && cm\) syncMetaControls\(cm, threadMetaStatus\(th\), threadSidOf\(th\)\);/);
 });
 
 test("marks use the prefix-tolerant anchor matcher", () => {
@@ -461,7 +461,7 @@ test("while the thread is WRITING the passage holds the await-green tint and NOT
 });
 
 test("the popover renders the thread with the CHAT's own renderer from the branch point", () => {
-  assert.match(UI, /renderingSid = th\.tid;/);
+  assert.match(UI, /renderingSid = threadSidOf\(th\);/);   // the thread's session id (host-prefixed on a linked machine)
   assert.match(UI, /const node = renderEvent\(ev, prev, turnWorkedSecs\(evs, it\.index, thWorking\)\);\s*\n\s*list\.appendChild\(node\);/);   // + the chat's worked footers (the parity bundle, 2026-08-26)
   assert.match(KERNEL, /def _thread_events\(tsid, cut_uuid, now, live_map, tm=None, out=None\):/);   // tm: the thread's live row (thread-live-1)
   assert.match(KERNEL, /evs = evs\[at \+ 1:\]/, "sliced to AFTER the branch point — the head system card never rides");
@@ -701,7 +701,7 @@ test("the parity bundle (2026-08-26): dividers, owner-scoped in-turn controls, t
   assert.match(UI, /const anchor = itemAnchor\(it, \(i\) => eventEpoch\(evs\[i\]\)\);\s*\n\s*const dayOpen = eventEpoch\(evs\[anchor\]\);[\s\S]{0,300}?if \(dayOpen != null\) \{\s*\n\s*const dv = dayDividerFor\(dayOpen, walk\);/);   // the T145 relay-note insert sits between; the unit timed by its anchor member, the divider decided against the walk's mark (T339)
   // the popover's list is stamped with the THREAD sid, and in-turn controls resolve their owner
   // from the DOM at click time — queued ✕ and the api-error card act on the thread, never the tab
-  assert.match(UI, /list\.dataset\.session = th\.tid;/);
+  assert.match(UI, /list\.dataset\.session = threadSidOf\(th\);/);   // the thread's session: a linked machine's routes to its kernel
   assert.match(UI, /function owningSidOf\(el0: HTMLElement \| null\): string \| null \{/);
   assert.match(UI, /const sidQ = owningSidOf\(el\) \|\| activeId;/);   // resolved once — the optimistic arm reuses it
   assert.match(UI, /\{ type: "cancelQueued", id: sidQ, md: qmd \}/);
@@ -716,7 +716,8 @@ test("the thread's running turn offers the chat's stop affordance, owner-scoped 
   const at = UI.indexOf("function cmtStateChip(");
   const chip = UI.slice(at, UI.indexOf("\n}", at));
   assert.match(chip, /b\.dataset\.act = "cmtinterrupt";/);
-  assert.match(chip, /b\.dataset\.sid = th\.tid;/, "the thread's OWN sid rides the button");
+  assert.match(chip, /b\.dataset\.sid = threadSidOf\(th\);/, "the thread's OWN session id rides the button (host-prefixed on a linked machine: the stop routes to its kernel)");
+  assert.match(chip, /b\.dataset\.tid = th\.tid;/, "…and the thread, whose latches the stop clears");
   // since thread-live-1 (2026-10-14) the chat bar's own rule decides, through the one predicate: working, compacting,
   // retrying and an API error (blocked) offer it; a question or permission prompt does not (the picker answers that)
   assert.match(chip, /const st = threadChipState\(th\);/, "the chat's chip for the thread");
@@ -732,11 +733,12 @@ test("the popover interrupt posts the THREAD sid, clears the send-latch on the g
   assert.ok(!body.includes("activeId"), "never the active tab — the owner-scoping class queued-x/Retry were fixed for");
   // T102's latch contract at the interrupt edge: the exchange ends with NO reply record coming, so
   // the pulse clears on the gesture itself — the deciding event — not on a reply that never lands.
-  assert.match(body, /cmtAwaitBase\.delete\(sid\);/);
+  assert.match(body, /const tid = \(elx as HTMLElement\)\.dataset\.tid \|\| sid;/, "the latches are the thread's, by its tid (the post is by its session id)");
+  assert.match(body, /cmtAwaitBase\.delete\(tid\);/);
   // …and the OWED arm stands down too (lab phase 4e caught it: replyOwed's trailing-user shape held
   // the mark green forever after a stop). The tombstone is record-count-keyed, never a clock, and a
   // fresh send retires it (re-owed).
-  assert.match(body, /cmtInterrupted\.add\(sid\);/);
+  assert.match(body, /cmtInterrupted\.add\(tid\);/);
   assert.match(UI, /return owed && !cmtInterrupted\.has\(th\.tid\);/,   // owed = the kernel's replyOwed, else the msgs read (T237)
     "gesture-pair tombstone: stop sets it, ONLY the next send clears it — the CLI files the interrupt "
     + "as a trailing user-kind record, so any record-shape re-derivation would re-fire (lab-caught)");
