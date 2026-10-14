@@ -135,13 +135,14 @@ test("the thread's status is its build's: the gauge's fields, the box's rows and
 test("the thinking line: the chat's own painter, in the popover's fixed-height foot, ticked by the one clock", () => {
   assert.match(fn("paintLiveThinking"), /paintThinkingLine\(n, th\);/);
   const thread = fn("paintThreadThinking");
-  assert.match(thread, /document\.querySelector\("#cmt-pop \.cmt-live-status"\)/);
+  assert.match(thread, /let n = pop\.querySelector\("\.cmt-live-status"\) as HTMLElement \| null;/);
+  assert.match(thread, /n = el\("div", "cmt-live-status"\);\s*\n\s*list\.after\(n\);/, "made once, by the first stretch shown (the chat's foot-line rule)");
   assert.match(thread, /const th = thinkingShown\(openThreadSid\(\)\);/, "the same gate: only while the thread works");
   assert.match(thread, /paintThinkingLine\(n, th\);/, "the one painter");
   assert.match(fn("thinkingShown"), /\?\? openThreadState\(id\)/, "a thread's working state is its chat chip");
   assert.match(fn("liveStatusTick"), /paintLiveThinking\(\);\s*\n\s*paintThreadThinking\(\);/);
   assert.match(fn("applyLiveStatus"), /if \(id === openThreadSid\(\)\) paintThreadThinking\(\);/);
-  assert.match(fn("renderCommentPopover"), /pop\.appendChild\(el\("div", "cmt-live-status"\)\);/);
+  assert.doesNotMatch(fn("renderCommentPopover"), /cmt-live-status/, "no room reserved for a thread that never thinks while its box is open");
 });
 
 test("a thread's subagents' progress reads the THREAD's frame and repaints in its popover", () => {

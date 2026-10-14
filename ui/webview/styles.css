@@ -4371,7 +4371,7 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 /* the open thread's thinking line and background box (render.ts paintThreadThinking and renderThreadBg, thread-live-2): the
    chat's foot line, at a FIXED height whether or not it shows anything so a stretch coming and going moves nothing in the
    box, and the chat's background box, its chat-column margins fallen to the popover's and its cap a share of the box */
-.cmt-live-status { flex: 0 0 auto; height: 18px; }
+.cmt-live-status { flex: 0 0 auto; height: 18px; }   /* made once, by the first stretch the box shows (paintThreadThinking), then kept */
 .cmt-live-status .live-thinking { padding-left: 4px; }
 .cmt-bg { flex: 0 0 auto; min-height: 0; max-height: 40%; overflow: hidden; box-sizing: border-box; margin: 0; cursor: auto;
   border: 1px solid var(--box-border); border-radius: 8px; background: var(--box-bg); display: flex; flex-direction: column; }   /* #bg-tasks's frame */

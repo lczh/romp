@@ -4957,12 +4957,22 @@ function paintLiveThinking(): void {
   if (!n) return;
   paintThinkingLine(n, th);
 }
-// The open comment thread's "Thinking · 14s", the same line in the popover's fixed-height .cmt-live-status (thread-live-2)
+// The open comment thread's "Thinking · 14s", the same line under its conversation (thread-live-2), by the chat's foot-line rule
+// (liveStatusEl): its room is made ONCE, by the first stretch shown, at a FIXED height kept for the popover's life whether or
+// not it shows anything, so a stretch starting and ending moves nothing in the box; and a thread that never thinks while
+// its box is open keeps the box's layout as it always was.
 function paintThreadThinking(): void {
-  const n = document.querySelector("#cmt-pop .cmt-live-status") as HTMLElement | null;
-  if (!n) return;
+  const pop = document.getElementById("cmt-pop");
+  if (!pop) return;
   const th = thinkingShown(openThreadSid());
-  if (!th) { if (n.firstChild) n.replaceChildren(); return; }
+  let n = pop.querySelector(".cmt-live-status") as HTMLElement | null;
+  if (!th) { if (n && n.firstChild) n.replaceChildren(); return; }
+  if (!n) {
+    const list = pop.querySelector(".cmt-msgs");
+    if (!list) return;
+    n = el("div", "cmt-live-status");
+    list.after(n);
+  }
   paintThinkingLine(n, th);
 }
 // The one line, painted into its host in place: the loader dots, the words, the quiet mark and the tip.
@@ -12270,9 +12280,6 @@ function renderCommentPopover(): void {
     fillCommentMsgs(list, th, sid);
     pop.appendChild(list);
     if (th.status === "open") {
-      // the thread's thinking line under its conversation, the chat's foot line (paintThreadThinking, thread-live-2): a
-      // fixed height whether or not it shows anything, so a stretch starting and ending moves nothing in the box
-      pop.appendChild(el("div", "cmt-live-status"));
       // the thread's question, when it stops on one: the chat's card, painted once the popover is in the page
       // (renderThreadAsk, below and on every askLive for the thread); out of the list, so a frame's refill never rebuilds it
       const ask = el("div", "cmt-ask");
