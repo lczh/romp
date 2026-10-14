@@ -5,7 +5,7 @@
 // the passage as it reads instead, and stops once it holds more than a quote can carry.
 // EXECUTED: quoteText, quoteSkips and quoteTextTrim, lifted whole from render.ts, over a small DOM stand-in shaped like the chat's
 // rendering (no jsdom here, the thread-selection-scope.test.ts precedent); the real page in Chromium is
-// quote-context-browser.test.ts, which CI cannot run. Synthetic text only.
+// quote-context-browser.test.ts. Synthetic text only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -146,6 +146,25 @@ test("across two replies: a collapsed tool row's label, toggle and folded input 
   const root = chat();
   assert.equal(read(root, [textOf(root, "The reply closes"), 0], [textOf(root, "The next reply"), 21]),
     "The reply closes here.\n\nThanks, carry on.\n\nThe next reply starts");
+});
+
+// review of #234 (2026-10-14): a tool group's line, its caret and the edits' totals as much as its summary, and an opened
+// edit's line-number gutters, which a <pre> holds and whose user-select: none the walk does not read there
+test("a tool group's caret and totals stay out, and an opened diff's line numbers; a diff row keeps its sign", () => {
+  const ns = { userSelect: "none" };
+  const row = (o: string, n: string, sign: string, code: string) =>
+    h("div.diff-row", h("span.diff-gut.diff-gut-old", ns, o), h("span.diff-gut.diff-gut-new", ns, n), h("span.diff-sign", ns, sign), h("span.diff-code", code));
+  const group = h("div.turn.turn-toolgroup", h("span.dot"),
+    h("div.toolgroup-line", h("span.toolgroup-caret", "\u25b8"), " ", h("span.toolgroup-head", "Ran a command, edited a file"), " ",
+      h("span.tool-totals", h("span.tool-plus", "+1"), " ", h("span.tool-minus", "-1"))));
+  const edit = h("div.turn.turn-tool.fold-open", h("span.dot"),
+    h("div.tool-head", h("span.tool-label", "Edited notes.py"), h("span.tool-fold-toggle", ns, h("span.tool-totals", "+1 -1"))),
+    h("pre.io-pre.fold-pre.diff-fold.tool-fold-body", row("10", "10", "", "a = 1"), row("11", "", "-", "b = 2"), row("", "11", "+", "b = 3")));
+  const root = h("div.thread", h("div.turn.turn-assistant", h("div.md", h("p", "The first reply ends here."))), group, edit,
+    h("div.turn.turn-assistant", h("div.md", h("p", "The second reply starts here."))));
+  assert.equal(read(root, [textOf(root, "The first reply"), 0], [textOf(root, "The second reply"), 23]),
+    "The first reply ends here.\n\na = 1\n-b = 2\n+b = 3\n\nThe second reply starts");
+  assert.equal(read(root, [textOf(root, "a = 1"), 0], [textOf(root, "b = 3"), 5]), "a = 1\n-b = 2\n+b = 3");
 });
 
 test("a closed fold shows its summary alone; an open one its contents too", () => {

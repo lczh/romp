@@ -20139,27 +20139,36 @@ def _shown_is_passage(shown, exact):
     """Whether `shown`, the passage as the page read it, is the passage `exact` (the range's own text, which the thread's
     highlight is found by): its characters, whitespace aside, are `exact`'s in order. The page leaves out what is not the
     message's content (a code block's Copy button, a tool row's label, a closed fold's contents) and breaks a code block's
-    lines where the code does, so `shown` may have fewer characters but never others, and what it leaves out is a few
-    stretches, one per thing left out: the in-order match may skip over `exact` at most once per four characters it
-    matches (text from elsewhere, matched character by character, skips at nearly every one). A "…" that marks a cut at
-    the cap is not part of either; where `exact` itself was cut (a quote chip's passage), `shown` is compared as far as
-    `exact` goes, and half of `exact` matched that way is the same passage."""
-    s, e = re.sub(r"\s+", "", str(shown or "")), re.sub(r"\s+", "", str(exact or ""))
+    lines where the code does, so `shown` may have fewer characters but never others. What it leaves out is whole things,
+    which stand between the words it keeps: each word of `shown` is matched whole, at its first place after the last
+    one's, and what lies between two words is free, however many things were left out there (review of #234: a few short
+    replies selected across six tool rows were not their own passage when every left-out stretch counted, and a word
+    matched a letter at a time could take letters from a label and count more). A word that is not there whole (something
+    left out inside it, or text from elsewhere) is matched a letter at a time, and those skips stay bounded: at most one
+    per four characters matched (text from elsewhere, matched letter by letter, skips at nearly every one). A "…" that
+    marks a cut at the cap is not part of either; where `exact` itself was cut (a quote chip's passage), `shown` is
+    compared as far as `exact` goes, and half of `exact` matched that way is the same passage."""
+    e = re.sub(r"\s+", "", str(exact or ""))
     cut = e.endswith("…")
-    s, e = s[:-1] if s.endswith("…") else s, e[:-1] if cut else e
-    if not s:
+    e = e[:-1] if cut else e
+    words = str(shown or "").split()
+    if words and words[-1].endswith("…"):
+        words[-1] = words[-1][:-1]
+    words = [w for w in words if w]
+    if not words:
         return False
     at, skips, k = 0, 0, 0
-    for k, ch in enumerate(s):
-        found = e.find(ch, at)
-        if found < 0:
-            if not (cut and 2 * k >= len(e)):
-                return False
-            break
-        skips += found > at
-        at = found + 1
-    else:
-        k = len(s)
+    for w in words:
+        found = e.find(w, at)
+        if found >= 0:
+            at, k = found + len(w), k + len(w)
+            continue
+        for ch in w:
+            found = e.find(ch, at)
+            if found < 0:
+                return bool(cut and 2 * k >= len(e)) and skips <= max(4, k // 4)
+            skips += found > at
+            at, k = found + 1, k + 1
     return skips <= max(4, k // 4)
 
 

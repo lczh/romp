@@ -20301,13 +20301,17 @@ function quoteViewOf(v: unknown): QuoteView | null {
 const QUOTE_BLOCKS = "p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, figcaption, summary, blockquote";
 // What a quote leaves out (quoteSkips): the page's controls, and the transcript's labels and markers, which describe the
 // conversation rather than say any of it: a turn's dot, rail and time, a day's divider, the fork spot, a tool row's head
-// (its label and fold toggle), a tool group's summary, a notice's glyph, source, meta and actions, a reply's thinking
-// count, a sent message's romp tag, a follow-up's tag and a nudge's caret, a send's undelivered label, a gap's glyph.
-// Anything else marked user-select: none is left out with them: that is how the page marks chrome a selection must copy
-// clean without (fold heads, the tool rows' IN and OUT, diff gutters).
+// (its label and fold toggle), a tool group's whole line (its caret, its summary and the edits' totals), a diff's
+// line-number gutters, a notice's glyph, source, meta and actions, a reply's thinking count, a sent message's romp tag, a
+// follow-up's tag and a nudge's caret, a send's undelivered label, a gap's glyph. Anything else marked user-select: none
+// is left out with them: that is how the page marks chrome a selection must copy clean without (fold heads, the tool
+// rows' IN and OUT). Inside a <pre> that style is not read (quoteSkips' `styled`), so chrome a code or diff block holds is
+// named here: the gutters (review of #234: an opened edit's rows went out as "1010a = 1"). A diff row's +/- sign stays,
+// though the page marks it user-select: none for a clean copy: it says what the row is, removed or added, and without it
+// a quote of a change reads as two versions of the same line.
 const QUOTE_CHROME = "button, select, input, textarea, svg, .code-copy, .dot, .rail-hit, .time-marker, .day-divider, .fork-spot, "
-  + ".tool-head, .toolgroup-head, .notice-glyph, .notice-src, .notice-meta, .notice-acts, .think-tokens, .romp-tag, .followup-tag, "
-  + ".nudge-caret, .undelivered-label, .tx-gap-glyph";
+  + ".tool-head, .toolgroup-line, .diff-gut, .notice-glyph, .notice-src, .notice-meta, .notice-acts, .think-tokens, .romp-tag, "
+  + ".followup-tag, .nudge-caret, .undelivered-label, .tx-gap-glyph";
 const QUOTE_BREAKS = /^(P|LI|UL|OL|DL|DD|DT|DIV|PRE|TABLE|THEAD|TBODY|TR|TD|TH|BLOCKQUOTE|H[1-6]|FIGURE|FIGCAPTION|SECTION|DETAILS|SUMMARY|HR)$/;
 const QUOTE_PARAS = /^(P|PRE|UL|OL|DL|TABLE|BLOCKQUOTE|H[1-6]|FIGURE|DETAILS|HR)$/;   // a blank line around, in a quote
 /** Whether a quote leaves out the element `e` and all it holds: a control, a label or marker (QUOTE_CHROME), a closed fold's

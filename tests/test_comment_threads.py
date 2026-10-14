@@ -1193,6 +1193,22 @@ class OpeningMessage(unittest.TestCase):
         self.assertEqual(km._comment_opener_parts(raw, "Why?", shown="Words that were never in it.")[0],
                          km._comment_opener_parts(raw, "Why?")[0], "text that is not the passage's is still left out")
 
+    def test_a_short_passage_across_many_tool_rows_is_quoted_as_it_reads(self):
+        # review of #234 (2026-10-14): five one-word replies between tool rows, selected into the next reply's first word.
+        # Every left-out stretch counted against the passage's few characters, so the clean lines were refused and the
+        # quote fell back to the range's own text, the rows' labels and all
+        exact = ("Ok.\nRun the tests1 lineINpytest -qOUTokGo.\nShow the log1 lineINgit log -1OUTokYes.\nRead a.py1 linexNo.\n"
+                 "Check1 lineINlsOUTokHm.\nCheck again1 lineINlsOUTokThe")
+        shown = "Ok.\n\nGo.\n\nYes.\n\nNo.\n\nHm.\n\nThe"
+        sent, _ = km._comment_opener_parts(exact, "Why?", shown=shown)
+        self.assertEqual(self._quote(sent), "> Ok.\n>\n> Go.\n>\n> Yes.\n>\n> No.\n>\n> Hm.\n>\n> The")
+        # what lies between two whole words is free; letters matched one at a time are still bounded
+        sentence = "Sentence number 1 talks about item 1."
+        self.assertTrue(km._shown_is_passage("number 1 talks", sentence))
+        self.assertFalse(km._shown_is_passage("Snntmbrtlksbttm", sentence), "its letters, in order, but scattered")
+        self.assertFalse(km._shown_is_passage("Done.", sentence))
+        self.assertTrue(km._shown_is_passage("Helloworld", "HelloLABELworld"), "a word with one thing left out inside it")
+
     # ── what romp sent, read back from a stored opening message (the popover's note, the user 2026-09-30) ──────────
     def test_the_split_gives_back_exactly_what_romp_added_and_the_users_words(self):
         for prior, frame in (("", None), (self.PRIOR, None), (self.PRIOR, km._FORK_FRAME)):
