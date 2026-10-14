@@ -30,6 +30,14 @@ export const CHIP_LABEL = {
   opening: "Opening…",             // spawned, transcript not on disk yet — the first record clears it (the user 2026-08-05)
 } satisfies Record<ChipState, string>;
 
+/** Does the bar offer its stop for this state? The chat statusline's rule, and the comment popover's through the same
+ *  call (thread-live-1, 2026-10-14): while busy (working, compacting) and while stuck retrying or stopped on an API
+ *  error, where the stop doubles as the auto-retry's off-switch (the user 2026-07-06). Never while idle, waiting on the
+ *  person (the picker answers that) or already interrupting. */
+export function chipStops(state: string | null | undefined): boolean {
+  return state === "working" || state === "compacting" || state === "retrying" || state === "blocked";
+}
+
 /** A named peer behind a peer-kind wait (kernel _peer_identity, 2026-08-26): the name, its host when remote, its
  *  identity colour. Structural: render.ts's PeerIdent and any payload shape fit. */
 export interface ChipPeer { name: string; host?: string | null; color?: { bg: string; fg?: string } | null }

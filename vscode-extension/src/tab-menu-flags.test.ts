@@ -39,10 +39,13 @@ test("each toggle item carries an icon (slashed when off) and a sub-description"
 test("the menu adds the notification bell toggle — inverted polarity: `notify` true is the ENABLED state (the user 2026-07-28)", () => {
   assert.match(SRC, /notify\?: boolean;/);                          // rides Session like the other two flags
   assert.match(SRC, /notify: \("notify" in msg\) \? !!frameBell\(msg\.id, msg, /);  // absorbed + carried across pushes (a linked kernel's resolved, bell-follow.ts)
-  assert.match(SRC, /const onBell = !!\(s && s\.notify\);/);
+  assert.match(SRC, /const onBell = bell\.fullOn;/);   // the session's own setting, else the defaults (bell-follow.ts sessionBell, 2026-10-11)
   // the icon slashes on !onBell (bell OFF), while feed/mail slash on their own off-flags being TRUE
   assert.match(SRC, /toggle\("bell", !onBell,\s*onBell \? "Stop notifying" : "Notify me"/);
   assert.match(SRC, /setSessionFlag\(id, "notify", !onBell\)/);
-  // what it does, in the sub-line: the kernel's feed-diff notifier fires on blocked-on-you / completed
-  assert.match(SRC, /system notification when its work blocks on you or completes/);
+  // what it does, in the sub-line: whose setting it is and what it means (bell-follow.ts sessionBell, executed in
+  // ui/webview/bell-follow.test.ts); a linked kernel on an older romp keeps the old wording there
+  assert.match(SRC, /onBell \? "Stop notifying" : "Notify me",\s*bell\.sub/);
+  const BELL = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "bell-follow.ts"), "utf8");
+  assert.match(BELL, /system notification when its work blocks on you or completes/);
 });

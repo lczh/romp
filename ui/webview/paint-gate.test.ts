@@ -3,7 +3,7 @@
 // ordering run executably; feed-hidden-paint.test.ts and outline-visibility.test.ts pin the wiring.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { paintHeld, paintReleased, publishPaneHidden, type PaneHiddenHost } from "./paint-gate";
+import { paintHeld, paintReleased, publishPaneHidden, paneSight, type PaneHiddenHost, type SightHost } from "./paint-gate";
 
 test("the first content always paints through, whatever the visibility (the pane loader retires on it)", () => {
   assert.equal(paintHeld(true, true, false), false, "hidden tab, empty list");
@@ -84,4 +84,22 @@ test("the observer's word is null until it speaks: the paint gate reads null as 
   assert.equal(publishPaneHidden(false, false, w), true, "the observer's first word publishes");
   assert.equal(publishPaneHidden(false, true, w), false);
   assert.equal(publishPaneHidden(true, true, w), true, "and the tab's arms publish once it has spoken");
+});
+
+test("paneSight: hidden when the tab is, or the pane by the probe or a published word of true; else seen only with the focus (review of PR 223)", () => {
+  const win = (o: { tabHidden?: boolean; framed?: boolean; iw?: number; ih?: number; word?: boolean; focused?: boolean } = {}): SightHost => {
+    const w: any = { innerWidth: o.iw ?? 800, innerHeight: o.ih ?? 600,
+                     document: { hidden: !!o.tabHidden, hasFocus: () => !!o.focused } };
+    w.parent = o.framed === false ? w : {};
+    if (o.word !== undefined) w.__rompPaneHidden = o.word;
+    return w;
+  };
+  assert.equal(paneSight(win({ tabHidden: true, focused: true })), "hidden", "a background tab: nobody sees it");
+  assert.equal(paneSight(win({ iw: 0, focused: true })), "hidden", "a pane display:none since load: the zero-viewport probe");
+  assert.equal(paneSight(win({ word: true, focused: true })), "hidden", "a pane hidden after a first show: the word it published");
+  assert.equal(paneSight(win({ framed: false, iw: 0, focused: true })), "seen", "the probe reads a frame only");
+  assert.equal(paneSight(win({ word: false })), "shown", "on screen, but the focus is in another window or pane");
+  assert.equal(paneSight(win({ focused: true })), "seen", "on screen and focused");
+  const broken: any = { get document() { throw new Error("detached"); } };
+  assert.equal(paneSight(broken), "shown", "a window that throws reads as on screen and unfocused: drawn, acknowledged by the user's dismissal");
 });

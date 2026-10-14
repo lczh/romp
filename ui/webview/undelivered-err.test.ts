@@ -74,7 +74,7 @@ test("the error center knows the new kind: chip label, description and filter to
   const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
   // KINDS drives the filter row, KINDLBL the chip, DESC the tooltip — a kind missing from any of the three
   // renders as an unlabelled entry with no way to mute it
-  assert.match(KERNEL, /var KINDS=\[[^\]]*'undelivered'\]/);
+  assert.match(KERNEL, /var KINDS=\[[^\]]*'undelivered'[,\]]/);   // later kinds may follow (missed, 2026-10-11)
   assert.match(KERNEL, /undelivered:'not sent'/);
   assert.match(KERNEL, /undelivered:"something you sent never reached a session/);
   // and it wears the follow-up-failed red: both mean a message of yours didn't land

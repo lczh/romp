@@ -16,28 +16,29 @@ test("an option can carry its own preview (the SDK backend sends one per option)
 
 test("single-select ↑/↓ steps the preview to the focused option instantly: every option carries its own preview", () => {
   // paint moves the highlight AND re-renders the preview for the new focus
-  assert.match(RENDER, /function paintLiveAskFocus\(\) \{[\s\S]*?renderAskPreview\(\);/);
+  assert.match(RENDER, /function paintLiveAskFocus\(s: AskSurface\) \{[\s\S]*?renderAskPreview\(s\);/);
   // no cursor nudge round trip (T331): the terminal scrape that needed one is gone, and nothing posts navAsk
   assert.doesNotMatch(RENDER, /navLiveAsk|navAsk|navTimer/, "no cursor-driven preview path");
   assert.doesNotMatch(RENDER, /answer it in the terminal|renderUnknownCard/, "no unreadable-screen card: the kernel pushes a typed ask or clears");
   // Enter still confirms; ↑/↓ never select
-  assert.match(RENDER, /e\.key === "Enter"[^}]*answerLiveAsk\(opts\[liveAskFocus\]\.n\)/);
+  // (each surface keeps its own highlight since thread-live-1: the chat's card and a comment popover's, s.focus)
+  assert.match(RENDER, /e\.key === "Enter"[^}]*answerLiveAsk\(s, opts\[s\.focus\]\.n\)/);
 });
 
 test("multi-select keyboard: ↑/↓ walk checkboxes + Submit/Cancel; Enter TOGGLES (the user 2026-06-27)", () => {
   // the card grabs keyboard focus + a keydown handler, like the single card
-  assert.match(RENDER, /card\.addEventListener\("keydown", onMultiKey\);/);
-  assert.match(RENDER, /function onMultiKey\(e: KeyboardEvent\)/);
+  assert.match(RENDER, /card\.addEventListener\("keydown", \(e\) => onMultiKey\(s, e\)\);/);
+  assert.match(RENDER, /function onMultiKey\(s: AskSurface, e: KeyboardEvent\)/);
   // arrows walk a COMBINED list = checkboxes + Submit + Cancel
   assert.match(RENDER, /const navCount = n \+ 2;/);
-  assert.match(RENDER, /e\.key === "ArrowDown"[^}]*% navCount[^}]*paintMultiFocus\(\)/);
+  assert.match(RENDER, /e\.key === "ArrowDown"[^}]*% navCount[^}]*paintMultiFocus\(s\)/);
   // Space toggles the focused checkbox (only when the highlight is on one)
-  assert.match(RENDER, /\(e\.key === " " \|\| e\.key === "Spacebar"\)[^}]*if \(liveAskFocus < n\) toggleLiveAsk\(opts\[liveAskFocus\]\.n\)/);
+  assert.match(RENDER, /\(e\.key === " " \|\| e\.key === "Spacebar"\)[^}]*if \(s\.focus < n\) toggleLiveAsk\(s, opts\[s\.focus\]\.n\)/);
   // Enter TOGGLES the focused checkbox — submit only when the highlight is ON the Submit button
-  assert.match(RENDER, /if \(liveAskFocus < n\) toggleLiveAsk\(opts\[liveAskFocus\]\.n\);\s*else if \(liveAskFocus === n\) submitLiveAsk\(\);\s*else cancelLiveAsk\(\);/);
+  assert.match(RENDER, /if \(s\.focus < n\) toggleLiveAsk\(s, opts\[s\.focus\]\.n\);\s*else if \(s\.focus === n\) submitLiveAsk\(s\);\s*else cancelLiveAsk\(s\);/);
   // the focused checkbox row AND the Submit/Cancel buttons carry the .focus highlight
-  assert.match(RENDER, /"ask-check" \+ \(i === liveAskFocus \? " focus" : ""\)/);
-  assert.match(RENDER, /btns\.forEach\(\(b, j\) => b\.classList\.toggle\("focus", nC \+ j === liveAskFocus\)\)/);
+  assert.match(RENDER, /"ask-check" \+ \(i === s\.focus \? " focus" : ""\)/);
+  assert.match(RENDER, /btns\.forEach\(\(b, j\) => b\.classList\.toggle\("focus", nC \+ j === s\.focus\)\)/);
   assert.match(CSS, /\.ask-check\.focus \{[^}]*box-shadow: inset 2px 0 0/);
   assert.match(CSS, /\.ask-btn\.focus \{ outline: 2px solid var\(--accent\)/);
 });
@@ -55,8 +56,8 @@ test("the inline custom-answer INPUT is gone — a static hint points at the mes
   // no more inline <input class="ask-custom-input"> built in the cards
   assert.doesNotMatch(RENDER, /className = "ask-custom-input"/);
   // both single + multi cards append the hint row when a Type-something slot exists
-  assert.match(RENDER, /if \(ask\.options\.some\(\(o\) => isTypeSomething\(o\.label\)\)\) card\.appendChild\(customHintRow\(\)\);/);
-  assert.match(RENDER, /function customHintRow\(\): HTMLElement/);
+  assert.match(RENDER, /if \(ask\.options\.some\(\(o\) => isTypeSomething\(o\.label\)\)\) card\.appendChild\(customHintRow\(s\)\);/);
+  assert.match(RENDER, /function customHintRow\(s: AskSurface\): HTMLElement/);
   assert.match(RENDER, /type it in the message box below/);
 });
 
@@ -65,7 +66,7 @@ test("a typed composer message routes to the active picker (custom fills Type-so
   // AskUserQuestion with a Type-something slot → "custom"; a raw unknown prompt → "text"; else null (normal send)
   assert.match(RENDER, /ask\.options\.some\(\(o\) => isTypeSomething\(o\.label\)\)\) return "custom";/);
   // sendComposer consults it FIRST and routes instead of sending a normal message
-  assert.match(RENDER, /const askRoute = typed \? composerAnswersAsk\(\) : null;\s*\n\s*if \(askRoute\) \{\s*\n\s*if \(askRoute === "custom"\) addCustomLiveAsk\(typed\); else sendTextLiveAsk\(typed\);/);
+  assert.match(RENDER, /const askRoute = typed \? composerAnswersAsk\(\) : null;\s*\n\s*if \(askRoute\) \{\s*\n\s*if \(askRoute === "custom"\) addCustomLiveAsk\(chatAsk, typed\); else sendTextLiveAsk\(chatAsk, typed\);/);
 });
 
 test("the composer shows it's in answer mode + the card never steals focus from a typing composer", () => {
@@ -73,6 +74,6 @@ test("the composer shows it's in answer mode + the card never steals focus from 
   assert.match(RENDER, /ta\.placeholder = "add your own answer…  \(⏎ submit\)";\s*\n\s*ta\.classList\.add\("answering"\);/);
   assert.match(CSS, /#composer-input\.answering \{ border-color: var\(--accent\)/);
   // the card only takes focus when the user is NOT typing in an input/textarea (never yanks the caret mid-word)
-  assert.match(RENDER, /function focusCardUnlessTyping\(card: HTMLElement\) \{\s*\n\s*if \(!isTypingTarget\(document\.activeElement\)\) card\.focus/);
-  assert.match(RENDER, /card\.addEventListener\("keydown", onSingleKey\);\s*\n\s*focusCardUnlessTyping\(card\);/);
+  assert.match(RENDER, /function focusCardUnlessTyping\(card: HTMLElement\) \{\s*\n\s*if \(!isTypingTarget\(document\.activeElement\) && !askCardElsewhere\(card\)\) card\.focus/);
+  assert.match(RENDER, /card\.addEventListener\("keydown", \(e\) => onSingleKey\(s, e\)\);\s*\n\s*focusCardUnlessTyping\(card\);/);
 });

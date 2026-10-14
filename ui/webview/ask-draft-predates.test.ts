@@ -30,7 +30,8 @@ test("both event stamps exist: when the question arrived, when this draft began"
 test("a draft that predates the question takes the composer OUT of answer mode", () => {
   assert.match(RENDER, /function draftPredatesAsk\(id: string\): boolean \{/);
   assert.match(RENDER, /return started != null && arrived != null && started < arrived;/);
-  assert.match(RENDER, /if \(draftPredatesAsk\(activeId\)\) return null;/);
+  assert.match(RENDER, /if \(draftPredatesAsk\(id\)\) return null;/, "boxAnswersAsk: the message box's rule, and a comment popover's box's (thread-live-1)");
+  assert.match(RENDER, /function composerAnswersAsk\(\): "custom" \| "text" \| null \{\s*\n\s*return activeId \? boxAnswersAsk\(activeId\) : null;/);
 });
 
 test("every send path ends the draft, and a send re-arms the picker's claim on the empty box", () => {

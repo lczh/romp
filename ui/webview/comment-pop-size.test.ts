@@ -157,7 +157,7 @@ test("the maximize button sits in .cmt-head right before the ×, delegated like 
   assert.match(CSS, /\.cmt-max \+ \.cmt-x \{ margin-left: 0; \}/, "the × no longer pushes itself: the pair sits together at the right");
   assert.match(CSS, /\.cmt-head \.cmt-x, \.cmt-head \.cmt-max \{ cursor: pointer; \}/);
   // the whole-box drag exempts it (a `button`), so a press on it is a click, never a drag
-  assert.match(RENDER, /if \(t\.closest\("\.cmt-x, \.cmt-name, \.cmt-input, \.cmt-msgs, \.cmt-quote, \.cmt-staged, \.cmt-chips, button, input, textarea, \.meta-btn, \.meta-menu"\)\) return;/);
+  assert.match(RENDER, /if \(t\.closest\("\.cmt-x, \.cmt-name, \.cmt-input, \.cmt-msgs, \.cmt-quote, \.cmt-staged, \.cmt-chips, \.cmt-ask, button, input, textarea, \.meta-btn, \.meta-menu"\)\) return;/);
 });
 
 test("a double-click on the title bar routes to the SAME toggle; the head's interactive children keep theirs; the title selects nothing", () => {

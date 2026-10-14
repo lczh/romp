@@ -13,7 +13,9 @@ import { distillText, distillInputs, applyDistillLine, distillPending, distillSt
 import { openContextMenu, CtxItem } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy): the card menu's card, dismissal and keys
 import { flipNeeded } from "./feed-flip";
 import { delegate } from "./actions";
+import { CmtDrops, cmtDropEntry } from "./comment-drops";   // a dropped comment create's dialog, shared with the chat page (review of PR 218)
 import { paintHeld, paintReleased, publishPaneHidden } from "./paint-gate";
+import { paneSight } from "./paint-gate";   // who can see a dropped comment's dialog here (review of PR 223)
 import { linkifyPrRefs, setLinkedText, installPrLinkOpener } from "./pr-links";
 import { cardInputsKey, cardNeedsUpdate, type GateEnv } from "./feed-card-gate";
 import { spinFor, awaitWord, groupRows, waitsNote, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow } from "./spin-caption";
@@ -5118,6 +5120,7 @@ function watchFeedVisibility(list: HTMLElement): void {
     feedIntersecting = entries.some((e) => e.isIntersecting);
     releasePaint();
     live.catchUp();   // the 15 s age pass skipped while off screen (feed-age.ts liveRefresher); one pass, same measure
+    cmtDrops.settle();   // the published word moved: a drop handed back while off screen is asked for again (review of PR 223)
   }).observe(list);
 }
 // The owed paint, settled the moment both measures say the pane can be seen. Synchronous on purpose (no
@@ -6189,6 +6192,9 @@ listenForFrames(perfFrameHandler("feed", (m) => vscodeApi?.postMessage(m), (e: M
         restoreChecks.set(id, { host: h, sentBuild: seen, seq: typeof m.seq === "number" ? m.seq : undefined });
       }
     }
+  } else if (m.type === "err" && cmtDrops.take(m)) {
+    // a dropped comment create: its own dialog, listing every drop that arrives while it is up, each acknowledged to its
+    // kernel once drawn and drawn once per page (cmtDrops; the chat page's twin); any other err frame takes the arm below
   } else if (m.type === "err" && typeof m.text === "string" && m.text) {
     // the dialog interrupts; the bell KEEPS it (the user 2026-07-29) — dismissing the modal must not erase
     // the fact that a message never landed. Same {romp:'notify'} bridge the card-badge mirror below uses.
@@ -6392,11 +6398,65 @@ function showPickerDialog(name: string, options: string[]) {
   (box.querySelector("button") as HTMLElement | null)?.focus();
 }
 
+// The dropped comment creates' dialog (comment-drops.ts), on showErrDialog's chrome and in its slot (#err-dialog: it
+// replaces an older err dialog): every drop that arrives while it is up joins its list, each with its own Copy, and is
+// acknowledged to its kernel once someone saw it (this page on screen and focused, or the user's dismissal); a drop that
+// arrives while nobody can see this page is handed back to its kernel for a page someone can see, and a drop this page drew
+// already is not drawn twice (reviews of PR 218 and PR 223, 2026-10-11). `cmtDropList` is the open list. It leaves the
+// screen only by the user's dismissal (dismissCmtDrops): a newer err dialog waits behind it (showErrDialog).
+let cmtDropList: HTMLElement | null = null;
+let errHeld: [string, string, string] | null = null;   // the newest err dialog waiting behind the drops dialog
+const cmtDrops = new CmtDrops({
+  isOpen: () => !!cmtDropList && cmtDropList.isConnected,
+  open: (title) => { cmtDropList = showCmtDropDialog(title); },
+  add: (d) => { cmtDropList!.appendChild(cmtDropEntry(d, el, { detail: "pickdlg-detail", button: "pickdlg-opt" },
+                                                      (t) => { navigator.clipboard?.writeText(t); })); },
+  retitle: (t) => { const h = cmtDropList?.parentElement?.querySelector(".pickdlg-title"); if (h) h.textContent = t; },
+  sight: () => paneSight(),
+  ack: (d) => vscodeApi?.postMessage({ type: "commentDropSeen", id: d.sid, createId: d.createId }),
+  hidden: (d, hidden) => vscodeApi?.postMessage({ type: "commentDropHidden", id: d.sid, createId: d.createId, hidden }),
+  // the bell keeps each drop, as it keeps every err frame (the arm below)
+  log: (d) => window.parent?.postMessage({ romp: "notify", kind: "undelivered", text: d.copy ? d.title + ": " + d.copy : d.title,
+                                           sid: d.sid }, "*"),
+});
+// the events that change who can see this page (paint-gate.ts paneSight): a drop drawn while nobody was looking is
+// acknowledged once someone is, and one handed back is asked for again (the observer's report is watchFeedVisibility's)
+window.addEventListener("focus", () => cmtDrops.settle());
+window.addEventListener("resize", () => cmtDrops.settle());
+document.addEventListener("visibilitychange", () => cmtDrops.settle());
+/** Open the drops dialog titled `title` and return its (empty) list. */
+function showCmtDropDialog(title: string): HTMLElement {
+  document.getElementById("err-dialog")?.remove();
+  const overlay = el("div", "pickdlg-overlay"); overlay.id = "err-dialog";
+  const box = el("div", "pickdlg-box");
+  const h = el("div", "pickdlg-title"); h.textContent = title;
+  const list = el("div", "cmt-drop-list");
+  const ok = el("button", "pickdlg-opt pickdlg-cancel");
+  ok.textContent = "Dismiss";
+  ok.onclick = () => dismissCmtDrops(overlay);
+  box.append(h, list, ok);
+  overlay.onclick = (e) => { if (e.target === overlay) dismissCmtDrops(overlay); };
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  ok.focus();
+  return list;
+}
+/** The user dismissed the drops dialog (Dismiss, the backdrop): every drop it listed was seen, and the err dialog waiting
+ *  behind it opens. */
+function dismissCmtDrops(overlay: HTMLElement): void {
+  overlay.remove();
+  cmtDrops.dismissed();
+  const h = errHeld;
+  errHeld = null;
+  if (h) showErrDialog(h[0], h[1], h[2]);
+}
+
 // The kernel's LOUD channel (the user 2026-07-29). The feed had no error surface at all: every failure here
 // went to feedToast, which fades, and a kernel `warn` had no handler on this page whatsoever — so an action
 // fired from a card could fail with the page showing nothing. A refused reply is typed work that is gone, so
 // it gets a dialog you must dismiss, reusing the resume-picker dialog's chrome rather than inventing another.
 function showErrDialog(title: string, text: string, copy: string) {
+  if (cmtDropList?.isConnected) { errHeld = [title, text, copy]; return; }   // it waits behind the drops dialog (review of PR 223)
   document.getElementById("err-dialog")?.remove();
   const overlay = el("div", "pickdlg-overlay"); overlay.id = "err-dialog";
   const box = el("div", "pickdlg-box");

@@ -6692,10 +6692,24 @@ box's rules: selecting again replaces the chip, holding ⌘ (Ctrl elsewhere) whi
 one, and the same text never lists twice. **⌘⏎** stages what is typed, with its chips, in a staged
 strip inside the thread's box (the message box's own strip, over the thread's own list); **⏎** sends
 everything staged and then what is in the box as one reply to the thread, each quote under
-`Replying to this part of the conversation:`. **⏎** on an empty box sends what is staged, and the
+`Replying to this part of the conversation:` (a few words of a sentence the way the message box sends
+them, [named, with their sentence](#a-highlight-shorter-than-a-sentence)). **⏎** on an empty box sends what is staged, and the
 strip's **Send now** sends it alone. **Esc** first drops the chips, then closes the box. The staged
 replies are kept per thread through a reload, and deleting the thread drops them. A resolved
 thread keeps its plain reply, and the new-comment box sends its comment on either key.
+
+### A comment thread that asks you something
+
+When a thread stops on a question or on a permission prompt, its box shows the same card the chat
+shows for a session's question, between the thread's messages and its reply box, and you answer it
+there: pick an option, or Allow or Deny a command. A question that takes your own answer turns the
+thread's reply box into its "add your own answer" field, as the message box does for a session's
+question; a reply you had started before the question arrived stays a reply. The thread's status
+line says **Needs you** meanwhile, and its highlight and its tick on the scroll rail wear the
+dashed needs-you ring an unread reply wears, until the question is answered. The question comes
+back after a reload, and the thread still gets no tab, no lane and no card of its own. The thread's
+stop button shows where the chat's does: while it works, compacts or retries, and after its turn
+ends on an API error.
 
 ### Where typing, pasting and dictation go
 
@@ -7435,11 +7449,70 @@ mark. Hovering a mark gives the state and when it was reached.
 A comment thread's opening message wraps your comment in text written for the
 thread's agent: a line saying the thread was split off from the main
 conversation to ask about one part of it, then the passage you highlighted,
-quoted. Under your comment, the thread's box shows a one-line note, "What romp
+quoted, or for a few words of a sentence the words and the sentence they sit in.
+Under your comment, the thread's box shows a one-line note, "What romp
 sent with your comment"; opening it shows that text exactly as it was sent. It
 is read from the thread's record, or for a thread made before the record kept
 it, from the opening message itself, so it is there after a reload too. A thread
 whose opening message romp added nothing to shows no note.
+
+## A highlight shorter than a sentence
+
+A quote of a few words alone ("placement") does not say where they were, so a
+highlight shorter than a sentence goes out named, with the sentence it sits in.
+In the message box, and in a comment thread's reply box:
+
+```
+Replying to "placement" in this part of the conversation:
+> …We should revisit the placement of the legend before shipping the deck…
+```
+
+A comment thread's opening message does the same under its first line:
+`About "placement" in this part of the conversation:`, then the sentence.
+
+This applies to a few words (up to 100 characters) that are less than their
+sentence. The sentence is read from the message as the chat shows it, at the
+moment you select, without any button's text: it runs from the end of the
+sentence before the words to the end of the one they are in, within one
+paragraph, list item, heading or table cell. A line break in the message's source
+inside a paragraph counts as a space. A period after an abbreviation, an initial
+or an acronym (`Dr.`, `J.`, `U.S.`), and one or an ellipsis followed by a
+lowercase word (`etc. and`, `tried … then`), do not end a sentence. A `…` marks
+where the paragraph goes on before or after the sentence (after a `?` or `!` it
+follows a space, and an ellipsis already there is not doubled), a sentence longer
+than about 280 characters is cut to the words around the highlight, and when the
+words occur more than once in what is quoted, the one you highlighted is in bold.
+
+Code is not prose. A few words of a line of a code block are named over that
+line, never a sentence and never in bold. An inline code span is part of the
+sentence it sits in: double-clicking `max_retries` in "Set `max_retries` to 5
+before the next run." sends
+
+```
+Replying to "max_retries" in this part of the conversation:
+> Set max_retries to 5 before the next run.
+```
+
+A passage over several lines of a code block is quoted as those lines, with their
+line breaks, under the usual lead-in. A longer highlight, a whole sentence or
+more, a quote from the file viewer and a highlight in the editor go out as
+before, the passage alone. What the quote chip's preview shows is what is sent.
+
+## What a quote of the chat holds
+
+A quote of a passage of the chat holds the passage's text as the chat shows it,
+read at the moment you select. What is not the conversation's text is left out:
+a code block's Copy button and any other control, a tool row's label and its
+folded input and output, the IN and OUT labels of an open one, a notice's
+source label, a message's time, the contents of a closed fold (its summary
+stays), and anything the chat marks as unselectable. A block
+starts a new line and a paragraph or a message is a blank line apart; a code
+block's lines keep their line breaks; a table's cells are a tab apart.
+
+A quote longer than 4,000 characters is cut there and ends in `…`, in the
+message box, in a comment thread's reply box and in a comment thread's opening
+message alike. A comment's highlight is still found by the selection's own text,
+whole, so the cut changes only what is sent.
 
 ## What a relay sends
 
@@ -7667,10 +7740,10 @@ it is in the bottom-right cluster. A small card opens with a main switch, two
 switches indented under it, and a button:
 
 - **Notifications** is the main switch. Off silences every device and the
-  desktop of every machine you have attached; the bells on individual sessions
-  and cards are mutes under it. While it is off, the two switches beneath it are
-  dimmed but still work, so you can set a phone up first and switch everything
-  on when you are ready.
+  desktop of every machine you have attached, except for the sessions and cards
+  you set to **Notify me** yourself. While it is off, the two switches beneath it
+  are dimmed but still work, so you can set a phone up first and switch
+  everything on when you are ready.
 - **This device**, under it, turns them on for the phone or browser you are
   holding. The first time, the browser asks for permission. If you refuse, the
   row goes grey and tells you where to allow it again (on an iPhone, Settings,
@@ -7688,6 +7761,15 @@ switches indented under it, and a button:
   quiet: nothing there was waiting on you. With many sessions running this is
   still a lot of buzzing, so it is off unless you want it. A turn that ends by
   asking you something buzzes once, not twice.
+
+A session's own bell, **Notify me** or **Stop notifying** in its tab menu and its
+timeline lane, is a choice you make for that session, and it beats the two
+switches: a session set to Notify me notifies when a turn you started ends, or
+when it needs you or finishes a task, even with the switches off, and one set to
+Stop notifying stays quiet with them on. A session you never set follows the
+switches, and its menu row says so ("default: …") beside what that means. So with
+**Also when a turn finishes** off, turning Notify me on for a few sessions hears
+just those.
 - **Send a test notification** sends one notification to the device you are
   holding, whatever the switches say, and prints the push service's answer under
   the button, so you can see at once whether the phone is set up or why it is
@@ -7700,7 +7782,13 @@ switches indented under it, and a button:
 A restart of the kernel (an update deploys one) announces nothing by itself.
 What Romp has told you about is written down beside its other state, so the
 cards already waiting on you or already finished when it comes back stay
-quiet. A card that stops needing you and then needs you again is announced
+quiet. Turn ends that would have notified you while it was down are not sent
+one by one when it is back: one notification, **Romp: missed notifications**,
+says how many sessions finished turns meanwhile. That includes a turn a session
+finished while the kernel was down whose end the kernel only learns when it
+reconnects to the session (the session's own process kept running and held
+it), so the notification waits until the kernel has reconnected to every
+session it found running. A card that stops needing you and then needs you again is announced
 once, not at every turn, unless you acted on the card in between (answered
 it, resolved it, crossed it off) or it finished in the meantime.
 
@@ -7713,18 +7801,54 @@ box's switches. On the dashboard, a linked machine's session and card bells
 show what reaches the devices set up on the machine you are looking at: a bell
 you set stays as you set it, on that machine, and one you never touched follows
 this machine's main switch. A linked machine running an older romp keeps its own
-switches, and its bells say so when you hover them. If the machine the phone is set up on
-restarts, what the linked machines raised meanwhile arrives when it is back,
-unless it is no longer current: the card was answered or moved on, or the
-session has finished another turn since. If a linked machine's kernel restarts,
-whatever it raised just before is skipped, and the log of the machine the phone
-is set up on says so and how many.
+switches, and its bells say so when you hover them.
+
+Notifications are never late and never silently lost. While the link holds, each
+arrives as it happens. When the machine the phone is set up on may have missed
+some (it restarted, a linked machine restarted, or the link dropped), none of
+the missed ones arrives late: one notification titled **Romp: missed
+notifications** says what you missed and why, for example "laptop was
+unreachable for 38 min · 3 sessions finished turns, 1 needs you". A linked
+machine keeps the notifications it offers on disk (`push-feed.json` in its
+state directory), so its own restart, every update included, is counted like
+an outage: "laptop restarted · 1 session finished a turn", or nothing at all
+when nothing finished that would have reached you. The notification says that
+notifications may have been missed, without a number, when the count cannot be
+known: that record could not be read or written (the kernel says so in its log
+and starts a new one), or more notifications came than it keeps (256) while the
+link was gone. A session it cannot count is said on its own, after the count of
+the rest ("1 session finished a turn; more may have been missed"): one whose
+reconnection after the restart failed, or one whose session process is too old
+to report a finished turn it answered by itself (it does after eight minutes
+without romp) when the machine may have been down that long. The notification
+waits until the restarted machine has reconnected to every session it found
+running, however long that takes. It counts only what your switches
+and bells would have let through, and says "may have been missed" only when
+something they allow could have been lost; when nothing could have, there is no
+notification, only a line in the kernel's log. A link that drops and comes back
+several times makes one such notification, sent once it holds again, and a
+machine that keeps restarting updates that one notification without a sound
+("restarted 3 times") until you open Romp on that device or its notifications
+flow normally again. Apple devices are not sent those updates, since an iPhone
+cannot replace a notification in place: what one missed is said by the next such
+notification it gets, or, if you open Romp there first or turn **This device**
+off there, as a **missed** entry in the Log. The machine keeps that record on
+disk until the dashboard confirms the entry is in its Log, so neither a reply
+lost on the way nor a restart of the machine (every update) loses it, and a
+restart does not make a notification you have not seen sound again. In one burst, at most 16 notifications arrive one by one; the rest are
+said in one more.
+
+A notification that replaces an earlier one without a sound (the card that
+follows a turn end's notification for the same session) takes the earlier one's
+place on Chrome and Firefox. An iPhone would show it beside the earlier one, so
+it is sent there only when it carries the app icon's needs-you count.
 
 Tapping a notification brings Romp forward on the session it was about. On an
 iPhone with the app already open in the background, the switch happens as the
 app comes forward; a notification you swipe away instead is read the same way,
-so the next time you open the app it may land on that session. With the app in
-front, nothing moves until you next come back to it.
+so the next time you open the app it may land on that session. When several are
+gone by then, it lands only if they were all about the same session. With the
+app in front, nothing moves until you next come back to it.
 
 The bell itself shows the state of the device you are looking at: lit when the
 main switch is on and this device is set up, and crossed out otherwise. Its
@@ -7759,7 +7883,8 @@ notification went to. A report on a valid id stamps that row's shown or tapped
 time, where the first stamp stands so a repeated report changes nothing, and
 records the worker's build string, which every report rewrites. A shown report
 also marks the older unsettled, untapped pushes for the same session on that
-device superseded, since the show replaced their notifications. And the
+device superseded, since the show replaced their notifications; on an Apple
+device, which shows each notification beside the last, it marks none. And the
 request's origin, read from its `Origin` header, else its `Referer`, else the
 forwarded headers or `Host`, is recorded on that device's subscription when
 none is on file; a recorded origin stands, and a different one is logged as a

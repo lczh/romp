@@ -968,10 +968,18 @@ class HostProcess(unittest.TestCase):
         self.assertGreaterEqual(rows[0]["parkedS"], 1.0)
         k2, hello = self._attach(sock)
         self.assertEqual(hello["parked"], [], "nothing left parked")
+        # …and the attaching kernel is TOLD (the review of #230): no kernel ran that Stop hook, so no kernel stamped the turn
+        # end, and the kernel counts it from this report into its restart's summary, with the moment the hook began waiting
+        (told,) = hello["selfAnswered"]
+        self.assertEqual((told["event"], told["rid"]), ("Stop", rows[0]["requestId"]))
+        self.assertLessEqual(told["t"], rows[0]["t"] - 1.0, "when the turn ended, not when the host answered for it")
         k2.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "result")
         texts = [c["text"] for f in k2.outs() if f["data"].get("type") == "assistant" for c in f["data"]["message"]["content"]]
         self.assertIn("hook answered", texts, "the CLI took the neutral answer and went on")
         k2.close()
+        k3, again = self._attach(sock)
+        self.assertEqual(again["selfAnswered"], hello["selfAnswered"], "every hello repeats it: a kernel stamps it once")
+        k3.close()
 
     def test_a_cancel_from_the_cli_drops_the_parked_request(self):
         host, sock, spec = self._start()

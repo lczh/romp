@@ -76,7 +76,8 @@ test("no observer, or no body: nothing is installed and nothing published; the s
 // ── the source pins ──
 test("render.ts installs the publisher once, at top level, over the page's body, and gates no paint; the module reads the frame's own visibility", () => {
   assert.match(RENDER, /^import \{ watchChatVisibility, browserChatVisibilityDeps \} from "\.\/chat-visibility";/m);
-  assert.match(RENDER, /^watchChatVisibility\(document\.body, \{ \.\.\.browserChatVisibilityDeps\(\), onShown: renderNoticeDisclosures \}\);/m, "top level, so it runs when the bundle loads (the script sits at the end of the body); the return edge re-measures the Needs you box's disclosures (the post-merge review of PR 1967)");
+  assert.match(RENDER, /^watchChatVisibility\(document\.body, \{ \.\.\.browserChatVisibilityDeps\(\), onShown: paneReturned \}\);/m, "top level, so it runs when the bundle loads (the script sits at the end of the body)");
+  assert.match(RENDER, /^function paneReturned\(\): void \{ renderNoticeDisclosures\(\); cmtDrops\.settle\(\); \}/m, "the return edge re-measures the Needs you box's disclosures (the post-merge review of PR 1967) and settles the comment drops' dialog (review of PR 223)");
   assert.equal(RENDER.split("watchChatVisibility(").length - 1, 1, "once");
   assert.ok(!RENDER.includes("paintHeld(") && !RENDER.includes("paintReleased("), "the chat gates no paint: every frame paints");
   assert.ok(!SRC.includes("__rompPaneHidden"), "the flag's name lives in paint-gate.ts: one publisher shape for every pane");

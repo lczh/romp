@@ -17,6 +17,7 @@ export type CommentThread = {
   /** messages waiting in its postal box (they land when it is broken out) */
   heldMail?: number;
   tid: string;
+  sid?: string;               // the thread's own session (the same id as tid for every thread romp makes): its question's askLive frames and answers key on it (thread-live-1)
   name?: string;              // the thread's editable name (<session>-comment-<N> by default)
   color?: string;             // the comment's identity color — picked distinct from its parent's
   anchorUuid: string;
@@ -24,6 +25,10 @@ export type CommentThread = {
   status: "open" | "resolved" | "promoting" | "promoted" | "merging" | "merged";   // merging/merged: folded back into the parent (the user 2026-08-23)
   createdT: number;
   state: string;              // the thread session's live state ("working"/"waiting"/…, "" when dormant)
+  /** the CHAT's state chip for a running thread (the kernel's _session_chip over the thread's live row: needsInput,
+   *  blocked, compacting, retrying, working, awaitingBg, ready, interrupting), "" for a dormant thread or an older kernel
+   *  (thread-live-1, 2026-10-14). Read through threadChipState, never alone. */
+  chip?: string;
   error?: string;             // the thread CLI's launch error, when it could not start
   unread: boolean;            // a FINISHED agent reply newer than the read watermark — yellow (kernel truth, T237)
   replyOwed?: boolean;        // a reply is still owed (no exchange yet / user's message newest / turn in progress / a send held) — the green wash (kernel truth, T237; absent on an older kernel)
@@ -139,6 +144,30 @@ export function agentCount(th: CommentThread): number {
 }
 export function threadStuck(state: string): boolean {
   return state === "permission" || state === "picker";
+}
+
+/** The thread's state as the chat's chip says it (status-chip.ts ChipState): the kernel's chip for a running thread, the
+ *  same derivation a tab's statusline wears (thread-live-1, 2026-10-14); for a thread with no chip (dormant, or an older
+ *  kernel), its raw backend state read the way the popover always read it: a question or permission prompt is
+ *  needsInput, working, retrying and compacting are themselves, anything else is ready. */
+export function threadChipState(th: Pick<CommentThread, "chip" | "state">): string {
+  if (th.chip) return th.chip;
+  const st = th.state || "";
+  if (threadStuck(st)) return "needsInput";
+  return st === "working" || st === "retrying" || st === "compacting" ? st : "ready";
+}
+
+/** The thread waits on the person: open, able to run, and stopped on a question or a permission prompt. Its picker shows
+ *  in the popover, and its passage and rail tick wear the needs-you cue (threadCued). */
+export function threadNeedsYou(th: Pick<CommentThread, "chip" | "state" | "status" | "error">): boolean {
+  return th.status === "open" && !th.error && threadChipState(th) === "needsInput";
+}
+
+/** The passage's needs-you cue (the dashed ring or box, and the rail tick's halo): an unread reply on an open thread, or
+ *  an open thread waiting on the person (threadNeedsYou). One predicate for the mark, the painter's gate, the rail and
+ *  the click's pick, so they never disagree. */
+export function threadCued(th: Pick<CommentThread, "chip" | "state" | "status" | "error" | "unread">): boolean {
+  return (!!th.unread && th.status === "open") || threadNeedsYou(th);
 }
 
 // ── exact-text re-anchoring ────────────────────────────────────────────────────────────────────
@@ -259,6 +288,11 @@ export function prunePending(pending: { text: string; t: number }[], msgs: Comme
  *  second with the first thread and wrote its name nowhere (review, 2026-09-09). */
 export type CommentCreate = { sid: string; uuid: string; exact: string; text: string; name: string;
   model: string; effort: string; fast: string; color: string; createId: string;
+  /** a few words' sentence or code line, read by the page at the selection (render.ts selectionQuoteView): the thread's
+   *  first message names the words and quotes it (the kernel's _comment_quote_parts, 2026-10-14) */
+  context?: string;
+  /** a code passage's lines with their line breaks, which the first message quotes in place of the passage */
+  shown?: string;
   /** the thread ids the page knew on the session at the send: a thread on this passage that is NOT among them is
    *  the one this create made (synthSuperseded) */
   prior?: string[] };
@@ -272,11 +306,11 @@ export function mintCreateId(): string {
 /** The create a send gesture holds: stamped with a fresh id, picks defaulted to "" (the kernel's
  *  default-comment settings, then the parent's). */
 export function newCommentCreate(anchor: { sid: string; uuid: string; exact: string; model?: string; effort?: string;
-                                           fast?: string; color?: string },
+                                           fast?: string; color?: string; context?: string | null; shown?: string | null },
                                  text: string, name: string): CommentCreate {
   return { sid: anchor.sid, uuid: anchor.uuid, exact: anchor.exact, text, name, model: anchor.model || "",
            effort: anchor.effort || "", fast: anchor.fast || "", color: anchor.color || "",
-           createId: mintCreateId() };
+           createId: mintCreateId(), ...(anchor.context ? { context: anchor.context } : anchor.shown ? { shown: anchor.shown } : {}) };
 }
 
 /** The held create an ack or a refusal answers. The kernel echoes the gesture's createId, so the answer names exactly
@@ -411,7 +445,9 @@ export function synthSuperseded(threads: CommentThread[], held: CommentCreate): 
 /** The commentCreate frame for a held create: the send and every re-post of it build the same one, so
  *  the kernel sees one id for one gesture. */
 export function commentCreateFrame(c: CommentCreate): { type: "commentCreate"; id: string; uuid: string; exact: string;
-    text: string; name: string; model: string; effort: string; fast: string; color: string; createId: string } {
+    text: string; name: string; model: string; effort: string; fast: string; color: string; createId: string; context?: string;
+    shown?: string } {
   return { type: "commentCreate", id: c.sid, uuid: c.uuid, exact: c.exact, text: c.text, name: c.name,
-           model: c.model, effort: c.effort, fast: c.fast, color: c.color, createId: c.createId };
+           model: c.model, effort: c.effort, fast: c.fast, color: c.color, createId: c.createId,
+           ...(c.context ? { context: c.context } : c.shown ? { shown: c.shown } : {}) };   // only when there is one: a frame without either is the plain quote
 }

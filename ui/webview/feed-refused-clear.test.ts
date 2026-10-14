@@ -146,5 +146,5 @@ test("kernel: the clears-log refusal names the request the way _refuse_drive's f
   // each account names only its own ids (the third review's high): a skipped session's frame carries its own out of the batch
   assert.match(KERNEL, /_ids = \[i for i in _batch if \(i\.startswith\("notice:%s:" % sid\) if notices else \(not i\.startswith\("notice:"\) and i\.rsplit\(":", 1\)\[0\] == sid\)\)\]/, "a skipped session's own ids out of the batch");
   // the dialogs attach their box (the verifier's medium B, pre-existing on main): the behaviour rides the feed lab; this pins both functions carry the append
-  assert.equal((FEED.match(/overlay\.appendChild\(box\);/g) || []).length, 3, "the quarantine dialog's, and now showErrDialog's and showPickerDialog's");
+  assert.equal((FEED.match(/overlay\.appendChild\(box\);/g) || []).length, 4, "the quarantine dialog's, and now showErrDialog's and showPickerDialog's, and the comment drops' (showCmtDropDialog, review of PR 218)");
 });

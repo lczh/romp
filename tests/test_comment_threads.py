@@ -1106,6 +1106,93 @@ class OpeningMessage(unittest.TestCase):
         self.assertTrue(body.startswith(km._FORK_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD))
         self.assertEqual(km._comment_strip_frame(body), "Review the cap.")
 
+    # ── a passage shorter than a sentence (the user 2026-10-14, who approved the wording): the opener names the words
+    # and quotes the sentence they sit in, which the page read from the rendered message at the selection ────────────
+    SENTENCE = "\u2026We should revisit the placement of the legend before shipping the deck\u2026"
+
+    def test_a_short_passage_names_its_words_and_quotes_its_sentence(self):
+        body = km._comment_first_message("placement", "Where would it go instead?", context=self.SENTENCE)
+        self.assertEqual(body, km._THREAD_FRAME + "\n\n"
+                         'About "placement" in this part of the conversation:\n\n'
+                         "> \u2026We should revisit the placement of the legend before shipping the deck\u2026\n\n"
+                         "Where would it go instead?")
+        self.assertEqual(km._comment_strip_frame(body), "Where would it go instead?", "the bubble shows the comment alone")
+        sent, said = km._comment_opener_parts("placement", "Where would it go instead?", context=self.SENTENCE)
+        self.assertEqual(km._comment_opener_split(body), (sent, said), "the note shows what romp added, verbatim")
+
+    def test_a_short_passages_marked_occurrence_rides_as_the_page_marked_it(self):
+        ctx = "Move the legend below the chart, and keep the **legend**'s font small."
+        body = km._comment_first_message("legend", "Which one moves?", context=ctx)
+        self.assertIn('About "legend" in this part of the conversation:\n\n> ' + ctx + "\n\n", body)
+
+    def test_a_short_passage_on_every_layout_splits_back(self):
+        for prior, frame in (("", None), ("", km._FORK_FRAME), (self.PRIOR, None), (self.PRIOR, km._FORK_FRAME)):
+            with self.subTest(prior=bool(prior), frame=bool(frame)):
+                sent, said = km._comment_opener_parts("placement", "> quoting myself\n\nWhy?", prior, frame,
+                                                      context=self.SENTENCE)
+                self.assertIn('About "placement" in this part of the conversation:\n\n> ' + self.SENTENCE, sent)
+                self.assertEqual(km._comment_opener_split(sent + "\n\n" + said), (sent, "> quoting myself\n\nWhy?"))
+
+    # ── review of #229 (2026-10-14): code is named over its line, a code passage keeps its line breaks, and only a few
+    # words are ever named ─────────────────────────────────────────────────────────────────────────────────────────────
+    def test_a_word_in_a_line_of_code_is_named_over_that_line(self):
+        body = km._comment_first_message("refill", "Why call it here?", context="x = refill(cache)")
+        self.assertEqual(body, km._THREAD_FRAME + "\n\n"
+                         'About "refill" in this part of the conversation:\n\n> x = refill(cache)\n\nWhy call it here?')
+
+    def test_a_code_passage_over_several_lines_is_quoted_as_its_lines(self):
+        exact = "def refill(cache):    return cache.load()"          # the rendered rows join with no line break
+        lines = "def refill(cache):\n    return cache.load()\n\nx = 1"
+        exact2 = exact + "x = 1"
+        body = km._comment_first_message(exact2, "Why load?", shown=lines)
+        self.assertEqual(body, km._THREAD_FRAME + "\n\n" + km._COMMENT_FRAME_HEAD + "\n\n"
+                         "> def refill(cache):\n>     return cache.load()\n>\n> x = 1\n\nWhy load?")
+        sent, said = km._comment_opener_parts(exact2, "Why load?", shown=lines)
+        self.assertEqual(km._comment_opener_split(body), (sent, said), "the note shows it verbatim, the comment splits off")
+        self.assertEqual(km._comment_first_message(exact, "Why?", shown="something else entirely"),
+                         km._comment_first_message(exact, "Why?"), "lines that are not the passage are not used")
+
+    def test_a_long_passage_is_never_named_whatever_comes_with_it(self):
+        exact = " ".join("w%d" % i for i in range(40))           # 150 characters, no full stop
+        body = km._comment_first_message(exact, "Why?", context="\u2026" + exact + " w40\u2026")
+        self.assertEqual(body, km._comment_first_message(exact, "Why?"), "the head never repeats a long selection")
+
+    def test_no_sentence_or_one_without_the_words_is_the_plain_opener(self):
+        plain = km._comment_first_message("placement", "Why?")
+        self.assertIn("\n\n" + km._COMMENT_FRAME_HEAD + "\n\n> placement\n\n", plain, "a whole-sentence passage, as before")
+        self.assertEqual(km._comment_first_message("placement", "Why?", context=""), plain)
+        self.assertEqual(km._comment_first_message("placement", "Why?", context="An unrelated line."), plain,
+                         "a sentence that does not hold the words is not this passage's")
+
+    # ── review of #231 (2026-10-14): the opening message holds the message box's 4,000-character cap, with the cut marked,
+    # and quotes the passage as the page read it, its controls, labels and closed folds left out ──────────────────────
+    LONG = " ".join("Sentence number %d talks about item %d." % (i, i) for i in range(400))   # about 16,500 characters
+
+    def _quote(self, sent):
+        return sent.split(km._COMMENT_FRAME_HEAD + "\n\n", 1)[1]
+
+    def test_a_passage_longer_than_the_cap_is_quoted_cut_there_with_the_cut_marked(self):
+        cut = "> " + self.LONG[:3999].rstrip() + "…"
+        self.assertEqual(self._quote(km._comment_opener_parts(self.LONG, "Thoughts?")[0]), cut, "the passage itself")
+        self.assertEqual(self._quote(km._comment_opener_parts(self.LONG, "Thoughts?", shown=self.LONG)[0]), cut,
+                         "the passage as the page read it")
+        self.assertEqual(len(km._cap_quote(self.LONG)), 4000)
+        self.assertEqual(km._cap_quote("short"), "short")
+        body = km._comment_first_message(self.LONG, "Thoughts?")
+        self.assertEqual(km._comment_opener_split(body), km._comment_opener_parts(self.LONG, "Thoughts?"), "it splits back")
+
+    def test_lines_that_leave_out_the_pages_labels_and_folds_are_the_passages(self):
+        exact = "x = refill(cache)Copy\nMore detailText inside the closed fold.\nThe paragraph after the fold."   # the range's text
+        shown = "x = refill(cache)\n\nMore detail\n\nThe paragraph after the fold."                            # as it reads
+        sent, _ = km._comment_opener_parts(exact, "Why?", shown=shown)
+        self.assertEqual(self._quote(sent), "> x = refill(cache)\n>\n> More detail\n>\n> The paragraph after the fold.")
+        # a chip's passage, cut at the cap with labels in it: its text as it reads runs on past where the cut words end
+        raw = km._cap_quote("List the files1 line " + self.LONG)
+        sent, _ = km._comment_opener_parts(raw, "Why?", shown=km._cap_quote(self.LONG))
+        self.assertEqual(self._quote(sent), "> " + km._cap_quote(self.LONG), "compared as far as the cut passage goes")
+        self.assertEqual(km._comment_opener_parts(raw, "Why?", shown="Words that were never in it.")[0],
+                         km._comment_opener_parts(raw, "Why?")[0], "text that is not the passage's is still left out")
+
     # ── what romp sent, read back from a stored opening message (the popover's note, the user 2026-09-30) ──────────
     def test_the_split_gives_back_exactly_what_romp_added_and_the_users_words(self):
         for prior, frame in (("", None), (self.PRIOR, None), (self.PRIOR, km._FORK_FRAME)):
@@ -1945,7 +2032,7 @@ class ThreadProjection(CommentBase):
     def test_the_built_events_are_not_edited_in_place(self):
         recs = self._seed_precompact_thread()
         self._frame_thread(recs, state="")
-        _key, _cut, cached, _t = km._built_thread[THREAD]
+        cached = km._built_thread[THREAD][2]   # (key, cut, events, started, chip)
         opener = next(e for e in cached if e.get("kind") == "user")
         self.assertEqual(opener["md"], "Why jitter at all?", "the cache holds the shown copy")
         ev = {"kind": "user", "md": km._comment_first_message("q", "c")}

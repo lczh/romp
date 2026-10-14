@@ -5,10 +5,12 @@
 // text carried their paths as a trailing line, quoted when they contain spaces). Pure: the DOM half lives in
 // render.ts and executes this.
 
-export interface RescindCite { quote: string; src?: string; kind?: "file"; path?: string; lines?: [number, number] | null }
+export interface RescindCite { quote: string; src?: string; kind?: "file"; path?: string; lines?: [number, number] | null; ctx?: string }
 export interface RescindedState { text: string; cites: RescindCite[]; files: string[] }
 
 const LEAD_CONVERSATION = "Replying to this part of the conversation:";
+// a passage shorter than a sentence (staged-messages.ts quoteLeadIn, 2026-10-14): its words in the lead, its sentence quoted
+const LEAD_WORDS = /^Replying to "(.+)" in this part of the conversation:$/;
 const LEAD_CODE = /^Replying to this highlighted code \((.+)\):$/;
 // a passage of a file the viewer showed (staged-messages.ts quoteLeadIn, 2026-09-30): its path, and its lines when it had them
 const LEAD_FILE = /^Replying to this part of (.+?)(?: \(lines? (\d+)(?:\u2013(\d+))?\))?:$/;
@@ -26,13 +28,14 @@ export function splitQuoteReplyBody(body: string): { cites: RescindCite[]; text:
     const lines = rest.split("\n");
     const lead = lines[0] || "";
     const code = LEAD_CODE.exec(lead);
-    const file = lead === LEAD_CONVERSATION ? null : LEAD_FILE.exec(lead);
-    if (lead !== LEAD_CONVERSATION && !code && !file) break;
+    const words = LEAD_WORDS.exec(lead);
+    const file = lead === LEAD_CONVERSATION || words ? null : LEAD_FILE.exec(lead);
+    if (lead !== LEAD_CONVERSATION && !code && !file && !words) break;
     let i = 1;
     const q: string[] = [];
     while (i < lines.length && (lines[i].startsWith("> ") || lines[i] === ">")) { q.push(lines[i] === ">" ? "" : lines[i].slice(2)); i++; }
     if (!q.length) break;
-    const cite: RescindCite = { quote: q.join("\n") };
+    const cite: RescindCite = words ? { quote: words[1], ctx: q.join("\n") } : { quote: q.join("\n") };
     if (code) cite.src = code[1];
     else if (file) {
       const a = file[2] ? Number(file[2]) : 0, b = file[3] ? Number(file[3]) : a;

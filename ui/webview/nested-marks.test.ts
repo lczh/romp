@@ -50,12 +50,12 @@ test("cmtopen walks the mark chain from the clicked mark up and opens the pick â
   const chain = RENDER.slice(RENDER.indexOf("function markChain("), RENDER.indexOf("\n}\n", RENDER.indexOf("function markChain(")));
   assert.match(chain, /closest\("mark\.cmt-hl"\)/, "each step is the next enclosing mark");
   assert.match(chain, /commentThreads\.get\(/, "unread comes from the thread store, the source the ring is painted from");
-  assert.match(chain, /!!th\?\.unread && th\.status === "open"/, "the same predicate styleCommentMark paints the ring with");
+  assert.match(chain, /unread: !!th && threadCued\(th\)/, "the same predicate styleCommentMark paints the ring with (an unread reply, or waiting on your answer)");
   assert.doesNotMatch(handler, /elx\.dataset\.tid;/, "the clicked element's own tid is no longer the answer");
 });
 
 test("an unread rail tick stacks above read siblings at the same top â€” the covered ring was the rail's face of the bug", () => {
-  const rule = CSS.match(/\.cmt-tick\.unread \{[^}]*\}/)?.[0] || "";
+  const rule = CSS.match(/\.cmt-tick\.unread, \.cmt-tick\.needs \{[^}]*\}/)?.[0] || "";
   assert.ok(rule, "the unread tick rule exists");
   assert.match(rule, /z-index: 1;/, "explicit stacking: siblings share position: absolute inside the rail, so paint order is DOM order without it");
   const base = CSS.match(/\.cmt-tick \{[^}]*\}/)?.[0] || "";

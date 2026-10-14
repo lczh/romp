@@ -943,8 +943,8 @@ test("executed: a waiting bypass pick's words sit under the Bypass row alone, af
 });
 
 test("executed: a comment thread's popover carries the frame's mark into the same menu (threadMetaStatus, lifted)", () => {
-  const tms = new Function("threadStuck", "threadBusy", transpile(slice("function threadMetaStatus(th: CommentThread): Status {")) + "\nreturn threadMetaStatus;")(
-    () => false, () => false);
+  const tms = new Function("threadChipState", transpile(slice("function threadMetaStatus(th: CommentThread): Status {")) + "\nreturn threadMetaStatus;")(
+    () => "ready");
   const TSID = "11111111-2222-4333-8444-777777777777";
   const th = { tid: "t-1", sid: TSID, state: "", mode: "acceptEdits", model: "Opus 5", effort: "high", modePending: true,
                relaunchWaits: "1 background task" };

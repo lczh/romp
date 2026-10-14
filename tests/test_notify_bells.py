@@ -91,14 +91,18 @@ class NotifyCardStore(unittest.TestCase):
         km._set_notify_card("TESTSID:g1", False, "TESTSID")     # back to the session's own default
         self.assertNotIn("TESTSID:g1", km._notify_cards())
 
-    def test_session_override_delete_if_default(self):
-        km._set_notify_session("TESTSID", True)                  # master off → a deviation, stored
+    def test_a_session_bell_click_is_stored_as_clicked(self):
+        # every session-bell click is the user's explicit choice (2026-10-11): with the master on and the turn switch
+        # off, "Notify me" restated the master and was deleted, so no session could be opted in to its turn ends
+        km._set_notify_session("TESTSID", True)                  # master off: stored
         self.assertEqual(km._session_flag_raw("TESTSID", "notify"), True)
-        km._set_notify_session("TESTSID", False)                 # matches master-off → removed
-        self.assertIsNone(km._session_flag_raw("TESTSID", "notify"))
-        km._set_notify_all(True)
-        km._set_notify_session("TESTSID", False)                 # a mute under master-on is a real value
+        km._set_notify_session("TESTSID", False)                 # matches master-off: stored all the same
         self.assertEqual(km._session_flag_raw("TESTSID", "notify"), False)
+        km._set_notify_all(True)
+        km._set_notify_session("TESTSID", True)                  # matches master-on: stored all the same
+        self.assertEqual(km._session_flag_raw("TESTSID", "notify"), True)
+        km._set_notify_session("TESTSID", None, as_given=True)   # only a None clears, back to the defaults
+        self.assertIsNone(km._session_flag_raw("TESTSID", "notify"))
 
     def test_prune_drops_only_ids_that_left_the_feed(self):
         km._set_notify_card("TESTSID:g1", True)

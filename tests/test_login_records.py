@@ -472,7 +472,7 @@ class AvailabilityLists(unittest.TestCase):
         src = inspect.getsource(km.build_session)
         self.assertIn('"authLogin": tm.get("authLogin", "")', src)
         self.assertIn('"authLabel": tm.get("authLabel", "") or _claude_login_display()', src)
-        src = inspect.getsource(km.Sessions.live)
+        src = inspect.getsource(km._sdk_live_norm)
         self.assertIn('"authLogin": st.get("authLogin", "")', src)
         self.assertIn('"authLabel": st.get("authLabel", "")', src)
 
