@@ -353,3 +353,43 @@ test("a selection in a code block of 4,000 lines costs work bounded by the selec
     assert.deepEqual(errors, [], "no page errors");
   }, [{ kind: "assistant", md: BIG, uuid: UUID }]);
 });
+
+
+// ── review of #234 (2026-10-14): a tool group's line and a diff's gutters are chrome too ─────────────────────────────────
+// two tool calls fold into one group line ("▸ Ran a command, edited a file +1 -1"), whose caret and totals went out as
+// "> ▸ +1 -1"; an opened edit's rows went out as "1010a = 1", the line numbers glued to the code (a <pre>'s rows are not
+// style-read, so the gutters' user-select: none was never seen)
+const U = (n: number) => "11111111-2222-4333-8444-" + String(n).padStart(12, "0");
+const GROUPED = [
+  { kind: "assistant", md: "The first reply ends here.", uuid: U(1) },
+  { kind: "tool", name: "Bash", desc: "List the files", input: "ls -la", output: "total 0", isError: false, uuid: U(2) },
+  { kind: "tool", name: "Edit", file: "notes.py", input: "edit", uuid: U(3),
+    diffRows: [{ oldNo: 10, newNo: 10, sign: " ", text: "a = 1" }, { oldNo: 11, newNo: null, sign: "-", text: "b = 2" },
+               { oldNo: null, newNo: 11, sign: "+", text: "b = 3" }] },
+  { kind: "assistant", md: "The second reply starts here. It goes on.", uuid: U(4) },
+];
+
+test("a tool group's caret and totals and a diff's line numbers stay out of a quote; a diff row keeps its sign", { timeout: 90000 }, async (t) => {
+  await inChat(t, async (page, errors) => {
+    const across = { to: "The second reply starts", scope: "#content", label: "The first reply ends here. The second reply starts" };
+    await select(page, "The first reply ends here.", 0, across);
+    assert.equal(await sendWith(page, "Go on."),
+      "Replying to this part of the conversation:\n> The first reply ends here.\n> \n> The second reply starts\n\nGo on.");
+    await select(page, "The first reply ends here.", 0, across);
+    const create = await commentWith(page, "Why?");
+    assert.match(create.exact, /\u25b8 Ran a command, edited a file \+1 -1/, "premise: the range's own text holds the group's line");
+    assert.equal(create.shown, "The first reply ends here.\n\nThe second reply starts");
+    // the group opened and the edit's diff with it
+    await page.locator("#content .toolgroup-line").first().click();
+    await page.locator("#content .tool-fold-toggle", { hasText: "+1 -1" }).click();
+    await page.waitForSelector("#content .diff-fold .diff-row", { state: "visible", timeout: 5000 });
+    await select(page, "a = 1", 0, { to: "b = 3", scope: "#content", label: "a = 1 -b = 2 +b = 3" });
+    assert.equal(await sendWith(page, "Why three?"),
+      "Replying to this part of the conversation:\n> a = 1\n> -b = 2\n> +b = 3\n\nWhy three?");
+    await select(page, "The first reply ends here.", 0, { ...across, label: "The first reply ends here. a = 1 -b = 2 +b = 3 The second reply starts" });
+    assert.equal(await sendWith(page, "And all of it?"),
+      "Replying to this part of the conversation:\n> The first reply ends here.\n> \n> a = 1\n> -b = 2\n> +b = 3\n> \n"
+      + "> The second reply starts\n\nAnd all of it?", "the open group's caret, the rows' heads and the closed fold stay out");
+    assert.deepEqual(errors, [], "no page errors");
+  }, GROUPED);
+});
