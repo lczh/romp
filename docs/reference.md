@@ -7783,8 +7783,9 @@ to report a finished turn it answered by itself (it does after eight minutes
 without romp) when the machine may have been down that long. The notification
 waits until the restarted machine has reconnected to every session it found
 running, however long that takes; notifications from after the restart arrive
-as usual meanwhile. A session whose own process stopped responding counts as
-one it cannot count, and if one is running but never answers the reconnect,
+as usual meanwhile. Ending a session whose process no longer answers ends its
+claude process directly, said in the error center. A session whose own process
+stopped responding counts as one it cannot count, and if one is running but never answers the reconnect,
 the error center says the summary is waiting on it (ending that session lets it
 go). It counts only what your switches
 and bells would have let through, and says "may have been missed" only when
