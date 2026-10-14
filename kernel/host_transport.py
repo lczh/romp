@@ -440,7 +440,7 @@ class HostTransport(_Base):
         and stays in the set until the hook has stamped the turn end; any other request leaves the set as it is handed
         over. The kernel's restart catch-up waits on the set emptying (SdkBackend.unwatched_pending), so a turn that ended
         while the kernel was down is counted into the restart's summary rather than delivered late."""
-        w = self.unwatched
+        w = getattr(self, "unwatched", None)            # getattr: a transport built without __init__ (a test's) watches nothing
         if not w or not isinstance(data, dict) or data.get("type") != "control_request":
             return
         rid = str(data.get("request_id") or "")
