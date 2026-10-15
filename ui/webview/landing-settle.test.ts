@@ -151,7 +151,8 @@ test("render.ts wiring, round one: the gesture verdict ends the settle by any in
   assert.match(RENDER, /return Math\.max\(8, Math\.min\(at\.getBoundingClientRect\(\)\.height, \(c \? c\.clientHeight : 600\) \* SETTLE_ROW_VIEWPORT_CAP\)\);/);
   assert.match(RENDER, /s\.rowH = settleRowHeight\(s\.at\);/, "re-measured when the settle swaps its element");
   // low 2: the aligned element flashes
-  assert.match(RENDER, /at\.classList\.add\("anchor-flash"\);/);
+  assert.match(RENDER, /const flashes = mark && at\.matches\("mark\.cmt-hl"\) \? [^\n]+ : \[at\];\s*\n\s*for \(const f of flashes\) f\.classList\.add\("anchor-flash"\);/,
+    "the aligned element, or every piece of the comment thread's highlight it is the first of");
   assert.match(CSS, /^\.anchor-flash \{ animation: anchor-flash 1\.6s ease-out; border-radius: 6px; \}/m, "the flash rule matches the aligned element, a turn or the words inside it");
   // low 4: a hidden view is a detached one
   assert.match(RENDER, /if \(s\.at\.isConnected && s\.at\.getClientRects\(\)\.length\) return s\.at;/);
@@ -166,7 +167,7 @@ test("render.ts wiring, round one: the gesture verdict ends the settle by any in
 test("render.ts wiring: the settle re-finds its target by uuid after a rebuild replaced the DOM, and gives up honestly when the turn is gone", () => {
   assert.match(RENDER, /function settleResolve\(s: NonNullable<typeof landSettling>\): HTMLElement \| null \{/);
   assert.match(RENDER, /const turn = s\.uuid \? findTurnEl\(s\.uuid\) : null;/, "a detached box measures as zeros: re-find, never measure it");
-  assert.match(RENDER, /s\.at = \(s\.mark \? threadMarkIn\(turn, s\.mark\) : null\) \?\? \(s\.quote \? highlightCiteSpan\(turn, s\.quote\) : null\) \?\? firstTextAtomBelow\(turn\) \?\? turn;/, "the same alignment as the landing's, re-derived (a comment thread's highlight first)");
+  assert.match(RENDER, /s\.at = \(s\.mark \? passageTarget\(turn, s\.mark, rebuilt\)\?\.el : null\) \?\? \(s\.quote \? highlightCiteSpan\(turn, s\.quote\) : null\) \?\? firstTextAtomBelow\(turn\) \?\? turn;/, "the same alignment as the landing's, re-derived (a comment thread's highlight first)");
   assert.match(RENDER, /if \(!at\) \{ settleFinish\(s, \{ dist: null, settled: false \}\); return; \}/, "the turn left the view: the row says so");
   assert.match(RENDER, /function findTurnEl\(uuid: string\): HTMLElement \| null \{/);
 });

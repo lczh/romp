@@ -1875,6 +1875,18 @@ function preEl(text: string, scrollKey?: string): HTMLElement {
 //     the host extension, which openExternal()s normal URLs and feeds vscode://romp.romp-chat-view deep
 //     links into its own URI handler.
 // DOMPurify already stripped dangerous schemes (javascript:, etc.) in md(), so a surviving href is safe.
+/** The HTML spec's ancestor revealing steps, which the browser's fragment navigation runs before it scrolls and
+ *  scrollIntoView does not: every closed <details> whose content holds `target` is opened, and a `hidden="until-found"` on
+ *  the target or an ancestor is removed; both shapes pass the sanitizer (details, summary and hidden are kept). A target
+ *  inside a details' own <summary> is in view already and opens nothing, as in the browser. A message's in-page link takes
+ *  it, and so does a landing on a comment thread's passage (passageTarget). */
+function revealAncestors(target: Element): void {
+  for (let n: Element | null = target; n; n = n.parentElement) {
+    if ((n.getAttribute("hidden") || "").toLowerCase() === "until-found") n.removeAttribute("hidden");
+    const p = n.parentElement;
+    if (p && p.localName === "details" && n.localName !== "summary" && !p.hasAttribute("open")) p.setAttribute("open", "");
+  }
+}
 document.addEventListener("click", (e) => {
   const a = (e.target as HTMLElement)?.closest?.("a[href]") as HTMLAnchorElement | null;
   if (!a) return;
@@ -1908,16 +1920,8 @@ document.addEventListener("click", (e) => {
     const target = frag ? userContentTarget(msg, frag) || userContentTarget(document, frag) : undefined;
     if (!target) return;
     e.preventDefault();
-    // The browser's fragment navigation REVEALS the target before it scrolls (the HTML spec's ancestor revealing
-    // steps): every closed <details> whose content holds the target is opened, and a `hidden="until-found"` on the
-    // target or an ancestor is removed. scrollIntoView does neither, so the same steps run here, ahead of the
-    // scroll; both shapes pass the sanitizer (details, summary and hidden are kept). A target inside a details'
-    // own <summary> is in view already and opens nothing, as in the browser.
-    for (let n: Element | null = target; n; n = n.parentElement) {
-      if ((n.getAttribute("hidden") || "").toLowerCase() === "until-found") n.removeAttribute("hidden");
-      const p = n.parentElement;
-      if (p && p.localName === "details" && n.localName !== "summary" && !p.hasAttribute("open")) p.setAttribute("open", "");
-    }
+    // The browser's fragment navigation REVEALS the target before it scrolls; scrollIntoView does not (revealAncestors)
+    revealAncestors(target);
     // a target inside the transcript moves #content, so the move is the pane's own write (every mover of #content
     // is a writeScroll, attributed); a target elsewhere on the page scrolls its own container the browser's way
     const cont = document.getElementById("content");
@@ -11005,6 +11009,7 @@ function closeCommentPop(): void {
   pendingCommentAnchor = null;
   cmtRedirect = null;
   cmtPopLost = null; cmtPopBesideAt = null;   // a landing's note and its spot beside the passage go with the box
+  endBesideWatch();                            // …and its watch on the passage
 }
 
 // close on any press outside the popover (drafts persist in commentDrafts; reopening restores them).
@@ -11531,6 +11536,10 @@ function readThread(sid: string, tid: string): void {
 // flashing it (pendingAnchorMark). The rail tick, the turn's tinted rail line and the quoted passage at the top of the open
 // thread take it and then open the thread beside the passage, never over it (passageLanding); the jump cluster's comment
 // rows take the same landing and open nothing (landThread). A passage the transcript does not hold is said in the box.
+// Three follow-ups (the review of 2026-10-15): a passage folded in a closed <details> of its message is brought out of the
+// fold before the landing aligns on it (passageTarget), and one that still cannot be shown lands its fold's heading with a
+// line in the box; every piece of a highlight split over several elements flashes (landOn); and the box keeps clear of a
+// passage that moves after the box is placed (besideWatch).
 /** The thread a passage landing opens once it lands, keyed by the anchor like pendingAnchorMark: a landing that waits on
  *  history opens it on arrival, and any other landing drops it (passageLanded). */
 let passageGo: { sid: string; tid: string; uuid: string } | null = null;
@@ -11542,6 +11551,7 @@ let cmtPopLost: { tid: string; text: string } | null = null;
 let cmtPopBesideAt: { tid: string; top: number; height: number; since: { x: number; y: number } | null } | null = null;
 const PASSAGE_LOST = "Couldn't find this passage in the transcript.";
 const PASSAGE_WORDS_LOST = "Couldn't find this passage's words in its message.";
+const PASSAGE_FOLDED = "Couldn't unfold this passage in its message.";
 
 /** Take the reader to thread `tid`'s passage, then open the thread beside it. Never switches session: every entry point
  *  sits on the session's own view. */
@@ -11549,6 +11559,7 @@ function passageLanding(sid: string, tid: string): void {
   const th = (commentThreads.get(sid) || []).find((t) => t.tid === tid);
   if (!th || sid !== activeId) return;
   const uuid = th.anchorUuid;
+  endBesideWatch();                              // a new landing: the box no longer follows the last one's passage
   pendingAnchorMark = { uuid, tid };
   passageGo = { sid, tid, uuid };
   flashedAnchor = null;                          // a fresh navigation: one flash, on the passage
@@ -11560,18 +11571,18 @@ function passageLanding(sid: string, tid: string): void {
   pendingAnchor = null;                          // nowhere in the transcript and nothing left to load: said in the box, not by a later pass's toast
   openBesidePassage(sid, tid, null, PASSAGE_LOST);
 }
-/** scrollToAnchor has just landed `uuid` on `turn` (on thread `mark`'s highlight `passage` when it has one): the thread a
- *  passage landing waits to open opens now, after the pass that landed (a landing inside landActive finishes its pass
- *  first). With no highlight the box says so only when the thread's words are not in the turn at all: a tool row's text
- *  is there, it just carries no highlight. */
-function passageLanded(uuid: string, mark: string | null, passage: HTMLElement | null, turn: HTMLElement): void {
+/** scrollToAnchor has just landed `uuid` on `turn` (on thread `mark`'s highlight `passage` when it has one, or on the heading
+ *  of the fold that still hides it, `folded`): the thread a passage landing waits to open opens now, after the pass that
+ *  landed (a landing inside landActive finishes its pass first). With no highlight the box says so only when the thread's
+ *  words are not in the turn at all: a tool row's text is there, it just carries no highlight. */
+function passageLanded(uuid: string, mark: string | null, passage: HTMLElement | null, turn: HTMLElement, folded: boolean): void {
   const go = passageGo;
   if (!go) return;
   passageGo = null;
   if (go.uuid !== uuid || go.tid !== mark) return;   // another landing took the reader elsewhere: the wait is over
   const exact = passage ? null : threadExact(go.tid);
   const lost = !passage && (!exact || !findAnchorRange(turnAtomsOf(turn).map((a) => a.textContent || "").join(""), exact));
-  queueMicrotask(() => openBesidePassage(go.sid, go.tid, passage, lost ? PASSAGE_WORDS_LOST : null));
+  queueMicrotask(() => openBesidePassage(go.sid, go.tid, passage, folded ? PASSAGE_FOLDED : lost ? PASSAGE_WORDS_LOST : null));
 }
 /** Open (or keep open) thread `tid` beside its passage, with `note` when the passage could not be reached. */
 function openBesidePassage(sid: string, tid: string, passage: HTMLElement | null, note: string | null): void {
@@ -11582,7 +11593,7 @@ function openBesidePassage(sid: string, tid: string, passage: HTMLElement | null
   if (prev && openCommentKey && openCommentKey.sid === sid && openCommentKey.tid === tid && prev.dataset.mode === "thread") paintCmtLost(prev, tid);   // its own quote was the click
   else openCommentPopover(sid, tid);
   const pop = document.getElementById("cmt-pop");
-  if (pop && passage && passage.isConnected) placeBesidePassage(pop, tid, passage);
+  if (pop && passage && passage.isConnected) { placeBesidePassage(pop, tid, passage); watchBeside(tid, passage); }
 }
 /** The open box moved off its passage (cmtPopBeside: below it, else above, else the roomier side at that side's height),
  *  when it covers it; its left edge and width stay. The size set here is ours, never the user's remembered one. */
@@ -11599,11 +11610,12 @@ function placeBesidePassage(pop: HTMLElement, tid: string, passage: HTMLElement)
   syncCmtMaxState(pop);
 }
 /** The passage's box on screen, cut to the chat's viewport: every fragment of the thread's highlight in the passage's turn,
- *  so a passage over several lines or paragraphs is one box. */
+ *  so a passage over several lines or paragraphs is one box; the heading a landing put the reader on instead (a fold it
+ *  could not open, passageTarget) is its own box. */
 function passageRect(passage: HTMLElement, tid: string): CmtPopRect | null {
   const c = document.getElementById("content");
   if (!c) return null;
-  const frags = Array.from((passage.closest(".turn") || passage).querySelectorAll(`mark.cmt-hl[data-tid="${cssEscape(tid)}"]`));
+  const frags = passage.matches("mark.cmt-hl") ? Array.from((passage.closest(".turn") || passage).querySelectorAll(`mark.cmt-hl[data-tid="${cssEscape(tid)}"]`)) : [passage];
   const cr = c.getBoundingClientRect();
   let u: CmtPopRect | null = null;
   for (const f of frags) for (const q of Array.from(f.getClientRects())) {
@@ -11614,6 +11626,70 @@ function passageRect(passage: HTMLElement, tid: string): CmtPopRect | null {
   if (!u) return null;
   const cut = { left: Math.max(u.left, cr.left), top: Math.max(u.top, cr.top), right: Math.min(u.right, cr.right), bottom: Math.min(u.bottom, cr.bottom) };
   return cut.bottom > cut.top && cut.right > cut.left ? cut : null;   // off the viewport: nothing on screen to keep clear
+}
+/** The box's watch on its passage once a landing opened it beside it: the passage can move AFTER the box is placed (a 26 px
+ *  fork control added under the last reply grows the turn, and the landing's settle re-lands the passage higher, or follow
+ *  mode writes the reader down), and nothing put the box beside it again, so it ended over the passage. Two events re-place
+ *  it (placeBesidePassage moves it only when it covers the passage): a layout change of the passage's turn or of the
+ *  transcript (a ResizeObserver, made after the settle's and the view's own, so their writes of the same frame are already
+ *  in), and any move of the transcript the PAGE writes (writeScroll). It ends with the box, at a new landing, when the user
+ *  moves or resizes the box (commentPopPos replaced) and at the reader's own first input over the transcript
+ *  (settleInput, or a writer the census calls the reader's): from then on where the passage goes is theirs. */
+let besideWatch: { tid: string; since: { x: number; y: number } | null; ro: ResizeObserver | null } | null = null;
+function watchBeside(tid: string, passage: HTMLElement): void {
+  endBesideWatch();
+  const w: NonNullable<typeof besideWatch> = { tid, since: commentPopPos, ro: null };
+  besideWatch = w;
+  if (typeof ResizeObserver !== "function") return;
+  w.ro = new ResizeObserver(() => besideFollow());
+  const turn = passage.closest(".turn");
+  if (turn) w.ro.observe(turn);
+  const v = activeId ? views.get(activeId) : null;
+  if (v) w.ro.observe(v.el);
+}
+function endBesideWatch(): void {
+  besideWatch?.ro?.disconnect();
+  besideWatch = null;
+}
+/** The passage moved under the box a landing placed beside it: the box goes beside it again. The passage is re-found (a
+ *  rebuild may have replaced it) and never revealed again: a fold the reader closed since stays closed. */
+function besideFollow(): void {
+  const w = besideWatch;
+  if (!w) return;
+  const pop = document.getElementById("cmt-pop");
+  const v = activeId ? views.get(activeId) : null;
+  if (!pop || !v || pop.dataset.tid !== w.tid || commentPopPos !== w.since) { endBesideWatch(); return; }
+  const m = v.el.querySelector(`mark.cmt-hl[data-tid="${cssEscape(w.tid)}"]`) as HTMLElement | null;
+  const at = m ? shownPassage(m) : null;
+  if (at) placeBesidePassage(pop, w.tid, at);
+}
+/** What a landing on thread `tid`'s passage aligns on, in `target`'s turn: its highlight (threadMarkIn), first brought out of
+ *  every closed fold of its message that hides it (revealAncestors: a <details> the message folds it in). Before, a passage
+ *  in a closed fold landed on nothing visible and nothing flashed. `folded` when something the landing cannot open still
+ *  hides it (shownPassage); `reveal` false leaves the folds as they are (a settle's re-find on the same turn). */
+function passageTarget(target: HTMLElement, tid: string, reveal = true): { el: HTMLElement; folded: boolean } | null {
+  const m = threadMarkIn(target, tid);
+  if (!m) return null;
+  if (reveal) revealAncestors(m);
+  const at = shownPassage(m);
+  return at ? { el: at, folded: at !== m } : null;
+}
+/** The highlight `m` when it shows, else the heading of the innermost fold it sits in (a <details>' summary), else its
+ *  nearest ancestor that shows: the place the passage would be. null when nothing around it shows. */
+function shownPassage(m: HTMLElement): HTMLElement | null {
+  if (elShows(m)) return m;
+  for (let n = m.parentElement; n; n = n.parentElement) {
+    const head = n.localName === "details" ? n.querySelector(":scope > summary") as HTMLElement | null : null;
+    if (head && elShows(head)) return head;
+    if (elShows(n)) return n;
+  }
+  return null;
+}
+/** Whether `e` is drawn: checkVisibility, since a box is not enough (Chromium lays out a closed <details>' content, hidden by
+ *  content-visibility, so a passage folded in one measures as if it were on screen); a box where the browser has no
+ *  checkVisibility. */
+function elShows(e: Element): boolean {
+  return typeof e.checkVisibility === "function" ? e.checkVisibility() : e.getClientRects().length > 0;
 }
 /** The box's line for a passage the landing could not reach, under its head (in place, or on a full rebuild). */
 function paintCmtLost(pop: HTMLElement, tid: string): void {
@@ -13420,6 +13496,9 @@ function writeScroll(content: HTMLElement, top: number, writer: string, stick = 
   // chord, a link or the chips, the wheel over a notch) is their takeover (round four: their writes read as another mover's and
   // land-realign undid them), every other writer's move is a sample for the settle rule, which re-lands (T386)
   if (after !== before && landSettling && !landSettling.done && writer !== "land-on" && writer !== "land-realign") { if (writerIsReader(writer)) settleGesture(); else settleSample(); }
+  // …and a thread's box a landing put beside its passage: a move the page wrote (the settle's re-land, follow mode) puts it
+  // beside the passage again; a move of the reader's ends the watch (besideWatch)
+  if (after !== before && besideWatch) { if (writerIsReader(writer)) endBesideWatch(); else besideFollow(); }
 }
 // EVERY mover of #content goes through writeScroll (T262j, the user 2026-09-08: an unwritten move the journal could
 // not name). scrollBy and scrollIntoView are scrollTop writes expressed differently, so they are expressed as such:
@@ -13614,12 +13693,14 @@ function scrollToAnchor(uuid: string): boolean {
   const quote = pendingAnchorQuote; pendingAnchorQuote = null;
   // a comment thread's landing (passageLanding) aligns on the thread's own highlight, never the turn's top: in a long message
   // the turn's top left the passage below the fold or under the thread's box. A thread whose words carry no highlight (a
-  // tool row's) lands on its turn, as the jump cluster measures it
+  // tool row's) lands on its turn, as the jump cluster measures it. A highlight in a closed fold of its message is brought
+  // out first, and one still hidden lands its fold's heading (passageTarget)
   const mark = pendingAnchorMark && pendingAnchorMark.uuid === uuid ? pendingAnchorMark.tid : null; pendingAnchorMark = null;
-  const markEl = mark ? threadMarkIn(target, mark) : null;
+  const markAt = mark ? passageTarget(target, mark) : null;
+  const markEl = markAt ? markAt.el : null;
   const quoteEl = !markEl && quote ? highlightCiteSpan(target, quote) : null;
   landOn(target, uuid, markEl ?? quoteEl ?? firstTextAtomBelow(target), quote, mark);
-  passageLanded(uuid, mark, markEl, target);   // …and a landing that opens the thread opens it now, beside the passage
+  passageLanded(uuid, mark, markEl, target, !!markAt?.folded);   // …and a landing that opens the thread opens it now, beside the passage
   return true;
 }
 /** The atoms of the transcript turn the anchor's element opens: itself and the following event elements up to (not
@@ -13781,6 +13862,7 @@ function settleInput(e: Event): void {
     }
   }
   settleLastInput = Date.now();
+  endBesideWatch();   // the reader's hand on the transcript: where the passage goes from here is theirs (besideWatch)
 }
 for (const ev of ["pointerdown", "pointermove", "pointerup", "pointercancel", "touchstart", "touchmove", "wheel", "keydown"]) window.addEventListener(ev, settleInput, { capture: true, passive: true });
 // a page put behind another mid-press gets neither pointerup nor pointercancel from Chromium (round four, low 1): the hold ends
@@ -13819,8 +13901,11 @@ function settleResolve(s: NonNullable<typeof landSettling>): HTMLElement | null 
   if (s.at.isConnected && s.at.getClientRects().length) return s.at;
   const turn = s.uuid ? findTurnEl(s.uuid) : null;
   if (!turn || !turn.getClientRects().length) return null;
+  // a thread's highlight is brought out of its fold again only in a REBUILT turn (a fresh, closed <details>): a fold the reader
+  // closed on the same turn stays closed, and the landing holds its heading
+  const rebuilt = turn !== s.turn;
   s.turn = turn;
-  s.at = (s.mark ? threadMarkIn(turn, s.mark) : null) ?? (s.quote ? highlightCiteSpan(turn, s.quote) : null) ?? firstTextAtomBelow(turn) ?? turn;
+  s.at = (s.mark ? passageTarget(turn, s.mark, rebuilt)?.el : null) ?? (s.quote ? highlightCiteSpan(turn, s.quote) : null) ?? firstTextAtomBelow(turn) ?? turn;
   s.rowH = settleRowHeight(s.at);   // the swapped element's own row (round one, low 1)
   s.ro?.observe(s.at); if (s.at !== turn) s.ro?.observe(turn);
   return s.at;
@@ -13878,8 +13963,12 @@ function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | 
   { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) v.stick = atBottom(c); }
   if (flashKey == null || flashKey !== flashedAnchor) {   // one flash per navigation (see flashedAnchor)
     if (flashKey != null) flashedAnchor = flashKey;
-    at.classList.add("anchor-flash");                     // the ALIGNED element flashes: the turn may sit above the viewport when the words are aligned (round one, low 2)
-    setTimeout(() => at.classList.remove("anchor-flash"), 1700);
+    // the ALIGNED element flashes: the turn may sit above the viewport when the words are aligned (round one, low 2). A comment
+    // thread's highlight flashes WHOLE: a passage split over several elements (a bold word, a line break, two paragraphs) is
+    // a mark per piece, and only the first one flashed (the review of 2026-10-15)
+    const flashes = mark && at.matches("mark.cmt-hl") ? Array.from((at.closest(".turn") || target).querySelectorAll(`mark.cmt-hl[data-tid="${cssEscape(mark)}"]`)) : [at];
+    for (const f of flashes) f.classList.add("anchor-flash");
+    setTimeout(() => { for (const f of flashes) f.classList.remove("anchor-flash"); }, 1700);
   }
   if (landSettling) settleSupersede(landSettling);   // a newer landing supersedes the older's settle: its row is filed as it stood, marked
   const landSettle = { turn: target, at, uuid: flashKey ?? null, quote: quote ?? null, mark: mark ?? null, rowH: settleRowHeight(at), samples: [] as SettleSample[],
