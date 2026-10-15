@@ -75344,6 +75344,15 @@ var bundleReady=false,readyQueued=false,readyAcked=false,readyProto=0,readyMsg=n
 var queuedDiag=0,DIAG_QUEUE_MAX=20;   // clientDiag rows waiting in `queue` for a reconnect, capped (an outage must not pile up breadcrumbs); other queued messages are untouched
 var queuedForeign=0,FOREIGN_QUEUE_MAX=20;   // of those, the window-sender rows (window-sender.ts noteForeign and the timeline boot's copy), which another page's posts cause: capped on their own count, so they never take one of the DIAG_QUEUE_MAX slots this page's own rows keep (under one cap, a foreign page posting into every frame during an outage cut the page's own record of it, the 2026-09-29 review); counted in queuedDiag as well, so the reload hold and the loss line leave them out like every breadcrumb; the cap is noteForeign's NOTE_MAX
 var failedConnects=0,firstFailT=0;   // handshakes that never OPENED since the last open: reported as ONE wsconnfail row on the next open, never one wsclose per redial
+// The redial schedule (2026-10-15; redialMs, _REDIAL_JS): an unannounced drop redials after 1 s, doubling per dial in a row
+// that went unanswered, to 30 s; inside an announced restart or a return to the tab (onclose's two eager windows) it starts
+// at 250 ms and doubles to 2 s instead. redialN counts the dials of the schedule in force and goes back to 0 when an open
+// socket receives a frame, or when the schedule changes (redialFast), so a restart that outlasts its announcement starts
+// the unannounced schedule from its 1 s floor. redialAt: when the scheduled redial is due, the watchdog's reference for a
+// lost timer. closingT: when the watchdog first saw the current socket CLOSING (0 = not seen).
+var REDIAL_MS=1000,REDIAL_MAX_MS=30000,REDIAL_FAST_MS=250,REDIAL_FAST_MAX_MS=2000,redialN=0,redialFast=false,redialAt=0,closingT=0,CLOSING_MS=5000;
+function redialMs(base,cap,n){var d=Math.min(cap,base*Math.pow(2,Math.min(n,16)));return Math.round(d*(0.8+0.4*Math.random()));}   // _REDIAL_JS, the shell's copy, character for character (test_ws_redial pins the two): written out here, not a template slot, since pane-shim-stale.test.ts renders this template from the kernel's source with slot values of its own
+function nextRedial(fast){if(fast!==redialFast){redialFast=fast;redialN=0;}return fast?redialMs(REDIAL_FAST_MS,REDIAL_FAST_MAX_MS,redialN++):redialMs(REDIAL_MS,REDIAL_MAX_MS,redialN++);}
 // This pane's DASHBOARD id. ?wid= when the host supplies one (the VS Code extension builds its own pane
 // URLs); otherwise the shell's per-tab id from sessionStorage, which is scoped to the browsing context and
 // shared with same-origin iframes — so every pane of one window agrees, a second window differs, and no
@@ -75551,11 +75560,16 @@ try{if(window.__rompReload&&!window.__rompReload.inShell()){window.__rompReload.
 if(!o){if(mine)have.remove();return;}if(mine){have.firstChild.textContent=o.text;return;}selfBar(o.text,"offer");};}}catch(e){}
 function raiseBuild(dv){var R=window.__rompReload;if(R){R.noteDv(dv);return;}   // the core decides (an offer, deduped by build; in a shell, the shell's)
 if(buildRaised)return;buildRaised=true;selfBar("A newer romp build is available.","build");}   // no core on this page: the bar, once
+// A dial the browser refuses outright (the WebSocket constructor throws: a malformed address, a port it blocks) is a
+// failed handshake like any other (2026-10-15): counted for the next open's wsconnfail row, and the next dial scheduled
+// on the unannounced schedule. Before, the throw escaped connect(), so a dial from the watchdog's abandon left `ws` null
+// and the watchdog returned on a null socket at every tick: nothing dialed again until the person came back to the tab.
+function dialRefused(){ws=null;if(!failedConnects)firstFailT=Date.now();failedConnects++;var d=nextRedial(false);redialAt=Date.now()+d;setTimeout(connect,d);}
 function connect(){if(ws&&(ws.readyState===0||ws.readyState===1))return;   // one live attempt at a time — a lost timer + the watchdog can both call in
 if(returnAt)returnRedialed=true;   // a dial inside a return window (whatever path led here) → the return-fresh row says so
-connT=Date.now();var proto=location.protocol==="https:"?"wss://":"ws://";
+connT=Date.now();closingT=0;var proto=location.protocol==="https:"?"wss://":"ws://";
 var active="";try{var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";}catch(e){}
-ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")+(COL?"&col="+encodeURIComponent(COL):"")+((SKEL||RESTART_DIET)?"&skeleton=1":"")+(APP==="fleet"?"&provrows=1":""));   // skeleton=1: a later chat column, or the main pane on every dial of every page load (RESTART_DIET, its redials included: 2026-10-11), served as a view of the session its ?active= names (above). reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page (2026-09-10), the last until a caps frame answers: its onopen posts the bundle's ready again (below), so the kernel serves the socket whole and answers
+try{ws=new WebSocket(proto+location.host+"/ws?app=%s&delta=1&iid="+encodeURIComponent(IID)+(wid?"&wid="+encodeURIComponent(wid):"")+(active?"&active="+encodeURIComponent(active):"")+((everConnected&&bundleReady&&readyAcked&&!readyQueued)?"&reconnect=1&proto="+readyProto:"")+(COL?"&col="+encodeURIComponent(COL):"")+((SKEL||RESTART_DIET)?"&skeleton=1":"")+(APP==="fleet"?"&provrows=1":""));}catch(e){dialRefused();return;}   // skeleton=1: a later chat column, or the main pane on every dial of every page load (RESTART_DIET, its redials included: 2026-10-11), served as a view of the session its ?active= names (above). reconnect=1: this page has held a socket before AND its bundle has said ready AND the kernel's caps frame has answered that ready AND the ready is not still waiting in the queue for this open, so it holds the sessions the kernel served it; the kernel skeletons the tabs it is not looking at (2026-09-07). A socket that opened and died before the bundle said ready held nothing for the page, and neither did one whose bundle said ready only after it died (the ready queued, and flushes onto this socket as the bundle's own); a ready that left on an open socket the kernel never answered (the socket died before its caps frame came back) served the page nothing either: all three redials dial as a fresh page (2026-09-10), the last until a caps frame answers: its onopen posts the bundle's ready again (below), so the kernel serves the socket whole and answers
 // onopen: flush the queue; a RECONNECT (after a drop) also PROMPTS a reload — the fresh socket resyncs live via
 // the kernel's next push, and the banner offers a full reload for anything a live push doesn't cover. This
 // replaced the old silent location.reload() (the user 2026-07-05: don't foist a reload; let me click). Since T265
@@ -75575,7 +75589,7 @@ if(window.__rompReload&&!window.__rompReload.inShell())window.__rompReload.check
 if(!ann)armStale(pendingWhy||"reconnect");   // T217: an ANNOUNCED restart's reconnect skips the arm — the resync lands in a beat and the flash was pure noise; a restart that never comes back stays loud through the disconnected state itself, and a SECOND reconnect arms as always
 pendingWhy="";freshPending=true;armFresh();try{window.dispatchEvent(new Event("romp:wsup"));}catch(e){}
 enqueue({type:"wsup"});}};   // the flip as a FRAME too: frames of the dead socket may still be draining from the FIFO, and a bundle that scopes "loaded on this socket" must see the flip between them and the new socket's frames, not at onopen (review find 2026-09-07)
-ws.onmessage=function(ev){lastRecv=Date.now();resumeProvisional=0;if(returnAt)returnBytes+=(ev.data&&ev.data.length)||0;var msg;try{msg=JSON.parse(ev.data);}catch(e){return;}
+ws.onmessage=function(ev){lastRecv=Date.now();resumeProvisional=0;redialN=0;if(returnAt)returnBytes+=(ev.data&&ev.data.length)||0;var msg;try{msg=JSON.parse(ev.data);}catch(e){return;}
 if(msg&&msg.type==="caps")readyAcked=true;   // the kernel's answer to a ready it processed: _send_caps, which the ready arm alone sends, after its own pushes. From here a redial may declare itself (the dial term in connect); the frame goes on to the bundle below like any other
 if(msg&&msg.type==="reloadRequired"){try{if(window.__rompReload)window.__rompReload.require(msg.why);}catch(e){}return;}   // the safety valve (2026-09-16): a kernel that must force a reload for correctness; the core honours it through its holds; nothing sends it today
 if(msg&&msg.type==="unknownOp"){try{if(window.__rompReload)window.__rompReload.behind();}catch(e){}}   // this page asked for something the kernel does not know (a page from before the kernel's build): the standing offer's wording gains the reason; the frame goes on to the bundle, whose degrade path answers it (render.ts onUnknownOp)
@@ -75626,10 +75640,11 @@ try{window.dispatchEvent(new Event("romp:wsdown"));}catch(e){}
 // into was already dead when the tab thawed — re-file the row marked resent and re-open the return-fresh window, so
 // both ride the redial (review find 2026-09-07: the frozen-then-dropped regime otherwise left no trace)
 if(returnRow&&Date.now()-foregroundedAt<STALE_MS){var rr=returnRow;returnRow=null;rr.resent=true;returnDiag("return",rr);returnAt=returnAt||foregroundedAt;returnBytes=0;}
-var inWin=Date.now()-foregroundedAt<STALE_MS,d=1500;   // a close landing within STALE_MS of a foreground (the FIN a frozen tab thawed into; an iOS return): the close IS the event
-if(inWin){d=eagerDial?0:250;eagerDial=false;}   // …so the FIRST such close redials NOW; every further close in the same window waits 250 ms (a kernel that is down must not be hammered) (2026-09-07)
-if(restartAnnounced&&Date.now()-restartAnnounced<30000)d=Math.min(d,250);   // an announced death keeps its tight redial
-setTimeout(connect,d);};   // the blind 1.5 s stays for unannounced drops outside any return window
+var inWin=Date.now()-foregroundedAt<STALE_MS,eager=false,fast=false;   // a close landing within STALE_MS of a foreground (the FIN a frozen tab thawed into; an iOS return): the close IS the event
+if(inWin){eager=eagerDial;eagerDial=false;fast=true;}   // …so the FIRST such close redials NOW; every further close in the same window backs off from 250 ms (a kernel that is down must not be hammered) (2026-09-07)
+if(restartAnnounced&&Date.now()-restartAnnounced<30000)fast=true;   // an announced death keeps its tight redial: from 250 ms, doubling to 2 s
+var d=eager?0:nextRedial(fast);redialAt=Date.now()+d;   // an unannounced drop outside any return window: from 1 s, doubling to 30 s; both spread at random (redialMs), so the panes and tabs one restart dropped do not redial in step (2026-10-15)
+setTimeout(connect,d);};
 ws.onerror=function(){try{ws.close();}catch(e){}};}
 // EVERY clientDiag row this page files leaves stamped with the page's build and the kernel boot it loaded against (2026-09-23):
 // LOADEDV, the dist token this page was served with (its ?v= urls), and BOOTID, the serving kernel's boot id baked in beside it.
@@ -75740,12 +75755,17 @@ netState("down");try{window.dispatchEvent(new Event("romp:wsdown"));}catch(e){}}
 // onclose will ever fire — force-close (the user 2026-06-29). CONNECTING past its deadline = the browser is
 // holding the attempt (Firefox delays re-admitting a recently-failed endpoint, and a handshake can hang) and
 // no onclose fires for it either — abort it so the close→retry chain resumes (the user 2026-07-21: the
-// "Disconnected — reconnecting…" banner sat until a manual refresh). CLOSED with no fresh attempt = the 1.5s
-// retry timer was lost (throttled/killed) — re-dial directly; connect()'s own guard makes this idempotent.
-setInterval(function(){if(!ws)return;
+// "Disconnected — reconnecting…" banner sat until a manual refresh). CLOSED, or no socket at all (a dial the
+// constructor refused, dialRefused), 8 s past the scheduled redial (redialAt) = the retry timer was lost
+// (throttled/killed) — re-dial directly; connect()'s own guard makes this idempotent. Keyed on the redial's due
+// time since the backoff (2026-10-15): keyed on the dial's start, it would cut every redial over 8 s short.
+// CLOSING (2026-10-15) = a close the far side never completes: the browser holds the socket there for up to a
+// minute before onclose fires, and no check covered it, so the redial waited the minute out. A socket seen
+// CLOSING on two ticks CLOSING_MS apart is abandoned and redialed now, as a quiet one is.
+setInterval(function(){if(!ws||ws.readyState===3){if(Date.now()-Math.max(connT,redialAt)>8000)connect();return;}
 if(ws.readyState===1){var bound=resumeProvisional?PROVISIONAL_MS:STALE_MS;if(everConnected&&Date.now()-lastRecv>bound){staleDiag("watchdog-close","quiet");abandon();connect();}return;}   // a resumed keep no frame has confirmed runs at the shorter bound (PROVISIONAL_MS, above)
 if(ws.readyState===0&&Date.now()-connT>15000){try{ws.close();}catch(e){}return;}
-if(ws.readyState===3&&Date.now()-connT>8000){connect();}},5000);
+if(ws.readyState===2){if(!closingT)closingT=Date.now();else if(Date.now()-closingT>=CLOSING_MS){if(openSock!==ws){if(!failedConnects)firstFailT=Date.now();failedConnects++;}staleDiag("watchdog-close","closing");abandon();connect();}}},5000);   // a handshake that never opened counts toward the wsconnfail row, as its onclose would have counted it
 // visibility fast-path (the user 2026-07-05): a BACKGROUNDED tab has its timers throttled, so the 5s watchdog
 // above can lag and the browser may have quietly dropped the socket while it slept. The instant the tab is
 // foregrounded, if the socket isn't open or has gone quiet past the watchdog window, treat the view as stale:
@@ -75760,7 +75780,7 @@ frozenMs:(res&&frozeAt>=hiddenAt&&resumedAt>frozeAt)?resumedAt-frozeAt:0,quietMs
 returnAt=Date.now();returnBytes=0;returnRedialed=false;returnRow=null;   // every return starts with no held row (review find, 2026-09-08): a keep row left over from an earlier return must not ride this one's close or abandon
 if(!stale){returnRow=row;returnDiag("return",row);return;}   // the socket stands: the row rides it now — and is HELD, because a FIN queued in the same thaw burst would swallow it (review find 2026-09-07; onclose re-files)
 pendingWhy="foreground";freshPending=true;armFresh();   // the reconnect's arm reads "foreground" (upstream's two-event prompt)
-if(ws&&ws.readyState===1)abandon();else{try{if(ws&&ws.readyState===0)ws.close();}catch(e){}}   // OPEN-but-quiet → abandoned + redialed below, now; stuck-CONNECTING → aborted, onclose retries
+if(ws&&(ws.readyState===1||ws.readyState===2))abandon();else{try{if(ws&&ws.readyState===0)ws.close();}catch(e){}}   // OPEN-but-quiet, or stuck CLOSING (2026-10-15) → abandoned + redialed below, now; stuck-CONNECTING → aborted, onclose retries
 if(!ws||ws.readyState===3)connect();
 returnDiag("return",row);});/*end-shim-core*/})();   // filed AFTER the redial so it queues for the new socket instead of vanishing into the dead one
 """ % (_reload_core(v, pvv), _RESTART_DIET_JS if app == "chat" else "var RESTART_DIET=false;", app, label, int(v), json.dumps(_BOOT_ID), "true" if no_stale else "false", json.dumps(pvv), app, app)
@@ -75780,6 +75800,17 @@ returnDiag("return",row);});/*end-shim-core*/})();   // filed AFTER the redial s
 _RESTART_DIET_JS = "var RESTART_DIET=false;if(!COL&&!SKEL){try{sessionStorage.removeItem('romp:reloadReason');}catch(e){}RESTART_DIET=true;}"
 
 
+# One redial delay, shared by the pane shim and the shell's own socket (2026-10-15). Both used to redial on a fixed beat
+# (the panes 1.5 s, the shell 2 s), so every pane of every open dashboard that one kernel restart dropped redialed in step,
+# and kept doing so against a kernel that was slow to come back. Now `base` doubles for each dial in a row that has not
+# yet been answered (`n`, which the caller resets when an open socket receives a frame), up to `cap`, and the result is
+# spread by up to a fifth either way at random, so the sockets a restart drops together come back apart. A base of 0
+# stays 0: the immediate redial a close right after the person returned to the tab earns. The shell's block takes it from
+# here; the pane shim's template carries the same text written out (see its copy), and test_ws_redial pins the two equal.
+_REDIAL_JS = ("function redialMs(base,cap,n){var d=Math.min(cap,base*Math.pow(2,Math.min(n,16)));"
+              "return Math.round(d*(0.8+0.4*Math.random()));}")
+
+
 def _shim_core_js(app="test", v=0):
     """The shim's decision code alone — the IIFE body between its /*shim-core*/ anchors, formatted for `app` —
     so a node test can run the REAL code (connect/onmessage/onclose, the watchdog, the visibility fast-path,
@@ -75792,6 +75823,19 @@ def _shim_core_js(app="test", v=0):
     i, j = js.find(a), js.find(b)
     if i < 0 or j < i:
         raise RuntimeError("the shim-core anchors are missing from _shim")
+    return js[i + len(a):j]
+
+
+def _shell_ws_js():
+    """The shell socket's dial, redial schedule and watchdog alone: the block of _LANDING_MOBILE_JS between its
+    /*shell-ws*/ anchors, so a node test can run the REAL code with fakes for Date.now, Math.random, WebSocket, the
+    timers and the few shell functions it calls (wid, shellDiag, reveal), the way _shim_core_js serves the pane
+    shim's tests (2026-10-15). Fails loudly if the anchors ever go missing."""
+    js = _LANDING_MOBILE_JS
+    a, b = "/*shell-ws*/", "/*end-shell-ws*/"
+    i, j = js.find(a), js.find(b)
+    if i < 0 or j < i or js.count(a) != 1:
+        raise RuntimeError("the shell-ws anchors are missing from _LANDING_MOBILE_JS")
     return js[i + len(a):j]
 
 
@@ -79735,15 +79779,37 @@ Array.prototype.forEach.call(bar.querySelectorAll('button[data-act]'),function(b
 b.addEventListener('click',function(){var f=A[b.getAttribute('data-act')];if(f)f();});});
 window.addEventListener('message',function(e){if(!window.__rompPaneSourceOk||!window.__rompPaneSourceOk(e))return;var m=e.data;if(!m)return;if(m.romp==='reveal'&&m.pane)reveal(m.pane);// the chat header's Fleet pill / the fleet's back-to-chat post toggleFleet — on mobile that IS a tab switch
 if(m.romp==='toggleFleet')userSwitch(m.to==='chat'?'chat':'fleet');});
+/*shell-ws*/
 var shellOpened=false;   // T265: this socket's REOPEN is the kernel-restart signal — the shell asks /version whose kernel answered
-function shellWS(){try{var proto=location.protocol==='https:'?'wss://':'ws://';
-var ws=new WebSocket(proto+location.host+'/ws?app=shell&wid='+encodeURIComponent(wid()));
+// The shell socket's redial and watchdog (2026-10-15). It used to redial 2 s after every close and had no watchdog: a
+// handshake that hung was left to the browser's own timeout, minutes long, and an OPEN socket whose far end died with no
+// close reaching the browser never redialed at all, so the badge, the bell, the API health cell and the update banner
+// went quiet with nothing on screen to say so. It keeps the panes' rules now (the pane shim's watchdog): an OPEN socket
+// that hears nothing for 30 s, not even the kernel's keepalive (every 10 s), is abandoned and redialed at once; a
+// handshake still pending at 15 s is aborted; a socket seen CLOSING on two ticks 5 s apart is abandoned and redialed; a
+// closed one whose scheduled redial is 8 s overdue (a lost timer) is redialed. A close redials on the panes' schedule
+// (redialMs): from 1 s doubling to 30 s, or from 250 ms doubling to 2 s within 30 s of the kernel announcing its
+// restart, and a frame on an open socket starts it over. Each watchdog action files a watchdog-close row.
+""" + _REDIAL_JS + """
+var sws=null,swsConnT=0,swsRecv=0,swsClosingT=0,swsRedialAt=0,swsN=0,swsFast=false,swsRestartAt=0;
+function shellRedial(){var fast=!!swsRestartAt&&Date.now()-swsRestartAt<30000;if(fast!==swsFast){swsFast=fast;swsN=0;}
+var d=fast?redialMs(250,2000,swsN++):redialMs(1000,30000,swsN++);swsRedialAt=Date.now()+d;setTimeout(shellWS,d);}
+// the API health detail's pause acknowledgment rides this socket: a press it carried cannot be answered now (the
+// redial's ready re-sends the last frame verbatim), so the detail is told before the redial (_LANDING_APIH_JS)
+function shellLost(ws){try{window.__rompApiSocketLost&&window.__rompApiSocketLost();}catch(e){}if(shellSock===ws)shellSock=null;}
+function shellWS(){if(sws&&(sws.readyState===0||sws.readyState===1))return;   // one live attempt at a time: the redial timer and the watchdog can both call in
+swsConnT=Date.now();swsClosingT=0;
+try{var proto=location.protocol==='https:'?'wss://':'ws://';
+var ws=new WebSocket(proto+location.host+'/ws?app=shell&wid='+encodeURIComponent(wid()));}
+catch(e){sws=null;shellRedial();return;}   // a dial the browser refused outright (the constructor threw): the next one is scheduled all the same, where the throw used to end the shell's dialing for the page's life
+sws=ws;
 // ready → the kernel sends the current needs-you count, so a relaunched installed app trues up
 // its icon badge immediately instead of waiting for the next change (plans/ios-app.md proposal 3)
 ws.onopen=function(){try{ws.send(JSON.stringify({type:'ready'}));}catch(e){}
-shellSock=ws;var q=diagQ;diagQ=[];q.forEach(function(m){try{ws.send(JSON.stringify(diagStamp(m)));}catch(e){}});   // the rows that waited for this socket
+swsRecv=Date.now();swsRestartAt=0;shellSock=ws;var q=diagQ;diagQ=[];q.forEach(function(m){try{ws.send(JSON.stringify(diagStamp(m)));}catch(e){}});   // the rows that waited for this socket
 if(shellOpened&&window.__rompReload)window.__rompReload.checkBoot();shellOpened=true;};
-ws.onmessage=function(ev){var m;try{m=JSON.parse(ev.data);}catch(e){return;}
+ws.onmessage=function(ev){swsRecv=Date.now();swsN=0;var m;try{m=JSON.parse(ev.data);}catch(e){return;}
+if(m&&m.type==='restarting'){swsRestartAt=Date.now();return;}   // the kernel announcing its own restart (T217): the close that follows redials on the tight schedule
 if(m&&m.type==='ka'&&m.pv&&window.__rompReload&&window.__rompReload.notePanes)window.__rompReload.notePanes(m.pv);   // the pane set's revision beside the build token (plans/panes-as-data.md): a define or remove at the kernel offers a reload
 if(m&&m.type==='ka'){if(m.dv&&window.__rompReload)window.__rompReload.noteDv(m.dv);}   // build drift on the shell's own keepalive (T265; an OFFER since 2026-09-16)
 else if(m&&m.type==='reloadRequired'){if(window.__rompReload)window.__rompReload.require(m.why);}   // the safety valve (2026-09-16): a kernel that must force a reload for correctness; nothing sends it today
@@ -79765,10 +79831,22 @@ else if(m&&m.type==='apiHealth'&&window.__rompApiHealth)window.__rompApiHealth(m
 else if(m&&m.type==='warn'&&typeof m.text==='string'&&m.text&&window.__rompNotify)window.__rompNotify('warn',m.text);
 // the boot check found a newer romp release — raise the update banner on every open dashboard
 else if(m&&m.type==='updateAvail'&&window.__rompUpdateOffer)window.__rompUpdateOffer(m.cur||'',m.tag||'',m.drift||'',m.boot||'',m.state||'');};
-// the API health detail's pause acknowledgment rides this socket: a press it carried cannot be answered now (the
-// redial's ready re-sends the last frame verbatim), so the detail is told before the redial (_LANDING_APIH_JS)
-ws.onclose=function(){try{window.__rompApiSocketLost&&window.__rompApiSocketLost();}catch(e){}if(shellSock===ws)shellSock=null;setTimeout(shellWS,2000);};}catch(e){}}
+ws.onclose=function(){shellLost(ws);shellRedial();};}
+// put a dead socket down without waiting for its close (the pane shim's abandon): detach it, since its eventual onclose
+// is nobody's event, close it for hygiene, do what onclose does, file the row (it queues for the redial) and dial now
+function shellAbandon(why,ms){var d=sws;if(!d)return;d.onopen=d.onmessage=d.onclose=d.onerror=null;try{d.close();}catch(e){}sws=null;shellLost(d);
+shellDiag('watchdog-close',{why:why,ms:ms});shellWS();}
+function shellWatch(){var now=Date.now();
+if(!sws||sws.readyState===3){if(now-Math.max(swsConnT,swsRedialAt)>8000)shellWS();return;}
+if(sws.readyState===1){if(now-swsRecv>30000)shellAbandon('quiet',now-swsRecv);return;}
+if(sws.readyState===0){if(now-swsConnT>15000){shellDiag('watchdog-close',{why:'connecting',ms:now-swsConnT});try{sws.close();}catch(e){}}return;}   // aborted: its onclose redials on the schedule
+if(!swsClosingT)swsClosingT=now;else if(now-swsClosingT>=5000)shellAbandon('closing',now-swsClosingT);}
+setInterval(shellWatch,5000);
+// a tab the browser FROZE ran no script, so no frame could stamp swsRecv while it slept: its resume re-bases an OPEN
+// socket's silence, as the panes' resume stamp does, and a socket that stays silent after the thaw is still put down
+document.addEventListener('resume',function(){if(sws&&sws.readyState===1)swsRecv=Date.now();});
 shellWS();
+/*end-shell-ws*/
 var last='chat';try{var s=localStorage.getItem(KT);if(s&&F[s])last=s;}catch(e){}show(last);
 })();
 """

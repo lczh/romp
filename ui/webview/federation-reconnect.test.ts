@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { FederationManager, mergeHostTimelines, socketVerdict,
-         REMOTE_STALE_MS, REMOTE_CONNECT_MS, REMOTE_REDIAL_MS, REMOTE_PROVISIONAL_MS } from "./federation";
+         REMOTE_STALE_MS, REMOTE_CONNECT_MS, REMOTE_REDIAL_MS, REMOTE_PROVISIONAL_MS, REMOTE_CLOSING_MS } from "./federation";
 
 const U = "11111111-2222-3333-4444-555555555555";
 
@@ -32,7 +32,16 @@ test("socketVerdict: a hung handshake is aborted; a CLOSED socket with no fresh 
   assert.equal(socketVerdict(0, 0, t, t + 3000), "", "a young handshake is left to finish");
   assert.equal(socketVerdict(3, 0, t, t + REMOTE_REDIAL_MS + 1), "redial", "CLOSED 8s+ with no new connect = a lost retry timer");
   assert.equal(socketVerdict(3, 0, t, t + 1000), "", "the 2s onclose redial is still coming");
-  assert.equal(socketVerdict(2, 0, t, t + 99999), "", "CLOSING is in flight — onclose will follow");
+  assert.equal(socketVerdict(2, 0, t, t + 99999), "", "CLOSING not yet seen by a tick (closingT 0): nothing to measure from");
+});
+
+// A socket held CLOSING (2026-10-15): the verdict used to leave CLOSING alone, so a close the far side never completed
+// held the redial until the browser gave up on it, up to a minute later
+test("socketVerdict: a socket held CLOSING past REMOTE_CLOSING_MS since a tick first saw it is put down", () => {
+  const t = 1_000_000;
+  assert.equal(REMOTE_CLOSING_MS, 5000, "the pane shim's CLOSING_MS: put down on the tick after the one that first saw it");
+  assert.equal(socketVerdict(2, 0, t, t + 54_999, REMOTE_STALE_MS, t + 50_000), "", "inside the bound since the first sighting");
+  assert.equal(socketVerdict(2, 0, t, t + 55_000, REMOTE_STALE_MS, t + 50_000), "close", "at the bound: the next 5 s tick puts it down");
 });
 
 test("the bounds are the pane shim's, byte for byte (kernel keepalive 10s → stale at 30s)", () => {
@@ -168,6 +177,34 @@ test("the foreground fast-path kills a socket still CONNECTING, whatever its age
     assert.equal(diag.filter((d) => d.data && d.data.ev === "watchdog-close" && d.data.why === "connecting" && d.data.foreground).length, 1);
     assert.equal(FakeWS.made.length, 2, "…and dials a fresh one in the same pass");
     fm.conns.get("TESTHOST").closed = true;
+  });
+});
+
+test("a relay socket held CLOSING is abandoned on the tick after the one that first saw it, and a fresh one dialed", async () => {
+  await withManager((fm, _e, diag, _p, said) => {
+    fm.openRemote("TESTHOST", true);
+    const ws = FakeWS.made[0];
+    ws.open();
+    ws.frame({ type: "ka", dv: 1 });
+    ws.readyState = 2;                      // a close began and the far side never completes it: no onclose comes
+    clock += 5000;
+    fm.watchdog(clock);
+    assert.equal(FakeWS.made.length, 1, "the first tick that sees it CLOSING only stamps it");
+    clock += 5000;
+    fm.watchdog(clock);
+    assert.equal(FakeWS.made.length, 2, "the next tick puts it down and dials a fresh socket, not a minute later");
+    assert.equal(ws.onclose, null, "the abandoned socket's handlers are detached: its late onclose redials nothing");
+    const conn = fm.conns.get("TESTHOST");
+    assert.equal(conn.ws, FakeWS.made[1]);
+    assert.equal(conn.closingT, 0, "the fresh socket starts unstamped");
+    assert.equal(diag.filter((d) => d.data && d.data.ev === "watchdog-close" && d.data.why === "closing").length, 1, "the crumb names the state it was put down in");
+    assert.deepEqual(said, ["romp:hostRelayUp TESTHOST", "romp:hostRelayDown TESTHOST"], "the drop is said, as its onclose would have said it");
+    // a foreground pass does not wait for the second sighting: the return puts a CLOSING socket down at once
+    FakeWS.made[1].open();
+    FakeWS.made[1].readyState = 2;
+    fm.watchdog(clock, true);
+    assert.equal(FakeWS.made.length, 3, "a foreground pass abandons a CLOSING socket and dials in the same pass");
+    conn.closed = true;
   });
 });
 

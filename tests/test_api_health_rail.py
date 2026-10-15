@@ -641,9 +641,12 @@ class Detail(unittest.TestCase):
         self.assertIn("hint=LOST;\nif(tip.style.display!=='block')return;if(held){dirty=true;return;}render();};", self.JS,
                       "painted on release under a held pointer, like a frame")
         html = km._landing()
-        self.assertIn("ws.onclose=function(){try{window.__rompApiSocketLost&&window.__rompApiSocketLost();}catch(e){}"
-                      "if(shellSock===ws)shellSock=null;setTimeout(shellWS,2000);};", html,
+        self.assertIn("function shellLost(ws){try{window.__rompApiSocketLost&&window.__rompApiSocketLost();}catch(e){}"
+                      "if(shellSock===ws)shellSock=null;}", html)
+        self.assertIn("ws.onclose=function(){shellLost(ws);shellRedial();};", html,
                       "the shell socket's close tells the detail before the redial")
+        self.assertIn("var d=sws;if(!d)return;d.onopen=d.onmessage=d.onclose=d.onerror=null;try{d.close();}catch(e){}sws=null;shellLost(d);", html,
+                      "…and so does the watchdog's abandon, which detaches that onclose (2026-10-15)")
 
     def test_focus_moves_to_the_card_before_the_pressed_button_is_disabled(self):
         # a disabled element cannot hold focus: left on the button, focus fell to BODY, where the card's Tab trap
