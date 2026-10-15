@@ -58,6 +58,8 @@ os.environ.setdefault("ROMP_SERVE_TOKEN", "test-token-DO-NOT-USE")
 km = load_source("romp_kernel_cdiag_reconnect", os.path.join(BIN, "romp-kernel"))
 
 WID = "11111111-2222-3333-4444-555555555556"
+# the rows the kernel files about the socket itself, at its accept and at its end (2026-10-15): not page rows, no stamp
+KERNEL_ROWS = ("wsopen", "wsend")
 S1 = "11111111-2222-3333-4444-555555555551"   # the tab the page persisted as active
 
 # The browser the shim thinks it runs in (tests/test_pane_shim_return.py's HARNESS, the same shape): `var` at module
@@ -320,7 +322,7 @@ class ThePairInTheLog(_State):
         self.assertEqual(c.get("skeleton"), set(), "the whole path ran: the set exists, empty with no sessions")
         self.assertEqual(c.get("skeletonOrder"), [])
         self.post(c, what="stale-raise", data={"app": "chat", "why": "reconnect"})
-        self.assertEqual([(r["what"], r["reconnect"]) for r in self.rows() if r["what"] != "wsopen"],
+        self.assertEqual([(r["what"], r["reconnect"]) for r in self.rows() if r["what"] not in KERNEL_ROWS],
                          [("wsclose", True), ("stale-raise", True)])
 
     def test_a_skeleton_column_that_declared_no_redial_is_stamped_false(self):
@@ -331,7 +333,7 @@ class ThePairInTheLog(_State):
         self.assertIs(c.get("reconnect"), True, "the skeleton arm armed the consumable flag")
         self.assertIsNone(c.get("redial"), "and left no dial record: the column declared no redial")
         self.post(c, data={"app": "chat", "code": 1006})
-        self.assertEqual([(r["what"], r["reconnect"]) for r in self.rows() if r["what"] != "wsopen"], [("wsclose", False)])
+        self.assertEqual([(r["what"], r["reconnect"]) for r in self.rows() if r["what"] not in KERNEL_ROWS], [("wsclose", False)])
         self.assertIs(self.rows("wsopen")[0]["data"]["reconnect"], False, "the accept's own row agrees")
 
     def test_a_feed_socket_reads_its_dial_record_too(self):
@@ -347,7 +349,7 @@ class ThePairInTheLog(_State):
         c2 = self._dial(q2, app="feed")
         self.assertIsNone(c2.get("redial"), "a fresh dial leaves no record")
         km.Handler._dispatch_ws(None, closes2[0], c2)
-        self.assertEqual([(r["what"], r["reconnect"]) for r in self.rows() if r["what"] != "wsopen"],
+        self.assertEqual([(r["what"], r["reconnect"]) for r in self.rows() if r["what"] not in KERNEL_ROWS],
                          [("wsclose", True), ("stale-raise", True), ("wsclose", False)])
 
 

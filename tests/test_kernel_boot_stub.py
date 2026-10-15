@@ -72,7 +72,7 @@ class BootWindowStub(unittest.TestCase):
         km._sdk = lambda: None                        # not SDK-owned — the Codex boot window
         self.cx = _FakeCodex()
         km._codex = lambda: self.cx
-        km._captions = lambda sid: {}
+        km._captions = lambda sid, on_fail=None: {}
 
     def tearDown(self):
         km._sessions, km._sdk, km._codex, km._captions = self._saved

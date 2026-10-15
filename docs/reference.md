@@ -3180,7 +3180,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   reads before the job they serve: the pass's sessions at the first two
   jobs' turns (the listing at first sight's, the alive ones at the lift's),
   the nudge ledger and the working notes when their caches miss, each input
-  whose records belong to sessions once per version of it (the ledger, the
+  whose records belong to sessions once per version of it, on a pass that
+  calls the job closed (the ledger, the
   session flags, and the relay queue's and the working notes' listings), and at the
   settle write's turn each listed session's settle evidence and, once its
   period has passed or is a second from passing, its leaf's stat. That cost
@@ -3194,9 +3195,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   stderr names each job and exception type once), `marks`
   (`session`: dirty-set entries naming one session, which open that
   session's file readers even when a re-stat looks the same; `all`: passes
-  with a box-wide mark, which only re-stat), and `floorCaught` (by file
+  with a box-wide mark, which only re-stat), `floorCaught` (by file
   position, a floor re-stat that found a file moved with no mark: a writer
-  that never said so). `byJob`, per job: `ticks`, `open` and `owed` by reason
+  that never said so), and `slicesUnread` (by input, a reading by session
+  of a shared input that failed, such as a write landing between the
+  gate's stat and its read, so a memo's race compared that input whole).
+  `byJob`, per job: `ticks`, `open` and `owed` by reason
   (an input's name, `due`, `first`, `fault`, `gateFault`, `unrecorded`,
   `undeclared`, or a job's own reason such as `canSpend` or `yield`; the
   checkpoint settle write opens on `ckptSettle`, its sessions' turn-end
@@ -3213,9 +3217,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   no signal for its inputs: a signal its declaration lacks, by evidence; the
   acts are `views`, `mark`, `push`, `send`, `problem`, `spendRow`, `write`, a
   declared file written with no mark or the checkpoint settle write's own
-  work (a first sight recorded, a session's documents written, a table
-  cleared), and `raised`, and an act is never raced) and `raced` (its memo
-  moved and an input of the memo's session moved after the gate looked,
+  work (a first sight recorded, a table cleared, and a session's documents
+  written on evidence the gate read, as below), and `raised`, and an act
+  is never raced) and `raced` (its memo
+  moved and an input of the memo's sessions moved after the gate looked,
   with a signal the next pass's gate will see:
   a box-wide file, an in-memory input or a registry row observed again; a
   mark, a judge write or a moved live row naming the session; or a box-wide
@@ -3224,15 +3229,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   when the floor, a later stat or an all-sessions mark brings the job back:
   a standing view is never re-statted, since it cannot tell a write during
   the run from one before the pass. A memo names the sessions its key
-  carries, and the walk's look names the askers whose registry rows its key
-  holds beside the session it looks at. It is tested on those sessions'
-  inputs alone: their registry rows, judge writes, judge calls in flight,
-  compaction clicks and settle evidence, and their records in the nudge
-  ledger, the session flags, the relay queue and the working notes, beside
-  the records that name no session. So another session's input moving never
+  carries and is tested on those sessions' inputs alone: their registry
+  rows, judge writes, judge calls in flight, compaction clicks and settle
+  evidence, and their records in the nudge ledger, the session flags, the
+  relay queue and the working notes, beside the records that name no
+  session. The walk's look also names the askers whose registry rows its
+  key holds, and of an asker only that row is tested, since none of its
+  other inputs is in the key. So another session's input moving never
   makes it raced, unless the memo's own key carried that input whole: the
   ten-file key carries the ledger's stat, and a key that moved there counts
-  any ledger write. The inputs every session reads whole, such as the
+  any ledger write. Each job that keys on the ten files takes the box-wide
+  ones (the clears, postal and downtime logs and the ledger) from a stat at
+  its own turn, after the gate read them, never from the pass's shared
+  snapshot, which an earlier job may have taken: a write the gate saw then
+  moves the key on that pass and leaves no miss for the next. The inputs every session reads whole, such as the
   clears, postal and downtime logs, count whole. A run whose memos name
   several sessions is raced only when each memo is. The settle write's
   work is an act only when the gate saw what it acted on: a settle key or
@@ -4013,8 +4023,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   re-derives only the sessions whose inputs moved. The sections that span
   sessions (the serving-fold join, the parked handoffs, the quarantine cards,
   the bell pass, the working and awaiting dot lists, the unreadable-state
-  ring) are never memoized: every build recomposes them from the served
-  entries, decoded fresh, so nothing memoized is mutated. `hit`, `miss` and
+  ring) are never memoized: every build recomposes them from the
+  per-session results. The fold keeps what it made of each entry: a card is
+  handed out again, the same object, while its session's entry string and
+  its stamp stand (its own and its rows' tints, a placeholder's clock, its
+  bell pair), so the push encodes only the cards that changed, and only a
+  changed string is decoded. Nothing after the fold writes a card it keeps:
+  the serving-fold join writes copies. `foldKept` counts the cards handed
+  out unchanged, `foldStamped` those re-stamped onto a copy because a tint
+  or a bell moved, `foldFresh` the cards folded from a decode and
+  `foldDecodes` the entry strings decoded; `wireEncoded` and `wireReused`
+  count the feed's cards the push's per-entry pass encoded and those it
+  served as the previous pass's string. `hit`, `miss` and
   `derived` count per session per build, `evict` the entries shed (a departed
   session, or the byte bound), `entries` and `bytes` are the resident set
   against `bound` (a sixty-fourth of the machine's memory, or
@@ -4071,14 +4091,25 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   all of them would still leave no room, it sheds nothing and the new one
   is not held. Then, and for an aggregate over the bound by itself, the
   session keeps the aggregate it was served from, so its next walk folds
-  only the turns since. Only aggregates the build has already used are
-  protected: one it has yet to use still carries an earlier build's
-  number, so a session whose grown aggregate is stored first, whichever
-  session that is, can shed the aggregate of a session derived after it,
-  which then walks every turn while the two do not fit together. While
-  two builds overlap, the aggregates used carry the number of the build
-  that began last, so one the earlier build used before then is not
-  protected either.
+  only the turns since. An aggregate over the bound by itself only grows
+  as its session closes turns, so the one kept for it never advances:
+  each of that session's walks folds every turn closed since it, so what
+  a walk adds to `segWalkTurns` grows by one for every turn the session
+  closes (never past walking every turn), and `segOverBound` counts each
+  of those walks. The kept aggregate is close to the bound, and in a
+  build that derives its session first, a session derived after it is
+  held only if it fits in the bytes the bound leaves beside the
+  aggregates the build has used; each turn-away raises `segEvict` while
+  `segEntries` and `segBytes` stay put, and a session with no aggregate
+  of its own then walks every turn. A steady climb in either counter is
+  this keep at work, not a fault. Only aggregates the build has already
+  used are protected: one it has yet to use still carries an earlier
+  build's number, so a session whose grown aggregate is stored first,
+  whichever session that is, can shed the aggregate of a session derived
+  after it, which then walks every turn while the two do not fit
+  together. While two builds overlap, the aggregates used carry the
+  number of the build that began last, so one the earlier build used
+  before then is not protected either.
   `segEntries`, `segBytes`
   (estimated) and `segBound` (`ROMP_FEED_SEG_HELD_BYTES`, else a 128th of
   the machine's memory) are the gauges. `reg` is the SDK registry
@@ -4192,7 +4223,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   alive or not, since its row is outside the key. The pass stats the postal
   log before it builds the asker index from it and the key carries that
   earlier stat, so the key never claims a newer log than the selection
-  read. The limit:
+  read; the clears and downtime logs and the ledger are statted with it and
+  laid over every key too, in place of the stats the pass's shared snapshot
+  holds, which can predate a write the jobs gate saw before the walk. The limit:
   the row invariant holds for the SDK backend only; a Codex session's
   liveness is in memory with its registry at `STATE/codex/registry.json`,
   so a Codex asker's revival would move nothing in a debtor's key (not
@@ -4530,18 +4563,31 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   joins the captions fresh. `scans` (scans whose walk finished),
   `heldTurns` and `walkedTurns` (closed turns served from the hold, and turns
   walked), `partial` (a finished scan whose held entry was not served whole:
-  a held turn moved, as an in-place rewrite or a late record moves one, or
-  the session has fewer closed turns than the entry held, as a rewind cut or
-  a past prompt edited leaves it; an append, a compaction's included, and a
-  cut's release that restores whole turns move neither this nor `reset`),
-  `reset` (an entry discarded whole because the leaf or the seams moved,
-  counted when it is discarded, before the walk),
+  a held turn moved, as an in-place rewrite or a late record moves one, or a
+  state row landing inside a closed turn: a turn boundary whose working
+  state row lands after the new turn's first record, until which the turn
+  that just closed runs its idle span to the parse's clock and so moves its
+  end, or an idle notice inside a closed turn's idle span, which adds an
+  atom; or the session has fewer closed turns than the entry held, none
+  included, as a rewind cut, a past prompt edited or a transcript that
+  cannot be read leaves it, and an entry that stands is kept; an append
+  whose state row is in place, a compaction's included, and a cut's release
+  that restores whole turns move neither this nor `reset`),
+  `reset` (an entry discarded whole because the leaf or the seams moved or
+  the leaf cannot be stat'd, counted when it is discarded, before the walk,
+  by a scan with no closed turn to hold too, such as a /clear's first),
   `raised` (a walk that raised, which stores nothing), `faulted` (every scan
   that raised, the walk's included, so `faulted` above `raised` means scans
-  are failing before their walk: the captions read, the parse, or the goal
-  store's read or its seams; the session serves its last-known captions, is
-  scanned again each build, and the kernel's log says so once until a scan
-  of it comes back clean), `evict` (entries the byte bound shed), `overBound`
+  are failing outside their walk: a captions file that exists and cannot be
+  read, the parse, the goal store's read or its seams, or the caption join,
+  which follows a finished walk and so counts under `scans` too; the
+  session serves its last-known captions, is scanned again each build, and
+  the kernel's log says so once until a scan of it comes back clean; a
+  transcript that cannot be read is no fault: the parse reads it as empty
+  and holds that under the transcript's unchanged stat for every reader, so
+  the scan comes back clean and the session's message captions stay gone
+  until a transcript record or a state row lands), `evict` (entries the
+  byte bound shed), `overBound`
   (scans whose own entry was over the bound by itself: served, not held, and
   shedding no other session), and the gauges `entries`, `bytes` (estimated)
   and `bound` (`ROMP_MSG_SCAN_HELD_BYTES`, else a 256th of the machine's
@@ -5132,6 +5178,45 @@ frames it received is measured in the panes themselves, by
   cannot be written is said on stderr once, since the reading rule holds only while
   writes succeed. A planned per-app split of the connect push (perf work) will read
   the same `kind`.
+- The kernel files one `wsend` row (surface `kernel`) when an accepted socket
+  ends, matching its `wsopen` row by `cid`: the app and kind, how long the socket
+  lived (`lifeMs`), how many messages the page sent on it (`msgsIn`) and how soon
+  the first came (`firstInMs`, null for none), and the `cause`: `close` (the
+  page's Close frame, with its `code`), `eof` (the connection ended without one),
+  `error` (the read raised; `why` names the exception), or `kernel` (the kernel
+  ended it, for a peer that stopped answering pings, a backlog past the budget, a
+  protocol error or a socket its page's redial superseded; `why` is the reason
+  the kernel logged).
+- A socket dial the kernel does not accept files a `wsrefused` row: a `/ws` or
+  `/remote/HOST/ws` request the gate refused (403), one with no upgrade key
+  (400), or a relay to a host that is not attached (404) or whose tunnel does not
+  answer (502). The row carries the path (a relay's as `/remote/*/ws` with its
+  `host`), the app and dashboard id the dial named, the status, the reason,
+  whether an upgrade key came, and the Origin header, never the query string.
+  The gate's refusal needs no credential, so any page, a cross-site one
+  included, can make the kernel file one; the app, dashboard id, host and
+  Origin are therefore cut to the characters such a value uses (letters,
+  digits and a few marks such as `.`, `-` and `:`) and to 40 to 100 of them. A
+  handshake whose 101 could not be written files `wsupgradefail`. At most 30 of
+  these rows a minute; the dials a full minute turned away are counted onto the
+  next row (`unfiled`). A static request files nothing, so a browser that stopped
+  reaching the kernel leaves no row, and one that reached it and was turned away
+  leaves these.
+- A page with no open socket still reports. Once a pane has had no open socket
+  for 20 seconds, it sends the breadcrumbs it queued for the socket (at most 20,
+  and at most 16,000 characters of them; a row that does not fit waits) and one
+  `nosocket` row (how long, how many dials failed, the socket's state,
+  whether the tab is hidden, and how late the watchdog's tick ran) to
+  `POST /client-diag`, then at most once a minute while the outage lasts; the
+  shell does the same for its own rows when its socket closes. The request is a
+  `fetch` with `keepalive`, behind the gate the page's other requests pass (its
+  cookie with its own origin, or the token). The kernel files each row as it
+  files the rows a socket carries, with `via: http` added and `reconnect` false;
+  a row it filed leaves the page's queue, and a refused or unanswered request
+  leaves the rows for the socket. The route takes at most 64 KiB (checked against
+  Content-Length before reading), 25 rows a request, and 120 rows and 1 MiB a
+  minute across every page; past the minute's budget it answers 429 and files the
+  count as one `diagPostRefused` row when the next minute admits a request.
 - The kernel files one `chatFull` row (surface `kernel`) per whole session frame
   the uuid-anchored chat wire sends to a client that already holds a base for the
   session, filed once the frame has left (a frame the per-client dedup swallowed
