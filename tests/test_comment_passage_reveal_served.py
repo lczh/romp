@@ -44,6 +44,7 @@ sys.path.insert(0, HERE)
 import test_ship_reship_served as _lab   # noqa: E402  the lab kernel's environment (the module, not its classes)
 
 WEB = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
+API = "aaaaaaaa-1111-2222-3333-cccccccccccc"   # a second session, for a tab to go to and come back from
 N = 150
 PARAS, AT = 14, 6
 USER_UUID = "11111111-2222-3333-4444-%012d"
@@ -211,64 +212,120 @@ const markNow = (tid) => page.evaluate((tid) => { let u = null;
     u = u ? { t: Math.min(u.t, q.top), b: Math.max(u.b, q.bottom), l: Math.min(u.l, q.left), r: Math.max(u.r, q.right) } : { t: q.top, b: q.bottom, l: q.left, r: q.right };
   return u && { t: Math.round(u.t), b: Math.round(u.b), l: Math.round(u.l), r: Math.round(u.r) }; }, tid);
 const scrollNow = () => page.evaluate(() => document.getElementById("content").scrollTop);
-// the last reply grows under the passage while the landing settles, the way the late fork control grows it: the landing
-// re-lands the passage higher, into where the box was
-// (measured in the same task as the growth, so the step stays inside the landing's settle, which re-lands it)
-const growTail = (px) => page.evaluate(([u, px]) => { const t = document.querySelector(`#content .turn[data-uuid="${u}"]`);
-  const p = document.getElementById("cmt-pop"), pr = p ? p.getBoundingClientRect() : null;
-  let m = null;
-  for (const x of Array.from(document.querySelectorAll('#content mark.cmt-hl[data-tid="tid-end"]'))) for (const q of Array.from(x.getClientRects()))
-    m = m ? { t: Math.min(m.t, q.top), b: Math.max(m.b, q.bottom), l: Math.min(m.l, q.left), r: Math.max(m.r, q.right) } : { t: q.top, b: q.bottom, l: q.left, r: q.right };
-  const d = document.createElement("div"); d.className = "fx-grow"; d.style.height = px + "px"; t.appendChild(d);
-  return { box: pr && { t: Math.round(pr.top), b: Math.round(pr.bottom), l: Math.round(pr.left), r: Math.round(pr.right) },
-           mark: m && { t: Math.round(m.t), b: Math.round(m.b), l: Math.round(m.l), r: Math.round(m.r) },
-           focused: !!document.activeElement?.closest("#cmt-pop"), hovered: !!p && p.matches(":hover") }; }, [R(149), px]);
-const ungrow = () => page.evaluate(() => { for (const d of Array.from(document.querySelectorAll("#content .fx-grow"))) d.remove(); });
 const landEnd = async () => {
   await fresh();
   await page.click(`#cmt-rail .cmt-tick[data-tid="tid-end"]`);
   await page.waitForSelector('#cmt-pop[data-tid="tid-end"]', { timeout: 15000 }).catch(() => {});
 };
 
-// 6. the pointer over the box: the passage moves into it, and the box stays where it is
+// 6, 7: the box holds still while the reader is in it. The message box under the transcript grows (lines put into it by the
+// page, the focus left where the scenario put it): the view re-pins the bottom and raises the passage into the thread's box
+const growComposer = (lines) => page.evaluate((lines) => {
+  const t = document.getElementById("composer-input"); if (!t) return null;
+  t.value = lines ? Array.from({ length: lines }, (_, i) => "line " + i + " about the rows").join("\n") : "";
+  t.dispatchEvent(new Event("input", { bubbles: true }));
+  return t.offsetHeight;
+}, lines);
+const inBox = () => page.evaluate(() => { const p = document.getElementById("cmt-pop"); return { focused: !!document.activeElement?.closest("#cmt-pop"), hovered: !!p && p.matches(":hover") }; });
+
+// 6. the pointer over the box: the passage rises into it, and the box stays where it is until the pointer leaves
 await landEnd();
+await page.waitForTimeout(1500);   // the landing settled: only the message box moves the passage from here
 await page.mouse.move(640, 250);   // inside the box, which the landing puts above the passage (asserted: hovered)
-out.hover0 = await growTail(40);
-await page.waitForTimeout(800);
+out.hover0 = { box: await boxNow(), mark: await markNow("tid-end"), ...(await inBox()) };
+await growComposer(5);
+await page.waitForTimeout(500);
 out.hover1 = { box: await boxNow(), mark: await markNow("tid-end") };
 await page.mouse.move(150, 650);   // the pointer leaves the box: the step-off it owed is paid now
 await page.waitForTimeout(200);
 out.hover2 = { box: await boxNow(), mark: await markNow("tid-end") };
-await ungrow();
+await growComposer(0);
+await page.waitForTimeout(300);
 
-// 7. typing in the box, the pointer elsewhere: the same
+// 7. typing in the box, the pointer elsewhere: the same, until the focus leaves it
 await landEnd();
+await page.waitForTimeout(1500);
 await page.mouse.move(150, 650);
 await page.evaluate(() => document.querySelector("#cmt-pop .cmt-input")?.focus());
 await page.keyboard.type("why");
-out.type0 = await growTail(40);
-await page.waitForTimeout(800);
+out.type0 = { box: await boxNow(), mark: await markNow("tid-end"), ...(await inBox()) };
+await growComposer(5);
+await page.waitForTimeout(500);
 out.type1 = { box: await boxNow(), mark: await markNow("tid-end") };
 await page.evaluate(() => { document.querySelector("#cmt-pop .cmt-input")?.blur(); });
 await page.waitForTimeout(200);   // the focus left the box: the step-off it owed is paid now
 out.type2 = { box: await boxNow(), mark: await markNow("tid-end") };
 await page.evaluate(() => { const i = document.querySelector("#cmt-pop .cmt-input"); if (i) { i.value = ""; i.dispatchEvent(new Event("input", { bubbles: true })); } });
-await ungrow();
+await growComposer(0);
+await page.waitForTimeout(300);
+
+// the session writing: a reply appended to its transcript, waited on until it reaches the page (`pg`)
+const atBottomNow = (pg = page) => pg.evaluate(() => { const c = document.getElementById("content"); return c.scrollHeight - c.scrollTop - c.clientHeight <= 2; });
+const chipNow = (pg = page) => pg.evaluate(() => { const b = document.getElementById("jump-bottom"); return !!b && !b.hidden; });
+let prev = R(149), nStream = 0;
+const streamOne = async (pg = page, wait = true, paras = 1) => {
+  const u = cfg.streamUuid.replace("%012d", String(nStream++).padStart(12, "0"));
+  fs.appendFileSync(cfg.transcript, JSON.stringify({ type: "assistant", uuid: u, parentUuid: prev, timestamp: new Date().toISOString(), sessionId: cfg.sid,
+    message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: Array.from({ length: paras }, (_, j) => "Streaming note " + nStream + "." + j + ": the writer flushes the next page of rows to the download, and the reader keeps pulling.").join("\n\n") }] } }) + "\n");
+  prev = u;
+  if (wait) await pg.waitForSelector(`#content .turn[data-uuid="${u}"]`, { state: "attached", timeout: 10000 }).catch(() => {});
+  return u;
+};
+const contentRect = () => page.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { t: Math.round(r.top), b: Math.round(r.bottom) }; });
+
+// 14. the session writes while the reader is on another tab, after a landing at the bottom: back on the tab, the passage is
+// where they left it, follow mode still paused, the chip showing the text below; the next reply does not move it either
+await landEnd();
+await page.waitForTimeout(1500);   // the landing settled
+out.away0 = { mark: await markNow("tid-end"), bottom: await atBottomNow() };
+await page.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`)?.click(), cfg.otherSid);
+await page.waitForTimeout(800);
+await streamOne(page, false, 8);   // eight paragraphs written while the reader is away: the page holds it, the hidden view draws it on return
+await page.waitForTimeout(1500);
+await page.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`)?.click(), cfg.sid);
+await page.waitForSelector(`#content .turn[data-uuid="${prev}"]`, { state: "attached", timeout: 10000 }).catch(() => {});   // drawn before or after the return
+await page.waitForTimeout(800);
+out.away1 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), chip: await chipNow(), content: await contentRect(), arrived: await page.evaluate((u) => !!document.querySelector(`#content .turn[data-uuid="${u}"]`), prev) };
+await streamOne();
+await page.waitForTimeout(400);
+out.away2 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), chip: await chipNow() };
+await page.click("#jump-bottom").catch(() => {});   // back to following, for what comes next
+await page.waitForTimeout(600);
+
+// 10. back on the tab after a landing at the bottom: the thread closed, another tab and back, the view at the bottom. It must
+// follow the next reply (or show the chip): a view at the bottom that silently stopped following hides the next text
+await landEnd();
+await page.waitForTimeout(1500);   // the landing settled
+await fresh();                    // the thread closed
+await page.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`)?.click(), cfg.otherSid);
+await page.waitForTimeout(800);
+await page.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`)?.click(), cfg.sid);
+await page.waitForTimeout(800);
+out.tab0 = { bottom: await atBottomNow(), chip: await chipNow() };
+out.tab = [];
+for (let i = 0; i < 3; i++) {   // loop-ok: three replies, each waited on its own turn reaching the page
+  await streamOne();
+  await page.waitForTimeout(400);
+  out.tab.push({ bottom: await atBottomNow(), chip: await chipNow() });
+}
+
+// 11. typing in the message box after a landing on the last reply: the box below grows, the view re-pins the bottom and the
+// passage rises into the thread's box above it; the thread's box steps off it
+await landEnd();
+await page.mouse.move(150, 650);
+await page.waitForTimeout(1500);   // the landing settled
+out.compose0 = { box: await boxNow(), mark: await markNow("tid-end"), h: await page.evaluate(() => document.getElementById("composer-input")?.offsetHeight ?? null) };
+await page.evaluate(() => document.getElementById("composer-input")?.focus());
+await page.keyboard.type("a note on the export");
+for (let i = 0; i < 4; i++) { await page.keyboard.press("Shift+Enter"); await page.keyboard.type("and one more line about the rows"); }   // loop-ok: four more lines typed
+await page.waitForTimeout(600);
+out.compose1 = { box: await boxNow(), mark: await markNow("tid-end"), h: await page.evaluate(() => document.getElementById("composer-input")?.offsetHeight ?? null) };
+await page.evaluate(() => { const t = document.getElementById("composer-input"); if (t) { t.value = ""; t.dispatchEvent(new Event("input", { bubbles: true })); t.blur(); } });
+await page.waitForTimeout(400);
 
 // 8. the session goes on writing: replies stream in under the last one from the moment the box opens. The landing paused
 // follow mode, so the view keeps its place: the passage stays clear of the box throughout and, once the landing settled, the
 // passage and the box hold still; the go-to-bottom chip shows the text below
-const atBottomNow = () => page.evaluate(() => { const c = document.getElementById("content"); return c.scrollHeight - c.scrollTop - c.clientHeight <= 2; });
-const chipNow = () => page.evaluate(() => { const b = document.getElementById("jump-bottom"); return !!b && !b.hidden; });
-let prev = R(149), nStream = 0;
-const streamOne = async () => {
-  const u = cfg.streamUuid.replace("%012d", String(nStream++).padStart(12, "0"));
-  fs.appendFileSync(cfg.transcript, JSON.stringify({ type: "assistant", uuid: u, parentUuid: prev, timestamp: new Date().toISOString(), sessionId: cfg.sid,
-    message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "Streaming note " + nStream + ": the writer flushes the next page of rows to the download, and the reader keeps pulling." }] } }) + "\n");
-  prev = u;
-  await page.waitForSelector(`#content .turn[data-uuid="${u}"]`, { state: "attached", timeout: 10000 }).catch(() => {});
-  return u;
-};
 await landEnd();
 const t0 = Date.now();
 await page.mouse.move(150, 650);
@@ -288,6 +345,66 @@ out.resume0 = { st: await scrollNow(), bottom: await atBottomNow(), chip: await 
 await streamOne();
 await page.waitForTimeout(400);
 out.resume1 = { st: await scrollNow(), bottom: await atBottomNow(), chip: await chipNow() };
+
+// 12. a phone: a landing through the jump arrows pauses follow mode, a reply arrives below, and the reader flicks back to the
+// bottom. The flick's momentum reaches the bottom well after the finger left (a smooth scroll stands in for it, started by the
+// touch); following resumes all the same, and the next reply is followed
+const phone = await (await browser.newContext({ viewport: { width: 390, height: 780 }, isMobile: true, hasTouch: true })).newPage();
+await phone.goto(cfg.chat);
+await phone.waitForSelector(`#tabs .tab[data-id="${cfg.sid}"]`, { state: "attached", timeout: 30000 });
+await phone.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`).click(), cfg.sid);
+await phone.waitForSelector("#content .turn-user", { state: "attached", timeout: 60000 });
+await phone.waitForSelector('#jump-cluster [data-move="prevComment"]', { state: "visible", timeout: 30000 }).catch(() => {});
+await phone.waitForTimeout(800);
+await phone.evaluate(() => document.querySelector('#jump-cluster [data-move="prevComment"]')?.click());   // the last thread's passage, tid-end
+await phone.waitForTimeout(1500);
+await streamOne(phone);
+await phone.waitForTimeout(400);
+out.flick0 = { bottom: await atBottomNow(phone), chip: await chipNow(phone) };
+out.flick = await phone.evaluate(() => new Promise((done) => {
+  const c = document.getElementById("content");
+  const t = new Touch({ identifier: 1, target: c, clientX: 200, clientY: 500 });
+  const t0 = performance.now();
+  let bottomAt = null;
+  const onScroll = () => { if (bottomAt == null && c.scrollHeight - c.scrollTop - c.clientHeight <= 2) bottomAt = performance.now() - t0; };
+  c.addEventListener("scroll", onScroll, { passive: true });
+  c.dispatchEvent(new TouchEvent("touchstart", { touches: [t], targetTouches: [t], changedTouches: [t], bubbles: true }));
+  c.dispatchEvent(new TouchEvent("touchmove", { touches: [t], targetTouches: [t], changedTouches: [t], bubbles: true }));
+  c.dispatchEvent(new TouchEvent("touchend", { touches: [], targetTouches: [], changedTouches: [t], bubbles: true }));
+  c.scrollTo({ top: c.scrollHeight, behavior: "smooth" });
+  const finish = () => { c.removeEventListener("scroll", onScroll); done({ bottomAt, distance: null }); };
+  c.addEventListener("scrollend", finish, { once: true });
+  setTimeout(finish, 4000);
+}));
+await phone.waitForTimeout(300);
+out.flick1 = { bottom: await atBottomNow(phone) };
+await streamOne(phone);
+await phone.waitForTimeout(400);
+out.flick2 = { bottom: await atBottomNow(phone), chip: await chipNow(phone) };
+// 13. the keys back to the bottom after a landing: End, PageDown and Space are the browser's own smooth scrolls, whose scrollend
+// can come before the last scroll event at the bottom. Each run: a landing (the passage has replies below it now), a reply that
+// lands below unfollowed, the keys to the bottom, then the next reply must be followed
+const keyBack = async (key) => {
+  await fresh();
+  await page.click(`#cmt-rail .cmt-tick[data-tid="tid-end"]`);
+  await page.waitForSelector('#cmt-pop[data-tid="tid-end"]', { timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(1500);   // the landing settled
+  await streamOne();
+  await page.waitForTimeout(300);
+  const before = { bottom: await atBottomNow(), chip: await chipNow() };
+  await page.mouse.click(150, 300);   // into the transcript, so the keys scroll it (the press outside closes the thread's box)
+  for (let i = 0; i < (key === "End" ? 1 : 10) && !(await atBottomNow()); i++) {   // loop-ok: a key at a time until the bottom, each waited past its smooth scroll
+    await page.keyboard.press(key);
+    await page.waitForTimeout(500);
+  }
+  const reached = await atBottomNow();
+  await streamOne();
+  await page.waitForTimeout(400);
+  return { key, before, reached, after: { bottom: await atBottomNow(), chip: await chipNow() } };
+};
+out.keys = [];
+for (const key of ["End", "End", "End", "End", "PageDown", "Space"]) out.keys.push(await keyBack(key));   // loop-ok: six runs, each waited on its own landing and replies
+
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -332,6 +449,10 @@ class ServedCommentPassageReveal(unittest.TestCase):
             os.chmod(os.path.join(fakebin, tool), 0o755)
         os.makedirs(cwd, exist_ok=True)
         Path(state, "names", WEB).write_text("web\t%s\t#9cd2ff\t#0c1a2e\n" % cwd)
+        Path(state, "names", API).write_text("api\t%s\t#f0b27a\t#2e1a0c\n" % cwd)
+        Path(state, "sdk", API + ".json").write_text(json.dumps(
+            {"sid": API, "name": "api", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": API, "alive": True,
+             "model": "claude-opus-5", "liveModel": "Opus 5"}))
         Path(state, "sdk", WEB + ".json").write_text(json.dumps(
             {"sid": WEB, "name": "web", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": WEB, "alive": True,
              "model": "claude-opus-5", "liveModel": "Opus 5"}))
@@ -350,6 +471,12 @@ class ServedCommentPassageReveal(unittest.TestCase):
                                      "content": [{"type": "text", "text": reply_body(k, how.get(k))}]}})
             prev = a
         Path(proj, WEB + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+        Path(proj, API + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in (
+            {"type": "user", "timestamp": iso(t0), "uuid": "44444444-5555-6666-7777-000000000001", "parentUuid": None, "promptSource": "typed",
+             "sessionId": API, "message": {"role": "user", "content": "notes-api: which routes need auth?"}},
+            {"type": "assistant", "timestamp": iso(t0 + 30), "uuid": "44444444-5555-6666-7777-000000000002", "parentUuid": "44444444-5555-6666-7777-000000000001",
+             "sessionId": API, "message": {"role": "assistant", "model": "claude-opus-5", "stop_reason": "end_turn",
+                                           "content": [{"type": "text", "text": "Every route under /notes, and the export."}]}})))
         rows = []
         cls.transcript = os.path.join(proj, WEB + ".jsonl")
         for i, (tid, k, how_) in enumerate(THREADS):
@@ -395,7 +522,7 @@ class ServedCommentPassageReveal(unittest.TestCase):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "sid": WEB,
-                       "threads": len(THREADS), "replyUuid": REPLY_UUID, "streamUuid": STREAM_UUID, "transcript": self.transcript}, f)
+                       "threads": len(THREADS), "replyUuid": REPLY_UUID, "streamUuid": STREAM_UUID, "transcript": self.transcript, "otherSid": API}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -468,7 +595,8 @@ class ServedCommentPassageReveal(unittest.TestCase):
             else:
                 self.assertTrue(a["hovered"], "the pointer is over the box: %r" % a)
             self.assertIsNotNone(a["box"], "%s: the box is open: %r" % (why, a))
-            self.assertLessEqual(b["mark"]["t"], a["mark"]["t"] - 30, "%s: the landing re-landed the passage higher (a move the box would follow): %r -> %r" % (why, a, b))
+            self.assertLessEqual(b["mark"]["t"], a["mark"]["t"] - 30, "%s: the growing message box raised the passage (a move the box would follow): %r -> %r" % (why, a, b))
+            self.assertFalse(self._clear(b["mark"], b["box"]), "%s: the risen passage is under the still box: %r" % (why, b))
             self.assertEqual(b["box"], a["box"], "%s: the box did not move: %r -> %r" % (why, a["box"], b["box"]))
             self.assertTrue(self._clear(c["mark"], c["box"]), "%s, then left: the box stepped off the passage: %r" % (why, c))
         # 8. a session still writing, from the moment the box opened: the passage is never under the box, and once the landing
@@ -488,6 +616,44 @@ class ServedCommentPassageReveal(unittest.TestCase):
         self.assertTrue(r["resume1"]["bottom"], "the next reply was followed, the view at the bottom: %r" % r["resume1"])
         self.assertGreater(r["resume1"]["st"], r["resume0"]["st"], "the view moved down with it: %r" % r)
         self.assertFalse(r["resume1"]["chip"], "no chip at the bottom: %r" % r["resume1"])
+        # 14. text written while the reader was away from a held tab: back on it, the passage where they left it, still paused
+        a0, a1, a2 = r["away0"], r["away1"], r["away2"]
+        self.assertTrue(a0["bottom"], "the landing on the last reply put the view at the bottom: %r" % a0)
+        self.assertTrue(a1["arrived"], "the reply written while away is in the transcript: %r" % a1)
+        self.assertTrue(a1["mark"] and a1["content"]["t"] <= a1["mark"]["t"] and a1["mark"]["b"] <= a1["content"]["b"], "the passage is in view: %r" % a1)
+        self.assertLess(abs(a1["mark"]["t"] - a0["mark"]["t"]), 4, "…where the reader left it: %r -> %r" % (a0, a1))
+        self.assertFalse(a1["bottom"], "not carried to the new bottom: %r" % a1)
+        self.assertTrue(a1["chip"], "the chip shows the text below: %r" % a1)
+        self.assertEqual(a2["mark"], a1["mark"], "follow mode stays paused: the next reply moves nothing: %r -> %r" % (a1, a2))
+        self.assertTrue(a2["chip"] and not a2["bottom"], a2)
+        # 10. back on the tab after a landing at the bottom: the next reply is followed (or the chip says it is below)
+        # (the rule: a view at the bottom follows, or the chip shows; what failed was a view at the bottom with no chip whose
+        # next reply landed below unseen)
+        self.assertTrue(r["tab0"]["bottom"] or r["tab0"]["chip"], r["tab0"])
+        states = [r["tab0"]] + r["tab"]
+        for before, after in zip(states, states[1:]):
+            if before["bottom"] and not before["chip"]:
+                self.assertTrue(after["bottom"], "a view back at the bottom follows again, reply after reply: %r" % states)
+            self.assertTrue(after["bottom"] or after["chip"], "never at neither: %r" % states)
+        # 11. the message box grows under a landing on the last reply: the passage stays clear of the thread's box
+        c0, c1 = r["compose0"], r["compose1"]
+        self.assertGreater(c1["h"], c0["h"] + 40, "the message box grew: %r -> %r" % (c0["h"], c1["h"]))
+        self.assertTrue(self._clear(c0["mark"], c0["box"]), "the landing left the passage clear: %r" % c0)
+        self.assertLess(c1["mark"]["t"], c0["mark"]["t"] - 30, "the view re-pinned the bottom, raising the passage: %r -> %r" % (c0, c1))
+        self.assertTrue(self._clear(c1["mark"], c1["box"]), "the thread's box stepped off the risen passage: %r" % c1)
+        # 13. End, PageDown and Space back to the bottom after a landing resume following, run after run
+        for k in r["keys"]:
+            self.assertFalse(k["before"]["bottom"], "the landing paused follow mode, the reply landed below: %r" % k)
+            self.assertTrue(k["reached"], "%s took the view to the bottom: %r" % (k["key"], k))
+            self.assertTrue(k["after"]["bottom"], "after %s to the bottom the next reply is followed: %r" % (k["key"], r["keys"]))
+        # 12. a phone flick back to the bottom whose momentum outlasts the input window resumes following
+        self.assertFalse(r["flick0"]["bottom"], "the landing paused follow mode, so the reply landed below: %r" % r["flick0"])
+        self.assertTrue(r["flick0"]["chip"], "…with the chip showing it: %r" % r["flick0"])
+        self.assertIsNotNone(r["flick"]["bottomAt"], "the flick reached the bottom: %r" % r["flick"])
+        self.assertGreater(r["flick"]["bottomAt"], 150, "…after the input window, the momentum's own time: %r" % r["flick"])
+        self.assertTrue(r["flick1"]["bottom"], r)
+        self.assertTrue(r["flick2"]["bottom"], "the next reply was followed: following resumed: %r" % r["flick2"])
+        self.assertFalse(r["flick2"]["chip"], r["flick2"])
 
 if __name__ == "__main__":
     unittest.main()
