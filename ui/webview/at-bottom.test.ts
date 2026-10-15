@@ -92,9 +92,10 @@ test("follow mode and the chip read atBottom at every site", () => {
     /const bottom = !cur && atBottom\(content\);/,                                                         // …and its reading line at the bottom
     /stick: hadSnap \? v\.stick : atBottom\(content\) \}/,                                                 // a file tab's held place for the way back (2026-09-30)
     /const atEnd = atBottom\(content\);   \/\/ measured before the box adds its room/,                          // the live-status foot line's first room (2026-10-08)
+    /const follow = v\.stick && !v\.followHeld && atBottom\(content\);/,                                     // a re-window under a reader in follow mode at the bottom ends at the bottom (2026-10-15)
   ];
   for (const re of follow) assert.match(RENDER, re, String(re));
-  assert.equal((RENDER.match(/\batBottom\(/g) || []).length, 21, "twenty call sites plus the definition (the scroll listener's end of a passage landing's follow pause, 2026-10-15; the re-show follow rule reads the same true bottom, T262 2026-09-09; the window ask's diagnostic row reads it too, T366; the landing's follow-mode end, T386; the jump cluster's two reads, 2026-09-24; a file tab's held place, 2026-09-30; the live-status foot line's first room, 2026-10-08)");
+  assert.equal((RENDER.match(/\batBottom\(/g) || []).length, 22, "twenty-one call sites plus the definition (the re-window's follow-mode end at the bottom, 2026-10-15; the scroll listener's end of a passage landing's follow pause, 2026-10-15; the re-show follow rule reads the same true bottom, T262 2026-09-09; the window ask's diagnostic row reads it too, T366; the landing's follow-mode end, T386; the jump cluster's two reads, 2026-09-24; a file tab's held place, 2026-09-30; the live-status foot line's first room, 2026-10-08)");
 });
 
 test("only the user's own send reveal keeps the 80 px band", () => {

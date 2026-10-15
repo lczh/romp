@@ -33,10 +33,13 @@ page measured would stand past that limit by more than a fifth.
 LongHistoryClimb, at 2x over a taller tail: a reader drops into the head gap and climbs back through the history with the wheel for
 CLIMB_PAGES pages, one page asked per step, by which point the rows the page holds, at the average unit it measured off the tail, would
 stand past the limit by more than a fifth. The scroll height must stay under the limit at every page, the estimates in it (the spacers
-and any gap drawn) at most half of it; the go-to-bottom chip's first press must bring the newest row on screen within a screen of the
-bottom, and its second leave the reader at the bottom. Then replies land below the window while the reader stands in the history (the
-residual chat-regions.ts HIDDEN_SHARE discloses): the reader drops back to the tail run's first rows, under the gap above them, one
-reply lands, then APPEND_TURNS more in one write, which the keyed paint puts in the bottom spacer at the held figure as it stands. The
+and any gap drawn) at most half of it; the go-to-bottom chip's first press must bring the newest row on screen at the bottom, and its
+second leave the reader there. Then the reader goes back far into the history the climb loaded (one scroll write, END_BACK_UNITS units
+under its top), clicks a reply's text and presses End, which must bring the newest row on screen at the bottom too (the window a press
+builds dresses its rows after the press lands, and those rows grew under a reader left 25 px short of the bottom; 2026-10-15). Then
+replies land below the window while the reader stands in the history (the residual chat-regions.ts HIDDEN_SHARE discloses): the reader
+drops back to the tail run's first rows, under the gap above them, one reply lands, then APPEND_TURNS more in one write, which the keyed
+paint puts in the bottom spacer at the held figure as it stands. The
 estimates must grow by that write's unit count (two units a turn) times that figure, within 2 px, and pass the half by at most that,
 and the next window build (a press of the chip) must bring them back under it. Before any reply lands, the window moves while the unit
 count holds (the climb's last page, the chip's second press, ROAD 9's drop), and the held figure must not move with it. Each test that reads
@@ -360,7 +363,8 @@ if (cfg.legs.includes("long")) {
 }
 if (cfg.legs.includes("climb")) {
   // ROAD 8: a reader drops into the head gap, climbs back through the history page by page with the wheel, then presses the
-  // go-to-bottom chip (twice, as a reader does when the first press leaves them short of the bottom)
+  // go-to-bottom chip twice (the second from where the first left them), then goes back far into the history the climb loaded and
+  // presses End
   const loaded = () => page.waitForFunction(() => window.__rompAskState().gapLoading === 0, null, { timeout: 15000 }).catch(() => {});
   const a0 = (await asks()).length;
   holdTurns = true;   // the drop is read before its page can land
@@ -381,12 +385,57 @@ if (cfg.legs.includes("climb")) {
     steps.push({ wheels: w, sh: r.sh, st: r.st, est: r.est, asked: (await asks()).slice(n) });
   }
   const climbed = Object.assign(await reading(), { measure: await measure() });
+  // the loaded run's top in scroll coordinates, read while the head gap stands drawn above the reader: the head gap's height is its
+  // estimate whether it is drawn or hidden in the top spacer, so the run starts there until another page lands (as ROAD 11 reads it)
+  const runTop = await page.evaluate(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect();
+    const g = Array.from(document.querySelectorAll("#content .tx-gap")).find((x) => x.offsetParent !== null && +x.dataset.lo === 0);
+    if (!g) return null; const b = g.getBoundingClientRect(); return { y: Math.round(b.bottom - cr.top + c.scrollTop), hi: +g.dataset.hi }; });
   const press = async (uuid) => { await page.click("#jump-bottom", { timeout: 5000 }).catch(() => {}); await page.waitForTimeout(1500); await painted(); return Object.assign(await reading(uuid), { measure: await measure() }); };
   const chip1 = await press();
   const chip2 = await press();
+  // End's first press after the climb (2026-10-15). The reader goes back far into the run the climb loaded by one scroll write,
+  // cfg.endBackUnits units under the run's top (each unit of the run hidden in the top spacer stands for the held figure, else the
+  // average unit), where the page builds a window over the run's middle rows and the tail stands hidden in the bottom spacer again,
+  // as the climb left it; the write's event, read on the page each frame and capped at 10 s, is every row on screen one of the run's
+  // and no gap page on the wire. Then a click on the text of a reply on screen (the selection's anchor and the last press in the
+  // transcript, focus on the page body, so the page takes End), and End, read as the chip's presses are
+  let end1 = null;
+  if (cfg.endBackUnits) {
+    const m = await measure(), a0 = (await asks()).length;
+    const to = runTop && m && (m.heldPx ?? m.avgUnit) ? Math.round(runTop.y + cfg.endBackUnits * (m.heldPx ?? m.avgUnit)) : null;
+    let back = { runTop, to, met: false };
+    if (to != null) {
+      await setTop(to);
+      const met = await page.waitForFunction((lo) => {
+        const c = document.getElementById("content"), cr = c.getBoundingClientRect();
+        const run = ((typeof window.__rompRegions === "function" && window.__rompRegions()) || []).find((r) => r.kind === "run" && r.hi != null && r.lo <= lo && lo < r.hi) || null;
+        const turns = Array.from(c.querySelectorAll(".turn[data-uuid]")).filter((e) => { if (e.offsetParent === null || e.dataset.turn == null) return false; const b = e.getBoundingClientRect(); return b.height > 0 && b.bottom > cr.top && b.top < cr.bottom; }).map((e) => +e.dataset.turn);
+        return !!run && turns.length > 0 && turns.every((t) => t >= run.lo && t < run.hi) && window.__rompAskState().gapLoading === 0;
+      }, runTop.hi, { timeout: 10000, polling: "raf" }).then(() => true, () => false);
+      await painted(); await page.waitForTimeout(500); await painted();
+      back = Object.assign(await reading(), { runTop, to, met, asks: (await asks()).slice(a0), measure: await measure() });
+    }
+    // the reply text the click lands on: the paragraph of a reply wholly on screen nearest the pane's centre, 12 px into its first line
+    const at = await page.evaluate(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect();
+      const ps = Array.from(c.querySelectorAll(".turn-assistant .md p")).filter((p) => { const b = p.getBoundingClientRect(); return b.height > 0 && b.top >= cr.top + 20 && b.bottom <= cr.bottom - 20 && /^Answer \d+/.test(p.textContent); });
+      const mid = (p) => Math.abs(p.getBoundingClientRect().top - cr.top - cr.height / 2);
+      const p = ps.sort((a, b) => mid(a) - mid(b))[0]; if (!p) return null;
+      const r = document.createRange(), t = document.createTreeWalker(p, NodeFilter.SHOW_TEXT).nextNode(); r.setStart(t, 0); r.setEnd(t, 6); const b = r.getBoundingClientRect();
+      const x = Math.round(b.left + 12), y = Math.round(b.top + b.height / 2), e = document.elementFromPoint(x, y);
+      return { x, y, onText: !!e && p.contains(e) }; });
+    if (at) { await page.mouse.click(at.x, at.y); await painted(); await page.waitForTimeout(300); }
+    const clicked = Object.assign({ at }, await page.evaluate(() => { const c = document.getElementById("content"), a = document.getSelection()?.anchorNode, ae = a && (a.nodeType === 1 ? a : a.parentElement);
+      return { bodyFocused: document.activeElement === document.body, anchorInContent: !!ae && c.contains(ae) }; }));
+    // whether the page took End: a window keydown listener added after the page's own reads End's default prevented (null when the key
+    // never reaches the window)
+    await page.evaluate(() => { window.__endTaken = null; window.addEventListener("keydown", (e) => { if (e.key === "End") window.__endTaken = e.defaultPrevented; }); });
+    await page.keyboard.press("End");
+    await page.waitForTimeout(1500); await painted();
+    end1 = Object.assign(await reading(), { measure: await measure(), back, clicked, taken: await page.evaluate(() => window.__endTaken) });
+  }
   // the climb's own record, printed before ROAD 9 grows the transcript: when a later road fails, the tests that read the climb alone
   // still read it (the lab's _climb takes this line when the driver failed or printed no result)
-  process.stdout.write("CLIMB:" + JSON.stringify({ drop, steps, climbed, chip1, chip2 }) + "\n");
+  process.stdout.write("CLIMB:" + JSON.stringify({ drop, steps, climbed, chip1, chip2, end1 }) + "\n");
   // ROAD 9 (the class's appended turns): replies land below the window while the reader stands in the history. The reader drops
   // back to the tail run's first rows, cfg.append.into units under its top (the units between that one and the top spacer's end are
   // all tail units, at the held figure each), so the window built there holds the climbed run's last units, the gap above the tail
@@ -419,7 +468,7 @@ if (cfg.legs.includes("climb")) {
     const next = await press(cfg.append.newest);
     below = { to, dropped, first, rest, next };
   }
-  out.climb = { drop, steps, climbed, chip1, chip2, below };
+  out.climb = { drop, steps, climbed, chip1, chip2, end1, below };
 }
 if (cfg.legs.includes("shown")) {
   // ROAD 10 (the class's second session): a view built while hidden takes its measures when it is first shown. When the page lands on
@@ -985,8 +1034,10 @@ class _LongHistoryLab:
     #                       idle window), "measure" (a wait for the first measure) or "hidden" (a wait for ROAD 10's hidden prebuild)
     GAPS_HELD = None      # px: the gaps' bound the page is held at from its boot (the served labs' hook), else the measured share
     CLIMB_PAGES = 0       # the history pages the climb's wheel loads after the drop's own page, before it presses the go-to-bottom chip
-    APPEND_TURNS = 0      # ROAD 9: the turns the transcript grows by in one write after the climb's chip presses and one first turn
+    APPEND_TURNS = 0      # ROAD 9: the turns the transcript grows by in one write after the climb's presses and one first turn
     APPEND_INTO = 2       # where ROAD 9's reader drops: this many units under the top of the tail run
+    END_BACK_UNITS = 0    # ROAD 8: after the chip's presses, the reader goes back this many units under the top of the run the climb
+    #                       loaded and presses End (0: no End)
     SECOND_SESSION = False   # ROAD 10: a second, short session (SID2) beside the long one
     END_PAGES = 0         # ROAD 11: the history pages the wheel climbs before the click (with END_AT, before the element is reached);
     #                       an End family climbs its longest member's, and each class reads the first END_PAGES steps of that climb
@@ -1159,7 +1210,7 @@ class _LongHistoryLab:
         return {"chat": "http://127.0.0.1:%d/chat?token=%s" % (cls.port, cls.token), "newest": cls.newest,
                 "scale": cls.SCALE, "viewport": cls.VIEWPORT, "legs": list(cls.LEGS), "boot": cls.BOOT, "sid": SID, "sid2": SID2, "base": BASE, "jumpTurn": JUMP_TURN,
                 "pageTurns": PAGE_TURNS, "gapsHeld": cls.GAPS_HELD,
-                "climbPages": cls.CLIMB_PAGES, "endMedia": cls.media, "bars": cls.BARS,
+                "climbPages": cls.CLIMB_PAGES, "endBackUnits": cls.END_BACK_UNITS, "endMedia": cls.media, "bars": cls.BARS,
                 # every appended event is a display unit of its own here (a prompt, a text reply)
                 "append": {"transcript": cls.transcript, "first": cls.append_first, "lines": cls.append_lines,
                            "units": 2 * cls.APPEND_TURNS, "newest": cls.append_newest, "into": cls.APPEND_INTO}
@@ -1382,6 +1433,7 @@ class LongHistoryClimb(_LongHistoryLab, unittest.TestCase):
     BOOT = "measure"      # it reads none of ROADs 1 to 3
     CLIMB_PAGES = 24
     APPEND_TURNS = 100    # 200 units, past the 140 the window renders, so at the held figure they carry the estimates past the half
+    END_BACK_UNITS = 200  # the run the climb loads holds about 800 units: a window built 200 units under its top holds neither gap
 
     def _climb(self):
         """The climb's record, its premise checked first, so each test that reads the climb fails on a short or misplaced climb by
@@ -1424,9 +1476,27 @@ class LongHistoryClimb(_LongHistoryLab, unittest.TestCase):
     def test_the_go_to_bottom_chip_shows_the_newest_row_after_the_climb(self):
         c = self._climb()
         self.assertTrue(c["chip1"]["newestOnScreen"], "the newest row is on screen after the first press: %r" % self._brief(c["chip1"]))
-        self.assertLessEqual(c["chip1"]["dist"], c["chip1"]["ch"], "…within a screen of the bottom (the newest row alone stands many screens tall here, so on screen is a looser bar): %r" % self._brief(c["chip1"]))
+        self.assertLessEqual(c["chip1"]["dist"], 2, "…at the bottom (the window the press builds dresses its rows after it lands, and a reader in follow mode stays at the bottom through that): %r" % self._brief(c["chip1"]))
         self.assertTrue(c["chip2"]["newestOnScreen"], "…and after the second: %r" % self._brief(c["chip2"]))
         self.assertLessEqual(c["chip2"]["dist"], 2, "…at the bottom: %r" % self._brief(c["chip2"]))
+
+    def test_end_from_far_back_in_the_climbed_history_lands_at_the_bottom(self):
+        # End takes the chip's road (render.ts goToBottom); its first press, from far back in the history the climb loaded with the
+        # tail hidden in the bottom spacer, lands at the bottom too
+        c = self._climb()
+        e = c["end1"]
+        self.assertIsNotNone(e, "the class pressed End after the climb")
+        b = e["back"]
+        self.assertTrue(b["met"], "the go-back's write put the climbed run's rows on screen within 10 s (none when no run's top was read): %r" % self._brief(b))
+        self.assertTrue(b["asks"] == [] and not b["newestRendered"] and b["dist"] > 100 * b["ch"],
+                        "the go-back stands in the climbed run, more than a hundred screens from the bottom, the newest row not rendered, no page asked: %r" % self._brief(b))
+        self.assertEqual(b["measure"]["units"], c["chip2"]["measure"]["units"], "no unit landed in the go-back: %r" % b["measure"])
+        k = e["clicked"]
+        self.assertTrue(k["at"] and k["at"]["onText"] and k["bodyFocused"] and k["anchorInContent"],
+                        "the click landed on a reply's text, focus on the page body and the selection's anchor in the transcript: %r" % k)
+        self.assertIs(e["taken"], True, "the page took End: %r" % self._brief(e))
+        self.assertTrue(e["newestOnScreen"], "the newest row is on screen after End: %r" % self._brief(e))
+        self.assertLessEqual(e["dist"], 2, "…at the bottom: %r" % self._brief(e))
 
     def test_rows_appended_below_the_window_take_the_held_figure_until_the_next_build(self):
         # ROAD 9, the residual chat-regions.ts HIDDEN_SHARE and render.ts heldPxOf disclose: the keyed paint (tailDiff) keeps the held

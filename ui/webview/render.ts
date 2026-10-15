@@ -17287,13 +17287,25 @@ function virtualizeToViewport(): void {
       const before = v.el.querySelector(`[data-unit="${c}"]`) as HTMLElement | null;
       const hiddenTop = before ? null : hiddenUnitTop(v, content, c);
       const beforeY = before ? before.getBoundingClientRect().top - content.getBoundingClientRect().top : (hiddenTop != null ? hiddenTop - content.scrollTop : 0);
+      // A re-window that starts with the reader in follow mode at the bottom ends with them at the bottom (2026-10-15); the chip's
+      // and End's write to the end of the bottom spacer start one. The anchor's write keeps the reader's offset into the unit under
+      // the viewport top, for a unit hidden in the bottom spacer an offset into its estimate, and the marks pass then grows the rows
+      // (the tip reply's fork spot lands below the line the browser anchors the view on): the first press after a long climb stopped
+      // 25 px short of the bottom, and a newest reply taller than the held figure could leave the reader thousands of px inside it.
+      // Not while a passage landing holds follow mode off (followHeld)
+      const follow = v.stick && !v.followHeld && atBottom(content);
       renderWindowItems(v, s, items, Math.max(0, c - WINDOW_RADIUS), Math.min(items.length, c + WINDOW_RADIUS), working);
       const anchor = v.el.querySelector(`[data-unit="${c}"]`) as HTMLElement | null;
       if (anchor) {
         const yNow = anchor.getBoundingClientRect().top - content.getBoundingClientRect().top + content.scrollTop;
         writeScroll(content, yNow - beforeY, "rewindow");
       }
+      const landed = follow ? content.scrollTop : undefined;   // where the anchor's write left the reader, before the marks pass
       if (activeId) applyCommentMarks(activeId);   // the re-window rebuilt turns — re-anchor highlights
+      // the follow-mode reader back at the bottom, once the window holds the last unit (else the bottom is a spacer's estimate).
+      // `landed` is the write's origin, so the browser's own move during the marks pass counts as this write's, and the echo reads as
+      // the re-window's own, not as a gesture
+      if (follow && (v.winEnd ?? 0) >= (v.unitTotal ?? 0)) writeScroll(content, content.scrollHeight, "rewindow", true, landed);
       scheduleRailSticky();
     } finally {
       revirtBusy = false;   // always release, even if a render threw — a wedged flag = no more loading
