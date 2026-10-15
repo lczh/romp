@@ -5,8 +5,9 @@ closer could close the reply turn without speaking to the goal, the unblocker sk
 blocked), and the nudge walk could never re-arm (the reply turn is romp-injected) — while a spent
 `failed` ledger latch from the pre-block episode routed the goal into the already-nudged branch
 every tick. The audited card sat in Working 2h45m with zero judge calls until the user noticed by
-eye. Two arms, executed here: the closer flags reply-reopened menu goals for an explicit ruling,
-and the reply gesture retires the goal's SPENT nudge record so the ladder re-arms. SYNTHETIC only."""
+eye. Two arms, executed here: the closer flags reply-reopened menu goals for an explicit ruling on
+the reply turn itself, and the reply gesture retires the goal's SPENT nudge record so the ladder
+re-arms. SYNTHETIC only."""
 import os
 import tempfile
 import unittest
@@ -44,14 +45,14 @@ class ReplyReopenedFlag(unittest.TestCase):
         nd = _node(gid, [_row("block", "closer", T, why="run this copy command"),
                          _row("reopen", "user", T + 180, msg=True),
                          _row("reopen", "planner", T + 180)])
-        self.assertEqual(jd._reply_reopened_ids([nd]), {gid})
+        self.assertEqual(jd._reply_reopened_ids([nd], {gid}), {gid})
 
     def test_a_later_ruling_stands_the_flag_down(self):
         gid = SID + ":g1"
         nd = _node(gid, [_row("block", "closer", T),
                          _row("reopen", "user", T + 180, msg=True),
                          _row("done", "closer", T + 400, why="delivered")])
-        self.assertEqual(jd._reply_reopened_ids([nd]), set(),
+        self.assertEqual(jd._reply_reopened_ids([nd], {gid}), set(),
                          "the judges already spoke on the reopened goal — nothing owed")
 
     def test_undo_and_moveless_reopens_never_flag(self):
@@ -60,12 +61,28 @@ class ReplyReopenedFlag(unittest.TestCase):
                           _row("reopen", "user", T + 60, msg=True, undo=True)])
         judge_only = _node(g2, [_row("block", "closer", T),
                                 _row("reopen", "planner", T + 60)])
-        self.assertEqual(jd._reply_reopened_ids([undo, judge_only]), set(),
+        self.assertEqual(jd._reply_reopened_ids([undo, judge_only], {g1, g2}), set(),
                          "an undo restore and a judge's own unseal are not the user's assertion")
+
+    def test_only_the_turn_the_reply_started_flags_it(self):
+        # 2026-10-15: the flag stayed on from the user's reply until some judge ruled on the goal, so a goal
+        # whose answer was filed under its sub-goals rode every LATER follow-up turn about other goals
+        # flagged "their reply may answer what it was waiting on", and the closer re-asked its answered
+        # question there. The flag belongs to the turn whose follow-up names the goal, and to no other.
+        g1, g2 = SID + ":g1", SID + ":g2"
+        reopened = _node(g1, [_row("block", "closer", T, why="ship the search paging now, or add a load test first?"),
+                              _row("reopen", "user", T + 180, msg=True),
+                              _row("reopen", "planner", T + 181)])
+        self.assertEqual(jd._reply_reopened_ids([reopened], {g2}), set(),
+                         "a later follow-up about another goal does not flag the earlier reply's goal")
+        self.assertEqual(jd._reply_reopened_ids([reopened], set()), set(),
+                         "nor does a turn no follow-up started")
+        self.assertEqual(jd._reply_reopened_ids([reopened], {g1}), {g1},
+                         "the reply turn itself still gets the explicit ruling")
 
     def test_the_closer_menu_carries_the_instruction(self):
         src = open(os.path.join(BIN, "romp-judge")).read()
-        self.assertIn("_reply_reopened_ids(menu)", src)
+        self.assertIn("_reply_reopened_ids(menu, targets)", src)
         self.assertIn("reopened by the user's own reply after an earlier ruling", src)
 
 
