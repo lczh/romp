@@ -16,6 +16,8 @@ was attributed to, beside the card the moved input changes:
     (the override journal), a clear (the session's slice of cleared.jsonl), a live-row change, a transcript
     append, a states append, a names rewrite, the hideFromFeed flag;
   * a peer's verdict re-derives the session whose card reads that peer's store (the peers dependency);
+  * a peer named by several sessions has its store read once per build for their keys, not once per session that
+    names it, and the feed and keys built that way equal the ones built with a take per session;
   * nudge facts re-derive only cards that read the changed node, including foreign node ids; unrelated
     bookkeeping and undisplayed history do not invalidate, and concurrent writes wait for the next snapshot;
   * a deferral record (the ledger's `deferred` map: the Stalled section, the Blocked filing) minted or retired
@@ -655,6 +657,136 @@ class EveryInputMovesItsSessionOnly(_Board):
         self.assertEqual(self._cards(f)[WEB + ":g1"]["column"], "completed")
         self.assertFalse(self._cards(f)[API + ":g1"]["origin"]["live"], "the badge dimmed with the sender's goal")
         self.assertEqual(self._cards(f)[TESTS + ":g1"]["column"], "working")
+
+
+# Two sender sessions no longer on the board (a goal store each, no names entry, no transcript, no live row), private to
+# the class below; derived from the module's own sids, as DOCS is.
+PEER = SIDS[0][:-3] + "005"
+PEER2 = SIDS[0][:-3] + "006"
+
+
+class APeerIsReadOncePerBuild(_Board):
+    """Every session's key carries the facts of each peer its previous derivation named (the `peers` component), and
+    those facts include whether the peer's store READS, taken through load_goals_shared, which reads the whole file and
+    compares it with its cached copy even when the cache hits. Each session used to take its own, so a build read a
+    peer's store once per session naming it, whether the session's cards were then served or derived. The facts are
+    now taken once per peer per build (_feed_peer_facts_once, 2026-10-15) and shared by every key naming the peer.
+
+    The world: web, api and tests each hold a goal delegated from PEER (the origin badge reads PEER's store), and tests
+    holds a second goal delegated from PEER2, so one peer is named by three sessions and the other by one. Reads are
+    counted at jd._disk_read, the one place a store file's bytes are read, by store path."""
+
+    def setUp(self):
+        super().setUp()
+        self._mint(PEER, "plan the notes-api release")
+        self._mint(PEER2, "review the notes-api schema")
+        for sid in (WEB, API):
+            self._publish_raw(sid, GOAL_OF[sid], origin={"peer": PEER, "goalId": PEER + ":g1"})
+        self._publish_two(TESTS, ((GOAL_OF[TESTS], PEER), ("cover the notes-api schema review", PEER2)))
+        self.peer_path = {p: str(jd.GOALDIR / (p + ".json")) for p in (PEER, PEER2)}
+
+    @staticmethod
+    def _publish_two(sid, goals):
+        """_publish_raw's store shape with one top-level goal per (text, sender) pair, each delegated from its sender's
+        g1."""
+        nodes, status = {}, {}
+        for i, (text, peer) in enumerate(goals, 1):
+            gid = "%s:g%d" % (sid, i)
+            nodes[gid] = {"id": gid, "parentId": None, "t": T0, "mt": T0, "text": text, "nodeComplete": False,
+                          "blocked": False, "cleared": False, "trail": ["s1"], "log": [],
+                          "origin": {"peer": peer, "goalId": peer + ":g1"}}
+            status[gid] = "working"
+        store = {"rompUuid": sid, "seq": 1, "rev": 7, "placementsV": jd.PLACEMENTS_V, "placements": {},
+                 "nodes": nodes, "status": status, "lastNode": gid}
+        p = jd.GOALDIR / (sid + ".json")
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(store))
+        os.replace(tmp, p)
+
+    def _counted_build(self):
+        """(the memo counters' movement, the feed, store reads per peer, facts takes per peer) of one build."""
+        reads, takes = collections.Counter(), collections.Counter()
+        real_read, real_facts = jd._disk_read, km._feed_peer_facts
+
+        def read(fd, path_s):
+            reads[path_s] += 1
+            return real_read(fd, path_s)
+
+        def facts(p, cleared_by_sid):
+            takes[p] += 1
+            return real_facts(p, cleared_by_sid)
+
+        with mock.patch.object(jd, "_disk_read", read), mock.patch.object(km, "_feed_peer_facts", facts):
+            d, feed = self._delta(self._build)
+        return (d, feed, {p: reads[self.peer_path[p]] for p in (PEER, PEER2)},
+                {p: takes[p] for p in (PEER, PEER2)})
+
+    def _settle(self):
+        """Three builds to the memo's steady state, the last returned: the first derives every session cold (each
+        derivation names its peers for the first time, so each key is left unsettled), the second derives each once
+        more with the peers' facts taken before the read, the third serves all three from the memo."""
+        d, _, _, _ = self._counted_build()
+        self.assertEqual((d["derived"], d["miss_by"]), (3, {"cold": 3}), d)
+        d, _, _, _ = self._counted_build()
+        self.assertEqual((d["derived"], d["miss_by"]), (3, {"peers": 3}), "the settling derivations: %r" % d)
+        d, feed, reads, takes = self._counted_build()
+        self.assertEqual((d["derived"], d["hit"]), (0, 3), "every session served: %r" % d)
+        return feed, reads, takes
+
+    def _peer_keys(self):
+        at = km._FEED_MEMO_LABELS.index("peers")
+        return {sid: km._feed_memo_get(sid)[0][at] for sid in SIDS}
+
+    def test_a_peer_named_by_three_sessions_is_read_once_per_build(self):
+        feed, reads, takes = self._settle()
+        self.assertEqual(takes, {PEER: 1, PEER2: 1}, "one take of each peer's facts in the build, however many name it")
+        self.assertEqual(reads, {PEER: 1, PEER2: 1},
+                         "a build that serves every session reads each peer's store once (before: PEER three times, "
+                         "once per session naming it)")
+        keys = self._peer_keys()
+        self.assertEqual({sid: tuple(p for p, _ in keys[sid]) for sid in SIDS},
+                         {WEB: (PEER,), API: (PEER,), TESTS: tuple(sorted((PEER, PEER2)))},
+                         "each key names the peers its cards read")
+        self.assertTrue(keys[WEB][0][1] == keys[API][0][1] == dict(keys[TESTS])[PEER],
+                        "the three keys hold the same facts for PEER")
+        cards = self._cards(feed)
+        self.assertEqual({gid: cards[gid]["origin"]["live"] for gid in (WEB + ":g1", API + ":g1", TESTS + ":g1",
+                                                                         TESTS + ":g2")},
+                         {WEB + ":g1": True, API + ":g1": True, TESTS + ":g1": True, TESTS + ":g2": True},
+                         "every badge reads its sender's open goal")
+
+    def test_the_feed_and_keys_equal_those_built_with_a_take_per_session(self):
+        shared_feed, _, _ = self._settle()
+        shared_keys = {sid: km._feed_memo_get(sid)[0] for sid in SIDS}
+        _reset_memo()
+        # the take this change replaced: each naming session's key took the peer's facts itself
+        with mock.patch.object(km, "_feed_peer_facts_once",
+                               lambda board, p: km._feed_peer_facts(p, board["cleared_by_sid"])):
+            own_feed, own_reads, own_takes = self._settle()
+            own_keys = {sid: km._feed_memo_get(sid)[0] for sid in SIDS}
+        self.assertEqual((own_takes, own_reads), ({PEER: 3, PEER2: 1}, {PEER: 3, PEER2: 1}),
+                         "premise: a take per session reads PEER once for each of the three sessions naming it")
+        self.assertEqual(_dump(shared_feed), _dump(own_feed), "the same feed, byte for byte")
+        self.assertEqual(shared_keys, own_keys, "the same memo key for every session, the peer facts included")
+        _reset_memo()
+        d, scratch = self._delta(self._build)
+        self.assertEqual(d["derived"], 3, d)
+        self.assertEqual(_dump(scratch), _dump(shared_feed), "and the feed a from-scratch build derives")
+
+    def test_a_peers_verdict_reaches_every_card_naming_it_at_the_next_build(self):
+        """The table lives one build: a verdict in PEER's store moves the facts the next build takes, so every session
+        naming PEER re-derives, and the session naming PEER2 as well keeps its PEER2 badge."""
+        self._settle()
+        self._complete(PEER)                  # the closer's verdict lands in PEER's store
+        d, feed, _, takes = self._counted_build()
+        self.assertEqual((d["derived"], d["miss_by"]), (3, {"peers": 3}), d)
+        self.assertEqual(takes, {PEER: 1, PEER2: 1}, d)
+        cards = self._cards(feed)
+        for gid in (WEB + ":g1", API + ":g1", TESTS + ":g1"):
+            self.assertFalse(cards[gid]["origin"]["live"], "%s: the badge dimmed with the sender's goal" % gid)
+        self.assertTrue(cards[TESTS + ":g2"]["origin"]["live"], "PEER2's goal is still open")
+        d, _, reads, _ = self._counted_build()
+        self.assertEqual((d["derived"], reads), (0, {PEER: 1, PEER2: 1}), "settled again: %r" % d)
 
 
 class TheClockIsNotAnInput(_Board):
