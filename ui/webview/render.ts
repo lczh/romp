@@ -19,9 +19,9 @@ import diff from "highlight.js/lib/languages/diff";
 import yaml from "highlight.js/lib/languages/yaml";
 import type { ParsedAsk } from "../ask-types";
 import { TABBAR_H_KEY, TABBAR_H_DEFAULT, clampTabbarH, parseTabbarH } from "./tabbar-resize";
-import type { CmtPopFrac } from "./comment-pop-size";
+import type { CmtPopFrac, CmtPopRect } from "./comment-pop-size";
 import { CMT_POP_SIZE_KEY, CMT_POP_THREAD_DEFAULT, parseCmtPopSize, clampCmtPopPx, toCmtPopFrac, isCmtPopMax,
-         centerCmtPop, cmtPopCapPx, CMT_POP_MIN_W, CMT_POP_MIN_H, CMT_POP_CAP_W, CMT_POP_CAP_H, CMT_POP_EDGE } from "./comment-pop-size";
+         centerCmtPop, cmtPopCapPx, cmtPopBeside, CMT_POP_MIN_W, CMT_POP_MIN_H, CMT_POP_CAP_W, CMT_POP_CAP_H, CMT_POP_EDGE } from "./comment-pop-size";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
 import { watchOverlayScrollbars } from "./overlay-scrollbars";
@@ -3078,7 +3078,7 @@ function wireTurnHover(turn: HTMLElement, dot: HTMLElement | null, uuid: string 
     // a tinted (unread-comment) rail opens THAT thread (the user 2026-08-23) — checked at click
     // time, so the same strip goes back to timeline navigation the moment the thread is read
     const um = turn.querySelector("mark.cmt-hl.unread") as HTMLElement | null;
-    if (um?.dataset.tid && activeId) { openCommentPopover(activeId, um.dataset.tid, e.clientX, e.clientY); return; }
+    if (um?.dataset.tid && activeId) { passageLanding(activeId, um.dataset.tid); return; }   // to its passage, then the thread beside it
     if (activeId) vscodeApi?.postMessage({ type: "dotOpen", sid: activeId, uuid, t, tlId });
   });
   let railTimer: ReturnType<typeof setTimeout> | undefined;
@@ -10987,6 +10987,7 @@ function closeCommentPop(): void {
   openCommentKey = null;
   pendingCommentAnchor = null;
   cmtRedirect = null;
+  cmtPopLost = null; cmtPopBesideAt = null;   // a landing's note and its spot beside the passage go with the box
 }
 
 // close on any press outside the popover (drafts persist in commentDrafts; reopening restores them).
@@ -11486,6 +11487,153 @@ function openCommentPopover(sid: string, tid: string, _x?: number, _y?: number,
   applyCommentMarks(sid);
 }
 
+// ── landing on a thread's passage (the user 2026-10-15) ─────────────────────────────────────────────────────────────
+// A click on a thread's tick on the scroll rail opened the thread and left the reader on the anchor TURN'S top, with the
+// thread's box over the middle of the pane: in a long message the passage sat below the fold or under the box, and nothing
+// took the reader to it. The landing now goes to the PASSAGE: the deep links' landing (scrollToAnchor: a turn outside the
+// rendered window rendered around it, history the page has not loaded fetched), aligned on the thread's highlight and
+// flashing it (pendingAnchorMark). The rail tick, the turn's tinted rail line and the quoted passage at the top of the open
+// thread take it and then open the thread beside the passage, never over it (passageLanding); the jump cluster's comment
+// rows take the same landing and open nothing (landThread). A passage the transcript does not hold is said in the box.
+/** The thread a passage landing opens once it lands, keyed by the anchor like pendingAnchorMark: a landing that waits on
+ *  history opens it on arrival, and any other landing drops it (passageLanded). */
+let passageGo: { sid: string; tid: string; uuid: string } | null = null;
+/** What the open thread's box says when the landing could not reach its passage, kept so a full rebuild says it again. */
+let cmtPopLost: { tid: string; text: string } | null = null;
+/** Where a landing put the box beside its passage, so a full rebuild of the same thread (a status flip) puts it back there
+ *  rather than over the passage. It stands until the box closes, or until the user moves or resizes it, which replaces
+ *  commentPopPos (`since` is the object the landing saw). */
+let cmtPopBesideAt: { tid: string; top: number; height: number; since: { x: number; y: number } | null } | null = null;
+const PASSAGE_LOST = "Couldn't find this passage in the transcript.";
+const PASSAGE_WORDS_LOST = "Couldn't find this passage's words in its message.";
+
+/** Take the reader to thread `tid`'s passage, then open the thread beside it. Never switches session: every entry point
+ *  sits on the session's own view. */
+function passageLanding(sid: string, tid: string): void {
+  const th = (commentThreads.get(sid) || []).find((t) => t.tid === tid);
+  if (!th || sid !== activeId) return;
+  const uuid = th.anchorUuid;
+  pendingAnchorMark = { uuid, tid };
+  passageGo = { sid, tid, uuid };
+  flashedAnchor = null;                          // a fresh navigation: one flash, on the passage
+  // landed (the box opens beside the passage, passageLanded), or the history it is in is on its way and its arrival lands
+  // it; a failure on the way is the landing's own word (its notice and toast), as for every jump
+  if (scrollToAnchor(uuid) || anchorPendingOlder) return;
+  pendingAnchorMark = null; passageGo = null;
+  if (landTrail[landTrail.length - 1] === "pointer-fetch-busy") return;   // another jump is still on its way, and its toast says so: this click is refused
+  pendingAnchor = null;                          // nowhere in the transcript and nothing left to load: said in the box, not by a later pass's toast
+  openBesidePassage(sid, tid, null, PASSAGE_LOST);
+}
+/** scrollToAnchor has just landed `uuid` on `turn` (on thread `mark`'s highlight `passage` when it has one): the thread a
+ *  passage landing waits to open opens now, after the pass that landed (a landing inside landActive finishes its pass
+ *  first). With no highlight the box says so only when the thread's words are not in the turn at all: a tool row's text
+ *  is there, it just carries no highlight. */
+function passageLanded(uuid: string, mark: string | null, passage: HTMLElement | null, turn: HTMLElement): void {
+  const go = passageGo;
+  if (!go) return;
+  passageGo = null;
+  if (go.uuid !== uuid || go.tid !== mark) return;   // another landing took the reader elsewhere: the wait is over
+  const exact = passage ? null : threadExact(go.tid);
+  const lost = !passage && (!exact || !findAnchorRange(turnAtomsOf(turn).map((a) => a.textContent || "").join(""), exact));
+  queueMicrotask(() => openBesidePassage(go.sid, go.tid, passage, lost ? PASSAGE_WORDS_LOST : null));
+}
+/** Open (or keep open) thread `tid` beside its passage, with `note` when the passage could not be reached. */
+function openBesidePassage(sid: string, tid: string, passage: HTMLElement | null, note: string | null): void {
+  if (sid !== activeId) return;                  // the reader left the session meanwhile
+  cmtPopLost = note ? { tid, text: note } : null;
+  cmtPopBesideAt = null;
+  const prev = document.getElementById("cmt-pop");
+  if (prev && openCommentKey && openCommentKey.sid === sid && openCommentKey.tid === tid && prev.dataset.mode === "thread") paintCmtLost(prev, tid);   // its own quote was the click
+  else openCommentPopover(sid, tid);
+  const pop = document.getElementById("cmt-pop");
+  if (pop && passage && passage.isConnected) placeBesidePassage(pop, tid, passage);
+}
+/** The open box moved off its passage (cmtPopBeside: below it, else above, else the roomier side at that side's height),
+ *  when it covers it; its left edge and width stay. The size set here is ours, never the user's remembered one. */
+function placeBesidePassage(pop: HTMLElement, tid: string, passage: HTMLElement): void {
+  const at = passageRect(passage, tid);
+  if (!at) return;
+  const r = pop.getBoundingClientRect();
+  const to = cmtPopBeside(r, at, window.innerHeight);
+  if (!to) return;
+  pop.style.top = to.top + "px";
+  if (Math.abs(to.height - r.height) > 0.5) pop.style.height = to.height + "px";
+  cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // the resize observer's "not the user's" mark
+  cmtPopBesideAt = { tid, top: to.top, height: to.height, since: commentPopPos };
+  syncCmtMaxState(pop);
+}
+/** The passage's box on screen, cut to the chat's viewport: every fragment of the thread's highlight in the passage's turn,
+ *  so a passage over several lines or paragraphs is one box. */
+function passageRect(passage: HTMLElement, tid: string): CmtPopRect | null {
+  const c = document.getElementById("content");
+  if (!c) return null;
+  const frags = Array.from((passage.closest(".turn") || passage).querySelectorAll(`mark.cmt-hl[data-tid="${cssEscape(tid)}"]`));
+  const cr = c.getBoundingClientRect();
+  let u: CmtPopRect | null = null;
+  for (const f of frags) for (const q of Array.from(f.getClientRects())) {
+    if (!q.width && !q.height) continue;
+    u = u ? { left: Math.min(u.left, q.left), top: Math.min(u.top, q.top), right: Math.max(u.right, q.right), bottom: Math.max(u.bottom, q.bottom) }
+      : { left: q.left, top: q.top, right: q.right, bottom: q.bottom };
+  }
+  if (!u) return null;
+  const cut = { left: Math.max(u.left, cr.left), top: Math.max(u.top, cr.top), right: Math.min(u.right, cr.right), bottom: Math.min(u.bottom, cr.bottom) };
+  return cut.bottom > cut.top && cut.right > cut.left ? cut : null;   // off the viewport: nothing on screen to keep clear
+}
+/** The box's line for a passage the landing could not reach, under its head (in place, or on a full rebuild). */
+function paintCmtLost(pop: HTMLElement, tid: string): void {
+  pop.querySelector(":scope > .cmt-lost")?.remove();
+  if (!cmtPopLost || cmtPopLost.tid !== tid) return;
+  const n = el("div", "cmt-note cmt-err cmt-lost");
+  n.textContent = cmtPopLost.text;
+  pop.querySelector(":scope > .cmt-head")?.after(n);
+}
+/** The quoted passage at the top of an open thread, made the way back to it (passagePress, below): the rail tick's landing,
+ *  which helps most once the reader has scrolled away or the thread was opened from somewhere else. */
+function passageLink(q: HTMLElement): void {
+  q.dataset.passage = "1";
+  q.title = "Go to this passage in the conversation";
+}
+// The quote acts on the RELEASE of a press that began on it, not on `click`: on the thread's opening message it sits in the
+// thread's list, which every comments frame refills, and a refill between press and release leaves no element for a click to
+// land on (the click-safe rule); the release lands on the refilled quote at the same spot. A press that moved (a drag
+// selecting some of its words, which seeds a quote chip) is not a click on it. Installed once, on the document.
+const PASSAGE_QUOTE = "#cmt-pop .cmt-quote[data-passage]";
+let passagePress: { x: number; y: number } | null = null;
+document.addEventListener("pointerdown", (e) => {
+  passagePress = e.button === 0 && (e.target as Element | null)?.closest?.(PASSAGE_QUOTE) ? { x: e.clientX, y: e.clientY } : null;
+}, true);
+document.addEventListener("pointerup", (e) => {
+  const p = passagePress;
+  passagePress = null;
+  const q = p ? (e.target as Element | null)?.closest?.(PASSAGE_QUOTE) as HTMLElement | null : null;
+  const cur = q ? openCommentThread() : null;
+  if (!p || !q || !cur || Math.abs(e.clientX - p.x) > 4 || Math.abs(e.clientY - p.y) > 4) return;
+  flash(q);                                      // the press acknowledged before the landing
+  passageLanding(cur.sid, cur.th.tid);
+}, true);
+/** The thread's words, to tell a passage with no highlight from one whose words are gone. */
+function threadExact(tid: string): string | null {
+  const th = activeId ? (commentThreads.get(activeId) || []).find((t) => t.tid === tid) : null;
+  return th && th.exact ? th.exact : null;
+}
+/** Thread `tid`'s highlight in the anchor's rendered turn: its first fragment, the turn's highlights put back first when the
+ *  landing has just rendered the turn (applyCommentMarks' per-turn step, without its repaints); null when the thread's
+ *  words are not in the turn's text (a tool row's, or text that changed). */
+function threadMarkIn(target: HTMLElement, tid: string): HTMLElement | null {
+  const sel = `mark.cmt-hl[data-tid="${cssEscape(tid)}"]`;
+  const have = target.querySelector(sel) as HTMLElement | null;
+  if (have) return have;
+  const sid = activeId;
+  const v = sid ? views.get(sid) : null;
+  const threads = sid ? commentThreads.get(sid) || [] : [];
+  const th = threads.find((t) => t.tid === tid);
+  if (!v || !th) return null;
+  const turn = v.el.querySelector(`.turn[data-uuid="${cssEscape(th.anchorUuid)}"]`) as HTMLElement | null;   // the turn applyCommentMarks marks
+  if (!turn) return null;
+  for (const t of threadsByAnchor(threads).get(th.anchorUuid) || []) ensureCommentMark(turn, t);
+  return turn.querySelector(sel) as HTMLElement | null;
+}
+
 /** commentCreated's adoption: swap the create popover for the named thread's (never a guess — the
  *  kernel sends the frame first, then the ack naming the tid). Called only for the box that SENT the
  *  create the ack answers (the ack handler checks it). When the frame hasn't landed yet (a
@@ -11693,6 +11841,7 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
       const ctx = el("div", "cmt-quote cmt-quote-ctx");
       ctx.textContent = th.exact;
       ctx.title = "the highlighted passage this thread is about";
+      passageLink(ctx);
       quoteHost.insertBefore(ctx, quoteHost.firstChild);
       list.closest(".cmt-pop")?.querySelector(":scope > .cmt-quote")?.remove();
     }
@@ -12286,6 +12435,7 @@ function renderCommentPopover(): void {
     pop.addEventListener("pointercancel", up);
   });
   pop.appendChild(head);
+  if (th) paintCmtLost(pop, th.tid);   // a landing that could not reach the passage says so under the head (passageLanding)
   wireEdgeResize(pop);
   if (th && cmtRedirect && cmtRedirect.tid === th.tid) {
     // a Comment on a passage that already has this thread opened it (the user 2026-10-01); one line says so, and one click
@@ -12306,6 +12456,7 @@ function renderCommentPopover(): void {
     const quote = el("div", "cmt-quote");
     quote.textContent = create ? create.exact : th!.exact;
     quote.title = "the highlighted passage this thread is about";
+    if (!create) passageLink(quote);   // a thread's quote takes the reader to the passage
     pop.appendChild(quote);
   }
   if (th && th.status !== "promoted") {
@@ -12692,12 +12843,15 @@ function renderCommentPopover(): void {
   const threadLayout = !!th || !!sent;
   if (threadLayout && !pop.style.width) { pop.style.width = Math.round(window.innerWidth * 0.7) + "px"; }
   if (threadLayout && !pop.style.height) { pop.style.height = Math.round(window.innerHeight * 0.6) + "px"; }
+  // a landing put this thread's box beside its passage (placeBesidePassage): a rebuild keeps it there until the user moves it
+  const beside = th && cmtPopBesideAt && cmtPopBesideAt.tid === th.tid && cmtPopBesideAt.since === commentPopPos ? cmtPopBesideAt : null;
+  if (beside) pop.style.height = beside.height + "px";
   cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // whatever it measures now is ours, the content size included
   const r = pop.getBoundingClientRect();
   const pos = threadLayout && !cmtPopPosMine ? null : commentPopPos;   // a selection point places only a new comment box
   const defaultX = threadLayout ? (window.innerWidth - r.width - 8) : (window.innerWidth - r.width) / 2;
   const px = Math.max(8, Math.min(pos?.x ?? defaultX, window.innerWidth - r.width - 8));
-  const py = Math.max(8, Math.min(pos?.y ?? 120, window.innerHeight - r.height - 8));
+  const py = Math.max(8, Math.min(beside ? beside.top : (pos?.y ?? 120), window.innerHeight - r.height - 8));
   pop.style.left = px + "px";
   pop.style.top = py + "px";
   syncCmtMaxState(pop);                              // a stored cap-sized preference opens reading "Restore"
@@ -13422,8 +13576,14 @@ function scrollToAnchor(uuid: string): boolean {
   // turn's atoms (the anchor's element and the atoms after it up to the next user turn), else on the turn's first text
   // atom below a tool or thinking atom, else on the anchor's element as before. The anchor's element is what flashes.
   const quote = pendingAnchorQuote; pendingAnchorQuote = null;
-  const quoteEl = quote ? highlightCiteSpan(target, quote) : null;
-  landOn(target, uuid, quoteEl ?? firstTextAtomBelow(target), quote);
+  // a comment thread's landing (passageLanding) aligns on the thread's own highlight, never the turn's top: in a long message
+  // the turn's top left the passage below the fold or under the thread's box. A thread whose words carry no highlight (a
+  // tool row's) lands on its turn, as the jump cluster measures it
+  const mark = pendingAnchorMark && pendingAnchorMark.uuid === uuid ? pendingAnchorMark.tid : null; pendingAnchorMark = null;
+  const markEl = mark ? threadMarkIn(target, mark) : null;
+  const quoteEl = !markEl && quote ? highlightCiteSpan(target, quote) : null;
+  landOn(target, uuid, markEl ?? quoteEl ?? firstTextAtomBelow(target), quote, mark);
+  passageLanded(uuid, mark, markEl, target);   // …and a landing that opens the thread opens it now, beside the passage
   return true;
 }
 /** The atoms of the transcript turn the anchor's element opens: itself and the following event elements up to (not
@@ -13500,6 +13660,9 @@ function landNearestMoment(t: number): boolean {
 // never mutated (the click-safety family); a browser without it, or an unfindable quote, keeps
 // today's whole-message landing exactly (the honest-fallback rule).
 let pendingAnchorQuote: string | null = null;
+// A comment thread's landing (passageLanding): the thread whose highlight the landing on `uuid` aligns on and flashes. Keyed by
+// the anchor so it rides a landing that waits on history (the re-attempt lands the same uuid) and is dropped by any other.
+let pendingAnchorMark: { uuid: string; tid: string } | null = null;
 /** Highlight the quoted sentence within the anchor's TURN (its element and the atoms after it, turnAtomsOf: a card's anchor is
  *  the turn's first atom, the words it quotes may be a later one, T386) and return the element the sentence starts in, for
  *  the landing to align on; null when the quote is not in the rendered text (no highlight, no guess) or the browser has no
@@ -13552,7 +13715,7 @@ function highlightCiteSpan(target: HTMLElement, quote: string): HTMLElement | nu
 // timers); a sample off the row re-lands ("land-realign"); the landing row is filed when the settle ends, with the
 // measured distance and whether it settled, so `ok` alone is never again the whole verdict. One settle in flight: a
 // newer landing supersedes the older's. The walk-forward of a detached window that fits the viewport waits for it.
-let landSettling: { turn: HTMLElement; at: HTMLElement; uuid: string | null; quote: string | null; rowH: number; samples: SettleSample[]; start: number;
+let landSettling: { turn: HTMLElement; at: HTMLElement; uuid: string | null; quote: string | null; mark: string | null; rowH: number; samples: SettleSample[]; start: number;
                     gesture: boolean; row: Record<string, unknown> | null; ro: ResizeObserver | null; timers: number[]; done: boolean; clamp: number } | null = null;
 const afterSettle: (() => void)[] = [];   // what waits for the landing to settle (the window's edge check)
 /** When the reader last put a hand on the scroller (ms): a pointer down or a drag on it or its scrollbar, a touch, a wheel, or a
@@ -13621,7 +13784,7 @@ function settleResolve(s: NonNullable<typeof landSettling>): HTMLElement | null 
   const turn = s.uuid ? findTurnEl(s.uuid) : null;
   if (!turn || !turn.getClientRects().length) return null;
   s.turn = turn;
-  s.at = (s.quote ? highlightCiteSpan(turn, s.quote) : null) ?? firstTextAtomBelow(turn) ?? turn;
+  s.at = (s.mark ? threadMarkIn(turn, s.mark) : null) ?? (s.quote ? highlightCiteSpan(turn, s.quote) : null) ?? firstTextAtomBelow(turn) ?? turn;
   s.rowH = settleRowHeight(s.at);   // the swapped element's own row (round one, low 1)
   s.ro?.observe(s.at); if (s.at !== turn) s.ro?.observe(turn);
   return s.at;
@@ -13664,11 +13827,12 @@ function settleTick(): void {
   if (step === "realign") { settleLand(s, "land-realign"); return; }
   settleFinish(s, settleRowFields(step, s.samples, s.rowH));
 }
-function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | null, quote?: string | null) {
+function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | null, quote?: string | null, mark?: string | null) {
   // the land and its re-alignments are writes of #content like any other, attributed (T262j): "land-on" for the
   // landing itself, "land-realign" for each re-land while the transcript settles under it. `alignOn` (T386): the element
   // whose top goes to the viewport top when it is not the turn's own (the quoted span, or a turn's text below a tool
-  // group); `quote` re-finds that span after a rebuild; the turn is still what flashes
+  // group); `quote` re-finds that span after a rebuild, and `mark` (a comment thread's tid) re-finds the thread's highlight
+  // first; the aligned element is what flashes
   const at = alignOn ?? target;
   settleLastInput = 0; settleScrollerHeld = false;   // the input that caused this landing (a click on a link in the scroller) is not evidence for taking it over (round three, low 4); a hold whose release never reached the page (a press held across an alt-tab) does not outlive the landing (round four, low 1)
   const land = (writer: string) => { const c = document.getElementById("content"); if (c) scrollElInto(c, at, "start", writer); };
@@ -13682,7 +13846,7 @@ function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | 
     setTimeout(() => at.classList.remove("anchor-flash"), 1700);
   }
   if (landSettling) settleSupersede(landSettling);   // a newer landing supersedes the older's settle: its row is filed as it stood, marked
-  const landSettle = { turn: target, at, uuid: flashKey ?? null, quote: quote ?? null, rowH: settleRowHeight(at), samples: [] as SettleSample[],
+  const landSettle = { turn: target, at, uuid: flashKey ?? null, quote: quote ?? null, mark: mark ?? null, rowH: settleRowHeight(at), samples: [] as SettleSample[],
                        start: Date.now(), gesture: false, row: null as Record<string, unknown> | null, ro: null as ResizeObserver | null, timers: [] as number[], done: false, clamp: 0 };
   landSettling = landSettle;
   if (typeof ResizeObserver === "function") {
@@ -16405,7 +16569,9 @@ function navStops(kind: "mine" | "comment" | "unread", s: Session, v: View, cont
   const stops: NavStop<NavLoad>[] = cands.map((c) => {
     if (cur) return { uuid: c.uuid, rank: c.rank, tid: c.tid, place: placeByOrder(c.unit, c.rank, cur) };
     const t = c.unit >= winStart && c.unit < winEnd ? navTurn(v, c.uuid) : null;   // only the rendered window has turns to measure
-    return { uuid: c.uuid, rank: c.rank, tid: c.tid, place: t ? placeRendered(t.getBoundingClientRect().top - cr.top, line, here) : unplaced(c.unit) };
+    // a thread's stop is its passage, where its landing puts the reader (passageLanding), else its turn
+    const at = t && c.tid ? (t.querySelector(`mark.cmt-hl[data-tid="${cssEscape(c.tid)}"]`) as HTMLElement | null) ?? t : t;
+    return { uuid: c.uuid, rank: c.rank, tid: c.tid, place: at ? placeRendered(at.getBoundingClientRect().top - cr.top, line, here) : unplaced(c.unit) };
   });
   if (kind === "mine") {
     if (s.regions && s.regions.some((r) => r.kind === "gap")) {
@@ -16425,7 +16591,7 @@ function navStops(kind: "mine" | "comment" | "unread", s: Session, v: View, cont
 /** Land a comment thread: the chips' landing verbatim (a fresh navigation's one flash on the turn, the uuid route, the
  *  mark's own pulse once its highlight is back) and NOT marked read: reading it is opening the thread. */
 function landThread(sid: string, tid: string, uuid: string): void {
-  flashedAnchor = null;                  // fresh navigation → landOn's one flash on the turn
+  flashedAnchor = null; pendingAnchorMark = { uuid, tid };   // fresh navigation → landOn's one flash, on the thread's passage (passageLanding's landing)
   if (scrollToAnchor(uuid)) {
     applyCommentMarks(sid);              // a re-windowed anchor turn gets its highlight back before the pulse
     const m = views.get(sid)?.el.querySelector(`mark.cmt-hl[data-tid="${cssEscape(tid)}"]`) as HTMLElement | null;
@@ -25042,15 +25208,11 @@ function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
         wrap.replaceChildren(chip);
       }
     },
-    // a scroll-rail tick: jump the chat to the commented message (fresh navigation → one flash)
-    // and open its thread beside it
+    // a scroll-rail tick: the chat lands the thread's passage and flashes it, then the thread opens beside it (passageLanding)
     cmtjump: (elx) => {
-      const tid = elx.dataset.tid, uuid = elx.dataset.uuid;
-      if (!tid || !uuid || !activeId) return;
-      flashedAnchor = null;
-      scrollToAnchor(uuid);
-      const r = elx.getBoundingClientRect();
-      openCommentPopover(activeId, tid, Math.max(8, r.left - 380), Math.max(60, r.top - 40));
+      const tid = elx.dataset.tid;
+      if (!tid || !activeId) return;
+      passageLanding(activeId, tid);
     },
     cmtsend: (elx) => {
       const pop = elx.closest(".cmt-pop") as HTMLElement | null;

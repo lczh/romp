@@ -33,7 +33,7 @@ test("the span rides the payload only while it was located IN the landing atom",
 
 test("the landing highlights with zero DOM surgery, and falls back honestly", () => {
   assert.match(RENDER, /pendingAnchorQuote = typeof \(m as \{ anchorQuote\?: string \}\)\.anchorQuote === "string"/);
-  assert.match(RENDER, /const quote = pendingAnchorQuote; pendingAnchorQuote = null;\s*\n\s*const quoteEl = quote \? highlightCiteSpan\(target, quote\) : null;/,
+  assert.match(RENDER, /const quote = pendingAnchorQuote; pendingAnchorQuote = null;[\s\S]{0,900}?\n\s*const quoteEl = !markEl && quote \? highlightCiteSpan\(target, quote\) : null;/,
     "consumed exactly at the successful landing — an honest-fail never strands a stale span; the element the sentence starts in is what the landing aligns on (T386)");
   const fn = RENDER.slice(RENDER.indexOf("function highlightCiteSpan"), RENDER.indexOf("// ── a landing SETTLES"));
   assert.match(fn, /CSS as unknown as \{ highlights\?: Map<string, unknown> \}/,

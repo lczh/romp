@@ -9,7 +9,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { CMT_POP_SIZE_KEY, CMT_POP_MIN_W, CMT_POP_MIN_H, CMT_POP_CAP_W, CMT_POP_CAP_H, CMT_POP_EDGE, CMT_POP_THREAD_DEFAULT,
-  CMT_POP_MAX_SLACK, cmtPopCapPx, clampCmtPopPx, toCmtPopFrac, parseCmtPopSize, isCmtPopMax, centerCmtPop } from "../../ui/webview/comment-pop-size";
+  CMT_POP_MAX_SLACK, cmtPopCapPx, clampCmtPopPx, toCmtPopFrac, parseCmtPopSize, isCmtPopMax, centerCmtPop, cmtPopCovers, cmtPopBeside } from "../../ui/webview/comment-pop-size";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
@@ -192,4 +192,41 @@ test("toggle: maximize = cap + centered + remembered + sized; restore = the pre-
   assert.match(fn, /syncCmtMaxState\(pop\);\s*\n\}\s*$/, "the label is repainted last, on both ends");
   // programmatic sizing records what it measures, so the observer never writes it back as the user's
   assert.match(RENDER, /function sizeCommentPop\(pop: HTMLElement, w: number, h: number\): void \{\s*\n\s*pop\.style\.width = w \+ "px";\s*\n\s*pop\.style\.height = h \+ "px";\s*\n\s*cmtPopApplied = \{ w: pop\.offsetWidth, h: pop\.offsetHeight \};/);
+});
+
+// ── beside its passage (the user 2026-10-15) ─────────────────────────────────────────────────────────────────────
+// A landing on a thread's passage (the rail tick, the turn's rail line, the box's own quote) opens the thread's box beside
+// the passage, never over it: the box stays where it is when it covers none of the passage; else it goes below the passage,
+// else above it, else to the roomier side at that side's height, never under the CSS floor. Only the vertical moves.
+test("beside the passage: a box clear of it stays; one over it goes below, else above, else the roomier side, shrunk to it", () => {
+  const box = (top: number, h: number) => ({ left: 300, right: 1000, top, bottom: top + h });
+  const at = (top: number, bottom: number) => ({ left: 80, right: 600, top, bottom });
+  // the thread's default box (top 120, 420 tall in a 700px window) over a passage landed at the pane's top: clear of it, stays
+  assert.equal(cmtPopCovers(box(120, 420), at(47, 63)), false);
+  assert.equal(cmtPopBeside(box(120, 420), at(47, 63), 700), null, "clear of the passage: it stays where it is");
+  // …a passage further down, under the box: the room below it fits the box, which goes there, its height kept
+  assert.deepEqual(cmtPopBeside(box(120, 420), at(150, 200), 700), { top: 208, height: 420 });
+  // a passage near the window's foot (the landing clamped at the transcript's end): above it
+  assert.deepEqual(cmtPopBeside(box(120, 420), at(520, 560), 700), { top: 92, height: 420 });
+  // a tall passage leaves room for neither: the roomier side, the box shrunk to it
+  assert.deepEqual(cmtPopBeside(box(120, 420), at(100, 350), 700), { top: 358, height: 334 });
+  assert.deepEqual(cmtPopBeside(box(120, 420), at(300, 600), 700), { top: 8, height: 284 });
+  // …never under the floor: a passage filling the window leaves the box at the CSS minimum, on the roomier side, in the window
+  const tall = cmtPopBeside(box(120, 420), at(40, 640), 700)!;
+  assert.equal(tall.height, CMT_POP_MIN_H);
+  assert.ok(tall.top >= CMT_POP_EDGE && tall.top + tall.height <= 700 - CMT_POP_EDGE, "inside the window: " + JSON.stringify(tall));
+  // a passage beside the box, not under it, is not covered
+  assert.equal(cmtPopCovers(box(120, 420), { left: 40, right: 290, top: 200, bottom: 220 }), false);
+});
+
+test("render.ts wiring: a passage landing opens the thread beside the passage, kept there across a rebuild until the user moves it", () => {
+  const fn = (name: string) => RENDER.split("function " + name + "(")[1].split("\nfunction ")[0].split("\n}\n")[0];
+  const place = fn("placeBesidePassage");
+  assert.match(place, /const to = cmtPopBeside\(r, at, window\.innerHeight\);\s*\n\s*if \(!to\) return;/, "a box clear of the passage is left alone");
+  assert.match(place, /cmtPopApplied = \{ w: pop\.offsetWidth, h: pop\.offsetHeight \};/, "the height set here is never written back as the user's size");
+  assert.match(place, /cmtPopBesideAt = \{ tid, top: to\.top, height: to\.height, since: commentPopPos \};/);
+  assert.match(RENDER, /const beside = th && cmtPopBesideAt && cmtPopBesideAt\.tid === th\.tid && cmtPopBesideAt\.since === commentPopPos \? cmtPopBesideAt : null;/,
+    "a full rebuild of the same thread keeps the spot, until a drag or a resize replaces commentPopPos");
+  assert.match(RENDER, /const py = Math\.max\(8, Math\.min\(beside \? beside\.top : \(pos\?\.y \?\? 120\), window\.innerHeight - r\.height - 8\)\);/);
+  assert.match(RENDER, /cmtPopLost = null; cmtPopBesideAt = null;/, "closing the box ends both");
 });

@@ -134,7 +134,7 @@ test("an unread thread tints its turn's RAIL segment yellow; clicking the rail o
   assert.match(CSS, /\.turn\.cmt-rail-unread::before \{ background: var\(--cmt-hl\); opacity: 1; width: 3px; left: 10px; \}/);
   // the rail-hit click checks at CLICK time, so the strip reverts to timeline navigation once read
   assert.match(UI, /const um = turn\.querySelector\("mark\.cmt-hl\.unread"\) as HTMLElement \| null;/);
-  assert.match(UI, /if \(um\?\.dataset\.tid && activeId\) \{ openCommentPopover\(activeId, um\.dataset\.tid, e\.clientX, e\.clientY\); return; \}/);
+  assert.match(UI, /if \(um\?\.dataset\.tid && activeId\) \{ passageLanding\(activeId, um\.dataset\.tid\); return; \}/, "to the passage, then the thread beside it (the rail tick's landing)");
 });
 
 test("busy and stuck are disjoint state families", () => {
@@ -412,7 +412,7 @@ test("the create dialog names the thread right there: prefilled <session>-commen
 test("the landing pulse fires once per navigation, not once per history-fetch round", () => {
   assert.match(UI, /let flashedAnchor: string \| null = null;/);
   assert.match(UI, /if \(flashKey == null \|\| flashKey !== flashedAnchor\)/);
-  assert.match(UI, /landOn\(target, uuid, quoteEl \?\? firstTextAtomBelow\(target\), quote\);/);   // the one landing write, aligned on the words when the frame quotes them (T386)
+  assert.match(UI, /landOn\(target, uuid, markEl \?\? quoteEl \?\? firstTextAtomBelow\(target\), quote, mark\);/);   // the one landing write, aligned on the words when the frame quotes them (T386), or on a comment thread's passage
   assert.match(UI, /if \(anchor\) flashedAnchor = null;/);
 });
 
