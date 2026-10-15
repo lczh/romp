@@ -985,7 +985,7 @@ class Inputs(_GateLab):
 
 
 class Detector(_GateLab):
-    """The evidence: an act is a wrongQuiet; a memo that moved is raced only when an input of the memo's session moved after the
+    """The evidence: an act is a wrongQuiet; a memo that moved is raced only when an input of the memo's sessions moved after the
     gate observed it with a signal the next pass's gate will see (an input observed again, a prelude signal naming the session,
     or one naming every session over a view this pass took that a re-stat finds moved: _jobs_gate_raced), and a wrongQuiet
     otherwise, whatever later brings the job back. The files roads first run in the interrupt tick, a job that reads the
@@ -1681,6 +1681,135 @@ class SharedParts(_GateLab):
                                                               lambda: (notes / SID).write_text("owns the exporter\n"))),
                          [({"miss": 1}, {}), ({}, {"miss": 1})])
 
+    # ── the review of #136: each owner path a reading by session has, and its two failure roads ──
+    def test_a_deferral_record_belongs_to_the_session_its_sid_field_names(self):
+        """A deferral record is filed under its goal's id, which names the goal store's own id (here one no live session has), so
+        the record's `sid` field is the only road from it to its session: web's record is no race of api's, api's is."""
+        self._two()
+        armed = self._memo_job("_auto_nudge_tick")
+        self.ledger(enabled=True, nudged={}, deferred={})
+        self.quiet()
+        store = "11111111-2222-3333-4444-00009a7e0008"                    # a goal store's own id, no live session's
+
+        def rec(sid):
+            return {"at": T0, "why": "the agent's to-do sync is due", "sid": sid}
+        web = {store + ":g1": rec(SID2)}
+        self.assertEqual(self._each("autoNudge", armed, (lambda: self.ledger(enabled=True, nudged={}, deferred=web),
+                                                         lambda: self.ledger(enabled=True, nudged={},
+                                                                             deferred=dict(web, **{store + ":g2": rec(SID)})))),
+                         [({"miss": 1}, {}), ({}, {"miss": 1})])
+
+    def test_a_note_or_relay_entry_replaced_under_its_name_is_its_sessions_race(self):
+        """A republished note replaces its file under the same name (the real publisher writes a temporary file and renames it
+        in), so a directory is read by each entry's name, mtime and size: api's note, then api's relay entry, each replaced on
+        another thread while the job runs, is api's race. Read by names alone, neither would be."""
+        km = self.km
+        self._two()
+        notes = self.root / "working"
+        notes.mkdir(parents=True, exist_ok=True)
+        km._set_working_note(SID, "owns the exporter\n")
+        q = km.jd._relay_queue_dir()
+        q.mkdir(parents=True, exist_ok=True)
+        entry = q / ("%s__%s_g2.json" % (SID, SID))
+        entry.write_text(json.dumps({"sid": SID, "nid": SID + ":g2", "marker": "m1"}))
+
+        def relay():
+            tmp = q / ".entry.tmp"
+            tmp.write_text(json.dumps({"sid": SID, "nid": SID + ":g2", "marker": "m1, sent again"}))
+            os.replace(tmp, entry)
+        for job, fn, move in (("clearDoneNotes", "_clear_done_working_notes",
+                               lambda: km._set_working_note(SID, "owns the exporter and its tests\n")),
+                              ("autoNudge", "_auto_nudge_tick", relay)):
+            armed = self._memo_job(fn)
+            self.passes(3)
+            self.assertEqual(self._once(job, armed, move), ({}, {"miss": 1}), job)
+        self.assertEqual(json.loads(entry.read_text())["marker"], "m1, sent again")
+
+    def test_a_judge_call_naming_no_session_is_every_memos_race(self):
+        """A judge call for no session sits in the part that names none, which every memo reads: one ending while api's walk runs
+        is api's race."""
+        jd = self.km.jd
+        self._two()
+        armed = self._memo_job("_auto_nudge_tick")
+        run = jd._active_begin("triage", None, 0)
+        self.addCleanup(jd._active_end, run)                            # (a second end is a no-op)
+        self.quiet()
+        self.assertEqual(self._once("autoNudge", armed, lambda: jd._active_end(run)), ({}, {"miss": 1}))
+
+    def test_a_judge_call_beginning_just_after_the_gate_counts_is_read_by_its_session(self):
+        """The gate's count of judge calls and its split by session are one locked read, so a call for another session that begins
+        right after the gate's read changes that session's part alone: api's miss is a wrongQuiet. Read apart (the count, then the
+        split), the split found another count than the one observed, the input was compared whole, and the miss filed raced. The
+        pass before is opened by a call for web, so the count the closed pass observes is one no earlier reading has split."""
+        km, jd = self.km, self.km.jd
+        self._two()
+        armed = self._memo_job("_auto_nudge_tick")
+        self.quiet()
+        runs, fire = [], [False]
+        self.addCleanup(lambda: [jd._active_end(r) for r in runs])
+
+        def after(read):
+            def counted(*a, **k):
+                out = read(*a, **k)
+                if fire[0] and getattr(km._JOBS_GATE_TL, "tick", None) is not None and km._jobs_gate_run() is None:
+                    fire[0] = False                                     # the gate's own read at the walk's turn: a call for a
+                    runs.append(jd._active_begin("triage", GONE, 0))    #  third session begins right after it
+                return out
+            return counted
+        for name in ("active_change", "active_change_by"):
+            p = mock.patch.object(jd, name, after(getattr(jd, name)))
+            p.start()
+            self.addCleanup(p.stop)
+        runs.append(jd._active_begin("triage", SID2, 0))
+        self.passes()
+        self.assertEqual(self.last()["autoNudge"], "open:judgeActive", "web's call opened the walk on a count not yet split")
+        w0, r0 = self.wrong("autoNudge"), self.raced("autoNudge")
+        fire[0] = True
+        armed[0] = lambda: None
+        self.passes()
+        self.assertEqual((armed[0], fire[0], len(runs)), (None, False, 2), "the walk ran, and the call began at the gate's read")
+        self.assertEqual(self.last()["autoNudge"], "closed")
+        self.assertEqual((_delta(self.wrong("autoNudge"), w0), _delta(self.raced("autoNudge"), r0)), ({"miss": 1}, {}))
+
+    def test_a_reading_that_fails_compares_the_input_whole_and_is_counted(self):
+        """A shared input's reading by session can fail (a write between the gate's stat and its read, a raise); the input is then
+        compared whole, so web's record files api's miss raced, and the fallback is counted by input under
+        jobs.gate.slicesUnread, never silent."""
+        km = self.km
+        self._two()
+        armed = self._memo_job("_auto_nudge_tick")
+        self.ledger(enabled=True, nudged={})
+        self.quiet()
+        p = mock.patch.dict(km._JG_SLICERS, {"box:ledger": lambda val: None})   # the ledger's reading fails
+        p.start()
+        self.addCleanup(p.stop)
+        km._JG_SLICE_MEMO.clear()
+        u0 = dict(self.gate()["slicesUnread"])
+        rec = {"count": 1, "lastTurnId": "t1"}
+        self.assertEqual(self._once("autoNudge", armed, lambda: self.ledger(enabled=True, nudged={SID2 + ":g1": rec})),
+                         ({}, {"miss": 1}))
+        self.assertEqual(_delta(self.gate()["slicesUnread"], u0), {"box:ledger": 1})
+
+    def test_a_reading_by_session_is_taken_for_a_closed_verdict_alone(self):
+        """The race test reads the slices of a run called closed alone, so a version an open pass observed is never read by
+        session: a ledger rewritten before a pass opens the walk on it with no reading, and the closed pass after it reads that
+        version once."""
+        km = self.km
+        self._two()
+        self._memo_job("_auto_nudge_tick")
+        self.ledger(enabled=True, nudged={})
+        self.quiet()
+        self.assertEqual(self.last()["autoNudge"], "closed")
+        reads, real = [], km._JG_SLICERS["box:ledger"]
+        p = mock.patch.dict(km._JG_SLICERS, {"box:ledger": lambda val: (reads.append(val), real(val))[1]})
+        p.start()
+        self.addCleanup(p.stop)
+        self.ledger(enabled=True, nudged={SID2 + ":g1": {"count": 1, "lastTurnId": "t1"}})
+        self.passes()
+        self.assertEqual((self.last()["autoNudge"], reads), ("open:ledger", []), "an open verdict reads no slice")
+        self.passes(2)
+        self.assertEqual((self.last()["autoNudge"], len(reads)), ("closed", 1), "the closed passes read the version once")
+
 
 class TheLookScope(_GateLab):
     """The walk's look names its session and the askers whose registry rows its key carries as one scope, through the REAL look
@@ -1743,6 +1872,74 @@ class TheLookScope(_GateLab):
         self.assertIsNone(self.armed[0])
         self.assertEqual(self.last()["autoNudge"], "closed")
         self.assertEqual((_delta(self.wrong("autoNudge"), w0), _delta(self.raced("autoNudge"), r0)), ({}, {"miss": 1}))
+
+    def test_an_askers_inputs_other_than_its_row_are_not_the_debtors_race(self):
+        """The review of #136: api's key carries web's registry row and nothing else of web's, so web's live-tail revision moving
+        (a signal the next prelude names web by) while api's look finds its memo moved behind the gate's back is no race of
+        api's memo: a wrongQuiet. Named for every channel, the asker made it raced and hid the missing signal."""
+        km = self.km
+        self.quiet()
+        self.assertEqual(self.last()["autoNudge"], "closed")
+        w0, r0 = self.wrong("autoNudge"), self.raced("autoNudge")
+
+        def move():
+            self.revs[SID2] = self.revs.get(SID2, 0) + 1                # web's live-tail revision
+            with km._TICK_SEEN_LOCK:                                    # api's memo, moved behind the gate's back
+                row = km._TICK_SEEN[("auto-nudge", SID)]
+                km._TICK_SEEN[("auto-nudge", SID)] = (row[0] + 1.0,) + tuple(row[1:])
+        self.armed[0] = move
+        self.passes()
+        self.assertIsNone(self.armed[0])
+        self.assertEqual(self.last()["autoNudge"], "closed")
+        self.assertEqual((_delta(self.wrong("autoNudge"), w0), _delta(self.raced("autoNudge"), r0)), ({"miss": 1}, {}))
+
+    def test_every_look_note_names_the_askers_rows_its_key_carries(self):
+        """Tests, point one of the review of #136, through the REAL look check over the REAL key: each of the look's five memo
+        notes (neverSeen, miss, and the three clock refusals) names web's registry row, which api's key carries because web asked
+        api something, so web's row rewritten on another thread before api's look is each note's race. A note naming api
+        alone would file it a wrongQuiet."""
+        km, jd = self.km, self.km.jd
+        armed, grown = [None], [0]
+
+        def web_row():
+            grown[0] += 1
+            (jd.SDKDIR / (SID2 + ".json")).write_text(json.dumps({"sid": SID2, "alive": True, "pad": "x" * grown[0]}))
+
+        def walk(now, live_map):
+            plant, armed[0] = armed[0], None
+            if plant is None:
+                return
+            th = threading.Thread(target=web_row)
+            th.start()
+            th.join()
+            s = dict(self.sessions[0])
+            st = tuple(km._nudge_look_stat(s)[0])
+            row = plant(st, now)
+            with km._TICK_SEEN_LOCK:
+                if row is None:
+                    km._TICK_SEEN.pop(("auto-nudge", SID), None)
+                else:
+                    km._TICK_SEEN[("auto-nudge", SID)] = row
+            km._nudge_look_check(s, now)
+        self.stub("_auto_nudge_tick", walk)
+        self.quiet()
+        cases = (("neverSeen", lambda st, now: None, None),
+                 ("miss", lambda st, now: (st[0] + 1.0,) + st[1:] + (-1.0, "working"), None),
+                 ("clockParse", lambda st, now: st + (-1.0, "closer-unsettled"), False),   # recorded under the closer, read with it off
+                 ("clockParse", lambda st, now: st + (None, "working"), None),             # an unbounded memo
+                 ("clockParse", lambda st, now: st + (float(now - 1), "working"), None))   # a flip come due
+        for n, (evidence, plant, closer) in enumerate(cases):
+            self.passes(2)
+            self.assertEqual(self.last()["autoNudge"], "closed", n)
+            w0, r0 = self.wrong("autoNudge"), self.raced("autoNudge")
+            armed[0] = plant
+            with mock.patch.object(km.jd, "CLOSER_ON", True if closer is None else closer):
+                self.passes()
+            self.assertIsNone(armed[0], n)
+            self.assertEqual(km._NUDGE_LOOK_ASKERS.get(SID), ([SID2], []), n)
+            self.assertEqual(self.last()["autoNudge"], "closed", n)
+            self.assertEqual((_delta(self.wrong("autoNudge"), w0), _delta(self.raced("autoNudge"), r0)), ({}, {evidence: 1}),
+                             "case %d" % n)
 
 
 class CallSites(_GateLab):
@@ -2059,9 +2256,29 @@ class TheCheckpointJobs(_GateLab):
         km = self.km
         self.assertEqual(self._behind(lambda: km._CKPT_SETTLE_SEEN.__setitem__(SID, (0, None))), ({"write": 1}, {}))
 
+    def test_a_lost_entry_beside_a_leaf_grown_behind_the_predicates_back_is_still_a_wrong_quiet_write(self):
+        """Tests, point five of the review of #136: the write's work is the session's memo only when EVERY trigger moved after the
+        gate read it. Here the settle trigger is evidence the gate read (the table lost its entry, as above) while the period's leaf
+        also grew after the predicate statted it: one trigger the gate saw makes the work an act, a wrongQuiet write, never raced
+        by the leaf alone."""
+        km = self.km
+        self._period_age(km.CKPT_PERIOD_S + 1.0)
+
+        def move():
+            km._CKPT_SETTLE_SEEN[SID] = (0, None)
+            with open(self.leaf, "a") as f:
+                f.write('{"type": "assistant"}\n')
+        self.assertEqual(self._behind(move), ({"write": 1}, {}))
+        self.assertEqual(self.persisted, [str(self.leaf)], "the real write wrote the leaf's document")
+
     def test_another_sessions_settle_evidence_is_not_this_sessions_race(self):
         """mem:ckptSettle read by the memo's session: with web listed too, a memo naming api and web's states log growing on
-        another thread while the write runs is a wrongQuiet; api's own states log growing is a race."""
+        another thread while the write runs is a wrongQuiet; api's own states log growing is a race. The memo is a stub's: the
+        real write never makes one this branch decides (the review of #136). Its hook notes a session's memo only when that
+        session's own settle key, or its leaf against the predicate's stat, moved after the gate read it, and the race test
+        re-reads exactly that input, so the real write's memo is raced by its own session's input whatever another session's
+        does, and real-write runs give these counts with or without the scope. The case pins the rule every memo is held to,
+        for a later memo of the write's that is not raced by its own input."""
         km, jd = self.km, self.km.jd
         self.add_session(SID2, "web")
         web_states = jd.STATE / "states" / (SID2 + ".jsonl")
@@ -2762,6 +2979,145 @@ class NotesLift(_GateLab):
         self.assertEqual((_delta(self.wrong("clearDoneNotes"), w1), _delta(self.raced("clearDoneNotes"), r1)),
                          ({"neverSeen": 1, "write": 1}, {}), "lifted: an act, never raced by its own write")
         self.assertFalse((notes / SID).exists())
+
+
+class TheSharedFilesAtTheJobsTurn(_GateLab):
+    """The review of #136: a job keyed on the ten files takes the four box-wide ones (the clears, postal and downtime logs and the
+    nudge ledger) from a stat at its own turn, after the gate read them, never from the pass's shared snapshot, which an earlier
+    job's reader took. Before, a write landing between that snapshot and the job's gate read opened the job on a key that did
+    not show it, and the next pass's key caught up as a miss with no input moving: a wrongQuiet, and for the notes job a stale
+    note kept for a pass. Each case drives the REAL job over such a write: the job takes it on its own pass, and the next pass
+    is closed and quiet."""
+
+    def _snapshot_walk(self):
+        """A walk that takes the pass's shared snapshot first, as the real walk's key does, then runs an armed write on another
+        thread (a writer elsewhere in the process, after the snapshot and before the later jobs' turns)."""
+        km = self.km
+        armed = [None]
+
+        def walk(now, live_map):
+            for s in km._alive_sessions(now, live_map):
+                km._session_files_stat(s)
+            fn, armed[0] = armed[0], None
+            if fn is not None:
+                th = threading.Thread(target=fn)
+                th.start()
+                th.join()
+        self.stub("_auto_nudge_tick", walk)
+        return armed
+
+    def _clear(self, also=None):
+        """A clear of api's goal, appended to the clears log by this process's writer, which marks every session after it."""
+        def write():
+            with open(self.root / "cleared.jsonl", "a") as f:
+                f.write(json.dumps({"id": SID + ":g1", "op": "clear"}) + "\n")
+            if also is not None:
+                also()
+            self.km._files_stat_mark()
+        return write
+
+    def _parsed(self):
+        p = mock.patch.object(self.km.jd, "parsed_session", lambda *a, **k: {"turns": [{"ended": True}]})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_the_walk_takes_a_ledger_write_of_the_deferral_sweep_on_its_own_pass(self):
+        """The deferral sweep, which runs before the walk, retires a record through the ledger's one writer: the walk's gate
+        opens on the ledger, and the REAL walk's key, the ledger statted at its turn, misses there and the look runs on that
+        pass. The next pass's key matches, so it is closed with no miss."""
+        km = self.km
+        self.add_session()
+        self.real_walk()
+        self.ledger(enabled=True, deferred={"g7": {"at": T0, "why": "the agent's to-do sync is due", "sid": GONE}})
+        looks = []
+
+        def look(s, now, live_map, nudged, waitfor, alive_ids=None, wake_only=False, cleared=None, reminders=None):
+            skip, st, _v = km._nudge_look_check(s, now)
+            looks.append(skip)
+            if not skip:
+                km._nudge_look_done(s, st, [], "working")
+        self.stub("_auto_nudge_session", look)
+        armed = [False]
+
+        def sweep(now):
+            if armed[0]:
+                armed[0] = False
+                d = dict(km._auto_nudge_data())
+                d["deferred"] = {}
+                km._write_auto_nudge(d)
+        self.stub("_deferral_sweep_tick", sweep)
+        self.quiet(T0)                                                  # (the walk's world on a synthetic clock, as TheSevenFaults')
+        self.assertEqual((self.last()["autoNudge"], looks[-1]), ("closed", True))
+        w0, r0 = self.wrong("autoNudge"), self.raced("autoNudge")
+        armed[0] = True
+        del looks[:]
+        self.passes(1, T0 + 1)
+        self.assertFalse(armed[0])
+        self.assertEqual((self.last()["autoNudge"], looks), ("open:ledger", [False]), "the look took the write on its own pass")
+        self.passes(1, T0 + 2)
+        self.assertEqual((self.last()["autoNudge"], looks), ("closed", [False, True]))
+        self.assertEqual((_delta(self.wrong("autoNudge"), w0), _delta(self.raced("autoNudge"), r0)), ({}, {}))
+
+    def test_the_interrupt_tick_takes_a_clear_during_the_walk_on_its_own_pass(self):
+        """A clear lands after the walk took the snapshot: the interrupt tick's gate opens on the clears log, and the REAL tick's
+        key, its clears position statted at its turn, misses there and the tick evaluates on that pass (no stop, nothing to
+        lift). The next pass skips it, closed with no miss."""
+        km = self.km
+        self.add_session()
+        armed = self._snapshot_walk()
+        self.real("_interrupt_block_tick")
+        for name, fn in (("_session_flag", lambda sid, flag: False), ("_compacting_now", lambda *a, **k: False),
+                         ("_api_error", lambda path: False), ("_session_working", lambda turns: False),
+                         ("_interrupt_marks", lambda turns, sid, family="judge", path=None: (0, 0))):   # no stop: nothing to block
+            self.stub(name, fn)
+        self._parsed()
+        evaluated, real_done = [], km._tick_job_done
+
+        def done(job, s, st):
+            if job == "interrupt-block":
+                evaluated.append(s["sid"])
+            return real_done(job, s, st)
+        self.stub("_tick_job_done", done)
+        self.quiet()
+        self.assertEqual(self.last()["interruptBlock"], "closed")
+        w0, r0 = self.wrong("interruptBlock"), self.raced("interruptBlock")
+        del evaluated[:]
+        armed[0] = self._clear()
+        self.passes()
+        self.assertIsNone(armed[0])
+        self.assertEqual((self.last()["interruptBlock"], evaluated), ("open:clears", [SID]), "the tick took the clear on its own pass")
+        self.passes()
+        self.assertEqual((self.last()["interruptBlock"], evaluated), ("closed", [SID]), "and the next pass skips it")
+        self.assertEqual((_delta(self.wrong("interruptBlock"), w0), _delta(self.raced("interruptBlock"), r0)), ({}, {}))
+
+    def test_the_notes_job_lifts_a_note_on_the_pass_a_clear_closes_its_last_open_top(self):
+        """api is idle with a working note and one open top goal; after the walk took the snapshot, a clear closes that goal. The
+        notes job's gate opens on the clears log, and the REAL job's key, its box-wide files statted at its turn, misses there:
+        the note is lifted on that pass, an act of a run the gate opened. Before, the stale key kept the note for a pass and the
+        lift came on the next one as a wrongQuiet of a miss and a write."""
+        km = self.km
+        self.add_session()
+        notes = self.root / "working"
+        notes.mkdir(parents=True, exist_ok=True)
+        (notes / SID).write_text("owns the notes-api exporter\n")
+        open_goal = [True]
+        armed = self._snapshot_walk()
+        self.real("_clear_done_working_notes")
+        self.stub("_session_working", lambda turns: False)
+        self.stub("_open_top_goal", lambda sid: open_goal[0])
+        self._parsed()
+        self.quiet()
+        self.assertEqual(self.last()["clearDoneNotes"], "closed")
+        self.assertTrue((notes / SID).exists(), "an open top goal keeps the note")
+        w0, r0 = self.wrong("clearDoneNotes"), self.raced("clearDoneNotes")
+        armed[0] = self._clear(also=lambda: open_goal.__setitem__(0, False))
+        self.passes()
+        self.assertIsNone(armed[0])
+        self.assertEqual(self.last()["clearDoneNotes"], "open:clears")
+        self.assertFalse((notes / SID).exists(), "the note lifted on the pass the clear landed")
+        self.passes(2)
+        self.assertEqual(self.last()["clearDoneNotes"], "closed")
+        self.assertEqual((_delta(self.wrong("clearDoneNotes"), w0), _delta(self.raced("clearDoneNotes"), r0)), ({}, {}))
 
 
 class ThePusher(_GateLab):
