@@ -11,7 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { atBottomDist } from "./scroll-keep";
-import { isReplyReady } from "./reply-ready";
+import { unreadCount } from "./jump-nav";
 import { hostOf } from "./host-prefix";
 import { isProvisionalId } from "./provisional";   // the loading branch's one "opening" gate (2026-09-11): the real module
 
@@ -272,7 +272,7 @@ test("the strip's repaint gate sees a skeleton: the signature reads renderKind a
 // stack to, as a browser's is. The chips refresh only on events (the pane's scroll and resize, a land, an append),
 // and a tab left at the top of a long transcript fires none of them on the switch, so the switch itself has to
 // take them down; and the go-to-bottom chip has to read the set, not the loader, whose min-height (styles.css)
-// overflows a short pane. Synthetic ids; atBottomDist and isReplyReady are the real modules and run (hostOf is
+// overflows a short pane. Synthetic ids; atBottomDist and unreadCount are the real modules and run (hostOf is
 // wired in and not reached: the skeleton's name comes from tabMeta).
 const LOADER_VH = Number((/\.tab-loading-wait \{[^}]*min-height: (\d+)vh;/.exec(CSS) || [])[1]);
 const PANE_PAD = 20;   // #content's vertical padding, 8px 0 12px (pinned in chipWorld)
@@ -329,18 +329,18 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
     // the ONE clause of updateJumpCluster's gate that hides the cluster (its unread badge with it) over the skeleton
     // (the read #1226 narrowed, when the badge was the reply chips)
     commentThreads: new Map<string, unknown[]>([["B", [{ tid: "t1", anchorUuid: "22222222-3333-4444-5555-666666666666", status: "open", unread: true }]]]),
-    jumpBtn, jumpCluster, atBottomDist, isReplyReady, hostOf, isProvisionalId, HOOKS,
+    jumpBtn, jumpCluster, atBottomDist, unreadCount, hostOf, isProvisionalId, HOOKS,
     el: (_tag: string, cls?: string): ChipEl => new ChipEl(cls || "", cls === "tab-loading-wait" ? Math.round(LOADER_VH / 100 * win.innerHeight) : 0),
     rompLoaderInner: (caption: string): ChipEl => { HOOKS.captions.push(caption); return new ChipEl("romp-loader", 0); },
   };
   const js = requireCjs("esbuild").transformSync(["liveSession", "atBottom", "showActive", "updateJumpBtn", "updateJumpCluster"].map(fn).join("\n"), { loader: "ts" }).code;
   const prelude = `
-    const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, jumpCluster, atBottomDist, isReplyReady, hostOf, isProvisionalId, el, rompLoaderInner, HOOKS } = W;
+    const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, jumpCluster, atBottomDist, unreadCount, hostOf, isProvisionalId, el, rompLoaderInner, HOOKS } = W;
     let activeId = null, skeletonLoading = null, jumpClusterSig = "", navCursor = null, navResume = null;
     // the cluster's measuring half, inert: the switch test is about its gate (a live session's stops are jump-nav.test.ts's)
     const pendingBuildRaf = null, loadingOlder = new Set(), gapLoading = new Set(), parseGapKey = (k) => ({ sid: k });
     const MOVES = ["prevMine", "nextMine", "prevComment", "nextComment", "prevUnread", "nextUnread"];
-    const eventUnitIndex = () => new Int32Array(0), navStops = () => ({ stops: [], mine: 0 }), readyAround = () => ({ above: null, below: null }), unreadCount = () => 0, pickNav = () => null, jumpMove = () => {};
+    const eventUnitIndex = () => new Int32Array(0), navStops = () => ({ stops: [], mine: 0 }), pickNav = () => null, jumpMove = () => {};
     const jcMine = { hidden: false }, jcCmt = { hidden: false }, jcUnread = { hidden: false }, jcCount = { hidden: true, setAttribute: () => {} };
     const setTip = () => {}, countTip = () => "", jumpCommand = (m) => "chat." + m;
     const jcButtons = { prevMine: {}, nextMine: {}, prevComment: {}, nextComment: {}, prevUnread: {}, nextUnread: {} };

@@ -144,7 +144,7 @@ import { MetaKind, MetaHooks, metaButton as buildMetaButton, syncMetaControls as
 import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
          pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent, CMT_SENT_GIST, CMT_SENT_GIST_PRIOR,
          holdAnswered, holdForPassage, synthSuperseded, existingThreadFor, type PassageAt } from "./comments";
-import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
+import { isReplyReady, type Dir } from "./reply-ready";
 import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
 import { threadSettled, threadOnRail } from "./comments";   // a thread's look by status: only resolved dims; relayed stays on the rail, open (2026-09-30)
 import { chipStops } from "./status-chip";   // the bar's stop rule, which the comment popover's stop shares (thread-live-1)
@@ -16252,13 +16252,16 @@ window.addEventListener("resize", updateJumpBtn);
 // After new content arrives the reader loses their place and wants to get back to their last message and read
 // everything since, especially on the phone, and to reach comments without hunting on the rail (the user, paraphrased).
 // A small cluster in the pane's bottom-left corner, one column with the go-to-bottom chip, three rows, top to bottom:
-// the threads with an UNREAD reply (previous / next, and how many wait off screen, in the needs-you red; shown only while
+// the threads with an UNREAD reply (previous / next, and how many wait, in the needs-you red; shown only while
 // one waits), every COMMENT thread (previous / next, in the comment ink; shown only while the session has threads), and
 // the reader's OWN messages (previous / next, in their blue; from the bottom, one previous lands on their last message).
 // Stepping through unread replies is its own job, so it has its own row (the user 2026-09-24); the row replaced the two
 // "↑ N replies unread" / "↓ N reply unread" chips (2026-09-08). What counts as unread and when a thread stops being
-// unread are the chips' (isReplyReady; opening the thread reads it, a press never does), and the count is the chips'
-// number: a thread on screen counts in neither direction. The arrows reach every unread thread, in view or not.
+// unread are the chips' (isReplyReady; opening the thread reads it, a press never does). The count is every unread thread
+// in the session, wherever it sits, so it moves only when a thread does (read, a reply landing, resolved or deleted) and
+// never as the reader scrolls (the user 2026-10-15: counting only the threads off screen, the chips' rule, made it flip
+// 5, 4, 5 with nothing read). The arrows reach every unread thread, in view or not; WHERE they go reads the view, the
+// number never does.
 // Every move lands through scrollToAnchor, the chips', the notches' and the rail ticks' one road: the target's top at
 // the viewport top and landOn's one flash, a target outside the rendered window rendered around it, and a comment
 // anchored in history the page has not loaded fetched by it. The reader's own messages are known only as far as the
@@ -16321,7 +16324,7 @@ const [jcPrevMine, jcNextMine] = jcPair(jcMine, "prevMine", "nextMine", "mine");
 const jcButtons: Record<Move, HTMLButtonElement> = {
   prevUnread: jcPrevUnread, nextUnread: jcNextUnread, prevComment: jcPrevComment, nextComment: jcNextComment, prevMine: jcPrevMine, nextMine: jcNextMine,
 };
-// how many unread replies wait off screen (the old chips' number), read-only: a badge on the unread capsule's corner,
+// how many unread replies wait in the session, read-only: a badge on the unread capsule's corner,
 // positioned in the cluster box (the unread capsule is its top), so the capsule's own clip never cuts it
 const jcCount = el("span", "jc-count");
 jcCount.hidden = true;
@@ -16419,30 +16422,6 @@ function navStops(kind: "mine" | "comment" | "unread", s: Session, v: View, cont
   }
   return { stops, mine: own.length };
 }
-/** The unread replies off screen, per direction, with the nearest of each: the old chips' measure verbatim (a rendered
- *  mark by its own box, a windowed-out anchor by event order against the rendered window). */
-function readyAround(s: Session, v: View, c: HTMLElement): { above: ReadyChip | null; below: ReadyChip | null } {
-  const ready = (commentThreads.get(s.id) || []).filter(isReplyReady);
-  const H = c.clientHeight;
-  const cr = c.getBoundingClientRect();
-  const marks: ReadyMark[] = [];
-  let evUnit: Int32Array | null = null;
-  for (const th of ready) {
-    const turn = v.el.querySelector(`.turn[data-uuid="${cssEscape(th.anchorUuid)}"]`) as HTMLElement | null;
-    const line = replyLine(th);
-    if (turn) {
-      // the mark's own box; the turn's when the rendered text drifted past re-matching (the tick's fallback too)
-      const node = (turn.querySelector(`mark.cmt-hl[data-tid="${cssEscape(th.tid)}"]`) as HTMLElement | null) || turn;
-      const r = node.getBoundingClientRect();
-      marks.push({ tid: th.tid, uuid: th.anchorUuid, line, ...placeMark(r.top - cr.top, r.bottom - cr.top, H) });
-    } else {
-      const idx = s.events.findIndex((e) => e.uuid === th.anchorUuid);
-      if (!evUnit) evUnit = eventUnitIndex(s);
-      marks.push({ tid: th.tid, uuid: th.anchorUuid, line, ...placeWindowed(idx >= 0 ? evUnit[idx] : -1, v.winStart, v.winEnd ?? v.winStart) });
-    }
-  }
-  return readyChips(marks);
-}
 /** Land a comment thread: the chips' landing verbatim (a fresh navigation's one flash on the turn, the uuid route, the
  *  mark's own pulse once its highlight is back) and NOT marked read: reading it is opening the thread. */
 function landThread(sid: string, tid: string, uuid: string): void {
@@ -16503,10 +16482,9 @@ function updateJumpCluster(): void {
   const mine = navStops("mine", s, v, c, evUnit);
   const threads = commentThreads.get(s.id) || [];
   const threadsHere = threads.some((t) => threadOnRail(t.status));
-  const unreadHere = threads.some(isReplyReady);   // the unread row shows while any thread's reply waits
+  const n = unreadCount(threads), unreadHere = n > 0;   // every unread thread, wherever it sits: the unread row shows while one waits
   const cmt = threadsHere ? navStops("comment", s, v, c, evUnit).stops : [];
   const unread = unreadHere ? navStops("unread", s, v, c, evUnit).stops : [];
-  const n = unreadHere ? unreadCount(readyAround(s, v, c)) : 0;   // the chips' number: off screen only
   const able = {
     prevMine: !!pickNav(mine.stops, "above"), nextMine: !!pickNav(mine.stops, "below"),
     prevComment: !!pickNav(cmt, "above"), nextComment: !!pickNav(cmt, "below"),
@@ -16521,7 +16499,7 @@ function updateJumpCluster(): void {
   jcCmt.hidden = !threadsHere;
   jcUnread.hidden = !unreadHere;
   for (const m of MOVES) jcButtons[m].disabled = !able[m];
-  jcCount.hidden = n === 0;   // every unread thread in view: no number (the chips hid at 0), the arrows still reach them
+  jcCount.hidden = n === 0;   // no unread thread: no number
   if (n) { jcCount.textContent = String(n); setTip(jcCount, countTip(n)); jcCount.setAttribute("aria-label", countTip(n)); }   // the one styled tip; the text swaps per update
   jumpCluster.hidden = !mineHere && !threadsHere;
   jumpCluster.style.bottom = bottom + "px";

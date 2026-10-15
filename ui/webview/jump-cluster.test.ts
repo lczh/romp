@@ -70,16 +70,15 @@ test("every move lands through scrollToAnchor; a thread lands the chips' way and
   }
 });
 
-test("unread means what the chips meant: the kernel's bit on an open thread; the count off screen, placed the chips' way", () => {
-  const ready = fn("readyAround");
-  assert.match(ready, /\(commentThreads\.get\(s\.id\) \|\| \[\]\)\.filter\(isReplyReady\)/);
-  assert.match(ready, /\.\.\.placeMark\(r\.top - cr\.top, r\.bottom - cr\.top, H\)/, "a rendered mark by its own box against the viewport");
-  assert.match(ready, /\.\.\.placeWindowed\(idx >= 0 \? evUnit\[idx\] : -1, v\.winStart, v\.winEnd \?\? v\.winStart\)/);
-  assert.match(ready, /return readyChips\(marks\);/);
-  assert.match(UPDATE, /const unreadHere = threads\.some\(isReplyReady\);/, "the unread capsule shows while any thread's reply waits");
-  assert.match(UPDATE, /const n = unreadHere \? unreadCount\(readyAround\(s, v, c\)\) : 0;/, "the count: the chips' number");
+test("unread means what the chips meant: the kernel's bit on an open thread; the count is every one of them, read from no position", () => {
+  // the user 2026-10-15: the badge counted only the threads off screen, so scrolling one into view took it off the count
+  // and scrolling away put it back, the number flipping with nothing read. It counts the session's threads now, and only
+  // a thread changing (read, a reply landing, resolved or deleted) moves it
+  assert.match(UPDATE, /const n = unreadCount\(threads\), unreadHere = n > 0;/, "the count: every unread thread in the session, the capsule shown while there is one");
+  assert.doesNotMatch(BLOCK, /readyAround|placeMark|readyChips/, "no off-screen measure left to drift back into the count");
+  assert.doesNotMatch(RENDER, /placeMark|readyChips|ReadyChip|ReadyMark/, "nor anywhere else in the page");
   assert.match(UPDATE, /jcUnread\.hidden = !unreadHere;/);
-  assert.match(UPDATE, /jcCount\.hidden = n === 0;/, "every unread thread in view: no number, as the chips hid at 0");
+  assert.match(UPDATE, /jcCount\.hidden = n === 0;/, "no unread thread: no number");
   // the arrows walk the unread threads, in view or not (jump-nav.test.ts: the one on screen below a landing is next)
   assert.match(fn("navStops"), /\.filter\(\(t\) => kind === "comment" \|\| isReplyReady\(t\.th\)\)/);
   assert.doesNotMatch(BLOCK, /unreadNext|unreadDir/, "no direction memory: explicit arrows replaced it");

@@ -1,13 +1,14 @@
 // The chat's JUMP CLUSTER (the user 2026-09-24, paraphrased: after new content arrives they lose their place and want to
 // get back to their last message and read everything since, especially on the phone, and they want comments reachable
 // without hunting on the rail). A small persistent cluster in the chat pane's bottom-left corner, three rows: the
-// threads with an UNREAD reply (previous / next, and how many wait off screen; it replaced the two "↑ N replies unread" /
+// threads with an UNREAD reply (previous / next, and how many wait; it replaced the two "↑ N replies unread" /
 // "↓ N reply unread" chips), every COMMENT thread (previous / next), and the user's OWN messages (previous / next).
 // Stepping through unread replies is its own job, so it has its own row and arrows (the user, 2026-09-24).
 // This module is the PURE half (node-tested, no DOM): where a stop sits against the reader's position and which stop a
 // move picks, plus the copy. render.ts (updateJumpCluster / runJump) measures the page and lands through
 // scrollToAnchor, the reply chips' and the rail's one landing road.
-import { WINDOWED_OUT, placeWindowed, replyWord, type Dir, type ReadyChip } from "./reply-ready";
+import type { CommentThread } from "./comments";
+import { WINDOWED_OUT, isReplyReady, placeWindowed, replyWord, type Dir } from "./reply-ready";
 
 export type Move = "prevMine" | "nextMine" | "prevComment" | "nextComment" | "prevUnread" | "nextUnread";
 export const MOVES: readonly Move[] = ["prevMine", "nextMine", "prevComment", "nextComment", "prevUnread", "nextUnread"];
@@ -80,11 +81,16 @@ export function pickNav<L>(stops: readonly NavStop<L>[], dir: Dir): NavStop<L> |
   return best;
 }
 
-/** How many unread replies wait off screen, both directions: the unread row's number, what the old chips counted (a
- *  thread in view counts in neither direction; its ring is showing). The row's arrows reach every unread thread, in
- *  view or not: after a landing the next one may sit on screen below it. */
-export function unreadCount(chips: { above: ReadyChip | null; below: ReadyChip | null }): number {
-  return (chips.above ? chips.above.count : 0) + (chips.below ? chips.below.count : 0);
+/** How many replies wait unread in the session: every thread whose reply waits (isReplyReady), wherever it sits. It
+ *  takes the threads and nothing about the view, so scrolling never moves it; only a thread changing does (opening it
+ *  reads it, a reply landing makes it unread, resolving or deleting it takes it off). Until 2026-10-15 it counted only
+ *  the threads off screen, the old per-direction chips' rule (a thread in view showed its own ring), and the single
+ *  badge that replaced the chips flipped 5, 4, 5 as threads scrolled in and out of view with nothing read (the user
+ *  2026-10-15). The arrows' targets still read the view (navStops); the number never does. */
+export function unreadCount(threads: readonly Pick<CommentThread, "unread" | "status">[]): number {
+  let n = 0;
+  for (const t of threads) if (isReplyReady(t)) n++;
+  return n;
 }
 
 // ── copy: the user's words, one line per control ──────────────────────────────────────────────────────
@@ -97,7 +103,7 @@ export const MOVE_TITLE: Record<Move, string> = {
   prevUnread: "Previous unread reply",
   nextUnread: "Next unread reply",
 };
-/** The unread count's tip and label: how many wait off screen. */
+/** The unread count's tip and label: how many wait. */
 export function countTip(n: number): string {
-  return replyWord(n) + " off screen";
+  return replyWord(n);
 }

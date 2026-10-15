@@ -1,13 +1,15 @@
 // The jump cluster's target selection (jump-nav.ts), driven by execution: previous / next of the user's own messages from
 // any position (scrolled up, just landed, inside a long reply, at the bottom, after a landing the scroll could not
 // top-align), previous / next comment (two threads on one passage included), previous / next unread reply in both
-// directions with none left at the ends, the unread count, barriers of unloaded history, and nothing to jump to.
+// directions with none left at the ends, the unread count (every unread thread, wherever it sits), barriers of unloaded
+// history, and nothing to jump to.
 // Synthetic numbers and ids only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import { placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, MOVE_TITLE, MOVES,
          HERE_PX, HEAD_DIST, type NavStop } from "./jump-nav";
-import { placeMark, readyChips, WINDOWED_OUT, type ReadyMark } from "./reply-ready";
+import { WINDOWED_OUT } from "./reply-ready";
+import type { CommentThread } from "./comments";
 
 const VIEW = 600;
 // a rendered stop by its top (px from the scroller's top edge), against the line the reader's position sets
@@ -144,9 +146,8 @@ test("previous unread from the bottom walks them in reverse, then nothing is lef
   assert.equal(pickNav(unreadStops(scroll), "below")?.uuid, "t2");
 });
 
-test("an unread thread on screen below the one just landed is still the next one (the count leaves it out; the arrow does not)", () => {
-  // t1 landed at the top; t2 is 300px below it, in view: the count (reply-ready's off-screen rule) would not count it,
-  // but next unread must reach it, or it would be skipped
+test("an unread thread on screen below the one just landed is still the next one", () => {
+  // t1 landed at the top; t2 is 300px below it, in view: next unread must reach it, or it would be skipped
   const ys = { t1: 1000, t2: 1300, t3: 6000 };
   assert.equal(pickNav(unreadStops(1000, ys), "below")?.uuid, "t2");
   assert.equal(pickNav(unreadStops(1000, ys), "above"), null);
@@ -157,14 +158,24 @@ test("no unread reply anywhere: neither arrow has a target", () => {
   assert.equal(pickNav(unreadStops(3000, {}), "below"), null);
 });
 
-test("the count is the unread replies off screen, both directions (the old chips' number)", () => {
-  const chip = (count: number, tid: string) => ({ count, nearest: { tid, uuid: "u-" + tid, line: "q " + tid, dir: "above" as const, dist: 1 } });
-  assert.equal(unreadCount({ above: chip(2, "a1"), below: chip(1, "b1") }), 3);
-  assert.equal(unreadCount({ above: null, below: chip(1, "b1") }), 1);
-  assert.equal(unreadCount({ above: null, below: null }), 0);
-  // the same rule the chips had: a mark in view counts in neither direction
-  const marks: ReadyMark[] = Object.entries({ t1: 400, t2: 2600, t3: 5200 }).map(([tid, y]) => ({ tid, uuid: "u-" + tid, line: "", ...placeMark(y - 2500, y - 2480, VIEW) }));
-  assert.equal(unreadCount(readyChips(marks)), 2, "t2 is on screen: two off screen");
+test("the count is every unread thread in the session, wherever it sits: scrolling never changes it", () => {
+  // the user 2026-10-15, who watched the badge go 5, 4, 5 while scrolling with nothing read: a count of the threads off
+  // screen drops one each time an unread thread scrolls into view. The count takes the threads alone, no position, so
+  // only a real change to a thread moves it
+  assert.equal(unreadCount.length, 1, "one input, the threads: no viewport, no scroll position, no placement");
+  type T = Pick<CommentThread, "tid" | "unread" | "status">;
+  const th = (tid: string, unread: boolean, status: T["status"] = "open"): T => ({ tid, unread, status });
+  const five = ["t1", "t2", "t3", "t4", "t5"].map((t) => th(t, true));
+  assert.equal(unreadCount(five), 5, "in view or not, all five count");
+  assert.equal(unreadCount([...five, th("t6", false)]), 5, "a read thread does not count");
+  // opening a thread reads it (openCommentPopover clears the bit): one fewer
+  assert.equal(unreadCount(five.map((t): T => (t.tid === "t3" ? { ...t, unread: false } : t))), 4);
+  // a reply lands on a read thread (the kernel sets the bit): one more
+  assert.equal(unreadCount([...five, th("t6", true)]), 6);
+  // resolved, merged or deleted: it waits on nobody
+  assert.equal(unreadCount(five.map((t): T => (t.tid === "t2" ? { ...t, status: "resolved" } : t))), 4);
+  assert.equal(unreadCount(five.slice(1)), 4);
+  assert.equal(unreadCount([]), 0);
 });
 
 // ── copy ──────────────────────────────────────────────────────────────────────────────────────────
@@ -174,6 +185,6 @@ test("the controls speak the user's words", () => {
   assert.equal(MOVE_TITLE.nextComment, "Next comment");
   assert.equal(MOVE_TITLE.prevUnread, "Previous unread reply");
   assert.equal(MOVE_TITLE.nextUnread, "Next unread reply");
-  assert.equal(countTip(2), "2 replies unread off screen");
-  assert.equal(countTip(1), "1 reply unread off screen");
+  assert.equal(countTip(2), "2 replies unread", "the count is not about the screen, so neither is its tip");
+  assert.equal(countTip(1), "1 reply unread");
 });
