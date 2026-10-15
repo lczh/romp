@@ -180,10 +180,23 @@ let holdTurns = false; const held = [];
 // askLiveClear for the session (sent again with each once-a-minute repost of unchanged frames) is dropped at the wire, and counted
 let dropAskClear = false, askClearsDropped = 0;
 const isAskClear = (m) => { if (typeof m !== "string" || !/^\{"type": ?"askLiveClear"/.test(m)) return false; try { return JSON.parse(m).id === cfg.sid; } catch (e) { return false; } };
+// ROAD 10's classes (cfg.boot "hidden") stand on the page landing on the short session cfg.sid2, and render.ts adopts whichever
+// session's full frame reaches the page first, an order the kernel's push timing decides: a full for the long session that comes
+// first waits at the wire, with every frame behind it, until the short session's full has passed
+let landHold = cfg.boot === "hidden" ? [] : null;
+const sessionOf = (m) => { const k = typeof m === "string" && /^\{"type": ?"session"/.test(m) ? /"id": ?"([^"]+)"/.exec(m) : null; return k ? k[1] : null; };
 await page.routeWebSocket((u) => /[?&]app=chat(?:&|$)/.test(u.href), (ws) => {
   const server = ws.connectToServer();
   ws.onMessage((m) => server.send(m));
-  server.onMessage((m) => { if (dropAskClear && isAskClear(m)) askClearsDropped++; else if (holdTurns && typeof m === "string" && /^\{"type": ?"chatTurns"/.test(m)) held.push([ws, m]); else ws.send(m); });
+  const deliver = (m) => { if (dropAskClear && isAskClear(m)) askClearsDropped++; else if (holdTurns && typeof m === "string" && /^\{"type": ?"chatTurns"/.test(m)) held.push([ws, m]); else ws.send(m); };
+  server.onMessage((m) => {
+    if (landHold) {
+      const id = sessionOf(m);
+      if (id === cfg.sid2) { const q = landHold; landHold = null; deliver(m); q.forEach(deliver); return; }
+      if (id === cfg.sid || landHold.length) { landHold.push(m); return; }
+    }
+    deliver(m);
+  });
   server.onClose(() => ws.close()); ws.onClose(() => server.close());
 });
 const release = () => { holdTurns = false; for (const [w, m] of held.splice(0)) { try { w.send(m); } catch (e) { /* closed */ } } };
