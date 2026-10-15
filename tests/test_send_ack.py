@@ -394,8 +394,16 @@ class Round5(_SendFixture):
     """The review of #202 (2026-10-10): the boot never rewrites or retires a file it could not read, a last line short only
     of its newline is kept, and a withdrawal answered as gone leaves a line in the kernel log."""
 
+    def setUp(self):
+        super().setUp()
+        # ONE clock reading per test: these tests compare the file byte for byte with rows rendered again after the code
+        # under test ran, so a row stamped from the wall clock at each render differed by a second whenever a second
+        # boundary fell between the write and the comparison (CI, 2026-10-15). The time is not what they test; 60 s ago
+        # keeps every row inside the seven days the boot's compaction keeps.
+        self._t0 = int(time.time())
+
     def _row(self, q, ago=60):
-        return json.dumps({"qid": q, "sid": SID, "t": int(time.time()) - ago, "ok": True})
+        return json.dumps({"qid": q, "sid": SID, "t": self._t0 - ago, "ok": True})
 
     def _problems(self):
         ev = self.state / "session-events.jsonl"
