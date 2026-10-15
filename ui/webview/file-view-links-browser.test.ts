@@ -92,7 +92,7 @@ function chatHostBundle(): string {
   const end = RENDER.indexOf("}, true);", start) + "}, true);".length;
   assert.ok(start > 0 && end > start, "render.ts's document-level anchor opener");
   const lifted = RENDER.slice(start, end);
-  const prelude = 'import { selectionOpenIn } from "./path-links";\nimport { isMarkdownUrl } from "./md-links";\nimport { userContentTarget } from "./md-sanitize";\n'
+  const prelude = 'import { selectionOpenIn } from "./path-links";\nimport { isMarkdownUrl } from "./md-links";\nimport { userContentTarget } from "./md-sanitize";\nimport { revealAncestors } from "./md-sanitize";\n'
     + "const vscodeApi: { postMessage(m: unknown): void } | null = null;\n"
     + "(window as any).__urlViews = [];\nconst openUrlView = (href: string): void => { (window as any).__urlViews.push(href); };\n"
     // render.ts's attributed mover of #content; this page has no #content and the viewer's links sit outside a message body, so the fragment arm never reaches it
