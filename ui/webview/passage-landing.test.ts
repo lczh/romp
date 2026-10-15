@@ -44,7 +44,7 @@ test("every entry point that opens a thread lands its passage first, and the clu
 });
 
 test("the box opens beside the passage, and the open thread's quote is the way back to it", () => {
-  assert.match(fn("openBesidePassage"), /if \(pop && passage && passage\.isConnected\) \{ placeBesidePassage\(pop, tid, passage\); watchBeside\(tid\); \}/);
+  assert.match(fn("openBesidePassage"), /if \(pop && passage && passage\.isConnected\) \{ placeBesidePassage\(pop, tid, passage\); watchBeside\(tid\); passageShown = \{ sid, tid \}; \}/);
   assert.match(fn("placeBesidePassage"), /const to = \(nudge \? cmtPopNudge : cmtPopBeside\)\(r, at, window\.innerHeight\);/);
   assert.match(RENDER, /if \(th\) paintCmtLost\(pop, th\.tid\);/, "a full rebuild keeps the box's note");
   // both forms of the quote: the standalone block before the thread's events land, and the context on its opening message
@@ -83,15 +83,35 @@ test("every piece of a split highlight flashes", () => {
 test("the box steps off its passage only when the landing re-lands it there, the least that clears it, and never while the reader is in it", () => {
   // the review of #248: the box followed every scroll of the view (the follow mode under a session still writing), so it climbed a
   // line at a time, shrank at the window's top and jumped below the passage, with the reader hovering or typing in it
-  assert.match(fn("watchBeside"), /besideWatch = settle && !settle\.done \? \{ tid, since: commentPopPos, settle \} : null;/, "for as long as THAT landing settles");
+  assert.match(fn("watchBeside"), /besideWatch = settle && !settle\.done \? \{ tid, since: commentPopPos, settle, owed: false \} : null;/, "for as long as THAT landing settles");
   assert.match(fn("settleLand"), /if \(besideWatch && besideWatch\.settle === s\) besideFollow\(\);/, "the landing's own re-land, and nothing else");
   assert.doesNotMatch(RENDER, /new ResizeObserver\(\(\) => besideFollow\(\)\)/, "no layout change moves the box");
   assert.doesNotMatch(fn("writeScroll"), /besideFollow/, "no scroll of the view moves the box");
   const follow = fn("besideFollow");
   assert.match(follow, /if \(!pop \|\| !v \|\| pop\.dataset\.tid !== w\.tid \|\| commentPopPos !== w\.since\) \{ endBesideWatch\(\); return; \}/,
     "the box closed, another thread's, or moved by the user: the watch ends");
-  assert.match(follow, /if \(pop\.matches\(":hover"\) \|\| pop\.contains\(document\.activeElement\)\) return;/, "frozen under the pointer and while it holds the focus");
+  assert.match(follow, /if \(\(left !== "pointer" && pop\.matches\(":hover"\)\) \|\| \(left !== "focus" && pop\.contains\(document\.activeElement\)\)\) \{ w\.owed = true; return; \}/,
+    "frozen under the pointer and while it holds the focus, owing the step-off");
+  assert.match(fn("besideLeft"), /besideFollow\(e\.type === "focusout" \? "focus" : "pointer"\);/, "…paid when the pointer or the focus leaves the box");
+  assert.match(RENDER, /document\.addEventListener\("pointerout", besideLeft, true\);\s*\n\s*document\.addEventListener\("focusout", besideLeft, true\);/);
+  assert.match(RENDER, /if \(besideWatch && !besideWatch\.settle\.done\) besideFollow\(\);/, "any move of the view while the landing settles (its re-land, the browser's own)");
   assert.match(follow, /const at = m \? shownPassage\(m\) : null;\s*\n\s*if \(at\) placeBesidePassage\(pop, w\.tid, at, true\);/, "re-found, never revealed again, nudged");
   assert.match(fn("passageLanding"), /endBesideWatch\(\);/, "a new landing ends the last one's");
   assert.match(fn("closeCommentPop"), /endBesideWatch\(\);/, "and so does closing the box");
+});
+
+test("a landing on a comment's passage pauses follow mode until the reader is back at the bottom (the user 2026-10-15)", () => {
+  assert.match(fn("landOn"), /if \(c && v\) \{ v\.followHeld = !!mark; v\.stick = !mark && atBottom\(c\); \}/, "held off even at the bottom; any other landing lifts it");
+  assert.match(fn("appendActive"), /const stick = content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\) && !v\?\.followHeld;/, "the appends keep the reader's place");
+  assert.match(fn("liveStatusEl"), /if \(atEnd && !v\.followHeld\) writeScroll/, "and so does the foot line's first room");
+  // released by the reader: their gesture at the bottom, a writer of theirs (a key, the chips), their own send from the tail
+  assert.match(RENDER, /if \(gv\?\.followHeld && atBottom\(c\) && \(\(cls === "gesture" && gestureEvidence\(settleLastInput, Date\.now\(\), settleScrollerHeld\)\)\s*\n\s*\|\| \(cls === "write-echo" && \(writerIsReader\(lastScrollWriter\) \|\| lastScrollWriter === "optimistic-send"\)\)\)\) \{\s*\n\s*releaseFollow\(\); gv\.stick = true;/);
+  assert.match(RENDER, /releaseFollow\(\);\s+\/\/ a passage landing's pause ends here too, before the snap's echo is read\s*\n\s*writeScroll\(c, c\.scrollHeight, "jump-button", true\);/, "the go-to-bottom chip");
+});
+
+test("a fold the landing opened stays open across a rebuild of the passage's turn while its box is open", () => {
+  assert.match(fn("applyCommentMarks"), /keepPassageShown\(sid, v\);/);
+  assert.match(fn("keepPassageShown"), /if \(!k \|\| k\.sid !== sid \|\| !openCommentKey \|\| openCommentKey\.sid !== sid \|\| openCommentKey\.tid !== k\.tid\) return;/, "only while the thread's box is open");
+  assert.match(RENDER, /document\.addEventListener\("toggle", \(e\) => \{[\s\S]{0,300}?passageShown = null;\s*\n\}, true\);/, "a fold the reader closes stays closed");
+  assert.match(fn("closeCommentPop"), /passageShown = null;/);
 });

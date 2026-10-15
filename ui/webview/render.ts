@@ -1674,7 +1674,7 @@ let landTrail: string[] = [];
 // every event object; a pass edited events in place without swapping them).
 interface PaintOut { pe: number | null; mark: number | null }
 interface Painted { items: DisplayItem[]; sig: (string | undefined)[]; out: (PaintOut | undefined)[] }
-interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner)
+interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; followHeld?: boolean; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner). followHeld: follow mode paused by a landing on a comment's passage, at the bottom or not, until the reader goes back to the bottom (landOn, releaseFollow)
 const views = new Map<string, View>();
 
 // Pending pickers (AskUserQuestion / tool-permission) keyed by session id. These
@@ -4923,7 +4923,7 @@ function liveStatusEl(): HTMLElement | null {
   const n = el("div", "");
   n.id = "live-status";
   content.insertBefore(n, document.getElementById("live-ask"));
-  if (atEnd) writeScroll(content, content.scrollHeight, "live-status", true);
+  if (atEnd && !v.followHeld) writeScroll(content, content.scrollHeight, "live-status", true);   // not while a passage landing holds follow mode off
   return n;
 }
 
@@ -10999,7 +10999,7 @@ function closeCommentPop(): void {
   pendingCommentAnchor = null;
   cmtRedirect = null;
   cmtPopLost = null; cmtPopBesideAt = null;   // a landing's note and its spot beside the passage go with the box
-  endBesideWatch();                            // …and its watch on the passage
+  endBesideWatch(); passageShown = null;       // …and its watch on the passage, and the folds it kept open
 }
 
 // close on any press outside the popover (drafts persist in commentDrafts; reopening restores them).
@@ -11042,6 +11042,7 @@ function applyCommentMarks(sid: string): void {
     // openCommentPopover drops the unread flag and re-runs this pass.
     turn.classList.toggle("cmt-rail-unread", list.some((t) => !!t.unread && t.status === "open"));
   }
+  keepPassageShown(sid, v);                    // a fold a passage landing opened stays open across the rebuild (passageShown)
   paintCommentOutlines(sid);                   // the unread boxes follow the marks this pass just placed (or unwrapped)
   // the jump cluster MEASURES the marks (its unread badge counts those above/below the viewport) and the turns, so it
   // recounts after this pass has the highlights back in the DOM — the comments frame's and every rebuild's hook for it
@@ -11550,7 +11551,7 @@ function passageLanding(sid: string, tid: string): void {
   const th = (commentThreads.get(sid) || []).find((t) => t.tid === tid);
   if (!th || sid !== activeId) return;
   const uuid = th.anchorUuid;
-  endBesideWatch();                              // a new landing: the box no longer follows the last one's passage
+  endBesideWatch(); passageShown = null;         // a new landing: the box no longer follows the last one's passage, nor keeps its folds open
   pendingAnchorMark = { uuid, tid };
   passageGo = { sid, tid, uuid };
   flashedAnchor = null;                          // a fresh navigation: one flash, on the passage
@@ -11586,7 +11587,7 @@ function openBesidePassage(sid: string, tid: string, passage: HTMLElement | null
   if (prev && openCommentKey && openCommentKey.sid === sid && openCommentKey.tid === tid && prev.dataset.mode === "thread") paintCmtLost(prev, tid);   // its own quote was the click
   else openCommentPopover(sid, tid);
   const pop = document.getElementById("cmt-pop");
-  if (pop && passage && passage.isConnected) { placeBesidePassage(pop, tid, passage); watchBeside(tid); }
+  if (pop && passage && passage.isConnected) { placeBesidePassage(pop, tid, passage); watchBeside(tid); passageShown = { sid, tid }; }
 }
 /** The open box moved off its passage when it covers it (cmtPopBeside: below it, else above, else the roomier side at that
  *  side's height; `nudge`, the least move that clears it, cmtPopNudge); its left edge and width stay. The size set here is
@@ -11623,33 +11624,66 @@ function passageRect(passage: HTMLElement, tid: string): CmtPopRect | null {
 }
 /** The box's watch on its passage once a landing opened it beside it, for as long as that landing settles. The landing can
  *  move the passage AFTER the box is placed: a 26 px fork control joins the last reply under it, and the settle re-lands
- *  the passage higher, into where the box was (#248). Each re-land of THAT landing (settleLand) moves the box the least
- *  that clears the passage again, and only when they overlap (cmtPopNudge). Nothing else moves it: the view following a
+ *  the passage higher, into where the box was (#248). Each re-land of THAT landing (settleLand), and any other move of the
+ *  view while it settles (the scroll listener: the browser's own move as the reply grows), moves the box the least that
+ *  clears the passage again, and only when they overlap (cmtPopNudge). Nothing else moves it: the view following a
  *  session's new text, the reader's scroll, a layout change under it. Those moved the box a line at a time as text
  *  streamed in, shrinking it at the window's top and then throwing it below the passage (the review of #248). Frozen
- *  while the pointer is over the box or the box holds the focus (the reader is reading or typing in it). It ends with the
- *  settle, the box, a new landing, or the user's own move or resize of the box (commentPopPos replaced). */
-let besideWatch: { tid: string; since: { x: number; y: number } | null; settle: NonNullable<typeof landSettling> } | null = null;
+ *  while the pointer is over the box or the box holds the focus (the reader is reading or typing in it); a step-off owed
+ *  meanwhile is paid when the pointer leaves the box or the focus does (besideLeft), if the passage is still under it. Its
+ *  re-lands end with the settle; the watch itself ends with the box, a new landing, or the user's own move or resize of
+ *  the box (commentPopPos replaced). */
+let besideWatch: { tid: string; since: { x: number; y: number } | null; settle: NonNullable<typeof landSettling>; owed: boolean } | null = null;
 function watchBeside(tid: string): void {
   const settle = landSettling;
-  besideWatch = settle && !settle.done ? { tid, since: commentPopPos, settle } : null;
+  besideWatch = settle && !settle.done ? { tid, since: commentPopPos, settle, owed: false } : null;
 }
 function endBesideWatch(): void {
   besideWatch = null;
 }
 /** The landing re-landed its passage under the box it placed beside it (settleLand): the box steps off it. The passage is
  *  re-found (a rebuild may have replaced it) and never revealed again: a fold the reader closed since stays closed. */
-function besideFollow(): void {
+function besideFollow(left: "pointer" | "focus" | null = null): void {
   const w = besideWatch;
   if (!w) return;
   const pop = document.getElementById("cmt-pop");
   const v = activeId ? views.get(activeId) : null;
   if (!pop || !v || pop.dataset.tid !== w.tid || commentPopPos !== w.since) { endBesideWatch(); return; }
-  if (pop.matches(":hover") || pop.contains(document.activeElement)) return;   // the reader is in the box: it holds still
+  // the reader is in the box: it holds still, and owes the step-off until they leave it (`left`: the way they just did, which
+  // the element's own state may not show yet)
+  if ((left !== "pointer" && pop.matches(":hover")) || (left !== "focus" && pop.contains(document.activeElement))) { w.owed = true; return; }
+  w.owed = false;
   const m = v.el.querySelector(`mark.cmt-hl[data-tid="${cssEscape(w.tid)}"]`) as HTMLElement | null;
   const at = m ? shownPassage(m) : null;
   if (at) placeBesidePassage(pop, w.tid, at, true);
 }
+/** The thread whose passage a landing brought out of its message's folds, while its box is open: a rebuild of the passage's
+ *  turn puts a message's <details> back closed, and one came about a second after the landing (the served lab saw the fold
+ *  open, then shut under the reader, whenever the rebuild fell after the landing's settle). Every rebuild's marks pass
+ *  (applyCommentMarks) opens them again (keepPassageShown), the openFolds idea for a fold that has no key of its own. It
+ *  ends with the box, at a new landing, and when the reader closes such a fold themselves (the toggle listener). */
+let passageShown: { sid: string; tid: string } | null = null;
+function keepPassageShown(sid: string, v: View): void {
+  const k = passageShown;
+  if (!k || k.sid !== sid || !openCommentKey || openCommentKey.sid !== sid || openCommentKey.tid !== k.tid) return;
+  for (const p of Array.from(v.el.querySelectorAll(`mark.cmt-hl[data-tid="${cssEscape(k.tid)}"]`))) if ((p.textContent || "").trim()) revealAncestors(p);
+}
+document.addEventListener("toggle", (e) => {   // the reader closed a fold the passage sits in: it stays closed
+  const d = e.target as HTMLElement | null;
+  const k = passageShown;
+  if (k && d && d.localName === "details" && !(d as HTMLDetailsElement).open && d.querySelector(`mark.cmt-hl[data-tid="${cssEscape(k.tid)}"]`)) passageShown = null;
+}, true);
+/** The pointer or the focus left the box while it owed a step-off (besideFollow held it still): the passage is checked
+ *  again, and the box steps the least that clears it if it is still under it. Installed once, on the document. */
+function besideLeft(e: Event): void {
+  if (!besideWatch?.owed) return;
+  const pop = document.getElementById("cmt-pop");
+  const to = (e as PointerEvent | FocusEvent).relatedTarget as Node | null;
+  if (!pop || !(e.target instanceof Node) || !pop.contains(e.target) || (to && pop.contains(to))) return;   // a move inside the box
+  besideFollow(e.type === "focusout" ? "focus" : "pointer");
+}
+document.addEventListener("pointerout", besideLeft, true);
+document.addEventListener("focusout", besideLeft, true);
 /** What a landing on thread `tid`'s passage aligns on, in `target`'s turn: its highlight's first piece (threadMarkIn), the
  *  highlight first brought out of every closed fold of its message that hides ANY of its pieces (revealAncestors: a
  *  <details> the message folds it in; a passage that runs on into a second fold kept its tail hidden when only the first
@@ -13950,7 +13984,12 @@ function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | 
   land("land-on");
   // a landing is the reader's intent to be AT this message: follow mode ends unless the landing put them at the bottom
   // (the follow-mode snap otherwise writes them back to the bottom on the next shrink, the T386 double click)
-  { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) v.stick = atBottom(c); }
+  // A landing on a comment thread's PASSAGE (`mark`: the tick, the tinted rail line, the open thread's quote, the jump arrows)
+  // pauses follow mode even there (the user 2026-10-15): the reader came to read that passage beside its thread, and a session
+  // still writing scrolled it up under the box and away. The pause is the view's own follow flag held off (followHeld): the
+  // appends keep the reader's place, the go-to-bottom chip shows once new text is below, and going back to the bottom
+  // resumes following as ever (releaseFollow). Any other landing lifts it
+  { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) { v.followHeld = !!mark; v.stick = !mark && atBottom(c); } }
   if (flashKey == null || flashKey !== flashedAnchor) {   // one flash per navigation (see flashedAnchor)
     if (flashKey != null) flashedAnchor = flashKey;
     // the ALIGNED element flashes: the turn may sit above the viewport when the words are aligned (round one, low 2). A comment
@@ -16434,7 +16473,8 @@ function appendActive() {
   // append that crosses the overflow boundary yanked the view. Overflowing + genuinely at the
   // bottom keeps the existing stick; scrolled-up keeps its never-yank rule.
   // follow mode: the TRUE bottom (T262c), never the send band
-  const stick = content.scrollHeight > content.clientHeight + 2 && atBottom(content);
+  // …and never while a passage landing holds follow mode off (followHeld): the reader keeps their place
+  const stick = content.scrollHeight > content.clientHeight + 2 && atBottom(content) && !v?.followHeld;
   const before = content.scrollTop;
   const heightBefore = content.scrollHeight;
   const distBefore = heightBefore - before - content.clientHeight;
@@ -16492,6 +16532,13 @@ if (typeof ResizeObserver === "function") {
 const jcChevron = (up: boolean): string => '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"'
   + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="'
   + (up ? "6 14.5 12 8.5 18 14.5" : "6 9.5 12 15.5 18 9.5") + '"/></svg>';
+/** End a passage landing's pause on follow mode (landOn's followHeld): the reader is back at the bottom, by their own scroll,
+ *  the go-to-bottom chip or their own send from the tail (the scroll listener), and the chat follows new text again exactly
+ *  as before. */
+function releaseFollow(): void {
+  const v = activeId ? views.get(activeId) : null;
+  if (v) v.followHeld = false;
+}
 const jumpBtn = document.createElement("button");
 jumpBtn.id = "jump-bottom";
 jumpBtn.setAttribute("aria-label", "go to bottom");
@@ -16514,6 +16561,7 @@ function updateJumpBtn(): void {
 jumpBtn.onclick = () => {
   const c = document.getElementById("content");
   if (!c) return;
+  releaseFollow();                                    // a passage landing's pause ends here too, before the snap's echo is read
   writeScroll(c, c.scrollHeight, "jump-button", true);   // the snap IS the acknowledgment
   const v = activeId ? views.get(activeId) : undefined;
   if (v) { v.stick = true; v.scrollTop = c.scrollTop; }   // the explicit re-entry into follow mode
@@ -16846,6 +16894,18 @@ window.addEventListener("keydown", (e) => {
     lastKnownSh = c.scrollHeight;   // sh/ch: a clamp reads top == sh - ch after sh dropped (T262e)
     if (gv) gv.echoOf = cls === "write-echo" ? lastScrollWriter : undefined;   // …and whose write this event echoes (the re-window skips its own)
     if (cls === "gesture" && gv && activeId) askGapsInView(activeId, gv, c);   // a reader's move over a gap in view: the page under them (2026-10-01)
+    // a passage landing's pause on follow mode (followHeld, which keeps followReader's flag off) ends when the READER is back at
+    // the bottom: their gesture (with their input behind it, the settle's own evidence), a writer the census calls theirs (a
+    // key, the chips) or their own send revealing itself from the tail. The landing's writes, the appends and the browser's
+    // own moves never end it
+    if (gv?.followHeld && atBottom(c) && ((cls === "gesture" && gestureEvidence(settleLastInput, Date.now(), settleScrollerHeld))
+                                           || (cls === "write-echo" && (writerIsReader(lastScrollWriter) || lastScrollWriter === "optimistic-send")))) {
+      releaseFollow(); gv.stick = true;
+    }
+    // …and while a passage landing settles, ANY move of the view (its re-land, or the browser's own move as the reply under the
+    // passage grows) can carry the passage under the box that landing opened: the box steps off it (besideWatch). A reader's
+    // own scroll has already ended the settle above, so it never moves the box
+    if (besideWatch && !besideWatch.settle.done) besideFollow();
   }, { passive: true });
 }
 // The live-ask host (#live-ask) sits INSIDE #content after the threads: the picker card is the transcript's tail

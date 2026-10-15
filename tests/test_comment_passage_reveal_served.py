@@ -10,7 +10,9 @@ And the review of that fix: the box followed every scroll of the view, so with t
 at a time as the view followed the new text, shrank at the window's top and then jumped below the passage, while the
 reader was hovering or typing in it; and a passage running from one closed fold into the next opened only the first.
 The box now moves only when the LANDING re-lands its passage into it (the late fork control above), the least that clears
-it, and never while the pointer is over it or it holds the focus; and every fold any piece of the passage sits in opens.
+it, and never while the pointer is over it or it holds the focus (it steps off once they leave); and every fold any piece
+of the passage sits in opens. And a landing on a passage pauses follow mode (the user 2026-10-15): with the session still
+writing, the passage and its box stay where the reader is looking, uncovered, and scrolling back to the bottom resumes it.
 
 A hermetic kernel serves a synthetic chat (the notes-api demo world, session web): 150 exchanges of fourteen-paragraph
 replies, so the page renders only the tail of what it holds. Four threads: reply 149's final paragraph, a passage in a closed
@@ -211,8 +213,16 @@ const markNow = (tid) => page.evaluate((tid) => { let u = null;
 const scrollNow = () => page.evaluate(() => document.getElementById("content").scrollTop);
 // the last reply grows under the passage while the landing settles, the way the late fork control grows it: the landing
 // re-lands the passage higher, into where the box was
+// (measured in the same task as the growth, so the step stays inside the landing's settle, which re-lands it)
 const growTail = (px) => page.evaluate(([u, px]) => { const t = document.querySelector(`#content .turn[data-uuid="${u}"]`);
-  const d = document.createElement("div"); d.className = "fx-grow"; d.style.height = px + "px"; t.appendChild(d); }, [R(149), px]);
+  const p = document.getElementById("cmt-pop"), pr = p ? p.getBoundingClientRect() : null;
+  let m = null;
+  for (const x of Array.from(document.querySelectorAll('#content mark.cmt-hl[data-tid="tid-end"]'))) for (const q of Array.from(x.getClientRects()))
+    m = m ? { t: Math.min(m.t, q.top), b: Math.max(m.b, q.bottom), l: Math.min(m.l, q.left), r: Math.max(m.r, q.right) } : { t: q.top, b: q.bottom, l: q.left, r: q.right };
+  const d = document.createElement("div"); d.className = "fx-grow"; d.style.height = px + "px"; t.appendChild(d);
+  return { box: pr && { t: Math.round(pr.top), b: Math.round(pr.bottom), l: Math.round(pr.left), r: Math.round(pr.right) },
+           mark: m && { t: Math.round(m.t), b: Math.round(m.b), l: Math.round(m.l), r: Math.round(m.r) },
+           focused: !!document.activeElement?.closest("#cmt-pop"), hovered: !!p && p.matches(":hover") }; }, [R(149), px]);
 const ungrow = () => page.evaluate(() => { for (const d of Array.from(document.querySelectorAll("#content .fx-grow"))) d.remove(); });
 const landEnd = async () => {
   await fresh();
@@ -222,42 +232,62 @@ const landEnd = async () => {
 
 // 6. the pointer over the box: the passage moves into it, and the box stays where it is
 await landEnd();
-{ const pb = await page.locator("#cmt-pop").boundingBox(); await page.mouse.move(pb.x + pb.width / 2, pb.y + 30); }
-out.hover0 = { box: await boxNow(), mark: await markNow("tid-end") };
-await growTail(40);
+await page.mouse.move(640, 250);   // inside the box, which the landing puts above the passage (asserted: hovered)
+out.hover0 = await growTail(40);
 await page.waitForTimeout(800);
 out.hover1 = { box: await boxNow(), mark: await markNow("tid-end") };
-await page.mouse.move(150, 650);
+await page.mouse.move(150, 650);   // the pointer leaves the box: the step-off it owed is paid now
+await page.waitForTimeout(200);
+out.hover2 = { box: await boxNow(), mark: await markNow("tid-end") };
 await ungrow();
 
 // 7. typing in the box, the pointer elsewhere: the same
 await landEnd();
 await page.mouse.move(150, 650);
 await page.evaluate(() => document.querySelector("#cmt-pop .cmt-input")?.focus());
-await page.keyboard.type("why two");
-out.type0 = { box: await boxNow(), mark: await markNow("tid-end"), focused: await page.evaluate(() => !!document.activeElement?.closest("#cmt-pop")) };
-await growTail(40);
+await page.keyboard.type("why");
+out.type0 = await growTail(40);
 await page.waitForTimeout(800);
 out.type1 = { box: await boxNow(), mark: await markNow("tid-end") };
-await page.evaluate(() => { const i = document.querySelector("#cmt-pop .cmt-input"); if (i) { i.value = ""; i.dispatchEvent(new Event("input", { bubbles: true })); i.blur(); } });
+await page.evaluate(() => { document.querySelector("#cmt-pop .cmt-input")?.blur(); });
+await page.waitForTimeout(200);   // the focus left the box: the step-off it owed is paid now
+out.type2 = { box: await boxNow(), mark: await markNow("tid-end") };
+await page.evaluate(() => { const i = document.querySelector("#cmt-pop .cmt-input"); if (i) { i.value = ""; i.dispatchEvent(new Event("input", { bubbles: true })); } });
 await ungrow();
 
-// 8. the session goes on writing: replies stream in under the last one, the view follows them, and the box stays put
-await landEnd();
-await page.mouse.move(150, 650);
-await page.waitForTimeout(1600);   // the landing settled
-out.stream0 = { box: await boxNow(), mark: await markNow("tid-end"), st: await scrollNow() };
-out.stream = [];
-let prev = R(149);
-for (let i = 0; i < 4; i++) {   // loop-ok: four replies, each waited on its own turn reaching the page
-  const u = cfg.streamUuid.replace("%012d", String(i).padStart(12, "0"));
+// 8. the session goes on writing: replies stream in under the last one from the moment the box opens. The landing paused
+// follow mode, so the view keeps its place: the passage stays clear of the box throughout and, once the landing settled, the
+// passage and the box hold still; the go-to-bottom chip shows the text below
+const atBottomNow = () => page.evaluate(() => { const c = document.getElementById("content"); return c.scrollHeight - c.scrollTop - c.clientHeight <= 2; });
+const chipNow = () => page.evaluate(() => { const b = document.getElementById("jump-bottom"); return !!b && !b.hidden; });
+let prev = R(149), nStream = 0;
+const streamOne = async () => {
+  const u = cfg.streamUuid.replace("%012d", String(nStream++).padStart(12, "0"));
   fs.appendFileSync(cfg.transcript, JSON.stringify({ type: "assistant", uuid: u, parentUuid: prev, timestamp: new Date().toISOString(), sessionId: cfg.sid,
-    message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "Streaming note " + i + ": the writer flushes the next page of rows to the download, and the reader keeps pulling." }] } }) + "\n");
+    message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "Streaming note " + nStream + ": the writer flushes the next page of rows to the download, and the reader keeps pulling." }] } }) + "\n");
   prev = u;
   await page.waitForSelector(`#content .turn[data-uuid="${u}"]`, { state: "attached", timeout: 10000 }).catch(() => {});
-  await page.waitForTimeout(300);
-  out.stream.push({ box: await boxNow(), mark: await markNow("tid-end"), st: await scrollNow(), arrived: await page.evaluate((u) => !!document.querySelector(`#content .turn[data-uuid="${u}"]`), u) });
+  return u;
+};
+await landEnd();
+const t0 = Date.now();
+await page.mouse.move(150, 650);
+out.stream = [];
+for (let i = 0; i < 8; i++) {   // loop-ok: eight replies, each waited on its own turn reaching the page
+  const u = await streamOne();
+  await page.waitForTimeout(150);
+  out.stream.push({ t: Date.now() - t0, box: await boxNow(), mark: await markNow("tid-end"), st: await scrollNow(), chip: await chipNow(),
+                    arrived: await page.evaluate((u) => !!document.querySelector(`#content .turn[data-uuid="${u}"]`), u) });
 }
+
+// 9. the reader scrolls back to the bottom with the wheel: following resumes, the next reply is followed
+await page.mouse.move(150, 400);
+for (let i = 0; i < 12; i++) { await page.mouse.wheel(0, 600); await page.waitForTimeout(100); }   // loop-ok: a reader wheeling down to the end
+await page.waitForTimeout(300);
+out.resume0 = { st: await scrollNow(), bottom: await atBottomNow(), chip: await chipNow() };
+await streamOne();
+await page.waitForTimeout(400);
+out.resume1 = { st: await scrollNow(), bottom: await atBottomNow(), chip: await chipNow() };
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -429,21 +459,35 @@ class ServedCommentPassageReveal(unittest.TestCase):
         self.assertTrue(r["two"]["fold"]["open"], "the first fold opened: %r" % r["two"])
         self.assertTrue(r["twoB"]["open"], "the second fold opened too, not only the first piece's: %r" % r["twoB"])
         self._beside(r["two"], "tid-two", "a passage across two folds")
-        # 6, 7. the passage moves into the box while the pointer is over it, or while the reader types in it: the box holds still
+        # 6, 7. the passage moves into the box while the pointer is over it, or while the reader types in it: the box holds still,
+        # and steps off the passage once the pointer or the focus leaves it
         for name, why in (("hover", "the pointer over the box"), ("type", "typing in the box")):
-            a, b = r[name + "0"], r[name + "1"]
+            a, b, c = r[name + "0"], r[name + "1"], r[name + "2"]
             if name == "type":
                 self.assertTrue(a["focused"], "the box holds the focus: %r" % a)
+            else:
+                self.assertTrue(a["hovered"], "the pointer is over the box: %r" % a)
             self.assertIsNotNone(a["box"], "%s: the box is open: %r" % (why, a))
             self.assertLessEqual(b["mark"]["t"], a["mark"]["t"] - 30, "%s: the landing re-landed the passage higher (a move the box would follow): %r -> %r" % (why, a, b))
             self.assertEqual(b["box"], a["box"], "%s: the box did not move: %r -> %r" % (why, a["box"], b["box"]))
-        # 8. a session still writing: replies stream in, the view follows them, and the box stays exactly where the landing put it
-        s0, st = r["stream0"], r["stream"]
+            self.assertTrue(self._clear(c["mark"], c["box"]), "%s, then left: the box stepped off the passage: %r" % (why, c))
+        # 8. a session still writing, from the moment the box opened: the passage is never under the box, and once the landing
+        # settled the passage and the box hold still (follow mode paused) while the go-to-bottom chip shows the text below
+        st = r["stream"]
         self.assertTrue(all(x["arrived"] for x in st), "the streamed replies reached the page: %r" % st)
-        self.assertTrue(self._clear(s0["mark"], s0["box"]), "the landing left the passage clear of the box: %r" % s0)
-        self.assertGreater(st[-1]["st"], s0["st"], "the view followed the new text: %r -> %r" % (s0, st))
         for x in st:
-            self.assertEqual(x["box"], s0["box"], "the box did not move as text streamed in: %r, then %r" % (s0["box"], [y["box"] for y in st]))
+            self.assertTrue(self._clear(x["mark"], x["box"]), "the passage stays uncovered as text streams in: %r" % x)
+        settled = [x for x in st if x["t"] > 1700]
+        self.assertGreaterEqual(len(settled), 2, "replies streamed in after the landing settled: %r" % st)
+        for x in settled:
+            self.assertEqual((x["mark"], x["box"], x["st"]), (settled[0]["mark"], settled[0]["box"], settled[0]["st"]),
+                             "the passage, the box and the view hold still as text streams in: %r" % settled)
+        self.assertTrue(st[-1]["chip"], "the go-to-bottom chip shows the new text below: %r" % st[-1])
+        # 9. scrolling back to the bottom resumes following
+        self.assertTrue(r["resume0"]["bottom"], "the reader wheeled back to the bottom: %r" % r["resume0"])
+        self.assertTrue(r["resume1"]["bottom"], "the next reply was followed, the view at the bottom: %r" % r["resume1"])
+        self.assertGreater(r["resume1"]["st"], r["resume0"]["st"], "the view moved down with it: %r" % r)
+        self.assertFalse(r["resume1"]["chip"], "no chip at the bottom: %r" % r["resume1"])
 
 if __name__ == "__main__":
     unittest.main()
