@@ -9902,13 +9902,14 @@ def _notify_session_effective(sid):
     return _notify_all_on() if v is None else v
 
 
-def _notify_card_effective(cards, item_id, sid):
+def _notify_card_effective(cards, item_id, sid, raw=None):
     """One card's effective arming — card override > session override > master. `cards` is passed in
     so the two per-build callers (build_feed's stamp loop, _feed_notifications' gate) resolve every
-    card against ONE read of the store."""
+    card against ONE read of the store; `raw`, when given, reads the session's own flag in place of
+    _session_flag_raw (build_feed's fold: one read per session per build, _feed_bell_reader)."""
     v = cards.get(item_id)
     if v is None:
-        v = _session_flag_raw(sid, "notify")
+        v = _session_flag_raw(sid, "notify") if raw is None else raw(sid)
     return bool(cards.get(NOTIFY_ALL_KEY)) if v is None else bool(v)
 
 
@@ -50087,10 +50088,11 @@ def _state_unknown_names(alive, live_map, working, awaiting):
 # inputs moved. Invalidation is event-based on the inputs alone: no clock rides the key. The clock-derived field
 # (each card's age tint, trgb) leaves the memoized entry and is stamped per build by the fold (_feed_fold_card),
 # and the two booleans the clock decides (_interrupting's stamp window, _closer_pending's settle gap) are computed
-# in the key, so a crossing moves the key and nothing else does. Entries are JSON strings: a hit decodes fresh
-# objects, so the post-loop passes that mutate cards (the serving-fold join, the notify pass) never touch a
-# memoized object. Cross-session sections (stateUnknown, the serving-fold commit, parked handoffs, the notices)
-# recompose per build from the per-session results and are never memoized across sessions.
+# in the key, so a crossing moves the key and nothing else does. Entries are JSON strings, decoded only when the string
+# changed: the fold keeps what it made of each string (_FEED_FOLD, beside _feed_fold_card), and nothing after the fold
+# writes a card it handed out (the serving-fold join copies before it writes, and the fold stamps the bell). Cross-session
+# sections (stateUnknown, the serving-fold commit, parked handoffs, the notices) recompose per build from the
+# per-session results and are never memoized across sessions.
 _FEED_MEMO_LABELS = ("transcript", "parse", "cut", "states", "names", "captions", "store", "anchors", "reg",
                      "cleared", "row", "ask", "live", "bg", "wait", "postal", "stalls", "nudge", "jauth", "jactive",
                      "hide", "watch", "subagents", "usage", "offer", "auth", "downtime", "debug", "interrupting",
@@ -50282,6 +50284,10 @@ def _feed_memo_report():
         out["entries"] = len(_feed_memo)
         out["bound"] = FEED_MEMO_BYTES
         out["failing"] = len(_FEED_DERIVE_FAILED)   # sessions whose LAST derivation raised (a standing fault, not history)
+        out.update(_FEED_FOLD_STATS)              # the fold's kept / re-stamped / fresh cards and its decodes (2026-10-15)
+    with _WIRE_STATS_LOCK:                        # ...and the wire's per-entry pass over the feed's cards: encoded, or the
+        enc, kept = _delta_entry_stats.get("feed", (0, 0))   # previous split's string served for the same object
+    out["wireEncoded"], out["wireReused"] = enc, kept
     out.update(_feed_seg_report())                # the card anchor walk's held aggregates (2026-10-06): the seg* keys
     return out
 
@@ -50477,7 +50483,8 @@ def _feed_session_key(s, tm, ctx, prev_entry):
     per-session facts the body needs and this function already computed are handed over in `ctx` (`ps`,
     `who_working`, `interrupting`, `store`, `closer`, `hide`, `leaf_ok`, `leaf_head`), so a build reads each once, hit
     or miss, and their side effects (the live merge's prune/settle, the interrupt stamp's pop, the snapshot punch) run
-    every build as they did before the memo. `prev_entry` is the session's previous decoded entry (None when cold): its `peers` and
+    every build as they did before the memo. `prev_entry` is the session's previous decoded entry without its card lists (None
+    when cold; the fold keeps it, _FEED_FOLD, so a hit decodes nothing): its `peers` and
     `reads` records drive the dependency components (_FEED_MEMO_DEPS), which _feed_key_with_deps re-evaluates over the NEW entry
     after a derivation (the chat build's deps idiom), so a cold entry hits on the next unchanged build. `ctx["prev_key"]`
     is the key that entry was memoized under (None when cold), set per session by build_feed's loop beside `prev_entry`:
@@ -52195,33 +52202,185 @@ def _feed_session_entry(s, ctx):
             "faults": _SUMMARY_ANCHOR_STATS["fault"] - _faults0}
 
 
-def _feed_fold_card(card, now, cmap):
-    """Stamp the clock-derived fields onto one card from a memoized entry, per build: `trgb` from its `_ageT` (the
-    epoch the tint is computed from; popped) on the build's colormap, and `t := now` for a placeholder whose time
-    IS the clock (`_ageT` None); the same for every row of its tree. The card is the fold's own object (a fresh
-    decode of the entry), never the memoized string."""
-    age_t = card.pop("_ageT", None)
-    if age_t is None:
+# THE FOLD KEEPS ITS CARDS (2026-10-15). The memo above saves each session's DERIVATION, but every build still decoded
+# every session's entry string, stamped a fresh tint on every card and tree row, and handed the push a new object per
+# card, so the wire's per-entry pass (_delta_split, which serves an entry's string by object identity) encoded every card
+# again: a build's cost followed the number of cards on the board, not what changed. The fold now keeps, per session, the
+# entry string it folded and the cards it handed out, each beside its STAMP: the values the fold wrote on it (the card's
+# tint, every row's tint, the clock a placeholder is dated by, the bell pair). A build over the same string recomputes
+# each card's stamp and hands out the SAME object when the stamp is equal, so the wire serves its string; a card whose
+# stamp moved is re-stamped onto a copy (the card dict, its tree list and the rows whose tint moved; everything below them
+# is shared, and nothing writes it); only a string that changed is decoded. The stamp is made of the output's own values,
+# so a kept card is the card a fresh fold makes, byte for byte (tests/test_feed_fold_reuse.py builds a board both ways).
+# What it rests on, the premise the wire's identity memo already states: nothing writes a card after the fold hands it
+# out. The two passes that did are copy-on-write now: the serving-fold join copies the tracker card, its tree and the row
+# it extends, and a serving card that lands on the board as its own card is copied before the bell pass stamps it; a
+# session card's bell is stamped by the fold itself, as part of its stamp. Records are replaced whole and never written
+# after they are published, so the pusher's build and a page's GET build can share them.
+_FEED_FOLD = {}   # sid -> (entry_json, deps, cards, folds): deps the decoded entry without its card lists (what the key
+#                   reads: reads, peers), or None for a muted session's null; cards ((tints, stamp, card), ...) for its
+#                   `asks`; folds ((tints, stamp, fold), ...) for its `servingFolds`. Under _feed_memo_lock for the dict
+#                   ops; a record is kept while its sid is alive AND holds a memo entry (_feed_fold_forget), so the
+#                   memo's byte bound still decides which sessions' strings stay resident.
+_FEED_FOLD_STATS = {"foldKept": 0, "foldStamped": 0, "foldFresh": 0, "foldDecodes": 0}   # /perf builds.feed.memo
+
+
+def _feed_fold_tints(card):
+    """One decoded card's clock inputs, before the fold pops them: its `_ageT` (None: a placeholder the build's clock
+    dates) and each tree row's `_ageT`."""
+    return card.get("_ageT"), tuple(r.get("_ageT") for r in card.get("tree") or [])
+
+
+def _feed_bell_reader():
+    """A build's reader of each session's own bell (_session_flag_raw), reading it once per session: the fold stamps a
+    bell pair on every card every build, and the flag read is a stat of the flags file, twice per card before."""
+    seen = {}
+
+    def raw(sid):
+        if sid not in seen:
+            seen[sid] = _session_flag_raw(sid, "notify")
+        return seen[sid]
+    return raw
+
+
+def _feed_fold_bell(card, ncards, raw):
+    """The bell pair the board stamps on a card (the notify pass's two fields): the effective arming, True or None, and
+    the override alone, the session's flag read through the build's reader `raw`. Values are True, False or None
+    only, so equal pairs are equal bytes."""
+    sid = str(card.get("sid") or "")
+    return (True if _notify_card_effective(ncards, card["itemId"], sid, raw) else None,
+            _push_explicit_bell(sid, card["itemId"], ncards, raw))
+
+
+def _feed_fold_stamp(tints, now, cmap, bell):
+    """What the fold writes on one card this build, as values: the clock a placeholder is dated by (typed, so 5 and 5.0
+    are two stamps, as they are two encodings), the card's tint, each row's tint, and the bell pair (None for a
+    serving-fold card, which the bell pass stamps after the join). Equal stamps over the same decoded card are equal
+    folded cards. The tints are computed exactly as the fold always computed them."""
+    age_t, rows = tints
+    return ((type(now), now) if age_t is None else None,
+            cm.age_rgb(now - (now if age_t is None else age_t), cmap),
+            tuple(cm.age_rgb(now - (rt if rt is not None else now), cmap) for rt in rows),
+            bell)
+
+
+def _feed_fold_card(card, stamp, now):
+    """Stamp the clock-derived fields onto one card freshly decoded from a memoized entry: `_ageT` popped (the epoch the
+    tint is computed from), `t := now` for a placeholder whose time IS the clock, `trgb` from the stamp; the same for
+    every row of its tree; then the bell pair, when the stamp carries one. The card is the fold's own object, never the
+    memoized string."""
+    card.pop("_ageT", None)
+    if stamp[0] is not None:
         card["t"] = now                              # a placeholder with no turn to date it: the build's clock, as before
-        age_t = now
-    card["trgb"] = list(cm.age_rgb(now - age_t, cmap))
-    for r in card.get("tree") or []:
-        rt = r.pop("_ageT", None)
-        r["trgb"] = list(cm.age_rgb(now - (rt if rt is not None else now), cmap))
+    card["trgb"] = list(stamp[1])
+    for r, rgb in zip(card.get("tree") or [], stamp[2]):
+        r.pop("_ageT", None)
+        r["trgb"] = list(rgb)
+    if stamp[3] is not None:
+        card["notify"], card["notifyRaw"] = stamp[3]
     return card
 
 
-def _feed_fold_entry(entry, now, cmap, name, asks, working, awaiting, bg_services, serving_folds):
-    """Fold one session's entry (a fresh decode of its memoized JSON, or the derivation just made) into the build's
-    cross-session accumulators, in the session's place in `alive` order: its cards onto `asks` (tinted for this
-    build), its serving-fold candidates, its dot names, its service chip under `name`. Returns (heal, hidden, cold)
-    for the caller's totals. None (a muted session) folds nothing."""
+def _feed_fold_restamp(card, old, new, now):
+    """A card the fold made on an earlier build, with this build's stamp: a copy of the card dict carrying the new values
+    in the keys the first fold wrote (so in the same places), its tree list copied when a row's tint moved and each such
+    row copied; rows whose tint stands and every value below are shared with the earlier card, which stays as it was."""
+    c = dict(card)
+    if new[0] is not None:
+        c["t"] = now
+    c["trgb"] = list(new[1])
+    if new[2] != old[2]:
+        tree = list(c["tree"])
+        for i, (a, b) in enumerate(zip(old[2], new[2])):
+            if a != b:
+                r = dict(tree[i])
+                r["trgb"] = list(b)
+                tree[i] = r
+        c["tree"] = tree
+    if new[3] is not None:
+        c["notify"], c["notifyRaw"] = new[3]
+    return c
+
+
+def _feed_fold_kept(sid, entry_json):
+    """The fold's record for sid when it was made from this very string (the same object, or an equal string: a
+    derivation that produced the same entry), else None."""
+    with _feed_memo_lock:
+        rec = _FEED_FOLD.get(sid)
+    if rec is not None and (rec[0] is entry_json or rec[0] == entry_json):
+        return rec
+    return None
+
+
+def _feed_fold_forget():
+    """Drop the records of sessions that hold no memo entry, after every build's _feed_memo_forget: a departed session, or
+    one the memo's byte bound shed or dropped, so the record never keeps alive a string the memo let go."""
+    with _feed_memo_lock:
+        for k in [k for k in _FEED_FOLD if k not in _feed_memo]:
+            del _FEED_FOLD[k]
+
+
+def _feed_fold_session(sid, entry_json, dec, now, cmap, bells, name, asks, working, awaiting, bg_services, serving_folds,
+                       tally):
+    """Fold one session's entry string into the build's cross-session accumulators, in the session's place in `alive`
+    order: its cards onto `asks` (tinted and belled for this build), its serving-fold candidates, its dot names, its
+    service chip under `name`. Returns (heal, hidden, cold) for the caller's totals; a muted session's null folds nothing.
+    `dec` is a decode of `entry_json` the caller already made and nothing has written, or None. Kept cards are handed
+    out as the same objects (THE FOLD KEEPS ITS CARDS, above); `bells` is the build's (bells store, flag reader) pair;
+    `tally` counts kept, re-stamped and freshly folded cards and the decodes."""
+    ncards, raw = bells
+    rec = _feed_fold_kept(sid, entry_json)
+    if rec is None:
+        if dec is None:
+            dec = json.loads(entry_json)
+        tally["foldDecodes"] += 1
+        deps = None if dec is None else {k: v for k, v in dec.items() if k not in ("asks", "servingFolds")}
+        cards, folds = [], []
+        if dec is not None:
+            for c in dec.get("asks") or []:
+                tints = _feed_fold_tints(c)
+                st = _feed_fold_stamp(tints, now, cmap, _feed_fold_bell(c, ncards, raw))
+                cards.append((tints, st, _feed_fold_card(c, st, now)))
+            for f in dec.get("servingFolds") or []:
+                tints = _feed_fold_tints(f["card"])
+                st = _feed_fold_stamp(tints, now, cmap, None)
+                _feed_fold_card(f["card"], st, now)
+                folds.append((tints, st, f))
+        tally["foldFresh"] += len(cards) + len(folds)
+        rec = (entry_json, deps, tuple(cards), tuple(folds))
+        changed = True
+    else:
+        deps = rec[1]
+        cards, folds, changed = [], [], rec[0] is not entry_json   # an equal string: re-keyed to the one the memo holds
+        for tints, st0, c in rec[2]:
+            st = _feed_fold_stamp(tints, now, cmap, _feed_fold_bell(c, ncards, raw))
+            if st != st0:
+                c = _feed_fold_restamp(c, st0, st, now)
+                changed = True
+                tally["foldStamped"] += 1
+            else:
+                tally["foldKept"] += 1
+            cards.append((tints, st, c))
+        for tints, st0, f in rec[3]:
+            st = _feed_fold_stamp(tints, now, cmap, None)
+            if st != st0:
+                f = dict(f, card=_feed_fold_restamp(f["card"], st0, st, now))
+                changed = True
+                tally["foldStamped"] += 1
+            else:
+                tally["foldKept"] += 1
+            folds.append((tints, st, f))
+        if changed:
+            rec = (entry_json, deps, tuple(cards), tuple(folds))
+    if changed:
+        with _feed_memo_lock:
+            _FEED_FOLD[sid] = rec
+    entry = deps                                     # the entry's fields beside its cards
     if entry is None:
         return 0, 0, False
-    for c in entry.get("asks") or []:
-        asks.append(_feed_fold_card(c, now, cmap))
-    for f in entry.get("servingFolds") or []:
-        _feed_fold_card(f["card"], now, cmap)
+    for _t, _s, c in rec[2]:
+        asks.append(c)
+    for _t, _s, f in rec[3]:
         serving_folds.append(f)
     if entry.get("working"):
         working.append(entry["working"])
@@ -52277,6 +52436,9 @@ def build_feed(now, live_map=None):
     _jactive = {r.get("fsid") for r in jd.active_runs()}   # judge calls in flight NOW → the Analyzing… prong
     cold_parse = False                               # any living session not yet parsed → warm it in the background
     cmap = _colormap()                               # the age tint's colormap, once per build: the FOLD's input (never the memo's)
+    _ncards = _notify_cards()                        # the bells, read once per build: the fold stamps each session card's pair
+    _bells = (_ncards, _feed_bell_reader())          # ...with each session's own flag read once per build
+    _fold_tally = {k: 0 for k in _FEED_FOLD_STATS}   # this build's kept / re-stamped / fresh cards and decodes, added once
     ctx = {"now": now, "live_map": live_map, "cleared": cleared, "dbg_rows": dbg_rows, "wmap": wmap,
            "stalls": _stalls, "jauth_map": _jauth_map, "jactive": _jactive}
     _feed_seg_build_begin()                          # past the bound, the held anchor aggregates this build's derivations have
@@ -52288,7 +52450,7 @@ def build_feed(now, live_map=None):
         fsid = s["sid"]
         tm = live_map.get(fsid)
         ent = _feed_memo_get(fsid)
-        prev = None
+        prev = dec = js = None
         # CONTAINMENT (2026-09-17): one session's card build raising used to propagate out of build_feed; the pusher's
         # catch swallowed it, no counter moved, and every client kept the LAST successful frame: the whole board froze
         # for an hour behind one session (a pre-cut atom whose transcript the hydration map did not know, a LazyBodyRead
@@ -52299,8 +52461,15 @@ def build_feed(now, live_map=None):
         # when the memo holds a decodable entry (stale, and the bell says so) else absent this build, nothing memoized,
         # so the next build tries again; every other session folds as usual and the frame ships.
         try:
-            prev = json.loads(ent[1]) if ent is not None else None   # the ONE decode per session per build: a hit's fresh
-            #                                                          objects to fold, and the dependency record the key reads
+            if ent is not None:
+                js = ent[1]
+                kept = _feed_fold_kept(fsid, js)
+                # the dependency record the key reads: the fold's kept copy when it folded this very string (the entry
+                # without its card lists, which the key never reads), else the one decode, which the fold then takes
+                if kept is not None:
+                    prev = kept[1]
+                else:
+                    prev = dec = json.loads(js)
             ctx["prev_key"] = ent[0] if ent is not None else None    # ...and the key it was memoized under: the key's
             #                                                          warm-to-stale re-read reads its parse component
             #                                                          (2026-09-18). Set for EVERY session, None when cold:
@@ -52308,16 +52477,15 @@ def build_feed(now, live_map=None):
             key = _feed_session_key(s, tm, ctx, prev)
             if ent is not None and ent[0] == key:
                 _feed_memo_count("hit")
-                entry = prev
             else:
                 _feed_memo_miss(ent[0] if ent is not None else None, key)
                 _feed_memo_count("derived")
                 entry = _feed_session_entry(s, ctx)
                 key = _feed_key_with_deps(key, ctx, entry)   # the peers and reads THIS derivation recorded
-                js = json.dumps(entry, default=_wire_default_in("_feed_memo"))   # str() of an unencodable value, said once
+                js_new = json.dumps(entry, default=_wire_default_in("_feed_memo"))   # str() of an unencodable value, said once
                 if not (entry or {}).get("faults"):      # a derivation that met a body-read fault is served but not kept:
-                    _feed_memo_put(fsid, key, js)        #   the next build re-derives it (the anchor memo skipped it too)
-                entry = json.loads(js)                   # the fold's objects come from the string on a miss too, so a hit and
+                    _feed_memo_put(fsid, key, js_new)    #   the next build re-derives it (the anchor memo skipped it too)
+                js, dec = js_new, None                   # the fold's objects come from the string on a miss too, so a hit and
                 #                                          a miss hand the board the same shapes, byte for byte
         except Exception as e:
             _feed_derive_complain(fsid, s["name"], e, prev is not None)
@@ -52325,14 +52493,19 @@ def build_feed(now, live_map=None):
                 if ent is not None:
                     _feed_memo_drop(fsid)                # an entry that no longer decodes: gone, so the next build starts cold
                 continue
-            entry = prev
+            js = ent[1]                                  # the previous cards, served (prev was read from this string)
         else:
             _feed_derive_recovered(fsid)
-        _heal, _hid, _cold = _feed_fold_entry(entry, now, cmap, s["name"], asks, working, awaiting, bg_services, serving_folds)
+        _heal, _hid, _cold = _feed_fold_session(fsid, js, dec, now, cmap, _bells, s["name"], asks, working, awaiting,
+                                                bg_services, serving_folds, _fold_tally)
         heal_total += _heal
         hidden_total += _hid
         cold_parse = cold_parse or _cold
     _feed_memo_forget({s["sid"] for s in alive})     # a departed session's entry drops with it
+    _feed_fold_forget()                              # ...and the fold's record of it, or of a string the memo let go
+    with _feed_memo_lock:
+        for _k, _v in _fold_tally.items():
+            _FEED_FOLD_STATS[_k] += _v
     _subagent_trees_forget(alive)                    # ...and, as a belt, the walk memo's roots nobody alive owns (2026-09-16)
     # THE SERVING FOLD, commit side (T137): join each candidate's rows under its dispatch's
     # tracker row — a read-only render-time join across stores (the node itself stays in the
@@ -52349,21 +52522,40 @@ def build_feed(now, live_map=None):
     if _rose:
         _HEAL_LOG["n"], _HEAL_LOG["h"] = max(heal_total, _HEAL_LOG["n"]), max(hidden_total, _HEAL_LOG.get("h", 0))
         sys.stderr.write("feed: %s (no request behind them; the planner nests new ones at mint time)\n" % "; ".join(_rose))
+    _n_folded = len(asks)                            # the session cards: their bells are the fold's (the bell pass below skips them)
     if serving_folds:
+        # COPY ON WRITE (2026-10-15): every card on `asks` and every candidate is an object the fold keeps and hands out
+        # again next build (THE FOLD KEEPS ITS CARDS), so the join writes copies: the tracker card, its tree list and the
+        # tracker row with its children list, each copied once per build; a candidate that keeps its own card lands as a
+        # copy, which the bell pass then stamps.
         _byrow = {}
-        for _c in asks:
-            for _r in _c.get("tree") or []:
+        for _ci, _c in enumerate(asks):
+            for _ri, _r in enumerate(_c.get("tree") or []):
                 if _r.get("kind") == "handoff":
-                    _byrow[_r["id"]] = (_c, _r)
+                    _byrow[_r["id"]] = (_ci, _ri)
+        _copied = {}                                  # asks index -> the row indexes already copied in that card's copy
         for _f in serving_folds:
             _hit = _byrow.get(_f["tracker"])
             if not _hit:
-                asks.append(_f["card"])
+                asks.append(dict(_f["card"]))
                 continue
-            _c, _r = _hit
+            _ci, _ri = _hit
             _rows = _f["card"].get("tree") or []
             if _rows:
-                _r.setdefault("children", []).append(_rows[0]["id"])
+                _done = _copied.get(_ci)
+                if _done is None:
+                    _c = dict(asks[_ci])
+                    _c["tree"] = list(_c["tree"])
+                    asks[_ci] = _c
+                    _done = _copied[_ci] = set()
+                _c = asks[_ci]
+                if _ri not in _done:
+                    _r = dict(_c["tree"][_ri])
+                    if isinstance(_r.get("children"), list):
+                        _r["children"] = list(_r["children"])
+                    _c["tree"][_ri] = _r
+                    _done.add(_ri)
+                _c["tree"][_ri].setdefault("children", []).append(_rows[0]["id"])
                 _c["tree"].extend(_rows)
     if cold_parse:
         _warm_fleet_bg(now)                          # a living session wasn't parsed yet → warm it + re-push (dots/anchors)
@@ -52403,9 +52595,10 @@ def build_feed(now, live_map=None):
     # parked handoffs and quarantine cards alike — so every card's right-click menu reflects its armed
     # state, EFFECTIVE (card override > session override > the master default, 2026-08-09) — with the
     # master on, every bell paints on unless muted. True/None (not False) keeps unarmed payloads
-    # byte-identical to pre-bell ones.
-    _ncards = _notify_cards()
-    for _a in asks:
+    # byte-identical to pre-bell ones. The session cards (the first _n_folded, a join's copies among them) carry the pair
+    # the fold stamped from the same read of the store (_feed_fold_bell, 2026-10-15); this pass stamps the rest, each an
+    # object of this build's own: a serving card's copy, a parked handoff, a notice card.
+    for _a in asks[_n_folded:]:
         _a["notify"] = True if _notify_card_effective(_ncards, _a["itemId"], str(_a.get("sid") or "")) else None
         # the override alone (card, else session; true/false/null), without this machine's master: a dashboard on
         # ANOTHER kernel resolves it against its own (bell-follow.ts; plans/federated-push.md, bells follow the dashboard)
@@ -61205,6 +61398,10 @@ def _delta_key(kind, it, prefix=""):
 
 _delta_entry_memo = {}   # (frame type, collection) -> {id(entry): (entry, json)} from the LAST split: an entry
 #                          object the builder reused (a memoized dead lane's bar dicts) is not encoded again
+_delta_entry_stats = {}  # frame type -> (entries encoded, entries served from the last split's memo), cumulative over the
+#                          memo-keyed splits, under _WIRE_STATS_LOCK; the feed's pair is /perf builds.feed.memo wireEncoded
+#                          and wireReused (2026-10-15: the fold hands out kept cards as the same objects, so this is where
+#                          a rebuild that changed one card shows one encode)
 
 
 def _delta_split(kind, value, memo_key=None):
@@ -61226,6 +61423,7 @@ def _delta_split(kind, value, memo_key=None):
     key = _delta_keyer(kind)                            # …and the kind parsed once, not per item
     prev = _delta_entry_memo.get(memo_key) if memo_key is not None else None
     cur = {} if memo_key is not None else None
+    encoded = [0]
     def put(kk, v, pre=""):
         if kk is None or kk in ents:
             n = len(order)
@@ -61235,10 +61433,14 @@ def _delta_split(kind, value, memo_key=None):
                     break
                 n += 1
         hit = prev.get(id(v)) if prev else None
-        pair = hit if (hit is not None and hit[0] is v) else (v, enc(v))   # a hit hands back the LAST split's own pair: no new
-        if cur is not None:                                                 #  tuple; a miss mints ONE, shared by the memo and the
-            cur[id(v)] = pair                                               #  entries (2026-09-16: two fresh (object, json) tuples
-        ents[kk] = pair; order.append(kk)                                   #  per bar per build, both tracked for life, see the docstring)
+        if hit is not None and hit[0] is v:
+            pair = hit                                                      # a hit hands back the LAST split's own pair: no new
+        else:                                                               #  tuple; a miss mints ONE, shared by the memo and the
+            pair = (v, enc(v))                                              #  entries (2026-09-16: two fresh (object, json) tuples
+            encoded[0] += 1                                                 #  per bar per build, both tracked for life, see the
+        if cur is not None:                                                 #  docstring)
+            cur[id(v)] = pair
+        ents[kk] = pair; order.append(kk)
     if kind == "dict" and isinstance(value, dict):
         for kk, v in value.items():
             put(str(kk), v)
@@ -61263,6 +61465,9 @@ def _delta_split(kind, value, memo_key=None):
             kind, type(value).__name__, "dict" if kind == "dict" or kind.startswith("dictlist:") else "list"))
     if cur is not None:
         _delta_entry_memo[memo_key] = cur
+        with _WIRE_STATS_LOCK:                     # one bump per split, not per entry
+            e0, r0 = _delta_entry_stats.get(memo_key[0], (0, 0))
+            _delta_entry_stats[memo_key[0]] = (e0 + encoded[0], r0 + len(order) - encoded[0])
     return ents, order
 
 
@@ -70323,16 +70528,17 @@ def _push_pull_proto(v):
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
 
 
-def _push_explicit_bell(sid, item_id="", cards=None):
+def _push_explicit_bell(sid, item_id="", cards=None, raw=None):
     """The bell the user set on THIS machine for an event: the card's own override first (a card event), else the
     session's; True/False for an explicit choice, None for no override (the event follows the subscriber's default).
     The master is NOT read here: it is this machine's switch for this machine's devices (`cards` lets a per-build
-    caller resolve against one read of the store)."""
+    caller resolve against one read of the store, and `raw` reads the session's flag the way
+    _notify_card_effective's does)."""
     if item_id:
         v = (cards if cards is not None else _notify_cards()).get(item_id)
         if v is not None:
             return bool(v)
-    return _session_flag_raw(sid, "notify") if sid else None
+    return (_session_flag_raw(sid, "notify") if raw is None else raw(sid)) if sid else None
 
 
 def _push_ring_add(events):

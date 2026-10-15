@@ -920,7 +920,11 @@ class TheBoundAndTheDepartures(_Board):
                                              # the card anchor walk's held aggregates (2026-10-06): its counters and gauges
                                              "segWalks", "segHeld", "segWalkTurns", "segPartial", "segReset", "segRaised",
                                              "segEvict", "segEntries", "segBytes", "segBound",
-                                             "segOverBound"})   # an aggregate over the bound by itself, never held (the review after the merge)
+                                             "segOverBound",   # an aggregate over the bound by itself, never held (the review after the merge)
+                                             # the fold's kept cards and the wire's per-entry encodes (2026-10-15,
+                                             # tests/test_feed_fold_reuse.py)
+                                             "foldKept", "foldStamped", "foldFresh", "foldDecodes",
+                                             "wireEncoded", "wireReused"})
         self.assertEqual(feed["memo"]["segBound"], km.FEED_SEG_HELD_BYTES)
         self.assertEqual((feed["memo"]["failed"], feed["memo"]["failing"]), (0, 0))
         self.assertEqual(set(feed["memo"]["miss_by"]), set(km._FEED_MEMO_LABELS) | {"cold"})
