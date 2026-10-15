@@ -15,7 +15,8 @@
 // `watchdog-close` row went down the quiet socket before the abandon, and an armed socket's `-quiet` raise
 // rides the redial; the redials an outage refused coalesced into one `wsconnfail` row on the next open)
 // and the caps on queued breadcrumbs (the page's own rows, and the trace rows a foreign sender's posts cause, each on a
-// count of its own).
+// count of its own). And the HTTP door (2026-10-15): a page with no open socket for 20 s sends its queued breadcrumbs and
+// one `nosocket` row over HTTP, at most once a minute, and a row the kernel filed that way never rides the socket too.
 // Synthetic only (TESTHOST, no session data).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
@@ -68,7 +69,8 @@ class Harness {
   bars: any[] = [];            // the bars a standalone page raised (selfBar): {text, kind, buttons}
   liveBar: any = null;         // the one bar standing (the #romp-stale-self slot)
   notified: any[] = [];        // what the shell's own write path (__rompNotify on the parent) received, synchronously
-  constructor(js: string, opts: { standalone?: boolean; session?: Map<string, string>; pathname?: string; parentNotify?: boolean } = {}) {
+  fetches: any[] = [];         // the HTTP door's requests (opts.fetch): url, init, the parsed body, and the answer's callbacks
+  constructor(js: string, opts: { standalone?: boolean; session?: Map<string, string>; pathname?: string; parentNotify?: boolean; fetch?: boolean } = {}) {
     const h = this;
     const session = opts.session || new Map<string, string>();
     class FakeWS {
@@ -113,6 +115,13 @@ class Harness {
       performance: { getEntriesByType: () => [] },
     };
     sandbox.window.window = sandbox.window;
+    // a page with fetch (every browser; the other scenarios run without one, where the HTTP door does nothing): each request
+    // is held until the scenario answers it (ok: the response, fail: a network error), so the order of events is the test's
+    if (opts.fetch) sandbox.window.fetch = (url: string, init: any) => {
+      const e: any = { url, init, body: JSON.parse(init.body), ok: null, fail: null };
+      h.fetches.push(e);
+      return { then(ok: any, fail: any) { e.ok = ok; e.fail = fail; } };
+    };
     if (opts.standalone) sandbox.window.parent = sandbox.window;   // no shell: the page is its own parent
     sandbox.sessionStorage = sandbox.window.sessionStorage;
     this.win = sandbox.window;
@@ -766,4 +775,101 @@ test("a standalone page renders the core's offer as its bar with Reload and Not 
   // a page in the shell installs no hook: the shell's banner speaks
   const inShell = new Harness(shimJs("feed", false, FAKE_CORE.replace("return false;", "return true;")));
   assert.equal(inShell.win.__rompReload.offer, null, "in a shell the pane renders no bar of its own");
+});
+
+// THE HTTP DOOR (2026-10-15). Every breadcrumb waited in the queue for a socket, so a page whose sockets never opened said
+// nothing at all. Once the page has had no open socket for BEACON_AFTER_MS (20 s), the watchdog's tick sends the queued rows
+// and one `nosocket` row over HTTP (POST /client-diag), at most once a minute; a row the kernel filed leaves the queue, and
+// a refused or failed request leaves it there for the socket.
+const DOOR = () => new Harness(shimJs("feed"), { fetch: true });
+const whats = (f: any) => f.body.rows.map((r: any) => r.what);
+
+test("a page whose socket never opens sends its rows over HTTP once it has gone 20 s without one, then once a minute", () => {
+  const h = DOOR();
+  h.win.__rompDiag("probe", { i: 1 });                                  // queued: the page's first dial is still connecting
+  h.now += 19_000; h.tick();                                            // the watchdog aborts the stuck handshake (15 s)...
+  assert.equal(h.fetches.length, 0, "...and nothing goes over HTTP before 20 s without a socket");
+  h.now += 1_000; h.tick();
+  assert.equal(h.fetches.length, 1, "one request at 20 s");
+  const f = h.fetches[0];
+  assert.equal(f.url, "/client-diag");
+  assert.equal(f.init.method, "POST");
+  assert.equal(f.init.keepalive, true, "keepalive: the request outlives a page that is closing");
+  assert.deepEqual(whats(f), ["probe", "nosocket"], "the queued row, then the summary");
+  const ns = f.body.rows[1];
+  assert.deepEqual([ns.type, ns.surface, ns.boot], ["clientDiag", "pane-shim", "1.1"], "a clientDiag row, stamped like every row the page files");
+  assert.deepEqual([ns.data.app, ns.data.downMs, ns.data.attempts, ns.data.everConnected, ns.data.ready, ns.data.hidden, ns.data.tickGapMs],
+                   ["feed", 20_000, 1, false, 3, false, 1_000], "how long, the dials that failed, the socket's state, the tab, the tick's lateness");
+  h.now += 5_000; h.tick();
+  assert.equal(h.fetches.length, 1, "one request in flight at a time");
+  f.ok({ ok: true });                                                    // the kernel filed both rows
+  h.now += 50_000; h.tick();
+  assert.equal(h.fetches.length, 1, "at most one a minute");
+  h.now += 10_000; h.tick();
+  assert.equal(h.fetches.length, 2, "the outage lasts: the next minute's summary");
+  assert.deepEqual(whats(h.fetches[1]), ["nosocket"], "a filed row is not sent again");
+  h.fetches[1].ok({ ok: true });
+  h.runTimers(); h.ws.open();
+  assert.equal(h.diags("probe").length, 0, "a row the kernel filed over HTTP never rides the socket too");
+  assert.equal(h.diags("wsconnfail").length, 1, "the open's own row is unchanged");
+  h.now += 25_000; h.tick();
+  assert.equal(h.fetches.length, 2, "an open socket sends nothing over HTTP");
+  h.settles(0);
+});
+
+test("a refused or failed request leaves the rows queued for the socket, and the next minute tries again", () => {
+  const h = DOOR();
+  h.win.__rompDiag("probe", { i: 2 });
+  h.now += 20_000; h.tick();
+  assert.equal(h.fetches.length, 1);
+  h.fetches[0].ok({ ok: false, status: 429 });                          // refused: past the kernel's budget
+  h.now += 60_000; h.tick();
+  assert.equal(h.fetches.length, 2);
+  assert.deepEqual(whats(h.fetches[1]), ["probe", "nosocket"], "the refused row goes again");
+  h.fetches[1].fail(new Error("network"));                              // no answer at all
+  h.runTimers(); h.ws.open();
+  assert.equal(h.diags("probe").length, 1, "kept for the socket, never lost");
+  h.settles(0);
+});
+
+test("an open socket, and an outage shorter than 20 s, send nothing over HTTP", () => {
+  const h = DOOR();
+  h.ws.open();
+  h.now += 25_000; h.tick();
+  h.ws.close(); h.runTimers();                                           // a blip: the redial is connecting
+  h.win.__rompDiag("probe", { i: 3 });
+  h.now += 10_000; h.tick();
+  h.ws.open();
+  h.now += 15_000; h.tick();
+  assert.equal(h.fetches.length, 0);
+  assert.equal(h.diags("probe").length, 1, "the row rode the socket as ever");
+  h.settles(0);
+});
+
+test("a request answered after a socket opened takes nothing out of the queue: that open's flush carried the rows", () => {
+  const h = DOOR();
+  h.win.__rompDiag("probe", { i: 4 });
+  h.now += 20_000; h.tick();                                             // in flight
+  assert.equal(h.fetches.length, 1);
+  h.runTimers(); h.ws.open();                                            // the socket opens first: its flush sends the row
+  assert.equal(h.diags("probe").length, 1);
+  h.ws.close();                                                          // and drops; the same row is queued again
+  h.win.__rompDiag("probe", { i: 4 });
+  h.fetches[0].ok({ ok: true });                                         // the old request's answer arrives now
+  h.runTimers(); h.ws.open();
+  assert.equal(h.diags("probe").length, 2, "the row queued after the open still rides the next socket");
+  h.settles(0);
+});
+
+test("a row too large for one request waits for the socket, and the rows that fit go", () => {
+  const h = DOOR();
+  h.win.__rompDiag("big", { pad: "x".repeat(17_000) });               // past BEACON_CHARS on its own
+  h.win.__rompDiag("small", { i: 5 });
+  h.now += 20_000; h.tick();
+  assert.equal(h.fetches.length, 1);
+  assert.deepEqual(whats(h.fetches[0]), ["small", "nosocket"], "the body stays under the route's cap");
+  h.fetches[0].ok({ ok: true });
+  h.runTimers(); h.ws.open();
+  assert.deepEqual([h.diags("big").length, h.diags("small").length], [1, 0], "the large row rides the socket; the filed one does not");
+  h.settles(0);
 });

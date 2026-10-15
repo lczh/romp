@@ -59542,6 +59542,212 @@ def _note_ws_open(client, reconnect=False, now=None):
         return False
 
 
+def _client_diag_rec(msg, wid, redial, now=None):
+    """The client-diag row a page's `clientDiag` message files, whichever door carried it: the page's socket (the clientDiag
+    arm of Handler._dispatch_ws) or POST /client-diag, the door a page with no open socket uses (_client_diag_file_post).
+    One builder, so a row reads the same whichever way it came; the HTTP door adds `via` and nothing else."""
+    return {"t": int(time.time() if now is None else now), "wid": str(wid or ""),
+            "surface": str(msg.get("surface") or ""), "what": str(msg.get("what") or ""),
+            # whether the socket that CARRIED the row declared the redial (?reconnect=1): the socket's dial
+            # record, `redial`, set at accept beside the consumable `reconnect` and never popped, so every row
+            # a socket carries reads the same value on every pane. Not the flag: _resolve_reconnect pops it on
+            # a chat socket's first strip, _client_reset_chat_base pops it at ready, nothing pops it on the
+            # other panes, and the ?skeleton=1 arm sets it for a column that declared no redial. The shim
+            # queues its `wsclose` row while the socket is down and flushes it onto the redial, so with the
+            # row's own bundleReady, readyAcked and readyQueued (the shim's state at the close) the log tells
+            # a declared redial from the ones the dial term gated off (2026-09-10: everConnected alone, true on
+            # every such row, could not). The wsopen row the accept files carries the same value, but it names
+            # the socket by cid and this row does not, so the two cannot be joined without the stamp. A row the
+            # HTTP door carried came on no socket, so it reads false.
+            "reconnect": bool(redial),
+            # the page's build and the kernel boot it loaded against (2026-09-23), stamped by the page's one diag door
+            # (the pane shim's diagStamp, the shell's twin) so every surface carries them: `build` the dist token the page
+            # was served with, `boot` the serving kernel's boot id baked into it. A row from a page that predates the
+            # stamp (or a host that sends none, the VS Code webview) reads null for both, itself a statement of old code
+            "build": msg.get("build") if isinstance(msg.get("build"), int) and not isinstance(msg.get("build"), bool) else None,
+            "boot": str(msg.get("boot"))[:40] if isinstance(msg.get("boot"), str) and msg.get("boot") else None,
+            "data": msg.get("data")}
+
+
+class _RowBudget:
+    """At most `per_window` rows (and, given `bytes_per_window`, that many bytes) per `window_s` seconds, counted under one
+    lock. take(n, nbytes) -> (admitted, refused_before): a full window refuses and counts the rows it refused, and the next
+    admitted caller is handed that count once, to file, so a bound never drops rows without saying how many."""
+
+    def __init__(self, per_window, window_s=60.0, clock=time.monotonic, bytes_per_window=None):
+        self.per_window, self.window_s, self.clock = int(per_window), float(window_s), clock
+        self.bytes_per_window = bytes_per_window
+        self._lock = threading.Lock()
+        self._start, self._used, self._bytes, self._refused = None, 0, 0, 0
+
+    def take(self, n=1, nbytes=0):
+        with self._lock:
+            now = self.clock()
+            if self._start is None or now - self._start >= self.window_s:
+                self._start, self._used, self._bytes = now, 0, 0
+            if self._used + n > self.per_window or (self.bytes_per_window is not None and self._bytes + nbytes > self.bytes_per_window):
+                self._refused += n
+                return False, 0
+            self._used += n
+            self._bytes += nbytes
+            refused, self._refused = self._refused, 0
+            return True, refused
+
+
+# POST /client-diag (2026-10-15). A page's clientDiag rows travelled over its websocket alone, so a page that could not
+# open one was silent by design, and the file could not tell a browser that stopped reaching the kernel from one that
+# stopped trying. The pane shim and the shell now send the rows they hold for a socket that will not open over plain
+# HTTP (fetch with keepalive), behind the gate every POST passes (the page's romp_token cookie with its own origin, or
+# the token), and the kernel files them with the socket's own builder (_client_diag_rec), marked `via: http`. Bounded
+# three ways: the body, checked against its Content-Length before a byte is read; the rows a request may carry; and the
+# rows and bytes a minute across every page. Past the minute's budget a request is refused with 429 and its rows counted,
+# and the count is filed as one `diagPostRefused` row when the next window admits a request. A page sends at most one
+# request a minute per pane and per shell while it has no socket, each under about 50 KB (the page holds its body to
+# 16,000 characters of rows), so the budget binds only on a page that misbehaves, and even then the file, rotated at
+# CLIENT_DIAG_MAX_BYTES, turns over no faster than once in several minutes.
+CLIENT_DIAG_POST_MAX_BYTES = 64 * 1024
+CLIENT_DIAG_POST_MAX_ROWS = 25
+CLIENT_DIAG_POST_ROWS_PER_MIN = 120
+CLIENT_DIAG_POST_BYTES_PER_MIN = 1024 * 1024
+_CLIENT_DIAG_POST_BUDGET = _RowBudget(CLIENT_DIAG_POST_ROWS_PER_MIN, bytes_per_window=CLIENT_DIAG_POST_BYTES_PER_MIN)
+
+
+def _client_diag_file_post(raw, now=None):
+    """File the rows of one POST /client-diag body -> (status, reply). The body is {"wid": the dashboard id, "rows": [the
+    page's clientDiag messages, as its socket would carry them]}; a row that is not a clientDiag message is skipped. 400
+    for a body that is not that object, 413 for more than CLIENT_DIAG_POST_MAX_ROWS rows, 429 past the minute's budget
+    (nothing filed, the rows counted for the next window's row), 503 when the file cannot be written (the page keeps the
+    rows for its socket); else 200 with the count filed."""
+    try:
+        body = json.loads(raw.decode("utf-8")) if raw else None
+    except (ValueError, UnicodeDecodeError, RecursionError):
+        body = None
+    if not isinstance(body, dict) or not isinstance(body.get("rows"), list):
+        return 400, {"ok": False, "error": "expected a JSON object with a rows list"}
+    if len(body["rows"]) > CLIENT_DIAG_POST_MAX_ROWS:
+        return 413, {"ok": False, "error": "%d rows; at most %d a request" % (len(body["rows"]), CLIENT_DIAG_POST_MAX_ROWS)}
+    rows = [m for m in body["rows"] if isinstance(m, dict) and m.get("type") == "clientDiag"]
+    if not rows:
+        return 200, {"ok": True, "filed": 0}
+    admitted, refused = _CLIENT_DIAG_POST_BUDGET.take(len(rows), len(raw))
+    if not admitted:
+        return 429, {"ok": False, "error": "more than %d client-diag rows or %d bytes a minute arrived over HTTP; try again later"
+                                           % (CLIENT_DIAG_POST_ROWS_PER_MIN, CLIENT_DIAG_POST_BYTES_PER_MIN)}
+    now = time.time() if now is None else now
+    wid = str(body.get("wid") or "")[:100]
+    lines = []
+    if refused:
+        lines.append(json.dumps({"t": int(now), "wid": "", "surface": "kernel", "what": "diagPostRefused",
+                                 "data": {"rows": refused, "perMin": CLIENT_DIAG_POST_ROWS_PER_MIN, "bytesPerMin": CLIENT_DIAG_POST_BYTES_PER_MIN}}) + "\n")
+    for m in rows:
+        rec = _client_diag_rec(m, wid, False, now=now)
+        rec["via"] = "http"
+        lines.append(json.dumps(rec) + "\n")
+    try:
+        for ln in lines:
+            _client_diag_append(jd.STATE / "client-diag.jsonl", ln)
+    except OSError as e:
+        return 503, {"ok": False, "error": "client-diag.jsonl could not be written (%s)" % e}
+    return 200, {"ok": True, "filed": len(rows)}
+
+
+def _ws_close_code(payload):
+    """The status code a Close frame carries (RFC 6455 section 5.5.1: its first two bytes), or None when it carries none."""
+    return struct.unpack(">H", payload[:2])[0] if payload and len(payload) >= 2 else None
+
+
+# The socket-life rows (2026-10-15). wsopen recorded the sockets the kernel accepted and nothing else: not when one ended or
+# why, nor a dial it turned away, so a page whose sockets stopped working left the same record as a page that was closed.
+# wsend closes each wsopen (one per accepted socket, so bounded by them); wsrefused and wsupgradefail record a dial the
+# kernel did not accept, at most CONN_ROWS_PER_MIN a minute, the rest counted onto the next row filed (`unfiled`). A
+# static request files nothing.
+CONN_ROWS_PER_MIN = 30
+_CONN_ROW_BUDGET = _RowBudget(CONN_ROWS_PER_MIN)
+_ws_life_row_failed = False   # set once a wsend, wsrefused or wsupgradefail row could not be written: said on stderr once
+
+
+def _ws_life_row_fault(what, e):
+    global _ws_life_row_failed
+    if not _ws_life_row_failed:
+        _ws_life_row_failed = True
+        print("[client-diag] could not file a %s row (%s): from here on a missing socket row is not a record of no socket"
+              % (what, e), file=sys.stderr)
+
+
+def _note_ws_end(client, life, now=None):
+    """One `wsend` row (surface kernel) per accepted socket when it ends, the twin of its wsopen row by cid: the app, the
+    kind, how long it lived (lifeMs), how many messages the page sent on it (msgsIn) and how soon the first came
+    (firstInMs, null for none), and the cause: `close` (the page's Close frame, with its code), `eof` (the connection
+    ended without one), `error` (the read raised; `why` names the exception's class), or `kernel` (the kernel ended it: a
+    peer that stopped answering pings, a backlog past the budget, a protocol error, a socket superseded by its page's
+    redial; `why` is the reason its log line gave). A socket the page never spoke on is msgsIn 0. `life` is the handler's
+    record of the socket (_ws). Returns whether a row was filed; the file's own failure is never the socket's."""
+    try:
+        now = time.time() if now is None else now
+        cause, why = life.get("cause") or "eof", life.get("why")
+        if cause != "close" and client.get("endWhy"):
+            cause, why = "kernel", client.get("endWhy")   # the kernel shut the socket; the EOF or error the read saw was its echo
+        t0, first = life.get("t0") or now, life.get("first")
+        data = {"app": client.get("app"), "kind": client.get("kind"), "cid": client.get("cid"), "cause": cause,
+                "lifeMs": int(max(0.0, now - t0) * 1000), "msgsIn": int(life.get("in") or 0),
+                "firstInMs": int(max(0.0, first - t0) * 1000) if first else None}
+        if cause == "close":
+            data["code"] = life.get("code")
+        if why:
+            data["why"] = str(why)[:200]
+        _client_diag_append(jd.STATE / "client-diag.jsonl", json.dumps({"t": int(now), "wid": str(client.get("wid") or ""), "surface": "kernel",
+                                                                         "what": "wsend", "data": data}) + "\n")
+        return True
+    except Exception as e:
+        _ws_life_row_fault("wsend", e)
+        return False
+
+
+# A refused dial's row carries strings the dial chose, and the gate's 403 is reached with no credential at all, so any
+# cross-site page's `new WebSocket(...)` to the loopback port can file one. Each such string is cut to the characters a
+# real one uses (an app name, a uuid dashboard id, a host as _SSH_HOST_RE admits one, an origin), so a dial cannot write
+# prose, quotes or markup into the file, only a short token.
+_WS_ROW_FIELD_DROP = re.compile(r"[^A-Za-z0-9_.:-]")
+_WS_ROW_HOST_DROP = re.compile(r"[^A-Za-z0-9_.@:\[\]-]")
+_WS_ROW_ORIGIN_DROP = re.compile(r"[^A-Za-z0-9_.:/\[\]-]")
+
+
+def _ws_row_field(s, n, drop=_WS_ROW_FIELD_DROP):
+    """`s` as a refused dial's row may carry it: only the characters `drop` keeps, then at most `n` of them."""
+    return drop.sub("", str(s or ""))[:n]
+
+
+def _note_ws_refused(headers, path, q, status, why, what="wsrefused", now=None):
+    """One row for a socket dial the kernel did not accept: `wsrefused` for a /ws or /remote/HOST/ws request turned away (at
+    the gate, 403; with no upgrade key, 400; a relay to a host that is not attached, 404, or whose tunnel does not answer,
+    502), `wsupgradefail` for a handshake whose 101 could not be written. The path (a relay's as /remote/*/ws with its
+    host), the app and the dashboard id the dial named, the status, the reason, whether it carried an upgrade key, and its
+    Origin header, each cut to a plain character set (_ws_row_field); never the query string, which may carry a token. A
+    dial that never reached the kernel files nothing, so a browser that stopped reaching it reads as no rows, and one that
+    reached it and was turned away reads as these. At most CONN_ROWS_PER_MIN a minute; the dials a full minute refused are
+    counted onto the next row (`unfiled`)."""
+    try:
+        admitted, unfiled = _CONN_ROW_BUDGET.take(1)
+        if not admitted:
+            return False
+        now = time.time() if now is None else now
+        p, q = str(path or ""), q or {}
+        relay = p.startswith("/remote/") and p.endswith("/ws")
+        data = {"path": "/remote/*/ws" if relay else p, "app": _ws_row_field((q.get("app") or [""])[0], 40), "status": int(status),
+                "why": str(why)[:200], "key": bool(headers.get("Sec-WebSocket-Key")),
+                "origin": _ws_row_field(headers.get("Origin"), 100, _WS_ROW_ORIGIN_DROP)}
+        if relay:
+            data["host"] = _ws_row_field(p[len("/remote/"):-len("/ws")], 100, _WS_ROW_HOST_DROP)
+        if unfiled:
+            data["unfiled"] = unfiled
+        _client_diag_append(jd.STATE / "client-diag.jsonl", json.dumps({"t": int(now), "wid": _ws_row_field((q.get("wid") or [""])[0], 100), "surface": "kernel",
+                                                                         "what": what, "data": data}) + "\n")
+        return True
+    except Exception as e:
+        _ws_life_row_fault(what, e)
+        return False
+
+
 def _note_history_reply(client, sid, mtype, reply, nbytes, now=None, sent=True):
     """One client-diag row per history reply (loadTurns/loadOlder/loadAround/loadNewer, proto-2 or the legacy loadOlder
     arm) the kernel serves to ANY client (2026-09-15). The kernel kept no per-client record of a history round trip, so a
@@ -59910,6 +60116,7 @@ def _drop_dead_ws_client(client, why):
     if not client.get("alive"):
         return
     client["alive"] = False
+    client.setdefault("endWhy", str(why)[:200])   # the reason the socket's end row gives (_note_ws_end)
     sys.stderr.write("ws: dropping %s client — %s\n" % (client.get("app"), why))
     try:
         client["sock"].shutdown(socket.SHUT_RDWR)
@@ -59972,6 +60179,7 @@ def _ws_fail(wfile, lock, client, code, why):
     a compression context against the response's terms, or sets RSV1 where the extension forbids it, is cut off at
     its first such message after every redial — the line names the cause each time rather than leaving a run of
     1006s that reads as a flaky network."""
+    client.setdefault("endWhy", "%s (close %d)" % (why, code))   # the reason the socket's end row gives (_note_ws_end)
     if not client.get("failLogged"):
         client["failLogged"] = True
         sys.stderr.write("ws: dropping %s client — %s (close %d)\n" % (client.get("app"), why, code))
@@ -60020,7 +60228,7 @@ def _ws_recv(rfile):
 _WS_MAX_MESSAGE = 80 * 1024 * 1024
 
 
-def _ws_recv_message(rfile, on_ping, on_pong=None, inflate=False, on_fail=None):
+def _ws_recv_message(rfile, on_ping, on_pong=None, inflate=False, on_fail=None, on_close=None):
     """Read frames until one COMPLETE data message is assembled → (opcode, payload), or (None, None)
     on close/EOF/overrun. Browsers FRAGMENT large sends (RFC 6455 §5.4 — Chrome splits at ~128 KB),
     and the old per-frame loop handed each fragment straight to json.loads: a phone photo's dropFile
@@ -60037,7 +60245,9 @@ def _ws_recv_message(rfile, on_ping, on_pong=None, inflate=False, on_fail=None):
     compressed message that will not inflate (1007) or inflates past the cap (1009), a fragmented message past
     the cap (1009) — before (None, None) comes back, so the handler can answer with a Close frame carrying the
     code and log the reason (review, 2026-09-23: these ends left the pane a bare 1006, the code of a network
-    drop, and the log nothing). EOF and the peer's own close are the peer's doing and say nothing."""
+    drop, and the log nothing). EOF and the peer's own close are the peer's doing and say nothing to on_fail; the close is
+    told to `on_close(payload)` (2026-10-15), so the socket's end row can tell a page that closed from a connection that
+    dropped."""
     frag_op, frag, frag_z = None, None, False
 
     def fail(code, why):
@@ -60059,6 +60269,8 @@ def _ws_recv_message(rfile, on_ping, on_pong=None, inflate=False, on_fail=None):
             return None, None
         rsv1, op = bool(op & 0x40), op & 0x0F  # RSV1 rides above the opcode (see _ws_recv)
         if op == 0x8:                          # close
+            if on_close is not None:
+                on_close(payload or b"")
             return None, None
         if rsv1 and (op == 0x0 or op >= 0x8):  # RSV1 belongs to a message's FIRST data frame alone (RFC 7692 §6.1)
             return fail(1002, "RSV1 on a %s frame" % ("continuation" if op == 0x0 else "control"))
@@ -60610,6 +60822,7 @@ def _note_ws_drop(c, why, frame_len, key=None):
     whose frame tipped the budget; the raise site (_mk_ws_send) has none of its own and reads the one
     _client_send leaves on the client for the length of its call (`curSlot`), so the line names the frame
     — a direct one-shot `client["send"]` finds it unset and the line reads `slot=-`, honestly."""
+    c.setdefault("endWhy", str(why)[:200])   # the reason the socket's end row gives (_note_ws_end), the first one said
     if c.get("dropLogged"):
         return
     c["dropLogged"] = True
@@ -75476,6 +75689,7 @@ var bundleReady=false,readyQueued=false,readyAcked=false,readyProto=0,readyMsg=n
 var queuedDiag=0,DIAG_QUEUE_MAX=20;   // clientDiag rows waiting in `queue` for a reconnect, capped (an outage must not pile up breadcrumbs); other queued messages are untouched
 var queuedForeign=0,FOREIGN_QUEUE_MAX=20;   // of those, the window-sender rows (window-sender.ts noteForeign and the timeline boot's copy), which another page's posts cause: capped on their own count, so they never take one of the DIAG_QUEUE_MAX slots this page's own rows keep (under one cap, a foreign page posting into every frame during an outage cut the page's own record of it, the 2026-09-29 review); counted in queuedDiag as well, so the reload hold and the loss line leave them out like every breadcrumb; the cap is noteForeign's NOTE_MAX
 var failedConnects=0,firstFailT=0;   // handshakes that never OPENED since the last open: reported as ONE wsconnfail row on the next open, never one wsclose per redial
+var beaconQ=[],beaconT=0,beaconBusy=false,beaconGen=0,downT=Date.now(),tickT=0,BEACON_AFTER_MS=20000,BEACON_EVERY_MS=60000,BEACON_ROWS=20,BEACON_CHARS=16000;   // the HTTP door (beaconTick, below): the queued breadcrumbs it may carry, when it last went, whether one is in flight, which open it belongs to; since when this page has had no open socket (0 while one is open, the page's load counting as the start: netState keeps it), and the watchdog's last tick
 // This pane's DASHBOARD id. ?wid= when the host supplies one (the VS Code extension builds its own pane
 // URLs); otherwise the shell's per-tab id from sessionStorage, which is scoped to the browsing context and
 // shared with same-origin iframes — so every pane of one window agrees, a second window differs, and no
@@ -75518,7 +75732,8 @@ var PROVISIONAL_MS=15000,resumeProvisional=0;   // a resumed keep is PROVISIONAL
 var connT=0;   // when the current socket's connect() attempt started — the progress watchdog's reference point
 // Tell the shell this pane's WS state so it can show ONE "disconnected" banner (the user 2026-06-27): a real
 // network drop used to blind-reload into a dead page, leaving the pane silently frozen with no explanation.
-function netState(s){try{if(window.parent!==window)window.parent.postMessage({romp:"wsState",app:APP,state:s},"*");}catch(e){}}
+function netState(s){if(s==="up"){downT=0;beaconQ=[];beaconGen++;}else if(!downT)downT=Date.now();   // every open, close and abandon passes here: the HTTP door's clock, and an open's flush carries the queued rows (beaconTick)
+try{if(window.parent!==window)window.parent.postMessage({romp:"wsState",app:APP,state:s},"*");}catch(e){}}
 // A FILE dragged onto a pane that takes no drops must not navigate the pane to the file — the browser's default for an
 // unhandled drop (the user 2026-09-12: an image dropped beside the chat's box replaced the page with the image). Every
 // pane but the chat refuses it here: a not-allowed cursor over the pane, the drop swallowed. The chat's own document takes
@@ -75774,7 +75989,7 @@ if(ws&&ws.readyState===1){ws.send(s);return;}
 if(m&&(m.type==="sendMessage"||m.type==="askFollowUp")&&typeof m.qid==="string")queuedKept++;   // kept by the page across a reload: not a loss at the reload (__rompShimPersist)
 if(m&&m.type==="ready")readyQueued=true;   // ...and this one waits for the open: the redial that carries it dials as a fresh page (onopen clears the bit after the flush)
 if(m&&m.type==="clientDiag"){var fr=m.surface==="window-sender";if(fr?queuedForeign>=FOREIGN_QUEUE_MAX:queuedDiag-queuedForeign>=DIAG_QUEUE_MAX)return;if(fr)queuedForeign++;queuedDiag++;}   // breadcrumbs waiting for a reconnect are capped, this page's own and the window-sender rows each on their own count; everything else queues as before
-queue.push(s);}
+queue.push(s);if(m&&m.type==="clientDiag")beaconQ.push({s:s,fr:m.surface==="window-sender"});}   // a queued breadcrumb the HTTP door may carry while no socket opens (beaconTick)
 // ONE ordered dispatch FIFO per socket (the user 2026-09-07, whose dashboard froze on return to its tab): a tab
 // that sat hidden or frozen thaws into EVERY frame the browser queued for it, and each used to be parsed AND
 // fully rendered in its own task — eight feed renders and sixteen timeline draws for a board that only needs
@@ -75868,13 +76083,33 @@ function abandon(){var d=ws;if(!d)return;d.onopen=d.onmessage=d.onclose=d.onerro
 if(stalePending&&openSock===d){var qw=stalePending;stalePending="";raiseStale(qw+"-quiet");}   // the reconnected socket armed and then said nothing before its resync: nothing is coming on it, and the view IS stale — the disowned onclose cannot rule on it, and the redial's open would otherwise re-arm from zero
 if(returnRow&&returnAt){var rr=returnRow;returnRow=null;rr.resent=true;returnDiag("return",rr);returnBytes=0;}   // a KEPT socket put down before any fresh frame reached this return (the watchdog at the provisional bound): the keep row went into a socket that proved dead, so re-file it onto the redial as onclose does for a same-burst FIN, keyed on the return still being open, never on the clock (review find, 2026-09-08)
 netState("down");try{window.dispatchEvent(new Event("romp:wsdown"));}catch(e){}}
+// THE HTTP DOOR (2026-10-15): every breadcrumb waits in `queue` for a socket, so a page whose sockets never opened said
+// nothing, and the kernel's file could not tell a browser that stopped reaching it from one that stopped trying. Once this
+// page has had no open socket for BEACON_AFTER_MS, the watchdog's tick sends over plain HTTP the breadcrumbs queued for the
+// socket (oldest first, at most BEACON_ROWS and BEACON_CHARS of them, so the body stays under the route's 64 KiB even in
+// three-byte characters; a row that does not fit waits for the next request or the socket) and one `nosocket` row: how long, how many dials failed since the last open,
+// the socket's state, whether the tab is hidden and how late the tick ran (a starved main thread runs it late); then at
+// most once a BEACON_EVERY_MS while the outage lasts. fetch with keepalive rather than sendBeacon, because its answer says
+// the kernel filed the rows: they leave `queue` and never ride the reconnect as well. A refusal, an error or no answer
+// within 10 s leaves them queued for the socket. The kernel's POST /client-diag files them as it files the socket's rows,
+// behind the gate the page's other requests pass (its cookie, its origin), marked via http. No window.fetch, nothing.
+function beaconTick(){var now=Date.now(),gap=tickT?now-tickT:-1;tickT=now;
+if(!downT||now-downT<BEACON_AFTER_MS||beaconBusy||(beaconT&&now-beaconT<BEACON_EVERY_MS)||typeof window.fetch!=="function")return;
+var sent=[],size=0,gen=beaconGen;for(var bi=0;bi<beaconQ.length&&sent.length<BEACON_ROWS;bi++){var bq=beaconQ[bi];if(size+bq.s.length>BEACON_CHARS)continue;sent.push(bq);size+=bq.s.length;}
+var row=diagStamp({type:"clientDiag",surface:"pane-shim",what:"nosocket",data:{app:APP,downMs:now-downT,attempts:failedConnects,firstFailMs:firstFailT?now-firstFailT:-1,ready:ws?ws.readyState:-1,everConnected:everConnected,hidden:document.visibilityState!=="visible",tickGapMs:gap,queued:beaconQ.length}});
+var body='{"wid":'+JSON.stringify(wid)+',"rows":['+sent.map(function(b){return b.s;}).concat([JSON.stringify(row)]).join(",")+']}';
+beaconT=now;beaconBusy=true;var ac=null,tm=0;try{ac=typeof AbortController==="function"?new AbortController():null;}catch(e){ac=null;}
+if(ac)tm=setTimeout(function(){try{ac.abort();}catch(e){}},10000);
+function done(ok){beaconBusy=false;if(tm)clearTimeout(tm);if(!ok||gen!==beaconGen)return;   // filed, and no socket has opened since (its flush already carried the rows)
+for(var i=0;i<sent.length;i++){var k=beaconQ.indexOf(sent[i]);if(k>=0)beaconQ.splice(k,1);var j=queue.indexOf(sent[i].s);if(j>=0){queue.splice(j,1);queuedDiag--;if(sent[i].fr)queuedForeign--;}}}
+try{window.fetch("/client-diag",{method:"POST",keepalive:true,body:body,signal:ac?ac.signal:undefined}).then(function(r){done(!!(r&&r.ok));},function(){done(false);});}catch(e){done(false);}}
 // progress watchdog (state-keyed, one per socket state): OPEN but silent past STALE_MS = half-open, no
 // onclose will ever fire — force-close (the user 2026-06-29). CONNECTING past its deadline = the browser is
 // holding the attempt (Firefox delays re-admitting a recently-failed endpoint, and a handshake can hang) and
 // no onclose fires for it either — abort it so the close→retry chain resumes (the user 2026-07-21: the
 // "Disconnected — reconnecting…" banner sat until a manual refresh). CLOSED with no fresh attempt = the 1.5s
 // retry timer was lost (throttled/killed) — re-dial directly; connect()'s own guard makes this idempotent.
-setInterval(function(){if(!ws)return;
+setInterval(function(){beaconTick();if(!ws)return;
 if(ws.readyState===1){var bound=resumeProvisional?PROVISIONAL_MS:STALE_MS;if(everConnected&&Date.now()-lastRecv>bound){staleDiag("watchdog-close","quiet");abandon();connect();}return;}   // a resumed keep no frame has confirmed runs at the shorter bound (PROVISIONAL_MS, above)
 if(ws.readyState===0&&Date.now()-connT>15000){try{ws.close();}catch(e){}return;}
 if(ws.readyState===3&&Date.now()-connT>8000){connect();}},5000);
@@ -79722,9 +79957,10 @@ _LANDING_MOBILE_JS = """
 // socket carries the shell's wid, so its rows and this dashboard's pane rows match on it — and so a reveal
 // the kernel aims at a dashboard's shell by wid (_reveal_chat_for's second line) has a target at last.
 var diagQ=[],DIAGQ_MAX=20,shellSock=null;
+var shellDownT=Date.now(),shellFails=0,shellBeaconT=0,shellBeaconBusy=false;   // the HTTP door (shellBeaconTick, below): since when no shell socket has been open (the load counting as the start), the dials that never opened since, when it last went, whether one is in flight
 function shellDiag(what,data){var m={type:'clientDiag',surface:'shell',what:what,data:data};
 if(shellSock&&shellSock.readyState===1){try{shellSock.send(JSON.stringify(diagStamp(m)));}catch(e){}}
-else if(diagQ.length<DIAGQ_MAX)diagQ.push(m);}
+else if(diagQ.length<DIAGQ_MAX)diagQ.push(m);shellBeaconTick();}
 // …stamped as it LEAVES with the page's build and the boot it loaded against (2026-09-23), the pane shim's diagStamp twin: read
 // off the landing's reload core (window.__rompReload: loaded, boot, both baked by the kernel that served this page), which
 // parses after this script, so a row queued before it existed is stamped at the flush, never at the call
@@ -79870,11 +80106,12 @@ if(m.romp==='toggleFleet')userSwitch(m.to==='chat'?'chat':'fleet');});
 var shellOpened=false;   // T265: this socket's REOPEN is the kernel-restart signal — the shell asks /version whose kernel answered
 function shellWS(){try{var proto=location.protocol==='https:'?'wss://':'ws://';
 var ws=new WebSocket(proto+location.host+'/ws?app=shell&wid='+encodeURIComponent(wid()));
+try{ws.addEventListener('close',function(){if(shellSock!==ws)shellFails++;else shellDownT=Date.now();shellBeaconTick();});}catch(e){}   // the HTTP door's count and clock (shellBeaconTick, below): added before onclose is set, so it runs first and still finds an opened socket as shellSock
 // ready → the kernel sends the current needs-you count, so a relaunched installed app trues up
 // its icon badge immediately instead of waiting for the next change (plans/ios-app.md proposal 3)
 ws.onopen=function(){try{ws.send(JSON.stringify({type:'ready'}));}catch(e){}
 shellSock=ws;var q=diagQ;diagQ=[];q.forEach(function(m){try{ws.send(JSON.stringify(diagStamp(m)));}catch(e){}});   // the rows that waited for this socket
-if(shellOpened&&window.__rompReload)window.__rompReload.checkBoot();shellOpened=true;};
+shellDownT=0;shellFails=0;if(shellOpened&&window.__rompReload)window.__rompReload.checkBoot();shellOpened=true;};
 ws.onmessage=function(ev){var m;try{m=JSON.parse(ev.data);}catch(e){return;}
 if(m&&m.type==='ka'&&m.pv&&window.__rompReload&&window.__rompReload.notePanes)window.__rompReload.notePanes(m.pv);   // the pane set's revision beside the build token (plans/panes-as-data.md): a define or remove at the kernel offers a reload
 if(m&&m.type==='ka'){if(m.dv&&window.__rompReload)window.__rompReload.noteDv(m.dv);}   // build drift on the shell's own keepalive (T265; an OFFER since 2026-09-16)
@@ -79900,6 +80137,20 @@ else if(m&&m.type==='updateAvail'&&window.__rompUpdateOffer)window.__rompUpdateO
 // the API health detail's pause acknowledgment rides this socket: a press it carried cannot be answered now (the
 // redial's ready re-sends the last frame verbatim), so the detail is told before the redial (_LANDING_APIH_JS)
 ws.onclose=function(){try{window.__rompApiSocketLost&&window.__rompApiSocketLost();}catch(e){}if(shellSock===ws)shellSock=null;setTimeout(shellWS,2000);};}catch(e){}}
+// THE HTTP DOOR (2026-10-15), the pane shim's beaconTick twin for the shell's own rows: once no shell socket has been open for
+// 20 s, the shell sends what diagQ holds (oldest first, at most 20 and 16,000 characters, as the panes do) and one `nosocket` row (how long, how many dials never
+// opened, whether the tab is hidden) over plain HTTP to the kernel's POST /client-diag, then at most once a minute while the
+// outage lasts. The shell keeps no timer of its own for it: a socket's close and a row queued while none is open are the
+// events that ask, and a dial that hangs leaves the panes' own doors to speak. A filed answer takes the rows out of diagQ,
+// so they never ride the socket as well; a refusal, an error or no answer within 10 s leaves them queued.
+function shellBeaconTick(){var now=Date.now();if(shellSock&&shellSock.readyState===1)return;
+if(!shellDownT||now-shellDownT<20000||shellBeaconBusy||(shellBeaconT&&now-shellBeaconT<60000)||typeof window.fetch!=='function')return;
+var sent=[],rows=[],size=0;for(var i=0;i<diagQ.length&&sent.length<20;i++){var r=diagStamp(diagQ[i]),n=JSON.stringify(r).length;if(size+n>16000)continue;sent.push(diagQ[i]);rows.push(r);size+=n;}
+rows.push(diagStamp({type:'clientDiag',surface:'shell',what:'nosocket',data:{app:'shell',downMs:now-shellDownT,attempts:shellFails,hidden:document.visibilityState!=='visible',queued:diagQ.length}}));
+shellBeaconT=now;shellBeaconBusy=true;var ac=null,tm=0;try{ac=typeof AbortController==='function'?new AbortController():null;}catch(e){ac=null;}
+if(ac)tm=setTimeout(function(){try{ac.abort();}catch(e){}},10000);
+function done(ok){shellBeaconBusy=false;if(tm)clearTimeout(tm);if(!ok)return;for(var i=0;i<sent.length;i++){var k=diagQ.indexOf(sent[i]);if(k>=0)diagQ.splice(k,1);}}
+try{window.fetch('/client-diag',{method:'POST',keepalive:true,body:JSON.stringify({wid:wid(),rows:rows}),signal:ac?ac.signal:undefined}).then(function(r){done(!!(r&&r.ok));},function(){done(false);});}catch(e){done(false);}}
 shellWS();
 var last='chat';try{var s=localStorage.getItem(KT);if(s&&F[s])last=s;}catch(e){}show(last);
 })();
@@ -83272,6 +83523,8 @@ class Handler(BaseHTTPRequestHandler):
             ok, self._set_cookie, why = self._authorize(q)
             self._cors_origin = self.headers.get("Origin") if ok else None   # echoed by _send (CORS delivery)
             if not ok:
+                if p == "/ws" or (p.startswith("/remote/") and p.endswith("/ws")):
+                    _note_ws_refused(self.headers, p, q, 403, why)   # a socket dial turned away, on the record (bounded; no query)
                 if p == "/":
                     # A bare-URL browser open lands here token-less: serve the paste-the-token page
                     # (Jupyter's login flow) instead of a dead 403 — the redirect seeds the cookie.
@@ -83841,6 +84094,22 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _client_diag_post(self):
+        """POST /client-diag: a page's clientDiag rows over HTTP (2026-10-15; _client_diag_file_post has the contract). The gate
+        has run (do_POST's _authorize: the page's cookie with its own origin, or the token); the declared length is held to
+        CLIENT_DIAG_POST_MAX_BYTES before a byte is read, and the body is then read by _read_post_body's rules."""
+        _cl = str(self.headers.get("Content-Length") or "0").strip()
+        if re.fullmatch(r"[0-9]{1,20}", _cl) and int(_cl) > CLIENT_DIAG_POST_MAX_BYTES:
+            self.close_connection = True
+            return self._send(413, json.dumps({"ok": False, "error": "a client-diag body is at most %d bytes" % CLIENT_DIAG_POST_MAX_BYTES}),
+                              "application/json", headers={"Connection": "close"})
+        raw_body, berr = self._read_post_body()
+        if berr is not None:
+            return self._send(berr[0], json.dumps({"ok": False, "error": berr[1]}), "application/json",
+                              headers={"Connection": "close"})
+        status, out = _client_diag_file_post(raw_body)
+        return self._send(status, json.dumps(out), "application/json", cache="no-cache")
+
     def _read_post_body(self):
         """The POST body, read only AFTER _authorize passed and only within bounds -> (bytes, None), or
         (None, (status, error)) with the connection marked to close (the unread body would otherwise be
@@ -83964,6 +84233,8 @@ class Handler(BaseHTTPRequestHandler):
                 # Unread bytes make the connection unusable for keep-alive, so it closes with the denial.
                 self.close_connection = True
                 return self._send(403, "forbidden: " + why, "text/plain", headers={"Connection": "close"})
+            if u.path == "/client-diag":
+                return self._client_diag_post()   # a page's rows with no socket to carry them; its own body cap, checked before the read
             raw_body, berr = self._read_post_body()
             if berr is not None:
                 return self._send(berr[0], json.dumps({"ok": False, "error": berr[1]}), "application/json",
@@ -86449,26 +86720,8 @@ class Handler(BaseHTTPRequestHandler):
             # actually observed (click fired? fetch outcome? rects?) so the next report carries
             # recorded evidence. First user: the strip's network button (the user 2026-07-14).
             try:
-                rec = {"t": int(time.time()), "wid": str(client.get("wid") or ""),
-                       "surface": str(msg.get("surface") or ""), "what": str(msg.get("what") or ""),
-                       # whether the socket that CARRIED the row declared the redial (?reconnect=1): the socket's dial
-                       # record, `redial`, set at accept beside the consumable `reconnect` and never popped, so every row
-                       # a socket carries reads the same value on every pane. Not the flag: _resolve_reconnect pops it on
-                       # a chat socket's first strip, _client_reset_chat_base pops it at ready, nothing pops it on the
-                       # other panes, and the ?skeleton=1 arm sets it for a column that declared no redial. The shim
-                       # queues its `wsclose` row while the socket is down and flushes it onto the redial, so with the
-                       # row's own bundleReady, readyAcked and readyQueued (the shim's state at the close) the log tells
-                       # a declared redial from the ones the dial term gated off (2026-09-10: everConnected alone, true on
-                       # every such row, could not). The wsopen row the accept files carries the same value, but it names
-                       # the socket by cid and this row does not, so the two cannot be joined without the stamp.
-                       "reconnect": bool(client.get("redial")),
-                       # the page's build and the kernel boot it loaded against (2026-09-23), stamped by the page's one diag door
-                       # (the pane shim's diagStamp, the shell's twin) so every surface carries them: `build` the dist token the page
-                       # was served with, `boot` the serving kernel's boot id baked into it. A row from a page that predates the
-                       # stamp (or a host that sends none, the VS Code webview) reads null for both, itself a statement of old code
-                       "build": msg.get("build") if isinstance(msg.get("build"), int) and not isinstance(msg.get("build"), bool) else None,
-                       "boot": str(msg.get("boot"))[:40] if isinstance(msg.get("boot"), str) and msg.get("boot") else None,
-                       "data": msg.get("data")}
+                # the row, as POST /client-diag files it too (_client_diag_rec: the socket's redial stamp, the page's build and boot)
+                rec = _client_diag_rec(msg, client.get("wid"), client.get("redial"))
                 # past the size cap the file becomes .1 and a new one starts; the check, rename and write are one
                 # locked step, since every pane's socket posts from its own handler thread
                 _client_diag_append(jd.STATE / "client-diag.jsonl", json.dumps(rec) + "\n")
@@ -87091,6 +87344,7 @@ class Handler(BaseHTTPRequestHandler):
     def _ws(self):
         key = self.headers.get("Sec-WebSocket-Key")
         if not key:
+            _note_ws_refused(self.headers, "/ws", parse_qs(urlparse(self.path).query), 400, "no upgrade key")   # on the record, bounded
             return self._send(400, "expected websocket", "text/plain")
         q = parse_qs(urlparse(self.path).query)
         app = (q.get("app") or ["chat"])[0]
@@ -87113,7 +87367,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Sec-WebSocket-Accept", _ws_accept(key))
         if deflate is not None:
             self.send_header("Sec-WebSocket-Extensions", _ws_deflate_response(deflate))
-        self.end_headers()
+        try:
+            self.end_headers()
+        except OSError as e:
+            # the 101 never reached the page (it went away mid-handshake): a failed upgrade, on the record like a refused
+            # dial, and raised on as before
+            _note_ws_refused(self.headers, "/ws", q, 101, "the 101 could not be written (%s)" % type(e).__name__, what="wsupgradefail")
+            raise
         self.close_connection = True              # hijacked socket — don't let the handler keep-alive after
         _client_seen[0] = time.time()
         lock = threading.Lock()
@@ -87193,6 +87453,8 @@ class Handler(BaseHTTPRequestHandler):
         _note_ws_open(client, reconnect=reconnect)   # the durable record of this open: app, wid, kind (page or relay), reconnect
         if client.get("reconnect"):
             _pusher_wake.set()   # the reconnect is the event; without this it waited out the 0.5-3 s backstop
+        # this socket's life for its end row (_note_ws_end): opened when, how many messages and when the first, and how it ended
+        life = {"t0": time.time(), "in": 0, "first": None, "cause": "eof", "code": None, "why": None}
         try:
             while client["alive"]:
                 # one COMPLETE message per iteration — fragments reassembled, pings answered inline
@@ -87202,10 +87464,13 @@ class Handler(BaseHTTPRequestHandler):
                     self.rfile, lambda payload: _ws_pong(self.wfile, lock, payload or b""),
                     on_pong=lambda payload: _note_ws_inbound(client),
                     inflate=bool(client.get("deflate")),   # a peer that negotiated permessage-deflate may send RSV1 frames
+                    on_close=lambda payload: life.update(cause="close", code=_ws_close_code(payload)),   # the page's own Close frame
                     on_fail=lambda code, why: _ws_fail(self.wfile, lock, client, code, why))   # an end the kernel decides: Close frame + one log line
                 if op is None:                         # EOF / close / a client overran the reassembly cap
                     break
                 _note_ws_inbound(client)               # any message proves the peer alive
+                life["first"] = life["first"] or time.time()
+                life["in"] += 1
                 client["inRead"] = False               # in a dispatch: pongs wait unread, not judged
                 # webview→kernel messages: on "ready", push the initial state to this client
                 try:
@@ -87225,9 +87490,10 @@ class Handler(BaseHTTPRequestHandler):
                     sys.stderr.write("ws handler [%s]: %s\n" % ((msg or {}).get("type"), traceback.format_exc()))
                 finally:
                     _note_ws_inbound(client)           # pings sent during the dispatch were unjudgeable: fresh clock
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            life.update(cause="error", why=type(e).__name__)
         finally:
+            _note_ws_end(client, life)             # first, so nothing below can lose it: the twin of the socket's wsopen row
             _lane_close(client)                    # what the loop read is still dispatched; a connect push nobody can read stops
             client["alive"] = False
             sendq.put(None)                    # end this client's sender thread
@@ -87262,8 +87528,10 @@ class Handler(BaseHTTPRequestHandler):
             r = _remotes.get(host)
             port, rtok = (r or {}).get("local_port") or 0, (r or {}).get("token") or ""
         if not port:
+            _note_ws_refused(self.headers, "/remote/%s/ws" % host, parse_qs(query or ""), 404, "no attached host")
             return self._send(404, "no attached host %r" % host, "text/plain")
         if not self.headers.get("Sec-WebSocket-Key"):
+            _note_ws_refused(self.headers, "/remote/%s/ws" % host, parse_qs(query or ""), 400, "no upgrade key")
             return self._send(400, "expected websocket", "text/plain")
         q = parse_qs(query or "")
         q.pop("token", None)         # whatever the browser sent never travels — with or without a row token
@@ -87276,6 +87544,7 @@ class Handler(BaseHTTPRequestHandler):
             up = socket.create_connection(("127.0.0.1", int(port)), timeout=6)
         except OSError as e:
             _demand_redial(host, "refused" if isinstance(e, ConnectionRefusedError) else "timeout")
+            _note_ws_refused(self.headers, "/remote/%s/ws" % host, q, 502, "the tunnel did not answer (%s)" % type(e).__name__)
             return self._send(502, "tunnel to %s is not answering — re-dialing now" % host, "text/plain")
         up.settimeout(None)          # create_connection's timeout would otherwise cut the long-lived splice
         lines = ["GET /ws?%s HTTP/1.1" % urlencode(q, doseq=True),
