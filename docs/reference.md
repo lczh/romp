@@ -6719,7 +6719,9 @@ three groups, each an up arrow, an icon naming what it steps through, and a down
   read yet. The group shows while any thread has one. The red badge on its corner is how many of
   those replies there are in the session, wherever they sit, so scrolling never changes it. It
   changes when a thread does: opening one reads it, a new reply makes it unread, and resolving or
-  deleting one takes it off.
+  deleting one takes it off. A thread opened and closed at once stays read, on a linked machine
+  too: an update the kernel sent before it recorded the read never brings the reply back. A read
+  the kernel could not record is said in a notice, and the thread shows unread again.
 - **Comments** (the comment yellow, a speech bubble): every comment thread, read or not. The group
   shows while the session has any.
 - **Your messages** (the blue of your messages, a person): the messages you typed.

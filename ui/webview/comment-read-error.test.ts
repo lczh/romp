@@ -9,6 +9,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { heldUnread, readKey } from "./read-latch";
 
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
 const requireCjs = createRequire(path.join(EXT, "package.json"));
@@ -27,7 +28,8 @@ function liftCommentArms(): string {
 
 const NAMES = ["m", "commentThreads", "commentReadError", "commentPending", "commentDrafts", "cmtAwaitBase", "cmtCreateInFlight",
   "synthSuperseded", "cmtLatchReleased", "pendingAdopt", "pendingCommentAnchor", "adoptCommentThread", "openCommentKey",
-  "vscodeApi", "applyCommentMarks", "renderCommentPopover", "warnToast", "ephemeralWarnToast", "tabName", "commentThreadAsks"];
+  "vscodeApi", "applyCommentMarks", "renderCommentPopover", "warnToast", "ephemeralWarnToast", "tabName", "commentThreadAsks",
+  "commentSeenAcks", "cmtReadLatch", "heldUnread", "readKey", "readThread"];   // the held reads (read-latch.ts): none here
 const thread = (tid: string) => ({ tid, anchorUuid: "u-" + tid, exact: "the passage", status: "open", createdT: 1, state: "",
   unread: false, promotedName: "", msgs: [] });
 
@@ -46,7 +48,8 @@ function page() {
   const deliver = (m: object) => {
     st.open = arms(m, st.threads, st.readError, st.pending, st.drafts, new Map(), new Map(),
       () => false, () => false, null, null, () => {}, st.open, null, () => {}, () => {},
-      (t: string) => st.replayed.push(t), (t: string) => st.toasts.push(t), (sid: string) => (sid === SID ? "web" : undefined), new Map());
+      (t: string) => st.replayed.push(t), (t: string) => st.toasts.push(t), (sid: string) => (sid === SID ? "web" : undefined), new Map(),
+      new Map(), new Map(), heldUnread, readKey, () => {});
   };
   return { st, deliver };
 }

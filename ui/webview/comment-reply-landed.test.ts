@@ -85,7 +85,7 @@ test("latches are pruned only against EVERY session's known threads — never on
 
 test("a reply landing while its popover is open advances the watermark BEFORE the marks paint", () => {
   const handler = RENDER.split('else if (m.type === "comments" && m.id) {')[1].split("\n  }\n")[0];
-  const seen = handler.indexOf('vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid: th.tid });');
+  const seen = handler.indexOf("readThread(sid, th.tid);");   // the stamp (readThread posts commentSeen), on the frame's own bit
   const paint = handler.indexOf("applyCommentMarks(sid);");
   assert.ok(seen > 0 && paint > 0 && seen < paint, "seen-stamp first, paint after — the mark never wears yellow for a reply read as it lands");
   assert.match(handler, /if \(openCommentKey && openCommentKey\.sid === sid\) renderCommentPopover\(\);/);

@@ -35,6 +35,7 @@ export type CommentThread = {
   live?: { status?: Record<string, unknown>; bgTasks?: unknown } | null;
   error?: string;             // the thread CLI's launch error, when it could not start
   unread: boolean;            // a FINISHED agent reply newer than the read watermark — yellow (kernel truth, T237)
+  seenSeq?: number;           // how many reads the kernel has recorded for the thread: a held read ends at the frame that counts it (read-latch.ts)
   replyOwed?: boolean;        // a reply is still owed (no exchange yet / user's message newest / turn in progress / a send held) — the green wash (kernel truth, T237; absent on an older kernel)
   queued?: number;            // sends the backend holds or has fed for this thread, not yet in the transcript (T237)
   lastUuid?: string;          // the newest record shown/held — "did the transcript move?" without the projection caps (T237)

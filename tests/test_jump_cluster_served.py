@@ -291,6 +291,10 @@ if (Object.values(out.steps).every((s) => s.ok)) {
   await page.click('#cmt-pop [data-act="cmtclose"]').catch(() => {});
   await page.waitForSelector("#cmt-pop", { state: "detached", timeout: 10000 }).catch(() => {});
   out.counts.closed = await count();
+  // the reply lands on the kernel's own frame that counts the read (seenSeq, 2026-10-15): the page holds a read until a frame
+  // does, so a frame from before it is no reply after it
+  await page.waitForFunction(() => ((window.__lastCmt && window.__lastCmt.threads) || []).some((t) => t.tid === "tid-c" && t.seenSeq >= 1),
+                             null, { timeout: 15000 }).catch(() => {});
   out.counts.reply = await page.evaluate(() => window.__replyLands("tid-c"));
   out.counts.replyInView = await inView(R(140));
 }
