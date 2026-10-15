@@ -5132,6 +5132,41 @@ frames it received is measured in the panes themselves, by
   cannot be written is said on stderr once, since the reading rule holds only while
   writes succeed. A planned per-app split of the connect push (perf work) will read
   the same `kind`.
+- The kernel files one `wsend` row (surface `kernel`) when an accepted socket
+  ends, matching its `wsopen` row by `cid`: the app and kind, how long the socket
+  lived (`lifeMs`), how many messages the page sent on it (`msgsIn`) and how soon
+  the first came (`firstInMs`, null for none), and the `cause`: `close` (the
+  page's Close frame, with its `code`), `eof` (the connection ended without one),
+  `error` (the read raised; `why` names the exception), or `kernel` (the kernel
+  ended it, for a peer that stopped answering pings, a backlog past the budget, a
+  protocol error or a socket its page's redial superseded; `why` is the reason
+  the kernel logged).
+- A socket dial the kernel does not accept files a `wsrefused` row: a `/ws` or
+  `/remote/HOST/ws` request the gate refused (403), one with no upgrade key
+  (400), or a relay to a host that is not attached (404) or whose tunnel does not
+  answer (502). The row carries the path (a relay's as `/remote/*/ws` with its
+  `host`), the app and dashboard id the dial named, the status, the reason,
+  whether an upgrade key came, and the Origin header, never the query string. A
+  handshake whose 101 could not be written files `wsupgradefail`. At most 30 of
+  these rows a minute; the dials a full minute turned away are counted onto the
+  next row (`unfiled`). A static request files nothing, so a browser that stopped
+  reaching the kernel leaves no row, and one that reached it and was turned away
+  leaves these.
+- A page with no open socket still reports. Once a pane has had no open socket
+  for 20 seconds, it sends the breadcrumbs it queued for the socket (at most 20,
+  and at most 16,000 characters of them; a row that does not fit waits) and one
+  `nosocket` row (how long, how many dials failed, the socket's state,
+  whether the tab is hidden, and how late the watchdog's tick ran) to
+  `POST /client-diag`, then at most once a minute while the outage lasts; the
+  shell does the same for its own rows when its socket closes. The request is a
+  `fetch` with `keepalive`, behind the gate the page's other requests pass (its
+  cookie with its own origin, or the token). The kernel files each row as it
+  files the rows a socket carries, with `via: http` added and `reconnect` false;
+  a row it filed leaves the page's queue, and a refused or unanswered request
+  leaves the rows for the socket. The route takes at most 64 KiB (checked against
+  Content-Length before reading), 25 rows a request, and 120 rows and 1 MiB a
+  minute across every page; past the minute's budget it answers 429 and files the
+  count as one `diagPostRefused` row when the next minute admits a request.
 - The kernel files one `chatFull` row (surface `kernel`) per whole session frame
   the uuid-anchored chat wire sends to a client that already holds a base for the
   session, filed once the frame has left (a frame the per-client dedup swallowed
