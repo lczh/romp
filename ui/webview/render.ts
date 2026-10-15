@@ -13980,6 +13980,7 @@ function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | 
   // first; the aligned element is what flashes
   const at = alignOn ?? target;
   settleLastInput = 0; settleScrollerHeld = false;   // the input that caused this landing (a click on a link in the scroller) is not evidence for taking it over (round three, low 4); a hold whose release never reached the page (a press held across an alt-tab) does not outlive the landing (round four, low 1)
+  readerScrolling = false;   // …nor is a gesture still running: the landing moved the view, the reader's flick is over
   const land = (writer: string) => { const c = document.getElementById("content"); if (c) scrollElInto(c, at, "start", writer); };
   land("land-on");
   // a landing is the reader's intent to be AT this message: follow mode ends unless the landing put them at the bottom
@@ -16294,6 +16295,11 @@ function landActive(content: HTMLElement | null, v: View): void {
     }
     else if (!v.shown || v.stick) writeScroll(content, content.scrollHeight, "land-bottom", true);
     else writeScroll(content, v.scrollTop, "land-saved");
+    // a passage landing's pause on follow mode never outlives a re-show (the tab coming back, a full rebuild) that leaves the
+    // reader at the bottom: there no chip says text is below, so following is the only truthful state (the review of #251:
+    // back on the tab after a landing, the view sat at the bottom, chipless, and the next text landed below unseen). New text
+    // that arrived meanwhile left the saved spot above the bottom instead, and the chip shows it
+    if (v.followHeld && atBottom(content)) { v.followHeld = false; v.stick = true; }
   }
   v.shown = true;
   scheduleRailSticky();
@@ -16532,6 +16538,10 @@ if (typeof ResizeObserver === "function") {
 const jcChevron = (up: boolean): string => '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"'
   + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="'
   + (up ? "6 14.5 12 8.5 18 14.5" : "6 9.5 12 15.5 18 9.5") + '"/></svg>';
+/** The reader's own scroll gesture still running (the scroll listener): set by a gesture with their input behind it, carried
+ *  through the momentum after it, ended by the scroll settling (scrollend) or a landing (landOn). */
+let readerScrolling = false;
+{ const c = document.getElementById("content"); if (c) c.addEventListener("scrollend", () => { readerScrolling = false; }, { passive: true }); }
 /** End a passage landing's pause on follow mode (landOn's followHeld): the reader is back at the bottom, by their own scroll,
  *  the go-to-bottom chip or their own send from the tail (the scroll listener), and the chat follows new text again exactly
  *  as before. */
@@ -16898,7 +16908,12 @@ window.addEventListener("keydown", (e) => {
     // the bottom: their gesture (with their input behind it, the settle's own evidence), a writer the census calls theirs (a
     // key, the chips) or their own send revealing itself from the tail. The landing's writes, the appends and the browser's
     // own moves never end it
-    if (gv?.followHeld && atBottom(c) && ((cls === "gesture" && gestureEvidence(settleLastInput, Date.now(), settleScrollerHeld))
+    // The reader's gesture is followed to its end, not to an input window: a phone flick's momentum reaches the bottom long
+    // after the finger left (gestureEvidence's 120 ms), so a gesture with the reader's input behind it starts readerScrolling
+    // and every gesture-classified scroll after it is theirs until the scroll settles (scrollend) or a landing moves the view.
+    // The page's own writes in between (the window sliding under a long flick) do not end it: the momentum runs on through them
+    if (cls === "gesture" && gestureEvidence(settleLastInput, Date.now(), settleScrollerHeld)) readerScrolling = true;
+    if (gv?.followHeld && atBottom(c) && ((cls === "gesture" && readerScrolling)
                                            || (cls === "write-echo" && (writerIsReader(lastScrollWriter) || lastScrollWriter === "optimistic-send")))) {
       releaseFollow(); gv.stick = true;
     }
@@ -17058,8 +17073,12 @@ if (typeof ResizeObserver === "function") {
       if (content && !snapView && lastH >= 0 && content.clientHeight > 0 && v && v.shown && followBoxBelow(v.stick || wasAtBottom, dh)) {   // a transcript rule: it stands down while the overview owns #content (the footer's hide is not a box below the reader, T322)
         writeScroll(content, content.scrollHeight, "box-below", true);
         v.scrollTop = content.scrollTop;                      // keep the per-view saved position in sync
-        v.stick = true;                                       // the record agrees: a follow-mode reader, whichever truth said so
+        v.stick = !v.followHeld;                              // the record agrees: a follow-mode reader, whichever truth said so (a passage landing's pause stands)
         repinned = true;
+        // the re-pin moved the transcript up by the box's growth (the composer growing as the reader types), and a thread's box
+        // opened beside a passage near the bottom stood still over it: it steps off the passage, the same overlap rule as the
+        // landing's re-land (besideFollow; the review of #251)
+        besideFollow();
       }
       lastH = h; for (const id of BOXES_BELOW) FEET[id] = now[id];
       // the pass is the EVENT a reader of the bottom holds at (the same flake: under load a lab read scrollTop after the box grew
@@ -21339,7 +21358,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   const content = document.getElementById("content");
   if (content && activeId && activeId !== id) {
     const cur = views.get(activeId);
-    if (cur) { cur.scrollTop = content.scrollTop; cur.stick = atBottom(content); }   // the leaving tab's follow mode: the true bottom
+    if (cur) { cur.scrollTop = content.scrollTop; cur.stick = atBottom(content) && !cur.followHeld; }   // the leaving tab's follow mode: the true bottom (a passage landing's pause: its saved spot)
   }
   // Stash the leaving tab's draft; show the entering tab's own (usually empty).
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
