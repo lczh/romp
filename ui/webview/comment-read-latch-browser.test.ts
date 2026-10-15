@@ -12,7 +12,11 @@
 //     link is back decides, read or not;
 //  4. the same on a linked machine's session (host-prefixed ids, the read posted under that id), its relay slow: frames
 //     from before the read arriving late, on both sides of the answer, and this page's own kernel dropping and returning
-//     meanwhile, leave the badge at 2; its relay dropping before the answer lets the next frame decide.
+//     meanwhile, leave the badge at 2; its relay dropping before the answer lets the next frame decide;
+//  5. through the real federation layer: a read sent into a relay gone silent, the watchdog's drop and the reconnect, then
+//     a new reply shows unread (the review of #247: the watchdog's drop was never said, and the read held for good).
+// Case 3 follows the shim's reconnect order: the return is its {type:"wsup"} frame, never the romp:wsup event, which fires
+// while the dead socket's last frames may still be draining.
 // What the page posts is read off a recording acquireVsCodeApi. Skips with a stated reason when no playwright browser is
 // installed, and fails with it where CI requires the leg (browser-leg.ts). Synthetic prose and placeholder ids only.
 import { test } from "node:test";
@@ -187,18 +191,23 @@ test("the link drops before the kernel answers the read: frames from the dead so
     await send(page, frame(SID, before));
     await openThread(page, SID, TIDS[0]);
     await closeThread(page);
+    // the shim's order on a reconnect: the old socket's close fires romp:wsdown; its last frames drain from the shim's FIFO;
+    // the new socket's open fires romp:wsup while one of those may still be queued, and the shim's {type:"wsup"} FRAME
+    // follows them, ahead of the new socket's own frames
     await edge(page, "romp:wsdown");
     await send(page, frame(SID, before));                           // the old socket's last frames, handed on after its close
     assert.equal(await badge(page), "2", "a frame from the dropped link does not decide");
     await edge(page, "romp:wsup");
-    await send(page, frame(SID, before));                           // the new link's frame: the read never arrived
+    await send(page, frame(SID, before));                           // one more of the dead socket's, still draining after the open
+    assert.equal(await badge(page), "2", "the open event is not the return: the dead socket's frame after it does not decide (it flapped once)");
+    await send(page, { type: "wsup" }, frame(SID, before));         // the flip frame, then the new link's frame: the read never arrived
     assert.equal(await badge(page), "3", "the read was lost with the link: the thread shows unread, never held forever");
     // read again, and this time the read got there before the link dropped
     await openThread(page, SID, TIDS[0]);
     await closeThread(page);
     await edge(page, "romp:wsdown");
     await edge(page, "romp:wsup");
-    await send(page, frame(SID, [row(0, "", { unread: false, seenSeq: 1 }), row(1, ""), row(2, "")]));
+    await send(page, { type: "wsup" }, frame(SID, [row(0, "", { unread: false, seenSeq: 1 }), row(1, ""), row(2, "")]));
     assert.equal(await badge(page), "2", "the new link's frame shows the read");
     await send(page, frame(SID, [replied("", 1), row(1, ""), row(2, "")]));
     assert.equal(await badge(page), "3", "and nothing holds a later reply");
@@ -239,4 +248,97 @@ test("a linked machine's thread: the read goes under the host-prefixed id, and a
     assert.equal(await badge(page), "2", "the read got there: read");
     assert.deepEqual(errors, []);
   });
+});
+
+// ── the same read through the REAL federation layer (federation.ts in the page, a fake WebSocket under it) ─────────────
+// The review of #247: the relay watchdog puts a silent socket down by detaching its handlers, so the socket's onclose,
+// which said romp:hostRelayDown, never ran. A read sent into a relay that had gone silent was never answered, and with no
+// down there was nothing for the next socket's frames to decide it by: the hold stood for the page's life and a later
+// reply on the thread never showed unread (a phone resuming with a dead relay, inside the watchdog's window). The page's
+// clock is Playwright's, so the watchdog's silence is fast-forwarded rather than waited out.
+const fedHtml = () => `<!DOCTYPE html><html lang=en><head><meta charset=utf-8><style>${STYLES}</style></head><body>
+${chatBody(ATTACH_TITLE_WEB)}
+<script>window.__posted=[];window.acquireVsCodeApi=function(){return{postMessage:function(m){window.__posted.push(m);if(window.__rompFed)window.__rompFed.outbound(m)},getState:function(){return null},setState:function(){}}};</script>
+<script src=/dist/federation.js></script>
+<script src=/dist/render.js></script></body></html>`;
+
+test("a read sent into a relay gone silent: the watchdog's drop says so, and after the reconnect a new reply shows unread", async (t) => {
+  const browser = await launchLeg(t, pw, "chromium");
+  if (!browser) return;
+  const errors: string[] = [];
+  try {
+    const build = (entry: string) => requireCjs("esbuild").buildSync({ ...BUILD, entryPoints: [path.join(UI, entry)] }).outputFiles[0].text;
+    const renderJs = build("render.ts"), fedJs = build("federation.ts");
+    const page = await browser.newPage({ viewport: { width: 1000, height: 700 } });
+    page.on("pageerror", (e: Error) => { errors.push(e.message); });
+    await page.clock.install();
+    // the relay sockets: each one the manager dials is kept, opened and fed by the test, and records what is sent on it
+    await page.addInitScript(() => {
+      const w = window as any;
+      w.__ws = [];
+      w.__relay = [];
+      for (const ev of ["romp:hostRelayDown", "romp:hostRelayUp"]) window.addEventListener(ev, (e: Event) => w.__relay.push(ev + " " + ((e as CustomEvent).detail || {}).host));
+      class FakeWS {
+        static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
+        readyState = 0; sent: any[] = []; onopen: any = null; onmessage: any = null; onclose: any = null; onerror: any = null;
+        constructor(public url: string) { w.__ws.push(this); }
+        send(s: string) { this.sent.push(JSON.parse(s)); }
+        close() { this.readyState = 3; }
+        open() { this.readyState = 1; if (this.onopen) this.onopen(); }
+        frame(m: any) { if (this.onmessage) this.onmessage({ data: JSON.stringify(m) }); }
+      }
+      w.WebSocket = FakeWS;
+    });
+    await page.route("**/*", (route: any) => {
+      const u = new URL(route.request().url());
+      if (u.hostname !== "romp.test") return route.fulfill({ status: 404, body: "" });
+      if (u.pathname === "/chat") return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: fedHtml() });
+      if (u.pathname === "/dist/render.js") return route.fulfill({ status: 200, contentType: "application/javascript", body: renderJs });
+      if (u.pathname === "/dist/federation.js") return route.fulfill({ status: 200, contentType: "application/javascript", body: fedJs });
+      if (u.pathname === "/tunnels") return route.fulfill({ status: 200, contentType: "application/json",
+        body: JSON.stringify({ tunnels: [{ host: HOST, hasToken: true, localPort: 1, status: "up", upSeq: 1 }] }) });
+      return route.fulfill({ status: 404, body: "" });
+    });
+    await page.goto("http://romp.test/chat");
+    await page.waitForFunction(() => (window as any).__ws.length === 1, null, { timeout: 10000 });
+    const RSID = HOST + ":" + SID;
+    const relay = (i: number, ...msgs: object[]) => page.evaluate(([k, ms]: [number, object[]]) => {
+      const ws = (window as any).__ws[k];
+      for (const m of ms) ws.frame(m);
+    }, [i, msgs] as [number, object[]]).then(() => settle(page));
+    const events: object[] = [];
+    for (let k = 0; k < N; k++) {
+      events.push({ kind: "user", md: `Step ${k}: how should the export of the notes table handle a slow disk?`, uuid: uid(1, k) });
+      events.push({ kind: "assistant", md: replyText(k), uuid: uid(2, k) });
+    }
+    await page.evaluate(() => (window as any).__ws[0].open());
+    // the linked kernel's frames carry ITS ids; the federation layer prefixes them on the way in
+    await relay(0, { type: "session", id: SID, name: "web", cwd: "/tmp/TESTHOST/notes-api", status: { state: "idle", sinceEpoch: null }, events },
+                frame(SID, [row(0, ""), row(1, ""), row(2, "")]));
+    await page.waitForSelector("#content .turn-assistant .md p", { state: "attached", timeout: 10000 });
+    await page.waitForFunction(() => (document.querySelector("#jump-cluster .jc-count")?.textContent || "").trim() === "3", null, { timeout: 10000 });
+
+    const read = await openThread(page, RSID, TIDS[0]);
+    await closeThread(page);
+    const sent = await page.evaluate(() => (window as any).__ws[0].sent.filter((m: any) => m.type === "commentSeen"));
+    assert.deepEqual(sent.map((m: any) => [m.id, m.tid, m.rid]), [[SID, TIDS[0], read.rid]], "the read went to the linked kernel, by its own id, on the relay");
+    assert.equal(await badge(page), "2");
+
+    // the relay says nothing more: no answer, no frame. The watchdog puts it down and dials a fresh one
+    await page.clock.fastForward(40_000);
+    await page.waitForFunction(() => (window as any).__ws.length === 2, null, { timeout: 10000 });
+    assert.deepEqual(await page.evaluate(() => (window as any).__relay), [`romp:hostRelayUp ${HOST}`, `romp:hostRelayDown ${HOST}`],
+                     "the watchdog's drop is said, as a close is");
+    await page.evaluate(() => (window as any).__ws[1].open());
+    // the linked kernel had recorded the read before the relay went quiet (its answer died with the socket): the new
+    // relay's first frame shows it, and a reply after it shows unread
+    await relay(1, frame(SID, [row(0, "", { unread: false, seenSeq: 1 }), row(1, ""), row(2, "")]));
+    assert.equal(await badge(page), "2", "the new relay's frame shows the read");
+    await relay(1, frame(SID, [replied("", 1), row(1, ""), row(2, "")]));
+    assert.equal(await badge(page), "3", "a reply after the read shows unread: the read is not held for the page's life");
+    assert.equal(await markUnread(page, TIDS[0]), true);
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser.close();
+  }
 });

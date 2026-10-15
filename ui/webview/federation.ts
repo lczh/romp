@@ -1275,6 +1275,7 @@ export class FederationManager {
         try { dead.close(); } catch (e) { /* already dying */ }
         c.ws = null;
         this.dialEvent(c.host, false);   // its onclose is detached above, so the attempt's end is said HERE (the swirl must not spin on a dead dial)
+        this.relayDown(c.host);          // …and so is the drop itself, as onclose says it (2026-10-15, the review of #247)
         this.connect(c);   // settings queued on the conn meanwhile ride the fresh socket's open (flushPending)
       } else if (v === "redial") {
         this.connect(c);
@@ -2090,9 +2091,7 @@ export class FederationManager {
       this.dialEvent(conn.host, false);   // the attempt ended (refused, or the socket dropped): still until the redial
       this.diag("hostconn", { host: conn.host, ev: "close", code: ev.code, clean: ev.wasClean, detached: conn.closed });
       conn.acksSeen = false;
-      // the remote twin of the shim's romp:wsdown: a send to this host that its kernel has not answered may never have
-      // reached it, and the chat says so on the bubble until the next socket's resend is answered (render.ts)
-      try { window.dispatchEvent(new CustomEvent("romp:hostRelayDown", { detail: { host: conn.host } })); } catch (e) { /* never break the relay */ }
+      this.relayDown(conn.host);
       if (!conn.closed) setTimeout(() => this.connect(conn), 2000); // reconnect a dropped remote
     };
     ws.onerror = () => {
@@ -2100,6 +2099,16 @@ export class FederationManager {
         ws.close();
       } catch (e) {}
     };
+  }
+
+  /** A relay socket to `host` is gone, closed or put down by the watchdog: romp:hostRelayDown, the remote twin of the
+   *  shim's romp:wsdown. A send to this host that its kernel has not answered may never have reached it, and the chat
+   *  says so on the bubble until the next socket's resend is answered; the asks in flight on it are released; a comment
+   *  thread's read it has not answered waits for the next socket's first frame to decide it (render.ts, read-latch.ts).
+   *  Every drop says it: the watchdog's abandon detaches the socket's onclose, and a drop it did not say left that read
+   *  held for the page's life, so a later reply on the thread never showed unread (the review of #247, 2026-10-15). */
+  private relayDown(host: string): void {
+    try { window.dispatchEvent(new CustomEvent("romp:hostRelayDown", { detail: { host } })); } catch (e) { /* never break the relay */ }
   }
 
   /** One host's dial state changed: its relay socket's dial began (CONNECTING) or ended (open, closed, or
