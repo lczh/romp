@@ -27,16 +27,18 @@
 //     and hands it to showActive, which by then has no DOM to capture from.
 // Event-based throughout: the scroll event and the show itself; no timer, no age threshold.
 
-export interface KeepView { scrollTop: number; stick: boolean; shown: boolean; }
+export interface KeepView { scrollTop: number; stick: boolean; shown: boolean; followHeld?: boolean; }
 
 /** The reader scrolled the active view: its saved spot and follow-mode follow them. A view not yet shown
  *  keeps its defaults (its first land goes to the bottom regardless), a hidden pane never scrolls, and while
  *  a deferred build is pending (`building`) the position is the reveal's clamp, not the reader's — the
- *  build's own land fires the next scroll event, and that one is recorded. */
+ *  build's own land fires the next scroll event, and that one is recorded. While a landing on a comment's
+ *  passage holds follow mode off (`followHeld`, render.ts landOn) the flag stays off at the bottom too, until
+ *  the reader is back there by their own move (render.ts releaseFollow). */
 export function followReader(v: KeepView | null | undefined, scrollTop: number, near: boolean, building = false): void {
   if (!v || !v.shown || building) return;
   v.scrollTop = scrollTop;
-  v.stick = near;
+  v.stick = near && !v.followHeld;
 }
 
 /** landActive's landing when no anchor scrolled: "bottom" for an unshown or follow-mode view, else the saved spot. */

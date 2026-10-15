@@ -81,7 +81,7 @@ test("render.ts: the transcript's foot line keeps its room whether or not it sho
   assert.doesNotMatch(RENDER, /\nliveStatusEl\(\);/, "no foot line at load, ahead of the transcript");
   const mk = RENDER.slice(RENDER.indexOf("function liveStatusEl("), RENDER.indexOf("function paintLiveThinking("));
   assert.match(mk, /if \(!content \|\| !v \|\| !v\.el\.children\.length\) return null;/);
-  assert.match(mk, /const atEnd = atBottom\(content\);[\s\S]*content\.insertBefore\(n, document\.getElementById\("live-ask"\)\);\s*\n\s*if \(atEnd\) writeScroll\(content, content\.scrollHeight, "live-status", true\);/);
+  assert.match(mk, /const atEnd = atBottom\(content\);[\s\S]*content\.insertBefore\(n, document\.getElementById\("live-ask"\)\);\s*\n\s*if \(atEnd && !v\.followHeld\) writeScroll\(content, content\.scrollHeight, "live-status", true\);/);
 });
 
 test("render.ts: a live status lives as long as its socket, a relay's reopen included", () => {

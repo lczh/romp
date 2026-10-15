@@ -106,7 +106,7 @@ test("the scroll clamp: how far short of the viewport top a target near the tail
 
 test("render.ts wiring: landOn ends follow mode, feeds the rule from the page's own events, files the row at settle time, and the walk-forward waits", () => {
   assert.match(RENDER, /import \{ SETTLE_MS, SETTLE_FIRST_PAINT_MS, SETTLE_ROW_VIEWPORT_CAP, settleStep, settleRowFields, reachableOffset, gestureEvidence, scrollerGrab, writerIsReader, type SettleSample \} from "\.\/landing-settle";/);
-  assert.match(RENDER, /if \(c && v\) v\.stick = atBottom\(c\); \}/, "a landing ends follow mode unless it put the reader at the bottom (the tail-shrink snap otherwise undoes it)");
+  assert.match(RENDER, /if \(c && v\) \{ v\.followHeld = !!mark; v\.stick = !mark && atBottom\(c\); \} \}/, "a landing ends follow mode unless it put the reader at the bottom (the tail-shrink snap otherwise undoes it); a landing on a comment's passage ends it there too");
   assert.match(RENDER, /const landSettle = \{ turn: target, at, uuid: flashKey \?\? null, quote: quote \?\? null, mark: mark \?\? null, rowH: settleRowHeight\(at\), samples: \[\] as SettleSample\[\],/, "one settle in flight per landing, with what re-finds its target (a comment thread's highlight among them)");
   assert.match(RENDER, /ro\.observe\(at\); if \(at !== target\) ro\.observe\(target\);/, "the aligned element's box, and the turn's");
   assert.match(RENDER, /for \(const sp of Array\.from\(v\.el\.querySelectorAll\("\.tx-spacer"\)\)\) ro\.observe\(sp\);/, "the view's spacers: their size from estimate to measurement");

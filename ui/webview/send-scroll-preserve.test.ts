@@ -71,7 +71,7 @@ test("registerOptimistic gates the snap on a pre-append nearBottomForSend read",
   // nearBottomForSend's 80px threshold — the replica's constant
   assert.match(RENDER, /function nearBottomForSend\(c: HTMLElement\): boolean \{\s*\n\s*return c\.scrollHeight - c\.scrollTop - c\.clientHeight < 80;/);
   // appendActive's stick rule — overflow gate + the TRUE bottom (T262c), restore otherwise
-  assert.match(RENDER, /const stick = content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\);/);
+  assert.match(RENDER, /const stick = content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\) && !v\?\.followHeld;/);
 });
 
 test("every composer-shaped send rides the same gate — staged flush and provisional adoption included", () => {
