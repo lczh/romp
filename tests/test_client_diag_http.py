@@ -347,7 +347,8 @@ class SocketLife(_Served):
         st, s = self.upgrade("/ws?app=feed&wid=W-ref1&token=" + QMARK, {"Origin": self.origin})
         _drain_close(s)
         self.assertEqual(st, 403)
-        st, s = self.upgrade("/ws?app=chat&wid=W-ref2", {"Cookie": "romp_token=" + km.TOKEN, "Origin": "http://elsewhere.example"})
+        st, s = self.upgrade("/ws?app=chat%3Cb%3E&wid=W-ref2%20%22said%20so%22%3Cscript%3E",   # a cross-site page's chosen strings
+                             {"Cookie": "romp_token=" + km.TOKEN, "Origin": 'http://elsewhere.example "x" <y>'})
         _drain_close(s)
         self.assertEqual(st, 403)
         st, s = self.upgrade("/ws?app=chat&wid=W-ref3")                    # past the minute's two rows
@@ -358,9 +359,11 @@ class SocketLife(_Served):
         _drain_close(s)
         self.assertEqual(st, 400, "no upgrade key")
         got = self.wait_rows("wsrefused", n=3)
-        self.assertEqual([(r["wid"], r["data"]["status"]) for r in got], [("W-ref1", 403), ("W-ref2", 403), ("W-ref4", 400)])
+        self.assertEqual([(r["wid"], r["data"]["status"]) for r in got], [("W-ref1", 403), ("W-ref2saidsoscript", 403), ("W-ref4", 400)],
+                         "a dial's dashboard id is cut to the characters a real one uses: no spaces, quotes or markup")
         self.assertIn("token required", got[0]["data"]["why"])
-        self.assertEqual((got[1]["data"]["why"], got[1]["data"]["origin"]), ("cross-site origin", "http://elsewhere.example"))
+        self.assertEqual((got[1]["data"]["why"], got[1]["data"]["app"], got[1]["data"]["origin"]),
+                         ("cross-site origin", "chatb", "http://elsewhere.examplexy"), "the app and the Origin, cut the same way")
         self.assertEqual((got[2]["data"]["why"], got[2]["data"]["key"], got[2]["data"]["unfiled"]), ("no upgrade key", False, 1),
                          "the dial the full minute refused, counted onto the next row")
         self.assertEqual([r["data"]["path"] for r in got], ["/ws"] * 3)
@@ -371,8 +374,12 @@ class SocketLife(_Served):
         st, s = self.upgrade("/remote/NOHOST/ws?app=chat&wid=W-relay&token=" + km.TOKEN, {"Origin": self.origin})
         _drain_close(s)
         self.assertEqual(st, 404)
-        got = self.wait_rows("wsrefused")
-        self.assertEqual([(r["data"]["path"], r["data"]["host"], r["data"]["status"]) for r in got], [("/remote/*/ws", "NOHOST", 404)])
+        st, s = self.upgrade("/remote/NO%20HOST%22%3Cb%3E/ws?app=chat&wid=W-relay2&token=" + km.TOKEN, {"Origin": self.origin})
+        _drain_close(s)
+        self.assertEqual(st, 404)
+        got = self.wait_rows("wsrefused", n=2)
+        self.assertEqual([(r["data"]["path"], r["data"]["host"], r["data"]["status"]) for r in got],
+                         [("/remote/*/ws", "NOHOST", 404), ("/remote/*/ws", "NOHOSTb", 404)], "the host the path named, cut to a host's characters")
 
     def test_a_static_request_files_nothing(self):
         for path, headers in (("/healthz", {}), ("/version", {}), ("/", self.page()), ("/ws", {})):

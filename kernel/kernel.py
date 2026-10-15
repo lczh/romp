@@ -59601,14 +59601,29 @@ def _note_ws_end(client, life, now=None):
         return False
 
 
+# A refused dial's row carries strings the dial chose, and the gate's 403 is reached with no credential at all, so any
+# cross-site page's `new WebSocket(...)` to the loopback port can file one. Each such string is cut to the characters a
+# real one uses (an app name, a uuid dashboard id, a host as _SSH_HOST_RE admits one, an origin), so a dial cannot write
+# prose, quotes or markup into the file, only a short token.
+_WS_ROW_FIELD_DROP = re.compile(r"[^A-Za-z0-9_.:-]")
+_WS_ROW_HOST_DROP = re.compile(r"[^A-Za-z0-9_.@:\[\]-]")
+_WS_ROW_ORIGIN_DROP = re.compile(r"[^A-Za-z0-9_.:/\[\]-]")
+
+
+def _ws_row_field(s, n, drop=_WS_ROW_FIELD_DROP):
+    """`s` as a refused dial's row may carry it: only the characters `drop` keeps, then at most `n` of them."""
+    return drop.sub("", str(s or ""))[:n]
+
+
 def _note_ws_refused(headers, path, q, status, why, what="wsrefused", now=None):
     """One row for a socket dial the kernel did not accept: `wsrefused` for a /ws or /remote/HOST/ws request turned away (at
     the gate, 403; with no upgrade key, 400; a relay to a host that is not attached, 404, or whose tunnel does not answer,
     502), `wsupgradefail` for a handshake whose 101 could not be written. The path (a relay's as /remote/*/ws with its
     host), the app and the dashboard id the dial named, the status, the reason, whether it carried an upgrade key, and its
-    Origin header; never the query string, which may carry a token. A dial that never reached the kernel files nothing, so
-    a browser that stopped reaching it reads as no rows, and one that reached it and was turned away reads as these. At
-    most CONN_ROWS_PER_MIN a minute; the dials a full minute refused are counted onto the next row (`unfiled`)."""
+    Origin header, each cut to a plain character set (_ws_row_field); never the query string, which may carry a token. A
+    dial that never reached the kernel files nothing, so a browser that stopped reaching it reads as no rows, and one that
+    reached it and was turned away reads as these. At most CONN_ROWS_PER_MIN a minute; the dials a full minute refused are
+    counted onto the next row (`unfiled`)."""
     try:
         admitted, unfiled = _CONN_ROW_BUDGET.take(1)
         if not admitted:
@@ -59616,13 +59631,14 @@ def _note_ws_refused(headers, path, q, status, why, what="wsrefused", now=None):
         now = time.time() if now is None else now
         p, q = str(path or ""), q or {}
         relay = p.startswith("/remote/") and p.endswith("/ws")
-        data = {"path": "/remote/*/ws" if relay else p, "app": str((q.get("app") or [""])[0])[:40], "status": int(status),
-                "why": str(why)[:200], "key": bool(headers.get("Sec-WebSocket-Key")), "origin": str(headers.get("Origin") or "")[:100]}
+        data = {"path": "/remote/*/ws" if relay else p, "app": _ws_row_field((q.get("app") or [""])[0], 40), "status": int(status),
+                "why": str(why)[:200], "key": bool(headers.get("Sec-WebSocket-Key")),
+                "origin": _ws_row_field(headers.get("Origin"), 100, _WS_ROW_ORIGIN_DROP)}
         if relay:
-            data["host"] = p[len("/remote/"):-len("/ws")][:100]
+            data["host"] = _ws_row_field(p[len("/remote/"):-len("/ws")], 100, _WS_ROW_HOST_DROP)
         if unfiled:
             data["unfiled"] = unfiled
-        _client_diag_append(jd.STATE / "client-diag.jsonl", json.dumps({"t": int(now), "wid": str((q.get("wid") or [""])[0])[:100], "surface": "kernel",
+        _client_diag_append(jd.STATE / "client-diag.jsonl", json.dumps({"t": int(now), "wid": _ws_row_field((q.get("wid") or [""])[0], 100), "surface": "kernel",
                                                                          "what": what, "data": data}) + "\n")
         return True
     except Exception as e:

@@ -5146,7 +5146,11 @@ frames it received is measured in the panes themselves, by
   (400), or a relay to a host that is not attached (404) or whose tunnel does not
   answer (502). The row carries the path (a relay's as `/remote/*/ws` with its
   `host`), the app and dashboard id the dial named, the status, the reason,
-  whether an upgrade key came, and the Origin header, never the query string. A
+  whether an upgrade key came, and the Origin header, never the query string.
+  The gate's refusal needs no credential, so any page, a cross-site one
+  included, can make the kernel file one; the app, dashboard id, host and
+  Origin are therefore cut to the characters such a value uses (letters,
+  digits and a few marks such as `.`, `-` and `:`) and to 40 to 100 of them. A
   handshake whose 101 could not be written files `wsupgradefail`. At most 30 of
   these rows a minute; the dials a full minute turned away are counted onto the
   next row (`unfiled`). A static request files nothing, so a browser that stopped
