@@ -50820,15 +50820,22 @@ def _feed_key_with_deps(key, ctx, entry):
 # bound, a store sheds the least recently used entries that no derivation of the current build has used so far; when
 # shedding every one of them would still leave no room, it sheds nothing and the newcomer is not held, nor is an
 # aggregate over the bound by itself, and either way the entry the walk was served from stays, so the next walk folds
-# only the turns since it. The guarantee is narrow: an entry a derivation of this build has already used is not shed by
-# a later store of the same build. An entry the build has yet to use still carries an earlier build's number, so past
-# the bound a session whose grown aggregate is stored first, in whichever order the build derives them, can shed the
-# entry of a session derived after it, which then walks every turn while the two do not fit together (the review after
-# the merge, 2026-10-07). Also protecting the entries the previous build used was measured and declined: past the bound
-# the stored entries then stop advancing, so each session's walk grows by one turn for every turn it closes. While two
-# builds overlap (the pusher's and a handler thread's, such as Clear all's), every entry used from then on carries the
-# number of the build that began last, so an entry the earlier build used before that is no longer protected. GET /perf
-# reports it inside builds.feed.memo (the seg* keys).
+# only the turns since it. An aggregate over the bound by itself only grows as its session closes turns, so the entry
+# kept for it never advances while it stands: each walk of that session folds every turn closed since that entry, one
+# turn more for every turn the session closes (never past walking every turn), and counts under segOverBound. That
+# entry, the last one held before the session outgrew the bound, is close to the bound, and a build that derives its
+# session first has used it, so a session derived after it in that build is held only if its aggregate fits in the bytes
+# the bound leaves beside the entries the build has used; one turned away is counted under segEvict while the table
+# stays as it was, and a session with no entry of its own then walks every turn (the review after #138 merged,
+# 2026-10-07). The guarantee is narrow: an entry a derivation of this build has already used is not shed by a later
+# store of the same build. An entry the build has yet to use still carries an earlier build's number, so past the bound
+# a session whose grown aggregate is stored first, in whichever order the build derives them, can shed the entry of a
+# session derived after it, which then walks every turn while the two do not fit together (the review after the merge,
+# 2026-10-07). Also protecting the entries the previous build used was measured and declined: past the bound the stored
+# entries then stop advancing, so each session's walk grows by one turn for every turn it closes. While two builds
+# overlap (the pusher's and a handler thread's, such as Clear all's), every entry used from then on carries the number
+# of the build that began last, so an entry the earlier build used before that is no longer protected. GET /perf reports
+# it inside builds.feed.memo (the seg* keys).
 _FEED_SEG_HELD = collections.OrderedDict()   # fsid -> (head, seams, keys, maps, plain_t, bytes, build), least recently
 #                                              used first; maps = (seg_uuid, seg_trig, seg_best, cite_uuids, positions),
 #                                              never mutated once held (a derivation folds into copies); build = the
@@ -51035,9 +51042,12 @@ def _feed_seg_plain_t(w):
     counted under segEvict). When shedding every one of them would still leave no room, nothing is shed and the newcomer
     is not held (counted once under segEvict); an aggregate over the bound by itself is not held either and sheds no
     other session (segOverBound). In both cases the entry the walk was served from stays, since the table held it under
-    this bound, so the next walk folds only the turns since it. This keeps an entry a derivation of this build has
-    already used; one the build has yet to use carries an earlier build's number and can be shed by a grown aggregate
-    stored before it (the comment above _FEED_SEG_HELD)."""
+    this bound, so the next walk folds only the turns since it. An aggregate over the bound by itself only grows, so the
+    entry kept for it never advances: each walk folds every turn closed since it, one turn more for every turn the
+    session closes, and once this build has used that entry, close to the bound, a session derived after it is held only
+    if it fits in the bytes the bound leaves beside it. This keeps an entry a derivation of this build has already used;
+    one the build has yet to use carries an earlier build's number and can be shed by a grown aggregate stored before it
+    (the comment above _FEED_SEG_HELD)."""
     try:
         closed_t = w.base_plain
         if w.start < w.n_closed:
@@ -51077,7 +51087,8 @@ def _feed_seg_plain_t(w):
             if keep is not None:
                 _FEED_SEG_HELD[w.fsid] = keep        # the newcomer, or else the entry it was served from (the table held
                 #                                      that one under this bound, so it fits): the next walk folds only the
-                #                                      turns since it
+                #                                      turns since it, though one kept for an aggregate over the bound
+                #                                      by itself never advances (the comment above _FEED_SEG_HELD)
     return best
 
 
