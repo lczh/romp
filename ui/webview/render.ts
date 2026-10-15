@@ -16541,7 +16541,22 @@ const jcChevron = (up: boolean): string => '<svg viewBox="0 0 24 24" width="14" 
 /** The reader's own scroll gesture still running (the scroll listener): set by a gesture with their input behind it, carried
  *  through the momentum after it, ended by the scroll settling (scrollend) or a landing (landOn). */
 let readerScrolling = false;
-{ const c = document.getElementById("content"); if (c) c.addEventListener("scrollend", () => { readerScrolling = false; }, { passive: true }); }
+/** The reader's scroll took the view to the bottom while a passage landing holds follow mode off: following resumes. Read where
+ *  the gesture reaches the bottom (the scroll listener) AND where it settles (scrollend), whichever comes last: Chromium fires
+ *  a keyboard smooth scroll's scrollend (End, PageDown, Space) BEFORE its last scroll event at the bottom, so a check on the
+ *  scroll events alone met a gesture already ended and an input past its window, and resumed in about one run in three (the
+ *  review of #252). scrollTop is final at scrollend, so the bottom is read there as it stands. */
+function resumeAtBottom(c: HTMLElement): void {
+  const v = activeId ? views.get(activeId) : null;
+  if (v?.followHeld && atBottom(c)) { releaseFollow(); v.stick = true; }
+}
+{
+  const c = document.getElementById("content");
+  if (c) c.addEventListener("scrollend", () => {
+    if (readerScrolling && c.clientHeight > 0) resumeAtBottom(c);   // the reader's gesture settled: at the bottom, it follows again
+    readerScrolling = false;
+  }, { passive: true });
+}
 /** End a passage landing's pause on follow mode (landOn's followHeld): the reader is back at the bottom, by their own scroll,
  *  the go-to-bottom chip or their own send from the tail (the scroll listener), and the chat follows new text again exactly
  *  as before. */
@@ -16913,10 +16928,7 @@ window.addEventListener("keydown", (e) => {
     // and every gesture-classified scroll after it is theirs until the scroll settles (scrollend) or a landing moves the view.
     // The page's own writes in between (the window sliding under a long flick) do not end it: the momentum runs on through them
     if (cls === "gesture" && gestureEvidence(settleLastInput, Date.now(), settleScrollerHeld)) readerScrolling = true;
-    if (gv?.followHeld && atBottom(c) && ((cls === "gesture" && readerScrolling)
-                                           || (cls === "write-echo" && (writerIsReader(lastScrollWriter) || lastScrollWriter === "optimistic-send")))) {
-      releaseFollow(); gv.stick = true;
-    }
+    if ((cls === "gesture" && readerScrolling) || (cls === "write-echo" && (writerIsReader(lastScrollWriter) || lastScrollWriter === "optimistic-send"))) resumeAtBottom(c);
     // …and while a passage landing settles, ANY move of the view (its re-land, or the browser's own move as the reply under the
     // passage grows) can carry the passage under the box that landing opened: the box steps off it (besideWatch). A reader's
     // own scroll has already ended the settle above, so it never moves the box
