@@ -88084,7 +88084,15 @@ class _LoopbackServer(ThreadingHTTPServer):
     loopback quickly holds the whole server there: GitHub's macOS 15 and 16 images block about 36 seconds per
     server on it (measured 2026-09-16 on the bats leg, where every Python stub and the postal bus paid it once),
     and a Mac with a stale resolver would keep this kernel from answering for as long. server_name feeds
-    nothing this kernel reads (the CGI handler's environment, never used here), so it is the bind address."""
+    nothing this kernel reads (the CGI handler's environment, never used here), so it is the bind address.
+
+    request_queue_size is the backlog server_activate hands listen(), and socketserver's default is 5. Connections are
+    accepted on the main thread, which needs the interpreter lock like every other thread, so while the kernel stalls
+    (a long collection, memory paged back in from swap) nothing is accepted, and once five connections wait the system
+    drops the next ones: the browser's dial hangs and is retried on the system's own slow schedule. 128 holds a burst
+    of redials from several dashboards through such a stall (the system's somaxconn still caps it)."""
+    request_queue_size = 128
+
     def server_bind(self):
         socketserver.TCPServer.server_bind(self)     # the bind, with allow_reuse_address as HTTPServer sets it
         host, port = self.server_address[:2]
