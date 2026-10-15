@@ -3806,6 +3806,14 @@ def fed_text_opener(text: str) -> str:
     return "injected" if "<!-- romp-injected -->" in (text or "") else "human"
 
 
+# A turn that ended while no kernel was listening (2026-10-14; plans/federated-push.md, "The feed across a restart"): a
+# hosted CLI keeps running across a kernel restart, and the Stop hook of a turn it ends meanwhile waits at its host until
+# a kernel attaches and answers it. The transport marks such a hook's input with this key (host_transport's
+# UNWATCHED_STOP_KEY, pinned equal by a test: the request's id), the hook stamps `lastStopUnwatched` beside the settle,
+# and the kernel's turn tick counts that turn end into its restart's summary instead of buzzing it late.
+UNWATCHED_STOP_KEY = "rompUnwatched"
+
+
 # The bus banner's per-message marker, event_model's one detector (its POSTAL_RE; the fallback is the same pattern
 # for a stand-in event_model in tests).
 _POSTAL_MID_RE = getattr(_em, "POSTAL_RE", None) or re.compile(r"<!--\s*romp-msg-id:\s*(\S+?)\s*-->")
@@ -6451,6 +6459,9 @@ class SdkSession:
         # detach (the kernel leaving, the host keeping the CLI) so _on_session_gone never reads it as a crash;
         # `_host_end_grace` is the bound the next `end` carries (kill sets the short one)
         self._host = None
+        self._unwatched_rids = set()       # request ids its CLI sent before this kernel life first attached to it (the first
+        #                                    hello's `parked`), until each is handed over, a Stop hook among them until it
+        #                                    has stamped its turn end (the transport's `unwatched`; unwatched_pending)
         self._host_intent = False          # set before the host attach or spawn begins, so a drain mid-attach detaches
         self._host_is_attach = False       # the current host connect is an ATTACH (a replay-bearing hello)
         self._deliberate_connect = False   # this connect is a deliberate reconnect inside a live thread: a fresh CLI marks no echoes
@@ -6487,17 +6498,25 @@ class SdkSession:
         # _cli_working mirrors the last lifecycle state we persisted so the live stream can re-assert
         # 'working' if a stamp ever falls behind actual output, with no reliance on feed-vs-result counting.
         self._cli_working = False
-        # WHO OPENED the turn in flight — "human" (any fed text without the romp-injected marker: the
-        # composer's words, a queued message, a typed follow-up, a button's /command) or "injected" (romp's
-        # own feed — a nudge, a follow-up, a restart notice, relayed mail — or a turn the CLI opened by
-        # itself: a background task's notification, a scheduled prompt, a peer's channel message, told by
-        # the streamed record's origin stamp). None until an open is seen. Set at the two places a turn can
-        # open (the feeder's pop; _forward's stamped user atom while nothing romp fed is in flight, see
-        # _note_turn_opener), stamped
-        # beside lastStopAt by the Stop hook as lastTurnOpener, and read by the kernel's turn-finished push,
-        # which buzzes the phone for the human's turns only (the user 2026-09-10: ten buzzes in fifty minutes
-        # from one session reacting, turn after turn, to its own background subagents' completions).
-        self._turn_opener = None
+        # WHO OPENED the turn in flight — "human" (a fed text without the romp-injected marker: the composer's
+        # words, a queued message, a typed follow-up, a button's /command) or "injected" (romp's own feed — a
+        # nudge, a follow-up, a restart notice, relayed mail — or a turn the CLI opened by itself: a
+        # background task's notification, a scheduled prompt, a peer's message, a text it drained after the
+        # turn it was fed into ended). Decided at the moment the turn OPENS, from the event that opened it,
+        # never left over from an earlier turn (2026-10-11, see _open_turn_as): the feeder's pop from idle
+        # (the text it fed), and a turn frame the CLI streams while nothing romp fed is in flight
+        # (_on_message: the CLI opened it; "injected" unless the turn is the drain of a text romp fed, whose
+        # speaker it then takes). A human text the CLI takes into a turn already running claims it at the
+        # take (_note_turn_opener). Persisted in the registry as turnOpener at each open, so a session
+        # object born mid-turn (a kernel restart under a hosted CLI) reads the turn's opener back instead of
+        # guessing; None only when no open was ever seen. Stamped beside lastStopAt by the Stop hook as
+        # lastTurnOpener ("unknown" for None), and read by the kernel's turn-finished push, which buzzes the
+        # phone for the human's turns only (the user 2026-09-10: ten buzzes in fifty minutes from one session
+        # reacting, turn after turn, to its own background subagents' completions; 2026-10-11: half of one
+        # day's "human" turn ends had no text fed by romp at all, because a turn the CLI opened kept the
+        # previous turn's label).
+        _to = reg.get("turnOpener") if isinstance(reg, dict) else None
+        self._turn_opener = _to if _to in ("human", "injected") else None
         self._skill_tool_ids = set()   # Skill tool_use ids seen on THIS stream → classify their injected
         #                                instructions payload (parent_tool_use_id link) as a skillMd atom
         self.since = 0
@@ -7442,6 +7461,10 @@ class SdkSession:
         self.ended = True
         if self.loop:
             self.loop.call_soon_threadsafe(self._wake_set)   # break the receive loop even if idle (no msg coming)
+            t = self._host
+            if t is not None and getattr(t, "hello", None) is None and hasattr(t, "abort_connect"):
+                # an attach still waiting for its host's hello: ending the session ends that wait (the review of #233)
+                self.loop.call_soon_threadsafe(t.abort_connect, "the session was ended")
         if self.loop and self.client and not self.detached:
             # stop an in-flight turn promptly. NOT for a detached session (T315): the interrupt is a control
             # request the SDK writes to the transport, and under a host that reaches the CLI's stdin before the
@@ -9652,6 +9675,17 @@ class SdkSession:
         finally:
             self._fire_boot_settled()   # a dead thread must free its boot-stagger slot (first, so
             #                             a raising _on_session_gone can never leak the slot)
+            held = getattr(self, "_unwatched_rids", None)
+            if held:                    # this object answers no held request now: the restart catch-up must not wait on it,
+                #                         and a finished turn its host held is one this life cannot count (the review of #230);
+                #                         a later attach of the same session owes them still (the review of #233)
+                try:
+                    self.backend._catchup_lost.setdefault(self.sid, "its session ended before this kernel had recorded a "
+                                                                    "finished turn its host held")
+                    self.backend._unwatched_owed.setdefault(self.sid, set()).update(held)
+                except Exception:
+                    pass
+                held.clear()
             self._release_launch_slot()   # …and a relaunch's launch slot, and its place in line for one
             if self._launch_slots() is not None:
                 self._launch_slots().unwait(self)
@@ -9769,7 +9803,11 @@ class SdkSession:
                     self._intr_level = 0             #   ...and its escalation episode (a new stop starts polite)
                     self._first_out_t = None         # the turn's first output is still to come (turns.jsonl)
                     self._fed_t = time.time()        # the pop, at millisecond resolution (turns.jsonl fedT)
-                self._note_turn_opener(fed_text_opener(item), fresh)   # who this turn is for (the Stop hook stamps it)
+                if fresh:
+                    # fed from idle: this text OPENS the turn, so it says who the turn is for (the Stop hook stamps
+                    # it). A text fed mid-turn says so at its TAKE instead (_note_turn_opener's callers): the CLI may
+                    # splice it into the running turn or run it as its own once that turn ends
+                    self._note_turn_opener(fed_text_opener(item), True)
                 if item.startswith(RENAME_PING_HEAD):
                     self._ping_feeding = True       # hold feeds until this turn's first streamed message
                 self._mark_producing()              # the one gate: a text fed under a standing prompt leaves the prompt's state
@@ -10063,6 +10101,17 @@ class SdkSession:
                     # while the attach-failed marker names this host (see _ensure)
                     self._host_stand_down(e)
                     break
+                if not connected and isinstance(e, _ht().HostHelloLost):
+                    # the host accepted the attach and never said hello, and its lease no longer says it lives (or the
+                    # session was ended meanwhile): its CLI may still be there, so never the crash heal; stand down
+                    # as an attach that did not complete does (the review of #233)
+                    if not self.ended:
+                        self._host_stand_down(e, said="session %s: its session host accepted the reconnect and never "
+                                                      "answered (%s); until the next message tries again, its turns "
+                                                      "notify nothing" % (self.name, e))
+                    else:
+                        self.detached = True
+                    break
                 if not connected:
                     # The CLI never came up. RECORD why, where the user can see it: this thread is about
                     # to die, and everything downstream of it (_on_session_gone settling 'waiting') is
@@ -10088,15 +10137,16 @@ class SdkSession:
             if self.ended or not self._reconnect:
                 break        # drain ended on its own (process exit) or we're shutting down → done
 
-    def _host_stand_down(self, exc) -> None:
+    def _host_stand_down(self, exc, said=None) -> None:
         """Four attaches reached a live host and none completed (the initialize timed out each time: a wedged
         host, or a CLI that never answers): the host keeps the CLI, and this session stands down from it: a
         `host.attach-failed` problem row, the state settled `waiting` (on its host; the next send connects and
         tries the attach again), the thread's exit marked a detach so the session-gone path neither heals nor
         settles, and no crash-resume nudge: the CLI never died (the commit-8 review's item 3)."""
         st = self.backend.state_dir
-        problem_row(st, "session %s: could not complete an attach to its live session host after %d tries (%s); the host keeps "
-                    "the CLI; the next message tries again" % (self.name, self._host_attach_retries, type(exc).__name__),
+        problem_row(st, said or ("session %s: could not complete an attach to its live session host after %d tries (%s); the "
+                                 "host keeps the CLI; the next message tries again"
+                                 % (self.name, self._host_attach_retries, type(exc).__name__)),
                     "host.attach-failed", sid=self.sid, name=self.name, log=self.backend._log, tries=self._host_attach_retries)
         lease, lstate = self.backend._host_lease(self.sid, if_unreadable="unreadable")
         if lstate == "attach":
@@ -10468,15 +10518,28 @@ class SdkSession:
             return ""
 
     def _note_turn_opener(self, opener: str, fresh: bool) -> None:
-        """Record who opened, or joined, the turn in flight (see _turn_opener in __init__). A HUMAN text
-        always makes the turn theirs: from idle it opens one; mid-turn the CLI splices it in at the next
-        tool boundary and answers it there, so the person asked during the turn and its end IS news to
-        them. An INJECTED opener counts only from idle (`fresh`): a nudge fed into the human's running turn,
-        or a task notification the CLI folds into it, does not take the turn from them. Never reset at the
-        settle: the next open overwrites, and the Stop hook (which runs BEFORE the ResultMessage) reads the
-        turn it is closing."""
+        """Record who opened, or joined, the turn in flight (see _turn_opener in __init__). `fresh`: this text
+        OPENS the turn (fed from idle, or a drained text the CLI took when no turn ran). Otherwise the CLI took
+        it into the turn already running (its lifecycle `started` for a hold whose turn had not ended, or the
+        landed record on a CLI without lifecycle frames): a HUMAN text makes that turn theirs, since the person
+        asked during it and is answered in it; an injected one (a nudge, relayed mail) does not take the turn
+        from whoever opened it. Never reset at the settle: every open sets it, and the Stop hook (which runs
+        BEFORE the ResultMessage) reads the turn it is closing."""
         if fresh or opener == "human":
-            self._turn_opener = opener
+            self._open_turn_as(opener)
+
+    def _open_turn_as(self, opener: str) -> None:
+        """Set the turn in flight's opener and persist it as the registry's turnOpener when it changed, so a session
+        object born mid-turn (a kernel restart while a hosted CLI runs the turn) reads it back (__init__)."""
+        if opener not in ("human", "injected"):
+            return
+        changed = getattr(self, "_turn_opener", None) != opener
+        self._turn_opener = opener
+        if changed:
+            try:
+                self.backend._update_reg(self.sid, turnOpener=opener)
+            except Exception:
+                pass
 
     def _turn_ledger_row(self, msg, usd=None, turn_u=None, now=None) -> dict:
         """The turns.jsonl row for the ResultMessage `msg` (see the ledger note by append_turn_row): the
@@ -11186,6 +11249,13 @@ class SdkSession:
             if u.get("settled") and getattr(self, "_inflight_texts", None) is not None:
                 with self._lock:
                     self._inflight_texts.append(u.get("item", u["text"]))
+                    opens = self.inflight == 0       # no turn counted yet: this text opens the one starting now
+                # the turn it joins is the one the CLI is starting: from idle the text opens it (and the turn frame that
+                # follows reads the same answer off the twin); behind a turn the CLI already opened, a human text claims it
+                self._note_turn_opener(fed_text_opener(u.get("text") or ""), opens)
+            elif not u.get("fresh"):
+                # fed mid-turn and taken while that turn still runs: spliced in at a tool boundary
+                self._note_turn_opener(fed_text_opener(u.get("text") or ""), False)
         else:
             self.backend._log("feed hold (%s): the CLI reports the held text %s without running it; the next queued text "
                               "goes in" % (self.name, cl.state))
@@ -11239,6 +11309,7 @@ class SdkSession:
             # init and a turn-less result, no query sent (_consume_move_settle), and counting that init
             # would leave an idle session busy (a reconnect deferred, a drive op parked) until its next
             # real turn; should a count slip through anyway, the move's result zeroes it.
+            opened = None
             with self._lock:
                 if self.inflight == 0:
                     self.inflight = 1
@@ -11252,6 +11323,17 @@ class SdkSession:
                         # (a CLI that writes lifecycle frames says when the text joins a turn: _on_command_lifecycle;
                         # the turn starting here may be a notification's, queued ahead of it)
                         self._inflight_texts.append(u.get("item", u["text"]))
+                    # WHO OPENED this turn, decided now, at the event that opened it (2026-10-11): the CLI did. Its
+                    # fed-turn twin holds what romp fed into it, which here can only be a text the CLI drained after
+                    # the turn it was fed into ended (appended just above, or by its lifecycle `started` a frame
+                    # earlier), and then the turn is that text's speaker's. With nothing romp fed it is the CLI's
+                    # own turn (a background task's notification, a peer's message, a scheduled prompt), never the
+                    # human's: before this, such a turn kept the previous turn's label, and a busy session's
+                    # notification turns buzzed the phone as if the person had asked for them
+                    texts = [x for x in (getattr(self, "_inflight_texts", None) or []) if isinstance(x, str)]
+                    opened = "human" if any(fed_text_opener(x) == "human" for x in texts) else "injected"
+            if opened:
+                self._open_turn_as(opened)          # outside the lock: it may write the registry
         if getattr(self, "_ping_feeding", False):   # getattr: __new__-built test doubles skip __init__
             # the ping's turn is streaming — the CLI demonstrably started it, so a message fed from
             # here on lands MID-TURN as its own record (the CLI's designed forward behavior); the
@@ -11270,6 +11352,11 @@ class SdkSession:
             # the CLI took the last fed text (_untaken_taken, the turn-boundary road): the next queued text can go
             # in as its own message now. Checked BEFORE the result settle below marks the turn ended, so a
             # result frame is read against the state the text was fed into.
+            u = self._untaken
+            if not (u.get("fresh") or u.get("settled") or u.get("fault")):
+                # its record LANDED inside the turn still running: a human text makes that turn theirs (a drained or
+                # fresh text was labelled at its turn's open, and a faulted scan says nothing about which turn took it)
+                self._note_turn_opener(fed_text_opener(u.get("text") or ""), False)
             self._release_untaken()
         if isinstance(msg, SystemMessage) and msg.subtype == "init":
             self._fire_boot_settled()   # the CLI is up and streaming — its transcript catch-up burst
@@ -12164,6 +12251,29 @@ class SdkSession:
         return {}
 
     async def _stop_hook(self, inp, tool_use_id, context):
+        """The Stop hook as the CLI calls it: _stop_hook_run, and for a Stop its CLI sent before this kernel life first
+        attached to it (the transport's mark, the request's id) the guarantee that it does not hold the restart's
+        catch-up open: a hook that ends without having stamped the turn end (it raised, or was cancelled) leaves that
+        session's count unknown, loudly, instead of a held id nothing retires (the review of #233)."""
+        unwatched = inp.pop(UNWATCHED_STOP_KEY, None) if isinstance(inp, dict) else None
+        if not unwatched:
+            return await self._stop_hook_run(inp, tool_use_id, context, None)
+        try:
+            return await self._stop_hook_run(inp, tool_use_id, context, unwatched)
+        finally:
+            rids = getattr(self, "_unwatched_rids", set())
+            if str(unwatched) in rids:                   # the stamp never landed: this turn end is not on record
+                rids.discard(str(unwatched))
+                try:
+                    self.backend._catchup_lost.setdefault(self.sid, "a finished turn its host held could not be "
+                                                                    "recorded (its hook failed, or its registry would "
+                                                                    "not read)")
+                except Exception:
+                    pass
+                self.backend._log("stop hook (%s): a finished turn its host held across the restart was not recorded; "
+                                  "its count is unknown" % self.name, problem=True)
+
+    async def _stop_hook_run(self, inp, tool_use_id, context, unwatched):
         """At turn-end, CLEAR the awaiting overlay (awaiting:false). Background SHELL tasks don't ride
         this overlay: they were excluded from awaiting entirely on 2026-07-07 (a leftover dev server /
         `tail -f` pinned an idle session to a working flavor off a lossy transcript scrape), and when the
@@ -12172,6 +12282,9 @@ class SdkSession:
         (see _on_task_event), terminal-status-cleared, no overlay records needed. So this hook still
         ignores inp['background_tasks'] and just clears any stale awaiting:true — keeping the overlay
         channel available for signals that need durability across a backend restart."""
+        # `unwatched`: a Stop its CLI sent before this kernel life first attached to it (the request's id, _stop_hook): the
+        # turn ended while no kernel was listening, stamped so below (lastStopUnwatched), and retired from the session's
+        # set once the stamp has landed, so the kernel's restart catch-up knows every such turn end is on record
         self._record_transcript_path(inp)   # where the CLI writes, for discovery (see the helper)
         append_awaiting(self.backend.state_dir, self.sid, False)
         # Record the ARMED TIMER SET (the hook payload's session_crons: CronCreate crons, ScheduleWakeup
@@ -12287,11 +12400,24 @@ class SdkSession:
         # rather than an inference from transcript mtimes — romp_cards' round keys on it). Beside it,
         # in the SAME write so a reader never pairs one turn's settle with another's opener, WHO opened
         # the turn (2026-09-10, see _turn_opener): the kernel's turn-finished push buzzes the phone for
-        # the human's turns only. No open seen (a session object born mid-turn at a kernel restart, a
-        # CLI that stamps no origin) reads "human" — fail OPEN on the buzz, never silently drop it.
+        # the human's turns only. No open ever seen (none recorded in the registry either) stamps "unknown",
+        # which buzzes nothing: only a turn a human opened may (2026-10-11; it used to read "human").
+        # lastHumanStopAt, in the same write, is the newest end of a turn a human opened: the kernel's boot
+        # reads it to tell whether one ended while no kernel was watching (the missed-notifications summary).
         try:
-            self.backend._update_reg(self.sid, lastStopAt=int(time.time()),
-                                     lastTurnOpener=getattr(self, "_turn_opener", None) or "human")
+            opener = getattr(self, "_turn_opener", None) or "unknown"
+            now_s = int(time.time())
+            stamp = {"lastStopAt": now_s, "lastTurnOpener": opener}
+            if opener == "human":
+                stamp["lastHumanStopAt"] = now_s
+            if unwatched:
+                # the turn end the settle names happened while no kernel was listening: keyed on the settle itself, so a
+                # later turn's stamp (another lastStopAt) needs no write to clear it
+                stamp["lastStopUnwatched"] = now_s
+            if self.backend._update_reg(self.sid, **stamp) is not False and unwatched:
+                # on record: retired (only now; a registry that would not read took no stamp, and _stop_hook's guard then
+                # says this session's count is unknown, the review of #235)
+                getattr(self, "_unwatched_rids", set()).discard(str(unwatched))
         except Exception:
             pass
         # delete-while-busy: the turn this delete interrupted has ENDED — complete the arm here,
@@ -13721,6 +13847,18 @@ class SdkBackend:
         #                                               writes (lease_census reports a skew as lease.version-skew)
         self._leases: dict = {}            # sid -> (session, lease dict): the leases this kernel holds (T305)
         self._boot_attach_sids: set = set()   # sids the boot reconcile attached to a live host (T315)
+        # THE RESTART CATCH-UP's per-session facts (plans/federated-push.md, "The feed across a restart"; the review of
+        # #230): the kernel's _push_catchup_ready reads them through catchup_lost / catchup_unreported / unwatched_pending
+        self._boot_attach_set: set = set()    # the boot's re-attaches, frozen with their count (the catch-up waits on each)
+        self._hello_sids: set = set()         # sids a host's hello reached in this kernel life (a session object rebuilt
+        #                                       mid-life is not a first attach: its held requests are no restart's)
+        self._catchup_lost: dict = {}         # sid -> why its count cannot be vouched for (its session ended first)
+        self._catchup_unreported: dict = {}   # sid -> when its first hello came, from a host too old to report the
+        #                                       finished turns it answered itself (the kernel judges the wait it bounds)
+        self._catchup_failed = None           # why the boot reconcile failed: the catch-up closes with its count unknown
+        self._boot_attach_frozen = False      # the boot reconcile has named its re-attaches (_boot_attach_set)
+        self._boot_attach_settled_sids: set = set()   # those that settled: a hello, or their session ended or never started
+        self._unwatched_owed: dict = {}       # sid -> held request ids a session ended still owing (a later attach owes them)
         self._lease_deferred: dict = {}       # sid -> a boot decision an unreadable lease could not settle (_lease_defer)
         self._lease_listing_failed = False    # the deferral's process listing is failing: said once per episode (_lease_rejudge)
         self._lease_watch_thread = None       # the thread taking those decisions again as their leases settle
@@ -14292,7 +14430,15 @@ class SdkBackend:
                                 on_exit=lambda ex, s=sess: self._host_ended(s, ex),
                                 on_reexec=lambda f, s=sess: self._on_host_reexec_now(s),
                                 on_lost=lambda t, s=sess: self._on_host_socket_lost(s, t),
-                                on_fault=lambda f, s=sess: self._on_host_fault(s, f))
+                                on_fault=lambda f, s=sess: self._on_host_fault(s, f),
+                                alive=lambda s=sess: self._host_alive_why(s.sid))
+
+    def _host_alive_why(self, sid: str):
+        """While a hello is awaited: None as long as `sid`'s lease names a live host that beats (or cannot be read, and so
+        may), else why not. A frozen or dead host's beat stops and its lease goes stale within LEASE_TTL_S, so the wait
+        ends on that event rather than never (HostTransport.connect)."""
+        _lease, state = self._host_lease(sid, if_unreadable="attach")
+        return None if state == "attach" else "its lease no longer names a live host (%s)" % state
 
     def _on_host_fault(self, sess, f: dict) -> None:
         """A host's `fault` frame: a problem line, and for a handover that failed after the host had accepted it (`reexec-failed`:
@@ -14690,6 +14836,37 @@ class SdkBackend:
         whose CLI therefore predates this kernel; its identity is recorded and nothing else moves. No CLI
         identity at all (a hello older than the identity itself): nothing stamped, said in the log, never a
         raise out of the connect."""
+        # the requests this CLI sent before this kernel life first attached to it (the first hello of the SID in this life,
+        # whichever session object it reaches: one rebuilt mid-life is not a restart's, the review of #230; a later hello
+        # adds its own only while that set is still open, a reconnect before the catch-up finished): handed to the
+        # transport, which marks a Stop hook among them as a turn that ended while no kernel listened
+        # (host_transport._mark_unwatched). The finished turns the host answered itself meanwhile (its hello's
+        # `selfAnswered`) are stamped here (_stamp_self_answered). All of it BEFORE the boot attach is counted settled below,
+        # so the kernel's restart catch-up never sees an attach done with its held turn ends not yet known
+        try:
+            first = sess.sid not in self._hello_sids
+            self._hello_sids.add(sess.sid)
+            parked = {str(x) for x in (hello.get("parked") or []) if x}
+            rids = getattr(sess, "_unwatched_rids", None)
+            if rids is None:
+                rids = sess._unwatched_rids = set()
+            owed = self._unwatched_owed.pop(sess.sid, set())
+            if parked and (first or rids):
+                rids |= parked
+            elif parked & owed:
+                # an earlier attach of this life ended still holding them (it gave up): they ended during the restart, so
+                # this later attach (a send's) counts them into a summary, never delivers them late (the review of #233)
+                rids |= parked & owed
+            t_now = getattr(sess, "_host", None)
+            if t_now is not None:
+                t_now.unwatched = rids
+            told = hello.get("selfAnswered")
+            if isinstance(told, list):
+                self._stamp_self_answered(sess, told)
+            elif first and getattr(sess, "_host_is_attach", False):
+                self._catchup_unreported[sess.sid] = time.time()   # a host older than the report: the kernel judges it
+        except Exception as e:
+            self._log("host (%s): the held requests of the attach were not read: %s" % (sess.name, e))
         boot = sess.sid in self._boot_attach_sids
         self._boot_attach_sids.discard(sess.sid)
         h, c, j = hello.get("host") or {}, hello.get("cli") or {}, hello.get("journal") or {}
@@ -15465,6 +15642,8 @@ class SdkBackend:
             # hello discard its sid from _boot_attach_sids, and a per-iteration membership test then saw no attach, parked no
             # callback, and the count never reached zero (two boots of 2026-09-11 said attachTimedOut with every hello landed)
             attach_set = {s for s in to_start if s in self._boot_attach_sids}
+            self._boot_attach_set = set(attach_set)   # the restart catch-up's roster: each says hello, or its count is lost
+            self._boot_attach_frozen = True
             with self._boot_attach_lock:
                 self._boot_attach_pending = len(attach_set)
             if not self._boot_attach_pending:
@@ -15487,11 +15666,15 @@ class SdkBackend:
                     if slot:
                         sem.release()                    # the parked release never got attached — free the slot here
                     if attach:
+                        self._boot_attach_settled_sids.add(sid)
                         self._boot_attach_count_down()
                     self._log("boot reconcile: spawn %s failed (sweep continues): %s"
                               % (sid, traceback.format_exc()))
-        except Exception:
+        except Exception as e:
             self._log("boot reconcile failed: %s" % traceback.format_exc())
+            # the restart catch-up waits on the re-attaches this pass starts: closed now, with the count unknown, rather
+            # than waiting on attaches that may never be started (the review of #233)
+            self._catchup_failed = "the boot reconcile failed (%s)" % type(e).__name__
         # the sessions a lease could not settle are decided again when it can, watched from here on: after the boot's own
         # starts, so a settled lease's start never jumps the stagger
         self._lease_watch_start()
@@ -15775,6 +15958,103 @@ class SdkBackend:
         except Exception as e:
             self._log("boot milestone %s: %s" % (kind, e))
 
+    def _stamp_self_answered(self, sess, told) -> None:
+        """The finished turns `sess`'s host answered itself while no kernel was attached (its hello's `selfAnswered`: Stop
+        hooks it held past HOOK_SELF_ANSWER_S, each with the moment it began holding it). No kernel ran their Stop hook,
+        so their turn end was never stamped and the restart's summary could not count it (the review of #230: the
+        kernel compared clocks instead, from its own start, while the host's wait ran from its detach to the re-attach).
+        Stamped here as the hook would have, with lastStopUnwatched, at the newest one's moment: the turn tick counts it
+        into the summary like a Stop the host still held. A report repeats in every hello; a moment the registry's settle
+        has already passed stamps nothing, so a second hearing counts nothing twice."""
+        ends = [int(x["t"]) for x in told if isinstance(x, dict) and x.get("event") == "Stop"
+                and isinstance(x.get("t"), (int, float)) and not isinstance(x.get("t"), bool)]
+        if not ends:
+            return
+        t = max(ends)
+        reg = read_reg(self.state_dir, sess.sid) or {}
+        try:
+            settled = int(reg.get("lastStopAt") or 0)
+        except (TypeError, ValueError):
+            settled = 0
+        if t <= settled:
+            return
+        opener = getattr(sess, "_turn_opener", None) or "unknown"
+        stamp = {"lastStopAt": t, "lastTurnOpener": opener, "lastStopUnwatched": t}
+        if opener == "human":
+            stamp["lastHumanStopAt"] = t
+        if self._update_reg(sess.sid, **stamp) is False:
+            self._catchup_lost.setdefault(sess.sid, "a finished turn its host answered itself could not be recorded "
+                                                    "(its registry would not read)")
+            self._log("host (%s): a finished turn its host answered itself could not be recorded (its registry would not "
+                      "read); its count is unknown" % sess.name, problem=True)
+            return
+        self._log("host (%s): its host answered %d finished turn's hook itself while no kernel was attached; the newest is "
+                  "counted as a turn that ended while the kernel was down" % (sess.name, len(ends)))
+
+    def _notifies(self, sid: str) -> bool:
+        """Can this session produce a notification at all? A comment thread (registry threadOf) cannot: the kernel's turn
+        tick and card diff never read one, so the restart catch-up neither waits on it nor counts it as lost (the review
+        of #235: a thread whose re-attach failed made the summary say "may have been missed")."""
+        s = self.sessions.get(sid)
+        if s is not None:
+            return not getattr(s, "thread_of", "")
+        return not (read_reg(self.state_dir, sid) or {}).get("threadOf")
+
+    def catchup_lost(self) -> dict:
+        """sid -> why this kernel life cannot vouch for that session's count of the turn ends it missed during the restart:
+        a boot re-attach that ended without a hello (its thread died, or it was never started), a session that ended
+        before it had stamped a finished turn its host held (_run's exit), or one whose held turn end could not be
+        recorded. The kernel says those may have been missed. Comment threads are left out: they notify nothing."""
+        out = {sid: why for sid, why in self._catchup_lost.items() if self._notifies(sid)}
+        for sid in self._boot_attach_set:
+            if sid not in self._hello_sids and sid not in out and self._notifies(sid):
+                out[sid] = "its session could not be reconnected after the restart"
+        return out
+
+    def catchup_attaching(self):
+        """The boot re-attaches of sessions that can notify which have not settled yet (no hello, and their session not
+        ended), or None before the boot reconcile has named them. The catch-up waits on these alone: a comment thread's
+        re-attach holds nothing (the review of #235)."""
+        if not self._boot_attach_frozen:
+            return None
+        return sorted(sid for sid in self._boot_attach_set
+                      if sid not in self._boot_attach_settled_sids and self._notifies(sid))
+
+    def catchup_failed(self):
+        """Why the restart catch-up cannot wait on the boot's re-attaches (the boot reconcile failed), or None."""
+        return self._catchup_failed
+
+    def catchup_stuck(self) -> list:
+        """The boot re-attaches waiting for a hello from a host that still beats: their transport's liveness probe has
+        found the host alive at least twice with no hello (a live host answers in milliseconds). The kernel tells the
+        user when these are all the restart's catch-up still waits on (_push_catchup_ready)."""
+        out = []
+        for sid in list(self._boot_attach_set):
+            s = self.sessions.get(sid)
+            t = getattr(s, "_host", None) if s is not None else None
+            if (t is not None and getattr(t, "hello", None) is None and int(getattr(t, "hello_probes", 0) or 0) >= 2
+                    and self._notifies(sid)):
+                out.append(sid)
+        return out
+
+    def catchup_problem(self, text: str, **fields) -> None:
+        """The restart catch-up held open by re-attaches stuck on a live but silent host: one row in the error center."""
+        problem_row(self.state_dir, text, "push.catchup-held", log=self._log, **fields)
+
+    def catchup_unreported(self) -> dict:
+        """sid -> when its first hello of this life came, for each session whose host runs code older than the
+        `selfAnswered` report: whether it answered a finished turn's hook itself is unknown, and the kernel bounds it by
+        how long that host could have been without a kernel."""
+        return {sid: t for sid, t in self._catchup_unreported.items() if self._notifies(sid)}
+
+    def unwatched_pending(self) -> int:
+        """How many sessions still hold a request their CLI sent before this kernel life first attached to it: not yet
+        handed over, or a Stop hook among them that has not stamped its turn end. The kernel's restart catch-up waits on
+        zero (_push_catchup_ready), so every turn that ended while it was down is on record before it says it has caught up.
+        A comment thread's are left out: its turn ends notify nothing."""
+        return sum(1 for s in list(self.sessions.values())
+                   if getattr(s, "_unwatched_rids", None) and not getattr(s, "thread_of", ""))
+
     def _boot_attach_count_down(self) -> None:
         with self._boot_attach_lock:
             self._boot_attach_pending -= 1
@@ -15794,6 +16074,8 @@ class SdkBackend:
                 return
             fired.append(1)
             getattr(self, "_boot_attach_unsettled", set()).discard(sid)
+            if sid is not None:
+                getattr(self, "_boot_attach_settled_sids", set()).add(sid)
             if release:
                 try:
                     release()
@@ -19060,14 +19342,100 @@ class SdkBackend:
             _note_ended(s)                         # #1735: register the ended session; the controller measures cyclicity at the idle tick
             if s._host is not None:                # a kill is not graceful today: the host's `end` gets the short bound (T315)
                 s._host.end_grace = _ht().sh.END_GRACE_KILL_S
+            hung = s._host is not None and getattr(s._host, "hello", None) is None
+            if s.thread is not None:             # this kernel's own end of the session, under way: a second end waits for it
+                self.__dict__.setdefault("_ending_threads", {})[sid] = s.thread
             s.shutdown()
+            if hung:
+                # its attach never heard the host: the host still runs the CLI the user is ending, so `end` goes the
+                # road a session with no object takes, bounded the same way (the review of #233)
+                self._end_host_or_cli(sid)
         else:
             # no object (a session that stood down from its host, or one never started this life) while a live
             # host still holds the CLI under its lease: the user's end must end it. The host gets `end` with the
             # kill bound through its socket, the road the drain and a shutdown take, on a thread of its own; the
             # host ends the CLI, removes its lease and leaves (the commit-14 review's second item)
-            self._end_host_by_lease(sid)
+            self._end_host_or_cli(sid)
         self._poke()
+        return True
+
+    def _is_own_kernel(self, ident) -> bool:
+        """Does a `busy` answer's kernel identity name THIS kernel process (its pid and start time)?"""
+        me = self._kernel_identity()
+        return (isinstance(ident, dict) and str(ident.get("pid")) == str(me.get("pid"))
+                and str(ident.get("start") or "") == str(me.get("start") or ""))
+
+    def _await_own_end(self, sid: str) -> None:
+        """Block (an end thread's executor) until this kernel's own in-flight end of `sid` is over: the session thread
+        a kill shut down (kill() records it), bounded by the host's kill grace and the transport's exit wait."""
+        own = self.__dict__.get("_ending_threads", {}).get(sid)
+        if own is not None and own is not threading.current_thread():
+            own.join(float(_ht().sh.END_GRACE_KILL_S) + 10.0)
+
+    def _end_host_or_cli(self, sid: str) -> None:
+        """A deliberate end with no attached session object to carry it: `end` through the host (_end_host_by_lease), or,
+        when the lease names a host that no longer beats (frozen or gone) while its CLI still runs, the CLI ended directly
+        (_end_cli_directly), on a thread of its own (the review of #235: a CLI still spending until the host's idle bound)."""
+        if self._end_host_by_lease(sid):
+            return
+        lease, lstate = self._host_lease(sid, if_unreadable="unreadable")
+        if lstate == "orphan" and lease:
+            threading.Thread(target=self._end_cli_directly, args=(sid, lease, "its session host no longer beats"),
+                             name="end-cli:" + sid[:8], daemon=True).start()
+
+    def _end_cli_directly(self, sid: str, lease, why: str, kill=None, alive=None, sleep=None, now=None) -> bool:
+        """A deliberate end its host could not confirm (no hello within the bound, no exit after the `end`, a host that
+        no longer beats): the CLI the lease names is ended by this kernel, said loudly. Before, the CLI ran on, still
+        spending if mid-turn, until the host's idle bound ended it (the review of #235).
+
+        Only a CLI this kernel can PROVE it started (the review of #238): the lease's pid AND start time (a reused pid is
+        never hit; never a pattern), and the state tag in the process's own environment equal to this kernel's
+        (proc_state_tag, the rule every reaper keeps), since a copied lease proves nothing: a lab kernel over a copied state
+        directory holds the live session's lease, pid and start time included, and would end the live kernel's CLI. A tag
+        that differs, or that cannot be read, refuses the end, loudly, and nothing is signaled.
+
+        Exactly what a normal end ends (the review of #238): the CLI process alone, SIGTERM and then SIGKILL after the
+        host's own kill grace (END_GRACE_KILL_S), never its scope or its process tree, so a job the session started with
+        nohup or setsid outlives a forced end exactly as it outlives a normal one. `kill`, `alive`, `sleep` and `now` are
+        test seams. False when nothing was signaled."""
+        kill = kill or os.kill
+        sleep = sleep or time.sleep
+        now = now or time.time
+        try:
+            pid, start = int((lease or {}).get("pid")), str((lease or {}).get("start") or "")
+        except (TypeError, ValueError):
+            pid, start = 0, ""
+        name = str((lease or {}).get("name") or sid[:8])
+        same = (lambda: proc_start(pid) == start) if alive is None else alive
+        if not pid or not start or not same():
+            self._log("host (%s): the end was not confirmed (%s), and the lease names no CLI that still runs" % (name, why))
+            return False
+        tag, own = proc_state_tag(pid), state_tag_of(self.state_dir)
+        if tag != own:
+            problem_row(self.state_dir, "session %s: its session host did not confirm the end (%s), and its CLI (pid %d) "
+                        "was NOT ended: %s, so this kernel cannot prove it started it (a copied state directory carries "
+                        "another kernel's lease); end it from the kernel that runs it" % (
+                            name, why, pid, ("it carries another kernel's state tag" if tag else
+                                             "its state tag cannot be read")),
+                        "host.end-refused", sid=sid, name=name, log=self._log, pid=pid)
+            return False
+        try:
+            kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return False
+        deadline = now() + float(_ht().sh.END_GRACE_KILL_S)
+        while now() < deadline and same():
+            sleep(0.05)
+        forced = False
+        if same():
+            try:
+                kill(pid, signal.SIGKILL)
+                forced = True
+            except ProcessLookupError:
+                pass
+        problem_row(self.state_dir, "session %s: its session host did not confirm the end (%s), so its CLI (pid %d) was "
+                    "ended directly" % (name, why, pid), "host.end-forced", sid=sid, name=name, log=self._log, pid=pid,
+                    forced=int(forced))
         return True
 
     def _end_host_by_lease(self, sid: str) -> bool:
@@ -19098,11 +19466,43 @@ class SdkBackend:
                     await t.close()
                 except Exception:
                     pass
+                if lease:
+                    self._end_cli_directly(sid, lease, "no answer within 5 s")   # the user's end must end the CLI
                 return
             except Exception as e:
                 self._log("host (%s): end by lease failed: %s: %s" % (sid[:8], type(e).__name__, e))
-                return
+                busy = getattr(t, "busy_with", None)
+                if isinstance(busy, dict):
+                    if not self._is_own_kernel(busy):
+                        # another kernel is attached: the session is that kernel's to end (its own kill road applies), and
+                        # this one forces nothing on it
+                        self._log("host (%s): another kernel (pid %s) is attached to this session's host; the end is that "
+                                  "kernel's to make, nothing is forced from here" % (sid[:8], busy.get("pid")), problem=True)
+                        return
+                    # THIS kernel's own connection holds the host (the review of #238): an end already under way (a
+                    # thread resolved and its parent ended within its grace, two end requests), or the attach the end
+                    # interrupted, which the host has not yet seen go. Wait for that one; force nothing while it runs
+                    await asyncio.get_running_loop().run_in_executor(None, self._await_own_end, sid)
+                    if self._host_lease(sid, if_unreadable="unreadable")[1] != "attach":
+                        self._log("host (%s): this kernel's own end of the session carried it" % sid[:8])
+                        return
+                    t = ht.HostTransport(str(sock), kernel=ident, ack=-1, end_grace=ht.sh.END_GRACE_KILL_S)
+                    try:
+                        await asyncio.wait_for(t.connect(), timeout=5.0)
+                    except Exception as e2:
+                        why2 = ("still attached to this kernel's earlier connection"
+                                if isinstance(getattr(t, "busy_with", None), dict) else "%s: %s" % (type(e2).__name__, e2))
+                        if lease:
+                            self._end_cli_directly(sid, lease, why2)
+                        return
+                elif lease:
+                    self._end_cli_directly(sid, lease, "%s: %s" % (type(e).__name__, e))
+                    return
+                else:
+                    return
             await t.end_and_close()             # `end` with the kill bound, whatever the initialize gate says
+            if getattr(t, "exit_info", None) is None and lease:
+                self._end_cli_directly(sid, lease, "no exit after the end")   # the host took the end and did not confirm it
             with self._lock:                    # the host named by the lease has been told to end: a later End for the
                 self.__dict__.setdefault("_ended_hosts", {})[sid] = holder_key   # same holder opens no second socket
         def run():
@@ -19196,6 +19596,34 @@ class SdkBackend:
         when the registry directory moved), and each state is read now (thread_state)."""
         return {sid: {"state": self.thread_state(sid), "threadOf": parent}
                 for sid, parent in self._rows_table()["threads"].items()}
+
+    def thread_live_sessions(self, parents=None) -> dict[str, dict]:
+        """{sid: live row} for every RUNNING comment thread: the row live_sessions would report for it (its running
+        snapshot) plus "threadOf", its parent. These are exactly the rows live_sessions leaves out, served apart so that a
+        thread never joins the map that drives tabs, lanes and the feed; the kernel keeps them in a map of their own
+        (kernel _thread_live) and feeds the chat's live channels from it, the question and permission poll first
+        (thread-live-1, 2026-10-14). `parents`: only threads whose parent is in this set (the kernel asks for the open
+        tabs' threads). A dormant thread has no process and so no live row: it is absent, as it raises no question and
+        runs no agent. The set is the registry's rows table (thread_sessions' own); one thread whose snapshot raises is
+        left out, said on stderr, and the others stay."""
+        out, retry_on = {}, None
+        for sid, parent in self._rows_table()["threads"].items():
+            if parents is not None and parent not in parents:
+                continue
+            with self._lock:
+                s = self.sessions.get(sid)
+            if not (s and s.thread.is_alive()):
+                continue
+            if retry_on is None:
+                retry_on = retry_upgrade_on(self.state_dir)   # once per listing, as live_sessions reads it
+            try:
+                row = dict(s.snapshot(retry_on=retry_on))
+            except Exception:
+                sys.stderr.write("thread_live_sessions: row for %s failed (left out): %s\n" % (sid, traceback.format_exc()))
+                continue
+            row["threadOf"] = parent
+            out[str(sid)] = row
+        return out
 
     def thread_state(self, sid: str) -> str:
         """A comment thread's live state for the listing: its running session's state (SdkSession.live_state, the state
@@ -21472,21 +21900,11 @@ class SdkBackend:
             self._touch_live(sess.sid)
         if vanished:
             self._note_live_tail_race("_evict_live_overflow")
-        # A user atom the CLI streams while NOTHING ROMP FED is in flight, wearing an injected provenance
-        # stamp, is a turn the CLI opened by itself (a background task's notification, a scheduled prompt,
-        # a peer's channel message), never the composer's words: a fed text is not replayed on the stream
-        # (replay-user-messages stays off, see _options), so its opener was noted at the feeder's pop.
-        # Only the CLI's own stamp says so (atom["origin"], msg_to_atom); a stamp-less user atom (a tool
-        # result) or a "human" stamp says nothing. Judged BEFORE the working re-assert below, and against
-        # the fed-turn twin (_inflight_texts), not the turn count: _on_message counts the CLI's own turn
-        # from its first frame, ahead of this call, so `inflight` is already 1 when the stamped atom is
-        # judged and a count-based test never fired (the phone then buzzed for every notification turn).
-        # The twin holds what romp fed into the turn in flight: the same stamp arriving with a fed text in
-        # the twin is a splice into that turn, which keeps its opener (see SdkSession._note_turn_opener),
-        # and a drained mid-turn text rejoins the twin at the count, so its turn stays the human's.
-        okind = (atom.get("origin") or {}).get("kind") if atom.get("type") == "user" else None
-        if okind and okind != "human" and not getattr(sess, "_inflight_texts", None) and not sess._cli_working:
-            sess._note_turn_opener("injected", True)
+        # (Who opened the turn is NOT read here. Until 2026-10-11 a user atom the CLI streamed with an injected origin
+        # stamp marked a CLI-opened turn, but the CLI does not stream the prompt record of a turn it opens itself
+        # (replay-user-messages stays off), so the mark almost never fired: on one machine in one day, two turns were
+        # labelled injected while half the "human" turn ends had no text fed by romp. The turn's own open is the event
+        # now: the turn frame _on_message counts while nothing romp fed is in flight, see SdkSession._open_turn_as.)
         # The stream is the AUTHORITATIVE busy signal: a genuine WORK atom (streamed assistant/tool
         # output — not an input echo, not a /model-style command line) means the CLI is producing RIGHT
         # NOW, so re-assert 'working' if a prior state write settled ahead of it (e.g. a separate turn
@@ -21943,8 +22361,10 @@ class SdkBackend:
         return True
 
     def _update_reg(self, sid: str, **fields):
+        """The registry's read-modify-write under _reg_lock. False when the registry exists but would not read and the
+        write was skipped rather than gut it; True when it landed (a caller that must know, the held turn end's stamp)."""
         with self._reg_lock:                       # kernel + loop threads both write (queue mirror);
-            self._update_reg_held(sid, **fields)   # unserialized RMWs would drop fields
+            return self._update_reg_held(sid, **fields)   # unserialized RMWs would drop fields
 
     def _update_reg_held(self, sid: str, **fields):
         """_update_reg's read-modify-write, for a caller that already holds _reg_lock: one that reads the value it
@@ -21959,10 +22379,11 @@ class SdkBackend:
                 # smaller harm: the next update lands on the healed read.
                 sys.stderr.write("update_reg: %s unreadable — skipping a %s write rather than "
                                  "gutting the reg\n" % (sid[:8], "/".join(sorted(fields))))
-                return
+                return False
             reg = {"sid": sid}
         reg.update(fields)
         write_reg(self.state_dir, sid, reg)
+        return True
 
     def _reg_for_flip(self, sid: str):
         """The RMW base for a VISIBILITY FLIP (kill/resume/promote) when the disk read fails but

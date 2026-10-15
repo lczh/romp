@@ -26,7 +26,9 @@ const BOOT = fs.readFileSync(path.join(ROOT, "ui", "webview", "timeline-boot.ts"
 
 test("the kernel answers a refused store write on the DELIVERING socket, addressed to the gesture", () => {
   const fn = KERNEL.slice(KERNEL.indexOf("def _refuse_setting("), KERNEL.indexOf("\ndef _session_order():"));
-  assert.match(fn, /_reply\(client, \{"type": "settingRefused", "gesture": str\(gesture\), "sid": str\(sid or ""\),\n\s+"itemId": str\(item_id or ""\), "flag": str\(flag or ""\),\n\s+"value": value if isinstance\(value, bool\) else None, "text": text\}\)/);
+  assert.match(fn, /fr = \{"type": "settingRefused", "gesture": str\(gesture\), "sid": str\(sid or ""\),\n\s+"itemId": str\(item_id or ""\), "flag": str\(flag or ""\),\n\s+"value": value if isinstance\(value, bool\) else None, "text": text\}/);
+  // a refused session bell also carries the bell's own setting, which the menus paint from (bell-follow.ts sessionBell)
+  assert.match(fn, /if gesture == "flag" and flag == "notify" and sid:\n(\s+#[^\n]*\n)*\s+fr\["notifyRaw"\] = _session_flag_raw\(str\(sid\), "notify"\)\n\s+_reply\(client, fr\)/);
   assert.match(fn, /if not client or not callable\(client\.get\("send"\)\):\n\s+return/, "a dead socket is the client's problem; the refusal already stands");
   // every store-fault arm of _dispatch_ws refuses through it, naming its gesture -- the flag toggle carries
   // sid + flag + the value the kernel still paints, the bell the card + its painted value, the drag neither
@@ -140,7 +142,8 @@ test("feed: the card bell's latch drops, the card repaints, the reason toasts (s
   // repaint): cardNotifyOn — pendingNotify over the payload's notify — is the gate env's notifyOn input, and
   // the inputs key folds it in (feed-card-gate.ts cardInputsKey), so the released latch changes the key
   assert.ok(arm.indexOf("pendingNotify.delete") < arm.indexOf("render();"));
-  assert.match(FEED, /^function cardNotifyOn\(it: \{ itemId: string; notify\?: boolean \| null \}\): boolean \{\n\s+return pendingNotify\.has\(it\.itemId\) \? !!pendingNotify\.get\(it\.itemId\) : !!it\.notify;/m);
+  // (the payload's bell as it paints: a linked kernel's resolved against this kernel's master, bell-follow.ts)
+  assert.match(FEED, /^function cardNotifyOn\(it: \{ itemId: string; sid\?: string; notify\?: boolean \| null; notifyRaw\?: boolean \| null \}\): boolean \{\n\s+return pendingNotify\.has\(it\.itemId\) \? !!pendingNotify\.get\(it\.itemId\) : bellState\(String\(it\.sid \|\| ""\), it\)\.on;/m);
   assert.match(FEED, /notifyOn: cardNotifyOn,/, "the gate env reads the bell through the latch");
   assert.match(GATE, /env\.notifyOn\(it\) \? "n" : ""/, "the key carries the bell's effective state");
   // and the page still has NO warn handler: undelivered-err.test.ts pins that, and it stays true on purpose
@@ -162,7 +165,7 @@ test("the shell's bell knows the `refused` kind: listed, labelled, explained, an
   // KINDS drives the filter row, KINDLBL the chip, DESC the tooltip -- a kind missing from any of the three
   // renders as an unlabelled entry with no way to mute it. Its own kind, so muting `warn` (the judge's
   // anomaly stamp) never mutes a change of yours that did not land
-  assert.match(KERNEL, /var KINDS=\[[^\]]*'refused','undelivered'\]/);
+  assert.match(KERNEL, /var KINDS=\[[^\]]*'refused','undelivered'[,\]]/);   // later kinds may follow (missed, 2026-10-11)
   assert.match(KERNEL, /refused:'not saved'/);
   // the tooltip covers BOTH things filed under the kind (review find, 2026-09-08): a change that did not
   // save (a read OR a write fault), and a state file that could not be read or was moved aside

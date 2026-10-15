@@ -51,7 +51,7 @@ test("a status-only frame re-renders the awaiting box when its fields change —
   assert.match(body, /if \(msg\.id === activeId\) \{\s*\n\s*updateStatusline\(\);/, "the chip repaint stays");
   assert.match(body, /if \(awaitKey\(s\.status\) !== before\) awaitChanged\(msg\.id\);/);
   // …and the kernel's delta carries the full status the box reads from
-  assert.match(KERNEL, /tail = \{"type": "chatTail", "id": sid, "from": change_from,\s*\n\s*"events": evs\[change_from:\], "total": total, "status": m\.get\("status"\),\n(\s*#[^\n]*\n)*\s*"notify": m\.get\("notify"\), "hideFromFeed": m\.get\("hideFromFeed"\), "postalServiceOff": m\.get\("postalServiceOff"\)\}/,
+  assert.match(KERNEL, /tail = \{"type": "chatTail", "id": sid, "from": change_from,\s*\n\s*"events": evs\[change_from:\], "total": total, "status": m\.get\("status"\),\n(\s*#[^\n]*\n)*\s*"notify": m\.get\("notify"\), "hideFromFeed": m\.get\("hideFromFeed"\), "postalServiceOff": m\.get\("postalServiceOff"\),\s*\n\s*"notifyRaw": m\.get\("notifyRaw"\)\}/,
     "…and the per-session view flags beside it (2026-09-11), so a bell flipped elsewhere reaches a caught-up client on the flip");
 });
 
@@ -69,7 +69,7 @@ test("the box's render condition: in-flight content present ⇒ box; absent ⇒ 
   // neither a wait, nor rows, nor tracked tasks. A chip flip Awaiting→Working with agents still in flight
   // keeps the box (its header re-worded); a wait clearing with nothing left hides it in the same frame.
   const body = RENDER.split("function renderBgTasks(")[1].split("\nfunction ")[0];
-  assert.match(body, /if \(!s \|\| !activeId \|\| \(!why && !items\.length && !tasks\.length\)\) \{ host\.style\.display = "none"; host\.classList\.remove\("bg-awaited"\); return; \}/);
+  assert.match(body, /if \(!s \|\| !sid \|\| \(!why && !items\.length && !tasks\.length\)\) \{ host\.style\.display = "none"; host\.classList\.remove\("bg-awaited"\); return; \}/);
   assert.match(body, /host\.style\.display = "";/);
 });
 

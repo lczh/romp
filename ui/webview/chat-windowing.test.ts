@@ -294,7 +294,7 @@ test("the landing notice's pulse is one-shot (the follow-up after PR 1584, low 1
 
 
 test("the skeleton prefetch never builds a tab the strip does not show (the user 2026-09-14): tabInView and the #only= filter gate it", () => {
-  assert.match(RENDER, /const next = nextPrefetch\(skeletonTabs, activeId, awaitingFull, document\.hidden \|\| paneHidden\(\), stripShowsTab\);/,
+  assert.match(RENDER, /const next = nextPrefetch\(skeletonTabs, activeId, awaitingFull, document\.hidden \|\| paneHidden\(\), stripShowsTab, \(id\) => !hostSocketDown\(id\)\);/,
     "the idle prefetch's gate is the strip's own visibility, stripShowsTab (the views, another column's holds, the #only= filter, a collapsed section's fold)");
   assert.match(RENDER, /function stripShowsTab\(id: string\): boolean \{ return stripShows\(id\) && !collapsedTabIds\.has\(id\); \}/, "a tab folded under a collapsed section header is not shown, so not prefetched (the follow-up after PR 1661, low 3)");
   // THE REVEAL IS DETECTED WHERE THE SHOWN SET IS COMPUTED (PR 1671 round four): renderTabs compares the tabs it shows now (visibleIds

@@ -167,14 +167,16 @@ test("the session bell is a command (the user 2026-09-11): the palette asks the 
   // the pane: the same override the tab menu's bell row writes, on the ACTIVE session only, never a placeholder tab
   assert.match(RENDER, /if \(m\.romp === "notifyToggle"\) \{\s*const s = activeId && !isProvisionalId\(activeId\) \? liveSession\(activeId\) : undefined;/,
     "the LIVE session only: a skeleton tab's copy is stale, and a placeholder has no session to flag");
-  assert.match(RENDER, /const on = !s\.notify;\s*setSessionFlag\(activeId, "notify", on\);\s*ephemeralNoteToast\(\(on \? "Notifications enabled for " : "Notifications disabled for "\)/,
+  // (the tab menu's rule, 2026-10-11: flip what its row shows, bell-follow.ts sessionBell, stored as the session's own setting)
+  assert.match(RENDER, /const on = !sessionBell\(activeId, s\)\.fullOn;[^\n]*\n\s*setSessionFlag\(activeId, "notify", on\);\s*ephemeralNoteToast\(\(on \? "Notifications enabled for " : "Notifications disabled for "\)/,
     "said on a NOTE toast (review 2026-09-14): a confirmation, not a warning; tab-keys.test.ts pins the dress");
   // the tab menu's bell row reveals the command's chord once one is bound (keyHint reads the shared bindings store)
   assert.match(RENDER, /const bellKey = keyHint\("session\.notify"\);[\s\S]{0,400}?\+ \(bellKey \? " · " \+ bellKey : ""\),/);
   assert.match(RENDER, /\(\) => setSessionFlag\(id, "notify", !onBell\)\);/, "the tab menu's row still writes the same flag");
   // the other column (or browser) learns on the flip: the flags ride the tail frame and the tail handler applies them
   const tail = RENDER.split("function chatTail(msg: any) {")[1].split("\n}")[0];
-  assert.match(tail, /applyFrameFlags\(s, msg, pendingFlags, msg\.id\);/, "the tail's flags land under the click's pending guard (flag-pending.ts, review 2026-09-14)");
+  // (the frame handed over with a linked kernel's bell resolved against this kernel's master: frameBell, bell-follow.ts)
+  assert.match(tail, /applyFrameFlags\(s, frameBell\(msg\.id, msg, [^\n]*\), pendingFlags, msg\.id\);/, "the tail's flags land under the click's pending guard (flag-pending.ts, review 2026-09-14)");
 });
 
 test("palette-main is bundled for the shell page", () => {

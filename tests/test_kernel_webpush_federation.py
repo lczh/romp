@@ -2,6 +2,10 @@
 """Federated push (plans/federated-push.md): one device subscription buzzes for every connected
 kernel. Push scope = dashboard scope.
 
+The forward and the relay are the LEGACY push-from-origin leg, kept for the version transition only: a kernel
+that holds a row now PULLS its peer's events (tests/test_push_pull.py, tests/test_push_pull_kernels.py), and the plan
+names the condition under which these two classes are deleted with the code they pin.
+
 What these pin, by layer:
 
   * the forward — _push_forward ships this kernel's fired bell events to attached TRUSTED peers

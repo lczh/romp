@@ -21,7 +21,9 @@ What these pin, by layer:
     peers the bell-event way. Since 2026-09-10 it fires for the HUMAN's turns only: the Stop hook
     stamps who opened the turn beside the settle (lastTurnOpener, sdk_backend) and an end the CLI
     or romp opened by itself (a subagent's task notification, a scheduled prompt, a peer's message,
-    a nudge) is skipped without spending the buzz claim; a registry without the field reads human.
+    a nudge) is skipped without spending the buzz claim. Since 2026-10-11 the opener is decided at
+    the turn's OPEN (a turn the CLI opens with nothing romp fed is never the human's) and anything but
+    "human" on an SDK registry buzzes nothing; an explicit session "on" beats both switches.
   * the one-buzz-per-turn-end rule — _buzz_claim: the bell event and the turn push both claim
     (sid, turn-end key); the first to file buzzes and the other yields; bell events never
     suppress each other; a sid-less event always passes.
@@ -535,9 +537,10 @@ class RemoteNames(unittest.TestCase):
         self.assertIsNone(km._remote_name_of("nohost", SID_WEB))
 
 
-def _stamp_stop(sid, t, opener=None):
+def _stamp_stop(sid, t, opener="human"):
     """The Stop hook's ledger stamp — the SDK session's authoritative turn-end fact. `opener` is the
-    lastTurnOpener the hook stamps beside it (2026-09-10); None leaves the field off, an older ledger's shape."""
+    lastTurnOpener the hook stamps beside it (2026-09-10; a human's turn unless a test says otherwise);
+    None leaves the field off, an older ledger's shape."""
     d = jd.STATE / "sdk"
     d.mkdir(parents=True, exist_ok=True)
     reg = {"lastStopAt": int(t)}
@@ -660,6 +663,28 @@ class TurnFinishedPush(unittest.TestCase):
         km._set_notify_turns(True)
         self.assertEqual(self._tick()[0], [], "the memo advanced while off; nothing to replay")
 
+    def test_an_explicit_on_beats_both_switches_off(self):
+        # the user 2026-10-11: the turn switch is the default; a session set to Notify me notifies whatever it says
+        km._set_notify_session(SID_WEB, True)
+        _stamp_stop(SID_WEB, 1000)
+        self._tick()
+        for master, turns in ((False, False), (True, False), (False, True)):
+            km._set_notify_all(master)
+            km._set_notify_turns(turns)
+            _stamp_stop(SID_WEB, 1001 + int(master) + 2 * int(turns))
+            self.assertEqual(len(self._tick()[0]), 1, (master, turns))
+
+    def test_no_choice_follows_the_switches_and_an_explicit_off_mutes_with_both_on(self):
+        km._set_notify_all(True)
+        _stamp_stop(SID_WEB, 1000)
+        self._tick()
+        _stamp_stop(SID_WEB, 1001)
+        self.assertEqual(self._tick()[0], [], "no choice, the turn switch off: silent")
+        km._set_notify_turns(True)
+        km._set_notify_session(SID_WEB, False)
+        _stamp_stop(SID_WEB, 1002)
+        self.assertEqual(self._tick()[0], [], "an explicit Stop notifying mutes with both switches on")
+
     def test_a_muted_session_stays_quiet(self):
         km._set_notify_all(True)
         km._set_notify_turns(True)
@@ -707,8 +732,9 @@ class TurnOpenerGate(unittest.TestCase):
     coordinating session, none about anything the user had asked at that moment. The Stop hook now stamps
     WHO opened the turn beside the settle (lastTurnOpener, sdk_backend) and the tick skips an end whose
     opener is not the human — without spending the buzz claim, so a bell event that turn raises keeps its
-    buzz. A registry without the field (an older ledger) reads as the human's: a missing
-    fact never drops the user's buzz."""
+    buzz. Since 2026-10-11 only "human" buzzes: an SDK registry without the field, or with "unknown" (no
+    open seen), buzzes nothing; a session with no SDK registry at all is a Codex session, whose every turn
+    is a send through romp."""
 
     def setUp(self):
         _reset_store()
@@ -759,22 +785,28 @@ class TurnOpenerGate(unittest.TestCase):
         self.assertEqual(len(self._tick()[0]), 1, "the human's next turn buzzes once; the silent ends never replay")
         self.assertEqual(self._tick()[0], [])
 
-    def test_an_older_registry_without_the_field_is_the_humans(self):
-        _stamp_stop(SID_WEB, 1000)
+    def test_a_registry_without_the_field_or_an_unknown_open_buzzes_nothing(self):
+        # only a turn a human opened may buzz (2026-10-11): before, a missing fact read as the human's, and so did a
+        # turn the CLI opened by itself, since the label was never set for it
+        _stamp_stop(SID_WEB, 1000, opener=None)
         self._tick()
-        _stamp_stop(SID_WEB, 1001)                                     # a pre-field ledger: lastStopAt alone
+        _stamp_stop(SID_WEB, 1001, opener=None)                        # a pre-field ledger: lastStopAt alone
         self.assertNotIn("lastTurnOpener", km._thread_reg(SID_WEB))
-        self.assertEqual(len(self._tick()[0]), 1, "a missing fact never drops the user's buzz")
+        self.assertEqual(self._tick()[0], [])
+        _stamp_stop(SID_WEB, 1002, opener="unknown")                   # the hook saw no open (sdk_backend's stamp)
+        self.assertEqual(self._tick()[0], [])
 
-    def test_a_value_the_hook_never_writes_reads_as_the_humans(self):
+    def test_only_human_buzzes_and_a_session_without_an_sdk_registry_is_a_codex_sessions(self):
         _stamp_stop(SID_WEB, 1000, opener="human")
         self._tick()
         _stamp_stop(SID_WEB, 1001, opener=7)
-        self.assertEqual(len(self._tick()[0]), 1)
+        self.assertEqual(self._tick()[0], [])
         self.assertEqual(km._turn_opener({"lastTurnOpener": "injected"}), "injected")
         self.assertEqual(km._turn_opener({"lastTurnOpener": "human"}), "human")
-        for junk in ({}, {"lastTurnOpener": None}, {"lastTurnOpener": "peer"}, None):
-            self.assertEqual(km._turn_opener(junk), "human", junk)
+        for junk in ({"lastStopAt": 5}, {"lastTurnOpener": None}, {"lastTurnOpener": "peer"}, {"lastTurnOpener": "unknown"}):
+            self.assertEqual(km._turn_opener(junk), "unknown", junk)
+        for none in ({}, None):                                        # no SDK registry: a Codex session, every turn a send
+            self.assertEqual(km._turn_opener(none), "human", none)
 
     def test_the_opener_and_the_settle_come_off_one_registry_read_and_the_gate_precedes_the_claim(self):
         # the pair is ONE Stop-hook write; reading the file twice could pair an older settle with a
@@ -788,26 +820,32 @@ class TurnOpenerGate(unittest.TestCase):
 
 
 class TurnOpenerStamp(unittest.TestCase):
-    """The backend's half of the gate: who opened the turn is a fact the session learns at the two moments a
-    turn can open — the feeder's POP (a fed text: the human's words, or romp's own marker-carrying nudge /
-    follow-up / restart notice / relayed mail) and a user atom the CLI STREAMS WHILE IDLE (a turn the CLI
-    opened by itself: a background task's notification, a scheduled prompt, a peer's channel message, told
-    by its origin stamp; a fed text is never replayed on the stream). The Stop hook stamps it beside
-    lastStopAt in the same write. Synthetic throughout: the notes-api demo session, invented prompt text."""
+    """The backend's half of the gate: who opened the turn is decided at the moment the turn OPENS, from the event that
+    opened it (2026-10-11), never left over from an earlier turn. The feeder's POP from idle labels the turn by the text
+    it fed (the human's words, or romp's own marker-carrying nudge / follow-up / notice / relayed mail). A turn frame the
+    CLI streams while nothing romp fed is in flight is a turn the CLI opened itself: injected, unless it is the drain of
+    a text romp fed (which the CLI took after the turn it was fed into ended), whose speaker it takes. A human text the
+    CLI takes into a turn already running claims it at the take. Persisted in the registry (turnOpener), so a session
+    object born mid-turn reads it back; the Stop hook stamps it beside lastStopAt, "unknown" when no open was seen.
+    Until this, a turn the CLI opened kept the previous turn's label (the streamed-record mark it relied on never fired:
+    the CLI does not stream the prompt record of a turn it opens itself), and on one machine in one day 237 of 524
+    "human" turn ends had no text fed by romp: 222 opened by a background task's notification, 15 by a peer's message.
+    Synthetic throughout: the notes-api demo session, invented prompt text."""
 
     NUDGE = "Where does this stand?\n\n<!-- romp-injected --><!-- romp-auto -->"
-    NOTIF = "[SYSTEM NOTIFICATION - NOT USER INPUT]\n\n<task-notification>done</task-notification>"
+    MAIL = "<!-- romp-injected -->A message from api: the schema is merged."
 
-    class _TextBlock:
-        def __init__(self, text):
-            self.text = text
+    class AssistantMessage:
+        def __init__(self):
+            self.content, self.model, self.parent_tool_use_id, self.uuid = [], "claude-x", None, "a-1"
+            self.error, self.usage = None, None
 
-    class _UserMessage:
-        def __init__(self, content, origin=None, uuid="u-1"):
-            self.content, self.uuid, self.tool_use_result, self.origin = content, uuid, None, origin
+    class ResultMessage:
+        pass
 
-    _TextBlock.__name__ = "TextBlock"
-    _UserMessage.__name__ = "UserMessage"
+    class SystemMessage:
+        def __init__(self, subtype, data=None):
+            self.subtype, self.data = subtype, data or {}
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
@@ -818,17 +856,35 @@ class TurnOpenerStamp(unittest.TestCase):
         sb.write_reg(Path(state_dir), SID_WEB, {"sid": SID_WEB, "name": "web", "cwd": "/tmp", "alive": True})
         return be, sb.SdkSession(be, sb.read_reg(Path(state_dir), SID_WEB))
 
-    def _streamed(self, origin, text=NOTIF, be=None, sess=None):
-        be, sess = be or self.be, sess or self.sess
-        be._forward(sess, self._UserMessage([self._TextBlock(text)], origin=origin, uuid="u-%d" % time.time_ns()))
+    def _frame(self, msg, sess=None):
+        sess = sess or self.sess
+        sess._on_message(msg, self.AssistantMessage, self.ResultMessage, self.SystemMessage)
 
-    def _stop(self):
-        asyncio.run(self.sess._stop_hook({}, None, None))
+    def _cli_opens_a_turn(self, sess=None):
+        """The CLI starts a turn of its own: its first streamed frame (an assistant message) with nothing romp fed in flight."""
+        self._frame(self.AssistantMessage(), sess)
+
+    def _settle(self, sess=None):
+        """A turn's result, as far as the opener cares: nothing in flight, the twin cleared, a held text marked settled."""
+        sess = sess or self.sess
+        sess.inflight = 0
+        sess._inflight_texts.clear()
+        if sess._untaken is not None:
+            sess._untaken["settled"] = True
+
+    def _feed_mid_turn(self, text, cu="c-1", sess=None):
+        """A text the feeder pops while a turn runs: held (untaken) and in the twin, as the pop leaves it."""
+        sess = sess or self.sess
+        sess._untaken = {"text": text, "item": text, "fresh": False, "settled": False, "qid": None, "cu": cu,
+                         "t": int(time.time()), "off": None, "fsid": None}
+        sess._inflight_texts.append(text)
+
+    def _started(self, cu="c-1", sess=None):
+        self._frame(sb.CommandLifecycle({"command_uuid": cu, "state": "started"}), sess)
+
+    def _stop(self, sess=None):
+        asyncio.run((sess or self.sess)._stop_hook({}, None, None))
         return sb.read_reg(Path(self.d), SID_WEB) or {}
-
-    def _idle(self):
-        self.sess.inflight = 0
-        self.sess._cli_working = False
 
     def test_fed_text_opener_reads_the_marker_in_its_comment_form_only(self):
         self.assertEqual(sb.fed_text_opener("fix the login redirect"), "human")
@@ -839,73 +895,113 @@ class TurnOpenerStamp(unittest.TestCase):
                          "the comment form only, the rule send()'s echo authoring follows")
         self.assertEqual(sb.fed_text_opener(""), "human")
 
-    def test_the_humans_text_opens_the_turn_as_theirs_and_the_stop_stamps_it_beside_the_settle(self):
+    def test_the_humans_text_fed_from_idle_opens_the_turn_as_theirs_and_the_stop_stamps_it(self):
         self.sess._note_turn_opener(sb.fed_text_opener("fix the login redirect"), True)
         reg = self._stop()
         self.assertEqual(reg["lastTurnOpener"], "human")
         self.assertAlmostEqual(reg["lastStopAt"], time.time(), delta=30)
+        self.assertEqual(reg["lastHumanStopAt"], reg["lastStopAt"], "the newest end of a turn a human opened, beside it")
 
     def test_a_nudge_fed_from_idle_opens_an_injected_turn(self):
         self.sess._note_turn_opener(sb.fed_text_opener(self.NUDGE), True)
-        self.assertEqual(self._stop()["lastTurnOpener"], "injected")
+        reg = self._stop()
+        self.assertEqual(reg["lastTurnOpener"], "injected")
+        self.assertNotIn("lastHumanStopAt", reg)
 
-    def test_a_nudge_folded_into_the_humans_turn_leaves_it_theirs(self):
-        self.sess._note_turn_opener("human", True)
-        self.sess._note_turn_opener(sb.fed_text_opener(self.NUDGE), False)     # mid-turn: the CLI splices it in
-        self.assertEqual(self._stop()["lastTurnOpener"], "human")
+    def test_a_turn_the_cli_opens_itself_is_never_the_humans(self):
+        # the bug: the previous turn was the human's, the CLI then opened one of its own (a background task finished, a
+        # peer's message arrived, a scheduled prompt fired: the same event, a turn frame with nothing romp fed), and the
+        # label stayed "human", so its end buzzed the phone
+        for first in ("assistant", "init"):
+            with self.subTest(first_frame=first):
+                self.sess._note_turn_opener("human", True)
+                self.assertEqual(self._stop()["lastTurnOpener"], "human")
+                self._settle()
+                with mock.patch.object(sb.asyncio, "ensure_future", side_effect=lambda c: c.close()):   # init's refreshes
+                    self._frame(self.AssistantMessage() if first == "assistant" else self.SystemMessage("init"))
+                self.assertEqual(self.sess.inflight, 1, "the CLI's own turn is counted, as before")
+                self.assertEqual(self.sess._turn_opener, "injected")
+                self.assertEqual(self._stop()["lastTurnOpener"], "injected")
+                self._settle()
 
-    def test_the_humans_message_spliced_into_an_injected_turn_makes_it_theirs(self):
-        # the person asked during it and is answered in it, so the turn's end IS news to them
-        self.sess._note_turn_opener("injected", True)
-        self.sess._note_turn_opener(sb.fed_text_opener("and the tests?"), False)
-        self.assertEqual(self._stop()["lastTurnOpener"], "human")
+    def test_a_romp_injected_text_the_cli_runs_as_its_own_turn_is_injected(self):
+        # relayed mail fed while the human's turn ran; that turn ended before the CLI took it, so the CLI ran it as a
+        # turn of its own. Both roads to the take: the lifecycle `started` (then the turn frame) and, on a CLI without
+        # lifecycle frames, the turn frame alone
+        for lifecycle in (True, False):
+            with self.subTest(lifecycle=lifecycle):
+                self.sess._lifecycle = lifecycle
+                self.sess._note_turn_opener("human", True)
+                self.sess.inflight = 1
+                self._feed_mid_turn(self.MAIL)
+                self.assertEqual(self._stop()["lastTurnOpener"], "human", "the human's turn ends as theirs")
+                self._settle()
+                if lifecycle:
+                    self._started()
+                self._cli_opens_a_turn()
+                self.assertEqual(self._stop()["lastTurnOpener"], "injected", "the mail's own turn is not")
+                self.sess._untaken = None
+                self._settle()
 
-    def test_a_task_notification_streamed_while_idle_opens_an_injected_turn(self):
-        self.sess._note_turn_opener("human", True)      # the previous turn, the human's…
-        self._idle()                                    # …settled
-        self._streamed({"kind": "task-notification"})
+    def test_a_humans_text_the_cli_runs_as_its_own_turn_is_theirs(self):
+        for lifecycle in (True, False):
+            with self.subTest(lifecycle=lifecycle):
+                self.sess._lifecycle = lifecycle
+                self.sess._note_turn_opener("injected", True)              # a notification's turn is running
+                self.sess.inflight = 1
+                self._feed_mid_turn("and the tests?")
+                self.assertEqual(self._stop()["lastTurnOpener"], "injected",
+                                 "the text was not taken before that turn ended: it does not claim it")
+                self._settle()
+                if lifecycle:
+                    self._started()
+                self._cli_opens_a_turn()
+                self.assertEqual(self._stop()["lastTurnOpener"], "human", "the turn that answers it is the human's")
+                self.sess._untaken = None
+                self._settle()
+
+    def test_the_humans_text_spliced_into_a_cli_turn_makes_it_theirs(self):
+        # the person asked during it and is answered in it, so its end IS news to them
+        self.sess._lifecycle = True
+        self._cli_opens_a_turn()
         self.assertEqual(self.sess._turn_opener, "injected")
-        self.assertTrue(self.sess._cli_working, "the atom still re-asserts working, as before")
-        self.assertEqual(self._stop()["lastTurnOpener"], "injected")
-
-    def test_a_peers_message_and_a_scheduled_prompt_streamed_while_idle_are_injected_too(self):
-        for origin in ({"kind": "peer", "name": "api"},
-                       {"kind": "task-notification", "subkind": "peer-send-message"},
-                       {"kind": "task-notification", "subkind": "scheduled-trigger"},
-                       {"kind": "auto-continuation"}):
-            self.sess._turn_opener = "human"
-            self._idle()
-            self._streamed(origin)
-            self.assertEqual(self.sess._turn_opener, "injected", origin)
-
-    def test_a_notification_spliced_into_the_humans_turn_does_not_take_it(self):
-        self.sess._note_turn_opener("human", True)
-        self.sess.inflight = 1                           # the human's text is in flight
-        self.sess._cli_working = True
-        self._streamed({"kind": "task-notification"})
-        self.assertEqual(self.sess._turn_opener, "human")
-
-    def test_a_stamp_less_or_human_stamped_user_atom_says_nothing(self):
-        self.sess._note_turn_opener("human", True)
-        self._idle()
-        self._streamed(None, text="hello there")
-        self._streamed({"kind": "human"}, text="hello again")
-        self.assertEqual(self.sess._turn_opener, "human")
-
-    def test_no_open_seen_stamps_the_humans(self):
-        # a fresh session object (a kernel restart mid-turn), or a CLI that stamps no origin: fail OPEN
-        # on the buzz — a missing fact never drops the user's
-        self.assertIsNone(self.sess._turn_opener)
+        self._feed_mid_turn("and the tests?", cu="c-2")
+        self.assertEqual(self.sess._turn_opener, "injected", "fed, not yet taken: nothing claimed at the pop")
+        self._started(cu="c-2")
         self.assertEqual(self._stop()["lastTurnOpener"], "human")
 
-    def test_the_feeder_notes_the_opener_at_the_pop(self):
+    def test_a_nudge_spliced_into_the_humans_turn_leaves_it_theirs(self):
+        self.sess._lifecycle = True
+        self.sess._note_turn_opener("human", True)
+        self.sess.inflight = 1
+        self._feed_mid_turn(self.NUDGE)
+        self._started()
+        self.assertEqual(self._stop()["lastTurnOpener"], "human")
+
+    def test_a_session_born_mid_turn_reads_the_opener_back(self):
+        # a kernel restart while a hosted CLI runs the turn: the new session object never saw the open
+        self.sess._note_turn_opener("human", True)
+        self.assertEqual(sb.read_reg(Path(self.d), SID_WEB)["turnOpener"], "human", "persisted at the open")
+        reborn = sb.SdkSession(self.be, sb.read_reg(Path(self.d), SID_WEB))
+        self.assertEqual(reborn._turn_opener, "human")
+        self.assertEqual(self._stop(reborn)["lastTurnOpener"], "human")
+
+    def test_no_open_seen_stamps_unknown(self):
+        self.assertIsNone(self.sess._turn_opener)
+        reg = self._stop()
+        self.assertEqual(reg["lastTurnOpener"], "unknown")
+        self.assertEqual(km._turn_opener(reg), "unknown", "which buzzes nothing")
+
+    def test_the_feeder_labels_only_a_text_fed_from_idle(self):
         import inspect
         src = inspect.getsource(sb.SdkSession._amain)
-        self.assertIn("self._note_turn_opener(fed_text_opener(item), fresh)", src)
-        self.assertLess(src.index("fresh = item is not None"), src.index("self._note_turn_opener("),
-                        "fresh (from idle, not mid-turn) is decided under the lock first")
+        i = src.index("self._note_turn_opener(fed_text_opener(item), True)")
+        self.assertIn("if fresh:", src[i - 400:i])
+        self.assertLess(src.index("fresh = item is not None"), i, "fresh (from idle, not mid-turn) is decided under the lock first")
+        self.assertNotIn("_note_turn_opener", inspect.getsource(sb.SdkBackend._forward),
+                         "the streamed record no longer labels a turn: the turn's own open does")
 
-    def test_end_to_end_the_kernel_buzzes_for_the_humans_turn_and_not_the_nudged_or_notified_ones(self):
+    def test_end_to_end_the_kernel_buzzes_for_the_humans_turns_only(self):
         # the backend's Stop hook writes the same STATE/sdk/<sid>.json the kernel's tick reads
         _reset_store()
         for p in (jd.STATE / "sdk", jd.STATE / "states"):
@@ -921,6 +1017,7 @@ class TurnOpenerStamp(unittest.TestCase):
             with mock.patch("time.time", return_value=float(t)):
                 asyncio.run(sess._stop_hook({}, None, None))
             sess._mark("waiting")                                      # the settle that follows the Stop
+            self._settle(sess)
 
         def tick():
             with mock.patch.object(km, "_alive_sessions", return_value=alive), \
@@ -931,18 +1028,392 @@ class TurnOpenerStamp(unittest.TestCase):
         stop_at(2000)
         tick()                                                         # the baseline sighting
         self.assertEqual(km._thread_reg(SID_WEB)["lastTurnOpener"], "human")
-        # a subagent finished: the CLI opens the turn itself, the session reacts, the Stop stamps
-        self._streamed({"kind": "task-notification"}, be=be, sess=sess)
+        # a subagent finished (or a peer wrote, or a scheduled prompt fired): the CLI opens the turn itself
+        self._cli_opens_a_turn(sess)
         stop_at(2001)
         self.assertEqual(tick(), [], "the reaction's end is not news to the user")
         # romp's own nudge, fed from idle
         sess._note_turn_opener(sb.fed_text_opener(self.NUDGE), True)
         stop_at(2002)
         self.assertEqual(tick(), [])
+        # relayed mail fed mid-turn and run by the CLI as its own turn
+        self._cli_opens_a_turn(sess)
+        self._feed_mid_turn(self.MAIL, sess=sess)
+        stop_at(2003)
+        tick()
+        sess._lifecycle = True
+        self._started(sess=sess)
+        self._cli_opens_a_turn(sess)
+        stop_at(2004)
+        self.assertEqual(tick(), [], "a message the CLI ran as its own turn is not the human's")
+        sess._untaken = None
         # the human's next message
         sess._note_turn_opener(sb.fed_text_opener("ship it"), True)
-        stop_at(2003)
+        stop_at(2005)
         self.assertEqual([f["body"] for f in tick()], ["Folded the report in."])
+
+
+def _kill_quietly(pid):
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
+
+
+class UnwatchedTurnEnd(unittest.TestCase):
+    """A turn that ended while no kernel was listening (2026-10-14; plans/federated-push.md, "The feed across a restart").
+    A hosted CLI keeps running across a kernel restart; the Stop hook of a turn it ends meanwhile waits at its host, and the
+    host's hello names it among the requests still open when the restarted kernel attaches. The first hello of a session
+    object hands those ids to the transport (which marks the Stop among them), the hook stamps the settle as unwatched
+    (lastStopUnwatched beside lastStopAt) and retires the id, and the backend reports how many sessions still hold one
+    (unwatched_pending: the kernel's restart catch-up waits on zero). The kernel's tick then counts that turn end into its
+    restart's summary and files it as a gap event for a kernel pulling from it; before, it read as a fresh turn end and
+    buzzed late. Synthetic: the notes-api demo session, invented reply text."""
+
+    def setUp(self):
+        _reset_store()
+        for p in (jd.STATE / "sdk", jd.STATE / "states"):
+            for f in p.glob("*") if p.exists() else []:
+                f.unlink()
+        self.be = sb.SdkBackend(str(jd.STATE), "/bin/true", lambda *a, **k: None, log=lambda *a, **k: None)
+        sb.write_reg(jd.STATE, SID_WEB, {"sid": SID_WEB, "name": "web", "cwd": "/tmp", "alive": True})
+        self.sess = sb.SdkSession(self.be, sb.read_reg(jd.STATE, SID_WEB))
+        self.be.sessions[SID_WEB] = self.sess
+        km._TURN_MISSED.clear()                              # nothing another case's restart left for the summary
+
+    def hello(self, parked, told=()):
+        """A host's hello for this session (an attach to the CLI it kept), naming the requests still open and the finished
+        turns it answered itself (`told`; None: a host older than that report says nothing of them)."""
+        import types
+        self.sess._host_is_attach = True
+        self.sess._host = types.SimpleNamespace(exit_info=None, ack_offset=0, end_grace=120.0, hello=None,
+                                                _init_pending=False, detach_mode=False, unwatched=None)
+        hello = {"host": {"pid": 9000, "start": "1.0", "version": self.be.code_version},
+                 "cli": {"pid": 11, "start": "c", "fsid": SID_WEB}, "journal": {"next": 0},
+                 "parked": list(parked), "inflight": 1}
+        if told is not None:
+            hello["selfAnswered"] = list(told)
+        self.be._on_host_hello(self.sess, hello)
+
+    def stop_at(self, t, rid=None):
+        inp = {sb.UNWATCHED_STOP_KEY: rid} if rid else {}
+        with mock.patch("time.time", return_value=float(t)):
+            asyncio.run(self.sess._stop_hook(inp, None, None))
+        return sb.read_reg(jd.STATE, SID_WEB) or {}
+
+    def test_the_first_attach_watches_what_its_cli_held_and_the_stop_hook_stamps_it(self):
+        self.hello(["req-held", "req-perm"])
+        self.assertIs(self.sess._host.unwatched, self.sess._unwatched_rids, "one set, shared with the transport")
+        self.assertEqual(self.be.unwatched_pending(), 1)
+        self.sess._unwatched_rids.discard("req-perm")        # the transport handed the prompt over
+        self.sess._note_turn_opener("human", True)
+        reg = self.stop_at(3000, "req-held")
+        self.assertEqual((reg["lastStopAt"], reg["lastStopUnwatched"], reg["lastHumanStopAt"]), (3000, 3000, 3000))
+        self.assertEqual(self.be.unwatched_pending(), 0, "stamped: the restart's catch-up no longer waits on it")
+        reg = self.stop_at(3009)
+        self.assertEqual((reg["lastStopAt"], reg["lastStopUnwatched"]), (3009, 3000),
+                         "the next turn's settle is an ordinary one: the mark names the settle it was stamped with")
+
+    def test_only_the_first_attach_of_a_life_watches(self):
+        self.hello(["req-held"])
+        self.hello(["req-held"])                             # a reconnect before the catch-up finished: still watched
+        self.assertEqual(self.sess._unwatched_rids, {"req-held"})
+        self.sess._unwatched_rids.clear()                    # handed over and stamped
+        self.hello(["req-new"])                              # a later attach (a host's re-exec): a request held a moment
+        self.assertEqual(self.sess._unwatched_rids, set())   # by a handover is not one the restart missed
+        self.assertEqual(self.be.unwatched_pending(), 0)
+
+    def test_a_session_object_rebuilt_mid_life_is_no_restarts(self):
+        # the review of #230: "first attach" was per session OBJECT, so a session rebuilt mid-run (its thread ended, a new
+        # object attached to the same host) took a Stop the host held for those seconds for a turn that ended during a
+        # restart, and the summary said "restarted" with no restart. It is per session for the kernel's life now
+        self.hello([])                                       # this life's first hello for the session
+        self.sess = sb.SdkSession(self.be, sb.read_reg(jd.STATE, SID_WEB))
+        self.be.sessions[SID_WEB] = self.sess
+        self.hello(["req-held"])
+        self.assertEqual((self.sess._unwatched_rids, self.be.unwatched_pending()), (set(), 0),
+                         "an ordinary turn end, a few seconds late, as before")
+
+    def test_a_finished_turn_its_host_answered_itself_is_stamped_from_the_hello(self):
+        # the host answers a Stop hook it held past its bound with no kernel attached, so no kernel ran that hook and the
+        # turn end was never stamped; the first cut compared clocks (the old exit against the new process's start) to
+        # guess whether that could have happened. The host now reports each in its hello, and the attach stamps it
+        self.sess._note_turn_opener("human", True)
+        self.stop_at(5000)
+        told = [{"rid": "req-1", "event": "Stop", "t": 5400.5}, {"rid": "req-0", "event": "SubagentStop", "t": 5500}]
+        self.hello([], told=told)
+        reg = sb.read_reg(jd.STATE, SID_WEB)
+        self.assertEqual((reg["lastStopAt"], reg["lastStopUnwatched"], reg["lastHumanStopAt"], reg["lastTurnOpener"]),
+                         (5400, 5400, 5400, "human"), "the Stop's own moment, as a turn that ended while no kernel listened")
+        self.stop_at(5600)
+        self.hello([], told=told)                            # every hello repeats the report
+        self.assertEqual(sb.read_reg(jd.STATE, SID_WEB)["lastStopAt"], 5600, "a moment the settle has passed stamps nothing")
+        self.assertEqual(self.be.catchup_unreported(), {}, "a host that reports needs no clock")
+
+    def test_a_host_too_old_to_report_is_named_for_the_kernel_to_judge(self):
+        with mock.patch("time.time", return_value=7000.0):
+            self.hello([], told=None)
+        self.assertEqual(self.be.catchup_unreported(), {SID_WEB: 7000.0})
+
+    def test_a_reattach_that_ends_without_a_hello_or_a_session_that_ends_holding_one_is_lost(self):
+        self.be._boot_attach_set = {SID_WEB, SID_API}
+        self.hello(["req-held"])
+        self.assertEqual(self.be.catchup_lost(), {SID_API: "its session could not be reconnected after the restart"})
+        self.assertEqual(self.be.unwatched_pending(), 1)
+
+        async def ends():
+            raise RuntimeError("the connection dropped")
+        with mock.patch.object(self.sess, "_amain", ends), mock.patch.object(self.sess, "_release_hold_at_exit"), \
+             mock.patch.object(self.be, "_on_session_gone"):
+            self.sess._run()                                 # its thread ends before the held Stop was answered
+        self.assertEqual(self.be.unwatched_pending(), 0, "the catch-up does not wait on a session that is gone")
+        self.assertEqual(self.be.catchup_lost()[SID_WEB],
+                         "its session ended before this kernel had recorded a finished turn its host held")
+
+    def test_a_held_turn_ends_hook_that_fails_before_recording_it_is_uncountable_loudly(self):
+        # the review of #233: the hook raising before its stamp (here: the awaiting overlay's write) left the id held, so
+        # the restart's catch-up waited on it for good, with no line anywhere
+        self.hello(["req-held"])
+        logged = []
+        with mock.patch.object(sb, "append_awaiting", side_effect=OSError(28, "No space left on device")), \
+             mock.patch.object(self.be, "_log", side_effect=lambda m, **k: logged.append((m, k))):
+            with self.assertRaises(OSError):
+                asyncio.run(self.sess._stop_hook({sb.UNWATCHED_STOP_KEY: "req-held"}, None, None))
+        self.assertEqual(self.be.unwatched_pending(), 0, "the catch-up does not wait on it")
+        self.assertEqual(self.be.catchup_lost()[SID_WEB], "a finished turn its host held could not be recorded (its hook "
+                                                          "failed, or its registry would not read)")
+        self.assertTrue(any("was not recorded; its count is unknown" in m and k.get("problem") for m, k in logged), logged)
+
+    def test_a_session_that_gave_up_reconnecting_owes_its_held_turn_end_to_the_next_attach(self):
+        # the review of #233: an attach that reached the host and then gave up (its initialize never answered, or its
+        # thread ended) left the session's first hello spent, so the attach a later send makes read the same held Stop
+        # as an ordinary one and buzzed that downtime turn end late. The held ids are owed to the next attach of the life
+        self.hello(["req-held", "req-perm"])
+
+        async def ends():
+            raise RuntimeError("the initialize was never answered")
+        with mock.patch.object(self.sess, "_amain", ends), mock.patch.object(self.sess, "_release_hold_at_exit"), \
+             mock.patch.object(self.be, "_on_session_gone"):
+            self.sess._run()
+        self.assertIn(SID_WEB, self.be.catchup_lost(), "this restart's count is unknown for it")
+        self.sess = sb.SdkSession(self.be, sb.read_reg(jd.STATE, SID_WEB))   # a send revives it
+        self.be.sessions[SID_WEB] = self.sess
+        self.hello(["req-held", "req-perm", "req-new"])
+        self.assertEqual(self.sess._unwatched_rids, {"req-held", "req-perm"},
+                         "still owed: the Stop among them is counted into a summary, never delivered late")
+        self.assertIs(self.sess._host.unwatched, self.sess._unwatched_rids)
+
+    def test_a_failed_boot_reconcile_closes_the_catch_up_at_once(self):
+        # the review of #233: the reconcile failing before its re-attach phase left nothing to settle, and the catch-up
+        # waited for attaches that never started
+        self.assertIsNone(self.be.catchup_failed())
+        with mock.patch.object(sb, "_OurIds", side_effect=RuntimeError("the census fell over")), \
+             mock.patch.object(self.be, "_lease_watch_start"), mock.patch.object(self.be, "_start_test_root_sweep"):
+            self.be._boot_reconcile([sb.read_reg(jd.STATE, SID_WEB)])
+        self.assertEqual(self.be.catchup_failed(), "the boot reconcile failed (RuntimeError)")
+
+    def test_ending_a_session_interrupts_an_attach_still_waiting_for_its_hello(self):
+        # the review of #233: the kill shut the session down but never interrupted its hung connect, and the host kept the
+        # CLI the user was ending
+        import types
+        aborted = []
+        self.sess._host = types.SimpleNamespace(hello=None, abort_connect=lambda why: aborted.append(why), end_grace=120.0)
+        self.sess.loop = types.SimpleNamespace(call_soon_threadsafe=lambda f, *a: f(*a))
+        with mock.patch.object(self.be, "_end_host_by_lease") as end:
+            self.be.kill(SID_WEB)
+        self.assertEqual(aborted, ["the session was ended"])
+        end.assert_called_once_with(SID_WEB)
+
+    def test_a_reattach_stuck_on_a_live_silent_host_is_named(self):
+        import types
+        self.be._boot_attach_set = {SID_WEB}
+        self.sess._host = types.SimpleNamespace(hello=None, hello_probes=1)
+        self.assertEqual(self.be.catchup_stuck(), [], "one probe: an answer may still come")
+        self.sess._host.hello_probes = 2
+        self.assertEqual(self.be.catchup_stuck(), [SID_WEB])
+
+    def _cli_and_lease(self, start=None, tag=None, argv=None):
+        """A stand-in CLI (a process of its own, carrying a state tag in its environment as every session CLI does: this
+        kernel's unless `tag` says otherwise) and a host lease naming it by pid and start time, held by a live, beating host
+        (this process)."""
+        import subprocess
+        env = dict(os.environ, **{sb.STATE_TAG_ENV: tag or sb.state_tag_of(jd.STATE)})
+        cli = subprocess.Popen(argv or ["sleep", "60"], start_new_session=True, env=env)
+        self.addCleanup(lambda: (cli.poll() is None and cli.kill(), cli.wait()))
+        lease = {"sid": SID_WEB, "fsid": SID_WEB, "name": "web", "pid": cli.pid,
+                 "start": start or sb.proc_start(cli.pid),
+                 "holder": {"pid": os.getpid(), "start": sb.proc_start(os.getpid()), "kind": "host"}, "t": time.time()}
+        sb.write_lease(jd.STATE, lease)
+        self.addCleanup(lambda: sb.lease_path(jd.STATE, SID_WEB).unlink(missing_ok=True))
+        return cli, lease
+
+    def _host(self, answer):
+        """The session's host socket, served on a thread: `answer(conn)` is what the host does with one connection."""
+        import socket
+        import threading as th
+        path = str(sb._ht().host_sock(jd.STATE, SID_WEB))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(path)
+        srv.listen(4)
+        self.addCleanup(lambda: (srv.close(), os.path.exists(path) and os.unlink(path)))
+
+        def serve():
+            try:
+                while True:
+                    c, _ = srv.accept()
+                    answer(c)
+            except OSError:
+                return
+        th.Thread(target=serve, daemon=True).start()
+
+    def _end(self):
+        said = []
+        with mock.patch.object(self.be, "_log", side_effect=lambda m, **k: said.append(m)):
+            self.be._end_host_or_cli(SID_WEB)
+            self.be._end_threads[SID_WEB].join(30)
+        return said
+
+    def test_an_end_its_host_cannot_confirm_ends_the_cli_itself_by_its_exact_identity(self):
+        # the review of #235: ending a session whose host stayed stalled past the 5 s bound left the CLI running, still
+        # spending if mid-turn, until the host's idle bound
+        cli, lease = self._cli_and_lease()
+        self._host(lambda c: c.recv(65536))              # takes the attach, never answers
+        said = self._end()
+        self.assertIsNotNone(cli.wait(10), "the CLI is ended")
+        self.assertTrue(any("did not confirm the end" in m and "was ended directly" in m for m in said), said)
+
+    def test_a_copied_state_kernels_end_kills_nothing_and_refuses_loudly(self):
+        # the review of #238: a lab kernel over a COPIED state directory holds the live session's lease, pid and start time
+        # included, so the lease alone would have it end the live kernel's CLI (the 2026-09-23 incident class). The CLI's
+        # own state tag must be this kernel's, the rule every reaper keeps
+        for tag in ("0123456789abcdef", None):
+            with self.subTest(tag=tag):
+                cli, lease = self._cli_and_lease(tag=tag or "not-a-tag")
+                said = []
+                with mock.patch.object(self.be, "_log", side_effect=lambda m, **k: said.append(m)):
+                    self.assertFalse(self.be._end_cli_directly(SID_WEB, lease, "no answer within 5 s"))
+                self.assertIsNone(cli.poll(), "never signaled")
+                self.assertTrue(any("was NOT ended" in m and "cannot prove it started it" in m for m in said), said)
+
+    def test_a_direct_end_never_hits_a_process_the_lease_does_not_name_exactly(self):
+        cli, lease = self._cli_and_lease(start="not its start time")   # a reused pid: the start time differs
+        with mock.patch.object(self.be, "_log"):
+            self.assertFalse(self.be._end_cli_directly(SID_WEB, lease, "no answer within 5 s"))
+        self.assertIsNone(cli.poll(), "never signaled")
+
+    def test_a_second_end_waits_for_this_kernels_own_instead_of_forcing(self):
+        # the review of #238: a thread resolved and its parent ended within the first end's grace (or two end requests)
+        # met a host still attached to THIS kernel's own ending connection: its `busy` was taken for a host that could not
+        # confirm the end, and the CLI's tree was killed mid-shutdown with a false host.end-forced row
+        import threading as th
+        cli, lease = self._cli_and_lease()
+        me = self.be._kernel_identity()
+        self._host(lambda c: (c.recv(65536), c.sendall(sb._ht().sh.encode_frame({"t": "busy", "kernel": me})), c.close()))
+
+        def own_end():                                   # this kernel's first end, under way: the host ends its CLI
+            time.sleep(0.5)
+            sb.lease_path(jd.STATE, SID_WEB).unlink(missing_ok=True)
+        first = th.Thread(target=own_end, daemon=True)
+        first.start()
+        self.be._ending_threads = {SID_WEB: first}
+        said = self._end()
+        self.assertIsNone(cli.poll(), "nothing forced: the first end carries it")
+        self.assertTrue(any("this kernel's own end of the session carried it" in m for m in said), said)
+        self.assertFalse(any("was ended directly" in m for m in said), said)
+
+    def test_a_host_held_by_another_kernel_is_never_forced(self):
+        cli, lease = self._cli_and_lease()
+        self._host(lambda c: (c.recv(65536), c.sendall(sb._ht().sh.encode_frame({"t": "busy", "kernel": {"pid": 7}})),
+                              c.close()))
+        said = self._end()
+        self.assertIsNone(cli.poll(), "another kernel's session: its own end applies")
+        self.assertTrue(any("another kernel (pid 7) is attached" in m for m in said), said)
+
+    def test_a_forced_end_ends_exactly_the_cli_as_a_normal_end_would(self):
+        # the review of #238: the forced end reused the orphan reaper, which stops the CLI's whole scope and tree, so a job
+        # the session had started with nohup or setsid died with it, which a normal end (stdin closed, the CLI killed after
+        # its grace) never does
+        import sys
+        kid = os.path.join(str(jd.STATE), "kid.pid")
+        code = ("import os, subprocess, sys, time\n"
+                "p = subprocess.Popen(['sleep', '60'], start_new_session=True)\n"
+                "open(sys.argv[1], 'w').write(str(p.pid))\n"
+                "time.sleep(60)\n")
+        cli, lease = self._cli_and_lease(argv=[sys.executable, "-c", code, kid])
+        for _ in range(200):                             # loop-ok: the stand-in writes its child's pid once it has one
+            if os.path.exists(kid) and open(kid).read().strip():
+                break
+            time.sleep(0.02)
+        child = int(open(kid).read())
+        self.addCleanup(lambda: _kill_quietly(child))
+        with mock.patch.object(self.be, "_log"):
+            self.assertTrue(self.be._end_cli_directly(SID_WEB, lease, "no answer within 5 s"))
+        self.assertIsNotNone(cli.wait(10), "the CLI is ended")
+        os.kill(child, 0)                                # raises if the setsid job was killed with it
+
+    def test_a_held_turn_end_the_registry_would_not_take_is_uncountable(self):
+        # the review of #235: a registry that would not read made the stamp a silent skip, and the held id was retired
+        # as if the turn end were on record
+        self.hello(["req-held"])
+        sb._reg_path(jd.STATE, SID_WEB).write_text("{ torn")
+        with mock.patch.object(self.be, "_log"):
+            asyncio.run(self.sess._stop_hook({sb.UNWATCHED_STOP_KEY: "req-held"}, None, None))
+        self.assertEqual(self.be.unwatched_pending(), 0)
+        self.assertIn("could not be recorded", self.be.catchup_lost()[SID_WEB])
+
+    def test_a_comment_thread_is_left_out_of_the_catch_up(self):
+        # it notifies nothing (the kernel's turn tick and card diff never read one): its re-attach is not waited on, its
+        # held requests hold nothing, and its loss is not a "may have been missed" (the review of #235)
+        thread = "11111111-2222-4333-8444-555555555577"
+        sb.write_reg(jd.STATE, thread, {"sid": thread, "name": "web: a comment", "cwd": "/tmp", "alive": True,
+                                        "threadOf": SID_WEB})
+        t = sb.SdkSession(self.be, sb.read_reg(jd.STATE, thread))
+        t._unwatched_rids = {"req-thread"}
+        self.be.sessions[thread] = t
+        self.be._boot_attach_set = {SID_WEB, thread}
+        self.be._boot_attach_frozen = True
+        self.be._catchup_lost[thread] = "its session ended before this kernel had recorded a finished turn its host held"
+        self.assertEqual(self.be.unwatched_pending(), 0)
+        self.assertEqual(sorted(self.be.catchup_lost()), [SID_WEB])
+        self.assertEqual(self.be.catchup_attaching(), [SID_WEB])
+        self.be._boot_attach_settled_sids.add(SID_WEB)
+        self.assertEqual(self.be.catchup_attaching(), [], "the thread's re-attach holds nothing")
+
+    def test_end_to_end_the_kernel_never_buzzes_it_late_and_files_it_as_a_gap_event(self):
+        km._set_notify_all(True)
+        km._set_notify_turns(True)
+        self.addCleanup(lambda: (km._set_notify_all(False), km._set_notify_turns(False)))
+        alive = [{"sid": SID_WEB, "name": "web", "path": _transcript(SID_WEB, "Folded the report in.")}]
+
+        def tick():
+            pushed = []
+            with mock.patch.object(km, "_alive_sessions", return_value=alive), \
+                 mock.patch.object(km, "_push_notify", side_effect=lambda *a, **k: pushed.append((a, k))), \
+                 mock.patch.object(km, "_push_forward"), mock.patch.object(km, "_self_host", return_value="boxa"), \
+                 mock.patch.dict(km._PUSH_CATCHUP, {"done": True}), io.StringIO() as sink, \
+                 mock.patch.object(km.sys, "stderr", sink):
+                return km._turn_notify_tick(time.time(), {SID_WEB: {"state": "waiting"}}), pushed
+
+        self.sess._note_turn_opener("human", True)
+        self.stop_at(4000)
+        tick()                                               # the baseline sighting
+        self.hello(["req-held"])                             # the restarted kernel attaches; the host held a finished turn
+        self.stop_at(4007, "req-held")
+        fired, pushed = tick()
+        self.assertEqual(fired, [], "not buzzed one by one, late")
+        self.assertEqual(pushed, [(("Romp: missed notifications", "boxa restarted · 1 session finished a turn", ""),
+                                   {"kind": "missed"})])
+        with km._push_ring_cond:
+            ev = dict(km._PUSH_RING[-1])
+        self.assertEqual((ev["kind"], ev["sid"], ev["turnKey"], ev.get("gap")), ("turn", SID_WEB, 4007, True))
+
+    def test_the_constants_shared_across_modules_agree(self):
+        ht = sb._ht()
+        self.assertEqual(sb.UNWATCHED_STOP_KEY, ht.UNWATCHED_STOP_KEY)
+        self.assertEqual(km.UNWATCHED_SELF_ANSWER_S, ht.sh.HOOK_SELF_ANSWER_S,
+                         "the kernel vouches for a restart's count only within the bound after which a host answers a "
+                         "held Stop hook itself")
 
 
 class FirstLine(unittest.TestCase):
@@ -1083,10 +1554,11 @@ class ShellPopover(unittest.TestCase):
         self.assertIn(">This device<", h)
         self.assertIn(">Also when a turn finishes<", h)
         self.assertIn("id=rbp-test data-act=test>Send a test notification<", h)
-        # the "why" under each switch — the master's in two sentences: what off does, what the bells are
-        self.assertIn("The main switch: off silences every device subscribed to this romp, and this desktop. "
-                      "The bells on sessions and cards are mutes under it.", h)
-        self.assertIn("Buzzes every time any session finishes a turn. With many sessions running, that is a lot of buzzing.", h)
+        # the "why" under each switch — the master's: what off does, and that a bell set to Notify me beats it (2026-10-11)
+        self.assertIn("The main switch: off silences every device subscribed to this romp, and this desktop, "
+                      "except for sessions and cards you set to Notify me.", h)
+        self.assertIn("Buzzes every time any session finishes a turn you started. With many sessions running, that is a "
+                      "lot of buzzing; to hear only some, set those sessions to Notify me.", h)
         self.assertIn("id=rbp-test-out", h)
 
     def test_the_device_and_turn_rows_nest_under_the_master(self):
@@ -1484,6 +1956,62 @@ class LandingPushDeviceRowExecutes(unittest.TestCase):
         self.assertFalse(r["bad"])
         self.assertEqual(r["checked"], "true")
         self.assertEqual(r["notes"], [])
+
+
+# Turning This device off (the review of #222): the subscription's record went with it, so what the device was still owed
+# by the missed-notification summaries was dropped unsaid, and turning it back on (a new subscription) could not bring it
+# back. The page asks the kernel to hand it over (missed:2, as GET /push/pending does: the value that says this page
+# acknowledges, the review of #225), puts each in the Log as a "missed" entry, and then says it drew them (POST
+# /push/missed-logged), the word the kernel waits for before it lets go.
+_DEV_OFF_DRIVER = r"""
+const tick = () => new Promise((r) => setTimeout(r, 0));
+const base = global.fetch;
+let UNSUB_ANSWER = { ok: true, missed: [{ host: 'TESTHOST', text: 'TESTHOST restarted - 1 session finished a turn', id: 'MISSED-id-000000000009' }, { host: 'boxb', text: '' }, 'junk'] };
+global.fetch = (path, init) => {
+  if (path === '/push/unsubscribe') { FETCHES.push([path, JSON.parse(init.body)]); return Promise.resolve({ ok: true, json: () => Promise.resolve(UNSUB_ANSWER) }); }
+  return base(path, init);
+};
+const UNSUBBED = [];
+SUB = { endpoint: 'https://push.example.net/send/dev-1', unsubscribe: () => { UNSUBBED.push(1); SUB = null; return Promise.resolve(true); } };
+async function tapDev() {
+  NOTES.length = 0; FETCHES.length = 0;
+  pop._h.click({ target: devRow });
+  for (let i = 0; i < 8; i++) await tick();
+  return { fetches: FETCHES.slice(), notes: NOTES.slice(), checked: devRow.getAttribute('aria-checked') };
+}
+(async () => {
+  await tick(); await tick();                                    // boot: the switches read, this device subscribed
+  const out = { boot: devRow.getAttribute('aria-checked') };
+  out.off = await tapDev();
+  out.unsubscribed = UNSUBBED.length;
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+class LandingPushDeviceOffSaysWhatItWasOwed(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import subprocess
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+            f.write(_PUSH_HARNESS + km._LANDING_PUSH_JS + _DEV_OFF_DRIVER)
+            path = f.name
+        try:
+            r = subprocess.run(["node", path], capture_output=True, text=True, timeout=30)
+        finally:
+            os.unlink(path)
+        assert r.returncode == 0, "the bell's script threw: " + r.stderr[:800]
+        cls.out = json.loads(r.stdout.strip().splitlines()[-1])
+
+    EP = "https://push.example.net/send/dev-1"
+
+    def test_turning_this_device_off_puts_what_it_was_owed_in_the_log_and_says_so(self):
+        r = self.out["off"]
+        self.assertEqual((self.out["boot"], r["checked"], self.out["unsubscribed"]), ("true", "false", 1))
+        self.assertEqual(r["fetches"], [["/push/unsubscribe", {"endpoint": self.EP, "missed": 2}],
+                                        ["/push/missed-logged", {"endpoint": self.EP, "ids": ["MISSED-id-000000000009"]}]],
+                         "the page asks for what the device was owed, draws it, then says it did")
+        self.assertEqual(r["notes"], [["missed", "TESTHOST restarted - 1 session finished a turn"]], "an entry without words is nobody's")
 
 
 if __name__ == "__main__":

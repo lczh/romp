@@ -106,6 +106,23 @@ test("nextPrefetch: null when hidden, null while one is in flight, else the firs
   assert.equal(nextPrefetch(newSkeletonState(), A, none, false, all), null, "a fresh page has no set");
 });
 
+test("nextPrefetch: a tab whose relay is closed is neither fetched nor held in flight, so the other machines' tabs keep filling (2026-10-11)", () => {
+  // two linked machines' skeletons interleaved in the kernel-merged order; TESTHOST's relay drops while its tab B is in flight
+  const RB = "TESTHOST:" + B, RC = "OTHERHOST:" + C, RD = "TESTHOST:" + D;
+  const st = newSkeletonState();
+  applyTabOrderSkeleton(st, [RB, RC, RD], [A, RB, RC, RD]);
+  const up = () => true;
+  const testhostDown = (id: string) => !id.startsWith("TESTHOST:");
+  assert.equal(nextPrefetch(st, A, new Set([RB]), false, all, up), null, "premise: one in flight holds the chain while its relay is open");
+  assert.equal(nextPrefetch(st, A, new Set([RB]), false, all, testhostDown), RC,
+    "its relay closed: the ask nobody will answer no longer holds the chain, and the other machine's tab is next");
+  assert.equal(nextPrefetch(st, A, none, false, all, testhostDown), RC, "the closed relay's tabs are skipped, not asked");
+  onFull(st, RC);
+  assert.equal(nextPrefetch(st, A, none, false, all, testhostDown), null, "only the closed relay's tabs left: nothing to ask yet");
+  assert.equal(nextPrefetch(st, A, none, false, all, up), RB, "the relay reopens: its tabs resume in order");
+  assert.equal(nextPrefetch(st, A, none, false, all), RB, "no predicate: every id reachable, as before");
+});
+
 test("holdStatus: a status ahead of its strip is kept for the array that lists the id and dropped by one that does not", () => {
   // The pane shim's FIFO delivers a newer tabOrder at the END of a burst, so a skeleton's status frames can land before
   // the strip that names the set (a later chat column's open sends two strips, 2026-09-11). The status waits for the

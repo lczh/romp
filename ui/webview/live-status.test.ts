@@ -81,7 +81,7 @@ test("render.ts: the transcript's foot line keeps its room whether or not it sho
   assert.doesNotMatch(RENDER, /\nliveStatusEl\(\);/, "no foot line at load, ahead of the transcript");
   const mk = RENDER.slice(RENDER.indexOf("function liveStatusEl("), RENDER.indexOf("function paintLiveThinking("));
   assert.match(mk, /if \(!content \|\| !v \|\| !v\.el\.children\.length\) return null;/);
-  assert.match(mk, /const atEnd = atBottom\(content\);[\s\S]*content\.insertBefore\(n, document\.getElementById\("live-ask"\)\);\s*\n\s*if \(atEnd\) writeScroll\(content, content\.scrollHeight, "live-status", true\);/);
+  assert.match(mk, /const atEnd = atBottom\(content\);[\s\S]*content\.insertBefore\(n, document\.getElementById\("live-ask"\)\);\s*\n\s*if \(atEnd && !v\.followHeld\) writeScroll\(content, content\.scrollHeight, "live-status", true\);/);
 });
 
 test("render.ts: a live status lives as long as its socket, a relay's reopen included", () => {
@@ -134,7 +134,9 @@ test("render.ts: thinking rows carry the exact figure, and the footer the turn's
 
 test("kernel: the frames are built once a push and ride it to chat and Sessions-pane clients, outside every build", () => {
   assert.match(KERNEL, /ls_frames = _live_status_frames\(live_map\) if \(want_chat or want_tl\) else \(\{\}, \{\}\)/);
-  assert.match(KERNEL, /_send_tab_order\(c, tab_order, tab_meta, live_map\)\n\s*_send_live_status\(c, ls_frames\[0\], tab_set\)/);
+  // the tabs' frames and the open tabs' running comment threads' (thread-live-2) as ONE set, so neither clears the other's
+  assert.match(KERNEL, /_send_tab_order\(c, tab_order, tab_meta, live_map\)\n\s*_send_live_status\(c, ls_chat, ls_allowed\)/);
+  assert.match(KERNEL, /ls_chat, ls_allowed = _chat_live_status_set\(ls_frames\[0\], tab_set, _thread_live_map\(\)\)/);
   const send = KERNEL.slice(KERNEL.indexOf("def _send_live_status("), KERNEL.indexOf("def _note_needfull_status("));
   assert.doesNotMatch(send, /_live_status_frame\(|c\.get\("sent"\) or \{\}\)\s*if|for k in/, "no per-client frame build and no scan of the sent table");
   assert.match(KERNEL, /for c in tl_clients:\n\s*_send_live_status\(c, ls_frames\[1\]\)[^\n]*\n\s*_PERF_STATS\.stage\("push\.timeline"/,

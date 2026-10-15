@@ -61,8 +61,8 @@ class FakeWS {
 // the test owns the clock: the manager stamps connT/lastRecv with Date.now(), and the watchdog is
 // ticked with an explicit `now`, so silence is advanced by hand rather than waited out
 let clock = 1_000_000_000;
-async function withManager(fn: (fm: any, emitted: any[], diag: any[], posted: any[]) => void | Promise<void>): Promise<void> {
-  const emitted: any[] = [], diag: any[] = [], posted: any[] = [];
+async function withManager(fn: (fm: any, emitted: any[], diag: any[], posted: any[], said: string[]) => void | Promise<void>): Promise<void> {
+  const emitted: any[] = [], diag: any[] = [], posted: any[] = [], said: string[] = [];
   const g: any = globalThis;
   const saved: Record<string, any> = {};
   const set = (k: string, v: any) => { saved[k] = { had: k in g, v: g[k] }; g[k] = v; };
@@ -74,13 +74,16 @@ async function withManager(fn: (fm: any, emitted: any[], diag: any[], posted: an
   set("localStorage", { getItem: () => null, setItem: () => {} });
   const parent = { postMessage: (m: any) => { posted.push(m); } };
   set("window", {
-    dispatchEvent: (ev: any) => { if (ev && ev.data) emitted.push(ev.data); },
+    dispatchEvent: (ev: any) => {
+      if (ev && ev.data) emitted.push(ev.data);
+      else if (ev && /^romp:hostRelay/.test(ev.type)) said.push(ev.type + " " + ev.detail.host);   // the relay's up and down
+    },
     __rompLocalSend: (m: any) => { if (m && m.type === "clientDiag") diag.push(m); },
     sessionStorage: { getItem: () => "" },
     parent,
   });
   try {
-    await fn(new FederationManager(), emitted, diag, posted);   // awaited: the globals must outlive an async poll
+    await fn(new FederationManager(), emitted, diag, posted, said);   // awaited: the globals must outlive an async poll
   } finally {
     Date.now = realNow;
     for (const [k, r] of Object.entries(saved)) { if (r.had) g[k] = r.v; else delete g[k]; }
@@ -123,6 +126,33 @@ test("a relay socket that opens and then goes silent past the bound is abandoned
     FakeWS.made[1].frame({ type: "feed", asks: [] });
     assert.equal(diag.filter((d) => d.data && d.data.ev === "watchdog-close").length, 1, "one crumb per abandonment");
     conn.closed = true;
+  });
+});
+
+// The review of #247 (2026-10-15): the abandon detaches the socket's onclose, which is where a relay's drop was said, so a
+// socket the watchdog put down was never said to be down. The chat's unanswered sends kept "sending…", and a comment
+// thread's read sent on it stayed held for the page's life (render.ts, read-latch.ts). The drop is said here as onclose says it.
+test("a relay socket the watchdog puts down is said to be down, as a closed one is, before its redial says it is back", async () => {
+  await withManager((fm, _e, _d, _p, said) => {
+    fm.openRemote("TESTHOST", true);
+    FakeWS.made[0].open();
+    clock += REMOTE_STALE_MS + 1;                           // silent past the bound
+    fm.watchdog(clock);
+    assert.equal(FakeWS.made[0].closed, 1, "premise: the watchdog put it down");
+    assert.deepEqual(said, ["romp:hostRelayUp TESTHOST", "romp:hostRelayDown TESTHOST"], "the drop is said, once");
+    FakeWS.made[1].open();
+    assert.deepEqual(said.slice(2), ["romp:hostRelayUp TESTHOST"], "…and the redial's open says it is back");
+    // a handshake the foreground pass kills is a drop too, as its onclose would have said
+    fm.watchdog(clock, true);
+    assert.equal(said.length, 3, "an open, live socket is left alone");
+    fm.conns.get("TESTHOST").ws.readyState = 0;
+    fm.watchdog(clock, true);
+    assert.deepEqual(said.slice(3), ["romp:hostRelayDown TESTHOST"]);
+    // and a socket that closes on its own says it once, through the same door
+    FakeWS.made[2].open();
+    FakeWS.made[2].die();
+    assert.deepEqual(said.slice(4), ["romp:hostRelayUp TESTHOST", "romp:hostRelayDown TESTHOST"]);
+    fm.conns.get("TESTHOST").closed = true;
   });
 });
 

@@ -79,9 +79,10 @@ test("the battery compacts on a Codex session too (native compaction, 2026-09-19
   assert.match(RENDER, /^function ctxBar\(\): HTMLElement \{ const bar = buildCtxBar\(compactActiveSession\); bar\.id = "ctx-bar"; return bar; \}/m);
   const c = RENDER.indexOf("function compactActiveSession(bar: HTMLElement): void {");
   assert.ok(c > 0);
-  const body = RENDER.slice(c, RENDER.indexOf("\n}\n", c));
+  const body = RENDER.slice(c, RENDER.indexOf("\n}\n", RENDER.indexOf("function compactSessionOf(", c)));   // the chat's battery and its one post (compactSessionOf, which a comment thread's gauge shares)
   assert.doesNotMatch(body, /backend === "codex"/, "no backend test between the state gate and the post");
-  assert.match(body, /vscodeApi\.postMessage\(\{ type: "compactSession", id: activeId \}\);/);
+  assert.match(body, /compactSessionOf\(bar, activeId, s\.status\.state\);/);
+  assert.match(body, /vscodeApi\.postMessage\(\{ type: "compactSession", id: sid \}\);/);
   assert.match(TL, /hit\.style\.cursor = 'pointer';/);
   assert.doesNotMatch(TL, /runs in Codex, which has no \/compact/);
   const press = TL.slice(TL.indexOf("hit.addEventListener('pointerdown'"), TL.indexOf("svg.appendChild(hit);"));

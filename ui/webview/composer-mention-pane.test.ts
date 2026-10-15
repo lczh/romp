@@ -2,8 +2,8 @@
 // functions are sliced from render.ts by their banner comments, bundled with composer-mention.ts the way the
 // webview is built, and driven in headless Chromium against a real textarea, so the browser decides what
 // Ctrl+A, PageUp, Home, Ctrl+Z and a synthetic IME keystroke do to the caret, the selection and the undo
-// stack. Skips by name when playwright or its browser is missing (md-sanitize-browser.test.ts's idiom; CI's
-// test step runs before its Chromium install, so the browser cases skip there). Source pins hold only the
+// stack. Skips by name when playwright or its browser is missing, and fails where CI requires the leg
+// (browser-leg.ts). Source pins hold only the
 // wiring the slices cannot carry: the one clear helper every clear site calls, the keydown order, the roster
 // hook at the top of renderTabs, the transcript hook, the selection menu's Copy, the chips' stylesheet rules.
 // Synthetic names only (romp, rompdocs, web, api, TESTHOST; placeholder ids).
@@ -12,6 +12,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { skipLeg } from "./browser-leg";
 
 const PKG = process.cwd();                                   // vscode-extension, where npm test runs
 const UI = path.resolve(PKG, "..", "ui", "webview");
@@ -128,10 +129,10 @@ type Harness = { page: any; state: () => Promise<any>; value: () => Promise<stri
 /** A fresh page on the harness, its composer mounted over `roster`, writing to `activeId`; null (and the test
  *  skipped, by name) when no playwright browser can be launched here. */
 async function open(t: any, roster: unknown[] = ROSTER, activeId: string | null = null): Promise<Harness | null> {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it (CI's test step runs before its Chromium install)"); return null; }
+  if (!pw) { skipLeg(t, "chromium", "playwright is not installed under vscode-extension (npm ci there installs it)"); return null; }
   let b: any;
   try { b = await browser(); }
-  catch (e) { t.skip("no playwright browser on this machine; the browser leg needs one (CI's test step runs before its Chromium install): " + String((e as Error).message).split("\n")[0]); return null; }
+  catch (e) { skipLeg(t, "chromium", "no playwright chromium on this machine (npx playwright install chromium under vscode-extension): " + String((e as Error).message).split("\n")[0]); return null; }
   const js = bundle();
   const page = await b.newPage({ viewport: { width: 800, height: 600 } });
   const errors: string[] = [];

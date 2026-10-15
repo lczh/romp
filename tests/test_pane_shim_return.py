@@ -70,14 +70,14 @@ function out(o){process.stdout.write(JSON.stringify(o));}
 """
 
 
-def _run(scenario, pre=""):
+def _run(scenario, pre="", app="test"):
     node = shutil.which("node")
     if not node:
         raise unittest.SkipTest("node not installed")
     fx = tempfile.mkdtemp()
     path = os.path.join(fx, "run.js")
     with open(path, "w") as f:
-        f.write(pre + HARNESS + km._shim_core_js() + "\n" + scenario)
+        f.write(pre + HARNESS + km._shim_core_js(app) + "\n" + scenario)
     r = subprocess.run([node, path], capture_output=True, text=True, timeout=60)
     if r.returncode != 0:
         raise AssertionError("node failed:\n" + r.stderr)
@@ -581,9 +581,9 @@ class ReconnectFlag(unittest.TestCase):
     that the page was served, and the shim latches it (readyAcked) for the page's life. A keepalive back is no
     answer, and neither is a pushed view frame: the pusher serves a socket from its registration at accept, ahead
     of the ready's processing. A page whose caps frame never comes (the socket died between the pushes and the
-    frame) dials fresh for its life, since the bundle posts ready once and no later socket carries one: every
-    redial of it is served whole, the cost before 2026-09-07, never a false skeleton. The twin-retire at
-    registration was rejected as the signal: it misses a socket the kernel already dropped."""
+    frame) dials fresh until one does: each such dial posts the bundle's ready again on its open, so the kernel
+    serves that socket whole, answers the ready, and the redials after declare themselves; never a false skeleton.
+    The twin-retire at registration was rejected as the signal: it misses a socket the kernel already dropped."""
 
     def test_the_first_dial_has_no_flag_and_a_redial_after_the_kernel_answered_the_bundles_ready_carries_it_after_iid_and_active(self):
         r = _run(r"""
@@ -730,21 +730,22 @@ out({first:first,firstState:firstState,connecting:connecting,opened:opened,desig
         # everConnected&&bundleReady&&!readyQueued the redial declared itself and was served skeletons for sessions the
         # page had never received. The kernel's ready arm answers every ready it processes with a caps frame, sent
         # after its pushes (_send_caps, the one sender), so the shim latches on that frame (readyAcked): no caps, no
-        # flag. Once set the latch holds for the page's life; never set, it stays clear for the page's life, since
-        # the bundle posts ready once and no later socket carries one: every redial of such a page is served whole.
+        # flag. Once set the latch holds for the page's life; never set, it stays clear until a caps frame comes, and
+        # every redial of such a page is served whole (each posts the ready again on its open: the round-3 C test).
+        # The harness answers no ready, so here the page keeps dialling fresh.
         r = _run(r"""
 function redial(){var live=timers.filter(function(t){return t.live&&t.fn.name==="connect";});live[live.length-1].fn();}
 localStorage.getItem=function(){return JSON.stringify({activeId:"S1"});};
 open();window.__rompLocalSend({type:"ready"});recv({type:"ka"});sock().readyState=3;sock().onclose();redial();var unanswered=sock().url;   // the ready left on an open socket; a keepalive came back, never the caps frame, and the socket died
-open();recv({type:"ka"});sock().readyState=3;sock().onclose();redial();var stillFresh=sock().url;                                    // no later socket carries a ready, so no caps frame comes: the page keeps dialling fresh
-open();caps();sock().readyState=3;sock().onclose();redial();var answered=sock().url;                                                 // harness only (a kernel answers no socket that carried no ready): the frame, and the frame alone, arms the gate
+open();recv({type:"ka"});sock().readyState=3;sock().onclose();redial();var stillFresh=sock().url;                                    // the ready posted again on that open goes unanswered too: the page keeps dialling fresh
+open();caps();sock().readyState=3;sock().onclose();redial();var answered=sock().url;                                                 // the kernel answers the ready re-posted on this open: the frame, and the frame alone, arms the gate
 out({unanswered:unanswered,stillFresh:stillFresh,answered:answered,n:sockets.length});""")
         self.assertEqual(r["n"], 4)
         self.assertNotIn("reconnect", r["unanswered"],
                          "the kernel never answered the ready, so it never served the page: the redial dials as a fresh page: " + r["unanswered"])
         self.assertTrue(r["unanswered"].endswith("&active=S1"), "the active hint still rides: " + r["unanswered"])
         self.assertNotIn("reconnect", r["stillFresh"],
-                         "no later socket carries a ready and no caps frame comes: the page dials fresh for its life: " + r["stillFresh"])
+                         "no caps frame comes: the page dials fresh until one does: " + r["stillFresh"])
         self.assertTrue(r["answered"].endswith("&active=S1&reconnect=1&proto=1"),
                         "the caps frame is the latch, on whichever socket of the page it arrives: " + r["answered"])
 
@@ -783,6 +784,40 @@ out({noReady:noReady,onConnecting:onConnecting,queued:queued,flushed:flushed,des
         self.assertNotIn("reconnect", r["queued"], "the ready is still queued: the frame on record does not stand in for its flush: " + r["queued"])
         self.assertEqual(r["flushed"], 1, "the flush carries the queued ready onto the socket that opened, once")
         self.assertTrue(r["designed"].endswith("&active=S1&reconnect=1&proto=1"), "ready, flush and answer all on record: the redial declares itself: " + r["designed"])
+
+
+class RedialKeepsTheDiet(unittest.TestCase):
+    """The main chat pane states the skeleton diet on EVERY dial of the load, not only on its first socket (2026-10-11). A
+    redial before the kernel answered the page's ready (a kernel restart mid-load, a phone losing signal before the first
+    push finished) is not reconnect=1 (the gate above), so a term gated on the first socket made it a dial for the whole
+    board, the minutes-long case the diet exists to remove. The kernel's handshake already serves skeleton=1 without
+    reconnect=1 as a fresh skeleton page (skeletonOnReady, the later column's first dial) and beside it as a plain redial
+    (the later column's redial), so the term rides every dial. Runs the REAL chat shim's core (RESTART_DIET set, no column)."""
+
+    def test_every_redial_of_the_main_chat_pane_carries_the_diet_whatever_the_ready_s_state(self):
+        r = _run(r"""
+function redial(){var live=timers.filter(function(t){return t.live&&t.fn.name==="connect";});live[live.length-1].fn();}
+localStorage.getItem=function(){return JSON.stringify({activeId:"S1"});};
+var first=sockets[0].url;
+open();recv({type:"ka"});sock().readyState=3;sock().onclose();redial();var beforeReady=sock().url;              // died before the bundle said ready
+open();window.__rompLocalSend({type:"ready"});recv({type:"ka"});sock().readyState=3;sock().onclose();redial();var unanswered=sock().url;   // the ready left, no caps came back
+open();caps();recv({type:"ka"});sock().readyState=3;sock().onclose();redial();var answered=sock().url;          // the kernel answered: the designed redial
+out({first:first,beforeReady:beforeReady,unanswered:unanswered,answered:answered,diet:RESTART_DIET});""", app="chat")
+        self.assertTrue(r["diet"], "premise: the main chat pane diets")
+        self.assertIn("&skeleton=1", r["first"], "the first dial states the diet: " + r["first"])
+        self.assertNotIn("reconnect", r["beforeReady"], "premise: the gate makes this redial a fresh page: " + r["beforeReady"])
+        self.assertIn("&skeleton=1", r["beforeReady"], "a redial before the bundle's ready keeps the diet: " + r["beforeReady"])
+        self.assertNotIn("reconnect", r["unanswered"], "premise: an unanswered ready dials fresh: " + r["unanswered"])
+        self.assertIn("&skeleton=1", r["unanswered"], "a redial after a ready the kernel never answered keeps the diet: " + r["unanswered"])
+        self.assertTrue(r["answered"].endswith("&active=S1&reconnect=1&proto=1&skeleton=1"),
+                        "the designed redial carries both terms, as a later column's does: " + r["answered"])
+
+    def test_a_non_chat_pane_never_carries_the_term(self):
+        r = _run(r"""
+function redial(){var live=timers.filter(function(t){return t.live&&t.fn.name==="connect";});live[live.length-1].fn();}
+open();recv({type:"ka"});sock().readyState=3;sock().onclose();redial();
+out({urls:sockets.map(function(s){return s.url;})});""", app="feed")
+        self.assertTrue(all("skeleton=1" not in u for u in r["urls"]), r["urls"])
 
 
 class SocketFlipMarker(unittest.TestCase):

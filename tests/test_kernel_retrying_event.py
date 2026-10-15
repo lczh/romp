@@ -43,7 +43,7 @@ class RetryingEmit(unittest.TestCase):
         self.assertGreater(i_queued, i_retry)
 
     def test_sessions_live_passes_retryCount_through_from_the_sdk_backend(self):
-        src = inspect.getsource(km.Sessions.live)
+        src = inspect.getsource(km._sdk_live_norm)
         self.assertIn('"retryCount": int(st.get("retryCount") or 0),', src)
 
     def test_backend_snapshot_exposes_the_retry_count(self):

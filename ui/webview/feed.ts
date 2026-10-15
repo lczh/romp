@@ -13,7 +13,9 @@ import { distillText, distillInputs, applyDistillLine, distillPending, distillSt
 import { openContextMenu, CtxItem } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy): the card menu's card, dismissal and keys
 import { flipNeeded } from "./feed-flip";
 import { delegate } from "./actions";
+import { CmtDrops, cmtDropEntry } from "./comment-drops";   // a dropped comment create's dialog, shared with the chat page (review of PR 218)
 import { paintHeld, paintReleased, publishPaneHidden } from "./paint-gate";
+import { paneSight } from "./paint-gate";   // who can see a dropped comment's dialog here (review of PR 223)
 import { linkifyPrRefs, setLinkedText, installPrLinkOpener } from "./pr-links";
 import { cardInputsKey, cardNeedsUpdate, type GateEnv } from "./feed-card-gate";
 import { spinFor, awaitWord, groupRows, waitsNote, GROUP_TITLE, ROW_KIND_OF_LEGACY, type AwaitRow } from "./spin-caption";
@@ -48,6 +50,7 @@ import { focusedEntries, focusedCardCount } from "./feed-focus";   // the focuse
 import { FEED_BOARD, columnOf, columnTable, feedColumns, isNeedsYou, adoptBoards, boardOf, boardById, knownBoards, type Board, type FeedCategory } from "./board-def";   // the feed as one board definition (plans/card-boards.md, phase one)
 import { wireTip, setTip, pruneTip } from "./tip";
 import { perfFrameHandler } from "./perf-telemetry";
+import { bellState, bellClickFields, legacyBellNote, setHubSwitches } from "./bell-follow";   // a linked kernel's bells follow this kernel's switches
 import { listenForFrames } from "./frame-listener";
 
 // (The standalone-deliverable "FeedItem" subsystem was REMOVED 2026-07-07: the kernel had emitted
@@ -133,6 +136,7 @@ interface AskItem {
   groupN?: number;                                 // host: sibling count for that turn (>1 ⇒ fold into one group card)
   provisional?: boolean;                           // a LIVE-PROMPT placeholder (kernel _provisional_card): the session is working an in-progress turn the planner hasn't classified yet. No goal node (empty tree) — dim, non-interactive, no clear/nudge/modal; replaced by the real card once the planner places the segment.
   judging?: boolean;                               // the turn has SETTLED and the judge's pass is due/in flight → the swirl chip says Analyzing… — on a provisional card while the planner's classify is pending (the user 2026-07-12), and on a REAL working card while the closer's verdict is (the settle→verdict gap, the user 2026-07-13); an open turn stays the honest Working…
+  notifyRaw?: boolean | null;                      // the bell's override alone (card, else session; null = none), sent so a card from a LINKED kernel paints against THIS kernel's master (bell-follow.ts); absent from an older kernel
   notify?: boolean | null;                         // per-card bell (the user 2026-07-28): the kernel fires an OS notification when THIS card enters needs_input/completed. EFFECTIVE state (card override > session override > the master bell's default, 2026-08-09) — with the master on, every card arrives armed unless muted. True/absent, never false
   tree: AskTreeNode[];                             // the ask's DAG, rendered as a tree in the expanded body
 }
@@ -1218,8 +1222,10 @@ function cardBellSvg(off: boolean): string {
     + '<path d="M6.6 11.6 A1.5 1.5 0 0 0 9.4 11.6"/>' + slash + "</svg>";
 }
 
-function cardNotifyOn(it: { itemId: string; notify?: boolean | null }): boolean {
-  return pendingNotify.has(it.itemId) ? !!pendingNotify.get(it.itemId) : !!it.notify;
+// the bell as the devices subscribed at THIS kernel hear it: a local card's as its kernel sent it, a linked kernel's resolved
+// against this kernel's master (bell-follow.ts)
+function cardNotifyOn(it: { itemId: string; sid?: string; notify?: boolean | null; notifyRaw?: boolean | null }): boolean {
+  return pendingNotify.has(it.itemId) ? !!pendingNotify.get(it.itemId) : bellState(String(it.sid || ""), it).on;
 }
 
 // paint the corner bell to a state: armed = accent + unslashed (always visible via .on), off = slashed
@@ -1227,12 +1233,16 @@ function cardNotifyOn(it: { itemId: string; notify?: boolean | null }): boolean 
 function paintCardBell(card: HTMLElement, on: boolean): void {
   const btn = (card as any)._bell as HTMLElement | undefined;
   if (!btn) return;
-  if ((btn as any)._bellOn === on) return;   // steady state: never churn the svg under a press (click-safety)
+  const it = (card as any)._it as AskItem | undefined;
+  const sid = String((it && it.sid) || "");
+  const legacy = !!it && bellState(sid, it).legacy;   // a linked kernel too old to send its raw override: painted as it reports it, and said so
+  if ((btn as any)._bellOn === on && (btn as any)._bellLegacy === legacy) return;   // steady state: never churn the svg under a press (click-safety)
   (btn as any)._bellOn = on;
+  (btn as any)._bellLegacy = legacy;
   btn.classList.toggle("on", on);
   btn.innerHTML = cardBellSvg(!on);
-  const say = on ? "system notifications on for this task — click to stop"
-    : "notify me when this task blocks on you or completes";
+  const say = (on ? "system notifications on for this task — click to stop"
+    : "notify me when this task blocks on you or completes") + (legacy ? " · " + legacyBellNote(sid) : "");
   setTip(btn, say);                                    // styled tip (tip.ts), not a native title
   btn.setAttribute("aria-label", say);                 // the icon-only button keeps an accessible name
 }
@@ -1241,7 +1251,7 @@ function paintCardBell(card: HTMLElement, on: boolean): void {
 function setCardNotify(card: HTMLElement, it: AskItem, value: boolean): void {
   pendingNotify.set(it.itemId, value);               // sticky until the kernel's payload carries it
   paintCardBell(card, value);                        // acknowledge instantly, before the round-trip
-  vscodeApi?.postMessage({ type: "cardNotify", itemId: it.itemId, sid: it.sid, value });
+  vscodeApi?.postMessage({ type: "cardNotify", itemId: it.itemId, sid: it.sid, value, ...bellClickFields(String(it.sid || ""), it) });   // a linked kernel's card: stored as given
 }
 
 // The kernel's reply to a latched click re-arms THAT button (review find, 2026-09-08). Each card-face latch
@@ -1927,7 +1937,7 @@ function updateAskCard(card: HTMLElement, it: AskItem) {
   a._it = it;   // the freshest payload copy — the right-click bell menu reads this, never a stale closure; and the gate's identity
   // per-card bell: retire the optimistic value once the kernel's payload agrees (event-based, no timer),
   // then render whichever stands. Same sticky-optimism shape as the timeline lane's _pendingFlags.
-  if (pendingNotify.has(it.itemId) && !!it.notify === pendingNotify.get(it.itemId)) pendingNotify.delete(it.itemId);
+  if (pendingNotify.has(it.itemId) && bellState(String(it.sid || ""), it).on === pendingNotify.get(it.itemId)) pendingNotify.delete(it.itemId);
   if (a._bell) (a._bell as HTMLElement).style.display = it.provisional ? "none" : "";   // no stable identity to arm
   paintCardBell(card, cardNotifyOn(it));
   card.className = "fitem ask" + (it.live ? " live" : " dead") + (it.itemId === (hoverAskId ?? pinnedAskId) ? " focused" : "") + (it.itemId === pinnedAskId ? " pinned" : "") + (it.provisional ? " provisional" : "");
@@ -5110,6 +5120,7 @@ function watchFeedVisibility(list: HTMLElement): void {
     feedIntersecting = entries.some((e) => e.isIntersecting);
     releasePaint();
     live.catchUp();   // the 15 s age pass skipped while off screen (feed-age.ts liveRefresher); one pass, same measure
+    cmtDrops.settle();   // the published word moved: a drop handed back while off screen is asked for again (review of PR 223)
   }).observe(list);
 }
 // The owed paint, settled the moment both measures say the pane can be seen. Synchronous on purpose (no
@@ -6068,6 +6079,11 @@ listenForFrames(perfFrameHandler("feed", (m) => vscodeApi?.postMessage(m), (e: M
     }
     if (m.ok) feedToast("summary retry armed — it regenerates on the next judge pass over this card");
     else feedToast("couldn't retry the summary: " + (String(m.error || "") || "the kernel refused it"));
+  } else if (m.type === "notifySwitches") {
+    // this kernel's master moved (or the ready's first word on it): a linked kernel's card with no override of its own
+    // follows it, so the bells repaint (bell-follow.ts). Only the LOCAL kernel's frame reaches here (federation drops a
+    // linked kernel's, as it drops its caps)
+    if (setHubSwitches(m)) render();
   } else if (m.type === "revealCards") {
     // chat rail CLICK → scroll to the card(s) covering that turn and pulse them (the user 2026-07-23).
     // Distinct from hoverCards, which only outlines whatever is already on screen: this one MOVES the
@@ -6176,6 +6192,9 @@ listenForFrames(perfFrameHandler("feed", (m) => vscodeApi?.postMessage(m), (e: M
         restoreChecks.set(id, { host: h, sentBuild: seen, seq: typeof m.seq === "number" ? m.seq : undefined });
       }
     }
+  } else if (m.type === "err" && cmtDrops.take(m)) {
+    // a dropped comment create: its own dialog, listing every drop that arrives while it is up, each acknowledged to its
+    // kernel once drawn and drawn once per page (cmtDrops; the chat page's twin); any other err frame takes the arm below
   } else if (m.type === "err" && typeof m.text === "string" && m.text) {
     // the dialog interrupts; the bell KEEPS it (the user 2026-07-29) — dismissing the modal must not erase
     // the fact that a message never landed. Same {romp:'notify'} bridge the card-badge mirror below uses.
@@ -6379,11 +6398,65 @@ function showPickerDialog(name: string, options: string[]) {
   (box.querySelector("button") as HTMLElement | null)?.focus();
 }
 
+// The dropped comment creates' dialog (comment-drops.ts), on showErrDialog's chrome and in its slot (#err-dialog: it
+// replaces an older err dialog): every drop that arrives while it is up joins its list, each with its own Copy, and is
+// acknowledged to its kernel once someone saw it (this page on screen and focused, or the user's dismissal); a drop that
+// arrives while nobody can see this page is handed back to its kernel for a page someone can see, and a drop this page drew
+// already is not drawn twice (reviews of PR 218 and PR 223, 2026-10-11). `cmtDropList` is the open list. It leaves the
+// screen only by the user's dismissal (dismissCmtDrops): a newer err dialog waits behind it (showErrDialog).
+let cmtDropList: HTMLElement | null = null;
+let errHeld: [string, string, string] | null = null;   // the newest err dialog waiting behind the drops dialog
+const cmtDrops = new CmtDrops({
+  isOpen: () => !!cmtDropList && cmtDropList.isConnected,
+  open: (title) => { cmtDropList = showCmtDropDialog(title); },
+  add: (d) => { cmtDropList!.appendChild(cmtDropEntry(d, el, { detail: "pickdlg-detail", button: "pickdlg-opt" },
+                                                      (t) => { navigator.clipboard?.writeText(t); })); },
+  retitle: (t) => { const h = cmtDropList?.parentElement?.querySelector(".pickdlg-title"); if (h) h.textContent = t; },
+  sight: () => paneSight(),
+  ack: (d) => vscodeApi?.postMessage({ type: "commentDropSeen", id: d.sid, createId: d.createId }),
+  hidden: (d, hidden) => vscodeApi?.postMessage({ type: "commentDropHidden", id: d.sid, createId: d.createId, hidden }),
+  // the bell keeps each drop, as it keeps every err frame (the arm below)
+  log: (d) => window.parent?.postMessage({ romp: "notify", kind: "undelivered", text: d.copy ? d.title + ": " + d.copy : d.title,
+                                           sid: d.sid }, "*"),
+});
+// the events that change who can see this page (paint-gate.ts paneSight): a drop drawn while nobody was looking is
+// acknowledged once someone is, and one handed back is asked for again (the observer's report is watchFeedVisibility's)
+window.addEventListener("focus", () => cmtDrops.settle());
+window.addEventListener("resize", () => cmtDrops.settle());
+document.addEventListener("visibilitychange", () => cmtDrops.settle());
+/** Open the drops dialog titled `title` and return its (empty) list. */
+function showCmtDropDialog(title: string): HTMLElement {
+  document.getElementById("err-dialog")?.remove();
+  const overlay = el("div", "pickdlg-overlay"); overlay.id = "err-dialog";
+  const box = el("div", "pickdlg-box");
+  const h = el("div", "pickdlg-title"); h.textContent = title;
+  const list = el("div", "cmt-drop-list");
+  const ok = el("button", "pickdlg-opt pickdlg-cancel");
+  ok.textContent = "Dismiss";
+  ok.onclick = () => dismissCmtDrops(overlay);
+  box.append(h, list, ok);
+  overlay.onclick = (e) => { if (e.target === overlay) dismissCmtDrops(overlay); };
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  ok.focus();
+  return list;
+}
+/** The user dismissed the drops dialog (Dismiss, the backdrop): every drop it listed was seen, and the err dialog waiting
+ *  behind it opens. */
+function dismissCmtDrops(overlay: HTMLElement): void {
+  overlay.remove();
+  cmtDrops.dismissed();
+  const h = errHeld;
+  errHeld = null;
+  if (h) showErrDialog(h[0], h[1], h[2]);
+}
+
 // The kernel's LOUD channel (the user 2026-07-29). The feed had no error surface at all: every failure here
 // went to feedToast, which fades, and a kernel `warn` had no handler on this page whatsoever — so an action
 // fired from a card could fail with the page showing nothing. A refused reply is typed work that is gone, so
 // it gets a dialog you must dismiss, reusing the resume-picker dialog's chrome rather than inventing another.
 function showErrDialog(title: string, text: string, copy: string) {
+  if (cmtDropList?.isConnected) { errHeld = [title, text, copy]; return; }   // it waits behind the drops dialog (review of PR 223)
   document.getElementById("err-dialog")?.remove();
   const overlay = el("div", "pickdlg-overlay"); overlay.id = "err-dialog";
   const box = el("div", "pickdlg-box");

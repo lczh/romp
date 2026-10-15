@@ -53,6 +53,17 @@ _HOST_SCOPE_RE = re.compile(r"romp-host-([0-9a-fA-F]{1,8})-(\d+)\.scope\Z")
 ACK_BATCH = 64            # acknowledge at least every this many records…
 ACK_INTERVAL_S = 0.1      # …or this often
 SOCKET_WAIT_S = 20.0      # how long a spawn waits for the host's socket before it is a launch failure
+# The key a Stop hook's input wears when its CLI sent it before this kernel life first attached (HostTransport.unwatched):
+# the turn ended while no kernel was listening, and the Stop hook stamps it so (sdk_backend's UNWATCHED_STOP_KEY, pinned
+# equal by a test). The value is the request's id, which the hook retires from the session's set once it has stamped.
+UNWATCHED_STOP_KEY = "rompUnwatched"
+HELLO_PROBE_S = sh.LEASE_HEARTBEAT_S   # while a hello is awaited, how often the host's liveness is asked (its lease's beat)
+
+
+class HostHelloLost(CLIConnectionError):
+    """The wait for a host's hello ended without one: the host's lease no longer names a live, beating host (a frozen or
+    dead host accepts the connection from its backlog and never answers), or the session was ended meanwhile
+    (HostTransport.abort_connect). The session stands down from the host rather than heal: its CLI may still live."""
 
 
 def _setting(state_dir, name: str, default: str) -> str:
@@ -227,7 +238,7 @@ class HostTransport(_Base):
 
     def __init__(self, sock_path=None, *, kernel=None, ack=sh.ACK_NONE, end_grace=sh.END_GRACE_DEFAULT_S,
                  on_ack=None, on_hello=None, on_stderr=None, on_exit=None, on_fault=None, journal_dir=None, on_reexec=None,
-                 on_lost=None):
+                 on_lost=None, alive=None):
         self.sock_path = str(sock_path) if sock_path else None
         self.kernel = dict(kernel or {})
         self.ack_offset = int(ack)
@@ -260,6 +271,17 @@ class HostTransport(_Base):
         self._my_requests: set = set()  # control_request ids this transport wrote (the Query's initialize first)
         self._hold: list = []           # replayed records held until the initialize's answer has been yielded
         self._init_pending = True       # live mode: the Query's initialize has not been answered yet
+        self.alive = alive              # () -> None while the host's lease says it lives, else why not: the hello wait's
+        #                                 bound, the liveness event every host already beats (the review of #233: the
+        #                                 wait had none, and one frozen host held the restart's catch-up open for good)
+        self._abort_why = None          # abort_connect's reason: the session was ended while its hello was awaited
+        self.busy_with = None           # the attached kernel a `busy` answer named ({pid, start, version}), when one did
+        self.hello_probes = 0           # liveness probes that found the host beating and its hello still not come: a live
+        #                                 host answers in milliseconds, so a count past one is a host stuck yet alive
+        self.unwatched = None           # the session's set of request ids its CLI sent before this kernel life first attached
+        #                                 to it (the hello's `parked`), shared with the session (SdkBackend._on_host_hello);
+        #                                 None when not watching. A Stop hook among them ended a turn while no kernel was
+        #                                 listening: its input is marked (_mark_unwatched), and the hook stamps it so
 
     @classmethod
     def from_journal(cls, journal_dir, ack=sh.ACK_NONE, **kw):
@@ -277,13 +299,27 @@ class HostTransport(_Base):
         fr = sh.FrameReader()
         hello = None
         while hello is None:
-            chunk = await self._reader.read(65536)
+            if self.alive is None:
+                chunk = await self._reader.read(65536)
+            else:
+                try:
+                    chunk = await asyncio.wait_for(self._reader.read(65536), timeout=HELLO_PROBE_S)
+                except asyncio.TimeoutError:
+                    why = self._abort_why or self.alive()
+                    if why:                      # a host that stopped beating never answers: no wait without an end
+                        self._drop_before_hello()
+                        raise HostHelloLost("no hello from the session host: %s" % why)
+                    self.hello_probes += 1
+                    continue                     # it still beats: a slow answer, not a lost one
             if not chunk:
+                if self._abort_why:
+                    raise HostHelloLost("no hello from the session host: %s" % self._abort_why)
                 raise CLIConnectionError("the host closed the socket before hello")
             for f in fr.feed(chunk):
                 if f.get("t") == "hello":
                     hello = f
                 elif f.get("t") == "busy":
+                    self.busy_with = f.get("kernel") if isinstance(f.get("kernel"), dict) else {}   # WHICH kernel holds it
                     raise CLIConnectionError("another kernel is attached to this host: %r" % (f.get("kernel"),))
                 else:
                     self._early.append(f)
@@ -296,6 +332,21 @@ class HostTransport(_Base):
         self._ready = True
         if self.on_hello:
             self.on_hello(hello)
+
+    def abort_connect(self, why: str = "the session was ended") -> None:
+        """End a wait for the host's hello now (on the session's loop): the session was ended while it waited (the review
+        of #233: ending a session never interrupted a hung attach). The connect raises HostHelloLost. A transport past
+        its hello is left alone: its own close ends it."""
+        if self.hello is None and not self.journal_dir:
+            self._abort_why = str(why)
+            self._drop_before_hello()
+
+    def _drop_before_hello(self) -> None:
+        try:
+            if self._writer is not None:
+                self._writer.close()
+        except Exception:
+            pass
 
     def is_ready(self) -> bool:
         return self._ready and not self._closed
@@ -423,7 +474,27 @@ class HostTransport(_Base):
     def _take(self, out: dict):
         self._advance(out)
         self._tag(out.get("offset"), out["data"])
+        self._mark_unwatched(out["data"])
         return out["data"]
+
+    def _mark_unwatched(self, data) -> None:
+        """A record handed over while the session's set of requests held from before this kernel life first attached is
+        open (`unwatched`): a Stop hook callback among them has its input marked with UNWATCHED_STOP_KEY (the request's id),
+        and stays in the set until the hook has stamped the turn end; any other request leaves the set as it is handed
+        over. The kernel's restart catch-up waits on the set emptying (SdkBackend.unwatched_pending), so a turn that ended
+        while the kernel was down is counted into the restart's summary rather than delivered late."""
+        w = getattr(self, "unwatched", None)            # getattr: a transport built without __init__ (a test's) watches nothing
+        if not w or not isinstance(data, dict) or data.get("type") != "control_request":
+            return
+        rid = str(data.get("request_id") or "")
+        if rid not in w:
+            return
+        req = data.get("request") if isinstance(data.get("request"), dict) else {}
+        inp = req.get("input") if isinstance(req.get("input"), dict) else None
+        if req.get("subtype") == "hook_callback" and inp is not None and inp.get("hook_event_name") == "Stop":
+            inp[UNWATCHED_STOP_KEY] = rid
+        else:
+            w.discard(rid)
 
     def _tag(self, offset, data, replay=None) -> None:
         """A RESULT record's own offset, queued for the spend fold (T354): the consumer pops one per result it handles,

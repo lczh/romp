@@ -89,7 +89,8 @@ test("a window ask carries the navigation's time and kind to its reply; the thre
   assert.match(RENDER, /markjump: \(elx\) => \{\s*\n\s*const uuid = elx\.dataset\.uuid;\s*\n\s*if \(!uuid \|\| !activeId\) return;\s*\n\s*flashedAnchor = null;\s*\n\s*scrollToAnchor\(uuid\);/, "the notch lands directly");
   assert.match(RENDER, /function landThread\(sid: string, tid: string, uuid: string\): void \{\s*\n\s*flashedAnchor = null;[^\n]*\n\s*if \(scrollToAnchor\(uuid\)\) \{/, "the jump cluster lands a thread directly (the reply chips' landing, folded in)");
   assert.match(RENDER, /else \{ flashedAnchor = null; scrollToAnchor\(hit\.uuid\); \}/, "…and the reader's own messages the notch's way");
-  assert.match(RENDER, /cmtjump: \(elx\) => \{[\s\S]*?flashedAnchor = null;\s*\n\s*scrollToAnchor\(uuid\);/, "the comment tick lands directly");
+  assert.match(RENDER, /cmtjump: \(elx\) => \{\s*\n\s*const tid = elx\.dataset\.tid;\s*\n\s*if \(!tid \|\| !activeId\) return;\s*\n\s*passageLanding\(activeId, tid\);/, "the comment tick takes the passage landing…");
+  assert.match(RENDER, /function passageLanding\(sid: string, tid: string\): void \{[\s\S]*?flashedAnchor = null;[^\n]*\n[\s\S]*?if \(scrollToAnchor\(uuid\) \|\| anchorPendingOlder\) return;/, "…which lands directly");
 });
 
 test("the set-aside notice is independent of the reveal-progress guard and carries its own tooltip (2026-09-19 round two)", () => {

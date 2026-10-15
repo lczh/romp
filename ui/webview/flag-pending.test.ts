@@ -5,7 +5,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { notePendingFlag, dropPendingFlag, applyFrameFlags, PENDING_FLAG_MAX_AGE, SESSION_FLAGS, type PendingFlags } from "./flag-pending";
+import { notePendingFlag, dropPendingFlag, applyFrameFlags, frameRaw, PENDING_FLAG_MAX_AGE, SESSION_FLAGS, type PendingFlags } from "./flag-pending";
 
 const SID = "11111111-2222-4333-8444-000000000601";
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
@@ -57,12 +57,31 @@ test("expectations are per flag and per session; a refusal drops one, a departur
   assert.deepEqual([...SESSION_FLAGS], ["notify", "hideFromFeed", "postalServiceOff"]);
 });
 
+test("the bell: a frame carrying the session's own setting confirms on it, and the setting lands under the guard (2026-10-11)", () => {
+  assert.deepEqual([frameRaw({ notifyRaw: true }), frameRaw({ notifyRaw: false }), frameRaw({ notifyRaw: null }), frameRaw({}), frameRaw({ notifyRaw: "on" })],
+                   [true, false, null, undefined, undefined]);
+  const pending: PendingFlags = new Map();
+  const s: { notify?: boolean; notifyRaw?: boolean | null } = { notify: false, notifyRaw: null };
+  notePendingFlag(pending, SID, "notify", false); s.notifyRaw = false;   // an explicit off clicked over a master that is already off
+  assert.deepEqual(applyFrameFlags(s, { notify: false, notifyRaw: null }, pending, SID), [], "the effective value agrees before the click landed…");
+  assert.equal(pending.get(SID)!.get("notify")!.age, 1, "…and does not confirm it");
+  assert.equal(s.notifyRaw, false, "the copy keeps the clicked setting while the click stands");
+  applyFrameFlags(s, { notify: false, notifyRaw: false }, pending, SID);
+  assert.equal(pending.size, 0, "the stored setting is the echo");
+  applyFrameFlags(s, { notify: true, notifyRaw: null }, pending, SID);
+  assert.deepEqual(s, { notify: true, notifyRaw: null }, "with no click standing the frame's setting lands as it is");
+  applyFrameFlags(s, { notify: false }, pending, SID);
+  assert.equal(s.notifyRaw, null, "a frame without the setting leaves the copy's alone");
+});
+
 test("render.ts: the click notes its expectation, both frame roads apply the flags under the guard, the refusal drops it", () => {
-  assert.match(RENDER, /import \{ notePendingFlag, dropPendingFlag, applyFrameFlags, type PendingFlags, type SessionFlag \} from "\.\/flag-pending";/);
+  assert.match(RENDER, /import \{ notePendingFlag, dropPendingFlag, applyFrameFlags, frameRaw, type PendingFlags, type SessionFlag \} from "\.\/flag-pending";/);
   assert.match(RENDER, /const pendingFlags: PendingFlags = new Map\(\);[^\n]*\nfunction setSessionFlag/, "the store, declared beside its writer");
   assert.match(RENDER, /function setSessionFlag\(id: string, flag: "hideFromFeed" \| "postalServiceOff" \| "notify", value: boolean\) \{\n\s*const s = sessions\.get\(id\);\n\s*if \(s\) s\[flag\] = value;[^\n]*\n\s*notePendingFlag\(pendingFlags, id, flag, value\);/, "the click");
-  assert.match(RENDER, /if \(tm\) applyMetaToSession\(s, tm, pendingTabMeta\.get\(msg\.id\)\);\n\s*applyFrameFlags\(s, msg, pendingFlags, msg\.id\);/, "the full session frame, once the copy is built from it and the pushed meta re-applied");
-  assert.match(RENDER, /if \(msg\.status\) s\.status = msg\.status;\n[^\n]*\n[^\n]*\n\s*applyFrameFlags\(s, msg, pendingFlags, msg\.id\);/, "the chatTail (both wires carry the flags)");
+  // both roads hand the guard the frame with a LINKED kernel's bell resolved against this kernel's master (frameBell,
+  // bell-follow.ts); a local session's frame passes through it unchanged
+  assert.match(RENDER, /if \(tm\) applyMetaToSession\(s, tm, pendingTabMeta\.get\(msg\.id\)\);\n\s*applyFrameFlags\(s, frameBell\(msg\.id, msg, s\.notifyRaw\), pendingFlags, msg\.id\);/, "the full session frame, once the copy is built from it and the pushed meta re-applied");
+  assert.match(RENDER, /if \(msg\.status\) s\.status = msg\.status;\n[^\n]*\n[^\n]*\n\s*applyFrameFlags\(s, frameBell\(msg\.id, msg, [^\n]*\), pendingFlags, msg\.id\);/, "the chatTail (both wires carry the flags)");
   assert.doesNotMatch(RENDER, /for \(const f of \["notify", "hideFromFeed", "postalServiceOff"\] as const\)/, "no unguarded copy of the tail's flags remains");
   assert.match(RENDER, /if \(m\.gesture === "flag" && typeof m\.sid === "string" && typeof m\.flag === "string" && m\.sid && m\.flag\) \{[\s\S]*?dropPendingFlag\(pendingFlags, m\.sid, m\.flag as SessionFlag\);/, "the refusal ends the expectation on THIS event");
 });

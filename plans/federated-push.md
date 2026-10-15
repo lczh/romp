@@ -1,72 +1,614 @@
-# Federated push: one subscription buzzes for every connected kernel
+# Federated push: one subscription buzzes for every linked kernel
 
-Status: IMPLEMENTED, landing in the commit that adds this file.
+Status: the PULL direction is the design of record (2026-10-10). It replaces push-from-origin
+(2026-08-08), which stays only as a transition leg with a written removal condition (below). The
+follow-ups from its review (2026-10-11) are folded in: who opened a turn is decided when it opens, an
+explicit session bell beats the switches, one policy for every gap ("never late, never silent"), a
+per-batch cap, and an event is marked passed only once the gate has decided it. Since 2026-10-14 the
+origin's feed survives its own restart, so a restart is counted like any other gap ("The feed across a
+restart" below).
 
-The ask (the user 2026-08-08, minutes after installing the home-screen app): with kernels
-linked, having to think about WHICH kernel a notification comes from is exactly the mechanics
-romp exists to hide — a device subscribed at one kernel should get the bell events of every
-kernel connected to it. Concretely: the phone is installed against the always-on box, the
-laptop's sessions do the day's work, and the laptop's "needs you" must still buzz the pocket.
+The ask (the user 2026-08-08, minutes after installing the home-screen app): with kernels linked,
+having to think about WHICH kernel a notification comes from is exactly the mechanics romp exists
+to hide. A device subscribed at one kernel should get the bell events of every kernel connected to
+it. The phone is installed against the always-on box, the laptop's sessions do the day's work, and
+the laptop's "needs you" must still buzz the pocket.
 
 **The invariant: push scope = dashboard scope.** The dashboard you subscribed from shows every
-attached host's sessions merged together; the bell you tapped there means "notify me about all
-of this", not "about the slice this kernel happens to own".
+linked host's sessions merged together, and the bell you tapped there means "notify me about all of
+this", not "about the slice this kernel happens to own". The hosts a dashboard shows are exactly the
+rows its kernel holds: `_remote_ws` relays a host's socket only through a row's port and token, and
+404s without one. So the hosts whose events reach a device are exactly the rows held by the kernel
+the device subscribed at, minus the ones the user has not marked trusted.
 
-## Why the gap existed
+## Why push-from-origin failed
 
-The merged multi-host view is assembled in the BROWSER (`federation.js`: one socket per kernel,
-ids prefixed `host:`); the serving kernel splices relay connections and reads nothing. So the
-kernel that holds a push subscription never sees another host's cards, and its bell detector
-(`_feed_notifications`, diffing fresh feed builds) fires for local sessions only.
+The first design (2026-08-08) forwarded at the event source: when a kernel's bell fired, its
+`_push_forward` POSTed the event to `/push/relay` on every trusted row in its OWN `_remotes`, and
+the receiver mirrored it to its own devices. Two things were wrong with that.
 
-## Design: forward at the event source, mirror at the subscriber
+1. **The topology is one-way.** With ssh-attach (the default way to link a machine), only the
+   attacher holds a row: the hub dialed the laptop, the hub holds the laptop's port and token, and
+   the laptop holds nothing for the hub. The laptop's `_push_forward` had nobody to send to, so its
+   turn ends and needs-you cards never reached the phone subscribed at the hub. Only the two-way
+   arrangements (check-in, "Share my sessions") gave the origin a row back, and those are the
+   exception.
+2. **The origin gated on its own switches.** The forward ran only for events that buzzed on the
+   ORIGIN: its master, its turn switch and its bells. On an attached machine the master and turn
+   switch are absent (nobody opens that machine's popover; the user toggles the hub's), so they read
+   off and nothing was forwarded even where a row existed. A latent bug rode on the same gate: when
+   the origin's own turn push claimed the turn end's one buzz (`_buzz_claim`), the needs-you card
+   that the same turn end raised yielded locally, and since only what buzzed locally was forwarded,
+   the hub never heard that needs-you at all.
 
-When a kernel's bell fires (the same armed-card feed-build transition that drives every other
-sink), `_push_forward` hands the fired events — `[{title, body, sid}]` — to every attached
-TRUSTED peer via `POST /push/relay`; the receiving kernel mirrors them out through its own
-`_push_notify` to the devices subscribed to it.
+## The map: every other cross-machine flow starts at the row holder
 
-Decisions, and the reasons they went this way:
+Every cross-machine flow in romp except push is started by the kernel that holds the row and reads
+toward itself:
 
-- **The existing pair channel, no new legs.** Every attached pair can already `_peer_call` each
-  other: the tunnel plus the serve token exchanged at attach/check-in. Both sides run the same
-  code, so events flow in both directions of an attachment automatically.
-- **A relayed event is terminal.** `/push/relay` delivers to local devices and never forwards
-  onward, so attachment cycles cannot echo an event; no event ids or seen-sets are needed.
-- **Trust is judged by origin at delivery time, receiver-side** — the same by-origin judgment
-  the postal bus makes for inbound mail. Only a host the user marked `trusted` may buzz their
-  devices; `directed`/`isolated`/unknown drops WITH ITS REASON on stderr (fail loudly), naming
-  the network panel's per-host selector as the remedy. The sender also forwards only to trusted
-  peers: your events leave your kernel only toward boxes you control.
-- **The origin is worn on the sid, the way every federated surface routes** (`host-prefix.ts`):
-  the mirrored event's sid gains `origin:` so a tap routes through the merged dashboard's own
-  tabs. The title passes through exactly as the origin composed it (`Romp needs you: web`,
-  `Romp: web` — `_notify_title`): the session name alone, since 2026-09-09. Until then the relay
-  grafted the origin onto the title too (`romp: boxa:web`); the user found the host noise in
-  the words, when the tap already carries the routing in `data`.
-- **Mirrored events omit `badge`** and the service worker applies `setAppBadge` only to a
-  numeric value: the origin kernel's needs-you count is not the receiving kernel's count, and
-  repainting 0 would clear a real local badge.
-- **`_reveal_msg` trusts the browser for prefixed sids.** A `host:sid` focus is handed to the
-  chat pane as-is (its tabs route it); the local session-list liveness check would otherwise
-  mint a wrong `confirmRevive` from the wrong kernel's world.
+- the dashboard relay (`/remote/<host>/ws`, `_remote_ws`): the hub splices its browser's socket to
+  the row's port with the row's token;
+- the supervisor's polls (`_tunnel_supervisor`): `/sessions`, `/version`, `/usage`,
+  `/api-health/frame`, the tag views, each through the row;
+- settings converge (`_converge_peer_settings`): the hub reads the peer's `/version` and pushes its
+  newer picks through the peer's gesture route, both legs started by the row holder;
+- auto-update (`_maybe_auto_push`, `_auto_pull_remote`): started by the supervisor's pass over a row;
+- the postal peer exchange: each bus dials the peers its kernel told it about (the kernel's rows),
+  and the dialed side long-polls (`/peer-exchange`).
 
-## Verified findings that shaped it
+Push was the only flow the ORIGIN started. The fix is to turn it round like the rest.
 
-1. `_remotes` rows carry `local_port` + `token` for BOTH attach styles (ssh-attach fetches the
-   token; check-in hands it over in `_checkin_payload`) — so the authenticated kernel-to-kernel
-   channel needed no new trust surface.
-2. The chat pane's `focus` handler routes by tab id and already expects jumps "incl. from a
-   remote kernel"; remote tabs exist under their prefixed ids once federation merges them.
+## The design: the row holder pulls
 
-## Known follow-ups, deliberately not in this landing
+### The origin's half
 
-- **Cold-start precision for remote sids.** A tap that boots the app delivers its parked reveal
-  on the chat pane's `ready` — possibly before federation has merged the origin host's tabs, in
-  which case the focus lands on the dashboard, not the session. Event-based fix when it earns
-  its keep: park the prefixed focus browser-side until that host's tabs arrive.
-- **A merged badge count.** The icon count is the local kernel's needs-you number; a truly
-  federated count is a design question (sum across hosts? per-host chips?) for later.
-- **Visibility for tier-dropped relays.** stderr satisfies fail-loudly for an operator; if
-  dropped relays turn out to matter in practice, the bus's held-mail quarantine-card treatment
-  is the pattern to copy.
+Every event the origin DETECTS lands in a ring as a candidate. Detection stays where it
+was, reading the origin's own stores: the card diff (`_feed_notifications_diff`, a card entering a
+notified column) and the turn tick (`_turn_notify_tick`, a turn the user opened ending; "Who opened
+the turn" below says how that is known). The ring is
+keyed `(feed, seq)` and holds the newest 256; it is kept on disk and outlives a restart ("The feed across
+a restart" below). A puller older than protocol 3 sees it keyed `(bootId, seq)`, the boot id being this
+kernel life's `_BOOT_ID`, as before.
+
+`GET /push/events?after=<bootId>:<seq>&wait=<s>` serves it, behind the serve token like every route a
+row's holder calls. It is a long-poll in the postal `/peer-exchange` shape: with nothing newer than
+the cursor it parks on a condition variable, and the first new candidate releases every parked
+request. No polling cadence anywhere. The answer is `{boot, next, events[, stale]}`, with
+`{reset, skipped}` when it resets (below). `next` is the newest seq examined, the puller's next cursor.
+
+The origin advertises the capability in `/version` as `pushPull: 3` (protocol 2, the gap policy's
+fields, and protocol 3, the feed across a restart: below).
+
+### The hub's half
+
+The hub runs one puller thread per TRUSTED row that has a port and a token and whose `/version`
+advertises `pushPull` (`_push_pull_reconcile`, at the end of each supervisor pass, which also wakes a
+puller waiting out its retry backoff when its row answered that pass). It uses the row's own port and
+token, the credentials the dashboard relay already uses, so no new credential and no new trust
+surface. A call that does not answer backs off exponentially (capped at 30 s, the postal dialer's
+ladder).
+
+The cursor is kept on disk per row (`push-pull-cursors.json`, 0600), so a hub restart resumes where
+it left off. Each event is marked passed (the `(row, bootId, seq)` backstop) only once the gate, or a
+gap's count, has decided it, and the cursor moves on disk after every event in the answer is decided:
+a gate that raises part-way (the puller thread dies, the supervisor's next pass restarts it) re-offers
+the undecided events rather than skipping them, and the backstop keeps the decided ones to once. A
+buzz claim filed for a push that then raised is put back, so the re-offer does not yield to itself.
+(Until 2026-10-11 the events were marked passed before the gate ran, so a gate that raised lost them.)
+
+Sids are prefixed with the HUB's own name for the row (`TESTHOST:<sid>`), the merged dashboard's tab
+address, never the name the origin declares for itself. `/push/relay` prefixed and judged trust by
+the self-declared name, which broke when the hub knew the host under a different ssh name.
+
+### The gating split
+
+- **The origin applies only the explicit bells.** The card and session bells live on the origin (the
+  merged dashboard writes them by sid to the kernel that owns the session). An explicit mute (the
+  card's bell off, else its session's) drops the event before it is a candidate. An explicit arm
+  rides as `bell: "on"`, and no override rides as `bell: "default"`. The origin's master and turn
+  switch govern the origin's own devices only, never the candidates.
+- **The hub applies its own switches**, by the rules its own sessions follow, with the origin's
+  override standing in for a local one. An explicit `"on"` beats the switches, for a card and for a
+  turn end alike (the user 2026-10-11: the turn-finished switch is the default, and a session set to
+  "Notify me" still notifies with it off). `"default"` follows them: a card the hub's master, a turn
+  end the master AND the turn switch. An explicit mute never leaves its origin. A held batch is said
+  in one line, as relayed events were.
+- **At most 16 notifications per answer** (`PUSH_PULL_BATCH_CAP`, the old relay's 16). Past the cap
+  the rest are said in ONE more notification ("TESTHOST · 7 more: 3 sessions finished turns, 4 need
+  you", titled "Romp: more notifications") and one loud log line naming how many were collapsed, so an
+  unexpected burst (a judge pass moving twenty cards at once, a bug) can never machine-gun the phone,
+  and nothing is dropped silently either. The old relay simply dropped everything past 16. The note
+  wears its own tag (kind `more`), so it never replaces a gap's summary on the lock screen.
+- **The hub owns the one-buzz-per-turn-end rule**, keyed on its own row name, the sid and the
+  origin's turn-end key: `_buzz_claim` on the prefixed sid, with the turn key every candidate
+  carries. A turn end and the card it raises buzz once between them, whichever arrives first; a card
+  that yields is sent quietly, and takes the turn notification's place where the user agent honours
+  the per-session tag (Chrome, Firefox). Apple's does not (the iPhone item under "Gaps" has the
+  evidence): there it would land beside the turn's as a second, silent notification, and a pulled
+  card carries no badge (the origin's count is not ours), so an Apple device is not sent it. A quiet
+  push goes to an Apple device only when it carries the badge, the count a closed app learns only from
+  a push: the hub's own card after its own turn end (`_push_notify`; the review of #221). This removes
+  the latent bug above, because the origin's own claim no longer decides what leaves it.
+
+**Announced when offered** (a change the pull made to the once-per-(card, column) rule, not in the
+original sketch). An announcement is the card ENTERING the column, offered to the origin's devices
+(gated by its switches) and to every puller (gated by theirs). So the card diff marks a candidate
+announced whatever the origin's own switches say; otherwise a card bouncing in and out of a column on
+an origin whose master is off would be re-offered, and buzz the hub, at every bounce. The cost: a
+card that entered while the origin's master was off and comes back to the same column with nothing of
+the user's in between stays quiet if that master is later turned on, like the first boot's seed (it
+was on the board all along). Before the pull, an unarmed entry left no mark.
+
+### Bells follow the dashboard
+
+The gating split only holds if the bells the user sees and clicks are the ones the hub's gate reads.
+Two things in the bell store stood in the way (found while building the pull, 2026-10-10, and decided
+by the user the same day):
+
+- the origin's setters (`_set_notify_card`, `_set_notify_session`) stored a click only when it differed
+  from the ORIGIN's master, so a mute clicked while that master is off (the usual case: nobody opens
+  an attached machine's own popover) was never stored, the event still carried `"default"`, and the
+  hub buzzed;
+- the payloads carried each bell's EFFECTIVE value, resolved against the origin's master, so the
+  merged dashboard showed an attached machine's bells off while the phone was buzzed for them.
+
+So a linked kernel's bells now follow the dashboard they are shown on:
+
+- **The origin sends the raw override** beside the effective value: `notifyRaw` (true, false or null
+  for none) on every feed card (the card's override, else its session's), on every chat session frame
+  and chat tail (the session's override; the chat view key includes it, so an override-only change
+  still sends a tail), and on every timeline lane.
+- **The hub's switches reach the panes** in a `notifySwitches` frame (`{all, turns}`), sent to each
+  pane at its ready (after `caps`) and to every ready pane when a switch flips. The browser's
+  federation keeps only the LOCAL kernel's frame, as it keeps only the local `caps`.
+- **The browser paints a linked bell against the hub's master** (`ui/webview/bell-follow.ts`; the
+  timeline's plain-JS twin is `laneBell` in `ui/romp-timeline-view.js`): an override stands, and no
+  override follows the hub's master. The feed card bell, the chat tab menu's row, the bell command and
+  the timeline lane gear all read it, and their pending guards confirm a click on what the bell
+  paints, since the origin's own effective value can agree with a click before the click has landed.
+- **A click on a linked bell goes as given** (`asGiven: true` on `cardNotify` and `setSessionFlag`).
+  The origin stores it exactly as sent; a null value as given clears the override, the deliberate
+  "back to default" (the protocol carries it; no surface offers it yet).
+- **A local card bell is unchanged.** A click on a kernel's own dashboard keeps the delete-if-default
+  rule for a CARD's bell. The as-given path is taken for a linked kernel's card bell, decided in the
+  browser by the host prefix.
+- **A session bell is always the user's explicit choice** (2026-10-11, the user's decision). Every
+  click on a session's bell (the tab menu's row, the bell command, the timeline lane gear, the
+  Obsidian `/flag` route) is stored exactly as clicked, local or linked: with the hub's master on and
+  its turn switch off, "Notify me" used to restate the master and be deleted, so no session could be
+  opted in to its turn ends. The row now says whether the bell is the session's own setting or the
+  default and what that means ("your setting: when a turn you started ends, or it blocks on you or
+  completes", "default: when it blocks on you or completes", and so on: `sessionBell` in
+  `bell-follow.ts`, `laneBell` its timeline twin). The row reads on when the session notifies for
+  everything a session can (its own setting on, or no setting with the master and the turn switch
+  both on), and a click stores the opposite. A refusal frame carries the setting too (`notifyRaw` on
+  `settingRefused` and on `/flag`'s refusal body), so a refused click repaints from it. No surface yet
+  offers "back to the default" (a null sent as given clears it; the protocol carries it).
+- **An older linked kernel falls back visibly.** A kernel that sends no `notifyRaw` serves no pull
+  either, and keeps its own rules (its legacy relay gates on its switches). Its bells paint as it
+  reports them, its clicks go out as before, and the bell's hover (the tab menu row, the lane gear
+  row) says it follows that machine's own switch because that machine runs an older romp. Nothing is
+  guessed.
+
+### Staleness
+
+The origin re-validates each event when it serves it, with no time limit (`_push_event_current`):
+
+- a card event is served only while the card still sits in the column it entered (the notify
+  snapshot, the last feed build's view) and the user has not acted on it since (the override
+  journal, the record `_notify_user_acted_since` already reads);
+- a turn event is served only while that turn end is still the session's latest (`_turn_end_key`);
+- either is dropped if an explicit mute was set on the origin since.
+
+A stale event is skipped, counted in `stale`, and the cursor passes it.
+
+### Gaps: never late, never silent
+
+The first cut had two rules for a gap, and they disagreed (the user, 2026-10-11): a lost cursor or an
+origin restart skipped silently to the newest event, while a hub restart with its cursor delivered
+the missed events late, one by one, once the origin judged them still current. One policy replaces
+both, for every gap this kernel knows of:
+
+- **Continuous operation:** each event is delivered as it arrives (as built).
+- **After a gap: nothing late, one summary.** None of the missed events is delivered one by one.
+  This kernel counts those that would have passed its gate (the switches and the explicit bells,
+  including an explicit "on" beating the switches) and says them in ONE notification per gap per row,
+  titled "Romp: missed notifications", with no session to land on, so a tap opens the dashboard. The
+  count includes events the origin no longer calls current (a newer turn end since, a card that has
+  moved on): the summary says what would have buzzed had this kernel been listening. An explicit mute
+  set since is still dropped at the origin.
+- **Nothing would have passed: no buzz**, only a log line.
+- **The count cannot be known** (the row's kernel restarted and its feed could not be read, or it
+  cannot vouch for that restart's count, or the backlog overflowed past the cursor: "The feed across a
+  restart" below): the summary says notifications may have been missed, with no number, and only when something the user's switches and bells allow could have been among the lost
+  events (`_push_gap_could_pass`), decided from facts the hub holds, never assumed: the row's kernel
+  holds an explicit "on" bell (`bellsOn`), or turn ends pass by default (this kernel's master AND its
+  turn switch on; the turn switch alone passes nothing), or cards pass by default (this master on)
+  while the row's kernel detects card events at all (`cardsOn`: its Task tracking switch; off, its
+  feed is not built and no card enters a notified column). Otherwise only a log line. (The first cut
+  said it whenever this kernel's master was on, so with the turn switch off, no bell set and Task
+  tracking off over there, every restart of the linked kernel, which is every deploy, buzzed for
+  nothing. The review reproduced it, 2026-10-11.) The rule is about what COULD have been lost, so a
+  linked machine that detects cards (a laptop with Task tracking on) makes a "may have been missed"
+  summary at each of its restarts, every deploy included, once the hub pulls from it and while the
+  hub's master is on: correct, since a card could have entered a notified column in the life that
+  ended. The fold below keeps a run of them to one sound per device. (A missing `cardsOn`, from an
+  origin built before it, counts as on: the safe side, pinned by a test.)
+- **A summary not yet seen takes in the next gaps quietly, per device.** Once a summary has gone out
+  for a row, the next gaps from that row fold into it on each device that holds it unseen: the same
+  notification (its tag) is replaced with the merged counts and reasons ("TESTHOST restarted 3 times ·
+  …"), without a sound, so a crash-looping kernel buzzes each device once, not at every restart. Each
+  device has its own state (`_PUSH_GAP_TOLD`, row, then endpoint): the fold ends for a device when a
+  page holding ITS subscription comes forward (its `GET /push/pending`, asked on every load, show and
+  focus), and for every device when the row delivers a notification normally, outside any gap. The
+  next gap after either sounds on that device. (The first cut kept one state for all devices, so a
+  desktop browser's subscription, whose page asks on every focus, re-armed the phone too, and a crash
+  loop buzzed the phone at every restart while the user sat at the desktop. The review of #220.)
+- **An iPhone is never sent the quiet update.** On Apple's user agents a same-tag notification lands
+  beside the old one, not in its place, so the update would leave one buzzed summary plus a silent
+  extra per restart, each lighting the lock screen. The evidence is WebKit's open source, read
+  2026-10-11 and not tried on a device: webpushd's `WebPushDaemon::showNotification`
+  (`Source/WebKit/webpushd/WebPushDaemon.mm`), which displays every iOS web-app notification,
+  declarative or shown by a worker, files each as a `UNNotificationRequest` whose identifier is that
+  notification's own fresh UUID (a declarative message's is minted per push in
+  `WebPushMessage::notificationPayloadToCoreData`); the tag is read only to filter
+  `getNotifications`. `silent` is honoured (`platformShouldPlaySound`). The worker could close the
+  old one itself (`getNotifications({tag})`, then `close()` in the mutable push event, which runs
+  before the user agent displays the new notification), but `Notification::close` refuses a
+  persistent notification younger than 30 s (`s_persistentNotificationMinimumLifetime`), and a crash
+  loop's summaries can come closer together than that (the pull's long-poll is 20 s). So a device
+  whose endpoint is Apple's (`_push_tag_replaces`) is sent nothing while it holds an unseen summary:
+  the gap is folded on the hub into what that device is owed, never dropped, and the next summary it
+  is sent (after the row delivers normally, it sounds) carries it, unless its page comes forward
+  first, when the dashboard does: the `GET /push/pending` answer carries it as `missed` (the page asks
+  with `missed=2`, so a page from an older build, which would drop the words, re-arms its device and
+  leaves the share owed), and the page puts each in the Log as a **missed** entry, without a sound.
+  (The first cut cleared it when the page came forward, unsaid, and a phone whose next notification
+  came normally held its count until another gap that might never come. The review of #221.)
+  Handing it over does not clear it: each entry carries an id, and the hub keeps the share owed, on
+  disk, until the page says it drew the entry (`POST /push/missed-logged`), so an answer lost on the
+  way loses nothing; until then the share is handed again under the same id, which the page draws
+  once. A share that grows meanwhile is a new one under a new id, so a late word about the old one
+  clears nothing. Turning **This device** off hands the share over the same way (`POST
+  /push/unsubscribe` with `missed: 2`; a page from an older build sends no flag and the share goes
+  with the subscription, as before). (The first cut cleared it at the answer and at the unsubscribe.
+  The review of #222.) Keeping the share is negotiated by its own value: a page built before the
+  acknowledgement already asks with `missed=1`, draws every entry it is handed without an id check and
+  never says so, so it is handed each share once, without an id, and the share goes with that answer
+  (on either route). (The first cut of the acknowledgement read `missed=1` as keep-until-acknowledged,
+  and such a page, open across the deploy, put the same entry in its Log again at every coming
+  forward until it reloaded. The review of #225.)
+- **What each device holds survives a restart of the hub.** `_PUSH_GAP_TOLD` is written to
+  `STATE/push-gap-told.json` (0600: its keys are endpoints, capability URLs) at every change and read
+  at the first touch of a life, so a restart, which every deploy is, neither drops what a device is
+  owed nor makes a summary it still holds unseen sound again. A device that unsubscribes, or whose
+  push service says it is gone, takes its record with it. (The first cut kept it in memory. The
+  review of #221.)
+- **The same fact on the push ledger.** A shown ack supersedes the older rows for the same session on
+  that device because the show replaced their notifications; on an Apple device it did not, and
+  superseding there made a tap on the older notification land nothing (its row was gone, the newer
+  one still on the screen). An Apple device supersedes nothing, at the kernel or at the page (the
+  `/push/pending` answer's `replaces`). Without the superseding, a notification swiped away unopened
+  and a later one tapped for the same session are two gone at once, and a live iPhone tells the page
+  of neither. Gone notifications that are all about one session land on it, once, by the newest of
+  them (its card: which one was tapped is unknown), whether one is gone or several; gone ones about
+  two or more sessions land nothing. Clearing several of one session's notifications without opening
+  any therefore lands on that session at the next opening: the user's call (2026-10-12), the same
+  trade as the one swipe of 2026-09-10, a working tap over a false move. (#225 landed them; the
+  review of #225 took that out in #227, and the user put it back.) A tap some road did see (the
+  link, the worker's click) lands by that road, on the tapped one's own card, and any tap a road
+  landed in the same visit, a link by popstate and the worker's message included, is the newer word,
+  so nothing gone lands over it; going out of view ends the visit. (A tap landed by the worker's
+  message or by popstate did not count, so an older notification swiped away for another session
+  could land over it. The review of #225.) A tap that reaches the page AFTER a check spent its
+  notification still lands: the page keeps the pushes it landed apart from the ones it spent, and
+  only a second road for a landed push is a duplicate. (One record for both made such a tap a
+  duplicate, lost. The review of #227.)
+- **One summary per gap, however the link flaps.** A gap opens on the event that proves it: a failed
+  call (`unreachable`), a reset answer (`restarted`, `overflow`), this kernel's first answer of a life
+  while holding a cursor (`hub`: it restarted). It stays open across further failures and closes only
+  on an answer whose request found the cursor at the row's newest (`caughtUp`, protocol 2: the link
+  held for a whole long-poll). That answer's own events fired while the puller listened, and are
+  delivered one by one after the summary. No timer anywhere: every step is an answer or a failure.
+
+The summary is said in the user's terms, naming the machine by this kernel's name for the row and the
+reason it actually knows:
+
+    TESTHOST was unreachable for 38 min · 3 sessions finished turns, 1 needs you
+    TESTHOST was unreachable for 2 h 5 min · notifications may have been missed
+    TESTHOST restarted · 1 session finished a turn
+    TESTHOST restarted · notifications may have been missed
+    TESTHOST restarted 3 times · notifications may have been missed
+    boxa restarted · TESTHOST: 1 session finished a turn
+    boxa restarted · notifications from TESTHOST may have been missed
+
+(`boxa` is the hub's own name, `_self_host`. The outage is said as a duration, from the row's last
+answer to its first answer back, never as clock times: the kernel's clock zone is not the user's,
+and the first cut printed UTC times to a phone in another zone.)
+
+**Protocol 2** carries what the policy needs. A puller that asks `v=2` is told `caughtUp` (the
+request found its cursor at this life's newest), `bellsOn` and `cardsOn`, and is served every event
+past its cursor, a stale one flagged `current: false` instead of dropped. A v1 puller is served
+exactly as before. An origin that does not say `bellsOn` or `cardsOn` (a v1 origin mid-update, or the
+first protocol-2 build for `cardsOn`) is assumed to have them on, and a v1 origin's gap closes on an
+empty-handed, reset-free answer, which proves the same as `caughtUp`.
+
+**No record versus an unreadable one.** A hub with no cursor for a row in a readable record (or no
+record file at all) treats the row as new to it: it starts at the newest, says so in the log, and
+summarizes nothing. That is the case at the first boot of a build that pulls, and summarizing there
+would interrupt the user for events that were never theirs to miss. A record that exists but cannot
+be read is a gap with no number, said once per row.
+
+**The hub's own sessions follow the same rule across its restart.** `_turn_notify_tick`'s memo of each
+live session's last turn-end key is written to `turn-notify-memo.json` whenever it moves (keys move at
+turn ends, not per cycle). The first tick of a life reads the previous life's copy: a session whose
+newest end of a turn a HUMAN opened (`lastHumanStopAt`, which the Stop hook stamps beside
+`lastStopAt`) is newer than the key the previous life last saw finished a turn while no kernel was
+watching. Those are said in one summary ("boxa restarted · 2 sessions finished turns"), counting only
+the sessions whose bell would have let the buzz through, and never buzzed one by one. Before, a
+session's first sighting in a life was a silent baseline, so they vanished. With no memo on disk (the
+first boot of this build) the first tick is a silent baseline, said in the log. Since 2026-10-14 the summary
+also counts a turn a session's host held across the restart (below), and waits until this kernel has caught
+up on its restart, so it is one summary with every such turn end in it.
+
+### The feed across a restart
+
+The ring lived in memory until 2026-10-14, so a restart of the origin (every deploy) took it along: the
+hub's cursor named a life that was gone, the reset said `restarted`, and the hub could only say "TESTHOST
+restarted · notifications may have been missed", which it did at every deploy once a single session over
+there had its bell on, whether or not anything had finished. Session hosts made it worse: a hosted CLI keeps
+running across the restart, and a turn it ended meanwhile was noticed after the kernel re-attached and
+buzzed late, as a fresh turn end. Now:
+
+- **The feed is on disk.** `STATE/push-feed.json` (0600: the events carry session text) holds the feed's
+  id, the newest seq, the kept events (the ring's 256) and the lives it has seen (the newest 64), written
+  through the one atomic write door at every change and fsynced (`_push_feed_save_locked`). The first touch
+  of a life reads it back (`_push_feed_ensure_locked`, called at boot), so the ring, its sequence and its
+  id carry on. A file that is missing (the first boot of this build) starts a new feed, said in one line;
+  one that cannot be read or holds no feed starts a new feed loudly (a corrupt file is moved aside by the
+  strict reader) and never stops the kernel: every puller's cursor then names another feed, resets, and
+  summarizes the restart as before, with no number. A write that fails disowns the file
+  (`_push_feed_disown_locked`): it is removed, so a restart before the next landed write starts a new feed,
+  or, when it cannot be removed either, the feed takes a new identity at once. Before (the review of #230),
+  the next life read the older file back and issued the same numbers again for other events, and a puller
+  whose cursor was past them passed over them without saying the count was unknown.
+- **Protocol 3: the cursor names the feed and the life.** A v3 cursor is `<feed>/<boot>:<seq>`. One of
+  this feed stays valid across restarts; the answer's `boot` is this life's form of it, `feed` names the
+  feed (the hub's backstop is `(row, feed, seq)`), and `restarts` says how many lives began after the one
+  in the cursor (the feed's list of lives). The hub opens its gap as `restarted` by that count, not as a
+  reset: what the origin missed meanwhile comes as counted events.
+- **Gap events: what the origin learns about its own downtime.** The origin files them in the feed
+  flagged `gap`, and a v3 puller never delivers one by one: it counts each into the restart's summary,
+  opening a gap for it if none is open (a session that re-attached late), and the gap's ordinary rules
+  decide whether that summary sounds (the per-device fold, the iPhone's share). They are:
+  - a turn end whose Stop hook the session's CLI sent while no kernel was attached. The session's host
+    holds the hook until a kernel attaches; its hello lists the open requests (`parked`), the session's
+    first hello in a kernel life (per session, not per session object: one rebuilt mid-life is no restart's,
+    the review of #230) hands them to the transport (`HostTransport.unwatched`), the transport marks the Stop
+    hook's input (`UNWATCHED_STOP_KEY`), and the hook stamps `lastStopUnwatched` beside `lastStopAt` with the
+    same value. The turn tick reads that stamp as a turn end that happened while it was down, whenever it
+    first sees it;
+  - a turn end whose Stop hook the host answered itself: past `HOOK_SELF_ANSWER_S` (480 s) with no kernel
+    attached it answers the hook neutrally, and no kernel ever runs it. The host keeps the newest 16 such
+    answers (`selfAnswered`: the request, the event and when it began holding it) and reports them in every
+    hello; the attach stamps the newest as the Stop hook would have, with `lastStopUnwatched`, unless the
+    registry's settle has passed it already, so a report heard twice counts once
+    (`SdkBackend._stamp_self_answered`);
+  - a turn end the previous life stamped and never ticked, which the turn memo shows (above), judged at
+    a session's first sight while this life catches up; the memo also keeps a turn end the previous life
+    already filed from being filed again;
+  - a card the first feed build of a life finds moved into a notified column: it moved while no build of
+    this kernel was watching.
+
+  The origin's own devices get the turn ends in its own summary ("boxa restarted · …", above); its own
+  card announcements at the first build are unchanged (a known limit, below).
+- **The count is complete before the puller closes its gap, decided by events alone.** Until the origin
+  has caught up on its restart (`_push_catchup_ready`: every boot re-attach to a live host has settled, the
+  boot milestone `attachDone`, each by its hello or its session's end, and no session still holds a
+  request its CLI sent before the attach, the backend's `unwatched_pending`), no v3 answer says `caughtUp`,
+  so the hub's gap stays open; a request parked meanwhile is released when it catches up. The gap holds only
+  the restart's own count: a v3 answer also says `listening` (the request found the cursor at the newest),
+  and what fires while the hub listens is delivered as it comes, gap open or not; only gap events, and what
+  fired while the hub was not listening, wait for the summary. (Until the review of #233 a catch-up held open
+  folded every new notification into a summary that had not been sent.) Whether an event fired while the hub
+  listened is judged by WHEN it fired, not by whether a request was open (the review of #235: one filed between
+  two requests went into the pending summary): each event wears the moment the origin filed it (`filed`) and
+  each answer the origin's own moment (`now`), both on the origin's clock, and an event filed at or after the
+  hub's previous answer, with no failed call since, is delivered. A comment thread (`threadOf`) is left out of
+  the catch-up altogether: it notifies nothing, so its re-attach is not waited on and its loss is no "may have
+  been missed". The turn tick
+  reads the readiness before it reads the turn ends and declares the catch-up after filing them, so nothing
+  it vouched for comes after. The first cut also stopped waiting `BOOT_ROW_BACKSTOP_S` (30 s) after the
+  reconcile and called the count incomplete; the big machine's re-attaches take 22 to 39 s (once 82), so 9
+  of 74 boots since 2026-09-24 would have said "may have been missed" with nothing missed (the review of
+  #230). A re-attach ends one way or the other: the wait for a host's hello asks the host's liveness at its
+  lease's beat (`HostTransport.alive`, every `HELLO_PROBE_S`) and ends when the lease no longer names a live,
+  beating host, the frozen host the review of #233 found holding the catch-up open for good (the session then
+  stands down from the host, never the crash heal, and its count is its own unknown); ending the session ends
+  the wait too (`abort_connect`, and the kill sends `end` by the lease). A deliberate end the host cannot
+  confirm (no hello within 5 s, no exit after the `end`, a lease whose host no longer beats) ends the CLI
+  itself, said as a `host.end-forced` problem row (the review of #235: the CLI ran on, spending, until the
+  host's idle bound), under three rules from the review of #238: only a CLI this kernel can prove it started,
+  by the lease's pid and start time AND the state tag in the process's own environment (a copied lease proves
+  nothing: a lab kernel over a copied state directory would otherwise end the live kernel's CLI), else it
+  refuses loudly (`host.end-refused`) and signals nothing; exactly what a normal end ends, the CLI process
+  with the host's kill grace (SIGTERM, then SIGKILL after `END_GRACE_KILL_S`), never its scope or tree, so a
+  nohup or setsid job outlives it as it outlives a normal end; and a `busy` answer forces nothing: one naming
+  another kernel leaves the end to that kernel, and one naming this kernel (its own end already under way, or
+  the attach it interrupted) waits for that end and sends `end` again only if the host still lives. A host that beats and still never
+  answers can hold it; when those are all the catch-up waits on (`catchup_stuck`: two probes found the host
+  alive and silent), the user is told once, in the error center (`push.catchup-held`), and ending that session
+  lets the summary go. A boot reconcile that fails closes the catch-up at once with the count unknown
+  (`catchup_failed`), since the re-attaches it would wait on may never start.
+- **A session whose count cannot be vouched for is said on its own.** The catch-up returns `(sid, why)` for
+  each: a boot re-attach that ended without a hello, a session that ended before it had stamped a Stop its
+  host held (`SdkBackend.catchup_lost`), and a session whose host runs code older than the `selfAnswered`
+  report (`catchup_unreported`) when the span from the newest orderly exit in the restart ledger to its
+  re-attach reaches the 480 s bound (a killed life writes no exit row, but the host's wait began at the
+  kill, after the newest row, so the newest row still bounds it). The first cut compared the old exit with
+  the new process's start, which falls short of the host's wait by the re-attach's length, so a 7 to 8
+  minute outage could lose a turn end and still call the count exact. Each such session is said loudly and
+  filed as a `lost` gap event wearing that session's bell; the hub counts it as missed only if that bell
+  would have let a turn end through (a muted session files none), and its summary keeps the exact count of
+  the rest with "; more may have been missed". If the turn tick itself fails, or the readiness check does,
+  the catch-up is closed at once with the count unknown, loudly, rather than left open while the hub counts
+  everything into a summary it never sends. So is a session whose held Stop hook ends without its stamp (it
+  raised or was cancelled, or its registry would not read and `_update_reg` skipped the stamp:
+  `_stop_hook`'s guard). A session that gave up its re-attach still owes its held
+  requests (`_unwatched_owed`): the attach a later send makes counts them into a summary, never late.
+- **The origin's own devices follow the same rule** (`_turn_missed_say`): its summary carries the exact
+  count, adds "may have been missed" only when a session it cannot vouch for would have buzzed here (that
+  session's bell, or for a failure naming no session the turn switches or any session's explicit on), and is
+  not sent when there is neither.
+- **Older pullers are served as before.** A v1 or v2 cursor names a life; it is served that life's events
+  only and never a gap event, so an older hub resets at a restart and summarizes it as it always did. The
+  one-time cost at the deploy that brings this in: the hub's cursor names the old build's life, so that
+  restart is summarized with no number, once.
+
+### Who opened the turn
+
+Only a turn a human opened may produce a turn-end notification. The review found the label wrong for
+half of them: on the big machine, 234 of 461 turn ends labelled "human" in one day had no text fed by
+romp. The label was set at the feeder's pop and never reset, and the mark meant to catch a turn the
+CLI opened itself (a user record streamed with an injected origin stamp) almost never fired, because
+the CLI does not stream the prompt record of a turn it opens. So a turn opened by a background task's
+notification, a peer's message, a scheduled prompt, or a message the CLI ran as its own turn after the
+one it was fed into ended, kept the previous turn's "human".
+
+The opener is now decided when the turn OPENS, from the event that opened it
+(`SdkSession._open_turn_as`):
+
+- the feeder's pop from idle: the text it fed says who (the human's words, or romp's marker-carrying
+  nudge, notice or relayed mail);
+- a turn frame the CLI streams while nothing romp fed is in flight (`_on_message`, where the CLI's own
+  turn is already counted): the CLI opened it, so "injected", unless the turn is the drain of a text
+  romp fed (its lifecycle `started` after its turn ended, or the turn-boundary road), whose speaker it
+  takes;
+- a human text the CLI takes into a turn already running (its `started` while that turn runs, or its
+  landed record on a CLI without lifecycle frames) claims that turn; a text fed mid-turn no longer
+  claims the turn at its pop, since the CLI may run it as its own turn instead.
+
+The opener is persisted in the registry (`turnOpener`) at each open, so a session object born mid-turn
+(a kernel restart under a hosted CLI) reads it back. The Stop hook stamps `lastTurnOpener` beside
+`lastStopAt` ("unknown" when no open was ever seen), and the kernel buzzes only for "human": anything
+else on an SDK registry is silent. A session with no SDK registry is a Codex session, whose every turn
+is a send through romp; its turn ends still read as the human's.
+
+One-time cost at the deploy that brought this in: a turn already running when the kernel restarted
+onto it has no saved opener (the registry's `turnOpener` did not exist yet), so its end is stamped
+"unknown" and stays silent, even when the user had started it. From the next turn on every turn's
+opener is recorded at its open. Accepted (the review, 2026-10-11): one missed buzz per session busy
+at that restart, against guessing.
+
+Checked against the big machine's own records, read-only (the turn ledger and the transcripts' queue
+and origin records, no message text): of 237 "human" turn ends in the 24 hours before the fix with no
+text fed by romp, the transcripts show 222 opened by a background task's notification and 15 by a
+peer's message. The new rule labels 236 of them as opened by the CLI and one as the human's, which is
+right: a human's message joined that turn. Of the 287 with a fed text, it keeps 282 as the human's and
+labels 5 as the CLI's: notification turns that ended before the CLI took the human's message, which it
+then answered in the next turn (labelled the human's).
+
+## The transition: one mechanism per pair, and its removal condition
+
+Old and new kernels meet during an update, so both legs exist for now, and each pair uses exactly one:
+
+- The hub pulls from any origin that advertises `pushPull`, and ignores `/push/relay` from an origin
+  it pulls from. The origin is mapped onto the row by the row's key or the self-name its `/version`
+  taught the row (`_peer_key`). The ignore is said once per origin.
+- The origin keeps `_push_forward` only toward rows whose `/version` does not advertise the pull, and
+  stops for each as soon as the supervisor's poll of that row sees `pushPull` (the row's
+  `push_pull`).
+- The hub's gate passes each pulled event at most once by `(row, bootId, seq)`, a backstop beside the
+  cursor.
+
+**Removal condition:** once auto-update has converged every linked kernel on a build that serves
+`/push/events`, delete `_push_forward`, its two call sites, the `/push/relay` route and its tests
+(`tests/test_kernel_webpush_federation.py`'s forward and relay classes), and the hub's relay-ignore.
+
+## What stays from the first design
+
+- **A pulled event omits `badge`.** The origin's needs-you count is not the hub's, and the worker
+  applies `setAppBadge` only to a numeric value, so a pulled event never clears a real local count.
+- **The title passes through as the origin composed it** (`_notify_title`: the session name alone).
+  The host rides only the sid prefix and the payload's `host`.
+- **`_reveal_msg` trusts the browser for prefixed sids.** A `host:sid` focus is handed to the chat
+  pane as-is; the local session list would otherwise mint a wrong `confirmRevive`.
+- **Trust is the user's line.** Only a host the user marked trusted is pulled; the gate re-reads the
+  trust at delivery, so a row lowered while a call was parked buzzes nothing.
+
+## Known limits and follow-ups
+
+- **Card events are dormant while Task tracking is off.** The card diff runs on the feed's cards, and
+  with all background judging off (the Task tracking switch) no card enters a notified column, so only
+  turn ends travel. When it is on, card events reach the phone under the hub's master and the explicit
+  bells, by the gating split above.
+- **A card that entered a notified column while its kernel was down is still announced late on that
+  kernel's own devices**, at the first build after the restart (the once-per-(card, column) rule's "it
+  entered while no kernel was watching"). A kernel pulling from it counts it into the restart's summary
+  (a gap event, since 2026-10-14). The origin's own devices could follow once the first build is known to
+  fall within the catch-up: the feed is built only while a client rides it.
+- **A send romp injects into a Codex session reads as the human's**: Codex has no Stop-hook stamp, and
+  every Codex turn is a send through romp.
+
+- **Card buzzes need an open socket on the origin.** The card diff runs on the origin's feed builds,
+  and the pusher builds the feed only while a client rides it (any dashboard socket to that kernel,
+  the hub's relay included). An origin no dashboard is looking at still detects turn ends, which the
+  turn tick reads every cycle, but not card moves. This predates the pull, holds for a single kernel
+  too, and is left as it is for now: a headless feed build costs a build per cycle on every kernel.
+- **A merged badge** (optional, not built): each long-poll answer could carry the origin's needs-you
+  count, for an icon count across every linked kernel.
+- **Cold-start precision for remote sids.** A tap that boots the app delivers its parked reveal on
+  the chat pane's `ready`, possibly before federation has merged that host's tabs. The event-based
+  fix, when it earns its keep, is to park the prefixed focus browser-side until those tabs arrive.
+
+## Tests
+
+- `tests/test_push_pull_kernels.py`: two real kernels where only the hub holds a row (the check-in
+  shape), a loopback push service, the hub's ledger as the record. A turn end and a needs-you card on
+  the origin each reach the hub's gate exactly once, under the hub's name for the row. Then a hub
+  restart with its cursor (the missed turn end is not delivered late; one summary says it), a hub
+  restart with no record file (resumes at the newest, says so, delivers nothing old), an origin
+  restart by its orderly exit while a turn ends (no reset: the missed turn end is counted into the summary
+  the device holds unseen, then the next turn end delivered once), and an origin restart with nothing
+  finishing (no notification at all), and nothing twice throughout.
+  The user's bell scenario runs there too, over the hub's relay socket: with the hub's master on and
+  the origin's never set, the origin's card carries no override, a mute clicked as given is stored and
+  the next turn end stays on the origin, and an arm clicked as given buzzes.
+- `tests/test_push_pull.py`: the ring under each detector, the explicit-bell gate, the latent claim
+  bug, the serve (long-poll release, each reset, staleness, the token gate, protocol 2's fields), the
+  hub's gate (an explicit "on" beating both switches, the cap's one collapsed notification and log
+  line), the puller (reset line, cursor on disk, dedupe, refusal, an event marked passed only once
+  decided), the gap policy (an outage, a flapping link, nothing that would have passed, the row's
+  restart, an overflow, this kernel's restart with and without its record, a v1 row), the hub's own
+  sessions across its restart, the transition, and the bells (as-given storage, a session click
+  stored as clicked, the payload fields, the switches frame, a refusal's setting, the gate's rules).
+- `tests/test_push_pull.py`'s `OriginRestart`: the feed across a restart, both kernels in one process. A
+  restart with nothing belled finishing buzzes nothing (before: "may have been missed" at every restart);
+  one belled turn end that a host held across it is one summary with its count and no late buzz; a turn
+  end after the boot is delivered as it happens; a session re-attached or first seen after the catch-up is
+  still a summary, and never twice; the hub restarting too; a corrupt or unreadable feed (a loud new feed,
+  the unknown count); a killed origin, a long outage and an attach that never settles (the `lost` event);
+  an overflow; the sequence carried across the restart; an older puller never served a gap event; a card
+  the first build finds moved.
+  Since the review of #230: a slow re-attach with nothing belled finishing is silent and with a held turn
+  end is exact; a session whose re-attach failed is its own unknown (the hub's summary and the origin's own
+  device's, and exact when that session's bell would not have passed); a killed origin is counted exactly; a
+  host too old to report is vouched for by its wait from the newest exit row; a failing turn-end check
+  closes the catch-up as unknown, loudly; a failed feed write makes the next boot a new feed (or the
+  identity new at once).
+- `tests/test_host_transport.py` and `tests/test_kernel_notify_popover.py`'s `UnwatchedTurnEnd`: the
+  transport marks a Stop hook its CLI sent before the attach, the first hello of a session in a life
+  watches the held requests and a later one does not (a session object rebuilt mid-life included), the hook
+  stamps `lastStopUnwatched` and retires the id, a host's `selfAnswered` report is stamped once, a host too
+  old to report is named, a re-attach without a hello and a session that ends holding a Stop are lost, the
+  tick files it as a gap event and never buzzes it late, and the constants shared across the modules agree.
+- `tests/test_session_host.py`: a Stop hook the host answered itself is reported in every later hello.
+- `tests/test_kernel_notify_popover.py`: who opened the turn, decided at its open (a turn the CLI
+  opens itself, a message it runs as its own turn, a human text spliced in or drained, a session born
+  mid-turn, no open seen) and end to end through the Stop hook to the kernel's tick; an explicit
+  session "on" beating both switches.
+- `ui/webview/bell-follow.test.ts`, `flag-pending.test.ts`, `ui/timeline-flags.test.ts`,
+  `ui/timeline-views-ack.test.ts` and `feed-render-incremental.test.ts`: the paint rule, the session
+  bell's own setting versus the default and its sub-lines, the pending guard confirming on the setting,
+  federation keeping only the local switches frame, the timeline twin, and the feed's card bell in the
+  user's scenario, an older kernel's bell painted as reported with its hover note.

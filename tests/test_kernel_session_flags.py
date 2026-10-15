@@ -639,12 +639,13 @@ class FlagsWsRefusal(unittest.TestCase):
         self.assertEqual(p.read_bytes(), before)
 
 
-class SessionBellJudgedAgainstAProvedMaster(unittest.TestCase):
-    """_set_notify_session judges the click against the MASTER bell, which lives in the OTHER store
-    (notify-cards.json). Read through the display reader, a fault there folded the master to off, so a
-    click matching that fabricated master popped the session's stored override and rewrote
-    session-flags.json without it -- the user's mute erased under the success path. The master is read
-    PROVED now: a fault on the bells file refuses the flags write exactly like a fault on the flags file."""
+class SessionBellStoredAsClicked(unittest.TestCase):
+    """_set_notify_session used to judge the click against the MASTER bell, which lives in the OTHER store
+    (notify-cards.json), and to delete an override that matched it; a fault there once folded the master to
+    off and erased the user's mute under the success path, so the master was read PROVED and a fault on the
+    bells file refused the click. Since 2026-10-11 every session-bell click is stored exactly as clicked (an
+    explicit choice beats the defaults), so the setter no longer reads the bells file at all: a fault there
+    can neither erase an override nor refuse the click."""
     SID = "11111111-2222-3333-4444-555555555555"
 
     def setUp(self):
@@ -661,39 +662,28 @@ class SessionBellJudgedAgainstAProvedMaster(unittest.TestCase):
         km._flags_cache.clear(); km._notify_cards_cache.clear()
         self.td.cleanup()
 
-    def test_a_session_bell_click_is_refused_when_the_bells_store_cannot_be_read(self):
+    def test_a_session_bell_click_never_reads_the_bells_store(self):
         km._set_notify_all(True)                                   # the master is ON …
         km._set_notify_session(self.SID, False)                    # … and this session is MUTED (a stored override)
         km._flags_cache.clear(); km._notify_cards_cache.clear()
         flags_p, cards_p = jd.STATE / "session-flags.json", jd.STATE / "notify-cards.json"
         self.assertEqual(json.loads(flags_p.read_text()), {self.SID: {"notify": False}})
-        before = flags_p.read_bytes()
-        raised = None
         with _reads_fault(cards_p):                                # the OTHER store faults
-            try:
-                km._set_notify_session(self.SID, False)            # the user clicks mute again (or the pane re-sends it)
-            except Exception as e:                                 # noqa: BLE001 -- before the fix it never raises
-                raised = e
-        # before the fix: the master folded to off, False == off, the override was POPPED and the flags file
-        # rewritten as {} -- the mute gone. Now the write is refused and the file is byte-for-byte unchanged.
-        self.assertEqual(flags_p.read_bytes(), before, "the flags file must be unchanged when the bells file can't be read")
-        self.assertEqual(type(raised).__name__, "_StateUnreadable", "refused loudly (got %r)" % raised)
-        self.assertIn("notify-cards.json", str(raised), "the refusal names the store that faulted")
+            km._set_notify_session(self.SID, False)                # the user clicks mute again (or the pane re-sends it)
+            km._set_notify_session(self.SID, True)
+        self.assertEqual(json.loads(flags_p.read_text()), {self.SID: {"notify": True}}, "stored as clicked")
 
-    def test_the_ws_arm_refuses_a_session_bell_on_the_other_store_s_fault(self):
+    def test_the_ws_arm_stores_a_session_bell_through_the_other_store_s_fault(self):
         km._set_notify_all(True); km._set_notify_session(self.SID, False)
         km._flags_cache.clear(); km._notify_cards_cache.clear()
         flags_p, cards_p = jd.STATE / "session-flags.json", jd.STATE / "notify-cards.json"
-        before = flags_p.read_bytes()
         sent = []
         client = {"app": "timeline", "wid": "w1", "alive": True, "send": lambda raw: sent.append(json.loads(raw))}
         with _reads_fault(cards_p):
-            km.Handler._dispatch_ws(None, {"type": "setSessionFlag", "id": self.SID, "flag": "notify", "value": False}, client)
-        self.assertEqual(flags_p.read_bytes(), before)
-        self.assertEqual(len(sent), 1)
-        self.assertEqual((sent[0]["type"], sent[0]["gesture"], sent[0]["flag"]), ("settingRefused", "flag", "notify"))
-        self.assertIn("notify-cards.json could not be read", sent[0]["text"])
-        self.assertEqual(self.dirty, [])
+            km.Handler._dispatch_ws(None, {"type": "setSessionFlag", "id": self.SID, "flag": "notify", "value": True}, client)
+        self.assertEqual(json.loads(flags_p.read_text()), {self.SID: {"notify": True}})
+        self.assertEqual(sent, [], "no refusal: the click never depended on the bells file")
+        self.assertEqual(self.dirty, [1])
 
 
 class FlagsWsWriteFailure(unittest.TestCase):

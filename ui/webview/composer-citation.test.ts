@@ -126,7 +126,7 @@ test("highlighting transcript text seeds a QUOTE chip — the same chip, reply-c
   // seeding NEVER focuses the composer — a focus steal would collapse the selection mid-drag
   const seeder = RENDER.split("function seedTranscriptQuote(")[1].split("\n}")[0];
   assert.doesNotMatch(seeder, /focusComposer/);
-  assert.match(RENDER, /quote: quote\.slice\(0, QUOTE_CAP\)/);   // mkQuoteCitation bounds every chip
+  assert.match(RENDER, /quote: capQuote\(quote\)/);   // mkQuoteCitation bounds every chip (the cut marked, quote-context.ts capQuote)
 });
 
 test("⌘-selecting another piece of text ADDS a context below the held ones (the user 2026-08-04)", () => {
@@ -141,7 +141,7 @@ test("⌘-selecting another piece of text ADDS a context below the held ones (th
   const seeder = RENDER.split("function seedTranscriptQuote(")[1].split("\n}")[0];
   const gesture = RENDER.split("function seedGestureChip(")[1].split("\n}")[0];
   assert.match(seeder, /seedGestureChip\(list, chip\);/);
-  assert.match(RENDER, /seedGestureChip\(list, mkQuoteCitation\(quote, uuid\)\);/, "the thread's box seeds by the same rules");
+  assert.match(RENDER, /seedGestureChip\(list, mkQuoteCitation\(quote, uuid, undefined, liveQuoteView\(quote\)\)\);/, "the thread's box seeds by the same rules");
   assert.match(gesture, /let idx = quoteSeedIdx != null && quoteSeedIdx < list\.length \? quoteSeedIdx : null;/);
   assert.match(gesture, /if \(quoteAddHeld && list\.length\) idx = list\.length;/);
   assert.match(gesture, /else \{ list\.length = 0; idx = 0; \}/);
@@ -185,7 +185,8 @@ test("one ⌘-drag never lists the same context twice (the user 2026-08-04)", ()
   // (2) …and identical text collapses regardless of the path that re-cited it (a repeated double-click,
   // a drag re-traced after a transcript rebuild killed the selection) — the gesture's own chip survives.
   const gesture = RENDER.split("function seedGestureChip(")[1].split("\n}")[0];
-  assert.match(gesture, /if \(i !== idx && list\[i\]\.quote === chip\.quote\) \{\s*\n\s*list\.splice\(i, 1\);\s*\n\s*if \(i < idx\) idx--;/);
+  // (a chip's identity is its words and what goes out for them, 2026-10-14: the same words in another sentence stack)
+  assert.match(gesture, /if \(i !== idx && citeKey\(list\[i\]\) === citeKey\(chip\)\) \{\s*\n\s*list\.splice\(i, 1\);\s*\n\s*if \(i < idx\) idx--;/);
 });
 
 test("Enter with a live transcript selection drops into the message box with the quote as context (the user 2026-08-04)", () => {

@@ -21,7 +21,7 @@ test("the ring is the painter's call: only mark.cmt-hl.unread.cmt-ring carries a
   const marks = CSS.match(/^mark\.cmt-hl[^{]*\{[^}]*\}/gms) || [];
   assert.ok(marks.length >= 7, "the mark rules are found");
   for (const rule of marks) {
-    if (rule.startsWith("mark.cmt-hl.unread.cmt-ring ")) continue;
+    if (rule.startsWith("mark.cmt-hl.unread.cmt-ring ") || rule.startsWith("mark.cmt-hl.needs.cmt-ring ")) continue;   // .needs: waiting on your answer, the same cue (thread-live-1)
     assert.doesNotMatch(rule, /outline/, "an outline on an inline mark paints per line fragment — only the painter's .cmt-ring may, on one or two rows: " + rule);
   }
   assert.match(RENDER, /m\.classList\.toggle\("cmt-ring", ring\);/, "the painter toggles it");
@@ -33,7 +33,7 @@ test("read marks wear no box, and the fill tiers are byte-untouched — the colo
   assert.match(CSS, /mark\.cmt-hl\.resolved \{ background: var\(--cmt-hl-resolved\); \}/);
   assert.match(CSS, /mark\.cmt-hl:hover \{ background: color-mix\(in srgb, var\(--cmt-hl\) 58%, transparent\); \}/);
   // the painter draws a box for UNREAD marks only: a read mark has no box to wear
-  assert.match(RENDER, /v\.el\.querySelectorAll\("mark\.cmt-hl\.unread"\)/);
+  assert.match(RENDER, /v\.el\.querySelectorAll\("mark\.cmt-hl\.unread, mark\.cmt-hl\.needs"\)/);
 });
 
 test("the yellow corner dot stays gone root and branch", () => {
@@ -47,8 +47,12 @@ test("the yellow corner dot stays gone root and branch", () => {
 
 test("unread is the kernel's bit on an open thread, cleared by opening the thread — the box follows it, nothing else", () => {
   assert.match(RENDER, /m\.classList\.toggle\("unread", !!th\.unread && th\.status === "open"\);/);
-  assert.match(RENDER, /if \(th\) th\.unread = false;\s*\/\/ optimistic; the kernel's watermark reconciles/);
-  assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "commentSeen", id: sid, tid \}\);/);
+  // opening the thread reads it: readThread clears the bit and stamps the kernel's watermark, the clear held until the
+  // kernel's frame counts that read (2026-10-15, read-latch.ts); a kernel that answers no read gets the plain stamp
+  assert.match(RENDER, /readThread\(sid, tid\);\s*\/\/ opening it reads it/);
+  const read = RENDER.slice(RENDER.indexOf("function readThread("), RENDER.indexOf("\n}\n", RENDER.indexOf("function readThread(")));
+  assert.match(read, /cmtReadLatch\.set\(key, holdRead\(sid, tid, rid, raw\)\);\s*\n\s*th\.unread = false;\s*\n\s*vscodeApi\?\.postMessage\(\{ type: "commentSeen", id: sid, tid, rid \}\);/);
+  assert.match(read, /vscodeApi\?\.postMessage\(\{ type: "commentSeen", id: sid, tid \}\);\s*\n\s*if \(th\) th\.unread = false;/);
   // the jump cluster's landing never touches it (the reply chips' did not either; jump-cluster.test.ts pins the handler);
   // the state has ONE clearer
   const at = RENDER.indexOf("function landThread(");

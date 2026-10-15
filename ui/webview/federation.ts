@@ -133,6 +133,8 @@ export const BOOKKEEPING: ReadonlyMap<string, (m: any) => string | null> = new M
   ["loadEpisode",    (m) => "loadEpisode" + K + m.id],             // render.ts noticeOpened: a clear notice's conversation on first expand
   ["imgRequest",     (m) => "imgRequest" + K + m.id + K + m.path], // render.ts: an inline image's bytes, asked on render
   ["commentSeen",    (m) => "commentSeen" + K + m.id + K + m.tid], // render.ts: a thread's read watermark as its popover opens or a reply lands in it
+  ["commentDropSeen", (m) => "commentDropSeen" + K + m.id + K + m.createId],   // render.ts / feed.ts: a dropped comment create's dialog, seen
+  ["commentDropHidden", (m) => "commentDropHidden" + K + m.id + K + m.createId],   // render.ts / feed.ts: whether anyone can see the page a drop was offered to (its last word wins)
   ["dotHover",       ()  => "dotHover"],                           // render.ts: the chat's hovered dot (a bare dotHover is the leave)
   ["hoverHighlight", ()  => "hoverHighlight"],                     // feed.ts: the hovered card's rows on the timeline
   ["showAskPath",    (m) => (m.jump ? null : "showAskPath")],      // feed.ts: the hovered / pinned card's path glow (`off` clears); `jump` is the click
@@ -228,7 +230,24 @@ export function prefixInbound(host: string, msg: any): any {
   if (out.type === "data" && out.data && typeof out.data === "object") out.data = prefixTimelineData(host, out.data);
   else if (out.type === "bars") return { ...out, ..._prefixTimelineDetail(host, out) };
   if (out.activeChat && typeof out.activeChat === "object") out.activeChat = _prefixActiveChat(host, out.activeChat);
+  // A COMMENT THREAD is a session of its own, and its `sid` is a session id like every other (thread-live-1, 2026-10-14): the
+  // kernel's question frames (askLive) and its live statuses name the thread by it, and the page answers, stops and sets the
+  // thread's model by it, so a linked machine's thread arrives with its host's prefix here, on the comments frame and on a
+  // create's answer (commentCreated's `thread` row), exactly as the frames that name it do. Unprefixed, a linked machine's
+  // thread showed its Needs you cue with no question to answer (the popover looked the question up by the bare id while
+  // its frame arrived prefixed), and its Stop went to this machine's kernel. A kernel from before the frame carried `sid`
+  // names the thread by its tid, which is the thread's session id. The tid itself stays bare: the thread ops address it
+  // under its parent's id, which carries the host.
+  if (out.type === "comments" && Array.isArray(out.threads)) out.threads = out.threads.map((t: any) => _prefixThreadSid(host, t));
+  if (out.type === "commentCreated" && out.thread && typeof out.thread === "object") out.thread = _prefixThreadSid(host, out.thread);
   return out;
+}
+
+/** A comments-frame thread row with its session id (`sid`, else its tid) wearing `host`'s prefix, on a copy. */
+function _prefixThreadSid(host: string, t: any): any {
+  if (!t || typeof t !== "object") return t;
+  const own = typeof t.sid === "string" && t.sid ? t.sid : (typeof t.tid === "string" ? t.tid : "");
+  return own ? { ...t, sid: prefixId(host, own) } : t;
 }
 
 /** The delegation origin and the awaiting peers of a card OR a chat-box row, rewritten in place on a copy the caller owns.
@@ -1256,6 +1275,7 @@ export class FederationManager {
         try { dead.close(); } catch (e) { /* already dying */ }
         c.ws = null;
         this.dialEvent(c.host, false);   // its onclose is detached above, so the attempt's end is said HERE (the swirl must not spin on a dead dial)
+        this.relayDown(c.host);          // …and so is the drop itself, as onclose says it (2026-10-15, the review of #247)
         this.connect(c);   // settings queued on the conn meanwhile ride the fresh socket's open (flushPending)
       } else if (v === "redial") {
         this.connect(c);
@@ -1289,6 +1309,10 @@ export class FederationManager {
     // a kernel's `caps` frame describes THAT kernel; the panes hold only the LOCAL kernel's (its views
     // store is the one they write). A remote's would read as the local kernel's — dropped here.
     if (m && m.type === "caps" && host !== LOCAL) return;
+    // …and the same for its notification switches: a linked kernel's bells paint against the switches of the kernel this
+    // page is served by, whose gate decides what reaches the devices subscribed here (bell-follow.ts). A linked kernel's
+    // own master would read as this one's.
+    if (m && m.type === "notifySwitches" && host !== LOCAL) return;
     // The ARRANGEMENT the kernel keeps for this viewer (2026-09-23), served on connect and pushed on every
     // change — the event the other devices converge on. Only the LOCAL kernel's counts: a remote kernel's
     // store is whatever dashboard sits in front of THAT machine, and taking it would let one viewer's drag
@@ -2067,9 +2091,7 @@ export class FederationManager {
       this.dialEvent(conn.host, false);   // the attempt ended (refused, or the socket dropped): still until the redial
       this.diag("hostconn", { host: conn.host, ev: "close", code: ev.code, clean: ev.wasClean, detached: conn.closed });
       conn.acksSeen = false;
-      // the remote twin of the shim's romp:wsdown: a send to this host that its kernel has not answered may never have
-      // reached it, and the chat says so on the bubble until the next socket's resend is answered (render.ts)
-      try { window.dispatchEvent(new CustomEvent("romp:hostRelayDown", { detail: { host: conn.host } })); } catch (e) { /* never break the relay */ }
+      this.relayDown(conn.host);
       if (!conn.closed) setTimeout(() => this.connect(conn), 2000); // reconnect a dropped remote
     };
     ws.onerror = () => {
@@ -2077,6 +2099,16 @@ export class FederationManager {
         ws.close();
       } catch (e) {}
     };
+  }
+
+  /** A relay socket to `host` is gone, closed or put down by the watchdog: romp:hostRelayDown, the remote twin of the
+   *  shim's romp:wsdown. A send to this host that its kernel has not answered may never have reached it, and the chat
+   *  says so on the bubble until the next socket's resend is answered; the asks in flight on it are released; a comment
+   *  thread's read it has not answered waits for the next socket's first frame to decide it (render.ts, read-latch.ts).
+   *  Every drop says it: the watchdog's abandon detaches the socket's onclose, and a drop it did not say left that read
+   *  held for the page's life, so a later reply on the thread never showed unread (the review of #247, 2026-10-15). */
+  private relayDown(host: string): void {
+    try { window.dispatchEvent(new CustomEvent("romp:hostRelayDown", { detail: { host } })); } catch (e) { /* never break the relay */ }
   }
 
   /** One host's dial state changed: its relay socket's dial began (CONNECTING) or ended (open, closed, or

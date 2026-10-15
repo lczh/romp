@@ -210,7 +210,7 @@ test("the dot is the comment's landed colour; UNREAD shouts; keyed on the kernel
   // page — never a raw hex; its UNREAD halo is the needs-you red the passage's box and ring wear (the user 2026-09-12:
   // the rail agrees with the box's cue, by colour, since a 16×6 tick cannot show a dash)
   assert.match(CSS, /\.cmt-tick \{\s*\n\s*position: absolute; right: 1px; width: 14px; height: 4px;[\s\S]{0,120}background: var\(--cmt-hl-outline\);/, "the ink token, never a raw hex");
-  assert.match(CSS, /\.cmt-tick\.unread \{ width: 16px; height: 6px; right: 0; opacity: 1; z-index: 1;\s*\n\s*box-shadow: 0 0 0 1\.5px var\(--bg\), 0 0 0 3px var\(--st-awaiting-bg\); \}/,
+  assert.match(CSS, /\.cmt-tick\.unread, \.cmt-tick\.needs \{ width: 16px; height: 6px; right: 0; opacity: 1; z-index: 1;\s*\n\s*box-shadow: 0 0 0 1\.5px var\(--bg\), 0 0 0 3px var\(--st-awaiting-bg\); \}/,
     "…and lifted above a read sibling at the same top (nested-marks.test.ts)");
   assert.match(RAIL, /\+ \(th\.unread && th\.status === "open" \? " unread" : ""\)/, "the same predicate the mark's ring and the reply chips read");
   assert.match(RAIL, /\+ ":" \+ \(t\.th\.unread \? 1 : 0\)/, "the unread bit rides the signature: a reply landing repaints the dot");
@@ -220,8 +220,10 @@ test("the dot is the comment's landed colour; UNREAD shouts; keyed on the kernel
 test("a dot is a BUTTON, delegated: click = jump to the anchor and open the thread; same-tid sets move in place", () => {
   assert.match(RAIL, /const tick = el\("button", cls\(t\.th\)\) as HTMLButtonElement;/);
   assert.match(RAIL, /tick\.dataset\.act = "cmtjump";\s*\n\s*tick\.dataset\.tid = t\.th\.tid;\s*\n\s*tick\.dataset\.uuid = t\.th\.anchorUuid;/);
-  assert.match(RENDER, /cmtjump: \(elx\) => \{\s*\n\s*const tid = elx\.dataset\.tid, uuid = elx\.dataset\.uuid;\s*\n\s*if \(!tid \|\| !uuid \|\| !activeId\) return;\s*\n\s*flashedAnchor = null;\s*\n\s*scrollToAnchor\(uuid\);/);
-  assert.match(RENDER, /openCommentPopover\(activeId, tid, Math\.max\(8, r\.left - 380\), Math\.max\(60, r\.top - 40\)\);/, "…and opens it (which is what marks it read)");
+  assert.match(RENDER, /cmtjump: \(elx\) => \{\s*\n\s*const tid = elx\.dataset\.tid;\s*\n\s*if \(!tid \|\| !activeId\) return;\s*\n\s*passageLanding\(activeId, tid\);/);
+  // the passage landing (2026-10-15): the passage first, then the thread opens beside it (which is what marks it read)
+  assert.match(RENDER, /queueMicrotask\(\(\) => openBesidePassage\(go\.sid, go\.tid, passage, note\)\);/, "…and opens it once landed");
+  assert.match(RENDER, /else openCommentPopover\(sid, tid\);/);
   assert.match(RAIL, /if \(kids\.length === ticks\.length && kids\.every\(\(k, i\) => k\.dataset\.tid === ticks\[i\]\.th\.tid\)\) \{/, "an unchanged tick set moves in place — a mid-press rebuild can't eat the click");
   assert.match(CSS, /\.cmt-tick \{[\s\S]{0,200}pointer-events: auto; cursor: pointer;/, "only the tick takes the pointer");
 });

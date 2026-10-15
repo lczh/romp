@@ -11,7 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { atBottomDist } from "./scroll-keep";
-import { isReplyReady } from "./reply-ready";
+import { unreadCount } from "./jump-nav";
 import { hostOf } from "./host-prefix";
 import { isProvisionalId } from "./provisional";   // the loading branch's one "opening" gate (2026-09-11): the real module
 
@@ -168,8 +168,9 @@ test("upsert computes wasSkeleton beside awaitingFull.delete and routes a just-l
 
 test("the idle prefetch: runPrebuild asks nextPrefetch (hidden = document.hidden || the pane display:none) for exactly one, and viewState is null for a skeleton", () => {
   const run = fn("runPrebuild");
-  assert.match(run, /if \(pendingBuildRaf != null\) \{ schedulePrebuild\(\); return; \}[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*const next = nextPrefetch\(skeletonTabs, activeId, awaitingFull, document\.hidden \|\| paneHidden\(\), stripShowsTab\);\s*\n\s*if \(next\) requestFullSession\(next, "prefetch"\);/,
-    "…for exactly one tab the strip SHOWS (tabInView and the #only= filter, the user 2026-09-14: hidden tabs are not built until shown)");
+  assert.match(run, /if \(pendingBuildRaf != null\) \{ schedulePrebuild\(\); return; \}[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*const next = nextPrefetch\(skeletonTabs, activeId, awaitingFull, document\.hidden \|\| paneHidden\(\), stripShowsTab, \(id\) => !hostSocketDown\(id\)\);\s*\n\s*if \(next\) requestFullSession\(next, "prefetch"\);/,
+    "…for exactly one tab the strip SHOWS (tabInView and the #only= filter, the user 2026-09-14: hidden tabs are not built until shown), "
+    + "whose socket can answer (a linked machine's relay open, 2026-10-11)");
   assert.match(run, /const viewState = \(id: string\): ViewState \| null => \{\s*\n\s*if \(skeletonTabs\.ids\.has\(id\)\) return null;/,
     "the pure planner never builds DOM for a stale session");
   assert.match(RENDER, /function paneHidden\(\): boolean \{\s*\n\s*try \{ return \(window\.parent !== window && \(window\.innerWidth === 0 \|\| window\.innerHeight === 0\)\) \|\| \(window as PaneHiddenHost\)\.__rompPaneHidden === true; \}/,
@@ -271,7 +272,7 @@ test("the strip's repaint gate sees a skeleton: the signature reads renderKind a
 // stack to, as a browser's is. The chips refresh only on events (the pane's scroll and resize, a land, an append),
 // and a tab left at the top of a long transcript fires none of them on the switch, so the switch itself has to
 // take them down; and the go-to-bottom chip has to read the set, not the loader, whose min-height (styles.css)
-// overflows a short pane. Synthetic ids; atBottomDist and isReplyReady are the real modules and run (hostOf is
+// overflows a short pane. Synthetic ids; atBottomDist and unreadCount are the real modules and run (hostOf is
 // wired in and not reached: the skeleton's name comes from tabMeta).
 const LOADER_VH = Number((/\.tab-loading-wait \{[^}]*min-height: (\d+)vh;/.exec(CSS) || [])[1]);
 const PANE_PAD = 20;   // #content's vertical padding, 8px 0 12px (pinned in chipWorld)
@@ -328,18 +329,18 @@ function chipWorld(opts: { clientHeight: number; innerHeight: number; transcript
     // the ONE clause of updateJumpCluster's gate that hides the cluster (its unread badge with it) over the skeleton
     // (the read #1226 narrowed, when the badge was the reply chips)
     commentThreads: new Map<string, unknown[]>([["B", [{ tid: "t1", anchorUuid: "22222222-3333-4444-5555-666666666666", status: "open", unread: true }]]]),
-    jumpBtn, jumpCluster, atBottomDist, isReplyReady, hostOf, isProvisionalId, HOOKS,
+    jumpBtn, jumpCluster, atBottomDist, unreadCount, hostOf, isProvisionalId, HOOKS,
     el: (_tag: string, cls?: string): ChipEl => new ChipEl(cls || "", cls === "tab-loading-wait" ? Math.round(LOADER_VH / 100 * win.innerHeight) : 0),
     rompLoaderInner: (caption: string): ChipEl => { HOOKS.captions.push(caption); return new ChipEl("romp-loader", 0); },
   };
   const js = requireCjs("esbuild").transformSync(["liveSession", "atBottom", "showActive", "updateJumpBtn", "updateJumpCluster"].map(fn).join("\n"), { loader: "ts" }).code;
   const prelude = `
-    const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, jumpCluster, atBottomDist, isReplyReady, hostOf, isProvisionalId, el, rompLoaderInner, HOOKS } = W;
+    const { sessions, views, tabMeta, skeletonTabs, commentThreads, jumpBtn, jumpCluster, atBottomDist, unreadCount, hostOf, isProvisionalId, el, rompLoaderInner, HOOKS } = W;
     let activeId = null, skeletonLoading = null, jumpClusterSig = "", navCursor = null, navResume = null;
     // the cluster's measuring half, inert: the switch test is about its gate (a live session's stops are jump-nav.test.ts's)
     const pendingBuildRaf = null, loadingOlder = new Set(), gapLoading = new Set(), parseGapKey = (k) => ({ sid: k });
     const MOVES = ["prevMine", "nextMine", "prevComment", "nextComment", "prevUnread", "nextUnread"];
-    const eventUnitIndex = () => new Int32Array(0), navStops = () => ({ stops: [], mine: 0 }), readyAround = () => ({ above: null, below: null }), unreadCount = () => 0, pickNav = () => null, jumpMove = () => {};
+    const eventUnitIndex = () => new Int32Array(0), navStops = () => ({ stops: [], mine: 0 }), pickNav = () => null, jumpMove = () => {};
     const jcMine = { hidden: false }, jcCmt = { hidden: false }, jcUnread = { hidden: false }, jcCount = { hidden: true, setAttribute: () => {} };
     const setTip = () => {}, countTip = () => "", jumpCommand = (m) => "chat." + m;
     const jcButtons = { prevMine: {}, nextMine: {}, prevComment: {}, nextComment: {}, prevUnread: {}, nextUnread: {} };
@@ -425,6 +426,22 @@ test("run: a column's own session, listed by the strip but not among its skeleto
   // …the neighbouring skeleton still asks on its pick: the gate is the set, not the missing session
   w.api.set({ activeId: "B" }); w.api.showActive();
   assert.deepEqual(w.HOOKS.fulls, ["skeleton-click:B"]);
+});
+
+test("a relay's close releases that host's asks and re-arms the prefetch for the others; its reopen re-arms it for its own (2026-10-11)", () => {
+  // a linked machine that drops mid-prefetch: its in-flight ask has no socket to answer it, and the one-at-a-time rule held every
+  // other machine's tabs behind it until the relay reopened. The close is the event: release that host's asks, re-arm the chain
+  // (which skips the closed relay's tabs: runPrebuild's reachable test, pinned above), and the reopen re-arms it for that host
+  const listeners = [...RENDER.matchAll(/window\.addEventListener\("romp:hostRelayDown", \(e: Event\) => \{([\s\S]*?)\n\}\);/g)].map((m) => m[1]);
+  const release = listeners.find((b) => b.includes("clearAsksForHost"));
+  assert.ok(release, "a relay-down listener releases the asks");
+  assert.match(release!, /if \(!h\) return;\s*\n\s*clearAsksForHost\(h\);\s*\n\s*schedulePrebuild\(\);/, "that host's asks, then the chain re-armed");
+  const i = RENDER.indexOf('window.addEventListener("romp:hostRelayUp", (e) => {');
+  const up = RENDER.slice(i, RENDER.indexOf("\n});", i));
+  assert.match(up, /\n  if \(h\) schedulePrebuild\(\);/, "the reopen re-arms the chain for that host's tabs");
+  assert.ok(up.indexOf("clearAsksForHost(h);") < up.indexOf("if (h) schedulePrebuild();"), "after its asks are cleared");
+  assert.match(fn("hostSocketDown"), /return !!fed && typeof fed\.open === "function" && !fed\.open\(h\);/,
+    "reachability is the relay socket's own open state, published by federation (a local id is always reachable)");
 });
 
 test("the relay's reopen forgets that host's loaded record (2026-09-23): a restarted remote kernel's skeleton list is adopted", () => {

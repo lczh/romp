@@ -192,8 +192,9 @@ class FakeHost:
     one-fed-text-at-a-time hold (SdkSession._untaken) releases on; a host that echoes nothing holds every text after
     the first for good."""
 
-    def __init__(self, path, records, busy=False, exit_after=None, answer_init=None, echo_turns=False):
+    def __init__(self, path, records, busy=False, exit_after=None, answer_init=None, echo_turns=False, parked=()):
         self.path, self.records, self.busy, self.exit_after = path, records, busy, exit_after
+        self.parked = list(parked)          # the request ids its hello names as still open (sent before this attach)
         self.answer_init = answer_init      # None: every control request answered; else answer_init(attach_no) -> bool
         self.echo_turns = echo_turns
         self.next_offset = len(records)     # the journal position of the next record this host writes (echo_turns)
@@ -219,7 +220,7 @@ class FakeHost:
                         self.attaches += 1
                         answering = self.answer_init is None or self.answer_init(self.attaches)
                         writer.write(sh.encode_frame({"t": "hello", "protocol": 1, "host": {"pid": 10, "start": "h", "version": "v"},
-                                                      "cli": {"pid": 11, "start": "c", "fsid": SID}, "journal": {"next": len(self.records)}, "parked": []}))
+                                                      "cli": {"pid": 11, "start": "c", "fsid": SID}, "journal": {"next": len(self.records)}, "parked": list(self.parked)}))
                         for off, rec in enumerate(self.records):
                             if off > int(f.get("ack", -1)):
                                 writer.write(sh.encode_frame({"t": "out", "offset": off, "data": rec}))
@@ -374,6 +375,85 @@ class TransportOverSocket(unittest.TestCase):
             self.assertIn({"t": "signal", "sig": "INT"}, fh.got)
             fh.close()
         run(go())
+
+    def test_a_stop_hook_its_cli_sent_before_this_kernel_attached_is_marked_unwatched(self):
+        # the feed across a restart (plans/federated-push.md, 2026-10-14): a hosted CLI ends a turn while no kernel is
+        # attached, its Stop hook waits at the host, and the hello names it among the open requests. The transport marks
+        # that hook's input with the request id, so the hook stamps the turn end as one no kernel was listening to; any
+        # other held request (a permission prompt) just leaves the session's set, and a Stop the CLI sends after the attach
+        # is an ordinary one
+        def hook(rid, event="Stop"):
+            return {"type": "control_request", "request_id": rid,
+                    "request": {"subtype": "hook_callback", "callback_id": "hook_0", "input": {"hook_event_name": event}}}
+        perm = {"type": "control_request", "request_id": "req-perm",
+                "request": {"subtype": "can_use_tool", "tool_name": "Bash", "input": {"command": "ls"}}}
+        recs = [hook("req-held"), perm, hook("req-live")]
+
+        async def go():
+            fh = FakeHost(self._path(), recs, parked=["req-held", "req-perm"]); await fh.start()
+            watch = set()
+
+            def on_hello(hello):                              # the backend's part (_on_host_hello): the set it shares
+                watch.update(hello["parked"])
+                t.unwatched = watch
+            t = ht.HostTransport(fh.path, kernel={"pid": 1}, on_hello=on_hello)
+            await t.connect()
+            got = []
+
+            async def read():
+                async for m in t.read_messages():
+                    got.append(m)
+                    if len(got) == 4:
+                        break
+            reader = asyncio.ensure_future(read())
+            await asyncio.sleep(0.05)
+            await t.write(json.dumps({"type": "control_request", "request_id": "req_0_i", "request": {"subtype": "initialize"}}))
+            await asyncio.wait_for(reader, 5)
+            held, p, live = got[1:]
+            self.assertEqual(held["request"]["input"].get(ht.UNWATCHED_STOP_KEY), "req-held")
+            self.assertNotIn(ht.UNWATCHED_STOP_KEY, p["request"]["input"], "a permission prompt is no turn end")
+            self.assertNotIn(ht.UNWATCHED_STOP_KEY, live["request"]["input"], "sent after the attach: watched")
+            self.assertEqual(watch, {"req-held"}, "the held Stop stays open until its hook has stamped the turn end")
+            fh.close()
+        run(go())
+
+    def test_a_frozen_host_ends_the_hello_wait_when_its_lease_stops_and_an_end_interrupts_it(self):
+        # the review of #233: a host whose loop is frozen accepts the connection from its backlog and never says hello,
+        # and the wait had no end, so one such re-attach held the restart's catch-up open for good. The wait now asks the
+        # host's liveness (its lease's beat) at each probe: while it beats the wait goes on, counted; once it stops, the
+        # connect raises HostHelloLost. Ending the session ends the wait too
+        async def frozen(reader, writer):
+            await reader.read(65536)                     # takes the attach, answers nothing
+            await asyncio.sleep(30)
+
+        async def go():
+            path = self._path()
+            srv = await asyncio.start_unix_server(frozen, path=path)
+            beats = ["alive", "alive", "alive"]
+
+            def alive():
+                return None if beats and beats.pop() else "its lease no longer names a live host (stale-heartbeat)"
+            with mock.patch.object(ht, "HELLO_PROBE_S", 0.05):
+                t = ht.HostTransport(path, kernel={"pid": 1}, alive=alive)
+                with self.assertRaises(ht.HostHelloLost) as cm:
+                    await asyncio.wait_for(t.connect(), 5)
+                self.assertIn("stale-heartbeat", str(cm.exception))
+                self.assertEqual(t.hello_probes, 3, "it waited while the host beat, and counted each probe")
+                self.assertTrue(issubclass(ht.HostHelloLost, ht.CLIConnectionError))
+                t2 = ht.HostTransport(path, kernel={"pid": 1}, alive=lambda: None)   # beats on: only an end stops it
+                waiting = asyncio.ensure_future(t2.connect())
+                await asyncio.sleep(0.2)
+                self.assertFalse(waiting.done())
+                self.assertGreaterEqual(t2.hello_probes, 2)
+                t2.abort_connect("the session was ended")
+                with self.assertRaises(ht.HostHelloLost) as cm:
+                    await asyncio.wait_for(waiting, 5)
+                self.assertIn("the session was ended", str(cm.exception))
+            srv.close()
+        run(go())
+
+    def test_the_unwatched_key_is_the_backends(self):
+        self.assertEqual(ht.UNWATCHED_STOP_KEY, sb.UNWATCHED_STOP_KEY)
 
 
 class TransportOverJournal(unittest.TestCase):

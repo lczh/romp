@@ -17,7 +17,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { threadSettled, type CommentThread } from "./comments";
+import { threadSettled, threadNeedsYou, threadCued, type CommentThread } from "./comments";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const COMMENTS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "comments.ts"), "utf8");
@@ -85,7 +85,7 @@ test("latches are pruned only against EVERY session's known threads — never on
 
 test("a reply landing while its popover is open advances the watermark BEFORE the marks paint", () => {
   const handler = RENDER.split('else if (m.type === "comments" && m.id) {')[1].split("\n  }\n")[0];
-  const seen = handler.indexOf('vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid: th.tid });');
+  const seen = handler.indexOf("readThread(sid, th.tid);");   // the stamp (readThread posts commentSeen), on the frame's own bit
   const paint = handler.indexOf("applyCommentMarks(sid);");
   assert.ok(seen > 0 && paint > 0 && seen < paint, "seen-stamp first, paint after — the mark never wears yellow for a reply read as it lands");
   assert.match(handler, /if \(openCommentKey && openCommentKey\.sid === sid\) renderCommentPopover\(\);/);
@@ -110,7 +110,7 @@ function markFor(th: CommentThread, latched = false): Set<string> {
     const commentInFlight_ = null;`;
   const classes = new Set<string>();
   const m = { classList: { toggle(c: string, on: boolean) { if (on) classes.add(c); else classes.delete(c); } }, title: "" };
-  new Function("m", "th", "threadSettled", prelude + "\n" + inflightSrc + "\n" + styleSrc + "\nstyleCommentMark(m, th);")(m, th, threadSettled);
+  new Function("m", "th", "threadSettled", "threadNeedsYou", "threadCued", prelude + "\n" + inflightSrc + "\n" + styleSrc + "\nstyleCommentMark(m, th);")(m, th, threadSettled, threadNeedsYou, threadCued);
   return classes;
 }
 const base = (over: Partial<CommentThread>): CommentThread => ({

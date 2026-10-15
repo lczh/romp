@@ -42,7 +42,7 @@ test("a comment tick is longer: 14px out from the edge (unread 16), same height,
   assert.equal(px(tick, "height"), 4);
   assert.equal(px(tick, "right"), 1);
   assert.match(tick, /background: var\(--cmt-hl-outline\); opacity: 0\.75; pointer-events: auto; cursor: pointer;/, "the ink and the pointer contract unchanged");
-  const unread = rule(".cmt-tick.unread");
+  const unread = rule(".cmt-tick.unread, .cmt-tick.needs");   // a thread waiting on your answer wears the unread tick (thread-live-1)
   assert.equal(px(unread, "width"), 16, "unread fills the rail, as it did");
   assert.equal(px(unread, "height"), 6);
   assert.equal(px(unread, "right"), 0);
@@ -61,8 +61,8 @@ test("the comment tick's HIT box is a padded ::before, clamped per tick by the p
   assert.match(hit, /top: calc\(-1 \* var\(--hit-t, 5px\)\); bottom: calc\(-1 \* var\(--hit-b, 5px\)\);/, "per-tick pads, 5px when nothing is near");
   assert.equal(TICK_PAD, 5, "the painter's cap matches the CSS fallback");
   // the painter sets the pads on BOTH DOM paths (the in-place move and the rebuild), from the one helper
-  assert.match(RAIL, /const pads = railPads\(ticks\.map\(\(t\) => \(\{ y: t\.y, h: t\.th\.unread && t\.th\.status === "open" \? 6 : 4 \}\)\), TICK_PAD, r\.height\);/,
-    "the painted height per tick: unread 6, else 4 — the same predicate the class reads");
+  assert.match(RAIL, /const pads = railPads\(ticks\.map\(\(t\) => \(\{ y: t\.y, h: threadCued\(t\.th\) \? 6 : 4 \}\)\), TICK_PAD, r\.height\);/,
+    "the painted height per tick: cued (unread, or waiting on your answer) 6, else 4 — the predicate the two classes read");
   assert.match(RAIL, /const dress = \(tick: HTMLElement, t: typeof ticks\[number\], i: number\) => \{/);
   assert.match(RAIL, /tick\.style\.setProperty\("--hit-t", pads\[i\]\[0\] \+ "px"\);\s*\n\s*tick\.style\.setProperty\("--hit-b", pads\[i\]\[1\] \+ "px"\);/);
   assert.match(RAIL, /ticks\.forEach\(\(t, i\) => dress\(kids\[i\], t, i\)\);/, "the in-place path dresses");

@@ -276,12 +276,14 @@ class ErrorCenterExecutes(unittest.TestCase):
         # 'not saved' joined with the state-readers change: a setting, bell, tag or order the kernel REFUSED
         # because it could not read the file that holds it files an entry of its own kind, so muting the
         # judge's 'warning' never mutes a change of yours that did not land.
+        # 'missed' joined with the review of #221: what a gap summary owed a device and never showed it (an iPhone holding
+        # an earlier summary unseen) is said here when Romp is next in front of the user on that device.
         a = self.out["filterBar"]
-        self.assertEqual(a["n"], 14)
+        self.assertEqual(a["n"], 15)
         self.assertEqual(a["first"], "offline")
         self.assertEqual(a["labels"],
                          "offline|limit|judge|warning|stalled|follow-up failed|retrying|api error|"
-                         "sdk|fleet sync|jump failed|cleared|not saved|not sent")
+                         "sdk|fleet sync|jump failed|cleared|not saved|not sent|missed")
 
     def test_muting_a_kind_hides_counts_and_live_cue_but_keeps_the_entries(self):
         a = self.out["afterMute"]

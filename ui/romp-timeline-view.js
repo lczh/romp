@@ -1126,6 +1126,33 @@ function offsetRect(rect, frames) {
 // The gear menu's rows, one per per-session flag. `enabled` reads the toggle's MEANING off the session
 // (hideFromFeed/postalServiceOff are off-flags; notify is an on-flag), `value` maps a desired
 // enabled-state back to the flag value _setSessionFlag persists.
+// Bells follow the dashboard (plans/federated-push.md; ui/webview/bell-follow.ts states the rule, inlined here because this
+// file loads no modules: it also runs inside Obsidian). A lane from a LINKED kernel (its id wears the "host:" prefix)
+// notifies the devices subscribed at the kernel this page is served by, so its bell paints from that kernel's raw override
+// (`notifyRaw`: true, false, or null for none) and THIS kernel's master (the local notifySwitches frame): an override
+// stands, no override follows this master. A linked kernel too old to send the override paints as it reports it
+// (`legacy`, said in the row's sub-line).
+// The session bell is a setting the user makes (2026-10-11; bell-follow.ts sessionBell states the rule, this is its twin):
+// on, off, or no choice of its own. The row reads on when the session notifies for everything a session can (`fullOn`:
+// its own setting on, or no setting under this kernel's master AND turn-finished switches), a click stores the opposite
+// as the session's own setting, and the sub-line says whether it is that setting or the defaults. The switches are this
+// kernel's for a local lane and a linked one alike. A lane whose kernel sends no setting keeps the bell it reports.
+let HUB_NOTIFY_ALL = null;     // this kernel's master, from setNotifySwitches (null until the first frame)
+let HUB_NOTIFY_TURNS = null;   // …and its turn-finished switch, from the same frame
+const BELL_ALL = 'when a turn you started ends, or it blocks on you or completes';
+function laneBell(s) {
+  const id = String((s && s.id) || '');
+  const raw = s ? s.notifyRaw : undefined;
+  if (raw === undefined) {
+    return { fullOn: !!(s && s.notify), explicit: false, legacy: id.indexOf(':') > 0,
+             sub: 'system notification when its work blocks on you or completes' };
+  }
+  if (raw === true) return { fullOn: true, explicit: true, legacy: false, sub: 'your setting: ' + BELL_ALL };
+  if (raw === false) return { fullOn: false, explicit: true, legacy: false, sub: 'your setting: no notifications' };
+  const all = HUB_NOTIFY_ALL === true, turns = HUB_NOTIFY_TURNS === true;
+  return { fullOn: all && turns, explicit: false, legacy: false,
+           sub: 'default: ' + (all && turns ? BELL_ALL : all ? 'when it blocks on you or completes' : 'no notifications') };
+}
 const LANE_TOGGLES = [
   { flag: 'hideFromFeed', label: 'Feed cards', icon: feedCheckIcon,
     enabled: (s) => !s.hideFromFeed, value: (enable) => !enable,
@@ -1134,8 +1161,8 @@ const LANE_TOGGLES = [
     enabled: (s) => !s.postalServiceOff, value: (enable) => !enable,
     desc: 'visible to peer sessions, can send and receive their messages; off = fully isolated' },
   { flag: 'notify', label: 'Notifications', icon: bellIcon,
-    enabled: (s) => !!s.notify, value: (enable) => enable,
-    desc: 'system notification when its work blocks on you or completes' },
+    enabled: (s) => laneBell(s).fullOn, value: (enable) => enable,
+    desc: (s) => laneBell(s).sub },   // its own setting or the defaults, and what that means
 ];
 // Model + effort choices come from the kernel's /models — the ONE list shared with the chat statusline picker
 // and the judge-tier settings (the user 2026-07-02: no hardcoded model list per surface). Populated in place
@@ -3768,6 +3795,9 @@ class TimelinePanel {
         const targets = [((this.data && this.data.sessions) || []).find((x) => x.id === sid),
                          this._laneMenu && this._laneMenu._sid === sid ? this._laneMenu._session : null];
         for (const s of targets) if (s) s[flag] = m.value;
+        // …and a refused bell's own setting (notifyRaw), which the row paints from (laneBell), when the frame carries it
+        const raw = flag === 'notify' && 'notifyRaw' in m ? m.notifyRaw : undefined;
+        if (raw === true || raw === false || raw === null) for (const s of targets) if (s && s.notifyRaw !== undefined) s.notifyRaw = raw;
       }
       this._laneRefusal = { sid, flag, text };
       if (this._laneMenu && this._laneMenu._sid === sid && this._laneMenuBuild) this._laneMenuBuild();
@@ -4076,6 +4106,14 @@ class TimelinePanel {
   // dropped whatever the base became: its ack cannot reach this socket, and one that somehow did is
   // an ack for a write this page no longer tracks — its blob meets the gate like any other arrival,
   // and nothing is re-pinned (viewsAck).
+  // this kernel's notification switches (the local kernel's notifySwitches frame; federation drops a linked kernel's): a
+  // lane with no bell setting of its own follows the master and the turn-finished switch (laneBell). The bell lives in the
+  // lane gear, which reads them as it builds, so nothing is drawn here.
+  setNotifySwitches(m) {
+    HUB_NOTIFY_ALL = !!(m && m.all === true);
+    HUB_NOTIFY_TURNS = !!(m && m.turns === true);
+  }
+
   setCaps(m) {
     this._caps = new Set((m && Array.isArray(m.caps)) ? m.caps.filter((c) => typeof c === 'string') : []);
     const served = m ? m.viewsSeq : undefined;
@@ -5578,7 +5616,9 @@ class TimelinePanel {
         body.setAttribute('style', 'display:flex;flex-direction:column;line-height:1.25;min-width:0;');
         const lab = body.createDiv({ text: t.label + ' — ' + (on ? 'on' : 'off') });
         lab.setAttribute('style', on ? '' : 'opacity:0.75;');
-        const sub = body.createDiv({ text: t.desc });
+        const legacyBell = t.flag === 'notify' && laneBell(s).legacy;
+        const sub = body.createDiv({ text: (typeof t.desc === 'function' ? t.desc(s) : t.desc) + (legacyBell
+          ? ' · follows ' + String(s.id).slice(0, String(s.id).indexOf(':')) + "'s own notification switch: that machine runs an older romp" : '') });
         sub.setAttribute('style', 'opacity:0.6;font-size:0.82em;');
         row.addEventListener('mouseenter', () => { row.style.background = HOVER_BG; });
         row.addEventListener('mouseleave', () => { row.style.background = 'transparent'; });
@@ -5586,9 +5626,12 @@ class TimelinePanel {
           e.stopPropagation();
           const next = t.value(!on);                 // the flag value that flips this toggle
           if (this._laneRefusal && this._laneRefusal.sid === s.id && this._laneRefusal.flag === t.flag) this._laneRefusal = null;   // a retry retires the last refusal
+          const asGiven = t.flag === 'notify' && String(s.id).indexOf(':') > 0 && !laneBell(s).legacy;   // a linked kernel's bell: stored as given there
+          const rawBell = t.flag === 'notify' && s.notifyRaw !== undefined;   // a bell whose kernel sends the session's own setting
           s[t.flag] = next;                          // optimistic …
+          if (rawBell) s.notifyRaw = next;           // … the session's own setting too, which is what the bell paints from …
           (this._pendingFlags[s.id] = this._pendingFlags[s.id] || {})[t.flag] = next;   // … sticky until the kernel confirms
-          this._setSessionFlag(s, t.flag, next);
+          this._setSessionFlag(s, t.flag, next, asGiven);
           this._reconcilePendingFlags();
           this.draw();
           build();                                   // repaint states in place; the panel stays open
@@ -5666,8 +5709,13 @@ class TimelinePanel {
     for (const s of (this.data && this.data.sessions) || []) {
       const p = pend[s.id]; if (!p) continue;
       for (const flag of Object.keys(p)) {
-        if (s[flag] === p[flag]) delete p[flag];   // the kernel now agrees → stop overriding this flag
-        else s[flag] = p[flag];                    // not yet confirmed → keep the optimistic value sticky
+        // a bell click is the session's own setting (laneBell), so it confirms when the frame's setting (notifyRaw) is the
+        // clicked value, on a local lane and a linked one alike, and holds by it: the effective value can agree before the
+        // click has landed. A linked kernel too old to send the setting confirms on `notify`, as it always did
+        const rawBell = flag === 'notify' && s.notifyRaw !== undefined;
+        const cur = rawBell ? s.notifyRaw : s[flag];
+        if (cur === p[flag]) delete p[flag];       // the kernel now agrees → stop overriding this flag
+        else { s[flag] = p[flag]; if (rawBell) s.notifyRaw = p[flag]; }   // not yet confirmed → keep the optimistic value sticky
       }
       if (!Object.keys(p).length) delete pend[s.id];
     }
@@ -5713,10 +5761,12 @@ class TimelinePanel {
   // itself, with no lock against the kernel's own setter; the panel writes none of the state files now
   // (_kernelPost has the rule). Plain node (the runner) has neither a hook nor Electron and writes
   // nothing — the guard every writer here wears.
-  _setSessionFlag(s, flag, value) {
+  _setSessionFlag(s, flag, value, asGiven) {
     try {
       if (typeof window !== 'undefined' && typeof window.__rompTimelineSetFlag === 'function') {
-        window.__rompTimelineSetFlag(s.id, flag, value); return;
+        if (asGiven) window.__rompTimelineSetFlag(s.id, flag, value, true);   // a linked kernel's bell: stored as given (laneBell)
+        else window.__rompTimelineSetFlag(s.id, flag, value);
+        return;
       }
       if (!this._kernelHost()) return;
       return this._kernelPost('/flag', { id: s.id, flag, value: !!value }).then((r) => {   // the settle promise, for the tests that await it
@@ -7338,4 +7388,4 @@ class TimelinePanel {
   body(s) { return s ? '<div class="b">' + s + '</div>' : ''; }
 }
 
-module.exports = { TimelinePanel, tlThinkingLabel, tlChipCandidates, tlRows, selBandRows, tagSections, tabGroupsState, sectionFolded, toggleSectionFold, tlGroupByTag, setTlGroupByTag, TAG_CHIP_GEOM, TAG_CHIP_STYLE, TABGROUPS_KEY, TABGROUPS_DEFAULT_COLLAPSED, expandBar, expandBars, expandJudging, BAR_WIRE, JUDGING_WIRE, badgeFor, roundedPath, crossX, workAnchorOf, idleGaps, fmtSpan, dotLit, barLit, interpNow, shouldReanchorEdge, reanchorEdge, isFreshNowSample, barEndT, dragAxis, stripRompMarks, collapseRepeat, reqText, menuTop, offsetRect, viewVisible, viewLabel, viewMoreCount, viewToggleMember, viewTagUnion, lensAll, lensToggle, lensVisible, lensLabel, lensSummary, timelineLens, loadModelChoices, MODEL_CHOICES, EFFORT_CHOICES, CODEX_EFFORT_CHOICES, codexEffortChoices, codexModelsError };
+module.exports = { TimelinePanel, tlThinkingLabel, tlChipCandidates, tlRows, selBandRows, tagSections, tabGroupsState, sectionFolded, toggleSectionFold, tlGroupByTag, setTlGroupByTag, TAG_CHIP_GEOM, TAG_CHIP_STYLE, TABGROUPS_KEY, TABGROUPS_DEFAULT_COLLAPSED, expandBar, expandBars, expandJudging, BAR_WIRE, JUDGING_WIRE, badgeFor, roundedPath, crossX, workAnchorOf, idleGaps, fmtSpan, dotLit, barLit, interpNow, shouldReanchorEdge, reanchorEdge, isFreshNowSample, barEndT, dragAxis, stripRompMarks, collapseRepeat, reqText, menuTop, offsetRect, viewVisible, viewLabel, viewMoreCount, viewToggleMember, viewTagUnion, lensAll, lensToggle, lensVisible, lensLabel, lensSummary, timelineLens, loadModelChoices, MODEL_CHOICES, EFFORT_CHOICES, CODEX_EFFORT_CHOICES, codexEffortChoices, codexModelsError, laneBell };

@@ -3668,7 +3668,7 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `stacks`: every live thread's stack, keyed `"<ident> <kind>"`. The kind
   is the thread's name up to the naming convention's colon (`sdk` and
   `sdk-intr`, `sdk-fbcause` (a session reading a standing fallback's cause off its transcript at an attach) for a session's threads, `codex` for a Codex session's worker,
-  `end-host` for a session's end hook, `port-up` for a dial's port watch, `peer` for a postal peer loop,
+  `end-host` for a session's end hook, `end-cli` for the direct end of a CLI whose host could not confirm an end, `port-up` for a dial's port watch, `peer` for a postal peer loop, `push-pull` for a linked machine's notification puller,
   `romp-refused-mark` for the refused-echo mark a cut-off boot re-delivery writes aside), the
   target function for a thread the code left unnamed (`_ask_poll`,
   `_parent_watch`, `_update_check_loop`, `_tunnel_supervisor`,
@@ -6644,6 +6644,24 @@ On a touch screen each control in the chip row and the staged strip (Comment, St
 Send now, each staged message's x and the strip's collapse arrow) takes a tap area at least 44
 pixels each way, with none of them touching, while keeping its compact look.
 
+### Going to a commented passage
+
+A comment thread's tick on the chat's scroll rail takes you to its passage: the passage moves to the
+top of the view and flashes, all of it, then the thread opens beside it, below the passage (above it
+near the end of the conversation) and never over it. If the landing moves the passage under the box
+while it settles (something added under the last reply), the box steps just clear of it, unless the
+pointer is over the box or you are typing in it, in which case it steps aside once you leave it; the
+view scrolling never moves the box. Going to a passage also stops the chat following new text, so
+with the session still writing the passage and its thread stay where you are looking; the
+go-to-bottom arrow shows the new text below, and scrolling back to the bottom follows it again. A passage the page has not drawn or loaded yet is drawn or
+fetched first, and every collapsed section of its message that it sits in is unfolded; a part that
+still cannot be shown is said in the thread's box, and when that is the passage's start the landing
+goes to the section's heading. The quoted passage at the top of an open thread
+does the same, which helps once you have scrolled away, and so does the tinted rail line of a message
+with an unread reply. The comment arrows in the chat's corner land on the passage the same way
+without opening the thread. When the thread's words are no longer in its message, the message lands
+and the thread's box says so.
+
 ### Quoting and staging in a comment thread
 
 In a comment thread that takes replies (open, or relayed back to the session), a passage selected
@@ -6652,10 +6670,38 @@ box's rules: selecting again replaces the chip, holding ⌘ (Ctrl elsewhere) whi
 one, and the same text never lists twice. **⌘⏎** stages what is typed, with its chips, in a staged
 strip inside the thread's box (the message box's own strip, over the thread's own list); **⏎** sends
 everything staged and then what is in the box as one reply to the thread, each quote under
-`Replying to this part of the conversation:`. **⏎** on an empty box sends what is staged, and the
+`Replying to this part of the conversation:` (a few words of a sentence the way the message box sends
+them, [named, with their sentence](#a-highlight-shorter-than-a-sentence)). **⏎** on an empty box sends what is staged, and the
 strip's **Send now** sends it alone. **Esc** first drops the chips, then closes the box. The staged
 replies are kept per thread through a reload, and deleting the thread drops them. A resolved
 thread keeps its plain reply, and the new-comment box sends its comment on either key.
+
+### A comment thread that asks you something
+
+When a thread stops on a question or on a permission prompt, its box shows the same card the chat
+shows for a session's question, between the thread's messages and its reply box, and you answer it
+there: pick an option, or Allow or Deny a command. A question that takes your own answer turns the
+thread's reply box into its "add your own answer" field, as the message box does for a session's
+question; a reply you had started before the question arrived stays a reply. The thread's status
+line says **Needs you** meanwhile, and its highlight and its tick on the scroll rail wear the
+dashed needs-you ring an unread reply wears, until the question is answered. The question comes
+back after a reload, and the thread still gets no tab, no lane and no card of its own. A thread on a
+linked machine is answered the same way from this machine's dashboard: the answer, the stop and a model or effort pick go
+to the kernel that runs it. A linked machine whose kernel predates thread questions keeps the old note, which points at
+Break out. The thread's
+stop button shows where the chat's does: while it works, compacts or retries, and after its turn
+ends on an API error.
+
+### What a comment thread is doing
+
+An open thread's box shows what the chat shows for a session at work, each from the same parts: the
+"Thinking · 14s" line under its messages while it thinks, each running subagent's progress on its
+agent row, the background box with the commands, agents and watches it waits on, the context
+gauge beside its model and effort, and the API retry card while the API backs off. A thread that
+finished its turn but waits on a background command reads **Awaiting command**, never **Ready**.
+A click on the gauge compacts the thread; Stop on a background row stops that task in the thread.
+Reading at the bottom of the thread's messages, you stay at the bottom as these parts come and go,
+so a reply streams into view; scrolled up, you keep your place.
 
 ### Where typing, pasting and dictation go
 
@@ -6679,7 +6725,11 @@ three groups, each an up arrow, an icon naming what it steps through, and a down
 
 - **Unread replies** (red, a speech bubble with a dot): the comment threads whose reply you have not
   read yet. The group shows while any thread has one. The red badge on its corner is how many of
-  those replies sit off screen; a thread in view is not counted, since its highlight already shows.
+  those replies there are in the session, wherever they sit, so scrolling never changes it. It
+  changes when a thread does: opening one reads it, a new reply makes it unread, and resolving or
+  deleting one takes it off. A thread opened and closed at once stays read, on a linked machine
+  too: an update the kernel sent before it recorded the read never brings the reply back. A read
+  the kernel could not record is said in a notice, and the thread shows unread again.
 - **Comments** (the comment yellow, a speech bubble): every comment thread, read or not. The group
   shows while the session has any.
 - **Your messages** (the blue of your messages, a person): the messages you typed.
@@ -7040,7 +7090,10 @@ and for every linked machine's: the tab you were reading arrives whole and the o
 arrive as skeletons, so the first paint costs one transcript however many sessions are
 running. Each skeleton tab that loads, by a click or while the page is idle, costs the
 kernel that one tab. A page with no tab to show yet (a new browser profile) is sent
-every tab whole.
+every tab whole. A page whose connection drops before its first load finishes keeps
+the skeleton tabs on the next try too. If a linked machine's connection drops while
+its tabs are filling in, the other machines' tabs keep filling in, and its own resume
+when it reconnects.
 
 ![After a reconnect, the tab you were reading is back in full while the other tabs wait as skeletons](assets/guide/reconnect-skeleton-tabs.png){ width="32%" }
 ![Clicking a skeleton tab puts up the loader until its transcript arrives](assets/guide/reconnect-skeleton-click.png){ width="32%" }
@@ -7392,11 +7445,70 @@ mark. Hovering a mark gives the state and when it was reached.
 A comment thread's opening message wraps your comment in text written for the
 thread's agent: a line saying the thread was split off from the main
 conversation to ask about one part of it, then the passage you highlighted,
-quoted. Under your comment, the thread's box shows a one-line note, "What romp
+quoted, or for a few words of a sentence the words and the sentence they sit in.
+Under your comment, the thread's box shows a one-line note, "What romp
 sent with your comment"; opening it shows that text exactly as it was sent. It
 is read from the thread's record, or for a thread made before the record kept
 it, from the opening message itself, so it is there after a reload too. A thread
 whose opening message romp added nothing to shows no note.
+
+## A highlight shorter than a sentence
+
+A quote of a few words alone ("placement") does not say where they were, so a
+highlight shorter than a sentence goes out named, with the sentence it sits in.
+In the message box, and in a comment thread's reply box:
+
+```
+Replying to "placement" in this part of the conversation:
+> …We should revisit the placement of the legend before shipping the deck…
+```
+
+A comment thread's opening message does the same under its first line:
+`About "placement" in this part of the conversation:`, then the sentence.
+
+This applies to a few words (up to 100 characters) that are less than their
+sentence. The sentence is read from the message as the chat shows it, at the
+moment you select, without any button's text: it runs from the end of the
+sentence before the words to the end of the one they are in, within one
+paragraph, list item, heading or table cell. A line break in the message's source
+inside a paragraph counts as a space. A period after an abbreviation, an initial
+or an acronym (`Dr.`, `J.`, `U.S.`), and one or an ellipsis followed by a
+lowercase word (`etc. and`, `tried … then`), do not end a sentence. A `…` marks
+where the paragraph goes on before or after the sentence (after a `?` or `!` it
+follows a space, and an ellipsis already there is not doubled), a sentence longer
+than about 280 characters is cut to the words around the highlight, and when the
+words occur more than once in what is quoted, the one you highlighted is in bold.
+
+Code is not prose. A few words of a line of a code block are named over that
+line, never a sentence and never in bold. An inline code span is part of the
+sentence it sits in: double-clicking `max_retries` in "Set `max_retries` to 5
+before the next run." sends
+
+```
+Replying to "max_retries" in this part of the conversation:
+> Set max_retries to 5 before the next run.
+```
+
+A passage over several lines of a code block is quoted as those lines, with their
+line breaks, under the usual lead-in. A longer highlight, a whole sentence or
+more, a quote from the file viewer and a highlight in the editor go out as
+before, the passage alone. What the quote chip's preview shows is what is sent.
+
+## What a quote of the chat holds
+
+A quote of a passage of the chat holds the passage's text as the chat shows it,
+read at the moment you select. What is not the conversation's text is left out:
+a code block's Copy button and any other control, a tool row's label and its
+folded input and output, the IN and OUT labels of an open one, a notice's
+source label, a message's time, the contents of a closed fold (its summary
+stays), and anything the chat marks as unselectable. A block
+starts a new line and a paragraph or a message is a blank line apart; a code
+block's lines keep their line breaks; a table's cells are a tab apart.
+
+A quote longer than 4,000 characters is cut there and ends in `…`, in the
+message box, in a comment thread's reply box and in a comment thread's opening
+message alike. A comment's highlight is still found by the selection's own text,
+whole, so the cut changes only what is sent.
 
 ## What a relay sends
 
@@ -7624,10 +7736,10 @@ it is in the bottom-right cluster. A small card opens with a main switch, two
 switches indented under it, and a button:
 
 - **Notifications** is the main switch. Off silences every device and the
-  desktop of every machine you have attached; the bells on individual sessions
-  and cards are mutes under it. While it is off, the two switches beneath it are
-  dimmed but still work, so you can set a phone up first and switch everything
-  on when you are ready.
+  desktop of every machine you have attached, except for the sessions and cards
+  you set to **Notify me** yourself. While it is off, the two switches beneath it
+  are dimmed but still work, so you can set a phone up first and switch
+  everything on when you are ready.
 - **This device**, under it, turns them on for the phone or browser you are
   holding. The first time, the browser asks for permission. If you refuse, the
   row goes grey and tells you where to allow it again (on an iPhone, Settings,
@@ -7645,6 +7757,15 @@ switches indented under it, and a button:
   quiet: nothing there was waiting on you. With many sessions running this is
   still a lot of buzzing, so it is off unless you want it. A turn that ends by
   asking you something buzzes once, not twice.
+
+A session's own bell, **Notify me** or **Stop notifying** in its tab menu and its
+timeline lane, is a choice you make for that session, and it beats the two
+switches: a session set to Notify me notifies when a turn you started ends, or
+when it needs you or finishes a task, even with the switches off, and one set to
+Stop notifying stays quiet with them on. A session you never set follows the
+switches, and its menu row says so ("default: …") beside what that means. So with
+**Also when a turn finishes** off, turning Notify me on for a few sessions hears
+just those.
 - **Send a test notification** sends one notification to the device you are
   holding, whatever the switches say, and prints the push service's answer under
   the button, so you can see at once whether the phone is set up or why it is
@@ -7657,15 +7778,78 @@ switches indented under it, and a button:
 A restart of the kernel (an update deploys one) announces nothing by itself.
 What Romp has told you about is written down beside its other state, so the
 cards already waiting on you or already finished when it comes back stay
-quiet. A card that stops needing you and then needs you again is announced
+quiet. Turn ends that would have notified you while it was down are not sent
+one by one when it is back: one notification, **Romp: missed notifications**,
+says how many sessions finished turns meanwhile. That includes a turn a session
+finished while the kernel was down whose end the kernel only learns when it
+reconnects to the session (the session's own process kept running and held
+it), so the notification waits until the kernel has reconnected to every
+session it found running. A card that stops needing you and then needs you again is announced
 once, not at every turn, unless you acted on the card in between (answered
 it, resolved it, crossed it off) or it finished in the meantime.
+
+A phone set up on one machine also hears every linked machine you marked
+trusted, the same machines whose sessions that machine's dashboard shows. Its
+kernel asks each linked kernel for its notifications over the link the dashboard
+already uses (`GET /push/events`, a long-poll), so a session on a laptop you
+attached from the always-on box buzzes the phone set up at the box, under the
+box's switches. On the dashboard, a linked machine's session and card bells
+show what reaches the devices set up on the machine you are looking at: a bell
+you set stays as you set it, on that machine, and one you never touched follows
+this machine's main switch. A linked machine running an older romp keeps its own
+switches, and its bells say so when you hover them.
+
+Notifications are never late and never silently lost. While the link holds, each
+arrives as it happens. When the machine the phone is set up on may have missed
+some (it restarted, a linked machine restarted, or the link dropped), none of
+the missed ones arrives late: one notification titled **Romp: missed
+notifications** says what you missed and why, for example "laptop was
+unreachable for 38 min · 3 sessions finished turns, 1 needs you". A linked
+machine keeps the notifications it offers on disk (`push-feed.json` in its
+state directory), so its own restart, every update included, is counted like
+an outage: "laptop restarted · 1 session finished a turn", or nothing at all
+when nothing finished that would have reached you. The notification says that
+notifications may have been missed, without a number, when the count cannot be
+known: that record could not be read or written (the kernel says so in its log
+and starts a new one), or more notifications came than it keeps (256) while the
+link was gone. A session it cannot count is said on its own, after the count of
+the rest ("1 session finished a turn; more may have been missed"): one whose
+reconnection after the restart failed, or one whose session process is too old
+to report a finished turn it answered by itself (it does after eight minutes
+without romp) when the machine may have been down that long. The notification
+waits until the restarted machine has reconnected to every session it found
+running, however long that takes; notifications from after the restart arrive
+as usual meanwhile. Ending a session whose process no longer answers ends its
+claude process directly, said in the error center. A session whose own process
+stopped responding counts as one it cannot count, and if one is running but never answers the reconnect,
+the error center says the summary is waiting on it (ending that session lets it
+go). It counts only what your switches
+and bells would have let through, and says "may have been missed" only when
+something they allow could have been lost; when nothing could have, there is no
+notification, only a line in the kernel's log. A link that drops and comes back
+several times makes one such notification, sent once it holds again, and a
+machine that keeps restarting updates that one notification without a sound
+("restarted 3 times") until you open Romp on that device or its notifications
+flow normally again. Apple devices are not sent those updates, since an iPhone
+cannot replace a notification in place: what one missed is said by the next such
+notification it gets, or, if you open Romp there first or turn **This device**
+off there, as a **missed** entry in the Log. The machine keeps that record on
+disk until the dashboard confirms the entry is in its Log, so neither a reply
+lost on the way nor a restart of the machine (every update) loses it, and a
+restart does not make a notification you have not seen sound again. In one burst, at most 16 notifications arrive one by one; the rest are
+said in one more.
+
+A notification that replaces an earlier one without a sound (the card that
+follows a turn end's notification for the same session) takes the earlier one's
+place on Chrome and Firefox. An iPhone would show it beside the earlier one, so
+it is sent there only when it carries the app icon's needs-you count.
 
 Tapping a notification brings Romp forward on the session it was about. On an
 iPhone with the app already open in the background, the switch happens as the
 app comes forward; a notification you swipe away instead is read the same way,
-so the next time you open the app it may land on that session. With the app in
-front, nothing moves until you next come back to it.
+so the next time you open the app it may land on that session. When several are
+gone by then, it lands only if they were all about the same session. With the
+app in front, nothing moves until you next come back to it.
 
 The bell itself shows the state of the device you are looking at: lit when the
 main switch is on and this device is set up, and crossed out otherwise. Its
@@ -7700,7 +7884,8 @@ notification went to. A report on a valid id stamps that row's shown or tapped
 time, where the first stamp stands so a repeated report changes nothing, and
 records the worker's build string, which every report rewrites. A shown report
 also marks the older unsettled, untapped pushes for the same session on that
-device superseded, since the show replaced their notifications. And the
+device superseded, since the show replaced their notifications; on an Apple
+device, which shows each notification beside the last, it marks none. And the
 request's origin, read from its `Origin` header, else its `Referer`, else the
 forwarded headers or `Host`, is recorded on that device's subscription when
 none is on file; a recorded origin stands, and a different one is logged as a

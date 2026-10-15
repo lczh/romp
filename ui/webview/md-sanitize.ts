@@ -78,6 +78,19 @@ export function userContentTarget(root: ParentNode, id: string): Element | undef
     || Array.from(root.querySelectorAll("a[name]")).find((e) => { const v = e.getAttribute("name"); return v === own || v === id; });
 }
 
+/** The HTML spec's ancestor revealing steps, which the browser's fragment navigation runs before it scrolls and
+ *  scrollIntoView does not: every closed <details> whose content holds `target` is opened, and a `hidden="until-found"` on
+ *  the target or an ancestor is removed; both shapes pass the sanitizer (details, summary and hidden are kept). A target
+ *  inside a details' own <summary> is in view already and opens nothing, as in the browser. The chat's click delegate
+ *  (render.ts) runs it on what userContentTarget found, and a landing on a comment thread's passage on its highlight. */
+export function revealAncestors(target: Element): void {
+  for (let n: Element | null = target; n; n = n.parentElement) {
+    if ((n.getAttribute("hidden") || "").toLowerCase() === "until-found") n.removeAttribute("hidden");
+    const p = n.parentElement;
+    if (p && p.localName === "details" && n.localName !== "summary" && !p.hasAttribute("open")) p.setAttribute("open", "");
+  }
+}
+
 /** The one profile. Spread `RETURN_DOM: true` onto it to take the sanitized <body> back (sanitizeMd does). */
 export const MD_PURIFY: Config = {
   USE_PROFILES: { html: true, svg: true },

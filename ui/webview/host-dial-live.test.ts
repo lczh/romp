@@ -66,7 +66,8 @@ test("federation publishes the dial state through the pure rule and says when it
   assert.match(FED, /ws\.onclose = \(ev: CloseEvent\) => \{\n\s*this\.dialEvent\(conn\.host, false\);/, "…or on close");
   assert.match(FED, /new CustomEvent\("romp:hostDial", \{ detail: \{ host, dialing \} \}\)/);
   // the watchdog's abandon detaches the dying socket's onclose, so it must say the attempt ended itself
-  assert.match(FED, /c\.ws = null;\n\s*this\.dialEvent\(c\.host, false\);[^\n]*\n\s*this\.connect\(c\);/, "an abandoned dial ends the live state before the fresh dial begins");
+  // (…and says the drop itself, as onclose does: romp:hostRelayDown, the review of #247; federation-reconnect.test.ts runs it)
+  assert.match(FED, /c\.ws = null;\n\s*this\.dialEvent\(c\.host, false\);[^\n]*\n\s*this\.relayDown\(c\.host\);[^\n]*\n\s*this\.connect\(c\);/, "an abandoned dial ends the live state before the fresh dial begins");
   assert.ok((FED.match(/this\.dialEvent\(/g) || []).length >= 5, "the three socket transitions, the watchdog's abandon and the poll's change dispatch it, nothing timed");
 });
 

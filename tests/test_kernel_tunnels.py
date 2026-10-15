@@ -385,5 +385,54 @@ class SshHostSafety(unittest.TestCase):
         self.assertEqual(argv[-2], "--", "a `--` separator immediately precedes the host")
 
 
+class TunnelRoutesRefuseAHostTheGuardRefuses(unittest.TestCase):
+    """POST /tunnels/update, /tunnels/pull and /tunnels/start take the host from the request body. Through the
+    real Handler on a loopback server, each answers a host _safe_ssh_host refuses with 502, ok false and detail
+    'invalid host', and runs no subprocess. Synthetic host; subprocess is stubbed, so nothing launches."""
+
+    REFUSED = "bad host"      # a name carrying a space, the refused form the function-level tests use
+
+    def setUp(self):
+        self.calls = []
+        saved = (km.subprocess.run, km.subprocess.Popen, km._update_remote)
+
+        def restore():
+            km.subprocess.run, km.subprocess.Popen, km._update_remote = saved
+        self.addCleanup(restore)
+
+        def run(argv, **kw):
+            self.calls.append(("run", list(argv)))
+            return km.subprocess.CompletedProcess(argv, 1, "", "")
+
+        def popen(argv, **kw):
+            self.calls.append(("popen", list(argv)))
+        km.subprocess.run, km.subprocess.Popen = run, popen
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.addCleanup(self.srv.server_close)
+        self.addCleanup(self.srv.shutdown)
+
+    def _assert_refused(self, path):
+        status, body = _req(self.port, "POST", path, {"host": self.REFUSED})
+        self.assertEqual(status, 502, "%s answers a refused host with 502: %r" % (path, body))
+        self.assertIs(body.get("ok"), False)
+        self.assertEqual(body.get("detail"), "invalid host")
+        self.assertEqual(self.calls, [], "%s runs no subprocess for a refused host" % path)
+
+    def test_the_update_route_refuses_the_host(self):
+        self._assert_refused("/tunnels/update")
+
+    def test_the_pull_route_refuses_the_host(self):
+        self._assert_refused("/tunnels/pull")
+
+    def test_the_start_route_refuses_the_host_before_the_update_leg(self):
+        def update_spy(host, head=None):
+            self.calls.append(("update_remote", [host]))
+            return False, "stub: the update leg ran"
+        km._update_remote = update_spy
+        self._assert_refused("/tunnels/start")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

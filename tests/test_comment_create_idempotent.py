@@ -2,7 +2,7 @@
 """T289: a comment CREATE is idempotent on its own identity.
 
 A create parked for transcript lag is retried by BOTH the kernel (the pusher's _retry_parked_creates) and
-the client (its frame-keyed re-post), and a create whose ack was lost is sent again by the popover; before
+the client (its re-post on a reconnect), and a create whose ack was lost is sent again by the popover; before
 this the second copy either collided on its explicit name and was refused with the create toast the user
 saw, or, with the name now left to the kernel, would have minted a SECOND thread for one comment. The
 kernel remembers each create it completed and answers a repeat with the SAME thread's ack; a lag-parked
@@ -59,6 +59,12 @@ def aline(t, text, uuid, parent=None):
 class FakeBackend:
     def __init__(self):
         self.calls = []
+        # the live tail (2026-10-11): the lagging anchor these tests comment on is a reply that STREAMED and whose record the
+        # CLI has not written yet, so it is a work atom of the session's tail, the event a park waits on (_anchor_streaming)
+        self.streaming = {"a9"}
+
+    def live_atoms(self, sid):
+        return [{"type": "assistant", "uuid": u} for u in sorted(self.streaming)]
 
     def fork(self, name, parent_sid, cut_uuid="", bg="", fg="", sid=None, thread_of="", model="", effort="", fast=""):
         self.calls.append(("fork", name)); return sid
@@ -79,7 +85,7 @@ class FakeBackend:
         self.calls.append(("promote", name)); return True
 
 
-class CreateIsIdempotent(unittest.TestCase):
+class _Harness(unittest.TestCase):
     def setUp(self):
         self._saved = jd.STATE
         self._saved_proj = jd.PROJECTS
@@ -98,6 +104,7 @@ class CreateIsIdempotent(unittest.TestCase):
         # failing the next one too. Under the lock every writer of the three memos takes.
         with km._create_lock:
             km._recent_creates.clear(); km._inflight_creates.clear(); km._parked_creates.clear()
+            km._dropped_creates.clear()                  # a dropped gesture's answer (2026-10-11) is a memo of the same kind
         self.now = int(time.time())
         cdir = str(Path(self._td) / "work")
         self.proj = jd._proj_dir(cdir)
@@ -129,6 +136,11 @@ class CreateIsIdempotent(unittest.TestCase):
         self.client = {"send": lambda s: self.sent.append(json.loads(s)), "app": "chat"}
 
     def tearDown(self):
+        # …and they end empty too (review of PR 211, 2026-10-11): a drop no fake pane acknowledged stays on offer, and every
+        # module in the run shares this kernel, so another module's pane saying ready would be handed this test's dialog
+        with km._create_lock:
+            km._recent_creates.clear(); km._inflight_creates.clear(); km._parked_creates.clear()
+            km._dropped_creates.clear()
         (km._sdk, km.Sessions.backend_for, km._sdk_ready, km._sessions, km._reveal_chat_for,
          km._push_session_now, km._live_map, km._kernel_knows, km._comment_create_spawn) = self._saved_fns
         km.NAMES = self._saved_km_names
@@ -158,6 +170,57 @@ class CreateIsIdempotent(unittest.TestCase):
     def _acks(self):
         return [f for f in self.sent if f.get("type") == "commentCreated"]
 
+
+class ShortPassageSentence(_Harness):
+    """A passage shorter than a sentence (the user 2026-10-14): the page sends the sentence it sits in with the create
+    (`context`), read from the rendered message at the selection, and the thread's opener names the words and quotes it.
+    The kernel takes the page's sentence; it never reconstructs one. Synthetic prose."""
+    SENTENCE = "Use exponential backoff with a jitter of ten percent."
+
+    def _create_with(self, uuid, exact, context):
+        msg = {"type": "commentCreate", "id": PARENT, "uuid": uuid, "exact": exact, "text": "Why ten?", "name": "",
+               "createId": "c-" + uuid}
+        if context is not None:
+            msg["context"] = context
+        return self._drive(msg)
+
+    def test_the_create_carries_the_pages_sentence_into_the_opener(self):
+        self._create_with("a1", "jitter", self.SENTENCE)
+        row = self._rows()[0]
+        self.assertTrue(row["sent"].endswith('About "jitter" in this part of the conversation:\n\n> ' + self.SENTENCE),
+                        row["sent"])
+        self.assertEqual(row["exact"], "jitter", "the passage stays the highlighted words")
+
+    def test_a_parked_create_keeps_the_sentence_when_it_lands(self):
+        self._create_with("a9", "jitter", "\u2026Add a jitter to the backoff\u2026")
+        self.assertEqual(len(km._parked_creates), 1)
+        p = Path(km._sessions(0)[0]["path"])
+        with p.open("a") as fh:
+            fh.write(json.dumps(aline(self.now - 300, "Then add a jitter to the backoff. Cap it too.", "a9", parent="a1")) + "\n")
+        km._retry_parked_creates()
+        self.assertEqual(km._parked_creates, [])
+        self.assertIn('About "jitter" in this part of the conversation:\n\n> \u2026Add a jitter to the backoff\u2026',
+                      self._rows()[0]["sent"])
+
+    def test_a_code_passages_lines_reach_the_opener_and_survive_the_park(self):
+        lines = "def refill(cache):\n    return cache.load()"
+        msg = {"type": "commentCreate", "id": PARENT, "uuid": "a9", "exact": "def refill(cache):    return cache.load()",
+               "text": "Why load?", "name": "", "createId": "c-lines", "shown": lines}
+        self._drive(msg)
+        self.assertEqual(len(km._parked_creates), 1)
+        p = Path(km._sessions(0)[0]["path"])
+        with p.open("a") as fh:
+            fh.write(json.dumps(aline(self.now - 300, "def refill(cache): return cache.load()", "a9", parent="a1")) + "\n")
+        km._retry_parked_creates()
+        self.assertTrue(self._rows()[0]["sent"].endswith(km._COMMENT_FRAME_HEAD + "\n\n> def refill(cache):\n>     return cache.load()"),
+                        self._rows()[0]["sent"])
+
+    def test_a_frame_without_one_quotes_the_passage_as_before(self):
+        self._create_with("a1", "Use exponential backoff with a jitter of ten percent.", None)
+        self.assertTrue(self._rows()[0]["sent"].endswith(km._COMMENT_FRAME_HEAD + "\n\n> " + self.SENTENCE))
+
+
+class CreateIsIdempotent(_Harness):
     def test_the_same_create_twice_yields_one_thread_and_two_acks_naming_it(self):
         self._create(); self._create()
         self.assertEqual(len(self._rows()), 1, "one comment, one thread")
@@ -200,6 +263,59 @@ class CreateIsIdempotent(unittest.TestCase):
         acks = self._acks()
         self.assertTrue(acks and acks[-1]["tid"] == rows[0]["tid"], acks)
         self.assertEqual(self._warns(), [])
+
+    def _write_unrelated(self, n, parent):
+        """`n` records that are not the anchor, appended to the parent's transcript, each followed by two retry passes (the second
+        sees no new write); returns the last record's uuid, the chain's new leaf."""
+        p = Path(km._sessions(0)[0]["path"])
+        for i in range(n):
+            u = "w%02d" % i
+            with p.open("a") as fh:
+                fh.write(json.dumps(aline(self.now - 400 + i, "the notes-api step %d" % i, u, parent=parent)) + "\n")
+            parent = u
+            km._retry_parked_creates()
+            km._retry_parked_creates()
+        return parent
+
+    def test_a_parked_creates_budget_counts_its_transcripts_writes_not_the_retries(self):
+        # (2026-10-11) the budget counted retries, sized for pusher cycles, and every needFull's repair ran the retry too, so a
+        # page's idle prefetch (37 repairs on the measured board) dropped a parked create in seconds, before its anchor landed:
+        # a silent loss. A try is spent now only when the transcript was written since the last one, the event the park waits on
+        km._parked_creates.clear()
+        self._create(uuid="a9")
+        self.assertEqual(len(km._parked_creates), 1, "premise: the anchor is not on disk yet, so the create parked")
+        for _ in range(km._PARK_MAX_TRIES + 10):         # more passes than the budget, the transcript quiet
+            km._retry_parked_creates()
+        self.assertEqual([pk["tries"] for pk in km._parked_creates], [0], "a quiet transcript spends nothing: the park stands")
+        leaf = self._write_unrelated(km._PARK_MAX_TRIES - 1, "a1")
+        self.assertEqual([pk["tries"] for pk in km._parked_creates], [km._PARK_MAX_TRIES - 1],
+                         "one try per write that still lacks the record, however many passes ran")
+        p = Path(km._sessions(0)[0]["path"])
+        with p.open("a") as fh:                            # the record lands at last
+            fh.write(json.dumps(aline(self.now - 100, "Add a jitter to the backoff.", "a9", parent=leaf)) + "\n")
+        km._retry_parked_creates()
+        self.assertEqual(km._parked_creates, [], "created once it landed")
+        self.assertEqual(len(self._rows()), 1)
+
+    def test_a_parked_create_leaves_the_park_after_the_budgets_writes_without_its_record(self):
+        km._parked_creates.clear()
+        self._create(uuid="a9")
+        self.assertEqual(len(km._parked_creates), 1)
+        self._write_unrelated(km._PARK_MAX_TRIES - 1, "a1")
+        self.assertEqual(len(km._parked_creates), 1, "one write short of the budget: still parked")
+        with km._clients_lock:
+            saved_clients = list(km._clients)
+            km._clients[:] = [self.client]
+        try:
+            self._write_unrelated(1, "w%02d" % (km._PARK_MAX_TRIES - 2))
+        finally:
+            with km._clients_lock:
+                km._clients[:] = saved_clients
+        self.assertEqual(km._parked_creates, [], "the budget's last write without the record: the record isn't coming")
+        self.assertEqual(self._rows(), [])
+        last = [f for f in self.sent if f.get("type") == "commentCreateFailed"][-1]
+        self.assertEqual((last["transient"], last.get("dropped")), (False, True),
+                         "the drop is said to the page, never a silent loss (review of PR 209, 2026-10-11)")
 
     def test_a_repost_arriving_while_the_pushers_retry_creates_is_not_a_second_thread(self):
         # THE RACE (review, 2026-09-09): the pusher sends the chat frame before it retries parked creates,
@@ -417,6 +533,628 @@ class CreateIsIdempotent(unittest.TestCase):
         self.assertFalse(last("commentCreateFailed")["transient"])
         self._create(text="An older client", create_id=None)
         self.assertEqual(last("commentCreated")["createId"], "", "a frame with no id is answered with an empty one")
+
+
+
+WORDS = "Why a ten percent jitter and not a fixed delay?"
+
+
+class ParkEndsInAnAnswer(_Harness):
+    """A parked create ends in an answer every page hears, on the event it waits for (review of PR 209, 2026-10-11).
+
+    The park waits for its anchor's record, and that record comes while the anchor is a streamed message the CLI has not
+    written (a work atom of the session's live tail) or not at all: an atom leaves the tail only once its record is on disk
+    or its turn is over. Keyed on the transcript's writes alone, a quiet session's park (its turn over, nothing written)
+    waited forever, never dropped and never said, and the page's own give-up counted that session's frames, so its mark
+    pended forever too; where the page did give up, it handed the words back while the park could still make the thread
+    later, and a user who sent them again got two threads; after a reload nothing said the drop at all. Now the first retry
+    that finds the anchor gone from the tail and the record still missing drops the park, out loud: the typed failure to
+    every page, a dialog with the words to the page that sent it (else one watching the session), the words verbatim in
+    undelivered.jsonl, one log line without them. The drop is the gesture's one answer: nothing creates it later."""
+
+    def setUp(self):
+        super().setUp()
+        with km._clients_lock:
+            saved = list(km._clients)
+            km._clients[:] = [self.client]               # the page that sent it, connected
+
+        def restore():
+            with km._clients_lock:
+                km._clients[:] = saved
+        self.addCleanup(restore)
+
+    def _retry(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            km._retry_parked_creates()
+        return buf.getvalue()
+
+    def _undelivered(self):
+        p = jd.STATE / "undelivered.jsonl"
+        return [json.loads(ln) for ln in p.read_text().splitlines()] if p.exists() else []
+
+    @staticmethod
+    def _of(frames, kind, cid):
+        return [f for f in frames if f.get("type") == kind and (cid is None or f.get("createId") == cid)]
+
+    def test_a_quiet_sessions_park_ends_once_its_anchor_stops_streaming(self):
+        # on main: the park stood through every retry once the turn was over (a quiet transcript spends nothing), forever
+        self._create(uuid="a9", create_id="g-quiet", text=WORDS)
+        self.assertEqual(len(km._parked_creates), 1, "premise: parked while the reply streams and its record lags")
+        for _ in range(5):
+            self._retry()
+        self.assertEqual(len(km._parked_creates), 1, "the reply still streams: its record is coming, the park waits")
+        self.be.streaming.clear()                        # the turn ended: its atom retired, and no record was ever written
+        log = self._retry()
+        self.assertEqual(km._parked_creates, [], "the next retry ends the park, with not one write to the transcript")
+        nack = self._of(self.sent, "commentCreateFailed", "g-quiet")[-1]
+        self.assertEqual((nack["transient"], nack.get("dropped"), nack["text"]), (False, True, km.ANCHOR_GONE_ERR),
+                         "the page's hold ends on the kernel's answer: its mark goes and the words come back")
+        errs = self._of(self.sent, "err", None)
+        self.assertEqual(len(errs), 1, "one dialog, on the page that sent it")
+        self.assertEqual((errs[0]["copy"], errs[0]["sid"]), (WORDS, PARENT), "the words in its copy slot, for its session")
+        self.assertIn("web", errs[0]["text"], "it names the session")
+        self.assertIn("comment create dropped (aaaaaaaa, session web, create g-quiet)", log, "the kernel log says it")
+        self.assertNotIn(WORDS, log, "never the words in the log")
+        row = self._undelivered()[-1]
+        self.assertEqual((row["op"], row["sid"], row["createId"], row["text"]), ("commentCreate", PARENT, "g-quiet", WORDS),
+                         "the words verbatim in undelivered.jsonl")
+        self.assertEqual(self._rows(), [])
+
+    def test_a_lag_answer_for_an_anchor_that_is_not_streaming_is_refused_at_the_door(self):
+        # a passage between two /clears, a reply salvaged after the CLI discarded it, an unreadable first transcript: the
+        # record is not coming, so nothing is parked to wait on it (on main it parked, and on a quiet session for good)
+        self.be.streaming.clear()
+        self._create(uuid="a9", create_id="g-gone", text=WORDS)
+        self.assertEqual(km._parked_creates, [], "nothing to wait for: nothing parked")
+        nack = self._of(self.sent, "commentCreateFailed", "g-gone")[-1]
+        self.assertEqual((nack["transient"], nack["text"]), (False, km.ANCHOR_GONE_ERR))
+        self.assertIn(km.ANCHOR_GONE_ERR, self._warns(), "a real refusal, said at the gesture like any other")
+
+    def test_after_the_drop_nothing_makes_the_thread_later_and_the_words_sent_again_make_one(self):
+        # on main the page gave up on its own count while the park stood, and the park made the thread later: with the words
+        # sent again, two threads for one comment. The drop is the gesture's answer now, whatever turns up after it
+        self._create(uuid="a9", create_id="g-late", text=WORDS)
+        self.be.streaming.clear()
+        self._retry()
+        self.assertEqual(km._parked_creates, [], "premise: dropped, the words handed back")
+        p = Path(km._sessions(0)[0]["path"])
+        with p.open("a") as fh:                          # the record turns up after all
+            fh.write(json.dumps(aline(self.now - 300, "Add a jitter to the backoff.", "a9", parent="a1")) + "\n")
+        self._retry()
+        self._create(uuid="a9", create_id="g-late", text=WORDS)   # the page's re-post, crossing the drop on the wire
+        self.assertEqual(self._rows(), [], "no late thread, from the pusher or from the re-post")
+        nack = self._of(self.sent, "commentCreateFailed", "g-late")[-1]
+        self.assertEqual((nack["transient"], nack.get("dropped")), (False, True), "the re-post hears the drop again")
+        self.assertEqual(len(self._of(self.sent, "err", None)), 1, "…and is not shown its dialog a second time")
+        self._create(uuid="a9", create_id="g-again", text=WORDS)  # the user sends the handed-back words: a new gesture
+        self.assertEqual(len(self._rows()), 1, "exactly one thread")
+
+    def test_a_drop_reaches_the_page_open_after_a_reload_with_the_words(self):
+        # on main the drop said nothing to anyone: the reloaded page held no record of the create, and the park went silently
+        self._create(uuid="a9", create_id="g-reload", text=WORDS)
+        self.client["alive"] = False                     # the page reloads: the socket that sent the create is gone
+        fresh_sent = []
+        # …and its bundle said ready: a socket whose page is still loading is no pick for a dialog (review of PR 218)
+        fresh = {"send": lambda s: fresh_sent.append(json.loads(s)), "app": "chat", "alive": True, "active": PARENT,
+                 "ready": True}
+        with km._clients_lock:
+            km._clients[:] = [self.client, fresh]
+        self.be.streaming.clear()
+        before = len(self.sent)
+        self._retry()
+        errs = self._of(fresh_sent, "err", None)
+        self.assertEqual(len(errs), 1, "the page open now is told: %r" % fresh_sent)
+        self.assertEqual((errs[0]["copy"], errs[0]["sid"], errs[0]["title"]), (WORDS, PARENT, "That comment did not start a thread"),
+                         "with the words to copy back, for its session")
+        self.assertEqual([f.get("dropped") for f in self._of(fresh_sent, "commentCreateFailed", "g-reload")], [True])
+        self.assertEqual(self.sent[before:], [], "the dead socket is sent nothing")
+        self.assertEqual(self._undelivered()[-1]["text"], WORDS)
+
+    def test_a_drop_no_pane_heard_is_shown_to_the_page_when_it_reposts(self):
+        # no page connected at the drop (a phone asleep): the reopened page re-posts the create it still holds, and the
+        # door shows it the dialog the drop could not deliver, once
+        self._create(uuid="a9", create_id="g-unheard", text=WORDS)
+        with km._clients_lock:
+            km._clients[:] = []
+        self.client["alive"] = False
+        self.be.streaming.clear()
+        self._retry()
+        self.assertEqual(km._parked_creates, [])
+        self.client["alive"] = True
+        self.sent.clear()
+        self._create(uuid="a9", create_id="g-unheard", text=WORDS)
+        self.assertEqual([f["type"] for f in self.sent], ["commentCreateFailed", "err"])
+        self.assertEqual((self.sent[0].get("dropped"), self.sent[1]["copy"]), (True, WORDS))
+        self.sent.clear()
+        self._create(uuid="a9", create_id="g-unheard", text=WORDS)
+        self.assertEqual([f["type"] for f in self.sent], ["commentCreateFailed"], "shown once")
+        self.assertEqual(self._rows(), [])
+
+
+class _Pane(dict):
+    """A connected pane as the kernel holds it: its socket's frames land in `got`. `ok=False` is a socket whose sends fail."""
+    def __init__(self, app="chat", active=PARENT, ok=True):
+        super().__init__(app=app, alive=True, active=active)
+        self.got = []
+
+        def send(s):
+            if not ok:
+                raise OSError("the socket is gone")
+            self.got.append(json.loads(s))
+        self["send"] = send
+
+    def of(self, kind):
+        return [f for f in self.got if f.get("type") == kind]
+
+
+class _HandlerSelf:
+    """The handler's `self` for Handler._dispatch_ws: the ready arm's connect push is not under test here."""
+    def _push_one(self, client, only=None):
+        pass
+
+
+class _PaneHarness(_Harness):
+    """Panes connected to the kernel as it holds them (_Pane), the door's create jobs held until run (_run_jobs), and the
+    ready arm driven for real (_ready)."""
+
+    def setUp(self):
+        super().setUp()
+        with km._clients_lock:
+            saved = list(km._clients)
+            km._clients[:] = []
+
+        def restore():
+            with km._clients_lock:
+                km._clients[:] = saved
+        self.addCleanup(restore)
+        self.jobs = []
+        km._comment_create_spawn = lambda target, args: self.jobs.append((target, args))   # held: the page reconnects first
+
+    def _connect(self, *panes):
+        with km._clients_lock:
+            km._clients[:] = list(panes)
+
+    def _drive_on(self, client, msg):
+        with contextlib.redirect_stderr(io.StringIO()):
+            return km._drive(msg, client)
+
+    def _create_on(self, client, uuid, cid, text=WORDS):
+        return self._drive_on(client, {"type": "commentCreate", "id": PARENT, "uuid": uuid, "exact": "exponential backoff",
+                                       "text": text, "name": "", "createId": cid})
+
+    def _run_jobs(self):
+        with contextlib.redirect_stderr(io.StringIO()):
+            while self.jobs:
+                target, args = self.jobs.pop(0)
+                target(*args)
+
+    def _drop_unheard(self, cid="g-unseen"):
+        """A parked create dropped while no pane is connected (a phone asleep, the page reloaded): the dialog reaches no
+        one, and the page that held the create is gone, so no re-post will ever come."""
+        sender = _Pane()
+        self._connect(sender)
+        self._create_on(sender, "a9", cid)
+        self._run_jobs()
+        self.assertEqual(len(km._parked_creates), 1, "premise: parked while the reply streams")
+        sender["alive"] = False
+        self._connect()
+        self.be.streaming.clear()
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._retry_parked_creates()
+        self.assertEqual(km._parked_creates, [], "premise: dropped")
+        self.assertEqual(sender.of("err"), [], "premise: no pane drew it")
+
+    def _ready(self, pane):
+        self._connect(*[c for c in km._clients if c is not pane], pane)
+        with contextlib.redirect_stderr(io.StringIO()):
+            km.Handler._dispatch_ws(_HandlerSelf(), {"type": "ready"}, pane)
+
+
+class OutcomeReachesThePageWhereverItIs(_PaneHarness):
+    """A create's outcome reaches the page that holds it on whatever socket it holds now, and a drop's dialog counts as told
+    only once a page has drawn it (review of PR 211, 2026-10-11).
+
+    The door's create runs on a thread of its own and can take seconds (a large transcript's cut, the fork's start). A page
+    whose socket dropped and reopened meanwhile re-posted the create on the new socket and was answered busy, the transient
+    answer that keeps its mark; the job then answered the socket that SENT it, which was dead, so a refusal left the mark
+    pending until the next reconnect or a reload. A dropped park's dialog counted as told the moment a socket took the write,
+    so a stalled socket swallowed it and nothing showed it again; and with no pane connected at the drop, the words were in
+    undelivered.jsonl and the log alone, with no dialog and no Log entry anywhere."""
+
+    def _reconnect_mid_job(self, uuid, cid):
+        """The create is sent, its job starts, and the page's socket drops and reopens before the job ends: the shim's
+        romp:wsup re-posts the held create on the new socket, which the door answers busy while the job holds it."""
+        old = _Pane()
+        self._connect(old)
+        self._create_on(old, uuid, cid)
+        self.assertEqual(len(self.jobs), 1, "premise: the create's job is running")
+        old["alive"] = False                             # the socket dropped (Handler._ws's finally)
+        new = _Pane()
+        self._connect(new)
+        self._create_on(new, uuid, cid)                  # the page's re-post on the reopened socket
+        self.assertEqual([(f["transient"], f["createId"]) for f in new.of("commentCreateFailed")], [(True, cid)],
+                         "premise: answered busy, the mark kept while the job runs")
+        self._run_jobs()
+        return old, new
+
+    def test_a_thread_made_while_the_page_reconnected_reaches_it_on_the_new_socket(self):
+        old, new = self._reconnect_mid_job("a1", "g-mid-ok")
+        acks = new.of("commentCreated")
+        self.assertEqual([a["createId"] for a in acks], ["g-mid-ok"],
+                         "the thread's answer reaches the page on the socket it holds now: %r" % new.got)
+        self.assertEqual(acks[0]["tid"], self._rows()[0]["tid"])
+        self.assertEqual(len(self._rows()), 1)
+
+    def test_a_refusal_made_while_the_page_reconnected_reaches_it_with_the_reason(self):
+        self.be.streaming.clear()                        # the anchor is not coming: the job refuses it outright
+        old, new = self._reconnect_mid_job("a9", "g-mid-refused")
+        last = new.of("commentCreateFailed")[-1]
+        self.assertEqual((last["createId"], last["transient"], last["text"]), ("g-mid-refused", False, km.ANCHOR_GONE_ERR),
+                         "the refusal ends the page's hold on its new socket, its mark gone and the words back: %r" % new.got)
+        self.assertIs(last.get("say"), True, "and that page, sent no warn, is told to say the reason itself")
+        self.assertEqual(new.of("warn"), [], "no warn on a socket the create was not sent on")
+        self.assertEqual(km._parked_creates, [])
+
+    def test_a_refusal_reaches_the_sending_page_as_before_and_other_pages_hear_it_quietly(self):
+        sender, other = _Pane(), _Pane()
+        self._connect(sender, other)
+        self.be.streaming.clear()
+        self._create_on(sender, "a9", "g-refused")
+        self._run_jobs()
+        self.assertEqual([f["text"] for f in sender.of("warn")], [km.ANCHOR_GONE_ERR], "the sender is warned, as before")
+        self.assertNotIn("say", sender.of("commentCreateFailed")[-1], "…so its own copy carries no second telling")
+        self.assertIs(other.of("commentCreateFailed")[-1].get("say"), True,
+                      "another page holds no such create and ignores it; were it the holder, it would say why")
+
+    def test_a_drop_no_pane_heard_surfaces_on_the_next_pane_that_listens(self):
+        self._drop_unheard()
+        page = _Pane()
+        self._ready(page)                                # a page opens (the reload, the phone waking): its bundle says ready
+        errs = page.of("err")
+        self.assertEqual(len(errs), 1, "the drop's dialog reaches the next page that listens: %r" % page.got)
+        self.assertEqual((errs[0]["copy"], errs[0]["sid"], errs[0]["createId"]), (WORDS, PARENT, "g-unseen"),
+                         "with the words to copy back, for its session, naming the create its acknowledgement answers")
+        other = _Pane()
+        self._ready(other)
+        self.assertEqual(other.of("err"), [], "one pane at a time: a live pane holds it until it acknowledges or closes")
+
+    def test_a_drop_counts_as_told_only_once_a_pane_acknowledges_it(self):
+        stalled = _Pane()                                # its peer stopped reading: writes still enqueue, nothing is drawn
+        self._connect(stalled)
+        self._create_on(stalled, "a9", "g-stalled")
+        self._run_jobs()
+        self.be.streaming.clear()
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._retry_parked_creates()
+        self.assertEqual(len(stalled.of("err")), 1, "premise: the write went to the socket that sent the create")
+        self.assertFalse(km._dropped_creates[(PARENT, "g-stalled")]["told"], "a socket write is not a page seeing it")
+        stalled["alive"] = False                         # the page redials (_register_ws_client retires the twin socket)
+        page = _Pane()
+        self._connect(page)
+        self._create_on(page, "a9", "g-stalled")         # its re-post on the reopened socket
+        self.assertEqual([f["type"] for f in page.got], ["commentCreateFailed", "err"],
+                         "the re-post hears the drop and is shown the dialog the stalled socket swallowed")
+        self._create_on(page, "a9", "g-stalled")
+        self.assertEqual(len(page.of("err")), 1, "a live pane holds it: not shown twice while it is up")
+        with contextlib.redirect_stderr(io.StringIO()):
+            km.Handler._dispatch_ws(_HandlerSelf(), {"type": "commentDropSeen", "id": PARENT, "createId": "g-stalled"}, page)
+        self.assertTrue(km._dropped_creates[(PARENT, "g-stalled")]["told"], "the page drew it and said so: told")
+        page["alive"] = False
+        later = _Pane()
+        self._ready(later)
+        self.assertEqual(later.of("err"), [], "a drop a page acknowledged is offered to no one again")
+        self.assertEqual(self._rows(), [])
+
+    def test_a_pane_that_closes_without_acknowledging_hands_the_dialog_to_one_still_connected(self):
+        self._drop_unheard("g-handed-on")
+        first, second = _Pane(), _Pane(active="")
+        self._ready(first)
+        self._ready(second)
+        self.assertEqual((len(first.of("err")), len(second.of("err"))), (1, 0), "premise: one pane holds it")
+        first["alive"] = False                           # its socket closes before the page drew it (Handler._ws's finally)
+        self._connect(second)
+        km._reoffer_drops_of(first)
+        self.assertEqual([e["createId"] for e in second.of("err")], ["g-handed-on"],
+                         "the pane still connected is shown it; it never waits for a pane that may not come back")
+
+    def test_the_listen_events_offer_untold_drops_and_a_close_hands_them_on(self):
+        import inspect
+        src = inspect.getsource(km.Handler._dispatch_ws)
+        arm = src[src.find('msg.get("type") == "ready"'):]
+        self.assertLess(arm.index("_consume_pending_reveal(client)"), arm.index("_offer_untold_drops(client, fresh=True)"),
+                        "the ready arm offers them where it consumes a parked reveal: the pane listens from there, and holds "
+                        "nothing it was sent before (review of PR 218)")
+        mod = Path(km.__file__).read_text() if getattr(km, "__file__", None) else inspect.getsource(km)
+        for name in ("_push", "_push_session_now", "_confirm_close_now"):   # read from the file: the harness stubs one of them
+            i = mod.index("\ndef %s(" % name)
+            s = mod[i:mod.index("\ndef ", i + 1)]
+            self.assertLess(s.index('_consume_pending_reveal(c, why="the pane\'s redial")'), s.index("_offer_untold_drops(c)"),
+                            name + ": a redial's first strip, the ready a redial never posts")
+        s = inspect.getsource(km.Handler._ws)
+        self.assertLess(s.index("_clients.remove(client)"), s.index("_reoffer_drops_of(client)"),
+                        "a closed socket hands on what it held, once it is out of the pick")
+
+
+class DropsReachAPageThatListens(_PaneHarness):
+    """A dropped create's dialog goes only to a pane whose bundle listens, and survives a kernel restart until a page draws
+    it (review of PR 218, 2026-10-11).
+
+    The fallback pick (_one_err_pane) took any connected pane, and a page whose bundle was still loading could win it on
+    lastIn: the frame vanished into a document with no listener, that pane held the drop, and at its ready its own offer
+    was refused because a live pane, itself, held it, so the drop stayed untold until it closed. And the memo lived in
+    memory alone: a drop with no page open, then a restart before one opened, left undelivered.jsonl and the log as its
+    only record, and a page that still held the create re-posted it to a kernel that no longer knew the drop."""
+
+    def _park(self, cid):
+        sender = _Pane()
+        self._connect(sender)
+        self._create_on(sender, "a9", cid)
+        self._run_jobs()
+        self.assertEqual(len(km._parked_creates), 1, "premise: parked while the reply streams")
+        sender["alive"] = False                          # the page that sent it is gone
+        return sender
+
+    def _drop_now(self):
+        self.be.streaming.clear()
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._retry_parked_creates()
+        self.assertEqual(km._parked_creates, [], "premise: dropped")
+
+    def _restart(self):
+        """The kernel restarts: the memo in memory is gone and the boot restores what the last kernel kept."""
+        with km._create_lock:
+            km._dropped_creates.clear()
+        with contextlib.redirect_stderr(io.StringIO()):
+            return km._dropped_creates_load()
+
+    def test_the_fallback_pick_skips_a_pane_whose_bundle_has_not_said_ready(self):
+        self._park("g-loading")
+        loading, page = _Pane(), _Pane()
+        loading["lastIn"] = 200                          # the shim's frames: a socket that answers, its bundle still loading
+        page["ready"], page["lastIn"] = True, 100
+        self._connect(loading, page)
+        self._drop_now()
+        self.assertEqual(loading.of("err"), [], "a page that cannot hear the dialog yet is not handed it")
+        self.assertEqual([e["createId"] for e in page.of("err")], ["g-loading"], "the page that listens is: %r" % page.got)
+        self._ready(loading)
+        self.assertEqual(loading.of("err"), [], "one pane at a time: the listening page holds it until it acknowledges")
+
+    def test_a_redialed_pane_listens_from_its_handshake(self):
+        # the shim dials ?reconnect=1 only once the kernel answered its bundle's ready, and a redial posts no ready again
+        self._park("g-redial")
+        loading, redialed = _Pane(), _Pane(app="feed", active="")
+        loading["lastIn"] = 200
+        redialed["redial"], redialed["lastIn"] = True, 100
+        self._connect(loading, redialed)
+        self._drop_now()
+        self.assertEqual(loading.of("err"), [])
+        self.assertEqual([e["createId"] for e in redialed.of("err")], ["g-redial"])
+
+    def test_a_pane_sent_the_drop_before_it_listened_is_shown_it_at_its_ready(self):
+        self._drop_unheard("g-early")
+        early = _Pane()
+        self._connect(early)
+        entry = km._dropped_creates[(PARENT, "g-early")]
+        self.assertTrue(km._offer_dropped_create(entry, early), "premise: the frame went to its socket")
+        early.got.clear()                                # …into a document with no listener yet: lost
+        self._ready(early)
+        self.assertEqual([e["createId"] for e in early.of("err")], ["g-early"],
+                         "its ready says it holds nothing it was sent before: the drop it held comes again")
+        self.assertFalse(km._dropped_creates[(PARENT, "g-early")]["told"], "still untold until the page acknowledges it")
+
+    def test_a_drop_no_page_saw_before_a_restart_is_shown_to_the_first_page_after_it(self):
+        self._drop_unheard("g-restart")
+        before = km._dropped_creates[(PARENT, "g-restart")]["frame"]
+        kept = (jd.STATE / "comment-drops.json").read_text()
+        self.assertIn("g-restart", kept)
+        self.assertNotIn(WORDS, kept, "the words stay in undelivered.jsonl alone")
+        self.assertEqual(self._restart(), 1, "the boot restores the untold drop")
+        page = _Pane()
+        self._ready(page)
+        errs = page.of("err")
+        self.assertEqual(errs, [before], "the first page after the restart is shown the same dialog, words and all")
+        self.assertEqual(errs[0]["copy"], WORDS)
+
+    def test_after_a_restart_a_repost_of_a_dropped_create_hears_the_drop_and_makes_no_thread(self):
+        holder = self._park("g-repost")                  # the page holding it is asleep through the drop and the restart
+        self._connect()
+        self._drop_now()
+        self._restart()
+        p = Path(km._sessions(0)[0]["path"])
+        with p.open("a") as fh:                          # the record has landed meanwhile: a fresh create would succeed
+            fh.write(json.dumps(aline(self.now - 300, "Add a jitter to the backoff.", "a9", parent="a1")) + "\n")
+        holder["alive"] = True
+        holder.got.clear()
+        self._connect(holder)
+        self._create_on(holder, "a9", "g-repost")        # its re-post on the restarted kernel
+        self._run_jobs()
+        self.assertEqual(self._rows(), [], "the gesture's answer stands across the restart: no thread beside the dialog")
+        self.assertEqual([(f["type"], f.get("dropped")) for f in holder.got], [("commentCreateFailed", True), ("err", None)],
+                         "the re-post hears the drop and is shown its dialog")
+
+    def test_a_drop_a_page_acknowledged_is_not_shown_again_after_a_restart(self):
+        self._drop_unheard("g-told")
+        page = _Pane()
+        self._ready(page)
+        self.assertEqual(len(page.of("err")), 1)
+        with contextlib.redirect_stderr(io.StringIO()):
+            km.Handler._dispatch_ws(_HandlerSelf(), {"type": "commentDropSeen", "id": PARENT, "createId": "g-told"}, page)
+        page["alive"] = False
+        self.assertEqual(self._restart(), 0, "acknowledged on disk too")
+        self.assertTrue(km._dropped_creates[(PARENT, "g-told")]["told"], "…and still the gesture's answer")
+        later = _Pane()
+        self._ready(later)
+        self.assertEqual(later.of("err"), [])
+
+    def test_a_restored_drop_whose_words_cannot_be_read_back_is_shown_saying_so(self):
+        self._drop_unheard("g-nowords")
+        (jd.STATE / "undelivered.jsonl").unlink()
+        self._restart()
+        page = _Pane()
+        self._ready(page)
+        errs = page.of("err")
+        self.assertEqual(len(errs), 1, "shown all the same: the user learns the comment did not start a thread")
+        self.assertEqual(errs[0]["copy"], "")
+        self.assertIn("could not read your text back from undelivered.jsonl", errs[0]["text"])
+        self.assertIn("the file is missing", errs[0]["text"])
+
+    def test_the_boot_restores_the_drops_before_the_server_binds(self):
+        import inspect
+        s = inspect.getsource(km.main)
+        self.assertLess(s.index("_dropped_creates_load()"), s.index("_LoopbackServer("),
+                        "restored before any socket can re-post a dropped create")
+
+
+class DropsGoToAPaneSomeoneCanSee(_PaneHarness):
+    """A pane that is offered a drop while nobody can see it hands it back, and the drop goes on to a pane someone can see
+    (review of PR 223, 2026-10-11).
+
+    The kernel offers a drop to one pane at a time and stops once that pane acknowledges it. After a restart with a drop no
+    page had shown, a background tab or a hidden pane (the phone layout, a feed pane switched off) could say ready first:
+    it drew the dialog off screen and acknowledged it, and even a page that did not acknowledge kept the drop from every
+    other pane for as long as its socket lived. Now such a pane says it cannot be seen (commentDropHidden, `hidden`), and
+    says so again with `hidden` false once it can be, to be offered the drop back if no pane holds it."""
+
+    def _hidden(self, pane, cid, hidden):
+        with contextlib.redirect_stderr(io.StringIO()):
+            km.Handler._dispatch_ws(_HandlerSelf(), {"type": "commentDropHidden", "id": PARENT, "createId": cid,
+                                                     "hidden": hidden}, pane)
+
+    def test_a_pane_nobody_can_see_hands_the_drop_on_to_the_pane_someone_can(self):
+        self._drop_unheard("g-background")
+        background, front = _Pane(), _Pane(active="")
+        self._ready(background)                          # a background tab says ready first, after the restart
+        self._ready(front)
+        self.assertEqual((len(background.of("err")), front.of("err")), (1, []), "premise: one pane at a time")
+        self._hidden(background, "g-background", True)
+        self.assertEqual([e["createId"] for e in front.of("err")], ["g-background"],
+                         "the pane the user can see is shown it: %r" % front.got)
+        self.assertFalse(km._dropped_creates[(PARENT, "g-background")]["told"], "and it is untold until that pane says so")
+        self._hidden(background, "g-background", False)  # the user switches to the background tab
+        self.assertEqual(len(background.of("err")), 1, "the pane showing it holds it: not drawn in two places")
+
+    def test_a_drop_handed_back_with_no_other_pane_comes_back_once_the_pane_can_be_seen(self):
+        self._drop_unheard("g-alone")
+        tab = _Pane()
+        self._ready(tab)
+        self._hidden(tab, "g-alone", True)
+        self.assertIsNone(km._dropped_creates[(PARENT, "g-alone")]["offered"], "nobody holds it: it waits")
+        self.assertEqual(len(tab.of("err")), 1, "not sent straight back to the pane that cannot show it")
+        later = _Pane(active="")
+        later["ready"] = True
+        self._connect(tab, later)
+        km._reoffer_drops_of(_Pane())                    # an unrelated socket closing changes nothing
+        self._hidden(tab, "g-alone", False)
+        self.assertEqual([e["createId"] for e in tab.of("err")], ["g-alone", "g-alone"],
+                         "offered to it again once someone can see it")
+        self.assertEqual(later.of("err"), [])
+
+    def test_a_pane_that_said_it_cannot_be_seen_is_skipped_when_the_holder_closes(self):
+        self._drop_unheard("g-skip")
+        hidden, holder = _Pane(), _Pane(active="")
+        hidden["lastIn"], holder["ready"], holder["lastIn"] = 200, True, 100
+        self._connect(holder)
+        self._ready(hidden)
+        self._hidden(hidden, "g-skip", True)
+        self.assertEqual([e["createId"] for e in holder.of("err")], ["g-skip"], "premise: handed on")
+        holder["alive"] = False                          # it closes before the user saw it
+        self._connect(hidden)
+        km._reoffer_drops_of(holder)
+        self.assertEqual(len(hidden.of("err")), 1, "the pick skips the pane that said it cannot be seen")
+        self._hidden(hidden, "g-skip", False)
+        self.assertEqual(len(hidden.of("err")), 2, "…until it says it can be")
+
+    def test_a_ready_on_the_same_socket_forgets_that_the_pane_could_not_be_seen(self):
+        self._drop_unheard("g-fresh")
+        page = _Pane()
+        self._ready(page)
+        self._hidden(page, "g-fresh", True)
+        self._ready(page)                                # its bundle evaluated again: it decides afresh
+        self.assertEqual(len(page.of("err")), 2)
+
+
+class TheDropsFileIsNeverOverwrittenUnread(_PaneHarness):
+    """comment-drops.json that cannot be read, or holds a shape this kernel never writes, is a fault the user hears about,
+    and is never written over (review of PR 223, 2026-10-11).
+
+    An unreadable file was reported at boot, then replaced by the next drop's save, so the drops it listed were lost for
+    good and a page still holding one of those comments could re-post it as a second thread. A `drops` value that was not
+    a list raised out of the boot load, and only the kernel log said so."""
+
+    def setUp(self):
+        super().setUp()
+        self.notices = []
+        saved = km._sync_notice
+        km._sync_notice = lambda text, ok=True, kind="sync": self.notices.append(text)
+        self.addCleanup(lambda: setattr(km, "_sync_notice", saved))
+        self.addCleanup(lambda: km._dropped_creates_unread.__setitem__(slice(None), [None, False]))
+        self.path = jd.STATE / "comment-drops.json"
+
+    def _drop_another(self, cid):
+        self.be.streaming.add("a9")                      # the next comment's anchor streams again
+        self._drop_unheard(cid)
+
+    def _load(self):
+        with km._create_lock:
+            km._dropped_creates.clear()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            n = km._dropped_creates_load()
+        return n, err.getvalue()
+
+    def test_a_file_the_boot_could_not_read_is_left_as_it_is_for_the_kernels_life(self):
+        self.path.write_text(json.dumps({"drops": [{"sid": PARENT, "createId": "g-before", "why": "x", "told": False}]}))
+        before = self.path.read_bytes()
+        real = km._read_state_json
+
+        def eio(path, *a, **k):
+            if Path(path) == self.path:
+                raise km._StateUnreadable(path, "read failed: [Errno 5] Input/output error")
+            return real(path, *a, **k)
+        km._read_state_json = eio
+        try:
+            n, _ = self._load()
+        finally:
+            km._read_state_json = real
+        self.assertEqual(n, 0)
+        self.assertTrue(any("comment-drops.json could not be read" in t and "left as it is" in t for t in self.notices),
+                        "the user hears it, with what it means: %r" % self.notices)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            km._dropped_creates_save()
+            km._dropped_creates_save()
+        self.assertEqual(err.getvalue().count("comment-drops.json is left as it is"), 1, "said once in the log, not per save")
+        self._drop_another("g-after")                    # a new drop's save
+        with contextlib.redirect_stderr(io.StringIO()):
+            km._dropped_create_seen(PARENT, "g-after")   # …and an acknowledgement's
+        self.assertEqual(self.path.read_bytes(), before, "never written over: the drops it lists are still there")
+        self.assertIn((PARENT, "g-after"), km._dropped_creates, "the new drop lives on in memory for this kernel")
+
+    def test_a_drops_value_of_the_wrong_shape_is_moved_aside_and_said_not_raised(self):
+        for bad in ({"drops": 5}, {"drops": {"sid": PARENT, "createId": "g"}}, {"drops": ["g", {"sid": PARENT}]},
+                    {"drops": [{"sid": PARENT, "createId": 7}]}):
+            self.notices.clear()
+            self.path.write_text(json.dumps(bad))
+            n, log = self._load()                        # raised a TypeError for a number, before
+            self.assertEqual(n, 0, bad)
+            self.assertFalse(self.path.exists(), "moved aside, never read as if it were ours: %r" % (bad,))
+            asides = list(self.path.parent.glob("comment-drops.json.corrupt-*"))
+            self.assertEqual(len(asides), 1, "the bytes kept for a look: %r" % (bad,))
+            self.assertEqual(json.loads(asides[0].read_text()), bad)
+            asides[0].unlink()
+            self.assertTrue(any("comment-drops.json" in t and "send it again" in t for t in self.notices),
+                            "said to the user in their terms: %r" % self.notices)
+            self.assertIn("comment-drops.json", log)
+            self.assertIsNone(km._dropped_creates_unread[0], "a file moved aside is not one to leave alone: the next save writes")
+
+    def test_a_drops_file_that_reads_cleanly_is_written_as_before(self):
+        self._drop_unheard("g-clean")
+        n, _ = self._load()
+        self.assertEqual(n, 1)
+        self._drop_another("g-clean-2")
+        self.assertIn("g-clean-2", self.path.read_text())
+        self.assertEqual(self.notices, [])
 
 
 if __name__ == "__main__":

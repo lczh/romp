@@ -105,7 +105,7 @@ class WiringAcrossSurfaces(unittest.TestCase):
         self.assertIn("mailboxIcon", src, "the gear menu draws the (monochrome) mailbox icon")
         self.assertIn("flag: 'postalServiceOff', label: 'Postal service', icon: mailboxIcon", src,
                       "the gear menu row toggles the postalServiceOff flag")
-        self.assertIn("this._setSessionFlag(s, t.flag, next);", src, "menu rows persist via _setSessionFlag")
+        self.assertIn("this._setSessionFlag(s, t.flag, next, asGiven);", src, "menu rows persist via _setSessionFlag (asGiven: a linked kernel's bell, bell-follow.ts)")
 
 
 

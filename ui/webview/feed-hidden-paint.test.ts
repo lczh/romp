@@ -158,7 +158,8 @@ test("BOTH release events run the same release: visibilitychange→visible and t
     "the hidden arm releases nothing, so it publishes the pane's word itself");
   assert.equal(SRC.split("publishPaneHidden(").length - 1, 2, "two publish sites, both on the gate's events; no timer");
   const watch = body("watchFeedVisibility");
-  assert.match(watch, /new IntersectionObserver\(\(entries\) => \{\n\s*feedIntersecting = entries\.some\(\(e\) => e\.isIntersecting\);\n\s*releasePaint\(\);\n\s*live\.catchUp\(\);[^\n]*\n\s*\}\)\.observe\(list\);/);
+  assert.match(watch, /new IntersectionObserver\(\(entries\) => \{\n\s*feedIntersecting = entries\.some\(\(e\) => e\.isIntersecting\);\n\s*releasePaint\(\);\n\s*live\.catchUp\(\);[^\n]*\n\s*cmtDrops\.settle\(\);[^\n]*\n\s*\}\)\.observe\(list\);/,
+               "…and the comment drops' dialog settles on the same report (review of PR 223)");
   assert.match(watch, /if \(typeof IntersectionObserver === "undefined"\) return;/);
 });
 
@@ -202,7 +203,7 @@ function feedWiring() {
   const a = SRC.indexOf(start), b = SRC.indexOf(end, a);
   assert.ok(a > 0 && b > a, "the wiring's anchors moved; re-anchor");
   const js = requireCjs("esbuild").transformSync(SRC.slice(a, b) + "  paint();\n}\n", { loader: "ts" }).code;
-  const st = { hidden: false, model: 0, painted: 0, paints: 0, catchUps: 0, host: {} as PaneHiddenHost };
+  const st = { hidden: false, model: 0, painted: 0, paints: 0, catchUps: 0, settles: 0, host: {} as PaneHiddenHost };
   const listeners: Array<() => void> = [];
   let observerCb: Cb | null = null;
   const list = { get childElementCount() { return st.painted; } };
@@ -216,6 +217,7 @@ function feedWiring() {
     const paintHeld = P.paintHeld, paintReleased = P.paintReleased;
     const publishPaneHidden = (docHidden, intersecting) => P.publishPaneHidden(docHidden, intersecting, S.host);
     const live = { catchUp() { S.catchUps++; } };
+    const cmtDrops = { settle() { S.settles++; } };
     const paint = () => { S.paints++; S.painted = S.model; };
   `;
   const api = new Function("P", "S", "document", "IntersectionObserver", prelude + js + "\nreturn { render, releasePaint };")(
@@ -241,6 +243,7 @@ test("run: feed.ts's own wiring publishes the pane's word on its events, nothing
   f.observer(true);
   assert.equal(f.st.host.__rompPaneHidden, false, "the observer's first word, published from releasePaint");
   assert.equal(f.st.catchUps, 1, "the observer's callback still runs the age pass's catch-up");
+  assert.equal(f.st.settles, 1, "…and settles the comment drops' dialog, whose page sight it just moved (review of PR 223)");
   f.observer(false);                                   // the shell hides the pane after the show; the viewport would still read its size
   assert.equal(f.st.host.__rompPaneHidden, true, "hidden after a first show: the case the probe misses");
   f.frame(2);

@@ -57,3 +57,26 @@ export function publishPaneHidden(docHidden: boolean, intersecting: boolean | nu
   w.__rompPaneHidden = hidden;
   return hidden;
 }
+
+// CAN ANYONE SEE A DIALOG HERE? (review of PR 223, 2026-10-11). A dropped comment's dialog (comment-drops.ts) is
+// acknowledged to the kernel only once someone saw it, and the kernel stops offering a drop once one pane acknowledges
+// it, so a pane that drew it in a background tab or a display:none frame took it off every page the user was looking
+// at. Three answers, read from the same witnesses as the pane's hidden word: "hidden" when the tab is hidden or the pane
+// is (the zero-viewport probe, or the word of true this page published: the union paneHidden() reads in render.ts and
+// the kernel's shim), "shown" when the pane is on screen but its document does not hold the focus (another window,
+// another pane, or the dashboard's own chrome has it, so the user may be looking elsewhere), and "seen" when it is on
+// screen and focused. `w` is the page's window; the tests hand in a stand-in.
+export type Sight = "hidden" | "shown" | "seen";
+export interface SightHost extends PaneHiddenHost {
+  parent: unknown;
+  innerWidth: number;
+  innerHeight: number;
+  document: { readonly hidden: boolean; hasFocus(): boolean };
+}
+export function paneSight(w: SightHost = globalThis as unknown as SightHost): Sight {
+  let hidden: boolean;
+  try { hidden = w.document.hidden || (w.parent !== w && (w.innerWidth === 0 || w.innerHeight === 0)) || w.__rompPaneHidden === true; }
+  catch { hidden = false; }
+  if (hidden) return "hidden";
+  try { return w.document.hasFocus() ? "seen" : "shown"; } catch { return "shown"; }
+}

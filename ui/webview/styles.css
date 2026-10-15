@@ -2780,7 +2780,7 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 .ask-preview-diff .diff-del { color: #ff9492; background: rgba(248, 81, 73, 0.15); }
 .ask-preview-diff .diff-hunk { color: var(--accent); opacity: 0.85; }
 .ask-preview-diff .diff-ctx { color: var(--vscode-foreground, #ddd); opacity: 0.75; }
-#live-ask.sending { opacity: 0.5; pointer-events: none; }
+#live-ask.sending, .cmt-ask.sending { opacity: 0.5; pointer-events: none; }
 /* multi-select checkboxes */
 /* the "+ add your own" row — a static hint pointing at the message box below (the inline input moved into
    the normal composer, the user 2026-07-09); the composer doubles as the free-text answer field now */
@@ -3615,6 +3615,14 @@ body.picker-lifted > #picker.kb-tight { align-items: flex-start; padding: 12px 1
 .confirm-btn.danger { border-color: var(--vscode-errorForeground, #f48771); color: var(--vscode-errorForeground, #f48771); }
 .confirm-btn.danger:hover { background: rgba(244, 135, 113, 0.15); }
 .confirm-btn:focus { outline: 1px solid var(--vscode-focusBorder, #4daafc); }
+/* the comment drops' dialog (comment-drops.ts): an entry per drop, its words on one line beside its own Copy; a long
+   list scrolls inside the box. No new sizes: the words wear .confirm-detail's */
+.cmt-drop-list { display: flex; flex-direction: column; gap: 14px; max-height: 50vh; overflow-y: auto; }
+.cmt-drop { display: flex; flex-direction: column; gap: 6px; }
+.cmt-drop-words { display: flex; align-items: center; gap: 8px; }
+.cmt-drop-quote { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--sans); font-size: 0.92em; color: var(--fg); }
+.cmt-drop-words .confirm-btn { flex: 0 0 auto; }
 
 /* transient notice for DEGRADED deep-link landings (render.ts landToast) — a
    bad jump announces itself instead of impersonating a successful one */
@@ -4145,6 +4153,10 @@ mark.cmt-hl.unread { background: color-mix(in srgb, var(--cmt-hl) 45%, transpare
 .cmt-outline { position: absolute; pointer-events: none; user-select: none; box-sizing: border-box;
   outline: 1.5px dashed var(--st-awaiting-bg); border-radius: 3px; }
 mark.cmt-hl.unread.cmt-ring { outline: 1.5px dashed var(--st-awaiting-bg); outline-offset: 1px; }
+/* NEEDS YOU (thread-live-1, 2026-10-14): a thread stopped on a question or a permission prompt wears the same cue on its
+   passage, ring or box by the same row count (paintCommentOutlines takes .needs beside .unread); the dashed red is also
+   the tab strip's ring for a session stopped on a live prompt. Its fill stays the read 30%: the reply has not landed */
+mark.cmt-hl.needs.cmt-ring { outline: 1.5px dashed var(--st-awaiting-bg); outline-offset: 1px; }
 /* the turn's rail segment shouts an unread thread (the user 2026-08-23): the identity line's own
    segment tints the comment yellow — wider and fully opaque so it reads from across the pane — and
    the rail-hit strip over it opens the thread on click. applyCommentMarks clears the class the
@@ -4164,6 +4176,13 @@ mark.cmt-hl.busy {
 }
 mark.cmt-hl.hl-first { border-top-left-radius: 2px; border-bottom-left-radius: 2px; }
 mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 2px; }
+/* a landing on a thread's passage (render.ts passageLanding, the user 2026-10-15) flashes the passage itself: the landing's
+   flash in the highlight's own yellow, brighter, fading back to the mark's own tint (a from-only frame ends on the element's
+   background, where the turn's flash ends on transparent), the mark's own corners kept */
+@keyframes cmt-land-flash { from { background-color: color-mix(in srgb, var(--cmt-hl) 85%, transparent); } }
+mark.cmt-hl.anchor-flash { animation: cmt-land-flash 1.6s ease-out; border-radius: 0; }
+mark.cmt-hl.anchor-flash.hl-first { border-top-left-radius: 2px; border-bottom-left-radius: 2px; }
+mark.cmt-hl.anchor-flash.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 2px; }
 /* (an unmatched stray `}` sat here from 7f0c9b8c's block removal, 2026-08-23→24: Chromium's error
    recovery EATS the rule that follows one, which silently killed the combined code/katex busy rule
    below — math never greened while prose did (the user 2026-08-24, screenshot). A brace-balance
@@ -4281,6 +4300,9 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 }
 .cmt-pop.dragging { cursor: grabbing; }
 .cmt-pop .cmt-quote, .cmt-pop .cmt-msgs, .cmt-pop .cmt-input, .cmt-pop .cmt-name { cursor: auto; }
+/* an open thread's quote is the way back to its passage (passageLink): the pointer, and full ink under it */
+.cmt-pop .cmt-quote[data-passage] { cursor: pointer; }
+.cmt-pop .cmt-quote[data-passage]:hover { opacity: 1; }
 .cmt-pop button, .cmt-pop .meta-btn { cursor: pointer; }
 /* the thread's own statusline (the user 2026-08-25: the popover should carry the chat's components —
    the working chip WITH its counting timer, and the model/effort badges in the statusline's own
@@ -4347,6 +4369,23 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
   font: inherit;
 }
 .cmt-input:focus { outline: none; border-color: var(--accent); }
+/* the popover box doubles as a question's "add your own" field exactly as the message box does (render.ts syncCmtBoxAskMode,
+   thread-live-1): the same accent border, wash and placeholder tint */
+.cmt-input.answering { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, var(--vscode-input-background, rgba(255, 255, 255, 0.05))); }
+.cmt-input.answering::placeholder { color: color-mix(in srgb, var(--accent) 65%, var(--dim)); }
+/* THE OPEN THREAD'S QUESTION (thread-live-1, 2026-10-14): the chat's own question card (.ask-card.ask-live), painted by the
+   chat's painter into this host between the conversation and the box (render.ts renderThreadAsk). It never squeezes the
+   conversation away: past half the box it scrolls within itself, and the card's chat-column margins fall to the popover's */
+.cmt-ask { flex: 0 1 auto; min-height: 0; max-height: 50%; overflow-y: auto; cursor: auto; }
+.cmt-ask .ask-live { max-width: none; margin: 0; }
+/* the open thread's thinking line and background box (render.ts paintThreadThinking and renderThreadBg, thread-live-2): the
+   chat's foot line, at a FIXED height whether or not it shows anything so a stretch coming and going moves nothing in the
+   box, and the chat's background box, its chat-column margins fallen to the popover's and its cap a share of the box */
+.cmt-live-status { flex: 0 0 auto; height: 18px; }   /* made once, by the first stretch the box shows (paintThreadThinking), then kept */
+.cmt-live-status .live-thinking { padding-left: 4px; }
+.cmt-bg { flex: 0 0 auto; min-height: 0; max-height: 40%; overflow: hidden; box-sizing: border-box; margin: 0; cursor: auto;
+  border: 1px solid var(--box-border); border-radius: 8px; background: var(--box-bg); display: flex; flex-direction: column; }   /* #bg-tasks's frame */
+.cmt-bg.bg-awaited { border-color: var(--st-awaitbg-bg); }
 .cmt-actions { display: flex; gap: 6px; align-items: center; }
 .cmt-actions:empty { display: none; }
 /* the chat's under-bubble button family, exactly (the composer-stage-btn dress — the user
@@ -4437,8 +4476,8 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
    pattern as .cmt-tick.busy wearing the await green. It also stacks ABOVE its read siblings: two
    threads on one passage share a `top`, and the later-painted read tick covered the unread one
    (the user 2026-09-10) */
-.cmt-tick.unread { width: 16px; height: 6px; right: 0; opacity: 1; z-index: 1;
-  box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--st-awaiting-bg); }
+.cmt-tick.unread, .cmt-tick.needs { width: 16px; height: 6px; right: 0; opacity: 1; z-index: 1;
+  box-shadow: 0 0 0 1.5px var(--bg), 0 0 0 3px var(--st-awaiting-bg); }   /* .needs: waiting on your answer (thread-live-1) */
 /* a WRITING thread's tick wears the same await-green as the passage (the user 2026-08-24: the
    marching-ants crawl — the "spinning dots" — is retired; the state COLOR is the in-flight cue,
    here as everywhere on the rail) */

@@ -161,6 +161,7 @@ CENSUS = {
     "_session_chip": ("pure", "over classified inputs: the parse and live tail, the row, the backend brackets, the clock booleans, the live task rows, the watches, the states overlay, the store and the downtime list"),
     "_session_cwd": ("sig", "cwd", "the names entry's cwd, else the transcript's stamp"),
     "_session_flag": ("sig", "flags"),
+    "_session_flag_raw": ("sig", "flags", "the bell's override alone (notifyRaw), for a dashboard on another kernel (bell-follow.ts)"),
     "_task_tracking_on": ("sig", "flags", "the Task tracking switch (T404): its file's identity rides the flags component beside session-flags.json; off blanks the ledger's judge output as a mute does"),
     "_mail_off_fields": ("sig", "flags", "the effective mail state and its reason from ONE derivation (postalServiceOff, mailOffWhy): the record's readability and threadOf through _thread_reg (reg), then the mailbox flag with its legacy twin (flags) (T356)"),
     "_session_meta": ("pure", "over the transcript's records, memoized by record identity (transcript)"),
@@ -386,7 +387,8 @@ def _unkeyed_field_permits():
     the projection block between _chat_sig_deps and _chat_build_sig (the constants, their comment and _chat_row_sig,
     which name the field in order to drop it) and _chat_build_sig itself (the key, whose row comment says so; a read
     there would be a key input, not a payload read); for ctxTokens also the compaction-suggestion tick (a
-    reader, a tick, not a build), Sessions.live (the merge that writes it) and the one line of the jobs pass's gate's
+    reader, a tick, not a build), Sessions.live and _sdk_live_norm (the merge that writes it: the SDK row's normalization,
+    factored out of Sessions.live for the thread live map, thread-live-1) and the one line of the jobs pass's gate's
     row fields (_JOBS_GATE_ROW_FIELDS, 2026-10-05: the live row's fields the jobs read, the compaction tick's among
     them, which the gate fingerprints on the jobs thread; no build reads it). Ranges as _reads_outside takes them."""
     def span(f):
@@ -395,11 +397,11 @@ def _unkeyed_field_permits():
     text = Path(inspect.getsourcefile(km._chat_build_sig)).read_text(encoding="utf-8")
     key = (span(km._chat_sig_deps)[1], span(km._chat_build_sig)[1])
     gate = next(((i, i + 1) for i, l in enumerate(text.split("\n"), 1) if l.startswith("_JOBS_GATE_ROW_FIELDS = (")), None)
-    ctx = (key, span(km._compact_suggest_tick), span(km.Sessions.live)) + ((gate,) if gate else ())
+    ctx = (key, span(km._compact_suggest_tick), span(km.Sessions.live), span(km._sdk_live_norm)) + ((gate,) if gate else ())
     # the live-status fields (2026-10-08): read by the liveStatus frame's builder, which is no chat build (the page paints
     # it without one), and thinkingLive written by the merge
     live = (span(km._live_status_frame), span(km._live_status_frames))   # the frame and the push's once-built set of them
-    return text, {"lastTool": (key,) + live, "ctxTokens": ctx, "thinkingLive": (key, span(km.Sessions.live)) + live,
+    return text, {"lastTool": (key,) + live, "ctxTokens": ctx, "thinkingLive": (key, span(km.Sessions.live), span(km._sdk_live_norm)) + live,
                   "agentProgress": (key,) + live}
 
 
