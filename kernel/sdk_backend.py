@@ -22719,7 +22719,6 @@ class SdkBackend:
                 self._log("session gone (%s): model-pending clear failed: %s" % (sess.name, e))
         self._seed_writes_dropped(sess.sid)   # no verdict can reach its pending shared-model writes now
         sess._fast_pending = ""           # a fast opt-in that never launched: the next connect is a launch from the reg's ask
-        sess._mode_pending = ""           # …and a bypass pick the same way (the next connect launches from the reg's mode)
         if sess._effort_pending:          # an /effort reconnect that never landed before the thread died → clear the dots/notice
             sess._effort_pending = ""
             try:
