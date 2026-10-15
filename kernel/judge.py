@@ -15848,10 +15848,46 @@ def _close_turn(store, turn, samples=None, seg_by_id=None):
 
 
 def _turn_open(turn, turns):
-    """A turn whose end is NOT yet known (the in-progress final turn): the last turn, not `ended`, with
-    no idle terminator. Same gate the captioner/planner use — the closer only runs on ended turns."""
-    return (turn is turns[-1] and not turn["ended"]
-            and not any(a["type"] == "idle" for a in turn["atoms"]))
+    """A turn whose end is NOT yet known (the in-progress final turn) — the closer only runs on ended turns.
+    The last turn is open while it is still producing: not `ended`, and its tail (past any trailing command
+    confirmations) is not an idle span. An idle span EARLIER in the turn means the turn resumed after a
+    stop, not that it is over (the kernel's _session_working, same rule): a background task's completion
+    notice reopens the turn it folds into, and keying on any idle atom read that reply as end-known while
+    it streamed, so the closer re-judged the whole turn at each of its steps. It is open too while its
+    newest record is such a notice with no reply after it yet: `ended` then still describes the reply
+    before the notice (the CLI writes the notice as it opens the turn that answers it). A stop that never
+    answers lands its idle span at the tail, which ends the wait."""
+    if turn is not turns[-1]:
+        return False
+    atoms = turn["atoms"]
+    i = len(atoms) - 1
+    while i >= 0 and atoms[i].get("command"):
+        i -= 1
+    if i >= 0 and atoms[i]["type"] == "idle":
+        return False
+    return not turn["ended"] or (i >= 0 and _task_notice(atoms[i]))
+
+
+def _task_notice(atom):
+    """A background task's completion notice: a harness-authored user record stamped task-notification (a
+    peer's message on that channel authors 'teammate', never 'system'), or, unstamped, the notice's own
+    text (its tag, or the CLI's preamble ahead of it)."""
+    if atom.get("type") != "user" or atom.get("author") != "system":
+        return False
+    o = atom.get("origin")
+    if isinstance(o, dict):
+        return o.get("kind") == "task-notification"
+    if atom.get("lazy") is not None:
+        em.hydrate([atom])
+    text = em._text_of(em._content(atom.get("message")))
+    return "<task-notification>" in text or text.lstrip().startswith("[SYSTEM NOTIFICATION - NOT USER INPUT]")
+
+
+def _close_content(turn):
+    """What the closer reads of a turn, counted: its atoms less the idle spans (the states overlay's stop
+    markers carry no text). A grown turn whose count is unchanged since its last judgment grew by idle
+    spans alone, and is re-recorded at its new size with no call (_close_session)."""
+    return sum(1 for a in turn["atoms"] if a["type"] != "idle")
 
 
 def _call_fail_kill(last):
@@ -15928,6 +15964,7 @@ def _invalidate_closure(store, session, seg_t):
     closed.discard(tid)
     store["closedTurns"] = sorted(closed)
     (store.get("closedSig") or {}).pop(tid, None)
+    (store.get("closedContent") or {}).pop(tid, None)
 
 
 def _close_session(fsid, path, now, cap=CLOSE_FAIRNESS):
@@ -15940,7 +15977,11 @@ def _close_session(fsid, path, now, cap=CLOSE_FAIRNESS):
     goal sticks blocked on an already-answered question (the user 2026-06-26, via bugs: g47). closedSig
     fingerprints each turn's atom count at close; a LARGER count next pass means the turn grew → re-judge
     it. Legacy turns (closed before this, no sig) are assumed unchanged so we don't re-judge the whole
-    backlog.
+    backlog. closedContent beside it records what the judgment read (_close_content: the atoms less the
+    idle spans): a turn that grew by idle spans alone, the states overlay marking a stop, has nothing new
+    to judge, so its sig moves to the new size with no call (every background task's completion notice
+    folds into the turn before it and its reply ends with such a stop, a second look at the same text
+    otherwise). A turn judged before closedContent existed re-judges on any growth, as before.
 
     A FAILED CALL ends this session's walk for the pass (2026-09-03): every end-known turn is visited each
     pass UNTIL the first failed call — a parse reject (the model answered THIS turn's prompt) and a
@@ -15976,6 +16017,7 @@ def _close_session(fsid, path, now, cap=CLOSE_FAIRNESS):
     seg_by_id = None                                  # built on the first turn the walk judges (below)
     swept = _closed_turns(store)
     sig = dict(store.get("closedSig") or {})
+    seen = dict(store.get("closedContent") or {})     # what each judgment read (_close_content), beside its size
     turns = session["turns"]
     _judge_ctx.relay_turns = (str(fsid), turns)      # the block writer's excerpt source (T334 relay)
     newly, did, cut = [], 0, False
@@ -15985,6 +16027,10 @@ def _close_session(fsid, path, now, cap=CLOSE_FAIRNESS):
         tid, fp = turn["id"], len(turn["atoms"])
         if tid in swept and sig.get(tid, fp) == fp:    # closed AND unchanged (legacy: no sig → assume unchanged) → skip
             continue
+        nc = _close_content(turn)
+        if tid in swept and seen.get(tid) == nc:       # grown by idle spans alone: the judged text stands, so the turn
+            sig[tid] = fp                              #  takes its new size with no call (the kernel's _closer_settled
+            continue                                   #  reads the size, and the nudge gate it holds opens)
         if cap is not None and did >= cap:             # cap is None by default now (no per-pass close cap);
             break                                      # an explicit caller (a test) can still bound a backfill
         _judge_ctx.last_call_fail = None               # a stale stash must never charge THIS turn (below)
@@ -16022,7 +16068,7 @@ def _close_session(fsid, path, now, cap=CLOSE_FAIRNESS):
                     fails = dict(store.get("closeFails") or {})
                     k = _close_strike(fails.get(tid), fp, "safeguards")   # its own streak: a cut never counts here
                     if k >= DISTILL_FAIL_CAP:
-                        swept.add(tid); sig[tid] = fp; did += 1
+                        swept.add(tid); sig[tid] = fp; seen[tid] = nc; did += 1
                         fails.pop(tid, None)
                         _log_judge_error("closer", fsid, "give-up",
                                          note="%d safeguards refusals on this turn's content; swept "
@@ -16067,7 +16113,7 @@ def _close_session(fsid, path, now, cap=CLOSE_FAIRNESS):
                                                     shape["status"], shape["lifted"], shape["cut"])
                                if isinstance(shape, dict) else "")
                     if kill and k >= DISTILL_FAIL_CAP:
-                        swept.add(tid); sig[tid] = fp; did += 1
+                        swept.add(tid); sig[tid] = fp; seen[tid] = nc; did += 1
                         fails.pop(tid, None)
                         store["closeFails"] = fails
                         _log_judge_error("closer", fsid, "give-up",
@@ -16085,7 +16131,8 @@ def _close_session(fsid, path, now, cap=CLOSE_FAIRNESS):
                         remaining = sum(1 for t in turns[ti + 1:]
                                         if not _turn_open(t, turns)
                                         and not (t["id"] in swept
-                                                 and sig.get(t["id"], len(t["atoms"])) == len(t["atoms"])))
+                                                 and (sig.get(t["id"], len(t["atoms"])) == len(t["atoms"])
+                                                      or seen.get(t["id"]) == _close_content(t))))
                         _log_judge_error("closer", fsid, "sweep-cut",
                                          note="%d end-known turn(s) left unswept behind turn %s: %s (model %s%s); %s"
                                               % (remaining, _turn_tag(tid), fail_note[:160],
@@ -16096,9 +16143,11 @@ def _close_session(fsid, path, now, cap=CLOSE_FAIRNESS):
         newly += res
         if isinstance(store.get("closeFails"), dict):
             store["closeFails"].pop(tid, None)         # a landed judgment retires the strike record
-        swept.add(tid); sig[tid] = fp; did += 1        # remember the size we judged at → detect later growth
+        swept.add(tid); sig[tid] = fp; seen[tid] = nc; did += 1   # the size judged at → detect later growth
     store["closedTurns"] = sorted(swept)
     store["closedSig"] = sig
+    if seen or "closedContent" in store:
+        store["closedContent"] = seen
     settled = _session_settled(fsid, path, session, store, now)
     rollup_status(store, settled)
     save_goals(fsid, store)
