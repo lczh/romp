@@ -94,7 +94,8 @@ test("the box steps off its passage only when the landing re-lands it there, the
     "frozen under the pointer and while it holds the focus, owing the step-off");
   assert.match(fn("besideLeft"), /besideFollow\(e\.type === "focusout" \? "focus" : "pointer"\);/, "…paid when the pointer or the focus leaves the box");
   assert.match(RENDER, /document\.addEventListener\("pointerout", besideLeft, true\);\s*\n\s*document\.addEventListener\("focusout", besideLeft, true\);/);
-  assert.match(RENDER, /if \(besideWatch && !besideWatch\.settle\.done\) besideFollow\(\);/, "any move of the view while the landing settles (its re-land, the browser's own)");
+  assert.match(RENDER, /if \(besideWatch && \(!besideWatch\.settle\.done \|\| \(cls === "gesture" && !readerScrolling && gv\?\.followHeld\)\)\) besideFollow\(\);/,
+    "any move of the view while the landing settles (its re-land, the browser's own), and the browser's own move of a held view after it");
   assert.match(follow, /const at = m \? shownPassage\(m\) : null;\s*\n\s*if \(at\) placeBesidePassage\(pop, w\.tid, at, true\);/, "re-found, never revealed again, nudged");
   assert.match(fn("passageLanding"), /endBesideWatch\(\);/, "a new landing ends the last one's");
   assert.match(fn("closeCommentPop"), /endBesideWatch\(\);/, "and so does closing the box");
@@ -117,7 +118,9 @@ test("a landing on a comment's passage pauses follow mode until the reader is ba
   // a re-show that leaves the reader at the bottom ends the pause (the tab coming back: a reader who left at the bottom lands
   // back there, so the return is deterministic, whatever the re-shown window's heights)
   assert.match(fn("landActive"), /if \(v\.followHeld && atBottom\(content\)\) \{ v\.followHeld = false; v\.stick = true; \}/);
-  assert.match(RENDER, /cur\.stick = atBottom\(content\); \}   \/\/ the leaving tab's follow mode/);
+  assert.match(RENDER, /cur\.stick = atBottom\(content\) && !cur\.followHeld;\s*\n\s*cur\.heldKeep = cur\.followHeld \? \{ anchor: captureScrollAnchor\(content, cur\) \} : null;/,
+    "a held tab keeps its place for the return, never the session's new bottom (the user's decision)");
+  assert.match(fn("landActive"), /else if \(v\.followHeld && v\.heldKeep\) \{[\s\S]{0,400}?if \(!\(k\.anchor && keepPlaceAcrossWindow\(content, v, k\.anchor\)\)\) writeScroll\(content, v\.scrollTop, "land-saved"\);/);
   // the message box growing re-pins the bottom and raises the passage: the thread's box steps off it
   assert.match(RENDER, /v\.stick = !v\.followHeld;[^\n]*\n\s*repinned = true;\n(?:\s*\/\/[^\n]*\n){3}\s*besideFollow\(\);/);
   assert.match(RENDER, /releaseFollow\(\);\s+\/\/ a passage landing's pause ends here too, before the snap's echo is read\s*\n\s*writeScroll\(c, c\.scrollHeight, "jump-button", true\);/, "the go-to-bottom chip");

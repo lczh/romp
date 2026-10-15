@@ -78,7 +78,7 @@ test("follow mode and the chip read atBottom at every site", () => {
     /const stick = content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\) && !v\?\.followHeld;/,          // appendActive (never while a passage landing holds follow mode off)
     /const off = c\.scrollHeight > c\.clientHeight \+ 2 && !atBottom\(c\);/,                             // updateJumpBtn
     /followReader\(activeId \? views\.get\(activeId\) : null, c\.scrollTop, atBottom\(c\), pendingBuildRaf != null\);/,   // the scroll record
-    /cur\.stick = atBottom\(content\);/,                                                                  // the leaving tab's save
+    /cur\.stick = atBottom\(content\) && !cur\.followHeld;/,                                              // the leaving tab's save (a passage landing's pause keeps its place: HeldKeep)
     /_wasNear = !_scrollContent \|\| !_v0 \|\| !_v0\.shown \|\| atBottom\(_scrollContent\);/,             // the rebuild branch
     /const bottom = live && atBottom\(content!\);/,                                                          // rerenderAll's one read, before the clear: the re-show follow flag and the keep
     /\(!atBottom\(content\) \? captureScrollAnchor\(content, v\) : null\)\) : null;/,                       // showActive's keep
