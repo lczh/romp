@@ -103,3 +103,18 @@ export function cmtPopBeside(box: CmtPopRect, at: CmtPopRect, innerH: number, ga
   const hh = Math.max(CMT_POP_MIN_H, above);
   return fit(at.top - gap - hh, hh);
 }
+
+/** Where the box goes when its passage moved INTO it after the landing placed it beside it (the landing re-landed the
+ *  passage while a control joined the reply under it): null when they do not overlap, so the box stays exactly where it
+ *  is; else the nearest spot clear of the passage, the box's foot just above it or its head just below it, whichever is
+ *  the shorter move and fits the window at the box's size. Only when neither fits does it fall back to the landing's own
+ *  rule (cmtPopBeside: the roomier side, at that side's height). Never a move further than the overlap needs. */
+export function cmtPopNudge(box: CmtPopRect, at: CmtPopRect, innerH: number, gap = 8): { top: number; height: number } | null {
+  if (!cmtPopCovers(box, at)) return null;
+  const h = box.bottom - box.top;
+  const up = at.top - gap - h, down = at.bottom + gap;
+  const fits = (top: number) => top >= CMT_POP_EDGE && top + h <= innerH - CMT_POP_EDGE;
+  const order = Math.abs(up - box.top) <= Math.abs(down - box.top) ? [up, down] : [down, up];
+  for (const top of order) if (fits(top)) return { top: Math.round(top), height: Math.round(h) };
+  return cmtPopBeside(box, at, innerH, gap);
+}

@@ -6648,11 +6648,13 @@ pixels each way, with none of them touching, while keeping its compact look.
 
 A comment thread's tick on the chat's scroll rail takes you to its passage: the passage moves to the
 top of the view and flashes, all of it, then the thread opens beside it, below the passage (above it
-near the end of the conversation) and never over it. If the passage moves after the thread opens
-(something added under the last reply), the box moves with it, until you scroll or move the box
-yourself. A passage the page has not drawn or loaded yet is drawn or fetched first, and one folded
-away in a collapsed section of its message is unfolded; one that still cannot be shown lands on the
-section's heading, and the thread's box says so. The quoted passage at the top of an open thread
+near the end of the conversation) and never over it. If the landing moves the passage under the box
+while it settles (something added under the last reply), the box steps just clear of it, unless the
+pointer is over the box or you are typing in it; the view scrolling, as it follows a session that is
+still writing, never moves the box. A passage the page has not drawn or loaded yet is drawn or
+fetched first, and every collapsed section of its message that it sits in is unfolded; a part that
+still cannot be shown is said in the thread's box, and when that is the passage's start the landing
+goes to the section's heading. The quoted passage at the top of an open thread
 does the same, which helps once you have scrolled away, and so does the tinted rail line of a message
 with an unread reply. The comment arrows in the chat's corner land on the passage the same way
 without opening the thread. When the thread's words are no longer in its message, the message lands
