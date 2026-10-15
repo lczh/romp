@@ -37,6 +37,11 @@ the build has used sheds nothing, so a small third session keeps its entry; and,
 grown aggregate stored first in a build sheds the entry of a session the same build derives after it, which then walks
 every turn, in either order.
 
+The review after #138 merged (2026-10-07) added, pinned as it stands: the entry kept for an aggregate over the bound by
+itself never advances, so each walk of its session folds one turn more for every turn the session closes; and that
+entry, used first in each build and close to the bound, turns away a session derived after it whose aggregate fits under
+the bound by itself, which then walks every turn while the table and its gauges stay as they were.
+
 Synthetic data only: placeholder uuids, the notes-api demo's web, api and tests, invented text, a private state root
 with session hosts off."""
 import collections
@@ -906,6 +911,45 @@ class BoundAndDepartures(HoldWorld):
             self.assertEqual(list(km._FEED_SEG_HELD), [SID_API], "api's store shed web's entry, which build 3 had yet to use")
             self.check("build 3: web, derived after api", whole=True)
             self.assertEqual(list(km._FEED_SEG_HELD), [SID_API], "...and web's grown aggregate is not held beside api's")
+
+    def test_the_entry_kept_for_an_aggregate_over_the_bound_never_advances_and_leaves_little_room_after_it(self):
+        """Pinned as it stands (the review after #138 merged, 2026-10-07): an aggregate over the bound by itself only
+        grows, so the entry kept for it never advances. web has 30 turns and api 10, under a bound of web's 30-turn
+        aggregate plus 500 bytes; web is derived first in each build and closes a turn before it. web's entry stays at
+        30 turns, each of its walks folds one turn more than the last (every turn closed since the entry, and the open
+        one), and each counts under segOverBound. That entry, used in each build before api is derived, is close to the
+        bound, so api, whose aggregate fits under the bound by itself but not beside it, is turned away in each build:
+        counted under segEvict, every turn walked, the table and its gauges as they were. Every map matches the one-pass
+        walk, so the cost is walk time only (the comment above _FEED_SEG_HELD)."""
+        self.history(SID_WEB, "w")
+        self.history(SID_API, "p", turns=10)
+        self.new_build()
+        self.check("build 1: web", whole=True)
+        size = km._FEED_SEG_HELD[SID_WEB][5]
+        bound = size + 500
+        closed = self.tree(SID_API)["turns"][:-1]
+        api_size = km._feed_seg_entry_bytes(tuple(km._turn_hold_key(t) for t in closed), one_pass(closed, self.store))
+        self.assertLessEqual(api_size, bound, "the premise: api's aggregate fits under the bound by itself")
+        self.assertGreater(api_size + size, bound, "the premise: ...but not beside web's")
+        with mock.patch.object(km, "FEED_SEG_HELD_BYTES", bound):
+            for b in (2, 3, 4):
+                self.new_build()
+                self.close_turn(SID_WEB, b - 1)
+                s0 = self.stats()
+                self.check("build %d: web, derived first" % b, folded=b)
+                s1 = self.stats()
+                self.assertEqual((s1["segOverBound"] - s0["segOverBound"], s1["segEvict"] - s0["segEvict"]), (1, 0),
+                                 "build %d: the premise: web's grown aggregate is over the bound by itself" % b)
+                self.assertEqual(len(km._FEED_SEG_HELD[SID_WEB][2]), self.TURNS,
+                                 "build %d: web's kept entry never advances" % b)
+                self.check("build %d: api, derived after web" % b, sid=SID_API, whole=True)
+                s2 = self.stats()
+                self.assertEqual((s2["segOverBound"] - s1["segOverBound"], s2["segEvict"] - s1["segEvict"]), (0, 1),
+                                 "build %d: api's aggregate is turned away, counted under segEvict" % b)
+                self.assertEqual(list(km._FEED_SEG_HELD), [SID_WEB], "build %d: web's kept entry alone stands" % b)
+                rep = km._feed_memo_report()
+                self.assertEqual((rep["segEntries"], rep["segBytes"]), (1, size),
+                                 "build %d: the entry and byte gauges stay put" % b)
 
     def test_the_bound_is_a_fraction_of_the_machines_memory_unless_the_environment_names_bytes(self):
         with mock.patch.dict(os.environ, {"ROMP_FEED_SEG_HELD_BYTES": "4096"}):

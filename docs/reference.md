@@ -4071,14 +4071,25 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   all of them would still leave no room, it sheds nothing and the new one
   is not held. Then, and for an aggregate over the bound by itself, the
   session keeps the aggregate it was served from, so its next walk folds
-  only the turns since. Only aggregates the build has already used are
-  protected: one it has yet to use still carries an earlier build's
-  number, so a session whose grown aggregate is stored first, whichever
-  session that is, can shed the aggregate of a session derived after it,
-  which then walks every turn while the two do not fit together. While
-  two builds overlap, the aggregates used carry the number of the build
-  that began last, so one the earlier build used before then is not
-  protected either.
+  only the turns since. An aggregate over the bound by itself only grows
+  as its session closes turns, so the one kept for it never advances:
+  each of that session's walks folds every turn closed since it, so what
+  a walk adds to `segWalkTurns` grows by one for every turn the session
+  closes (never past walking every turn), and `segOverBound` counts each
+  of those walks. The kept aggregate is close to the bound, and in a
+  build that derives its session first, a session derived after it is
+  held only if it fits in the bytes the bound leaves beside the
+  aggregates the build has used; each turn-away raises `segEvict` while
+  `segEntries` and `segBytes` stay put, and a session with no aggregate
+  of its own then walks every turn. A steady climb in either counter is
+  this keep at work, not a fault. Only aggregates the build has already
+  used are protected: one it has yet to use still carries an earlier
+  build's number, so a session whose grown aggregate is stored first,
+  whichever session that is, can shed the aggregate of a session derived
+  after it, which then walks every turn while the two do not fit
+  together. While two builds overlap, the aggregates used carry the
+  number of the build that began last, so one the earlier build used
+  before then is not protected either.
   `segEntries`, `segBytes`
   (estimated) and `segBound` (`ROMP_FEED_SEG_HELD_BYTES`, else a 128th of
   the machine's memory) are the gauges. `reg` is the SDK registry
