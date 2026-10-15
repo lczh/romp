@@ -1674,7 +1674,13 @@ let landTrail: string[] = [];
 // every event object; a pass edited events in place without swapping them).
 interface PaintOut { pe: number | null; mark: number | null }
 interface Painted { items: DisplayItem[]; sig: (string | undefined)[]; out: (PaintOut | undefined)[] }
-interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; followHeld?: boolean; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner). followHeld: follow mode paused by a landing on a comment's passage, at the bottom or not, until the reader goes back to the bottom (landOn, releaseFollow)
+/** Where the reader was when they left a tab whose follow mode a passage landing holds off: the turn at the viewport's top and its
+ *  offset (captureScrollAnchor). The return restores THAT place and keeps the pause, so text the session wrote meanwhile waits
+ *  below under the chip (the user's decision: the passage stays where they were looking), whether the page drew it before the
+ *  return or draws it after (the appends keep the place while the pause holds). Nothing written meanwhile puts the reader back
+ *  at the bottom, where the re-show's reconcile resumes following (landActive). */
+interface HeldKeep { anchor: { uuid: string; y: number } | null }
+interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; followHeld?: boolean; heldKeep?: HeldKeep | null; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner). followHeld: follow mode paused by a landing on a comment's passage, at the bottom or not, until the reader goes back to the bottom (landOn, releaseFollow); heldKeep: where a held view was left, for the tab's return (HeldKeep)
 const views = new Map<string, View>();
 
 // Pending pickers (AskUserQuestion / tool-permission) keyed by session id. These
@@ -16293,15 +16299,20 @@ function landActive(content: HTMLElement | null, v: View): void {
         }
       }
     }
+    else if (v.followHeld && v.heldKeep) {
+      // back on a tab a passage landing holds: the place the reader left (HeldKeep), the turn at the top at its offset, never
+      // the session's new bottom; the pause is kept
+      const k = v.heldKeep; v.heldKeep = null;
+      if (!(k.anchor && keepPlaceAcrossWindow(content, v, k.anchor))) writeScroll(content, v.scrollTop, "land-saved");
+    }
     else if (!v.shown || v.stick) writeScroll(content, content.scrollHeight, "land-bottom", true);
     else writeScroll(content, v.scrollTop, "land-saved");
     // a passage landing's pause on follow mode never outlives a re-show (the tab coming back, a full rebuild) that leaves the
     // reader at the bottom: there no chip says text is below, so following is the only truthful state (the review of #251:
-    // back on the tab after a landing, the view sat at the bottom, chipless, and the next text landed below unseen). A reader
-    // who left the tab at the bottom comes back to the bottom (the leaving tab's save), the saved spot's pixels never asked to
-    // agree with a re-shown window's heights (a CI run of #253 came back a few pixels above it)
+    // back on the tab after a landing, the view sat at the bottom, chipless, and the next text landed below unseen)
     if (v.followHeld && atBottom(content)) { v.followHeld = false; v.stick = true; }
   }
+  v.heldKeep = null;   // a held tab's place serves the one return it was saved for (an anchored landing took it over, or it was used)
   v.shown = true;
   scheduleRailSticky();
   updateJumpBtn();   // per-tab truth: the entering tab's restored position decides the chip, not the left one's
@@ -16563,7 +16574,7 @@ function resumeAtBottom(c: HTMLElement): void {
  *  as before. */
 function releaseFollow(): void {
   const v = activeId ? views.get(activeId) : null;
-  if (v) v.followHeld = false;
+  if (v) { v.followHeld = false; v.heldKeep = null; }
 }
 const jumpBtn = document.createElement("button");
 jumpBtn.id = "jump-bottom";
@@ -16933,7 +16944,10 @@ window.addEventListener("keydown", (e) => {
     // …and while a passage landing settles, ANY move of the view (its re-land, or the browser's own move as the reply under the
     // passage grows) can carry the passage under the box that landing opened: the box steps off it (besideWatch). A reader's
     // own scroll has already ended the settle above, so it never moves the box
-    if (besideWatch && !besideWatch.settle.done) besideFollow();
+    // …and so can the browser's own move of a view whose follow mode a passage landing paused (a clamp when the tail re-lays
+    // out shorter for a frame as the session writes, the footer moving to the new reply): no input of the reader's is behind
+    // it, so the box steps off a passage it now covers. The reader's own scroll never moves the box
+    if (besideWatch && (!besideWatch.settle.done || (cls === "gesture" && !readerScrolling && gv?.followHeld))) besideFollow();
   }, { passive: true });
 }
 // The live-ask host (#live-ask) sits INSIDE #content after the threads: the picker card is the transcript's tail
@@ -21371,7 +21385,14 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   const content = document.getElementById("content");
   if (content && activeId && activeId !== id) {
     const cur = views.get(activeId);
-    if (cur) { cur.scrollTop = content.scrollTop; cur.stick = atBottom(content); }   // the leaving tab's follow mode: the true bottom (a reader who left at the bottom comes back to it, and a passage landing's pause ends there: landActive)
+    // the leaving tab's follow mode: the true bottom (a reader who left at the bottom comes back to it, and a passage landing's
+    // pause ends there: landActive). A held view keeps its place instead (HeldKeep): the passage the reader landed on was the
+    // bottom then, and the bottom the session writes to while they are away is not where they were looking
+    if (cur) {
+      cur.scrollTop = content.scrollTop;
+      cur.stick = atBottom(content) && !cur.followHeld;
+      cur.heldKeep = cur.followHeld ? { anchor: captureScrollAnchor(content, cur) } : null;
+    }
   }
   // Stash the leaving tab's draft; show the entering tab's own (usually empty).
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;

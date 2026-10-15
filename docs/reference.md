@@ -6655,7 +6655,9 @@ pointer is over the box or you are typing in it, in which case it steps aside on
 view scrolling never moves the box. Going to a passage also stops the chat following new text, so
 with the session still writing the passage and its thread stay where you are looking; the
 go-to-bottom arrow shows the new text below, and getting back to the bottom, by scrolling, by
-End, Page Down or Space, or by coming back to the tab with the view there, follows it again. A passage the page has not drawn or loaded yet is drawn or
+End, Page Down or Space, or by coming back to the tab with the view there, follows it again. Coming
+back to the tab after the session wrote meanwhile puts you back at the passage, with the arrow showing
+the new text below. A passage the page has not drawn or loaded yet is drawn or
 fetched first, and every collapsed section of its message that it sits in is unfolded; a part that
 still cannot be shown is said in the thread's box, and when that is the passage's start the landing
 goes to the section's heading. The quoted passage at the top of an open thread

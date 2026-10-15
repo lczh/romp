@@ -263,14 +263,34 @@ await page.waitForTimeout(300);
 const atBottomNow = (pg = page) => pg.evaluate(() => { const c = document.getElementById("content"); return c.scrollHeight - c.scrollTop - c.clientHeight <= 2; });
 const chipNow = (pg = page) => pg.evaluate(() => { const b = document.getElementById("jump-bottom"); return !!b && !b.hidden; });
 let prev = R(149), nStream = 0;
-const streamOne = async (pg = page) => {
+const streamOne = async (pg = page, wait = true, paras = 1) => {
   const u = cfg.streamUuid.replace("%012d", String(nStream++).padStart(12, "0"));
   fs.appendFileSync(cfg.transcript, JSON.stringify({ type: "assistant", uuid: u, parentUuid: prev, timestamp: new Date().toISOString(), sessionId: cfg.sid,
-    message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "Streaming note " + nStream + ": the writer flushes the next page of rows to the download, and the reader keeps pulling." }] } }) + "\n");
+    message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: Array.from({ length: paras }, (_, j) => "Streaming note " + nStream + "." + j + ": the writer flushes the next page of rows to the download, and the reader keeps pulling.").join("\n\n") }] } }) + "\n");
   prev = u;
-  await pg.waitForSelector(`#content .turn[data-uuid="${u}"]`, { state: "attached", timeout: 10000 }).catch(() => {});
+  if (wait) await pg.waitForSelector(`#content .turn[data-uuid="${u}"]`, { state: "attached", timeout: 10000 }).catch(() => {});
   return u;
 };
+const contentRect = () => page.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { t: Math.round(r.top), b: Math.round(r.bottom) }; });
+
+// 14. the session writes while the reader is on another tab, after a landing at the bottom: back on the tab, the passage is
+// where they left it, follow mode still paused, the chip showing the text below; the next reply does not move it either
+await landEnd();
+await page.waitForTimeout(1500);   // the landing settled
+out.away0 = { mark: await markNow("tid-end"), bottom: await atBottomNow() };
+await page.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`)?.click(), cfg.otherSid);
+await page.waitForTimeout(800);
+await streamOne(page, false, 8);   // eight paragraphs written while the reader is away: the page holds it, the hidden view draws it on return
+await page.waitForTimeout(1500);
+await page.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`)?.click(), cfg.sid);
+await page.waitForSelector(`#content .turn[data-uuid="${prev}"]`, { state: "attached", timeout: 10000 }).catch(() => {});   // drawn before or after the return
+await page.waitForTimeout(800);
+out.away1 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), chip: await chipNow(), content: await contentRect(), arrived: await page.evaluate((u) => !!document.querySelector(`#content .turn[data-uuid="${u}"]`), prev) };
+await streamOne();
+await page.waitForTimeout(400);
+out.away2 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), chip: await chipNow() };
+await page.click("#jump-bottom").catch(() => {});   // back to following, for what comes next
+await page.waitForTimeout(600);
 
 // 10. back on the tab after a landing at the bottom: the thread closed, another tab and back, the view at the bottom. It must
 // follow the next reply (or show the chip): a view at the bottom that silently stopped following hides the next text
@@ -596,10 +616,25 @@ class ServedCommentPassageReveal(unittest.TestCase):
         self.assertTrue(r["resume1"]["bottom"], "the next reply was followed, the view at the bottom: %r" % r["resume1"])
         self.assertGreater(r["resume1"]["st"], r["resume0"]["st"], "the view moved down with it: %r" % r)
         self.assertFalse(r["resume1"]["chip"], "no chip at the bottom: %r" % r["resume1"])
+        # 14. text written while the reader was away from a held tab: back on it, the passage where they left it, still paused
+        a0, a1, a2 = r["away0"], r["away1"], r["away2"]
+        self.assertTrue(a0["bottom"], "the landing on the last reply put the view at the bottom: %r" % a0)
+        self.assertTrue(a1["arrived"], "the reply written while away is in the transcript: %r" % a1)
+        self.assertTrue(a1["mark"] and a1["content"]["t"] <= a1["mark"]["t"] and a1["mark"]["b"] <= a1["content"]["b"], "the passage is in view: %r" % a1)
+        self.assertLess(abs(a1["mark"]["t"] - a0["mark"]["t"]), 4, "…where the reader left it: %r -> %r" % (a0, a1))
+        self.assertFalse(a1["bottom"], "not carried to the new bottom: %r" % a1)
+        self.assertTrue(a1["chip"], "the chip shows the text below: %r" % a1)
+        self.assertEqual(a2["mark"], a1["mark"], "follow mode stays paused: the next reply moves nothing: %r -> %r" % (a1, a2))
+        self.assertTrue(a2["chip"] and not a2["bottom"], a2)
         # 10. back on the tab after a landing at the bottom: the next reply is followed (or the chip says it is below)
-        self.assertTrue(r["tab0"]["bottom"], "back on the tab, the view is at the bottom: %r" % r["tab0"])
-        for x in r["tab"]:
-            self.assertTrue(x["bottom"], "a view back at the bottom follows again, reply after reply: %r" % r["tab"])
+        # (the rule: a view at the bottom follows, or the chip shows; what failed was a view at the bottom with no chip whose
+        # next reply landed below unseen)
+        self.assertTrue(r["tab0"]["bottom"] or r["tab0"]["chip"], r["tab0"])
+        states = [r["tab0"]] + r["tab"]
+        for before, after in zip(states, states[1:]):
+            if before["bottom"] and not before["chip"]:
+                self.assertTrue(after["bottom"], "a view back at the bottom follows again, reply after reply: %r" % states)
+            self.assertTrue(after["bottom"] or after["chip"], "never at neither: %r" % states)
         # 11. the message box grows under a landing on the last reply: the passage stays clear of the thread's box
         c0, c1 = r["compose0"], r["compose1"]
         self.assertGreater(c1["h"], c0["h"] + 40, "the message box grew: %r -> %r" % (c0["h"], c1["h"]))
