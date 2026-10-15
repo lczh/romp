@@ -120,8 +120,9 @@ test("an unread thread wears ONE outline box around its whole passage and a shou
   assert.match(UI, /function paintCommentOutlines\(sid: string\): void \{/);
   assert.doesNotMatch(CSS, /mark\.cmt-hl \{[^}]*position: relative;/s, "nothing left for the mark to anchor");
   assert.match(CSS, /\.cmt-tick\.unread, \.cmt-tick\.needs \{ width: 16px; height: 6px; right: 0; opacity: 1;/);   // 10px until the comment-forward rail (2026-09-24, rail-comment-forward.test.ts)
-  // the clearing story is the existing machinery, untouched: optimistic on open + kernel watermark
-  assert.match(UI, /if \(th\) th\.unread = false;\s*\/\/ optimistic; the kernel's watermark reconciles/);
+  // the clearing story: opening the thread reads it (readThread), held until the kernel's frame counts the read (2026-10-15,
+  // read-latch.ts; executed in comment-read-latch-browser.test.ts)
+  assert.match(UI, /readThread\(sid, tid\);\s*\/\/ opening it reads it/);
 });
 
 test("an unread thread tints its turn's RAIL segment yellow; clicking the rail opens the thread", () => {
@@ -1261,6 +1262,7 @@ test("New thread instead carries the selection's live range, so it opens the com
     + "applyCommentMarks, vscodeApi, document, quoteContext } = env;\n"
     + "let commentPopPos = null, cmtPopPosMine = false, cmtRedirect = null, pendingCommentAnchor = null, openCommentKey = null;\n"
     + "const renderCommentPopover = () => { env.shown.push({ open: openCommentKey, anchor: pendingCommentAnchor }); };\n"
+    + "const readThread = () => {};\n"   // the read the opening makes (its own tests: comment-read-latch-browser.test.ts)
     + src + "\nreturn { openCommentComposer, cmtnewthread };")(env) as { openCommentComposer: (...args: unknown[]) => void; cmtnewthread: () => void };
   const view = { ctx: "\u2026Each export then refills the cache from the database, and the worker drains the queue\u2026" };
   page.openCommentComposer(SID, "a3", "the cache", 100, 200, inside, false, view);

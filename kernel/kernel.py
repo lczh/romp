@@ -21266,7 +21266,9 @@ def _comments_frame(sid, live_map=None, thread_live=None):
     return {"type": "comments", "id": sid, "threads": threads, "caps": list(COMMENT_FRAME_CAPS)}
 
 
-COMMENT_FRAME_CAPS = ("threadAsks",)   # the comments frame's capabilities (_comments_frame's caps, read by the page per kernel)
+# the comments frame's capabilities (_comments_frame's caps, read by the page per kernel): "threadAsks" above; "seenAck", this
+# kernel answers a numbered read with the count it recorded it at and its frames carry each thread's count (_comment_seen)
+COMMENT_FRAME_CAPS = ("threadAsks", "seenAck")
 
 
 def _comment_frame_entry(th, be, now, live_map=None, thread_live=None):
@@ -21413,6 +21415,7 @@ def _comment_frame_entry(th, be, now, live_map=None, thread_live=None):
                     "chip": chip,                                  # the chat's state chip for a running thread, "" for a dormant one
                     "live": live_view,                             # its status projection and background tasks, None when dormant (thread-live-2)
                     "unread": unread, "replyOwed": reply_owed,   # yellow / green — see the docstring (T237)
+                    "seenSeq": int(th.get("seenSeq") or 0),        # the reads recorded for it: a page's held read ends at the frame that counts it (_comment_seen)
                     "queued": queued,                              # sends the backend holds or has fed, not yet in the transcript
                     "lastUuid": last_uuid,                         # the newest record shown/held — the client's cap-proof "transcript moved" datum
                     "unreachable": unreachable or None,            # a broken thread (missing transcript / lost cut): owes nothing
@@ -22585,9 +22588,46 @@ def _comment_delete(parent_sid, tid):
 
 
 def _comment_seen(parent_sid, tid):
-    """The popover was opened — stamp the read watermark (view state, not a verdict)."""
-    _comment_update(parent_sid, tid, lastSeenT=int(time.time()))
-    return None
+    """The popover was opened — stamp the read watermark (view state, not a verdict) and count the read. Returns
+    (seq, None), `seq` the thread's `seenSeq` after this read, or (None, error) when the read was not recorded (the thread
+    is gone, or its store could not be read or written).
+
+    `seenSeq` counts the reads recorded for the thread and rides every comments frame: the page holds a read it sent as
+    read until a frame counts it (render.ts readThread, read-latch.ts), so a frame built before the read was recorded,
+    already on its way, cannot put the thread's unread mark back (2026-10-15)."""
+    try:
+        with _comments_lock:
+            try:
+                data = _read_comments(parent_sid)[1]  # a store that cannot be read says so, never "no threads"
+            except FileNotFoundError:
+                data = {}
+            for th in data.get("threads") or []:
+                if th.get("tid") == tid:
+                    seq = int(th.get("seenSeq") or 0) + 1
+                    th.update(lastSeenT=int(time.time()), seenSeq=seq)
+                    _save_comments(parent_sid, data)
+                    return seq, None
+    except (OSError, ValueError) as e:
+        return None, "the comments store could not be read or written: %s" % (getattr(e, "strerror", None) or str(e) or type(e).__name__)
+    return None, "that thread is gone"
+
+
+def _answer_comment_seen(client, sid, tid, rid):
+    """The commentSeen op: record the read (_comment_seen), and when the page numbered it (`rid`, a page that holds its
+    reads) answer that page with the count it was recorded at (commentSeenAck), or with why it was not (commentSeenFailed),
+    which ends the page's hold and is said to the reader. A read the page did not number is answered by the next frame
+    alone, as before; its failure goes to the log."""
+    seq, err = _comment_seen(sid, tid)
+    if err:
+        sys.stderr.write("comment read not recorded (%s, thread %s): %s\n" % (sid[:8], tid[:8], err))
+    else:
+        _push_soon()          # the frame that counts the read, now rather than at the next backstop cycle: it ends the page's hold
+    if rid is None:
+        return
+    if err:
+        client["send"](json.dumps({"type": "commentSeenFailed", "id": sid, "tid": tid, "rid": rid, "error": err}))
+    else:
+        client["send"](json.dumps({"type": "commentSeenAck", "id": sid, "tid": tid, "rid": rid, "seq": seq}))
 
 
 def _comment_kill_all(parent_sid, be):
@@ -24583,7 +24623,7 @@ def _drive(msg, client):
         if err:
             client["send"](json.dumps({"type": "warn", "text": err}))
     elif t == "commentSeen" and msg.get("tid"):
-        _comment_seen(sid, str(msg["tid"]))
+        _answer_comment_seen(client, sid, str(msg["tid"]), msg.get("rid"))
     elif t == "commentPromote" and msg.get("tid") and msg.get("name"):
         # Break the thread out into its own board session. LOUD on refusal; on success the new tab
         # arrives focused via _comment_promote's own push (the forkSession acknowledgement shape).

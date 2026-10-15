@@ -1562,6 +1562,70 @@ class ThreadProjection(CommentBase):
         fr = km._comments_frame(PARENT)
         self.assertFalse(fr["threads"][0]["unread"])
 
+    # ── a read the page holds until a frame counts it (2026-10-15) ────────────────────────────────────
+    # Opening a thread clears its unread mark in the page at once; a frame the kernel built before it recorded that read
+    # was already on its way and put the mark back (3, 2, 3, 2 on the jump cluster's badge). The kernel now counts every
+    # read it records (seenSeq, on every frame) and answers a numbered read with that count, so the page can tell a frame
+    # from before its read from one after it (render.ts readThread, read-latch.ts).
+    def test_each_read_is_counted_and_every_frame_carries_the_count(self):
+        self._seed_thread(seen=self.now - 450)
+        fr = km._comments_frame(PARENT)
+        self.assertEqual((fr["threads"][0]["seenSeq"], fr["threads"][0]["unread"]), (0, True), "never read: no count")
+        self.assertIn("seenAck", fr["caps"], "the page holds its reads only for a kernel that answers them")
+        self.assertEqual(km._comment_seen(PARENT, THREAD), (1, None))
+        km._thread_msgs_cache.clear()
+        fr = km._comments_frame(PARENT)
+        self.assertEqual((fr["threads"][0]["seenSeq"], fr["threads"][0]["unread"]), (1, False))
+        self.assertEqual(km._comment_seen(PARENT, THREAD), (2, None), "every read counts, a second look included")
+        self.assertEqual(km._comment_thread(PARENT, THREAD)["seenSeq"], 2, "the count is the row's: a restart keeps it")
+
+    def _client(self):
+        sent = []
+        return {"send": lambda s: sent.append(json.loads(s)), "app": "chat"}, sent
+
+    def test_a_numbered_read_is_answered_with_the_count_it_was_recorded_at(self):
+        self._seed_thread(seen=self.now - 450)
+        client, sent = self._client()
+        saved = (km._kernel_knows, km.Sessions.backend_for)
+        km._kernel_knows = lambda sid: sid == PARENT          # the dispatcher's ownership guard is not under test
+        km.Sessions.backend_for = staticmethod(lambda sid: None)
+        try:
+            self.assertTrue(km._drive({"type": "commentSeen", "id": PARENT, "tid": THREAD, "rid": 7}, client))
+        finally:
+            km._kernel_knows, km.Sessions.backend_for = saved
+        self.assertEqual(sent, [{"type": "commentSeenAck", "id": PARENT, "tid": THREAD, "rid": 7, "seq": 1}])
+        km._thread_msgs_cache.clear()
+        self.assertEqual(km._comments_frame(PARENT)["threads"][0]["seenSeq"], 1, "the frame that shows the read counts it")
+        # a page that numbers no read (one from before the hold) is answered by the next frame alone, as before
+        km._answer_comment_seen(client, PARENT, THREAD, None)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(km._comment_thread(PARENT, THREAD)["seenSeq"], 2)
+
+    def test_a_read_the_kernel_could_not_record_is_refused_to_the_page_that_sent_it(self):
+        self._seed_thread(seen=self.now - 450)
+        client, sent = self._client()
+        log = io.StringIO()
+        with contextlib.redirect_stderr(log):
+            km._answer_comment_seen(client, PARENT, "77777777-8888-9999-aaaa-bbbbbbbbbbbb", 3)
+        self.assertEqual(sent, [{"type": "commentSeenFailed", "id": PARENT, "tid": "77777777-8888-9999-aaaa-bbbbbbbbbbbb",
+                                 "rid": 3, "error": "that thread is gone"}])
+        saved = km._atomic_write
+        def full(path, text):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        km._atomic_write = full
+        try:
+            with contextlib.redirect_stderr(log):
+                km._answer_comment_seen(client, PARENT, THREAD, 4)
+        finally:
+            km._atomic_write = saved
+        self.assertEqual(sent[1]["type"], "commentSeenFailed")
+        self.assertEqual(sent[1]["rid"], 4)
+        self.assertIn("No space left on device", sent[1]["error"])
+        self.assertIn("comment read not recorded", log.getvalue(), "the log carries it too")
+        km._thread_msgs_cache.clear()
+        fr = km._comments_frame(PARENT)
+        self.assertEqual((fr["threads"][0]["seenSeq"], fr["threads"][0]["unread"]), (0, True), "nothing was recorded")
+
     # ── T237 (the user 2026-09-03, twice): the mark turns yellow only when the reply has LANDED ────────
     # yellow = a FINISHED reply you have not seen. The kernel is the one truth: `unread` keys on the
     # thread's turn having ENDED (the event model's own turn-end — the chat's working predicate, never

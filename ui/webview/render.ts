@@ -151,6 +151,7 @@ import { chipStops } from "./status-chip";   // the bar's stop rule, which the c
 import { threadChipState, threadNeedsYou, threadCued } from "./comments";   // a thread's chip, and its wait on you: the popover's statusline and the passage's cue (thread-live-1)
 import { isRelay, parseRelay, relayHtml, relayPlain } from "./relay-view";   // a relayed thread's expanded bubble: a small transcript (2026-10-06)
 import { threadTakesReplies, stageThreadReply, threadReply } from "./comments";   // a thread's reply box: its quote chips, its staged stack, its release (2026-10-07)
+import { type ReadLatch, readKey, holdRead, heldUnread, answerRead, linkEdge } from "./read-latch";   // a thread's read, held until the kernel's frame shows it (2026-10-15)
 import { CmtDrops, cmtDropEntry } from "./comment-drops";   // a dropped comment create's dialog, shared with the feed (review of PR 218)
 import { activeInput } from "./active-input";   // the one box typing, pasting and dictation from outside any box go to (2026-10-07)
 import { dragSlotIndex } from "./dragslot";
@@ -10927,6 +10928,22 @@ const commentInFlight = (th: CommentThread): boolean => {
 };
 const commentDrafts = new Map<string, string>();                    // draft key → unsent popover text
 const commentThreadAsks = new Map<string, boolean>();               // parent sid → its kernel answers thread questions in the popover (the comments frame's caps)
+const commentSeenAcks = new Map<string, boolean>();                 // parent sid → its kernel answers each read with the count it recorded it at (caps "seenAck")
+// The reads the kernel's frames do not show yet (read-latch.ts): readKey(sid, tid) → the held read. A frame's unread bit for
+// a held thread reads through heldUnread, so a frame built before the kernel recorded the read cannot put the mark back
+const cmtReadLatch = new Map<string, ReadLatch>();
+let cmtReadRid = 0;                                                 // the page's read ids: the kernel's answer names the read it answers
+// The link a held read went out on dropped before the kernel answered it: the read may never have arrived, so the first
+// frame after the link is back decides (linkEdge). This page's own kernel: the shim's romp:wsdown / romp:wsup (the
+// extension's pipeState in the message handler); a linked machine's: its relay socket's romp:hostRelayDown / romp:hostRelayUp
+window.addEventListener("romp:wsdown", () => linkEdge(cmtReadLatch.values(), "", false, hostOf));
+window.addEventListener("romp:wsup", () => linkEdge(cmtReadLatch.values(), "", true, hostOf));
+const relayEdge = (e: Event, up: boolean): void => {
+  const h = (e as CustomEvent).detail?.host;
+  if (typeof h === "string" && h) linkEdge(cmtReadLatch.values(), h, up, hostOf);
+};
+window.addEventListener("romp:hostRelayDown", (e: Event) => relayEdge(e, false));
+window.addEventListener("romp:hostRelayUp", (e: Event) => relayEdge(e, true));
 // The popover-boot hold (fillCommentMsgs): tid → when the loader first held the list. Held until the
 // thread's events land (event-based) or the backstop expires (never trap); a backstop timer refills
 // the open popover so the fall-through actually paints.
@@ -11480,11 +11497,30 @@ function openCommentPopover(sid: string, tid: string, _x?: number, _y?: number,
   // click coords no longer seed the position (the user 2026-08-25): a THREAD popover opens at the
   // fixed right-aligned geometry below; only a real drag (commentPopPos) parks it elsewhere. The
   // CREATE composer (openCommentComposer) still opens at the selection point — a different gesture.
-  vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid });
-  const th = (commentThreads.get(sid) || []).find((t) => t.tid === tid);
-  if (th) th.unread = false;                    // optimistic; the kernel's watermark reconciles
+  readThread(sid, tid);                         // opening it reads it: the mark clears now, and stays clear until the kernel's frame shows the read
   renderCommentPopover();
   applyCommentMarks(sid);
+}
+
+/** The reader has seen thread `tid` of session `sid` (its popover opened on it, or a reply landed in it while open): its
+ *  unread mark clears now and the kernel stamps the thread's read watermark (commentSeen). The clear HOLDS until the
+ *  kernel's frame shows that read (read-latch.ts), so a frame that left the kernel before the read cannot bring the mark
+ *  back. A kernel that answers no read (no "seenAck" in its caps) gets the plain stamp with nothing held, as before; a
+ *  thread whose create is still in flight has nothing on the kernel to stamp yet. */
+function readThread(sid: string, tid: string): void {
+  const th = (commentThreads.get(sid) || []).find((t) => t.tid === tid);
+  if (tid.startsWith("pending:")) { if (th) th.unread = false; return; }
+  if (!th || !commentSeenAcks.get(sid)) {
+    vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid });
+    if (th) th.unread = false;                  // optimistic; the kernel's next frame reconciles
+    return;
+  }
+  const key = readKey(sid, tid);
+  const raw = cmtReadLatch.get(key)?.raw ?? !!th.unread;   // the frame's own bit (a held read's, when this reads it again)
+  const rid = ++cmtReadRid;
+  cmtReadLatch.set(key, holdRead(sid, tid, rid, raw));
+  th.unread = false;
+  vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid, rid });
 }
 
 // ── landing on a thread's passage (the user 2026-10-15) ─────────────────────────────────────────────────────────────
@@ -11647,7 +11683,7 @@ function adoptCommentThread(sid: string, tid: string): void {
   }
   pendingAdopt = null;
   openCommentKey = { sid, tid };
-  vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid });
+  readThread(sid, tid);
   renderCommentPopover();
   applyCommentMarks(sid);
 }
@@ -13944,7 +13980,8 @@ function ensureToastBox(): HTMLElement {
 // (reload-notices.ts liveNotices reads only the toasts without it).
 // Toasts that report what HAPPENED to a send or a file stay unmarked, since what they say is as true after the reload
 // as before: the nack (the attachment was not saved, the held message not sent), the dismissal and the other-tab ack
-// (the held message not sent).
+// (the held message not sent). A comment thread's read the kernel refused is marked too (2026-10-15): the thread shows unread
+// again, and the fresh page reads that from the kernel's next comments frame.
 function ephemeralWarnToast(msg: string): void { warnToast(msg).dataset.ephemeral = "1"; }
 // The same toast for a CONFIRMATION (review 2026-09-14): the warn toast's border is the error colour, so a routine
 // "done" on it read as a failure. Dressed .note (styles.css: the standard hairline, no tint), otherwise the warn toast's
@@ -22953,6 +22990,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     return;
   }
   // the pipe's down edge is the VS Code twin of the shim's romp:wsdown: unconfirmed sends say so (markPendingLost)
+  if (m.type === "pipeState") linkEdge(cmtReadLatch.values(), "", !!m.up, hostOf);   // …and a held read the kernel has not answered waits on the next link (read-latch.ts)
   if (m.type === "pipeState" && m.up) reaskWaitingSubagents();   // the extension's reconnect-class event (it never sees romp:wsup), T355
   if (m.type === "pipeState" && m.up) forgetHeldWm(sessions, null);   // …and the held watermarks go (frame-guard.ts, 2026-09-23): the kernel behind the pane's pipe may be a fresh process whose live-tail revision restarted at 0
   if (m.type === "pipeState" && !m.up && paneArranges(window as any)) { setViewOrderPublisher(null); setFoldsPublisher(null); }   // the pipe that heard the kernel's arrangement is gone: stop speaking for it until the next connection's viewOrder frame (view-order.ts ViewOrderPublisher, 2026-09-23)
@@ -23514,6 +23552,19 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     commentReadError.delete(sid);
     const threads = (m.threads || []) as CommentThread[];
     commentThreadAsks.set(sid, Array.isArray(m.caps) && m.caps.includes("threadAsks"));   // its kernel answers thread questions in the popover
+    commentSeenAcks.set(sid, Array.isArray(m.caps) && m.caps.includes("seenAck"));       // …and answers each read with its count (read-latch.ts)
+    // a thread the reader has read reads as read until this frame shows the kernel recorded it (heldUnread): a frame built
+    // before the read cannot put its mark back; one that shows it, a reply landed since included, is the kernel's word.
+    // A held thread the frame no longer lists (deleted) takes its hold with it
+    for (const [key, l] of Array.from(cmtReadLatch)) {
+      if (l.sid !== sid) continue;
+      const th = threads.find((t) => t.tid === l.tid);
+      if (!th) { cmtReadLatch.delete(key); continue; }
+      l.raw = !!th.unread;
+      const r = heldUnread(l, th);
+      th.unread = r.unread;
+      if (r.done) cmtReadLatch.delete(key);
+    }
     // an OPTIMISTIC synth thread (a create still in flight) survives the frame rebuild until the
     // frame lists the thread that create made, or its create fails — the frame used to wipe it, so
     // every create's mark BLINKED between the gesture and the thread's first frame, and a
@@ -23563,11 +23614,9 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     if (openCommentKey && openCommentKey.sid === sid) {
       // reading IS seeing: a reply that lands while its popover is open must not dot the mark — the
       // watermark advances BEFORE the marks paint (T237), so it never wears yellow for it, not even one tick
+      // (the frame's OWN bit: a reply landing while an earlier read is still held reads as read here, and is read again)
       const th = threads.find((t) => t.tid === openCommentKey!.tid);
-      if (th && th.unread) {
-        th.unread = false;
-        vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid: th.tid });
-      }
+      if (th && (th.unread || !!cmtReadLatch.get(readKey(sid, th.tid))?.raw)) readThread(sid, th.tid);
     }
     applyCommentMarks(sid);
     if (openCommentKey && openCommentKey.sid === sid) renderCommentPopover();
@@ -23621,6 +23670,35 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
         if ((commentThreads.get(String(m.id)) || []).some((t) => t.tid === tid)) adoptCommentThread(String(m.id), tid);
         else pendingAdopt = { tid, createId: held.createId };
       }
+    }
+  }
+  // the kernel's answer to a read (read-latch.ts): the count it recorded the read at, which the frames' seenSeq reaches once
+  // they show it. The frame the page holds may already be that one (a frame can overtake the answer): then the hold ends here
+  else if (m.type === "commentSeenAck" && m.id && m.tid) {
+    const sid = String(m.id), tid = String(m.tid), key = readKey(sid, tid);
+    const l = cmtReadLatch.get(key);
+    const th = (commentThreads.get(sid) || []).find((t) => t.tid === tid);
+    if (l && answerRead(l, m.rid, m.seq) && th) {
+      const r = heldUnread(l, { unread: l.raw, seenSeq: th.seenSeq });
+      if (r.done) {
+        cmtReadLatch.delete(key);
+        th.unread = r.unread;
+        if (openCommentKey && openCommentKey.sid === sid && openCommentKey.tid === tid && th.unread) readThread(sid, tid);   // reading is seeing
+        applyCommentMarks(sid);
+      }
+    }
+  }
+  // …and its refusal: the read was not recorded, so the thread shows what the kernel's frame says of it again, and the page
+  // says why. Only for the newest read of the thread the page sent: an older one's refusal is moot behind it
+  else if (m.type === "commentSeenFailed" && m.id && m.tid) {
+    const sid = String(m.id), tid = String(m.tid), key = readKey(sid, tid);
+    const l = cmtReadLatch.get(key);
+    if (l && l.rid === m.rid) {
+      cmtReadLatch.delete(key);
+      const th = (commentThreads.get(sid) || []).find((t) => t.tid === tid);
+      if (th) th.unread = l.raw;
+      applyCommentMarks(sid);
+      ephemeralWarnToast(`Couldn’t mark the thread “${th?.name || tid}” as read${m.error ? ` (${m.error})` : ""}, so it shows as unread again.`);
     }
   }
   // a reply the kernel refused: drop its optimistic bubble (it must not read as 'still thinking'

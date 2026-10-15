@@ -11,7 +11,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { prefixInbound, routeOutbound } from "./federation";
+import { prefixInbound, routeOutbound, bookkeepingKey } from "./federation";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
@@ -86,7 +86,26 @@ test("a number key that answers the question card is the card's: consumed, so no
 
 test("a kernel that serves no thread question keeps the old note, by the comments frame's capability", () => {
   assert.match(KERNEL, /"caps": list\(COMMENT_FRAME_CAPS\)\}/);
-  assert.match(KERNEL, /COMMENT_FRAME_CAPS = \("threadAsks",\)/);
+  assert.match(KERNEL, /COMMENT_FRAME_CAPS = \("threadAsks", "seenAck"\)/);
   assert.match(RENDER, /commentThreadAsks\.set\(sid, Array\.isArray\(m\.caps\) && m\.caps\.includes\("threadAsks"\)\);/);
   assert.match(fn("fillCommentMsgs"), /if \(th\.status === "open" && threadStuck\(th\.state\) && !commentThreadAsks\.get\(sid\)\) \{\s*\n\s*const note = el\("div", "cmt-note"\);\s*\n\s*note\.textContent = "This thread hit a prompt it can't answer from here\. Break it out to continue\.";/);
+});
+
+// A read of a linked machine's thread (2026-10-15, read-latch.ts): the page holds it until that machine's frame counts it, so
+// the read must reach that kernel with its number, and its answer must come back under the session's prefixed id, the key
+// the page holds it by. While the relay is down the read waits on the conn's queue, the newest per thread.
+test("a read of a linked machine's thread goes there by the bare id with its number, and the answer comes back under the prefixed id", () => {
+  const routes = routeOutbound({ type: "commentSeen", id: "TESTHOST:" + PARENT, tid: THREAD, rid: 3 }, new Set(["TESTHOST"]));
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0].host, "TESTHOST");
+  assert.deepEqual([routes[0].msg.id, routes[0].msg.tid, routes[0].msg.rid], [PARENT, THREAD, 3]);
+  const ack = prefixInbound("TESTHOST", { type: "commentSeenAck", id: PARENT, tid: THREAD, rid: 3, seq: 2 });
+  assert.deepEqual([ack.id, ack.tid, ack.rid, ack.seq], ["TESTHOST:" + PARENT, THREAD, 3, 2], "the tid stays bare, as the frame's does");
+  const nack = prefixInbound("TESTHOST", { type: "commentSeenFailed", id: PARENT, tid: THREAD, rid: 3, error: "that thread is gone" });
+  assert.deepEqual([nack.id, nack.tid, nack.rid], ["TESTHOST:" + PARENT, THREAD, 3]);
+  assert.equal(bookkeepingKey({ type: "commentSeen", id: PARENT, tid: THREAD, rid: 3 }), bookkeepingKey({ type: "commentSeen", id: PARENT, tid: THREAD, rid: 4 }),
+               "a relay that is down holds the newest read of the thread, the one the page's hold waits on");
+  // the kernel answers the read it was sent, by its number
+  assert.match(KERNEL, /_answer_comment_seen\(client, sid, str\(msg\["tid"\]\), msg\.get\("rid"\)\)/);
+  assert.match(KERNEL, /"type": "commentSeenAck", "id": sid, "tid": tid, "rid": rid, "seq": seq/);
 });
