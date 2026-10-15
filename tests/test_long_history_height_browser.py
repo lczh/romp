@@ -41,7 +41,12 @@ replies land below the window while the reader stands in the history (the residu
 drops back to the tail run's first rows, under the gap above them, one reply lands, then APPEND_TURNS more in one write, which the keyed
 paint puts in the bottom spacer at the held figure as it stands. The
 estimates must grow by that write's unit count (two units a turn) times that figure, within 2 px, and pass the half by at most that,
-and the next window build (a press of the chip) must bring them back under it. Before any reply lands, the window moves while the unit
+and the next window build (a press of the chip) must bring them back under it. Then the reader goes back into the climbed run as for
+End, and one more reply lands below the window, taller than the held figure, with its turn left open, so it takes the place of the
+error card the lab's session ends on (the card stands only while no turn is open) as the newest unit; the chip's press must bring that
+reply on screen at the bottom (the window the press builds anchored the reader in the newest unit at their offset into its held
+estimate, which left them tens of thousands of px inside a reply taller than the figure; 2026-10-15). Before any reply lands, the
+window moves while the unit
 count holds (the climb's last page, the chip's second press, ROAD 9's drop), and the held figure must not move with it. Each test that reads
 the climb checks its premise first, so a short climb fails every one of them on its own. A failed run is not re-run over the transcript
 ROAD 9 grew, and when the driver fails after printing the climb's record (before ROAD 9), the tests that read the climb alone read that
@@ -398,9 +403,9 @@ if (cfg.legs.includes("climb")) {
   // average unit), where the page builds a window over the run's middle rows and the tail stands hidden in the bottom spacer again,
   // as the climb left it; the write's event, read on the page each frame and capped at 10 s, is every row on screen one of the run's
   // and no gap page on the wire. Then a click on the text of a reply on screen (the selection's anchor and the last press in the
-  // transcript, focus on the page body, so the page takes End), and End, read as the chip's presses are
-  let end1 = null;
-  if (cfg.endBackUnits) {
+  // transcript, focus on the page body, so the page takes End), and End, read as the chip's presses are. ROAD 9's last press goes
+  // back the same way first (goBack)
+  const goBack = async () => {
     const m = await measure(), a0 = (await asks()).length;
     const to = runTop && m && (m.heldPx ?? m.avgUnit) ? Math.round(runTop.y + cfg.endBackUnits * (m.heldPx ?? m.avgUnit)) : null;
     let back = { runTop, to, met: false };
@@ -415,6 +420,11 @@ if (cfg.legs.includes("climb")) {
       await painted(); await page.waitForTimeout(500); await painted();
       back = Object.assign(await reading(), { runTop, to, met, asks: (await asks()).slice(a0), measure: await measure() });
     }
+    return back;
+  };
+  let end1 = null;
+  if (cfg.endBackUnits) {
+    const back = await goBack();
     // the reply text the click lands on: the paragraph of a reply wholly on screen nearest the pane's centre, 12 px into its first line
     const at = await page.evaluate(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect();
       const ps = Array.from(c.querySelectorAll(".turn-assistant .md p")).filter((p) => { const b = p.getBoundingClientRect(); return b.height > 0 && b.top >= cr.top + 20 && b.bottom <= cr.bottom - 20 && /^Answer \d+/.test(p.textContent); });
@@ -444,7 +454,13 @@ if (cfg.legs.includes("climb")) {
   // lands first; then the rest land in one write, which the keyed paint (render.ts tailDiff) puts in the bottom spacer at the held
   // figure as it stands. A press of the chip is the next window build.
   // Each landing is read after its units arrive or a 20 s wait ends, its newest row still the fixture's last reply as written at
-  // setup (cfg.newest); the chip press after both landings names the last reply appended
+  // setup (cfg.newest); the chip press after both landings names the last reply appended.
+  // Then the reader goes back into the climbed run as before End (goBack), and one more reply lands (cfg.append.tall), taller than the
+  // held figure, its turn left open: the error card the lab's session ends on stands only while no turn is open, so the reply takes
+  // its place as the newest unit, hidden in the bottom spacer, and the unit count stands, the held figure with it. Read after the
+  // regions name it the tail run's last unit or a 20 s wait ends. Then the chip, its press read with the reply's height. (The press
+  // above, the first build after the appends, lowers the held figure, and the thread shrinking under a reader in follow mode puts them
+  // at the bottom on its own: render.ts tail-shrink)
   let below = null;
   if (cfg.append) {
     const land = async (file, units) => {
@@ -466,7 +482,15 @@ if (cfg.legs.includes("climb")) {
     const first = await land(cfg.append.first, 2);
     const rest = await land(cfg.append.lines, cfg.append.units);
     const next = await press(cfg.append.newest);
-    below = { to, dropped, first, rest, next };
+    const back = cfg.endBackUnits ? await goBack() : null, t = cfg.append.tall;
+    fs.appendFileSync(cfg.append.transcript, JSON.stringify({ type: "assistant", uuid: t.uuid, parentUuid: cfg.append.newest, sessionId: cfg.sid,
+      timestamp: new Date().toISOString(), message: { role: "assistant", model: "claude-fable-5-1", content: [{ type: "text", text: t.text }] } }) + "\n");
+    const last = await page.waitForFunction((u) => { const r = ((typeof window.__rompRegions === "function" && window.__rompRegions()) || []).find((x) => x.kind === "run" && x.hi == null);
+      return !!r && r.last === u; }, t.uuid, { timeout: 20000, polling: "raf" }).then(() => true, () => false);
+    await painted(); await page.waitForTimeout(500); await painted();
+    const landed = Object.assign(await reading(t.uuid), { last, measure: await measure() });
+    const pressed = Object.assign(await press(t.uuid), { newestH: await page.evaluate((u) => { const r = document.querySelector(`#content .turn[data-uuid="${u}"]`); return r ? r.offsetHeight : null; }, t.uuid) });
+    below = { to, dropped, first, rest, next, tall: { back, landed, pressed } };
   }
   out.climb = { drop, steps, climbed, chip1, chip2, end1, below };
 }
@@ -1146,6 +1170,10 @@ class _LongHistoryLab:
         cls.append_lines = os.path.join(cls.lab, "append.jsonl")
         Path(cls.append_lines).write_text("".join(json.dumps(r) + "\n" for r in more[2:]))
         cls.append_newest = more[-1]["uuid"] if more else None
+        # the reply ROAD 9 lands last, chained on the last appended one by the driver with its turn left open: a tall reply, as the
+        # tail's are, taller than the held figure
+        kt = TURNS + 1 + cls.APPEND_TURNS
+        cls.append_tall = {"uuid": "22222222-3333-4444-5555-%012d" % (2 * kt + 1), "text": "Answer %d: the notes index, row by row.\n\n" % kt + tall}
         if cls.SECOND_SESSION:   # "api": a few short turns, every one newer than the long session's last
             Path(state, "names", SID2).write_text("api\t%s\t\t\n" % cwd)
             Path(state, "sdk", SID2 + ".json").write_text(json.dumps(
@@ -1213,7 +1241,7 @@ class _LongHistoryLab:
                 "climbPages": cls.CLIMB_PAGES, "endBackUnits": cls.END_BACK_UNITS, "endMedia": cls.media, "bars": cls.BARS,
                 # every appended event is a display unit of its own here (a prompt, a text reply)
                 "append": {"transcript": cls.transcript, "first": cls.append_first, "lines": cls.append_lines,
-                           "units": 2 * cls.APPEND_TURNS, "newest": cls.append_newest, "into": cls.APPEND_INTO}
+                           "units": 2 * cls.APPEND_TURNS, "newest": cls.append_newest, "into": cls.APPEND_INTO, "tall": cls.append_tall}
                 if cls.APPEND_TURNS else None}
 
     @classmethod
@@ -1530,6 +1558,29 @@ class LongHistoryClimb(_LongHistoryLab, unittest.TestCase):
         self.assertLessEqual(r["est"], half + k * mf["heldPx"] + 4, "…by at most their count times the figure: %d" % r["est"])
         self.assertLessEqual(n["est"], half + 4, "the next window build (a press of the chip) brings the estimates back under the half: %r" % self._brief(n))
         self.assertLess(max(x["sh"] for x in (d, f, r, n)), self.limit, "the thread fits the tallest box through the road: %r" % [x["sh"] for x in (d, f, r, n)])
+
+    def test_the_chip_lands_at_the_bottom_when_the_newest_reply_is_taller_than_the_held_figure(self):
+        # ROAD 9's last press: the newest unit, hidden in the bottom spacer at the held figure, is a reply far taller than it. The
+        # press's window build anchors the reader in that unit at their offset into its estimate, and a re-window that starts with the
+        # reader in follow mode at the bottom ends with them there (render.ts virtualizeToViewport, 2026-10-15); before that the
+        # reader stood tens of thousands of px inside the reply, the chip still shown.
+        # The result first, then the climb's premise, as in the append test
+        res = self._result()
+        self._climb()
+        b = res["climb"]["below"]
+        self.assertIsNotNone(b, "the class appended replies after the climb")
+        k, t, p = b["tall"]["back"], b["tall"]["landed"], b["tall"]["pressed"]
+        self.assertTrue(k and k["met"] and not k["newestRendered"] and k["dist"] > 100 * k["ch"],
+                        "the go-back put the climbed run's rows on screen, more than a hundred screens from the bottom: %r" % self._brief(k))
+        self.assertTrue(t["last"] and not t["newestRendered"] and t["measure"]["winEnd"] < t["measure"]["units"],
+                        "the tall reply landed as the session's last unit, the error card gone with its turn open, hidden in the bottom spacer: %r" % self._brief(t))
+        self.assertEqual((p["measure"]["units"], p["measure"]["heldPx"]), (k["measure"]["units"], t["measure"]["heldPx"]),
+                         "the unit count and the held figure stand through the landing and the press's window build (the reply took the card's "
+                         "place), so the thread does not shrink under the reader: %r, %r, %r" % (k["measure"], t["measure"], p["measure"]))
+        self.assertTrue(p["newestH"] is not None and p["newestH"] > t["measure"]["heldPx"] + p["ch"],
+                        "the reply stands taller than the held figure by more than a screen: its height %r, %r" % (p["newestH"], t["measure"]))
+        self.assertTrue(p["newestOnScreen"], "the reply is on screen after the press: %r" % self._brief(p))
+        self.assertLessEqual(p["dist"], 2, "…at the bottom: %r" % self._brief(p))
 
     def test_the_held_figure_stays_put_while_the_window_moves(self):
         # chat-regions.ts heldUnitPx counts every unit that is not a gap, rendered or hidden, so window builds over the same units set
