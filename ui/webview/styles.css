@@ -4176,6 +4176,13 @@ mark.cmt-hl.busy {
 }
 mark.cmt-hl.hl-first { border-top-left-radius: 2px; border-bottom-left-radius: 2px; }
 mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 2px; }
+/* a landing on a thread's passage (render.ts passageLanding, the user 2026-10-15) flashes the passage itself: the landing's
+   flash in the highlight's own yellow, brighter, fading back to the mark's own tint (a from-only frame ends on the element's
+   background, where the turn's flash ends on transparent), the mark's own corners kept */
+@keyframes cmt-land-flash { from { background-color: color-mix(in srgb, var(--cmt-hl) 85%, transparent); } }
+mark.cmt-hl.anchor-flash { animation: cmt-land-flash 1.6s ease-out; border-radius: 0; }
+mark.cmt-hl.anchor-flash.hl-first { border-top-left-radius: 2px; border-bottom-left-radius: 2px; }
+mark.cmt-hl.anchor-flash.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 2px; }
 /* (an unmatched stray `}` sat here from 7f0c9b8c's block removal, 2026-08-23→24: Chromium's error
    recovery EATS the rule that follows one, which silently killed the combined code/katex busy rule
    below — math never greened while prose did (the user 2026-08-24, screenshot). A brace-balance
@@ -4293,6 +4300,9 @@ mark.cmt-hl.hl-last { border-top-right-radius: 2px; border-bottom-right-radius: 
 }
 .cmt-pop.dragging { cursor: grabbing; }
 .cmt-pop .cmt-quote, .cmt-pop .cmt-msgs, .cmt-pop .cmt-input, .cmt-pop .cmt-name { cursor: auto; }
+/* an open thread's quote is the way back to its passage (passageLink): the pointer, and full ink under it */
+.cmt-pop .cmt-quote[data-passage] { cursor: pointer; }
+.cmt-pop .cmt-quote[data-passage]:hover { opacity: 1; }
 .cmt-pop button, .cmt-pop .meta-btn { cursor: pointer; }
 /* the thread's own statusline (the user 2026-08-25: the popover should carry the chat's components —
    the working chip WITH its counting timer, and the model/effort badges in the statusline's own

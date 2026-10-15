@@ -107,7 +107,7 @@ test("the scroll clamp: how far short of the viewport top a target near the tail
 test("render.ts wiring: landOn ends follow mode, feeds the rule from the page's own events, files the row at settle time, and the walk-forward waits", () => {
   assert.match(RENDER, /import \{ SETTLE_MS, SETTLE_FIRST_PAINT_MS, SETTLE_ROW_VIEWPORT_CAP, settleStep, settleRowFields, reachableOffset, gestureEvidence, scrollerGrab, writerIsReader, type SettleSample \} from "\.\/landing-settle";/);
   assert.match(RENDER, /if \(c && v\) v\.stick = atBottom\(c\); \}/, "a landing ends follow mode unless it put the reader at the bottom (the tail-shrink snap otherwise undoes it)");
-  assert.match(RENDER, /const landSettle = \{ turn: target, at, uuid: flashKey \?\? null, quote: quote \?\? null, rowH: settleRowHeight\(at\), samples: \[\] as SettleSample\[\],/, "one settle in flight per landing, with what re-finds its target");
+  assert.match(RENDER, /const landSettle = \{ turn: target, at, uuid: flashKey \?\? null, quote: quote \?\? null, mark: mark \?\? null, rowH: settleRowHeight\(at\), samples: \[\] as SettleSample\[\],/, "one settle in flight per landing, with what re-finds its target (a comment thread's highlight among them)");
   assert.match(RENDER, /ro\.observe\(at\); if \(at !== target\) ro\.observe\(target\);/, "the aligned element's box, and the turn's");
   assert.match(RENDER, /for \(const sp of Array\.from\(v\.el\.querySelectorAll\("\.tx-spacer"\)\)\) ro\.observe\(sp\);/, "the view's spacers: their size from estimate to measurement");
   assert.match(RENDER, /function settleTick\(\): void \{/);
@@ -166,13 +166,13 @@ test("render.ts wiring, round one: the gesture verdict ends the settle by any in
 test("render.ts wiring: the settle re-finds its target by uuid after a rebuild replaced the DOM, and gives up honestly when the turn is gone", () => {
   assert.match(RENDER, /function settleResolve\(s: NonNullable<typeof landSettling>\): HTMLElement \| null \{/);
   assert.match(RENDER, /const turn = s\.uuid \? findTurnEl\(s\.uuid\) : null;/, "a detached box measures as zeros: re-find, never measure it");
-  assert.match(RENDER, /s\.at = \(s\.quote \? highlightCiteSpan\(turn, s\.quote\) : null\) \?\? firstTextAtomBelow\(turn\) \?\? turn;/, "the same alignment as the landing's, re-derived");
+  assert.match(RENDER, /s\.at = \(s\.mark \? threadMarkIn\(turn, s\.mark\) : null\) \?\? \(s\.quote \? highlightCiteSpan\(turn, s\.quote\) : null\) \?\? firstTextAtomBelow\(turn\) \?\? turn;/, "the same alignment as the landing's, re-derived (a comment thread's highlight first)");
   assert.match(RENDER, /if \(!at\) \{ settleFinish\(s, \{ dist: null, settled: false \}\); return; \}/, "the turn left the view: the row says so");
   assert.match(RENDER, /function findTurnEl\(uuid: string\): HTMLElement \| null \{/);
 });
 
 test("render.ts wiring: a card anchored on a turn's first atom lands on the quoted words, or the turn's text atom, not the tool group", () => {
-  assert.match(RENDER, /const quote = pendingAnchorQuote; pendingAnchorQuote = null;\s*\n\s*const quoteEl = quote \? highlightCiteSpan\(target, quote\) : null;\s*\n\s*landOn\(target, uuid, quoteEl \?\? firstTextAtomBelow\(target\), quote\);/);
+  assert.match(RENDER, /const quote = pendingAnchorQuote; pendingAnchorQuote = null;[\s\S]{0,900}?\n\s*const quoteEl = !markEl && quote \? highlightCiteSpan\(target, quote\) : null;\s*\n\s*landOn\(target, uuid, markEl \?\? quoteEl \?\? firstTextAtomBelow\(target\), quote, mark\);/);
   assert.match(RENDER, /function highlightCiteSpan\(target: HTMLElement, quote: string\): HTMLElement \| null \{/, "the highlight returns the element the sentence starts in");
   // low 3: text atoms first, then tool and thinking atoms; the alignment is the top, one rule for every landing
   assert.match(RENDER, /const ordered = \[\.\.\.atoms\.filter\(\(a\) => !isToolOrThinkingAtom\(a\)\), \.\.\.atoms\.filter\(\(a\) => isToolOrThinkingAtom\(a\)\)\];/);
@@ -182,6 +182,6 @@ test("render.ts wiring: a card anchored on a turn's first atom lands on the quot
   assert.match(RENDER, /function firstTextAtomBelow\(target: HTMLElement\): HTMLElement \| null \{\s*\n\s*if \(!isToolOrThinkingAtom\(target\)\) return null;/);
   assert.match(RENDER, /function turnAtomsOf\(target: HTMLElement\): HTMLElement\[\] \{/);
   assert.match(RENDER, /if \(!\(n instanceof HTMLElement\) \|\| !n\.classList\.contains\("turn"\) \|\| n\.classList\.contains\("turn-user"\)\) break;/, "the turn ends at the next user turn");
-  assert.match(RENDER, /function landOn\(target: HTMLElement, flashKey\?: string, alignOn\?: HTMLElement \| null, quote\?: string \| null\) \{/);
+  assert.match(RENDER, /function landOn\(target: HTMLElement, flashKey\?: string, alignOn\?: HTMLElement \| null, quote\?: string \| null, mark\?: string \| null\) \{/);
   assert.match(RENDER, /const at = alignOn \?\? target;/);
 });

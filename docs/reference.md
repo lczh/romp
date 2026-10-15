@@ -6644,6 +6644,16 @@ On a touch screen each control in the chip row and the staged strip (Comment, St
 Send now, each staged message's x and the strip's collapse arrow) takes a tap area at least 44
 pixels each way, with none of them touching, while keeping its compact look.
 
+### Going to a commented passage
+
+A comment thread's tick on the chat's scroll rail takes you to its passage: the passage moves to the
+top of the view and flashes, then the thread opens beside it, below the passage (above it near the
+end of the conversation) and never over it. A passage the page has not drawn or loaded yet is drawn
+or fetched first. The quoted passage at the top of an open thread does the same, which helps once you
+have scrolled away, and so does the tinted rail line of a message with an unread reply. The comment
+arrows in the chat's corner land on the passage the same way without opening the thread. When the
+thread's words are no longer in its message, the message lands and the thread's box says so.
+
 ### Quoting and staging in a comment thread
 
 In a comment thread that takes replies (open, or relayed back to the session), a passage selected
