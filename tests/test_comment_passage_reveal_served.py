@@ -361,6 +361,30 @@ out.flick1 = { bottom: await atBottomNow(phone) };
 await streamOne(phone);
 await phone.waitForTimeout(400);
 out.flick2 = { bottom: await atBottomNow(phone), chip: await chipNow(phone) };
+// 13. the keys back to the bottom after a landing: End, PageDown and Space are the browser's own smooth scrolls, whose scrollend
+// can come before the last scroll event at the bottom. Each run: a landing (the passage has replies below it now), a reply that
+// lands below unfollowed, the keys to the bottom, then the next reply must be followed
+const keyBack = async (key) => {
+  await fresh();
+  await page.click(`#cmt-rail .cmt-tick[data-tid="tid-end"]`);
+  await page.waitForSelector('#cmt-pop[data-tid="tid-end"]', { timeout: 15000 }).catch(() => {});
+  await page.waitForTimeout(1500);   // the landing settled
+  await streamOne();
+  await page.waitForTimeout(300);
+  const before = { bottom: await atBottomNow(), chip: await chipNow() };
+  await page.mouse.click(150, 300);   // into the transcript, so the keys scroll it (the press outside closes the thread's box)
+  for (let i = 0; i < (key === "End" ? 1 : 10) && !(await atBottomNow()); i++) {   // loop-ok: a key at a time until the bottom, each waited past its smooth scroll
+    await page.keyboard.press(key);
+    await page.waitForTimeout(500);
+  }
+  const reached = await atBottomNow();
+  await streamOne();
+  await page.waitForTimeout(400);
+  return { key, before, reached, after: { bottom: await atBottomNow(), chip: await chipNow() } };
+};
+out.keys = [];
+for (const key of ["End", "End", "End", "End", "PageDown", "Space"]) out.keys.push(await keyBack(key));   // loop-ok: six runs, each waited on its own landing and replies
+
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -582,6 +606,11 @@ class ServedCommentPassageReveal(unittest.TestCase):
         self.assertTrue(self._clear(c0["mark"], c0["box"]), "the landing left the passage clear: %r" % c0)
         self.assertLess(c1["mark"]["t"], c0["mark"]["t"] - 30, "the view re-pinned the bottom, raising the passage: %r -> %r" % (c0, c1))
         self.assertTrue(self._clear(c1["mark"], c1["box"]), "the thread's box stepped off the risen passage: %r" % c1)
+        # 13. End, PageDown and Space back to the bottom after a landing resume following, run after run
+        for k in r["keys"]:
+            self.assertFalse(k["before"]["bottom"], "the landing paused follow mode, the reply landed below: %r" % k)
+            self.assertTrue(k["reached"], "%s took the view to the bottom: %r" % (k["key"], k))
+            self.assertTrue(k["after"]["bottom"], "after %s to the bottom the next reply is followed: %r" % (k["key"], r["keys"]))
         # 12. a phone flick back to the bottom whose momentum outlasts the input window resumes following
         self.assertFalse(r["flick0"]["bottom"], "the landing paused follow mode, so the reply landed below: %r" % r["flick0"])
         self.assertTrue(r["flick0"]["chip"], "…with the chip showing it: %r" % r["flick0"])

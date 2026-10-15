@@ -105,15 +105,19 @@ test("a landing on a comment's passage pauses follow mode until the reader is ba
   assert.match(fn("appendActive"), /const stick = content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\) && !v\?\.followHeld;/, "the appends keep the reader's place");
   assert.match(fn("liveStatusEl"), /if \(atEnd && !v\.followHeld\) writeScroll/, "and so does the foot line's first room");
   // released by the reader: their gesture at the bottom, a writer of theirs (a key, the chips), their own send from the tail
-  assert.match(RENDER, /if \(gv\?\.followHeld && atBottom\(c\) && \(\(cls === "gesture" && readerScrolling\)\s*\n\s*\|\| \(cls === "write-echo" && \(writerIsReader\(lastScrollWriter\) \|\| lastScrollWriter === "optimistic-send"\)\)\)\) \{\s*\n\s*releaseFollow\(\); gv\.stick = true;/);
+  assert.match(RENDER, /if \(\(cls === "gesture" && readerScrolling\) \|\| \(cls === "write-echo" && \(writerIsReader\(lastScrollWriter\) \|\| lastScrollWriter === "optimistic-send"\)\)\) resumeAtBottom\(c\);/);
+  assert.match(fn("resumeAtBottom"), /if \(v\?\.followHeld && atBottom\(c\)\) \{ releaseFollow\(\); v\.stick = true; \}/);
   // the reader's gesture is followed to its end (a phone flick's momentum outlasts the input window): started by a gesture with
   // their input behind it, carried until the scroll settles; a landing is never the reader's scroll
   assert.match(RENDER, /if \(cls === "gesture" && gestureEvidence\(settleLastInput, Date\.now\(\), settleScrollerHeld\)\) readerScrolling = true;/);
-  assert.match(RENDER, /c\.addEventListener\("scrollend", \(\) => \{ readerScrolling = false; \}, \{ passive: true \}\);/);
+  // …and read where it SETTLES too: a keyboard smooth scroll's scrollend comes before its last scroll event at the bottom (End,
+  // PageDown, Space resumed one run in three)
+  assert.match(RENDER, /c\.addEventListener\("scrollend", \(\) => \{\s*\n\s*if \(readerScrolling && c\.clientHeight > 0\) resumeAtBottom\(c\);[^\n]*\n\s*readerScrolling = false;\s*\n\s*\}, \{ passive: true \}\);/);
   assert.match(fn("landOn"), /readerScrolling = false;/);
-  // a re-show that leaves the reader at the bottom ends the pause (the tab coming back); the leaving tab keeps its saved spot
+  // a re-show that leaves the reader at the bottom ends the pause (the tab coming back: a reader who left at the bottom lands
+  // back there, so the return is deterministic, whatever the re-shown window's heights)
   assert.match(fn("landActive"), /if \(v\.followHeld && atBottom\(content\)\) \{ v\.followHeld = false; v\.stick = true; \}/);
-  assert.match(RENDER, /cur\.stick = atBottom\(content\) && !cur\.followHeld;/);
+  assert.match(RENDER, /cur\.stick = atBottom\(content\); \}   \/\/ the leaving tab's follow mode/);
   // the message box growing re-pins the bottom and raises the passage: the thread's box steps off it
   assert.match(RENDER, /v\.stick = !v\.followHeld;[^\n]*\n\s*repinned = true;\n(?:\s*\/\/[^\n]*\n){3}\s*besideFollow\(\);/);
   assert.match(RENDER, /releaseFollow\(\);\s+\/\/ a passage landing's pause ends here too, before the snap's echo is read\s*\n\s*writeScroll\(c, c\.scrollHeight, "jump-button", true\);/, "the go-to-bottom chip");
