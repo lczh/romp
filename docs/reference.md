@@ -3180,7 +3180,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   reads before the job they serve: the pass's sessions at the first two
   jobs' turns (the listing at first sight's, the alive ones at the lift's),
   the nudge ledger and the working notes when their caches miss, each input
-  whose records belong to sessions once per version of it (the ledger, the
+  whose records belong to sessions once per version of it, on a pass that
+  calls the job closed (the ledger, the
   session flags, and the relay queue's and the working notes' listings), and at the
   settle write's turn each listed session's settle evidence and, once its
   period has passed or is a second from passing, its leaf's stat. That cost
@@ -3194,9 +3195,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   stderr names each job and exception type once), `marks`
   (`session`: dirty-set entries naming one session, which open that
   session's file readers even when a re-stat looks the same; `all`: passes
-  with a box-wide mark, which only re-stat), and `floorCaught` (by file
+  with a box-wide mark, which only re-stat), `floorCaught` (by file
   position, a floor re-stat that found a file moved with no mark: a writer
-  that never said so). `byJob`, per job: `ticks`, `open` and `owed` by reason
+  that never said so), and `slicesUnread` (by input, a reading by session
+  of a shared input that failed, such as a write landing between the
+  gate's stat and its read, so a memo's race compared that input whole).
+  `byJob`, per job: `ticks`, `open` and `owed` by reason
   (an input's name, `due`, `first`, `fault`, `gateFault`, `unrecorded`,
   `undeclared`, or a job's own reason such as `canSpend` or `yield`; the
   checkpoint settle write opens on `ckptSettle`, its sessions' turn-end
@@ -3213,9 +3217,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   no signal for its inputs: a signal its declaration lacks, by evidence; the
   acts are `views`, `mark`, `push`, `send`, `problem`, `spendRow`, `write`, a
   declared file written with no mark or the checkpoint settle write's own
-  work (a first sight recorded, a session's documents written, a table
-  cleared), and `raised`, and an act is never raced) and `raced` (its memo
-  moved and an input of the memo's session moved after the gate looked,
+  work (a first sight recorded, a table cleared, and a session's documents
+  written on evidence the gate read, as below), and `raised`, and an act
+  is never raced) and `raced` (its memo
+  moved and an input of the memo's sessions moved after the gate looked,
   with a signal the next pass's gate will see:
   a box-wide file, an in-memory input or a registry row observed again; a
   mark, a judge write or a moved live row naming the session; or a box-wide
@@ -3224,15 +3229,20 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   when the floor, a later stat or an all-sessions mark brings the job back:
   a standing view is never re-statted, since it cannot tell a write during
   the run from one before the pass. A memo names the sessions its key
-  carries, and the walk's look names the askers whose registry rows its key
-  holds beside the session it looks at. It is tested on those sessions'
-  inputs alone: their registry rows, judge writes, judge calls in flight,
-  compaction clicks and settle evidence, and their records in the nudge
-  ledger, the session flags, the relay queue and the working notes, beside
-  the records that name no session. So another session's input moving never
+  carries and is tested on those sessions' inputs alone: their registry
+  rows, judge writes, judge calls in flight, compaction clicks and settle
+  evidence, and their records in the nudge ledger, the session flags, the
+  relay queue and the working notes, beside the records that name no
+  session. The walk's look also names the askers whose registry rows its
+  key holds, and of an asker only that row is tested, since none of its
+  other inputs is in the key. So another session's input moving never
   makes it raced, unless the memo's own key carried that input whole: the
   ten-file key carries the ledger's stat, and a key that moved there counts
-  any ledger write. The inputs every session reads whole, such as the
+  any ledger write. Each job that keys on the ten files takes the box-wide
+  ones (the clears, postal and downtime logs and the ledger) from a stat at
+  its own turn, after the gate read them, never from the pass's shared
+  snapshot, which an earlier job may have taken: a write the gate saw then
+  moves the key on that pass and leaves no miss for the next. The inputs every session reads whole, such as the
   clears, postal and downtime logs, count whole. A run whose memos name
   several sessions is raced only when each memo is. The settle write's
   work is an act only when the gate saw what it acted on: a settle key or
@@ -4192,7 +4202,9 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   alive or not, since its row is outside the key. The pass stats the postal
   log before it builds the asker index from it and the key carries that
   earlier stat, so the key never claims a newer log than the selection
-  read. The limit:
+  read; the clears and downtime logs and the ledger are statted with it and
+  laid over every key too, in place of the stats the pass's shared snapshot
+  holds, which can predate a write the jobs gate saw before the walk. The limit:
   the row invariant holds for the SDK backend only; a Codex session's
   liveness is in memory with its registry at `STATE/codex/registry.json`,
   so a Codex asker's revival would move nothing in a debtor's key (not

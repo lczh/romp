@@ -995,7 +995,7 @@ class JobsCpu(unittest.TestCase):
                  "cpuByJob",   # cpuByJob: per job on the jobs thread, {runs, cpuMs}
                  "gate"}       # gate: the jobs pass's gate in shadow (stage one of the event-driven jobs pass, 2026-10-05)
     GATE_KEYS = {"ticks", "wouldSkipPass", "wouldSkipPassCpuMs", "quietDeclared", "passMs", "passCpuMs", "wouldRunMs", "wouldRunCpuMs",
-                 "closedMs", "closedCpuMs", "tickMs", "tickCpuMs", "gateFaults", "marks", "floorCaught", "treeFloor", "byJob",
+                 "closedMs", "closedCpuMs", "tickMs", "tickCpuMs", "gateFaults", "marks", "floorCaught", "slicesUnread", "treeFloor", "byJob",
                  "wrongQuietLast", "today", "projected", "mode", "asked", "lastPass"}
 
     def setUp(self):
