@@ -848,7 +848,7 @@ class QueuedBubbleDisplay(unittest.TestCase):
         be = self._Be(queued)
         with mock.patch.object(km, "_sessions", lambda now: list(self.sess)), \
              mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: be)), \
-             mock.patch.object(km, "_captions", lambda sid: {}), \
+             mock.patch.object(km, "_captions", lambda sid, on_fail=None: {}), \
              mock.patch.object(km, "_limit_hold", lambda sid: None):
             m = km.build_session(SID, self.now, live_map={})
         self.assertIsNotNone(m, "the session must build")

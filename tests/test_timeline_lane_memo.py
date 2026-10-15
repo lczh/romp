@@ -1209,8 +1209,8 @@ class EveryInputBusts(LaneMemoBase):
         km.jd.append_caption(LIVE_SID, seg, "segment", self.t0, "first summary")
         real, landed = self._saved["_captions"], []
 
-        def late_row(fsid):
-            caps = real(fsid)
+        def late_row(fsid, on_fail=None):
+            caps = real(fsid, on_fail=on_fail)
             if not landed:
                 landed.append(1)
                 km.jd.append_caption(fsid, seg, "segment", self.t0, "landed after the read")
@@ -1555,11 +1555,11 @@ class NotHeld(LaneMemoBase):
         # held, and the next build, whose stat sees the file, holds it
         seg, real, landed = self.seg_id(), self._saved["_captions"], []
 
-        def appears_before_the_read(fsid):
+        def appears_before_the_read(fsid, on_fail=None):
             if not landed:
                 landed.append(1)
                 km.jd.append_caption(fsid, seg, "segment", self.t0, "landed between the stat and the read")
-            return real(fsid)
+            return real(fsid, on_fail=on_fail)
         km._captions = appears_before_the_read
         tl1 = self.build()
         self.assertEqual(tl1["turns"][LIVE_SID][0]["c"], "landed between the stat and the read", "this build read the row")
@@ -2287,8 +2287,8 @@ class PrefixMemo(LaneMemoBase):
         km.jd.append_caption(LIVE_SID, seg0, "segment", self.t0, "Added backoff")
         real, read = km._captions, []
 
-        def evicted_after_the_read(fsid):
-            caps = real(fsid)
+        def evicted_after_the_read(fsid, on_fail=None):
+            caps = real(fsid, on_fail=on_fail)
             if fsid == LIVE_SID and not read:
                 read.append(km._caption_rows_version(fsid, caps))
                 with km.em._JSONL_CACHE_LOCK:

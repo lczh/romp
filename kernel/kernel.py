@@ -38001,7 +38001,7 @@ def _caption_rows_report():
     return out
 
 
-def _captions(fsid):
+def _captions(fsid, on_fail=None):
     """{unit id -> caption row} from captions/<fsid>.jsonl — append-incremental like the states logs
     (2026-09-03): the chat build, the feed and the timeline each re-read and re-decoded the whole file
     per build. Rows are the cache's objects: read-only.
@@ -38024,10 +38024,15 @@ def _captions(fsid):
     _caption_rows_version answers for); a newer one (a later generation, or this generation and base with more records)
     stands, and this call's rows are answered and not held; anything else is replaced. The drop of a read that found no
     file makes the same check: an entry of a generation the reader minted after this call began is a later read's, and
-    stands (the next call or sweep decides it)."""
+    stands (the next call or sweep decides it).
+
+    A captions file that exists and cannot be stat'd, opened or read answers the empty mapping, as an absent one does;
+    `on_fail`, when given, is called with the error first (em._read_jsonl_incremental's), so a caller that must tell the
+    two apart can (the message-caption scan, _msg_sum_scan_session, 2026-10-15). It is called inside the reader: a
+    caller that raises on it collects the error and raises after this returns, so the memo's bookkeeping runs first."""
     path = str(jd.CAPDIR / (fsid + ".jsonl"))
     floor = em._GEN[0]                                # the reader's last generation minted before this read
-    records = em._read_jsonl_incremental(path)
+    records = em._read_jsonl_incremental(path, on_fail=on_fail)
     with em._JSONL_CACHE_LOCK:
         ent = em._JSONL_CACHE.get(path)
     if ent is None or ent[4] is not records:          # no entry (no file), or another thread already replaced it
@@ -55635,13 +55640,20 @@ _MSG_SCAN_STATS = {"scans": 0, "heldTurns": 0, "walkedTurns": 0, "partial": 0, "
                    "evict": 0, "overBound": 0}
 #   scans: scans whose walk finished (a walk that raised counts under raised instead); heldTurns / walkedTurns: closed turns served from the hold / turns walked (the
 #   open one always); partial: a finished scan whose held entry was not served whole: a held turn's key moved (an
-#   in-place rewrite, a late record) or the session has fewer closed turns than the entry held (a rewind cut, a past
-#   prompt edited, a rewrite that drops turns); an append, a compaction's included, and a cut's release that restores
-#   whole turns move neither this nor reset (the entry the cut stored is served whole, the restored turns walked);
-#   reset: a held entry discarded whole (another leaf, or the seams moved), counted when it is discarded, before the
-#   walk, so a walk that then raises does not hide it; raised: a walk that raised (stored nothing); faulted: every scan
-#   _msg_summaries made that raised, the walk's included, so faulted minus raised counts the faults outside the walk
-#   (the captions read, the parse, the store read, the seams' fingerprint); evict: entries the byte bound shed;
+#   in-place rewrite, a late record, or a state row landing inside a closed turn: a turn boundary whose working state
+#   row lands after the new turn's first record, until which the turn that just closed runs its idle span to the
+#   parse's clock and so moves its end, or an idle notice inside a closed turn's idle span, one more atom) or the
+#   session has fewer closed turns than the entry held, none included (a rewind cut, a past prompt edited, a rewrite
+#   that drops turns, a transcript that cannot be read); an append whose state row is in place, a compaction's
+#   included, and a cut's release that restores whole turns move neither this nor reset (the entry the cut stored is
+#   served whole, the restored turns walked);
+#   reset: a held entry discarded whole (another leaf, a leaf that cannot be stat'd, or the seams moved), counted when
+#   it is discarded, before the walk, so a walk that then raises does not hide it, and so too by a scan with no closed
+#   turn to hold (a /clear's first); raised: a walk that raised (stored nothing); faulted: every scan _msg_summaries
+#   made that raised, the walk's included, so faulted minus raised counts the faults outside the walk (a captions file
+#   that exists and cannot be read, the parse, the store read, the seams' fingerprint, and the caption join, which
+#   follows a finished walk and so counts under scans too); a transcript that cannot be read is no fault: it parses as
+#   empty (_msg_sum_scan_session); evict: entries the byte bound shed;
 #   overBound: a scan whose own entry was over the bound by itself (served, not held, and shedding no other session)
 _HOLD_KEY_BYTES = 360                # one held key's estimated bytes beside its turn id: the tuple, the end, two uuids
 
@@ -55697,30 +55709,36 @@ def _msg_mid_records(sid, turns, store, head):
     leaves no dead entry newest in the table, counting toward the bound and shedding valid ones. The closed turns'
     records are stored for the next scan, only when the walk finished. A fault raises: a walk that raises stores
     nothing and raises on through _msg_sum_scan_session to _msg_summaries, which keeps its last-known submap under no
-    key so the next build retries."""
+    key so the next build retries.
+
+    The comparison runs whenever an entry stands, also for a scan that has no closed turn to key or no head (the
+    review after the merge, 2026-10-15: such a scan skipped it, so a cut at the first turn's reply or an edit of the
+    first prompt counted nothing, and a /clear's leaf left the old entry counting toward the bound until its first turn
+    closed). Such a scan drops an entry under another leaf or other seams, or any entry when its own leaf cannot be
+    stat'd, and counts reset; an entry that stands has more closed turns than the scan, so it counts partial and is
+    kept, and the cut's release serves it whole."""
     fp = _seams_fp(store)
     n_closed = len(turns) - 1
     keys = [_turn_hold_key(t) for t in turns[:n_closed]] if head is not None and n_closed > 0 else []
     held, start, partial = (), 0, False
-    if keys:
-        with _MSG_SCAN_LOCK:
-            table = _msg_scan_held()
-            ent = table.get(sid)
-            if ent is not None:
-                if ent[0] == head and ent[1] == fp:
-                    table.move_to_end(sid)           # a used entry is the newest: the bound sheds colder sessions first
-                else:
-                    del table[sid]                   # another leaf or other seams: never servable, dropped here
-                    _MSG_SCAN_STATS["reset"] += 1
-                    ent = None
+    with _MSG_SCAN_LOCK:
+        table = _msg_scan_held()
+        ent = table.get(sid)
         if ent is not None:
-            k = 0
-            for a, b in zip(ent[2], keys):
-                if a != b:
-                    break
-                k += 1
-            held, start = ent[3][:k], k
-            partial = k < len(ent[2])                # a held turn moved, or fewer closed turns than the entry held
+            if ent[0] == head and ent[1] == fp:
+                table.move_to_end(sid)               # a used entry is the newest: the bound sheds colder sessions first
+            else:
+                del table[sid]                       # another leaf (or none), other seams: never servable, dropped
+                _MSG_SCAN_STATS["reset"] += 1
+                ent = None
+    if ent is not None:
+        k = 0
+        for a, b in zip(ent[2], keys):
+            if a != b:
+                break
+            k += 1
+        held, start = ent[3][:k], k
+        partial = k < len(ent[2])                    # a held turn moved, or fewer closed turns than the entry held
     walked = []
     try:
         for t in turns[start:]:
@@ -55765,30 +55783,38 @@ def _msg_scan_forget(live):
             faulting.intersection_update(live)
 
 
-def _msg_scan_fault(sid, e):
+def _msg_scan_fault(sid, e, per, last):
     """A scan of `sid` that raised, from _msg_summaries' fault path: counted under faulted (every fault, the walk's
     included; raised counts the walk's alone), and said on stderr once per episode, an episode being the run of faulted
-    scans of one session up to its next clean one (_msg_scan_clean). The session keeps its last-known captions under no
-    key, so it is scanned again on every build until a scan comes back clean: without the line and the counter, a
-    session whose captions read, parse or store read keeps failing would serve stale captions while /perf read
-    healthy."""
+    scans of one session up to its next clean one (_msg_scan_clean). The session keeps its last-known captions (`last`)
+    in `per` under no key, so it is scanned again on every build until a scan comes back clean: without the line and
+    the counter, a session whose captions file cannot be read, or whose parse, store read or caption join keeps
+    failing, would serve stale captions while /perf read healthy.
+
+    The submap is written under the same lock as the episode set, as _msg_scan_clean writes its own (the review after
+    the merge, 2026-10-15): written after the lock, a fault in the pusher could land between a handler scan's clean and
+    that scan's submap write, leaving the session in the set behind a standing key, and a later fault was counted and
+    not said."""
     with _MSG_SCAN_LOCK:
         _MSG_SCAN_STATS["faulted"] += 1
         faulting = _msg_sum_cache.setdefault("faulting", set())
         first = sid not in faulting
         faulting.add(sid)
+        per[sid] = (None, last)
     if first:
         print("[msg-scan] sid=%s: the message-caption scan faulted (%s: %s); serving its last-known captions and "
               "scanning it again each build (said once until a scan of it comes back clean)"
               % (str(sid)[:8], type(e).__name__, str(e)[:120]), file=sys.stderr)
 
 
-def _msg_scan_clean(sid):
-    """A scan of `sid` that came back clean: the end of its fault episode, so the next fault is said again."""
+def _msg_scan_clean(sid, per, key, sub):
+    """A scan of `sid` that came back clean: the end of its fault episode, so the next fault is said again, and its
+    submap `sub` stored in `per` under `key`, under the same lock (_msg_scan_fault)."""
     with _MSG_SCAN_LOCK:
         faulting = _msg_sum_cache.get("faulting")
         if faulting:
             faulting.discard(sid)
+        per[sid] = (key, sub)
 
 
 def _msg_scan_report():
@@ -55802,16 +55828,24 @@ def _msg_scan_report():
 
 def _msg_sum_scan_session(sid, path, now):
     """Scan ONE session's transcript for its msgId→caption entries (the caption of each peer-message
-    segment it bore). Returns {mid: caption}; {} when it has no captions yet. Raises on a fault (the captions read, the
-    parse, the store read or the walk); _msg_summaries keeps its last-known submap under no key so the next build
-    retries.
+    segment it bore). Returns {mid: caption}; {} when it has no captions yet. Raises on a fault (a captions file that
+    exists and cannot be stat'd, opened or read, the parse, the store read, the walk or the caption join);
+    _msg_summaries keeps its last-known submap under no key so the next build retries. An absent captions file is no
+    captions, not a fault. A transcript that cannot be read is not a fault either: the parse reads it as empty and the
+    parse store holds that tree under the transcript's unchanged stat for every reader, so the scan comes back clean
+    with no captions and the session's message captions stay gone until a transcript record or a state row moves the
+    parse's key (the review after the merge, 2026-10-15; telling an unreadable leaf apart is the parse's to do, for
+    every walker at once).
 
     The walk is _msg_mid_records: each closed turn's (segment id, message ids) pairs are held between scans, so an
     append, a caption row or a store republish walks the open turn alone where it re-segmented every turn and read
     every atom's ids (2026-10-05). The captions are joined here, fresh at every scan, so a caption row costs the join
     alone; the join assigns exactly what the one-pass loop did, in the same order (a captioned segment's ids, turn
     by turn and segment by segment)."""
-    caps = _captions(sid)
+    errs = []
+    caps = _captions(sid, on_fail=errs.append)       # an unreadable file reads as empty there, and is a fault here
+    if errs:                                         # (the review after the merge, 2026-10-15: it read as no captions,
+        raise errs[0]                                #  a clean scan stored under a standing key); raised after the read
     if not caps:                                     # no captions yet → nothing to join, skip the parse
         return {}
     head = _msg_scan_head(path)                      # BEFORE the parse (stat-then-read)
@@ -55892,12 +55926,10 @@ def _msg_summaries():
         except Exception as e:
             # keep last-known on a transient error, under no key: the next build retries the scan (the held turns make a
             # retry cheap) instead of serving the pre-raise map until an input moves; counted and said (_msg_scan_fault)
-            _msg_scan_fault(sid, e)
-            per[sid] = (None, ent[1] if ent else {})
+            _msg_scan_fault(sid, e, per, ent[1] if ent else {})
             dirty = True
             continue
-        _msg_scan_clean(sid)
-        per[sid] = (key, sub)
+        _msg_scan_clean(sid, per, key, sub)
         dirty = True
     for sid in [k for k in per if k not in live]:    # forget dead sessions so `per` can't grow unbounded
         del per[sid]
