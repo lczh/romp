@@ -10934,10 +10934,12 @@ const commentSeenAcks = new Map<string, boolean>();                 // parent si
 const cmtReadLatch = new Map<string, ReadLatch>();
 let cmtReadRid = 0;                                                 // the page's read ids: the kernel's answer names the read it answers
 // The link a held read went out on dropped before the kernel answered it: the read may never have arrived, so the first
-// frame after the link is back decides (linkEdge). This page's own kernel: the shim's romp:wsdown / romp:wsup (the
-// extension's pipeState in the message handler); a linked machine's: its relay socket's romp:hostRelayDown / romp:hostRelayUp
+// frame after the link is back decides (linkEdge). This page's own kernel: the shim's romp:wsdown, and its {type:"wsup"}
+// FRAME for the return (the message handler; the extension's pipeState there too). Never the romp:wsup event, which fires
+// at onopen while the dead socket's last frames may still be draining from the shim's FIFO: one of those, from before
+// the read, decided it and the badge flapped once (the review of #247). A linked machine's: its relay socket's
+// romp:hostRelayDown / romp:hostRelayUp, which arrive in that socket's own order
 window.addEventListener("romp:wsdown", () => linkEdge(cmtReadLatch.values(), "", false, hostOf));
-window.addEventListener("romp:wsup", () => linkEdge(cmtReadLatch.values(), "", true, hostOf));
 const relayEdge = (e: Event, up: boolean): void => {
   const h = (e as CustomEvent).detail?.host;
   if (typeof h === "string" && h) linkEdge(cmtReadLatch.values(), h, up, hostOf);
@@ -23031,6 +23033,9 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   // live now and knows nothing to clear of what the old one showed, so the page drops it all; a remote host's return
   // drops that host's the same way (its kernel re-sends on the new relay)
   if (m.type === "wsup" || m.type === "hostUp") dropLiveStatus(m.type === "hostUp" ? (Array.isArray(m.hosts) ? m.hosts : []) : null);
+  // …and a comment thread's read this kernel had not answered when the old socket dropped: the new socket's first frame
+  // decides it (read-latch.ts linkEdge), in FRAME order, after the dead socket's last frames
+  if (m.type === "wsup") linkEdge(cmtReadLatch.values(), "", true, hostOf);
   if (m.type === "tabOrder") noteSkeletonTabOrder(m);   // BEFORE the chain's applyTabOrder below: one repaint, final skeleton set (2026-09-07)
   if (m.type === "session") upsert(m);
   else if (m.type === "globalRetryPaused") {
