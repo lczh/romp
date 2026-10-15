@@ -7763,17 +7763,12 @@ def _split_sections(text):
     return None, re.sub(r"^\s*TAKEAWAY:\s*", "", text).strip()
 
 
-def _goal_work_text(store, seg_by_id, nid, char_cap, subtree=True, marks=None, boundary_t=None):
-    """The raw work already logged under goal `nid` — its own trail segments, plus its whole subtree's if
-    `subtree` (the same gather the distiller uses for a goal's history), oldest-first, deduped, bounded to
-    the most recent char_cap chars. '' if nid has no captured segments. Lets a judge that already knows
-    WHICH goal it's acting on (a tagged follow-up, a nudge, a delegation, a turn-end close) see that goal's
-    real history, not just its compressed ≤10-word title (the user 2026-07-01: the menu title alone loses
-    whatever the title left out, e.g. a constraint or approach settled a few turns back). `marks` (a
-    _CiteMarks, distill/brief only) labels each assistant message inline so the call can cite its source.
-    `boundary_t` (the goal's deltaSince): when a prior episode settled at that time and there is genuinely
-    both earlier and later work, splice FOLLOWUP_DIVIDER between them so the distiller can scope its takeaway
-    to the most recent stretch (the follow-up) rather than re-summarizing history the user already saw."""
+def _goal_work_segs(store, seg_by_id, nid, subtree=True, prune=()):
+    """The segments _goal_work_text renders for goal `nid`: its own trail, plus its whole subtree's if
+    `subtree`, plus every placement into those nodes, resolved against seg_by_id, deduped, oldest-first.
+    `prune` (the closer's riders, 2026-10-15) names descendants left out of the walk together with
+    everything under them: the closer lists them under their own numbers in the same call, so their
+    work is shown there once rather than twice."""
     nodes = store["nodes"]
     ids = [nid]
     if subtree:
@@ -7782,7 +7777,8 @@ def _goal_work_text(store, seg_by_id, nid, char_cap, subtree=True, marks=None, b
             children.setdefault(nd.get("parentId"), []).append(_nid)
         stack, ids = [nid], []
         while stack:
-            x = stack.pop(); ids.append(x); stack.extend(children.get(x, []))
+            x = stack.pop(); ids.append(x)
+            stack.extend(c for c in children.get(x, []) if c not in prune)
     seg_ids, seen = [], set()
     for n in ids:
         for sid in nodes.get(n, {}).get("trail", []):
@@ -7806,7 +7802,23 @@ def _goal_work_text(store, seg_by_id, nid, char_cap, subtree=True, marks=None, b
     for sg in segs:                                    # a trail key and a placement key can resolve to the SAME
         if sg["id"] not in dedup:                      # live segment — the history must not repeat it
             dedup.add(sg["id"]); uniq.append(sg)
-    segs = uniq
+    return uniq
+
+
+def _goal_work_text(store, seg_by_id, nid, char_cap, subtree=True, marks=None, boundary_t=None, segs=None):
+    """The raw work already logged under goal `nid` — its own trail segments, plus its whole subtree's if
+    `subtree` (the same gather the distiller uses for a goal's history), oldest-first, deduped, bounded to
+    the most recent char_cap chars. '' if nid has no captured segments. Lets a judge that already knows
+    WHICH goal it's acting on (a tagged follow-up, a nudge, a delegation, a turn-end close) see that goal's
+    real history, not just its compressed ≤10-word title (the user 2026-07-01: the menu title alone loses
+    whatever the title left out, e.g. a constraint or approach settled a few turns back). `marks` (a
+    _CiteMarks, distill/brief only) labels each assistant message inline so the call can cite its source.
+    `boundary_t` (the goal's deltaSince): when a prior episode settled at that time and there is genuinely
+    both earlier and later work, splice FOLLOWUP_DIVIDER between them so the distiller can scope its takeaway
+    to the most recent stretch (the follow-up) rather than re-summarizing history the user already saw.
+    `segs`: the gather itself (_goal_work_segs) when the caller already holds it; subtree is then unused."""
+    if segs is None:
+        segs = _goal_work_segs(store, seg_by_id, nid, subtree=subtree)
     parts = [_unit_text(sg["atoms"], marker=marks) for sg in segs]   # marks label in sorted order — keep it
     if boundary_t is not None:
         # Insert the divider AFTER the last segment at/under the boundary. `segs` is sorted, so the split index
@@ -15393,7 +15405,7 @@ def _status_report_candidates(store, turn):
     return out
 
 
-def _reply_reopened_ids(menu):
+def _reply_reopened_ids(menu, targets):
     """Menu goals whose diary says the USER'S OWN REPLY reopened them with no ruling since (the user
     2026-08-23, the reopen-orphan): a blocked/completed card the user answered flips to Working on the
     optimistic reopen, and if this closer then closes the reply turn without speaking to the goal,
@@ -15402,15 +15414,32 @@ def _reply_reopened_ids(menu):
     zero judge calls, until the user themselves noticed. The deciding event is the user's msg-reopen
     (their assertion "not finished", often carrying the answer the block asked for); a later done/block
     row means a judge already spoke and the flag stands down. Undo-restore reopens are not that
-    assertion and never flag."""
+    assertion and never flag.
+
+    Only a goal THIS turn's own follow-up names (`targets`, the romp-goal-id markers on the turn's
+    triggers) is flagged (2026-10-15): "their reply may answer what it was waiting on" holds for the
+    reply turn alone. Flagged on every later turn it rode, a goal whose answer had been filed under its
+    sub-goals, never on itself, was blocked again hours later with the question the user had already
+    answered, and a reply about a different goal had its outcome credited to the flagged rider."""
     out = set()
     for nd in menu:
+        if nd["id"] not in targets:
+            continue
         rows = [e for e in (nd.get("log") or []) if e.get("kind") in ("done", "block", "reopen")]
         k = max((i for i, e in enumerate(rows) if e.get("kind") in ("done", "block")), default=-1)
         if any(e.get("kind") == "reopen" and e.get("src") == "user" and e.get("msg")
                and not e.get("undo") for e in rows[k + 1:]):
             out.add(nd["id"])
     return out
+
+
+def _reply_pivoted(nd):
+    """True when the newest ruling in goal `nd`'s diary (fold order) is the planner's pivot `dismiss`:
+    it judged that the user's reply about this goal started a new thread and left the goal unchanged,
+    so the reply is not about it (2026-10-15, the closer's reply-subject line)."""
+    rows = sorted((e for e in (nd.get("log") or []) if e.get("kind") in ("done", "block", "reopen", "dismiss")),
+                  key=lambda e: (e.get("ev_t") or 0, e.get("at") or 0))
+    return bool(rows) and rows[-1].get("kind") == "dismiss"
 
 
 def _deleg_report_lines(store, nid):
@@ -15455,21 +15484,60 @@ def _deleg_report_lines(store, nid):
     return out
 
 
-def _menu_history_text(store, seg_by_id, menu, char_cap):
+def _menu_history_text(store, seg_by_id, menu, char_cap, n_touched=None, newest=None):
     """Each menu goal's own raw work-so-far (see _goal_work_text), labeled by its menu number, for the
-    closer's <goal-history> block. subtree=False here (unlike the planner's single-target case): the
-    turn-menu already lists a touched node's whole open-ancestor chain as SEPARATE entries, so a subtree
-    walk per entry would duplicate a child's trail into every ancestor's block. '' if no goal has any
-    captured work (e.g. seg_by_id is empty)."""
+    closer's <goal-history> block. subtree=False for the TURN's own goals (unlike the planner's
+    single-target case): the turn-menu already lists a touched node's whole open-ancestor chain as
+    SEPARATE entries, so a subtree walk per entry would duplicate a child's trail into every ancestor's
+    block. '' if no goal has any captured work (e.g. seg_by_id is empty).
+
+    A RIDER (a menu number past `n_touched`; with no n_touched every entry is the turn's own) is shown
+    its whole subtree instead (2026-10-15): it is ruled from history, and once the user answers a card
+    the work that answers it is filed under its sub-goals, so its own trail alone ended at the question
+    and the closer asked it again. A descendant riding the same call under its own number is pruned
+    from the walk with everything under it, so nothing is shown twice. `newest`, when given, receives
+    each entry's newest segment time (menu number → t): the evidence a rider's block anchors to
+    (_close_ev). A rider's counts the work of the descendants pruned from its history entry too, since
+    the same call shows that work under their own numbers."""
+    on_menu = {nd["id"] for nd in menu}
     parts = []
     for i, nd in enumerate(menu, 1):
-        work = _goal_work_text(store, seg_by_id, nd["id"], char_cap, subtree=False)
+        rider = n_touched is not None and i > n_touched
+        segs = _goal_work_segs(store, seg_by_id, nd["id"], subtree=rider,
+                               prune=(on_menu - {nd["id"]}) if rider else ())
+        if newest is not None and segs:
+            newest[i] = max(sg.get("t") or 0 for sg in segs)
+        work = _goal_work_text(store, seg_by_id, nd["id"], char_cap, segs=segs)
         if work:
             parts.append("Goal #%d (%s):\n%s" % (i, nd["text"], work))
+    if newest is not None and n_touched is not None:
+        nodes, num = store["nodes"], {nd["id"]: i for i, nd in enumerate(menu, 1)}
+        for j, nd in enumerate(menu, 1):              # fold each entry's newest into every rider above it
+            x, seen = nd.get("parentId"), set()
+            while x and x not in seen and j in newest:
+                seen.add(x)
+                if num.get(x, 0) > n_touched:
+                    newest[num[x]] = max(newest.get(num[x], 0), newest[j])
+                x = nodes.get(x, {}).get("parentId")
     return "\n\n".join(parts)
 
 
-def apply_close(store, menu, verdicts, t=None, touched=None, t_overrides=None, t_end=None):
+def _close_ev(i, kind, t, t_overrides=None, hist_t=None):
+    """The evidence time a closer `kind` verdict on menu goal #i journals: the turn's `t`; a lift
+    rider's anchor (t_overrides); and for a BLOCK on a rider ruled from goal history (hist_t,
+    2026-10-15) the newest segment in the history the closer was shown. Stamped with the turn instead,
+    a history block read as newer than the user's latest reply, so a block re-asking an already
+    answered question cleared the reply's floor: a writer whose evidence predates the diary stands
+    down, and this is the time that says so. A done keeps the turn's time (or the lift's): a newer
+    state row in the goal's own diary (an interrupt pause, a lift, a re-engage) must not hide a done
+    the steps-finished or status channel exists to file."""
+    h = (hist_t or {}).get(i)
+    if h is not None and kind == "block":
+        return h
+    return (t_overrides or {}).get(i, t)
+
+
+def apply_close(store, menu, verdicts, t=None, touched=None, t_overrides=None, t_end=None, hist_t=None):
     """Apply the closer's turn-end verdicts over the touched open tops: COMPLETE each in verdicts["done"]
     (recording doneWhy, clearing any soft block), BLOCK each in verdicts["block"] (recording blockWhy =
     the question owed to the user), and STAMP each in verdicts["awaiting"] (the ⏳ annotation: waiting on
@@ -15497,7 +15565,10 @@ def apply_close(store, menu, verdicts, t=None, touched=None, t_overrides=None, t
     awaiting-assert gate below consults done rows as endings, and a closer's done with no horizon read as
     its arrival, later than the turn by the closer's own latency, so it silenced an assert from a turn
     triggered in that gap. Absent (a caller without the turn) a row with no horizon reads its arrival, the
-    pre-2026-09-07 compare, unchanged."""
+    pre-2026-09-07 compare, unchanged.
+
+    `hist_t` (2026-10-15) = {menu number: newest history segment time} for the riders ruled from goal
+    history: a block on one journals that time (_close_ev), never the ruling turn's."""
     done, block = verdicts.get("done", {}), verdicts.get("block", {})
     awaiting = verdicts.get("awaiting", {})
     newly = []
@@ -15538,11 +15609,12 @@ def apply_close(store, menu, verdicts, t=None, touched=None, t_overrides=None, t
                 nd["mt"] = ev
             newly.append(nd["id"])
         elif i in block:
-            kind, landed = file_block(store, nd, "closer", block[i] or None, ev, t)   # T334: a peer's block is a peer wait
+            ev_b = _close_ev(i, "block", t, t_overrides, hist_t)
+            kind, landed = file_block(store, nd, "closer", block[i] or None, ev_b, t)   # T334: a peer's block is a peer wait
             if not landed:                            # the user's follow-up postdates this turn's evidence: their reply
                 continue                              #   owns the verdict now, not this stale close (or a same stamp)
-            if ev is not None and kind == "block":    # (the event materialized the flags + blockWhy; a peer wait is an
-                nd["mt"] = ev                         #   annotation and never bumps mt)
+            if ev_b is not None and kind == "block":  # (the event materialized the flags + blockWhy; a peer wait is an
+                nd["mt"] = ev_b                       #   annotation and never bumps mt)
         elif i in awaiting:
             aw_why = (awaiting[i] or {}).get("why") or None
             aw_kind = (awaiting[i] or {}).get("kind")
@@ -15663,7 +15735,13 @@ def _close_turn(store, turn, samples=None, seg_by_id=None):
     menu = menu + cands + starved + status + [nd for nd, _ in lifted]
     if not menu:
         return []
-    hist = _menu_history_text(store, seg_by_id, menu, CLOSE_HISTORY_CHARS) if seg_by_id is not None else ""
+    # the goals this turn's reply answers: the romp-goal-id a follow-up or nudge carries on its trigger
+    targets = []
+    for sg in _segs(turn, store):
+        targets += [g for g in _seg_followup_all(sg) if g not in targets]
+    newest = {}                                        # menu number → its history's newest segment time
+    hist = (_menu_history_text(store, seg_by_id, menu, CLOSE_HISTORY_CHARS, n_touched=n_touched, newest=newest)
+            if seg_by_id is not None else "")
     menu_text = _menu_text(store, menu)
     cand_ids = {c["id"] for c in cands}
     flagged = [i for i, nd in enumerate(menu, 1) if nd["id"] in cand_ids]
@@ -15712,7 +15790,28 @@ def _close_turn(store, turn, samples=None, seg_by_id=None):
                          ", ".join("#%d" % i for i in tflagged),
                          "are" if len(tflagged) > 1 else "is",
                          "each" if len(tflagged) > 1 else "it"))
-    ro_ids = _reply_reopened_ids(menu)
+    # the reply's own subject is off the menu and the turn lists no goal of its own (2026-10-15), most
+    # often because the planner ruled the subject before this call: with only riders listed, a reply about
+    # it had its outcome or its question credited to whichever rider fit best (a verdict attaches by menu
+    # number alone). Name the subject. A target the planner's pivot dismissed is not one (it ruled the
+    # reply started a new thread), and a rider the same message names is a subject too, never barred.
+    on_menu = {nd["id"] for nd in menu}
+    away = [store["nodes"][g] for g in targets
+            if g in store["nodes"] and g not in on_menu and not _reply_pivoted(store["nodes"][g])]
+    listed = ["#%d" % i for i, nd in enumerate(menu, 1) if nd["id"] in targets]
+    riders = ["#%d" % i for i in range(n_touched + 1, len(menu) + 1) if menu[i - 1]["id"] not in targets]
+    if n_touched == 0 and away and riders:
+        menu_text += ("\n\nThis turn's reply answers the user's message about %s not listed above:\n%s\n"
+                      "%sWhat the reply delivers or asks %sbelongs to %s. Credit none of it to goal%s %s "
+                      "unless the reply plainly speaks to that goal by name."
+                      % ("goals" if len(away) > 1 else "a goal",
+                         "\n".join("- %s" % str(nd.get("text") or "?").strip()[:120] for nd in away),
+                         ("The same message also asks about goal%s %s, listed above. "
+                          % ("s" if len(listed) > 1 else "", ", ".join(listed))) if listed else "",
+                         ("about the goal%s not listed " % ("s" if len(away) > 1 else "")) if listed else "",
+                         "those goals" if len(away) > 1 else "that goal",
+                         "s" if len(riders) > 1 else "", ", ".join(riders)))
+    ro_ids = _reply_reopened_ids(menu, targets)
     rflagged = [i for i, nd in enumerate(menu, 1) if nd["id"] in ro_ids]
     if rflagged:
         menu_text += ("\n\nGoal%s %s w%s reopened by the user's own reply after an earlier ruling: "
@@ -15786,10 +15885,16 @@ def _close_turn(store, turn, samples=None, seg_by_id=None):
                    if e.get("kind") in ("done", "block", "unblock", "reopen")]
             if evs:
                 t_overrides[i] = max(evs)
+    # every RIDER is ruled from the goal history it was shown, so a block on one anchors to that
+    # history's newest segment (_close_ev, 2026-10-15), and a block computed from evidence older than the
+    # user's latest reply stands down below instead of re-asking what the reply answered. A rider this
+    # turn's own follow-up names is ruled from the reply itself and keeps the turn's time.
+    hist_t = {i: newest[i] for i in range(n_touched + 1, len(menu) + 1)
+              if i in newest and menu[i - 1]["id"] not in targets}
     for kind in ("done", "block"):
         for i in list(out.get(kind) or {}):
             nd = menu[i - 1]
-            ev = t_overrides.get(i, turn.get("t"))
+            ev = _close_ev(i, kind, turn.get("t"), t_overrides, hist_t)
             sim = dict(nd)
             sim["log"] = list(nd.get("log") or []) + [{"ev_t": ev, "src": "closer",
                                                        "kind": kind, "at": int(time.time())}]
@@ -15806,7 +15911,7 @@ def _close_turn(store, turn, samples=None, seg_by_id=None):
     # the last thing the closer's transcript could have shown it.
     t_end = max((a.get("t") or 0 for a in turn.get("atoms") or ()), default=0) or turn.get("end")
     newly = apply_close(store, menu, out, t=turn.get("t"), touched=n_touched, t_overrides=t_overrides,
-                        t_end=t_end)
+                        t_end=t_end, hist_t=hist_t)
     # The reply LANDED → the closer considered every menu node (a verdict or a considered omission).
     # ONE look-stamp replaces the retired umbSig/starvedSig signatures (2026-08-13): the newest row
     # FILED in each node's top subtree as of this look, stamped BELOW apply_close so the reply's own
