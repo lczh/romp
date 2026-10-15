@@ -10,6 +10,7 @@ import * as path from "node:path";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
+const SANITIZE = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "md-sanitize.ts"), "utf8");
 const fn = (name: string): string => RENDER.split("\nfunction " + name + "(")[1].split("\n}\n")[0];
 
 test("the landing aligns on the thread's highlight and flashes it, and re-finds it after a rebuild", () => {
@@ -59,8 +60,9 @@ test("the box opens beside the passage, and the open thread's quote is the way b
 test("a passage in a closed fold is brought out before the landing aligns on it, and one still hidden lands its fold's heading", () => {
   const target = fn("passageTarget");
   assert.match(target, /if \(reveal\) revealAncestors\(m\);\s*\n\s*const at = shownPassage\(m\);\s*\n\s*return at \? \{ el: at, folded: at !== m \} : null;/);
-  assert.match(fn("revealAncestors"), /p\.localName === "details" && n\.localName !== "summary" && !p\.hasAttribute\("open"\)\) p\.setAttribute\("open", ""\);/,
+  assert.match(SANITIZE, /export function revealAncestors\(target: Element\): void \{[\s\S]{0,300}?p\.localName === "details" && n\.localName !== "summary" && !p\.hasAttribute\("open"\)\) p\.setAttribute\("open", ""\);/,
     "the browser's ancestor revealing steps, shared with a message's in-page links");
+  assert.match(RENDER, /^import \{ sanitizeMd, userContentTarget, revealAncestors \} from "\.\/md-sanitize";/m);
   assert.match(RENDER, /\/\/ The browser's fragment navigation REVEALS the target before it scrolls; scrollIntoView does not \(revealAncestors\)\s*\n\s*revealAncestors\(target\);/);
   const shown = fn("shownPassage");
   assert.match(shown, /const head = n\.localName === "details" \? n\.querySelector\(":scope > summary"\) as HTMLElement \| null : null;\s*\n\s*if \(head && elShows\(head\)\) return head;/,

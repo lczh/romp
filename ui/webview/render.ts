@@ -1,6 +1,6 @@
 import { marked } from "marked";
 import { GEAR_GLYPH, ICON_FORK } from "./icons";   // the fork control's glyph (T381), the stroke family the bars share
-import { sanitizeMd, userContentTarget } from "./md-sanitize";   // the one sanitizer every markdown surface shares, and the lookup for a message's own `#` links
+import { sanitizeMd, userContentTarget, revealAncestors } from "./md-sanitize";   // the one sanitizer every markdown surface shares, the lookup for a message's own `#` links, and the reveal of what they name
 import { noticeBodyNodes, noticeAttachmentNodes, type NoticeAttachment } from "./notice-face";   // the notice face the feed card shows, for the approval box
 import { applySections, registerSectionHost, unregisterSectionHost, stateBadges, buildSectionElements, cardSpin, applySpin, applyDistillLanding, configureSectionSync, sectionActs,
          applyRelayNote, type SectionEnv, type SectionItem, type BadgeItem, type SpinFields, type AskTreeNode } from "./card-sections";   // the card's sections, badges, swirl and landings: one builder with the feed card (plans/needs-you.md, the row carries what the card carries)
@@ -1875,18 +1875,6 @@ function preEl(text: string, scrollKey?: string): HTMLElement {
 //     the host extension, which openExternal()s normal URLs and feeds vscode://romp.romp-chat-view deep
 //     links into its own URI handler.
 // DOMPurify already stripped dangerous schemes (javascript:, etc.) in md(), so a surviving href is safe.
-/** The HTML spec's ancestor revealing steps, which the browser's fragment navigation runs before it scrolls and
- *  scrollIntoView does not: every closed <details> whose content holds `target` is opened, and a `hidden="until-found"` on
- *  the target or an ancestor is removed; both shapes pass the sanitizer (details, summary and hidden are kept). A target
- *  inside a details' own <summary> is in view already and opens nothing, as in the browser. A message's in-page link takes
- *  it, and so does a landing on a comment thread's passage (passageTarget). */
-function revealAncestors(target: Element): void {
-  for (let n: Element | null = target; n; n = n.parentElement) {
-    if ((n.getAttribute("hidden") || "").toLowerCase() === "until-found") n.removeAttribute("hidden");
-    const p = n.parentElement;
-    if (p && p.localName === "details" && n.localName !== "summary" && !p.hasAttribute("open")) p.setAttribute("open", "");
-  }
-}
 document.addEventListener("click", (e) => {
   const a = (e.target as HTMLElement)?.closest?.("a[href]") as HTMLAnchorElement | null;
   if (!a) return;
