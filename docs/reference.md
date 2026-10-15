@@ -6707,7 +6707,9 @@ three groups, each an up arrow, an icon naming what it steps through, and a down
 
 - **Unread replies** (red, a speech bubble with a dot): the comment threads whose reply you have not
   read yet. The group shows while any thread has one. The red badge on its corner is how many of
-  those replies sit off screen; a thread in view is not counted, since its highlight already shows.
+  those replies there are in the session, wherever they sit, so scrolling never changes it. It
+  changes when a thread does: opening one reads it, a new reply makes it unread, and resolving or
+  deleting one takes it off.
 - **Comments** (the comment yellow, a speech bubble): every comment thread, read or not. The group
   shows while the session has any.
 - **Your messages** (the blue of your messages, a person): the messages you typed.
