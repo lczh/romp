@@ -114,9 +114,10 @@ test("a landing on a comment's passage pauses follow mode until the reader is ba
   // PageDown, Space resumed one run in three)
   assert.match(RENDER, /c\.addEventListener\("scrollend", \(\) => \{\s*\n\s*if \(readerScrolling && c\.clientHeight > 0\) resumeAtBottom\(c\);[^\n]*\n\s*readerScrolling = false;\s*\n\s*\}, \{ passive: true \}\);/);
   assert.match(fn("landOn"), /readerScrolling = false;/);
-  // a re-show that leaves the reader at the bottom ends the pause (the tab coming back); the leaving tab keeps its saved spot
+  // a re-show that leaves the reader at the bottom ends the pause (the tab coming back: a reader who left at the bottom lands
+  // back there, so the return is deterministic, whatever the re-shown window's heights)
   assert.match(fn("landActive"), /if \(v\.followHeld && atBottom\(content\)\) \{ v\.followHeld = false; v\.stick = true; \}/);
-  assert.match(RENDER, /cur\.stick = atBottom\(content\) && !cur\.followHeld;/);
+  assert.match(RENDER, /cur\.stick = atBottom\(content\); \}   \/\/ the leaving tab's follow mode/);
   // the message box growing re-pins the bottom and raises the passage: the thread's box steps off it
   assert.match(RENDER, /v\.stick = !v\.followHeld;[^\n]*\n\s*repinned = true;\n(?:\s*\/\/[^\n]*\n){3}\s*besideFollow\(\);/);
   assert.match(RENDER, /releaseFollow\(\);\s+\/\/ a passage landing's pause ends here too, before the snap's echo is read\s*\n\s*writeScroll\(c, c\.scrollHeight, "jump-button", true\);/, "the go-to-bottom chip");

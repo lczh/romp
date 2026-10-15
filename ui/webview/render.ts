@@ -16297,8 +16297,9 @@ function landActive(content: HTMLElement | null, v: View): void {
     else writeScroll(content, v.scrollTop, "land-saved");
     // a passage landing's pause on follow mode never outlives a re-show (the tab coming back, a full rebuild) that leaves the
     // reader at the bottom: there no chip says text is below, so following is the only truthful state (the review of #251:
-    // back on the tab after a landing, the view sat at the bottom, chipless, and the next text landed below unseen). New text
-    // that arrived meanwhile left the saved spot above the bottom instead, and the chip shows it
+    // back on the tab after a landing, the view sat at the bottom, chipless, and the next text landed below unseen). A reader
+    // who left the tab at the bottom comes back to the bottom (the leaving tab's save), the saved spot's pixels never asked to
+    // agree with a re-shown window's heights (a CI run of #253 came back a few pixels above it)
     if (v.followHeld && atBottom(content)) { v.followHeld = false; v.stick = true; }
   }
   v.shown = true;
@@ -21370,7 +21371,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   const content = document.getElementById("content");
   if (content && activeId && activeId !== id) {
     const cur = views.get(activeId);
-    if (cur) { cur.scrollTop = content.scrollTop; cur.stick = atBottom(content) && !cur.followHeld; }   // the leaving tab's follow mode: the true bottom (a passage landing's pause: its saved spot)
+    if (cur) { cur.scrollTop = content.scrollTop; cur.stick = atBottom(content); }   // the leaving tab's follow mode: the true bottom (a reader who left at the bottom comes back to it, and a passage landing's pause ends there: landActive)
   }
   // Stash the leaving tab's draft; show the entering tab's own (usually empty).
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
