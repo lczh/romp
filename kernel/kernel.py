@@ -50360,11 +50360,13 @@ def _feed_peer_facts(p, cleared_by_sid):
     """What one card-owning session's derivation read about a PEER p (an origin sender, a handoff recipient, a stamped
     or awaited peer), by identity and value: the peer's goal store, journal and archive (jd._store_identity; the shared
     read-only view the origin badge reads) with whether that view READS (jd.load_goals_shared_or_fault's fault
-    boundary: an EIO moves no stat, and the badge reads absorbed while the sender's store faults; a stat-hit on a
-    healthy store, the same episode table the body's own read then hits), its names-registry entry (the snapshot the
-    build's _name_of/_name_color read), its slice of the clear set (a cleared sender goal dims the badge), and the
-    attached host that owns it with the name that host gave it (_peer_identity's remote rungs). The postal rung rides
-    the board-wide `postal` component."""
+    boundary: an EIO moves no stat, and the badge reads absorbed while the sender's store faults; the same episode
+    table the body's own read then hits), its names-registry entry (the snapshot the build's _name_of/_name_color
+    read), its slice of the clear set (a cleared sender goal dims the badge), and the attached host that owns it with
+    the name that host gave it (_peer_identity's remote rungs). The postal rung rides the board-wide `postal`
+    component. On a healthy store the read is a whole one: load_goals_shared reads the file to its end and compares
+    the bytes with its cached copy even when the cache hits, which is why the key takes these facts through
+    _feed_peer_facts_once, once per peer per build."""
     r = _host_for_sid(p)
     host = str((r or {}).get("host") or "") if r else ""
     ident = jd._store_identity(p)[1:]                # BEFORE the read below (stat-then-read)
@@ -50373,6 +50375,27 @@ def _feed_peer_facts(p, cleared_by_sid):
             tuple(_names_parts(p) or ()),
             cleared_by_sid.get(p, ()),
             host, _remote_name_of(host, p) if r else None)
+
+
+def _feed_peer_facts_once(board, p):
+    """_feed_peer_facts for peer p, taken ONCE per build and handed to every session whose key names p (2026-10-15).
+    Before this each naming session took its own, so one build read p's whole store file, and compared it with the
+    shared cache's copy, once per session that named p, whether that session's cards were then served or derived: a
+    cost that grew with p's history and with the number of sessions naming it (a peer every worker's cards point at was
+    read once per worker per build). Now the keys read it once per build, however many sessions name it.
+
+    The key's order holds (stat-then-read): the facts are taken at the first key in the build that names p, and every
+    session that names p derives after its own key, so each derivation's reads of p come after the stat its key
+    carries. A publish to p landing mid-build, after the facts were taken, leaves the later namers' keys on the old
+    identity for this build, and the next build's facts move them; the same publish landing just after a namer's key
+    did the same before this. A peer a derivation names for the first time still has no facts in that session's key
+    (_feed_key_with_deps leaves it unsettled), whatever this table holds. `board` is the build's _feed_board_facts
+    dict, so the table lives exactly one build."""
+    memo = board["peer_facts"]
+    facts = memo.get(p)
+    if facts is None:
+        facts = memo[p] = _feed_peer_facts(p, board["cleared_by_sid"])
+    return facts
 
 
 def _subagent_dirs_ident(sid, d):
@@ -50449,11 +50472,13 @@ def _feed_board_facts(ctx, now):
     by party, a snapshot of displayed nudge fields/history, usage.json's identity and the login-account window sitting at its cap
     with its reset ahead as (window, resetsAt) or None (the `offer` component's payload), the key on hand,
     the host-suspension spans, the debug mode and its rows' identity. Taken before any session's derivation, so
-    every file read follows its stat and every nudge key and card uses the same snapshot."""
+    every file read follows its stat and every nudge key and card uses the same snapshot. Beside them `peer_facts`,
+    the build's table of peer facts, filled as the keys ask (_feed_peer_facts_once): one entry per peer per build."""
     b = ctx.get("board")
     if b is None:
         dbg = bool(jd._debug_mode())
         b = {"cleared_by_sid": _cleared_by_sid(ctx["cleared"]),   # the clear set indexed by owning session, once per build
+             "peer_facts": {},                                     # peer sid -> its key facts, filled by _feed_peer_facts_once
              "postal": _postal_maps_indexed(),
              "nudge_records": {gid: ({k: rec.get(k) for k in _FEED_NUDGE_FIELDS}
                                       if isinstance(rec, dict) else rec)
@@ -50670,7 +50695,8 @@ def _feed_session_key(s, tm, ctx, prev_entry):
       peers: ((peer sid, _feed_peer_facts(peer)) ...) for every peer the previous derivation read (origin senders
         via jd.load_goals_shared_or_fault / _name_of / _name_color, handoff rows' _ho_sid, the identities
         _handoff_peer_identities, _peer_identity and _handoff_card_fields resolved, the awaiting arm's peers);
-        None when cold. A deps component.
+        None when cold. A deps component. Each peer's facts are taken once per build and shared by every session
+        that names it (_feed_peer_facts_once), so a peer's store is read once for the keys however many name it.
     NOT components: the clock (the fold stamps trgb and a clock-stamped placeholder's t per build), the colormap (the
     fold reads it), notify-cards.json (the post-loop notify pass), session-order, the views, the notices (post-loop)."""
     fsid, path = s["sid"], s.get("path")
@@ -50706,7 +50732,7 @@ def _feed_session_key(s, tm, ctx, prev_entry):
     auth = board["auth"]
     downtime = board["downtime"]
     debug = board["debug"]
-    facts = {p: _feed_peer_facts(p, board["cleared_by_sid"]) for p in ((prev_entry or {}).get("peers") or ())}
+    facts = {p: _feed_peer_facts_once(board, p) for p in ((prev_entry or {}).get("peers") or ())}   # one take per peer per build
     ctx["peer_facts"] = facts                        # pre-derivation facts: _feed_key_with_deps keeps these for the peers
     peers = tuple((p, facts[p]) for p in sorted(facts)) if prev_entry is not None else None   # the new entry names again
     # ── the in-memory reads ──
