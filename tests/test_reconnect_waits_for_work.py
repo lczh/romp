@@ -802,8 +802,12 @@ class AWakeupSurvivesThePicksRelaunch(_Harness):
         return c2
 
     def _sent(self, c):
-        """how many times the wakeup's prompt reached client `c`, fed or queued behind the first"""
+        """how many times the wakeup's prompt reached client `c`, fed or queued behind the first; a fed prompt counts
+        once it reaches `c` (the input generator pops it, then writes the registry and a state row before it hands it
+        over)"""
         self._settle(0.3)
+        self._wait(lambda: self.WAKE in c.writes or not any(self.WAKE in str(f) for f in self.s.fed_texts()),
+                   "a fed wakeup reaching the client")
         return c.writes.count(self.WAKE) + sum(1 for p in self.s.pending() if self.WAKE in str(p))
 
     def _a_sweep_inside(self, hook):
@@ -1744,7 +1748,10 @@ class ARewindLeavesItsWakeupsToTheFreshCli(_Harness):
             self._settle(0.3)
 
     def _kernel_sent(self, prompt):
-        """the kernel's sends of `prompt`: fed to any of this session's CLIs, or still queued"""
+        """the kernel's sends of `prompt`: fed to any of this session's CLIs, or still queued; a fed prompt counts once
+        it reaches a client"""
+        self._wait(lambda: any(prompt in c.writes for c in self._Client.instances)
+                   or not any(prompt in str(f) for f in self.s.fed_texts()), "a fed prompt reaching its client")
         return (sum(c.writes.count(prompt) for c in self._Client.instances)
                 + sum(1 for p in self.s.pending() if prompt in str(p)))
 
