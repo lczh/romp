@@ -55,10 +55,13 @@ Two tests drive the same road. One compares warm with cold at every step and che
 for web's lane, one where only the open turn, the captions or the store's nodes moved (red before 2026-10-06, when a
 caption row or a republish re-walked the whole lane), every turn where the leaf, the seams or a held turn's hold key
 moved (a state row that moves only the end of a held turn's first idle span moves no key: one). It also reads the
-message-caption scan's counters across the warm build where a step decides them: partial at the in-place rewrites, the
+message-caption scan's counters across the warm build where a step decides them: partial at the state row that lands
+after the new turn's first record (until it lands, the turn that just closed runs its idle span to the parse's clock,
+so its end moves) and the idle notice inside a closed turn's idle span (one more atom), the in-place rewrites, the
 late record, the rewind cut and its release (the release only because the cut world leaves out the late record inside
 turn 5; a release that restores whole turns counts nothing) and the past-prompt edit; reset at the seams' moves, the
-replacement, the resume and the /clear; neither at an append, a republish or a compaction.
+replacement, the resume and the /clear; neither at an append whose state row is in place, a republish or a
+compaction.
 
 Synthetic data only: placeholder uuids, the web and api names, invented notes-api text, a private state root with
 session hosts off."""
@@ -576,7 +579,8 @@ class BuildRoad(RoadWorld):
         self.append(SID_WEB, [peer(t, "w-u%02d" % (n + 1), "w-a%02d" % n, "api asks: page by cursor next?", "m-p13")])
         self.step("a new turn opens before its state row", walks=2)
         self.state(SID_WEB, t, "working")
-        self.step("the new turn's state row after its record", walks=2)
+        self.step("the new turn's state row after its record", walks=2,
+                  scan={"partial": 1, "reset": 0})     # the turn that closed: its end moves to the row
 
         # state rows inside a closed turn's idle span, the turn's end standing (the post-merge review of the lane prefix's
         # inputs by value, 2026-10-06): the idle notice after a Stop splits the span in two, one more atom, which the hold
@@ -585,7 +589,7 @@ class BuildRoad(RoadWorld):
         t6 = self.t0 + 300 * 6                         # web's turn 6: a typed ask, its Stop at t6 + 65, turn 7 at t6 + 300
         self.state(SID_WEB, t6 + 125, "idle")
         self.step("an idle notice inside a closed turn's idle span, the turn's end standing",
-                  walks=self.turns() - 6, lane="whole")
+                  walks=self.turns() - 6, lane="whole", scan={"partial": 1, "reset": 0})   # one more atom in turn 6
         self.state(SID_WEB, t6 + 95, "working")
         self.step("a state row moving a closed turn's first idle end, its end and atom count standing", walks=1, lane=1)
 

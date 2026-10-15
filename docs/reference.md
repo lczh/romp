@@ -4541,18 +4541,31 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   joins the captions fresh. `scans` (scans whose walk finished),
   `heldTurns` and `walkedTurns` (closed turns served from the hold, and turns
   walked), `partial` (a finished scan whose held entry was not served whole:
-  a held turn moved, as an in-place rewrite or a late record moves one, or
-  the session has fewer closed turns than the entry held, as a rewind cut or
-  a past prompt edited leaves it; an append, a compaction's included, and a
-  cut's release that restores whole turns move neither this nor `reset`),
-  `reset` (an entry discarded whole because the leaf or the seams moved,
-  counted when it is discarded, before the walk),
+  a held turn moved, as an in-place rewrite or a late record moves one, or a
+  state row landing inside a closed turn: a turn boundary whose working
+  state row lands after the new turn's first record, until which the turn
+  that just closed runs its idle span to the parse's clock and so moves its
+  end, or an idle notice inside a closed turn's idle span, which adds an
+  atom; or the session has fewer closed turns than the entry held, none
+  included, as a rewind cut, a past prompt edited or a transcript that
+  cannot be read leaves it, and an entry that stands is kept; an append
+  whose state row is in place, a compaction's included, and a cut's release
+  that restores whole turns move neither this nor `reset`),
+  `reset` (an entry discarded whole because the leaf or the seams moved or
+  the leaf cannot be stat'd, counted when it is discarded, before the walk,
+  by a scan with no closed turn to hold too, such as a /clear's first),
   `raised` (a walk that raised, which stores nothing), `faulted` (every scan
   that raised, the walk's included, so `faulted` above `raised` means scans
-  are failing before their walk: the captions read, the parse, or the goal
-  store's read or its seams; the session serves its last-known captions, is
-  scanned again each build, and the kernel's log says so once until a scan
-  of it comes back clean), `evict` (entries the byte bound shed), `overBound`
+  are failing outside their walk: a captions file that exists and cannot be
+  read, the parse, the goal store's read or its seams, or the caption join,
+  which follows a finished walk and so counts under `scans` too; the
+  session serves its last-known captions, is scanned again each build, and
+  the kernel's log says so once until a scan of it comes back clean; a
+  transcript that cannot be read is no fault: the parse reads it as empty
+  and holds that under the transcript's unchanged stat for every reader, so
+  the scan comes back clean and the session's message captions stay gone
+  until a transcript record or a state row lands), `evict` (entries the
+  byte bound shed), `overBound`
   (scans whose own entry was over the bound by itself: served, not held, and
   shedding no other session), and the gauges `entries`, `bytes` (estimated)
   and `bound` (`ROMP_MSG_SCAN_HELD_BYTES`, else a 256th of the machine's
