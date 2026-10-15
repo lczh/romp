@@ -272,7 +272,10 @@ class Collector(unittest.TestCase):
                                      # reset entries, walks that raised, evictions, and the occupancy against the bound
                                      "segWalks", "segHeld", "segWalkTurns", "segPartial", "segReset", "segRaised", "segEvict",
                                      "segEntries", "segBytes", "segBound",
-                                     "segOverBound"})   # an aggregate over the bound by itself, never held (the review after the merge)
+                                     "segOverBound",   # an aggregate over the bound by itself, never held (the review after the merge)
+                                     # the fold's kept, re-stamped and fresh cards and its decodes, and the wire's per-entry
+                                     # encodes and reuses of the feed's cards (2026-10-15, tests/test_feed_fold_reuse.py)
+                                     "foldKept", "foldStamped", "foldFresh", "foldDecodes", "wireEncoded", "wireReused"})
         self.assertEqual(set(memo["miss_by"]), set(km._FEED_MEMO_LABELS) | {"cold"})
         self.assertEqual(set(memo["row_by"]), set(km._FEED_ROW_FIELDS) | {"presence"})
         self.assertEqual(memo["bound"], km.FEED_MEMO_BYTES)

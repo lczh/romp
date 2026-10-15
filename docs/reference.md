@@ -4023,8 +4023,18 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   re-derives only the sessions whose inputs moved. The sections that span
   sessions (the serving-fold join, the parked handoffs, the quarantine cards,
   the bell pass, the working and awaiting dot lists, the unreadable-state
-  ring) are never memoized: every build recomposes them from the served
-  entries, decoded fresh, so nothing memoized is mutated. `hit`, `miss` and
+  ring) are never memoized: every build recomposes them from the
+  per-session results. The fold keeps what it made of each entry: a card is
+  handed out again, the same object, while its session's entry string and
+  its stamp stand (its own and its rows' tints, a placeholder's clock, its
+  bell pair), so the push encodes only the cards that changed, and only a
+  changed string is decoded. Nothing after the fold writes a card it keeps:
+  the serving-fold join writes copies. `foldKept` counts the cards handed
+  out unchanged, `foldStamped` those re-stamped onto a copy because a tint
+  or a bell moved, `foldFresh` the cards folded from a decode and
+  `foldDecodes` the entry strings decoded; `wireEncoded` and `wireReused`
+  count the feed's cards the push's per-entry pass encoded and those it
+  served as the previous pass's string. `hit`, `miss` and
   `derived` count per session per build, `evict` the entries shed (a departed
   session, or the byte bound), `entries` and `bytes` are the resident set
   against `bound` (a sixty-fourth of the machine's memory, or
