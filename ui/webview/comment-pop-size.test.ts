@@ -9,7 +9,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { CMT_POP_SIZE_KEY, CMT_POP_MIN_W, CMT_POP_MIN_H, CMT_POP_CAP_W, CMT_POP_CAP_H, CMT_POP_EDGE, CMT_POP_THREAD_DEFAULT,
-  CMT_POP_MAX_SLACK, cmtPopCapPx, clampCmtPopPx, toCmtPopFrac, parseCmtPopSize, isCmtPopMax, centerCmtPop, cmtPopCovers, cmtPopBeside } from "../../ui/webview/comment-pop-size";
+  CMT_POP_MAX_SLACK, cmtPopCapPx, clampCmtPopPx, toCmtPopFrac, parseCmtPopSize, isCmtPopMax, centerCmtPop, cmtPopCovers, cmtPopBeside, cmtPopNudge } from "../../ui/webview/comment-pop-size";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
@@ -222,11 +222,25 @@ test("beside the passage: a box clear of it stays; one over it goes below, else 
 test("render.ts wiring: a passage landing opens the thread beside the passage, kept there across a rebuild until the user moves it", () => {
   const fn = (name: string) => RENDER.split("function " + name + "(")[1].split("\nfunction ")[0].split("\n}\n")[0];
   const place = fn("placeBesidePassage");
-  assert.match(place, /const to = cmtPopBeside\(r, at, window\.innerHeight\);\s*\n\s*if \(!to\) return;/, "a box clear of the passage is left alone");
+  assert.match(place, /const to = \(nudge \? cmtPopNudge : cmtPopBeside\)\(r, at, window\.innerHeight\);\s*\n\s*if \(!to\) return;/, "a box clear of the passage is left alone");
   assert.match(place, /cmtPopApplied = \{ w: pop\.offsetWidth, h: pop\.offsetHeight \};/, "the height set here is never written back as the user's size");
   assert.match(place, /cmtPopBesideAt = \{ tid, top: to\.top, height: to\.height, since: commentPopPos \};/);
   assert.match(RENDER, /const beside = th && cmtPopBesideAt && cmtPopBesideAt\.tid === th\.tid && cmtPopBesideAt\.since === commentPopPos \? cmtPopBesideAt : null;/,
     "a full rebuild of the same thread keeps the spot, until a drag or a resize replaces commentPopPos");
   assert.match(RENDER, /const py = Math\.max\(8, Math\.min\(beside \? beside\.top : \(pos\?\.y \?\? 120\), window\.innerHeight - r\.height - 8\)\);/);
   assert.match(RENDER, /cmtPopLost = null; cmtPopBesideAt = null;/, "closing the box ends both");
+});
+
+test("cmtPopNudge: a passage that moved into the box moves it the least that clears it, and one clear of it moves nothing", () => {
+  const box = (top: number, bottom: number) => ({ left: 292, right: 992, top, bottom });
+  const at = (top: number, bottom: number) => ({ left: 80, right: 600, top, bottom });
+  // the box sat 8 px above the passage; the passage came up 5 px: still clear, nothing moves (the gap is air, not a rule)
+  assert.equal(cmtPopNudge(box(65, 485), at(488, 504), 700), null);
+  // it came up 26 px (the late fork control under the last reply): the box goes up 26 px, its size kept
+  assert.deepEqual(cmtPopNudge(box(65, 485), at(467, 483), 700), { top: 39, height: 420 });
+  // a passage that came up under the box's head: below it is the nearer clear spot
+  assert.deepEqual(cmtPopNudge(box(300, 500), at(290, 306), 900), { top: 314, height: 200 });
+  // no room at the box's size either side: the landing's rule (the roomier side, at that side's height)
+  assert.deepEqual(cmtPopNudge(box(30, 450), at(400, 416), 700), cmtPopBeside(box(30, 450), at(400, 416), 700));
+  assert.equal(cmtPopNudge(box(30, 450), at(400, 416), 700)!.top >= CMT_POP_EDGE, true);
 });

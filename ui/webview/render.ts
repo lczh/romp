@@ -21,7 +21,7 @@ import type { ParsedAsk } from "../ask-types";
 import { TABBAR_H_KEY, TABBAR_H_DEFAULT, clampTabbarH, parseTabbarH } from "./tabbar-resize";
 import type { CmtPopFrac, CmtPopRect } from "./comment-pop-size";
 import { CMT_POP_SIZE_KEY, CMT_POP_THREAD_DEFAULT, parseCmtPopSize, clampCmtPopPx, toCmtPopFrac, isCmtPopMax,
-         centerCmtPop, cmtPopCapPx, cmtPopBeside, CMT_POP_MIN_W, CMT_POP_MIN_H, CMT_POP_CAP_W, CMT_POP_CAP_H, CMT_POP_EDGE } from "./comment-pop-size";
+         centerCmtPop, cmtPopCapPx, cmtPopBeside, cmtPopNudge, CMT_POP_MIN_W, CMT_POP_MIN_H, CMT_POP_CAP_W, CMT_POP_CAP_H, CMT_POP_EDGE } from "./comment-pop-size";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
 import { watchOverlayScrollbars } from "./overlay-scrollbars";
@@ -11529,7 +11529,7 @@ function readThread(sid: string, tid: string): void {
 // Three follow-ups (the review of 2026-10-15): a passage folded in a closed <details> of its message is brought out of the
 // fold before the landing aligns on it (passageTarget), and one that still cannot be shown lands its fold's heading with a
 // line in the box; every piece of a highlight split over several elements flashes (landOn); and the box keeps clear of a
-// passage that moves after the box is placed (besideWatch).
+// passage the landing moves after the box is placed, and of nothing else (besideWatch).
 /** The thread a passage landing opens once it lands, keyed by the anchor like pendingAnchorMark: a landing that waits on
  *  history opens it on arrival, and any other landing drops it (passageLanded). */
 let passageGo: { sid: string; tid: string; uuid: string } | null = null;
@@ -11542,6 +11542,7 @@ let cmtPopBesideAt: { tid: string; top: number; height: number; since: { x: numb
 const PASSAGE_LOST = "Couldn't find this passage in the transcript.";
 const PASSAGE_WORDS_LOST = "Couldn't find this passage's words in its message.";
 const PASSAGE_FOLDED = "Couldn't unfold this passage in its message.";
+const PASSAGE_PART_FOLDED = "Couldn't unfold all of this passage in its message.";
 
 /** Take the reader to thread `tid`'s passage, then open the thread beside it. Never switches session: every entry point
  *  sits on the session's own view. */
@@ -11562,17 +11563,19 @@ function passageLanding(sid: string, tid: string): void {
   openBesidePassage(sid, tid, null, PASSAGE_LOST);
 }
 /** scrollToAnchor has just landed `uuid` on `turn` (on thread `mark`'s highlight `passage` when it has one, or on the heading
- *  of the fold that still hides it, `folded`): the thread a passage landing waits to open opens now, after the pass that
- *  landed (a landing inside landActive finishes its pass first). With no highlight the box says so only when the thread's
- *  words are not in the turn at all: a tool row's text is there, it just carries no highlight. */
-function passageLanded(uuid: string, mark: string | null, passage: HTMLElement | null, turn: HTMLElement, folded: boolean): void {
+ *  of the fold that still hides it, `folded` "whole"; "part" when a piece after the first is still hidden): the thread a
+ *  passage landing waits to open opens now, after the pass that landed (a landing inside landActive finishes its pass
+ *  first). With no highlight the box says so only when the thread's words are not in the turn at all: a tool row's text
+ *  is there, it just carries no highlight. */
+function passageLanded(uuid: string, mark: string | null, passage: HTMLElement | null, turn: HTMLElement, folded: "whole" | "part" | null): void {
   const go = passageGo;
   if (!go) return;
   passageGo = null;
   if (go.uuid !== uuid || go.tid !== mark) return;   // another landing took the reader elsewhere: the wait is over
   const exact = passage ? null : threadExact(go.tid);
   const lost = !passage && (!exact || !findAnchorRange(turnAtomsOf(turn).map((a) => a.textContent || "").join(""), exact));
-  queueMicrotask(() => openBesidePassage(go.sid, go.tid, passage, folded ? PASSAGE_FOLDED : lost ? PASSAGE_WORDS_LOST : null));
+  const note = folded === "whole" ? PASSAGE_FOLDED : folded === "part" ? PASSAGE_PART_FOLDED : lost ? PASSAGE_WORDS_LOST : null;
+  queueMicrotask(() => openBesidePassage(go.sid, go.tid, passage, note));
 }
 /** Open (or keep open) thread `tid` beside its passage, with `note` when the passage could not be reached. */
 function openBesidePassage(sid: string, tid: string, passage: HTMLElement | null, note: string | null): void {
@@ -11583,15 +11586,16 @@ function openBesidePassage(sid: string, tid: string, passage: HTMLElement | null
   if (prev && openCommentKey && openCommentKey.sid === sid && openCommentKey.tid === tid && prev.dataset.mode === "thread") paintCmtLost(prev, tid);   // its own quote was the click
   else openCommentPopover(sid, tid);
   const pop = document.getElementById("cmt-pop");
-  if (pop && passage && passage.isConnected) { placeBesidePassage(pop, tid, passage); watchBeside(tid, passage); }
+  if (pop && passage && passage.isConnected) { placeBesidePassage(pop, tid, passage); watchBeside(tid); }
 }
-/** The open box moved off its passage (cmtPopBeside: below it, else above, else the roomier side at that side's height),
- *  when it covers it; its left edge and width stay. The size set here is ours, never the user's remembered one. */
-function placeBesidePassage(pop: HTMLElement, tid: string, passage: HTMLElement): void {
+/** The open box moved off its passage when it covers it (cmtPopBeside: below it, else above, else the roomier side at that
+ *  side's height; `nudge`, the least move that clears it, cmtPopNudge); its left edge and width stay. The size set here is
+ *  ours, never the user's remembered one. */
+function placeBesidePassage(pop: HTMLElement, tid: string, passage: HTMLElement, nudge = false): void {
   const at = passageRect(passage, tid);
   if (!at) return;
   const r = pop.getBoundingClientRect();
-  const to = cmtPopBeside(r, at, window.innerHeight);
+  const to = (nudge ? cmtPopNudge : cmtPopBeside)(r, at, window.innerHeight);
   if (!to) return;
   pop.style.top = to.top + "px";
   if (Math.abs(to.height - r.height) > 0.5) pop.style.height = to.height + "px";
@@ -11617,52 +11621,51 @@ function passageRect(passage: HTMLElement, tid: string): CmtPopRect | null {
   const cut = { left: Math.max(u.left, cr.left), top: Math.max(u.top, cr.top), right: Math.min(u.right, cr.right), bottom: Math.min(u.bottom, cr.bottom) };
   return cut.bottom > cut.top && cut.right > cut.left ? cut : null;   // off the viewport: nothing on screen to keep clear
 }
-/** The box's watch on its passage once a landing opened it beside it: the passage can move AFTER the box is placed (a 26 px
- *  fork control added under the last reply grows the turn, and the landing's settle re-lands the passage higher, or follow
- *  mode writes the reader down), and nothing put the box beside it again, so it ended over the passage. Two events re-place
- *  it (placeBesidePassage moves it only when it covers the passage): a layout change of the passage's turn or of the
- *  transcript (a ResizeObserver, made after the settle's and the view's own, so their writes of the same frame are already
- *  in), and any move of the transcript the PAGE writes (writeScroll). It ends with the box, at a new landing, when the user
- *  moves or resizes the box (commentPopPos replaced) and at the reader's own first input over the transcript
- *  (settleInput, or a writer the census calls the reader's): from then on where the passage goes is theirs. */
-let besideWatch: { tid: string; since: { x: number; y: number } | null; ro: ResizeObserver | null } | null = null;
-function watchBeside(tid: string, passage: HTMLElement): void {
-  endBesideWatch();
-  const w: NonNullable<typeof besideWatch> = { tid, since: commentPopPos, ro: null };
-  besideWatch = w;
-  if (typeof ResizeObserver !== "function") return;
-  w.ro = new ResizeObserver(() => besideFollow());
-  const turn = passage.closest(".turn");
-  if (turn) w.ro.observe(turn);
-  const v = activeId ? views.get(activeId) : null;
-  if (v) w.ro.observe(v.el);
+/** The box's watch on its passage once a landing opened it beside it, for as long as that landing settles. The landing can
+ *  move the passage AFTER the box is placed: a 26 px fork control joins the last reply under it, and the settle re-lands
+ *  the passage higher, into where the box was (#248). Each re-land of THAT landing (settleLand) moves the box the least
+ *  that clears the passage again, and only when they overlap (cmtPopNudge). Nothing else moves it: the view following a
+ *  session's new text, the reader's scroll, a layout change under it. Those moved the box a line at a time as text
+ *  streamed in, shrinking it at the window's top and then throwing it below the passage (the review of #248). Frozen
+ *  while the pointer is over the box or the box holds the focus (the reader is reading or typing in it). It ends with the
+ *  settle, the box, a new landing, or the user's own move or resize of the box (commentPopPos replaced). */
+let besideWatch: { tid: string; since: { x: number; y: number } | null; settle: NonNullable<typeof landSettling> } | null = null;
+function watchBeside(tid: string): void {
+  const settle = landSettling;
+  besideWatch = settle && !settle.done ? { tid, since: commentPopPos, settle } : null;
 }
 function endBesideWatch(): void {
-  besideWatch?.ro?.disconnect();
   besideWatch = null;
 }
-/** The passage moved under the box a landing placed beside it: the box goes beside it again. The passage is re-found (a
- *  rebuild may have replaced it) and never revealed again: a fold the reader closed since stays closed. */
+/** The landing re-landed its passage under the box it placed beside it (settleLand): the box steps off it. The passage is
+ *  re-found (a rebuild may have replaced it) and never revealed again: a fold the reader closed since stays closed. */
 function besideFollow(): void {
   const w = besideWatch;
   if (!w) return;
   const pop = document.getElementById("cmt-pop");
   const v = activeId ? views.get(activeId) : null;
   if (!pop || !v || pop.dataset.tid !== w.tid || commentPopPos !== w.since) { endBesideWatch(); return; }
+  if (pop.matches(":hover") || pop.contains(document.activeElement)) return;   // the reader is in the box: it holds still
   const m = v.el.querySelector(`mark.cmt-hl[data-tid="${cssEscape(w.tid)}"]`) as HTMLElement | null;
   const at = m ? shownPassage(m) : null;
-  if (at) placeBesidePassage(pop, w.tid, at);
+  if (at) placeBesidePassage(pop, w.tid, at, true);
 }
-/** What a landing on thread `tid`'s passage aligns on, in `target`'s turn: its highlight (threadMarkIn), first brought out of
- *  every closed fold of its message that hides it (revealAncestors: a <details> the message folds it in). Before, a passage
- *  in a closed fold landed on nothing visible and nothing flashed. `folded` when something the landing cannot open still
- *  hides it (shownPassage); `reveal` false leaves the folds as they are (a settle's re-find on the same turn). */
-function passageTarget(target: HTMLElement, tid: string, reveal = true): { el: HTMLElement; folded: boolean } | null {
+/** What a landing on thread `tid`'s passage aligns on, in `target`'s turn: its highlight's first piece (threadMarkIn), the
+ *  highlight first brought out of every closed fold of its message that hides ANY of its pieces (revealAncestors: a
+ *  <details> the message folds it in; a passage that runs on into a second fold kept its tail hidden when only the first
+ *  piece's folds opened). Before, a passage in a closed fold landed on nothing visible and nothing flashed. `folded`:
+ *  "whole" when something the landing cannot open still hides the first piece (the landing goes to its fold's heading,
+ *  shownPassage), "part" when it hides a later one; `reveal` false leaves the folds as they are (a settle's re-find on the
+ *  same turn). Pieces of bare whitespace (between two blocks) draw nothing and count for nothing. */
+function passageTarget(target: HTMLElement, tid: string, reveal = true): { el: HTMLElement; folded: "whole" | "part" | null } | null {
   const m = threadMarkIn(target, tid);
   if (!m) return null;
-  if (reveal) revealAncestors(m);
+  const pieces = (Array.from((m.closest(".turn") || target).querySelectorAll(`mark.cmt-hl[data-tid="${cssEscape(tid)}"]`)) as HTMLElement[])
+    .filter((p) => p === m || (p.textContent || "").trim());
+  if (reveal) for (const p of pieces) revealAncestors(p);
   const at = shownPassage(m);
-  return at ? { el: at, folded: at !== m } : null;
+  if (!at) return null;
+  return { el: at, folded: at !== m ? "whole" : pieces.some((p) => !elShows(p)) ? "part" : null };
 }
 /** The highlight `m` when it shows, else the heading of the innermost fold it sits in (a <details>' summary), else its
  *  nearest ancestor that shows: the place the passage would be. null when nothing around it shows. */
@@ -13486,9 +13489,6 @@ function writeScroll(content: HTMLElement, top: number, writer: string, stick = 
   // chord, a link or the chips, the wheel over a notch) is their takeover (round four: their writes read as another mover's and
   // land-realign undid them), every other writer's move is a sample for the settle rule, which re-lands (T386)
   if (after !== before && landSettling && !landSettling.done && writer !== "land-on" && writer !== "land-realign") { if (writerIsReader(writer)) settleGesture(); else settleSample(); }
-  // …and a thread's box a landing put beside its passage: a move the page wrote (the settle's re-land, follow mode) puts it
-  // beside the passage again; a move of the reader's ends the watch (besideWatch)
-  if (after !== before && besideWatch) { if (writerIsReader(writer)) endBesideWatch(); else besideFollow(); }
 }
 // EVERY mover of #content goes through writeScroll (T262j, the user 2026-09-08: an unwritten move the journal could
 // not name). scrollBy and scrollIntoView are scrollTop writes expressed differently, so they are expressed as such:
@@ -13690,7 +13690,7 @@ function scrollToAnchor(uuid: string): boolean {
   const markEl = markAt ? markAt.el : null;
   const quoteEl = !markEl && quote ? highlightCiteSpan(target, quote) : null;
   landOn(target, uuid, markEl ?? quoteEl ?? firstTextAtomBelow(target), quote, mark);
-  passageLanded(uuid, mark, markEl, target, !!markAt?.folded);   // …and a landing that opens the thread opens it now, beside the passage
+  passageLanded(uuid, mark, markEl, target, markAt ? markAt.folded : null);   // …and a landing that opens the thread opens it now, beside the passage
   return true;
 }
 /** The atoms of the transcript turn the anchor's element opens: itself and the following event elements up to (not
@@ -13852,7 +13852,6 @@ function settleInput(e: Event): void {
     }
   }
   settleLastInput = Date.now();
-  endBesideWatch();   // the reader's hand on the transcript: where the passage goes from here is theirs (besideWatch)
 }
 for (const ev of ["pointerdown", "pointermove", "pointerup", "pointercancel", "touchstart", "touchmove", "wheel", "keydown"]) window.addEventListener(ev, settleInput, { capture: true, passive: true });
 // a page put behind another mid-press gets neither pointerup nor pointercancel from Chromium (round four, low 1): the hold ends
@@ -13909,6 +13908,7 @@ function settleRowHeight(at: HTMLElement): number {
 function settleLand(s: NonNullable<typeof landSettling>, writer: string): void {
   const c = document.getElementById("content"); const at = settleResolve(s);
   if (c && at) scrollElInto(c, at, "start", writer);
+  if (besideWatch && besideWatch.settle === s) besideFollow();   // the box a passage landing opened steps off the re-landed passage
 }
 function settleFinish(s: NonNullable<typeof landSettling>, fields: { dist: number | null; settled: boolean }): void {
   settleEnd(s);

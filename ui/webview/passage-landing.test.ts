@@ -18,7 +18,7 @@ test("the landing aligns on the thread's highlight and flashes it, and re-finds 
   assert.match(land, /const mark = pendingAnchorMark && pendingAnchorMark\.uuid === uuid \? pendingAnchorMark\.tid : null; pendingAnchorMark = null;/,
     "keyed by the anchor: a landing that waits on history keeps it, any other landing drops it");
   assert.match(land, /const markAt = mark \? passageTarget\(target, mark\) : null;\s*\n\s*const markEl = markAt \? markAt\.el : null;/);
-  assert.match(land, /landOn\(target, uuid, markEl \?\? quoteEl \?\? firstTextAtomBelow\(target\), quote, mark\);\s*\n\s*passageLanded\(uuid, mark, markEl, target, !!markAt\?\.folded\);/,
+  assert.match(land, /landOn\(target, uuid, markEl \?\? quoteEl \?\? firstTextAtomBelow\(target\), quote, mark\);\s*\n\s*passageLanded\(uuid, mark, markEl, target, markAt \? markAt\.folded : null\);/,
     "the passage is what the one write aligns on and what flashes; then the thread opens");
   assert.match(fn("threadMarkIn"), /for \(const t of threadsByAnchor\(threads\)\.get\(th\.anchorUuid\) \|\| \[\]\) ensureCommentMark\(turn, t\);/,
     "a turn the landing just rendered gets its highlights back first (applyCommentMarks' per-turn step, without its repaints)");
@@ -40,12 +40,12 @@ test("every entry point that opens a thread lands its passage first, and the clu
   assert.match(go, /openBesidePassage\(sid, tid, null, PASSAGE_LOST\);/, "a passage the transcript does not hold is said in the box");
   const landed = fn("passageLanded");
   assert.match(landed, /if \(go\.uuid !== uuid \|\| go\.tid !== mark\) return;/, "another landing ends the wait");
-  assert.match(landed, /queueMicrotask\(\(\) => openBesidePassage\(go\.sid, go\.tid, passage, folded \? PASSAGE_FOLDED : lost \? PASSAGE_WORDS_LOST : null\)\);/, "the box after the landing");
+  assert.match(landed, /const note = folded === "whole" \? PASSAGE_FOLDED : folded === "part" \? PASSAGE_PART_FOLDED : lost \? PASSAGE_WORDS_LOST : null;\s*\n\s*queueMicrotask\(\(\) => openBesidePassage\(go\.sid, go\.tid, passage, note\)\);/, "the box after the landing");
 });
 
 test("the box opens beside the passage, and the open thread's quote is the way back to it", () => {
-  assert.match(fn("openBesidePassage"), /if \(pop && passage && passage\.isConnected\) \{ placeBesidePassage\(pop, tid, passage\); watchBeside\(tid, passage\); \}/);
-  assert.match(fn("placeBesidePassage"), /const to = cmtPopBeside\(r, at, window\.innerHeight\);/);
+  assert.match(fn("openBesidePassage"), /if \(pop && passage && passage\.isConnected\) \{ placeBesidePassage\(pop, tid, passage\); watchBeside\(tid\); \}/);
+  assert.match(fn("placeBesidePassage"), /const to = \(nudge \? cmtPopNudge : cmtPopBeside\)\(r, at, window\.innerHeight\);/);
   assert.match(RENDER, /if \(th\) paintCmtLost\(pop, th\.tid\);/, "a full rebuild keeps the box's note");
   // both forms of the quote: the standalone block before the thread's events land, and the context on its opening message
   assert.match(RENDER, /if \(!create\) passageLink\(quote\);/);
@@ -59,7 +59,10 @@ test("the box opens beside the passage, and the open thread's quote is the way b
 // tests/test_comment_passage_reveal_served.py; these pin the wiring.
 test("a passage in a closed fold is brought out before the landing aligns on it, and one still hidden lands its fold's heading", () => {
   const target = fn("passageTarget");
-  assert.match(target, /if \(reveal\) revealAncestors\(m\);\s*\n\s*const at = shownPassage\(m\);\s*\n\s*return at \? \{ el: at, folded: at !== m \} : null;/);
+  assert.match(target, /if \(reveal\) for \(const p of pieces\) revealAncestors\(p\);\s*\n\s*const at = shownPassage\(m\);/,
+    "every fold ANY piece of the passage sits in opens, not only the first piece's (the review of #248)");
+  assert.match(target, /return \{ el: at, folded: at !== m \? "whole" : pieces\.some\(\(p\) => !elShows\(p\)\) \? "part" : null \};/);
+  assert.match(RENDER, /const PASSAGE_PART_FOLDED = "Couldn't unfold all of this passage in its message\.";/);
   assert.match(SANITIZE, /export function revealAncestors\(target: Element\): void \{[\s\S]{0,300}?p\.localName === "details" && n\.localName !== "summary" && !p\.hasAttribute\("open"\)\) p\.setAttribute\("open", ""\);/,
     "the browser's ancestor revealing steps, shared with a message's in-page links");
   assert.match(RENDER, /^import \{ sanitizeMd, userContentTarget, revealAncestors \} from "\.\/md-sanitize";/m);
@@ -77,18 +80,18 @@ test("every piece of a split highlight flashes", () => {
   assert.match(fn("landOn"), /const flashes = mark && at\.matches\("mark\.cmt-hl"\) \? Array\.from\(\(at\.closest\("\.turn"\) \|\| target\)\.querySelectorAll\(`mark\.cmt-hl\[data-tid="\$\{cssEscape\(mark\)\}"\]`\)\) : \[at\];\s*\n\s*for \(const f of flashes\) f\.classList\.add\("anchor-flash"\);\s*\n\s*setTimeout\(\(\) => \{ for \(const f of flashes\) f\.classList\.remove\("anchor-flash"\); \}, 1700\);/);
 });
 
-test("the box keeps clear of a passage that moves after it was placed, until the reader takes over", () => {
-  const watch = fn("watchBeside");
-  assert.match(watch, /w\.ro = new ResizeObserver\(\(\) => besideFollow\(\)\);/, "a layout change of the passage's turn or the transcript");
-  assert.match(watch, /if \(turn\) w\.ro\.observe\(turn\);/);
-  assert.match(watch, /if \(v\) w\.ro\.observe\(v\.el\);/);
-  assert.match(RENDER, /if \(after !== before && besideWatch\) \{ if \(writerIsReader\(writer\)\) endBesideWatch\(\); else besideFollow\(\); \}/,
-    "a move the page writes re-places the box; the reader's own ends the watch");
+test("the box steps off its passage only when the landing re-lands it there, the least that clears it, and never while the reader is in it", () => {
+  // the review of #248: the box followed every scroll of the view (the follow mode under a session still writing), so it climbed a
+  // line at a time, shrank at the window's top and jumped below the passage, with the reader hovering or typing in it
+  assert.match(fn("watchBeside"), /besideWatch = settle && !settle\.done \? \{ tid, since: commentPopPos, settle \} : null;/, "for as long as THAT landing settles");
+  assert.match(fn("settleLand"), /if \(besideWatch && besideWatch\.settle === s\) besideFollow\(\);/, "the landing's own re-land, and nothing else");
+  assert.doesNotMatch(RENDER, /new ResizeObserver\(\(\) => besideFollow\(\)\)/, "no layout change moves the box");
+  assert.doesNotMatch(fn("writeScroll"), /besideFollow/, "no scroll of the view moves the box");
   const follow = fn("besideFollow");
   assert.match(follow, /if \(!pop \|\| !v \|\| pop\.dataset\.tid !== w\.tid \|\| commentPopPos !== w\.since\) \{ endBesideWatch\(\); return; \}/,
     "the box closed, another thread's, or moved by the user: the watch ends");
-  assert.match(follow, /const at = m \? shownPassage\(m\) : null;\s*\n\s*if \(at\) placeBesidePassage\(pop, w\.tid, at\);/, "re-found, never revealed again");
-  assert.match(fn("settleInput"), /settleLastInput = Date\.now\(\);\s*\n\s*endBesideWatch\(\);/, "the reader's hand on the transcript ends it");
+  assert.match(follow, /if \(pop\.matches\(":hover"\) \|\| pop\.contains\(document\.activeElement\)\) return;/, "frozen under the pointer and while it holds the focus");
+  assert.match(follow, /const at = m \? shownPassage\(m\) : null;\s*\n\s*if \(at\) placeBesidePassage\(pop, w\.tid, at, true\);/, "re-found, never revealed again, nudged");
   assert.match(fn("passageLanding"), /endBesideWatch\(\);/, "a new landing ends the last one's");
   assert.match(fn("closeCommentPop"), /endBesideWatch\(\);/, "and so does closing the box");
 });

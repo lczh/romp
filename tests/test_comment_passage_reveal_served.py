@@ -6,10 +6,16 @@ the thread's passage, flashes it and opens the thread beside it; three shapes of
   a passage folded in a closed <details> of its reply: the view went where the hidden passage would be and nothing visible
   flashed; and one that cannot be shown (a hidden block inside the fold) must land the fold's heading and say so in the box;
   a passage split over several elements (a bold phrase): only its first piece flashed.
+And the review of that fix: the box followed every scroll of the view, so with the session still writing it climbed a line
+at a time as the view followed the new text, shrank at the window's top and then jumped below the passage, while the
+reader was hovering or typing in it; and a passage running from one closed fold into the next opened only the first.
+The box now moves only when the LANDING re-lands its passage into it (the late fork control above), the least that clears
+it, and never while the pointer is over it or it holds the focus; and every fold any piece of the passage sits in opens.
 
 A hermetic kernel serves a synthetic chat (the notes-api demo world, session web): 150 exchanges of fourteen-paragraph
 replies, so the page renders only the tail of what it holds. Four threads: reply 149's final paragraph, a passage in a closed
-fold of reply 120, one with a bold phrase in reply 110, and one in a hidden block inside a fold of reply 100. Skips LOUDLY
+fold of reply 120, one with a bold phrase in reply 110, one in a hidden block inside a fold of reply 100, and one across
+two closed folds of reply 90; then replies stream in under the last one by appending to the transcript. Skips LOUDLY
 without the extension deps or a Playwright browser. SYNTHETIC fixtures only (placeholder UUIDs, invented prose, host
 TESTHOST)."""
 import json
@@ -42,7 +48,8 @@ USER_UUID = "11111111-2222-3333-4444-%012d"
 REPLY_UUID = "22222222-3333-4444-5555-%012d"
 THREAD_SID = "eeeeeeee-1111-2222-3333-%012d"
 # (tid, reply index, how the passage sits in its reply)
-THREADS = [("tid-end", 149, "end"), ("tid-fold", 120, "fold"), ("tid-split", 110, "split"), ("tid-hidden", 100, "hidden")]
+THREADS = [("tid-end", 149, "end"), ("tid-fold", 120, "fold"), ("tid-split", 110, "split"), ("tid-hidden", 100, "hidden"), ("tid-two", 90, "two")]
+STREAM_UUID = "33333333-4444-5555-6666-%012d"   # the replies that stream in after the last one
 FOLDED = "Couldn't unfold this passage in its message."
 
 
@@ -62,6 +69,11 @@ def exact(k):
     return "The bounded buffer at step %d holds two hundred rows before the writer flushes." % k
 
 
+def two_exact(k):
+    """A passage that starts in one closed fold and runs into the next, the second's heading between."""
+    return "The bounded buffer at step %d holds two hundred rows Writer notes before the writer flushes to the file." % k
+
+
 def para(j, k):
     return ("Paragraph %d of step %d walks the export: the reader pulls a page of notes, the encoder turns each into a row, "
             "and the writer appends it to the file the client downloads, so nothing waits on the whole set." % (j, k))
@@ -76,6 +88,10 @@ def reply_body(k, how):
             out.append('<details class="fx-fold"><summary>Export notes</summary><p>%s</p></details>' % exact(k))
         elif how == "hidden" and j == AT:
             out.append('<details class="fx-hidden"><summary>Archived notes</summary><div hidden><p>%s</p></div></details>' % exact(k))
+        elif how == "two" and j == AT:
+            out.append('<details class="fx-two-a"><summary>Buffer notes</summary><p>The bounded buffer at step %d holds two hundred rows</p></details>' % k)
+        elif how == "two" and j == AT + 1:
+            out.append('<details class="fx-two-b"><summary>Writer notes</summary>\n<p>before the writer flushes to the file.</p></details>')
         elif how == "split" and j == AT:
             out.append("The bounded buffer at step %d holds **two hundred** rows before the writer flushes." % k)
         else:
@@ -136,7 +152,7 @@ const measure = (tid, fold) => page.evaluate(({ tid, fold }) => {
   const lost = pop ? pop.querySelector(".cmt-lost") : null;
   // shown: drawn, not only laid out (Chromium lays out a closed <details>' content, so a folded passage has a box)
   return { content: { t: c.top, b: c.bottom }, mark: u, inView: !!u && u.b > c.top && u.t < c.bottom, pieces: marks.length,
-           shown: marks.length > 0 && marks.every((m) => m.checkVisibility()),
+           shown: marks.length > 0 && marks.filter((m) => m.textContent.trim()).every((m) => m.checkVisibility()),
            flashed: (window.__pieces[tid] || []).slice().sort(), fold: d ? { open: d.open, head: { l: s.left, t: s.top, r: s.right, b: s.bottom } } : null,
            pop: p ? { l: p.left, t: p.top, r: p.right, b: p.bottom } : null, popTid: pop ? pop.dataset.tid : null,
            lost: lost ? lost.textContent : null, vh: innerHeight, seq: window.__seq.slice() };
@@ -178,6 +194,70 @@ out.split = await opened("tid-split");
 await fresh();
 await page.click(`#cmt-rail .cmt-tick[data-tid="tid-hidden"]`);
 out.hidden = await opened("tid-hidden", "fx-hidden");
+
+// 5. a passage that starts in one closed fold and runs into the next: both folds open, every piece shows
+await fresh();
+await page.click(`#cmt-rail .cmt-tick[data-tid="tid-two"]`);
+out.two = await opened("tid-two", "fx-two-a");
+out.twoB = await page.evaluate(() => { const d = document.querySelector("#content details.fx-two-b");
+  return d ? { open: d.open, pieces: d.querySelectorAll('mark.cmt-hl[data-tid="tid-two"]').length } : null; });
+
+// 6-8: the box holds still while the reader reads. The box and the passage, the view's scroll, as numbers
+const boxNow = () => page.evaluate(() => { const p = document.getElementById("cmt-pop"); if (!p) return null; const r = p.getBoundingClientRect(); return { t: Math.round(r.top), b: Math.round(r.bottom), l: Math.round(r.left), r: Math.round(r.right) }; });
+const markNow = (tid) => page.evaluate((tid) => { let u = null;
+  for (const m of Array.from(document.querySelectorAll(`#content mark.cmt-hl[data-tid="${tid}"]`))) for (const q of Array.from(m.getClientRects()))
+    u = u ? { t: Math.min(u.t, q.top), b: Math.max(u.b, q.bottom), l: Math.min(u.l, q.left), r: Math.max(u.r, q.right) } : { t: q.top, b: q.bottom, l: q.left, r: q.right };
+  return u && { t: Math.round(u.t), b: Math.round(u.b), l: Math.round(u.l), r: Math.round(u.r) }; }, tid);
+const scrollNow = () => page.evaluate(() => document.getElementById("content").scrollTop);
+// the last reply grows under the passage while the landing settles, the way the late fork control grows it: the landing
+// re-lands the passage higher, into where the box was
+const growTail = (px) => page.evaluate(([u, px]) => { const t = document.querySelector(`#content .turn[data-uuid="${u}"]`);
+  const d = document.createElement("div"); d.className = "fx-grow"; d.style.height = px + "px"; t.appendChild(d); }, [R(149), px]);
+const ungrow = () => page.evaluate(() => { for (const d of Array.from(document.querySelectorAll("#content .fx-grow"))) d.remove(); });
+const landEnd = async () => {
+  await fresh();
+  await page.click(`#cmt-rail .cmt-tick[data-tid="tid-end"]`);
+  await page.waitForSelector('#cmt-pop[data-tid="tid-end"]', { timeout: 15000 }).catch(() => {});
+};
+
+// 6. the pointer over the box: the passage moves into it, and the box stays where it is
+await landEnd();
+{ const pb = await page.locator("#cmt-pop").boundingBox(); await page.mouse.move(pb.x + pb.width / 2, pb.y + 30); }
+out.hover0 = { box: await boxNow(), mark: await markNow("tid-end") };
+await growTail(40);
+await page.waitForTimeout(800);
+out.hover1 = { box: await boxNow(), mark: await markNow("tid-end") };
+await page.mouse.move(150, 650);
+await ungrow();
+
+// 7. typing in the box, the pointer elsewhere: the same
+await landEnd();
+await page.mouse.move(150, 650);
+await page.evaluate(() => document.querySelector("#cmt-pop .cmt-input")?.focus());
+await page.keyboard.type("why two");
+out.type0 = { box: await boxNow(), mark: await markNow("tid-end"), focused: await page.evaluate(() => !!document.activeElement?.closest("#cmt-pop")) };
+await growTail(40);
+await page.waitForTimeout(800);
+out.type1 = { box: await boxNow(), mark: await markNow("tid-end") };
+await page.evaluate(() => { const i = document.querySelector("#cmt-pop .cmt-input"); if (i) { i.value = ""; i.dispatchEvent(new Event("input", { bubbles: true })); i.blur(); } });
+await ungrow();
+
+// 8. the session goes on writing: replies stream in under the last one, the view follows them, and the box stays put
+await landEnd();
+await page.mouse.move(150, 650);
+await page.waitForTimeout(1600);   // the landing settled
+out.stream0 = { box: await boxNow(), mark: await markNow("tid-end"), st: await scrollNow() };
+out.stream = [];
+let prev = R(149);
+for (let i = 0; i < 4; i++) {   // loop-ok: four replies, each waited on its own turn reaching the page
+  const u = cfg.streamUuid.replace("%012d", String(i).padStart(12, "0"));
+  fs.appendFileSync(cfg.transcript, JSON.stringify({ type: "assistant", uuid: u, parentUuid: prev, timestamp: new Date().toISOString(), sessionId: cfg.sid,
+    message: { role: "assistant", model: "claude-opus-5", content: [{ type: "text", text: "Streaming note " + i + ": the writer flushes the next page of rows to the download, and the reader keeps pulling." }] } }) + "\n");
+  prev = u;
+  await page.waitForSelector(`#content .turn[data-uuid="${u}"]`, { state: "attached", timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(300);
+  out.stream.push({ box: await boxNow(), mark: await markNow("tid-end"), st: await scrollNow(), arrived: await page.evaluate((u) => !!document.querySelector(`#content .turn[data-uuid="${u}"]`), u) });
+}
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -241,7 +321,8 @@ class ServedCommentPassageReveal(unittest.TestCase):
             prev = a
         Path(proj, WEB + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
         rows = []
-        for i, (tid, k, _how) in enumerate(THREADS):
+        cls.transcript = os.path.join(proj, WEB + ".jsonl")
+        for i, (tid, k, how_) in enumerate(THREADS):
             tsid = THREAD_SID % (i + 11)
             anchor = REPLY_UUID % k
             t = t0 + 600 * N + 60 * i
@@ -256,7 +337,7 @@ class ServedCommentPassageReveal(unittest.TestCase):
                 {"sid": tsid, "name": "web-comment-%d" % (i + 1), "cwd": cwd, "lastSid": tsid, "threadOf": WEB, "forkAt": anchor,
                  "alive": False, "mode": "auto", "effort": "high", "model": "claude-opus-5"}))
             rows.append({"tid": tid, "sid": tsid, "name": "web-comment-%d" % (i + 1), "anchorUuid": anchor, "cutUuid": anchor,
-                         "exact": exact(k), "status": "open", "createdT": t, "lastSeenT": int(time.time()) + 86400})
+                         "exact": two_exact(k) if how_ == "two" else exact(k), "status": "open", "createdT": t, "lastSeenT": int(time.time()) + 86400})
         Path(state, "comments", WEB + ".json").write_text(json.dumps({"threads": rows}))
         cls.port, cls.token = _free_port(), "testtok-passagereveal"
         env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST")
@@ -284,7 +365,7 @@ class ServedCommentPassageReveal(unittest.TestCase):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "sid": WEB,
-                       "threads": len(THREADS), "replyUuid": REPLY_UUID}, f)
+                       "threads": len(THREADS), "replyUuid": REPLY_UUID, "streamUuid": STREAM_UUID, "transcript": self.transcript}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -314,7 +395,7 @@ class ServedCommentPassageReveal(unittest.TestCase):
         self.assertLessEqual(m["pop"]["b"], m["vh"], "%s: the box is in the window: %r" % (where, m["pop"]))
         self.assertIsNone(m["lost"], "%s: a passage found says nothing more: %r" % (where, m))
 
-    def test_folded_split_and_end_of_chat_passages_land_whole_and_uncovered(self):
+    def test_passages_land_whole_and_the_box_steps_off_only_for_the_landing(self):
         r = self._drive()
         self.assertEqual(sorted(r["ticks"]), sorted(t[0] for t in THREADS), "a tick for each thread: %r" % r["ticks"])
         # 1. the last reply's final line, from far up: the box stays clear of the passage after the late fork control
@@ -342,6 +423,27 @@ class ServedCommentPassageReveal(unittest.TestCase):
         self.assertLess(abs(head["t"] - h["content"]["t"]), 3, "the fold's heading is at the top of the pane: %r" % h)
         self.assertIn("flash:summary", h["seq"], "the heading flashed: %r" % h["seq"])
         self.assertTrue(self._clear(head, h["pop"]), "the box does not cover the heading: %r" % h)
+        # 5. a passage from one closed fold into the next: both open, every piece drawn
+        self.assertIsNotNone(r["twoB"], "the reply has the second fold: %r" % r)
+        self.assertGreaterEqual(r["twoB"]["pieces"], 2, "the passage runs on into the second fold (its heading and its text): %r" % r["twoB"])
+        self.assertTrue(r["two"]["fold"]["open"], "the first fold opened: %r" % r["two"])
+        self.assertTrue(r["twoB"]["open"], "the second fold opened too, not only the first piece's: %r" % r["twoB"])
+        self._beside(r["two"], "tid-two", "a passage across two folds")
+        # 6, 7. the passage moves into the box while the pointer is over it, or while the reader types in it: the box holds still
+        for name, why in (("hover", "the pointer over the box"), ("type", "typing in the box")):
+            a, b = r[name + "0"], r[name + "1"]
+            if name == "type":
+                self.assertTrue(a["focused"], "the box holds the focus: %r" % a)
+            self.assertIsNotNone(a["box"], "%s: the box is open: %r" % (why, a))
+            self.assertLessEqual(b["mark"]["t"], a["mark"]["t"] - 30, "%s: the landing re-landed the passage higher (a move the box would follow): %r -> %r" % (why, a, b))
+            self.assertEqual(b["box"], a["box"], "%s: the box did not move: %r -> %r" % (why, a["box"], b["box"]))
+        # 8. a session still writing: replies stream in, the view follows them, and the box stays exactly where the landing put it
+        s0, st = r["stream0"], r["stream"]
+        self.assertTrue(all(x["arrived"] for x in st), "the streamed replies reached the page: %r" % st)
+        self.assertTrue(self._clear(s0["mark"], s0["box"]), "the landing left the passage clear of the box: %r" % s0)
+        self.assertGreater(st[-1]["st"], s0["st"], "the view followed the new text: %r -> %r" % (s0, st))
+        for x in st:
+            self.assertEqual(x["box"], s0["box"], "the box did not move as text streamed in: %r, then %r" % (s0["box"], [y["box"] for y in st]))
 
 if __name__ == "__main__":
     unittest.main()
