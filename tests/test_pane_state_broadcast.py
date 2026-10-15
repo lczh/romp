@@ -439,6 +439,7 @@ global.encodeURIComponent = (s) => s;
 global.location = { protocol: 'http:', host: 'TESTHOST:1' };
 global.sessionStorage = { getItem: () => 'wid1' };
 global.setTimeout = () => 0;
+global.setInterval = () => 0;   // the shell socket's watchdog ticks on an interval: a live one would keep node from exiting
 const pane = (id) => ({ id, classList: { toggle: (c, on) => { TOGGLES.push([id, c, !!on]); } }, contentDocument: {},
   contentWindow: { addEventListener: () => {} }, addEventListener: () => {} });
 const PANES = {};
