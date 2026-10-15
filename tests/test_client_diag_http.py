@@ -480,6 +480,7 @@ global.location = { protocol: 'http:', host: 'TESTHOST:1' };
 global.sessionStorage = { getItem: () => 'wid1' };
 global.setTimeout = (f, ms) => { TIMERS.push({ f, ms }); return TIMERS.length; };
 global.clearTimeout = () => {};
+global.setInterval = () => 0;   // the shell socket's watchdog ticks on an interval: a live one would keep node from exiting
 global.fetch = (url, init) => { const e = { url, init, ok: null, fail: null }; FETCHES.push(e); return { then(ok, fail) { e.ok = ok; e.fail = fail; } }; };
 let RAN = 0;
 function redial() { const t = TIMERS.slice(RAN); RAN = TIMERS.length; t.filter((x) => x.f && x.f.name === 'shellWS').forEach((x) => x.f()); }
