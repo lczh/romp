@@ -7374,12 +7374,11 @@ class SdkSession:
         self.backend._poke()
 
     def set_model_live(self, model, prev=None):
-        """Change the model on a CONNECTED session via the SDK control channel. No-op if not yet
-        connected — _options applies chosen_model on connect instead. `prev` is what set_model wrote
+        """Change the model on a CONNECTED session via the SDK control channel. `prev` is what set_model wrote
         (`picked`) and the token of its shared-defaults write (`tok`) — the keys every layer's revert
         compares against if the CLI refuses the switch (_do_set_model, the mode path's T139 rule).
-        A pick made while _options waits on the version read is held, and reaches the CLI once a connect is
-        up if it is still the session's model then (_send_held_picks)."""
+        A pick made with no client is held, and reaches the CLI once a connect is up if it is still the
+        session's model then and that CLI does not already run it (_hold_live_pick, _send_held_picks)."""
         if self.loop and self.client:
             self.loop.call_soon_threadsafe(
                 lambda: asyncio.ensure_future(self._do_set_model(model, prev)))
@@ -7399,9 +7398,9 @@ class SdkSession:
     def set_mode_live(self, mode, prev="default"):
         """Change the permission mode on a CONNECTED session via the SDK control channel. `prev` is
         the last CONFIRMED mode, captured by set_mode before its optimistic flip — the value every
-        layer reverts to if the CLI refuses the switch (T139). A pick made while _options waits on the
-        version read is held, and reaches the CLI once a connect is up if it is still the session's mode
-        then (_send_held_picks)."""
+        layer reverts to if the CLI refuses the switch (T139). A pick made with no client is held, and
+        reaches the CLI once a connect is up if it is still the session's mode then and that CLI does not
+        already run it (_hold_live_pick, _send_held_picks)."""
         if self.loop and self.client:
             self.loop.call_soon_threadsafe(
                 lambda: asyncio.ensure_future(self._do_set_mode(mode, prev)))
@@ -7409,28 +7408,37 @@ class SdkSession:
             self._hold_live_pick(self._do_set_mode, mode, prev)
 
     def _hold_live_pick(self, send, value, prev):
-        """A model or permission-mode pick that found no client. While _options waits on the version read
-        (_picks_held_open is a list) the pick is held for _send_held_picks, since the options already hold the model
-        and the mode. At any other moment nothing is held."""
-        if getattr(self, "_picks_held_open", None) is None:
-            return
+        """A model or permission-mode pick that found no client, held for _send_held_picks. A launch's options read the
+        model and the mode before its version read, the host's spawn and the CLI's handshake, which take seconds: a
+        pick made in that window is in neither the options nor any request unless it is held here, and the CLI would
+        run the old model and mode for its whole life while the session and its badge show the pick. So every pick
+        that finds no client is held, and the connect that comes up sends the ones its CLI does not already run. A
+        client that came up while the pick took the lock gets the pick live, after the held ones that connect sent."""
         with self._lock:
-            held = self._picks_held_open
-            if held is not None:
-                held.append((send, value, prev))
+            if not (self.loop and self.client):
+                self._picks_held = list(getattr(self, "_picks_held", None) or []) + [(send, value, prev)]
+                return
+        self.loop.call_soon_threadsafe(lambda: asyncio.ensure_future(send(value, prev)))
 
-    def _send_held_picks(self):
-        """Send the picks _hold_live_pick held, in the order they were made, now that a connect is up: at a launch the
-        ones this connect's version read held (its options carry any earlier one, _picks_launched), at an attach all
-        of them. A held pick is sent only while it is still the session's model (for a mode pick, its mode). Returns
-        whether a model pick was sent. Loop thread."""
+    def _send_held_picks(self, opts=None):
+        """Send the picks _hold_live_pick held, in the order they were made, now that a connect is up. A held pick is
+        sent only while it is still the session's model (for a mode pick, its mode) and the CLI this connect reached
+        does not already run that value: at a launch, what its options (`opts`) carried, which takes in every pick made
+        before they read the model and the mode; at an attach, to a CLI an earlier launch made, the model it last
+        accepted (_model_accepted) and the mode confirmed before the first held mode pick (that pick's `prev`). So a
+        pick taken back to what the CLI runs sends nothing. Returns whether a model pick was sent. Loop thread."""
         with self._lock:
             held, self._picks_held = getattr(self, "_picks_held", None) or [], []
-            if not getattr(self, "_host_is_attach", False):
-                held = held[getattr(self, "_picks_launched", 0):]
+            if opts is not None and not getattr(self, "_host_is_attach", False):
+                runs = (getattr(opts, "model", None), getattr(opts, "permission_mode", None))
+            else:
+                accepted = getattr(self, "_model_accepted", None)
+                modes = [prev for send, _value, prev in held if send == self._do_set_mode]
+                runs = (None if accepted in (None, "", "default") else accepted, modes[0] if modes else None)
             held = [(send, value, prev) for send, value, prev in held
                     if ((prev or {}).get("picked") == self.chosen_model if send == self._do_set_model
-                        else value == self.mode)]
+                        else value == self.mode)
+                    and value != runs[0 if send == self._do_set_model else 1]]
         for send, value, prev in held:
             asyncio.ensure_future(send(value, prev))
         return any(send == self._do_set_model for send, _value, _prev in held)
@@ -9969,7 +9977,7 @@ class SdkSession:
                     self.backend._push_soon(self.sid)
                     self._connected.set()   # the control channel exists from here (move() waits on this)
                     self._release_launch_slot()   # a relaunch's CLI is up: its launch slot goes to the next one waiting
-                    held_model = self._send_held_picks()   # a model or mode picked while a version read waited
+                    held_model = self._send_held_picks(opts)   # a model or mode picked while no client was up
                     if self._host is None:
                         self.backend._lease_open(self, client)   # ownership by lease (T305): pid + start time, heartbeat
                     #   (under a host the HOST holds the lease)
@@ -17672,21 +17680,10 @@ class SdkBackend:
         launch_keyed = not login and keyed_box
 
         def _version_read(env):
-            # token_fast_org_read for this launch; a model or mode picked meanwhile is held for the connect, after any
-            # pick still held (SdkSession._hold_live_pick)
-            lock = getattr(sess, "_lock", None) or threading.Lock()
-            with lock:
-                sess._picks_held_open = []
-            try:
-                return token_fast_org_read(env, self.claude_bin, self._log, getattr(self, "_fast_cli_said", None),
-                                           fast_flag)
-            finally:
-                with lock:
-                    sess._picks_held = list(getattr(sess, "_picks_held", None) or []) + sess._picks_held_open
-                    sess._picks_held_open = None
-        # A pick still held here was held by an earlier connect's read, and that connect never came up: these options
-        # carry it, so a launch from them sends only what this connect's read holds (SdkSession._send_held_picks)
-        sess._picks_launched = len(getattr(sess, "_picks_held", None) or [])
+            # token_fast_org_read for this launch; a model or mode picked meanwhile is held for the connect
+            # (SdkSession._hold_live_pick)
+            return token_fast_org_read(env, self.claude_bin, self._log, getattr(self, "_fast_cli_said", None),
+                                       fast_flag)
         token_case = ""
         if login_id:
             # A launch billed to a STORED login (T346): the token its command printed rides this ONE process as
