@@ -965,17 +965,24 @@ export const REMOTE_REDIAL_MS = 8000;
 // end stays open), and only the kernel's next frame can tell; until one lands the watchdog runs at this bound
 // instead of REMOTE_STALE_MS.
 export const REMOTE_PROVISIONAL_MS = 15000;
+// A socket held CLOSING (2026-10-15): a close the far side never completes leaves the browser holding the socket there
+// for up to a minute before onclose fires, and the verdict used to leave CLOSING alone, so the redial waited that minute
+// out. The watchdog stamps the first tick that sees a socket CLOSING (Conn.closingT) and puts it down once it has stayed
+// CLOSING this long: on the next tick, 5 s on. The pane shim's CLOSING_MS, byte for byte.
+export const REMOTE_CLOSING_MS = 5000;
 
 /** What the watchdog should do about ONE remote socket, from its state alone (pure, unit-tested):
  *  "close" — force-close so the onclose→redial chain runs (open but silent past the keepalive bound,
- *  or a hung handshake); "redial" — CLOSED with no fresh attempt: dial directly; "" — leave it be.
- *  `lastRecv` is stamped at open and on every frame, so an open socket's silence is measured from
+ *  or a hung handshake, or a socket stuck CLOSING); "redial" — CLOSED with no fresh attempt: dial directly;
+ *  "" — leave it be. `lastRecv` is stamped at open and on every frame, so an open socket's silence is measured from
  *  its own open, never from an earlier socket's traffic. `staleMs` is the silence bound for an OPEN
- *  socket: REMOTE_STALE_MS, or REMOTE_PROVISIONAL_MS while a resumed keep awaits its confirming frame. */
-export function socketVerdict(readyState: number, lastRecv: number, connT: number, now: number, staleMs = REMOTE_STALE_MS): "close" | "redial" | "" {
+ *  socket: REMOTE_STALE_MS, or REMOTE_PROVISIONAL_MS while a resumed keep awaits its confirming frame. `closingT` is
+ *  when the watchdog first saw this socket CLOSING (0 = not yet seen). */
+export function socketVerdict(readyState: number, lastRecv: number, connT: number, now: number, staleMs = REMOTE_STALE_MS, closingT = 0): "close" | "redial" | "" {
   if (readyState === 1) return now - (lastRecv || connT) > staleMs ? "close" : "";
   if (readyState === 0) return now - connT > REMOTE_CONNECT_MS ? "close" : "";
   if (readyState === 3) return now - connT > REMOTE_REDIAL_MS ? "redial" : "";
+  if (readyState === 2) return closingT && now - closingT >= REMOTE_CLOSING_MS ? "close" : "";
   return "";
 }
 
@@ -1008,6 +1015,7 @@ interface Conn {
   lastRecv: number; // epoch ms of the last frame on the CURRENT socket (keepalives count); 0 = none yet
   resumeProvisional: number; // the `resume` stamp lastRecv rests on until a frame confirms it (the watchdog runs at REMOTE_PROVISIONAL_MS meanwhile); 0 = confirmed, or no stamp
   connT: number;    // when the current socket's connect() attempt started — the watchdog's reference point
+  closingT: number; // when the watchdog first saw the current socket CLOSING (socketVerdict, REMOTE_CLOSING_MS); 0 = not seen
   everOpened?: boolean; // a socket for this conn has reached `open` at least once (the shim's everConnected)
   readyAcked?: boolean; // the remote answered this page's `ready` with a `caps` frame at least once (the shim's readyAcked): the redial gate's latch that the remote served this page whole and holds its sessions
   acksEver?: boolean; // some socket of this page's to this host has said it (acksSeen): a chat send dropped while the host is down is kept and resent, so its toast says that (dropWarn)
@@ -1252,17 +1260,19 @@ export class FederationManager {
 
   /** One pass of the remote-socket watchdog (public so the tests can tick it with their own clock):
    *  apply socketVerdict to every dialed connection. `foreground` (the visibility fast-path) also
-   *  kills a socket still CONNECTING, whatever its age — a handshake the sleeping tab never finished. */
+   *  kills a socket still CONNECTING, whatever its age — a handshake the sleeping tab never finished —
+   *  and one held CLOSING (2026-10-15), whose close the far side never completed. */
   watchdog(now: number, foreground = false): void {
     for (const c of this.conns.values()) {
       if (c.closed || !c.ws) continue;
       const rs = c.ws.readyState;
-      let v = socketVerdict(rs, c.lastRecv, c.connT, now, c.resumeProvisional ? REMOTE_PROVISIONAL_MS : REMOTE_STALE_MS);
-      if (foreground && rs === 0) v = "close";
+      if (rs === 2 && !c.closingT) c.closingT = now;   // the first tick that sees it CLOSING: the verdict measures from here
+      let v = socketVerdict(rs, c.lastRecv, c.connT, now, c.resumeProvisional ? REMOTE_PROVISIONAL_MS : REMOTE_STALE_MS, c.closingT);
+      if (foreground && (rs === 0 || rs === 2)) v = "close";
       if (v === "close") {
         // the same breadcrumb family as open/close/detach, so a "cards came back late" report reads
         // WHICH socket the watchdog put down and how long it had been silent
-        this.diag("hostconn", { host: c.host, ev: "watchdog-close", why: rs === 1 ? "quiet" : "connecting",
+        this.diag("hostconn", { host: c.host, ev: "watchdog-close", why: rs === 1 ? "quiet" : rs === 2 ? "closing" : "connecting",
                                 quietMs: c.lastRecv ? now - c.lastRecv : -1, foreground });
         // ABANDON it, don't wait for it: close() on a socket whose far side is gone starts a closing
         // handshake nobody answers, and the browser holds CLOSING for ~60s before onclose fires (the
@@ -1949,7 +1959,7 @@ export class FederationManager {
     // credential is added by the relay (_remote_ws), so this URL carries no token at all. The URL is
     // built fresh on every dial (remoteDialUrl, called from connect) so a redial reflects the page's
     // current terms, exactly as the pane's own local socket rebuilds its ?active=/reconnect on each open.
-    const conn: Conn = { host, ws: null, url: "", closed: false, live, lastRecv: 0, resumeProvisional: 0, connT: 0, pending: new Map() };
+    const conn: Conn = { host, ws: null, url: "", closed: false, live, lastRecv: 0, resumeProvisional: 0, connT: 0, closingT: 0, pending: new Map() };
     this.conns.set(host, conn);
     this.ensureHost(host);
     this.connect(conn);
@@ -2018,6 +2028,7 @@ export class FederationManager {
     if (conn.ws && (conn.ws.readyState === 0 || conn.ws.readyState === 1)) return; // already connecting/open
     let ws: WebSocket;
     conn.connT = Date.now();
+    conn.closingT = 0;
     conn.lastRecv = 0;
     conn.resumeProvisional = 0;   // a fresh socket starts unmarked: the provisional rule was the resumed socket's
     conn.acksSeen = false;        // …and has said nothing about answering sends yet: its own keepalive says it (onmessage)

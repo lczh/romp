@@ -497,6 +497,9 @@ global.innerHeight = 844; global.innerWidth = 390; global.scrollY = 0;
 global.scrollTo = () => {};
 global.matchMedia = () => ({ matches: true });                 // a coarse pointer: the phone
 global.requestAnimationFrame = (f) => { RAF.push(f); return RAF.length; };
+global.setInterval = () => 0;   // the shell socket's watchdog ticks on an interval: a live one would keep node from exiting
+global.setTimeout = () => 0;    // this harness has no WebSocket, so the shell's dial throws and schedules its redial: a live timer would keep
+                                 // node redialing (and running) forever; the fit itself runs on animation frames, never on timers
 global.addEventListener = on(WIN);
 global.visualViewport = { height: 844, scale: 1, addEventListener: on(VV) };
 const pane = (id) => ({ id, classList: { toggle() {} }, contentDocument: {},
@@ -688,6 +691,7 @@ window.__rompPaneSourceOk = () => true;   // the shell's source check (the boot 
 global.innerHeight = 844; global.innerWidth = 390; global.scrollY = 0; global.scrollTo = () => {};
 global.matchMedia = () => ({ matches: true });
 global.requestAnimationFrame = () => 1;
+global.setInterval = () => 0;   // the shell socket's watchdog ticks on an interval: a live one would keep node from exiting
 global.addEventListener = on(WIN);
 global.visualViewport = { height: 844, scale: 1, addEventListener() {} };
 global.document = { visibilityState: 'visible', addEventListener() {}, body,
