@@ -5093,6 +5093,26 @@ class BgTaskLifecycle(unittest.TestCase):
         self.assertEqual(be2._ensured, [])
         self.assertEqual([t["desc"] for t in sb.read_reg(be2.state_dir, s2.sid)["bgTasks"]], ["timer"])
 
+    def test_session_gone_while_a_live_host_runs_the_cli_tells_nothing_and_keeps_the_mirror(self):
+        # the thread ended but a live host still runs the CLI (an attach that stood down after four initialize timeouts
+        # ends it `detached`, not `ended`; a lease that cannot be read counts as a live host): the tasks run on, so no
+        # notice, no wake, and the mirror keeps naming them for the next attach's seed. A detach whose host has gone
+        # (its lease no longer holds) is told as before: the CLI went with its host.
+        for detached, hosted, told in ((True, True, False), (False, True, False), (True, False, True)):
+            with self.subTest(detached=detached, hosted=hosted):
+                s = self._sess()
+                be = s.backend
+                be._lease_survives = lambda sid, _hosted=hosted, **_: _hosted
+                self._feed(s, "task_started", {"task_id": "b1", "description": "power watcher"})
+                s.detached = detached
+                be._ensured = []
+                be._ensure = lambda sid, on_boot_settled=None, _be=be: _be._ensured.append(sid)
+                be._on_session_gone(s)
+                reg = sb.read_reg(be.state_dir, s.sid)
+                notices = [q for q in (reg.get("queue") or []) if "power watcher" in q]
+                self.assertEqual((len(notices), be._ensured), (1, [s.sid]) if told else (0, []))
+                self.assertEqual([t["desc"] for t in reg["bgTasks"]], [] if told else ["power watcher"])
+
     def test_a_threads_crash_resume_hears_dead_tasks_once_after_the_nudge(self):
         # a comment thread's CLI dies mid-turn with the kernel alive: the crash resume spawns the
         # fresh session through _ensure, whose thread-wake report (the boot sweep never resumes a

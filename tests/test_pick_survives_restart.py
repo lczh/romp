@@ -399,6 +399,66 @@ class AReattachToTheSameCliInsideOneKernel(_Harness):
         self.assertEqual([m["effortApplied"] for m in self._effort_markers()], ["max"])
 
 
+class _AlwaysTimesOut(_Client):
+    """Every connect fails as an initialize that timed out does."""
+
+    async def __aenter__(self):
+        raise TimeoutError("the initialize timed out")
+
+
+class AStandDownFromALiveHost(_Harness):
+    """After a kernel restart the session attaches to the CLI its host kept, a monitor still running in it. Every attach
+    reaches the host's hello and then times out at the initialize, four times, so the session stands down: the host keeps
+    the CLI and its monitor. Before the fix the session-gone path that follows told the session its monitor was cut off
+    and emptied the registry's mirror, so the user's next message reached the CLI behind that false notice and the attach
+    it made seeded nothing: the monitor the CLI still ran no longer counted toward quiet()."""
+
+    HOLDER = {"pid": 9000, "start": "1.0"}               # the scripted host's identity (its hello's `host`)
+
+    def test_the_stand_down_tells_nothing_keeps_the_mirror_and_the_next_attach_counts_the_monitor(self):
+        be1, s1 = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"}])
+        c1 = self._connect(s1, 1)
+        self._a_turn_that_leaves_a_monitor(s1, c1)
+        self._end_kernel(s1)
+        self.assertEqual([t.get("taskId") for t in (self._reg().get("bgTasks") or [])], ["t-mon"],
+                         "precondition: the drain keeps the mirror for the next kernel")
+        be2, s2 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"} for _ in range(5)], survives=True)
+        be2._host_lease = lambda sid, **_: ({"holder": dict(self.HOLDER)}, "attach")   # a live host holds the lease
+        scripted = be2._host_transport_for
+        sdk = sys.modules["claude_agent_sdk"]
+
+        async def wedged(sess, opts, classes):
+            out = await scripted(sess, opts, classes)
+            if sdk.ClaudeSDKClient is _AlwaysTimesOut:
+                sess._host.hello, sess._host._init_pending = {"host": dict(self.HOLDER)}, True   # hello, then no initialize
+            return out
+        be2._host_transport_for = wedged
+        sdk.ClaudeSDKClient = _AlwaysTimesOut
+        s2.start()
+        s2.thread.join(timeout=30)
+        self.assertFalse(s2.thread.is_alive(), "precondition: the thread stood down")
+        self.assertTrue(s2.detached and not s2.ended, "precondition: a stand-down, not an end")
+        self.assertTrue(any("could not complete an attach" in l for l in self.lines), self.lines[-12:])
+        self.assertIsInstance(self._reg().get("hostAttachFailed"), dict, "precondition: the marker names the live host")
+        self.assertEqual(len(_Client.instances), 5, "precondition: one launch, then four attaches")
+        reg = self._reg()
+        self.assertEqual([q for q in (reg.get("queue") or []) if isinstance(q, str) and "background task" in q], [],
+                         "the host's CLI still runs the monitor: no notice that it was cut off")
+        self.assertEqual([t.get("taskId") for t in (reg.get("bgTasks") or [])], ["t-mon"],
+                         "the mirror still names the monitor, for the next attach's seed")
+
+        sdk.ClaudeSDKClient = _Client                      # the host answers this time
+        self.assertTrue(be2.send(SID, "are you still there?", user=True))   # the user's message lifts the stand-down
+        s3 = be2.sessions[SID]
+        self.sessions.append(s3)
+        self._wait(lambda: len(_Client.instances) == 6 and _Client.instances[5] is s3.client, "the attach that completes")
+        c = _Client.instances[5]
+        self._wait(lambda: c.writes, "the first turn fed")
+        self._settle(0.5)
+        self.assertEqual([w for w in c.writes if "background task" in w], [], "nothing was cut, so the agent hears nothing of it")
+        self.assertEqual(s3.live_work()[1], 1, "the attach seeds the monitor the CLI still runs")
+
+
 class TheSpeedCheckAtTheConnect(_Harness):
     def test_a_connect_to_a_cli_launched_with_subagents_at_standard_speed_begins_its_speed_check(self):
         """A session with Subagents at standard speed on, on Opus 5.5 with its own fast pick and the version check

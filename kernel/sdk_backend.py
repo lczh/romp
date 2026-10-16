@@ -22480,7 +22480,10 @@ class SdkBackend:
                 self.sessions.pop(sess.sid, None)
         if popped:
             _note_ended(sess)                      # #1735: register the ended session; the controller measures cyclicity at the idle tick
-        if not sess.detached and not self._lease_survives(sess.sid, if_unreadable=True):
+        # a live host still runs this session's CLI (or may: a lease that cannot be read), read once, before the heal below can
+        # start a new connect
+        hosted = self._lease_survives(sess.sid, if_unreadable=True)
+        if not sess.detached and not hosted:
             self._land_at_cli_end(sess)   # its CLI ended (a detach's host keeps it): a waiting billing switch lands, before
             #                               anything below starts the session again (the crash heal, the task-death notice);
             #                               a lease that cannot be read lands nothing, its host may still run the old CLI
@@ -22518,9 +22521,13 @@ class SdkBackend:
         # and wake it so it can relaunch what still matters (the user 2026-07-11: nimbus's campaign
         # watcher died with a kernel restart and the session never knew). Skipped when `ended` (our own
         # drain/shutdown): the reg's bgTasks mirror survives for the NEXT kernel's boot reconcile to
-        # deliver the same notice.
+        # deliver the same notice. Skipped too while a live host still runs the CLI (an attach that stood
+        # down, 2026-10-16): nothing died, and the mirror keeps naming the tasks for the next attach's seed
+        # (_seed_surviving_work). Told otherwise, the agent could start duplicates, and the emptied mirror
+        # let a relaunch waiting for quiet cut them for real. A detach whose host has gone is still told:
+        # its CLI went with it.
         died = sess._live_bg_tasks()
-        if died and not sess.ended:
+        if died and not sess.ended and not hosted:
             try:
                 note = task_death_notice(died)
                 with self._reg_lock:
