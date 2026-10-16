@@ -645,7 +645,8 @@ class Detail(unittest.TestCase):
                       "if(shellSock===ws)shellSock=null;}", html)
         self.assertIn("ws.onclose=function(){shellLost(ws);shellRedial();};", html,
                       "the shell socket's close tells the detail before the redial")
-        self.assertIn("var d=sws;if(!d)return;d.onopen=d.onmessage=d.onclose=d.onerror=null;try{d.close();}catch(e){}sws=null;shellLost(d);", html,
+        self.assertIn("var d=sws;if(!d)return;d.__rompGone=true;d.onopen=d.onmessage=d.onclose=d.onerror=null;try{d.close();}catch(e){}sws=null;"
+                      "if(shellSock===d)shellDownT=Date.now();else shellFails++;shellLost(d);", html,
                       "…and so does the watchdog's abandon, which detaches that onclose (2026-10-15)")
 
     def test_focus_moves_to_the_card_before_the_pressed_button_is_disabled(self):

@@ -202,7 +202,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("if(ws.readyState===0&&Date.now()-connT>15000){try{ws.close();}catch(e){}return;}", js)
         # a lost redial timer is judged against the redial's due time (redialAt), so a backed-off redial is not cut
         # short, and a missing socket (a dial the constructor refused) counts as CLOSED (2026-10-15)
-        self.assertIn("setInterval(function(){if(!ws||ws.readyState===3){if(Date.now()-Math.max(connT,redialAt)>8000)connect();return;}", js)
+        self.assertIn("setInterval(function(){beaconTick();if(!ws||ws.readyState===3){if(Date.now()-Math.max(connT,redialAt)>8000)connect();return;}", js)
         # a socket held CLOSING is abandoned on the tick after the one that first saw it (2026-10-15)
         self.assertIn("if(ws.readyState===2){if(!closingT)closingT=Date.now();else if(Date.now()-closingT>=CLOSING_MS){", js)
         # the foregrounding fast-path abandons an OPEN-but-quiet socket, or one held CLOSING, and redials it NOW
