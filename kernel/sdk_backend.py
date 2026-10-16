@@ -19554,12 +19554,20 @@ class SdkBackend:
         absolute dueEpoch + arming-generation stamp make the close safe — the dead generation
         hands the wakeup to deliver_lost_wakeups, which delivers the prompt at due and revives
         the session then. Both this guard and ensure_scheduled read recurring_crons(reg), the
-        same predicate over the same record, so the two sides can never disagree."""
+        same predicate over the same record, so the two sides can never disagree.
+        A live background task or subagent holds the close too, the work quiet() counts for a
+        relaunch: they run inside the CLI, so closing it cuts them off, and a close is our own
+        shutdown, which writes no task-death notice. A session idle on a watcher or a dev server
+        then waited forever for a completion that could never come (audit 2026-10-16). The close
+        waits for the task's own end event instead."""
         with self._lock:
             s = self.sessions.get(sid)
         if not s or s.ended:
             return False
         if s.inflight or s.pending() or s._cur_ask_fut is not None:
+            return False
+        subagents, bg_tasks = s.live_work()
+        if subagents or bg_tasks:
             return False
         reg = read_reg(self.state_dir, sid) or {}
         if recurring_crons(reg):

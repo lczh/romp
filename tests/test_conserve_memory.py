@@ -58,6 +58,7 @@ class Flag(unittest.TestCase):
 class BackendClose(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        (Path(self.d) / "session-hosts").write_text("off")   # a state root of its own: no real session host
         self.be = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None)
         sb.write_reg(Path(self.d), SID, {"sid": SID, "name": "bg", "cwd": "/tmp", "alive": True})
         self.s = sb.SdkSession(self.be, sb.read_reg(Path(self.d), SID))
@@ -122,6 +123,60 @@ class BackendClose(unittest.TestCase):
         self.s.inflight = 0
         self.s._pending.append("queued prompt")
         self.assertFalse(self.be.conserve_close(SID), "a queued prompt stands it down too")
+
+    def test_never_closes_a_cli_running_background_work(self):
+        # A background task (a watcher, a dev server, a build) and a subagent run INSIDE the CLI, so a close cuts
+        # them off, and a close is our own shutdown, which writes no task-death notice: a session idle on the
+        # task's completion would wait for it forever. The task arrives through the CLI's own lifecycle stream (the
+        # real handler), and only its end frees the close.
+        self.s._on_task_event("task_started", {"task_id": "t-1", "description": "watch the build",
+                                               "task_type": "local_bash"})
+        self.assertFalse(self.be.conserve_idle(SID), "a live background task is work")
+        self.assertFalse(self.be.conserve_close(SID), "…and the CLI running it is not closed")
+        self.assertIn(SID, self.be.sessions)
+        self.s._on_task_event("task_notification", {"task_id": "t-1", "status": "completed"})
+        self.assertTrue(self.be.conserve_idle(SID), "the task's own end frees the close")
+        with self.s._sub_lock:
+            self.s._subagents["a-1"] = {"type": "general-purpose", "since": int(time.time())}
+        self.assertFalse(self.be.conserve_idle(SID), "a live subagent is work too")
+        with self.s._sub_lock:
+            self.s._subagents.pop("a-1")
+        self.assertTrue(self.be.conserve_idle(SID))
+
+    def test_the_sweep_keeps_a_faded_session_whose_background_task_runs(self):
+        # The whole scenario: conserve on, no viewer, the last turn settled two hours ago, so the row reads
+        # 'waiting' and faded (a background task does not make it 'working'). Only conserve_idle can hold the close.
+        stop = threading.Event()
+        self.s.thread = threading.Thread(target=stop.wait, daemon=True)
+        self.s.thread.start()
+        self.addCleanup(stop.set)
+        sb.append_state(Path(self.d), SID, "waiting", t=int(time.time()) - 7200)
+        self.s._on_task_event("task_started", {"task_id": "t-1", "description": "watch the build",
+                                               "task_type": "local_bash"})
+        saved = (km._sdk, km._views_client, km._conserve_last_viewer[0])
+        with km._clients_lock:
+            before = list(km._clients)
+            km._clients[:] = []                                  # no dashboard open
+        km._sdk = lambda: self.be
+        km._views_client = lambda: {"active": "all", "tags": [], "actives": {}}
+        km._conserve_last_viewer[0] = 0.0                        # the viewer lease long expired
+        km._conserve_hidden_at.clear()
+        km._set_conserve(True)
+        try:
+            now = time.time()
+            row = self.be.live_sessions().get(SID) or {}
+            self.assertIn(SID, self.be.running_sids())
+            self.assertTrue(km._idle_faded(str(row.get("state") or ""), row.get("since") or 0, now),
+                            "the row must read faded, or the sweep never weighs the close: %r" % row)
+            km._conserve_tick(now)
+            km._conserve_tick(now + km.CONSERVE_HIDE_GRACE_S + 1)
+            self.assertIn(SID, self.be.running_sids(), "the sweep closed a CLI running a background task")
+        finally:
+            km._sdk, km._views_client, km._conserve_last_viewer[0] = saved
+            with km._clients_lock:
+                km._clients[:] = before
+            km._set_conserve(False)
+            km._conserve_hidden_at.clear()
 
 
 class Tick(unittest.TestCase):
