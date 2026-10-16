@@ -912,30 +912,79 @@ class AToggleWhileTheLaunchIsPrepared(_Harness):
         self.assertTrue(s._host_is_attach, "the premise: an attach")
         self.assertEqual(_Client.instances[1].controls, [])
 
-    def test_a_model_picked_once_the_version_read_is_over_is_not_held_for_the_connect(self):
-        """A guard of the hold's window, which opens and closes with the version read. A model picked after the read, as
-        the connect reaches the host, finds the hold closed and is not held."""
-        cli, reading, hold = self._token_read_waits()
-        os.unlink(hold)                                    # the read answers at once
+    def _picked_while_the_connect_comes_up(self, road):
+        """A session on claude-opus-5 in acceptEdits connects, and its connect waits once _options has built the
+        options: at the session host, for a launch (`road` "launch") or for an attach to the CLI a host kept across a
+        kernel restart ("attach"), or with session hosts off at the client's own connect to its CLI ("child"). A model
+        and a mode are picked meanwhile, from another thread as the kernel's routes pick. Returns the session and the
+        client once it is the live one."""
         reg = self._reg()
-        reg.update(auth="login", fast=True, model="claude-opus-5")
+        reg.update(model="claude-opus-5")
         sb.write_reg(self.state, SID, reg)
-        be, s = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"},
-                              {"attach": False, "cli": CLI_B, "launch": "spec"}], cli=cli)
-        be.login_ok = lambda: True
-        spawn = be._host_transport_for
-        hold_after_pick = []
+        entered, release = threading.Event(), threading.Event()
 
-        async def transport_for(sess, opts, classes):
-            be.set_model(SID, "claude-sonnet-5")           # after _options, before the client is up
-            hold_after_pick.append((sess._picks_held_open, list(getattr(sess, "_picks_held", None) or [])))
-            return await spawn(sess, opts, classes)
-        be._host_transport_for = transport_for
+        async def gate():
+            entered.set()
+            for _ in range(1000):                          # at most 10 s, so a failing test still lets the thread end
+                if release.is_set():
+                    return
+                await asyncio.sleep(0.01)
+        if road != "child":
+            first = ({"attach": True, "cli": CLI_A, "launch": _record(False)} if road == "attach"
+                     else {"attach": False, "cli": CLI_A, "launch": "spec"})
+            be, s = self._kernel([first, {"attach": False, "cli": CLI_B, "launch": "spec"}], survives=road == "attach")
+            spawn = be._host_transport_for
+
+            async def transport_for(sess, opts, classes):
+                await gate()
+                return await spawn(sess, opts, classes)
+            be._host_transport_for = transport_for
+        else:
+            class _ConnectWaits(_Client):
+                async def __aenter__(self):
+                    await gate()
+                    return self
+            sys.modules["claude_agent_sdk"].ClaudeSDKClient = _ConnectWaits
+            be, s = self._kernel([])
+            be.session_hosts_on = lambda: False
         s.start()
+        self._wait(entered.is_set, "the connect, waiting after the options were built")
+        self.assertIsNone(s.client, "the premise: no client yet")
+        self.assertTrue(be.set_model(SID, "claude-sonnet-5"))
+        self.assertTrue(be.set_mode(SID, "plan"))
+        release.set()
         self._wait(lambda: len(_Client.instances) >= 1 and _Client.instances[0] is s.client, "connect 1")
-        self.assertTrue(os.path.exists(reading), "the premise: the version was read")
-        self.assertEqual(s.chosen_model, "claude-sonnet-5", "the premise: the pick was made")
-        self.assertEqual(hold_after_pick, [(None, [])], "the hold closed with the read, and nothing was held")
+        c = _Client.instances[0]
+        self.assertEqual((getattr(c.options, "model", None), getattr(c.options, "permission_mode", None)),
+                         ("claude-opus-5", "acceptEdits"), "the premise: the launch was built before the picks")
+        return s, c
+
+    def test_a_model_and_a_mode_picked_while_the_session_host_brings_the_launch_up_reach_the_cli(self):
+        """The launch's options were built, and its connect waits on the session host: the model and the mode picked
+        meanwhile are sent to the CLI once the connect is up, in the order they were made, and nothing relaunches."""
+        s, c = self._picked_while_the_connect_comes_up("launch")
+        self.assertFalse(s._host_is_attach, "the premise: a launch")
+        self._wait(lambda: c.controls == [("model", "claude-sonnet-5"), ("mode", "plan")], "the picks sent")
+        self._settle(0.5)
+        self.assertEqual(len(_Client.instances), 1, "no relaunch")
+
+    def test_a_model_and_a_mode_picked_while_the_attach_to_a_kept_cli_comes_up_reach_the_cli(self):
+        """As the launch, at an attach to the CLI a host kept across a kernel restart: the model and the mode picked while
+        the attach waits on the host are sent to that CLI once the attach is up."""
+        s, c = self._picked_while_the_connect_comes_up("attach")
+        self.assertTrue(s._host_is_attach, "the premise: an attach")
+        self._wait(lambda: c.controls == [("model", "claude-sonnet-5"), ("mode", "plan")], "the picks sent")
+        self._settle(0.5)
+        self.assertEqual(len(_Client.instances), 1, "no relaunch")
+
+    def test_a_model_and_a_mode_picked_while_a_kernel_child_connects_reach_the_cli(self):
+        """As the launch, with session hosts off: the client's own connect to its CLI waits, and the model and the mode
+        picked meanwhile are sent to that CLI once the connect is up."""
+        s, c = self._picked_while_the_connect_comes_up("child")
+        self.assertIsNone(s._host, "the premise: a kernel child, no session host")
+        self._wait(lambda: c.controls == [("model", "claude-sonnet-5"), ("mode", "plan")], "the picks sent")
+        self._settle(0.5)
+        self.assertEqual(len(_Client.instances), 1, "no relaunch")
 
     def _a_model_the_subagent_speed_recipe_excludes(self, during_the_read):
         """A session with Subagents at standard speed on, on Opus 5.5 with its own fast pick, a login riding the
@@ -1346,6 +1395,12 @@ class AToggleWhileTheLaunchIsPrepared(_Harness):
         self.assertEqual(c.controls, [], "nothing sent")
         self.assertEqual(self._armed(s), ("Opus 5", "Sonnet 5"), "the retry armed")
 
+    def test_a_mode_picked_during_the_version_read_and_taken_back_at_an_attach_is_not_sent(self):
+        """The mode the attached CLI runs is the one confirmed before the pick: a pick taken back to it sends nothing."""
+        s, c = self._at_an_attach_with_a_standing_fallback(lambda be: self.assertTrue(be.set_mode(SID, "plan")),
+                                                          back=lambda be: be.set_mode(SID, "acceptEdits"))
+        self.assertEqual((c.controls, s.mode), ([], "acceptEdits"), "nothing sent")
+
     def test_the_account_default_picked_during_the_version_read_reaches_the_cli_as_no_model(self):
         """The account's default ("default", which goes out as set_model(None)) picked while a launch's version read
         waits is sent once the launch is up, and its dots end."""
@@ -1407,20 +1462,21 @@ class AToggleWhileTheLaunchIsPrepared(_Harness):
                          (1, False, "claude-sonnet-5"), "the premise: a fresh launch whose options carry Sonnet")
         self._wait(lambda: c.controls == [("model", "claude-opus-5")], "the pick sent")
 
-    def test_a_pick_that_finds_the_hold_closed_once_it_has_the_lock_is_not_held(self):
-        """A guard of the hold's second look, under the session lock: a pick that saw the hold open while the version
-        read's end closed it is not held, and nothing raises."""
+    def test_a_pick_that_finds_a_client_once_it_has_the_lock_goes_to_it_live_and_is_not_held(self):
+        """A guard of the hold's second look, under the session lock: a pick that found no client, whose connect came up
+        before the pick had the lock (and so already sent what was held), goes to that client live and is not held."""
         be, s = self._kernel([])
+        scheduled = []
 
-        class ClosingLock:
+        class ConnectingLock:
             def __enter__(lk):
-                s._picks_held_open = None                  # the read's end, between the pick's first look and the lock
+                # the connect came up between the pick's first look and the lock
+                s.loop, s.client = types.SimpleNamespace(call_soon_threadsafe=scheduled.append), object()
             def __exit__(lk, *a):
                 return False
-        s._picks_held_open = []
-        s._lock = ClosingLock()
+        s._lock = ConnectingLock()
         s._hold_live_pick(s._do_set_model, "claude-sonnet-5", {"picked": "claude-sonnet-5"})
-        self.assertEqual((s._picks_held_open, getattr(s, "_picks_held", None) or []), (None, []))
+        self.assertEqual((len(scheduled), getattr(s, "_picks_held", None) or []), (1, []))
 
     def test_a_relaunch_gives_its_launch_slot_back_once_its_cli_is_up_and_sends_the_picks_held_during_its_version_read(self):
         """The machine has one launch slot. An effort pick relaunches a quiet session, the relaunch takes the slot,
