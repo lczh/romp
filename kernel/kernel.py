@@ -52624,6 +52624,8 @@ def build_feed(now, live_map=None):
         _HEAL_LOG["n"], _HEAL_LOG["h"] = max(heal_total, _HEAL_LOG["n"]), max(hidden_total, _HEAL_LOG.get("h", 0))
         sys.stderr.write("feed: %s (no request behind them; the planner nests new ones at mint time)\n" % "; ".join(_rose))
     _n_folded = len(asks)                            # the session cards: their bells are the fold's (the bell pass below skips them)
+    serving_folded = []                              # the serving cards the join below folds into a rendered tracker row: still on
+    #                                                  the board, inside the sender's card, so the bells' diff must not read them as gone
     if serving_folds:
         # COPY ON WRITE (2026-10-15): every card on `asks` and every candidate is an object the fold keeps and hands out
         # again next build (THE FOLD KEEPS ITS CARDS), so the join writes copies: the tracker card, its tree list and the
@@ -52640,6 +52642,7 @@ def build_feed(now, live_map=None):
             if not _hit:
                 asks.append(dict(_f["card"]))
                 continue
+            serving_folded.append(_f["card"]["itemId"])
             _ci, _ri = _hit
             _rows = _f["card"].get("tree") or []
             if _rows:
@@ -52705,6 +52708,10 @@ def build_feed(now, live_map=None):
         # ANOTHER kernel resolves it against its own (bell-follow.ts; plans/federated-push.md, bells follow the dashboard)
         _a["notifyRaw"] = _push_explicit_bell(str(_a.get("sid") or ""), _a["itemId"], _ncards)
     return {"type": "feed", "asks": asks, "now": now,
+            # the ids of the serving cards folded into their dispatch's card this build (the join above): no card of their
+            # own, yet not gone, so the bells' diff keeps their told mark and their bell overrides (_feed_notifications_diff).
+            # Only when a join happened, so a board without one ships the frame it always did
+            **({"servingFoldedIds": serving_folded} if serving_folded else {}),
             **_views_payload(),   # the rendered views blob — the outline + feed tag mounts read it (2026-08-25); under a read fault its marker rides too, or alone (2026-09-08)
             # usage-limit-down latch (judge-limit.json): analysis is paused because the account
             # cannot bill judge calls — the dashboard must SAY so, never fail quietly into retries
@@ -69618,6 +69625,16 @@ def _feed_notifications_diff(feed):
               - set(_kept_open)) | {str(a.get("sid") or "") for a in cur.values()}
     nxt = {i: e for i, e in prev.items() if i not in cur and e.get("sid") not in roster}   # unrendered: remembered,
     #                                                until the sweep finds the session gone for good (_notify_prev_forget_gone)
+    # FOLDED, NOT GONE: a worker's serving card that left the board's cards only because the build folded it into its
+    # dispatch's card (build_feed's serving join, from working or completed) keeps its mark the way a working card does.
+    # Read as gone, every needs-you, fold, needs-you flap announced it again with nothing from the user in between, and
+    # the prune below deleted the user's mute on it at its first fold.
+    folded = {str(i) for i in (feed.get("servingFoldedIds") or ())} - set(cur)
+    for iid in folded:
+        ent = prev.get(iid)
+        if ent is not None and ent.get("announced"):
+            nxt[iid] = {"sid": ent.get("sid"), "board": ent.get("board") or "feed", "column": None,
+                        "announced": ent["announced"], "announcedAt": ent.get("announcedAt")}
     now_t = int(feed.get("now") or time.time())   # the build's own moment: wall clock, like the journal's t
     entered = []                                     # (itemId, card, column, entry): the cards that ENTERED a column
     for iid, a in cur.items():
@@ -69666,7 +69683,7 @@ def _feed_notifications_diff(feed):
                 out.append((title, body, e["sid"], iid))
     _NOTIFY_PREV[0] = nxt
     _notify_prev_write(nxt)                          # after the marks: the file records what was told
-    _prune_notify_cards(set(cur) | set(nxt))         # a card still remembered is not gone
+    _prune_notify_cards(set(cur) | set(nxt) | folded)   # a card still remembered, or folded into another, is not gone
     _push_ring_add(ring)                             # after the snapshot moved: a serve re-validates against it (_push_event_current)
     if first_boot:
         sys.stderr.write("[notify] no snapshot on disk — seeded %d cards from the board silently\n" % len(nxt))
