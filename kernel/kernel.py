@@ -50064,7 +50064,11 @@ def _card_warn_rows(rows, fsid, subtree, placements, cap=20):
     return out[-cap:]
 
 
-def _boundary_clear_notices(alive):
+ENDED_NOTICE_WINDOW = 7 * 86400     # how long a dead session's 'ended' row rides the feed after its finalize (below)
+_ENDED_MARKER_SLACK = 86400         # the marker pre-filter's allowance for clocks; it only ever keeps MORE markers
+
+
+def _boundary_clear_notices(alive, now=None):
     """The newest /clear boundary that SETTLED cards, per living session — read from the episodes
     log's settle annotations (the authoritative record, written on the settle path). The feed
     mirrors each into the shell's notification bell exactly once (client seen-set), so a clear that
@@ -50080,7 +50084,22 @@ def _boundary_clear_notices(alive):
     currently borne by a LIVE session under a different sid — the lifecycle on disk is identical,
     only the interrupt is suppressed, because "web ended" ringing while a live web sits in front of
     the user misreads as being about the live one (name reuse, and every pre-upgrade re-anchored
-    /clear lane the boot backfill stamps)."""
+    /clear lane the boot backfill stamps).
+
+    The dead sweep is BOUNDED (2026-10-16). Nothing deletes a gone/ marker, so before this every session that
+    ever died with cards open shipped its 'ended' row in every feed frame for the life of the install, and every
+    build re-opened every marker. A death's row now rides the feed for ENDED_NOTICE_WINDOW after the finalize
+    wrote its record, keyed on that record's own t (the row's bell signature too), long enough for a dashboard
+    opened that week to ring it once (nothing tells the kernel a row was shown: the seen-set is the browser's).
+    The cut slides forward only, so a row that leaves never comes back: the client keeps its seen-set to the
+    rows a frame carries, and a returning row would ring again. It is not the discover-window bound
+    session-order.json wears: a session idle for days and then ended has no transcript in that window, yet its
+    end is exactly what the bell is for. The finalize writes the marker just before the record and any later
+    write of a marker moves its mtime forward, so a marker whose file is older than the window (less the slack)
+    cannot carry an in-window record: it costs one stat and no read."""
+    if now is None:
+        now = time.time()
+    floor = now - ENDED_NOTICE_WINDOW
     out = []
     live_names = {s["name"] for s in alive}
     live_sids = {s["sid"] for s in alive}
@@ -50094,8 +50113,18 @@ def _boundary_clear_notices(alive):
         r = max(settles.values(), key=lambda x: x.get("t") or 0)
         out.append({"sid": s["sid"], "name": s["name"], "t": r.get("t") or 0,
                     "titles": [str(d.get("text") or "") for d in (r.get("settled") or [])]})
+    gone = []
     try:
-        gone = [p.name[:-5] for p in (jd.STATE / "gone").iterdir() if p.name.endswith(".json")]
+        with os.scandir(jd.STATE / "gone") as it:
+            for e in it:
+                if not e.name.endswith(".json"):
+                    continue
+                try:
+                    if e.stat().st_mtime < floor - _ENDED_MARKER_SLACK:
+                        continue                       # finalized before the window: one stat, no read (docstring)
+                except OSError:
+                    continue
+                gone.append(e.name[:-5])
     except OSError:
         gone = []
     for sid in gone:
@@ -50112,6 +50141,8 @@ def _boundary_clear_notices(alive):
         if not ended:
             continue                                   # died with nothing open: records on disk, no interrupt
         r = max(ended, key=lambda x: x.get("t") or 0)
+        if (r.get("t") or 0) < floor:
+            continue                                   # its week has passed: off every frame for good (docstring)
         try:
             name = (jd.NAMES / sid).read_text().split("\t")[0].strip()
         except Exception:

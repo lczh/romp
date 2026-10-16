@@ -4,6 +4,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from romp_load import load_source
 
@@ -18,6 +19,8 @@ km = load_source("romp_kernel_death2", os.path.join(BIN, "romp-kernel"))
 
 NOW = 1781100000
 SID = "11111111-2222-3333-4444-555555555555"
+DAY = 86400
+OLD = ["7d3f0c2e-9a41-4b6e-8c15-%012d" % i for i in range(1, 41)]   # private synthetic sids (the window's tests)
 
 
 def _write_marker(sid, **m):
@@ -37,6 +40,21 @@ def _wipe(sid):
         mod._gone_memo.pop(sid, None)                  # deleted-then-recreated file within one mtime
         mod._episode_memo.pop(sid, None)               # tick would otherwise serve a stale memo
         mod._UNREADABLE_LOGGED.discard(str(mod.STATESDIR / (sid + ".jsonl")))   # a read-failure episode ends with the file
+
+
+def _ended(sid, at, marker_at=None):
+    """A death the finalize settled at `at` with two cards open, as it leaves the disk: the marker stamped
+    endedAt (its file written then, unless `marker_at` says a later write moved it), and one 'ended:'
+    record stamped `at`."""
+    died = at - 30
+    _write_marker(sid, t=died, by="kill", endedAt=died)
+    mt = at if marker_at is None else marker_at
+    os.utime(jd.GONEDIR / (sid + ".json"), (mt, mt))
+    jd.append_episode_settle(sid, "ended:%d" % died, at,
+                             [{"id": sid + ":g1", "text": "Fix the login flow"},
+                              {"id": sid + ":g2", "text": "Pick the auth library"}])
+    jd.NAMES.mkdir(parents=True, exist_ok=True)
+    (jd.NAMES / sid).write_text("api\t~\t#123456\t#fff\n")
 
 
 def _store(status=None, nodes=None):
@@ -196,15 +214,17 @@ class BellCarriesTheEnd(unittest.TestCase):
     def tearDown(self):
         (km.jd.STATE, km.jd.NAMES, km.jd.GONEDIR, km.jd.STATESDIR,
          km.jd.EPIDIR, km.jd.SDKDIR) = self._saved
-        _wipe(SID)
-        try:
-            (jd.NAMES / SID).unlink()
-        except OSError:
-            pass
+        for sid in [SID] + OLD:
+            _wipe(sid)
+            try:
+                (jd.NAMES / sid).unlink()
+            except OSError:
+                pass
 
     def test_a_dead_finalized_session_with_open_cards_reaches_the_bell(self):
-        _write_marker(SID, t=NOW, by="kill", endedAt=NOW)
-        jd.append_episode_settle(SID, "ended:%d" % NOW, NOW + 1,
+        now = int(time.time())                         # the wall clock: an ended row rides its week only
+        _write_marker(SID, t=now - 60, by="kill", endedAt=now - 60)
+        jd.append_episode_settle(SID, "ended:%d" % (now - 60), now - 59,
                                  [{"id": SID + ":g1", "text": "an unfinished thing"}])
         jd.NAMES.mkdir(parents=True, exist_ok=True)
         (jd.NAMES / SID).write_text("web\t/tmp\t#123456\t#fff\n")
@@ -216,8 +236,9 @@ class BellCarriesTheEnd(unittest.TestCase):
         self.assertTrue(mine and mine[0].get("ended") and mine[0]["titles"] == ["an unfinished thing"], diag)
 
     def test_the_name_reuse_guard_suppresses_only_the_interrupt(self):
-        _write_marker(SID, t=NOW, by="kill", endedAt=NOW)
-        jd.append_episode_settle(SID, "ended:%d" % NOW, NOW + 1, [{"id": SID + ":g1", "text": "x"}])
+        now = int(time.time())                         # inside the window, so the guard is what holds it back
+        _write_marker(SID, t=now - 60, by="kill", endedAt=now - 60)
+        jd.append_episode_settle(SID, "ended:%d" % (now - 60), now - 59, [{"id": SID + ":g1", "text": "x"}])
         jd.NAMES.mkdir(parents=True, exist_ok=True)
         (jd.NAMES / SID).write_text("web\t/tmp\t#123456\t#fff\n")
         alive = [{"sid": "22222222-3333-4444-5555-666666666666", "name": "web"}]
@@ -230,6 +251,52 @@ class BellCarriesTheEnd(unittest.TestCase):
         self.assertEqual([r for r in rows if r["sid"] == SID], [],
                          "'web ended' ringing beside a LIVE web misreads — records stay on disk, "
                          "only the interrupt is suppressed")
+
+    # The dead sweep's bound (2026-10-16): nothing deletes a gone/ marker, so before it every session that ever
+    # died with cards open shipped an 'ended' row in every feed frame, and every build re-opened every marker.
+
+    def test_an_ended_row_leaves_the_frame_once_its_week_has_passed(self):
+        now = int(time.time())
+        _ended(SID, now - 3600)                        # ended an hour ago: the bell's real job
+        _ended(OLD[0], now - 8 * DAY)                  # ended eight days ago: rang its week
+        _ended(OLD[1], now - 8 * DAY, marker_at=now - 60)   # a marker written since (a later death that left
+        #                                                     nothing open) does not bring the old record back
+        rows = km._boundary_clear_notices([])
+        sids = [r["sid"] for r in rows]
+        self.assertIn(SID, sids, "harness check: the recent end reaches the bell")
+        self.assertEqual([s for s in sids if s in OLD], [],
+                         "a session that ended eight days ago still rides every feed frame: rows=%r"
+                         % [(r["sid"][-2:], round((now - r["t"]) / DAY, 1)) for r in rows])
+
+    def test_the_row_leaves_when_its_week_ends(self):
+        now = int(time.time())
+        at = now - km.ENDED_NOTICE_WINDOW + 600
+        _ended(OLD[0], at)
+        self.assertEqual([r["sid"] for r in km._boundary_clear_notices([], now=now) if r["sid"] in OLD],
+                         [OLD[0]], "ten minutes before its week ends the row still rides")
+        self.assertEqual([r["sid"] for r in km._boundary_clear_notices([], now=now + 601) if r["sid"] in OLD],
+                         [], "a second past its week the row is off the frame (and the cut only moves forward)")
+
+    def test_a_marker_older_than_the_window_costs_a_stat_and_no_read(self):
+        now = int(time.time())
+        _ended(SID, now - 3600)
+        for i, sid in enumerate(OLD):
+            _ended(sid, now - (30 + i) * DAY)          # one end a day, the newest a month back
+        reads = []
+        real = km.jd._death_marker
+
+        def counting(sid):
+            reads.append(sid)
+            return real(sid)
+        km.jd._death_marker = counting
+        try:
+            rows = km._boundary_clear_notices([])
+        finally:
+            km.jd._death_marker = real
+        self.assertIn(SID, [r["sid"] for r in rows], "harness check: the recent end reaches the bell")
+        self.assertEqual(sorted(s for s in reads if s in OLD), [],
+                         "a build re-opened %d markers finalized long before the window"
+                         % len([s for s in reads if s in OLD]))
 
 
 class RunClosePins(unittest.TestCase):
