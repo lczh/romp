@@ -84,6 +84,7 @@ var document={addEventListener:function(t,f){(docL[t]=docL[t]||[]).push(f);}};
 var lostCalls=0,diagRows=[];var window={__rompApiSocketLost:function(){lostCalls++;}};var navigator={};
 var location={protocol:"http:",host:"TESTHOST"};
 var diagQ=[],shellSock=null;function shellDiag(what,data){diagRows.push({what:what,data:data});}
+var shellDownT=Date.now(),shellFails=0,shellBeaconT=0,shellBeaconBusy=false;   // the HTTP door's state, declared ahead of the block as the page does (it has no fetch here, so the door never sends)
 function diagStamp(m){return m;}function wid(){return "w1";}function reveal(){}
 """
 
