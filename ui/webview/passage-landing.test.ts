@@ -137,13 +137,13 @@ test("a paused view stands in room down to its bottom edge, so a tail that shrin
   // the served lab: the fork control left the last drawn reply a frame before the next reply was drawn, and the browser clamped a
   // paused view at the bottom 26 px a reply (tests/test_comment_passage_reveal_served.py, case 10)
   const floor = fn("holdFloor");
-  assert.match(floor, /const px = Math\.max\(0, Math\.ceil\(h - \(content\.scrollHeight - content\.scrollTop - content\.clientHeight\)\)\) \+ "px";\s*\n\s*if \(el\.style\.minHeight !== px\) el\.style\.minHeight = px;/,
-    "the thread reaches the view's bottom edge, rounded up into atBottom's band");
+  assert.match(floor, /const px = Math\.max\(parseFloat\(el\.style\.minHeight\) \|\| 0, Math\.ceil\(h - \(content\.scrollHeight - content\.scrollTop - content\.clientHeight\)\)\) \+ "px";\s*\n\s*if \(el\.style\.minHeight !== px\) el\.style\.minHeight = px;/,
+    "the thread reaches the view's bottom edge, rounded up into atBottom's band, and only grows while the pause holds: a scroll up never lowers it to meet the reader (the review of #279)");
   assert.match(floor, /const before = content\.scrollTop;\s*\n\s*el\.style\.minHeight = "";\s*\n\s*writeScroll\(content, content\.scrollTop, "hold-floor", false, before\);/,
     "let go as a claimed write: a clamp to the shorter end is the page's move, never a gesture");
   assert.match(RENDER, /if \(gv\?\.followHeld\) holdFloor\(c, gv\);/, "every scroll of the held view moves the room with the reader's place");
   assert.match(fn("releaseFollow"), /if \(v\) \{ v\.followHeld = false; v\.heldKeep = null; if \(c\) holdFloor\(c, v\); \}/, "it goes with the pause");
-  assert.match(fn("landOn"), /if \(!mark\) releaseFollow\(\);[^\n]*\n\s*const land = /, "…before any other landing measures");
+  assert.match(fn("landOn"), /if \(c && v\) holdFloor\(c, v, false\); \}[^\n]*\n\s*if \(!mark\) releaseFollow\(\);[^\n]*\n\s*const land = /, "every landing measures the transcript as it stands, and any other landing lifts the pause");
   assert.match(fn("landOn"), /if \(mark\) \{ const c = document\.getElementById\("content"\); const v = activeId \? views\.get\(activeId\) : null; if \(c && v\) holdFloor\(c, v\); \}/, "a passage landing sets it where it lands");
   const show = fn("landActive");
   assert.match(show, /if \(!\(v\.followHeld && v\.heldKeep\)\) holdFloor\(content, v, false\);\s*\n\s*sizeSpacers\(v\);/, "a re-show other than the held tab's return lands on the transcript as it stands");

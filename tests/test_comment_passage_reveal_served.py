@@ -289,6 +289,35 @@ const streamOne = async (pg = page, wait = true, paras = 1) => {
 };
 const contentRect = () => page.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { t: Math.round(r.top), b: Math.round(r.bottom) }; });
 
+// 15. the review of #279: paused at the bottom, the tail shrinks 80 px under the reader (a stand-in element leaves the end of the
+// transcript; the room under the paused view keeps the passage still), then the reader wheels UP 40 px. That is a reader off the
+// bottom: still paused, the chip showing, and the next reply moves nothing. Then they wheel down to the bottom: following resumes
+// and the next reply is followed
+await page.evaluate(() => {
+  const th = Array.from(document.querySelectorAll("#content > .thread")).find((t) => t.offsetHeight > 0);
+  const d = document.createElement("div"); d.id = "fx-tail"; d.style.height = "80px"; th?.appendChild(d);
+});
+await landEnd();
+await page.mouse.move(150, 650);
+await page.waitForTimeout(1500);   // the landing settled
+out.shrink0 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), st: await scrollNow() };
+await page.evaluate(() => document.getElementById("fx-tail")?.remove());
+await page.waitForTimeout(400);
+out.shrink1 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), st: await scrollNow() };
+await page.mouse.move(150, 400);
+await page.mouse.wheel(0, -40);
+await page.waitForTimeout(1000);   // past the scroll's end
+out.shrink2 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), chip: await chipNow(), st: await scrollNow() };
+await streamOne();
+await page.waitForTimeout(400);
+out.shrink3 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), chip: await chipNow() };
+for (let i = 0; i < 4; i++) { await page.mouse.wheel(0, 600); await page.waitForTimeout(150); }   // loop-ok: a reader wheeling down to the end
+await page.waitForTimeout(600);
+out.shrink4 = { bottom: await atBottomNow(), chip: await chipNow() };
+await streamOne();
+await page.waitForTimeout(400);
+out.shrink5 = { bottom: await atBottomNow(), chip: await chipNow() };
+
 // 14. the session writes while the reader is on another tab, after a landing at the bottom: back on the tab, the passage is
 // where they left it, follow mode still paused, the chip showing the text below; the next reply does not move it either
 await landEnd();
@@ -651,6 +680,20 @@ class ServedCommentPassageReveal(unittest.TestCase):
         self.assertTrue(r["resume1"]["bottom"], "the next reply was followed, the view at the bottom: %r" % r["resume1"])
         self.assertGreater(r["resume1"]["st"], r["resume0"]["st"], "the view moved down with it: %r" % r)
         self.assertFalse(r["resume1"]["chip"], "no chip at the bottom: %r" % r["resume1"])
+        # 15. a scroll up after the tail shrank under a paused view is a reader off the bottom: still paused (the review of #279,
+        # where the room under the view was lowered to meet the reader, the scroll's end read them as at the bottom, following
+        # resumed and the view jumped 40 px); a scroll down to the bottom resumes following
+        s0, s1, s2, s3, s4, s5 = (r["shrink%d" % i] for i in range(6))
+        self.assertTrue(s0["bottom"], "the landing on the last reply put the view at the bottom: %r" % s0)
+        self.assertLess(abs(s1["mark"]["t"] - s0["mark"]["t"]), 3, "the 80 px shrink under the paused view moved nothing: %r -> %r" % (s0, s1))
+        self.assertFalse(s2["bottom"], "40 px up from the bottom is off the bottom: %r" % s2)
+        self.assertTrue(s2["chip"], "…with the chip showing the way back: %r" % s2)
+        self.assertLess(abs((s2["mark"]["t"] - s1["mark"]["t"]) - (s1["st"] - s2["st"])), 3, "the view moved by the reader's scroll alone: %r -> %r" % (s1, s2))
+        self.assertLess(s1["st"] - s2["st"], 60, "…the wheel's 40 px, no jump on top: %r -> %r" % (s1, s2))
+        self.assertLess(abs(s3["mark"]["t"] - s2["mark"]["t"]), 3, "still paused: the next reply moves nothing: %r -> %r" % (s2, s3))
+        self.assertTrue(s3["chip"] and not s3["bottom"], s3)
+        self.assertTrue(s4["bottom"] and not s4["chip"], "the reader wheeled down to the bottom: %r" % s4)
+        self.assertTrue(s5["bottom"] and not s5["chip"], "following resumed: the next reply was followed: %r" % s5)
         # 14. text written while the reader was away from a held tab: back on it, the passage where they left it, still paused
         a0, a1, a2 = r["away0"], r["away1"], r["away2"]
         self.assertTrue(a0["bottom"], "the landing on the last reply put the view at the bottom: %r" % a0)

@@ -14056,7 +14056,8 @@ function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | 
   const at = alignOn ?? target;
   settleLastInput = 0; settleScrollerHeld = false;   // the input that caused this landing (a click on a link in the scroller) is not evidence for taking it over (round three, low 4); a hold whose release never reached the page (a press held across an alt-tab) does not outlive the landing (round four, low 1)
   readerScrolling = false;   // …nor is a gesture still running: the landing moved the view, the reader's flick is over
-  if (!mark) releaseFollow();   // any other landing lifts a passage landing's pause, and the room it kept (holdFloor) goes before the land measures
+  { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) holdFloor(c, v, false); }   // every landing measures the transcript as it stands: the room a pause kept (holdFloor) goes first
+  if (!mark) releaseFollow();   // any other landing lifts a passage landing's pause
   const land = (writer: string) => { const c = document.getElementById("content"); if (c) scrollElInto(c, at, "start", writer); };
   land("land-on");
   // a landing is the reader's intent to be AT this message: follow mode ends unless the landing put them at the bottom
@@ -16656,14 +16657,18 @@ function releaseFollow(): void {
  *  the shrink, with nothing to put it back, the pause being the absence of that write. So while the pause holds, the thread
  *  reaches down to the view's bottom edge at least (its min-height): a shrink under the reader leaves room below the last line,
  *  and the next text fills that room first. Set where the reader's place is decided (the landing, every scroll of the held view, a
- *  re-show); cleared with the pause, and before any land that is not the held tab's return (`on` false), the clamp that clearing
- *  can cause claimed as the page's write. Rounded up: the room ends at most a pixel under the view, inside atBottom's band. */
+ *  re-show); cleared with the pause, and before every landing and every land that is not the held tab's return (`on` false), the
+ *  clamp that clearing can cause claimed as the page's write. Rounded up: the room ends at most a pixel under the view, inside
+ *  atBottom's band. While the pause holds the room only grows: a scroll up leaves it where it was, so the transcript's end stays
+ *  below the reader and only their scroll back down to it resumes following (the review of #279: lowered to the view's bottom on
+ *  every scroll, the room met a reader who had scrolled 40 px up, the scroll's end read them as at the bottom, following resumed
+ *  and the view jumped by the room let go). */
 function holdFloor(content: HTMLElement, v: View, on = !!v.followHeld): void {
   const el = v.el;
   if (on) {
     const h = el.getBoundingClientRect().height;
     if (h <= 0 || content.clientHeight <= 0) return;   // a hidden view has no place to hold
-    const px = Math.max(0, Math.ceil(h - (content.scrollHeight - content.scrollTop - content.clientHeight))) + "px";
+    const px = Math.max(parseFloat(el.style.minHeight) || 0, Math.ceil(h - (content.scrollHeight - content.scrollTop - content.clientHeight))) + "px";
     if (el.style.minHeight !== px) el.style.minHeight = px;
     return;
   }
@@ -17037,7 +17042,7 @@ window.addEventListener("keydown", (e) => {
     // The page's own writes in between (the window sliding under a long flick) do not end it: the momentum runs on through them
     if (cls === "gesture" && gestureEvidence(settleLastInput, Date.now(), settleScrollerHeld)) readerScrolling = true;
     if ((cls === "gesture" && readerScrolling) || (cls === "write-echo" && (writerIsReader(lastScrollWriter) || lastScrollWriter === "optimistic-send"))) resumeAtBottom(c);
-    if (gv?.followHeld) holdFloor(c, gv);   // the pause stands: the room under the reader follows their place (holdFloor)
+    if (gv?.followHeld) holdFloor(c, gv);   // the pause stands: the room under the reader follows their place down, never up (holdFloor)
     // …and while a passage landing settles, ANY move of the view (its re-land, or the browser's own move as the reply under the
     // passage grows) can carry the passage under the box that landing opened: the box steps off it (besideWatch). A reader's
     // own scroll has already ended the settle above, so it never moves the box
