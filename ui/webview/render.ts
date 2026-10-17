@@ -1677,8 +1677,8 @@ interface Painted { items: DisplayItem[]; sig: (string | undefined)[]; out: (Pai
 /** Where the reader was when they left a tab whose follow mode a passage landing holds off: the turn at the viewport's top and its
  *  offset (captureScrollAnchor). The return restores THAT place and keeps the pause, so text the session wrote meanwhile waits
  *  below under the chip (the user's decision: the passage stays where they were looking), whether the page drew it before the
- *  return or draws it after (the appends keep the place while the pause holds). Nothing written meanwhile puts the reader back
- *  at the bottom, where the re-show's reconcile resumes following (landActive). */
+ *  return or draws it after (the appends keep the place while the pause holds). Nothing written meanwhile puts them back at the
+ *  same place, the pause standing until they go back to the bottom themselves (landActive, releaseFollow). */
 interface HeldKeep { anchor: { uuid: string; y: number } | null }
 interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; followHeld?: boolean; heldKeep?: HeldKeep | null; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner). followHeld: follow mode paused by a landing on a comment's passage, at the bottom or not, until the reader goes back to the bottom (landOn, releaseFollow); heldKeep: where a held view was left, for the tab's return (HeldKeep)
 const views = new Map<string, View>();
@@ -13987,6 +13987,7 @@ function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | 
   const at = alignOn ?? target;
   settleLastInput = 0; settleScrollerHeld = false;   // the input that caused this landing (a click on a link in the scroller) is not evidence for taking it over (round three, low 4); a hold whose release never reached the page (a press held across an alt-tab) does not outlive the landing (round four, low 1)
   readerScrolling = false;   // …nor is a gesture still running: the landing moved the view, the reader's flick is over
+  if (!mark) releaseFollow();   // any other landing lifts a passage landing's pause, and the room it kept (holdFloor) goes before the land measures
   const land = (writer: string) => { const c = document.getElementById("content"); if (c) scrollElInto(c, at, "start", writer); };
   land("land-on");
   // a landing is the reader's intent to be AT this message: follow mode ends unless the landing put them at the bottom
@@ -13997,6 +13998,7 @@ function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | 
   // appends keep the reader's place, the go-to-bottom chip shows once new text is below, and going back to the bottom
   // resumes following as ever (releaseFollow). Any other landing lifts it
   { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) { v.followHeld = !!mark; v.stick = !mark && atBottom(c); } }
+  if (mark) { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) holdFloor(c, v); }   // the paused reader's room, where the land put them (holdFloor)
   if (flashKey == null || flashKey !== flashedAnchor) {   // one flash per navigation (see flashedAnchor)
     if (flashKey != null) flashedAnchor = flashKey;
     // the ALIGNED element flashes: the turn may sit above the viewport when the words are aligned (round one, low 2). A comment
@@ -16206,6 +16208,9 @@ function landActive(content: HTMLElement | null, v: View): void {
     whenChatVisible(() => { const c = document.getElementById("content"); const vv = activeId ? views.get(activeId) : null; if (c && vv) landActive(c, vv); });
     return;
   }
+  // the room a held view kept under its reader (holdFloor) serves that place alone: every other land measures the transcript as it
+  // stands (a rebuild may be far shorter), and the land below sets it again where it puts a reader still held
+  if (!(v.followHeld && v.heldKeep)) holdFloor(content, v, false);
   sizeSpacers(v);  // the view is now VISIBLE (display set in showActive), so the spacers get a real height
                    // measurement — a tab pre-built while display:none could only fall back until now
   // The durable seek re-arms the per-pass attempt: every render pass retries until it lands, the
@@ -16301,17 +16306,15 @@ function landActive(content: HTMLElement | null, v: View): void {
     }
     else if (v.followHeld && v.heldKeep) {
       // back on a tab a passage landing holds: the place the reader left (HeldKeep), the turn at the top at its offset, never
-      // the session's new bottom; the pause is kept
+      // the session's new bottom; the pause is kept at the bottom too, the chip showing what is written below (the user
+      // 2026-10-17): only the reader ends it (releaseFollow)
       const k = v.heldKeep; v.heldKeep = null;
       if (!(k.anchor && keepPlaceAcrossWindow(content, v, k.anchor))) writeScroll(content, v.scrollTop, "land-saved");
     }
     else if (!v.shown || v.stick) writeScroll(content, content.scrollHeight, "land-bottom", true);
     else writeScroll(content, v.scrollTop, "land-saved");
-    // a passage landing's pause on follow mode never outlives a re-show (the tab coming back, a full rebuild) that leaves the
-    // reader at the bottom: there no chip says text is below, so following is the only truthful state (the review of #251:
-    // back on the tab after a landing, the view sat at the bottom, chipless, and the next text landed below unseen)
-    if (v.followHeld && atBottom(content)) { v.followHeld = false; v.stick = true; }
   }
+  holdFloor(content, v);   // a reader still held stands in room down to the view's bottom edge, wherever the land put them
   v.heldKeep = null;   // a held tab's place serves the one return it was saved for (an anchored landing took it over, or it was used)
   v.shown = true;
   scheduleRailSticky();
@@ -16574,7 +16577,31 @@ function resumeAtBottom(c: HTMLElement): void {
  *  as before. */
 function releaseFollow(): void {
   const v = activeId ? views.get(activeId) : null;
-  if (v) { v.followHeld = false; v.heldKeep = null; }
+  const c = document.getElementById("content");
+  if (v) { v.followHeld = false; v.heldKeep = null; if (c) holdFloor(c, v); }   // …and the room the pause kept under the reader goes with it
+}
+/** The room a paused view stands in (the user 2026-10-17: a paused view holds the passage where the reader is looking). A passage
+ *  landing's pause (followHeld) often leaves the reader at the transcript's very end, and the end shrinks there while the session
+ *  writes: the fork control leaves the last drawn reply a frame before the next reply is drawn (26 px a reply in the served lab),
+ *  a notice gives way to a shorter reply, a footer comes off. The browser clamps scrollTop to the shorter end and the view moves by
+ *  the shrink, with nothing to put it back, the pause being the absence of that write. So while the pause holds, the thread
+ *  reaches down to the view's bottom edge at least (its min-height): a shrink under the reader leaves room below the last line,
+ *  and the next text fills that room first. Set where the reader's place is decided (the landing, every scroll of the held view, a
+ *  re-show); cleared with the pause, and before any land that is not the held tab's return (`on` false), the clamp that clearing
+ *  can cause claimed as the page's write. Rounded up: the room ends at most a pixel under the view, inside atBottom's band. */
+function holdFloor(content: HTMLElement, v: View, on = !!v.followHeld): void {
+  const el = v.el;
+  if (on) {
+    const h = el.getBoundingClientRect().height;
+    if (h <= 0 || content.clientHeight <= 0) return;   // a hidden view has no place to hold
+    const px = Math.max(0, Math.ceil(h - (content.scrollHeight - content.scrollTop - content.clientHeight))) + "px";
+    if (el.style.minHeight !== px) el.style.minHeight = px;
+    return;
+  }
+  if (!el.style.minHeight) return;
+  const before = content.scrollTop;
+  el.style.minHeight = "";
+  writeScroll(content, content.scrollTop, "hold-floor", false, before);   // a clamp to the shorter end is the page's move, never a gesture
 }
 const jumpBtn = document.createElement("button");
 jumpBtn.id = "jump-bottom";
@@ -16941,6 +16968,7 @@ window.addEventListener("keydown", (e) => {
     // The page's own writes in between (the window sliding under a long flick) do not end it: the momentum runs on through them
     if (cls === "gesture" && gestureEvidence(settleLastInput, Date.now(), settleScrollerHeld)) readerScrolling = true;
     if ((cls === "gesture" && readerScrolling) || (cls === "write-echo" && (writerIsReader(lastScrollWriter) || lastScrollWriter === "optimistic-send"))) resumeAtBottom(c);
+    if (gv?.followHeld) holdFloor(c, gv);   // the pause stands: the room under the reader follows their place (holdFloor)
     // …and while a passage landing settles, ANY move of the view (its re-land, or the browser's own move as the reply under the
     // passage grows) can carry the passage under the box that landing opened: the box steps off it (besideWatch). A reader's
     // own scroll has already ended the settle above, so it never moves the box

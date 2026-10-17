@@ -115,9 +115,9 @@ test("a landing on a comment's passage pauses follow mode until the reader is ba
   // PageDown, Space resumed one run in three)
   assert.match(RENDER, /c\.addEventListener\("scrollend", \(\) => \{\s*\n\s*if \(readerScrolling && c\.clientHeight > 0\) resumeAtBottom\(c\);[^\n]*\n\s*readerScrolling = false;\s*\n\s*\}, \{ passive: true \}\);/);
   assert.match(fn("landOn"), /readerScrolling = false;/);
-  // a re-show that leaves the reader at the bottom ends the pause (the tab coming back: a reader who left at the bottom lands
-  // back there, so the return is deterministic, whatever the re-shown window's heights)
-  assert.match(fn("landActive"), /if \(v\.followHeld && atBottom\(content\)\) \{ v\.followHeld = false; v\.stick = true; \}/);
+  // a re-show never ends the pause, at the bottom either (the user 2026-10-17: a paused view holds the passage where the reader
+  // left it); only the reader does
+  assert.doesNotMatch(fn("landActive"), /v\.followHeld = false/, "the tab's return keeps the pause");
   assert.match(RENDER, /cur\.stick = atBottom\(content\) && !cur\.followHeld;\s*\n\s*cur\.heldKeep = cur\.followHeld \? \{ anchor: captureScrollAnchor\(content, cur\) \} : null;/,
     "a held tab keeps its place for the return, never the session's new bottom (the user's decision)");
   assert.match(fn("landActive"), /else if \(v\.followHeld && v\.heldKeep\) \{[\s\S]{0,400}?if \(!\(k\.anchor && keepPlaceAcrossWindow\(content, v, k\.anchor\)\)\) writeScroll\(content, v\.scrollTop, "land-saved"\);/);
@@ -131,4 +131,21 @@ test("a fold the landing opened stays open across a rebuild of the passage's tur
   assert.match(fn("keepPassageShown"), /if \(!k \|\| k\.sid !== sid \|\| !openCommentKey \|\| openCommentKey\.sid !== sid \|\| openCommentKey\.tid !== k\.tid\) return;/, "only while the thread's box is open");
   assert.match(RENDER, /document\.addEventListener\("toggle", \(e\) => \{[\s\S]{0,300}?passageShown = null;\s*\n\}, true\);/, "a fold the reader closes stays closed");
   assert.match(fn("closeCommentPop"), /passageShown = null;/);
+});
+
+test("a paused view stands in room down to its bottom edge, so a tail that shrinks under it never moves the passage (the user 2026-10-17)", () => {
+  // the served lab: the fork control left the last drawn reply a frame before the next reply was drawn, and the browser clamped a
+  // paused view at the bottom 26 px a reply (tests/test_comment_passage_reveal_served.py, case 10)
+  const floor = fn("holdFloor");
+  assert.match(floor, /const px = Math\.max\(0, Math\.ceil\(h - \(content\.scrollHeight - content\.scrollTop - content\.clientHeight\)\)\) \+ "px";\s*\n\s*if \(el\.style\.minHeight !== px\) el\.style\.minHeight = px;/,
+    "the thread reaches the view's bottom edge, rounded up into atBottom's band");
+  assert.match(floor, /const before = content\.scrollTop;\s*\n\s*el\.style\.minHeight = "";\s*\n\s*writeScroll\(content, content\.scrollTop, "hold-floor", false, before\);/,
+    "let go as a claimed write: a clamp to the shorter end is the page's move, never a gesture");
+  assert.match(RENDER, /if \(gv\?\.followHeld\) holdFloor\(c, gv\);/, "every scroll of the held view moves the room with the reader's place");
+  assert.match(fn("releaseFollow"), /if \(v\) \{ v\.followHeld = false; v\.heldKeep = null; if \(c\) holdFloor\(c, v\); \}/, "it goes with the pause");
+  assert.match(fn("landOn"), /if \(!mark\) releaseFollow\(\);[^\n]*\n\s*const land = /, "…before any other landing measures");
+  assert.match(fn("landOn"), /if \(mark\) \{ const c = document\.getElementById\("content"\); const v = activeId \? views\.get\(activeId\) : null; if \(c && v\) holdFloor\(c, v\); \}/, "a passage landing sets it where it lands");
+  const show = fn("landActive");
+  assert.match(show, /if \(!\(v\.followHeld && v\.heldKeep\)\) holdFloor\(content, v, false\);\s*\n\s*sizeSpacers\(v\);/, "a re-show other than the held tab's return lands on the transcript as it stands");
+  assert.match(show, /holdFloor\(content, v\);[^\n]*\n\s*v\.heldKeep = null;/, "…and a reader still held gets the room back where the land put them");
 });
