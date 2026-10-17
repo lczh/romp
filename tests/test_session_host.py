@@ -1021,6 +1021,25 @@ class HostProcess(unittest.TestCase):
         host.wait(timeout=10)
         k.close()
 
+    def test_a_restarts_term_then_end_ends_a_cli_that_outlives_eof_without_the_end_grace(self):
+        # Restart session's teardown (SdkSession.relaunch_now, 2026-10-17): a CLI with a background agent running does
+        # not exit on EOF, so the plain `end` left it up until the end grace (two minutes) ran out and SIGKILLed it.
+        # The relaunch asks the host to signal TERM before its `end`; a turn that would hold the CLI thirty seconds past
+        # the EOF stands in for the agent, and the CLI is gone in seconds with the long grace still standing.
+        host, sock, spec = self._start()
+        k, hello = self._attach(sock)
+        k.send({"t": "in", "data": self._user("slow sleep=30")})
+        k.recv_until(lambda f: f.get("t") == "out" and f["data"].get("type") == "assistant")
+        t0 = time.monotonic()
+        k.send({"t": "signal", "sig": "TERM"})
+        k.send({"t": "end", "grace": 120})
+        ex = k.recv_until(lambda f: f.get("t") == "exit", timeout=15)
+        self.assertLess(time.monotonic() - t0, 10, "ended by the TERM, not by the end grace")
+        self.assertEqual(ex["cause"], "end", "the kernel's end, never end-forced")
+        self.assertIn("signalled", [r["kind"] for r in self._hostlog()])
+        host.wait(timeout=10)
+        k.close()
+
     def test_signal_reaches_the_cli_and_a_second_kernel_is_told_busy(self):
         host, sock, spec = self._start()
         k, hello = self._attach(sock)

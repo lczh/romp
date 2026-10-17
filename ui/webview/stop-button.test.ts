@@ -39,6 +39,15 @@ test("it carries a stop icon + a state-aware tooltip and aria-label", () => {
   assert.match(RENDER, /setAttribute\("aria-label", stuck \? "Stop retrying this session" : "Interrupt session"\)/);
 });
 
+test("every stop says plainly that the session's background agents stop with it", () => {
+  // the user 2026-10-17: a Stop ends the turn AND every background agent the session is running, and those agents can
+  // never be picked back up (the CLI records them as stopped by the user). The behaviour stays; the button says so, in
+  // the person's words: the chat bar's stop in both its forms, and the comment popover's stop on a thread's session.
+  assert.match(RENDER, /"Stop\\ninterrupt this session \(same as Ctrl\+C\); its background agents stop too"/);
+  assert.match(RENDER, /"Stop retrying\\ninterrupt this thread and hold its auto-retry off until you send it a message; its background agents stop too"/);
+  assert.match(RENDER, /b\.title = "Stop — interrupt this thread's turn; its background agents stop too";/);
+});
+
 test("it's a white square that reveals the pale-red stop tint ONLY on hover, with a press flash", () => {
   const base = (CSS.match(/\.stop-btn \{[^}]*\}/) || [""])[0];
   assert.match(base, /color: var\(--fg\)/, "neutral white-ish square by default");

@@ -12174,7 +12174,7 @@ function cmtStateChip(th: CommentThread): HTMLElement {
   const stopBtn = () => {
     const b = el("button", "stop-btn cmt-stop");
     (b as HTMLButtonElement).type = "button";
-    b.title = "Stop — interrupt this thread's turn";
+    b.title = "Stop — interrupt this thread's turn; its background agents stop too";
     b.setAttribute("aria-label", "Interrupt this thread");
     b.dataset.act = "cmtinterrupt";
     b.dataset.sid = threadSidOf(th);   // the thread's session (host-prefixed on a linked machine: the stop routes to its kernel)
@@ -19707,8 +19707,8 @@ function stopButton(state?: ChipState): HTMLElement {
   const stuck = state === "retrying" || state === "blocked";
   // styled tip (tip.ts): a label line + its explanation, so the icon-only square explains itself
   setTip(btn, stuck
-    ? "Stop retrying\ninterrupt this thread and hold its auto-retry off until you send it a message"
-    : "Stop\ninterrupt this session (same as Ctrl+C)");
+    ? "Stop retrying\ninterrupt this thread and hold its auto-retry off until you send it a message; its background agents stop too"
+    : "Stop\ninterrupt this session (same as Ctrl+C); its background agents stop too");
   btn.setAttribute("aria-label", stuck ? "Stop retrying this session" : "Interrupt session");
   btn.appendChild(el("span", "stop-icon"));   // a filled square (CSS), the universal stop glyph
   btn.addEventListener("click", (e) => {

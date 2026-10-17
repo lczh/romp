@@ -6039,7 +6039,7 @@ class LiveSubagentsRetire(unittest.TestCase):
         """Pin the wiring: the drop runs at the loop top, before _reconcile_stranded, every iteration."""
         src = open(os.path.join(BIN, "romp_sdk_backend.py"), encoding="utf-8").read()
         i = src.index('self._drop_live_work("reconnect", cut_by=cut_by)')   # with the gesture that asked for it (2026-10-01)
-        j = src.index("self._reconcile_stranded()")
+        j = src.index("self._reconcile_stranded(cli_gone=")   # with the Restart's proof its CLI is gone (2026-10-17)
         self.assertLess(i, j, "the drop precedes the stranded-turn reconcile at the loop top")
         k = src.rfind("while not self.ended:", 0, i)
         self.assertGreater(k, 0)

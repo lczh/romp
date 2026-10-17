@@ -54,7 +54,7 @@ test("every chip state has a decided answer, and a restart interrupts exactly th
   // needsInput and retrying moved across on 2026-09-24: both are chip states for a turn that is still open, which the
   // relaunch cuts (this list once pinned retrying as costing nothing); awaiting is needsInput's legacy name
   for (const st of COSTS) assert.equal(restartInterrupts(st), true, st + " costs something");
-  // interrupting: a Stop already asked the turn to end and a restart sends nothing more; clearing: as it always was
+  // interrupting: a Stop already asked the turn to end and a restart cuts nothing more; clearing: as it always was
   for (const st of FREE) assert.equal(restartInterrupts(st), false, st + " costs nothing");
   for (const st of ["", null, undefined, "toString"]) assert.equal(restartInterrupts(st), false, String(st) + " is no state: no dialog");
 });
