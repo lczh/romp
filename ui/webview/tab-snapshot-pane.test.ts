@@ -711,7 +711,7 @@ test("pinned: the wiring the lifted slices cannot reach: showActive's branch, th
   assert.match(RENDER, /const leavingSnap = snapView !== null;\s*\n\s*snapView = null;\s*\n\s*if \(collapsedTabIds\.has\(id\)\) unfoldSectionOf\(id\);[^\n]*\n\s*if \(activeId === id && anchor == null && anchorT == null\) \{[^\n]*\n\s*if \(leavingSnap\) \{ renderTabs\(\); showActive\(\); \}[^\n]*\n\s*return;\s*\n\s*\}/);
   // the strip: the plan the view reads is the one just rendered; every push refreshes the view; the section gone puts the transcript back
   assert.match(TABS, /collapsedTabIds = plan\.folded;\s*\n\s*lastStripItems = plan\.items;/);
-  assert.match(TABS, /const shown = snapView;\s*\n\s*const held = shown \? snapshotHoldsFocus\(\) : false;\s*\n\s*if \(snapView\) renderSnapshot\(\);\s*\n\s*if \(shown && !snapView\) \{ showActive\(\); if \(held\) focusActiveTab\(\); \}/);
+  assert.match(TABS, /const shown = snapView;\s*\n\s*const held = shown \? snapshotHoldsFocus\(\) : false;\s*\n\s*if \(snapView\) renderSnapshot\(\);\s*\n\s*if \(shown && !snapView\) \{ showActive\(\); if \(held\) focusActiveTab\(true\); \}/);
   assert.equal((TABS.match(/stripAftermath\(visibleIds, ids\)/g) || []).length, 2, "on the skip path and the rebuild path alike");
   // the header and the #tabs delegate's header act run above (lifted); what the lift cannot show is that the act
   // is the one the strip's delegate installs, and that the no-op act and the way-back act are gone

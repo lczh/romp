@@ -119,6 +119,7 @@
  "tests/test_stage_over_picker_served.py": 3.2,
  "tests/test_statusline_stop_left_browser.py": 10.7,
  "tests/test_statusline_widgets_browser.py": 21.4,
+ "tests/test_strip_scroll_keep_served.py": 70.0,
  "tests/test_strip_tag_chips_browser.py": 27.1,
  "tests/test_subgoal_marks_served.py": 4.8,
  "tests/test_tab_badge_browser.py": 28.0,

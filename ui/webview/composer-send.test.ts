@@ -57,7 +57,7 @@ test("⏎ jumps focus to the tab bar after sending so ←/→ switch sessions (t
   // after the Enter-send, focusActiveTab() moves focus off the composer onto the active tab, so the next
   // ←/→ hits onTabKey (tab switch) instead of the textarea caret. The send BUTTON keeps composer focus.
   assert.match(RENDER, /sendComposer\(\);\s*focusActiveTab\(\);/);
-  assert.match(RENDER, /function focusActiveTab\(\)/);
+  assert.match(RENDER, /function focusActiveTab\(quiet = false\)/);
 });
 
 test("Escape ↔ Enter toggle focus between the chat box and the tab bar (the user 2026-06-25)", () => {
