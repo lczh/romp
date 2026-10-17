@@ -94,7 +94,7 @@ test("follow mode and the chip read atBottom at every site", () => {
     /const atEnd = atBottom\(content\);   \/\/ measured before the box adds its room/,                          // the live-status foot line's first room (2026-10-08)
   ];
   for (const re of follow) assert.match(RENDER, re, String(re));
-  assert.equal((RENDER.match(/\batBottom\(/g) || []).length, 22, "twenty-one call sites plus the definition (a re-show at the bottom ends a passage landing's follow pause, 2026-10-15; the scroll listener's end of a passage landing's follow pause, 2026-10-15; the re-show follow rule reads the same true bottom, T262 2026-09-09; the window ask's diagnostic row reads it too, T366; the landing's follow-mode end, T386; the jump cluster's two reads, 2026-09-24; a file tab's held place, 2026-09-30; the live-status foot line's first room, 2026-10-08)");
+  assert.equal((RENDER.match(/\batBottom\(/g) || []).length, 21, "twenty call sites plus the definition (a re-show at the bottom no longer ends a passage landing's follow pause, 2026-10-17: the paused passage stays where the reader left it; the scroll listener's end of a passage landing's follow pause, 2026-10-15; the re-show follow rule reads the same true bottom, T262 2026-09-09; the window ask's diagnostic row reads it too, T366; the landing's follow-mode end, T386; the jump cluster's two reads, 2026-09-24; a file tab's held place, 2026-09-30; the live-status foot line's first room, 2026-10-08)");
 });
 
 test("only the user's own send reveal keeps the 80 px band", () => {
