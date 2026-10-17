@@ -1764,6 +1764,20 @@ def _recip_id_for(to, rows=None):
         return to
     return None
 
+def _recip_by_short_id(short, rows):
+    """A short id (the 8+ character prefix every list_agents row shows) -> the ONE session id it
+    starts, or None. Recall's reading of the form resolve_recipient sends to: the live listing
+    first, as the send matched it; then the mailboxes here, so mail parked for a session that has
+    since ended stays recallable by the id the sender used. Two hits refuse, never a guess."""
+    if not _ID_FORM_RE.fullmatch(short or ""):
+        return None
+    boxes = [b.name for b in MAILROOT.iterdir() if b.is_dir()] if MAILROOT.is_dir() else []
+    for ids in ([str(a.get("id") or "") for a in _with_remote_presence(list(rows))], boxes):
+        hits = {i for i in ids if i.startswith(short)}
+        if hits:
+            return hits.pop() if len(hits) == 1 else None
+    return None
+
 def _durable_session(bare, by_id):
     """Does `bare` name a session the DURABLE per-session registry knows as live-or-resumable?
     The corroboration read behind the answered-but-absent refusal arm (2026-08-31): the kernel's
@@ -1949,6 +1963,17 @@ def resolve_recipient(to, frm_id=""):
 WHY_CARRIED = "already left for %s and can no longer be withdrawn"        # _recall: a carried outbox record
 WHY_IN_FLIGHT = "is on its way to %s right now (try again in a moment)"    # _recall: a record an exchange is carrying
 
+def _outbox_addressed(to, host, msg):
+    """Does recall address `to` name the parked outbox record `msg`, held for `host`? Every form
+    peer_route sends by: the far session's name, its full id or short id (the record's `toId`),
+    each bare or `host:`-qualified. Matching the name alone left mail sent by the rename-proof id
+    unrecallable while it was still parked (2026-10-17)."""
+    want_host, bare = to.split(":", 1) if ":" in to else ("", to)
+    if want_host and want_host != host:
+        return False
+    return _addr_matches({"name": msg.get("to") or "",
+                          "id": str(msg.get("toId") or "").rsplit(":", 1)[-1]}, bare)
+
 def _recall(from_id, to, mid, kept=None):
     """Unsend UNREAD mail: delete messages still sitting in a recipient's `new/`
     (queued or parked) that were sent BY from_id. With `to`, scope to that one
@@ -1994,15 +2019,22 @@ def _recall(from_id, to, mid, kept=None):
         return listing[0]
 
     if to:
-        rid = _recip_id_for(to, rows=_rows())
-        if not rid and MAILROOT.is_dir():
+        # Recall takes every address form the send took (resolve_recipient): `<this host>:name`,
+        # the form an ambiguity refusal tells the sender to use, is the bare name here, and a short
+        # id is the one list_agents prints. Read only as a name, both came back "nothing to recall,
+        # already read" while the message sat unread (2026-10-17). Another host's `host:x` has
+        # nothing in a local box; its mail is parked in the outbox, matched below.
+        want_host, bare = to.split(":", 1) if ":" in to else ("", to)
+        local = not want_host or want_host == self_host()
+        rid = (_recip_id_for(bare, rows=_rows()) or _recip_by_short_id(bare, _rows())) if local else None
+        if not rid and local and MAILROOT.is_dir():
             # Addressing is live-only, but RECALL is not addressing: the sender is unsending their
             # own bytes, not raising the dead. Mail parked for a session that has since died sits
             # right here in its new/ — a name that no longer resolves live falls back to the
             # durable name map so parked mail stays recallable (sighting 2026-08-29: a handoff
             # parked for a dead session could not be unsent by name; only the raw id worked).
             hits = [b.name for b in MAILROOT.iterdir()
-                    if b.is_dir() and _name_for_id(b.name, rows=_rows()) == to]
+                    if b.is_dir() and _name_for_id(b.name, rows=_rows()) == bare]
             rid = hits[0] if len(hits) == 1 else None    # two dead boxes, one name: refuse, stay scoped
         boxes = [rid] if rid else []
     elif MAILROOT.is_dir():
@@ -2052,7 +2084,7 @@ def _recall(from_id, to, mid, kept=None):
                         continue
                     if msg.get("frm_id") != from_id or msg.get("origin"):
                         continue
-                    if to and (msg.get("to") or "") != to and "%s:%s" % (hostdir.name, msg.get("to") or "") != to:
+                    if to and not _outbox_addressed(to, hostdir.name, msg):
                         continue
                     riding = any(f.stem in mids for mids in (_inflight.get(hostdir.name) or {}).values())
                     if msg.get("carried") or riding:
