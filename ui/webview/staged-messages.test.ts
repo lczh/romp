@@ -46,6 +46,27 @@ test("the persistence round-trip keeps text, context and order — and drops jun
   assert.equal(r.count("c"), 0);
 });
 
+test("a quote staged on its own survives the round-trip and a merged restore; an item with no words and no quote is still junk", () => {
+  // select a passage, Cmd/Ctrl+Enter with an empty box: the item is a quote and no words, and a reload, a webview
+  // reload or a column move must bring it back exactly as it was staged
+  const s = new StagedStack();
+  s.push("a", { text: "", cites: [{ quote: "q", title: "t" }] });
+  s.push("a", { text: "about it", cites: [] });
+  const r = new StagedStack();
+  r.restore(JSON.parse(JSON.stringify(s.entries())));
+  assert.equal(r.count("a"), 2, "the quote-only item is kept");
+  assert.deepEqual(r.list("a")[0], { text: "", cites: [{ quote: "q", title: "t" }] });
+  assert.equal(stagedRunBody(r.list("a")), stagedRunBody(s.list("a")), "the release sends what was staged");
+  // the column hand-over restores what was here followed by what arrived: quote-only items on both sides stay
+  const m = new StagedStack();
+  m.restore({ a: [{ text: "", cites: [{ quote: "here" }] }, { text: "", cites: [{ quote: "arrived" }] }] });
+  assert.deepEqual(m.list("a").map((x) => (x.cites[0] as any).quote), ["here", "arrived"]);
+  // nothing to say is still junk: no words and no quote, an empty quote, or only a goal chip
+  m.restore({ b: [{ text: "", cites: [] }, { text: "", cites: [{ quote: "" }] }, { text: "", cites: [{ itemId: "x:g1" }] },
+    { text: "", cites: [null] }, { cites: [{ quote: "q" }] }] });
+  assert.equal(m.count("b"), 0);
+});
+
 test("a staged line stays inside the pane: shrinkable strips, ellipsis, click-to-expand tail", () => {
   // the user 2026-08-16 (screenshot): one long staged message refused to shrink — the composer's
   // strips are wrapped flex ITEMS, and without flex-basis 100% + min-width 0 their min-content
