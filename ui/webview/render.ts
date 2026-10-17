@@ -9117,18 +9117,18 @@ function onTabKey(e: KeyboardEvent) {
  *  the focused node scrolls nothing, so the gesture scrolls it into view itself. */
 function focusActiveTab(quiet = false) {
   const bar = document.getElementById("tabs");
-  const land = (node: HTMLElement | null | undefined) => {
+  const focusOn = (node: HTMLElement | null | undefined) => {   // not `land`: that name is the transcript's write family (landing-settle.ts)
     if (!node) return;
     if (quiet) node.focus({ preventScroll: true });
     else if (document.activeElement === node) node.scrollIntoView({ block: "nearest", inline: "nearest" });
     else node.focus();
   };
   const tab = bar?.querySelector(`.tab[data-id="${fileTabOpen ?? activeId}"]`) as HTMLElement | null;   // a file tab up is the one shown (2026-09-30)
-  if (tab) { land(tab); return; }
+  if (tab) { focusOn(tab); return; }
   // the active tab is folded away under its section: the header is its stand-in (tab-groups.ts)
   const home = activeId ? homeSectionOf(lastStripItems, activeId) : null;
   if (!home || home.name === null || !bar) return;
-  land(Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name));
+  focusOn(Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name));
 }
 /** Open a section that puts a folded-away tab on screen: a session pick names the tab, so its tab must be on
  *  screen. Per holder, since a session under several tags has a copy under each and every copy's fold stands on
