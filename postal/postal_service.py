@@ -2254,6 +2254,20 @@ def _push_disabled():
     _PUSH_FAULT_SAID[0] = False
     return off
 
+def _live_sender(meta, by_id, by_name):
+    """The live session that SENT a message, for the two notices about mail nobody read (the orphan sweep's
+    bounce, the stuck-mail warning): the row whose id is the message's From-Id, the header deliver() writes
+    on every message. Both used to look the From NAME up instead (review find, 2026-10-17), so the notice
+    and the original text went to whichever live session answered to that name: a later session that
+    reused it, a local namesake of a peer host's sender (relayed mail carries the far sid), a session named
+    like a `--from` label (whose id is ext:<label>); and a sender renamed since heard nothing. A From-Id
+    that names no live local session notifies nobody. Only a message with no From-Id line at all, which
+    nothing writes today, falls back to the name."""
+    if "from-id" in meta:
+        return by_id.get(meta["from-id"])
+    return by_name.get(meta.get("from", ""))
+
+
 def _sweep_orphans():
     """Bounce mail stuck UNREAD in a DEAD recipient's mailbox back to its (live)
     sender — "↩ UNDELIVERED …" — so the sender learns it never landed and can
@@ -2267,11 +2281,11 @@ def _sweep_orphans():
         return                                         # mid-restart), indistinguishable here from "everyone died":
                                                        # never mass-bounce; a real orphan waits for a sweep that
                                                        # has a live row to compare against
-    live_ids = {a["id"] for a in live}
+    by_id = {a["id"]: a for a in live}
     by_name = {a["name"]: a for a in live}
     now = time.time()
     for box in MAILROOT.iterdir():
-        if not box.is_dir() or box.name in live_ids:   # live recipient -> not orphaned
+        if not box.is_dir() or box.name in by_id:      # live recipient -> not orphaned
             continue
         newd = box / "new"
         if not newd.is_dir():
@@ -2309,7 +2323,7 @@ def _sweep_orphans():
                     continue
             except Exception:
                 continue
-            s = by_name.get(meta.get("from", ""))
+            s = _live_sender(meta, by_id, by_name)
             if s:                                      # bounce to the live sender + wake it
                 bounce = ("↩ UNDELIVERED — your message to '%s' was never read; that session "
                           "has exited. Resend or route elsewhere.\nOriginal: %s"
@@ -2412,7 +2426,7 @@ def _warn_stuck_mail():
                 k, _, v = ln.partition(": "); meta[k.lower()] = v
             if meta.get("x-park"):                       # deliberate handoff → waits for revival, never 'stuck'
                 continue
-            s = by_name.get(meta.get("from", ""))
+            s = _live_sender(meta, by_id, by_name)
             if s and s["id"] != box.name:               # warn the live sender (never self)
                 warn = _stuck_warn_text(recip, box.name, body)
                 try:
