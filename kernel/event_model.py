@@ -817,15 +817,20 @@ def _entry_weight(ent) -> int:
         return 0
 
 
-def _cache_pop_locked(path):
+def _cache_pop_locked(path, keep_gen=None):
     """Under _JSONL_CACHE_LOCK: drop `path`'s entry and its weight; returns the weight (0 when absent). Every pop
     that actually removed an entry counts under `released`, a /perf STATISTIC only (#1735): these entries are
     decoded json, acyclic, freed by reference counting whether frozen or not, so a pop is never a gc-freeze reclaim
-    trigger (the reclaim keys on the freeze controller's observed ended-session judgement and the backstop, not on `released`)."""
+    trigger (the reclaim keys on the freeze controller's observed ended-session judgement and the backstop, not on `released`).
+    The file's pending checkpoint restore goes with the entry it was taken for (_ckpt_release_pending), unless the caller
+    puts back an entry of that same generation (`keep_gen`: an append, a tail's upgrade to the whole file)."""
     ent = _JSONL_CACHE.pop(path, None)
     if ent is None:
         return 0
     _RECORD_CACHE_STATS["released"] += 1
+    gen = ent[6] if len(ent) > 6 else None
+    if gen != keep_gen:
+        _ckpt_release_pending(path, gen)
     w = _entry_weight(ent)
     _JSONL_CACHE_BYTES[0] = max(0, _JSONL_CACHE_BYTES[0] - w)
     return w
@@ -842,7 +847,7 @@ def _cache_insert_locked(path, ent, began=None):
     included, counts. Returns the paths the budget evicted, for _asm_drop_holding once the caller has let this lock go,
     less any whose own read is under way (_READ_IN_FLIGHT)."""
     prev = _JSONL_CACHE.get(path)
-    _cache_pop_locked(path)
+    _cache_pop_locked(path, keep_gen=ent[6] if len(ent) > 6 else None)   # the same generation back keeps its pending restore
     w = _entry_weight(ent)
     mark = _BUDGET_EVICTED.pop(path, None)
     if mark is True and began is not None and began[0] is not None:
@@ -1148,7 +1153,8 @@ _HANDOFF_FAULTS = {}              # (hand-off kind, key) -> the kind of the faul
 _DROP_HOLD = threading.local()    # the converge pass holds this thread's quiescence drops while it heals and primes a leaf, then pays
 #                                   them once (T362 follow-up review, low 2): {path: pop} of the drops held, or absent
 _CKPT_LOCK = threading.Lock()
-_CKPT_PENDING = {}                # path -> {"count": N, "gen": g, "folds": {name: {"count", "state"}}} restores not yet taken
+_CKPT_PENDING = {}                # path -> {"count": N, "gen": g, "folds": {name: {"count", "state"}}} restores not yet taken,
+#                                   for the reader entry of generation g alone and released with it (_ckpt_release_pending)
 _CKPT_SEQ = {}                    # path -> the seq of the last checkpoint read or written for it
 _FOLD_DIRTY = set()               # paths whose fold cursors moved since their checkpoint was last written
 _FOLD_REG = {}                    # checkpoint name -> the fold's cursor dict (fold_records registers at first call)
@@ -1597,6 +1603,10 @@ def _ckpt_pending(path, ent):
     key = str(path)
     with _CKPT_LOCK:
         pend = _CKPT_PENDING.get(key)
+        if pend is not None and ent is not None and pend["gen"] < ent[6]:
+            _CKPT_PENDING.pop(key, None)                  # taken for an entry that left memory by a road that did not release
+            pend = None                                   #  it (a read that failed after the restore began): it serves no later
+    #                                                       entry, and the document is not consulted again (_CKPT_SEQ below)
     if pend is not None or ent is None or _CKPT_DIR_FN is None:
         return pend                                       # a tail entry the assembly checkpoint's cut read created (T323
     #                                                       stage 4a) is consulted like a whole one: the fold's recorded
@@ -1634,6 +1644,18 @@ def _ckpt_pending(path, ent):
         _CKPT_SEQ[key] = int(doc.get("seq") or 0)
         _CKPT_STATS["restored"] += 1
     return pend
+
+
+def _ckpt_release_pending(path, gen):
+    """Let `path`'s pending restore go with the reader entry of generation `gen` it was taken for (_cache_pop_locked). The
+    restore serves that entry alone (_restored_cursor), yet it carries a state for every fold in the document, folds this
+    process never runs over the file included (the judges' fold, in the kernel). Kept after its entry left, it held those
+    states until the process exited, outside every cache bound, and a whole read of the file afterward met it as a dropped
+    restore. Runs under _JSONL_CACHE_LOCK, so without _CKPT_LOCK (the module never nests the two): a get and a pop, where a
+    lost race costs a fold one refold, the module's rule for its shared dicts."""
+    pend = _CKPT_PENDING.get(path)
+    if pend is not None and pend.get("gen") == gen:
+        _CKPT_PENDING.pop(path, None)
 
 
 def _document_carries_state(key, name, ent):
