@@ -11,6 +11,9 @@
 //
 // The confirm box beside it is the chat's confirm dialog (`showConfirm` in render.ts) in the same classes, for a pane
 // that has to ask before it acts: the Sessions pane's Delete asks with the strip's own title, detail and buttons.
+//
+// A scroll the page makes for itself (scrollQuietly) is not the reader's and dismisses nothing, and a card whose item moved
+// under it follows the item (shiftContextMenu): the tab strip's rebuild does both while it holds the reader's place.
 
 export interface CtxItem {
   label: string;
@@ -46,6 +49,21 @@ export function placeMenu(x: number, y: number, w: number, h: number, vw: number
 
 let openMenu: HTMLElement | null = null;
 let teardown: (() => void) | null = null;
+// Scrolls the page makes for itself rather than for the reader (the tab strip holding its place while a rebuild adds sessions
+// above the view, render.ts keepStripScroll): the scroll event each raises is not the reader moving, so an open menu stays.
+// Each is marked by its scroller and the offset the write left, and the mark is read by that scroller's next scroll event (one
+// per scroller per frame), in a listener installed once here, ahead of any menu's: a reader's own scroll in the same frame
+// leaves another offset, and that event closes the menu as any scroll does.
+const quietScrolls = new Map<EventTarget, number>();
+let quietEvent: Event | null = null;   // the scroll event being dispatched, when it is the page's own move
+if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+  document.addEventListener("scroll", (e) => {
+    const t = e.target as EventTarget, quiet = quietScrolls.get(t);
+    if (quiet === undefined) return;
+    quietScrolls.delete(t);
+    quietEvent = (t as HTMLElement).scrollTop === quiet ? e : null;
+  }, { capture: true, passive: true });
+}
 
 /** The open context menu's card, or null: a caller's gate (the chat holds its typing shortcuts while a menu is up). */
 export function contextMenuOpen(): HTMLElement | null { return openMenu; }
@@ -54,6 +72,23 @@ export function contextMenuOpen(): HTMLElement | null { return openMenu; }
 export function closeContextMenu(): void {
   if (teardown) { const t = teardown; teardown = null; t(); }
   if (openMenu) { openMenu.remove(); openMenu = null; }
+}
+
+/** Scroll `box` to `top` as the page's own move, not the reader's: an open menu is not dismissed by it. */
+export function scrollQuietly(box: HTMLElement, top: number): void {
+  const was = box.scrollTop;
+  box.scrollTop = top;
+  if (box.scrollTop !== was) quietScrolls.set(box, box.scrollTop);
+}
+
+/** Move the open card by (`dx`, `dy`), with every flyout it holds (each placed on its own beside it): a card whose item moved
+ *  under it (the tab strip's rebuild re-flowing the tab a menu was opened on) follows the item. */
+export function shiftContextMenu(dx: number, dy: number): void {
+  if (!openMenu || (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5)) return;
+  for (const c of [openMenu, ...Array.from(openMenu.querySelectorAll<HTMLElement>(".ctx-menu"))]) {
+    c.style.left = Math.round((parseFloat(c.style.left) || 0) + dx) + "px";
+    c.style.top = Math.round((parseFloat(c.style.top) || 0) + dy) + "px";
+  }
 }
 
 /** A detached card in the menu dress, for a caller that appends its own rows before showMenuCard() places it. */
@@ -153,7 +188,7 @@ export function showMenuCard(menu: HTMLElement, x: number, y: number, opts: CtxM
   // later at the same phase yields to the menu's), any scroll outside it, the window losing focus
   const onDown = (e: Event) => { if (!menu.contains(e.target as Node)) closeContextMenu(); };
   const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.preventDefault(); closeContextMenu(); } };
-  const onScroll = (e: Event) => { if (!menu.contains(e.target as Node)) closeContextMenu(); };
+  const onScroll = (e: Event) => { if (e !== quietEvent && !menu.contains(e.target as Node)) closeContextMenu(); };   // quietEvent: the page's own move (scrollQuietly)
   const onBlur = () => closeContextMenu();
   document.addEventListener("pointerdown", onDown, true);
   document.addEventListener("keydown", onKey, true);

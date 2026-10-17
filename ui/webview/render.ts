@@ -115,7 +115,7 @@ import { insertAtCaret } from "./composer-insert";
 import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDialing, hostDownNote } from "./host-prefix";
 import { sessionLabelNodes } from "./host-prefix";   // the viewer's message bar names its session the strip's way (2026-09-30)
 import { bellState, bellClickFields, legacyBellNote, setHubSwitches, hubMaster, sessionBell } from "./bell-follow";   // a linked kernel's bells follow this kernel's switches; a session bell's own setting beats the defaults
-import { menuCard, addMenuItem, addMenuSep, showMenuCard, openContextMenu, closeContextMenu } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy)
+import { menuCard, addMenuItem, addMenuSep, showMenuCard, openContextMenu, closeContextMenu, contextMenuOpen, scrollQuietly, shiftContextMenu } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy)
 import { focusAfterDismiss, emptyStateParts } from "./pane-focus";   // where focus goes when a tab leaves, and the empty body's line (T357)
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
@@ -1014,6 +1014,9 @@ const skeletonTabs = newSkeletonState();
 type StripAnchor = { box: HTMLElement; keys: string[]; offs: Map<string, number>; st: number };   // st: the box's offset as the strip left it
 let stripAnchorHeld: StripAnchor | null = null;
 let stripAnchorRaf = false;
+// The strip item an open menu was opened on (a tab, or a group header) and where it stood on screen: the rebuild anchors on it and
+// the card follows it (followStripMenu). Up here for the same reason.
+let stripMenuOn: { card: HTMLElement; key: string; x: number; y: number } | null = null;
 // The skeleton tab the user is LOOKING AT while its full is on the way (showActive's loader branch). Latched for
 // upsert, because on the click path the strip that RELEASES the id (the kernel dropped it from the set when it sent
 // the full) lands BEFORE the full itself, so by the time the frame arrives the id is no longer in the set and
@@ -7772,6 +7775,7 @@ function renderTabs() {
   paintTabRowLines(bar);
   ensureTabRowObserver(bar);
   keepStripScroll(bar, anchor);
+  followStripMenu(bar);
   // Restore tab-mode focus if a tab held it before this rebuild (see the focus capture above the wipe). QUIETLY: a repaint is
   // not a gesture, and a plain focus() scrolls the node into view, which threw a reader who had picked a tab and then scrolled
   // the strip back to that tab on every push (the user 2026-10-17). The gestures that land here next (a click, an arrow, Escape)
@@ -7872,6 +7876,8 @@ function stripScrollAnchor(bar: HTMLElement): StripAnchor | null {
     keys.push(key); offs.set(key, r.top - top);
   }
   if (!keys.length) return null;
+  const menuAt = stripMenuOn ? keys.indexOf(stripMenuOn.key) : -1;
+  if (menuAt > 0) keys.unshift(keys.splice(menuAt, 1)[0]);   // an open menu's item first: the card stays over it
   stripAnchorHeld = { box, keys, offs, st: box.scrollTop };
   if (!stripAnchorRaf) { stripAnchorRaf = true; requestAnimationFrame(() => { stripAnchorRaf = false; stripAnchorHeld = null; }); }
   return stripAnchorHeld;
@@ -7884,9 +7890,26 @@ function keepStripScroll(bar: HTMLElement, a: StripAnchor | null): void {
   if (key) {   // none: everything that was in view left the strip, and the raw offset stands
     const top = a.box.getBoundingClientRect().top + a.box.clientTop;
     const moved = now.get(key)!.getBoundingClientRect().top - top - a.offs.get(key)!;
-    if (Math.abs(moved) >= 0.5) a.box.scrollTop += moved;
+    if (Math.abs(moved) >= 0.5) scrollQuietly(a.box, a.box.scrollTop + moved);   // the page's move, not the reader's: an open menu stays up
   }
   a.st = a.box.scrollTop;
+}
+// An open menu's item moved under it in the rebuild (re-flowed rows, or a strip at its top, where nothing anchors): the card
+// follows it. Gone from the strip, the card stays where it is (its rows act by id).
+function noteStripMenu(card: HTMLElement, key: string): void {
+  const node = Array.from(document.getElementById("tabs")?.children ?? []).find((c) => stripItemKey(c) === key);
+  const r = node?.getBoundingClientRect();
+  stripMenuOn = r && r.height ? { card, key, x: r.left, y: r.top } : null;
+}
+function followStripMenu(bar: HTMLElement): void {
+  const m = stripMenuOn;
+  if (!m) return;
+  if (contextMenuOpen() !== m.card) { stripMenuOn = null; return; }
+  const node = Array.from(bar.children).find((c) => stripItemKey(c) === m.key);
+  const r = node?.getBoundingClientRect();
+  if (!r || !r.height) return;
+  shiftContextMenu(r.left - m.x, r.top - m.y);
+  m.x = r.left; m.y = r.top;
 }
 // Right-click context menu on a tab. Webviews can't use VS Code's native menus,
 // so this is a small themed floating menu; one open at a time, dismissed by any
@@ -7926,6 +7949,7 @@ function dismissTabMenu() {
 function onTabMenuClosed() {
   ctxMenuEl = null;
   tagsFlyNewInput = null;
+  stripMenuOn = null;
 }
 
 // Right-clicking a SELECTION in the transcript pops a small menu with Reply (quote
@@ -8852,6 +8876,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
   // not a dismissal: taller than the window it scrolls inside it, styles.css max-height, 2026-09-13), Tab, the focus leaving,
   // the window's blur; the rows reachable by the arrows; the focus back on the opener at the close (the shared builder)
   ctxMenuEl = showMenuCard(menu, e.clientX, e.clientY, { onClose: onTabMenuClosed });
+  noteStripMenu(ctxMenuEl, "t:" + id + "\0" + (copy ?? ""));   // the card goes where its tab goes through a rebuild
 }
 // A remote host coming or going flips the disconnected marks on its tabs. The federation manager fires
 // this only when the reachable set actually CHANGES (its own /tunnels poll is the event), so this is a
@@ -8960,6 +8985,7 @@ function showTagMenu(x: number, y: number, name: string, folded: boolean | null,
   ctxMenuEl = openTagContextMenu(x, y, { name, members: g.members.length, folded, only, configure: true, overview }, g.color || "", paletteColors,
     { pick: (act) => tagMenuPick(act, name, folded !== null), recolor: (c) => { const u = unionNamed(name); if (u) commitTagUnionEdit(u, { color: c }); } },
     { viaKeyboard, onClose: onTabMenuClosed });
+  if (folded !== null && ctxMenuEl) noteStripMenu(ctxMenuEl, "h:" + name);   // off a strip header: the card goes where the header goes
 }
 function unionNamed(name: string): TagUnion | undefined {
   const g = viewTagUnion(effViews()).find((u) => u.name === name);
@@ -9129,6 +9155,25 @@ function focusActiveTab(quiet = false) {
   const home = activeId ? homeSectionOf(lastStripItems, activeId) : null;
   if (!home || home.name === null || !bar) return;
   focusOn(Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name));
+}
+/** Bring the active tab (or the header standing in for it) into the strip's view, the focus left where it is. Every deliberate
+ *  navigation calls it (setActive's pick, from the feed, the Sessions pane, a deep link, a notification, the keyboard; a jump to
+ *  the tab already shown): before the strip held its place through rebuilds (keepStripScroll, the quiet focus restore), the
+ *  rebuild's plain focus() did this as a side effect, and with the focus in the strip only. A repaint never calls it. Only the
+ *  strip's own box scrolls, by the least that shows the whole item. */
+function revealActiveTab(): void {
+  const bar = document.getElementById("tabs"), box = bar?.parentElement;
+  if (!bar || !box || !box.clientHeight) return;   // no strip on screen (the phone's, a hidden pane): nothing to reveal in
+  let node = bar.querySelector(`.tab[data-id="${fileTabOpen ?? activeId}"]`) as HTMLElement | null;
+  if (!node) {   // folded away under its section: the header stands in for it (focusActiveTab's rule)
+    const home = activeId ? homeSectionOf(lastStripItems, activeId) : null;
+    if (home && home.name !== null) node = Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name) ?? null;
+  }
+  const r = node?.getBoundingClientRect();
+  if (!r || !r.height) return;
+  const top = box.getBoundingClientRect().top + box.clientTop, bottom = top + box.clientHeight;
+  const by = r.top < top ? r.top - top : r.bottom > bottom ? Math.min(r.bottom - bottom, r.top - top) : 0;
+  if (Math.abs(by) >= 0.5) box.scrollTop += by;
 }
 /** Open a section that puts a folded-away tab on screen: a session pick names the tab, so its tab must be on
  *  screen. Per holder, since a session under several tags has a copy under each and every copy's fold stands on
@@ -21463,7 +21508,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   if (!quietActivation) wantFile = null;   // a pick leaves a FILE TAB (leaveFileTab: its discard ask; quietActivation: a restore does not)
   if (fileTabOpen && !quietActivation) {
     if (!leaveFileTab()) return;
-    if (activeId === id && anchor == null && anchorT == null) { if (collapsedTabIds.has(id)) unfoldSectionOf(id); renderTabs(); showActive(); return; }   // the session under the file
+    if (activeId === id && anchor == null && anchorT == null) { if (collapsedTabIds.has(id)) unfoldSectionOf(id); renderTabs(); showActive(); revealActiveTab(); return; }   // the session under the file
   }
   // A session pick ends the section view (the header put it up; the pick names a session) and brings the
   // picked tab on screen: a tab folded away under its header (a row of the view, a feed deep link, the
@@ -21473,6 +21518,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   if (collapsedTabIds.has(id)) unfoldSectionOf(id);   // per holder: see unfoldSectionOf
   if (activeId === id && anchor == null && anchorT == null) {   // already active, nothing to do…
     if (leavingSnap) { renderTabs(); showActive(); }             // …except put its transcript back
+    if (!quietActivation) revealActiveTab();                     // …and its tab on screen: the pick named it
     return;
   }
   navHist.record();   // every real navigation records the spot being LEFT (the user 2026-08-14: Ctrl+M / Ctrl+, walk the trail)
@@ -21532,6 +21578,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   renderTabs();
   showActive();
   schedulePrebuild(); // warm the OTHER tabs in idle (MRU-first) so the next switch is instant
+  if (!quietActivation) revealActiveTab();   // a pick shows the tab it named; a restore (quietly) keeps the reader's place in the strip
 }
 
 function cycleTab(dir: number) {
@@ -23387,6 +23434,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     // and three)
     if (activeId === m.id) notifyActive();
     if (m.live && activeId === m.id) {
+      revealActiveTab();   // the jump named the tab already shown: on screen in the strip, as setActive's pick would put it
       // one frame LATER, not now: when this focus is what un-hid the pane (the shell's reveal lands a
       // task after revealSelfPane's postMessage), the pane is still display:none here and scrollHeight
       // is 0 — the jump read as a no-op (the user 2026-08-13). Next frame the layout is real; when the

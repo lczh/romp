@@ -178,6 +178,7 @@ function lift(): (hooks: Hooks) => Api {
     const TAG_BTN_BORDER_CSS = "var(--card-border, rgba(255,255,255,0.10))";   // the tag button's themed border the lock borrows (T395)
     const syncTagFilter = () => { H.tagSyncs++; }; const paintTabRowLines = () => { H.rowPaints++; }; const ensureTabRowObserver = () => {}; const flowStripRows = () => {};
     const focusActiveTab = () => {}; const syncNoSessionsPlaceholder = (v, t) => { H.aftermaths.push([v, t]); };
+    let stripMenuOn = null; const contextMenuOpen = () => null; const shiftContextMenu = () => {}; const scrollQuietly = () => {};   // no menu open here: the strip's follow of an open card (followStripMenu) does nothing
   `;
   const epilogue = `
     return { renderTabs, sig: () => tabStripSig, folded: () => collapsedTabIds, skeletonTabs,

@@ -183,7 +183,7 @@ function lift(): (H: Hooks) => Api {
     const pickerOverlayUp = () => H.pickerOpen;   // render.ts's shown-overlay check (tab-cycle-standdown-exec.test.ts runs the real one)
     const window = { addEventListener: (t, f, cap) => { (cap ? H.winCap : H.winBub).push(f); } };
     // the tag menu's surroundings: the real unions of the world, the card itself a recorder of what it was handed
-    const dismissTabMenu = () => {}; const onTabMenuClosed = () => {}; const paletteColors = [];
+    const dismissTabMenu = () => {}; const onTabMenuClosed = () => {}; const noteStripMenu = () => {}; const paletteColors = [];   // noteStripMenu: the card follows its header through a rebuild (test_strip_reveal_served.py drives it)
     const effViews = () => H.views0; const viewTagUnion = H.viewTagUnion;
     const surfaceLens = () => ({ all: true }); const lensAll = (l) => l.all === true;
     const openTagContextMenu = (x, y, state, color, palette, handlers) => { H.menus.push({ x, y, state, handlers }); return el("div", "ctx-menu"); };
@@ -708,7 +708,7 @@ test("pinned: the wiring the lifted slices cannot reach: showActive's branch, th
   assert.match(RENDER, /const s = activeId && !snapView \? liveSession\(activeId\) : null;/, "no background-task box under it");
   // setActive: a pick ends the view, opens a folded-away tab's section before the early return, and puts the transcript
   // back even when the pick is the tab already active
-  assert.match(RENDER, /const leavingSnap = snapView !== null;\s*\n\s*snapView = null;\s*\n\s*if \(collapsedTabIds\.has\(id\)\) unfoldSectionOf\(id\);[^\n]*\n\s*if \(activeId === id && anchor == null && anchorT == null\) \{[^\n]*\n\s*if \(leavingSnap\) \{ renderTabs\(\); showActive\(\); \}[^\n]*\n\s*return;\s*\n\s*\}/);
+  assert.match(RENDER, /const leavingSnap = snapView !== null;\s*\n\s*snapView = null;\s*\n\s*if \(collapsedTabIds\.has\(id\)\) unfoldSectionOf\(id\);[^\n]*\n\s*if \(activeId === id && anchor == null && anchorT == null\) \{[^\n]*\n\s*if \(leavingSnap\) \{ renderTabs\(\); showActive\(\); \}[^\n]*\n\s*if \(!quietActivation\) revealActiveTab\(\);[^\n]*\n\s*return;\s*\n\s*\}/);
   // the strip: the plan the view reads is the one just rendered; every push refreshes the view; the section gone puts the transcript back
   assert.match(TABS, /collapsedTabIds = plan\.folded;\s*\n\s*lastStripItems = plan\.items;/);
   assert.match(TABS, /const shown = snapView;\s*\n\s*const held = shown \? snapshotHoldsFocus\(\) : false;\s*\n\s*if \(snapView\) renderSnapshot\(\);\s*\n\s*if \(shown && !snapView\) \{ showActive\(\); if \(held\) focusActiveTab\(true\); \}/);
