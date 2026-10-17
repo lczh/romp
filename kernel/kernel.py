@@ -25062,11 +25062,11 @@ def _restart_session(sid, client=None):
     steps, and the reason to reach it is a CLI UPGRADE (the user 2026-09-23): a session launched before an
     upgrade keeps the binary it launched with, so a model only the newer CLI knows is unreachable from it.
 
-    The work is the owning backend's (SessionBackend.relaunch → SdkBackend.relaunch, which rides
-    request_reconnect, the road every connect-time switch already takes), so nothing here duplicates the
+    The work is the owning backend's (SessionBackend.relaunch → SdkBackend.relaunch, which ends the CLI with
+    SIGTERM and reconnects, never interrupting it: SdkSession.relaunch_now), so nothing here duplicates the
     revive's resume: the two doors reach different machinery on purpose, and only this one leaves the
-    session live throughout. Runs off the WS recv loop like the revive — the interrupt and the reconnect
-    must not block the socket. CodexBackend.relaunch always refuses, and says why: every Codex session runs
+    session live throughout. Runs off the WS recv loop like the revive — the relaunch must not block the
+    socket. CodexBackend.relaunch always refuses, and says why: every Codex session runs
     on the kernel's one Codex app-server, which End + Revive leaves in place, so a newer binary is reached
     there by a kernel restart instead (2026-09-24, the post-merge note on #2125).
 

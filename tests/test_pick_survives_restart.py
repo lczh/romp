@@ -770,10 +770,11 @@ class AToggleWhileTheLaunchIsPrepared(_Harness):
         self.assertEqual([x["fast"] for x in seen], [True, False], "the Restart's relaunch carries no flag")
         self.assertEqual([l for l in self.lines if MOVED in l], [])
 
-    def test_fast_mode_turned_off_during_the_version_read_is_left_to_a_restart_waiting_behind_a_queued_message(self):
+    def test_fast_mode_turned_off_during_the_version_read_is_left_to_a_restart_asked_with_a_message_queued(self):
         """A guard of the relaunch for a change made while the launch was prepared. While the first launch's version read
-        waits, a message is queued, the session's own fast pick is turned off and a Restart is asked: the Restart waits
-        for the queued message's turn, its relaunch carries no flag, and no line about the change is logged."""
+        waits, a message is queued, the session's own fast pick is turned off and a Restart is asked: the Restart
+        relaunches as soon as the first CLI is up (it waits on no turn since 2026-10-17, relaunch_now), the queued
+        message goes to the fresh CLI, the relaunch carries no flag, and no line about the change is logged."""
         cli, reading, hold = self._token_read_waits()
         reg = self._reg()
         reg.update(auth="login", fast=True)
@@ -788,17 +789,11 @@ class AToggleWhileTheLaunchIsPrepared(_Harness):
         self.assertTrue(be.set_fast(SID, "off"))
         self.assertEqual(be.relaunch(SID), "")
         os.unlink(hold)
-        self._wait(lambda: len(_Client.instances) >= 1 and _Client.instances[0] is s.client, "connect 1")
-        c = _Client.instances[0]
-        self._wait(lambda: c.writes == ["first turn"], "the queued turn fed")
-        self.assertTrue(s._reconnect_when_idle, "the premise: the Restart waits for the turn")
-        self._push(c, _SystemMessage("init", {"model": "claude-x", "permissionMode": "acceptEdits", "session_id": FSID},
-                                     uuid=self._uid()))
-        self._push(c, _result(uuid=self._uid(), subtype="success", is_error=False, num_turns=1, session_id=FSID,
-                              duration_ms=1, duration_api_ms=1, total_cost_usd=0.01,
-                              usage={"input_tokens": 1, "output_tokens": 1}, result="ok", parent_tool_use_id=None))
         self._wait(lambda: len(_Client.instances) == 2 and _Client.instances[1] is s.client, "the Restart's relaunch")
+        c2 = _Client.instances[1]
+        self._wait(lambda: c2.writes == ["first turn"], "the queued message, fed to the fresh CLI")
         self._settle(0.5)
+        self.assertEqual(_Client.instances[0].writes, [], "never fed to the CLI being replaced")
         self.assertEqual([x["fast"] for x in seen], [True, False], "the Restart's relaunch carries no flag")
         self.assertEqual([l for l in self.lines if MOVED in l], [])
 
