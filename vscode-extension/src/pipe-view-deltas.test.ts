@@ -123,6 +123,23 @@ test("closing sockets neither send recovery nor replay it onto the next connecti
   assert.deepEqual(current.sent, [{ type: "needSlot", slot: "feed" }]);
 });
 
+test("a comment, a reply and a withdrawal held while the socket is down go out on the reconnect, in order", async () => {
+  // the reconnect keeps intent only (pipe-intent.ts) and then reloads the webview, whose memory held the only copy of
+  // the words; these three were dropped there with the view chatter (review find, 2026-10-17)
+  const h = await harness("chat");
+  h.sockets[0].close();
+  const reply = { type: "commentReply", id: "web", tid: "t1", text: "use the v2 endpoint" };
+  const create = { type: "commentCreate", id: "web", uuid: "11111111-2222-4333-8444-555555555555", createId: "c1", text: "why this route?" };
+  const withdraw = { type: "cancelQueued", id: "api", md: "run the tests", qid: "q1" };
+  for (const m of [reply, { type: "dotHover", id: "web" }, create, withdraw]) h.pipe.send(m);
+  assert.equal(h.pipe.queuedIntents(), 3, "the down banner counts all three as held");
+  h.timers.shift()!();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const current = h.sockets[1]; current.emit("open");
+  assert.deepEqual(current.sent, [reply, create, withdraw], "the hover is view chatter; the reloaded page resyncs it");
+  assert.equal(h.stats().reconnects, 1, "the webview still reloads, after the replay");
+});
+
 test("timeline lane and message deltas preserve the unchanged lane", async () => {
   const h = await harness("timeline"), ws = h.sockets[0];
   ws.frame({ type: "bars", turns: { web: [{ id: "a", n: 1 }], api: [{ id: "b" }] },
