@@ -1009,6 +1009,11 @@ const pendingTabMeta = new Map<string, PendingTabMeta>();
 // kernel sends only the active tab in full and names the rest here, each carrying a status frame instead of
 // a transcript. Declared up here beside tabMeta and closingTabs for the same reason they are: renderTabs reads it.
 const skeletonTabs = newSkeletonState();
+// The strip's scroll anchor while one frame's rebuilds run (stripScrollAnchor, keepStripScroll). Declared up here beside tabMeta for
+// the same reason: renderTabs reads it, and renderTabs can run before the module finishes evaluating.
+type StripAnchor = { box: HTMLElement; keys: string[]; offs: Map<string, number>; st: number };   // st: the box's offset as the strip left it
+let stripAnchorHeld: StripAnchor | null = null;
+let stripAnchorRaf = false;
 // The skeleton tab the user is LOOKING AT while its full is on the way (showActive's loader branch). Latched for
 // upsert, because on the click path the strip that RELEASES the id (the kernel dropped it from the set when it sent
 // the full) lands BEFORE the full itself, so by the time the frame arrives the id is no longer in the set and
@@ -7517,6 +7522,7 @@ function renderTabs() {
   // and the composer's name overlay wears that same fade (T335): re-sync it on the same event, so a background the host
   // rewrote (a VS Code colour-theme switch, which fires no romp event) reaches the box when it reaches the strip
   syncComposerPh();
+  const anchor = stripScrollAnchor(bar);   // where the reader is in a scrolled strip, measured before the wipe and re-applied once the new strip is laid out (keepStripScroll)
   // Preserve TAB-MODE keyboard focus across the rebuild (the user 2026-06-29). renderTabs runs on EVERY kernel
   // push (0.5–3s), and replaceChildren() destroys the focused tab — dropping focus out of the strip (often out
   // of the chat iframe entirely), which silently killed ←/→/Enter nav after a send or any push: you were left
@@ -7765,13 +7771,17 @@ function renderTabs() {
   }
   paintTabRowLines(bar);
   ensureTabRowObserver(bar);
-  // Restore tab-mode focus if a tab held it before this rebuild (see the focus capture above the wipe).
+  keepStripScroll(bar, anchor);
+  // Restore tab-mode focus if a tab held it before this rebuild (see the focus capture above the wipe). QUIETLY: a repaint is
+  // not a gesture, and a plain focus() scrolls the node into view, which threw a reader who had picked a tab and then scrolled
+  // the strip back to that tab on every push (the user 2026-10-17). The gestures that land here next (a click, an arrow, Escape)
+  // bring the tab into view themselves (focusActiveTab).
   if (focusedGroup !== undefined) {
     const h = Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((x) => x.dataset.group === focusedGroup);
     // the group gone, or now holding the active tab (no stop): the old rule
-    if (h && h.tabIndex >= 0) h.focus(); else focusActiveTab();
-  } else if (focusedGear) (bar.querySelector(".tab-widgets-gear") as HTMLElement | null)?.focus();   // not the active tab: Enter again would drop the caret into the composer
-  else if (refocusTab) focusActiveTab();
+    if (h && h.tabIndex >= 0) h.focus({ preventScroll: true }); else focusActiveTab(true);
+  } else if (focusedGear) (bar.querySelector(".tab-widgets-gear") as HTMLElement | null)?.focus({ preventScroll: true });   // not the active tab: Enter again would drop the caret into the composer
+  else if (refocusTab) focusActiveTab(true);
   stripAftermath(visibleIds, ids);
   // (The Fleet toggle that briefly lived here as a tab-bar pill was removed 2026-06-24: Fleet/Chat are now
   // the rotated toggles in the chat pane's vertical strip — see _LANDING_FLEET_JS — so the pill was redundant.)
@@ -7817,7 +7827,7 @@ function stripAftermath(visibleIds: readonly string[], ids: readonly string[]): 
   const shown = snapView;
   const held = shown ? snapshotHoldsFocus() : false;
   if (snapView) renderSnapshot();
-  if (shown && !snapView) { showActive(); if (held) focusActiveTab(); }
+  if (shown && !snapView) { showActive(); if (held) focusActiveTab(true); }   // quiet: a push ended the view, not a gesture
   // Hiding the LAST visible session must also blank its transcript: a strip with no tabs cannot sit
   // over a hidden session's live chat (the ghost would show exactly what the hide asked to put away).
   // Restored the moment anything is visible again — the placeholder owns the empty state meanwhile.
@@ -7829,6 +7839,55 @@ function stripAftermath(visibleIds: readonly string[], ids: readonly string[]): 
   }
 }
 
+// THE STRIP KEEPS ITS PLACE THROUGH A REBUILD (the user 2026-10-17: with many sessions the strip scrolls, and every update to it
+// threw the reader back to the top). renderTabs rebuilds #tabs whenever its signature changes, and the scroll box (#tabbar) keeps
+// its raw offset across that, so sessions added or removed ABOVE the view slid what the reader was looking at by a row or more.
+// The rebuild anchors instead: before the wipe it notes the items whose top edge is in view (a tab by its id and the group its
+// copy sits in, a header by its tag), and after the new strip is laid out it scrolls by however far the first of them that is
+// still on the strip moved, so that item stays where it was. A strip at its top keeps no anchor (what lands above shows there).
+// The anchor is what the reader SAW: one frame can carry several rebuilds (a tabOrder frame that drops sessions dismisses them
+// one by one, each a rebuild), and the in-between strips are never painted, so the anchor taken at the first of them holds
+// until the next frame (the animation frame is the paint's own event), unless the box was scrolled meanwhile.
+// Only a gesture scrolls the strip otherwise: the rebuild's focus restore is quiet too (focusActiveTab).
+function stripItemKey(c: Element): string | null {   // a declaration, hoisted: renderTabs can run before the module finishes evaluating
+  const e = c as HTMLElement;
+  if (e.classList.contains("tab-group-head")) return "h:" + (e.dataset.group ?? "");
+  return e.classList.contains("tab") && e.dataset.id ? "t:" + e.dataset.id + "\0" + (e.dataset.copy ?? "") : null;
+}
+function stripScrollAnchor(bar: HTMLElement): StripAnchor | null {
+  const box = bar.parentElement;
+  if (!box) return null;
+  const held = stripAnchorHeld;
+  if (held && held.box === box && box.scrollTop === held.st) return held;   // a rebuild earlier in this frame took it: the strip the reader saw
+  stripAnchorHeld = null;
+  if (box.scrollTop <= 0) return null;
+  const top = box.getBoundingClientRect().top + box.clientTop, bottom = top + box.clientHeight;
+  const keys: string[] = [], offs = new Map<string, number>();
+  for (const c of Array.from(bar.children)) {
+    const key = stripItemKey(c);
+    if (!key) continue;
+    const r = c.getBoundingClientRect();
+    if (!r.height || r.top < top - 0.5) continue;
+    if (r.top >= bottom) break;
+    keys.push(key); offs.set(key, r.top - top);
+  }
+  if (!keys.length) return null;
+  stripAnchorHeld = { box, keys, offs, st: box.scrollTop };
+  if (!stripAnchorRaf) { stripAnchorRaf = true; requestAnimationFrame(() => { stripAnchorRaf = false; stripAnchorHeld = null; }); }
+  return stripAnchorHeld;
+}
+function keepStripScroll(bar: HTMLElement, a: StripAnchor | null): void {
+  if (!a || bar.parentElement !== a.box) return;
+  const now = new Map<string, Element>();
+  for (const c of Array.from(bar.children)) { const key = stripItemKey(c); if (key && !now.has(key)) now.set(key, c); }
+  const key = a.keys.find((k) => now.has(k));
+  if (key) {   // none: everything that was in view left the strip, and the raw offset stands
+    const top = a.box.getBoundingClientRect().top + a.box.clientTop;
+    const moved = now.get(key)!.getBoundingClientRect().top - top - a.offs.get(key)!;
+    if (Math.abs(moved) >= 0.5) a.box.scrollTop += moved;
+  }
+  a.st = a.box.scrollTop;
+}
 // Right-click context menu on a tab. Webviews can't use VS Code's native menus,
 // so this is a small themed floating menu; one open at a time, dismissed by any
 // outside click, Escape, scroll, or losing window focus.
@@ -9052,14 +9111,24 @@ function onTabKey(e: KeyboardEvent) {
     focusComposerOrAsk();
   }
 }
-function focusActiveTab() {
+/** Focus the active tab (or the header standing in for it). `quiet`: a repaint restoring the focus it took away, which must not
+ *  scroll the strip; every other caller is a gesture (a click, an arrow, Escape, a send), which brings the tab into view. A
+ *  gesture usually finds the tab already focused, by its own setActive's rebuild restoring the focus quietly, and focus() on
+ *  the focused node scrolls nothing, so the gesture scrolls it into view itself. */
+function focusActiveTab(quiet = false) {
   const bar = document.getElementById("tabs");
+  const focusOn = (node: HTMLElement | null | undefined) => {   // not `land`: that name is the transcript's write family (landing-settle.ts)
+    if (!node) return;
+    if (quiet) node.focus({ preventScroll: true });
+    else if (document.activeElement === node) node.scrollIntoView({ block: "nearest", inline: "nearest" });
+    else node.focus();
+  };
   const tab = bar?.querySelector(`.tab[data-id="${fileTabOpen ?? activeId}"]`) as HTMLElement | null;   // a file tab up is the one shown (2026-09-30)
-  if (tab) { tab.focus(); return; }
+  if (tab) { focusOn(tab); return; }
   // the active tab is folded away under its section: the header is its stand-in (tab-groups.ts)
   const home = activeId ? homeSectionOf(lastStripItems, activeId) : null;
   if (!home || home.name === null || !bar) return;
-  Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name)?.focus();
+  focusOn(Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name));
 }
 /** Open a section that puts a folded-away tab on screen: a session pick names the tab, so its tab must be on
  *  screen. Per holder, since a session under several tags has a copy under each and every copy's fold stands on

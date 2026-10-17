@@ -77,7 +77,7 @@ test("locked, nothing moves: every draggable gate, both dragstart guards, the me
   assert.match(KERNEL, /var why=refusal\(src,sid\);if\(why==='locked'\)return notify\(LOCKED\);if\(why\|\|!movable\(src,sid\)\)return notify\('Only an open session can be moved between columns\.'\);/, "a lock is not \"not an open session\"");
   assert.match(RENDER, /if \(fedMissing \|\| settings\.tabsLocked\) return false;/, "a drop after another window locked mid-drag commits nothing (round one, LOW 3)");
   assert.match(RENDER, /const focusedGear = !!focusedEl\?\.closest\("\.tab-widgets-gear"\);/);
-  assert.match(RENDER, /\} else if \(focusedGear\) \(bar\.querySelector\("\.tab-widgets-gear"\) as HTMLElement \| null\)\?\.focus\(\);/, "the gear held the keyboard when a push rebuilt the strip: it keeps the focus, not the active tab (round one, LOW 2; a lock toggle leaves the focus on the menu's row, and the menu's Escape refocuses the live gear itself; T405 round two, low 6)");
+  assert.match(RENDER, /\} else if \(focusedGear\) \(bar\.querySelector\("\.tab-widgets-gear"\) as HTMLElement \| null\)\?\.focus\(\{ preventScroll: true \}\);/, "the gear held the keyboard when a push rebuilt the strip: it keeps the focus, not the active tab (round one, LOW 2; a lock toggle leaves the focus on the menu's row, and the menu's Escape refocuses the live gear itself; T405 round two, low 6)");
 });
 
 test("the setting: per browser, off by default, only the literal true locks; the write fans out like the gear's", () => {
