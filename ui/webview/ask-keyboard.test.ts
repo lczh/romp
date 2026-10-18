@@ -73,7 +73,9 @@ test("the composer shows it's in answer mode + the card never steals focus from 
   // placeholder + tint while a free-text picker is up
   assert.match(RENDER, /ta\.placeholder = "add your own answer…  \(⏎ submit\)";\s*\n\s*ta\.classList\.add\("answering"\);/);
   assert.match(CSS, /#composer-input\.answering \{ border-color: var\(--accent\)/);
-  // the card only takes focus when the user is NOT typing in an input/textarea (never yanks the caret mid-word)
-  assert.match(RENDER, /function focusCardUnlessTyping\(card: HTMLElement\) \{\s*\n\s*if \(!isTypingTarget\(document\.activeElement\) && !askCardElsewhere\(card\)\) card\.focus/);
+  // the card only takes focus when the user is NOT typing in an input/textarea (never yanks the caret mid-word), in this
+  // page or anywhere in the window: on the dashboard the keys may be in another column's box (windowFocusedElement,
+  // executed by window-focus.test.ts; the served leg is tests/test_ask_card_focus_columns_served.py)
+  assert.match(RENDER, /function focusCardUnlessTyping\(card: HTMLElement\) \{\s*\n\s*const here = document\.activeElement, there = windowFocusedElement\(window\);\s*\n\s*if \(isTypingTarget\(here\) \|\| isTypingTarget\(there\) \|\| askCardElsewhere\(card, here\) \|\| askCardElsewhere\(card, there\)\) return;\s*\n\s*card\.focus\(\{ preventScroll: true \}\);/);
   assert.match(RENDER, /card\.addEventListener\("keydown", \(e\) => onSingleKey\(s, e\)\);\s*\n\s*focusCardUnlessTyping\(card\);/);
 });
