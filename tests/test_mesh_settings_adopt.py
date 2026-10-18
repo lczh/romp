@@ -475,21 +475,27 @@ class RoundTwo(unittest.TestCase):
             self.assertIn("self_name", km._remotes_rows_for_save()[0], "…and persists with it")
 
     def test_apply_over_a_newer_local_click_is_refused_and_drops_the_record(self):
+        # the click itself retires the record since the setters do (SettledByThisMachine); the route's guard answers a record
+        # that OUTLIVED its click, the store written and the records not (two files)
         self.a.set("task-tracking", True, 1_000)
         self.b.set("task-tracking", False, 2_000)
         self.a.propose("TESTHOSTB", self.b.version())
-        self.a.set("task-tracking", True, 2_500)               # the user clicked here after the line was drawn (the same value)
+        with self.a:                                            # the user clicked here after the line was drawn (the same value)
+            (jd.STATE / km.TASK_TRACKING_FILE).write_text(json.dumps({"enabled": True, "gt": 2_500}))
         ack = self.a.answer({"store": "task-tracking", "gt": 2_000, "answer": "apply"})
         self.assertFalse(ack["ok"]); self.assertEqual(ack["error"], "your own newer choice stands; the proposal is dropped")
         self.assertEqual(self.a.read("task-tracking"), (True, 2_500), "nothing applied")
         self.assertEqual(ack["settingsProposals"], {}, "the record is gone")
 
-    def test_the_line_reads_the_live_local_value_and_a_local_click_to_the_proposed_value_ends_it(self):
+    def test_the_line_reads_the_live_local_value_and_the_next_pass_drops_a_record_the_store_settles(self):
+        # a click through the setter retires the record at once (SettledByThisMachine); a store that moved under a record
+        # that outlived it (the store written, the records not) is what the live read and the pass still answer
         self.a.set("task-tracking", True, 1_000)
         self.b.set("task-tracking", False, 2_000)
         self.a.propose("TESTHOSTB", self.b.version())
         self.assertEqual(self.a.proposals()["task-tracking"][0]["current"], True)
-        self.a.set("task-tracking", False, 2_500)              # the user took the proposed value by their own click
+        with self.a:
+            (jd.STATE / km.TASK_TRACKING_FILE).write_text(json.dumps({"enabled": False, "gt": 2_500}))
         self.assertEqual(self.a.proposals()["task-tracking"][0]["current"], False, "the line says what the control shows, not the raise-time value")
         self.assertEqual(self.a.propose("TESTHOSTB", self.b.version())[0], [], "the next pass: the values agree, the record drops")
         self.assertEqual(self.a.proposals(), {})
@@ -883,6 +889,130 @@ class PhaseTwo(unittest.TestCase):
         self.assertEqual((row.get("settings"), row.get("settingsGt"), row.get("settingsPinned")), ({"taskTracking": False}, {"task-tracking": 2_000}, {"task-tracking": True}),
                          "the row serves the stamps and the pins beside the settings (the base served settings alone)")
         self.assertIn('r["settingsPinned"] = (rver or {}).get("settingsPinned")', KERNEL_SRC, "the supervisor keeps the peer's pins on the row")
+
+
+class SettledByThisMachine(unittest.TestCase):
+    """A proposal this machine's own value settles retires when the value is written, not when a peer's settings next arrive
+    (plans/settings-across-machines.md, "the card's life": the record drops for the values coming to agree and for a local click
+    that outranks it). The incident, synthetic: the hub turned Task tracking off; a machine that polls nobody got the hub's push,
+    recorded the proposal and showed its needs-you card; seconds later the same off landed there under a newer click, and since
+    the hub then held nothing newer to push, nothing ever arrived to retire the record: the card asked for days about a setting
+    both machines already agreed on. Here `self.here` is that machine (no remotes rows) and `self.hub` is TESTHOST."""
+
+    KEY = "proposal.task-tracking.TESTHOST"
+
+    def setUp(self):
+        self.hub, self.here, self.other = _Kernel(), _Kernel(), _Kernel()
+        for k in (self.hub, self.here, self.other):
+            (k.root / "session-hosts").write_text("off\n")       # a state root this test mints: per-session hosts off
+        with km._remotes_lock:
+            self._rows = dict(km._remotes); km._remotes.clear()   # this machine polls nobody: the push is its only inbound leg
+
+    def tearDown(self):
+        with km._remotes_lock:
+            km._remotes.clear(); km._remotes.update(self._rows)
+        self.hub.close(); self.here.close(); self.other.close()
+
+    def _arm(self, msg):
+        """The WS arm as the socket runs it, on this machine: the frames it sent back."""
+        sent = []
+        client = {"send": lambda s: sent.append(json.loads(s)), "alive": True}
+        with self.here:
+            with contextlib.redirect_stderr(io.StringIO()):
+                km.Handler._dispatch_ws(types.SimpleNamespace(), msg, client)
+        return sent
+
+    def _raise(self, store="task-tracking", mine=True, mine_gt=1_000, theirs=False, gt=2_000):
+        """This machine holds `mine`; the hub's newer pick arrives by its push and stands as a proposal with its card."""
+        self.here.set(store, mine, mine_gt)
+        self.hub.set(store, theirs, gt)
+        self.here.push("TESTHOST", store, theirs, gt)
+        key = "proposal.%s.TESTHOST" % store
+        self.assertEqual([r["host"] for r in self.here.proposals()[store]], ["TESTHOST"])
+        self.assertIn(key, self.here.cards())
+        return key
+
+    def test_a_newer_click_here_to_the_proposed_value_retires_the_record_and_its_card_at_once(self):
+        self._raise(gt=2_000)
+        sent = self._arm({"type": "setTaskTracking", "enabled": False, "gt": 7_187, "origin": "local"})   # five seconds on, the same off here
+        self.assertEqual([f["type"] for f in sent], ["taskTracking"], "applied (the kernel's echo), not stood down")
+        self.assertEqual(self.here.read("task-tracking"), (False, 7_187))
+        self.assertEqual(self.here.proposals(), {}, "the gear's line is gone: nothing pending (the base kept the record until a push that never came)")
+        self.assertEqual(self.here.records().get("task-tracking"), None, "no record and no kept stamp: the user answered nothing, the click settled it")
+        self.assertEqual(self.here.cards(), {}, "the needs-you card expired with the record")
+        with self.here:
+            ops = [(r["op"], r["key"]) for r in km._notice_rows(km.NOTICE_OWNERLESS_SID)]
+        self.assertEqual(ops, [("post", self.KEY), ("expire", self.KEY)], "through the records' one writer: the card's own expiry, no other road")
+        self.here.push("TESTHOST", "task-tracking", False, 2_000)   # the hub's old push again: older than this machine's click
+        self.assertEqual((self.here.proposals(), self.here.cards()), ({}, {}), "an older push raises nothing")
+
+    def test_a_click_here_to_the_proposed_value_settles_it_even_under_an_older_stamp(self):
+        # (a) on its own: the device that clicked here ran behind the hub's clock, so the click's stamp is newer than this
+        # store's but older than the proposal's; the values agree all the same, and there is nothing left to ask
+        self._raise(mine_gt=1_000, gt=5_000)
+        self.here.set("task-tracking", False, 3_000)
+        self.assertEqual(self.here.read("task-tracking"), (False, 3_000))
+        self.assertEqual((self.here.proposals(), self.here.cards()), ({}, {}), "the values agree: settled whatever the stamps' order")
+        self.here.push("TESTHOST", "task-tracking", False, 5_000)
+        self.assertEqual(self.here.read("task-tracking"), (False, 5_000), "the hub's newer stamp, the same value: the stamp lifts as ever")
+        self.assertEqual((self.here.proposals(), self.here.cards()), ({}, {}), "…and raises nothing")
+
+    def test_any_newer_click_here_settles_it_and_the_newest_click_is_then_proposed_to_the_hub(self):
+        # (b): a click here newer than the proposal outranks it whatever its value (the newest click wins); the hub, which
+        # polls this machine, then sees this machine's newer pick as ITS proposal: the question moves to where it is open
+        self._raise(mine=True, mine_gt=1_000, gt=2_000)
+        self.here.set("task-tracking", True, 3_000)              # on again, here, after the hub's off
+        self.assertEqual((self.here.proposals(), self.here.cards()), ({}, {}), "outranked by the click here: settled")
+        pending, _err = self.hub.propose("TESTHOST2", self.here.version())
+        self.assertEqual(pending, ["task-tracking"], "the hub is asked about the newer click")
+        self.assertEqual(sorted(self.hub.cards()), ["proposal.task-tracking.TESTHOST2"])
+
+    def test_an_older_click_here_that_keeps_this_machines_value_leaves_the_record_standing(self):
+        # neither rule holds: the values still differ and the hub's pick is the newer click; the question is still open
+        self._raise(mine=True, mine_gt=1_000, gt=5_000)
+        self.here.set("task-tracking", True, 3_000)
+        self.assertEqual(self.here.proposals()["task-tracking"], [{"host": "TESTHOST", "value": False, "gt": 5_000, "current": True}])
+        self.assertEqual(self.here.cards()[self.KEY][0], 1, "the card stands, unrevised")
+
+    def test_every_synchronized_store_retires_the_same_way(self):
+        for store in SETTERS:                                    # the two that share the nudge ledger retire outside its lock
+            key = self._raise(store=store, mine=False, mine_gt=1_000, theirs=True, gt=2_000)
+            self.here.set(store, True, 2_500)
+            self.assertNotIn(store, self.here.proposals(), store)
+            self.assertNotIn(key, self.here.cards(), store)
+
+    def test_the_poll_that_lifts_a_stamp_drops_what_the_lift_settles_in_the_same_pass_and_says_it_once(self):
+        # the hub polls two machines: TESTHOST2 proposes off@2000; then TESTHOST3 holds the hub's own on under a newer stamp
+        # (3000) and, in the same answer, a Suggest /compact pick the hub lacks. The lift to 3000 settles TESTHOST2's record;
+        # the pass drops it from its own copy too, so writing the new compact record does not post TESTHOST2's card again
+        self.hub.set("task-tracking", True, 1_000)
+        self.here.set("task-tracking", False, 2_000)
+        self.hub.propose("TESTHOST2", self.here.version())
+        self.assertEqual(sorted(self.hub.cards()), ["proposal.task-tracking.TESTHOST2"])
+        self.other.set("task-tracking", True, 3_000); self.other.set("compact-suggest", True, 3_000)
+        pending, _err = self.hub.propose("TESTHOST3", self.other.version())
+        self.assertEqual(pending, ["compact-suggest"])
+        self.assertEqual(self.hub.read("task-tracking"), (True, 3_000), "the same value under a newer stamp lifted the stamp")
+        self.assertEqual(sorted(self.hub.cards()), ["proposal.compact-suggest.TESTHOST3"], "TESTHOST2's card expired in this pass")
+        self.assertNotIn("task-tracking", self.hub.proposals())
+        self.assertEqual([k for k, _rev, _t in self.hub.posted()], ["proposal.task-tracking.TESTHOST2", "proposal.compact-suggest.TESTHOST3"],
+                         "each card said once: the settled one was not posted again")
+
+    def test_the_boot_pass_retires_a_record_its_store_already_settles(self):
+        # the store written and the records not (a kernel stopped between the two writes, or one from before this rule): the
+        # record and its card stand over a store that settles them, until the boot pass reads the two together
+        self._raise(gt=2_000)
+        key = self._raise(store="file-editing", mine=False, mine_gt=1_000, theirs=True, gt=2_000)
+        with self.here:
+            (jd.STATE / km.TASK_TRACKING_FILE).write_text(json.dumps({"enabled": False, "gt": 7_187}))
+            with contextlib.redirect_stderr(io.StringIO()):
+                gone = km._retire_settled_proposals()
+        self.assertEqual(gone, [("task-tracking", "TESTHOST")])
+        self.assertEqual(sorted(self.here.proposals()), ["file-editing"], "a record its store does not settle stands")
+        self.assertEqual(sorted(self.here.cards()), [key])
+        main = inspect.getsource(km.main)
+        self.assertIn("_retire_settled_proposals()", main, "main runs the pass")
+        self.assertLess(main.index("_retire_settled_proposals()"), main.index("_tunnel_supervisor"), "…before the supervisor polls anyone")
 
 
 class _FakePeer(BaseHTTPRequestHandler):

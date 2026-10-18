@@ -10570,7 +10570,9 @@ def _set_auto_nudge(enabled, gt=None, origin=None, scope=None):
         except OSError as e:                          # said once per episode by the writer; THIS gesture's
             _note_refused_gesture("auto-nudge", gt, enabled, d, why="write failed: %s" % _errno_text(e))
             return None                                 # refusal is answered on its socket (_tell_stale_gesture)
-        return d["gt"]
+        stamp = d["gt"]
+    _retire_settled_proposals("auto-nudge")   # outside _NUDGE_LOCK: the records' lock is taken before the ledger's (the poll's order)
+    return stamp
 
 
 def _compact_suggest_on():
@@ -10609,7 +10611,9 @@ def _set_compact_suggest(enabled, gt=None, origin=None, scope=None):
         except OSError as e:                          # as _set_auto_nudge: the writer said it once; the
             _note_refused_gesture("compact-suggest", gt, enabled, d, why="write failed: %s" % _errno_text(e))
             return None                                 # socket hears this gesture's refusal
-        return d["compactSuggestGt"]
+        stamp = d["compactSuggestGt"]
+    _retire_settled_proposals("compact-suggest")   # outside _NUDGE_LOCK, as _set_auto_nudge
+    return stamp
 
 
 def _file_editing_on():
@@ -10654,6 +10658,7 @@ def _set_file_editing(enabled, gt=None, origin=None, scope=None):
         except OSError as e:
             sys.stderr.write("setting file-editing: write failed (%s) — nothing applied\n" % e)
             return None
+        _retire_settled_proposals("file-editing")
         return stamp
 
 
@@ -10893,6 +10898,7 @@ def _set_task_tracking(enabled, gt=None, origin=None, scope=None):
             sys.stderr.write("setting task-tracking: write failed (%s) — nothing applied\n" % e)   # delivering socket hears it as
             _note_refused_gesture("task-tracking", gt, enabled, {}, why="write failed: %s" % _errno_text(e), known=True)   # its
             return None                                #  siblings' refusals (T404 round two, medium 4); the kept value is always known here
+        _retire_settled_proposals("task-tracking")
         return stamp
 
 
@@ -64364,6 +64370,39 @@ def _proposal_drop(store, host=None, answered_gt=None):
         return True
 
 
+def _proposal_settled(r, mine, mine_gt):
+    """True when this machine's own value answers record `r`: the value is ours now, or a click here at or after the record's
+    stamp outranks it (the newest click wins). The one rule, read by the poll's pass and by every local write."""
+    return r.get("value") == mine or _gt_int(r.get("gt")) <= mine_gt
+
+
+def _retire_settled_proposals(store=None):
+    """Drop every record for `store` (every synchronized store when None) that this machine's own value now settles
+    (_proposal_settled), through the records' one writer, so the card expires and the gear's line goes with it. Each of the
+    four setters runs this once its write landed. Until then only the poll's pass applied the rule, when a peer's settings next
+    arrived; a machine that polls nobody hears its hub only when the hub holds a newer stamp, so after a click here that set
+    the proposed value nothing arrived again and the needs-you card asked, for good, about a question already settled. Once
+    at boot too, over every store: the store and the records are two files, so a kernel stopped between the two writes (or
+    one from before this rule) left a record its store already settles. Returns the [(store, machine)] dropped."""
+    gone = []
+    with _SETTINGS_LOCK:
+        values, stamps = _mesh_settings_snapshot()
+        recs = _settings_proposals()
+        for key, s, _setter in _MESH_ADOPTED_SETTINGS:
+            rec = recs.get(s)
+            if (store is not None and s != store) or not rec:
+                continue
+            mine, mine_gt = values.get(key), stamps.get(s) or 0
+            for h in [h for h, r in rec["hosts"].items() if _proposal_settled(r, mine, mine_gt)]:
+                r = rec["hosts"].pop(h)
+                gone.append((s, h))
+                sys.stderr.write("setting %s: %s's proposal (%s, gesture %d) is settled by this machine's own value (%s, gesture %d); "
+                                 "dropped\n" % (s, h, r.get("value"), _gt_int(r.get("gt")), mine, mine_gt))
+        if gone:
+            _proposals_write(recs)
+    return gone
+
+
 def _settings_proposals_map():
     """/version's `settingsProposals` (to a caller with the token, round two): {store: [record, ...]}, the PENDING records only,
     one per proposing machine, newest stamp first: host, value, gt, and `current`, the LIVE local value (the first cut served
@@ -64415,15 +64454,15 @@ def _propose_peer_settings(host, rver):
                 if host in rec["hosts"]:
                     rec["hosts"].pop(host, None); recs[store] = rec; changed = True
                 continue
+            if val == mine and pgt > mine_gt:              # the same value under a newer stamp: the stamp lifts, nothing to show.
+                if setter(val, gt=pgt, origin="local") is not None:   # The setter retires from the FILE every record the lifted
+                    mine_gt = pgt                          # stamp settles, so the pass below drops the same from this copy
+                _pop_stale_notice()                        # BEFORE it is written (a copy that kept them would post their cards again)
             for h in list(rec["hosts"]):                       # a record is a DIFFERENT value under a NEWER stamp, whoever
-                r = rec["hosts"][h]                            # raised it: ours now, or outranked by a later local click, it drops
-                if r.get("value") == mine or _gt_int(r.get("gt")) <= mine_gt:
+                if _proposal_settled(rec["hosts"][h], mine, mine_gt):   # raised it: ours now, or outranked by a later click here, it drops
                     rec["hosts"].pop(h, None); recs[store] = rec; changed = True
             mine_rec = rec["hosts"].get(host) or {}
             if pgt <= mine_gt or val == mine:
-                if pgt > mine_gt and val == mine:          # the same value under a newer stamp: the stamp lifts, nothing to show
-                    setter(val, gt=pgt, origin="local")
-                    _pop_stale_notice()
                 if mine_rec and (pgt >= _gt_int(mine_rec.get("gt")) or mine == mine_rec.get("value")):
                     rec["hosts"].pop(host, None); recs[store] = rec; changed = True   # this machine's divergence ended: its
                     #                              CURRENT news agrees or is older than ours; a stale push (an older stamp than
@@ -64461,7 +64500,8 @@ def _answer_setting_proposal(body):
     record's stamp (that machine changed its mind otherwise: refused with the reason, the gear re-fills). apply: the value
     through the store's own gt-gated setter under the PEER's stamp (the two machines then hold one stamp and the peer's
     next poll proposes nothing back); a local click that already outranks the record is refused and drops it (round two:
-    the first cut answered ok with nothing applied); keep: that machine's record drops and its stamp is remembered as
+    the first cut answered ok with nothing applied; since the setters retire what they settle, only a record that outlived
+    its click reaches this, its retirement's write having failed or not yet landed); keep: that machine's record drops and its stamp is remembered as
     answered; pin: the pin is set and every record for the store drops. Answers the current snapshot with the pins and the
     proposals."""
     def out(ok, err=None):
@@ -89042,6 +89082,10 @@ def main():
         _model_alias_boot_pass()                              # head (claude-fable-5) → the family alias, so the
     except Exception:                                         # next reconnect follows the CLI's newest.
         sys.stderr.write("model-alias migration: %s\n" % traceback.format_exc())   # MUST precede _sdk: regs → chosen_model there
+    try:                                                      # a settings proposal this machine's own value already settles
+        _retire_settled_proposals()                           # (the store written, the records not: two files) drops, and its
+    except Exception:                                         # card expires, before a page draws it
+        sys.stderr.write("settings proposals boot pass: %s\n" % traceback.format_exc())
     _write_palette_mirror()                                   # keep bin/romp's palette-colors mirror current across code updates
     _boot_warm()                                              # pre-parse the live fleet during the reconnect gap (fast first paint)
     threading.Thread(target=_sdk, daemon=True, name="sdk-boot").start()   # construct the SDK backend NOW so its boot
