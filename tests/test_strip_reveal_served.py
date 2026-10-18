@@ -48,6 +48,7 @@ import test_strip_scroll_keep_served as _keep   # noqa: E402  the 150-session wo
 FAR = _keep.HUB[_keep.N_HUB - 3][1]   # an untagged session near the strip's end
 TOP = _keep.HUB[1][1]                 # a session on the strip's first row (the web group)
 TOP_REPLY = "11111111-2222-3333-4444-%012d" % 5001   # its finished turn's reply (_keep._session_files)
+FAR2 = _keep.HUB[_keep.N_HUB - 6][1]  # another untagged session near the strip's end, for the one-pane window
 
 DRIVER = r"""
 import { createRequire } from "node:module";
@@ -63,7 +64,7 @@ const page = await context.newPage();
 page.on("pageerror", (e) => console.error("pageerror: " + String(e).slice(0, 300)));
 // the kernel's strip frame enters through window.__rompFed.inbound (the shim's door for every frame): kept, to hand a copy
 // with sessions added back through that door
-await page.addInitScript(() => {
+const capInit = () => {
   let fed;
   window.__cap = { order: null, seen: [] };
   Object.defineProperty(window, "__rompFed", { configurable: true, get() { return fed; }, set(v) {
@@ -78,7 +79,8 @@ await page.addInitScript(() => {
       };
     }
   } });
-});
+};
+await page.addInitScript(capInit);
 const out = {};
 const fail = async (why) => {
   const st = await page.evaluate(() => ({ tabs: document.querySelectorAll("#tabs .tab[data-id]").length,
@@ -215,6 +217,105 @@ if (out.menuAfter.open) {
   await page.mouse.wheel(0, -120);
   out.wheelClosed = await page.waitForFunction(() => !document.querySelector("body > .ctx-menu"), null, { timeout: 5000 }).then(() => true, () => false);
 }
+
+// 4. the strip at its top (where nothing anchors, so what lands above shows), a right-click on a tab in view, then forty sessions
+// land above it in a new tag section placed first (the review of #282: the tab was carried out of the strip and its card past the
+// window's bottom)
+await page.keyboard.press("Escape");
+await page.evaluate(() => { document.getElementById("tabbar").scrollTop = 0; });
+await page.evaluate(() => window.__frames(3));
+const topTarget = await page.evaluate(() => {
+  const sc = document.getElementById("tabbar"), b = sc.getBoundingClientRect();
+  const top = b.top + sc.clientTop, bottom = top + sc.clientHeight;
+  const inView = Array.from(document.querySelectorAll("#tabs .tab[data-id]")).filter((t) => {
+    const r = t.getBoundingClientRect();
+    return r.height && r.top >= top + 2 && r.bottom <= bottom - 2;
+  });
+  const t = inView[Math.floor(inView.length / 2)];
+  if (!t) return null;
+  const r = (t.querySelector(".tab-label") || t).getBoundingClientRect();
+  return { id: t.dataset.id, copy: t.dataset.copy ?? "", x: Math.round(r.left + 6), y: Math.round(r.top + r.height / 2) };
+});
+if (!topTarget) await fail("no tab in view at the strip's top");
+await page.mouse.click(topTarget.x, topTarget.y, { button: "right" });
+try { await page.waitForFunction(() => !!document.querySelector("body > .ctx-menu"), null, { timeout: 5000 }); }
+catch (e) { await fail("the tab menu never opened at the strip's top"); }
+await page.evaluate(() => {
+  window.__menuAtCopy = (id, copy) => {
+    const m = document.querySelector("body > .ctx-menu"), t = document.querySelector(`#tabs .tab[data-id="${id}"][data-copy="${copy}"]`);
+    const sc = document.getElementById("tabbar"), top = sc.getBoundingClientRect().top + sc.clientTop;
+    const mr = m ? m.getBoundingClientRect() : null, tr = t ? t.getBoundingClientRect() : null;
+    return { open: !!m, st: sc.scrollTop, tabOff: tr ? Math.round((tr.top - top) * 10) / 10 : null,
+             inView: !!tr && tr.top >= top - 0.5 && tr.bottom <= top + sc.clientHeight + 0.5,
+             dx: mr && tr ? Math.round((mr.left - tr.left) * 10) / 10 : null, dy: mr && tr ? Math.round((mr.top - tr.top) * 10) / 10 : null,
+             cardTop: mr ? Math.round(mr.top) : null, cardBottom: mr ? Math.round(mr.bottom) : null, winH: window.innerHeight };
+  };
+});
+out.topMenuBefore = await page.evaluate(([id, copy]) => window.__menuAtCopy(id, copy), [topTarget.id, topTarget.copy]);
+const forty = Array.from({ length: 40 }, (_, i) => "ffffffff-1111-2222-3333-" + String(i).padStart(12, "0"));
+await page.evaluate((ids) => {
+  const g = JSON.parse(JSON.stringify(window.__cap.order));
+  g.order = ids.concat(g.order);
+  g.tabs = ids.map((id, i) => ({ id, name: "tests-top-" + String(i).padStart(2, "0"), color: { bg: "#54B204", fg: "#ffffff" } })).concat(g.tabs || []);
+  if (Array.isArray(g.live)) g.live = ids.concat(g.live);
+  // a tag of their own, first in the tag order: its section is the strip's first rows, above every tab on screen
+  const views = g.views || (g.views = {});
+  views.tags = [{ id: "t-tests", name: "tests", color: "#54B204", members: ids }].concat(views.tags || []);
+  views.tagOrder = ["tests"].concat((views.tagOrder || []).filter((n) => n !== "tests"));
+  window.__rompFed.inbound("", g);
+}, forty);
+try { await page.waitForFunction((ids) => ids.every((id) => document.querySelector(`#tabs .tab[data-id="${id}"]`)), forty, { timeout: 20000 }); }
+catch (e) { await fail("the forty sessions never reached the strip"); }
+await page.evaluate(() => window.__frames(3));
+out.topMenuAfter = await page.evaluate(([id, copy]) => window.__menuAtCopy(id, copy), [topTarget.id, topTarget.copy]);
+out.topAddedAbove = await page.evaluate(([ids, id, copy]) => {
+  const kids = Array.from(document.getElementById("tabs").children), at = kids.findIndex((c) => c.dataset && c.dataset.id === id && (c.dataset.copy ?? "") === copy);
+  return at >= 0 && ids.every((x) => { const i = kids.findIndex((c) => c.dataset && c.dataset.id === x); return i >= 0 && i < at; });
+}, [forty, topTarget.id, topTarget.copy]);
+await page.keyboard.press("Escape");
+
+// 5. a window one pane wide (800 px, the shell's one-pane layout with its bottom tabs), the reader on the Feed tab: a jump the
+// kernel answers with its focus frame (the Sessions pane's openSession here; a card on another host's feed and a notification tap
+// arrive the same way) activates the session while the chat pane is hidden, and the pane comes forward a task later. Its tab must
+// be in the strip's view once the chat shows (the review of #282: the reveal was skipped while hidden and never retried)
+const ctx2 = await browser.newContext({ viewport: { width: 800, height: 700 } });
+await ctx2.addInitScript(capInit);
+const shell = await ctx2.newPage();
+shell.on("pageerror", (e) => console.error("shell pageerror: " + String(e).slice(0, 300)));
+await shell.goto(cfg.shell);
+const chatFrame = async () => { const h = await shell.$("#f-chat"); return h ? h.contentFrame() : null; };
+let cf = null;
+try {
+  await shell.waitForSelector("#f-chat", { timeout: 20000 });
+  cf = await chatFrame();
+  await cf.waitForFunction((n) => document.querySelectorAll("#tabs .tab[data-id]").length >= n && window.__cap && window.__cap.order && window.__cap.caps, cfg.nHub, { timeout: 120000 });
+} catch (e) { await fail("the shell's chat pane never showed the sessions: " + e); }
+out.narrowMobile = await shell.evaluate(() => !!(window.__rompMobileOn && window.__rompMobileOn()));
+await cf.evaluate(() => {
+  window.__look = (id) => {
+    const sc = document.getElementById("tabbar");
+    const top = sc.getBoundingClientRect().top + sc.clientTop, bottom = top + sc.clientHeight;
+    const t = document.querySelector(`#tabs .tab[data-id="${id}"]`), r = t ? t.getBoundingClientRect() : null;
+    return { st: sc.scrollTop, boxH: sc.clientHeight, present: !!t, inView: !!r && r.height > 0 && r.top >= top - 0.5 && r.bottom <= bottom + 0.5,
+             active: document.querySelector("#tabs .tab.active")?.dataset.id || null };
+  };
+  window.__frames = (n) => new Promise((res) => { const step = (k) => (k ? requestAnimationFrame(() => step(k - 1)) : res()); step(n); });
+  document.getElementById("tabbar").scrollTop = 0;
+});
+await cf.evaluate(() => window.__frames(3));
+out.narrowBefore = await cf.evaluate((id) => window.__look(id), cfg.far2);
+await shell.click("#mtabs button[data-pane=feed]");
+try { await shell.waitForFunction(() => document.body.getAttribute("data-tab") === "feed", null, { timeout: 5000 }); }
+catch (e) { await fail("the Feed tab never showed"); }
+out.narrowHidden = await cf.evaluate((id) => window.__look(id), cfg.far2);   // the chat pane hidden: its strip has no box on screen
+await cf.evaluate((id) => window.__rompFed.outbound({ type: "openSession", id }), cfg.far2);
+try { await cf.waitForFunction((x) => document.querySelector("#tabs .tab.active")?.dataset.id === x && window.__cap.seen.includes("focus:" + x), cfg.far2, { timeout: 45000 }); }
+catch (e) { await fail("the jump never activated the session in the hidden chat pane"); }
+try { await shell.waitForFunction(() => document.body.getAttribute("data-tab") === "chat", null, { timeout: 10000 }); }
+catch (e) { await fail("the jump never brought the chat pane forward"); }
+await cf.evaluate(() => window.__frames(3));
+out.narrowAfter = await cf.evaluate((id) => window.__look(id), cfg.far2);
+await ctx2.close();
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -268,8 +369,8 @@ class ServedStripReveal(unittest.TestCase):
         cfg = os.path.join(cls.lab, "cfg.json")
         origin = "http://127.0.0.1:%d" % cls.port
         with open(cfg, "w") as f:
-            json.dump({"chat": "%s/chat?token=%s" % (origin, cls.token), "origin": origin, "nHub": _keep.N_HUB,
-                       "far": FAR, "top": TOP, "topReply": TOP_REPLY}, f)
+            json.dump({"chat": "%s/chat?token=%s" % (origin, cls.token), "shell": "%s/?token=%s" % (origin, cls.token),
+                       "origin": origin, "nHub": _keep.N_HUB, "far": FAR, "far2": FAR2, "top": TOP, "topReply": TOP_REPLY}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -312,6 +413,29 @@ class ServedStripReveal(unittest.TestCase):
         self.assertAlmostEqual(a["tabOff"], b["tabOff"], delta=1, msg="its tab stayed where it was in the view" + d)
         self.assertAlmostEqual(a["dx"], b["dx"], delta=1, msg="the card is where it was beside its tab" + d)
         self.assertAlmostEqual(a["dy"], b["dy"], delta=1, msg="…at the same height" + d)
+
+    def test_an_open_tab_menu_at_the_strips_top_keeps_its_tab_in_view_and_stays_inside_the_window(self):
+        b, a = self.result["topMenuBefore"], self.result["topMenuAfter"]
+        d = "\n  before %s\n  after %s" % (json.dumps(b), json.dumps(a))
+        self.assertTrue(b["open"] and b["st"] == 0 and b["inView"], "the menu opened on a tab in view, the strip at its top" + d)
+        self.assertTrue(self.result["topAddedAbove"], "the forty sessions landed above the menu's tab" + d)
+        self.assertTrue(a["open"], "the menu is still open after the update" + d)
+        self.assertTrue(a["inView"], "its tab is still in the strip's view" + d)
+        self.assertAlmostEqual(a["tabOff"], b["tabOff"], delta=1, msg="…where it was: the strip held it under the card" + d)
+        self.assertAlmostEqual(a["dx"], b["dx"], delta=1, msg="the card is where it was beside its tab" + d)
+        self.assertAlmostEqual(a["dy"], b["dy"], delta=1, msg="…at the same height" + d)
+        self.assertLessEqual(a["cardBottom"], a["winH"], "the card is inside the window" + d)
+
+    def test_a_jump_while_the_chat_pane_is_hidden_reveals_its_tab_when_the_pane_shows(self):
+        r = self.result
+        b, h, a = r["narrowBefore"], r["narrowHidden"], r["narrowAfter"]
+        d = "\n  before %s\n  hidden %s\n  after %s" % (json.dumps(b), json.dumps(h), json.dumps(a))
+        self.assertTrue(r["narrowMobile"], "800 px is the shell's one-pane layout" + d)
+        self.assertTrue(b["present"] and not b["inView"], "the session's tab is on the strip, below the view" + d)
+        self.assertEqual(h["boxH"], 0, "on the Feed tab the chat pane is hidden: its strip has no box on screen" + d)
+        self.assertEqual(a["active"], FAR2, "the jump activated the session" + d)
+        self.assertGreater(a["boxH"], 0, "the chat pane came forward" + d)
+        self.assertTrue(a["inView"], "…with the session's tab in the strip's view" + d)
 
     def test_the_readers_own_wheel_still_closes_the_menu(self):
         if not self.result["menuAfter"]["open"]:

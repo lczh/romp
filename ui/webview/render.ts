@@ -1017,6 +1017,10 @@ let stripAnchorRaf = false;
 // The strip item an open menu was opened on (a tab, or a group header) and where it stood on screen: the rebuild anchors on it and
 // the card follows it (followStripMenu). Up here for the same reason.
 let stripMenuOn: { card: HTMLElement; key: string; x: number; y: number } | null = null;
+// A deliberate navigation's reveal that found no strip on screen (revealActiveTab): owed until the strip's box sizes in. Up here for
+// the same reason.
+let stripRevealOwed = false;
+let stripRevealRo: ResizeObserver | null = null;
 // The skeleton tab the user is LOOKING AT while its full is on the way (showActive's loader branch). Latched for
 // upsert, because on the click path the strip that RELEASES the id (the kernel dropped it from the set when it sent
 // the full) lands BEFORE the full itself, so by the time the frame arrives the id is no longer in the set and
@@ -7848,7 +7852,9 @@ function stripAftermath(visibleIds: readonly string[], ids: readonly string[]): 
 // its raw offset across that, so sessions added or removed ABOVE the view slid what the reader was looking at by a row or more.
 // The rebuild anchors instead: before the wipe it notes the items whose top edge is in view (a tab by its id and the group its
 // copy sits in, a header by its tag), and after the new strip is laid out it scrolls by however far the first of them that is
-// still on the strip moved, so that item stays where it was. A strip at its top keeps no anchor (what lands above shows there).
+// still on the strip moved, so that item stays where it was. A strip at its top keeps no anchor (what lands above shows there),
+// except the item an open menu stands on, which holds still under its card there too (the review of #282: at the top, forty
+// sessions added above carried the tab out of the strip, and its card past the window's bottom).
 // The anchor is what the reader SAW: one frame can carry several rebuilds (a tabOrder frame that drops sessions dismisses them
 // one by one, each a rebuild), and the in-between strips are never painted, so the anchor taken at the first of them holds
 // until the next frame (the animation frame is the paint's own event), unless the box was scrolled meanwhile.
@@ -7864,7 +7870,8 @@ function stripScrollAnchor(bar: HTMLElement): StripAnchor | null {
   const held = stripAnchorHeld;
   if (held && held.box === box && box.scrollTop === held.st) return held;   // a rebuild earlier in this frame took it: the strip the reader saw
   stripAnchorHeld = null;
-  if (box.scrollTop <= 0) return null;
+  const atTop = box.scrollTop <= 0;
+  if (atTop && !stripMenuOn) return null;
   const top = box.getBoundingClientRect().top + box.clientTop, bottom = top + box.clientHeight;
   const keys: string[] = [], offs = new Map<string, number>();
   for (const c of Array.from(bar.children)) {
@@ -7877,7 +7884,8 @@ function stripScrollAnchor(bar: HTMLElement): StripAnchor | null {
   }
   if (!keys.length) return null;
   const menuAt = stripMenuOn ? keys.indexOf(stripMenuOn.key) : -1;
-  if (menuAt > 0) keys.unshift(keys.splice(menuAt, 1)[0]);   // an open menu's item first: the card stays over it
+  if (atTop) { if (menuAt < 0) return null; keys.splice(0, keys.length, keys[menuAt]); }   // at the top only the menu's item anchors
+  else if (menuAt > 0) keys.unshift(keys.splice(menuAt, 1)[0]);   // an open menu's item first: the card stays over it
   stripAnchorHeld = { box, keys, offs, st: box.scrollTop };
   if (!stripAnchorRaf) { stripAnchorRaf = true; requestAnimationFrame(() => { stripAnchorRaf = false; stripAnchorHeld = null; }); }
   return stripAnchorHeld;
@@ -9160,10 +9168,16 @@ function focusActiveTab(quiet = false) {
  *  navigation calls it (setActive's pick, from the feed, the Sessions pane, a deep link, a notification, the keyboard; a jump to
  *  the tab already shown): before the strip held its place through rebuilds (keepStripScroll, the quiet focus restore), the
  *  rebuild's plain focus() did this as a side effect, and with the focus in the strip only. A repaint never calls it. Only the
- *  strip's own box scrolls, by the least that shows the whole item. */
+ *  strip's own box scrolls, by the least that shows the whole item.
+ *  With no strip on screen (the chat pane hidden, as on the Feed tab of a window one pane wide, where a jump un-hides the pane a
+ *  task after it activates; the phone's hidden strip) the reveal is owed, and paid when the strip's box sizes in: its
+ *  ResizeObserver is that event (the review of #282: the reveal was skipped and never retried, so the jump showed the chat with
+ *  its tab off-screen). */
 function revealActiveTab(): void {
   const bar = document.getElementById("tabs"), box = bar?.parentElement;
-  if (!bar || !box || !box.clientHeight) return;   // no strip on screen (the phone's, a hidden pane): nothing to reveal in
+  if (!bar || !box) return;
+  if (!box.clientHeight) { oweStripReveal(box); return; }
+  stripRevealOwed = false;
   let node = bar.querySelector(`.tab[data-id="${fileTabOpen ?? activeId}"]`) as HTMLElement | null;
   if (!node) {   // folded away under its section: the header stands in for it (focusActiveTab's rule)
     const home = activeId ? homeSectionOf(lastStripItems, activeId) : null;
@@ -9174,6 +9188,12 @@ function revealActiveTab(): void {
   const top = box.getBoundingClientRect().top + box.clientTop, bottom = top + box.clientHeight;
   const by = r.top < top ? r.top - top : r.bottom > bottom ? Math.min(r.bottom - bottom, r.top - top) : 0;
   if (Math.abs(by) >= 0.5) box.scrollTop += by;
+}
+function oweStripReveal(box: HTMLElement): void {
+  stripRevealOwed = true;
+  if (stripRevealRo || typeof ResizeObserver !== "function") return;
+  stripRevealRo = new ResizeObserver(() => { if (stripRevealOwed && box.clientHeight) revealActiveTab(); });
+  stripRevealRo.observe(box);
 }
 /** Open a section that puts a folded-away tab on screen: a session pick names the tab, so its tab must be on
  *  screen. Per holder, since a session under several tags has a copy under each and every copy's fold stands on
