@@ -16563,15 +16563,14 @@ def _newest_done_at(store):
 
 def _parse_unblock(raw, n):
     """{"verdicts":[{"n","do","why"}]} → {1-based idx: why} for the LIFTS, or None if unusable.
-    Tolerant of fences/prose around the object; anything malformed or out-of-range holds (conservative).
-    A 0/negative "n" anywhere rejects the whole reply (see _zero_based_tell: an off-base reply's other
-    n's would lift the wrong blocks)."""
-    m = re.search(r"\{.*\}", raw or "", re.S)
-    if not m:
-        return None
-    try:
-        obj = json.loads(m.group(0))
-    except Exception:
+    Isolated by _json_obj like every other triage reply, so fences, prose around the object (braces
+    included) and a reply cut off at its final closers all parse; the old greedy `\\{.*\\}` lost the
+    last two, and each loss retried the same evidence until the give-up cap dropped the lift for good.
+    An "n" may arrive as an int or an int-like string ("1"); a bool or a fraction names no block.
+    Anything malformed or out-of-range holds (conservative). A 0/negative "n" anywhere rejects the
+    whole reply (see _zero_based_tell: an off-base reply's other n's would lift the wrong blocks)."""
+    obj = _json_obj(raw)
+    if obj is None:
         return None
     verdicts = obj.get("verdicts")
     if not isinstance(verdicts, list) or _zero_based_tell(verdicts):
@@ -16581,7 +16580,14 @@ def _parse_unblock(raw, n):
         if not isinstance(v, dict) or v.get("do") != "lift":
             continue
         i = v.get("n")
-        if isinstance(i, int) and 1 <= i <= n:
+        if isinstance(i, str):
+            try:
+                i = int(i.strip())
+            except ValueError:
+                continue
+        if isinstance(i, bool) or not isinstance(i, int):
+            continue                       # JSON true is not block 1, and 1.5 is no block at all
+        if 1 <= i <= n:
             out[i] = str(v.get("why") or "").strip()
     return out
 

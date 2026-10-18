@@ -644,6 +644,30 @@ class PlanParse(unittest.TestCase):
                          {"done": {2: "x"}, "block": {}, "awaiting": {}})
         self.assertEqual(jd._parse_unblock('{"verdicts":[{"n":2,"do":"lift","why":"x"}]}', 3), {2: "x"})
 
+    def test_unblock_reply_is_isolated_like_every_other_triage_reply(self):
+        # The unblocker kept the greedy first-brace-to-last-brace parse after the other triage parsers
+        # moved to _json_obj, so two reply shapes those parsers accept came back None here, and each
+        # None retried the same evidence until the give-up cap dropped the lift for good.
+        lift = '{"verdicts": [{"n": 1, "do": "lift", "why": "answered in the reply"}]}'
+        self.assertEqual(jd._parse_unblock(lift[:-1], 1), {1: "answered in the reply"},
+                         "a reply cut off at its final brace is repaired, as the planner's is")
+        self.assertEqual(jd._parse_unblock(lift + "\n\nNote: the config lives in {repo}/notes-api.", 1),
+                         {1: "answered in the reply"},
+                         "trailing prose with a brace in it is ignored, not swallowed into the JSON")
+        self.assertEqual(jd._parse_unblock("```json\n" + lift + "\n```", 1), {1: "answered in the reply"})
+        # n read as the closer reads its goal refs: an int-like string counts...
+        self.assertEqual(jd._parse_unblock('{"verdicts": [{"n": "1", "do": "lift", "why": "x"}]}', 1),
+                         {1: "x"})
+        # ...but a bool or a fraction names no block, and holds
+        self.assertEqual(jd._parse_unblock('{"verdicts": [{"n": true, "do": "lift", "why": "x"}]}', 1), {})
+        self.assertEqual(jd._parse_unblock('{"verdicts": [{"n": 1.5, "do": "lift", "why": "x"}]}', 2), {})
+        self.assertEqual(jd._parse_unblock('{"verdicts": [{"n": "one", "do": "lift", "why": "x"}]}', 1), {})
+        # a string zero is still the off-base tell, and junk is still unusable
+        self.assertIsNone(jd._parse_unblock(
+            '{"verdicts": [{"n": "0", "do": "lift", "why": "x"}, {"n": 1, "do": "lift", "why": "y"}]}', 2))
+        self.assertIsNone(jd._parse_unblock("not json at all", 1))
+        self.assertIsNone(jd._parse_unblock('{"verdicts": [{"n": 1, "do": "lift", "why": "cut mid', 1))
+
     def test_retitle_parses_with_valid_goal_and_text(self):
         # retitle (the user 2026-07-01, narrower than the cut amend): a goal-number op, no "ref" (it only
         # ever targets a PRE-existing node, never a same-reply mint).
