@@ -29,7 +29,13 @@ test("the press guard is armed on #tabs pointerdown and released on pointerup/ca
   // gesture, detaching the dragged node, because this release had already let it)
   assert.match(RENDER, /window\.addEventListener\("pointercancel", \(\) => \{ if \(draggedId \|\| draggedGroup\) return; releaseTabStrip\(\); \}\);/);
   assert.doesNotMatch(RENDER, /window\.addEventListener\("pointercancel", releaseTabStrip\)/, "never the bare release: it would end the hold at dragstart");
-  assert.match(RENDER, /window\.addEventListener\("blur", releaseTabStrip\)/);   // press may end off-strip / in another frame
+  // the window's blur releases only when the PAGE lost the focus (a window switch: no pointerup ever comes); the focus moving to
+  // another frame of the page (another column's question card focusing itself on a push) keeps the hold, and the window it moved
+  // to is watched (page-focus.ts pageBlurred, executed in page-focus.test.ts; tests/test_chat_split_served.py drives it served)
+  assert.doesNotMatch(RENDER, /window\.addEventListener\("blur", releaseTabStrip\)/, "never the bare release: a sibling frame's focus would drop the hold mid-press");
+  assert.match(RENDER, /window\.addEventListener\("blur", \(\) => \{\n\s*if \(!tabPointerHeld \|\| tabHoldFocusOff\) return;[^\n]*\n\s*const off = pageBlurred\(window, releaseTabStrip\);\n\s*if \(tabPointerHeld\) tabHoldFocusOff = off;/);
+  const rel = RENDER.slice(RENDER.indexOf("function releaseTabStrip(): void {"), RENDER.indexOf("\n}\n", RENDER.indexOf("function releaseTabStrip(): void {")));
+  assert.match(rel, /^function releaseTabStrip\(\): void \{\n\s*if \(tabHoldFocusOff\) \{ tabHoldFocusOff\(\); tabHoldFocusOff = null; \}[^\n]*\n\s*if \(!tabPointerHeld\) return;/, "every release takes the watch off first, held or not");
 });
 
 test("release flushes a pending rebuild a tick LATER so the click fires against the live node first", () => {

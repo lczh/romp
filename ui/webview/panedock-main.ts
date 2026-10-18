@@ -34,6 +34,7 @@ import {
   edges, has, layout as layoutRects, leaves, move, parse, serialise, setFixed,
 } from "./pane-tree";
 import { paneSourceOk } from "./pane-source";
+import { watchPageFocus } from "./page-focus";
 import {
   BAND, CHAT, DEFAULT_BAND_PX, FEED, FILES, FLEET, GUTTER, LAYOUT_KEY, RING, type Payload, type Shown, type Zone,
   bandPxOf, colNumberOf, crossedSlop, dragEdge, edgeAt, edgeClamp, grabbable, growKey, isChatPane, landingRect, planTabDrop, pressGeometry, reconcileShown, roundRect, seedLayout, zoneAt,
@@ -844,25 +845,27 @@ class Engine {
     const up = (ev: Event) => { if (mine(ev)) this.endDiv(true); };
     // every other way the gesture ends is a CANCEL, Escape's path (the kit's convention: the pane drag's pointercancel is its cancel,
     // cancelPress, and a divider's Escape restores the press): a pointercancel (a touch the browser took for a pan), a lost capture,
-    // and the window's blur (a page put behind another mid-press gets neither a pointerup nor a pointercancel from Chromium: the
-    // tab strip's hold, render.ts). Before these the drag outlived the gesture: plain mouse movement kept resizing, and the next
-    // click committed it. A cancel restores the press layout and the band's grab-time height, and writes nothing
-    const cancel = (ev: Event) => {
-      // a blur with the page still focused is focus moving INTO one of the shell's own pane frames (the chat's question card focusing
-      // itself on a re-render, the shell focusing a pane's frame), not the window losing focus: the press is still held, so the drag
-      // goes on. Chromium moves the focused frame before it fires that blur, and drops the page's focus before it fires a window
-      // switch's (focus_controller.cc: SetFocusedFrame, SetFocused), so document.hasFocus() reads true for the one and false for the other
-      if (ev.type === "blur" && document.hasFocus()) return;
-      if (ev.type === "blur" ? this.div === drag : mine(ev)) this.endDiv(false);
-    };
+    // and the page losing the window's focus (a page put behind another mid-press gets neither a pointerup nor a pointercancel from
+    // Chromium: the tab strip's hold, render.ts). Before these the drag outlived the gesture: plain mouse movement kept resizing, and
+    // the next click committed it. A cancel restores the press layout and the band's grab-time height, and writes nothing
+    const cancel = (ev: Event) => { if (mine(ev)) this.endDiv(false); };
     // Escape reaches the drag from a focused pane through the engine's own keydown wiring on every pane document (wire, onKey)
     window.addEventListener("pointermove", mv, true); window.addEventListener("pointerup", up, true);
-    window.addEventListener("pointercancel", cancel, true); window.addEventListener("lostpointercapture", cancel, true); window.addEventListener("blur", cancel);
+    window.addEventListener("pointercancel", cancel, true); window.addEventListener("lostpointercapture", cancel, true);
+    // The window switch is heard at the blur of the window HOLDING the focus, wherever in the page that is (page-focus.ts): the press
+    // keeps the focus where it was (the default prevented above), so with the chat's composer typed into it is the chat's window
+    // that blurs, and the shell's hears nothing (the review of PR 302: the drag outlived the switch, and plain mouse movement resized
+    // until the next click committed it). A blur with the page still focused is the focus moving to another of its frames (the
+    // chat's question card focusing itself on a re-render, the shell focusing a pane's frame, PR 302), so the drag goes on and the
+    // watch moves with the focus; a pane reloaded under the watch is heard again at its frame's load. The focus held in a
+    // cross-origin pane (a sandboxed URL-source one) at the press cannot be followed, its window taking no listener of ours: a
+    // switch from there goes unheard, as before
+    const unwatch = watchPageFocus(window, () => { if (this.div === drag) this.endDiv(false); });
     // the listeners go BEFORE the capture is released, so the lostpointercapture that release raises is never heard as a cancel: each
-    // route ends the drag once
+    // route ends the drag once (the watch's own end runs once, and is off before endDiv goes on)
     this.divOff = () => {
       window.removeEventListener("pointermove", mv, true); window.removeEventListener("pointerup", up, true);
-      window.removeEventListener("pointercancel", cancel, true); window.removeEventListener("lostpointercapture", cancel, true); window.removeEventListener("blur", cancel);
+      window.removeEventListener("pointercancel", cancel, true); window.removeEventListener("lostpointercapture", cancel, true); unwatch();
       try { if (d.hasPointerCapture(pid)) d.releasePointerCapture(pid); } catch { /* the pointer is gone already */ }
     };
   }
@@ -912,7 +915,7 @@ class Engine {
   }
 
   /** End the drag: `commit` lands the last recorded position (and renders), a cancel (Escape, a pointercancel, a lost capture, the
-   *  window's blur) restores; `write` (the release's default) persists the commit; a reconcile that ends the drag under a toggled
+   *  page losing the window's focus) restores; `write` (the release's default) persists the commit; a reconcile that ends the drag under a toggled
    *  pane lands without writing and writes the corrected layout itself. */
   private endDiv(commit: boolean, write = true): void {
     const d = this.div;

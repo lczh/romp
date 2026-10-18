@@ -26,8 +26,11 @@ four divider drags the dashboard has and reads, for each:
     front, in the full Chromium with the page's focus emulation off) mid-drag ends the drag as Escape does, on a divider
     between columns and on the band's edge (the press layout and the band's height back, nothing written, more travel and the
     release after inert); focus moved into a pane frame mid-drag, which blurs the shell's window with the page still focused,
-    leaves the drag live, and the release lands it at the pointer with one store write; a pane hidden under the band edge's
-    drag ends it committed; the band's edge without the shell's grab refuses with a console error and a notice.
+    leaves the drag live, and the release lands it at the pointer with one store write; a window switch with a pane's field
+    holding the keyboard (the press keeps it there), which blurs that pane's window and not the shell's, ends the drag as Escape
+    does too, after the focus moved from pane to pane mid-drag and after that pane reloaded mid-drag as well, and leaves no
+    listener of the drag's on any pane window; a pane hidden under the band edge's drag ends it committed; the band's edge
+    without the shell's grab refuses with a console error and a notice.
 The four: (1) the shipped column gutters (kit off), (2) the sessions band's height divider (kit off), (3) the chat's vertical
 split divider (kit off, a session moved down), (4) the docking kit's dividers (kit on: a divider between columns and one
 between rows). The lab also measures the cost the design names: frames per second from the shell's requestAnimationFrame
@@ -549,6 +552,16 @@ pc.on("pageerror", (e) => out.errors.push("C: " + String(e).slice(0, 200)));
 const consoleC = [];
 pc.on("console", (m) => { if (m.type() === "error") consoleC.push(m.text().slice(0, 400)); });
 await pc.addInitScript(() => { try { const s = JSON.parse(localStorage.getItem("romp:settings") || "{}"); s.paneDocking = true; s.showFilesControl = true; localStorage.setItem("romp:settings", JSON.stringify(s)); } catch (e) {} });
+// every window of the page counts the blur and pagehide listeners put on it by ANOTHER frame's script: the kit's focus watch is the
+// shell's code, and a function made in another frame is no instance of this window's Function. The pane-focus legs below read
+// them in each pane frame mid-drag (the watch on the window holding the focus) and after (none left, a reloaded pane's included)
+await pc.addInitScript(() => {
+  const foreign = { blur: new Set(), pagehide: new Set() };
+  const add = EventTarget.prototype.addEventListener, rem = EventTarget.prototype.removeEventListener;
+  EventTarget.prototype.addEventListener = function (t, f, o) { if (this === window && foreign[t] && typeof f === "function" && !(f instanceof Function)) foreign[t].add(f); return add.call(this, t, f, o); };
+  EventTarget.prototype.removeEventListener = function (t, f, o) { if (this === window && foreign[t]) foreign[t].delete(f); return rem.call(this, t, f, o); };
+  window.__labForeign = () => foreign.blur.size + foreign.pagehide.size;
+});
 await pc.goto(cfg.url);
 await pc.waitForFunction(() => !!(window.__rompPaneDock && window.__rompPaneDock.on() && document.querySelectorAll(".pd-div").length >= 1), null, { timeout: 20000 }).catch(async () => { await die("the kit did not come on (C)"); });
 await pc.waitForTimeout(800);
@@ -645,6 +658,78 @@ async function frameFocusLeg(which, dd, dd2) {
 }
 out.kitFrameFocus_column = await frameFocusLeg("column", -50, -100);
 out.kitFrameFocus_band = await frameFocusLeg("band", -40, -80);
+// a PANE holding the keyboard at the press (the review of PR 302): the chat's composer typed into, then a divider pressed (the press
+// keeps the focus where it was), then a window switch mid-drag. The switch blurs the window holding the focus, the CHAT's, and the
+// shell's hears nothing: the drag must end as at the shell's own blur (the press layout and the band's height back, nothing written,
+// more travel and the release after inert). The chat's window blur is logged with the top's hasFocus at that moment, and the
+// listeners other frames put on each pane window counted mid-drag and after. `hop`: before the switch, the files pane's own script
+// focuses an element of its page, the focus moving pane to pane with the window keeping it: the drag goes on and follows the
+// pointer, and the switch then blurs the FILES pane's window. `reload`: the files pane holds the keyboard, and is reloaded mid-drag;
+// its new document's element focused, and the switch blurs the reloaded pane's new window
+// a pane frame by its element's id, through playwright's own frame (its evaluate is the page's own script's, CSP aside), the same
+// frame object across a reload
+const paneFrame = async (id) => { for (const f of pc.frames()) { if (f === pc.mainFrame()) continue; try { const e = await f.frameElement(); if ((await e.getAttribute("id")) === id) return f; } catch (e) { /* detached */ } } return null; };
+const inPane = async (id, fn) => { const f = await paneFrame(id); if (!f) return { error: "no frame " + id }; return f.evaluate(fn); };
+const foreignIn = () => pc.evaluate(() => Object.fromEntries(Array.from(document.querySelectorAll("iframe[id]")).map((f) => { let n = null; try { n = f.contentWindow.__labForeign(); } catch (e) { n = "unreadable"; } return [f.id, n]; })));
+const probeFocus = () => { let t = document.getElementById("lab-focus-probe");
+  if (!t) { t = document.createElement("textarea"); t.id = "lab-focus-probe"; t.style.cssText = "position:fixed;left:0;top:0;width:4px;height:4px;opacity:0"; document.body.appendChild(t); }
+  t.focus(); window.__labPaneBlurs = window.__labPaneBlurs || []; if (!window.__labPaneBlursOn) { window.__labPaneBlursOn = true; window.addEventListener("blur", () => window.__labPaneBlurs.push({ topHasFocus: top.document.hasFocus() })); }
+  return { active: document.activeElement ? document.activeElement.tagName + (document.activeElement.id ? "#" + document.activeElement.id : "") : null, hasFocus: document.hasFocus() }; };
+const composerFocus = () => { const t = document.querySelector("#composer textarea") || document.querySelector("textarea"); if (t) t.focus();
+  window.__labPaneBlurs = window.__labPaneBlurs || []; if (!window.__labPaneBlursOn) { window.__labPaneBlursOn = true; window.addEventListener("blur", () => window.__labPaneBlurs.push({ topHasFocus: top.document.hasFocus() })); }
+  return { active: document.activeElement ? document.activeElement.tagName : null, hasFocus: document.hasFocus() }; };
+const paneBlurs = (id) => inPane(id, () => (window.__labPaneBlurs || []).splice(0));
+const shellActiveC = () => pc.evaluate(() => { const a = document.activeElement; return a ? a.tagName + (a.id ? "#" + a.id : "") : null; });
+async function paneSwitchLeg(which, dd, { hop = false, reload = false } = {}) {
+  const p = await pickDiv(which); if (!p) return { error: "no " + which + " divider" };
+  const along = (k) => (which === "band" ? [p.x, p.y + k] : [p.x + k, p.y]);
+  const holder = reload ? "f-files" : "f-chat";
+  const focus = await inPane(holder, reload ? probeFocus : composerFocus);
+  const shellActive = await shellActiveC(), focusedBefore = await pc.evaluate(() => document.hasFocus());
+  await blursC(); await paneBlurs("f-chat"); await paneBlurs("f-files");
+  const heardBase = await foreignIn();   // what other frames' scripts already listen for on the pane windows (the shell's own wiring)
+  const w0 = await writes(pc); const before = await stateC(w0);
+  await pc.mouse.move(p.x, p.y); await pc.mouse.down(); await frame(pc);
+  await pc.mouse.move(...along(dd), { steps: 4 }); await frame(pc); await frame(pc);
+  const mid = await stateC(w0);
+  const kept = await inPane(holder, () => (document.activeElement ? document.activeElement.tagName : null) + "/" + document.hasFocus());   // the press left the keyboard where it was
+  const heardMid = await foreignIn();
+  let hopped = null, reloaded = null, afterHop = null, heardHop = null;
+  if (hop) {
+    hopped = await inPane("f-files", probeFocus); await frame(pc); await frame(pc);
+    afterHop = await stateC(w0);
+    await pc.mouse.move(...along(dd - 30), { steps: 4 }); await frame(pc); await frame(pc);   // the drag still follows the pointer
+    hopped.moved = await stateC(w0);
+    heardHop = await foreignIn();
+  }
+  if (reload) {
+    await pc.evaluate(() => { const f = document.getElementById("f-files"); window.__labLoaded = false; f.addEventListener("load", () => { window.__labLoaded = true; }, { once: true }); f.contentWindow.location.reload(); });
+    reloaded = { loaded: await pc.waitForFunction(() => window.__labLoaded === true && document.getElementById("f-files").contentDocument.readyState === "complete", null, { timeout: 15000 }).then(() => true).catch(() => false) };
+    await frame(pc); await frame(pc);
+    reloaded.focus = await inPane("f-files", probeFocus); await frame(pc);
+    reloaded.state = await stateC(w0);
+    reloaded.heard = await foreignIn();
+  }
+  away = await ctxC.newPage(); await away.bringToFront();
+  await frame(pc); await frame(pc);
+  const shellBlurs = await blursC();
+  const chatBlurs = await paneBlurs("f-chat"), filesBlurs = await paneBlurs("f-files");
+  await pc.mouse.move(...along(dd - 60), { steps: 4 }); await frame(pc); await frame(pc);   // more travel under the held pointer
+  const moved = await stateC(w0);
+  await pc.mouse.up(); await frame(pc); await frame(pc);
+  const released = await stateC(w0);
+  const heardAfter = await foreignIn();
+  await comeBack();
+  await autosizeC();
+  const autosized = await stateC(w0);
+  for (const id of ["f-chat", "f-files"]) await inPane(id, () => { const t = document.getElementById("lab-focus-probe"); if (t) t.remove(); const a = document.activeElement; if (a && a.blur) a.blur(); return 1; });
+  await pc.evaluate(() => { const a = document.activeElement; if (a && a.tagName === "IFRAME") a.blur(); });   // the keyboard handed back to the shell
+  return { which, dd, hop, reload, focus, shellActive, focusedBefore, kept, heardBase, heardMid, hopped, afterHop, heardHop, reloaded, shellBlurs, chatBlurs, filesBlurs, before, mid, moved, released, heardAfter, autosized };
+}
+out.kitPaneSwitch_column = await paneSwitchLeg("column", -90);
+out.kitPaneSwitch_band = await paneSwitchLeg("band", -45);
+out.kitPaneHop_column = await paneSwitchLeg("column", -90, { hop: true });
+out.kitPaneReload_column = await paneSwitchLeg("column", -90, { reload: true });
 // a pane hidden under the band edge's drag: the drag ends at its last position, committed, as a column drag does at a toggle; the
 // reconcile writes the corrected layout once; more travel, then a release or an Escape, change nothing; the pane put back after
 async function bandToggleLeg({ escape = false } = {}) {
@@ -1259,6 +1344,66 @@ class ServedLiveDividers(unittest.TestCase):
             self.assertEqual(s2["tl"], d["tl"], "%s: the shell's autosize after the gesture keeps the band where the release put it" % name)
             self._same_rects(d["rects"], s2["rects"], "%s: and every pane" % name)
             self.assertEqual(s2["writes"], d["writes"], "%s: nothing more written" % name)
+
+    def test_a_window_switch_with_a_pane_holding_the_keyboard_ends_the_drag_as_escape_does(self):
+        # the review of PR 302: the press keeps the focus where it was, so with a pane's field typed into (the chat's composer) a window
+        # switch mid-drag blurs that PANE's window and not the shell's, and the drag outlived it: plain mouse movement resized until
+        # the next click committed it. The drag's watch hears the blur of the window holding the focus (page-focus.ts), follows the
+        # focus from pane to pane (the files pane focusing itself mid-drag ends nothing), and hears a pane reloaded under it at its
+        # new document; every listener it put on a pane window is gone at the end
+        r = self._result()
+        self.assertEqual(r["errors"], [], "no page error")
+        for name in ("kitPaneSwitch_column", "kitPaneSwitch_band", "kitPaneHop_column", "kitPaneReload_column"):
+            c = r[name]
+            self.assertNotIn("error", c, c)
+            holder = "f-files" if c["reload"] else "f-chat"
+            switched = "f-files" if (c["reload"] or c["hop"]) else "f-chat"   # the pane holding the focus at the switch
+            self.assertTrue(c["focusedBefore"] and c["focus"]["hasFocus"], "%s: the page and the pane had the focus at the press: %r" % (name, c["focus"]))
+            self.assertEqual(c["shellActive"], "IFRAME#" + holder, "%s: the keyboard in the pane at the press" % name)
+            self.assertEqual(c["kept"], "TEXTAREA/true", "%s: the press left the keyboard in the pane's field" % name)
+            self.assertTrue(c["mid"]["pressed"], "%s: the drag was live" % name)
+            if c["which"] == "band":
+                self.assertGreater(abs(c["mid"]["band"] - c["before"]["band"]), 15, "%s: the drag moved the band first: %r" % (name, c["mid"]["band"]))
+            else:
+                self.assertNotEqual(c["mid"]["layout"], c["before"]["layout"], "%s: the drag moved the pair first" % name)
+            if c["hop"]:
+                h = c["hopped"]
+                self.assertEqual((h["active"], h["hasFocus"]), ("TEXTAREA#lab-focus-probe", True), "%s: the files pane took the focus mid-drag: %r" % (name, h))
+                self.assertTrue(c["afterHop"]["pressed"], "%s: the focus moving pane to pane ends nothing" % name)
+                self._same_rects(c["mid"]["rects"], c["afterHop"]["rects"], "%s: nothing snapped back at the focus move" % name)
+                self.assertTrue(h["moved"]["pressed"], "%s: more travel is still the drag" % name)
+                self.assertNotEqual(h["moved"]["layout"], c["afterHop"]["layout"], "%s: and the pair follows it" % name)
+                self.assertEqual(c["chatBlurs"], [{"topHasFocus": True}], "%s: the chat's window blurred at the focus move, the page still focused" % name)
+            if c["reload"]:
+                d = c["reloaded"]
+                self.assertTrue(d["loaded"], "%s: the files pane reloaded mid-drag: %r" % (name, d))
+                self.assertEqual((d["focus"]["active"], d["focus"]["hasFocus"]), ("TEXTAREA#lab-focus-probe", True), "%s: its new document holds the focus: %r" % (name, d["focus"]))
+                self.assertTrue(d["state"]["pressed"], "%s: the reload ends nothing" % name)
+            self.assertEqual(c["shellBlurs"], [], "%s: the shell's window heard no blur: the switch blurs the window holding the focus" % name)
+            self.assertEqual(c["filesBlurs" if switched == "f-files" else "chatBlurs"][-1:], [{"topHasFocus": False}], "%s: the switch blurred %s, the top's focus gone at that blur: %r" % (name, switched, (c["chatBlurs"], c["filesBlurs"])))
+            for step in ("moved", "released"):
+                s = c[step]
+                self.assertFalse(s["pressed"], "%s: the drag is over after the switch (%s)" % (name, step))
+                self._same_rects(c["before"]["rects"], s["rects"], "%s: the press layout back and kept through more travel and the release (%s)" % (name, step))
+                self.assertEqual(s["layout"], c["before"]["layout"], "%s: the engine's layout is the press layout (%s)" % (name, step))
+                self.assertEqual(s["tl"], c["before"]["tl"], "%s: the band's height variable at its grab-time value (%s)" % (name, step))
+                self._within(s["band"], c["before"]["band"], 1.0, "%s: the band's height back (%s)" % (name, step))
+                self.assertEqual(s["writes"], {"layout": 0, "remembered": 0}, "%s: nothing written (%s)" % (name, step))
+                self.assertEqual(s["stored"], c["before"]["stored"], "%s: the stored layout untouched (%s)" % (name, step))
+            a = c["autosized"]
+            self.assertEqual(a["tl"], c["before"]["tl"], "%s: the shell's autosize after the gesture keeps the band where it was" % name)
+            self.assertEqual(a["writes"], {"layout": 0, "remembered": 0}, "%s: still nothing written" % name)
+            # the mechanism, read last so a regression names the behaviour first: mid-drag the drag listens on the window holding the
+            # focus (its blur and its unload) and on no other, moves with the focus, hears a reloaded pane's NEW window, and leaves
+            # nothing on any pane window at the end (counted against what the shell's own wiring already listens for)
+            base = c["heardBase"]
+            delta = lambda m: {k: v - base.get(k, 0) for k, v in m.items() if isinstance(v, int) and v != base.get(k, 0)}
+            self.assertEqual(delta(c["heardMid"]), {holder: 2}, "%s: mid-drag, the window holding the focus is heard: %r" % (name, c["heardMid"]))
+            if c["hop"]:
+                self.assertEqual(delta(c["heardHop"]), {"f-files": 2}, "%s: the watch moved with the focus: %r" % (name, c["heardHop"]))
+            if c["reload"]:
+                self.assertEqual(delta(c["reloaded"]["heard"]), {"f-files": 2}, "%s: the reloaded pane's NEW window is heard: %r" % (name, c["reloaded"]["heard"]))
+            self.assertEqual(delta(c["heardAfter"]), {}, "%s: no listener of the drag's left on any pane window: %r" % (name, c["heardAfter"]))
 
     def test_a_pane_hidden_under_the_band_edges_drag_ends_it_committed_and_the_store_takes_the_toggle_at_once(self):
         # the review of PR 295: the reconcile ended a column or row drag on a change of the leaf set, never the band edge's, so the band

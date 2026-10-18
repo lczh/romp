@@ -89,6 +89,7 @@ import { liveNotices, keepReloadNotices, takeReloadNotices } from "./reload-noti
 import { mintProvisionalId, isProvisionalId, provisionalName, adoptsProvisional, focusResolvesProvisional } from "./provisional";
 import { colFromSearch, columnHolds, columnEmptiness, type ColSets } from "./chat-columns";   // the chat split's partition (2026-09-11): which column this page is, which sessions it holds
 import { onlyTag, matchesOnly, onlyWindow } from "./only-filter";
+import { pageBlurred } from "./page-focus";   // the strip's press-hold: a blur ends it only when the page lost the focus (releaseTabStrip)
 import { numberDiff, type DiffRow } from "./diff-lines";
 import { actionParts, toolRowLabel, toolInputText } from "./compact";
 import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
@@ -6791,6 +6792,9 @@ let renderPendingAfterRename = false;
 // dispatches right after pointerup, fires against the still-present node first.
 let tabPointerHeld = false;
 let renderPendingWhilePressed = false;
+// The hold's watch for the page losing the focus once a blur of this window was only the focus moving to another frame of the
+// page (page-focus.ts pageBlurred; the window's blur listener below arms it): its off switch, taken off at every release.
+let tabHoldFocusOff: (() => void) | null = null;
 // The strip's last rendered SIGNATURE (renderTabs): every input the strip paints, as one string. renderTabs
 // runs on every kernel push, and on a board of a few dozen tabs most pushes are tails for tabs that are not
 // active; rebuilding every tab node with its listeners and then reading each one's offsetTop
@@ -6807,6 +6811,7 @@ let tabStripSig = "";
 // too: a native drag swallows the pointerup, so without this a finished drag would leave the strip
 // frozen against pushes until the next unrelated press (see the dragend handler).
 function releaseTabStrip(): void {
+  if (tabHoldFocusOff) { tabHoldFocusOff(); tabHoldFocusOff = null; }   // first, so any release (a pointerup in this page) takes the watch off
   if (!tabPointerHeld) return;
   tabPointerHeld = false;
   if (renderPendingWhilePressed) { renderPendingWhilePressed = false; setTimeout(() => renderTabs(), 0); }
@@ -15772,7 +15777,7 @@ function snapshotHost(): HTMLElement | null {
   // CLICK-SAFE (ui/CLAUDE.md): the rows are rebuilt by renderTabs on every push that changes one, and a rebuild
   // between mousedown and mouseup leaves the click with no row under it. A press on the view latches the
   // STRIP's hold (tabPointerHeld): renderTabs, and renderSnapshot's own rebuild, wait for the release
-  // (pointerup / pointercancel / blur on the window, releaseTabStrip's one path), and the deferred flush
+  // (pointerup / pointercancel / the page losing the focus, releaseTabStrip's one path), and the deferred flush
   // repaints the strip and the view together. One latch for two surfaces one gesture can span.
   host.addEventListener("pointerdown", () => { tabPointerHeld = true; });
   return host;
@@ -25886,8 +25891,8 @@ function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
   // Click-safe pressing (the user 2026-06-30): hold renderTabs() while a pointer is pressed anywhere on the
   // strip, so a kernel push mid-press can't replaceChildren() out from under the ✕/tab you're clicking and
   // drop the click (see tabPointerHeld). #tabs is stable across every rebuild, so this listener is installed
-  // ONCE. Release on pointerup/cancel (anywhere — a press often ends off the tiny ✕) and on blur (the press
-  // may end in another frame / outside the window, where no pointerup reaches us). The flush is a setTimeout(0)
+  // ONCE. Release on pointerup/cancel (anywhere — a press often ends off the tiny ✕) and on the page losing the
+  // focus (the press may end outside the window, where no pointerup reaches us: below). The flush is a setTimeout(0)
   // so the click — dispatched immediately after pointerup, before the timer — fires against the live node first.
   tabs.addEventListener("pointerdown", () => { tabPointerHeld = true; });
   window.addEventListener("pointerup", releaseTabStrip);
@@ -25899,7 +25904,19 @@ function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
   // dragged node: the live reorder stopped, and the drop moved nothing (2026-09-11, a rename pushed mid-drag in the
   // served lab). The drag state the dragstart handlers set is the tell; a drag of ours in flight keeps the hold.
   window.addEventListener("pointercancel", () => { if (draggedId || draggedGroup) return; releaseTabStrip(); });
-  window.addEventListener("blur", releaseTabStrip);
+  // The window's blur releases the hold only when the PAGE lost the focus: a window switch, which puts the page behind another
+  // mid-press with neither a pointerup nor a pointercancel. A blur that is the focus moving to ANOTHER frame of the page (another
+  // chat column's question card focusing itself on a push, focusCardUnlessTyping) leaves the press held: its pointerup still comes
+  // here, and releasing early let that same push rebuild the strip under the press and lose the click. This frame's own
+  // document.hasFocus() reads false for both, so the TOP document's is read (page-focus.ts; the shell is same-origin), and the
+  // window the focus moved to is watched from then on, so a window switch later in the press still releases. In VS Code's webview
+  // the top is cross-origin and cannot be read: there every blur releases the hold, as it always has, since nothing this page can
+  // read tells the two apart.
+  window.addEventListener("blur", () => {
+    if (!tabPointerHeld || tabHoldFocusOff) return;   // not held, or the watch is on and hears this blur itself
+    const off = pageBlurred(window, releaseTabStrip);
+    if (tabPointerHeld) tabHoldFocusOff = off;   // the page's focus gone: the call released the hold already, and its watch is off
+  });
   // LIVE REORDER (T127, the user 2026-08-27: dragging should push the other tabs into their new
   // locations as you drag, the way browsers do): while a tab drags, its in-flow element moves
   // through the strip's DOM as the pointer crosses the MIDPOINT of the tab under it — the
