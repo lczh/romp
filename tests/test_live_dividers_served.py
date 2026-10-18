@@ -21,7 +21,11 @@ four divider drags the dashboard has and reads, for each:
   - under the kit, a pane toggled mid-drag ends the drag committed and the store parses, matches the screen and survives a
     reload; the band re-sized by the shell's autosize under a column drag keeps its height through the drag's frames and
     reaches the store once; the band's own edge writes the store once at release and nothing on Escape; the divider's cursor
-    holds over the panes for the drag.
+    holds over the panes for the drag;
+  - under the kit, a pointercancel, a lost pointer capture or the window's blur mid-drag ends the drag as Escape does, on a divider
+    between columns and on the band's edge (the press layout and the band's height back, nothing written, more travel and the
+    release after inert); a pane hidden under the band edge's drag ends it committed; the band's edge without the shell's grab
+    refuses with a console error and a notice.
 The four: (1) the shipped column gutters (kit off), (2) the sessions band's height divider (kit off), (3) the chat's vertical
 split divider (kit off, a session moved down), (4) the docking kit's dividers (kit on: a divider between columns and one
 between rows). The lab also measures the cost the design names: frames per second from the shell's requestAnimationFrame
@@ -98,7 +102,10 @@ let browser;
 try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const out = { errors: [] };
-const die = async (why) => { fs.writeSync(1, "RESULT:" + JSON.stringify({ ...out, died: why }) + "\n"); await browser.close(); process.exit(0); };
+// the result line outgrew the pipe's 64 KiB buffer (the cancel legs, 2026-10-18), and one write to a full pipe is partial: the line is
+// written until it is all out, or the test reads a truncated record
+const emit = (line) => { const b = Buffer.from(line); for (let o = 0; o < b.length;) { try { o += fs.writeSync(1, b, o, b.length - o); } catch (e) { if (e.code !== "EAGAIN") throw e; } } };
+const die = async (why) => { emit("RESULT:" + JSON.stringify({ ...out, died: why }) + "\n"); await browser.close(); process.exit(0); };
 // Chromium delivers pointer moves aligned to animation frames and the shell applies a divider's position at the next frame: read
 // geometry only after two frames have passed since the move (an event wait, not a timer)
 const frame = (page) => page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(1)))));
@@ -519,7 +526,102 @@ out.kitBandAutosize = await bandKitUnderAutosize(-50);
   out.kitReload = { before, after: await rectsOf(), storedBefore: storedBefore.raw, layoutAfter: await layoutOf(), storedAfter: (await storedLayout()).raw };
 }
 await ctxB.close();
-fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
+
+// ── (C) the kit ON: the ways a divider drag ends other than a release (the review of PR 295), on a page of their own ──────────────
+// A pointercancel (a touch the browser took for a pan), a lost pointer capture and the window's blur (a page put behind another
+// mid-press hears neither a pointerup nor a pointercancel), each mid-drag on a divider between columns and on the band's edge; a pane
+// hidden under the band edge's drag (the reconcile ended column and row drags only); the band's edge with the shell's grab missing.
+// The page's own context, so these legs neither lean on the legs above nor move what the reload above restores.
+const ctxC = await browser.newContext({ viewport: { width: 1500, height: 900 } });
+const pc = await ctxC.newPage();
+pc.on("pageerror", (e) => out.errors.push("C: " + String(e).slice(0, 200)));
+const consoleC = [];
+pc.on("console", (m) => { if (m.type() === "error") consoleC.push(m.text().slice(0, 400)); });
+await pc.addInitScript(() => { try { const s = JSON.parse(localStorage.getItem("romp:settings") || "{}"); s.paneDocking = true; s.showFilesControl = true; localStorage.setItem("romp:settings", JSON.stringify(s)); } catch (e) {} });
+await pc.goto(cfg.url);
+await pc.waitForFunction(() => !!(window.__rompPaneDock && window.__rompPaneDock.on() && document.querySelectorAll(".pd-div").length >= 1), null, { timeout: 20000 }).catch(async () => { await die("the kit did not come on (C)"); });
+await pc.waitForTimeout(800);
+await pc.evaluate(() => { window.__rompPaneToggle("fleet", true); window.__rompPaneToggle("files", true); });
+await pc.waitForTimeout(800);
+await instrument(pc);
+await pc.evaluate(() => { window.__labPid = null; document.addEventListener("pointerdown", (e) => { window.__labPid = e.pointerId; }, true); });   // the press's pointer id, for the routes below
+const stateC = async (w0) => { const w = await writes(pc); return pc.evaluate(({ w, w0 }) => ({
+  rects: Object.fromEntries(window.__rompPaneDock.rects().map((r) => [r.pane, r.rect])), layout: JSON.stringify(window.__rompPaneDock.layout()),
+  stored: localStorage.getItem("romp-layout"), tl: document.querySelector(".col").style.getPropertyValue("--tl"),
+  band: (() => { const b = document.getElementById("tl-pane"); return b ? b.getBoundingClientRect().height : null; })(),
+  remembered: localStorage.getItem("romp-tl-h"), pressed: document.body.classList.contains("pd-resize"),
+  writes: { layout: (w["romp-layout"] || 0) - (w0["romp-layout"] || 0), remembered: (w["romp-tl-h"] || 0) - (w0["romp-tl-h"] || 0) } }), { w, w0 }); };
+// the divider between columns (the first row-dir one), or the band's edge (the col-dir one whose bottom meets the band's top)
+const pickDiv = (which) => pc.evaluate((wh) => { const b = document.getElementById("tl-pane"), br = b ? b.getBoundingClientRect() : null;
+  const ds = Array.from(document.querySelectorAll(".pd-div"));
+  const i = ds.findIndex((d) => { const r = d.getBoundingClientRect(); return wh === "band" ? d.getAttribute("data-dir") === "col" && !!br && Math.abs(r.bottom - br.top) <= 8 : d.getAttribute("data-dir") === "row"; });
+  if (i < 0) return null; const r = ds[i].getBoundingClientRect(); return { i, x: r.left + r.width / 2, y: r.top + r.height / 2 }; }, which);
+// the route, mid-drag, at the pressed divider: the pointercancel the browser sends a taken pointer, a release of the capture (the
+// browser's lostpointercapture follows at its next pointer event), the window's blur
+const fireRoute = (route, i) => pc.evaluate(({ route, i }) => { const d = document.querySelectorAll(".pd-div")[i], pid = window.__labPid;
+  if (route === "pointercancel") { d.dispatchEvent(new PointerEvent("pointercancel", { pointerId: pid, pointerType: "mouse", isPrimary: true, bubbles: true })); return null; }
+  if (route === "lostpointercapture") { const had = d.hasPointerCapture(pid); try { d.releasePointerCapture(pid); } catch (e) {} return had; }
+  window.dispatchEvent(new Event("blur")); return null; }, { route, i });
+// the shell's autosize run after the gesture (a romp-panes event): it applies the height the shell holds as the user's, else the
+// content fit, so a band that stays put through it means the remembered height and the height variable agree
+const autosizeC = async () => { await pc.evaluate(() => window.dispatchEvent(new Event("romp-panes"))); await frame(pc); await frame(pc); };
+async function cancelLeg(which, route, dd) {
+  const p = await pickDiv(which); if (!p) return { error: "no " + which + " divider" };
+  const along = (k) => (which === "band" ? [p.x, p.y + k] : [p.x + k, p.y]);   // a column divider moves along x, the band's edge along y
+  const w0 = await writes(pc); const before = await stateC(w0);
+  await pc.mouse.move(p.x, p.y); await pc.mouse.down(); await frame(pc);
+  await pc.mouse.move(...along(dd), { steps: 4 }); await frame(pc); await frame(pc);
+  const mid = await stateC(w0);
+  const captured = await fireRoute(route, p.i); await frame(pc); await frame(pc);
+  await pc.mouse.move(...along(dd - 60), { steps: 4 }); await frame(pc); await frame(pc);   // more travel under the held pointer
+  const moved = await stateC(w0);
+  await pc.mouse.up(); await frame(pc); await frame(pc);
+  const released = await stateC(w0);
+  await autosizeC();
+  return { which, route, dd, captured, before, mid, moved, released, autosized: await stateC(w0) };
+}
+for (const which of ["column", "band"]) for (const route of ["pointercancel", "lostpointercapture", "blur"]) {
+  out["kitCancel_" + which + "_" + route] = await cancelLeg(which, route, which === "band" ? -45 : -90);
+}
+// a pane hidden under the band edge's drag: the drag ends at its last position, committed, as a column drag does at a toggle; the
+// reconcile writes the corrected layout once; more travel, then a release or an Escape, change nothing; the pane put back after
+async function bandToggleLeg({ escape = false } = {}) {
+  const p = await pickDiv("band"); if (!p) return { error: "no band divider" };
+  const w0 = await writes(pc); const before = await stateC(w0);
+  await pc.mouse.move(p.x, p.y); await pc.mouse.down(); await frame(pc);
+  await pc.mouse.move(p.x, p.y - 50, { steps: 4 }); await frame(pc); await frame(pc);
+  const mid = await stateC(w0);
+  await pc.evaluate(() => window.__rompPaneToggle("files", false)); await frame(pc); await frame(pc);
+  const toggled = await stateC(w0);
+  await pc.mouse.move(p.x, p.y - 110, { steps: 4 }); await frame(pc); await frame(pc);
+  const moved = await stateC(w0);
+  if (escape) { await pc.keyboard.press("Escape"); await frame(pc); }
+  await pc.mouse.up(); await frame(pc); await frame(pc);
+  const released = await stateC(w0);
+  await autosizeC();
+  const autosized = await stateC(w0);
+  await pc.evaluate(() => window.__rompPaneToggle("files", true)); await frame(pc); await frame(pc);
+  return { escape, before, mid, toggled, moved, released, autosized };
+}
+out.kitBandToggleRelease = await bandToggleLeg();
+out.kitBandToggleEscape = await bandToggleLeg({ escape: true });
+// the band's edge with the shell's grab gone (window.__rompBandGrab): a loud refusal, never a half-working drag
+async function bandNoGrab() {
+  const p = await pickDiv("band"); if (!p) return { error: "no band divider" };
+  const w0 = await writes(pc); const before = await stateC(w0); const n0 = consoleC.length;
+  await pc.evaluate(() => { const w = window; w.__labGrab = w.__rompBandGrab; delete w.__rompBandGrab; w.__labNotes = []; const n = w.__rompNotify; w.__labNotify = n;
+    w.__rompNotify = function (k, t) { w.__labNotes.push({ kind: k, text: String(t) }); return n.apply(this, arguments); }; });
+  await pc.mouse.move(p.x, p.y); await pc.mouse.down(); await frame(pc);
+  await pc.mouse.move(p.x, p.y - 50, { steps: 4 }); await frame(pc); await frame(pc);
+  const mid = await stateC(w0);
+  await pc.mouse.up(); await frame(pc); await frame(pc);
+  const released = await stateC(w0);
+  const notes = await pc.evaluate(() => { const w = window; w.__rompBandGrab = w.__labGrab; w.__rompNotify = w.__labNotify; return w.__labNotes; });
+  return { before, mid, released, errors: consoleC.slice(n0), notes };
+}
+out.kitBandNoGrab = await bandNoGrab();
+await ctxC.close();
+emit("RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
 """
@@ -1007,6 +1109,91 @@ class ServedLiveDividers(unittest.TestCase):
         self.assertLess(far_d["edge"], far_d["pointer"] - 100, "the edge stopped at the clamp")
         self._within(far_u["L"]["h"], _kit_min(far_u["sum"]), 1.5, "far up: the top pane at the kit's minimum for a %r px pair under a %r px band: %r" % (far_u["sum"], far_u.get("band"), far_u))
         self.assertTrue(kcf["after"]["layoutRestored"])
+
+    def _same_rects(self, a, b, msg):
+        self.assertEqual(sorted(a.keys()), sorted(b.keys()), msg)
+        for k, v in a.items():
+            for side in ("x", "y", "w", "h"):
+                self._within(b[k][side], v[side], 1.0, "%s: %s's %s" % (msg, k, side))
+
+    def test_a_pointercancel_a_lost_capture_or_the_windows_blur_ends_a_kit_drag_as_escape_does(self):
+        # the review of PR 295: the kit's divider drags heard a move and a release only, so a pointer the browser took (a touch turned
+        # pan), a lost capture or a window put behind another left the drag live, plain mouse movement kept resizing and the next click
+        # committed it. Each route now ends the drag as Escape does: the press layout and the band's grab-time height back, nothing
+        # written, more travel and the release after inert, and the shell's remembered height left agreeing with the height variable
+        r = self._result()
+        self.assertEqual(r["errors"], [], "no page error")
+        for which in ("column", "band"):
+            for route in ("pointercancel", "lostpointercapture", "blur"):
+                name = "kitCancel_%s_%s" % (which, route)
+                c = r[name]
+                self.assertNotIn("error", c, c)
+                if which == "band":
+                    self.assertGreater(abs(c["mid"]["band"] - c["before"]["band"]), 15, "%s: the drag moved the band first: %r" % (name, c["mid"]["band"]))
+                else:
+                    self.assertNotEqual(c["mid"]["layout"], c["before"]["layout"], "%s: the drag moved the pair first" % name)
+                self.assertTrue(c["mid"]["pressed"], "%s: the drag was live before the route" % name)
+                if route == "lostpointercapture":
+                    self.assertTrue(c["captured"], "%s: the divider held the pointer's capture mid-drag" % name)
+                for step in ("moved", "released"):
+                    s = c[step]
+                    self.assertFalse(s["pressed"], "%s: the drag is over after the route (%s)" % (name, step))
+                    self._same_rects(c["before"]["rects"], s["rects"], "%s: the press layout back and kept through more travel and the release (%s)" % (name, step))
+                    self.assertEqual(s["layout"], c["before"]["layout"], "%s: the engine's layout is the press layout (%s)" % (name, step))
+                    self.assertEqual(s["tl"], c["before"]["tl"], "%s: the band's height variable at its grab-time value (%s)" % (name, step))
+                    self._within(s["band"], c["before"]["band"], 1.0, "%s: the band's height back (%s)" % (name, step))
+                    self.assertEqual(s["writes"], {"layout": 0, "remembered": 0}, "%s: nothing written, mid-drag or at the release (%s)" % (name, step))
+                    self.assertEqual(s["stored"], c["before"]["stored"], "%s: the stored layout untouched (%s)" % (name, step))
+                    self.assertEqual(s["remembered"], c["before"]["remembered"], "%s: the remembered band height untouched (%s)" % (name, step))
+                a = c["autosized"]
+                self.assertEqual(a["tl"], c["before"]["tl"], "%s: the shell's autosize after the gesture keeps the band where it was: the height it holds as the user's agrees with the variable: %r" % (name, a["tl"]))
+                self._within(a["band"], c["before"]["band"], 1.0, "%s: and the band's height" % name)
+                self.assertEqual(a["writes"], {"layout": 0, "remembered": 0}, "%s: still nothing written" % name)
+
+    def test_a_pane_hidden_under_the_band_edges_drag_ends_it_committed_and_the_store_takes_the_toggle_at_once(self):
+        # the review of PR 295: the reconcile ended a column or row drag on a change of the leaf set, never the band edge's, so the band
+        # drag ran on past the toggle (more travel kept resizing the band) and the store kept the hidden
+        # pane docked until the release. It now ends as a column drag does: landed where it was, the reconcile's one write
+        r = self._result()
+        for name in ("kitBandToggleRelease", "kitBandToggleEscape"):
+            t = r[name]
+            self.assertNotIn("error", t, t)
+            at = t["toggled"]
+            self.assertTrue(t["mid"]["pressed"], "%s: the band's drag was live before the toggle" % name)
+            self.assertGreater(abs(t["mid"]["band"] - t["before"]["band"]), 15, "%s: and had moved the band" % name)
+            self.assertFalse(at["pressed"], "%s: the toggle ended the drag (new information under the held pointer)" % name)
+            self.assertNotIn("files-pane", at["rects"], "%s: the hidden pane is off the page" % name)
+            self._within(at["band"], t["mid"]["band"], 1.5, "%s: the drag landed at its last position, committed" % name)
+            self.assertEqual(at["writes"]["layout"], 1, "%s: one store write at the toggle, the reconcile's corrected layout: %r" % (name, at["writes"]))
+            self.assertEqual(at["remembered"], str(int(_px(at["tl"]))), "%s: the landed height is the one the shell remembers, as at a release" % name)
+            stored = json.loads(at["stored"])
+            self.assertNotIn("files-pane", _leaves(stored["tree"]), "%s: the store holds no hidden pane docked" % name)
+            self._within(_fixed_px(stored["tree"], "tl-pane"), at["band"], 1.5, "%s: and the band's landed px" % name)
+            for step in ("moved", "released", "autosized"):
+                s = t[step]
+                self.assertFalse(s["pressed"], "%s: no drag (%s)" % (name, step))
+                self._same_rects(at["rects"], s["rects"], "%s: more travel, the %s and the shell's autosize change nothing (%s)" % (name, "Escape" if t["escape"] else "release", step))
+                self.assertEqual(s["tl"], at["tl"], "%s: the band's height variable stays (%s)" % (name, step))
+                self.assertNotIn("files-pane", _leaves(json.loads(s["layout"])["tree"]), "%s: the engine's layout docks no hidden pane (%s)" % (name, step))
+                self.assertEqual(s["writes"], at["writes"], "%s: nothing more written (%s)" % (name, step))
+                self.assertEqual(s["stored"], at["stored"], "%s: the store as the toggle left it (%s)" % (name, step))
+
+    def test_the_kits_band_edge_without_the_shells_grab_refuses_loudly_and_moves_nothing(self):
+        # the band's edge needs the shell's band gesture (window.__rompBandGrab, _LANDING_JS bandGrab); without it the edge fell back to
+        # writing the height variable alone, the snap-back PR 295 fixed, and Escape could not restore the remembered height, silently.
+        # The kit now refuses the drag, says so in the console naming the hook, and posts an error notice
+        r = self._result()
+        b = r["kitBandNoGrab"]
+        self.assertNotIn("error", b, b)
+        self.assertTrue(any("__rompBandGrab" in e for e in b["errors"]), "a console error names the missing hook: %r" % b["errors"])
+        self.assertEqual([n["kind"] for n in b["notes"]], ["error"], "one error notice in the shell's notification center: %r" % b["notes"])
+        for step in ("mid", "released"):
+            s = b[step]
+            self.assertFalse(s["pressed"], "no drag starts (%s)" % step)
+            self.assertEqual(s["tl"], b["before"]["tl"], "the band's height variable untouched (%s)" % step)
+            self._within(s["band"], b["before"]["band"], 1.0, "the band does not move (%s)" % step)
+            self._same_rects(b["before"]["rects"], s["rects"], "no pane moves (%s)" % step)
+            self.assertEqual(s["writes"], {"layout": 0, "remembered": 0}, "nothing written (%s)" % step)
 
 if __name__ == "__main__":
     unittest.main()
