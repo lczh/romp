@@ -6484,7 +6484,10 @@ local value at the time; a peer is named by the key its row carries, the alias i
 token learns the peer's own name from its `/version` and writes it on the row, saved with it, so a push naming itself
 resolves to the row's key, a record a push filed under the self-name before the first poll moves onto the row's key, and a
 detached row takes its records and kept stamps with it) and applies nothing; the same value under a newer stamp lifts the local stamp only; a pinned store raises
-none; the record drops when the values come to equal or the peer's stamp is no longer newer. The user answers through
+none; the record drops when the values come to equal or the peer's stamp is no longer newer, whichever machine moved: a
+click here that sets the proposed value, or any click here newer than the proposal, retires the record and its card as the
+store is written, on a machine that polls nobody as on one that polls, and the kernel reads the stores and the records
+together once at boot. The user answers through
 `POST /setting-proposal` (`{"store", "host", "gt", "answer": "apply" | "keep" | "pin"}`, this kernel's own record from that
 machine only, the stamp checked: a stamp the machine has since moved past is refused, that machine changed its mind and
 the line is refreshed): Apply runs the store's own gt-gated setter under the peer's stamp (a click on this machine that
