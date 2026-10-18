@@ -900,17 +900,26 @@ class SessionHost:
         pid number whatever had become of the CLI, so a frame arriving after the CLI exited and was reaped, in the
         seconds before the host itself ends, could signal an unrelated process that had been given the same pid. Now a
         reaped CLI is never signalled, and on Linux the signal goes through the pidfd opened at the spawn, which names
-        the process itself, so even a reap this host has not yet seen cannot misdirect it. Returns "sent", "gone" (the
-        CLI has exited), "none" (no CLI yet) or "failed" (logged)."""
+        the process itself, so even a reap this host has not yet seen cannot misdirect it. A pidfd send that fails for
+        any reason but the process being gone (a bad descriptor, a refusal) is logged and the signal goes by the pid,
+        the CLI still unreaped by the handle's account (the review of #283: it was dropped, so Stop's INT never reached
+        a CLI still running). Returns "sent", "gone" (the CLI has exited), "none" (no CLI yet) or "failed" (logged)."""
         if self.cli_pid is None or self.transport is None:
             return "none"
         if self._cli_reaped():
             return "gone"
-        try:
-            if self._cli_pidfd is not None:
+        if self._cli_pidfd is not None:
+            try:
                 signal.pidfd_send_signal(self._cli_pidfd, sig)
-            else:
-                os.kill(int(self.cli_pid), sig)
+                return "sent"
+            except ProcessLookupError:
+                return "gone"
+            except OSError as e:
+                self.log("signal-pidfd-failed", sig=int(sig), error=type(e).__name__)
+            if self._cli_reaped():
+                return "gone"
+        try:
+            os.kill(int(self.cli_pid), sig)
         except ProcessLookupError:
             return "gone"
         except OSError as e:

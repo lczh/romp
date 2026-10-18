@@ -4233,9 +4233,9 @@ def task_death_notice(tasks: list, cause: str = "a restart or crash", did: str =
     the user approved): Claude Code keeps its progress, so the session resumes it with SendMessage instead of
     starting it again. The check-and-relaunch ask, read by an agent, started the subagent over from scratch. The
     agent's id is named when the row carries it (an Agent task's lifecycle id IS the agent id, see _on_task_event);
-    a list of several pairs each description with its id. Bash commands, monitors and workflow runs keep the
-    check-and-relaunch ask, and a cut of both kinds is one notice: the lead counts each kind, then each kind's
-    descriptions and its own instruction, agents first."""
+    a list of several pairs each description with its id, and names every agent (the tasks' list stops at four).
+    Bash commands, monitors and workflow runs keep the check-and-relaunch ask, and a cut of both kinds is one notice:
+    the lead counts each kind, then each kind's descriptions and its own instruction, agents first."""
     agents = [t for t in tasks if str(t.get("type") or "") == "local_agent"]
     others = [t for t in tasks if str(t.get("type") or "") != "local_agent"]
 
@@ -4244,7 +4244,9 @@ def task_death_notice(tasks: list, cause: str = "a restart or crash", did: str =
 
     def _descs(group, ids):
         items = []
-        for t in group[:4]:
+        # every agent: its id is what resumes it (a fifth one left off the list had none, the review of #283); a task's
+        # description only names what to check, and the list keeps to four
+        for t in (group if ids else group[:4]):
             d = (t.get("desc") or "").strip()
             aid = str(t.get("taskId") or "").strip() if ids else ""
             items.append("%s (%s)" % (d, aid) if d and aid else (d or aid))

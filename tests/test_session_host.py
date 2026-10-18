@@ -450,6 +450,29 @@ class TheHostSignalsOnlyItsLiveCli(unittest.TestCase):
             self.assertEqual(h._signal_cli(signal.SIGTERM), "gone")
         self.assertEqual(kill.call_args_list, [], "never the bare pid number")
 
+    def test_a_pidfd_send_that_fails_for_another_reason_still_signals_the_unreaped_cli(self):
+        # the review of #283: a pidfd send that failed with anything but "no such process" (a closed or bad descriptor, a
+        # refusal) was a host-log line and nothing else, so Stop's INT never reached a CLI that was still running. The CLI
+        # is still this host's unreaped child, whose pid no other process can hold, so the signal goes by the pid instead
+        h = self._host()
+        child = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: child.poll() is None and (child.kill(), child.wait()))
+        h.transport = types.SimpleNamespace(proc=types.SimpleNamespace(returncode=None, pid=child.pid))
+        h.cli_pid = child.pid
+        h._cli_pidfd = 987654                    # a descriptor the send refuses below
+        with mock.patch.object(sh.signal, "pidfd_send_signal", create=True, side_effect=OSError(9, "Bad file descriptor")), \
+                mock.patch.object(sh.os, "kill") as kill:
+            self.assertEqual(h._signal_cli(signal.SIGINT), "sent")
+        self.assertEqual(kill.call_args_list, [mock.call(child.pid, signal.SIGINT)], "by the still-unreaped child's pid")
+        fell = [r for r in self._hostlog() if r["kind"] == "signal-pidfd-failed"]
+        self.assertEqual([(r["sig"], r["error"]) for r in fell], [(int(signal.SIGINT), "OSError")], "the pidfd's failure is logged")
+        # …and a CLI the host reaped meanwhile is still never signalled by its number
+        h.transport.proc.returncode = 0
+        with mock.patch.object(sh.signal, "pidfd_send_signal", create=True, side_effect=OSError(9, "Bad file descriptor")), \
+                mock.patch.object(sh.os, "kill") as kill:
+            self.assertEqual(h._signal_cli(signal.SIGINT), "gone")
+        self.assertEqual(kill.call_args_list, [])
+
 
 class HostProcess(unittest.TestCase):
     """Each test starts one host on the fake CLI in a private state root and kills everything after."""
