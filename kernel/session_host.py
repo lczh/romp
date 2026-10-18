@@ -743,6 +743,7 @@ class SessionHost:
         self.lease_api = lease_api or _lease_api()
         self.transport = None
         self.cli_pid = None
+        self._cli_pidfd = None          # a pidfd for the CLI, opened while it is known to be this host's unreaped child (Linux)
         self.cli_start = None
         self.cli_spawned_at = None      # the CLI's spawn time, set ONCE in _spawn: the lease and the hello carry it as the CLI's
         #                                 epoch (before 2026-09-14 the lease stamped the beat's time under the same name)
@@ -850,6 +851,7 @@ class SessionHost:
             await self.transport.connect()
             self.cli_pid = self.transport.pid
             self.log("cli-spawned", transport="pipe-fallback", cliPid=self.cli_pid)
+        self._open_cli_pidfd()
         self.cli_start = self.lease_api["proc_start"](self.cli_pid)
         self.cli_spawned_at = int(self.now())
         self._write_lease()
@@ -861,12 +863,60 @@ class SessionHost:
         lease came first, and a kernel could pass its wait and connect to a path nobody served yet)."""
         self.transport = AdoptedCliTransport(self.spec, self._on_stderr, self.reexec)
         await self.transport.connect()
+        self._open_cli_pidfd()          # still this process's child (exec keeps the pid) and not waited on yet
         if self.cli_start is None:
             self.cli_start = self.lease_api["proc_start"](self.cli_pid)
         try:
             os.unlink(str(self.dir / "reexec.json"))
         except OSError:
             pass
+
+    def _cli_reaped(self) -> bool:
+        """Whether this host has reaped its CLI (the transport's process handle carries a return code, or the adopted
+        process's wait came back): from then on the pid is free for the kernel to hand to any new process. No handle at
+        all counts as reaped. Until the reap a dead CLI is a zombie that still holds its pid, so the pid is the CLI's."""
+        proc = getattr(self.transport, "_process", None) or getattr(self.transport, "proc", None)
+        if proc is None:
+            return True
+        return bool(getattr(proc, "exited", False)) or getattr(proc, "returncode", None) is not None
+
+    def _open_cli_pidfd(self) -> None:
+        """Open a pidfd for the CLI right after the spawn or the adoption, while the handle says it is unreaped, so the
+        pid still names it. A signal through the pidfd reaches that process or fails with ESRCH; it can never reach a
+        process that reused the pid. Linux only (os.pidfd_open); elsewhere, or when the open fails, _signal_cli falls
+        back to the reap check before os.kill."""
+        self._cli_pidfd = None
+        if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal") or self.cli_pid is None \
+                or self._cli_reaped():
+            return
+        try:
+            self._cli_pidfd = os.pidfd_open(int(self.cli_pid))
+        except OSError as e:
+            self.log("cli-pidfd-unavailable", error=type(e).__name__)
+
+    def _signal_cli(self, sig) -> str:
+        """Signal this host's own CLI, and only while it is still that live child (the review of #281, 2026-10-18): the
+        `signal` frame (a Restart's TERM, Stop's INT and KILL) and the forced end's KILL. They called os.kill on the CLI's
+        pid number whatever had become of the CLI, so a frame arriving after the CLI exited and was reaped, in the
+        seconds before the host itself ends, could signal an unrelated process that had been given the same pid. Now a
+        reaped CLI is never signalled, and on Linux the signal goes through the pidfd opened at the spawn, which names
+        the process itself, so even a reap this host has not yet seen cannot misdirect it. Returns "sent", "gone" (the
+        CLI has exited), "none" (no CLI yet) or "failed" (logged)."""
+        if self.cli_pid is None or self.transport is None:
+            return "none"
+        if self._cli_reaped():
+            return "gone"
+        try:
+            if self._cli_pidfd is not None:
+                signal.pidfd_send_signal(self._cli_pidfd, sig)
+            else:
+                os.kill(int(self.cli_pid), sig)
+        except ProcessLookupError:
+            return "gone"
+        except OSError as e:
+            self.log("signal-failed", sig=int(sig), error=type(e).__name__)
+            return "failed"
+        return "sent"
 
     def _reexec_check(self, frame: dict):
         """(python, launcher) for a kernel's re-exec request, or a refusal reason: both paths must exist, and the CLI's
@@ -1168,10 +1218,7 @@ class SessionHost:
                 if now >= self.ending[0]:
                     self.ending = (float("inf"), "end-forced")
                     self.log("end-forced", cliPid=self.cli_pid)
-                    try:
-                        os.kill(int(self.cli_pid), signal.SIGKILL)
-                    except (ProcessLookupError, TypeError):
-                        pass
+                    self._signal_cli(signal.SIGKILL)
                 continue
             if self.attached is None and self.inflight == 0 and now - self.idle_since >= self.grace_s:
                 self.log("unattached-grace-expired", idleS=round(now - self.idle_since, 1))
@@ -1253,12 +1300,12 @@ class SessionHost:
                             pass
                     elif t == "signal":
                         sig = {"INT": signal.SIGINT, "KILL": signal.SIGKILL, "TERM": signal.SIGTERM}.get(str(frame.get("sig") or "").upper())
-                        if sig is not None and self.cli_pid:
-                            try:
-                                os.kill(int(self.cli_pid), sig)
+                        if sig is not None:
+                            how = self._signal_cli(sig)
+                            if how == "sent":
                                 self.log("signalled", sig=str(frame.get("sig")))
-                            except ProcessLookupError:
-                                pass
+                            elif how == "gone":
+                                self.log("signal-skipped", sig=str(frame.get("sig")), reason="the CLI has exited")
                     elif t == "end":
                         g = frame.get("grace")
                         await self._end(float(g) if g is not None else END_GRACE_DEFAULT_S, "end")
