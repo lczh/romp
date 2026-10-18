@@ -371,6 +371,18 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
                          "parser (a0000000000000001); fix the lexer (a0000000000000002). Claude Code kept their progress: "
                          "resume each by sending it a message (SendMessage to its id) instead of starting it again. If "
                          "they aren't needed any more, carry on.", "plural: each description paired with its id")
+        # the review of #283: the list stopped at four, so a fifth and sixth agent were cut off with no id to resume them by.
+        # Every agent is listed with its id; the tasks keep the four-item list
+        six = [{"desc": "agent %d" % i, "type": "local_agent", "taskId": "a000000000000000%d" % i} for i in range(1, 7)]
+        self.assertEqual(tail(sb.task_death_notice(six, did=R)),
+                         "[romp] I restarted Claude Code, which cut off 6 background agents you had running: agent 1 "
+                         "(a0000000000000001); agent 2 (a0000000000000002); agent 3 (a0000000000000003); agent 4 "
+                         "(a0000000000000004); agent 5 (a0000000000000005); agent 6 (a0000000000000006). Claude Code kept "
+                         "their progress: resume each by sending it a message (SendMessage to its id) instead of starting "
+                         "it again. If they aren't needed any more, carry on.", "every agent's id, past the fourth")
+        mixed6 = tail(sb.task_death_notice(six + [dict(bash, desc="task %d" % i) for i in range(1, 6)], did=R))
+        self.assertIn("(a0000000000000006). Claude Code kept their progress", mixed6, "every agent's id beside tasks too")
+        self.assertIn("The tasks: task 1; task 2; task 3; task 4. Their completion", mixed6, "the tasks' list keeps its four")
         mixed = sb.task_death_notice([a1, bash, mon], did=R)
         self.assertEqual(tail(mixed),
                          "[romp] I restarted Claude Code, which cut off 1 background agent and 2 background tasks you had "

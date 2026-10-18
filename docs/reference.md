@@ -1852,9 +1852,9 @@ The notice a session gets when a relaunch cut its background tasks says what
 the person did: "I restarted Claude Code", "I rewound the conversation and
 restarted Claude Code", or "I restarted Claude Code to apply a settings change
 now", followed by the tasks it cut off. A relaunch no gesture asked for (a
-session host that died mid-handover) keeps the plain "a restart or crash". A
-cut-off background agent (a subagent) is named with its agent id, and the
-session is told that Claude Code kept its progress and asked to resume it by
+session host that died mid-handover) keeps the plain "a restart or crash". Every
+cut-off background agent (a subagent) is named with its agent id, however many
+were cut (the tasks' list stops at four), and the session is told that Claude Code kept its progress and asked to resume it by
 sending it a message (SendMessage to that id) instead of starting it again; a
 Bash command or a monitor keeps the request to check whether it is still
 running before relaunching it. A cut of both kinds is one notice, each kind
