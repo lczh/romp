@@ -10,6 +10,7 @@ by design, so the fix is purely structural: one snapshot at cycle start, handed 
 SYNTHETIC fixtures only: placeholder UUIDs, invented names.
 """
 import collections
+import itertools
 import json
 import os
 import tempfile
@@ -446,6 +447,22 @@ class TickReadsTheRowsPath(_CycleFixture):
         self.assertNotIn(SID2, km._compact_clicked)
 
 
+class _SteppedClock:
+    """km's `time` with time() pinned: it starts at `start` and steps a microsecond per read, so the kernel's stamps stay
+    strictly ordered (a build's start before a later dirty mark, as on a real clock) while a test's reads move
+    it by microseconds; everything else (monotonic, sleep, strftime) passes through. Installed as the kernel module's own
+    `time` name, so no other module's clock moves."""
+
+    def __init__(self, real, start):
+        self._real, self._start, self._reads = real, float(start), itertools.count()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def time(self):
+        return self._start + next(self._reads) * 1e-6
+
+
 class LazyChatSerialization(unittest.TestCase):
     """The chat payload's full serialization is LAZY (round two of the 2026-08-10 CPU fix): steady
     state sends only chatTail suffixes, so eagerly json.dumps-ing the whole multi-MB active-tab
@@ -491,6 +508,12 @@ class LazyChatSerialization(unittest.TestCase):
         # deep-eq on the ledgers attach), so an unchanged second cycle serves the SAME tuple.
         base = OneSnapshotPerCycle("test_one_cycle_reads_liveness_once_however_deep_the_call")
         base.setUp()
+        # The kernel's clock, pinned (a CI flake, 2026-10-18): the view signature carries a 5 s bucket of the cycle's clock
+        # (its __bucket__), and the builder's full build is stored with no built-at, so only its signature serves it; a run
+        # whose last cycle crossed a bucket edge rebuilt the timeline there, and the bars' wire tuple with it. NOW is a
+        # bucket's first second, and the stepped clock moves milliseconds over the whole test, so every cycle reads one bucket.
+        clock = mock.patch.object(km, "time", _SteppedClock(time, NOW))
+        clock.start()
         try:
             km.Sessions.live = lambda: dict(base.row)
             frames = []
@@ -522,6 +545,7 @@ class LazyChatSerialization(unittest.TestCase):
             self.assertIs(km._bars_wire, w_bars, "unchanged bars → the SAME wire tuple, no re-dump")
             self.assertEqual(len(frames), n, "…and the deduped client got nothing new")
         finally:
+            clock.stop()
             base.tearDown()
             km._feed_wire = km._bars_wire = None
             km._built_feed[:] = [None, None, 0.0, 0.0]
