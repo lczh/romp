@@ -239,6 +239,24 @@ class Unblocker(UnblockerBase):
         jd._unblock_session(SID, path, NOW)
         self.assertEqual(len(self.calls), n_before, "given up on this evidence — no more calls")
 
+    def test_a_lift_cut_off_at_its_last_brace_still_lands(self):
+        # The greedy parse turned this reply into a parse failure; after the cap the lift was gone and
+        # the answered card stayed in Needs-you. _json_obj closes a clean truncation instead.
+        top, sub = self._store(block_t=T0 + 100)
+        path = self._transcript([(T0 + 200, "the answer is 10,000mAh, go ahead", "noted, proceeding")])
+        self._stub('{"verdicts": [{"n": 1, "do": "lift", "why": "the user said 10,000mAh later"}]')
+        self.assertEqual(jd._unblock_session(SID, path, NOW), [sub])
+        self.assertFalse(jd.load_goals(SID)["nodes"][sub]["blocked"], "the answered block is lifted")
+        self.assertEqual(len(self.calls), 1, "one call, no parse retry")
+
+    def test_a_lift_followed_by_an_aside_with_a_brace_still_lands(self):
+        top, sub = self._store(block_t=T0 + 100)
+        path = self._transcript([(T0 + 200, "the answer is 10,000mAh, go ahead", "noted, proceeding")])
+        self._stub('{"verdicts": [{"n": 1, "do": "lift", "why": "the user said 10,000mAh later"}]}\n\n'
+                   'Note: the pack spec lives in {repo}/notes-api.')
+        self.assertEqual(jd._unblock_session(SID, path, NOW), [sub])
+        self.assertFalse(jd.load_goals(SID)["nodes"][sub]["blocked"], "the answered block is lifted")
+
     def test_an_empty_reply_is_a_failed_call_and_retries_next_pass(self):
         top, sub = self._store(block_t=T0 + 100)
         path = self._transcript([(T0 + 200, "the answer is 10,000mAh", "noted")])
