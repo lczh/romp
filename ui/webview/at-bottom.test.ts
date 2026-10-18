@@ -75,7 +75,7 @@ test("render.ts defines atBottom on the shared tolerance and nearBottomForSend o
 
 test("follow mode and the chip read atBottom at every site", () => {
   const follow = [
-    /const stick = content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\) && !v\?\.followHeld;/,          // appendActive (never while a passage landing holds follow mode off)
+    /function followingTail\(content: HTMLElement, v: View \| null \| undefined\): boolean \{\s*\n\s*return content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\) && !v\?\.followHeld;/,   // following the tail: appendActive's stick and the host-offline foot's (never while a passage landing holds follow mode off)
     /const off = c\.scrollHeight > c\.clientHeight \+ 2 && !atBottom\(c\);/,                             // updateJumpBtn
     /followReader\(activeId \? views\.get\(activeId\) : null, c\.scrollTop, atBottom\(c\), pendingBuildRaf != null\);/,   // the scroll record
     /cur\.stick = atBottom\(content\) && !cur\.followHeld;/,                                              // the leaving tab's save (a passage landing's pause keeps its place: HeldKeep)

@@ -103,7 +103,9 @@ test("the box steps off its passage only when the landing re-lands it there, the
 
 test("a landing on a comment's passage pauses follow mode until the reader is back at the bottom (the user 2026-10-15)", () => {
   assert.match(fn("landOn"), /if \(c && v\) \{ v\.followHeld = !!mark; v\.stick = !mark && atBottom\(c\); \}/, "held off even at the bottom; any other landing lifts it");
-  assert.match(fn("appendActive"), /const stick = content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\) && !v\?\.followHeld;/, "the appends keep the reader's place");
+  assert.match(fn("appendActive"), /const stick = followingTail\(content, v\);/, "the appends keep the reader's place");
+  assert.match(fn("followingTail"), /&& !v\?\.followHeld;/, "…through the one following read, which a held view fails");
+  assert.match(fn("footChange"), /const stick = followingTail\(content, v\);/, "and so does the host-offline foot coming or going");
   assert.match(fn("liveStatusEl"), /if \(atEnd && !v\.followHeld\) writeScroll/, "and so does the foot line's first room");
   // released by the reader: their gesture at the bottom, a writer of theirs (a key, the chips), their own send from the tail
   assert.match(RENDER, /const readerMove = \(cls === "gesture" && readerScrolling\) \|\| \(cls === "write-echo" && \(writerIsReader\(lastScrollWriter\) \|\| lastScrollWriter === "optimistic-send"\)\);\s*\n\s*if \(readerMove\) resumeAtBottom\(c\);/);
