@@ -129,8 +129,11 @@ test("the note the tab carries on hover is still the one wording of it", () => {
   assert.match(RENDER, /tab\.title = hostDownNote\(id\)/);
 });
 
-test("both surfaces repaint on the reachability event", () => {
-  assert.match(RENDER, /window\.addEventListener\("romp-hosts", \(\) => \{ renderTabs\(\); syncComposerPh\(\); \}\)/, "the strip and the composer's name overlay (its host span wears the same mark, T328) repaint together");
+test("every surface repaints on the reachability event", () => {
+  // the strip and the composer's name overlay (its host span wears the same mark, T328) repaint together, and the transcript's
+  // host-offline foot with them: a host that drops while its session is read sends no frame and no dial event, so the drop is
+  // the one event that can put the foot up (2026-10-18: a checked-in host's foot never came up in the served lab without it)
+  assert.match(RENDER, /window\.addEventListener\("romp-hosts", \(\) => \{ renderTabs\(\); syncComposerPh\(\); syncHostOfflineFoot\(\); \}\)/);
   assert.match(TL, /window\.addEventListener\('romp-hosts', this\._onHosts\)/);
   assert.match(TL, /window\.removeEventListener\('romp-hosts', this\._onHosts\)/, "and let go on teardown");
 });

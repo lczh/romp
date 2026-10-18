@@ -8902,8 +8902,11 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
 // this only when the reachable set actually CHANGES (its own /tunnels poll is the event), so this is a
 // repaint per connect/drop, not per poll (the user 2026-07-29). The composer's overlay names the active session
 // with the same host span (T328), so it re-syncs on the same event: its mark would otherwise lag the tab's until
-// the next keystroke, resize, rename or tab switch.
-window.addEventListener("romp-hosts", () => { renderTabs(); syncComposerPh(); });
+// the next keystroke, resize, rename or tab switch. The transcript's host-offline foot is the same mark at the end of the
+// open session, so it follows too: the drop is the event that puts it up, and a host that drops while its session is
+// being read sends nothing else (no frame, no tab switch; a checked-in host has no dial to announce either), so without
+// this the foot waited for whatever repainted the pane next.
+window.addEventListener("romp-hosts", () => { renderTabs(); syncComposerPh(); syncHostOfflineFoot(); });
 // a dial attempt to a remote host began or ended (federation.ts dialEvent): the host-down foot's swirl
 // spins while one is in flight, as of the last /tunnels poll, so it repaints on this event and on nothing else
 window.addEventListener("romp:hostDial", () => { syncHostOfflineFoot(); repaintEmptyStateIfUnfocused(); });   // the unfocused body's "reconnecting" follows the dial state too (T357)

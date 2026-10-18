@@ -39,13 +39,22 @@ test("the transcript says why it ends, at the END, where the eye lands", () => {
   assert.match(RENDER, /function syncHostOfflineFoot\(\): void \{/);
   assert.match(RENDER, /is disconnected — this is the last romp got from it\. Reconnecting\./);
   // 2026-09-08 (the notice-vocabulary pass): a slim SESSION notice in the warn severity — the one row that sat
-  // outside the vocabulary (centred italic); .notice-foot gives it the prose column's indent off the rail
+  // outside the vocabulary (centred italic); .notice-foot lays it out like a thread (below)
   assert.match(RENDER, /foot\.id = "host-offline-foot";/);
   // `live` since 2026-09-10: the row is live while a dial to the host is in flight, and the romp swirl sits after
   // the gist as its flex sibling (host-dial-live.test.ts pins that rule) — the wording itself unchanged
   assert.match(RENDER, /notice\(\{ src: "session", glyph: "api", sev: "warn", gist: text, nested: true, live: dialing,/);
   assert.match(CSS, /\.notice-foot \{/);
   assert.doesNotMatch(CSS, /\.tx-hostoff/);
+});
+
+test("the foot keeps the thread's column and gutter, so the go-to-bottom chip beside it never covers its first letters", () => {
+  // a sibling of the threads, not a row inside one, so it reserves the gutter itself (2026-10-18: it started at the pane's
+  // 24px, and the chip, whose slot it sits beside, covered its glyph whenever the reader was a few lines up; the served lab,
+  // tests/test_jump_cluster_served.py ServedHostOfflineFoot, measures it)
+  const foot = CSS.match(/\n\.notice-foot \{([^}]*)\}/)?.[1] || "";
+  assert.match(foot, /max-width: var\(--chat-col\); margin: 0 auto;/, "the thread's column");
+  assert.ok(foot.includes("padding: 6px 24px 10px var(--thread-gutter);"), `the thread's gutter: ${foot}`);
 });
 
 test("the foot is a SIBLING of the view, never a child of it", () => {
