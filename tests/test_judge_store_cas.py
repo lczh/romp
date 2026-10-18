@@ -979,5 +979,156 @@ class ReadFaultCas(unittest.TestCase):
         return sorted(jd.GOALDIR.glob(self.FSID + ".json.corrupt-*"))
 
 
+class CloserRecordsCas(unittest.TestCase):
+    """The closer's per-turn records (closedTurns, closedSig, closedContent) through a save that rebases.
+
+    The planner reopens a closed turn when a done lands after the closer ruled (_invalidate_closure), and
+    the closer closes turns with the size it judged them at. closedTurns used to union on a rebase while
+    both maps kept the holder's copy: a reopen came back as a closed turn with no size, and a turn the
+    closer closed after a holder's load landed with no size. The closer reads a closed turn with no size
+    as a legacy turn and skips it at every size, so neither a reopen nor later growth was ever judged.
+    The record now merges per turn against the holder's base (_merge_closer_turns).
+
+    Mints goals, so it uses a PRIVATE synthetic sid (CLAUDE.md, 2026-08-24) and cleans that sid's override
+    journal in tearDown."""
+    FSID = "5b0e7c3a-91d4-4a6f-b2e8-3c7d0f1a9e42"
+
+    def setUp(self):
+        self._saved = jd.STATE
+        self.td = tempfile.TemporaryDirectory()
+        jd._rebind_state(Path(self.td.name))
+        self.t1 = "%s:100:aaaaaaaa" % self.FSID
+        self.t2 = "%s:300:bbbbbbbb" % self.FSID
+
+    def tearDown(self):
+        (jd._overrides_dir() / (self.FSID + ".jsonl")).unlink(missing_ok=True)
+        jd._rebind_state(self._saved)
+        (jd._overrides_dir() / (self.FSID + ".jsonl")).unlink(missing_ok=True)
+        self.td.cleanup()
+
+    def _seed(self, closed, sig, content):
+        s = {"rompUuid": self.FSID, "seq": 0, "placementsV": jd.PLACEMENTS_V, "nodes": {}, "placements": {}, "status": {}}
+        jd.apply_plan(s, "s1", T0, [{"do": "mint", "why": "x", "text": "Ship the notes-api search"}], [])
+        s["closedTurns"], s["closedSig"], s["closedContent"] = list(closed), dict(sig), dict(content)
+        jd.rollup_status(s, session_closed=False)
+        jd.save_goals(self.FSID, s)
+
+    def _publish_a_block(self, at):
+        """Another writer (the kernel's tick, a reply) loads, records one event and publishes."""
+        b = jd.load_goals(self.FSID)
+        jd.record_verdict(b, next(iter(b["nodes"].values())), "romp", "block", at, why="needs a decision")
+        jd.rollup_status(b, session_closed=False)
+        jd.save_goals(self.FSID, b)
+
+    def _close(self, store, tid, n):
+        """What _close_session records for a turn it judged at `n` atoms."""
+        store["closedTurns"] = sorted(set(store.get("closedTurns") or []) | {tid})
+        store.setdefault("closedSig", {})[tid] = n
+        store.setdefault("closedContent", {})[tid] = n
+
+    def _reopen(self, store, tid):
+        """The planner's reopen: a done for a segment inside the turn, filed after the closer ruled on it."""
+        t = int(tid.split(":")[1])
+        jd._invalidate_closure(store, {"turns": [{"t": t, "end": t + 100, "id": tid, "atoms": [], "ended": True}]}, t + 50)
+
+    def _disk(self):
+        return json.loads((jd.GOALDIR / (self.FSID + ".json")).read_text())
+
+    def _closer_judges(self, tid, n):
+        """The turn ids the real _close_session sends to the model for one ended turn of `n` atoms."""
+        called, t = [], int(tid.split(":")[1])
+        turn = {"t": t, "end": t + 50, "id": tid, "ended": True, "atoms": [{"type": "assistant", "t": t + i} for i in range(n)]}
+        with mock.patch.object(jd, "parsed_session", return_value={"turns": [turn]}), \
+                mock.patch.object(jd, "_close_turn", side_effect=lambda store, turn, seg_by_id=None: called.append(turn["id"]) or []), \
+                mock.patch.object(jd, "_segs", return_value=[]), \
+                mock.patch.object(jd, "_session_settled", return_value=False), \
+                mock.patch.object(jd, "_death_finalize", return_value=None):
+            jd._close_session(self.FSID, "/nonexistent/transcript.jsonl", NOW, cap=None)
+        return called
+
+    def test_a_reopen_survives_another_writers_publish(self):
+        self._seed([self.t1], {self.t1: 5}, {self.t1: 5})
+        a = jd.load_goals(self.FSID)                 # the planner holds the store across its model call
+        self._publish_a_block(T0 + 30)               # another writer publishes meanwhile
+        self._reopen(a, self.t1)
+        self.assertNotIn(self.t1, a["closedTurns"], "premise: the reopen happened in memory")
+        jd.save_goals(self.FSID, a)                  # this save rebases
+        d = self._disk()
+        self.assertEqual((d["closedTurns"], d.get("closedSig"), d.get("closedContent")), ([], {}, {}), "the reopen reached the disk")
+        self.assertEqual(sum(1 for e in next(iter(d["nodes"].values()))["log"] if e["kind"] == "block"), 1, "and the other writer's event too")
+        self.assertEqual(self._closer_judges(self.t1, 5), [self.t1], "the closer looks at the reopened turn again")
+
+    def test_a_reopen_published_while_the_closer_holds_the_store_wins(self):
+        self._seed([self.t1], {self.t1: 5}, {self.t1: 5})
+        a = jd.load_goals(self.FSID)                 # the closer, judging another turn
+        b = jd.load_goals(self.FSID)                 # the planner reopens t1 and publishes first
+        self._reopen(b, self.t1)
+        jd.save_goals(self.FSID, b)
+        self._close(a, self.t2, 3)
+        jd.save_goals(self.FSID, a)
+        d = self._disk()
+        self.assertEqual((d["closedTurns"], d.get("closedSig")), ([self.t2], {self.t2: 3}), "t1 stays reopened, t2 is closed with its size")
+        self.assertEqual(self._closer_judges(self.t1, 5), [self.t1], "the closer looks at t1 again")
+
+    def test_a_turn_the_closer_closed_keeps_its_size_under_a_stale_holder(self):
+        self._seed([], {}, {})
+        a = jd.load_goals(self.FSID)                 # any holder that loaded before the closer's publish
+        b = jd.load_goals(self.FSID)
+        self._close(b, self.t2, 3)
+        jd.save_goals(self.FSID, b)
+        jd.record_verdict(a, next(iter(a["nodes"].values())), "romp", "block", T0 + 40, why="another ask")
+        jd.save_goals(self.FSID, a)
+        d = self._disk()
+        self.assertEqual((d["closedTurns"], d.get("closedSig"), d.get("closedContent")), ([self.t2], {self.t2: 3}, {self.t2: 3}))
+        self.assertEqual(self._closer_judges(self.t2, 3), [], "judged at this size: skipped")
+        self.assertEqual(self._closer_judges(self.t2, 7), [self.t2], "the turn grew: judged again")
+
+    def test_when_both_moved_a_turn_the_reopen_wins(self):
+        self._seed([self.t1], {self.t1: 5}, {self.t1: 5})
+        a = jd.load_goals(self.FSID)                 # the planner
+        b = jd.load_goals(self.FSID)                 # the closer judges t1 again at a grown size, before the planner's done
+        self._close(b, self.t1, 9)
+        jd.save_goals(self.FSID, b)
+        self._reopen(a, self.t1)
+        jd.save_goals(self.FSID, a)
+        d = self._disk()
+        self.assertEqual((d["closedTurns"], d.get("closedSig")), ([], {}), "the closer's ruling predates the done: the turn is looked at again")
+        c = jd.load_goals(self.FSID)                 # the other way round: t1 closed at 9 again, then the closer holds the
+        self._close(c, self.t1, 9)                   #  store while the planner's reopen publishes, and the closer's own
+        jd.save_goals(self.FSID, c)                  #  save carries a new ruling on t1
+        a, b = jd.load_goals(self.FSID), jd.load_goals(self.FSID)
+        self._reopen(b, self.t1)
+        jd.save_goals(self.FSID, b)
+        self._close(a, self.t1, 11)
+        jd.save_goals(self.FSID, a)
+        d = self._disk()
+        self.assertEqual((d["closedTurns"], d.get("closedSig")), ([], {}), "the reopen on the disk wins over the holder's new ruling")
+
+    def test_the_closers_ruling_on_a_reopened_turn_stands_over_another_publish(self):
+        """The rule that keeps a reopen from repeating: the closer loaded the reopened turn, judged it, and its
+        save rebases over an unrelated publish. A merge where a reopen on either side always wins would put
+        the reopen back here, and the closer would judge the turn again on every pass that overlaps a publish."""
+        self._seed([], {}, {})
+        a = jd.load_goals(self.FSID)
+        self._publish_a_block(T0 + 30)
+        self._close(a, self.t1, 5)
+        jd.save_goals(self.FSID, a)
+        d = self._disk()
+        self.assertEqual((d["closedTurns"], d.get("closedSig")), ([self.t1], {self.t1: 5}))
+        self.assertEqual(self._closer_judges(self.t1, 5), [], "settled: no second look")
+
+    def test_a_fresh_holder_without_a_base_adopts_the_disks_size(self):
+        a = jd.load_goals(self.FSID)                 # no file yet: a fresh store, so the rebase has no base
+        self.assertIsNone(a.get("_baseIdent"), "premise: no base")
+        self._seed([], {}, {})
+        b = jd.load_goals(self.FSID)
+        self._close(b, self.t2, 3)
+        jd.save_goals(self.FSID, b)
+        jd.save_goals(self.FSID, a)
+        d = self._disk()
+        self.assertEqual((d["closedTurns"], d.get("closedSig"), d.get("closedContent")), ([self.t2], {self.t2: 3}, {self.t2: 3}))
+        self.assertEqual(self._closer_judges(self.t2, 7), [self.t2], "the turn grew: judged again")
+
+
 if __name__ == "__main__":
     unittest.main()

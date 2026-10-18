@@ -5128,7 +5128,14 @@ class _BaseRef(dict):
 
 
 def _base_nodes(path_s, ident, src=None):
-    """The nodes as the file held them at `ident`: FIRST from `src`, the holder's own reference to the bytes it read or wrote (`_baseSrc`,
+    """The nodes of _base_store: the node table as the file held it at `ident`, else None."""
+    base = _base_store(path_s, ident, src)
+    return (base.get("nodes") or {}) if base is not None else None
+
+
+def _base_store(path_s, ident, src=None):
+    """The store as the file held it at `ident` (the rebase's base: its nodes for the field carry, its closer records for
+    _merge_closer_turns): FIRST from `src`, the holder's own reference to the bytes it read or wrote (`_baseSrc`,
     a _BaseRef: the memo's pickle from a read or the text of its own publish), the guarantee; only a holder WITHOUT one (a store rebuilt
     from JSON, a copy of the shared read-only view) is served from the shared caches by identity, the raw-parse memo, the readers' history
     (a parse) or the published texts; else None (such a holder whose version left the caches). The reference goes first because an
@@ -5160,7 +5167,7 @@ def _base_nodes(path_s, ident, src=None):
         value = pickle.loads(blob) if blob is not None else json.loads(text)
     except Exception:
         return None
-    return (value.get("nodes") or {}) if isinstance(value, dict) else None
+    return value if isinstance(value, dict) else None
 
 
 def _raw_bump(key):
@@ -5516,6 +5523,42 @@ def _disk_rev_ident(fsid):
     return int(_disk_parse(path_s, data).get("rev") or 0), ident
 
 
+def _merge_closer_turns(store, disk, base):
+    """The closer's per-turn records after a rebase, merged into `store`: closedTurns, with closedSig (the size each
+    turn was judged at) and closedContent (what that judgment read) beside it, ONE record per turn. The closer adds
+    and updates records (_close_session); the planner reopens one when a done lands after the closer ruled
+    (_invalidate_closure). closedTurns used to union while both maps kept the holder's copy, and that lost both kinds
+    of news from the other writer: a reopened turn came back closed with no size, and a turn the closer closed after
+    the holder's load landed with no size. Either way the closer read it as a legacy turn and never judged it again at
+    any size, and the kernel's nudge gate read it as settled, so a done never rolled up and later work folded into
+    the turn went unjudged. Now each turn's record merges as a unit against the holder's `base` (the version it
+    loaded, rebased onto or last published): a side that left the record as the base had it takes the other side's;
+    when both moved it, a side that reopened the turn wins (the cost is one extra look by the closer; the other way
+    a done goes unrolled), else ours, as the field carry rules. With no base (a fresh store, or a holder whose version
+    left the caches) closedTurns unions as before and a turn takes its size and content from the holder, else from
+    the disk, so no turn closes without the size it was judged at when either side has one."""
+    sides = [(set(s.get("closedTurns") or []), s.get("closedSig") or {}, s.get("closedContent") or {})
+             if s is not None else None for s in (store, disk, base)]
+
+    def rec(side, tid):
+        return (tid in side[0], side[1].get(tid, _NOFIELD), side[2].get(tid, _NOFIELD))
+    merged = {}
+    for tid in set().union(*sides[0], *sides[1]):
+        m, d = rec(sides[0], tid), rec(sides[1], tid)
+        if sides[2] is None:
+            r = (m[0] or d[0],) + (m[1:] if m[1] is not _NOFIELD else d[1:])
+        else:
+            b = rec(sides[2], tid)
+            r = d if m == b else m if d == b else d if not d[0] else m
+        merged[tid] = r
+    order = dict.fromkeys(list(disk.get("closedTurns") or []) + list(store.get("closedTurns") or []))
+    store["closedTurns"] = [t for t in order if merged[t][0]]
+    for i, key in ((1, "closedSig"), (2, "closedContent")):
+        vals = {t: r[i] for t, r in merged.items() if r[i] is not _NOFIELD}
+        if vals or key in store or key in disk:
+            store[key] = vals
+
+
 def _rebase_onto_disk(fsid, store):
     """Rebase `store` onto the CURRENT on-disk store, keeping BOTH writers' work.
 
@@ -5533,7 +5576,8 @@ def _rebase_onto_disk(fsid, store):
     if raw is None:
         return                                       # no published store to rebase onto → publish as-is
     bident = store.get("_baseIdent")                 # the version this holder stands on: the CAS's identity, and the caches' key for a holder without its reference
-    base_nodes = _base_nodes(str(GOALDIR / (fsid + ".json")), tuple(bident), store.get("_baseSrc")) if bident else None   # the holder's own reference first, else the caches by identity
+    base = _base_store(str(GOALDIR / (fsid + ".json")), tuple(bident), store.get("_baseSrc")) if bident else None   # the holder's own reference first, else the caches by identity
+    base_nodes = (base.get("nodes") or {}) if base is not None else None
     _goal_io_bump("carryBase" if base_nodes is not None else "carryNoBase")   # no base: a fresh store (no parseable file at its load) or a holder without its
     #                                                                            reference whose version left the caches; either carries nothing
     disk = _guard_nodes(raw)                         # (a fault or unparseable file raises: never rebase
@@ -5726,11 +5770,7 @@ def _rebase_onto_disk(fsid, store):
             pl[k] = tomb[v]                          # target would read as unplaced and re-mint the twin
     store["placements"] = pl                         # union: neither writer's dedup bookkeeping is lost
     store["seq"] = max(int(store.get("seq") or 0), int(disk.get("seq") or 0))   # never reuse a gid
-    ct = list(disk.get("closedTurns") or [])
-    for t in (store.get("closedTurns") or []):
-        if t not in ct:
-            ct.append(t)
-    store["closedTurns"] = ct
+    _merge_closer_turns(store, disk, base)           # closedTurns with its sizes and contents, one record per turn
     if store.get("lastNode") in tomb:
         store["lastNode"] = tomb[store["lastNode"]]
     if store.get("lastNode") not in (store.get("nodes") or {}):
@@ -16059,7 +16099,9 @@ def _invalidate_closure(store, session, seg_t):
     own wrap-up. Dropping the turn from closedTurns re-enters it through the closer's own freshness
     machinery (the same channel a grown turn re-judges through): the closer re-judges next pass and
     rolls the completion up, and the auto-nudge's closer gate holds until that considered verdict
-    lands — nudges wait for the judges. Event-based: two real judge events ordered, no time window."""
+    lands — nudges wait for the judges. Event-based: two real judge events ordered, no time window. The
+    drop survives another writer's publish while the planner holds the store: the save's rebase merges the
+    turn's record against the planner's base (_merge_closer_turns), where a plain union put it back."""
     turn = next((t for t in (session.get("turns") or [])
                  if t.get("t", 0) <= seg_t <= t.get("end", t.get("t", 0))), None)
     tid = turn.get("id") if turn else None
