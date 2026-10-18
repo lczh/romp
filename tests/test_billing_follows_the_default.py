@@ -552,29 +552,29 @@ class AChangeBackThatKeepsTheRelaunchKeepsThePlaceForASlot(_Unit):
         s, slots = self._waits_in_line(relaunched, record=False)
         self._a_change_back_keeps_the_place(s, slots, relaunched)
 
-    def _a_restart(self, s):
+    def _a_rewind(self, s):
         recorded = s._do_request_reconnect
-        del s._do_request_reconnect                                  # the real arm of the cut road, which a Restart took
-        #                                                              before it relaunched at once by SIGTERM (relaunch_now)
-        s.request_reconnect(cut=True, cause="restart")
+        del s._do_request_reconnect                                  # the real arm of the cut road, called as a rewind calls
+        #                                                              it: the one relaunch left that waits for the turn's end
+        s.request_reconnect(cut=True, cause="rewind")
         s._do_request_reconnect = recorded
 
-    def test_with_a_restart_waiting_for_the_turns_end_a_change_back_keeps_the_place_in_line(self):
+    def test_with_a_rewind_waiting_for_the_turns_end_a_change_back_keeps_the_place_in_line(self):
         relaunched = []
         s, slots = self._waits_in_line(relaunched)
         s.inflight = 1                                               # a turn started while it waited
-        self._a_restart(s)
+        self._a_rewind(s)
         self.assertEqual((s._reconnect_when_idle, s._switch_wanted), (True, "bypass mode"),
-                         "the premise: the Restart waits for the turn's end, the pick's ask still standing")
+                         "the premise: the rewind waits for the turn's end, the pick's ask still standing")
         self.assertTrue(self.be.set_mode(SID, "default"))
         self.assertEqual(s._switch_wanted, "bypass mode", "a relaunch is on its way: the ask stands")
         self.assertTrue(slots.waiting(s), "and keeps its place in line")
 
-    def test_with_a_restart_armed_and_bypass_picked_again_before_the_loop_runs_a_change_back_keeps_the_place_in_line(self):
+    def test_with_a_rewind_armed_and_bypass_picked_again_before_the_loop_runs_a_change_back_keeps_the_place_in_line(self):
         relaunched = []
         s, slots = self._waits_in_line(relaunched)
-        self._a_restart(s)                                           # quiet: armed at once
-        self.assertEqual((s._reconnect, s._switch_wanted), (True, ""), "the premise: the Restart's relaunch is armed")
+        self._a_rewind(s)                                            # quiet: armed at once
+        self.assertEqual((s._reconnect, s._switch_wanted), (True, ""), "the premise: the rewind's relaunch is armed")
         s.loop = types.SimpleNamespace(is_closed=lambda: False, call_soon_threadsafe=lambda fn, *a: None)   # the loop not run
         self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
         self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the pick's own ask")
@@ -1307,24 +1307,24 @@ class AChangeBackWithdrawsOnlyARelaunchThatWouldChangeNothing(_ABypassPickChange
         self.assertTrue(self._relaunched_at_quiet(s))
         self.assertTrue(s.launch_values()["fast"], "and carries the opt-in Always fast wants")
 
-    def test_with_a_restart_waiting_for_the_turns_end_the_ask_stands_and_apply_now_runs_it(self):
+    def test_with_a_rewind_waiting_for_the_turns_end_the_ask_stands_and_apply_now_runs_it(self):
         s = self._session()
         self._bypass_waits(s)
-        s.request_reconnect(cut=True, cause="restart")
-        self.assertTrue(s._reconnect_when_idle, "the premise: the Restart waits for the turn's end")
+        s.request_reconnect(cut=True, cause="rewind")
+        self.assertTrue(s._reconnect_when_idle, "the premise: the rewind waits for the turn's end")
         self._change_back(s)
         self.assertEqual(s._switch_wanted, "bypass mode", "a relaunch is on its way: the ask stands")
         doors = []
         self.be._relaunch = lambda sid, cause: doors.append(cause) or ""
         self.assertEqual((self.be.apply_now(SID), doors), ("", ["apply"]), "and Apply now runs it")
 
-    def test_with_a_relaunch_armed_the_ask_stands_and_no_line_says_it_was_withdrawn(self):
+    def test_with_a_rewinds_relaunch_armed_the_ask_stands_and_no_line_says_it_was_withdrawn(self):
         q = []
         s = self._session(queued=q)
         s.inflight = 0
-        s.request_reconnect(cut=True, cause="restart")
+        s.request_reconnect(cut=True, cause="rewind")
         self._run(q)
-        self.assertTrue(s._reconnect, "the premise: the Restart's relaunch is armed")
+        self.assertTrue(s._reconnect, "the premise: the rewind's relaunch is armed")
         self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
         self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the pick's own ask")
         said = []
