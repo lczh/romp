@@ -715,6 +715,105 @@ class AReattachToTheSameCliInsideOneKernel(_Harness):
         self.assertEqual([m["effortApplied"] for m in self._effort_markers()], ["max"])
 
 
+class AnAttachBesideAPendingDeleteLeavesNothingForALaterFreshCli(_Harness):
+    """A kernel restart attaches to the CLI a host kept, launched for a delete no turn has consumed yet, so this kernel's
+    launch options carry that delete's --resume-session-at although the attached CLI already runs it. An attach is no
+    launch: no fresh-CLI stamp runs for it, and it leaves nothing that a later stamp reads as a rewind. Here a turn on the
+    attached CLI arms a ScheduleWakeup one-shot, lists it at its Stop hook and consumes the delete at its result; the host
+    then dies in its re-exec at that turn's end, and the reconnect, which meant to keep the CLI, spawns a fresh one with a
+    plain resume. That CLI does not carry the wakeup, so it stays the kernel's to deliver when it is due, as after any
+    plain relaunch; a rewind's hand-off would give it to the fresh CLI, whose first Stop hook drops what it does not list.
+    The scripted host plays the attach to the surviving CLI, then the spawn of CLI C on the re-exec's reconnect."""
+
+    WAKE = "check the notes-api build again"
+    CLI_C = {"pid": 4444, "start": "300.5", "spawnedAt": 1700000300}
+
+    def _record(self, text):
+        """the user record a turn's text lands as, in the transcript the session resumes"""
+        p = sb.transcript_path(self.cwd, str(self._reg().get("lastSid") or SID))
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        u = self._uid()
+        with open(p, "a") as f:
+            f.write(json.dumps({"type": "user", "uuid": u, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                                "message": {"role": "user", "content": text}}) + "\n")
+        return u
+
+    def _open_turn(self, s, c, text):
+        s.enqueue(text)
+        self._wait(lambda: text in c.writes, "the turn fed")
+        self._push(c, _SystemMessage("init", {"model": "claude-x", "permissionMode": "acceptEdits", "session_id": FSID},
+                                     uuid=self._uid()))
+        self._push(c, _AssistantMessage([_TextBlock("on it")], uuid=self._uid()))
+        self._wait(lambda: s._untaken is None and s.inflight == 1 and self._reg().get("lastSid") == FSID, "the turn open")
+        return self._record(text)
+
+    def _end_turn(self, s, c):
+        self._push(c, _result(uuid=self._uid(), subtype="success", is_error=False, num_turns=1, session_id=FSID,
+                              duration_ms=1, duration_api_ms=1, total_cost_usd=0.01,
+                              usage={"input_tokens": 1, "output_tokens": 1}, result="ok", parent_tool_use_id=None))
+        self._wait(lambda: s.inflight == 0 and not s._cli_working, "the turn settled")
+
+    def _one_shots(self):
+        return [c for c in self._reg().get("sessionCrons") or [] if not c.get("recurring")]
+
+    def _on(self, s, coro):
+        return asyncio.run_coroutine_threadsafe(coro, s.loop).result(5)
+
+    def _live(self, s, k):
+        """the k-th client (counted across kernels), once it is the live one of the running session `s`"""
+        self._wait(lambda: len(_Client.instances) == k and _Client.instances[k - 1] is s.client, "client %d" % k)
+        return _Client.instances[k - 1]
+
+    def test_a_wakeup_armed_on_the_attached_cli_stays_the_kernels_after_a_re_exec_that_spawned_a_fresh_cli(self):
+        be1, s1 = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"},
+                                {"attach": False, "cli": CLI_B, "launch": "spec"}])
+        c1 = self._connect(s1, 1)
+        kept = self._open_turn(s1, c1, "first turn")
+        self._end_turn(s1, c1)
+        self._open_turn(s1, c1, "start the notes-api release loop")
+        self._end_turn(s1, c1)
+        self.assertEqual(be1.rollback(SID, kept), (True, ""), "delete the second turn")
+        c2 = self._live(s1, 2)
+        self.assertEqual((getattr(c2.options, "extra_args", None) or {}).get("resume-session-at"), kept,
+                         "the premise: CLI B is the delete's, launched rewound")
+        self._end_kernel(s1)
+        self.assertEqual(self._reg().get("rewindTo"), kept, "the premise: no turn has consumed the delete")
+
+        be2, s2 = self._kernel([{"attach": True, "cli": CLI_B, "launch": "same"},
+                                {"attach": False, "cli": self.CLI_C, "launch": "spec"}], survives=True)
+        c3 = self._connect(s2, 3)
+        self._settle()
+        self.assertEqual((s2._host_is_attach, s2._rewind_armed), (True, True),
+                         "the premise: an attach to CLI B, with the delete in this launch's options")
+        self._open_turn(s2, c3, "watch the notes-api deploy")
+        t = time.time()
+        self._on(s2, s2._sched_tool_hook({"tool_name": "ScheduleWakeup", "tool_input": {"delaySeconds": 600, "prompt": self.WAKE},
+                                          "tool_response": {"scheduledFor": int(-(-(t + 600) // 60) * 60 * 1000),
+                                                            "clampedDelaySeconds": 600, "wasClamped": False}},
+                                         "tu-wake", None))
+        due = time.localtime(t + 600)
+        self._on(s2, s2._stop_hook({"session_crons": [{"id": "a1b2c3d4", "schedule": "%d %d * * *" % (due[4], due[3]),
+                                                       "prompt": self.WAKE, "recurring": False}],
+                                    "background_tasks": []}, None, None))
+        self._end_turn(s2, c3)
+        self.assertEqual((self._reg().get("rewindTo"), [c["prompt"] for c in self._one_shots()]), ("", [self.WAKE]),
+                         "the premise: the turn consumed the delete, and the wakeup is on record")
+
+        s2.loop.call_soon_threadsafe(be2._on_host_reexec_now, s2)   # the host re-execs at the turn's end, and dies in it
+        self._wait(lambda: s2._reconnect, "the re-exec's planned reconnect")
+        self._push(c3, _EOF)
+        c4 = self._live(s2, 4)
+        self.assertEqual((s2._host_is_attach, (getattr(c4.options, "extra_args", None) or {}).get("resume-session-at")),
+                         (False, None), "the premise: the reconnect spawned CLI C, a plain resume")
+        self._settle()
+        with be2._reg_lock:
+            reg = sb.read_reg(self.state, SID)
+            sb.write_reg(self.state, SID, dict(reg, sessionCrons=[dict(c, dueEpoch=time.time() - 30)
+                                                                  for c in reg.get("sessionCrons") or []]))
+        self.assertEqual(be2.deliver_lost_wakeups(), 1, "CLI C does not carry the wakeup: the kernel delivers it")
+        self._wait(lambda: self.WAKE in c4.writes, "its prompt, fed to CLI C")
+
+
 class _AlwaysTimesOut(_Client):
     """Every connect fails as an initialize that timed out does."""
 

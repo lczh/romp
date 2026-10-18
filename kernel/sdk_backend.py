@@ -6924,9 +6924,11 @@ class SdkSession:
         #                                and only a CLI launched from this session's state clears them (_amain)
         self._cut_cause = ""           # the gesture behind a cut relaunch not yet torn down (CUT_BY's key: restart, rewind,
         #                                apply), handed by request_reconnect(cut=True, cause=…); the teardown takes it
-        self._rewind_cli = False       # the teardown just taken was a rewind's (cut_by "rewind"): the next fresh-CLI stamp
-        #                                hands that CLI the one-shots this object first recorded, less those it drops
-        #                                (_fresh_cli_stamp)
+        self._launch_rewind = None     # the (target, leaf) pair this connect's launch applies with --resume-session-at, None
+        #                                when it applies none (_options); an attach reaches a CLI an earlier launch made
+        self._cli_rewind = None        # the pair the CLI this object last stamped was launched at: a fresh CLI launched at a
+        #                                pair its predecessor was not is a rewind's, and its stamp hands it the one-shots
+        #                                this object first recorded, less those it drops (_fresh_cli_stamp)
         self._rewind_owed = False      # a rewind's stamp could not hand them over: until a Stop hook records the armed set or
         #                                a later stamp moves it, every generation this object minted is the live CLI's
         #                                (cli_generations), and that later stamp hands them over as the rewind's would
@@ -9892,14 +9894,21 @@ class SdkSession:
         fails, keeps the old generation). That step drops the outgoing generation's one-shots with a due time that a
         generation of this object first recorded, when their earliest fire (wakeup_earliest_fire) has passed by this stamp
         or is not known, leaves one an earlier session object first recorded the kernel's, and gives the others
-        with no due time the new generation. After a rewind (an edit or a delete: the teardown's cut_by) every
-        other one-shot a generation of this object first recorded takes it too: nothing here tells a wakeup armed in a turn
+        with no due time the new generation. After a rewind (an edit or a delete: a launch at a --resume-session-at pair
+        the CLI it replaces was not launched at, whatever gesture ended that CLI) every other one-shot a generation of
+        this object first recorded takes it too: nothing here tells a wakeup armed in a turn
         the rewind discards from one armed in a turn it keeps, so the kernel delivers neither, and the first Stop hook of
         the CLI holding them keeps only the ones it lists; a stamp before that hook hands them to its fresh CLI again
         (_rewind_ids). A rewind whose step fails leaves every generation this object minted the live CLI's (_rewind_owed)
         instead, and the next stamp before a Stop hook hands their one-shots over as the rewind's would have."""
         gen = new_proc_gen()
-        rewound, self._rewind_cli = getattr(self, "_rewind_cli", False), False
+        # a rewind's CLI: its launch applies a (target, leaf) pair the CLI it replaces was not launched at. Read from the
+        # launch itself, never from the gesture that ended the old CLI: a Restart or an Apply now during a rewind's
+        # teardown, or a Restart during its wait for the turn's end, renames the cut, and a stamp keyed on that name took
+        # the rewound CLI for a plain relaunch's
+        at = getattr(self, "_launch_rewind", None)
+        rewound = at is not None and at != getattr(self, "_cli_rewind", None)
+        self._cli_rewind = at
         rewound = rewound or getattr(self, "_rewind_owed", False)
         self._hand_one_shots_to(gen, rewound)
         prev = (read_reg(self.backend.state_dir, self.sid) or {}).get("spawnedAt")
@@ -10231,7 +10240,6 @@ class SdkSession:
                 # the gesture that asked for this relaunch (a Restart, a rewind, an Apply now) names the cut in the
                 # notice; taken here, at the teardown it caused, so the next relaunch starts with none
                 cut_by, self._cut_cause = getattr(self, "_cut_cause", ""), ""
-                self._rewind_cli = cut_by == "rewind"   # read once by the stamp of the fresh CLI this relaunch connects
                 self._drop_live_work("reconnect", cut_by=cut_by)
             self._hello_launch = self._hello_spawned_at = None   # the next hello says what ITS CLI launched with
             self._cli_launch = None                               # …and no CLI serves until the next connect's reconcile
@@ -17932,11 +17940,13 @@ class SdkBackend:
         # (a crash-heal resume mid-rewind-turn must not re-rewind). _rewind_armed releases the held edit
         # turn to THIS client (the inputs() gate).
         sess._rewind_armed = False
+        sess._launch_rewind = None
         disp = rewind_disposition(sess._rewind_to, sess._rewind_leaf,
                                   last_record_uuid(transcript_path(sess.cwd, sess.resume_sid or sess.sid)))
         if disp == "apply":
             kw.setdefault("extra_args", {})["resume-session-at"] = sess._rewind_to   # merge-safe beside the fork's args
             sess._rewind_armed = True
+            sess._launch_rewind = (sess._rewind_to, sess._rewind_leaf)   # the pair this launch applies (_fresh_cli_stamp)
         elif disp == "spent":
             sess._rewind_to = sess._rewind_leaf = ""
             sess._rewind_bare = False
