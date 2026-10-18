@@ -2667,6 +2667,8 @@ def _version_info(authed=False):
             "drainRefused": dict(_DRAIN_REFUSED),   # T224: refused /busy?drain=1 arms — count (lifetime
             #                                          total), episodeCount (the current/last episode),
             #                                          open episode, last time; the silent degrade made visible
+            "wsRefusedCrossSite": dict(_WS_REFUSED_CROSS_SITE),   # socket dials the gate refused for a cross-site
+            #                                          Origin: count and newest time, never a client-diag row (2026-10-18)
             # T222: where the model pickers' version list came from (seed / cache / api), when, what
             # the API added beyond the shipped seed, and the last refresh failure — so a stale list
             # is a visible fact in `romp version`, never a guess
@@ -59961,9 +59963,10 @@ def _note_ws_end(client, life, now=None):
 
 
 # A refused dial's row carries strings the dial chose, and the gate's 403 is reached with no credential at all, so any
-# cross-site page's `new WebSocket(...)` to the loopback port can file one. Each such string is cut to the characters a
-# real one uses (an app name, a uuid dashboard id, a host as _SSH_HOST_RE admits one, an origin), so a dial cannot write
-# prose, quotes or markup into the file, only a short token.
+# client the origin gate admits (a local process that sends no Origin among them; a cross-site page's dial is only counted,
+# _WS_REFUSED_CROSS_SITE) can file one. Each such string is cut to the characters a real one uses (an app name, a uuid
+# dashboard id, a host as _SSH_HOST_RE admits one, an origin), so a dial cannot write prose, quotes or markup into the
+# file, only a short token.
 _WS_ROW_FIELD_DROP = re.compile(r"[^A-Za-z0-9_.:-]")
 _WS_ROW_HOST_DROP = re.compile(r"[^A-Za-z0-9_.@:\[\]-]")
 _WS_ROW_ORIGIN_DROP = re.compile(r"[^A-Za-z0-9_.:/\[\]-]")
@@ -59972,6 +59975,22 @@ _WS_ROW_ORIGIN_DROP = re.compile(r"[^A-Za-z0-9_.:/\[\]-]")
 def _ws_row_field(s, n, drop=_WS_ROW_FIELD_DROP):
     """`s` as a refused dial's row may carry it: only the characters `drop` keeps, then at most `n` of them."""
     return drop.sub("", str(s or ""))[:n]
+
+
+# A dial the gate turned away from a CROSS-SITE page files no row (2026-10-18): the gate's 403 needs no credential, so any
+# website open in the browser can dial this port, and at the row budget's 30 a minute one such page turned the 8 MB file
+# over within a day, pushing out the rows romp's own pages file, and took the minute's budget from their refusals. A refusal
+# whose Origin the gate admits (the kernel's own pages, the editor's webview, a client that sends no Origin) still files
+# its row; a cross-site one is counted here, served on /version as wsRefusedCrossSite (count, lastT): bare numbers.
+_WS_REFUSED_CROSS_SITE = {"count": 0, "lastT": 0}
+_WS_REFUSED_CROSS_SITE_LOCK = threading.Lock()
+
+
+def _note_ws_refused_cross_site(now=None):
+    """Count one /ws or /remote/HOST/ws dial the gate refused for a cross-site Origin (see _WS_REFUSED_CROSS_SITE)."""
+    with _WS_REFUSED_CROSS_SITE_LOCK:
+        _WS_REFUSED_CROSS_SITE["count"] += 1
+        _WS_REFUSED_CROSS_SITE["lastT"] = int(time.time() if now is None else now)
 
 
 def _note_ws_refused(headers, path, q, status, why, what="wsrefused", now=None):
@@ -83882,7 +83901,10 @@ class Handler(BaseHTTPRequestHandler):
             self._cors_origin = self.headers.get("Origin") if ok else None   # echoed by _send (CORS delivery)
             if not ok:
                 if p == "/ws" or (p.startswith("/remote/") and p.endswith("/ws")):
-                    _note_ws_refused(self.headers, p, q, 403, why)   # a socket dial turned away, on the record (bounded; no query)
+                    if self._origin_ok():
+                        _note_ws_refused(self.headers, p, q, 403, why)   # a socket dial turned away, on the record (bounded; no query)
+                    else:
+                        _note_ws_refused_cross_site()   # any website can dial the port: counted, never a row
                 if p == "/":
                     # A bare-URL browser open lands here token-less: serve the paste-the-token page
                     # (Jupyter's login flow) instead of a dead 403 — the redirect seeds the cookie.
