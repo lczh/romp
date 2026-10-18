@@ -2740,8 +2740,12 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 /* ---------- live "awaiting your input" picker (pending, click-to-answer) ---------- */
 /* The picker is part of the scrolling transcript (the user 2026-06-27): it's the last child of #content and
    flows at the BOTTOM of the chat, scrolling WITH the history — no fixed region, no separate scrollbar, so a
-   tall picker never hides the context above it. The .ask-live card centers itself in the chat column. */
-#live-ask { padding-bottom: 6px; }
+   tall picker never hides the context above it. The .ask-live card centers itself in the chat column.
+   The host is laid out like a .thread, the same column and the same 56px left gutter, because it sits beside the threads
+   rather than inside one: without the gutter the card ran to the pane's left edge, and the jump cluster, which floats over
+   that gutter in the bottom-left corner, covered the first letters of the question and its options (the user 2026-10-18,
+   who found the corner's pills had no room only when a question was waiting). */
+#live-ask { max-width: var(--chat-col); margin: 0 auto; padding: 0 24px 6px 56px; }
 /* the transcript's foot line (2026-10-08): "Thinking · 14s" where the reply will appear. A FIXED height whether or not it
    shows anything, so a stretch starting or ending moves nothing on screen (render.ts liveStatusEl); laid out like a
    thread, the line's text on the turns' text column (.turn padding-left 24px) */
