@@ -847,7 +847,14 @@ class Engine {
     // and the window's blur (a page put behind another mid-press gets neither a pointerup nor a pointercancel from Chromium: the
     // tab strip's hold, render.ts). Before these the drag outlived the gesture: plain mouse movement kept resizing, and the next
     // click committed it. A cancel restores the press layout and the band's grab-time height, and writes nothing
-    const cancel = (ev: Event) => { if (ev.type === "blur" ? this.div === drag : mine(ev)) this.endDiv(false); };
+    const cancel = (ev: Event) => {
+      // a blur with the page still focused is focus moving INTO one of the shell's own pane frames (the chat's question card focusing
+      // itself on a re-render, the shell focusing a pane's frame), not the window losing focus: the press is still held, so the drag
+      // goes on. Chromium moves the focused frame before it fires that blur, and drops the page's focus before it fires a window
+      // switch's (focus_controller.cc: SetFocusedFrame, SetFocused), so document.hasFocus() reads true for the one and false for the other
+      if (ev.type === "blur" && document.hasFocus()) return;
+      if (ev.type === "blur" ? this.div === drag : mine(ev)) this.endDiv(false);
+    };
     // Escape reaches the drag from a focused pane through the engine's own keydown wiring on every pane document (wire, onKey)
     window.addEventListener("pointermove", mv, true); window.addEventListener("pointerup", up, true);
     window.addEventListener("pointercancel", cancel, true); window.addEventListener("lostpointercapture", cancel, true); window.addEventListener("blur", cancel);
