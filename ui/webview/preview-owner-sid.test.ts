@@ -28,7 +28,7 @@ test("every render entry point sets the owner (and the out-of-sync ones restore 
   assert.match(RENDER, /renderingSid = savedRenderingSid;\s*\n\s*renderingOwnerSid = savedOwnerSid;/);
   // the comment popover renders a thread: fold keys per-thread, URLs per the thread's SESSION
   assert.match(RENDER, /function fillCommentMsgs\(list: HTMLElement, th: CommentThread, sid: string\)/);
-  assert.match(RENDER, /renderingSid = th\.tid;\s*\n\s*renderingOwnerSid = sid;/);
+  assert.match(RENDER, /renderingSid = threadSidOf\(th\);[^\n]*\n\s*renderingOwnerSid = sid;/);
   assert.match(RENDER, /renderingSid = saved;\s*\n\s*renderingOwnerSid = savedOwner;/);
   // chatEpisode fills in the MESSAGE handler, outside any sync — it pins both to the episode's session
   assert.match(RENDER, /renderingSid = sid;\s*\n\s*renderingOwnerSid = sid;\s*\n\s*try \{[\s\S]{0,220}fillClearBody/);

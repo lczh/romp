@@ -5,7 +5,7 @@
 // the passage as it reads instead, and stops once it holds more than a quote can carry.
 // EXECUTED: quoteText, quoteSkips and quoteTextTrim, lifted whole from render.ts, over a small DOM stand-in shaped like the chat's
 // rendering (no jsdom here, the thread-selection-scope.test.ts precedent); the real page in Chromium is
-// quote-context-browser.test.ts, which CI cannot run. Synthetic text only.
+// quote-context-browser.test.ts. Synthetic text only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -146,6 +146,66 @@ test("across two replies: a collapsed tool row's label, toggle and folded input 
   const root = chat();
   assert.equal(read(root, [textOf(root, "The reply closes"), 0], [textOf(root, "The next reply"), 21]),
     "The reply closes here.\n\nThanks, carry on.\n\nThe next reply starts");
+});
+
+// review of #234 (2026-10-14): a tool group's line, its caret and the edits' totals as much as its summary, and an opened
+// edit's line-number gutters, which a <pre> holds and whose user-select: none the walk does not read there
+test("a tool group's caret and totals stay out, and an opened diff's line numbers; a diff row keeps its sign", () => {
+  const ns = { userSelect: "none" };
+  const row = (o: string, n: string, sign: string, code: string) =>
+    h("div.diff-row." + (sign === "-" ? "diff-del" : sign === "+" ? "diff-add" : "diff-ctx"),
+      h("span.diff-gut.diff-gut-old", ns, o), h("span.diff-gut.diff-gut-new", ns, n), h("span.diff-sign", ns, sign), h("span.diff-code", code));
+  const group = h("div.turn.turn-toolgroup", h("span.dot"),
+    h("div.toolgroup-line", h("span.toolgroup-caret", "\u25b8"), " ", h("span.toolgroup-head", "Ran a command, edited a file"), " ",
+      h("span.tool-totals", h("span.tool-plus", "+1"), " ", h("span.tool-minus", "-1"))));
+  const edit = h("div.turn.turn-tool.fold-open", h("span.dot"),
+    h("div.tool-head", h("span.tool-label", "Edited notes.py"), h("span.tool-fold-toggle", ns, h("span.tool-totals", "+1 -1"))),
+    h("pre.io-pre.fold-pre.diff-fold.tool-fold-body", row("10", "10", "", "a = 1"), row("11", "", "-", "b = 2"), row("", "11", "+", "b = 3")));
+  const root = h("div.thread", h("div.turn.turn-assistant", h("div.md", h("p", "The first reply ends here."))), group, edit,
+    h("div.turn.turn-assistant", h("div.md", h("p", "The second reply starts here."))));
+  assert.equal(read(root, [textOf(root, "The first reply"), 0], [textOf(root, "The second reply"), 23]),
+    "The first reply ends here.\n\n a = 1\n-b = 2\n+b = 3\n\nThe second reply starts");
+  assert.equal(read(root, [textOf(root, "a = 1"), 0], [textOf(root, "b = 3"), 5]), " a = 1\n-b = 2\n+b = 3");
+});
+
+// review of #239 (2026-10-14): the walk writes each diff row's marker as it reads the row's code, so a selection that starts
+// inside a row's code (past its sign, which the page marks user-select: none) still says what the row is; a context row's
+// marker is the unified diff's leading space, kept on a line alone; a row the range only touches at an edge says nothing
+test("a diff row's marker comes with its code wherever the selection starts in it; a context row's is a space", () => {
+  const ns = { userSelect: "none" };
+  const row = (cls: string, sign: string, code: string) =>
+    h("div.diff-row." + cls, h("span.diff-gut.diff-gut-old", ns, "7"), h("span.diff-gut.diff-gut-new", ns, "7"), h("span.diff-sign", ns, sign), h("span.diff-code", code));
+  const blank = h("div.diff-row.diff-add", h("span.diff-gut", ns, ""), h("span.diff-gut", ns, "9"), h("span.diff-sign", ns, "+"), h("span.diff-code"));
+  const fold = h("pre.io-pre.fold-pre.diff-fold", h("div.diff-row.diff-hunk", h("span.diff-gut", ns, ""), h("span.diff-gut", ns, ""),
+    h("span.diff-sign", ns, ""), h("span.diff-code", "@@ -7 +7 @@")), row("diff-ctx", "", "- keep this item"),
+    row("diff-del", "-", "    rate = 0.1"), row("diff-add", "+", "    rate = 0.25"), blank, row("diff-add", "+", "done()"));
+  const root = h("div.thread", h("div.turn.turn-tool.fold-open", h("span.dot"), fold));
+  const del = textOf(root, "rate = 0.1"), add = textOf(root, "rate = 0.25"), ctx = textOf(root, "- keep");
+  assert.equal(read(root, [del, 4], [add, 15]), "-    rate = 0.1\n+    rate = 0.25", "a drag from the row's first word");
+  assert.equal(read(root, [del, 11], [add, 15]), "-           0.1\n+    rate = 0.25", "from mid-row: the code before it a blank");
+  assert.equal(read(root, [add, 0], [add, 15]), "+    rate = 0.25", "a triple-click's range, the row's code alone");
+  assert.equal(read(root, [ctx, 0], [ctx, 16]), " - keep this item", "a context line alone keeps its space");
+  assert.equal(read(root, [textOf(root, "@@"), 0], [textOf(root, "done()"), 6]),
+    "@@ -7 +7 @@\n - keep this item\n-    rate = 0.1\n+    rate = 0.25\n+\n+done()", "the hunk header as it reads; a blank row's marker alone");
+  assert.equal(read(root, [del, 14], [add, 15]), "+    rate = 0.25", "a start at a row's end: that row says nothing");
+  assert.equal(read(root, [del, 0], [add, 0]), "-    rate = 0.1", "an end at a row's start: that row says nothing");
+});
+
+// review of #242 (2026-10-14): the lead before a mid-row start was a blank per character, unbounded; a long lead is " …"
+test("the code before a mid-row start: blanks when short or only indent, a short mark when long", () => {
+  const ns = { userSelect: "none" };
+  const row = (sign: string, code: string) => h("div.diff-row." + (sign === "+" ? "diff-add" : "diff-ctx"),
+    h("span.diff-gut", ns, "3"), h("span.diff-gut", ns, "3"), h("span.diff-sign", ns, sign), h("span.diff-code", code));
+  const long = "a".repeat(5000) + " Token 140 marks the gadget field.";
+  const deep = " ".repeat(24) + "return total";
+  const root = h("div.thread", h("div.turn.turn-tool.fold-open", h("pre.io-pre.fold-pre.diff-fold",
+    row("+", long), row("+", deep), row(" ", "x".repeat(17) + " kept"), row(" ", "y".repeat(15) + " kept"))));
+  const at = (data: string, words: string): Point => { const t = textOf(root, data); return [t, t.data.indexOf(words)]; };
+  const end = (data: string): Point => { const t = textOf(root, data); return [t, t.data.length]; };
+  assert.equal(read(root, at("Token 140", "Token 140"), end("Token 140")), "+ \u2026Token 140 marks the gadget field.");
+  assert.equal(read(root, at("return total", "return"), end("return total")), "+" + " ".repeat(24) + "return total", "an indent is kept");
+  assert.equal(read(root, at("x".repeat(17), " kept"), end("x".repeat(17))), "  \u2026 kept", "17 characters: the mark");
+  assert.equal(read(root, at("y".repeat(15), " kept"), end("y".repeat(15))), " " + " ".repeat(15) + " kept", "15: blanks");
 });
 
 test("a closed fold shows its summary alone; an open one its contents too", () => {

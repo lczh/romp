@@ -411,7 +411,7 @@ class ApplyNowPushesAWaitingPickThrough(_Harness):
                       "had running: watch the spend.", note)
         self._wait(lambda: not s.snapshot()["authPending"], "the pick applied at the connect")
         self.assertEqual((s.snapshot()["relaunchWaits"], s.snapshot()["relaunchCuts"]), ("", ""))
-        self.assertTrue(any(l.startswith("apply now (web): idle, reconnecting now") for l in self.lines), self.lines)
+        self.assertTrue(any(l.startswith("apply now (web): ending its CLI with SIGTERM") for l in self.lines), self.lines)
         self.assertTrue(any("dropped 0 subagents and 1 background task on reconnect (apply)" in l for l in self.lines), self.lines)
 
     def test_with_nothing_waiting_it_changes_nothing(self):
@@ -443,6 +443,95 @@ class ApplyNowPushesAWaitingPickThrough(_Harness):
         plain = sb.task_death_notice([{"desc": "tail the build log"}])
         self._wait(lambda: c3.writes == [plain], "the plain notice")
         self.assertIn("ended (a restart or crash): tail the build log.", plain)
+
+
+class _Proc:
+    """The SDK transport's CLI process as _term_for_relaunch reaches it: SIGTERM ends it at once (the installed CLI exits
+    in about two seconds), and the order of the end and the teardown is recorded on the client."""
+
+    def __init__(self, events):
+        self.pid, self.returncode, self.events = 4242, None, events
+
+    def terminate(self):
+        self.events.append("SIGTERM")
+        self.returncode = -15
+
+
+class ARestartEndsTheCliWithSigterm(_Harness):
+    """Restart session ends the old CLI with SIGTERM, at once, and never sends it the interrupt control request (the user
+    2026-10-17). On the installed CLI that request stops every background agent the session runs, recorded as stopped by
+    the user, which SendMessage then refuses to resume: a pair of agents was lost to a Restart with a turn in flight that
+    way, and an earlier pair to a Stop. SIGTERM records nothing of the kind (verified in a lab on the real CLI: the
+    agent resumed by SendMessage after the relaunch), and unlike the teardown's EOF, which a CLI with a background agent
+    running ignores until the host's end grace runs out, it ends the CLI in seconds. A text the CLI held untaken goes to
+    the fresh CLI once the old one is proven gone; one that landed before the end is not fed twice. The REAL run loop
+    against the stand-in client, whose transport process records the SIGTERM; every id synthetic."""
+
+    class _Client(_Harness._Client):
+        instances = []
+
+        def __init__(self, options=None, transport=None):
+            super().__init__(options, transport)
+            self.interrupts, self.events = 0, []
+            self._transport = types.SimpleNamespace(_process=_Proc(self.events))
+
+        async def __aexit__(self, *a):
+            self.events.append("teardown")
+            return await super().__aexit__(*a)
+
+        async def interrupt(self):
+            self.interrupts += 1
+
+    def _with_a_background_agent(self, c):
+        self._task(c, "task_started", tid="a-sleeper", description="review the parser", task_type="local_agent")
+        self._wait(lambda: self.s.live_work()[1] == 1, "the background agent registered")
+
+    def test_a_restart_with_a_turn_in_flight_and_a_background_agent_sends_no_interrupt_and_relaunches_now(self):
+        s, c1 = self.s, self._first_turn()
+        self._with_a_background_agent(c1)
+        self.assertEqual(s.inflight, 1, "the turn is in flight")
+        self.assertEqual(self.be.relaunch(SID), "")
+        c2 = self._relaunched()                     # no result frame was ever sent: nothing waits on the turn's end
+        self.assertEqual(c1.interrupts, 0, "never the interrupt control request")
+        self.assertEqual(c1.events, ["SIGTERM", "teardown"], "the CLI is ended with SIGTERM before the connection closes")
+        self.assertTrue(any(l.startswith("relaunch (web): ending its CLI with SIGTERM, which cuts the running turn")
+                            for l in self.lines), self.lines)
+        note = sb.task_death_notice([{"desc": "review the parser"}], did=sb.CUT_BY["restart"])
+        self._wait(lambda: c2.writes == [note], "romp's own what-was-cut notice, fed to the fresh CLI")
+        self.assertEqual(s.inflight, 1, "the notice's own turn, and nothing stranded from the cut one")
+
+    def test_an_idle_restart_with_a_background_agent_ends_the_cli_with_sigterm_not_an_eof_wait(self):
+        s, c1 = self.s, self._first_turn()
+        self._with_a_background_agent(c1)
+        self._end_turn(c1)
+        self.assertEqual(self.be.relaunch(SID), "")
+        self._relaunched()
+        self.assertEqual(c1.interrupts, 0)
+        self.assertEqual(c1.events, ["SIGTERM", "teardown"],
+                         "an EOF alone leaves a CLI with a background agent running until the host's end grace ends it")
+
+    def test_a_text_the_cli_held_untaken_goes_to_the_fresh_cli_first(self):
+        s, c1 = self.s, self._first_turn()
+        s.enqueue("and cover the empty input too")
+        self._wait(lambda: c1.writes == ["first turn", "and cover the empty input too"], "fed mid-turn")
+        self._wait(lambda: s._untaken is not None, "held: the CLI has not taken it")
+        self.assertEqual(self.be.relaunch(SID), "")
+        c2 = self._relaunched()
+        self._wait(lambda: c2.writes == ["and cover the empty input too"], "the held text, fed to the fresh CLI")
+        self.assertEqual(c1.interrupts, 0)
+        self.assertTrue(any("was holding a fed text it had not run: back at the head of the queue" in l for l in self.lines),
+                        self.lines)
+
+    def test_a_held_text_that_landed_before_the_end_is_not_fed_twice(self):
+        s, c1 = self.s, self._first_turn()
+        s.enqueue("and cover the empty input too")
+        self._wait(lambda: s._untaken is not None and len(c1.writes) == 2, "fed mid-turn and held")
+        self._transcript_append("and cover the empty input too")   # the CLI wrote its record before the SIGTERM
+        self.assertEqual(self.be.relaunch(SID), "")
+        c2 = self._relaunched()
+        self._settle()
+        self.assertEqual(c2.writes, [], "it reached the conversation already: the fresh CLI resumes it, no second copy")
+        self.assertEqual(s.pending(), [])
 
 
 class ABypassPickWaitsAsAMarkOfItsOwn(_Harness):
@@ -2130,7 +2219,7 @@ class WhatTheRelaunchWaitsFor(unittest.TestCase):
         self.assertEqual(s.relaunch_cuts(), "", "a queued message survives the relaunch: the fresh CLI takes it")
         s._untaken = {"text": "fed, not taken yet"}
         self.assertEqual(s.relaunch_waits(), "the running turn")
-        self.assertEqual(s.relaunch_cuts(), "", "a fed text the CLI has not taken: the relaunch waits for that turn's end")
+        self.assertEqual(s.relaunch_cuts(), "", "a fed text the CLI has not taken: the fresh CLI takes it first")
         s._untaken = None
         with s._sub_lock:
             s._bg_tasks["t-1"] = {"desc": "watch", "type": "local_bash", "since": 1}

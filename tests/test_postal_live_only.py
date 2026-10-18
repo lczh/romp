@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import socket
 import tempfile
 import threading
@@ -155,6 +156,116 @@ class RecallReachesParkedMailForTheDead(unittest.TestCase):
         removed = pm._recall(ALPHA, "ghost", None)
         self.assertEqual([r["id"] for r in removed], ["m8"])
         self.assertEqual(list(box.iterdir()), [])
+
+
+class RecallTakesTheFormsSendTakes(unittest.TestCase):
+    """Recall finds mail under every address form the send accepted (2026-10-17). The notes-api
+    world: web sends, api runs here, and a second api runs on peer host TESTHOST-B, so a bare 'api'
+    is refused as ambiguous and the sender picks `TESTHOST:api`, or the short id list_agents shows,
+    or the far session's rename-proof id. Recall read each of these only as a bare name and answered
+    that nothing was left to recall while the message sat unread in new/ or parked in the outbox."""
+
+    WEB = "a1b2c3d4-1111-2222-3333-444444444444"
+    API = "5e6f7a8b-5555-6666-7777-888888888888"
+    FAR = "9c8d7e6f-9999-0000-1111-222222222222"
+    OLD = "0d0e0f10-aaaa-bbbb-cccc-dddddddddddd"      # an earlier api session here that has ended
+
+    def setUp(self):
+        self._prior = {k: os.environ.get(k) for k in ("ROMP_SESSIONS_FILE", "ROMP_POSTAL_HOST", "ROMP_POSTAL_PEERS")}
+        os.environ["ROMP_POSTAL_HOST"] = "TESTHOST"
+        os.environ.pop("ROMP_POSTAL_PEERS", None)                  # peer mode, the default
+        _set_live([{"id": self.WEB, "name": "web"}, {"id": self.API, "name": "api"}])
+        self._peers = dict(pm.PEER_STATE)
+        pm.PEER_STATE.clear()
+        pm.PEER_STATE["TESTHOST-B"] = {"presence": [{"id": self.FAR, "name": "api"}]}
+
+    def tearDown(self):
+        for k, v in self._prior.items():
+            restore_env(k, v)
+        pm.PEER_STATE.clear()
+        pm.PEER_STATE.update(self._peers)
+        for d in (pm.MAILROOT / self.API / "new", pm.OUTBOX / "TESTHOST-B"):
+            if d.is_dir():
+                for f in d.iterdir():
+                    f.unlink()
+        for sid in (self.API, self.OLD):
+            (pm.NAMES_DIR / sid).unlink(missing_ok=True)
+        shutil.rmtree(pm.MAILROOT / self.OLD, ignore_errors=True)
+
+    def _named(self, sid, name):
+        pm.NAMES_DIR.mkdir(parents=True, exist_ok=True)
+        (pm.NAMES_DIR / sid).write_text("%s\tTESTHOST" % name)
+
+    def _unread(self):
+        box = pm.MAILROOT / self.API / "new"
+        return sorted(f.name for f in box.iterdir()) if box.is_dir() else []
+
+    def _send_local(self, to):
+        res = pm.resolve_recipient(to, self.WEB)
+        self.assertEqual((res["kind"], res.get("agent", {}).get("id")), ("direct", self.API), res)
+        pm.deliver(self.API, "web", self.WEB, "the moot ask")
+        self.assertEqual(len(self._unread()), 1)
+        return self._unread()[0]
+
+    def _send_far(self, to):
+        res = pm.resolve_recipient(to, self.WEB)
+        self.assertEqual((res["kind"], res.get("host")), ("relay", "TESTHOST-B"), res)
+        hit, mid = res["agent"], "px-" + pm._unique()
+        self.assertTrue(pm.outbox_put("TESTHOST-B", {"mid": mid, "to": hit.get("name") or to,
+                                                     "toId": str(hit.get("id") or ""), "frm": "web",
+                                                     "frm_id": self.WEB, "body": "the moot ask",
+                                                     "kind": "question", "t": 1}))
+        return mid
+
+    def test_this_hosts_qualified_name(self):
+        # an ended session also named api left its box here: the qualified name, like the bare one,
+        # still means the LIVE api, not a two-box name the dead-name fallback refuses
+        (pm.MAILROOT / self.OLD / "new").mkdir(parents=True, exist_ok=True)
+        self._named(self.OLD, "api")
+        refusal = pm.resolve_recipient("api", self.WEB)
+        self.assertIn("TESTHOST:api", refusal.get("error", ""), "the refusal offers this form")
+        mid = self._send_local("TESTHOST:api")
+        self.assertEqual([r["id"] for r in pm._recall(self.WEB, "TESTHOST:api", None)], [mid])
+        self.assertEqual(self._unread(), [])
+
+    def test_short_id_from_list_agents(self):
+        mid = self._send_local(self.API[:8])
+        self.assertEqual([r["id"] for r in pm._recall(self.WEB, self.API[:8], None)], [mid])
+        self.assertEqual(self._unread(), [])
+
+    def test_short_id_of_a_session_that_has_ended(self):
+        # recall is not addressing: the mail still sits in the ended session's box here
+        mid = self._send_local(self.API[:8])
+        _set_live([{"id": self.WEB, "name": "web"}])
+        self._named(self.API, "api")                             # as any session that ran has
+        self.assertEqual([r["id"] for r in pm._recall(self.WEB, self.API[:8], None)], [mid])
+
+    def test_a_short_id_two_sessions_share_recalls_nothing(self):
+        twin = self.API[:8] + "-0000-0000-0000-000000000000"
+        mid = self._send_local(self.API[:13])
+        _set_live([{"id": self.WEB, "name": "web"}, {"id": self.API, "name": "api"},
+                   {"id": twin, "name": "tests"}])
+        self.assertEqual(pm._recall(self.WEB, self.API[:8], None), [], "two sessions start so: no guess")
+        self.assertEqual(self._unread(), [mid])
+
+    def test_another_hosts_qualifier_leaves_the_local_box(self):
+        mid = self._send_local("TESTHOST:api")
+        self.assertEqual(pm._recall(self.WEB, "TESTHOST-B:api", None), [])
+        self.assertEqual(self._unread(), [mid])
+
+    def test_far_session_id_parked_in_the_outbox(self):
+        for form in (self.FAR, self.FAR[:8], "TESTHOST-B:" + self.FAR[:8]):
+            mid = self._send_far(form)
+            self.assertEqual([r["id"] for r in pm._recall(self.WEB, form, None)], [mid], form)
+            self.assertEqual(pm.outbox_list("TESTHOST-B"), [], form)
+
+    def test_other_qualifiers_leave_far_parked_mail(self):
+        # the disambiguated local form, or a third host's qualifier, never withdraws mail parked
+        # for TESTHOST-B's api
+        mid = self._send_far("TESTHOST-B:api")
+        self.assertEqual(pm._recall(self.WEB, "TESTHOST:api", None), [])
+        self.assertEqual(pm._recall(self.WEB, "TESTHOST-C:" + self.FAR[:8], None), [])
+        self.assertEqual([m["mid"] for m in pm.outbox_list("TESTHOST-B")], [mid])
 
 
 class KernelSilenceIsNotDeadness(unittest.TestCase):

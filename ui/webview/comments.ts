@@ -29,8 +29,13 @@ export type CommentThread = {
    *  blocked, compacting, retrying, working, awaitingBg, ready, interrupting), "" for a dormant thread or an older kernel
    *  (thread-live-1, 2026-10-14). Read through threadChipState, never alone. */
   chip?: string;
+  /** what the popover's live painters read for a RUNNING thread (thread-live-2, 2026-10-14): its chat build's status,
+   *  projected to the fields the statusline chip, the context gauge and the background box read (kernel
+   *  _THREAD_LIVE_STATUS_KEYS), and its tracked background tasks; null for a dormant thread, absent from an older kernel */
+  live?: { status?: Record<string, unknown>; bgTasks?: unknown } | null;
   error?: string;             // the thread CLI's launch error, when it could not start
   unread: boolean;            // a FINISHED agent reply newer than the read watermark — yellow (kernel truth, T237)
+  seenSeq?: number;           // how many reads the kernel has recorded for the thread: a held read ends at the frame that counts it (read-latch.ts)
   replyOwed?: boolean;        // a reply is still owed (no exchange yet / user's message newest / turn in progress / a send held) — the green wash (kernel truth, T237; absent on an older kernel)
   queued?: number;            // sends the backend holds or has fed for this thread, not yet in the transcript (T237)
   lastUuid?: string;          // the newest record shown/held — "did the transcript move?" without the projection caps (T237)

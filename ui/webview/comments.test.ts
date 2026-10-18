@@ -120,8 +120,9 @@ test("an unread thread wears ONE outline box around its whole passage and a shou
   assert.match(UI, /function paintCommentOutlines\(sid: string\): void \{/);
   assert.doesNotMatch(CSS, /mark\.cmt-hl \{[^}]*position: relative;/s, "nothing left for the mark to anchor");
   assert.match(CSS, /\.cmt-tick\.unread, \.cmt-tick\.needs \{ width: 16px; height: 6px; right: 0; opacity: 1;/);   // 10px until the comment-forward rail (2026-09-24, rail-comment-forward.test.ts)
-  // the clearing story is the existing machinery, untouched: optimistic on open + kernel watermark
-  assert.match(UI, /if \(th\) th\.unread = false;\s*\/\/ optimistic; the kernel's watermark reconciles/);
+  // the clearing story: opening the thread reads it (readThread), held until the kernel's frame counts the read (2026-10-15,
+  // read-latch.ts; executed in comment-read-latch-browser.test.ts)
+  assert.match(UI, /readThread\(sid, tid\);\s*\/\/ opening it reads it/);
 });
 
 test("an unread thread tints its turn's RAIL segment yellow; clicking the rail opens the thread", () => {
@@ -134,7 +135,7 @@ test("an unread thread tints its turn's RAIL segment yellow; clicking the rail o
   assert.match(CSS, /\.turn\.cmt-rail-unread::before \{ background: var\(--cmt-hl\); opacity: 1; width: 3px; left: 10px; \}/);
   // the rail-hit click checks at CLICK time, so the strip reverts to timeline navigation once read
   assert.match(UI, /const um = turn\.querySelector\("mark\.cmt-hl\.unread"\) as HTMLElement \| null;/);
-  assert.match(UI, /if \(um\?\.dataset\.tid && activeId\) \{ openCommentPopover\(activeId, um\.dataset\.tid, e\.clientX, e\.clientY\); return; \}/);
+  assert.match(UI, /if \(um\?\.dataset\.tid && activeId\) \{ passageLanding\(activeId, um\.dataset\.tid\); return; \}/, "to the passage, then the thread beside it (the rail tick's landing)");
 });
 
 test("busy and stuck are disjoint state families", () => {
@@ -368,7 +369,7 @@ test("picking a model/effort never reads as an outside press — the box stays p
   // the shared menu's click arms the sid-scoped pending dots, and the frame-driven refresh re-runs
   // syncMetaControls on the popover's row exactly as the chat's tick does
   assert.match(UI, /metaPending\.set\(`\$\{opSid\}:\$\{kind\}`, \{ was, until: Date\.now\(\) \+ 20_000 \}\);/);
-  assert.match(UI, /if \(th && cm\) syncMetaControls\(cm, threadMetaStatus\(th\), th\.tid\);/);
+  assert.match(UI, /if \(th && cm\) syncMetaControls\(cm, threadMetaStatus\(th\), threadSidOf\(th\)\);/);
 });
 
 test("marks use the prefix-tolerant anchor matcher", () => {
@@ -412,7 +413,7 @@ test("the create dialog names the thread right there: prefilled <session>-commen
 test("the landing pulse fires once per navigation, not once per history-fetch round", () => {
   assert.match(UI, /let flashedAnchor: string \| null = null;/);
   assert.match(UI, /if \(flashKey == null \|\| flashKey !== flashedAnchor\)/);
-  assert.match(UI, /landOn\(target, uuid, quoteEl \?\? firstTextAtomBelow\(target\), quote\);/);   // the one landing write, aligned on the words when the frame quotes them (T386)
+  assert.match(UI, /landOn\(target, uuid, markEl \?\? quoteEl \?\? firstTextAtomBelow\(target\), quote, mark\);/);   // the one landing write, aligned on the words when the frame quotes them (T386), or on a comment thread's passage
   assert.match(UI, /if \(anchor\) flashedAnchor = null;/);
 });
 
@@ -461,7 +462,7 @@ test("while the thread is WRITING the passage holds the await-green tint and NOT
 });
 
 test("the popover renders the thread with the CHAT's own renderer from the branch point", () => {
-  assert.match(UI, /renderingSid = th\.tid;/);
+  assert.match(UI, /renderingSid = threadSidOf\(th\);/);   // the thread's session id (host-prefixed on a linked machine)
   assert.match(UI, /const node = renderEvent\(ev, prev, turnWorkedSecs\(evs, it\.index, thWorking\)\);\s*\n\s*list\.appendChild\(node\);/);   // + the chat's worked footers (the parity bundle, 2026-08-26)
   assert.match(KERNEL, /def _thread_events\(tsid, cut_uuid, now, live_map, tm=None, out=None\):/);   // tm: the thread's live row (thread-live-1)
   assert.match(KERNEL, /evs = evs\[at \+ 1:\]/, "sliced to AFTER the branch point — the head system card never rides");
@@ -701,7 +702,7 @@ test("the parity bundle (2026-08-26): dividers, owner-scoped in-turn controls, t
   assert.match(UI, /const anchor = itemAnchor\(it, \(i\) => eventEpoch\(evs\[i\]\)\);\s*\n\s*const dayOpen = eventEpoch\(evs\[anchor\]\);[\s\S]{0,300}?if \(dayOpen != null\) \{\s*\n\s*const dv = dayDividerFor\(dayOpen, walk\);/);   // the T145 relay-note insert sits between; the unit timed by its anchor member, the divider decided against the walk's mark (T339)
   // the popover's list is stamped with the THREAD sid, and in-turn controls resolve their owner
   // from the DOM at click time — queued ✕ and the api-error card act on the thread, never the tab
-  assert.match(UI, /list\.dataset\.session = th\.tid;/);
+  assert.match(UI, /list\.dataset\.session = threadSidOf\(th\);/);   // the thread's session: a linked machine's routes to its kernel
   assert.match(UI, /function owningSidOf\(el0: HTMLElement \| null\): string \| null \{/);
   assert.match(UI, /const sidQ = owningSidOf\(el\) \|\| activeId;/);   // resolved once — the optimistic arm reuses it
   assert.match(UI, /\{ type: "cancelQueued", id: sidQ, md: qmd \}/);
@@ -716,7 +717,8 @@ test("the thread's running turn offers the chat's stop affordance, owner-scoped 
   const at = UI.indexOf("function cmtStateChip(");
   const chip = UI.slice(at, UI.indexOf("\n}", at));
   assert.match(chip, /b\.dataset\.act = "cmtinterrupt";/);
-  assert.match(chip, /b\.dataset\.sid = th\.tid;/, "the thread's OWN sid rides the button");
+  assert.match(chip, /b\.dataset\.sid = threadSidOf\(th\);/, "the thread's OWN session id rides the button (host-prefixed on a linked machine: the stop routes to its kernel)");
+  assert.match(chip, /b\.dataset\.tid = th\.tid;/, "…and the thread, whose latches the stop clears");
   // since thread-live-1 (2026-10-14) the chat bar's own rule decides, through the one predicate: working, compacting,
   // retrying and an API error (blocked) offer it; a question or permission prompt does not (the picker answers that)
   assert.match(chip, /const st = threadChipState\(th\);/, "the chat's chip for the thread");
@@ -732,11 +734,12 @@ test("the popover interrupt posts the THREAD sid, clears the send-latch on the g
   assert.ok(!body.includes("activeId"), "never the active tab — the owner-scoping class queued-x/Retry were fixed for");
   // T102's latch contract at the interrupt edge: the exchange ends with NO reply record coming, so
   // the pulse clears on the gesture itself — the deciding event — not on a reply that never lands.
-  assert.match(body, /cmtAwaitBase\.delete\(sid\);/);
+  assert.match(body, /const tid = \(elx as HTMLElement\)\.dataset\.tid \|\| sid;/, "the latches are the thread's, by its tid (the post is by its session id)");
+  assert.match(body, /cmtAwaitBase\.delete\(tid\);/);
   // …and the OWED arm stands down too (lab phase 4e caught it: replyOwed's trailing-user shape held
   // the mark green forever after a stop). The tombstone is record-count-keyed, never a clock, and a
   // fresh send retires it (re-owed).
-  assert.match(body, /cmtInterrupted\.add\(sid\);/);
+  assert.match(body, /cmtInterrupted\.add\(tid\);/);
   assert.match(UI, /return owed && !cmtInterrupted\.has\(th\.tid\);/,   // owed = the kernel's replyOwed, else the msgs read (T237)
     "gesture-pair tombstone: stop sets it, ONLY the next send clears it — the CLI files the interrupt "
     + "as a trailing user-kind record, so any record-shape re-derivation would re-fire (lab-caught)");
@@ -1259,6 +1262,7 @@ test("New thread instead carries the selection's live range, so it opens the com
     + "applyCommentMarks, vscodeApi, document, quoteContext } = env;\n"
     + "let commentPopPos = null, cmtPopPosMine = false, cmtRedirect = null, pendingCommentAnchor = null, openCommentKey = null;\n"
     + "const renderCommentPopover = () => { env.shown.push({ open: openCommentKey, anchor: pendingCommentAnchor }); };\n"
+    + "const readThread = () => {};\n"   // the read the opening makes (its own tests: comment-read-latch-browser.test.ts)
     + src + "\nreturn { openCommentComposer, cmtnewthread };")(env) as { openCommentComposer: (...args: unknown[]) => void; cmtnewthread: () => void };
   const view = { ctx: "\u2026Each export then refills the cache from the database, and the worker drains the queue\u2026" };
   page.openCommentComposer(SID, "a3", "the cache", 100, 200, inside, false, view);

@@ -2519,5 +2519,94 @@ class CursorTableBound(Base):
         got, kind, nread = self._fold(live[0])
         self.assertEqual((kind, nread, got), ("hit", 0, [0, 1, 2]), "a neighbour at its entry's generation stayed: a stat")
 
+
+class PendingRestoreLifetime(Base):
+    """A file's pending checkpoint restore lives as long as the reader entry it was taken for. The restore carries a state for
+    every fold in the document, folds this process never runs over the file included (the judges' fold, in the kernel), and
+    only a fallback or a checkpoint-directory rebind released it: once the entry left memory (a quiet drop, an eviction) those
+    states stayed until the process exited, outside every cache bound, and a whole read of the file afterward met the stale
+    restore as a dropped one (droppedRestores, and a 'checkpoint restore dropped' line, for a restore no entry could take). The
+    restore now goes with its entry; an entry put back at the same generation (an append, a tail's upgrade) keeps it; and one
+    taken for an older entry than the reader's is let go unused."""
+
+    def setUp(self):
+        super().setUp()
+        self.run, self.idle, self.kinds = {}, {}, []
+
+    @staticmethod
+    def _step(st, o):
+        return st + [o["n"]]
+
+    def fold(self, p, name="synthRun"):
+        cache = self.run if name == "synthRun" else self.idle
+        return em.fold_records(cache, p, list, self._step, on=self.kinds.append, ckpt=name)
+
+    def seed(self, name):
+        """A file of three records whose document carries both folds at its witness."""
+        p = str(self.td / name)
+        _write(p, [{"n": i} for i in range(3)])
+        self.fold(p); self.fold(p, "synthIdle")
+        self.assertTrue(em.checkpoint_write(p))
+        self.assertEqual(sorted(self.doc(p)["folds"]), ["synthIdle", "synthRun"])
+        return p
+
+    def test_the_restore_goes_with_its_entry_and_keeps_nothing_of_a_fold_that_never_ran(self):
+        ps = [self.seed("leaf-%d.jsonl" % i) for i in range(4)]
+        q = str(self.td / "other.jsonl")
+        _write(q, [{"n": 0}])
+        self.fresh_process()
+        for p in ps:                                        # this process runs one of the two folds, never the other
+            self.assertEqual(self.fold(p), [0, 1, 2]); self.assertEqual(self.kinds[-1], "restore")
+            self.assertIn("synthIdle", em._CKPT_PENDING[p]["folds"], "the other fold's restore waits while its entry stands")
+        with em._JSONL_CACHE_LOCK:
+            for p in ps[:2]:
+                em._cache_pop_locked(p)                     # a quiet drop lets the entry go
+        with mock.patch.object(em, "_JSONL_CACHE_MAX", 1):
+            self.assertEqual(len(em._read_jsonl_incremental(q)), 1)   # the count cap evicts the other two
+        with em._JSONL_CACHE_LOCK:
+            self.assertEqual([p for p in ps if p in em._JSONL_CACHE], [], "every restored entry left memory")
+        self.assertEqual([p for p in ps if p in em._CKPT_PENDING], [],
+                         "no pending restore outlives its entry, so no state of the fold that never ran stays behind")
+
+    def test_an_append_and_a_tails_upgrade_keep_the_restore_for_a_fold_yet_to_run(self):
+        p = self.seed("leaf.jsonl")
+        self.fresh_process()
+        self.assertEqual(self.fold(p), [0, 1, 2]); self.assertEqual(self.kinds[-1], "restore")
+        _append(p, {"n": 3})
+        self.assertEqual(self.fold(p), [0, 1, 2, 3]); self.assertEqual(self.kinds[-1], "append")
+        self.assertEqual(len(em._read_jsonl_incremental(p)), 4)   # a whole reader upgrades the tail at the same generation
+        with em._JSONL_CACHE_LOCK:
+            self.assertEqual(em._JSONL_CACHE[p][5], 0)
+        self.assertEqual(self.fold(p, "synthIdle"), [0, 1, 2, 3])
+        self.assertEqual(self.kinds[-1], "restore", "both replacements kept the entry's generation, and with it the restore")
+        st = em.checkpoint_stats()
+        self.assertEqual((st["restoredFolds"], st["droppedRestores"]), ({"synthRun": 1, "synthIdle": 1}, 0))
+
+    def test_a_whole_read_after_the_entry_left_meets_no_stale_restore(self):
+        p = self.seed("leaf.jsonl")
+        for road in ("drop", "read error"):
+            with self.subTest(road=road):
+                self.fresh_process()
+                em._CKPT_STATS.update(restored=0, restoredFolds={}, droppedRestores=0, fallbacks={})
+                if road == "drop":
+                    self.assertEqual(self.fold(p), [0, 1, 2]); self.assertEqual(self.kinds[-1], "restore")
+                    with em._JSONL_CACHE_LOCK:
+                        em._cache_pop_locked(p)             # the restored entry leaves memory (a quiet drop, an eviction)
+                else:
+                    failed = []                             # the restore takes its pending record, then its read fails
+                    with mock.patch.object(em, "_scan_jsonl_stream", side_effect=OSError(errno.EIO, "synthetic read error")):
+                        self.assertIsNone(em._read_jsonl_entry(p, on_fail=failed.append, tail_ok=True))
+                    self.assertEqual(len(failed), 1)
+                self.assertEqual(len(em._read_jsonl_incremental(p)), 3)   # a whole reader reads the file again
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    got = self.fold(p, "synthIdle")
+                self.assertEqual(got, [0, 1, 2])
+                self.assertEqual(self.kinds[-1], "refold", "the document was consulted once in this process: a refold, as before")
+                self.assertEqual(em.checkpoint_stats()["droppedRestores"], 0, "no restore could serve this entry, so none was dropped")
+                self.assertNotIn("restore dropped", err.getvalue())
+                self.assertNotIn(p, em._CKPT_PENDING)
+
+
 if __name__ == "__main__":
     unittest.main()

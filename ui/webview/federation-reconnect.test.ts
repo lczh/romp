@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { FederationManager, mergeHostTimelines, socketVerdict,
-         REMOTE_STALE_MS, REMOTE_CONNECT_MS, REMOTE_REDIAL_MS, REMOTE_PROVISIONAL_MS } from "./federation";
+         REMOTE_STALE_MS, REMOTE_CONNECT_MS, REMOTE_REDIAL_MS, REMOTE_PROVISIONAL_MS, REMOTE_CLOSING_MS } from "./federation";
 
 const U = "11111111-2222-3333-4444-555555555555";
 
@@ -32,7 +32,16 @@ test("socketVerdict: a hung handshake is aborted; a CLOSED socket with no fresh 
   assert.equal(socketVerdict(0, 0, t, t + 3000), "", "a young handshake is left to finish");
   assert.equal(socketVerdict(3, 0, t, t + REMOTE_REDIAL_MS + 1), "redial", "CLOSED 8s+ with no new connect = a lost retry timer");
   assert.equal(socketVerdict(3, 0, t, t + 1000), "", "the 2s onclose redial is still coming");
-  assert.equal(socketVerdict(2, 0, t, t + 99999), "", "CLOSING is in flight — onclose will follow");
+  assert.equal(socketVerdict(2, 0, t, t + 99999), "", "CLOSING not yet seen by a tick (closingT 0): nothing to measure from");
+});
+
+// A socket held CLOSING (2026-10-15): the verdict used to leave CLOSING alone, so a close the far side never completed
+// held the redial until the browser gave up on it, up to a minute later
+test("socketVerdict: a socket held CLOSING past REMOTE_CLOSING_MS since a tick first saw it is put down", () => {
+  const t = 1_000_000;
+  assert.equal(REMOTE_CLOSING_MS, 5000, "the pane shim's CLOSING_MS: put down on the tick after the one that first saw it");
+  assert.equal(socketVerdict(2, 0, t, t + 54_999, REMOTE_STALE_MS, t + 50_000), "", "inside the bound since the first sighting");
+  assert.equal(socketVerdict(2, 0, t, t + 55_000, REMOTE_STALE_MS, t + 50_000), "close", "at the bound: the next 5 s tick puts it down");
 });
 
 test("the bounds are the pane shim's, byte for byte (kernel keepalive 10s → stale at 30s)", () => {
@@ -61,8 +70,8 @@ class FakeWS {
 // the test owns the clock: the manager stamps connT/lastRecv with Date.now(), and the watchdog is
 // ticked with an explicit `now`, so silence is advanced by hand rather than waited out
 let clock = 1_000_000_000;
-async function withManager(fn: (fm: any, emitted: any[], diag: any[], posted: any[]) => void | Promise<void>): Promise<void> {
-  const emitted: any[] = [], diag: any[] = [], posted: any[] = [];
+async function withManager(fn: (fm: any, emitted: any[], diag: any[], posted: any[], said: string[]) => void | Promise<void>): Promise<void> {
+  const emitted: any[] = [], diag: any[] = [], posted: any[] = [], said: string[] = [];
   const g: any = globalThis;
   const saved: Record<string, any> = {};
   const set = (k: string, v: any) => { saved[k] = { had: k in g, v: g[k] }; g[k] = v; };
@@ -74,13 +83,16 @@ async function withManager(fn: (fm: any, emitted: any[], diag: any[], posted: an
   set("localStorage", { getItem: () => null, setItem: () => {} });
   const parent = { postMessage: (m: any) => { posted.push(m); } };
   set("window", {
-    dispatchEvent: (ev: any) => { if (ev && ev.data) emitted.push(ev.data); },
+    dispatchEvent: (ev: any) => {
+      if (ev && ev.data) emitted.push(ev.data);
+      else if (ev && /^romp:hostRelay/.test(ev.type)) said.push(ev.type + " " + ev.detail.host);   // the relay's up and down
+    },
     __rompLocalSend: (m: any) => { if (m && m.type === "clientDiag") diag.push(m); },
     sessionStorage: { getItem: () => "" },
     parent,
   });
   try {
-    await fn(new FederationManager(), emitted, diag, posted);   // awaited: the globals must outlive an async poll
+    await fn(new FederationManager(), emitted, diag, posted, said);   // awaited: the globals must outlive an async poll
   } finally {
     Date.now = realNow;
     for (const [k, r] of Object.entries(saved)) { if (r.had) g[k] = r.v; else delete g[k]; }
@@ -126,6 +138,33 @@ test("a relay socket that opens and then goes silent past the bound is abandoned
   });
 });
 
+// The review of #247 (2026-10-15): the abandon detaches the socket's onclose, which is where a relay's drop was said, so a
+// socket the watchdog put down was never said to be down. The chat's unanswered sends kept "sending…", and a comment
+// thread's read sent on it stayed held for the page's life (render.ts, read-latch.ts). The drop is said here as onclose says it.
+test("a relay socket the watchdog puts down is said to be down, as a closed one is, before its redial says it is back", async () => {
+  await withManager((fm, _e, _d, _p, said) => {
+    fm.openRemote("TESTHOST", true);
+    FakeWS.made[0].open();
+    clock += REMOTE_STALE_MS + 1;                           // silent past the bound
+    fm.watchdog(clock);
+    assert.equal(FakeWS.made[0].closed, 1, "premise: the watchdog put it down");
+    assert.deepEqual(said, ["romp:hostRelayUp TESTHOST", "romp:hostRelayDown TESTHOST"], "the drop is said, once");
+    FakeWS.made[1].open();
+    assert.deepEqual(said.slice(2), ["romp:hostRelayUp TESTHOST"], "…and the redial's open says it is back");
+    // a handshake the foreground pass kills is a drop too, as its onclose would have said
+    fm.watchdog(clock, true);
+    assert.equal(said.length, 3, "an open, live socket is left alone");
+    fm.conns.get("TESTHOST").ws.readyState = 0;
+    fm.watchdog(clock, true);
+    assert.deepEqual(said.slice(3), ["romp:hostRelayDown TESTHOST"]);
+    // and a socket that closes on its own says it once, through the same door
+    FakeWS.made[2].open();
+    FakeWS.made[2].die();
+    assert.deepEqual(said.slice(4), ["romp:hostRelayUp TESTHOST", "romp:hostRelayDown TESTHOST"]);
+    fm.conns.get("TESTHOST").closed = true;
+  });
+});
+
 test("the foreground fast-path kills a socket still CONNECTING, whatever its age — the sleeping tab's unfinished handshake", async () => {
   await withManager((fm, _e, diag) => {
     fm.openRemote("TESTHOST", true);
@@ -138,6 +177,34 @@ test("the foreground fast-path kills a socket still CONNECTING, whatever its age
     assert.equal(diag.filter((d) => d.data && d.data.ev === "watchdog-close" && d.data.why === "connecting" && d.data.foreground).length, 1);
     assert.equal(FakeWS.made.length, 2, "…and dials a fresh one in the same pass");
     fm.conns.get("TESTHOST").closed = true;
+  });
+});
+
+test("a relay socket held CLOSING is abandoned on the tick after the one that first saw it, and a fresh one dialed", async () => {
+  await withManager((fm, _e, diag, _p, said) => {
+    fm.openRemote("TESTHOST", true);
+    const ws = FakeWS.made[0];
+    ws.open();
+    ws.frame({ type: "ka", dv: 1 });
+    ws.readyState = 2;                      // a close began and the far side never completes it: no onclose comes
+    clock += 5000;
+    fm.watchdog(clock);
+    assert.equal(FakeWS.made.length, 1, "the first tick that sees it CLOSING only stamps it");
+    clock += 5000;
+    fm.watchdog(clock);
+    assert.equal(FakeWS.made.length, 2, "the next tick puts it down and dials a fresh socket, not a minute later");
+    assert.equal(ws.onclose, null, "the abandoned socket's handlers are detached: its late onclose redials nothing");
+    const conn = fm.conns.get("TESTHOST");
+    assert.equal(conn.ws, FakeWS.made[1]);
+    assert.equal(conn.closingT, 0, "the fresh socket starts unstamped");
+    assert.equal(diag.filter((d) => d.data && d.data.ev === "watchdog-close" && d.data.why === "closing").length, 1, "the crumb names the state it was put down in");
+    assert.deepEqual(said, ["romp:hostRelayUp TESTHOST", "romp:hostRelayDown TESTHOST"], "the drop is said, as its onclose would have said it");
+    // a foreground pass does not wait for the second sighting: the return puts a CLOSING socket down at once
+    FakeWS.made[1].open();
+    FakeWS.made[1].readyState = 2;
+    fm.watchdog(clock, true);
+    assert.equal(FakeWS.made.length, 3, "a foreground pass abandons a CLOSING socket and dials in the same pass");
+    conn.closed = true;
   });
 });
 

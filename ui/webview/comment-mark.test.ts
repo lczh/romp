@@ -47,8 +47,12 @@ test("the yellow corner dot stays gone root and branch", () => {
 
 test("unread is the kernel's bit on an open thread, cleared by opening the thread — the box follows it, nothing else", () => {
   assert.match(RENDER, /m\.classList\.toggle\("unread", !!th\.unread && th\.status === "open"\);/);
-  assert.match(RENDER, /if \(th\) th\.unread = false;\s*\/\/ optimistic; the kernel's watermark reconciles/);
-  assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "commentSeen", id: sid, tid \}\);/);
+  // opening the thread reads it: readThread clears the bit and stamps the kernel's watermark, the clear held until the
+  // kernel's frame counts that read (2026-10-15, read-latch.ts); a kernel that answers no read gets the plain stamp
+  assert.match(RENDER, /readThread\(sid, tid\);\s*\/\/ opening it reads it/);
+  const read = RENDER.slice(RENDER.indexOf("function readThread("), RENDER.indexOf("\n}\n", RENDER.indexOf("function readThread(")));
+  assert.match(read, /cmtReadLatch\.set\(key, holdRead\(sid, tid, rid, raw\)\);\s*\n\s*th\.unread = false;\s*\n\s*vscodeApi\?\.postMessage\(\{ type: "commentSeen", id: sid, tid, rid \}\);/);
+  assert.match(read, /vscodeApi\?\.postMessage\(\{ type: "commentSeen", id: sid, tid \}\);\s*\n\s*if \(th\) th\.unread = false;/);
   // the jump cluster's landing never touches it (the reply chips' did not either; jump-cluster.test.ts pins the handler);
   // the state has ONE clearer
   const at = RENDER.indexOf("function landThread(");

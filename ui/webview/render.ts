@@ -1,6 +1,6 @@
 import { marked } from "marked";
 import { GEAR_GLYPH, ICON_FORK } from "./icons";   // the fork control's glyph (T381), the stroke family the bars share
-import { sanitizeMd, userContentTarget } from "./md-sanitize";   // the one sanitizer every markdown surface shares, and the lookup for a message's own `#` links
+import { sanitizeMd, userContentTarget, revealAncestors } from "./md-sanitize";   // the one sanitizer every markdown surface shares, the lookup for a message's own `#` links, and the reveal of what they name
 import { noticeBodyNodes, noticeAttachmentNodes, type NoticeAttachment } from "./notice-face";   // the notice face the feed card shows, for the approval box
 import { applySections, registerSectionHost, unregisterSectionHost, stateBadges, buildSectionElements, cardSpin, applySpin, applyDistillLanding, configureSectionSync, sectionActs,
          applyRelayNote, type SectionEnv, type SectionItem, type BadgeItem, type SpinFields, type AskTreeNode } from "./card-sections";   // the card's sections, badges, swirl and landings: one builder with the feed card (plans/needs-you.md, the row carries what the card carries)
@@ -19,9 +19,9 @@ import diff from "highlight.js/lib/languages/diff";
 import yaml from "highlight.js/lib/languages/yaml";
 import type { ParsedAsk } from "../ask-types";
 import { TABBAR_H_KEY, TABBAR_H_DEFAULT, clampTabbarH, parseTabbarH } from "./tabbar-resize";
-import type { CmtPopFrac } from "./comment-pop-size";
+import type { CmtPopFrac, CmtPopRect } from "./comment-pop-size";
 import { CMT_POP_SIZE_KEY, CMT_POP_THREAD_DEFAULT, parseCmtPopSize, clampCmtPopPx, toCmtPopFrac, isCmtPopMax,
-         centerCmtPop, cmtPopCapPx, CMT_POP_MIN_W, CMT_POP_MIN_H, CMT_POP_CAP_W, CMT_POP_CAP_H, CMT_POP_EDGE } from "./comment-pop-size";
+         centerCmtPop, cmtPopCapPx, cmtPopBeside, cmtPopNudge, CMT_POP_MIN_W, CMT_POP_MIN_H, CMT_POP_CAP_W, CMT_POP_CAP_H, CMT_POP_EDGE } from "./comment-pop-size";
 import { ctxFallbackColor, pickTone, readableRgb } from "./ctx-color";
 import { applyTheme } from "./theme";
 import { watchOverlayScrollbars } from "./overlay-scrollbars";
@@ -115,7 +115,7 @@ import { insertAtCaret } from "./composer-insert";
 import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDialing, hostDownNote } from "./host-prefix";
 import { sessionLabelNodes } from "./host-prefix";   // the viewer's message bar names its session the strip's way (2026-09-30)
 import { bellState, bellClickFields, legacyBellNote, setHubSwitches, hubMaster, sessionBell } from "./bell-follow";   // a linked kernel's bells follow this kernel's switches; a session bell's own setting beats the defaults
-import { menuCard, addMenuItem, addMenuSep, showMenuCard, openContextMenu, closeContextMenu } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy)
+import { menuCard, addMenuItem, addMenuSep, showMenuCard, openContextMenu, closeContextMenu, contextMenuOpen, scrollQuietly, shiftContextMenu } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy)
 import { focusAfterDismiss, emptyStateParts } from "./pane-focus";   // where focus goes when a tab leaves, and the empty body's line (T357)
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
@@ -144,13 +144,14 @@ import { MetaKind, MetaHooks, metaButton as buildMetaButton, syncMetaControls as
 import { agentCount, replyOwed, threadsByAnchor, threadBusy, threadStuck, findAnchorRange, sliceRanges, prunePending, newCommentCreate, commentCreateFrame,
          pickMarkToOpen, type CommentThread, type CommentCreate, markSkipsParent, CMT_SENT_GIST, CMT_SENT_GIST_PRIOR,
          holdAnswered, holdForPassage, synthSuperseded, existingThreadFor, type PassageAt } from "./comments";
-import { isReplyReady, placeMark, placeWindowed, readyChips, replyLine, type Dir, type ReadyMark, type ReadyChip } from "./reply-ready";
+import { isReplyReady, type Dir } from "./reply-ready";
 import { MOVES, MOVE_TITLE, HERE_PX, HEAD_DIST, placeRendered, placeSpan, placeByOrder, placeUnplaced, pickNav, unreadCount, countTip, type Move, type Place, type NavStop } from "./jump-nav";   // the jump cluster's pure half (2026-09-24)
 import { threadSettled, threadOnRail } from "./comments";   // a thread's look by status: only resolved dims; relayed stays on the rail, open (2026-09-30)
 import { chipStops } from "./status-chip";   // the bar's stop rule, which the comment popover's stop shares (thread-live-1)
 import { threadChipState, threadNeedsYou, threadCued } from "./comments";   // a thread's chip, and its wait on you: the popover's statusline and the passage's cue (thread-live-1)
 import { isRelay, parseRelay, relayHtml, relayPlain } from "./relay-view";   // a relayed thread's expanded bubble: a small transcript (2026-10-06)
 import { threadTakesReplies, stageThreadReply, threadReply } from "./comments";   // a thread's reply box: its quote chips, its staged stack, its release (2026-10-07)
+import { type ReadLatch, readKey, holdRead, heldUnread, answerRead, linkEdge } from "./read-latch";   // a thread's read, held until the kernel's frame shows it (2026-10-15)
 import { CmtDrops, cmtDropEntry } from "./comment-drops";   // a dropped comment create's dialog, shared with the feed (review of PR 218)
 import { activeInput } from "./active-input";   // the one box typing, pasting and dictation from outside any box go to (2026-10-07)
 import { dragSlotIndex } from "./dragslot";
@@ -1008,6 +1009,14 @@ const pendingTabMeta = new Map<string, PendingTabMeta>();
 // kernel sends only the active tab in full and names the rest here, each carrying a status frame instead of
 // a transcript. Declared up here beside tabMeta and closingTabs for the same reason they are: renderTabs reads it.
 const skeletonTabs = newSkeletonState();
+// The strip's scroll anchor while one frame's rebuilds run (stripScrollAnchor, keepStripScroll). Declared up here beside tabMeta for
+// the same reason: renderTabs reads it, and renderTabs can run before the module finishes evaluating.
+type StripAnchor = { box: HTMLElement; keys: string[]; offs: Map<string, number>; st: number };   // st: the box's offset as the strip left it
+let stripAnchorHeld: StripAnchor | null = null;
+let stripAnchorRaf = false;
+// The strip item an open menu was opened on (a tab, or a group header) and where it stood on screen: the rebuild anchors on it and
+// the card follows it (followStripMenu). Up here for the same reason.
+let stripMenuOn: { card: HTMLElement; key: string; x: number; y: number } | null = null;
 // The skeleton tab the user is LOOKING AT while its full is on the way (showActive's loader branch). Latched for
 // upsert, because on the click path the strip that RELEASES the id (the kernel dropped it from the set when it sent
 // the full) lands BEFORE the full itself, so by the time the frame arrives the id is no longer in the set and
@@ -1673,7 +1682,13 @@ let landTrail: string[] = [];
 // every event object; a pass edited events in place without swapping them).
 interface PaintOut { pe: number | null; mark: number | null }
 interface Painted { items: DisplayItem[]; sig: (string | undefined)[]; out: (PaintOut | undefined)[] }
-interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner)
+/** Where the reader was when they left a tab whose follow mode a passage landing holds off: the turn at the viewport's top and its
+ *  offset (captureScrollAnchor). The return restores THAT place and keeps the pause, so text the session wrote meanwhile waits
+ *  below under the chip (the user's decision: the passage stays where they were looking), whether the page drew it before the
+ *  return or draws it after (the appends keep the place while the pause holds). Nothing written meanwhile puts them back at the
+ *  same place, the pause standing until they go back to the bottom themselves (landActive, releaseFollow). */
+interface HeldKeep { anchor: { uuid: string; y: number } | null }
+interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; followHeld?: boolean; heldKeep?: HeldKeep | null; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner). followHeld: follow mode paused by a landing on a comment's passage, at the bottom or not, until the reader goes back to the bottom (landOn, releaseFollow); heldKeep: where a held view was left, for the tab's return (HeldKeep)
 const views = new Map<string, View>();
 
 // Pending pickers (AskUserQuestion / tool-permission) keyed by session id. These
@@ -1907,16 +1922,8 @@ document.addEventListener("click", (e) => {
     const target = frag ? userContentTarget(msg, frag) || userContentTarget(document, frag) : undefined;
     if (!target) return;
     e.preventDefault();
-    // The browser's fragment navigation REVEALS the target before it scrolls (the HTML spec's ancestor revealing
-    // steps): every closed <details> whose content holds the target is opened, and a `hidden="until-found"` on the
-    // target or an ancestor is removed. scrollIntoView does neither, so the same steps run here, ahead of the
-    // scroll; both shapes pass the sanitizer (details, summary and hidden are kept). A target inside a details'
-    // own <summary> is in view already and opens nothing, as in the browser.
-    for (let n: Element | null = target; n; n = n.parentElement) {
-      if ((n.getAttribute("hidden") || "").toLowerCase() === "until-found") n.removeAttribute("hidden");
-      const p = n.parentElement;
-      if (p && p.localName === "details" && n.localName !== "summary" && !p.hasAttribute("open")) p.setAttribute("open", "");
-    }
+    // The browser's fragment navigation REVEALS the target before it scrolls; scrollIntoView does not (revealAncestors)
+    revealAncestors(target);
     // a target inside the transcript moves #content, so the move is the pane's own write (every mover of #content
     // is a writeScroll, attributed); a target elsewhere on the page scrolls its own container the browser's way
     const cont = document.getElementById("content");
@@ -3078,7 +3085,7 @@ function wireTurnHover(turn: HTMLElement, dot: HTMLElement | null, uuid: string 
     // a tinted (unread-comment) rail opens THAT thread (the user 2026-08-23) — checked at click
     // time, so the same strip goes back to timeline navigation the moment the thread is read
     const um = turn.querySelector("mark.cmt-hl.unread") as HTMLElement | null;
-    if (um?.dataset.tid && activeId) { openCommentPopover(activeId, um.dataset.tid, e.clientX, e.clientY); return; }
+    if (um?.dataset.tid && activeId) { passageLanding(activeId, um.dataset.tid); return; }   // to its passage, then the thread beside it
     if (activeId) vscodeApi?.postMessage({ type: "dotOpen", sid: activeId, uuid, t, tlId });
   });
   let railTimer: ReturnType<typeof setTimeout> | undefined;
@@ -4910,6 +4917,7 @@ function applyLiveStatus(m: { id?: unknown; thinking?: unknown; tasks?: unknown 
   if (!ls.thinking && !Object.keys(ls.tasks).length) liveStatus.delete(id); else liveStatus.set(id, ls);
   paintTabThinking(id);
   if (id === activeId) paintLiveThinking();
+  if (id === openThreadSid()) paintThreadThinking();   // an open comment thread's own line (thread-live-2)
   paintTaskProgress(id);
 }
 
@@ -4929,7 +4937,7 @@ function liveStatusEl(): HTMLElement | null {
   const n = el("div", "");
   n.id = "live-status";
   content.insertBefore(n, document.getElementById("live-ask"));
-  if (atEnd) writeScroll(content, content.scrollHeight, "live-status", true);
+  if (atEnd && !v.followHeld) writeScroll(content, content.scrollHeight, "live-status", true);   // not while a passage landing holds follow mode off
   return n;
 }
 
@@ -4940,8 +4948,13 @@ function liveStatusEl(): HTMLElement | null {
 // on over an idle session (the second review of #171, 2026-10-08). An unreachable host's session shows none either.
 function thinkingShown(id: string | null | undefined): ThinkingLive | null {
   if (!id || hostIsDown(id)) return null;
-  const st = (liveSession(id) || sessions.get(id))?.status?.state;
+  const st = (liveSession(id) || sessions.get(id))?.status?.state ?? openThreadState(id);
   return st === "working" ? liveStatus.get(id)?.thinking || null : null;
+}
+// …and for the open comment thread, which is no session of the strip's: its chat chip (thread-live-2), else nothing known
+function openThreadState(id: string): string | undefined {
+  const cur = openCommentThread();
+  return cur && threadSidOf(cur.th) === id && cur.th.status === "open" ? threadChipState(cur.th) : undefined;
 }
 
 function paintLiveThinking(): void {
@@ -4949,6 +4962,28 @@ function paintLiveThinking(): void {
   if (!th) { const have = document.getElementById("live-status"); if (have?.firstChild) have.replaceChildren(); return; }
   const n = liveStatusEl();
   if (!n) return;
+  paintThinkingLine(n, th);
+}
+// The open comment thread's "Thinking · 14s", the same line under its conversation (thread-live-2), by the chat's foot-line rule
+// (liveStatusEl): its room is made ONCE, by the first stretch shown, at a FIXED height kept for the popover's life whether or
+// not it shows anything, so a stretch starting and ending moves nothing in the box; and a thread that never thinks while
+// its box is open keeps the box's layout as it always was.
+function paintThreadThinking(): void {
+  const pop = document.getElementById("cmt-pop");
+  if (!pop) return;
+  const th = thinkingShown(openThreadSid());
+  let n = pop.querySelector(".cmt-live-status") as HTMLElement | null;
+  if (!th) { if (n && n.firstChild) n.replaceChildren(); return; }
+  if (!n) {
+    const list = pop.querySelector(".cmt-msgs");
+    if (!list) return;
+    n = el("div", "cmt-live-status");
+    list.after(n);
+  }
+  paintThinkingLine(n, th);
+}
+// The one line, painted into its host in place: the loader dots, the words, the quiet mark and the tip.
+function paintThinkingLine(n: HTMLElement, th: ThinkingLive): void {
   const now = Date.now() / 1000;
   let line = n.firstElementChild as HTMLElement | null;
   if (!line) {
@@ -4988,10 +5023,13 @@ function paintTabThinking(id: string): void {
 // A session's running subagent rows: each progress span (renderTool's .agent-live, keyed by the spawning call's id)
 // rewritten from the latest frame, in place.
 function paintTaskProgress(id: string): void {
+  const roots: HTMLElement[] = [];
   const v = views.get(id);
-  if (!v) return;
+  if (v) roots.push(v.el);
+  const list = id === openThreadSid() ? document.querySelector("#cmt-pop .cmt-msgs") as HTMLElement | null : null;
+  if (list) roots.push(list);   // an open comment thread's agent rows, in its popover (thread-live-2)
   const tasks = liveStatus.get(id)?.tasks || {};
-  for (const n of Array.from(v.el.querySelectorAll<HTMLElement>(".agent-live[data-tu]"))) {
+  for (const n of roots.flatMap((r) => Array.from(r.querySelectorAll<HTMLElement>(".agent-live[data-tu]")))) {
     const t = taskProgressText(tasks[n.dataset.tu || ""], n.dataset.brief === "1");
     setLiveText(n, t);
   }
@@ -5001,6 +5039,7 @@ function paintTaskProgress(id: string): void {
 // where its text moved.
 function liveStatusTick(): void {
   paintLiveThinking();
+  paintThreadThinking();
   for (const [id, ls] of liveStatus) if (ls.thinking) paintTabThinking(id);
   const now = Date.now() / 1000;
   for (const n of Array.from(document.querySelectorAll<HTMLElement>(".tool-elapsed[data-since]"))) {
@@ -5766,7 +5805,7 @@ function renderTool(ev: Extract<ChatEvent, { kind: "tool" }>): HTMLElement {
     // a row that lists the agent's steps already counts its calls (the fold label) and names its latest tool (the
     // preview): the span then carries only the tokens, so no figure is said twice on one row
     if (ev.agentGist || ev.stepsTotal || ev.agentSteps?.length) p.dataset.brief = "1";
-    p.textContent = taskProgressText(liveStatus.get(renderingOwnerSid || renderingSid || "")?.tasks[ev.toolUseId], p.dataset.brief === "1");
+    p.textContent = taskProgressText(liveStatus.get((renderingIntoThread ? renderingSid : renderingOwnerSid || renderingSid) || "")?.tasks[ev.toolUseId], p.dataset.brief === "1");   // a thread's rows read the THREAD's frame (thread-live-2), never its parent's
     liveBits.push(p);
   }
   // An edit's totals are the diff fold's toggle below (+A -R), printed once per row (round two, medium 1); a FAILED edit's error fold
@@ -7490,6 +7529,7 @@ function renderTabs() {
   // and the composer's name overlay wears that same fade (T335): re-sync it on the same event, so a background the host
   // rewrote (a VS Code colour-theme switch, which fires no romp event) reaches the box when it reaches the strip
   syncComposerPh();
+  const anchor = stripScrollAnchor(bar);   // where the reader is in a scrolled strip, measured before the wipe and re-applied once the new strip is laid out (keepStripScroll)
   // Preserve TAB-MODE keyboard focus across the rebuild (the user 2026-06-29). renderTabs runs on EVERY kernel
   // push (0.5–3s), and replaceChildren() destroys the focused tab — dropping focus out of the strip (often out
   // of the chat iframe entirely), which silently killed ←/→/Enter nav after a send or any push: you were left
@@ -7738,13 +7778,18 @@ function renderTabs() {
   }
   paintTabRowLines(bar);
   ensureTabRowObserver(bar);
-  // Restore tab-mode focus if a tab held it before this rebuild (see the focus capture above the wipe).
+  keepStripScroll(bar, anchor);
+  followStripMenu(bar);
+  // Restore tab-mode focus if a tab held it before this rebuild (see the focus capture above the wipe). QUIETLY: a repaint is
+  // not a gesture, and a plain focus() scrolls the node into view, which threw a reader who had picked a tab and then scrolled
+  // the strip back to that tab on every push (the user 2026-10-17). The gestures that land here next (a click, an arrow, Escape)
+  // bring the tab into view themselves (focusActiveTab).
   if (focusedGroup !== undefined) {
     const h = Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((x) => x.dataset.group === focusedGroup);
     // the group gone, or now holding the active tab (no stop): the old rule
-    if (h && h.tabIndex >= 0) h.focus(); else focusActiveTab();
-  } else if (focusedGear) (bar.querySelector(".tab-widgets-gear") as HTMLElement | null)?.focus();   // not the active tab: Enter again would drop the caret into the composer
-  else if (refocusTab) focusActiveTab();
+    if (h && h.tabIndex >= 0) h.focus({ preventScroll: true }); else focusActiveTab(true);
+  } else if (focusedGear) (bar.querySelector(".tab-widgets-gear") as HTMLElement | null)?.focus({ preventScroll: true });   // not the active tab: Enter again would drop the caret into the composer
+  else if (refocusTab) focusActiveTab(true);
   stripAftermath(visibleIds, ids);
   // (The Fleet toggle that briefly lived here as a tab-bar pill was removed 2026-06-24: Fleet/Chat are now
   // the rotated toggles in the chat pane's vertical strip — see _LANDING_FLEET_JS — so the pill was redundant.)
@@ -7790,7 +7835,7 @@ function stripAftermath(visibleIds: readonly string[], ids: readonly string[]): 
   const shown = snapView;
   const held = shown ? snapshotHoldsFocus() : false;
   if (snapView) renderSnapshot();
-  if (shown && !snapView) { showActive(); if (held) focusActiveTab(); }
+  if (shown && !snapView) { showActive(); if (held) focusActiveTab(true); }   // quiet: a push ended the view, not a gesture
   // Hiding the LAST visible session must also blank its transcript: a strip with no tabs cannot sit
   // over a hidden session's live chat (the ghost would show exactly what the hide asked to put away).
   // Restored the moment anything is visible again — the placeholder owns the empty state meanwhile.
@@ -7802,6 +7847,74 @@ function stripAftermath(visibleIds: readonly string[], ids: readonly string[]): 
   }
 }
 
+// THE STRIP KEEPS ITS PLACE THROUGH A REBUILD (the user 2026-10-17: with many sessions the strip scrolls, and every update to it
+// threw the reader back to the top). renderTabs rebuilds #tabs whenever its signature changes, and the scroll box (#tabbar) keeps
+// its raw offset across that, so sessions added or removed ABOVE the view slid what the reader was looking at by a row or more.
+// The rebuild anchors instead: before the wipe it notes the items whose top edge is in view (a tab by its id and the group its
+// copy sits in, a header by its tag), and after the new strip is laid out it scrolls by however far the first of them that is
+// still on the strip moved, so that item stays where it was. A strip at its top keeps no anchor (what lands above shows there).
+// The anchor is what the reader SAW: one frame can carry several rebuilds (a tabOrder frame that drops sessions dismisses them
+// one by one, each a rebuild), and the in-between strips are never painted, so the anchor taken at the first of them holds
+// until the next frame (the animation frame is the paint's own event), unless the box was scrolled meanwhile.
+// Only a gesture scrolls the strip otherwise: the rebuild's focus restore is quiet too (focusActiveTab).
+function stripItemKey(c: Element): string | null {   // a declaration, hoisted: renderTabs can run before the module finishes evaluating
+  const e = c as HTMLElement;
+  if (e.classList.contains("tab-group-head")) return "h:" + (e.dataset.group ?? "");
+  return e.classList.contains("tab") && e.dataset.id ? "t:" + e.dataset.id + "\0" + (e.dataset.copy ?? "") : null;
+}
+function stripScrollAnchor(bar: HTMLElement): StripAnchor | null {
+  const box = bar.parentElement;
+  if (!box) return null;
+  const held = stripAnchorHeld;
+  if (held && held.box === box && box.scrollTop === held.st) return held;   // a rebuild earlier in this frame took it: the strip the reader saw
+  stripAnchorHeld = null;
+  if (box.scrollTop <= 0) return null;
+  const top = box.getBoundingClientRect().top + box.clientTop, bottom = top + box.clientHeight;
+  const keys: string[] = [], offs = new Map<string, number>();
+  for (const c of Array.from(bar.children)) {
+    const key = stripItemKey(c);
+    if (!key) continue;
+    const r = c.getBoundingClientRect();
+    if (!r.height || r.top < top - 0.5) continue;
+    if (r.top >= bottom) break;
+    keys.push(key); offs.set(key, r.top - top);
+  }
+  if (!keys.length) return null;
+  const menuAt = stripMenuOn ? keys.indexOf(stripMenuOn.key) : -1;
+  if (menuAt > 0) keys.unshift(keys.splice(menuAt, 1)[0]);   // an open menu's item first: the card stays over it
+  stripAnchorHeld = { box, keys, offs, st: box.scrollTop };
+  if (!stripAnchorRaf) { stripAnchorRaf = true; requestAnimationFrame(() => { stripAnchorRaf = false; stripAnchorHeld = null; }); }
+  return stripAnchorHeld;
+}
+function keepStripScroll(bar: HTMLElement, a: StripAnchor | null): void {
+  if (!a || bar.parentElement !== a.box) return;
+  const now = new Map<string, Element>();
+  for (const c of Array.from(bar.children)) { const key = stripItemKey(c); if (key && !now.has(key)) now.set(key, c); }
+  const key = a.keys.find((k) => now.has(k));
+  if (key) {   // none: everything that was in view left the strip, and the raw offset stands
+    const top = a.box.getBoundingClientRect().top + a.box.clientTop;
+    const moved = now.get(key)!.getBoundingClientRect().top - top - a.offs.get(key)!;
+    if (Math.abs(moved) >= 0.5) scrollQuietly(a.box, a.box.scrollTop + moved);   // the page's move, not the reader's: an open menu stays up
+  }
+  a.st = a.box.scrollTop;
+}
+// An open menu's item moved under it in the rebuild (re-flowed rows, or a strip at its top, where nothing anchors): the card
+// follows it. Gone from the strip, the card stays where it is (its rows act by id).
+function noteStripMenu(card: HTMLElement, key: string): void {
+  const node = Array.from(document.getElementById("tabs")?.children ?? []).find((c) => stripItemKey(c) === key);
+  const r = node?.getBoundingClientRect();
+  stripMenuOn = r && r.height ? { card, key, x: r.left, y: r.top } : null;
+}
+function followStripMenu(bar: HTMLElement): void {
+  const m = stripMenuOn;
+  if (!m) return;
+  if (contextMenuOpen() !== m.card) { stripMenuOn = null; return; }
+  const node = Array.from(bar.children).find((c) => stripItemKey(c) === m.key);
+  const r = node?.getBoundingClientRect();
+  if (!r || !r.height) return;
+  shiftContextMenu(r.left - m.x, r.top - m.y);
+  m.x = r.left; m.y = r.top;
+}
 // Right-click context menu on a tab. Webviews can't use VS Code's native menus,
 // so this is a small themed floating menu; one open at a time, dismissed by any
 // outside click, Escape, scroll, or losing window focus.
@@ -7840,6 +7953,7 @@ function dismissTabMenu() {
 function onTabMenuClosed() {
   ctxMenuEl = null;
   tagsFlyNewInput = null;
+  stripMenuOn = null;
 }
 
 // Right-clicking a SELECTION in the transcript pops a small menu with Reply (quote
@@ -8766,6 +8880,7 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
   // not a dismissal: taller than the window it scrolls inside it, styles.css max-height, 2026-09-13), Tab, the focus leaving,
   // the window's blur; the rows reachable by the arrows; the focus back on the opener at the close (the shared builder)
   ctxMenuEl = showMenuCard(menu, e.clientX, e.clientY, { onClose: onTabMenuClosed });
+  noteStripMenu(ctxMenuEl, "t:" + id + "\0" + (copy ?? ""));   // the card goes where its tab goes through a rebuild
 }
 // A remote host coming or going flips the disconnected marks on its tabs. The federation manager fires
 // this only when the reachable set actually CHANGES (its own /tunnels poll is the event), so this is a
@@ -8874,6 +8989,7 @@ function showTagMenu(x: number, y: number, name: string, folded: boolean | null,
   ctxMenuEl = openTagContextMenu(x, y, { name, members: g.members.length, folded, only, configure: true, overview }, g.color || "", paletteColors,
     { pick: (act) => tagMenuPick(act, name, folded !== null), recolor: (c) => { const u = unionNamed(name); if (u) commitTagUnionEdit(u, { color: c }); } },
     { viaKeyboard, onClose: onTabMenuClosed });
+  if (folded !== null && ctxMenuEl) noteStripMenu(ctxMenuEl, "h:" + name);   // off a strip header: the card goes where the header goes
 }
 function unionNamed(name: string): TagUnion | undefined {
   const g = viewTagUnion(effViews()).find((u) => u.name === name);
@@ -9025,14 +9141,43 @@ function onTabKey(e: KeyboardEvent) {
     focusComposerOrAsk();
   }
 }
-function focusActiveTab() {
+/** Focus the active tab (or the header standing in for it). `quiet`: a repaint restoring the focus it took away, which must not
+ *  scroll the strip; every other caller is a gesture (a click, an arrow, Escape, a send), which brings the tab into view. A
+ *  gesture usually finds the tab already focused, by its own setActive's rebuild restoring the focus quietly, and focus() on
+ *  the focused node scrolls nothing, so the gesture scrolls it into view itself. */
+function focusActiveTab(quiet = false) {
   const bar = document.getElementById("tabs");
+  const focusOn = (node: HTMLElement | null | undefined) => {   // not `land`: that name is the transcript's write family (landing-settle.ts)
+    if (!node) return;
+    if (quiet) node.focus({ preventScroll: true });
+    else if (document.activeElement === node) node.scrollIntoView({ block: "nearest", inline: "nearest" });
+    else node.focus();
+  };
   const tab = bar?.querySelector(`.tab[data-id="${fileTabOpen ?? activeId}"]`) as HTMLElement | null;   // a file tab up is the one shown (2026-09-30)
-  if (tab) { tab.focus(); return; }
+  if (tab) { focusOn(tab); return; }
   // the active tab is folded away under its section: the header is its stand-in (tab-groups.ts)
   const home = activeId ? homeSectionOf(lastStripItems, activeId) : null;
   if (!home || home.name === null || !bar) return;
-  Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name)?.focus();
+  focusOn(Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name));
+}
+/** Bring the active tab (or the header standing in for it) into the strip's view, the focus left where it is. Every deliberate
+ *  navigation calls it (setActive's pick, from the feed, the Sessions pane, a deep link, a notification, the keyboard; a jump to
+ *  the tab already shown): before the strip held its place through rebuilds (keepStripScroll, the quiet focus restore), the
+ *  rebuild's plain focus() did this as a side effect, and with the focus in the strip only. A repaint never calls it. Only the
+ *  strip's own box scrolls, by the least that shows the whole item. */
+function revealActiveTab(): void {
+  const bar = document.getElementById("tabs"), box = bar?.parentElement;
+  if (!bar || !box || !box.clientHeight) return;   // no strip on screen (the phone's, a hidden pane): nothing to reveal in
+  let node = bar.querySelector(`.tab[data-id="${fileTabOpen ?? activeId}"]`) as HTMLElement | null;
+  if (!node) {   // folded away under its section: the header stands in for it (focusActiveTab's rule)
+    const home = activeId ? homeSectionOf(lastStripItems, activeId) : null;
+    if (home && home.name !== null) node = Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name) ?? null;
+  }
+  const r = node?.getBoundingClientRect();
+  if (!r || !r.height) return;
+  const top = box.getBoundingClientRect().top + box.clientTop, bottom = top + box.clientHeight;
+  const by = r.top < top ? r.top - top : r.bottom > bottom ? Math.min(r.bottom - bottom, r.top - top) : 0;
+  if (Math.abs(by) >= 0.5) box.scrollTop += by;
 }
 /** Open a section that puts a folded-away tab on screen: a session pick names the tab, so its tab must be on
  *  screen. Per holder, since a session under several tags has a copy under each and every copy's fold stands on
@@ -9173,7 +9318,11 @@ function typeFromAnywhereTarget(e: Event): HTMLTextAreaElement | null {
   if (document.querySelector("#rsettings:not([hidden]), #ranalytics-back:not([hidden]), #rkeys-back, .meta-menu")) return null;   // the pane's own modals (settings, its Token usage panel) + meta menus own their keys (a letter typed there must never land in the draft)
   const box = activeInputBox();
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
-  if (box !== ta) return box;   // a comment popover's reply box or a viewer's bar; null while the topmost surface takes no input
+  // a comment popover's reply box takes the message box's own question gate (thread-live-1): while the open thread's
+  // question card is up the card owns the keys (digits are its number keys), and the box takes them once clicked into
+  const pop = document.getElementById("cmt-pop");
+  if (box && pop && box === pop.querySelector(".cmt-input")) { const tsid = openThreadSid(); return tsid && liveAsks.has(tsid) ? null : box; }
+  if (box !== ta) return box;   // a viewer's bar; null while the topmost surface takes no input
   // the message box's own gates
   if (!ta || ta.disabled || document.activeElement === ta) return null;   // no box / read-only session / already in the box
   if (activeId && liveAsks.has(activeId)) return null;   // the live-ask card owns input while it is up (digits are its number keys)
@@ -10894,6 +11043,25 @@ const commentInFlight = (th: CommentThread): boolean => {
   return owed && !cmtInterrupted.has(th.tid);
 };
 const commentDrafts = new Map<string, string>();                    // draft key → unsent popover text
+const commentThreadAsks = new Map<string, boolean>();               // parent sid → its kernel answers thread questions in the popover (the comments frame's caps)
+const commentSeenAcks = new Map<string, boolean>();                 // parent sid → its kernel answers each read with the count it recorded it at (caps "seenAck")
+// The reads the kernel's frames do not show yet (read-latch.ts): readKey(sid, tid) → the held read. A frame's unread bit for
+// a held thread reads through heldUnread, so a frame built before the kernel recorded the read cannot put the mark back
+const cmtReadLatch = new Map<string, ReadLatch>();
+let cmtReadRid = 0;                                                 // the page's read ids: the kernel's answer names the read it answers
+// The link a held read went out on dropped before the kernel answered it: the read may never have arrived, so the first
+// frame after the link is back decides (linkEdge). This page's own kernel: the shim's romp:wsdown, and its {type:"wsup"}
+// FRAME for the return (the message handler; the extension's pipeState there too). Never the romp:wsup event, which fires
+// at onopen while the dead socket's last frames may still be draining from the shim's FIFO: one of those, from before
+// the read, decided it and the badge flapped once (the review of #247). A linked machine's: its relay socket's
+// romp:hostRelayDown / romp:hostRelayUp, which arrive in that socket's own order
+window.addEventListener("romp:wsdown", () => linkEdge(cmtReadLatch.values(), "", false, hostOf));
+const relayEdge = (e: Event, up: boolean): void => {
+  const h = (e as CustomEvent).detail?.host;
+  if (typeof h === "string" && h) linkEdge(cmtReadLatch.values(), h, up, hostOf);
+};
+window.addEventListener("romp:hostRelayDown", (e: Event) => relayEdge(e, false));
+window.addEventListener("romp:hostRelayUp", (e: Event) => relayEdge(e, true));
 // The popover-boot hold (fillCommentMsgs): tid → when the loader first held the list. Held until the
 // thread's events land (event-based) or the backstop expires (never trap); a backstop timer refills
 // the open popover so the fall-through actually paints.
@@ -10954,6 +11122,8 @@ function closeCommentPop(): void {
   openCommentKey = null;
   pendingCommentAnchor = null;
   cmtRedirect = null;
+  cmtPopLost = null; cmtPopBesideAt = null;   // a landing's note and its spot beside the passage go with the box
+  endBesideWatch(); passageShown = null;       // …and its watch on the passage, and the folds it kept open
 }
 
 // close on any press outside the popover (drafts persist in commentDrafts; reopening restores them).
@@ -10996,6 +11166,7 @@ function applyCommentMarks(sid: string): void {
     // openCommentPopover drops the unread flag and re-runs this pass.
     turn.classList.toggle("cmt-rail-unread", list.some((t) => !!t.unread && t.status === "open"));
   }
+  keepPassageShown(sid, v);                    // a fold a passage landing opened stays open across the rebuild (passageShown)
   paintCommentOutlines(sid);                   // the unread boxes follow the marks this pass just placed (or unwrapped)
   // the jump cluster MEASURES the marks (its unread badge counts those above/below the viewport) and the turns, so it
   // recounts after this pass has the highlights back in the DOM — the comments frame's and every rebuild's hook for it
@@ -11446,11 +11617,284 @@ function openCommentPopover(sid: string, tid: string, _x?: number, _y?: number,
   // click coords no longer seed the position (the user 2026-08-25): a THREAD popover opens at the
   // fixed right-aligned geometry below; only a real drag (commentPopPos) parks it elsewhere. The
   // CREATE composer (openCommentComposer) still opens at the selection point — a different gesture.
-  vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid });
-  const th = (commentThreads.get(sid) || []).find((t) => t.tid === tid);
-  if (th) th.unread = false;                    // optimistic; the kernel's watermark reconciles
+  readThread(sid, tid);                         // opening it reads it: the mark clears now, and stays clear until the kernel's frame shows the read
   renderCommentPopover();
   applyCommentMarks(sid);
+}
+
+/** The reader has seen thread `tid` of session `sid` (its popover opened on it, or a reply landed in it while open): its
+ *  unread mark clears now and the kernel stamps the thread's read watermark (commentSeen). The clear HOLDS until the
+ *  kernel's frame shows that read (read-latch.ts), so a frame that left the kernel before the read cannot bring the mark
+ *  back. A kernel that answers no read (no "seenAck" in its caps) gets the plain stamp with nothing held, as before; a
+ *  thread whose create is still in flight has nothing on the kernel to stamp yet. */
+function readThread(sid: string, tid: string): void {
+  const th = (commentThreads.get(sid) || []).find((t) => t.tid === tid);
+  if (tid.startsWith("pending:")) { if (th) th.unread = false; return; }
+  if (!th || !commentSeenAcks.get(sid)) {
+    vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid });
+    if (th) th.unread = false;                  // optimistic; the kernel's next frame reconciles
+    return;
+  }
+  const key = readKey(sid, tid);
+  const raw = cmtReadLatch.get(key)?.raw ?? !!th.unread;   // the frame's own bit (a held read's, when this reads it again)
+  const rid = ++cmtReadRid;
+  cmtReadLatch.set(key, holdRead(sid, tid, rid, raw));
+  th.unread = false;
+  vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid, rid });
+}
+
+// ── landing on a thread's passage (the user 2026-10-15) ─────────────────────────────────────────────────────────────
+// A click on a thread's tick on the scroll rail opened the thread and left the reader on the anchor TURN'S top, with the
+// thread's box over the middle of the pane: in a long message the passage sat below the fold or under the box, and nothing
+// took the reader to it. The landing now goes to the PASSAGE: the deep links' landing (scrollToAnchor: a turn outside the
+// rendered window rendered around it, history the page has not loaded fetched), aligned on the thread's highlight and
+// flashing it (pendingAnchorMark). The rail tick, the turn's tinted rail line and the quoted passage at the top of the open
+// thread take it and then open the thread beside the passage, never over it (passageLanding); the jump cluster's comment
+// rows take the same landing and open nothing (landThread). A passage the transcript does not hold is said in the box.
+// Three follow-ups (the review of 2026-10-15): a passage folded in a closed <details> of its message is brought out of the
+// fold before the landing aligns on it (passageTarget), and one that still cannot be shown lands its fold's heading with a
+// line in the box; every piece of a highlight split over several elements flashes (landOn); and the box keeps clear of a
+// passage the landing moves after the box is placed, and of nothing else (besideWatch).
+/** The thread a passage landing opens once it lands, keyed by the anchor like pendingAnchorMark: a landing that waits on
+ *  history opens it on arrival, and any other landing drops it (passageLanded). */
+let passageGo: { sid: string; tid: string; uuid: string } | null = null;
+/** What the open thread's box says when the landing could not reach its passage, kept so a full rebuild says it again. */
+let cmtPopLost: { tid: string; text: string } | null = null;
+/** Where a landing put the box beside its passage, so a full rebuild of the same thread (a status flip) puts it back there
+ *  rather than over the passage. It stands until the box closes, or until the user moves or resizes it, which replaces
+ *  commentPopPos (`since` is the object the landing saw). */
+let cmtPopBesideAt: { tid: string; top: number; height: number; since: { x: number; y: number } | null } | null = null;
+const PASSAGE_LOST = "Couldn't find this passage in the transcript.";
+const PASSAGE_WORDS_LOST = "Couldn't find this passage's words in its message.";
+const PASSAGE_FOLDED = "Couldn't unfold this passage in its message.";
+const PASSAGE_PART_FOLDED = "Couldn't unfold all of this passage in its message.";
+
+/** Take the reader to thread `tid`'s passage, then open the thread beside it. Never switches session: every entry point
+ *  sits on the session's own view. */
+function passageLanding(sid: string, tid: string): void {
+  const th = (commentThreads.get(sid) || []).find((t) => t.tid === tid);
+  if (!th || sid !== activeId) return;
+  const uuid = th.anchorUuid;
+  endBesideWatch(); passageShown = null;         // a new landing: the box no longer follows the last one's passage, nor keeps its folds open
+  pendingAnchorMark = { uuid, tid };
+  passageGo = { sid, tid, uuid };
+  flashedAnchor = null;                          // a fresh navigation: one flash, on the passage
+  // landed (the box opens beside the passage, passageLanded), or the history it is in is on its way and its arrival lands
+  // it; a failure on the way is the landing's own word (its notice and toast), as for every jump
+  if (scrollToAnchor(uuid) || anchorPendingOlder) return;
+  pendingAnchorMark = null; passageGo = null;
+  if (landTrail[landTrail.length - 1] === "pointer-fetch-busy") return;   // another jump is still on its way, and its toast says so: this click is refused
+  pendingAnchor = null;                          // nowhere in the transcript and nothing left to load: said in the box, not by a later pass's toast
+  openBesidePassage(sid, tid, null, PASSAGE_LOST);
+}
+/** scrollToAnchor has just landed `uuid` on `turn` (on thread `mark`'s highlight `passage` when it has one, or on the heading
+ *  of the fold that still hides it, `folded` "whole"; "part" when a piece after the first is still hidden): the thread a
+ *  passage landing waits to open opens now, after the pass that landed (a landing inside landActive finishes its pass
+ *  first). With no highlight the box says so only when the thread's words are not in the turn at all: a tool row's text
+ *  is there, it just carries no highlight. */
+function passageLanded(uuid: string, mark: string | null, passage: HTMLElement | null, turn: HTMLElement, folded: "whole" | "part" | null): void {
+  const go = passageGo;
+  if (!go) return;
+  passageGo = null;
+  if (go.uuid !== uuid || go.tid !== mark) return;   // another landing took the reader elsewhere: the wait is over
+  const exact = passage ? null : threadExact(go.tid);
+  const lost = !passage && (!exact || !findAnchorRange(turnAtomsOf(turn).map((a) => a.textContent || "").join(""), exact));
+  const note = folded === "whole" ? PASSAGE_FOLDED : folded === "part" ? PASSAGE_PART_FOLDED : lost ? PASSAGE_WORDS_LOST : null;
+  queueMicrotask(() => openBesidePassage(go.sid, go.tid, passage, note));
+}
+/** Open (or keep open) thread `tid` beside its passage, with `note` when the passage could not be reached. */
+function openBesidePassage(sid: string, tid: string, passage: HTMLElement | null, note: string | null): void {
+  if (sid !== activeId) return;                  // the reader left the session meanwhile
+  cmtPopLost = note ? { tid, text: note } : null;
+  cmtPopBesideAt = null;
+  const prev = document.getElementById("cmt-pop");
+  if (prev && openCommentKey && openCommentKey.sid === sid && openCommentKey.tid === tid && prev.dataset.mode === "thread") paintCmtLost(prev, tid);   // its own quote was the click
+  else openCommentPopover(sid, tid);
+  const pop = document.getElementById("cmt-pop");
+  if (pop && passage && passage.isConnected) { placeBesidePassage(pop, tid, passage); watchBeside(tid); passageShown = { sid, tid }; }
+}
+/** The open box moved off its passage when it covers it (cmtPopBeside: below it, else above, else the roomier side at that
+ *  side's height; `nudge`, the least move that clears it, cmtPopNudge); its left edge and width stay. The size set here is
+ *  ours, never the user's remembered one. */
+function placeBesidePassage(pop: HTMLElement, tid: string, passage: HTMLElement, nudge = false): void {
+  const at = passageRect(passage, tid);
+  if (!at) return;
+  const r = pop.getBoundingClientRect();
+  const to = (nudge ? cmtPopNudge : cmtPopBeside)(r, at, window.innerHeight);
+  if (!to) return;
+  pop.style.top = to.top + "px";
+  if (Math.abs(to.height - r.height) > 0.5) pop.style.height = to.height + "px";
+  cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // the resize observer's "not the user's" mark
+  cmtPopBesideAt = { tid, top: to.top, height: to.height, since: commentPopPos };
+  syncCmtMaxState(pop);
+}
+/** The passage's box on screen, cut to the chat's viewport: every fragment of the thread's highlight in the passage's turn,
+ *  so a passage over several lines or paragraphs is one box; the heading a landing put the reader on instead (a fold it
+ *  could not open, passageTarget) is its own box. */
+function passageRect(passage: HTMLElement, tid: string): CmtPopRect | null {
+  const c = document.getElementById("content");
+  if (!c) return null;
+  const frags = passage.matches("mark.cmt-hl") ? Array.from((passage.closest(".turn") || passage).querySelectorAll(`mark.cmt-hl[data-tid="${cssEscape(tid)}"]`)) : [passage];
+  const cr = c.getBoundingClientRect();
+  let u: CmtPopRect | null = null;
+  for (const f of frags) for (const q of Array.from(f.getClientRects())) {
+    if (!q.width && !q.height) continue;
+    u = u ? { left: Math.min(u.left, q.left), top: Math.min(u.top, q.top), right: Math.max(u.right, q.right), bottom: Math.max(u.bottom, q.bottom) }
+      : { left: q.left, top: q.top, right: q.right, bottom: q.bottom };
+  }
+  if (!u) return null;
+  const cut = { left: Math.max(u.left, cr.left), top: Math.max(u.top, cr.top), right: Math.min(u.right, cr.right), bottom: Math.min(u.bottom, cr.bottom) };
+  return cut.bottom > cut.top && cut.right > cut.left ? cut : null;   // off the viewport: nothing on screen to keep clear
+}
+/** The box's watch on its passage once a landing opened it beside it, for as long as that landing settles. The landing can
+ *  move the passage AFTER the box is placed: a 26 px fork control joins the last reply under it, and the settle re-lands
+ *  the passage higher, into where the box was (#248). Each re-land of THAT landing (settleLand), and any other move of the
+ *  view while it settles (the scroll listener: the browser's own move as the reply grows), moves the box the least that
+ *  clears the passage again, and only when they overlap (cmtPopNudge). Nothing else moves it: the view following a
+ *  session's new text, the reader's scroll, a layout change under it. Those moved the box a line at a time as text
+ *  streamed in, shrinking it at the window's top and then throwing it below the passage (the review of #248). Frozen
+ *  while the pointer is over the box or the box holds the focus (the reader is reading or typing in it); a step-off owed
+ *  meanwhile is paid when the pointer leaves the box or the focus does (besideLeft), if the passage is still under it. Its
+ *  re-lands end with the settle; the watch itself ends with the box, a new landing, or the user's own move or resize of
+ *  the box (commentPopPos replaced). */
+let besideWatch: { tid: string; since: { x: number; y: number } | null; settle: NonNullable<typeof landSettling>; owed: boolean } | null = null;
+function watchBeside(tid: string): void {
+  const settle = landSettling;
+  besideWatch = settle && !settle.done ? { tid, since: commentPopPos, settle, owed: false } : null;
+}
+function endBesideWatch(): void {
+  besideWatch = null;
+}
+/** The landing re-landed its passage under the box it placed beside it (settleLand): the box steps off it. The passage is
+ *  re-found (a rebuild may have replaced it) and never revealed again: a fold the reader closed since stays closed. */
+function besideFollow(left: "pointer" | "focus" | null = null): void {
+  const w = besideWatch;
+  if (!w) return;
+  const pop = document.getElementById("cmt-pop");
+  const v = activeId ? views.get(activeId) : null;
+  if (!pop || !v || pop.dataset.tid !== w.tid || commentPopPos !== w.since) { endBesideWatch(); return; }
+  // the reader is in the box: it holds still, and owes the step-off until they leave it (`left`: the way they just did, which
+  // the element's own state may not show yet)
+  if ((left !== "pointer" && pop.matches(":hover")) || (left !== "focus" && pop.contains(document.activeElement))) { w.owed = true; return; }
+  w.owed = false;
+  const m = v.el.querySelector(`mark.cmt-hl[data-tid="${cssEscape(w.tid)}"]`) as HTMLElement | null;
+  const at = m ? shownPassage(m) : null;
+  if (at) placeBesidePassage(pop, w.tid, at, true);
+}
+/** The thread whose passage a landing brought out of its message's folds, while its box is open: a rebuild of the passage's
+ *  turn puts a message's <details> back closed, and one came about a second after the landing (the served lab saw the fold
+ *  open, then shut under the reader, whenever the rebuild fell after the landing's settle). Every rebuild's marks pass
+ *  (applyCommentMarks) opens them again (keepPassageShown), the openFolds idea for a fold that has no key of its own. It
+ *  ends with the box, at a new landing, and when the reader closes such a fold themselves (the toggle listener). */
+let passageShown: { sid: string; tid: string } | null = null;
+function keepPassageShown(sid: string, v: View): void {
+  const k = passageShown;
+  if (!k || k.sid !== sid || !openCommentKey || openCommentKey.sid !== sid || openCommentKey.tid !== k.tid) return;
+  for (const p of Array.from(v.el.querySelectorAll(`mark.cmt-hl[data-tid="${cssEscape(k.tid)}"]`))) if ((p.textContent || "").trim()) revealAncestors(p);
+}
+document.addEventListener("toggle", (e) => {   // the reader closed a fold the passage sits in: it stays closed
+  const d = e.target as HTMLElement | null;
+  const k = passageShown;
+  if (k && d && d.localName === "details" && !(d as HTMLDetailsElement).open && d.querySelector(`mark.cmt-hl[data-tid="${cssEscape(k.tid)}"]`)) passageShown = null;
+}, true);
+/** The pointer or the focus left the box while it owed a step-off (besideFollow held it still): the passage is checked
+ *  again, and the box steps the least that clears it if it is still under it. Installed once, on the document. */
+function besideLeft(e: Event): void {
+  if (!besideWatch?.owed) return;
+  const pop = document.getElementById("cmt-pop");
+  const to = (e as PointerEvent | FocusEvent).relatedTarget as Node | null;
+  if (!pop || !(e.target instanceof Node) || !pop.contains(e.target) || (to && pop.contains(to))) return;   // a move inside the box
+  besideFollow(e.type === "focusout" ? "focus" : "pointer");
+}
+document.addEventListener("pointerout", besideLeft, true);
+document.addEventListener("focusout", besideLeft, true);
+/** What a landing on thread `tid`'s passage aligns on, in `target`'s turn: its highlight's first piece (threadMarkIn), the
+ *  highlight first brought out of every closed fold of its message that hides ANY of its pieces (revealAncestors: a
+ *  <details> the message folds it in; a passage that runs on into a second fold kept its tail hidden when only the first
+ *  piece's folds opened). Before, a passage in a closed fold landed on nothing visible and nothing flashed. `folded`:
+ *  "whole" when something the landing cannot open still hides the first piece (the landing goes to its fold's heading,
+ *  shownPassage), "part" when it hides a later one; `reveal` false leaves the folds as they are (a settle's re-find on the
+ *  same turn). Pieces of bare whitespace (between two blocks) draw nothing and count for nothing. */
+function passageTarget(target: HTMLElement, tid: string, reveal = true): { el: HTMLElement; folded: "whole" | "part" | null } | null {
+  const m = threadMarkIn(target, tid);
+  if (!m) return null;
+  const pieces = (Array.from((m.closest(".turn") || target).querySelectorAll(`mark.cmt-hl[data-tid="${cssEscape(tid)}"]`)) as HTMLElement[])
+    .filter((p) => p === m || (p.textContent || "").trim());
+  if (reveal) for (const p of pieces) revealAncestors(p);
+  const at = shownPassage(m);
+  if (!at) return null;
+  return { el: at, folded: at !== m ? "whole" : pieces.some((p) => !elShows(p)) ? "part" : null };
+}
+/** The highlight `m` when it shows, else the heading of the innermost fold it sits in (a <details>' summary), else its
+ *  nearest ancestor that shows: the place the passage would be. null when nothing around it shows. */
+function shownPassage(m: HTMLElement): HTMLElement | null {
+  if (elShows(m)) return m;
+  for (let n = m.parentElement; n; n = n.parentElement) {
+    const head = n.localName === "details" ? n.querySelector(":scope > summary") as HTMLElement | null : null;
+    if (head && elShows(head)) return head;
+    if (elShows(n)) return n;
+  }
+  return null;
+}
+/** Whether `e` is drawn: checkVisibility, since a box is not enough (Chromium lays out a closed <details>' content, hidden by
+ *  content-visibility, so a passage folded in one measures as if it were on screen); a box where the browser has no
+ *  checkVisibility. */
+function elShows(e: Element): boolean {
+  return typeof e.checkVisibility === "function" ? e.checkVisibility() : e.getClientRects().length > 0;
+}
+/** The box's line for a passage the landing could not reach, under its head (in place, or on a full rebuild). */
+function paintCmtLost(pop: HTMLElement, tid: string): void {
+  pop.querySelector(":scope > .cmt-lost")?.remove();
+  if (!cmtPopLost || cmtPopLost.tid !== tid) return;
+  const n = el("div", "cmt-note cmt-err cmt-lost");
+  n.textContent = cmtPopLost.text;
+  pop.querySelector(":scope > .cmt-head")?.after(n);
+}
+/** The quoted passage at the top of an open thread, made the way back to it (passagePress, below): the rail tick's landing,
+ *  which helps most once the reader has scrolled away or the thread was opened from somewhere else. */
+function passageLink(q: HTMLElement): void {
+  q.dataset.passage = "1";
+  q.title = "Go to this passage in the conversation";
+}
+// The quote acts on the RELEASE of a press that began on it, not on `click`: on the thread's opening message it sits in the
+// thread's list, which every comments frame refills, and a refill between press and release leaves no element for a click to
+// land on (the click-safe rule); the release lands on the refilled quote at the same spot. A press that moved (a drag
+// selecting some of its words, which seeds a quote chip) is not a click on it. Installed once, on the document.
+const PASSAGE_QUOTE = "#cmt-pop .cmt-quote[data-passage]";
+let passagePress: { x: number; y: number } | null = null;
+document.addEventListener("pointerdown", (e) => {
+  passagePress = e.button === 0 && (e.target as Element | null)?.closest?.(PASSAGE_QUOTE) ? { x: e.clientX, y: e.clientY } : null;
+}, true);
+document.addEventListener("pointerup", (e) => {
+  const p = passagePress;
+  passagePress = null;
+  const q = p ? (e.target as Element | null)?.closest?.(PASSAGE_QUOTE) as HTMLElement | null : null;
+  const cur = q ? openCommentThread() : null;
+  if (!p || !q || !cur || Math.abs(e.clientX - p.x) > 4 || Math.abs(e.clientY - p.y) > 4) return;
+  flash(q);                                      // the press acknowledged before the landing
+  passageLanding(cur.sid, cur.th.tid);
+}, true);
+/** The thread's words, to tell a passage with no highlight from one whose words are gone. */
+function threadExact(tid: string): string | null {
+  const th = activeId ? (commentThreads.get(activeId) || []).find((t) => t.tid === tid) : null;
+  return th && th.exact ? th.exact : null;
+}
+/** Thread `tid`'s highlight in the anchor's rendered turn: its first fragment, the turn's highlights put back first when the
+ *  landing has just rendered the turn (applyCommentMarks' per-turn step, without its repaints); null when the thread's
+ *  words are not in the turn's text (a tool row's, or text that changed). */
+function threadMarkIn(target: HTMLElement, tid: string): HTMLElement | null {
+  const sel = `mark.cmt-hl[data-tid="${cssEscape(tid)}"]`;
+  const have = target.querySelector(sel) as HTMLElement | null;
+  if (have) return have;
+  const sid = activeId;
+  const v = sid ? views.get(sid) : null;
+  const threads = sid ? commentThreads.get(sid) || [] : [];
+  const th = threads.find((t) => t.tid === tid);
+  if (!v || !th) return null;
+  const turn = v.el.querySelector(`.turn[data-uuid="${cssEscape(th.anchorUuid)}"]`) as HTMLElement | null;   // the turn applyCommentMarks marks
+  if (!turn) return null;
+  for (const t of threadsByAnchor(threads).get(th.anchorUuid) || []) ensureCommentMark(turn, t);
+  return turn.querySelector(sel) as HTMLElement | null;
 }
 
 /** commentCreated's adoption: swap the create popover for the named thread's (never a guess — the
@@ -11466,7 +11910,7 @@ function adoptCommentThread(sid: string, tid: string): void {
   }
   pendingAdopt = null;
   openCommentKey = { sid, tid };
-  vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid });
+  readThread(sid, tid);
   renderCommentPopover();
   applyCommentMarks(sid);
 }
@@ -11535,13 +11979,12 @@ function cmtSentNote(th: CommentThread): HTMLElement | null {
 }
 
 function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): void {
-  list.dataset.session = th.tid;   // the THREAD owns its queue/errors — in-turn controls resolve to it
+  list.dataset.session = threadSidOf(th);   // the THREAD owns its queue/errors — in-turn controls resolve to it (its session id, host-prefixed on a linked machine)
   const prevScroll = list.scrollTop;
   // the slack rule (the user 2026-08-25, same word as the chat's appendActive): while the thread's
   // content hasn't overflowed the fixed box, streaming writes in place — no follow, no jump; once
-  // overflowing, the at-tail stick behaves as before
-  const overflowed = list.scrollHeight > list.clientHeight + 2;
-  const atTail = overflowed && list.scrollTop >= list.scrollHeight - list.clientHeight - 8;
+  // overflowing, the at-tail stick behaves as before (cmtFollowing, the same reading the box's own resize rule keeps)
+  const atTail = cmtFollowing(list);
   list.replaceChildren();
   // pruned against BOTH projections (T106 lab, screenshot: the follow-up double-showed — its
   // landed user TURN rendered from th.events while the echo, pruned only against th.msgs, waited
@@ -11583,7 +12026,7 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
     // the folds per thread, exactly as a chat tab would.
     const saved = renderingSid;
     const savedOwner = renderingOwnerSid;
-    renderingSid = th.tid;
+    renderingSid = threadSidOf(th);   // the thread's session id: its fold keys, and the session its rendered controls act on
     renderingOwnerSid = sid;   // fold keys are per-thread; file/preview URLs belong to the thread's SESSION
     renderingIntoThread = true;   // same renderer, minus the transcript-coupled hover chrome (see the flag)
     let prev: number | null = null;       // the rail's raw previous epoch (the same-minute rule)
@@ -11661,6 +12104,7 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
       const ctx = el("div", "cmt-quote cmt-quote-ctx");
       ctx.textContent = th.exact;
       ctx.title = "the highlighted passage this thread is about";
+      passageLink(ctx);
       quoteHost.insertBefore(ctx, quoteHost.firstChild);
       list.closest(".cmt-pop")?.querySelector(":scope > .cmt-quote")?.remove();
     }
@@ -11680,8 +12124,14 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
   // the await-green highlight carries the in-flight signal, and the reply's arrival is announced by
   // the green→yellow settle; the pending bubble still acknowledges the user's own send)
   // (a thread stopped on a question or a permission prompt shows the chat's own card under this list now, in the popover's
-  // .cmt-ask host, answerable here: renderThreadAsk, thread-live-1. The note that sent the reader to break the thread
-  // out instead is gone.)
+  // .cmt-ask host, answerable here: renderThreadAsk, thread-live-1.) A kernel from before that serves no thread question,
+  // so its stuck thread keeps the old way out: the note that points at Break out (the review of #232: a page newer than
+  // its kernel showed the cue with no card and no note)
+  if (th.status === "open" && threadStuck(th.state) && !commentThreadAsks.get(sid)) {
+    const note = el("div", "cmt-note");
+    note.textContent = "This thread hit a prompt it can't answer from here. Break it out to continue.";
+    list.appendChild(note);
+  }
   if (th.status === "open" && th.error) {
     // the CLI behind this thread could not start — dots pulsing forever would be a lie
     const note = el("div", "cmt-note cmt-err");
@@ -11689,6 +12139,42 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
     list.appendChild(note);
   }
   list.scrollTop = atTail ? list.scrollHeight : prevScroll;
+}
+
+// THE CONVERSATION KEEPS ITS BOTTOM (the review of PR 240, 2026-10-14). The popover's box has a fixed size and its
+// conversation list flexes inside it, so every other part of the box takes its height from the list: the thinking line, the
+// question card, the background box, the staged strip, the composer as it grows. A list that loses height keeps its
+// scrollTop, so a reader on the bottom is silently that much above it, and the next frame's refill (fillCommentMsgs) follows
+// only from within CMT_TAIL_PX of the bottom: after a send in a long thread, the reply streamed out of sight once the thread
+// began thinking. One rule for every part, the chat's rule for its boxes below the transcript (followBoxBelow with
+// atBottomBeforeGrowth): the list's own size is observed, and a reader who was following the conversation is written back
+// to its bottom at every change. Following is the refill's own reading (cmtFollowing: overflowing, and at the bottom; the
+// slack rule leaves a conversation that fits where it is), taken two ways, either of which re-pins: as RECORDED by the
+// list's scroll events (the reader's scrolls and every write the page makes; a change of size moves no scroll, so the
+// record still holds the truth from before it, and a refill that ran between the change and this pass and measured the
+// reader off the bottom cannot unseat it), and from the geometry with the lost height added back (a scroll event from an
+// earlier write, landing after the change, records the reader as off the bottom). A reader scrolled up is never moved.
+// (The question card also brings the bottom into view when it arrives, renderThreadAsk: that is its reveal, for any reader.)
+const CMT_TAIL_PX = 8;
+function cmtAtTail(list: HTMLElement): boolean {
+  return list.scrollHeight - list.scrollTop - list.clientHeight <= CMT_TAIL_PX;
+}
+function cmtFollowing(list: HTMLElement): boolean {
+  return list.scrollHeight > list.clientHeight + 2 && cmtAtTail(list);
+}
+function keepCmtTail(list: HTMLElement): void {
+  if (typeof ResizeObserver !== "function") return;
+  let following = cmtFollowing(list);
+  let lastW = -1, lastH = -1;
+  list.addEventListener("scroll", () => { following = cmtFollowing(list); }, { passive: true });
+  const ro = new ResizeObserver(() => {
+    if (!list.isConnected) { ro.disconnect(); return; }   // the popover closed or rebuilt: this list is gone
+    const w = list.clientWidth, h = list.clientHeight, sh = list.scrollHeight;
+    const wasFollowing = following || (lastH > h && sh > lastH + 2 && sh - list.scrollTop - lastH <= CMT_TAIL_PX);
+    if (lastH >= 0 && (w !== lastW || h !== lastH) && wasFollowing) list.scrollTop = sh;
+    lastW = w; lastH = h;
+  });
+  ro.observe(list);
 }
 
 // Refill the OPEN popover's conversation in place (leg C, the user 2026-08-24): the popover renders
@@ -11707,7 +12193,8 @@ function refillOpenCommentPop(): void {
  *  element set (mode · model · effort · fast; the user 2026-08-25) through the one code path.
  *  metaPending's switching-dots ride the same keys, sid-scoped. */
 function threadMetaStatus(th: CommentThread): Status {
-  return { state: threadChipState(th) as ChipState,   // the chat's chip for a running thread (thread-live-1), the raw state's reading otherwise
+  return { ...((th.live && th.live.status) || {}),   // a running thread's build status (thread-live-2): the gauge's and the box's fields, the Awaiting chip's words
+           state: threadChipState(th) as ChipState,   // the chat's chip for a running thread (thread-live-1), the raw state's reading otherwise
            sinceEpoch: th.sinceEpoch || null, mode: th.mode || "", model: th.model || "",
            // a bypass pick waiting for its relaunch (2026-10-01): the badge's dots and the picker's Bypass row words, as in
            // the chat; no effort, fast or billing mark rides, so the popover's pickers never offer Apply now
@@ -11739,10 +12226,11 @@ function cmtStateChip(th: CommentThread): HTMLElement {
   const stopBtn = () => {
     const b = el("button", "stop-btn cmt-stop");
     (b as HTMLButtonElement).type = "button";
-    b.title = "Stop — interrupt this thread's turn";
+    b.title = "Stop — interrupt this thread's turn; its background agents stop too";
     b.setAttribute("aria-label", "Interrupt this thread");
     b.dataset.act = "cmtinterrupt";
-    b.dataset.sid = th.tid;
+    b.dataset.sid = threadSidOf(th);   // the thread's session (host-prefixed on a linked machine: the stop routes to its kernel)
+    b.dataset.tid = th.tid;            // …and the thread, whose exchange latches the stop clears
     b.appendChild(el("span", "stop-icon"));
     return b;
   };
@@ -11765,7 +12253,7 @@ function cmtStateChip(th: CommentThread): HTMLElement {
     c.textContent = "⟳ Compacting context…";
     wrap.appendChild(c);
   } else {
-    wrap.appendChild(statusChip(chipWords({ state: st })));   // the shared chip (status-chip.ts): Needs you, API error, Ready, …
+    wrap.appendChild(statusChip(chipWords(threadMetaStatus(th))));   // the shared chip (status-chip.ts): Needs you, API error, Awaiting command, Ready, …
   }
   if (chipStops(st)) wrap.appendChild(stopBtn());   // the chat bar's rule, one predicate: working, compacting, retrying, blocked
   return wrap;
@@ -11967,7 +12455,7 @@ function commentSendFromPop(pop: HTMLElement): void {
   // The thread's question takes free text and the box is its "add your own" field (thread-live-1, the message box's rule,
   // boxAnswersAsk): the typed words answer it, through the chat's own frames by the thread's sid, and nothing else goes.
   // A staged stack waits for the next reply, as the message box's does.
-  const asid = cur.th.sid || cur.th.tid;   // the thread's session: its question and the box's draft stamp key on it
+  const asid = threadSidOf(cur.th);   // the thread's session: its question and the box's draft stamp key on it
   const askRoute = text ? boxAnswersAsk(asid) : null;
   if (askRoute) {
     if (askRoute === "custom") addCustomLiveAsk(threadAsk, text); else sendTextLiveAsk(threadAsk, text);
@@ -12113,7 +12601,10 @@ function renderCommentPopover(): void {
     const cs = prev.querySelector("#cmt-state");
     if (th && cs) cs.replaceWith(cmtStateChip(th));   // state chip + timer track every frame, in place
     const cm = prev.querySelector("#cmt-meta") as HTMLElement | null;
-    if (th && cm) syncMetaControls(cm, threadMetaStatus(th), th.tid);   // same in-place refresh as the chat's tick
+    if (th && cm) syncMetaControls(cm, threadMetaStatus(th), threadSidOf(th));   // same in-place refresh as the chat's tick
+    const cg = prev.querySelector(".cmt-ctx") as HTMLElement | null;
+    if (th && cg) paintThreadCtx(cg, th);               // the gauge's fill, from this frame (thread-live-2)
+    if (th) renderThreadBg();                           // the background box, from this frame
     return;
   }
   const hadFocus = !!prev?.querySelector(".cmt-input:focus-within, .cmt-input:focus");
@@ -12184,7 +12675,7 @@ function renderCommentPopover(): void {
   // interactive control or selectable text, and never the bottom-right resize corner
   pop.addEventListener("pointerdown", (ev: PointerEvent) => {
     const t = ev.target as HTMLElement;
-    if (t.closest(".cmt-x, .cmt-name, .cmt-input, .cmt-msgs, .cmt-quote, .cmt-staged, .cmt-chips, .cmt-ask, button, input, textarea, .meta-btn, .meta-menu")) return;   // the staged strip's rows and label are its own clicks (2026-10-07); so are the question card's options (thread-live-1: a captured press retargeted their click to the box)
+    if (t.closest(".cmt-x, .cmt-name, .cmt-input, .cmt-msgs, .cmt-quote, .cmt-staged, .cmt-chips, .cmt-ask, .cmt-bg, button, input, textarea, .meta-btn, .meta-menu")) return;   // the staged strip's rows and label are its own clicks (2026-10-07); so are the question card's options (thread-live-1: a captured press retargeted their click to the box)
     const pr = pop.getBoundingClientRect();
     if (ev.clientX > pr.right - 18 && ev.clientY > pr.bottom - 18) return;   // the resize handle's corner
     ev.preventDefault();
@@ -12210,6 +12701,7 @@ function renderCommentPopover(): void {
     pop.addEventListener("pointercancel", up);
   });
   pop.appendChild(head);
+  if (th) paintCmtLost(pop, th.tid);   // a landing that could not reach the passage says so under the head (passageLanding)
   wireEdgeResize(pop);
   if (th && cmtRedirect && cmtRedirect.tid === th.tid) {
     // a Comment on a passage that already has this thread opened it (the user 2026-10-01); one line says so, and one click
@@ -12230,6 +12722,7 @@ function renderCommentPopover(): void {
     const quote = el("div", "cmt-quote");
     quote.textContent = create ? create.exact : th!.exact;
     quote.title = "the highlighted passage this thread is about";
+    if (!create) passageLink(quote);   // a thread's quote takes the reader to the passage
     pop.appendChild(quote);
   }
   if (th && th.status !== "promoted") {
@@ -12244,6 +12737,12 @@ function renderCommentPopover(): void {
       const ask = el("div", "cmt-ask");
       ask.style.display = "none";
       pop.appendChild(ask);
+      // the thread's background box, the chat's own (renderBgTasks over the thread's build): its clicks on this stable
+      // host, installed once per popover, so a frame's repaint never drops a press (thread-live-2)
+      const bg = el("div", "cmt-bg");
+      bg.style.display = "none";
+      installBgBox(bg);
+      pop.appendChild(bg);
     }
   }
   if (sent) {
@@ -12398,7 +12897,7 @@ function renderCommentPopover(): void {
       if (th) {
         // the message box's draft stamp, kept for the thread's box (thread-live-1): a reply begun BEFORE the thread's
         // question arrived stays a reply; one begun after it answers the question (boxAnswersAsk)
-        const asid = th.sid || th.tid;
+        const asid = threadSidOf(th);
         if (box.value) { if (!draftStartedAt.has(asid)) draftStartedAt.set(asid, Date.now()); }
         else draftStartedAt.delete(asid);
         syncCmtBoxAskMode(asid);
@@ -12471,8 +12970,14 @@ function renderCommentPopover(): void {
       const right = el("span", "sl-right");
       const metaBox = el("span", "spinner-meta");   // the SAME wrapper the chat's badges wear — its
       metaBox.id = "cmt-meta";                      // mono/0.92em/dim dress is where the font lives
-      syncMetaControls(metaBox, threadMetaStatus(th), th.tid);
+      syncMetaControls(metaBox, threadMetaStatus(th), threadSidOf(th));   // the thread's session: a pick routes to the kernel that runs it
       right.appendChild(metaBox);
+      // the context gauge, the chat's own battery (thread-live-2): the thread's fill from its build's status, a click
+      // compacts the THREAD (compactOpenThread), kept across in-place refreshes and refilled by each frame
+      const ctx = buildCtxBar(compactOpenThread);
+      ctx.classList.add("cmt-ctx");
+      paintThreadCtx(ctx, th);
+      right.appendChild(ctx);
       mrow.appendChild(right);
       pop.appendChild(mrow);
     }
@@ -12539,13 +13044,17 @@ function renderCommentPopover(): void {
     open.textContent = "Open the session";
     open.title = "Switch to that session";
     open.dataset.act = "cmtopensession";
-    open.dataset.tid = th.tid;
+    open.dataset.sid = threadSidOf(th);   // the session it became, as the strip names its tab: host-prefixed on a linked machine (the review of #237)
     row.appendChild(open);
     pop.appendChild(row);
   }
   document.body.appendChild(pop);
   if (cmtStageable(th)) { paintCmtStaged(); paintCmtChips(); }   // the thread's stack and chips, from state (2026-10-07)
-  if (th && th.status === "open") renderThreadAsk();              // the thread's question, if it waits on one (thread-live-1)
+  if (th && th.status === "open") {
+    renderThreadAsk();              // the thread's question, if it waits on one (thread-live-1)
+    paintThreadThinking();          // its thinking line and its background box (thread-live-2)
+    renderThreadBg();
+  }
   if (typeof ResizeObserver === "function") {
     // resizing the BOX (resize: both) hands the extra room to the quoted context: the .sized class
     // unlocks the quote's clamp; armed only after a real user resize, so the natural size stays tight
@@ -12600,17 +13109,20 @@ function renderCommentPopover(): void {
   const threadLayout = !!th || !!sent;
   if (threadLayout && !pop.style.width) { pop.style.width = Math.round(window.innerWidth * 0.7) + "px"; }
   if (threadLayout && !pop.style.height) { pop.style.height = Math.round(window.innerHeight * 0.6) + "px"; }
+  // a landing put this thread's box beside its passage (placeBesidePassage): a rebuild keeps it there until the user moves it
+  const beside = th && cmtPopBesideAt && cmtPopBesideAt.tid === th.tid && cmtPopBesideAt.since === commentPopPos ? cmtPopBesideAt : null;
+  if (beside) pop.style.height = beside.height + "px";
   cmtPopApplied = { w: pop.offsetWidth, h: pop.offsetHeight };   // whatever it measures now is ours, the content size included
   const r = pop.getBoundingClientRect();
   const pos = threadLayout && !cmtPopPosMine ? null : commentPopPos;   // a selection point places only a new comment box
   const defaultX = threadLayout ? (window.innerWidth - r.width - 8) : (window.innerWidth - r.width) / 2;
   const px = Math.max(8, Math.min(pos?.x ?? defaultX, window.innerWidth - r.width - 8));
-  const py = Math.max(8, Math.min(pos?.y ?? 120, window.innerHeight - r.height - 8));
+  const py = Math.max(8, Math.min(beside ? beside.top : (pos?.y ?? 120), window.innerHeight - r.height - 8));
   pop.style.left = px + "px";
   pop.style.top = py + "px";
   syncCmtMaxState(pop);                              // a stored cap-sized preference opens reading "Restore"
   const msgs = pop.querySelector(".cmt-msgs") as HTMLElement | null;
-  if (msgs) msgs.scrollTop = msgs.scrollHeight;
+  if (msgs) { msgs.scrollTop = msgs.scrollHeight; keepCmtTail(msgs); }   // opens on the bottom, and keeps it while the box's other parts change (keepCmtTail)
   // …and the caret, EXCEPT while a reload is putting the reader's thread back (restoringCommentPop): nobody asked
   // for this popover on this page-load, so a reader who started typing in the composer the instant the transcript
   // landed must not have the caret pulled out from under them (the user 2026-09-23)
@@ -13330,8 +13842,16 @@ function scrollToAnchor(uuid: string): boolean {
   // turn's atoms (the anchor's element and the atoms after it up to the next user turn), else on the turn's first text
   // atom below a tool or thinking atom, else on the anchor's element as before. The anchor's element is what flashes.
   const quote = pendingAnchorQuote; pendingAnchorQuote = null;
-  const quoteEl = quote ? highlightCiteSpan(target, quote) : null;
-  landOn(target, uuid, quoteEl ?? firstTextAtomBelow(target), quote);
+  // a comment thread's landing (passageLanding) aligns on the thread's own highlight, never the turn's top: in a long message
+  // the turn's top left the passage below the fold or under the thread's box. A thread whose words carry no highlight (a
+  // tool row's) lands on its turn, as the jump cluster measures it. A highlight in a closed fold of its message is brought
+  // out first, and one still hidden lands its fold's heading (passageTarget)
+  const mark = pendingAnchorMark && pendingAnchorMark.uuid === uuid ? pendingAnchorMark.tid : null; pendingAnchorMark = null;
+  const markAt = mark ? passageTarget(target, mark) : null;
+  const markEl = markAt ? markAt.el : null;
+  const quoteEl = !markEl && quote ? highlightCiteSpan(target, quote) : null;
+  landOn(target, uuid, markEl ?? quoteEl ?? firstTextAtomBelow(target), quote, mark);
+  passageLanded(uuid, mark, markEl, target, markAt ? markAt.folded : null);   // …and a landing that opens the thread opens it now, beside the passage
   return true;
 }
 /** The atoms of the transcript turn the anchor's element opens: itself and the following event elements up to (not
@@ -13408,6 +13928,9 @@ function landNearestMoment(t: number): boolean {
 // never mutated (the click-safety family); a browser without it, or an unfindable quote, keeps
 // today's whole-message landing exactly (the honest-fallback rule).
 let pendingAnchorQuote: string | null = null;
+// A comment thread's landing (passageLanding): the thread whose highlight the landing on `uuid` aligns on and flashes. Keyed by
+// the anchor so it rides a landing that waits on history (the re-attempt lands the same uuid) and is dropped by any other.
+let pendingAnchorMark: { uuid: string; tid: string } | null = null;
 /** Highlight the quoted sentence within the anchor's TURN (its element and the atoms after it, turnAtomsOf: a card's anchor is
  *  the turn's first atom, the words it quotes may be a later one, T386) and return the element the sentence starts in, for
  *  the landing to align on; null when the quote is not in the rendered text (no highlight, no guess) or the browser has no
@@ -13460,7 +13983,7 @@ function highlightCiteSpan(target: HTMLElement, quote: string): HTMLElement | nu
 // timers); a sample off the row re-lands ("land-realign"); the landing row is filed when the settle ends, with the
 // measured distance and whether it settled, so `ok` alone is never again the whole verdict. One settle in flight: a
 // newer landing supersedes the older's. The walk-forward of a detached window that fits the viewport waits for it.
-let landSettling: { turn: HTMLElement; at: HTMLElement; uuid: string | null; quote: string | null; rowH: number; samples: SettleSample[]; start: number;
+let landSettling: { turn: HTMLElement; at: HTMLElement; uuid: string | null; quote: string | null; mark: string | null; rowH: number; samples: SettleSample[]; start: number;
                     gesture: boolean; row: Record<string, unknown> | null; ro: ResizeObserver | null; timers: number[]; done: boolean; clamp: number } | null = null;
 const afterSettle: (() => void)[] = [];   // what waits for the landing to settle (the window's edge check)
 /** When the reader last put a hand on the scroller (ms): a pointer down or a drag on it or its scrollbar, a touch, a wheel, or a
@@ -13528,8 +14051,11 @@ function settleResolve(s: NonNullable<typeof landSettling>): HTMLElement | null 
   if (s.at.isConnected && s.at.getClientRects().length) return s.at;
   const turn = s.uuid ? findTurnEl(s.uuid) : null;
   if (!turn || !turn.getClientRects().length) return null;
+  // a thread's highlight is brought out of its fold again only in a REBUILT turn (a fresh, closed <details>): a fold the reader
+  // closed on the same turn stays closed, and the landing holds its heading
+  const rebuilt = turn !== s.turn;
   s.turn = turn;
-  s.at = (s.quote ? highlightCiteSpan(turn, s.quote) : null) ?? firstTextAtomBelow(turn) ?? turn;
+  s.at = (s.mark ? passageTarget(turn, s.mark, rebuilt)?.el : null) ?? (s.quote ? highlightCiteSpan(turn, s.quote) : null) ?? firstTextAtomBelow(turn) ?? turn;
   s.rowH = settleRowHeight(s.at);   // the swapped element's own row (round one, low 1)
   s.ro?.observe(s.at); if (s.at !== turn) s.ro?.observe(turn);
   return s.at;
@@ -13543,6 +14069,7 @@ function settleRowHeight(at: HTMLElement): number {
 function settleLand(s: NonNullable<typeof landSettling>, writer: string): void {
   const c = document.getElementById("content"); const at = settleResolve(s);
   if (c && at) scrollElInto(c, at, "start", writer);
+  if (besideWatch && besideWatch.settle === s) besideFollow();   // the box a passage landing opened steps off the re-landed passage
 }
 function settleFinish(s: NonNullable<typeof landSettling>, fields: { dist: number | null; settled: boolean }): void {
   settleEnd(s);
@@ -13572,25 +14099,39 @@ function settleTick(): void {
   if (step === "realign") { settleLand(s, "land-realign"); return; }
   settleFinish(s, settleRowFields(step, s.samples, s.rowH));
 }
-function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | null, quote?: string | null) {
+function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | null, quote?: string | null, mark?: string | null) {
   // the land and its re-alignments are writes of #content like any other, attributed (T262j): "land-on" for the
   // landing itself, "land-realign" for each re-land while the transcript settles under it. `alignOn` (T386): the element
   // whose top goes to the viewport top when it is not the turn's own (the quoted span, or a turn's text below a tool
-  // group); `quote` re-finds that span after a rebuild; the turn is still what flashes
+  // group); `quote` re-finds that span after a rebuild, and `mark` (a comment thread's tid) re-finds the thread's highlight
+  // first; the aligned element is what flashes
   const at = alignOn ?? target;
   settleLastInput = 0; settleScrollerHeld = false;   // the input that caused this landing (a click on a link in the scroller) is not evidence for taking it over (round three, low 4); a hold whose release never reached the page (a press held across an alt-tab) does not outlive the landing (round four, low 1)
+  readerScrolling = false;   // …nor is a gesture still running: the landing moved the view, the reader's flick is over
+  { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) holdFloor(c, v, false); }   // every landing measures the transcript as it stands: the room a pause kept (holdFloor) goes first
+  if (!mark) releaseFollow();   // any other landing lifts a passage landing's pause
   const land = (writer: string) => { const c = document.getElementById("content"); if (c) scrollElInto(c, at, "start", writer); };
   land("land-on");
   // a landing is the reader's intent to be AT this message: follow mode ends unless the landing put them at the bottom
   // (the follow-mode snap otherwise writes them back to the bottom on the next shrink, the T386 double click)
-  { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) v.stick = atBottom(c); }
+  // A landing on a comment thread's PASSAGE (`mark`: the tick, the tinted rail line, the open thread's quote, the jump arrows)
+  // pauses follow mode even there (the user 2026-10-15): the reader came to read that passage beside its thread, and a session
+  // still writing scrolled it up under the box and away. The pause is the view's own follow flag held off (followHeld): the
+  // appends keep the reader's place, the go-to-bottom chip shows once new text is below, and going back to the bottom
+  // resumes following as ever (releaseFollow). Any other landing lifts it
+  { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) { v.followHeld = !!mark; v.stick = !mark && atBottom(c); } }
+  if (mark) { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) holdFloor(c, v); }   // the paused reader's room, where the land put them (holdFloor)
   if (flashKey == null || flashKey !== flashedAnchor) {   // one flash per navigation (see flashedAnchor)
     if (flashKey != null) flashedAnchor = flashKey;
-    at.classList.add("anchor-flash");                     // the ALIGNED element flashes: the turn may sit above the viewport when the words are aligned (round one, low 2)
-    setTimeout(() => at.classList.remove("anchor-flash"), 1700);
+    // the ALIGNED element flashes: the turn may sit above the viewport when the words are aligned (round one, low 2). A comment
+    // thread's highlight flashes WHOLE: a passage split over several elements (a bold word, a line break, two paragraphs) is
+    // a mark per piece, and only the first one flashed (the review of 2026-10-15)
+    const flashes = mark && at.matches("mark.cmt-hl") ? Array.from((at.closest(".turn") || target).querySelectorAll(`mark.cmt-hl[data-tid="${cssEscape(mark)}"]`)) : [at];
+    for (const f of flashes) f.classList.add("anchor-flash");
+    setTimeout(() => { for (const f of flashes) f.classList.remove("anchor-flash"); }, 1700);
   }
   if (landSettling) settleSupersede(landSettling);   // a newer landing supersedes the older's settle: its row is filed as it stood, marked
-  const landSettle = { turn: target, at, uuid: flashKey ?? null, quote: quote ?? null, rowH: settleRowHeight(at), samples: [] as SettleSample[],
+  const landSettle = { turn: target, at, uuid: flashKey ?? null, quote: quote ?? null, mark: mark ?? null, rowH: settleRowHeight(at), samples: [] as SettleSample[],
                        start: Date.now(), gesture: false, row: null as Record<string, unknown> | null, ro: null as ResizeObserver | null, timers: [] as number[], done: false, clamp: 0 };
   landSettling = landSettle;
   if (typeof ResizeObserver === "function") {
@@ -13688,7 +14229,8 @@ function ensureToastBox(): HTMLElement {
 // (reload-notices.ts liveNotices reads only the toasts without it).
 // Toasts that report what HAPPENED to a send or a file stay unmarked, since what they say is as true after the reload
 // as before: the nack (the attachment was not saved, the held message not sent), the dismissal and the other-tab ack
-// (the held message not sent).
+// (the held message not sent). A comment thread's read the kernel refused is marked too (2026-10-15): the thread shows unread
+// again, and the fresh page reads that from the kernel's next comments frame.
 function ephemeralWarnToast(msg: string): void { warnToast(msg).dataset.ephemeral = "1"; }
 // The same toast for a CONFIRMATION (review 2026-09-14): the warn toast's border is the error colour, so a routine
 // "done" on it read as a failure. Dressed .note (styles.css: the standard hairline, no tint), otherwise the warn toast's
@@ -15788,6 +16330,9 @@ function landActive(content: HTMLElement | null, v: View): void {
     whenChatVisible(() => { const c = document.getElementById("content"); const vv = activeId ? views.get(activeId) : null; if (c && vv) landActive(c, vv); });
     return;
   }
+  // the room a held view kept under its reader (holdFloor) serves that place alone: every other land measures the transcript as it
+  // stands (a rebuild may be far shorter), and the land below sets it again where it puts a reader still held
+  if (!(v.followHeld && v.heldKeep)) holdFloor(content, v, false);
   sizeSpacers(v);  // the view is now VISIBLE (display set in showActive), so the spacers get a real height
                    // measurement — a tab pre-built while display:none could only fall back until now
   // The durable seek re-arms the per-pass attempt: every render pass retries until it lands, the
@@ -15881,9 +16426,18 @@ function landActive(content: HTMLElement | null, v: View): void {
         }
       }
     }
+    else if (v.followHeld && v.heldKeep) {
+      // back on a tab a passage landing holds: the place the reader left (HeldKeep), the turn at the top at its offset, never
+      // the session's new bottom; the pause is kept at the bottom too, the chip showing what is written below (the user
+      // 2026-10-17): only the reader ends it (releaseFollow)
+      const k = v.heldKeep; v.heldKeep = null;
+      if (!(k.anchor && keepPlaceAcrossWindow(content, v, k.anchor))) writeScroll(content, v.scrollTop, "land-saved");
+    }
     else if (!v.shown || v.stick) writeScroll(content, content.scrollHeight, "land-bottom", true);
     else writeScroll(content, v.scrollTop, "land-saved");
   }
+  holdFloor(content, v);   // a reader still held stands in room down to the view's bottom edge, wherever the land put them
+  v.heldKeep = null;   // a held tab's place serves the one return it was saved for (an anchored landing took it over, or it was used)
   v.shown = true;
   scheduleRailSticky();
   updateJumpBtn();   // per-tab truth: the entering tab's restored position decides the chip, not the left one's
@@ -16062,7 +16616,8 @@ function appendActive() {
   // append that crosses the overflow boundary yanked the view. Overflowing + genuinely at the
   // bottom keeps the existing stick; scrolled-up keeps its never-yank rule.
   // follow mode: the TRUE bottom (T262c), never the send band
-  const stick = content.scrollHeight > content.clientHeight + 2 && atBottom(content);
+  // …and never while a passage landing holds follow mode off (followHeld): the reader keeps their place
+  const stick = content.scrollHeight > content.clientHeight + 2 && atBottom(content) && !v?.followHeld;
   const before = content.scrollTop;
   const heightBefore = content.scrollHeight;
   const distBefore = heightBefore - before - content.clientHeight;
@@ -16120,6 +16675,60 @@ if (typeof ResizeObserver === "function") {
 const jcChevron = (up: boolean): string => '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"'
   + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="'
   + (up ? "6 14.5 12 8.5 18 14.5" : "6 9.5 12 15.5 18 9.5") + '"/></svg>';
+/** The reader's own scroll gesture still running (the scroll listener): set by a gesture with their input behind it, carried
+ *  through the momentum after it, ended by the scroll settling (scrollend) or a landing (landOn). */
+let readerScrolling = false;
+/** The reader's scroll took the view to the bottom while a passage landing holds follow mode off: following resumes. Read where
+ *  the gesture reaches the bottom (the scroll listener) AND where it settles (scrollend), whichever comes last: Chromium fires
+ *  a keyboard smooth scroll's scrollend (End, PageDown, Space) BEFORE its last scroll event at the bottom, so a check on the
+ *  scroll events alone met a gesture already ended and an input past its window, and resumed in about one run in three (the
+ *  review of #252). scrollTop is final at scrollend, so the bottom is read there as it stands. */
+function resumeAtBottom(c: HTMLElement): void {
+  const v = activeId ? views.get(activeId) : null;
+  if (v?.followHeld && atBottom(c)) { releaseFollow(); v.stick = true; }
+}
+{
+  const c = document.getElementById("content");
+  if (c) c.addEventListener("scrollend", () => {
+    if (readerScrolling && c.clientHeight > 0) resumeAtBottom(c);   // the reader's gesture settled: at the bottom, it follows again
+    readerScrolling = false;
+  }, { passive: true });
+}
+/** End a passage landing's pause on follow mode (landOn's followHeld): the reader is back at the bottom, by their own scroll,
+ *  the go-to-bottom chip or their own send from the tail (the scroll listener), and the chat follows new text again exactly
+ *  as before. */
+function releaseFollow(): void {
+  const v = activeId ? views.get(activeId) : null;
+  const c = document.getElementById("content");
+  if (v) { v.followHeld = false; v.heldKeep = null; if (c) holdFloor(c, v); }   // …and the room the pause kept under the reader goes with it
+}
+/** The room a paused view stands in (the user 2026-10-17: a paused view holds the passage where the reader is looking). A passage
+ *  landing's pause (followHeld) often leaves the reader at the transcript's very end, and the end shrinks there while the session
+ *  writes: the fork control leaves the last drawn reply a frame before the next reply is drawn (26 px a reply in the served lab),
+ *  a notice gives way to a shorter reply, a footer comes off. The browser clamps scrollTop to the shorter end and the view moves by
+ *  the shrink, with nothing to put it back, the pause being the absence of that write. So while the pause holds, the thread
+ *  reaches down to the view's bottom edge at least (its min-height): a shrink under the reader leaves room below the last line,
+ *  and the next text fills that room first. Set where the reader's place is decided (the landing, every scroll of the held view, a
+ *  re-show); cleared with the pause, and before every landing and every land that is not the held tab's return (`on` false), the
+ *  clamp that clearing can cause claimed as the page's write. Rounded up: the room ends at most a pixel under the view, inside
+ *  atBottom's band. While the pause holds the room only grows: a scroll up leaves it where it was, so the transcript's end stays
+ *  below the reader and only their scroll back down to it resumes following (the review of #279: lowered to the view's bottom on
+ *  every scroll, the room met a reader who had scrolled 40 px up, the scroll's end read them as at the bottom, following resumed
+ *  and the view jumped by the room let go). */
+function holdFloor(content: HTMLElement, v: View, on = !!v.followHeld): void {
+  const el = v.el;
+  if (on) {
+    const h = el.getBoundingClientRect().height;
+    if (h <= 0 || content.clientHeight <= 0) return;   // a hidden view has no place to hold
+    const px = Math.max(parseFloat(el.style.minHeight) || 0, Math.ceil(h - (content.scrollHeight - content.scrollTop - content.clientHeight))) + "px";
+    if (el.style.minHeight !== px) el.style.minHeight = px;
+    return;
+  }
+  if (!el.style.minHeight) return;
+  const before = content.scrollTop;
+  el.style.minHeight = "";
+  writeScroll(content, content.scrollTop, "hold-floor", false, before);   // a clamp to the shorter end is the page's move, never a gesture
+}
 const jumpBtn = document.createElement("button");
 jumpBtn.id = "jump-bottom";
 jumpBtn.setAttribute("aria-label", "go to bottom");
@@ -16142,6 +16751,7 @@ function updateJumpBtn(): void {
 jumpBtn.onclick = () => {
   const c = document.getElementById("content");
   if (!c) return;
+  releaseFollow();                                    // a passage landing's pause ends here too, before the snap's echo is read
   writeScroll(c, c.scrollHeight, "jump-button", true);   // the snap IS the acknowledgment
   const v = activeId ? views.get(activeId) : undefined;
   if (v) { v.stick = true; v.scrollTop = c.scrollTop; }   // the explicit re-entry into follow mode
@@ -16160,13 +16770,16 @@ window.addEventListener("resize", updateJumpBtn);
 // After new content arrives the reader loses their place and wants to get back to their last message and read
 // everything since, especially on the phone, and to reach comments without hunting on the rail (the user, paraphrased).
 // A small cluster in the pane's bottom-left corner, one column with the go-to-bottom chip, three rows, top to bottom:
-// the threads with an UNREAD reply (previous / next, and how many wait off screen, in the needs-you red; shown only while
+// the threads with an UNREAD reply (previous / next, and how many wait, in the needs-you red; shown only while
 // one waits), every COMMENT thread (previous / next, in the comment ink; shown only while the session has threads), and
 // the reader's OWN messages (previous / next, in their blue; from the bottom, one previous lands on their last message).
 // Stepping through unread replies is its own job, so it has its own row (the user 2026-09-24); the row replaced the two
 // "↑ N replies unread" / "↓ N reply unread" chips (2026-09-08). What counts as unread and when a thread stops being
-// unread are the chips' (isReplyReady; opening the thread reads it, a press never does), and the count is the chips'
-// number: a thread on screen counts in neither direction. The arrows reach every unread thread, in view or not.
+// unread are the chips' (isReplyReady; opening the thread reads it, a press never does). The count is every unread thread
+// in the session, wherever it sits, so it moves only when a thread does (read, a reply landing, resolved or deleted) and
+// never as the reader scrolls (the user 2026-10-15: counting only the threads off screen, the chips' rule, made it flip
+// 5, 4, 5 with nothing read). The arrows reach every unread thread, in view or not; WHERE they go reads the view, the
+// number never does.
 // Every move lands through scrollToAnchor, the chips', the notches' and the rail ticks' one road: the target's top at
 // the viewport top and landOn's one flash, a target outside the rendered window rendered around it, and a comment
 // anchored in history the page has not loaded fetched by it. The reader's own messages are known only as far as the
@@ -16229,7 +16842,7 @@ const [jcPrevMine, jcNextMine] = jcPair(jcMine, "prevMine", "nextMine", "mine");
 const jcButtons: Record<Move, HTMLButtonElement> = {
   prevUnread: jcPrevUnread, nextUnread: jcNextUnread, prevComment: jcPrevComment, nextComment: jcNextComment, prevMine: jcPrevMine, nextMine: jcNextMine,
 };
-// how many unread replies wait off screen (the old chips' number), read-only: a badge on the unread capsule's corner,
+// how many unread replies wait in the session, read-only: a badge on the unread capsule's corner,
 // positioned in the cluster box (the unread capsule is its top), so the capsule's own clip never cuts it
 const jcCount = el("span", "jc-count");
 jcCount.hidden = true;
@@ -16310,7 +16923,9 @@ function navStops(kind: "mine" | "comment" | "unread", s: Session, v: View, cont
   const stops: NavStop<NavLoad>[] = cands.map((c) => {
     if (cur) return { uuid: c.uuid, rank: c.rank, tid: c.tid, place: placeByOrder(c.unit, c.rank, cur) };
     const t = c.unit >= winStart && c.unit < winEnd ? navTurn(v, c.uuid) : null;   // only the rendered window has turns to measure
-    return { uuid: c.uuid, rank: c.rank, tid: c.tid, place: t ? placeRendered(t.getBoundingClientRect().top - cr.top, line, here) : unplaced(c.unit) };
+    // a thread's stop is its passage, where its landing puts the reader (passageLanding), else its turn
+    const at = t && c.tid ? (t.querySelector(`mark.cmt-hl[data-tid="${cssEscape(c.tid)}"]`) as HTMLElement | null) ?? t : t;
+    return { uuid: c.uuid, rank: c.rank, tid: c.tid, place: at ? placeRendered(at.getBoundingClientRect().top - cr.top, line, here) : unplaced(c.unit) };
   });
   if (kind === "mine") {
     if (s.regions && s.regions.some((r) => r.kind === "gap")) {
@@ -16327,34 +16942,10 @@ function navStops(kind: "mine" | "comment" | "unread", s: Session, v: View, cont
   }
   return { stops, mine: own.length };
 }
-/** The unread replies off screen, per direction, with the nearest of each: the old chips' measure verbatim (a rendered
- *  mark by its own box, a windowed-out anchor by event order against the rendered window). */
-function readyAround(s: Session, v: View, c: HTMLElement): { above: ReadyChip | null; below: ReadyChip | null } {
-  const ready = (commentThreads.get(s.id) || []).filter(isReplyReady);
-  const H = c.clientHeight;
-  const cr = c.getBoundingClientRect();
-  const marks: ReadyMark[] = [];
-  let evUnit: Int32Array | null = null;
-  for (const th of ready) {
-    const turn = v.el.querySelector(`.turn[data-uuid="${cssEscape(th.anchorUuid)}"]`) as HTMLElement | null;
-    const line = replyLine(th);
-    if (turn) {
-      // the mark's own box; the turn's when the rendered text drifted past re-matching (the tick's fallback too)
-      const node = (turn.querySelector(`mark.cmt-hl[data-tid="${cssEscape(th.tid)}"]`) as HTMLElement | null) || turn;
-      const r = node.getBoundingClientRect();
-      marks.push({ tid: th.tid, uuid: th.anchorUuid, line, ...placeMark(r.top - cr.top, r.bottom - cr.top, H) });
-    } else {
-      const idx = s.events.findIndex((e) => e.uuid === th.anchorUuid);
-      if (!evUnit) evUnit = eventUnitIndex(s);
-      marks.push({ tid: th.tid, uuid: th.anchorUuid, line, ...placeWindowed(idx >= 0 ? evUnit[idx] : -1, v.winStart, v.winEnd ?? v.winStart) });
-    }
-  }
-  return readyChips(marks);
-}
 /** Land a comment thread: the chips' landing verbatim (a fresh navigation's one flash on the turn, the uuid route, the
  *  mark's own pulse once its highlight is back) and NOT marked read: reading it is opening the thread. */
 function landThread(sid: string, tid: string, uuid: string): void {
-  flashedAnchor = null;                  // fresh navigation → landOn's one flash on the turn
+  flashedAnchor = null; pendingAnchorMark = { uuid, tid };   // fresh navigation → landOn's one flash, on the thread's passage (passageLanding's landing)
   if (scrollToAnchor(uuid)) {
     applyCommentMarks(sid);              // a re-windowed anchor turn gets its highlight back before the pulse
     const m = views.get(sid)?.el.querySelector(`mark.cmt-hl[data-tid="${cssEscape(tid)}"]`) as HTMLElement | null;
@@ -16411,10 +17002,9 @@ function updateJumpCluster(): void {
   const mine = navStops("mine", s, v, c, evUnit);
   const threads = commentThreads.get(s.id) || [];
   const threadsHere = threads.some((t) => threadOnRail(t.status));
-  const unreadHere = threads.some(isReplyReady);   // the unread row shows while any thread's reply waits
+  const n = unreadCount(threads), unreadHere = n > 0;   // every unread thread, wherever it sits: the unread row shows while one waits
   const cmt = threadsHere ? navStops("comment", s, v, c, evUnit).stops : [];
   const unread = unreadHere ? navStops("unread", s, v, c, evUnit).stops : [];
-  const n = unreadHere ? unreadCount(readyAround(s, v, c)) : 0;   // the chips' number: off screen only
   const able = {
     prevMine: !!pickNav(mine.stops, "above"), nextMine: !!pickNav(mine.stops, "below"),
     prevComment: !!pickNav(cmt, "above"), nextComment: !!pickNav(cmt, "below"),
@@ -16429,7 +17019,7 @@ function updateJumpCluster(): void {
   jcCmt.hidden = !threadsHere;
   jcUnread.hidden = !unreadHere;
   for (const m of MOVES) jcButtons[m].disabled = !able[m];
-  jcCount.hidden = n === 0;   // every unread thread in view: no number (the chips hid at 0), the arrows still reach them
+  jcCount.hidden = n === 0;   // no unread thread: no number
   if (n) { jcCount.textContent = String(n); setTip(jcCount, countTip(n)); jcCount.setAttribute("aria-label", countTip(n)); }   // the one styled tip; the text swaps per update
   jumpCluster.hidden = !mineHere && !threadsHere;
   jumpCluster.style.bottom = bottom + "px";
@@ -16494,6 +17084,24 @@ window.addEventListener("keydown", (e) => {
     lastKnownSh = c.scrollHeight;   // sh/ch: a clamp reads top == sh - ch after sh dropped (T262e)
     if (gv) gv.echoOf = cls === "write-echo" ? lastScrollWriter : undefined;   // …and whose write this event echoes (the re-window skips its own)
     if (cls === "gesture" && gv && activeId) askGapsInView(activeId, gv, c);   // a reader's move over a gap in view: the page under them (2026-10-01)
+    // a passage landing's pause on follow mode (followHeld, which keeps followReader's flag off) ends when the READER is back at
+    // the bottom: their gesture (with their input behind it, the settle's own evidence), a writer the census calls theirs (a
+    // key, the chips) or their own send revealing itself from the tail. The landing's writes, the appends and the browser's
+    // own moves never end it
+    // The reader's gesture is followed to its end, not to an input window: a phone flick's momentum reaches the bottom long
+    // after the finger left (gestureEvidence's 120 ms), so a gesture with the reader's input behind it starts readerScrolling
+    // and every gesture-classified scroll after it is theirs until the scroll settles (scrollend) or a landing moves the view.
+    // The page's own writes in between (the window sliding under a long flick) do not end it: the momentum runs on through them
+    if (cls === "gesture" && gestureEvidence(settleLastInput, Date.now(), settleScrollerHeld)) readerScrolling = true;
+    if ((cls === "gesture" && readerScrolling) || (cls === "write-echo" && (writerIsReader(lastScrollWriter) || lastScrollWriter === "optimistic-send"))) resumeAtBottom(c);
+    if (gv?.followHeld) holdFloor(c, gv);   // the pause stands: the room under the reader follows their place down, never up (holdFloor)
+    // …and while a passage landing settles, ANY move of the view (its re-land, or the browser's own move as the reply under the
+    // passage grows) can carry the passage under the box that landing opened: the box steps off it (besideWatch). A reader's
+    // own scroll has already ended the settle above, so it never moves the box
+    // …and so can the browser's own move of a view whose follow mode a passage landing paused (a clamp when the tail re-lays
+    // out shorter for a frame as the session writes, the footer moving to the new reply): no input of the reader's is behind
+    // it, so the box steps off a passage it now covers. The reader's own scroll never moves the box
+    if (besideWatch && (!besideWatch.settle.done || (cls === "gesture" && !readerScrolling && gv?.followHeld))) besideFollow();
   }, { passive: true });
 }
 // The live-ask host (#live-ask) sits INSIDE #content after the threads: the picker card is the transcript's tail
@@ -16646,8 +17254,12 @@ if (typeof ResizeObserver === "function") {
       if (content && !snapView && lastH >= 0 && content.clientHeight > 0 && v && v.shown && followBoxBelow(v.stick || wasAtBottom, dh)) {   // a transcript rule: it stands down while the overview owns #content (the footer's hide is not a box below the reader, T322)
         writeScroll(content, content.scrollHeight, "box-below", true);
         v.scrollTop = content.scrollTop;                      // keep the per-view saved position in sync
-        v.stick = true;                                       // the record agrees: a follow-mode reader, whichever truth said so
+        v.stick = !v.followHeld;                              // the record agrees: a follow-mode reader, whichever truth said so (a passage landing's pause stands)
         repinned = true;
+        // the re-pin moved the transcript up by the box's growth (the composer growing as the reader types), and a thread's box
+        // opened beside a passage near the bottom stood still over it: it steps off the passage, the same overlap rule as the
+        // landing's re-land (besideFollow; the review of #251)
+        besideFollow();
       }
       lastH = h; for (const id of BOXES_BELOW) FEET[id] = now[id];
       // the pass is the EVENT a reader of the bottom holds at (the same flake: under load a lab read scrollTop after the box grew
@@ -17646,8 +18258,11 @@ function renderNoticeDisclosures(): void {
   for (const r of Array.from(host.querySelectorAll<HTMLElement>(".ntc-row"))) noticeMoreButton(r, noticeLineOf(r));
 }
 
-function renderBgTasks() {
-  const host = document.getElementById("bg-tasks");
+// THE BACKGROUND BOX's one painter: the chat's #bg-tasks for the active tab's session, or, given a `target`, another host for
+// another session's status and tracked tasks: a comment popover's .cmt-bg for its open thread (renderThreadBg, thread-live-2)
+interface BgBoxSource { bgTasks?: { tasks: BgTask[] } | null; status: Status; }
+function renderBgTasks(target?: { host: HTMLElement; sid: string | null; src: BgBoxSource | null }) {
+  const host = target ? target.host : document.getElementById("bg-tasks");
   if (!host) return;
   // THE HEADER KEEPS THE KEYBOARD (the box arc's round three, the second contributor's post-merge review of PR 2105): this render empties the box
   // and builds a new header on every call, the one its own click makes included, so Enter toggled the rows and dropped focus to the body (a
@@ -17657,7 +18272,9 @@ function renderBgTasks() {
   const refocusHead = !!document.activeElement && document.activeElement.classList.contains("bg-fold-head") && host.contains(document.activeElement)
     && document.activeElement.matches(":focus-visible");
   host.replaceChildren();
-  const s = activeId && !snapView ? liveSession(activeId) : null;   // (snapView: the pane shows a section, not this session)
+  const sid = target ? target.sid : (activeId && !snapView ? activeId : null);   // (snapView: the pane shows a section, not this session)
+  const s: BgBoxSource | null = target ? target.src : (sid ? liveSession(activeId) || null : null);   // the chat's: the active tab's gated session
+  host.dataset.sid = sid || "";   // whose box: the rows' Stop and Cancel post for this session (installBgBox)
   const tasks: BgTask[] = (s && s.bgTasks && s.bgTasks.tasks) || [];
   // Keyed on CONTENT, never the chip state (the user 2026-08-30, paraphrased: even while working, anything
   // the session has in flight shows at the chat bottom). The rows ride awaitingItems in both turn states;
@@ -17666,9 +18283,8 @@ function renderBgTasks() {
   // and list on their own when the wait does not name them (a service the session keeps around).
   const why = (s && (s.status.awaitingWhy || "").trim()) || "";
   const items = ((s && s.status.awaitingItems) || []).filter((it) => it && it.kind);
-  if (!s || !activeId || (!why && !items.length && !tasks.length)) { host.style.display = "none"; host.classList.remove("bg-awaited"); return; }
+  if (!s || !sid || (!why && !items.length && !tasks.length)) { host.style.display = "none"; host.classList.remove("bg-awaited"); return; }
   host.style.display = "";
-  const sid = activeId;
   // the AWAITED outline (the user 2026-08-19): the box wears the chip's await-green while the session waits
   // on its rows (the wait IS the box), and whenever the kernel names tracked tasks as awaited
   // (awaitingTaskIds — an exact launch-id match; the ids' PRESENCE, never the chip state); the status DOT
@@ -17973,8 +18589,12 @@ const threadAsk: AskSurface = { host: () => document.querySelector("#cmt-pop .cm
 // The open thread's own session id: the frame's `sid`, which is its tid for every thread romp makes (null with no thread open).
 function openThreadSid(): string | null {
   const cur = openCommentThread();
-  return cur ? (cur.th.sid || cur.th.tid) : (openCommentKey ? openCommentKey.tid : null);
+  return cur ? threadSidOf(cur.th) : (openCommentKey ? openCommentKey.tid : null);
 }
+// A thread's SESSION id, the one its question frames, its answers, its stop and its settings name: the frame's `sid`, which
+// the federation prefixes with the thread's host on a linked machine (federation.ts _prefixThreadSid), so every one of
+// those routes to the kernel that runs the thread; the tid on a kernel from before the frame carried it.
+function threadSidOf(th: CommentThread): string { return th.sid || th.tid; }
 
 // True on a phone/tablet (a coarse pointer) — the mobile signal we gate touch affordances on. NOT viewport
 // width (desktop chat panes are narrow too). Reused by the composer's Enter behavior, its resting
@@ -18405,7 +19025,7 @@ function onMultiKey(s: AskSurface, e: KeyboardEvent) {
     else if (s.focus === n) submitLiveAsk(s);
     else cancelLiveAsk(s);
   }
-  else if (/^[1-9]$/.test(e.key)) { const idx = opts.findIndex((o) => o.n === parseInt(e.key, 10)); if (idx >= 0) { s.focus = idx; paintMultiFocus(s); toggleLiveAsk(s, opts[idx].n); } }
+  else if (/^[1-9]$/.test(e.key)) { const idx = opts.findIndex((o) => o.n === parseInt(e.key, 10)); if (idx >= 0) { e.preventDefault(); s.focus = idx; paintMultiFocus(s); toggleLiveAsk(s, opts[idx].n); } }   // the number is the card's: consumed, so no box takes it as typing
 }
 
 // Review screen: show chosen answers + the Submit answers / Cancel options as
@@ -18494,7 +19114,9 @@ function onSingleKey(s: AskSurface, e: KeyboardEvent) {
   else if (e.key === "Enter") { e.preventDefault(); answerLiveAsk(s, opts[s.focus].n); }
   else if (/^[1-9]$/.test(e.key)) {
     const idx = opts.findIndex((o) => o.n === parseInt(e.key, 10));
-    if (idx >= 0) { s.focus = idx; answerLiveAsk(s, opts[idx].n); }
+    // the number answers the card, and is CONSUMED: unclaimed, it bubbled to the type-anywhere default, which dropped it
+    // into the open comment thread's reply box as the answer went (the review of #232)
+    if (idx >= 0) { e.preventDefault(); s.focus = idx; answerLiveAsk(s, opts[idx].n); }
   }
 }
 
@@ -18778,11 +19400,30 @@ function setCtxBar(bar: HTMLElement, ctxStr: string | undefined, compacting = fa
 }
 function compactActiveSession(bar: HTMLElement): void {
   const s = activeId ? liveSession(activeId) : null;
-  if (!s || !vscodeApi) return;
+  if (!s || !activeId) return;
+  compactSessionOf(bar, activeId, s.status.state);
+}
+// The battery's /compact for one session, the chat's or an open comment thread's (thread-live-2): its own id and state.
+function compactSessionOf(bar: HTMLElement, sid: string, state: string): void {
+  if (!vscodeApi) return;
   // awaiting: the pane's keyboard belongs to the prompt; compacting/closed: nothing to do
-  if (s.status.state === "needsInput" || s.status.state === "awaiting" || s.status.state === "compacting" || s.status.state === "closed") return;
-  vscodeApi.postMessage({ type: "compactSession", id: activeId });
+  if (state === "needsInput" || state === "awaiting" || state === "compacting" || state === "closed") return;
+  vscodeApi.postMessage({ type: "compactSession", id: sid });
   bar.classList.add("ctx-clicked");   // immediate cue; the real compacting state takes over via the poll
+}
+// The thread gauge's click: the open thread and its state as they stand AT THE CLICK, by the chat's own rules (compactSessionOf).
+// The gauge outlives the frame it was built on (the popover refreshes in place), so a state read when the popover opened went
+// stale: opened while the thread worked, a click during its question compacted it anyway; opened while it compacted, every
+// later click did nothing (the review of PR 240, 2026-10-14). Read fresh, as the chat's battery reads its tab (compactActiveSession).
+function compactOpenThread(bar: HTMLElement): void {
+  const cur = openCommentThread();
+  if (!cur || cur.th.status !== "open") return;
+  compactSessionOf(bar, threadSidOf(cur.th), threadMetaStatus(cur.th).state);
+}
+// A thread's gauge: the chat's setCtxBar over the thread's build status (its fill, tint and over-the-window mark).
+function paintThreadCtx(bar: HTMLElement, th: CommentThread): void {
+  const st = threadMetaStatus(th);
+  setCtxBar(bar, st.ctx, st.state === "compacting", pickTone(st.ctxColor, st.ctxTone), st.ctxOver);
 }
 
 
@@ -19127,8 +19768,8 @@ function stopButton(state?: ChipState): HTMLElement {
   const stuck = state === "retrying" || state === "blocked";
   // styled tip (tip.ts): a label line + its explanation, so the icon-only square explains itself
   setTip(btn, stuck
-    ? "Stop retrying\ninterrupt this thread and hold its auto-retry off until you send it a message"
-    : "Stop\ninterrupt this session (same as Ctrl+C)");
+    ? "Stop retrying\ninterrupt this thread and hold its auto-retry off until you send it a message; its background agents stop too"
+    : "Stop\ninterrupt this session (same as Ctrl+C); its background agents stop too");
   btn.setAttribute("aria-label", stuck ? "Stop retrying this session" : "Interrupt session");
   btn.appendChild(el("span", "stop-icon"));   // a filled square (CSS), the universal stop glyph
   btn.addEventListener("click", (e) => {
@@ -20299,13 +20940,21 @@ function quoteViewOf(v: unknown): QuoteView | null {
 const QUOTE_BLOCKS = "p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, figcaption, summary, blockquote";
 // What a quote leaves out (quoteSkips): the page's controls, and the transcript's labels and markers, which describe the
 // conversation rather than say any of it: a turn's dot, rail and time, a day's divider, the fork spot, a tool row's head
-// (its label and fold toggle), a tool group's summary, a notice's glyph, source, meta and actions, a reply's thinking
-// count, a sent message's romp tag, a follow-up's tag and a nudge's caret, a send's undelivered label, a gap's glyph.
-// Anything else marked user-select: none is left out with them: that is how the page marks chrome a selection must copy
-// clean without (fold heads, the tool rows' IN and OUT, diff gutters).
+// (its label and fold toggle), a tool group's whole line (its caret, its summary and the edits' totals), a diff's
+// line-number gutters, a notice's glyph, source, meta and actions, a reply's thinking count, a sent message's romp tag, a
+// follow-up's tag and a nudge's caret, a send's undelivered label, a gap's glyph. Anything else marked user-select: none
+// is left out with them: that is how the page marks chrome a selection must copy clean without (fold heads, the tool
+// rows' IN and OUT). Inside a <pre> that style is not read (quoteSkips' `styled`), so chrome a code or diff block holds is
+// named here: the gutters (review of #234: an opened edit's rows went out as "1010a = 1"). A diff row's sign is named too,
+// because the walk writes every row's marker itself as it reads the row's code (quoteText's diffMark): "-" removed, "+"
+// added, and the unified diff's leading space for context. Read off the sign's own text, a selection that started inside
+// a row's code left that row's sign out ("rate = 0.1" over "+    rate = 0.25" read the removed line as unchanged), and a
+// context row, which shows no sign, read as removed when its line began with "-" (review of #239). A hunk header
+// ("@@ -10 +10 @@") stays as it reads: it is the diff's own text and says where in the file the change sits, where a
+// gutter only numbers each row again.
 const QUOTE_CHROME = "button, select, input, textarea, svg, .code-copy, .dot, .rail-hit, .time-marker, .day-divider, .fork-spot, "
-  + ".tool-head, .toolgroup-head, .notice-glyph, .notice-src, .notice-meta, .notice-acts, .think-tokens, .romp-tag, .followup-tag, "
-  + ".nudge-caret, .undelivered-label, .tx-gap-glyph";
+  + ".tool-head, .toolgroup-line, .diff-gut, .diff-sign, .notice-glyph, .notice-src, .notice-meta, .notice-acts, .think-tokens, "
+  + ".romp-tag, .followup-tag, .nudge-caret, .undelivered-label, .tx-gap-glyph";
 const QUOTE_BREAKS = /^(P|LI|UL|OL|DL|DD|DT|DIV|PRE|TABLE|THEAD|TBODY|TR|TD|TH|BLOCKQUOTE|H[1-6]|FIGURE|FIGCAPTION|SECTION|DETAILS|SUMMARY|HR)$/;
 const QUOTE_PARAS = /^(P|PRE|UL|OL|DL|TABLE|BLOCKQUOTE|H[1-6]|FIGURE|DETAILS|HR)$/;   // a blank line around, in a quote
 /** Whether a quote leaves out the element `e` and all it holds: a control, a label or marker (QUOTE_CHROME), a closed fold's
@@ -20322,9 +20971,15 @@ function quoteSkips(e: Element, styled = true): boolean {
 /** The text of the selection `r` as it reads: the content it covers, without what quoteSkips leaves out; a block on its
  *  own line and a paragraph or a message a blank line apart, a code block's rows as its lines, a table's cells a tab apart,
  *  a <br> a line break, and other whitespace as the page shows it. Read from the range's start and stopped once longer
- *  than `cap`, so a drag over a long transcript costs what a quote can hold, not the transcript (review of #231). */
+ *  than `cap`, so a drag over a long transcript costs what a quote can hold, not the transcript (review of #231). A diff
+ *  row's line opens with its marker (diffMark), wherever in the row the selection starts. */
 function quoteText(r: Range, cap = QUOTE_CAP + 1): string {
   let out = "", owed = 0, pre = 0;           // owed: the line breaks due before the next text; pre: depth inside <pre>
+  // mark: a diff row's marker, owed before the first text read from its code; lead: the quote opens with one, whose
+  // leading space (a context row's) a single line keeps
+  let mark = "", lead = false;
+  const diffMark = (row: Element | null): string => !row ? "" : row.classList.contains("diff-del") ? "-"
+    : row.classList.contains("diff-add") ? "+" : row.classList.contains("diff-ctx") ? " " : "";
   const brk = (e: Element): number => (e.tagName === "TD" || e.tagName === "TH" ? 0   // a cell: a tab before the next (enter)
     : e.classList.contains("turn") || QUOTE_PARAS.test(e.tagName) ? 2
     : QUOTE_BREAKS.test(e.tagName) || (pre > 0 && e.classList.contains("ct")) ? 1 : 0);
@@ -20338,17 +20993,25 @@ function quoteText(r: Range, cap = QUOTE_CAP + 1): string {
     }
     owed = 0;
     if (!pre && (!out || /[\s]$/.test(out))) s = s.replace(/^ /, "");
-    out += s;
+    if (!out) lead = mark !== "";
+    out += mark + s;
+    mark = "";
   };
   const enter = (e: Element): void => {
     if (e.tagName === "BR") { if (out) out = out.replace(/[ \t]+$/, "") + "\n"; owed = 0; return; }
     if ((e.tagName === "TD" || e.tagName === "TH") && e.previousElementSibling && out && !owed && !out.endsWith("\n")) out = out.replace(/ +$/, "") + "\t";
     owed = Math.max(owed, brk(e));
     if (e.tagName === "PRE") pre++;
+    if (e.classList.contains("diff-code")) mark = diffMark(e.parentElement);
   };
   const exit = (e: Element): void => {
     if (e.tagName === "PRE") pre--;
     owed = Math.max(owed, brk(e));
+    if (mark && e.classList.contains("diff-code")) {   // nothing read from the row's code: a blank line's marker alone
+      const m = mark;
+      mark = "";
+      if (!e.firstChild) put(m);
+    }
   };
   const start = r.startContainer, end = r.endContainer;
   const stop = end.nodeType === Node.TEXT_NODE ? null : end.childNodes[r.endOffset] || null;   // the node the range ends before
@@ -20367,14 +21030,24 @@ function quoteText(r: Range, cap = QUOTE_CAP + 1): string {
   if (outer) { node = outer; pre = inside(outer); }
   else if (node) pre = inside(node);
   else { pre = inside(start) + ((start as Element).tagName === "PRE" ? 1 : 0); exit(start as Element); }   // on after it
+  // a start inside a diff row's code: the row's marker is owed all the same, and the code before the start stands apart
+  // from what was selected: as blanks as wide when it is short or only the row's indent, so the line keeps its place
+  // beside the rows under it ("-           0.1", never "-0.1"), else as " …". Blanks for a long lead were unbounded: a
+  // sentence at column 4,650 of a long row went out as its blanks alone, cut at the cap (review of #242)
+  const code = !outer && node && node.nodeType === Node.TEXT_NODE ? node.parentElement : null;
+  if (code && code.classList.contains("diff-code")) {
+    const before = node === start ? (start as Text).data.slice(0, r.startOffset) : "";
+    const blank = before.length <= 16 || (before.length <= 80 && !/\S/.test(before));
+    mark = diffMark(code.parentElement) + (blank ? before.replace(/[^\t]/g, " ") : " \u2026");
+  }
   for (;;) {
     if (!node) {                                                 // go on after `from`, leaving the elements it closes
       let x: Node = from;
       while (!x.nextSibling) {
         const up = x.parentNode;
-        if (!up || up === document.body || up.nodeType !== Node.ELEMENT_NODE) return quoteTextTrim(out);
+        if (!up || up === document.body || up.nodeType !== Node.ELEMENT_NODE) return quoteTextTrim(out, lead);
         exit(up as Element);
-        if (up === end) return quoteTextTrim(out);              // the range ends at the end of this element
+        if (up === end) return quoteTextTrim(out, lead);        // the range ends at the end of this element
         x = up;
       }
       node = x.nextSibling;
@@ -20404,13 +21077,14 @@ function quoteText(r: Range, cap = QUOTE_CAP + 1): string {
     if (e === end) break;
     from = e; node = null;
   }
-  return quoteTextTrim(out);
+  return quoteTextTrim(out, lead);
 }
 /** quoteText's result: no blank lines before it, no whitespace after it, and a single line trimmed (a code row's indent
- *  only means something beside the rows under it). */
-function quoteTextTrim(out: string): string {
+ *  only means something beside the rows under it), unless it opens with a diff row's marker (`lead`): a context row's
+ *  leading space is what says the line is unchanged. */
+function quoteTextTrim(out: string, lead = false): string {
   const t = out.replace(/^(?:[ \t]*\n)+/, "").trimEnd();
-  return t.includes("\n") ? t : t.trim();
+  return t.includes("\n") || lead ? t : t.trim();
 }
 /** The offset of the point (node, offset) in `el`'s text, or -1 when it lies outside it. */
 function textOffsetIn(el: Element, node: Node, offset: number): number {
@@ -20850,7 +21524,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   if (!quietActivation) wantFile = null;   // a pick leaves a FILE TAB (leaveFileTab: its discard ask; quietActivation: a restore does not)
   if (fileTabOpen && !quietActivation) {
     if (!leaveFileTab()) return;
-    if (activeId === id && anchor == null && anchorT == null) { if (collapsedTabIds.has(id)) unfoldSectionOf(id); renderTabs(); showActive(); return; }   // the session under the file
+    if (activeId === id && anchor == null && anchorT == null) { if (collapsedTabIds.has(id)) unfoldSectionOf(id); renderTabs(); showActive(); revealActiveTab(); return; }   // the session under the file
   }
   // A session pick ends the section view (the header put it up; the pick names a session) and brings the
   // picked tab on screen: a tab folded away under its header (a row of the view, a feed deep link, the
@@ -20860,6 +21534,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   if (collapsedTabIds.has(id)) unfoldSectionOf(id);   // per holder: see unfoldSectionOf
   if (activeId === id && anchor == null && anchorT == null) {   // already active, nothing to do…
     if (leavingSnap) { renderTabs(); showActive(); }             // …except put its transcript back
+    if (!quietActivation) revealActiveTab();                     // …and its tab on screen: the pick named it
     return;
   }
   navHist.record();   // every real navigation records the spot being LEFT (the user 2026-08-14: Ctrl+M / Ctrl+, walk the trail)
@@ -20874,7 +21549,14 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   const content = document.getElementById("content");
   if (content && activeId && activeId !== id) {
     const cur = views.get(activeId);
-    if (cur) { cur.scrollTop = content.scrollTop; cur.stick = atBottom(content); }   // the leaving tab's follow mode: the true bottom
+    // the leaving tab's follow mode: the true bottom (a reader who left at the bottom comes back to it, and a passage landing's
+    // pause ends there: landActive). A held view keeps its place instead (HeldKeep): the passage the reader landed on was the
+    // bottom then, and the bottom the session writes to while they are away is not where they were looking
+    if (cur) {
+      cur.scrollTop = content.scrollTop;
+      cur.stick = atBottom(content) && !cur.followHeld;
+      cur.heldKeep = cur.followHeld ? { anchor: captureScrollAnchor(content, cur) } : null;
+    }
   }
   // Stash the leaving tab's draft; show the entering tab's own (usually empty).
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
@@ -20912,6 +21594,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   renderTabs();
   showActive();
   schedulePrebuild(); // warm the OTHER tabs in idle (MRU-first) so the next switch is instant
+  if (!quietActivation) revealActiveTab();   // a pick shows the tab it named; a restore (quietly) keeps the reader's place in the strip
 }
 
 function cycleTab(dir: number) {
@@ -22664,6 +23347,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     return;
   }
   // the pipe's down edge is the VS Code twin of the shim's romp:wsdown: unconfirmed sends say so (markPendingLost)
+  if (m.type === "pipeState") linkEdge(cmtReadLatch.values(), "", !!m.up, hostOf);   // …and a held read the kernel has not answered waits on the next link (read-latch.ts)
   if (m.type === "pipeState" && m.up) reaskWaitingSubagents();   // the extension's reconnect-class event (it never sees romp:wsup), T355
   if (m.type === "pipeState" && m.up) forgetHeldWm(sessions, null);   // …and the held watermarks go (frame-guard.ts, 2026-09-23): the kernel behind the pane's pipe may be a fresh process whose live-tail revision restarted at 0
   if (m.type === "pipeState" && !m.up && paneArranges(window as any)) { setViewOrderPublisher(null); setFoldsPublisher(null); }   // the pipe that heard the kernel's arrangement is gone: stop speaking for it until the next connection's viewOrder frame (view-order.ts ViewOrderPublisher, 2026-09-23)
@@ -22704,6 +23388,9 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   // live now and knows nothing to clear of what the old one showed, so the page drops it all; a remote host's return
   // drops that host's the same way (its kernel re-sends on the new relay)
   if (m.type === "wsup" || m.type === "hostUp") dropLiveStatus(m.type === "hostUp" ? (Array.isArray(m.hosts) ? m.hosts : []) : null);
+  // …and a comment thread's read this kernel had not answered when the old socket dropped: the new socket's first frame
+  // decides it (read-latch.ts linkEdge), in FRAME order, after the dead socket's last frames
+  if (m.type === "wsup") linkEdge(cmtReadLatch.values(), "", true, hostOf);
   if (m.type === "tabOrder") noteSkeletonTabOrder(m);   // BEFORE the chain's applyTabOrder below: one repaint, final skeleton set (2026-09-07)
   if (m.type === "session") upsert(m);
   else if (m.type === "globalRetryPaused") {
@@ -22722,6 +23409,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "update") update(m);
   else if (m.type === "wsup") { onSocketUp(skeletonTabs); skeletonDiagArmed = true; }   // the shim's socket-flip marker, in FRAME order: the dead socket's frames may still be draining from the FIFO when onopen fires (review find 2026-09-07)
   else if (m.type === "status") statusOnly(m);
+  else if (m.type === "threadBgOut") applyThreadBgOut(m);   // a running comment thread's command output tails, for its popover's box
   else if (m.type === "liveStatus") applyLiveStatus(m);   // what a session is doing this second (thinking, its subagents' progress): no chat build behind it
   else if (m.type === "glossary" && typeof m.id === "string") {   // the session's glossary index (T351 stage 2): a new one re-links the view
     glossaries.set(m.id, m as GlossaryIndex);
@@ -22762,6 +23450,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     // and three)
     if (activeId === m.id) notifyActive();
     if (m.live && activeId === m.id) {
+      revealActiveTab();   // the jump named the tab already shown: on screen in the strip, as setActive's pick would put it
       // one frame LATER, not now: when this focus is what un-hid the pane (the shell's reveal lands a
       // task after revealSelfPane's postMessage), the pane is still display:none here and scrollHeight
       // is 0 — the jump read as a no-op (the user 2026-08-13). Next frame the layout is real; when the
@@ -23223,6 +23912,20 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     const sid = String(m.id);
     commentReadError.delete(sid);
     const threads = (m.threads || []) as CommentThread[];
+    commentThreadAsks.set(sid, Array.isArray(m.caps) && m.caps.includes("threadAsks"));   // its kernel answers thread questions in the popover
+    commentSeenAcks.set(sid, Array.isArray(m.caps) && m.caps.includes("seenAck"));       // …and answers each read with its count (read-latch.ts)
+    // a thread the reader has read reads as read until this frame shows the kernel recorded it (heldUnread): a frame built
+    // before the read cannot put its mark back; one that shows it, a reply landed since included, is the kernel's word.
+    // A held thread the frame no longer lists (deleted) takes its hold with it
+    for (const [key, l] of Array.from(cmtReadLatch)) {
+      if (l.sid !== sid) continue;
+      const th = threads.find((t) => t.tid === l.tid);
+      if (!th) { cmtReadLatch.delete(key); continue; }
+      l.raw = !!th.unread;
+      const r = heldUnread(l, th);
+      th.unread = r.unread;
+      if (r.done) cmtReadLatch.delete(key);
+    }
     // an OPTIMISTIC synth thread (a create still in flight) survives the frame rebuild until the
     // frame lists the thread that create made, or its create fails — the frame used to wipe it, so
     // every create's mark BLINKED between the gesture and the thread's first frame, and a
@@ -23272,11 +23975,9 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     if (openCommentKey && openCommentKey.sid === sid) {
       // reading IS seeing: a reply that lands while its popover is open must not dot the mark — the
       // watermark advances BEFORE the marks paint (T237), so it never wears yellow for it, not even one tick
+      // (the frame's OWN bit: a reply landing while an earlier read is still held reads as read here, and is read again)
       const th = threads.find((t) => t.tid === openCommentKey!.tid);
-      if (th && th.unread) {
-        th.unread = false;
-        vscodeApi?.postMessage({ type: "commentSeen", id: sid, tid: th.tid });
-      }
+      if (th && (th.unread || !!cmtReadLatch.get(readKey(sid, th.tid))?.raw)) readThread(sid, th.tid);
     }
     applyCommentMarks(sid);
     if (openCommentKey && openCommentKey.sid === sid) renderCommentPopover();
@@ -23330,6 +24031,35 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
         if ((commentThreads.get(String(m.id)) || []).some((t) => t.tid === tid)) adoptCommentThread(String(m.id), tid);
         else pendingAdopt = { tid, createId: held.createId };
       }
+    }
+  }
+  // the kernel's answer to a read (read-latch.ts): the count it recorded the read at, which the frames' seenSeq reaches once
+  // they show it. The frame the page holds may already be that one (a frame can overtake the answer): then the hold ends here
+  else if (m.type === "commentSeenAck" && m.id && m.tid) {
+    const sid = String(m.id), tid = String(m.tid), key = readKey(sid, tid);
+    const l = cmtReadLatch.get(key);
+    const th = (commentThreads.get(sid) || []).find((t) => t.tid === tid);
+    if (l && answerRead(l, m.rid, m.seq) && th) {
+      const r = heldUnread(l, { unread: l.raw, seenSeq: th.seenSeq });
+      if (r.done) {
+        cmtReadLatch.delete(key);
+        th.unread = r.unread;
+        if (openCommentKey && openCommentKey.sid === sid && openCommentKey.tid === tid && th.unread) readThread(sid, tid);   // reading is seeing
+        applyCommentMarks(sid);
+      }
+    }
+  }
+  // …and its refusal: the read was not recorded, so the thread shows what the kernel's frame says of it again, and the page
+  // says why. Only for the newest read of the thread the page sent: an older one's refusal is moot behind it
+  else if (m.type === "commentSeenFailed" && m.id && m.tid) {
+    const sid = String(m.id), tid = String(m.tid), key = readKey(sid, tid);
+    const l = cmtReadLatch.get(key);
+    if (l && l.rid === m.rid) {
+      cmtReadLatch.delete(key);
+      const th = (commentThreads.get(sid) || []).find((t) => t.tid === tid);
+      if (th) th.unread = l.raw;
+      applyCommentMarks(sid);
+      ephemeralWarnToast(`Couldn’t mark the thread “${th?.name || tid}” as read${m.error ? ` (${m.error})` : ""}, so it shows as unread again.`);
     }
   }
   // a reply the kernel refused: drop its optimistic bubble (it must not read as 'still thinking'
@@ -24738,36 +25468,68 @@ setupSettings();
     ...sectionActs(noticeSectionEnv, (el) => el.closest(".ntc-row") as HTMLElement | null),   // the shared builder's clicks (the badges, the line and its paragraphs, the awaited peers, the sub-goal triangles and texts): one binding on this stable root, since the rows' nodes are rebuilt on every frame (ui/CLAUDE.md)
   });
 })();
-// Background-task rows toggle open/closed — delegated to the stable #bg-tasks container (installed once),
-// not the per-task rows that renderBgTasks() rebuilds on every push, so the click always lands.
-(() => {
-  const host = document.getElementById("bg-tasks");
-  if (!host) return;
+// Background-task rows toggle open/closed — delegated to the box's stable container (installed once per host: the chat's
+// #bg-tasks at load, a comment popover's .cmt-bg as the popover is built), not the per-task rows that renderBgTasks()
+// rebuilds on every push, so the click always lands. The session a press acts on is the box's own (its host's data-sid,
+// renderBgTasks), never the active tab's: a thread's box stops the thread's tasks (thread-live-2).
+function installBgBox(host: HTMLElement): void {
+  const boxSid = (): string => host.dataset.sid || "";
   delegate(host, {
     "bg-fold": (el) => {   // the count header → show/hide the task list
       const id = el.dataset.id; if (!id) return;
       if (openFolds.has("bgfold:" + id)) openFolds.delete("bgfold:" + id); else openFolds.add("bgfold:" + id);
-      renderBgTasks();
+      repaintBgBoxes();
     },
     "bg-toggle": (el) => {   // a task row → show/hide its command + output
       const id = el.dataset.id; if (!id) return;
       if (openFolds.has("bgrow:" + id)) openFolds.delete("bgrow:" + id); else openFolds.add("bgrow:" + id);
-      renderBgTasks();
+      repaintBgBoxes();
     },
     "bg-stop": (el) => {   // stop this ONE task; the row disappears on its terminal lifecycle event
-      const id = el.dataset.id; if (!id || !activeId) return;
+      const id = el.dataset.id; const sid = boxSid(); if (!id || !sid) return;
       const btn = el as HTMLButtonElement;
       btn.disabled = true; btn.textContent = "Stopping…";   // immediate acknowledgement, before the round-trip
-      vscodeApi?.postMessage({ type: "stopTask", id: activeId, taskId: id });
+      vscodeApi?.postMessage({ type: "stopTask", id: sid, taskId: id });
     },
     "bg-cancel-watch": (el) => {   // retire this ONE armed watch (kernel cancel_watch — the `romp watch --cancel` path); the row goes when the registry drops it
-      const id = el.dataset.id; if (!id || !activeId) return;
+      const id = el.dataset.id; const sid = boxSid(); if (!id || !sid) return;
       const btn = el as HTMLButtonElement;
       btn.disabled = true; btn.textContent = "Cancelling…";   // immediate acknowledgement, before the round-trip
-      vscodeApi?.postMessage({ type: "cancelWatch", id: activeId, watchId: id });
+      vscodeApi?.postMessage({ type: "cancelWatch", id: sid, watchId: id });
     },
   });
-})();
+}
+(() => { const host = document.getElementById("bg-tasks"); if (host) installBgBox(host); })();
+// Every box on the page, after a fold changed (the fold keys are per session and per row, so each box reads its own)
+function repaintBgBoxes(): void { renderBgTasks(); renderThreadBg(); }
+// A running thread's command output tails (the review of PR 240, 2026-10-14): the comments frame carries the box's rows without
+// them, and the kernel sends each thread's tails on a frame of their own, read fresh on every push and sent only when one
+// moved (kernel _send_thread_bg_out). Kept per thread sid for the page's life: a slot that did not move is not resent, so a
+// popover reopened later still finds the tails it last got. A row's own output (a kernel from before the split) stands
+// until a frame names the row.
+const threadBgOut = new Map<string, Record<string, string>>();
+// The open thread's background box (thread-live-2): the chat's painter over the thread's build status and tracked tasks,
+// repainted by each comments frame (the popover's refresh), by its own folds and by each of its output frames
+function renderThreadBg(): void {
+  const host = document.querySelector("#cmt-pop .cmt-bg") as HTMLElement | null;
+  const cur = openCommentThread();
+  if (!host) return;
+  const live = cur && cur.th.status === "open" ? cur.th.live : null;
+  const sid = cur ? threadSidOf(cur.th) : null;
+  renderBgTasks({ host, sid,
+                  src: live ? { bgTasks: withThreadBgOut((live.bgTasks as { count: number; tasks: BgTask[] } | null) || null, sid), status: threadMetaStatus(cur!.th) } : null });
+}
+function withThreadBgOut(bg: { count: number; tasks: BgTask[] } | null, sid: string | null): { count: number; tasks: BgTask[] } | null {
+  const out = sid ? threadBgOut.get(sid) : undefined;
+  if (!bg || !out || !Array.isArray(bg.tasks)) return bg;
+  return { ...bg, tasks: bg.tasks.map((t) => (typeof out[t.id] === "string" ? { ...t, output: out[t.id] } : t)) };
+}
+function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
+  if (typeof m.id !== "string" || !m.id) return;
+  const out = m.out && typeof m.out === "object" ? m.out as Record<string, string> : {};
+  threadBgOut.set(m.id, out);
+  if (m.id === openThreadSid()) renderThreadBg();
+}
 (() => {
   // The statusline's Awaiting chip (slice 2, 2026-09-05): a click opens the awaiting box and brings it
   // into view. Delegated to the stable #statusline (updateStatusline rebuilds its children on every
@@ -24873,10 +25635,11 @@ setupSettings();
     // Interrupting… and the timer + button go; the next comments frame rebuilds this statusline.
     cmtinterrupt: (elx) => {
       const sid = (elx as HTMLElement).dataset.sid;
-      if (!sid || !vscodeApi) return;
-      vscodeApi.postMessage({ type: "interrupt", id: sid });
-      cmtAwaitBase.delete(sid);
-      cmtInterrupted.add(sid);
+      const tid = (elx as HTMLElement).dataset.tid || sid;
+      if (!sid || !tid || !vscodeApi) return;
+      vscodeApi.postMessage({ type: "interrupt", id: sid });   // the thread's session: the federation routes it to the kernel that runs it
+      cmtAwaitBase.delete(tid);
+      cmtInterrupted.add(tid);
       const wrap = document.getElementById("cmt-state");
       if (wrap) {
         const chip = el("span", "chip chip-interrupting");
@@ -24884,15 +25647,11 @@ setupSettings();
         wrap.replaceChildren(chip);
       }
     },
-    // a scroll-rail tick: jump the chat to the commented message (fresh navigation → one flash)
-    // and open its thread beside it
+    // a scroll-rail tick: the chat lands the thread's passage and flashes it, then the thread opens beside it (passageLanding)
     cmtjump: (elx) => {
-      const tid = elx.dataset.tid, uuid = elx.dataset.uuid;
-      if (!tid || !uuid || !activeId) return;
-      flashedAnchor = null;
-      scrollToAnchor(uuid);
-      const r = elx.getBoundingClientRect();
-      openCommentPopover(activeId, tid, Math.max(8, r.left - 380), Math.max(60, r.top - 40));
+      const tid = elx.dataset.tid;
+      if (!tid || !activeId) return;
+      passageLanding(activeId, tid);
     },
     cmtsend: (elx) => {
       const pop = elx.closest(".cmt-pop") as HTMLElement | null;
@@ -24931,9 +25690,9 @@ setupSettings();
       closeCommentPop();
     },
     cmtopensession: (elx) => {
-      const tid = elx.dataset.tid;
+      const sid = elx.dataset.sid;
       closeCommentPop();
-      if (tid) setActive(tid);
+      if (sid) setActive(sid);
     },
     // a branch divider (child side) or branch chip (parent side): jump to the other end of the
     // branch, landing on the branch-point turn via the deep-link anchor machinery. The refusal

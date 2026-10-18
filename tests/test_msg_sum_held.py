@@ -23,12 +23,20 @@ once per episode; an entry over the bound by itself counts under overBound, not 
 before the parse (a leaf replaced right after the parse returns); the join's order (an id in two turns takes the later
 turn's caption); the reference names every key of the block.
 
+From the review after the follow-up merged (2026-10-15): a captions file that exists and cannot be read is a fault,
+served from the last-known map until it reads again (a real mode-000 file); a scan with no closed turn left still
+compares the held entry (a cut at the first turn's reply, a /clear's first scan); a fault in the caption join counts
+under scans and faulted alike; a departure ends a fault episode, and each session's episode is its own; a fault landing
+right after a clean scan leaves no session in an episode behind a standing key; the reference names each key where its
+own clause opens.
+
 Synthetic data only: placeholder uuids, the web, api and tests names, invented notes-api text, a private state root
 with session hosts off."""
 import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -621,12 +629,199 @@ class MsgScanHold(unittest.TestCase):
         self.assertEqual(got.get("m-web01"), later, "warm too")
         self.assertEqual(got, one_pass(SID_WEB, self.leaf[SID_WEB], time.time()))
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root opens a mode-000 file")
+    def test_an_unreadable_captions_file_is_a_fault_until_it_reads_again(self):
+        """A captions file that exists and cannot be opened is a fault, not "no captions": the scan serves the last-known
+        map, counts and says it, and scans again each build, so the captions return as soon as the file reads again.
+        Before, the reader's empty answer took the no-captions return, a clean scan stored an empty submap under the
+        standing key: every caption of the session left the map, faulted stayed, nothing was said, and a permission fix
+        moved no key, so they stayed gone until another input moved (the review after the merge). The file really is
+        mode 000, after a row was appended, so the reader opens it again, as a change or a cache eviction makes it."""
+        self.session(SID_WEB, 4)
+        first = self.build()
+        self.assertIn("m-web01", first, "the premise: a captioned peer message")
+        t = self.open_t[SID_WEB]
+        self.append(SID_WEB, [reply(t + 20, "web-a04", "web-c04", "Shipped."),
+                              peer(t + 300, "web-u05", "web-a04", "api asks: and the cursor?", "m-web05")])
+        seg = next(s for _i, s in self.segs(SID_WEB) if "m-web05" in km._seg_mids(s))
+        self.caption(SID_WEB, [{"id": seg["id"], "grain": "segment", "t": seg["t"],
+                                "caption": "web: weighing the cursor"}])
+        p = jd.CAPDIR / (SID_WEB + ".jsonl")
+        os.chmod(p, 0)
+        self.addCleanup(os.chmod, p, 0o644)
+        s0 = km._msg_scan_report()
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            self.assertEqual(self.build(), first, "the last-known map is served, every caption kept")
+            self.assertEqual(self.build(), first, "scanned again, and faulted again")
+        rep = km._msg_scan_report()
+        self.assertEqual(rep["faulted"] - s0["faulted"], 2, "each scan of the unreadable file is a fault")
+        self.assertEqual(rep["scans"], s0["scans"], "no scan finished")
+        said = [ln for ln in err.getvalue().splitlines() if ln.startswith("[msg-scan]")]
+        self.assertEqual(len(said), 1, said)
+        self.assertIn("PermissionError", said[0])
+        os.chmod(p, 0o644)                              # a permission fix moves no mtime or size, so no key
+        got = self.build()
+        self.assertEqual(got.get("m-web05"), "web: weighing the cursor", "the file reads again: the next build has it")
+        self.assertEqual(got, one_pass(SID_WEB, self.leaf[SID_WEB], time.time()))
+
+    def test_a_scan_with_no_closed_turn_left_still_compares_the_held_entry(self):
+        """A scan with no closed turn to key skipped the comparison with the held entry: a rewind cut at the first turn's
+        reply counted nothing, and a /clear left the old leaf's entry held, counting toward the bound, its reset counted
+        only once the new leaf's first turn closed (the review after the merge). Now the cut's entry, which stands,
+        counts under partial and is kept, so the release serves it whole; the /clear's, under another leaf, is dropped
+        at the new leaf's first scan and counted under reset."""
+        cut = {}
+        self.addCleanup(jd.set_pending_cut_provider, jd._PENDING_CUT_FN)
+        jd.set_pending_cut_provider(lambda sid: cut.get(sid, ""))     # the parse's cut
+        backend = _Backend()
+        backend.pending_cut = lambda sid: cut.get(sid, "")            # the scan key's cut (tearDown puts km._sdk back)
+        km._sdk = lambda: backend
+        self.session(SID_WEB, 12)
+        self.build()
+        s0 = km._msg_scan_report()
+        cut[SID_WEB] = "web-a00"                                      # the cut world is turn 0 alone, its open turn
+        got = self.build()
+        s1 = km._msg_scan_report()
+        self.assertEqual(self.walked, 1, "the premise: the cut world is one open turn")
+        self.assertNotIn("m-web01", got, "the premise: the cut world drops turn 1's id")
+        self.assertEqual(s1["partial"] - s0["partial"], 1, "the entry stands with more closed turns: partial")
+        self.assertEqual(s1["reset"] - s0["reset"], 0, "the same leaf and seams: nothing discarded whole")
+        self.assertEqual(len(self.held()[2]), 12, "the entry is kept for the release")
+        cut[SID_WEB] = ""
+        got = self.build()
+        rep = km._msg_scan_report()
+        self.assertEqual((rep["partial"] - s1["partial"], rep["reset"] - s1["reset"]), (0, 0),
+                         "the release counts nothing")
+        self.assertEqual(rep["heldTurns"] - s1["heldTurns"], 12, "the kept entry served whole")
+        self.assertEqual(self.walked, 1, "the open turn alone walked")
+        self.assertEqual(got, one_pass(SID_WEB, self.leaf[SID_WEB], time.time()))
+        self.leaf[SID_WEB] = str(Path(self.leaf[SID_WEB]).with_name("b0ad0000-1005-4aaa-8bbb-00000000c001.jsonl"))
+        t = self.t + 120 * 14                                         # a /clear: a new leaf, one open turn so far
+        self.append(SID_WEB, [user(t, "web-x00", None, "start the notes-api export"),
+                              tool_call(t + 10, "web-y00", "web-x00", "toolu_3")])
+        s2 = km._msg_scan_report()
+        self.build()
+        rep = km._msg_scan_report()
+        self.assertEqual(self.walked, 1, "the premise: the new leaf is one open turn")
+        self.assertEqual(rep["reset"] - s2["reset"], 1, "the old leaf's entry is discarded at the new leaf's first scan")
+        self.assertIsNone(self.held(), "and nothing of it stays held toward the bound")
+        self.assertEqual(rep["partial"] - s2["partial"], 0)
+
+    def test_a_fault_in_the_caption_join_is_a_finished_scan_and_a_fault(self):
+        """The caption join runs after the walk has counted and stored, so a fault there counts under scans and faulted
+        alike and raised stays: faulted above raised means faults outside the walk, the join's among them, not only
+        before it (the review after the merge). The session serves its last-known map and the fault is said once."""
+        self.session(SID_WEB, 4)
+        first = self.build()
+        self.append(SID_WEB, [tool_out(self.open_t[SID_WEB] + 10, "web-r04", "web-c04", "toolu_1", "ok")])
+        s0 = km._msg_scan_report()
+        err = io.StringIO()
+        with mock.patch.object(km, "_seg_work_caption", side_effect=ValueError("a synthetic drifted caption row")), \
+                mock.patch("sys.stderr", err):
+            self.assertEqual(self.build(), first, "the last-known map is served")
+        rep = km._msg_scan_report()
+        self.assertEqual((rep["scans"] - s0["scans"], rep["faulted"] - s0["faulted"], rep["raised"] - s0["raised"]),
+                         (1, 1, 0), "a finished walk, then a fault outside it")
+        self.assertEqual(len([ln for ln in err.getvalue().splitlines() if ln.startswith("[msg-scan]")]), 1)
+
+    def said(self, err):
+        return len([ln for ln in err.getvalue().splitlines() if ln.startswith("[msg-scan]")])
+
+    def test_a_departed_session_ends_its_fault_episode(self):
+        """A session that leaves discovery takes its fault episode with it: back and faulting again, it is said again
+        (the review after the merge: nothing pinned the departure, so a departure that kept the episode left the tests
+        green)."""
+        self.session(SID_WEB, 4)
+        self.build()
+        self.append(SID_WEB, [tool_out(self.open_t[SID_WEB] + 10, "web-r04", "web-c04", "toolu_1", "ok")])
+        err = io.StringIO()
+        with mock.patch.object(km, "_msg_sum_scan_session", side_effect=OSError("a synthetic scan fault")), \
+                mock.patch("sys.stderr", err):
+            self.build()
+            self.assertIn(SID_WEB, km._msg_sum_cache["faulting"], "the premise: web is in a fault episode")
+            self.live = []
+            self.build()
+            self.assertNotIn(SID_WEB, km._msg_sum_cache.get("faulting") or set(), "it left discovery: its episode ended")
+            self.live = list(NAMES)
+            self.build()
+        self.assertEqual(self.said(err), 2, "said for each episode: before it left and once it was back")
+
+    def test_each_sessions_fault_episode_is_its_own(self):
+        """web's fault is said while api is in an episode of its own, and api's clean scan ends api's episode alone, so
+        web's next faults are not said again (the review after the merge: an episode set cleared whole by any clean
+        scan, or asked whether it was empty, left the tests green)."""
+        self.session(SID_WEB, 4)
+        self.session(SID_API, 4)
+        self.build()
+        real, failing = km._msg_sum_scan_session, set()
+
+        def scan(sid, path, now):
+            if sid in failing:
+                raise OSError("a synthetic scan fault")
+            return real(sid, path, now)
+        per_build = []
+        with mock.patch.object(km, "_msg_sum_scan_session", scan):
+            for step in ("api faults", "web faults too", "api comes back clean", "web faults again"):
+                if step == "api faults":
+                    failing.add(SID_API)
+                    self.append(SID_API, [tool_out(self.open_t[SID_API] + 10, "api-r04", "api-c04", "toolu_1", "ok")])
+                elif step == "web faults too":
+                    failing.add(SID_WEB)
+                    self.append(SID_WEB, [tool_out(self.open_t[SID_WEB] + 10, "web-r04", "web-c04", "toolu_1", "ok")])
+                elif step == "api comes back clean":
+                    failing.discard(SID_API)
+                err = io.StringIO()
+                with mock.patch("sys.stderr", err):
+                    self.build()
+                per_build.append(self.said(err))
+        self.assertEqual(per_build, [1, 1, 0, 0], "api's episode said, then web's; neither again")
+
+    def test_a_fault_landing_right_after_a_clean_scan_leaves_no_standing_key_in_an_episode(self):
+        """The clean scan and the fault path each write the session's submap under the lock they update the episode set
+        under. Written after it, a fault from another thread landing between a clean scan's end of episode and that
+        scan's submap write left the session in the episode set behind the clean scan's standing key: no build scanned
+        it again, the episode never ended, and a later, separate fault was counted and not said (the review after the
+        merge). The other thread's build, whose own stat saw the session move, runs right after the clean step."""
+        self.session(SID_WEB, 4)
+        self.build()
+        real_clean, raced = km._msg_scan_clean, []
+
+        def clean_then_fault(*a, **k):
+            real_clean(*a, **k)
+            if not raced:
+                raced.append(1)
+                with mock.patch.object(km, "_msg_sum_scan_session", side_effect=OSError("a synthetic fault")), \
+                        mock.patch.object(km, "_msg_sum_key", lambda s: ("moved",)):
+                    km._msg_summaries()
+        self.append(SID_WEB, [tool_out(self.open_t[SID_WEB] + 10, "web-r04", "web-c04", "toolu_1", "ok")])
+        with mock.patch.object(km, "_msg_scan_clean", clean_then_fault), mock.patch("sys.stderr", io.StringIO()):
+            self.build()
+        self.assertTrue(raced, "the premise: the other build faulted right after the clean step")
+        key = km._msg_sum_cache["per"][SID_WEB][0]
+        self.assertFalse(SID_WEB in (km._msg_sum_cache.get("faulting") or set()) and key is not None,
+                         "no session sits in a fault episode behind a standing key")
+        with mock.patch("sys.stderr", io.StringIO()):
+            self.build()                                                # scanned again, clean: the episode ends
+        self.append(SID_WEB, [tool_out(self.open_t[SID_WEB] + 20, "web-r05", "web-r04", "toolu_1", "ok")])
+        err = io.StringIO()
+        with mock.patch.object(km, "_msg_sum_scan_session", side_effect=OSError("a later, separate fault")), \
+                mock.patch("sys.stderr", err):
+            self.build()
+        self.assertEqual(self.said(err), 1, "a later, separate fault is said")
+
     def test_the_reference_names_every_key_of_the_block(self):
+        """Each key is named where its own clause opens: the backticked name, then its opening parenthesis, a line break
+        allowed between; the two turn counters and the gauges by their shared clauses. A mention elsewhere does not
+        count: with reset's or raised's clause deleted, or faulted's name stripped of its backticks, another clause still
+        named the key and a check for the bare name passed (the review after the merge)."""
         doc = (Path(HERE).parent / "docs" / "reference.md").read_text(encoding="utf-8")
         at = doc.index("`msgScan` is the message-caption scan's hold")
         passage = doc[at:doc.index("`judgingBand` is", at)]
+        turns = r"`heldTurns`\s+and\s+`walkedTurns`\s+\("
+        shared = {"heldTurns": turns, "walkedTurns": turns, "entries": r"the gauges\s+`entries`,\s+`bytes`\s+\("}
         for k in km._msg_scan_report():
-            self.assertIn("`%s`" % k, passage, k)
+            self.assertRegex(passage, shared.get(k, r"`%s`\s+\(" % re.escape(k)), k)
 
 
 if __name__ == "__main__":

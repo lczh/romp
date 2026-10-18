@@ -63,7 +63,11 @@ Every bug fix or feature change lands with a test (repo rule). Five suites:
 - **node suites** — live beside their sources in `ui/webview/*.test.ts` and
   `vscode-extension/src/*.test.ts`, run with `npm test` from
   `vscode-extension/`. Many pin lines of `kernel/kernel.py` as strings — run
-  BOTH this and pytest on every kernel change.
+  BOTH this and pytest on every kernel change. A file with a browser leg
+  launches playwright's Chromium (a few legs Firefox) through
+  `ui/webview/browser-leg.ts` and skips, saying why, without one;
+  `ROMP_BROWSER_TESTS_REQUIRE=1` (CI, with
+  `ROMP_BROWSER_TESTS_ENGINES=chromium`) turns that skip into a failure.
 - **`manager-*.test.js`** — the node supervisor (`bin/romp-manager`): restart
   gating, the kernel registry, and the drain-poll handshake. Run:
   `node --test tests/manager-*.test.js`.

@@ -167,14 +167,18 @@ export class StagedStack {
     return Object.fromEntries(this.m);
   }
 
-  /** Hydrate from a persisted shape; junk entries are dropped, never a crash. */
+  /** Hydrate from a persisted shape; junk entries are dropped, never a crash. An item stays when it has words or a
+   *  quote: a passage staged on its own (an empty box, a quote chip, Cmd/Ctrl+Enter) is a real item in the chat, the
+   *  file viewer and a comment thread alike, so a reload or a column move must keep it. */
   restore(saved: unknown): void {
     if (!saved || typeof saved !== "object") return;
     for (const [sid, v] of Object.entries(saved as Record<string, unknown>)) {
       const list: StagedMsg[] = [];
       for (const m of Array.isArray(v) ? v : []) {
-        if (m && typeof (m as any).text === "string" && (m as any).text)
-          list.push({ text: (m as any).text, cites: Array.isArray((m as any).cites) ? (m as any).cites : [] });
+        if (!m || typeof (m as any).text !== "string") continue;
+        const cites: unknown[] = Array.isArray((m as any).cites) ? (m as any).cites : [];
+        const quoted = cites.some((c) => !!c && typeof (c as { quote?: unknown }).quote === "string" && !!(c as { quote: string }).quote);
+        if ((m as any).text || quoted) list.push({ text: (m as any).text, cites });
       }
       if (list.length) this.m.set(sid, list);
     }

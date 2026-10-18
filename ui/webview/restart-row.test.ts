@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { createRequire } from "node:module";
 import { addRestartRow, restartInFlight, restartInterrupts, restartConfirmTitle, settleRestart, RESTART_INTERRUPTS } from "./restart-row";
 import { restartConfirmDetail, RESTART_LABEL, RESTART_BUSY_LABEL, RESTART_STANDING } from "./clear-confirm";
+import { launchLeg } from "./browser-leg";
 
 // "Restart session" (the user 2026-09-23): ONE action that relaunches a session's own CLI process in place,
 // where End then Revive was the only way to get a long-lived session onto a newly installed CLI — two
@@ -53,7 +54,7 @@ test("every chip state has a decided answer, and a restart interrupts exactly th
   // needsInput and retrying moved across on 2026-09-24: both are chip states for a turn that is still open, which the
   // relaunch cuts (this list once pinned retrying as costing nothing); awaiting is needsInput's legacy name
   for (const st of COSTS) assert.equal(restartInterrupts(st), true, st + " costs something");
-  // interrupting: a Stop already asked the turn to end and a restart sends nothing more; clearing: as it always was
+  // interrupting: a Stop already asked the turn to end and a restart cuts nothing more; clearing: as it always was
   for (const st of FREE) assert.equal(restartInterrupts(st), false, st + " costs nothing");
   for (const st of ["", null, undefined, "toString"]) assert.equal(restartInterrupts(st), false, String(st) + " is no state: no dialog");
 });
@@ -270,10 +271,8 @@ test("the kernel answers the op off the request thread, advertises it, and never
 let pw: any = null;
 try { pw = requireCjs("playwright"); } catch { pw = null; }
 async function inChromium(t: any, body: (browser: any) => Promise<void>): Promise<void> {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it"); return; }
-  let browser: any;
-  try { browser = await pw.chromium.launch(); }
-  catch (e) { t.skip("no playwright Chromium on this machine (npx playwright install chromium): " + String((e as Error).message).split("\n")[0]); return; }
+  const browser = await launchLeg(t, pw, "chromium");
+  if (!browser) return;
   try { await body(browser); } finally { await browser.close(); }
 }
 

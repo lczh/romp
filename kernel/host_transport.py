@@ -275,6 +275,7 @@ class HostTransport(_Base):
         #                                 bound, the liveness event every host already beats (the review of #233: the
         #                                 wait had none, and one frozen host held the restart's catch-up open for good)
         self._abort_why = None          # abort_connect's reason: the session was ended while its hello was awaited
+        self.busy_with = None           # the attached kernel a `busy` answer named ({pid, start, version}), when one did
         self.hello_probes = 0           # liveness probes that found the host beating and its hello still not come: a live
         #                                 host answers in milliseconds, so a count past one is a host stuck yet alive
         self.unwatched = None           # the session's set of request ids its CLI sent before this kernel life first attached
@@ -318,6 +319,7 @@ class HostTransport(_Base):
                 if f.get("t") == "hello":
                     hello = f
                 elif f.get("t") == "busy":
+                    self.busy_with = f.get("kernel") if isinstance(f.get("kernel"), dict) else {}   # WHICH kernel holds it
                     raise CLIConnectionError("another kernel is attached to this host: %r" % (f.get("kernel"),))
                 else:
                     self._early.append(f)

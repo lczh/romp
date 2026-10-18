@@ -284,7 +284,7 @@ test("executed + pinned: the section holding the ACTIVE tab folds like any other
   assert.doesNotMatch(CSS, /\.tab-group-head\.holds-active[^\n]*\{[^}]*(background|border|outline|text-decoration)/, "no dress of any kind on the holding row");
   // the hidden active tab's stand-in in render.ts: focus lands on the header, the arrows step from it, and a
   // pick of a folded-away session opens its section (tab-snapshot-pane.test.ts runs these)
-  assert.match(RENDER, /const home = activeId \? homeSectionOf\(lastStripItems, activeId\) : null;\s*\n\s*if \(!home \|\| home\.name === null \|\| !bar\) return;\s*\n\s*Array\.from\(bar\.querySelectorAll<HTMLElement>\("\.tab-group-head"\)\)\.find\(\(h\) => h\.dataset\.group === home\.name\)\?\.focus\(\);/,
+  assert.match(RENDER, /const home = activeId \? homeSectionOf\(lastStripItems, activeId\) : null;\s*\n\s*if \(!home \|\| home\.name === null \|\| !bar\) return;\s*\n\s*focusOn\(Array\.from\(bar\.querySelectorAll<HTMLElement>\("\.tab-group-head"\)\)\.find\(\(h\) => h\.dataset\.group === home\.name\)\);/,
     "focusActiveTab falls back to the header");
   assert.match(RENDER, /const nb = neighborOfFolded\(lastStripItems, activeId, dir\);\s*\n\s*if \(nb\) \{ setActive\(nb\); focusActiveTab\(\); \}/, "onTabKey (a focused tab's arrows)");
   assert.match(RENDER, /function unfoldSectionOf\(id: string\): void \{\s*\n\s*const holder = lastStripItems\.find\(\(it\) => "head" in it && it\.head\.name !== null && it\.folded && it\.head\.ids\.includes\(id\)\);\s*\n\s*if \(holder && "head" in holder && holder\.head\.name !== null\) writeTabGroups\(setSectionCollapsed\(tabGroups\(\), holder\.head\.name, false\)\);/,
@@ -749,7 +749,7 @@ test("the header's structure and gestures read as a label: the tag's chip, then 
   // a push mid-read must not kick focus off the header: renderTabs re-focuses the same group after the rebuild
   assert.match(RENDER, /const focusedGroup = \(focusedEl\?\.closest\("\.tab-group-head"\) as HTMLElement \| null\)\?\.dataset\.group;\s*\n\s*const focusedGear = !!focusedEl\?\.closest\("\.tab-widgets-gear"\);[^\n]*\n\s*const refocusTab = bar\.contains\(document\.activeElement\);/,
     "captured before the tab rule (chat-focus-model.test pins that rule's two-line shape)");
-  assert.match(RENDER, /if \(h && h\.tabIndex >= 0\) h\.focus\(\); else focusActiveTab\(\);/,
+  assert.match(RENDER, /if \(h && h\.tabIndex >= 0\) h\.focus\(\{ preventScroll: true \}\); else focusActiveTab\(true\);/,
     "…falling back to the active tab when the group is gone or now holds it");
   assert.doesNotMatch(CSS, /\.tab-group-head:hover/, "no hover lift on a tag row: it is not a tab (T322)");
   assert.doesNotMatch(CSS, /\.tab-group-head:hover \.tab-group-chip/, "no brightness lift on hover either (T322)");

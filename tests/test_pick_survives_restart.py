@@ -715,6 +715,66 @@ class AReattachToTheSameCliInsideOneKernel(_Harness):
         self.assertEqual([m["effortApplied"] for m in self._effort_markers()], ["max"])
 
 
+class _AlwaysTimesOut(_Client):
+    """Every connect fails as an initialize that timed out does."""
+
+    async def __aenter__(self):
+        raise TimeoutError("the initialize timed out")
+
+
+class AStandDownFromALiveHost(_Harness):
+    """After a kernel restart the session attaches to the CLI its host kept, a monitor still running in it. Every attach
+    reaches the host's hello and then times out at the initialize, four times, so the session stands down: the host keeps
+    the CLI and its monitor. Before the fix the session-gone path that follows told the session its monitor was cut off
+    and emptied the registry's mirror, so the user's next message reached the CLI behind that false notice and the attach
+    it made seeded nothing: the monitor the CLI still ran no longer counted toward quiet()."""
+
+    HOLDER = {"pid": 9000, "start": "1.0"}               # the scripted host's identity (its hello's `host`)
+
+    def test_the_stand_down_tells_nothing_keeps_the_mirror_and_the_next_attach_counts_the_monitor(self):
+        be1, s1 = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"}])
+        c1 = self._connect(s1, 1)
+        self._a_turn_that_leaves_a_monitor(s1, c1)
+        self._end_kernel(s1)
+        self.assertEqual([t.get("taskId") for t in (self._reg().get("bgTasks") or [])], ["t-mon"],
+                         "precondition: the drain keeps the mirror for the next kernel")
+        be2, s2 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"} for _ in range(5)], survives=True)
+        be2._host_lease = lambda sid, **_: ({"holder": dict(self.HOLDER)}, "attach")   # a live host holds the lease
+        scripted = be2._host_transport_for
+        sdk = sys.modules["claude_agent_sdk"]
+
+        async def wedged(sess, opts, classes):
+            out = await scripted(sess, opts, classes)
+            if sdk.ClaudeSDKClient is _AlwaysTimesOut:
+                sess._host.hello, sess._host._init_pending = {"host": dict(self.HOLDER)}, True   # hello, then no initialize
+            return out
+        be2._host_transport_for = wedged
+        sdk.ClaudeSDKClient = _AlwaysTimesOut
+        s2.start()
+        s2.thread.join(timeout=30)
+        self.assertFalse(s2.thread.is_alive(), "precondition: the thread stood down")
+        self.assertTrue(s2.detached and not s2.ended, "precondition: a stand-down, not an end")
+        self.assertTrue(any("could not complete an attach" in l for l in self.lines), self.lines[-12:])
+        self.assertIsInstance(self._reg().get("hostAttachFailed"), dict, "precondition: the marker names the live host")
+        self.assertEqual(len(_Client.instances), 5, "precondition: one launch, then four attaches")
+        reg = self._reg()
+        self.assertEqual([q for q in (reg.get("queue") or []) if isinstance(q, str) and "background task" in q], [],
+                         "the host's CLI still runs the monitor: no notice that it was cut off")
+        self.assertEqual([t.get("taskId") for t in (reg.get("bgTasks") or [])], ["t-mon"],
+                         "the mirror still names the monitor, for the next attach's seed")
+
+        sdk.ClaudeSDKClient = _Client                      # the host answers this time
+        self.assertTrue(be2.send(SID, "are you still there?", user=True))   # the user's message lifts the stand-down
+        s3 = be2.sessions[SID]
+        self.sessions.append(s3)
+        self._wait(lambda: len(_Client.instances) == 6 and _Client.instances[5] is s3.client, "the attach that completes")
+        c = _Client.instances[5]
+        self._wait(lambda: c.writes, "the first turn fed")
+        self._settle(0.5)
+        self.assertEqual([w for w in c.writes if "background task" in w], [], "nothing was cut, so the agent hears nothing of it")
+        self.assertEqual(s3.live_work()[1], 1, "the attach seeds the monitor the CLI still runs")
+
+
 class TheSpeedCheckAtTheConnect(_Harness):
     def test_a_connect_to_a_cli_launched_with_subagents_at_standard_speed_begins_its_speed_check(self):
         """A session with Subagents at standard speed on, on Opus 5.5 with its own fast pick and the version check
@@ -1026,10 +1086,11 @@ class AToggleWhileTheLaunchIsPrepared(_Harness):
         self.assertEqual([x["fast"] for x in seen], [True, False], "the Restart's relaunch carries no flag")
         self.assertEqual([l for l in self.lines if MOVED in l], [])
 
-    def test_fast_mode_turned_off_during_the_version_read_is_left_to_a_restart_waiting_behind_a_queued_message(self):
+    def test_fast_mode_turned_off_during_the_version_read_is_left_to_a_restart_asked_with_a_message_queued(self):
         """A guard of the relaunch for a change made while the launch was prepared. While the first launch's version read
-        waits, a message is queued, the session's own fast pick is turned off and a Restart is asked: the Restart waits
-        for the queued message's turn, its relaunch carries no flag, and no line about the change is logged."""
+        waits, a message is queued, the session's own fast pick is turned off and a Restart is asked: the Restart
+        relaunches as soon as the first CLI is up (it waits on no turn since 2026-10-17, relaunch_now), the queued
+        message goes to the fresh CLI, the relaunch carries no flag, and no line about the change is logged."""
         cli, reading, hold = self._token_read_waits()
         reg = self._reg()
         reg.update(auth="login", fast=True)
@@ -1044,17 +1105,11 @@ class AToggleWhileTheLaunchIsPrepared(_Harness):
         self.assertTrue(be.set_fast(SID, "off"))
         self.assertEqual(be.relaunch(SID), "")
         os.unlink(hold)
-        self._wait(lambda: len(_Client.instances) >= 1 and _Client.instances[0] is s.client, "connect 1")
-        c = _Client.instances[0]
-        self._wait(lambda: c.writes == ["first turn"], "the queued turn fed")
-        self.assertTrue(s._reconnect_when_idle, "the premise: the Restart waits for the turn")
-        self._push(c, _SystemMessage("init", {"model": "claude-x", "permissionMode": "acceptEdits", "session_id": FSID},
-                                     uuid=self._uid()))
-        self._push(c, _result(uuid=self._uid(), subtype="success", is_error=False, num_turns=1, session_id=FSID,
-                              duration_ms=1, duration_api_ms=1, total_cost_usd=0.01,
-                              usage={"input_tokens": 1, "output_tokens": 1}, result="ok", parent_tool_use_id=None))
         self._wait(lambda: len(_Client.instances) == 2 and _Client.instances[1] is s.client, "the Restart's relaunch")
+        c2 = _Client.instances[1]
+        self._wait(lambda: c2.writes == ["first turn"], "the queued message, fed to the fresh CLI")
         self._settle(0.5)
+        self.assertEqual(_Client.instances[0].writes, [], "never fed to the CLI being replaced")
         self.assertEqual([x["fast"] for x in seen], [True, False], "the Restart's relaunch carries no flag")
         self.assertEqual([l for l in self.lines if MOVED in l], [])
 
@@ -1168,30 +1223,79 @@ class AToggleWhileTheLaunchIsPrepared(_Harness):
         self.assertTrue(s._host_is_attach, "the premise: an attach")
         self.assertEqual(_Client.instances[1].controls, [])
 
-    def test_a_model_picked_once_the_version_read_is_over_is_not_held_for_the_connect(self):
-        """A guard of the hold's window, which opens and closes with the version read. A model picked after the read, as
-        the connect reaches the host, finds the hold closed and is not held."""
-        cli, reading, hold = self._token_read_waits()
-        os.unlink(hold)                                    # the read answers at once
+    def _picked_while_the_connect_comes_up(self, road):
+        """A session on claude-opus-5 in acceptEdits connects, and its connect waits once _options has built the
+        options: at the session host, for a launch (`road` "launch") or for an attach to the CLI a host kept across a
+        kernel restart ("attach"), or with session hosts off at the client's own connect to its CLI ("child"). A model
+        and a mode are picked meanwhile, from another thread as the kernel's routes pick. Returns the session and the
+        client once it is the live one."""
         reg = self._reg()
-        reg.update(auth="login", fast=True, model="claude-opus-5")
+        reg.update(model="claude-opus-5")
         sb.write_reg(self.state, SID, reg)
-        be, s = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"},
-                              {"attach": False, "cli": CLI_B, "launch": "spec"}], cli=cli)
-        be.login_ok = lambda: True
-        spawn = be._host_transport_for
-        hold_after_pick = []
+        entered, release = threading.Event(), threading.Event()
 
-        async def transport_for(sess, opts, classes):
-            be.set_model(SID, "claude-sonnet-5")           # after _options, before the client is up
-            hold_after_pick.append((sess._picks_held_open, list(getattr(sess, "_picks_held", None) or [])))
-            return await spawn(sess, opts, classes)
-        be._host_transport_for = transport_for
+        async def gate():
+            entered.set()
+            for _ in range(1000):                          # at most 10 s, so a failing test still lets the thread end
+                if release.is_set():
+                    return
+                await asyncio.sleep(0.01)
+        if road != "child":
+            first = ({"attach": True, "cli": CLI_A, "launch": _record(False)} if road == "attach"
+                     else {"attach": False, "cli": CLI_A, "launch": "spec"})
+            be, s = self._kernel([first, {"attach": False, "cli": CLI_B, "launch": "spec"}], survives=road == "attach")
+            spawn = be._host_transport_for
+
+            async def transport_for(sess, opts, classes):
+                await gate()
+                return await spawn(sess, opts, classes)
+            be._host_transport_for = transport_for
+        else:
+            class _ConnectWaits(_Client):
+                async def __aenter__(self):
+                    await gate()
+                    return self
+            sys.modules["claude_agent_sdk"].ClaudeSDKClient = _ConnectWaits
+            be, s = self._kernel([])
+            be.session_hosts_on = lambda: False
         s.start()
+        self._wait(entered.is_set, "the connect, waiting after the options were built")
+        self.assertIsNone(s.client, "the premise: no client yet")
+        self.assertTrue(be.set_model(SID, "claude-sonnet-5"))
+        self.assertTrue(be.set_mode(SID, "plan"))
+        release.set()
         self._wait(lambda: len(_Client.instances) >= 1 and _Client.instances[0] is s.client, "connect 1")
-        self.assertTrue(os.path.exists(reading), "the premise: the version was read")
-        self.assertEqual(s.chosen_model, "claude-sonnet-5", "the premise: the pick was made")
-        self.assertEqual(hold_after_pick, [(None, [])], "the hold closed with the read, and nothing was held")
+        c = _Client.instances[0]
+        self.assertEqual((getattr(c.options, "model", None), getattr(c.options, "permission_mode", None)),
+                         ("claude-opus-5", "acceptEdits"), "the premise: the launch was built before the picks")
+        return s, c
+
+    def test_a_model_and_a_mode_picked_while_the_session_host_brings_the_launch_up_reach_the_cli(self):
+        """The launch's options were built, and its connect waits on the session host: the model and the mode picked
+        meanwhile are sent to the CLI once the connect is up, in the order they were made, and nothing relaunches."""
+        s, c = self._picked_while_the_connect_comes_up("launch")
+        self.assertFalse(s._host_is_attach, "the premise: a launch")
+        self._wait(lambda: c.controls == [("model", "claude-sonnet-5"), ("mode", "plan")], "the picks sent")
+        self._settle(0.5)
+        self.assertEqual(len(_Client.instances), 1, "no relaunch")
+
+    def test_a_model_and_a_mode_picked_while_the_attach_to_a_kept_cli_comes_up_reach_the_cli(self):
+        """As the launch, at an attach to the CLI a host kept across a kernel restart: the model and the mode picked while
+        the attach waits on the host are sent to that CLI once the attach is up."""
+        s, c = self._picked_while_the_connect_comes_up("attach")
+        self.assertTrue(s._host_is_attach, "the premise: an attach")
+        self._wait(lambda: c.controls == [("model", "claude-sonnet-5"), ("mode", "plan")], "the picks sent")
+        self._settle(0.5)
+        self.assertEqual(len(_Client.instances), 1, "no relaunch")
+
+    def test_a_model_and_a_mode_picked_while_a_kernel_child_connects_reach_the_cli(self):
+        """As the launch, with session hosts off: the client's own connect to its CLI waits, and the model and the mode
+        picked meanwhile are sent to that CLI once the connect is up."""
+        s, c = self._picked_while_the_connect_comes_up("child")
+        self.assertIsNone(s._host, "the premise: a kernel child, no session host")
+        self._wait(lambda: c.controls == [("model", "claude-sonnet-5"), ("mode", "plan")], "the picks sent")
+        self._settle(0.5)
+        self.assertEqual(len(_Client.instances), 1, "no relaunch")
 
     def _a_model_the_subagent_speed_recipe_excludes(self, during_the_read):
         """A session with Subagents at standard speed on, on Opus 5.5 with its own fast pick, a login riding the
@@ -1602,6 +1706,12 @@ class AToggleWhileTheLaunchIsPrepared(_Harness):
         self.assertEqual(c.controls, [], "nothing sent")
         self.assertEqual(self._armed(s), ("Opus 5", "Sonnet 5"), "the retry armed")
 
+    def test_a_mode_picked_during_the_version_read_and_taken_back_at_an_attach_is_not_sent(self):
+        """The mode the attached CLI runs is the one confirmed before the pick: a pick taken back to it sends nothing."""
+        s, c = self._at_an_attach_with_a_standing_fallback(lambda be: self.assertTrue(be.set_mode(SID, "plan")),
+                                                          back=lambda be: be.set_mode(SID, "acceptEdits"))
+        self.assertEqual((c.controls, s.mode), ([], "acceptEdits"), "nothing sent")
+
     def test_the_account_default_picked_during_the_version_read_reaches_the_cli_as_no_model(self):
         """The account's default ("default", which goes out as set_model(None)) picked while a launch's version read
         waits is sent once the launch is up, and its dots end."""
@@ -1663,20 +1773,21 @@ class AToggleWhileTheLaunchIsPrepared(_Harness):
                          (1, False, "claude-sonnet-5"), "the premise: a fresh launch whose options carry Sonnet")
         self._wait(lambda: c.controls == [("model", "claude-opus-5")], "the pick sent")
 
-    def test_a_pick_that_finds_the_hold_closed_once_it_has_the_lock_is_not_held(self):
-        """A guard of the hold's second look, under the session lock: a pick that saw the hold open while the version
-        read's end closed it is not held, and nothing raises."""
+    def test_a_pick_that_finds_a_client_once_it_has_the_lock_goes_to_it_live_and_is_not_held(self):
+        """A guard of the hold's second look, under the session lock: a pick that found no client, whose connect came up
+        before the pick had the lock (and so already sent what was held), goes to that client live and is not held."""
         be, s = self._kernel([])
+        scheduled = []
 
-        class ClosingLock:
+        class ConnectingLock:
             def __enter__(lk):
-                s._picks_held_open = None                  # the read's end, between the pick's first look and the lock
+                # the connect came up between the pick's first look and the lock
+                s.loop, s.client = types.SimpleNamespace(call_soon_threadsafe=scheduled.append), object()
             def __exit__(lk, *a):
                 return False
-        s._picks_held_open = []
-        s._lock = ClosingLock()
+        s._lock = ConnectingLock()
         s._hold_live_pick(s._do_set_model, "claude-sonnet-5", {"picked": "claude-sonnet-5"})
-        self.assertEqual((s._picks_held_open, getattr(s, "_picks_held", None) or []), (None, []))
+        self.assertEqual((len(scheduled), getattr(s, "_picks_held", None) or []), (1, []))
 
     def test_a_relaunch_gives_its_launch_slot_back_once_its_cli_is_up_and_sends_the_picks_held_during_its_version_read(self):
         """The machine has one launch slot. An effort pick relaunches a quiet session, the relaunch takes the slot,

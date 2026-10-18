@@ -230,7 +230,24 @@ export function prefixInbound(host: string, msg: any): any {
   if (out.type === "data" && out.data && typeof out.data === "object") out.data = prefixTimelineData(host, out.data);
   else if (out.type === "bars") return { ...out, ..._prefixTimelineDetail(host, out) };
   if (out.activeChat && typeof out.activeChat === "object") out.activeChat = _prefixActiveChat(host, out.activeChat);
+  // A COMMENT THREAD is a session of its own, and its `sid` is a session id like every other (thread-live-1, 2026-10-14): the
+  // kernel's question frames (askLive) and its live statuses name the thread by it, and the page answers, stops and sets the
+  // thread's model by it, so a linked machine's thread arrives with its host's prefix here, on the comments frame and on a
+  // create's answer (commentCreated's `thread` row), exactly as the frames that name it do. Unprefixed, a linked machine's
+  // thread showed its Needs you cue with no question to answer (the popover looked the question up by the bare id while
+  // its frame arrived prefixed), and its Stop went to this machine's kernel. A kernel from before the frame carried `sid`
+  // names the thread by its tid, which is the thread's session id. The tid itself stays bare: the thread ops address it
+  // under its parent's id, which carries the host.
+  if (out.type === "comments" && Array.isArray(out.threads)) out.threads = out.threads.map((t: any) => _prefixThreadSid(host, t));
+  if (out.type === "commentCreated" && out.thread && typeof out.thread === "object") out.thread = _prefixThreadSid(host, out.thread);
   return out;
+}
+
+/** A comments-frame thread row with its session id (`sid`, else its tid) wearing `host`'s prefix, on a copy. */
+function _prefixThreadSid(host: string, t: any): any {
+  if (!t || typeof t !== "object") return t;
+  const own = typeof t.sid === "string" && t.sid ? t.sid : (typeof t.tid === "string" ? t.tid : "");
+  return own ? { ...t, sid: prefixId(host, own) } : t;
 }
 
 /** The delegation origin and the awaiting peers of a card OR a chat-box row, rewritten in place on a copy the caller owns.
@@ -948,17 +965,24 @@ export const REMOTE_REDIAL_MS = 8000;
 // end stays open), and only the kernel's next frame can tell; until one lands the watchdog runs at this bound
 // instead of REMOTE_STALE_MS.
 export const REMOTE_PROVISIONAL_MS = 15000;
+// A socket held CLOSING (2026-10-15): a close the far side never completes leaves the browser holding the socket there
+// for up to a minute before onclose fires, and the verdict used to leave CLOSING alone, so the redial waited that minute
+// out. The watchdog stamps the first tick that sees a socket CLOSING (Conn.closingT) and puts it down once it has stayed
+// CLOSING this long: on the next tick, 5 s on. The pane shim's CLOSING_MS, byte for byte.
+export const REMOTE_CLOSING_MS = 5000;
 
 /** What the watchdog should do about ONE remote socket, from its state alone (pure, unit-tested):
  *  "close" — force-close so the onclose→redial chain runs (open but silent past the keepalive bound,
- *  or a hung handshake); "redial" — CLOSED with no fresh attempt: dial directly; "" — leave it be.
- *  `lastRecv` is stamped at open and on every frame, so an open socket's silence is measured from
+ *  or a hung handshake, or a socket stuck CLOSING); "redial" — CLOSED with no fresh attempt: dial directly;
+ *  "" — leave it be. `lastRecv` is stamped at open and on every frame, so an open socket's silence is measured from
  *  its own open, never from an earlier socket's traffic. `staleMs` is the silence bound for an OPEN
- *  socket: REMOTE_STALE_MS, or REMOTE_PROVISIONAL_MS while a resumed keep awaits its confirming frame. */
-export function socketVerdict(readyState: number, lastRecv: number, connT: number, now: number, staleMs = REMOTE_STALE_MS): "close" | "redial" | "" {
+ *  socket: REMOTE_STALE_MS, or REMOTE_PROVISIONAL_MS while a resumed keep awaits its confirming frame. `closingT` is
+ *  when the watchdog first saw this socket CLOSING (0 = not yet seen). */
+export function socketVerdict(readyState: number, lastRecv: number, connT: number, now: number, staleMs = REMOTE_STALE_MS, closingT = 0): "close" | "redial" | "" {
   if (readyState === 1) return now - (lastRecv || connT) > staleMs ? "close" : "";
   if (readyState === 0) return now - connT > REMOTE_CONNECT_MS ? "close" : "";
   if (readyState === 3) return now - connT > REMOTE_REDIAL_MS ? "redial" : "";
+  if (readyState === 2) return closingT && now - closingT >= REMOTE_CLOSING_MS ? "close" : "";
   return "";
 }
 
@@ -991,6 +1015,7 @@ interface Conn {
   lastRecv: number; // epoch ms of the last frame on the CURRENT socket (keepalives count); 0 = none yet
   resumeProvisional: number; // the `resume` stamp lastRecv rests on until a frame confirms it (the watchdog runs at REMOTE_PROVISIONAL_MS meanwhile); 0 = confirmed, or no stamp
   connT: number;    // when the current socket's connect() attempt started — the watchdog's reference point
+  closingT: number; // when the watchdog first saw the current socket CLOSING (socketVerdict, REMOTE_CLOSING_MS); 0 = not seen
   everOpened?: boolean; // a socket for this conn has reached `open` at least once (the shim's everConnected)
   readyAcked?: boolean; // the remote answered this page's `ready` with a `caps` frame at least once (the shim's readyAcked): the redial gate's latch that the remote served this page whole and holds its sessions
   acksEver?: boolean; // some socket of this page's to this host has said it (acksSeen): a chat send dropped while the host is down is kept and resent, so its toast says that (dropWarn)
@@ -1235,17 +1260,19 @@ export class FederationManager {
 
   /** One pass of the remote-socket watchdog (public so the tests can tick it with their own clock):
    *  apply socketVerdict to every dialed connection. `foreground` (the visibility fast-path) also
-   *  kills a socket still CONNECTING, whatever its age — a handshake the sleeping tab never finished. */
+   *  kills a socket still CONNECTING, whatever its age — a handshake the sleeping tab never finished —
+   *  and one held CLOSING (2026-10-15), whose close the far side never completed. */
   watchdog(now: number, foreground = false): void {
     for (const c of this.conns.values()) {
       if (c.closed || !c.ws) continue;
       const rs = c.ws.readyState;
-      let v = socketVerdict(rs, c.lastRecv, c.connT, now, c.resumeProvisional ? REMOTE_PROVISIONAL_MS : REMOTE_STALE_MS);
-      if (foreground && rs === 0) v = "close";
+      if (rs === 2 && !c.closingT) c.closingT = now;   // the first tick that sees it CLOSING: the verdict measures from here
+      let v = socketVerdict(rs, c.lastRecv, c.connT, now, c.resumeProvisional ? REMOTE_PROVISIONAL_MS : REMOTE_STALE_MS, c.closingT);
+      if (foreground && (rs === 0 || rs === 2)) v = "close";
       if (v === "close") {
         // the same breadcrumb family as open/close/detach, so a "cards came back late" report reads
         // WHICH socket the watchdog put down and how long it had been silent
-        this.diag("hostconn", { host: c.host, ev: "watchdog-close", why: rs === 1 ? "quiet" : "connecting",
+        this.diag("hostconn", { host: c.host, ev: "watchdog-close", why: rs === 1 ? "quiet" : rs === 2 ? "closing" : "connecting",
                                 quietMs: c.lastRecv ? now - c.lastRecv : -1, foreground });
         // ABANDON it, don't wait for it: close() on a socket whose far side is gone starts a closing
         // handshake nobody answers, and the browser holds CLOSING for ~60s before onclose fires (the
@@ -1258,6 +1285,7 @@ export class FederationManager {
         try { dead.close(); } catch (e) { /* already dying */ }
         c.ws = null;
         this.dialEvent(c.host, false);   // its onclose is detached above, so the attempt's end is said HERE (the swirl must not spin on a dead dial)
+        this.relayDown(c.host);          // …and so is the drop itself, as onclose says it (2026-10-15, the review of #247)
         this.connect(c);   // settings queued on the conn meanwhile ride the fresh socket's open (flushPending)
       } else if (v === "redial") {
         this.connect(c);
@@ -1931,7 +1959,7 @@ export class FederationManager {
     // credential is added by the relay (_remote_ws), so this URL carries no token at all. The URL is
     // built fresh on every dial (remoteDialUrl, called from connect) so a redial reflects the page's
     // current terms, exactly as the pane's own local socket rebuilds its ?active=/reconnect on each open.
-    const conn: Conn = { host, ws: null, url: "", closed: false, live, lastRecv: 0, resumeProvisional: 0, connT: 0, pending: new Map() };
+    const conn: Conn = { host, ws: null, url: "", closed: false, live, lastRecv: 0, resumeProvisional: 0, connT: 0, closingT: 0, pending: new Map() };
     this.conns.set(host, conn);
     this.ensureHost(host);
     this.connect(conn);
@@ -2000,6 +2028,7 @@ export class FederationManager {
     if (conn.ws && (conn.ws.readyState === 0 || conn.ws.readyState === 1)) return; // already connecting/open
     let ws: WebSocket;
     conn.connT = Date.now();
+    conn.closingT = 0;
     conn.lastRecv = 0;
     conn.resumeProvisional = 0;   // a fresh socket starts unmarked: the provisional rule was the resumed socket's
     conn.acksSeen = false;        // …and has said nothing about answering sends yet: its own keepalive says it (onmessage)
@@ -2073,9 +2102,7 @@ export class FederationManager {
       this.dialEvent(conn.host, false);   // the attempt ended (refused, or the socket dropped): still until the redial
       this.diag("hostconn", { host: conn.host, ev: "close", code: ev.code, clean: ev.wasClean, detached: conn.closed });
       conn.acksSeen = false;
-      // the remote twin of the shim's romp:wsdown: a send to this host that its kernel has not answered may never have
-      // reached it, and the chat says so on the bubble until the next socket's resend is answered (render.ts)
-      try { window.dispatchEvent(new CustomEvent("romp:hostRelayDown", { detail: { host: conn.host } })); } catch (e) { /* never break the relay */ }
+      this.relayDown(conn.host);
       if (!conn.closed) setTimeout(() => this.connect(conn), 2000); // reconnect a dropped remote
     };
     ws.onerror = () => {
@@ -2083,6 +2110,16 @@ export class FederationManager {
         ws.close();
       } catch (e) {}
     };
+  }
+
+  /** A relay socket to `host` is gone, closed or put down by the watchdog: romp:hostRelayDown, the remote twin of the
+   *  shim's romp:wsdown. A send to this host that its kernel has not answered may never have reached it, and the chat
+   *  says so on the bubble until the next socket's resend is answered; the asks in flight on it are released; a comment
+   *  thread's read it has not answered waits for the next socket's first frame to decide it (render.ts, read-latch.ts).
+   *  Every drop says it: the watchdog's abandon detaches the socket's onclose, and a drop it did not say left that read
+   *  held for the page's life, so a later reply on the thread never showed unread (the review of #247, 2026-10-15). */
+  private relayDown(host: string): void {
+    try { window.dispatchEvent(new CustomEvent("romp:hostRelayDown", { detail: { host } })); } catch (e) { /* never break the relay */ }
   }
 
   /** One host's dial state changed: its relay socket's dial began (CONNECTING) or ended (open, closed, or

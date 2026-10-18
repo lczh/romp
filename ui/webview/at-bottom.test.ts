@@ -75,10 +75,10 @@ test("render.ts defines atBottom on the shared tolerance and nearBottomForSend o
 
 test("follow mode and the chip read atBottom at every site", () => {
   const follow = [
-    /const stick = content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\);/,          // appendActive
+    /const stick = content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\) && !v\?\.followHeld;/,          // appendActive (never while a passage landing holds follow mode off)
     /const off = c\.scrollHeight > c\.clientHeight \+ 2 && !atBottom\(c\);/,                             // updateJumpBtn
     /followReader\(activeId \? views\.get\(activeId\) : null, c\.scrollTop, atBottom\(c\), pendingBuildRaf != null\);/,   // the scroll record
-    /cur\.stick = atBottom\(content\);/,                                                                  // the leaving tab's save
+    /cur\.stick = atBottom\(content\) && !cur\.followHeld;/,                                              // the leaving tab's save (a passage landing's pause keeps its place: HeldKeep)
     /_wasNear = !_scrollContent \|\| !_v0 \|\| !_v0\.shown \|\| atBottom\(_scrollContent\);/,             // the rebuild branch
     /const bottom = live && atBottom\(content!\);/,                                                          // rerenderAll's one read, before the clear: the re-show follow flag and the keep
     /\(!atBottom\(content\) \? captureScrollAnchor\(content, v\) : null\)\) : null;/,                       // showActive's keep
@@ -87,14 +87,14 @@ test("follow mode and the chip read atBottom at every site", () => {
     /const wasAtBottom = !!contentX && contentX\.scrollHeight > contentX\.clientHeight \+ 2 && atBottom\(contentX\);/,   // the ✕ on a pending bubble (T262h)
     /unitChangeRow\(id, c\.dh, c\.cls, c\.fromTail, view3\.stick, atBottom\(content\), content\.scrollHeight, content\.clientHeight\)/,   // the unit-change row's measured bottom (T262n)
     /unitChangeRow\(activeId \|\| "", dh, cls, BOX_FROM_TAIL, v\.stick, atBottom\(c\), c\.scrollHeight, c\.clientHeight\)/,   // the scroller's boxes outside the thread (T262n follow-up)
-    /if \(c && v\) v\.stick = atBottom\(c\); \}/,                                                             // a deep-link landing ends follow mode unless it put the reader at the bottom (T386)
+    /if \(c && v\) \{ v\.followHeld = !!mark; v\.stick = !mark && atBottom\(c\); \} \}/,                          // a deep-link landing ends follow mode unless it put the reader at the bottom (T386); a passage landing ends it there too (2026-10-15)
     /if \(navCursor && atBottom\(content\)\) \{/,                                                          // the jump cluster: a landing the scroll clamped at the bottom (2026-09-24)
     /const bottom = !cur && atBottom\(content\);/,                                                         // …and its reading line at the bottom
     /stick: hadSnap \? v\.stick : atBottom\(content\) \}/,                                                 // a file tab's held place for the way back (2026-09-30)
     /const atEnd = atBottom\(content\);   \/\/ measured before the box adds its room/,                          // the live-status foot line's first room (2026-10-08)
   ];
   for (const re of follow) assert.match(RENDER, re, String(re));
-  assert.equal((RENDER.match(/\batBottom\(/g) || []).length, 20, "nineteen call sites plus the definition (the re-show follow rule reads the same true bottom, T262 2026-09-09; the window ask's diagnostic row reads it too, T366; the landing's follow-mode end, T386; the jump cluster's two reads, 2026-09-24; a file tab's held place, 2026-09-30; the live-status foot line's first room, 2026-10-08)");
+  assert.equal((RENDER.match(/\batBottom\(/g) || []).length, 21, "twenty call sites plus the definition (a re-show at the bottom no longer ends a passage landing's follow pause, 2026-10-17: the paused passage stays where the reader left it; the scroll listener's end of a passage landing's follow pause, 2026-10-15; the re-show follow rule reads the same true bottom, T262 2026-09-09; the window ask's diagnostic row reads it too, T366; the landing's follow-mode end, T386; the jump cluster's two reads, 2026-09-24; a file tab's held place, 2026-09-30; the live-status foot line's first room, 2026-10-08)");
 });
 
 test("only the user's own send reveal keeps the 80 px band", () => {

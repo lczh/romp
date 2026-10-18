@@ -2,7 +2,7 @@
 """The chat's jump cluster on the real /chat page (the user 2026-09-24, paraphrased: after new content arrives they lose
 their place and want to get back to their last message and read everything since, and reach comments without hunting on
 the rail). One narrow column in the pane's bottom-left corner, three capsules, each its up chevron, an icon and its down
-chevron: the threads with an unread reply (and how many wait off screen; it replaced the "replies unread" chips), every
+chevron: the threads with an unread reply (and how many there are; it replaced the "replies unread" chips), every
 comment thread, and the reader's own messages.
 
 A hermetic kernel serves a synthetic chat (the notes-api demo world, session web): 150 exchanges, more than one wire tail
@@ -16,7 +16,10 @@ lines long. Asserted in the browser, each move by the deep-link flash landing on
   lands on prompt 25 and previous again on prompt 24, which the page did not hold (asked for through the page's own gap
   loader, landed once it arrived); previous unread lands reply 3, fetched by the landing road; next unread (by key, then
   by click) walks 140 and 145, where none is left below; previous unread by key lands 140; neither marks a thread read;
-  the count is the unread replies off screen; the keys for messages and comments do what the buttons do; the api tab,
+  the count is every unread thread in the session, wherever it sits (the user 2026-10-15, who watched it go 5, 4, 5 as
+  threads scrolled in and out of view with nothing read): a landing that brings one into view, a scroll that takes it
+  out and brings it back, none of them moves the number; opening a thread takes one off and a reply landing on it puts
+  it back; the keys for messages and comments do what the buttons do; the api tab,
   whose transcript fits, shows no cluster; on a 390x844 phone all three capsules show, 34px wide with 32x40 chevrons, and
   the column clears the message box. The go-to-bottom chip is the column's foot (the user 2026-09-25, paraphrased: the
   same width as the column, in its look): shown, it measures the column's width (24 on desktop, 34 on the phone), 30 and 42
@@ -97,8 +100,19 @@ const out = { steps: {} };
 const ctx = await browser.newContext({ viewport: { width: 1000, height: 700 }, deviceScaleFactor: 2 });
 const page = await ctx.newPage();
 await page.addInitScript(({ sid, n }) => {
-  window.__cmtFrames = 0;
-  window.addEventListener("message", (e) => { const m = e.data; if (m && m.type === "comments" && m.id === sid && (m.threads || []).length >= n) window.__cmtFrames++; }, true);
+  window.__cmtFrames = 0; window.__lastCmt = null;
+  window.addEventListener("message", (e) => { const m = e.data; if (m && m.type === "comments" && m.id === sid && (m.threads || []).length >= n) window.__cmtFrames++;
+    if (m && m.type === "comments" && m.id === sid && !m.__synth) window.__lastCmt = m; }, true);
+  // a reply landing on a thread: the newest real frame again, that thread's reply unread (what the kernel's frame says
+  // when one lands), then the count as the page shows it at once, before any later frame of the kernel's can move it
+  window.__replyLands = (tid) => {
+    if (!window.__lastCmt) return null;
+    const f = JSON.parse(JSON.stringify(window.__lastCmt));
+    for (const t of f.threads || []) if (t.tid === tid) t.unread = true;
+    window.dispatchEvent(new MessageEvent("message", { data: Object.assign(f, { __synth: true }) }));
+    const c = document.querySelector("#jump-cluster .jc-count");
+    return c.hidden ? "" : c.textContent.trim();
+  };
 }, { sid: cfg.sid, n: cfg.threads });
 const settle = async (sel) => {
   await page.waitForSelector("#tabs .tab, #tabs [data-sid]", { timeout: 20000 });
@@ -250,6 +264,39 @@ if (Object.values(out.steps).every((s) => s.ok)) {
   out.read140 = await readState("tid-c");
   await move("prevMine", "Control+Alt+ArrowUp", U(140));
   await move("prevComment", "Control+Alt+Shift+ArrowUp", R(90));
+  // the count holds still while only the view moves (the user 2026-10-15): the next unread lands reply 140 in view, a
+  // screen up takes it out of view, a screen down brings it back
+  const count = () => page.evaluate(() => { const c = document.querySelector("#jump-cluster .jc-count"); return c.hidden ? "" : c.textContent.trim(); });
+  const inView = (u) => page.evaluate((u) => { const c = document.getElementById("content").getBoundingClientRect(), t = document.querySelector(`.turn[data-uuid="${u}"]`);
+    const r = t ? t.getBoundingClientRect() : null; return !!r && r.bottom > c.top && r.top < c.bottom; }, u);
+  // the reader's own gesture, the wheel over the transcript: a landing re-aligns its target while the transcript settles
+  // until the reader's own input takes over, so a bare scrollTop write would be put back
+  const scrollBy = async (dy) => {
+    const c = await page.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+    await page.mouse.move(c.x, c.y); await page.mouse.wheel(0, dy); await page.waitForTimeout(500);
+  };
+  out.counts = { onLast: out.atLast.count.text };
+  await move("nextUnread", "click", R(140));
+  out.counts.landed = await count(); out.counts.landedInView = await inView(R(140));
+  const screen = await page.evaluate(() => document.getElementById("content").clientHeight + 120);
+  await scrollBy(-screen);
+  out.counts.away = await count(); out.counts.awayInView = await inView(R(140));
+  await scrollBy(screen);
+  out.counts.back = await count(); out.counts.backInView = await inView(R(140));
+  // opening the thread reads it: one fewer; closed, a reply landing on it makes it unread again: one more
+  await page.click('mark.cmt-hl[data-tid="tid-c"]');
+  await page.waitForSelector("#cmt-pop", { timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(300);
+  out.counts.opened = await count();
+  await page.click('#cmt-pop [data-act="cmtclose"]').catch(() => {});
+  await page.waitForSelector("#cmt-pop", { state: "detached", timeout: 10000 }).catch(() => {});
+  out.counts.closed = await count();
+  // the reply lands on the kernel's own frame that counts the read (seenSeq, 2026-10-15): the page holds a read until a frame
+  // does, so a frame from before it is no reply after it
+  await page.waitForFunction(() => ((window.__lastCmt && window.__lastCmt.threads) || []).some((t) => t.tid === "tid-c" && t.seenSeq >= 1),
+                             null, { timeout: 15000 }).catch(() => {});
+  out.counts.reply = await page.evaluate(() => window.__replyLands("tid-c"));
+  out.counts.replyInView = await inView(R(140));
 }
 // the api tab: a transcript that fits shows no cluster
 await page.evaluate((sid) => { const t = document.querySelector(`#tabs .tab[data-id="${sid}"]`); if (t) t.click(); }, cfg.api);
@@ -429,7 +476,7 @@ class ServedJumpCluster(unittest.TestCase):
             self.assertEqual(s0[m]["disabled"], dis, "%s at the bottom: %r" % (m, s0[m]))
         self.assertEqual(s0["prevUnread"]["aria"], "Previous unread reply (Ctrl+Alt+PageUp)", "the tip names the key: %r" % s0["prevUnread"])
         self.assertEqual(s0["nextUnread"]["aria"], "Next unread reply (Ctrl+Alt+PageDown)", s0["nextUnread"])
-        # the count: the three unread replies off screen (the chips' number), a badge over the empty margin, never in a finger's way
+        # the count: the three unread replies, a badge over the empty margin, never in a finger's way
         self.assertEqual((s0["count"]["shown"], s0["count"]["text"]), (True, "3"), s0["count"])
         self.assertLess(s0["count"]["l"], s0["unread"]["l"], "on the capsule's upper-left corner, over the margin: %r" % s0["count"])
         self.assertLessEqual(s0["count"]["r"], s0["unread"]["l"] + s0["unread"]["w"], "the column is not widened: %r" % s0["count"])
@@ -438,7 +485,7 @@ class ServedJumpCluster(unittest.TestCase):
         for name, st in r["steps"].items():
             self.assertTrue(st["ok"], "%s did not land %s: %r (order %r)" % (name, st["want"], st, r["order"]))
             self.assertTrue(st["inView"], "%s: the landed turn is in view: %r" % (name, st))
-        self.assertEqual(len(r["steps"]), 15, "all fifteen moves ran: %r" % list(r["steps"]))
+        self.assertEqual(len(r["steps"]), 16, "all sixteen moves ran: %r" % list(r["steps"]))
         # on reply 145, the last unread thread: none left below, and the chip is up while the column did not move for it
         s1 = r["atLast"]
         self.assertTrue(s1["nextUnread"]["disabled"], "no unread reply is left below: %r" % s1["nextUnread"])
@@ -458,6 +505,16 @@ class ServedJumpCluster(unittest.TestCase):
         # the unread arrows land a thread without marking it read (opening the thread does)
         self.assertEqual(r["read145"], {"unread": True, "pop": False}, "landing is not reading: %r" % r["read145"])
         self.assertEqual(r["read140"], {"unread": True, "pop": False}, r["read140"])
+        # the count is every unread thread, wherever it sits: landing one into view, scrolling it out and back, never
+        # moves it (it read 2, 3, 2 here when it counted the threads off screen); only a thread's own change does
+        k = r["counts"]
+        self.assertEqual(k["onLast"], "3", "on reply 145, in view, it still counts: %r" % k)
+        self.assertTrue(k["landedInView"] and not k["awayInView"] and k["backInView"], "the scroll took reply 140 out of view and back: %r" % k)
+        self.assertEqual((k["landed"], k["away"], k["back"]), ("3", "3", "3"), "scrolling alone never changes the count: %r" % k)
+        self.assertEqual(k["opened"], "2", "opening a thread reads it: one fewer: %r" % k)
+        self.assertEqual(k["closed"], "2", "closing it changes nothing: %r" % k)
+        self.assertTrue(k["replyInView"], k)
+        self.assertEqual(k["reply"], "3", "a reply landing on it, in view, puts it back: %r" % k)
         # the api tab: its transcript fits, so no cluster
         self.assertTrue(r["api"]["fits"], r["api"])
         self.assertTrue(r["api"]["hidden"], "no cluster over a transcript that fits: %r" % r["api"])

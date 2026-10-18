@@ -1428,6 +1428,21 @@ class OverrunRecord(unittest.TestCase):
         after the pick stood at the end of the shell's scenes, past the hidden-pane, keyboard-order and content scenes."""
         self.assertIn("  out.hiddenPane.premise = await pickWeb(fr);\n  mark();", DRIVER)
 
+    def test_the_first_partial_line_follows_the_opening_scenes(self):
+        """Two texts say where the driver's first PARTIAL line stands: the mark() comment, which says the opening scenes, 1 to 0b, share
+        one, and _overrun_record's message for a stdout with none, which says the driver had not finished those scenes. Both hold only
+        while the first mark() call, indented or not, is the one that closes scene 0b on the line right above scene 0c's header (the
+        post-merge review of PR 140). So a call deleted or moved past 0c, or one added anywhere in the opening scenes, scene 0b's own body
+        included, fails here at the edit, not as a message naming the wrong scenes on the next overrun. Lying between the two headers is
+        not enough: a call inside scene 0b's body would split that scene across two PARTIAL lines, where the comment says the opening
+        scenes share one."""
+        first = re.search(r"\bmark\(\);", DRIVER).start()
+        self.assertEqual((DRIVER.count("\n// 0b."), DRIVER.count("\n// 0c."), DRIVER.find("\n// 0b.") < DRIVER.find("\n// 0c.")),
+                         (1, 1, True), "the premise: each scene header occurs once, 0b's before 0c's")
+        self.assertEqual(first, DRIVER.index("\n// 0c.") - len("mark();"), "the first mark() call is the one closing scene 0b, on the line "
+                         "right above scene 0c's header; a call deleted or moved past it, or one added earlier in the opening scenes,"
+                         " means rewording the mark() comment and _overrun_record's no-PARTIAL message")
+
 
 if __name__ == "__main__":
     unittest.main()

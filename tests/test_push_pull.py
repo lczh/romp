@@ -140,6 +140,7 @@ class _Base(unittest.TestCase):
             km._PUSH_CATCHUP["done"] = True                 # caught up on its restart (PersistedFeed drives the catch-up)
         km._TURN_MISSED.clear()
         km._PUSH_PULL_SEEN.clear()
+        km._PUSH_PULL_HEARD.clear()
         km._PUSH_PULL_CURSORS[0] = None
         km._PUSH_PULL_CURSOR_LOST[0] = False
         km._PUSH_PULL_SAID.clear()
@@ -609,6 +610,7 @@ class GapPolicy(_Base):
         km._PUSH_GAP_TOLD_LOADED[0] = False
         km._PUSH_PULL_CURSORS[0] = None
         km._PUSH_PULL_SEEN.clear()
+        km._PUSH_PULL_HEARD.clear()
         km._PUSH_GAPS.clear()
         km._PUSH_PULL_ANSWERED.clear()
         km._PUSH_PULL_LAST_OK.clear()
@@ -1227,8 +1229,12 @@ class _HeldStops:
         self.unreported = {}
         self.failed = None
         self.stuck = []
+        self.attaching = None
         self._boot_attach_pending = 0
         self.problems = []
+
+    def catchup_attaching(self):
+        return None if self.attaching is None else list(self.attaching)
 
     def unwatched_pending(self):
         return self.held
@@ -1477,6 +1483,7 @@ class OriginRestart(_Base):
         self.stops.held = 1
         self.tick()
         km._PUSH_PULL_ANSWERED.clear()                       # the hub restarted: its cursor is on disk, its memory gone
+        km._PUSH_PULL_HEARD.clear()
         km._PUSH_PULL_CURSORS[0] = None
         km._PUSH_GAPS.clear()
         self.pull()
@@ -1580,6 +1587,45 @@ class OriginRestart(_Base):
         self.pull()
         self.assertEqual(self.summaries(), ["TESTHOST restarted · 1 session finished a turn; more may have been missed"])
         self.assertEqual(len(self.from_hub("turn")), 1, "the held turn end was never delivered late")
+
+    def test_an_event_that_fires_between_two_requests_is_delivered_not_held_for_the_summary(self):
+        # the review of #235: "listening" was decided when the hub's request arrived, so an event the origin filed while
+        # the hub was between two requests (handling the last answer) went into the restart's pending summary, which may
+        # wait on a stuck host. Each event is judged by when it was filed against the origin's moment of the hub's
+        # previous answer
+        km._set_notify_session(API, True)
+        km._set_notify_session(WEB, True)
+        self.origin_restarts()
+        self.drop()
+        km._BOOT_ATTACHED.clear()                        # the catch-up waits (web's re-attach), so the gap stays open
+        self.stops.attaching = [WEB]
+        self.tick()
+        self.pull()                                      # the first answer back: the gap is open, the hub listens again
+        self.end_turn(API)                               # filed after that answer, before the hub's next request
+        self.tick()
+        self.pull()                                      # this request finds its cursor behind the newest
+        self.assertEqual([(a[2], k["kind"]) for a, k in self.from_hub()], [(ROW + ":" + API, "turn")])
+        self.assertEqual(self.summaries(), [])
+        # a call that fails forgets the moment: what is filed while the link is down is missed, and counted
+        self.drop()
+        self.end_turn(API)
+        self.tick()
+        self.pull()
+        self.assertEqual(len(self.from_hub("turn")), 1, "missed while the hub could not listen: never delivered late")
+
+    def test_a_comment_threads_reattach_neither_holds_the_catch_up_nor_makes_it_unknown(self):
+        # the review of #235: a comment thread notifies nothing, yet its re-attach was waited on and its loss said "may
+        # have been missed"; the backend leaves threads out of the roster and of the lost (test_kernel_notify_popover.py)
+        km._set_notify_session(WEB, True)
+        self.origin_restarts()
+        self.drop()
+        km._BOOT_ATTACHED.clear()                        # only a comment thread's re-attach has not settled
+        self.stops.attaching = []
+        self.tick()
+        self.pull()
+        self.pull()
+        self.assertEqual(self.summaries(), [])
+        self.assertIn("nothing it may have missed would have reached the devices here", self.err.getvalue())
 
     def test_a_failed_boot_reconcile_closes_the_catch_up_at_once_as_unknown(self):
         km._set_notify_session(WEB, True)

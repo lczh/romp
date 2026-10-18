@@ -220,8 +220,10 @@ test("the dot is the comment's landed colour; UNREAD shouts; keyed on the kernel
 test("a dot is a BUTTON, delegated: click = jump to the anchor and open the thread; same-tid sets move in place", () => {
   assert.match(RAIL, /const tick = el\("button", cls\(t\.th\)\) as HTMLButtonElement;/);
   assert.match(RAIL, /tick\.dataset\.act = "cmtjump";\s*\n\s*tick\.dataset\.tid = t\.th\.tid;\s*\n\s*tick\.dataset\.uuid = t\.th\.anchorUuid;/);
-  assert.match(RENDER, /cmtjump: \(elx\) => \{\s*\n\s*const tid = elx\.dataset\.tid, uuid = elx\.dataset\.uuid;\s*\n\s*if \(!tid \|\| !uuid \|\| !activeId\) return;\s*\n\s*flashedAnchor = null;\s*\n\s*scrollToAnchor\(uuid\);/);
-  assert.match(RENDER, /openCommentPopover\(activeId, tid, Math\.max\(8, r\.left - 380\), Math\.max\(60, r\.top - 40\)\);/, "…and opens it (which is what marks it read)");
+  assert.match(RENDER, /cmtjump: \(elx\) => \{\s*\n\s*const tid = elx\.dataset\.tid;\s*\n\s*if \(!tid \|\| !activeId\) return;\s*\n\s*passageLanding\(activeId, tid\);/);
+  // the passage landing (2026-10-15): the passage first, then the thread opens beside it (which is what marks it read)
+  assert.match(RENDER, /queueMicrotask\(\(\) => openBesidePassage\(go\.sid, go\.tid, passage, note\)\);/, "…and opens it once landed");
+  assert.match(RENDER, /else openCommentPopover\(sid, tid\);/);
   assert.match(RAIL, /if \(kids\.length === ticks\.length && kids\.every\(\(k, i\) => k\.dataset\.tid === ticks\[i\]\.th\.tid\)\) \{/, "an unchanged tick set moves in place — a mid-press rebuild can't eat the click");
   assert.match(CSS, /\.cmt-tick \{[\s\S]{0,200}pointer-events: auto; cursor: pointer;/, "only the tick takes the pointer");
 });

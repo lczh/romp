@@ -14,13 +14,14 @@
 //   • An author's <style>, <form> and <button> in a message are gone, an author's id is prefixed, a checkbox written
 //     by hand is forced disabled and a click leaves it unchecked.
 //   • The registry: a pass registered twice runs once per sanitize; a second run of the fill is a no-op.
-// Skips with a stated reason when no playwright browser is installed (CI installs none; tests/test_spend_modal_headless_served.py
-// is the precedent, skipping without a playwright install). Synthetic values only.
+// Skips with a stated reason when no playwright browser is installed, and fails with it where CI requires the leg
+// (browser-leg.ts). Synthetic values only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { launchLeg } from "./browser-leg";
 
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
 // resolve playwright and esbuild from the extension, not from wherever this bundle was written
@@ -80,10 +81,8 @@ let pw: any = null;
 try { pw = requireCjs("playwright"); } catch { pw = null; }
 
 async function inBrowser(t: any, body: (page: any, errors: string[]) => Promise<void>): Promise<void> {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it (CI installs no browsers)"); return; }
-  let browser: any;
-  try { browser = await pw.chromium.launch(); }
-  catch (e) { t.skip("no playwright browser on this machine; the browser leg needs one (CI installs none): " + String((e as Error).message).split("\n")[0]); return; }
+  const browser = await launchLeg(t, pw, "chromium");
+  if (!browser) return;
   const errors: string[] = [];
   try {
     const js = bundle();
@@ -101,7 +100,17 @@ async function inBrowser(t: any, body: (page: any, errors: string[]) => Promise<
     });
     await page.goto("http://romp.test/page");
     await page.waitForFunction(() => typeof (window as any).__pipe === "object", null, { timeout: 10000 });
-    await page.evaluate(() => (document as any).fonts.ready);
+    // Every KaTeX face loaded before a body measures. A face loads only when laid-out text first asks for it, so the
+    // fonts.ready this harness used to await, on a page with no math on it yet, resolved at once, and the first body then
+    // measured its formulas in the fallback font KaTeX's font-display:block stands in while the face downloads: the
+    // fraction's numerator overlapped its denominator by about 2px in that window and the stacking assertion failed
+    // wherever the download lost the race (a fresh profile every launch, so every run could lose it).
+    const faces = await page.evaluate(async () => {
+      const all = Array.from((document as any).fonts) as any[];
+      await Promise.all(all.map((f) => f.load().catch(() => null)));
+      return { all: all.length, loaded: all.filter((f) => f.status === "loaded").length };
+    });
+    assert.ok(faces.all > 0 && faces.loaded === faces.all, "every KaTeX face loaded before measuring: " + JSON.stringify(faces));
     await body(page, errors);
   } finally {
     await browser.close();

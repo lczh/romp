@@ -339,5 +339,104 @@ class AThreadsMailWaitsLikeAnyLiveSessions(unittest.TestCase):
         self.assertTrue((pm.MAILROOT / THREAD / "new" / mid).exists(), "the mail itself is left for delivery")
 
 
+class TheNoticeGoesToTheSenderById(unittest.TestCase):
+    """The orphan sweep's bounce and the stuck-mail warning pick the session to tell by the message's From-Id, the
+    header deliver() writes on every message. Both looked the From NAME up over the live listing (review find,
+    2026-10-17), and every test above gives the sender a unique name, so they passed either way. By name, a later
+    session that reused the sender's name, a local namesake of a peer host's sender, or a session named like a
+    `--from` label was woken with another session's text and told to resend it, while a sender renamed since heard
+    nothing. Mutants: either lookup back on the name (its tests fail); the name fallback for a message with no From-Id
+    line dropped (the header-less test fails)."""
+    NAMESAKE = "b7c1e2d3-0000-4000-8000-0000000000a3"   # a different session that also answers to 'alice'
+    FAR = "b7c1e2d3-0000-4000-8000-0000000000a4"        # alice on a peer host
+
+    def setUp(self):
+        self._seamfile = os.path.join(tempfile.mkdtemp(), "sessions.json")
+        self._prior_seam = os.environ.get("ROMP_SESSIONS_FILE")
+        os.environ["ROMP_SESSIONS_FILE"] = self._seamfile
+        for d in (pm.MAILROOT, pm.WARNED, pm.MAILPENDING):
+            shutil.rmtree(d, ignore_errors=True)
+        try:
+            (pm.TLDIR / "messages.jsonl").unlink()
+        except OSError:
+            pass
+
+    def tearDown(self):
+        restore_env("ROMP_SESSIONS_FILE", self._prior_seam)
+
+    def _live(self, rows):
+        Path(self._seamfile).write_text(json.dumps(rows))
+
+    def _age(self, secs):
+        old = time.time() - secs
+        for f in (pm.MAILROOT / RECIP / "new").iterdir():
+            os.utime(f, (old, old))
+
+    def _box(self, sid):
+        return [m["body"] for m in pm.read_box(sid, consume=False)]
+
+    def _rows(self, mid):
+        p = pm.TLDIR / "messages.jsonl"
+        return [r["ev"] for r in (json.loads(l) for l in p.read_text().splitlines() if l) if r.get("id") == mid]
+
+    def _sweep_with(self, rows, sender_id, **kw):
+        self._live(rows)
+        mid = pm.deliver(RECIP, "alice", sender_id, "the original text", **kw)
+        self._age(pm.ORPHAN_GRACE + 60)
+        pm._sweep_orphans()
+        return mid
+
+    def test_a_later_session_with_the_senders_name_is_not_told(self):
+        mid = self._sweep_with([{"id": self.NAMESAKE, "name": "alice", "state": "idle"}], SENDER)
+        self.assertEqual(self._box(self.NAMESAKE), [], "it never sent the mail and is not handed its text")
+        self.assertFalse((pm.MAILROOT / RECIP / "new" / mid).exists(), "the orphan is still destroyed")
+        self.assertEqual(self._rows(mid), ["sent", "bounced"], "and the destroy is on the ledger")
+
+    def test_a_local_namesake_of_a_relayed_sender_is_not_told(self):
+        self._sweep_with([{"id": self.NAMESAKE, "name": "alice", "state": "idle"}], self.FAR,
+                         from_host="TESTHOST", relay_mid="px-1", relay_via="TESTHOST")
+        self.assertEqual(self._box(self.NAMESAKE), [], "relayed mail carries the far sid, which no local row holds")
+
+    def test_a_session_named_like_a_from_label_is_not_told(self):
+        self._sweep_with([{"id": self.NAMESAKE, "name": "alice", "state": "idle"}], "ext:alice")
+        self.assertEqual(self._box(self.NAMESAKE), [], "a --from script's mail is not the session's")
+
+    def test_the_real_sender_is_told_when_another_live_session_shares_its_name(self):
+        self._sweep_with([{"id": SENDER, "name": "alice", "state": "idle"},
+                          {"id": self.NAMESAKE, "name": "alice", "state": "idle"}], SENDER)
+        self.assertEqual(self._box(self.NAMESAKE), [])
+        notes = self._box(SENDER)
+        self.assertEqual(len(notes), 1, "the sender hears it, whichever row the listing names last")
+        self.assertIn("UNDELIVERED", notes[0])
+
+    def test_a_sender_renamed_since_is_told(self):
+        self._sweep_with([{"id": SENDER, "name": "alice-old", "state": "idle"}], SENDER)
+        notes = self._box(SENDER)
+        self.assertEqual(len(notes), 1, "the rename does not cost the sender its notice")
+        self.assertIn("the original text", notes[0])
+
+    def test_a_message_with_no_from_id_line_falls_back_to_the_name(self):
+        self._live([{"id": SENDER, "name": "alice", "state": "idle"}])
+        newd = pm.MAILROOT / RECIP / "new"
+        newd.mkdir(parents=True)
+        (newd / "m-old").write_text("From: alice\nDate: now\n\nthe original text\n")
+        self._age(pm.ORPHAN_GRACE + 60)
+        pm._sweep_orphans()
+        self.assertEqual(len(self._box(SENDER)), 1, "header-less mail keeps the name lookup it always had")
+
+    def test_the_stuck_warning_goes_to_the_sender_by_id(self):
+        self._live([{"id": SENDER, "name": "alice-old", "state": "idle"},
+                    {"id": self.NAMESAKE, "name": "alice", "state": "idle"},
+                    {"id": RECIP, "name": "bob", "state": "idle"}])
+        mid = pm.deliver(RECIP, "alice", SENDER, "the original text")
+        self._age(pm.STUCK_GRACE + 60)
+        pm._warn_stuck_mail()
+        self.assertEqual(self._box(self.NAMESAKE), [], "the namesake never sent it")
+        warns = self._box(SENDER)
+        self.assertEqual(len(warns), 1, "the renamed sender is the one warned")
+        self.assertIn("STILL UNDELIVERED", warns[0])
+        self.assertTrue((pm.MAILROOT / RECIP / "new" / mid).exists(), "the stuck message is left for delivery")
+
+
 if __name__ == "__main__":
     unittest.main()

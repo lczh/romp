@@ -7,12 +7,13 @@
 // Rendered/Raw choice. Run FOR REAL over openFileView and openUrlView against a DOM stand-in (a tree, attributes
 // and dataset, bubbling events, a small selector matcher, localStorage, a fetch answering the kernel's headers),
 // plus pins over both sheets and an optional browser leg (headless Chromium through a child driver, skipped where
-// no browser is installed; CI installs none). Synthetic fixtures only.
+// no browser is installed, required in CI: browser-leg.ts). Synthetic fixtures only.
 import { test, type TestContext } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { measuredSkip } from "./browser-leg";
 import { marked } from "marked";   // the browser leg renders a synthetic task list through the real marked for mdBlock's task stamp
 
 const web = (f: string) => fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", f), "utf8");
@@ -889,7 +890,7 @@ function measure(): Rows | null {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
 const m = measure();
-const skip = m ? false : "no Playwright browser here (CI installs none); the layout claims rest on the sheet pins above";
+const skip = measuredSkip("chromium", m ? false : "no Playwright chromium here (its driver could not load playwright or launch the browser; npx playwright install chromium under vscode-extension); the layout claims rest on the sheet pins above");
 const near = (a: number, b: number, what: string) => assert.ok(Math.abs(a - b) < 1, what + ": " + a + " vs " + b);
 
 test("in a browser: the page never widens at 1000 and 420px, at 100% and 150%, in both sheets; prose and code keep the measure (80 of the root's ch, centred, whole pixels) and a table grows evenly out of the column up to the body while a table in a quote or a list item keeps the prose width; the heading ladder and the fence rows measure; at 150% every text size and the measure grow together; narrow, a table scrolls on its own; in print the file alone prints black on white", { skip }, () => {

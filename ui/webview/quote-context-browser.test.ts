@@ -3,8 +3,7 @@
 // real Range selects a few words of it, and what the page posts is read off a recording acquireVsCodeApi: the message
 // box's send (the quote chip seeded by selectionchange, composed by quoteReplyBody) and a comment's create (the key's box,
 // its frame's `context`). A whole sentence selected goes out as it always did. Skips with a stated reason when no
-// playwright browser is installed (CI installs none; md-sanitize-chat-fragment-browser.test.ts is the precedent).
-// Synthetic prose only.
+// playwright browser is installed, and fails with it where CI requires the leg (browser-leg.ts). Synthetic prose only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -12,6 +11,7 @@ import * as path from "node:path";
 import { createRequire } from "node:module";
 import { chatBody, ATTACH_TITLE_WEB } from "../../vscode-extension/src/page-skeleton";
 import { capQuote } from "./quote-context";
+import { launchLeg } from "./browser-leg";
 
 const EXT = process.cwd();                                        // npm test runs in vscode-extension
 const requireCjs = createRequire(path.join(EXT, "package.json"));
@@ -52,10 +52,8 @@ const AROUND = [
 ];
 
 async function inChat(t: any, body: (page: any, errors: string[]) => Promise<void>, events?: object[]): Promise<void> {
-  if (!pw) { t.skip("playwright is not installed under vscode-extension; the browser leg needs it (CI installs no browsers)"); return; }
-  let browser: any;
-  try { browser = await pw.chromium.launch(); }
-  catch (e) { t.skip("no playwright browser on this machine; the browser leg needs one (CI installs none): " + String((e as Error).message).split("\n")[0]); return; }
+  const browser = await launchLeg(t, pw, "chromium");
+  if (!browser) return;
   const errors: string[] = [];
   try {
     const renderJs = requireCjs("esbuild").buildSync({ ...BUILD, entryPoints: [path.join(UI, "render.ts")] }).outputFiles[0].text;
@@ -120,14 +118,14 @@ async function select(page: any, words: string, nth = 0, pick: Pick = {}): Promi
 }
 
 // the selection a real double-click (2) or triple-click (3) on the middle of `words` makes
-async function clickSelect(page: any, words: string, clicks: 2 | 3, label: string, nth = 0): Promise<void> {
+async function clickSelect(page: any, words: string, clicks: 2 | 3, label: string, nth = 0, scope = "#content .turn-assistant .md"): Promise<void> {
   const at = await page.evaluate(([fn, spec]: [string, object]) => {
     const r = (0, eval)(fn)(spec) as Range | null;
     if (!r) return null;
     (r.startContainer.parentElement as HTMLElement).scrollIntoView({ block: "center" });
     const b = Array.from(r.getClientRects()).find((x) => x.width > 0)!;
     return { x: b.left + b.width / 2, y: b.top + b.height / 2 };
-  }, [RANGE_OF, { words, nth, scope: "#content .turn-assistant .md" }] as [string, object]);
+  }, [RANGE_OF, { words, nth, scope }] as [string, object]);
   assert.ok(at, "premise: the reply shows " + JSON.stringify(words));
   await page.mouse.click(at.x, at.y, { clickCount: clicks });
   await chipShows(page, label);
@@ -354,4 +352,134 @@ test("a selection in a code block of 4,000 lines costs work bounded by the selec
     assert.ok(work.whole < 4000, "the whole block, bounded by the cap: " + JSON.stringify(work));
     assert.deepEqual(errors, [], "no page errors");
   }, [{ kind: "assistant", md: BIG, uuid: UUID }]);
+});
+
+
+// ── review of #234 (2026-10-14): a tool group's line and a diff's gutters are chrome too ─────────────────────────────────
+// two tool calls fold into one group line ("▸ Ran a command, edited a file +1 -1"), whose caret and totals went out as
+// "> ▸ +1 -1"; an opened edit's rows went out as "1010a = 1", the line numbers glued to the code (a <pre>'s rows are not
+// style-read, so the gutters' user-select: none was never seen)
+const U = (n: number) => "11111111-2222-4333-8444-" + String(n).padStart(12, "0");
+const GROUPED = [
+  { kind: "assistant", md: "The first reply ends here.", uuid: U(1) },
+  { kind: "tool", name: "Bash", desc: "List the files", input: "ls -la", output: "total 0", isError: false, uuid: U(2) },
+  { kind: "tool", name: "Edit", file: "notes.py", input: "edit", uuid: U(3),
+    diffRows: [{ oldNo: 10, newNo: 10, sign: " ", text: "a = 1" }, { oldNo: 11, newNo: null, sign: "-", text: "b = 2" },
+               { oldNo: null, newNo: 11, sign: "+", text: "b = 3" }] },
+  { kind: "assistant", md: "The second reply starts here. It goes on.", uuid: U(4) },
+];
+
+test("a tool group's caret and totals and a diff's line numbers stay out of a quote; a diff row keeps its sign", { timeout: 90000 }, async (t) => {
+  await inChat(t, async (page, errors) => {
+    const across = { to: "The second reply starts", scope: "#content", label: "The first reply ends here. The second reply starts" };
+    await select(page, "The first reply ends here.", 0, across);
+    assert.equal(await sendWith(page, "Go on."),
+      "Replying to this part of the conversation:\n> The first reply ends here.\n> \n> The second reply starts\n\nGo on.");
+    await select(page, "The first reply ends here.", 0, across);
+    const create = await commentWith(page, "Why?");
+    assert.match(create.exact, /\u25b8 Ran a command, edited a file \+1 -1/, "premise: the range's own text holds the group's line");
+    assert.equal(create.shown, "The first reply ends here.\n\nThe second reply starts");
+    // the group opened and the edit's diff with it
+    await page.locator("#content .toolgroup-line").first().click();
+    await page.locator("#content .tool-fold-toggle", { hasText: "+1 -1" }).click();
+    await page.waitForSelector("#content .diff-fold .diff-row", { state: "visible", timeout: 5000 });
+    await select(page, "a = 1", 0, { to: "b = 3", scope: "#content", label: "a = 1 -b = 2 +b = 3" });
+    assert.equal(await sendWith(page, "Why three?"),
+      "Replying to this part of the conversation:\n>  a = 1\n> -b = 2\n> +b = 3\n\nWhy three?", "a context row opens with a space (review of #239)");
+    await select(page, "The first reply ends here.", 0, { ...across, label: "The first reply ends here. a = 1 -b = 2 +b = 3 The second reply starts" });
+    assert.equal(await sendWith(page, "And all of it?"),
+      "Replying to this part of the conversation:\n> The first reply ends here.\n> \n>  a = 1\n> -b = 2\n> +b = 3\n> \n"
+      + "> The second reply starts\n\nAnd all of it?", "the open group's caret, the rows' heads and the closed fold stay out");
+    assert.deepEqual(errors, [], "no page errors");
+  }, GROUPED);
+});
+
+
+// ── review of #239 (2026-10-14): every diff row in a quote says what it is, wherever the selection starts ───────────────
+// the page marks a row's sign user-select: none, so a drag that starts inside the first row's code, or a triple-click on a
+// row, leaves the sign out of the range: "rate = 0.1 / +    rate = 0.25" read the removed line as unchanged. And a context
+// row had no marker at all, so a context line that begins with "-" read as removed. Every row now opens with its marker
+// ("-", "+", or the unified diff's leading space for context); the hunk header keeps its own "@@" line.
+const DIFFED = [
+  { kind: "assistant", md: "The rate changes below.", uuid: U(11) },
+  { kind: "tool", name: "Edit", file: "notes.txt", input: "edit", uuid: U(12),
+    diffRows: [{ oldNo: null, newNo: null, sign: "@", text: "@@ -10 +10 @@" }, { oldNo: 10, newNo: 10, sign: " ", text: "- keep this item" },
+               { oldNo: 11, newNo: null, sign: "-", text: "    rate = 0.1" }, { oldNo: null, newNo: 11, sign: "+", text: "    rate = 0.25" }] },
+  { kind: "assistant", md: "The rate is set.", uuid: U(13) },
+];
+async function openDiff(page: any): Promise<void> {
+  await page.locator("#content .tool-fold-toggle", { hasText: "+1 -1" }).click();
+  await page.waitForSelector("#content .diff-fold .diff-row", { state: "visible", timeout: 5000 });
+}
+
+test("a diff row keeps its sign when the selection starts inside it: a drag from mid-row, a triple-click", { timeout: 90000 }, async (t) => {
+  await inChat(t, async (page, errors) => {
+    await openDiff(page);
+    const lead = "Replying to this part of the conversation:\n";
+    await select(page, "rate = 0.1", 0, { to: "rate = 0.25", scope: "#content", label: "- rate = 0.1 + rate = 0.25" });
+    assert.equal(await sendWith(page, "Why the change?"), lead + "> -    rate = 0.1\n> +    rate = 0.25\n\nWhy the change?",
+      "the removed row read as unchanged when the drag started after its sign");
+    // from the middle of the row's code: the code before the start is a blank of its width, so the sign stays apart
+    await select(page, "0.1", 0, { to: "rate = 0.25", scope: "#content", label: "- 0.1 + rate = 0.25" });
+    assert.equal(await sendWith(page, "And this?"), lead + "> -           0.1\n> +    rate = 0.25\n\nAnd this?");
+    await clickSelect(page, "rate = 0.25", 3, "+ rate = 0.25", 0, "#content");
+    assert.equal(await sendWith(page, "Why 0.25?"), lead + "> +    rate = 0.25\n\nWhy 0.25?");
+    await clickSelect(page, "rate = 0.1", 3, "- rate = 0.1", 0, "#content");
+    assert.equal(await sendWith(page, "Why drop it?"), lead + "> -    rate = 0.1\n\nWhy drop it?");
+    // a comment's opening message quotes the same lines; the passage it anchors on, the range's own text, has no first sign
+    await select(page, "rate = 0.1", 0, { to: "rate = 0.25", scope: "#content", label: "- rate = 0.1 + rate = 0.25" });
+    const create = await commentWith(page, "Why?");
+    assert.equal(create.exact, "rate = 0.111+    rate = 0.25", "premise: the range's text holds the gutters and the second sign only");
+    assert.equal(create.shown, "-    rate = 0.1\n+    rate = 0.25");
+    assert.deepEqual(errors, [], "no page errors");
+  }, DIFFED);
+});
+
+test("a context row opens with the unified diff's space, so a context line that begins with \"-\" never reads as removed", { timeout: 90000 }, async (t) => {
+  await inChat(t, async (page, errors) => {
+    await openDiff(page);
+    const lead = "Replying to this part of the conversation:\n";
+    await select(page, "- keep this item", 0, { scope: "#content" });
+    assert.equal(await sendWith(page, "Is this kept?"), lead + ">  - keep this item\n\nIs this kept?");
+    // the whole hunk: its header keeps its line numbers (where in the file the change sits), the rows their markers
+    await select(page, "@@ -10 +10 @@", 0, { to: "rate = 0.25", scope: "#content", label: "@@ -10 +10 @@ - keep this item - rate = 0.1 + rate = 0.25" });
+    assert.equal(await sendWith(page, "Looks right?"),
+      lead + "> @@ -10 +10 @@\n>  - keep this item\n> -    rate = 0.1\n> +    rate = 0.25\n\nLooks right?");
+    assert.deepEqual(errors, [], "no page errors");
+  }, DIFFED);
+});
+
+// review of #242 (2026-10-14): the code before a mid-row start was a blank per character, unbounded, so a sentence at
+// column 4,650 of a long added row went out as "> +…" (its blanks alone, cut at the cap) and one at column 1,640 as 1,673
+// characters, nearly all spaces. A short lead keeps its blanks (the double-click "-           0.1" case above); a long one
+// is " …", and the selected text follows it whole
+const LONG_ROWS = [
+  { kind: "assistant", md: "Now the docs edit.", uuid: U(21) },
+  { kind: "tool", name: "Edit", file: "guide.md", input: "edit", uuid: U(22),
+    diffRows: [{ oldNo: null, newNo: null, sign: "@", text: "@@ -3 +3 @@" }, { oldNo: 3, newNo: null, sign: "-", text: "Old paragraph line." },
+               { oldNo: null, newNo: 3, sign: "+", text: Array.from({ length: 60 }, (_, i) => `Clause ${i} names the widget part.`).join(" ") },
+               { oldNo: null, newNo: 4, sign: "+", text: Array.from({ length: 150 }, (_, i) => `Token ${i} marks the gadget field.`).join(" ") }] },
+  { kind: "assistant", md: "The docs edit is in.", uuid: U(23) },
+];
+
+test("a selection far into a long diff row keeps its text and the row's sign, its lead a short mark, never a column of blanks", { timeout: 90000 }, async (t) => {
+  await inChat(t, async (page, errors) => {
+    await page.locator("#content .tool-fold-toggle", { hasText: "+2 -1" }).click();
+    await page.waitForSelector("#content .diff-fold .diff-row", { state: "visible", timeout: 5000 });
+    const lead = "Replying to this part of the conversation:\n";
+    const col = await page.evaluate(() => Array.from(document.querySelectorAll("#content .diff-add .diff-code"))
+      .map((c) => (c.textContent || "").indexOf("Token 140") + (c.textContent || "").indexOf("Clause 50") + 1));
+    assert.deepEqual(col, [1640, 4650], "premise: the sentences start at columns 1,640 and 4,650 of their rows");
+    await select(page, "Token 140 marks the gadget field.", 0, { scope: "#content", label: "+ …Token 140 marks the gadget field." });
+    const sent = await sendWith(page, "Why this one?");
+    assert.equal(sent, lead + "> + …Token 140 marks the gadget field.\n\nWhy this one?", "the selection was lost to the cap");
+    await select(page, "Clause 50 names the widget part.", 0, { scope: "#content", label: "+ …Clause 50 names the widget part." });
+    const mid = await sendWith(page, "And this?");
+    assert.equal(mid, lead + "> + …Clause 50 names the widget part.\n\nAnd this?", "1,673 characters, nearly all spaces");
+    // a comment's opening message: the same line, whose sign and mark the range's own text does not hold
+    await select(page, "Token 140 marks the gadget field.", 0, { scope: "#content", label: "+ …Token 140 marks the gadget field." });
+    const create = await commentWith(page, "Why?");
+    assert.deepEqual([create.exact, create.shown], ["Token 140 marks the gadget field.", "+ …Token 140 marks the gadget field."]);
+    assert.deepEqual(errors, [], "no page errors");
+  }, LONG_ROWS);
 });

@@ -23,6 +23,20 @@ export const INTENT_OPS: ReadonlySet<string> = new Set([
   // the tag unchanged with nothing saying so (review find, 2026-09-08: the mirror never outlives the reload)
   "editTag",
   "reorderTabs", "closeTab",
+  // comment threads. A new comment or a reply clears its box and draft at the press and keeps the words only in
+  // the page's memory, which the reconnect's reload wipes, so one dropped here was lost with nothing saying so
+  // (review find, 2026-10-17). A held frame never reached the kernel, so its replay is the first delivery; a
+  // create also carries its createId, which the kernel answers with the same thread if it ever comes twice.
+  "commentCreate", "commentReply", "commentResolve", "commentDelete", "commentPromote", "commentMerge",
+  // the ✕ or ✎ on a queued message. Dropped, the session still took the message the user withdrew, and after a
+  // ✎ it could take both the old words and the edited resend. It names its copy (qid), so it cancels only that one.
+  "cancelQueued",
+  // other clicks that act on a session, each naming what it acts on (a session, a task, a list of cards)
+  "compactSession", "forkSession", "stopTask", "applyNow", "cancelCreate", "askClearMany",
+  // Left out on purpose: clearAll names no cards, so a replay would clear whatever the kernel holds when the
+  // socket returns, including cards that arrived while this pane could not show them; dropped, the reload shows
+  // every card still there. answerPickerChoice has no consumer (the kernel lists it as a host op and this
+  // extension does not take it), so holding it would deliver nothing.
 ]);
 
 export function intentOp(type: unknown): boolean {

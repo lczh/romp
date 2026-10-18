@@ -79,7 +79,7 @@ test("render.ts: the reshow decision counts a live durable seek for the tab as n
 test("render.ts: the #content scroll listener keeps the active view's saved spot current (passive, no timer)", () => {
   assert.match(RENDER, /import \{ followReader, keepPlaceAcrossShow, followTail, atBottomDist, followBoxBelow, followTailShrink, followReflow, reshowStick, atBottomBeforeGrowth \} from "\.\/scroll-keep";/);   // + followTail (T262: follow only on new content); + atBottomBeforeGrowth; + followReflow (live dividers)
   // …and stands down while a deferred build is pending: the reveal's clamp fires a scroll event before the land
-  assert.match(RENDER, /c\.addEventListener\("scroll", \(\) => \{\n\s*if \(c\.clientHeight <= 0\) return;\n\s*followReader\(activeId \? views\.get\(activeId\) : null, c\.scrollTop, atBottom\(c\), pendingBuildRaf != null\);\n(?:.*\n){0,14}?\s*\}, \{ passive: true \}\);/);   // up to fourteen lines follow the follow rule (two of them the echo's writer and the gesture's gap ask, 2026-10-01) (three of them the settle's gesture-evidence note, T386 round two): the gesture classification, its mark on the view for the edge check (T366), the gesture row and the sh/ch note
+  assert.match(RENDER, /c\.addEventListener\("scroll", \(\) => \{\n\s*if \(c\.clientHeight <= 0\) return;\n\s*followReader\(activeId \? views\.get\(activeId\) : null, c\.scrollTop, atBottom\(c\), pendingBuildRaf != null\);\n(?:.*\n){0,36}?\s*\}, \{ passive: true \}\);/);   // up to thirty-six lines follow (twenty of them a passage landing's follow pause and its box's step-off, 2026-10-15) the follow rule (two of them the echo's writer and the gesture's gap ask, 2026-10-01) (three of them the settle's gesture-evidence note, T386 round two): the gesture classification, its mark on the view for the edge check (T366), the gesture row and the sh/ch note
   // landActive's landing rule itself is unchanged — its INPUT is what the fix repairs
   assert.match(RENDER, /if \(!v\.shown \|\| v\.stick\) writeScroll\(content, content\.scrollHeight, "land-bottom", true\);\n\s*else writeScroll\(content, v\.scrollTop, "land-saved"\);/);   // (T262: every #content write rides writeScroll)
 });
@@ -177,4 +177,14 @@ test("where the reader stood before a box below grew: the footprint added back, 
   assert.equal(atBottomBeforeGrowth(8819, 8371.22, 397, 50.78), true, "a box growing while shown by 50.78 px: a reader whose top line is 50.78 px above the post-growth bottom stood at the pre-growth bottom");
   assert.equal(atBottomBeforeGrowth(8819, 8371.22, 397, 0), false, "…and without the growth added back the same reader reads as scrolled up (the review of PR 1926)");
   assert.equal(atBottomBeforeGrowth(8819, 8422, 397, 50.78), true, "a reader already written to the NEW bottom before the pass reads as at the bottom too: the band has no bound below zero");
+});
+
+test("followReader keeps follow mode off while a landing on a comment's passage holds it, even at the bottom", () => {
+  const v: KeepView = { scrollTop: 0, stick: true, shown: true, followHeld: true };
+  followReader(v, 9400, true);                                          // the landing's own write echo, at the bottom
+  assert.equal(v.stick, false, "held: the appends keep the reader's place");
+  assert.equal(v.scrollTop, 9400, "the saved spot still follows the reader");
+  v.followHeld = false;                                                 // the reader is back at the bottom (render.ts releaseFollow)
+  followReader(v, 9600, true);
+  assert.equal(v.stick, true, "follow mode resumes");
 });

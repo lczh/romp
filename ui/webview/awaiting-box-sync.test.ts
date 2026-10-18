@@ -69,7 +69,7 @@ test("the box's render condition: in-flight content present ⇒ box; absent ⇒ 
   // neither a wait, nor rows, nor tracked tasks. A chip flip Awaiting→Working with agents still in flight
   // keeps the box (its header re-worded); a wait clearing with nothing left hides it in the same frame.
   const body = RENDER.split("function renderBgTasks(")[1].split("\nfunction ")[0];
-  assert.match(body, /if \(!s \|\| !activeId \|\| \(!why && !items\.length && !tasks\.length\)\) \{ host\.style\.display = "none"; host\.classList\.remove\("bg-awaited"\); return; \}/);
+  assert.match(body, /if \(!s \|\| !sid \|\| \(!why && !items\.length && !tasks\.length\)\) \{ host\.style\.display = "none"; host\.classList\.remove\("bg-awaited"\); return; \}/);
   assert.match(body, /host\.style\.display = "";/);
 });
 
