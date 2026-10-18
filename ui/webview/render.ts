@@ -13586,6 +13586,14 @@ function atBottom(c: HTMLElement): boolean {
 function nearBottomForSend(c: HTMLElement): boolean {
   return c.scrollHeight - c.scrollTop - c.clientHeight < 80;
 }
+/** Is the reader FOLLOWING the transcript's tail, read BEFORE a change at its end: the content overflows (with slack below, new
+ *  content writes in place and grows a scrollbar, the user 2026-08-25), the view sits at the true bottom (atBottom), and no passage
+ *  landing holds follow mode off (followHeld). One definition for each writer that keeps a following reader at the bottom across a
+ *  change it makes at the tail: the live append (appendActive) and the host-offline foot coming or going outside it
+ *  (syncHostOfflineFoot). The comment popover's list speaks the same rule (cmtFollowing). */
+function followingTail(content: HTMLElement, v: View | null | undefined): boolean {
+  return content.scrollHeight > content.clientHeight + 2 && atBottom(content) && !v?.followHeld;
+}
 
 // EVERY programmatic write to #content.scrollTop goes through here (T262, the user 2026-09-08, whose view "jumps
 // up slightly on my scroll" on a page whose bundle state nobody could see): a write that moved the view files one
@@ -16601,11 +16609,13 @@ function restoreScrollAnchor(content: HTMLElement, v: View, a: { uuid: string; y
 //
 // A sibling of the view element, never a child: syncView counts v.el's children to track what it has
 // rendered, so a foot node inside it would read as transcript.
-function syncHostOfflineFoot(): void {
+//
+// `keepPlace` false: the caller's own scroll maths run next and keep the reader's place across the foot (appendActive).
+function syncHostOfflineFoot(keepPlace = true): void {
   const content = document.getElementById("content");
   if (!content) return;
   const existing = document.getElementById("host-offline-foot");
-  if (!activeId || !hostIsDown(activeId)) { existing?.remove(); return; }
+  if (!activeId || !hostIsDown(activeId)) { if (existing) footChange(content, keepPlace, () => existing.remove()); return; }
   const host = String(activeId).slice(0, String(activeId).indexOf(":"));
   const text = host + " is disconnected — this is the last romp got from it. Reconnecting.";
   // The swirl after "Reconnecting" spins only while romp is actually trying to reach the host (the user
@@ -16622,7 +16632,6 @@ function syncHostOfflineFoot(): void {
   const dialing = hostIsDialing(activeId);
   const key = text + (dialing ? " |dialing" : "");
   if (existing && existing.dataset.text === key) return;
-  existing?.remove();
   // a slim SESSION notice in the warn severity at the transcript's tail (the audit's row 35 — it was a
   // centred italic line, the one row outside the vocabulary); off the rail, so the prose-column indent
   const foot = el("div", "notice-foot");
@@ -16637,7 +16646,24 @@ function syncHostOfflineFoot(): void {
     if (gistEl) gistEl.after(swirl); else card.querySelector(".notice-head")?.appendChild(swirl);
   }
   foot.appendChild(card);
-  content.appendChild(foot);
+  footChange(content, keepPlace, () => { existing?.remove(); content.appendChild(foot); });
+}
+// The foot coming, going or changing OUTSIDE appendActive (the host dropping mid-read, coming back, a dial starting or ending, a
+// re-show) moves the transcript's end with no write of the pane's: the browser keeps scrollTop, so a reader following the tail was
+// left the foot's height above the bottom, the notice mostly under the pane's edge, and no scroll event re-read the go-to-bottom
+// chip (the review of #308). The append's rule, read before the change: a reader following the tail (followingTail) is written to
+// the new bottom; anyone else keeps their scrollTop, and the clamp of a shorter end is claimed as the page's write ("append-raw"'s
+// shape). The chip re-reads after. Only the view on screen has a place to keep: a tab switch syncs the foot before it shows the
+// entering view, whose landing decides where the reader goes and re-reads the chip itself.
+function footChange(content: HTMLElement, keepPlace: boolean, change: () => void): void {
+  const v = activeId ? views.get(activeId) : null;
+  if (!keepPlace || !v || v.el.style.display === "none" || content.clientHeight <= 0) { change(); return; }
+  const stick = followingTail(content, v);
+  const before = content.scrollTop;
+  change();
+  if (stick) writeScroll(content, content.scrollHeight, "host-foot", true, before);
+  else writeScroll(content, before, "host-foot", false, before);
+  updateJumpBtn();
 }
 
 function appendActive() {
@@ -16651,13 +16677,13 @@ function appendActive() {
   // bottom keeps the existing stick; scrolled-up keeps its never-yank rule.
   // follow mode: the TRUE bottom (T262c), never the send band
   // …and never while a passage landing holds follow mode off (followHeld): the reader keeps their place
-  const stick = content.scrollHeight > content.clientHeight + 2 && atBottom(content) && !v?.followHeld;
+  const stick = followingTail(content, v);
   const before = content.scrollTop;
   const heightBefore = content.scrollHeight;
   const distBefore = heightBefore - before - content.clientHeight;
   const anchor = !stick && v ? captureScrollAnchor(content, v) : null;
   syncView(activeId, stick);
-  syncHostOfflineFoot();                 // before the scroll maths: it changes scrollHeight
+  syncHostOfflineFoot(false);            // before the scroll maths: it changes scrollHeight, and they keep the reader's place across it
   updateStatusline();
   // Follow-mode pins the bottom only when there is something new to follow (T262, the user 2026-09-08): a
   // status-only tail changes no content, and pinning on it snapped a reader wheeling up from the tail of a

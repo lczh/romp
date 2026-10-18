@@ -33,6 +33,8 @@ lines long. Asserted in the browser, each move by the deep-link flash landing on
 A second lab (ServedHostOfflineFoot, two kernels): a session on a checked-in TESTHOST whose link drops shows the
 host-offline foot under its last turn with no other event, and the foot keeps the thread's left gutter, so neither the
 column nor the go-to-bottom chip covers it, at the bottom and a few lines up, on the desktop and the phone, in either theme.
+As the foot comes up, a reader at the bottom stays there with the whole foot in view, a reader scrolled up is not moved, and
+a transcript that fit its pane is not yanked as the foot overflows it, the go-to-bottom chip coming up for it at once.
 With JUMP_SHOTS=<dir> the driver writes the cluster in the dark theme, the light theme and the phone layout (a coarse
 pointer), each also a screen up with the go-to-bottom chip showing (*-up-corner.png), the corner with the question's
 card up (ask-*.png, phone-ask-*.png; ask-long-*.png with the long path), and the foot's corner a few lines up
@@ -719,13 +721,16 @@ class ServedJumpCluster(unittest.TestCase):
 # threads rather than a row inside one. It sits in the go-to-bottom chip's slot at the bottom, and a reader a few lines up has
 # the chip beside it; the foot keeps the thread's left gutter, so neither the chip nor the column above it covers its first
 # letters. The lab is two hermetic kernels: a hub, and a TESTHOST checked in to it (the mobile handshake, no ssh) holding a
-# session long enough to overflow both layouts. Both pages read the remote session while its host answers; then the lab's
-# own TESTHOST kernel is killed by its pid, the hub's health pass reads the host down, and the page's next poll publishes the
-# drop (romp-hosts). Nothing else happens on either page, so the foot coming up at all is the drop's own repaint: before it
-# the foot waited for the next frame or tab switch, and a dropped host sends no frame.
+# session long enough to overflow both layouts, and a short one that fits. The pages read the remote sessions while their host
+# answers; then the lab's own TESTHOST kernel is killed by its pid, the hub's health pass reads the host down, and each page's
+# next poll publishes the drop (romp-hosts). Nothing else happens on any page, so the foot coming up at all is the drop's own
+# repaint (before it the foot waited for the next frame or tab switch, and a dropped host sends no frame), and where the
+# reader stands after it is the page's own write as the foot comes up (the review of #308).
 FOOT_SID = "aaaaaaaa-1111-2222-3333-777777777777"   # "web" on TESTHOST
+FOOT_SHORT_SID = "aaaaaaaa-1111-2222-3333-666666666666"   # "api" on TESTHOST: two exchanges, a transcript that fits the pane
 FOOT_HOST = "TESTHOST"
 FOOT_REMOTE = FOOT_HOST + ":" + FOOT_SID
+FOOT_SHORT_REMOTE = FOOT_HOST + ":" + FOOT_SHORT_SID
 FOOT_N = 40
 
 FOOT_DRIVER = r"""
@@ -738,14 +743,14 @@ let browser;
 try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const out = {};
-const open = async (opts) => {   // the remote session's tab on the hub's page, read to its bottom with the column up
+const open = async (opts, id = cfg.remote) => {   // a remote session's tab on the hub's page (the long one with the column up)
   const ctx = await browser.newContext(opts);
   const p = await ctx.newPage();
   await p.goto(cfg.chat);
-  await p.waitForSelector(`#tabs .tab[data-id="${cfg.remote}"]`, { state: "attached", timeout: 60000 });
-  await p.evaluate((id) => document.querySelector(`#tabs .tab[data-id="${id}"]`).click(), cfg.remote);
+  await p.waitForSelector(`#tabs .tab[data-id="${id}"]`, { state: "attached", timeout: 60000 });
+  await p.evaluate((id) => document.querySelector(`#tabs .tab[data-id="${id}"]`).click(), id);
   await p.waitForSelector("#content .turn-user", { state: "attached", timeout: 60000 });
-  await p.waitForSelector("#jump-cluster:not([hidden])", { timeout: 30000 }).catch(() => {});
+  if (id === cfg.remote) await p.waitForSelector("#jump-cluster:not([hidden])", { timeout: 30000 }).catch(() => {});
   return p;
 };
 const GEO = () => {
@@ -790,13 +795,42 @@ const footStep = async (p, prefix) => {
   await toBottom(p);
   return res;
 };
+// Where the reader stands as the foot comes up (the review of #308): the drop adds the foot at the transcript's end with no
+// append, so the page's own write is all that keeps a reader who follows the tail at the bottom, and all that re-reads the chip.
+const PLACE = () => {
+  const c = document.getElementById("content"), foot = document.getElementById("host-offline-foot"), chip = document.getElementById("jump-bottom");
+  const top = c.getBoundingClientRect().top + c.clientTop, r = foot ? foot.getBoundingClientRect() : null;
+  return { top: c.scrollTop, sh: c.scrollHeight, ch: c.clientHeight, dist: c.scrollHeight - c.scrollTop - c.clientHeight,
+           pane: { t: top, b: top + c.clientHeight }, foot: r ? { t: r.top, b: r.bottom, h: r.height } : null, chip: !!chip && !chip.hidden };
+};
+const settled = (p) => p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 300)))));
+// the short transcript's pane sized to hold it with a little room to spare (cfg.slack px), so it fits until the foot comes up: its
+// height read where it overflows a short pane (scrollHeight is the pane's own height while nothing overflows), then the pane grown
+const fit = async (p) => {
+  await p.setViewportSize({ width: 1000, height: 320 });
+  await settled(p);
+  const m = await p.evaluate(() => { const c = document.getElementById("content"); return { sh: c.scrollHeight, ch: c.clientHeight, vh: window.innerHeight }; });
+  await p.setViewportSize({ width: 1000, height: Math.ceil(m.vh - m.ch + m.sh + cfg.slack) });
+  await settled(p);
+};
 const desk = await open({ viewport: { width: 1000, height: 700 }, deviceScaleFactor: 2 });
 const phone = await open({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
-for (const p of [desk, phone]) await toBottom(p);
+const away = await open({ viewport: { width: 1000, height: 700 }, deviceScaleFactor: 2 });   // a reader scrolled well up
+const fits = await open({ viewport: { width: 1000, height: 700 }, deviceScaleFactor: 2 }, cfg.shortRemote);   // a transcript that fits
+for (const p of [desk, phone, away]) await toBottom(p);
+await away.evaluate((d) => { const c = document.getElementById("content"); c.scrollTop = c.scrollHeight - c.clientHeight - d; }, cfg.away);
+await fit(fits);
+const legs = { desk, phone, away, fits };
+for (const p of Object.values(legs)) await settled(p);
+out.before = {};
+for (const [k, p] of Object.entries(legs)) out.before[k] = await p.evaluate(PLACE);
 out.footWhileUp = await desk.evaluate(() => !!document.getElementById("host-offline-foot"));
 // the link drops: the lab's TESTHOST kernel goes away (its own pid, nothing matched by name), the hub reads the host down
 process.kill(cfg.remotePid, "SIGKILL");
-for (const p of [desk, phone]) await p.waitForSelector("#host-offline-foot", { state: "attached", timeout: 60000 }).catch(() => {});
+for (const p of Object.values(legs)) await p.waitForSelector("#host-offline-foot", { state: "attached", timeout: 60000 }).catch(() => {});
+out.after = {};
+for (const [k, p] of Object.entries(legs)) { await settled(p); out.after[k] = await p.evaluate(PLACE); }
+for (const p of [away, fits]) await p.context().close();
 out.desk = await footStep(desk, "");
 out.phone = await footStep(phone, "phone-");
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
@@ -857,9 +891,15 @@ def _foot_kernel(lab, name, port, token, sessions):
 class ServedHostOfflineFoot(unittest.TestCase):
     """The host-offline foot beside the jump cluster: the foot keeps the thread's left gutter, so neither the column nor the
     go-to-bottom chip under it covers the notice or a word of it, at the bottom and a few lines up, on the desktop and the
-    phone, in the dark theme and the light. It started at the pane's 24px, under the 14..38px chip (14..48 on the phone)."""
+    phone, in the dark theme and the light. It started at the pane's 24px, under the 14..38px chip (14..48 on the phone).
+    And where the reader stands as it comes up (the review of #308): two more desktop pages read as the host drops, one
+    scrolled well up the long session, one on a two-exchange session (api) whose pane is sized to hold it with less room than
+    the foot needs. Before the fix a reader at the bottom was left the foot's height above it, most of the foot under the
+    pane's edge, and the chip stayed down."""
     maxDiff = None
     UP = 16   # how far above the bottom the reader sits for the second measure: off the true bottom, so the chip is up
+    AWAY = 300   # how far above the bottom the scrolled-up reader sits as the host drops: well past the foot's height
+    SLACK = 12   # the room under the short transcript before the drop: less than the foot, so the foot overflows the pane
 
     @classmethod
     def setUpClass(cls):
@@ -885,7 +925,7 @@ class ServedHostOfflineFoot(unittest.TestCase):
         copy_dist(os.path.join(EXT, "dist"), os.path.join(cls.lab, "dist"))
         cls.rport, cls.rtoken = _free_port(), "testtok-foot-remote"
         cls.hport, cls.htoken = _free_port(), "testtok-foot-hub"
-        cls.remote, cls.rlog = _foot_kernel(cls.lab, "testhost", cls.rport, cls.rtoken, [(FOOT_SID, "web", FOOT_N)])
+        cls.remote, cls.rlog = _foot_kernel(cls.lab, "testhost", cls.rport, cls.rtoken, [(FOOT_SID, "web", FOOT_N), (FOOT_SHORT_SID, "api", 2)])
         cls.procs.append(cls.remote)
         hub, cls.hlog = _foot_kernel(cls.lab, "hub", cls.hport, cls.htoken, [])
         cls.procs.append(hub)
@@ -919,10 +959,23 @@ class ServedHostOfflineFoot(unittest.TestCase):
         shutil.rmtree(getattr(cls, "lab", ""), ignore_errors=True)
 
     def _drive(self):
+        """The driver's result, run once for the class: the drop it makes is the lab's one, and every test reads its pages."""
+        cls = type(self)
+        if "_result" not in cls.__dict__:
+            try:
+                cls._result = self._run_driver()
+            except BaseException as e:   # a skip or a failure is every test's, not the first one's alone
+                cls._result = e
+        if isinstance(cls._result, BaseException):
+            raise cls._result
+        return cls._result
+
+    def _run_driver(self):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.hport, self.htoken), "remote": FOOT_REMOTE,
-                       "remotePid": self.remote.pid, "up": self.UP, "shots": os.environ.get("JUMP_SHOTS", "")}, f)
+                       "shortRemote": FOOT_SHORT_REMOTE, "remotePid": self.remote.pid, "up": self.UP, "away": self.AWAY,
+                       "slack": self.SLACK, "shots": os.environ.get("JUMP_SHOTS", "")}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(FOOT_DRIVER)
@@ -963,6 +1016,37 @@ class ServedHostOfflineFoot(unittest.TestCase):
                     self.assertIsNotNone(g["gutter"], g)
                     self.assertLess(abs(g["card"]["l"] - g["gutter"]), 0.5,
                                     "%s: the foot starts at the thread's gutter, where the turns' column does: %r" % (at, g))
+
+    def test_the_foot_coming_up_keeps_the_reader_where_they_were_following(self):
+        """The drop adds the foot outside the append (the review of #308): a reader at the bottom stays there with the whole foot in
+        view, on the desktop and the phone; a reader scrolled well up is not moved a pixel; a transcript that fit the pane is not
+        yanked when the foot overflows it (the append's slack rule), and the go-to-bottom chip comes up for it at once."""
+        r = self._drive()
+        if os.environ.get("JUMP_SHOTS_ONLY") == "1":
+            self.skipTest("optional: JUMP_SHOTS_ONLY wrote the screenshots and ran no assertions")
+        b, a = r["before"], r["after"]
+        for where in ("desk", "phone"):
+            pre, post = b[where], a[where]
+            self.assertLessEqual(pre["dist"], 1, "%s: the reader sat at the bottom before the drop: %r" % (where, pre))
+            self.assertIsNone(pre["foot"], "%s: no foot while the host answered: %r" % (where, pre))
+            self.assertIsNotNone(post["foot"], "%s: the drop brought the foot up: %r" % (where, post))
+            self.assertLessEqual(post["dist"], 1, "%s: the reader is still at the bottom, the foot under the last turn followed: %r" % (where, post))
+            self.assertGreaterEqual(post["foot"]["t"], post["pane"]["t"] - 0.5, "%s: the foot's top is in view: %r" % (where, post))
+            self.assertLessEqual(post["foot"]["b"], post["pane"]["b"] + 0.5, "%s: the whole foot is in view, none of it under the pane's edge: %r" % (where, post))
+            self.assertFalse(post["chip"], "%s: at the bottom, no go-to-bottom chip: %r" % (where, post))
+        pre, post = b["away"], a["away"]
+        self.assertGreater(pre["dist"], self.AWAY - 2, "the scrolled-up reader sat well above the bottom: %r" % pre)
+        self.assertTrue(pre["chip"], "scrolled up, the chip was up: %r" % pre)
+        self.assertIsNotNone(post["foot"], "the drop brought the foot up: %r" % post)
+        self.assertEqual(post["top"], pre["top"], "a reader scrolled up is not moved: %r -> %r" % (pre, post))
+        self.assertTrue(post["chip"], "…and keeps the chip: %r" % post)
+        pre, post = b["fits"], a["fits"]
+        self.assertLessEqual(pre["sh"], pre["ch"] + 2, "the short transcript fit its pane before the drop: %r" % pre)
+        self.assertFalse(pre["chip"], "nothing to go to the bottom of: %r" % pre)
+        self.assertIsNotNone(post["foot"], "the drop brought the foot up: %r" % post)
+        self.assertGreater(post["sh"], post["ch"] + 2, "the foot overflows the pane, so the check means something: %r" % post)
+        self.assertEqual(post["top"], pre["top"], "a transcript that fit is not yanked as the foot first overflows it: %r -> %r" % (pre, post))
+        self.assertTrue(post["chip"], "the foot below the pane's edge, the chip is up at once, with no scroll to re-read it: %r" % post)
 
 
 if __name__ == "__main__":
