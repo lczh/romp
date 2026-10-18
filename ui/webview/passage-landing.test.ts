@@ -106,7 +106,7 @@ test("a landing on a comment's passage pauses follow mode until the reader is ba
   assert.match(fn("appendActive"), /const stick = content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\) && !v\?\.followHeld;/, "the appends keep the reader's place");
   assert.match(fn("liveStatusEl"), /if \(atEnd && !v\.followHeld\) writeScroll/, "and so does the foot line's first room");
   // released by the reader: their gesture at the bottom, a writer of theirs (a key, the chips), their own send from the tail
-  assert.match(RENDER, /if \(\(cls === "gesture" && readerScrolling\) \|\| \(cls === "write-echo" && \(writerIsReader\(lastScrollWriter\) \|\| lastScrollWriter === "optimistic-send"\)\)\) resumeAtBottom\(c\);/);
+  assert.match(RENDER, /const readerMove = \(cls === "gesture" && readerScrolling\) \|\| \(cls === "write-echo" && \(writerIsReader\(lastScrollWriter\) \|\| lastScrollWriter === "optimistic-send"\)\);\s*\n\s*if \(readerMove\) resumeAtBottom\(c\);/);
   assert.match(fn("resumeAtBottom"), /if \(v\?\.followHeld && atBottom\(c\)\) \{ releaseFollow\(\); v\.stick = true; \}/);
   // the reader's gesture is followed to its end (a phone flick's momentum outlasts the input window): started by a gesture with
   // their input behind it, carried until the scroll settles; a landing is never the reader's scroll
@@ -137,11 +137,16 @@ test("a paused view stands in room down to its bottom edge, so a tail that shrin
   // the served lab: the fork control left the last drawn reply a frame before the next reply was drawn, and the browser clamped a
   // paused view at the bottom 26 px a reply (tests/test_comment_passage_reveal_served.py, case 10)
   const floor = fn("holdFloor");
-  assert.match(floor, /const px = Math\.max\(parseFloat\(el\.style\.minHeight\) \|\| 0, Math\.ceil\(h - \(content\.scrollHeight - content\.scrollTop - content\.clientHeight\)\)\) \+ "px";\s*\n\s*if \(el\.style\.minHeight !== px\) el\.style\.minHeight = px;/,
+  assert.match(floor, /const px = Math\.max\(floor, Math\.ceil\(h - \(content\.scrollHeight - content\.scrollTop - content\.clientHeight\)\)\) \+ "px";\s*\n\s*if \(el\.style\.minHeight !== px\) el\.style\.minHeight = px;/,
     "the thread reaches the view's bottom edge, rounded up into atBottom's band, and only grows while the pause holds: a scroll up never lowers it to meet the reader (the review of #279)");
+  assert.match(floor, /let floor = parseFloat\(el\.style\.minHeight\) \|\| 0;\s*\n\s*if \(!reader && floor && v\.floorAt != null\) floor \+= at - v\.floorAt;[^\n]*\n\s*v\.floorAt = at;/,
+    "…except by a move that is not the reader's: the text moved under the view (scroll anchoring as text above it shrank), and the room moves with it (the review of #280)");
+  assert.match(floor, /const at = content\.getBoundingClientRect\(\)\.top \+ content\.clientTop \+ content\.clientHeight - r\.top;/, "measured where the view's bottom edge stands in the thread");
+  assert.match(floor, /v\.floorAt = null;\s*\n\s*if \(!el\.style\.minHeight\) return;/, "a room let go forgets where it stood");
   assert.match(floor, /const before = content\.scrollTop;\s*\n\s*el\.style\.minHeight = "";\s*\n\s*writeScroll\(content, content\.scrollTop, "hold-floor", false, before\);/,
     "let go as a claimed write: a clamp to the shorter end is the page's move, never a gesture");
-  assert.match(RENDER, /if \(gv\?\.followHeld\) holdFloor\(c, gv\);/, "every scroll of the held view moves the room with the reader's place");
+  assert.match(RENDER, /const readerMove = \(cls === "gesture" && readerScrolling\) \|\| \(cls === "write-echo" && \(writerIsReader\(lastScrollWriter\) \|\| lastScrollWriter === "optimistic-send"\)\);\s*\n\s*if \(readerMove\) resumeAtBottom\(c\);\s*\n\s*if \(gv\?\.followHeld\) holdFloor\(c, gv, true, readerMove\);/,
+    "every scroll of the held view moves the room with the reader's place, told whether the move was the reader's");
   assert.match(fn("releaseFollow"), /if \(v\) \{ v\.followHeld = false; v\.heldKeep = null; if \(c\) holdFloor\(c, v\); \}/, "it goes with the pause");
   assert.match(fn("landOn"), /if \(c && v\) holdFloor\(c, v, false\); \}[^\n]*\n\s*if \(!mark\) releaseFollow\(\);[^\n]*\n\s*const land = /, "every landing measures the transcript as it stands, and any other landing lifts the pause");
   assert.match(fn("landOn"), /if \(mark\) \{ const c = document\.getElementById\("content"\); const v = activeId \? views\.get\(activeId\) : null; if \(c && v\) holdFloor\(c, v\); \}/, "a passage landing sets it where it lands");

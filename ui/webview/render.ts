@@ -1688,7 +1688,7 @@ interface Painted { items: DisplayItem[]; sig: (string | undefined)[]; out: (Pai
  *  return or draws it after (the appends keep the place while the pause holds). Nothing written meanwhile puts them back at the
  *  same place, the pause standing until they go back to the bottom themselves (landActive, releaseFollow). */
 interface HeldKeep { anchor: { uuid: string; y: number } | null }
-interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; followHeld?: boolean; heldKeep?: HeldKeep | null; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner). followHeld: follow mode paused by a landing on a comment's passage, at the bottom or not, until the reader goes back to the bottom (landOn, releaseFollow); heldKeep: where a held view was left, for the tab's return (HeldKeep)
+interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; followHeld?: boolean; heldKeep?: HeldKeep | null; floorAt?: number | null; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner). followHeld: follow mode paused by a landing on a comment's passage, at the bottom or not, until the reader goes back to the bottom (landOn, releaseFollow); heldKeep: where a held view was left, for the tab's return (HeldKeep); floorAt: where the view's bottom edge stood in the thread when the room under a held view was last measured (holdFloor)
 const views = new Map<string, View>();
 
 // Pending pickers (AskUserQuestion / tool-permission) keyed by session id. These
@@ -16707,16 +16707,26 @@ function releaseFollow(): void {
  *  atBottom's band. While the pause holds the room only grows: a scroll up leaves it where it was, so the transcript's end stays
  *  below the reader and only their scroll back down to it resumes following (the review of #279: lowered to the view's bottom on
  *  every scroll, the room met a reader who had scrolled 40 px up, the scroll's end read them as at the bottom, following resumed
- *  and the view jumped by the room let go). */
-function holdFloor(content: HTMLElement, v: View, on = !!v.followHeld): void {
+ *  and the view jumped by the room let go). A move that is not the reader's (`reader` false: the browser's scroll anchoring as text
+ *  ABOVE the view shrinks or grows, the page's own compensating writes) carries the room with it: the text moved under the view,
+ *  and the room stays where it was below the view's bottom edge, which is where it stood in the thread (floorAt) moved by as much.
+ *  The review of #280: a room left where it was met a reader 50 px above the end as 300 px left the transcript above them; the
+ *  anchoring kept their passage still, the room stayed 300 px too low, and they could scroll into that much blank space, then
+ *  jump by it as following resumed at its end. */
+function holdFloor(content: HTMLElement, v: View, on = !!v.followHeld, reader = true): void {
   const el = v.el;
   if (on) {
-    const h = el.getBoundingClientRect().height;
+    const r = el.getBoundingClientRect(), h = r.height;
     if (h <= 0 || content.clientHeight <= 0) return;   // a hidden view has no place to hold
-    const px = Math.max(parseFloat(el.style.minHeight) || 0, Math.ceil(h - (content.scrollHeight - content.scrollTop - content.clientHeight))) + "px";
+    const at = content.getBoundingClientRect().top + content.clientTop + content.clientHeight - r.top;   // the view's bottom edge, in the thread
+    let floor = parseFloat(el.style.minHeight) || 0;
+    if (!reader && floor && v.floorAt != null) floor += at - v.floorAt;   // the text moved under the view: the room moves with it
+    v.floorAt = at;
+    const px = Math.max(floor, Math.ceil(h - (content.scrollHeight - content.scrollTop - content.clientHeight))) + "px";
     if (el.style.minHeight !== px) el.style.minHeight = px;
     return;
   }
+  v.floorAt = null;
   if (!el.style.minHeight) return;
   const before = content.scrollTop;
   el.style.minHeight = "";
@@ -17086,8 +17096,9 @@ window.addEventListener("keydown", (e) => {
     // and every gesture-classified scroll after it is theirs until the scroll settles (scrollend) or a landing moves the view.
     // The page's own writes in between (the window sliding under a long flick) do not end it: the momentum runs on through them
     if (cls === "gesture" && gestureEvidence(settleLastInput, Date.now(), settleScrollerHeld)) readerScrolling = true;
-    if ((cls === "gesture" && readerScrolling) || (cls === "write-echo" && (writerIsReader(lastScrollWriter) || lastScrollWriter === "optimistic-send"))) resumeAtBottom(c);
-    if (gv?.followHeld) holdFloor(c, gv);   // the pause stands: the room under the reader follows their place down, never up (holdFloor)
+    const readerMove = (cls === "gesture" && readerScrolling) || (cls === "write-echo" && (writerIsReader(lastScrollWriter) || lastScrollWriter === "optimistic-send"));
+    if (readerMove) resumeAtBottom(c);
+    if (gv?.followHeld) holdFloor(c, gv, true, readerMove);   // the pause stands: the room under the reader follows their place down, never up, and moves with the text a move of nobody's carried (holdFloor)
     // …and while a passage landing settles, ANY move of the view (its re-land, or the browser's own move as the reply under the
     // passage grows) can carry the passage under the box that landing opened: the box steps off it (besideWatch). A reader's
     // own scroll has already ended the settle above, so it never moves the box
