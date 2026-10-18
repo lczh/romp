@@ -103,6 +103,19 @@ IN_SHELL = r"""
 var SHELL_UP=true;window.parent.__rompShellUp=function(){return SHELL_UP;};
 """
 
+# Show/hide cycles during an outage (2026-10-18): each show's dial fails at once (a kernel that is down), and runFor(ms) runs
+# the scheduled redials in time order for `ms`, every dial failing, and returns how many sockets they opened. Both work
+# for the pane shim and the shell: hide/show set the page's visibility and fire visibilitychange.
+CYCLES = r"""
+function setVis(v){document.visibilityState=v;fire("visibilitychange");}
+function cycles(n,name){for(var i=0;i<n;i++){setVis("hidden");NOW+=1000;setVis("visible");var s=sock();if(s.readyState===0)drop();}}
+function runFor(ms,names){var end=NOW+ms,n0=sockets.length;for(var k=0;k<100000;k++){
+var live=timers.filter(function(t){return t.live&&names.indexOf(t.fn.name)>=0;});if(!live.length)break;
+live.sort(function(a,b){return a.at-b.at;});var t=live[0];if(t.at>end)break;t.live=false;if(NOW<t.at)NOW=t.at;var before=sockets.length;t.fn();
+if(sockets.length>before&&sock().readyState===0)drop();}
+return sockets.length-n0;}
+"""
+
 def _node(src):
     node = shutil.which("node")
     if not node:
@@ -287,6 +300,19 @@ out({own:own,backoff:backoff,woke:woke,again:again});""", pre=IN_SHELL)
         self.assertEqual(r["woke"], 1, "the shell's open: it dials now, not at the end of its 2 s wait")
         self.assertEqual(r["again"], 1, "an open pane is not dialed again")
 
+    def test_show_hide_cycles_during_an_outage_keep_one_scheduled_redial_and_the_backoffs_rate(self):
+        # (2026-10-18, the review of #293) each show dialed at once and left the pending redial running, so cycles stacked
+        # timers: five gave 101 dials a minute instead of 24 until the next open. A dial started by any road drops the
+        # scheduled one, so the minute after five cycles dials exactly as the minute after one
+        def run(n):
+            return _pane(CYCLES + r"""
+open();recv({type:"ka"});drop();cycles(%d,"connect");
+out({live:pending("connect").length+pending("probeKernel").length,perMin:runFor(60000,["connect","probeKernel"])});""" % n)
+        one, five = run(1), run(5)
+        self.assertEqual(five["live"], 1, "one scheduled redial, however many shows")
+        self.assertLessEqual(five["perMin"], one["perMin"], "the dial rate is the schedule's (each failed dial backs it off), never the number of shows'")
+        self.assertLess(five["perMin"], 30)
+
     def test_a_kernel_up_message_it_missed_is_caught_by_the_watchdog(self):
         r = _pane(r"""
 open();recv({type:"ka"});SHELL_UP=false;drop();var n0=sockets.length;SHELL_UP=true;tick();
@@ -431,6 +457,16 @@ open();recv({type:"restarting",boot:"B1"});document.visibilityState="hidden";dro
 if(hidden[0]!==null){fireRedial("shellWS");drop();}hidden.push(due("shellWS"));
 out({hidden:hidden});""", pre='navigator.setAppBadge=function(){};window.matchMedia=function(q){return {matches:q.indexOf("standalone")>=0};};\n')
         self.assertEqual(r["hidden"], [1000, None, 2000], "hidden: one slow dial, never the tight probes")
+
+    def test_show_hide_cycles_during_an_outage_keep_one_scheduled_redial_and_the_backoffs_rate(self):
+        def run(n):
+            return _shell(CYCLES + r"""
+open();recv({type:"ka"});drop();cycles(%d,"shellWS");
+out({live:pending("shellWS").length+pending("shellProbe").length,perMin:runFor(60000,["shellWS","shellProbe"])});""" % n)
+        one, five = run(1), run(5)
+        self.assertEqual(five["live"], 1, "one scheduled redial, however many shows")
+        self.assertLessEqual(five["perMin"], one["perMin"], "the dial rate is the schedule's (each failed dial backs it off), never the number of shows'")
+        self.assertLess(five["perMin"], 30)
 
     def test_an_installed_app_shown_with_its_socket_down_dials_at_once(self):
         # (2026-10-18, the review of #292) hidden, an installed app keeps the slow schedule rather than parking, so a return
