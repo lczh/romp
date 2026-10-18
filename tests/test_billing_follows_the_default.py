@@ -554,7 +554,8 @@ class AChangeBackThatKeepsTheRelaunchKeepsThePlaceForASlot(_Unit):
 
     def _a_restart(self, s):
         recorded = s._do_request_reconnect
-        del s._do_request_reconnect                                  # the real arm, for the Restart
+        del s._do_request_reconnect                                  # the real arm of the cut road, which a Restart took
+        #                                                              before it relaunched at once by SIGTERM (relaunch_now)
         s.request_reconnect(cut=True, cause="restart")
         s._do_request_reconnect = recorded
 
@@ -1455,13 +1456,44 @@ class AReasonSetAsideClearsAtALaunchNotAtAnAttach(psr._Harness):
 
 
 class ARestartBesideAWaitingBypassPickRuns(psr._Harness):
-    """A Restart's relaunch at the turn's end takes the ask standing into itself and sets nothing aside: it carries no switch
-    reason, so the waker's last look never cuts it and a change back never withdraws it."""
+    """A Restart relaunches at once (SdkSession.relaunch_now): the CLI is ended with SIGTERM, never sent the interrupt, and
+    the relaunch takes the ask standing into itself and sets nothing aside. It carries no switch reason, so the waker's
+    last look never cuts it, and a change back while it waits for the old CLI to be gone never withdraws it: the fresh CLI
+    comes up with the mode picked by then and the due retry's pick."""
 
     def test_a_change_back_leaves_the_restarts_relaunch_to_run_with_the_due_retrys_pick(self):
+        import asyncio
+        from unittest import mock
         sb.write_reg(self.state, SID, dict(self._reg(), model="opus"))
         be, s = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"},
                               {"attach": False, "cli": CLI_B, "launch": "spec"}])
+        signals, held, gone, interrupts = [], [], threading.Event(), []
+        transport_for = be._host_transport_for
+
+        async def _with_signal(sess, opts, classes):
+            got = await transport_for(sess, opts, classes)
+
+            async def _signal(sig):                                   # the host's signal frame: its CLI is sent `sig`
+                signals.append(sig)
+            sess._host.signal = _signal
+            return got
+        be._host_transport_for = _with_signal
+        real_exit, real_interrupt = psr._Client.__aexit__, psr._Client.interrupt
+
+        async def _exit(client, *a):
+            if signals and client is psr._Client.instances[0]:
+                held.append(client)                                   # the teardown waits for the SIGTERM'd CLI to exit
+                while not (gone.is_set() or s.ended):
+                    await asyncio.sleep(0.01)
+            return await real_exit(client, *a)
+
+        async def _interrupt(client):
+            interrupts.append(client)
+            return await real_interrupt(client)
+        for name, stand_in in (("__aexit__", _exit), ("interrupt", _interrupt)):
+            patch = mock.patch.object(psr._Client, name, stand_in)
+            patch.start()
+            self.addCleanup(patch.stop)
         c1 = self._connect(s, 1)
         s.enqueue("first turn")
         self._wait(lambda: c1.writes == ["first turn"], "the turn fed")
@@ -1476,17 +1508,26 @@ class ARestartBesideAWaitingBypassPickRuns(psr._Harness):
         with open(os.path.join(self.state, sb.RETRY_UPGRADE_STORE), "w") as f:
             f.write("on\n")
         s._upgrade_retry = {"from": "Opus 5", "to": "Sonnet 5", "pick": "opus", "since": 0, "next": 0, "attempts": 0}
-        self.assertEqual(be._relaunch(SID, "restart"), "")
-        self._wait(lambda: s._reconnect_when_idle, "the Restart waits for the turn's end")
-        self._push(c1, psr._result(uuid=self._uid(), subtype="success", is_error=False, num_turns=1, session_id=psr.FSID,
-                                   duration_ms=1, duration_api_ms=1, total_cost_usd=0.01,
-                                   usage={"input_tokens": 1, "output_tokens": 1}, result="ok", parent_tool_use_id=None))
-        self._wait(lambda: len(psr._Client.instances) == 2 or (s._switch_wanted and not s._reconnect
-                                                               and not s._reconnect_when_idle), "the relaunch, or its veto")
+        self.assertEqual(be.relaunch(SID), "")
+        self._wait(lambda: signals == ["TERM"] and held, "the Restart ending CLI A with SIGTERM while its turn runs")
+        self.assertEqual((s._reconnect, s._switch_wanted, s._switch_riders), (True, "", set()),
+                         "the relaunch is armed, the ask standing taken into it and nothing set aside")
         s.set_mode_live = lambda mode, prev="default": None
-        self.assertTrue(be.set_mode(SID, "acceptEdits"))
-        self._wait(lambda: len(psr._Client.instances) == 2 and psr._Client.instances[1] is s.client, "the relaunch onto CLI B")
-        self.assertEqual(psr._Client.instances[1].options.model, "opus", "CLI B runs the pick the retry asks for")
+        self.assertTrue(be.set_mode(SID, "acceptEdits"))             # changed back while the relaunch waits for CLI A to exit
+        armed = s._reconnect
+        self.assertTrue(be.set_mode(SID, "bypassPermissions"))       # and picked again
+        gone.set()
+        self.assertTrue(armed, "a change back during the SIGTERM wait leaves the Restart's relaunch armed")
+        self._wait(lambda: len(psr._Client.instances) == 2 and psr._Client.instances[1] is s.client,
+                   "the Restart's relaunch onto CLI B")
+        c2 = psr._Client.instances[1]
+        self.assertEqual(getattr(c2.options, "model", None), "opus", "CLI B runs the pick the retry asks for")
+        self.assertEqual((c2.options.permission_mode, self.launched[CLI_B["pid"]]["mode"]),
+                         ("bypassPermissions", "bypassPermissions"), "CLI B is launched with the bypass flag")
+        self.assertEqual(interrupts, [], "never the interrupt control request")
+        self._wait(lambda: not s.snapshot().get("modePending"), "the pick applied at CLI B's launch")
+        self._settle()
+        self.assertEqual(len(psr._Client.instances), 2, "one relaunch: nothing asks for another")
 
 
 class EveryReasonSetAsideForARelaunchIsCounted(unittest.TestCase):
@@ -1509,7 +1550,11 @@ class EveryReasonSetAsideForARelaunchIsCounted(unittest.TestCase):
         "SdkSession._re_raise_switch_ask": ("the busy re-check drops the carried reason when another ask stands",),
     }
     EXEMPT = {
-        "SdkSession._on_message": "its turn-end cut relaunch carries no switch reason, so nothing vetoes or withdraws it",
+        "SdkSession._on_message": ("a rewind's relaunch at the turn's end clears the ask standing without setting it aside, "
+                                   "and the fresh CLI it launches serves that ask"),
+        "SdkSession._do_relaunch_now": ("a Restart's or an Apply now's relaunch at once by SIGTERM clears the ask standing "
+                                        "without setting it aside, and the fresh CLI it launches serves that ask, whichever "
+                                        "of the two came first"),
     }
     OTHERS = {
         "SdkSession.__init__": "the ask starts empty",
