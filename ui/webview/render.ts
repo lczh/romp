@@ -76,7 +76,7 @@ import { StagedStack, quoteReplyBody, stagedPosts, type StagedMsg } from "./stag
 import { isSlashCommand } from "./staged-messages";   // the viewer's message bar refuses a slash command (2026-09-30)
 import { quoteContext, codeLineContext, capQuote, QUOTE_CAP, QUOTE_WORDS_MAX } from "./quote-context";   // a few words go out named, with their sentence or code line (2026-10-14); every quote within the cap
 import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, isKernelEchoUuid, newPending, mintQid, reconcilePending, clearBoundarySeen, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody, refusedRestoreText } from "./send-pending";
-import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, mergeTombstones, pendingFromKept, resendable, resendWire, restoreKept,
+import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, mergeTombstones, owesSends, pendingFromKept, resendable, resendWire, restoreKept,
          restoreTombstones, type Tombstone } from "./send-acks";
 import { type FrameWm, frameOlder, droppedLandedHuman, dropsLandedRow, forgetHeldWm } from "./frame-guard";   // the frame watermark guard (2026-09-22): an older build's frame is ignored, a vanished landed turn is filed; a reconnect forgets the held watermarks
 import { type LandEvent, LandingWatch } from "./send-landing";   // the send-landing invariant (2026-09-23): observation only, around the frame dispatch (landingBefore / landingAfter)
@@ -951,6 +951,12 @@ window.addEventListener("romp:hostAcks", (e: Event) => {
   const h = (e as CustomEvent).detail?.host;
   if (typeof h === "string") resendUnacked(h);
 });
+// The pane shim reads this before it parks its redial (kernel.py sendsOwed): a page that owes its own kernel a send keeps
+// dialing while hidden, so the send goes again on the first socket that opens (2026-10-18).
+(window as any).__rompSendsOwed = (): boolean => {
+  const now = Date.now();
+  return owesSends(pendingSent, "", hostOf, now, new Set(withdrawals(now).map((t) => t.qid)));
+};
 window.addEventListener("romp:hostRelayDown", (e: Event) => {
   const h = (e as CustomEvent).detail?.host;
   if (typeof h === "string" && h) markHostPendingLost(h);
