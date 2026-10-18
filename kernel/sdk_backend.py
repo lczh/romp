@@ -14283,6 +14283,8 @@ class SdkBackend:
         self._heal_attempts: dict[str, int] = {}  # sid -> crash-resume attempts since its last COMPLETED turn
         #                                           (bounds _heal_cut_session to one resume per cut; a completed
         #                                           turn resets it, so a crash LOOP can't respawn forever)
+        self._reattach_attempts: dict[str, int] = {}   # sid -> attaches again after a stream lost under a live host, since its
+        #                                           last COMPLETED turn (_reattach_live_host's bound, reset the same way)
         self._drive_marks: dict[str, tuple] = {}  # sid -> (path, pos, ts) of the last idle-queue drive's newest
         #                                           DRIVEN wrapper — the in-memory face of the reg's driveMark
         #                                           (the per-watermark latch; see drive_idle_queue)
@@ -22728,6 +22730,7 @@ class SdkBackend:
             self._land_at_cli_end(sess)   # its CLI ended (a detach's host keeps it): a waiting billing switch lands, before
             #                               anything below starts the session again (the crash heal, the task-death notice);
             #                               a lease that cannot be read lands nothing, its host may still run the old CLI
+        healed = False                    # the crash heal below ran: it starts the session again itself
         if not sess.ended and not sess.detached:
             if sess.inflight > 0 and not sess._interrupted:
                 # ABNORMAL death mid-turn (killed / crashed — not a user interrupt, not a clean
@@ -22736,6 +22739,7 @@ class SdkBackend:
                 # read 'working' and nothing ever resumed them — the silent stall). The trailing
                 # 'working' IS the cut marker; heal by resuming, bounded.
                 self._heal_cut_session(sess)
+                healed = True
             else:
                 # process exited on its own while idle (crash / EOF) — settle state; next send resumes
                 append_state(self.state_dir, sess.sid, "waiting")
@@ -22780,7 +22784,34 @@ class SdkBackend:
                 self._ensure(sess.sid)            # wake it to hear the notice (no-op if the heal respawned)
             except Exception:
                 self._log("bg-task death notice (%s): %s" % (sess.name, traceback.format_exc()))
+        elif died and not sess.ended and not sess.detached and not healed:
+            # the stream to a host that still runs the CLI broke (a host fault, a socket error) and the session did not stand
+            # down: nothing died, so nothing is said, but the notice's wake was this session's only road back to its host. Left
+            # unattached, an idle CLI is ended by the host once its grace runs out (session_host UNATTACHED_GRACE_DEFAULT_S),
+            # its tasks with it, and nobody sees it: the mirror keeps naming tasks that are gone (2026-10-18)
+            self._reattach_live_host(sess)
         self._poke()
+
+    def _reattach_live_host(self, sess: SdkSession) -> None:
+        """Attach a session again to the live host it lost its stream to while its background tasks run there (see
+        _on_session_gone). Bounded like the crash heal, and re-armed by the same event, a completed turn: once per loss, so a
+        host that faults every attach is not attached in a loop. A loss past the bound is said on the problem ring, and the
+        session waits for its next message, which attaches as any send does."""
+        sid = sess.sid
+        with self._lock:
+            tries = self._reattach_attempts.get(sid, 0)
+            self._reattach_attempts[sid] = tries + 1
+        if tries >= 1:
+            self._log("session %s: lost its stream to its session host again before a turn finished, so it is not attached "
+                      "again until its next message; the host stops an idle CLI nobody is attached to, with its background "
+                      "tasks, once its grace runs out" % sess.name, problem=True)
+            return
+        self._log("session %s: its stream to its live session host broke with background tasks running there; attaching "
+                  "again" % sess.name)
+        try:
+            self._ensure(sid)
+        except Exception:
+            self._log("session %s: attaching again to its live session host failed: %s" % (sess.name, traceback.format_exc()))
 
     def _land_at_cli_end(self, sess: SdkSession) -> None:
         """The CLI serving a session ENDED with a billing switch still waiting for its relaunch (a crash, a conserve close, a
@@ -22841,10 +22872,12 @@ class SdkBackend:
 
     def _turn_completed(self, sid: str):
         """A turn's ResultMessage landed — the session is demonstrably able to finish turns again, so
-        re-arm the crash-resume budget (_heal_cut_session's one-resume-per-cut bound), and count the
-        turn end (turn_seq — the event a parked move waits on after the CLI answered `busy`)."""
+        re-arm the crash-resume budget (_heal_cut_session's one-resume-per-cut bound) and the attach-again one
+        (_reattach_live_host's), and count the turn end (turn_seq — the event a parked move waits on after the
+        CLI answered `busy`)."""
         with self._lock:
             self._heal_attempts.pop(sid, None)
+            self._reattach_attempts.pop(sid, None)
             self._turn_seq[sid] = self._turn_seq.get(sid, 0) + 1
 
     def turn_seq(self, sid: str) -> int:

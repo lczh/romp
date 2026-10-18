@@ -5096,9 +5096,11 @@ class BgTaskLifecycle(unittest.TestCase):
     def test_session_gone_while_a_live_host_runs_the_cli_tells_nothing_and_keeps_the_mirror(self):
         # the thread ended but a live host still runs the CLI (an attach that stood down after four initialize timeouts
         # ends it `detached`, not `ended`; a lease that cannot be read counts as a live host): the tasks run on, so no
-        # notice, no wake, and the mirror keeps naming them for the next attach's seed. A detach whose host has gone
-        # (its lease no longer holds) is told as before: the CLI went with its host.
-        for detached, hosted, told in ((True, True, False), (False, True, False), (True, False, True)):
+        # notice, and the mirror keeps naming them for the next attach's seed. A session that did NOT stand down (its
+        # stream to the host broke) is attached again (2026-10-18): the host ends an unattached idle CLI after its grace,
+        # its tasks with it, unseen; a stand-down is never attached automatically. A detach whose host has gone (its lease
+        # no longer holds) is told as before: the CLI went with its host.
+        for detached, hosted, told, woken in ((True, True, False, False), (False, True, False, True), (True, False, True, True)):
             with self.subTest(detached=detached, hosted=hosted):
                 s = self._sess()
                 be = s.backend
@@ -5110,8 +5112,40 @@ class BgTaskLifecycle(unittest.TestCase):
                 be._on_session_gone(s)
                 reg = sb.read_reg(be.state_dir, s.sid)
                 notices = [q for q in (reg.get("queue") or []) if "power watcher" in q]
-                self.assertEqual((len(notices), be._ensured), (1, [s.sid]) if told else (0, []))
+                self.assertEqual(len(notices), 1 if told else 0)
+                self.assertEqual(be._ensured, [s.sid] if woken else [])
                 self.assertEqual([t["desc"] for t in reg["bgTasks"]], [] if told else ["power watcher"])
+
+    def test_a_stream_lost_under_a_live_host_attaches_again_once_until_a_turn_completes(self):
+        # the attach again is bounded the crash heal's way: a second loss before any turn completes (a host that faults
+        # every attach) is said on the problem ring and waits for the next message, never a loop; a completed turn re-arms
+        # it. A loss mid-turn goes to the crash heal, which starts the session itself and spends none of this budget.
+        s = self._sess()
+        be = s.backend
+        be._lease_survives = lambda sid, **_: True
+        be._ensured, logs = [], []
+        be._ensure = lambda sid, on_boot_settled=None: be._ensured.append(sid)
+        be._heal_cut_session = lambda sess: be._ensured.append("heal")
+        be._log = lambda m, problem=None, **_: logs.append((m, bool(problem)))
+
+        def lose(inflight=0):
+            sess = sb.SdkSession(be, {"sid": s.sid, "name": "n", "cwd": "/tmp"})
+            self._feed(sess, "task_started", {"task_id": "b1", "description": "power watcher"})
+            sess.inflight = inflight
+            be._on_session_gone(sess)
+
+        lose(inflight=1)
+        self.assertEqual(be._ensured, ["heal"], "mid-turn: the crash heal starts it")
+        lose()
+        self.assertEqual(be._ensured, ["heal", s.sid], "idle: attached again")
+        lose()
+        self.assertEqual(be._ensured, ["heal", s.sid], "lost again before a turn completed: not attached in a loop")
+        self.assertTrue(any(p and "again before a turn finished" in m for m, p in logs), "and said on the problem ring")
+        be._turn_completed(s.sid)
+        lose()
+        self.assertEqual(be._ensured, ["heal", s.sid, s.sid], "a completed turn re-arms it")
+        self.assertEqual([t["desc"] for t in sb.read_reg(be.state_dir, s.sid)["bgTasks"]], ["power watcher"],
+                         "nothing was said, and the mirror still names the task for the attach's seed")
 
     def test_a_threads_crash_resume_hears_dead_tasks_once_after_the_nudge(self):
         # a comment thread's CLI dies mid-turn with the kernel alive: the crash resume spawns the
