@@ -34,17 +34,39 @@ test("renderLiveAsk keeps the picker last and reveals it when the user is parked
 
 test("#live-ask is no longer a fixed 42vh mini-region — it flows in the scroll", () => {
   assert.doesNotMatch(CSS, /#live-ask \{[^}]*max-height: 42vh/);
-  assert.match(CSS, /#live-ask \{[^}]*padding: 0 24px 6px \d+px; \}/);
+  assert.match(CSS, /#live-ask \{[^}]*padding: 0 24px 6px var\(--thread-gutter\); \}/);
 });
 
 test("#live-ask keeps the thread's left gutter, so the jump cluster floating over it never covers the card", () => {
   // the host sits beside the threads, not inside one, so it reserves the gutter itself (the user 2026-10-18: the card ran to
-  // the pane's edge under the cluster); the gutter is read off .thread, so the two cannot drift apart
-  const gutter = CSS.match(/\.thread \{[^}]*padding: 0 24px 0 (\d+px)/)?.[1];
-  assert.ok(gutter, ".thread declares its gutter");
+  // the pane's edge under the cluster); the gutter is the one token .thread pads with, so the two cannot drift apart
   const host = CSS.match(/#live-ask \{([^}]*)\}/)?.[1] || "";
   assert.match(host, /max-width: var\(--chat-col\); margin: 0 auto;/, "the thread's column");
-  assert.ok(host.includes(`padding: 0 24px 6px ${gutter};`), `the thread's ${gutter} gutter: ${host}`);
+  assert.ok(host.includes("padding: 0 24px 6px var(--thread-gutter);"), `the thread's gutter: ${host}`);
+});
+
+test("every row of the chat column pads with the ONE gutter token, so none drifts off the turns' column and under the cluster", () => {
+  // the review of #306 (2026-10-18): the 56px was copied into four rules and the host-offline foot had none of it. The token is
+  // declared once per theme block (geometry: the same value in both, as --chat-col), and every row reads it
+  const decl = [...CSS.matchAll(/--thread-gutter: ([^;]+);/g)].map((m) => m[1]);
+  assert.deepEqual(decl, ["56px", "56px"], ":root and body.theme-light declare it, and nothing else does");
+  assert.doesNotMatch(CSS, /padding: \S+ 24px \S+ 56px;/, "no row pads with the gutter's value by hand");
+  const rule = (sel: string) => CSS.match(new RegExp("(?:^|\\n)" + sel.replace(/[.#]/g, "\\$&") + " \\{([^}]*)\\}"))?.[1] || "";
+  for (const [sel, pad] of [[".thread", "0 24px 0"], [".statusline", "7px 24px 0"], ["#live-ask", "0 24px 6px"],
+                            ["#live-status", "0 24px 0"], [".notice-foot", "6px 24px 10px"]]) {
+    const r = rule(sel);
+    assert.match(r, /max-width: var\(--chat-col\);\s*margin: 0 auto;/, `${sel} takes the thread's column: ${r}`);
+    assert.ok(r.includes(`padding: ${pad} var(--thread-gutter);`), `${sel} pads with the gutter token: ${r}`);
+  }
+  // the rail's time stamp spans the whole gutter, its right edge 3px past the turn's left edge whatever the gutter
+  assert.match(CSS, /\.time-marker \{[^}]*left: calc\(3px - var\(--thread-gutter\)\); width: var\(--thread-gutter\);/);
+});
+
+test("a long unbroken token in a waiting question wraps inside the card", () => {
+  // the review of #306 (2026-10-18): a path or URL in the question ran past the card's right border and was clipped at the
+  // pane's edge; the options' labels and descriptions already wrapped anywhere (the served lab measures the card)
+  assert.match(CSS, /\.ask-qtext \{[^}]*overflow-wrap: anywhere;/);
+  assert.match(CSS, /\.ask-warn \{[^}]*overflow-wrap: anywhere;/);
 });
 
 test("'Chat about this' is a selectable answer again (only Type-something / Submit are filtered)", () => {

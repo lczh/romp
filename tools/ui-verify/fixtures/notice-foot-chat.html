@@ -1,0 +1,39 @@
+<!-- SYNTHETIC fixture (notes-api demo domain, host TESTHOST): the tail of a session on a linked machine whose link has
+     dropped, read a few lines above the bottom. Under the last turns, the host-offline foot (render.ts syncHostOfflineFoot:
+     #host-offline-foot.notice-foot holding a slim SESSION notice in the warn severity, class for class), a sibling of the
+     thread rather than a row inside one; in the pane's bottom-left corner the jump cluster with its your-messages capsule
+     and, under it, the go-to-bottom chip that is up whenever the reader is off the true bottom (render.ts updateJumpCluster,
+     updateJumpBtn). The chip's slot is beside the foot, so the shot shows whether the chip covers the foot's first letters.
+     Run (dark, then the light theme; then a phone-narrow width):
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/notice-foot-chat.html \
+           --out /tmp/notice-foot/dark.png --size 720x360 \
+           --extra-css 'html,body{height:100%} #content{height:100%;box-sizing:border-box}'
+       ... --body-class "theme-light chat-theme-yatharth" --out /tmp/notice-foot/light.png
+       ... --size 390x520 --out /tmp/notice-foot/narrow-dark.png
+-->
+<div id="content">
+  <div class="thread">
+    <div class="turn turn-user"><div class="user-bubble">Where did the exporter fix land?</div></div>
+    <div class="turn"><span class="dot ring"></span><div class="assistant md"><p>The bounded buffer is in, and the header is written once. The retry cap stays at two minutes.</p></div></div>
+    <div class="turn turn-user"><div class="user-bubble">Do the fixtures cover both headers?</div></div>
+    <div class="turn"><span class="dot ring"></span><div class="assistant md"><p>Yes. The suite runs every fixture under the old header and the new one, and both pass.</p></div></div>
+    <div class="turn turn-user"><div class="user-bubble">Is the exporter fix merged?</div></div>
+    <div class="turn"><span class="dot ring"></span><div class="assistant md"><p>Merged on green. The release goes out behind the flag once the nightly run on the notes-api fixtures passes.</p></div></div>
+    <div class="turn turn-user"><div class="user-bubble">Tell me when the nightly run finishes.</div></div>
+    <div class="turn"><span class="dot ring"></span><div class="assistant md"><p>Will do. It usually takes about forty minutes.</p></div></div>
+  </div>
+  <div class="notice-foot" id="host-offline-foot"><div class="notice notice-nested notice-sev-warn notice-slim"><div class="notice-head"><span class="notice-glyph notice-glyph-api"><svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5.2 2 V5.4 M10.8 2 V5.4"/><path d="M3.4 5.4 H12.6 V7.6 A4.6 4.6 0 0 1 3.4 7.6 Z"/><path d="M8 12.2 V14.4"/></svg></span><span class="notice-src">session</span><span class="notice-gist">TESTHOST is disconnected — this is the last romp got from it. Reconnecting.</span></div></div></div>
+</div>
+<!-- bottom-left: the jump cluster over the chip's slot, and the chip in it (render.ts sets both bottoms from the pane's edge) -->
+<div class="jump-cluster" id="jump-cluster" style="bottom: 8px">
+  <div class="jc-group jc-mine" role="group" aria-label="Your messages">
+    <button type="button" class="jc-btn" aria-label="Your previous message"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 14.5 12 8.5 18 14.5"/></svg></button>
+    <span class="jc-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="5.2" r="2.6"/><path d="M3.2 13.6 C3.2 10.6 5.2 8.9 8 8.9 C10.8 8.9 12.8 10.6 12.8 13.6"/></svg></span>
+    <button type="button" class="jc-btn" aria-label="Your next message" disabled><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"/></svg></button>
+  </div>
+</div>
+<button id="jump-bottom" aria-label="go to bottom" style="bottom: 8px"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"/></svg></button>
+<!-- a few lines above the bottom, where the reader sits while the chip is up -->
+<script>var c = document.getElementById('content');
+function place() { c.scrollTop = c.scrollHeight - c.clientHeight - 16; }
+new ResizeObserver(place).observe(c);   /* again whenever the pane's size settles (the headless window resizes after the parse) */</script>

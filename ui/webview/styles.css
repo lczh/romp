@@ -57,6 +57,11 @@ body.scheme-solarized-dark {
      set a px value (e.g. 980px) to re-cap for prose readability. Shared by the transcript,
      ledger, statusline, composer, and live-ask picker so they stay aligned. */
   --chat-col: 100%;
+  /* The transcript's left gutter (2026-10-18): the rail's time stamps and day label live in it and the jump cluster floats
+     over it, so every row of the chat column reserves it, the threads and each row that sits beside them (the statusline,
+     the question card's host, the Thinking line, the host-offline foot). One value, so no such row drifts off the turns'
+     column and under the cluster. */
+  --thread-gutter: 56px;
   /* the word-button vocabulary (2026-08-28): three boxes + two type sizes, same values in both
      themes — a size is geometry, not a theme choice */
   --btn-pad-sm: 1px 8px; --btn-pad-md: 3px 10px; --btn-pad-lg: 5px 13px;
@@ -271,6 +276,7 @@ body.scheme-solarized-dark {
 body.theme-light {
   --card-border: rgba(0, 0, 0, 0.10);   /* main's T141 hairline, inverted warm for light */
   --chat-col: 100%;
+  --thread-gutter: 56px;   /* geometry, theme-invariant */
   --btn-pad-sm: 1px 8px; --btn-pad-md: 3px 10px; --btn-pad-lg: 5px 13px;   /* geometry, theme-invariant */
   --btn-fs-sm: 0.72em; --btn-fs-md: 0.82em;
   --bg: #F1EAE2;
@@ -1080,7 +1086,7 @@ html:not(.overlay-scrollbars) #content::-webkit-scrollbar-thumb:hover { backgrou
    44px its widest forms ran into the rail dots as turns scrolled past — the whole rail assembly (line,
    dots, stamps, prose) shifts right so the label owns its column and never clamps.
    so the times sit nearer the left margin and the prose column gains width. */
-.thread { max-width: var(--chat-col); margin: 0 auto; padding: 0 24px 0 56px; position: relative; }   /* .rail-band anchors here */
+.thread { max-width: var(--chat-col); margin: 0 auto; padding: 0 24px 0 var(--thread-gutter); position: relative; }   /* .rail-band anchors here */
 /* the transcript "No session open" placeholder (#empty-state). Scoped to its OWN class — a bare
    `.empty` selector here used to bleed `padding: 40px` onto every leaf-row tree spacer (the ledger's
    `ledger-tri empty` + the feed's `ftree-tri empty`, both zero-content spans), blowing them up to
@@ -1429,7 +1435,7 @@ body.chat-theme-yatharth .tab.tab-file.active { background: color-mix(in srgb, v
 #composer-resize:hover::after, #composer-resize.dragging::after { background: var(--accent); width: 52px; }
 body.composer-resizing { cursor: ns-resize; user-select: none; }
 .statusline {
-  max-width: var(--chat-col); margin: 0 auto; padding: 7px 24px 0 56px;   /* left matches .thread's 56px gutter so the controls align with the transcript column */
+  max-width: var(--chat-col); margin: 0 auto; padding: 7px 24px 0 var(--thread-gutter);   /* left: .thread's gutter, so the controls align with the transcript column */
   display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;   /* a narrow pane wraps the controls onto extra rows — every control stays visible (the user 2026-08-10, whose branch/model/mode badges vanished as the pane shrank) */
 }
 /* Signal-style compose ROW (the user 2026-07-30): paperclip · pill input · round send — the layout every
@@ -2167,8 +2173,8 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
    minute/day advanced since the previous timed event. Absolute (no layout shift), bg
    interrupts the rail so it reads as a tick on the timeline. .day adds the date+bold. */
 .time-marker {
-  position: absolute; top: 13px; left: -53px; width: 56px; z-index: 2;
-  text-align: right; white-space: nowrap; line-height: 1;       /* right edge sits ~3px LEFT of the dot (dot is at 6px); the slot is the thread's whole 56px gutter (T406: it was 48px until today's labels needed it; "59 min ago" measures 55.9px), aligned to the dot's row */
+  position: absolute; top: 13px; left: calc(3px - var(--thread-gutter)); width: var(--thread-gutter); z-index: 2;
+  text-align: right; white-space: nowrap; line-height: 1;       /* right edge sits ~3px LEFT of the dot (dot is at 6px); the slot is the thread's whole gutter (T406: it was 48px until today's labels needed it; "59 min ago" measures 55.9px), aligned to the dot's row */
   font-size: 0.72em; font-variant-numeric: tabular-nums; letter-spacing: 0.02em;
   color: var(--dim);
 }
@@ -2704,7 +2710,7 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 .turn-ask { padding-top: 11px; padding-bottom: 11px; }
 .ask-card { border: 1px solid var(--box-border); border-radius: 6px; padding: 9px 13px; background: var(--box-bg); }
 .ask-q + .ask-q { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--box-border); }
-.ask-qtext { font-weight: 600; color: var(--vscode-foreground, #fff); margin-bottom: 5px; }
+.ask-qtext { font-weight: 600; color: var(--vscode-foreground, #fff); margin-bottom: 5px; overflow-wrap: anywhere; }   /* a long path or URL in the question wraps inside the card, as the options' labels do (2026-10-18: it ran past the live card's border and was clipped at the pane's edge) */
 /* Option rows must survive a narrow screen (the user 2026-07-30, on a phone). The old flex row held a
    RIGID label (flex: 0 0 auto): wider than the card, it pushed past the right edge, and the description —
    squeezed to its one-character min width beyond it — wrapped a letter per line: an answered card
@@ -2741,15 +2747,15 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 /* The picker is part of the scrolling transcript (the user 2026-06-27): it's the last child of #content and
    flows at the BOTTOM of the chat, scrolling WITH the history — no fixed region, no separate scrollbar, so a
    tall picker never hides the context above it. The .ask-live card centers itself in the chat column.
-   The host is laid out like a .thread, the same column and the same 56px left gutter, because it sits beside the threads
+   The host is laid out like a .thread, the same column and the same left gutter, because it sits beside the threads
    rather than inside one: without the gutter the card ran to the pane's left edge, and the jump cluster, which floats over
    that gutter in the bottom-left corner, covered the first letters of the question and its options (the user 2026-10-18,
    who found the corner's pills had no room only when a question was waiting). */
-#live-ask { max-width: var(--chat-col); margin: 0 auto; padding: 0 24px 6px 56px; }
+#live-ask { max-width: var(--chat-col); margin: 0 auto; padding: 0 24px 6px var(--thread-gutter); }
 /* the transcript's foot line (2026-10-08): "Thinking · 14s" where the reply will appear. A FIXED height whether or not it
    shows anything, so a stretch starting or ending moves nothing on screen (render.ts liveStatusEl); laid out like a
    thread, the line's text on the turns' text column (.turn padding-left 24px) */
-#live-status { max-width: var(--chat-col); margin: 0 auto; padding: 0 24px 0 56px; height: 18px; position: relative; }
+#live-status { max-width: var(--chat-col); margin: 0 auto; padding: 0 24px 0 var(--thread-gutter); height: 18px; position: relative; }
 .live-thinking { padding-left: 24px; display: flex; align-items: center; gap: 7px; height: 18px; color: var(--dim); font-size: 0.86em; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; }
 .live-thinking.quiet .meta-dots i { animation: none; opacity: 0.35; }   /* silent stream: still dots, never a spinner past what the frames proved */
 .ask-live {
@@ -2822,7 +2828,7 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 .ask-btn-primary:hover { filter: brightness(1.1); }
 /* safeguard: awaiting screen the panel can't read → warn to check the terminal */
 .ask-live-unknown { border-color: var(--st-awaiting-bg); box-shadow: inset 3px 0 0 var(--st-awaiting-bg); }
-.ask-warn { color: var(--fg); font-weight: 600; margin-bottom: 9px; line-height: 1.4; }   /* the needs-you red is the rail + inset bar; the words stay --fg (2026-09-08) */
+.ask-warn { color: var(--fg); font-weight: 600; margin-bottom: 9px; line-height: 1.4; overflow-wrap: anywhere; }   /* the needs-you red is the rail + inset bar; the words stay --fg (2026-09-08) */
 
 .compacting-line { color: var(--st-compacting-bg); font-weight: 600; }   /* the STATUSLINE's compacting caption (not a transcript notice) */
 /* "Opening session" + three staggered pulsing dots (the user 2026-08-05) — the loader idiom's smallest
@@ -3144,8 +3150,11 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 /* the clear boundary's lazy body (loader dots while the cleared conversation is fetched, then the episode) */
 .clear-loading { display: inline-flex; align-items: center; gap: 8px; }
 .clear-truncated { color: var(--dim); padding: 4px 0 6px; }
-/* a notice sitting OUTSIDE the rail (the host-offline foot at the transcript's tail): the prose column's indent */
-.notice-foot { padding: 6px 12px 10px 24px; }
+/* a notice sitting OUTSIDE the rail (the host-offline foot at the transcript's tail), laid out like a .thread: the same column
+   and the same left gutter, because it sits beside the threads rather than inside one. It started at the pane's 24px, and
+   the go-to-bottom chip, whose slot it sits beside, covered its glyph and first letters whenever the reader was a few lines
+   up (2026-10-18, the row #306's author spotted beside the question card's). */
+.notice-foot { max-width: var(--chat-col); margin: 0 auto; padding: 6px 24px 10px var(--thread-gutter); }
 
 /* ── SUBAGENT TRANSCRIPTS (plans/subagent-transcripts.md, 2026-09-05) ──────────────────────────────
    The open-transcript arrow on an Agent head / agent bg row and the viewer header's pin share ONE
