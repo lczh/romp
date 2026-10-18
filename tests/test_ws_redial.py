@@ -97,12 +97,10 @@ return ANSWER?Promise.resolve({ok:true,json:function(){return Promise.resolve(AN
 function settle(){return new Promise(function(r){setImmediate(r);});}
 """
 
-# A pane inside the shell: the parent's read of its socket (SHELL_UP), and the message listener the pane installs, which
-# tell(m, source) drives
+# A pane inside the shell: the parent's read of its socket (SHELL_UP); the shell tells the pane its socket opened by
+# calling the pane's window.__rompKernelUp
 IN_SHELL = r"""
 var SHELL_UP=true;window.parent.__rompShellUp=function(){return SHELL_UP;};
-var winL={};window.addEventListener=function(t,f){(winL[t]=winL[t]||[]).push(f);};
-function tell(m,source){(winL.message||[]).forEach(function(f){f({data:m,source:source});});}
 """
 
 def _node(src):
@@ -233,14 +231,14 @@ out({queued:queued,ticked:n0,dialed:dialed});""")
         r = _pane(r"""
 open();recv({type:"ka"});SHELL_UP=false;drop();var queued=pending("connect").length+pending("probeKernel").length;
 NOW+=600000;tick();var n0=sockets.length;
-tell({romp:"kernelUp"},{});var foreign=sockets.length-n0;
-SHELL_UP=true;tell({romp:"kernelUp"},window.parent);var dialed=sockets.length-n0;
+window.__rompKernelUp();var early=sockets.length-n0;
+SHELL_UP=true;window.__rompKernelUp();window.__rompKernelUp();var dialed=sockets.length-n0;
 open();recv({type:"ka"});drop();var own=due("connect");
-out({queued:queued,ticked:n0,foreign:foreign,dialed:dialed,own:own});""", pre=IN_SHELL)
+out({queued:queued,ticked:n0,early:early,dialed:dialed,own:own});""", pre=IN_SHELL)
         self.assertEqual(r["queued"], 0, "the shell's socket is down: no redial of its own")
         self.assertEqual(r["ticked"], 1, "and the watchdog dials nothing while the shell's socket stays down")
-        self.assertEqual(r["foreign"], 0, "a kernelUp from anything but the parent is ignored")
-        self.assertEqual(r["dialed"], 1, "the shell's open: one dial")
+        self.assertEqual(r["early"], 0, "told while the shell's socket still reads down: nothing")
+        self.assertEqual(r["dialed"], 1, "the shell's open: one dial, however often it is told")
         self.assertEqual(r["own"], 1000, "a drop of this pane alone, with the shell's socket up, redials on its own schedule")
 
     def test_a_kernel_up_message_it_missed_is_caught_by_the_watchdog(self):
@@ -371,10 +369,11 @@ out({queued:queued,ticked:n0,dialed:dialed,again:sockets.length-n0});""")
     def test_its_socket_is_the_pages_probe_read_by_the_panes_and_its_open_told_to_them(self):
         r = _shell(r"""
 var up0=window.__rompShellUp();open();var up1=window.__rompShellUp();drop();
-out({up:[up0,up1,window.__rompShellUp()],posted:posted});""",
-                   pre='var posted=[];document.getElementsByTagName=function(t){return t==="iframe"?[{contentWindow:{postMessage:function(m){posted.push(m);}}}]:[];};\n')
+out({up:[up0,up1,window.__rompShellUp()],told:told});""",
+                   pre='var told=0;document.getElementsByTagName=function(t){return t==="iframe"?[{contentWindow:{__rompKernelUp:function(){told++;}}},'
+                       '{get contentWindow(){throw new Error("cross-origin");}},{contentWindow:{}}]:[];};\n')
         self.assertEqual(r["up"], [False, True, False])
-        self.assertEqual(r["posted"], [{"romp": "kernelUp"}], "the open is posted to every pane")
+        self.assertEqual(r["told"], 1, "the open is told to each same-origin pane; a cross-origin frame or one without the function is skipped")
 
     def test_an_open_socket_silent_past_30_s_is_abandoned_and_redialed_at_once(self):
         r = _shell(r"""

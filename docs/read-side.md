@@ -76,10 +76,11 @@ completed); the feed just paints columns. (Reflected in `docs/judges.md`.)
   (`stopping`), and its pages keep the 1 s schedule. A hidden page dials
   nothing until it is shown, then dials at once, and a pane inside the shell
   whose socket is down waits for the shell's socket, the page's one probe, to
-  open (`{romp: "kernelUp"}`) instead of dialing. A socket the browser holds
-  CLOSING is put down on the watchdog tick after the one that first saw it, a
-  dial the browser refuses outright still schedules the next, and the shell
-  page's own socket keeps all of these rules. After a reconnect the shim
+  open (the shell then calls each pane's `__rompKernelUp`) instead of
+  dialing. A socket the browser holds CLOSING is put down on the watchdog tick
+  after the one that first saw it, a dial the browser refuses outright still
+  schedules the next, and the shell page's own socket keeps all of these
+  rules. After a reconnect the shim
   raises the "what you see may be stale" prompt only on the SECOND `ka` arriving
   before the resync frame — one full heartbeat period, bracketed by two kernel
   heartbeats on that socket with no resync between them (a single `ka` can be a
