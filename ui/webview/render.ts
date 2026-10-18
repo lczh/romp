@@ -25618,10 +25618,14 @@ function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
     // it cuts the stalled turn and marks the thread retry-suppressed, so romp's auto-retry won't relapse.
     // Delegated (not a per-render listener) because the transcript tail rebuilds on every push. Acknowledge
     // at once — disable + relabel — so it never reads as unresponsive while the interrupt is in flight; the
-    // element vanishes on the next push when the storm ends, so no self-restore is needed.
+    // element vanishes on the next push when the storm ends, so no self-restore is needed. The interrupt goes to
+    // the session that OWNS the card (owningSidOf), never simply the active tab: a comment thread's popover draws
+    // the thread's own retrying card through this same renderer, and its stop must cut the THREAD's stalled turn,
+    // not the parent's running one.
     stopRetrying: (el) => {
-      if (!activeId || !vscodeApi) return;
-      vscodeApi.postMessage({ type: "interrupt", id: activeId });
+      const own = owningSidOf(el as HTMLElement);
+      if (!own || !vscodeApi) return;
+      vscodeApi.postMessage({ type: "interrupt", id: own });
       const b = el as HTMLButtonElement;
       b.disabled = true;
       b.textContent = "Stopping…";
