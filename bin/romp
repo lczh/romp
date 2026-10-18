@@ -2212,9 +2212,24 @@ if [[ "${1:-}" =~ ^(--)?(send|interrupt|end)$ ]]; then
         [[ -n "$_tag" ]] || { echo "usage: romp send <session> [--tag <label>] <text>" >&2; exit 2; }
         shift 2
     fi
+    # …and the same for end and interrupt (2026-10-18): `romp end --now web` posted `--now` as the session to end, and
+    # web kept running. end's two flags count wherever they stand (put back behind the name, ahead of the words after
+    # it, so the scan below reads them in the order typed); interrupt takes none, so a flag ahead of its session is a
+    # usage error, never a name.
+    _lead=""
+    while [[ "$_verb" != "send" && "${1:-}" == --* ]]; do
+        if [[ "$_verb" == "end" && ( "$1" == "--now" || "$1" == "--when-idle" ) ]]; then
+            _lead="$_lead $1"; shift
+        else
+            echo "usage: romp $_verb <session>$([[ "$_verb" == end ]] && echo ' [--now|--when-idle]')" >&2; exit 2
+        fi
+    done
     _who="${1:-}"
     if [[ -z "$_who" ]]; then echo "usage: romp $_verb <session> $([[ "$_verb" == send ]] && echo '<text>')" >&2; exit 2; fi
     shift
+    # _lead holds only the fixed flag words above, split on purpose
+    # shellcheck disable=SC2086
+    [[ -n "$_lead" ]] && set -- $_lead "$@"
     # `romp end self [--now]` — a session closing ITSELF after finishing its work (the user
     # 2026-08-15: telling a session "close yourself when done" never worked; an agent could only
     # kill its own process, which read as a crash). `self` resolves through ROMP_SID (spawn-frozen

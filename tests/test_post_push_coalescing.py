@@ -121,7 +121,10 @@ class ControlRouteLatency(unittest.TestCase):
             threading.Thread(target=km._push_all, daemon=True).start()
         km._pusher_wake.clear()
         t0 = time.time()
-        status, _ = self._post("/end", {"name": "nonexistent-session-probe"})
+        # the probe is a session the kernel counts as its own (no backend running it, nothing real to end): a name it
+        # never had is refused before any work since 2026-10-18, and this test times the end's own path
+        with mock.patch.object(km, "_kernel_knows", lambda sid: True):
+            status, _ = self._post("/end", {"name": "nonexistent-session-probe"})
         took = time.time() - t0
         self.assertLess(took, 1.5, "the control route sat behind push work — the wedge shape")
         self.assertEqual(status, 200)
