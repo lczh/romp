@@ -6811,10 +6811,16 @@ let tabStripSig = "";
 // too: a native drag swallows the pointerup, so without this a finished drag would leave the strip
 // frozen against pushes until the next unrelated press (see the dragend handler).
 function releaseTabStrip(): void {
-  if (tabHoldFocusOff) { tabHoldFocusOff(); tabHoldFocusOff = null; }   // first, so any release (a pointerup in this page) takes the watch off
+  tabHoldWatchOff();   // first, so any release (a pointerup in this page) takes the watch off
   if (!tabPointerHeld) return;
   tabPointerHeld = false;
   if (renderPendingWhilePressed) { renderPendingWhilePressed = false; setTimeout(() => renderTabs(), 0); }
+}
+// The hold's focus watch off. Every end of the press calls it: releaseTabStrip, and the tab's dragend, which releases the hold
+// by hand (wireTabDrag). A watch that outlived a drag kept the window's blur listener from arming one for the next press, and
+// once the frame it watched was closed it never ran: a window switch mid-press then released nothing (the review of PR 307).
+function tabHoldWatchOff(): void {
+  if (tabHoldFocusOff) { tabHoldFocusOff(); tabHoldFocusOff = null; }
 }
 
 // A SECTION HEADER for the tab strip (tab groups on tags, the user 2026-09-04). It reads as a LABEL,
@@ -6951,15 +6957,13 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
     hideTabTip();
   });
   // dragend closes the gesture whether it dropped or cancelled: release the click-safe hold the
-  // pointerdown latched (the drag swallowed the pointerup) and flush a push deferred mid-drag
+  // pointerdown latched (the drag swallowed the pointerup). A group's drag ends with no render of its
+  // own, so its release is a pointerup's: the hold and its focus watch off, a push deferred mid-drag flushed a tick later
   head.addEventListener("dragend", () => {
     draggedGroup = null;
     head.classList.remove("dragging");
     document.getElementById("tabs")?.querySelectorAll(".tab-group-head.drop-target").forEach((h) => h.classList.remove("drop-target"));
-    tabPointerHeld = false;
-    const pending = renderPendingWhilePressed;
-    renderPendingWhilePressed = false;
-    if (pending) setTimeout(() => renderTabs(), 0);
+    releaseTabStrip();
   });
   return head;
 }
@@ -7122,12 +7126,14 @@ function wireTabDrag(tab: HTMLElement, id: string): void {
   // released here by hand, covering the whole gesture against pushes (the click-safe rule). A
   // CANCELLED drag re-renders from the untouched order and everything FLIP-animates home — that
   // render also folds in any push that arrived, deferred, mid-drag. A committed drop's reorderTo
-  // already asked for its render; it ran deferred, so flush it.
+  // already asked for its render; it ran deferred, so flush it. By hand, not releaseTabStrip: its
+  // deferred flush would render the cancelled drag's strip a second time, a tick after the FLIP's.
   tab.addEventListener("dragend", () => {
     const cancelled = !tabDragCommitted;
     draggedId = null; draggedEl = null; tabDragCommitted = false;
     tab.classList.remove("dragging");
     clearDragCue();                      // the ring, the leave line and the + badge belong to the gesture, however it ended
+    tabHoldWatchOff();                   // the hold's focus watch goes with the hold (a sibling column took the focus mid-press)
     tabPointerHeld = false;
     const pending = renderPendingWhilePressed;
     renderPendingWhilePressed = false;

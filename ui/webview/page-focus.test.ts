@@ -4,7 +4,7 @@
 // kit's divider drag in tests/test_live_dividers_served.py and the chat strip's press-hold in tests/test_chat_split_served.py.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { pageBlurred, pageFocusWindow, watchPageFocus } from "./page-focus";
+import { pageBlurred, walkPageFocus, watchPageFocus } from "./page-focus";
 
 type Fn = (e: { type: string }) => void;
 class Target {
@@ -17,6 +17,8 @@ class Target {
 class Frame extends Target {
   tagName = "IFRAME";
   constructor(public contentWindow: Win | null) { super(); }
+  /** The DOM's answer: the frame's document, or null for a frame of another origin (whose window's document throws) or none. */
+  get contentDocument(): unknown { try { return this.contentWindow ? this.contentWindow.document : null; } catch { return null; } }
 }
 class Win extends Target {
   top!: Win; active: Target | Frame | null = null; crossOrigin = false;
@@ -51,15 +53,32 @@ class Page {
 }
 const W = (w: Win): Window => w as unknown as Window;
 
-test("pageFocusWindow: the window holding the focus, walked down from the top; null with the page's focus gone or the top unreadable", () => {
+test("walkPageFocus: the one walk, from the top down the frames it can read, with the reason it stopped", () => {
   const p = new Page();
-  assert.equal(pageFocusWindow(W(p.chat)), W(p.shell));
+  // each step by identity: the window's name, and the frame element's ("-" for the top's)
+  const steps = (w: ReturnType<typeof walkPageFocus>) => w.chain.map((s) => (s.win as unknown as Win).name + "@" + (s.frame === null ? "-" : s.frame as unknown === p.fFiles ? "fFiles" : s.frame as unknown === p.fChat ? "fChat" : "?"));
+  let w = walkPageFocus(W(p.chat));
+  assert.deepEqual(steps(w), ["shell@-"], "the shell holds the focus: the top alone");
+  assert.equal(w.element, null, "no active element in the fake shell");
+  assert.equal(w.stop, "leaf");
   p.focus(p.files);
-  assert.equal(pageFocusWindow(W(p.chat)), W(p.files), "read from a sibling frame: the top's chain leads to the frame holding it");
+  w = walkPageFocus(W(p.chat));
+  assert.deepEqual(steps(w), ["shell@-", "files@fFiles"], "read from a sibling frame: the top's chain leads to the frame holding it");
+  assert.equal(w.element, p.fFiles, "the files pane's document has no active element: the frame element holds the keys");
+  assert.equal(w.stop, "leaf");
+  const box = new Target(); p.files.active = box;
+  assert.equal(walkPageFocus(W(p.chat)).element, box, "down to the element inside the frame");
   p.away();
-  assert.equal(pageFocusWindow(W(p.chat)), null, "a window switch: the top reads no focus");
+  assert.deepEqual(steps(walkPageFocus(W(p.chat))), ["shell@-", "files@fFiles"], "the walk reads no hasFocus(): that is holder's policy, on top");
+  p.back();
+  p.files.crossOrigin = true;   // a sandboxed URL-source pane
+  w = walkPageFocus(W(p.chat));
+  assert.deepEqual([steps(w), w.element === (p.fFiles as unknown), w.stop], [["shell@-"], true, "cross-origin"], "a frame of another origin: the walk stops at its element");
+  p.fFiles.contentWindow = null;
+  w = walkPageFocus(W(p.chat));
+  assert.deepEqual([steps(w), w.element === (p.fFiles as unknown), w.stop], [["shell@-"], true, "leaf"], "a frame with no window is the end of the chain, not another origin");
   const q = new Page(); q.shell.crossOrigin = true;
-  assert.equal(pageFocusWindow(W(q.chat)), null, "a cross-origin top (VS Code's webview): nothing to read");
+  assert.deepEqual(walkPageFocus(W(q.chat)), { chain: [], element: null, stop: "unreadable-top" }, "a cross-origin top (VS Code's webview): nothing to read");
 });
 
 test("pageBlurred: a window switch with the focus in this frame runs lost at once and leaves nothing listening", () => {

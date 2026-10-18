@@ -10,32 +10,54 @@
 // of PR 302, in the full Chromium with focus emulation off). A window switch blurs only the window holding the focus, so the
 // watch listens there, and moves with the focus at every blur that leaves the page focused.
 
-/** The window holding the page's keyboard focus, and the frame element it sits in (null for the top). */
-interface Holder { win: Window; frame: HTMLIFrameElement | null }
+/** One window on the way down from the top: the top itself (frame null), or a frame's window and its frame element. */
+export interface FocusStep { win: Window; frame: HTMLIFrameElement | null }
 
-/** Walked down from the top document's active element through same-origin frames. null when the page does not hold the focus,
- *  and when that cannot be told: a top this document cannot read (VS Code's webview sits under a cross-origin top), or the
- *  focus inside a cross-origin frame (a sandboxed URL-source pane), whose window takes no listener of ours. */
-function holder(self: Window): Holder | null {
-  let win: Window;
-  let frame: HTMLIFrameElement | null = null;
-  try { win = self.top || self; if (!win.document.hasFocus()) return null; } catch { return null; }
-  for (;;) {
-    let a: Element | null;
-    try { a = win.document.activeElement; } catch { return null; }
-    if (!a || a.tagName !== "IFRAME") return { win, frame };
-    const f = a as HTMLIFrameElement;
-    let c: Window | null;
-    try { c = f.contentWindow; if (c) void c.document; } catch { return null; }   // a cross-origin frame: its document is not ours to read
-    if (!c) return { win, frame };
-    win = c; frame = f;
-  }
+/** The page's keyboard focus, walked down from the top document (walkPageFocus). */
+export interface FocusWalk {
+  /** The windows read, the top first, each frame's below the one holding its element; empty when the top cannot be read. */
+  chain: FocusStep[];
+  /** The innermost element holding the focus: the last document's active element, or the frame element itself when the walk
+   *  went no further into it (a frame of another origin, a frame with no window, a frame whose document has no active element).
+   *  null with no active element at the top, or the top unreadable. */
+  element: Element | null;
+  /** Why the walk stopped. "unreadable-top": this document cannot read the top (VS Code's webview sits under a cross-origin
+   *  top). "cross-origin": the focus is inside a frame of another origin (a sandboxed URL-source pane), `element` that frame,
+   *  whose window takes no listener of ours and whose document is not ours to read. "leaf": the end of the chain was reached. */
+  stop: "unreadable-top" | "cross-origin" | "leaf";
 }
 
-/** The window holding the keyboard focus of the page `self` is part of (see holder for when it is null). */
-export function pageFocusWindow(self: Window): Window | null {
-  const h = holder(self);
-  return h ? h.win : null;
+/** The one walk of the page's focus: from the top document's active element down through every frame whose document this
+ *  document can read. Each caller puts its own policy on the edges: holder (below) asks the page to hold the focus and calls
+ *  either stop short of a leaf "cannot be told"; window-focus.ts's windowFocusedElement falls back to its own document for an
+ *  unreadable top and answers a frame of another origin with the frame element. A frame's document is read as contentDocument,
+ *  which the DOM answers null for a frame of another origin (where its window's document throws) and for a frame with no window,
+ *  the two told apart by contentWindow. */
+export function walkPageFocus(self: Window): FocusWalk {
+  let win: Window, at: Element | null;
+  try { win = self.top || self; at = win.document.activeElement; }
+  catch { return { chain: [], element: null, stop: "unreadable-top" }; }
+  const chain: FocusStep[] = [{ win, frame: null }];
+  while (at && at.tagName === "IFRAME") {
+    const f = at as HTMLIFrameElement;
+    let inner: Window | null, doc: Document | null;
+    try { inner = f.contentWindow; doc = f.contentDocument; } catch { return { chain, element: f, stop: "cross-origin" }; }
+    if (!doc) return { chain, element: f, stop: inner ? "cross-origin" : "leaf" };
+    chain.push({ win: inner as Window, frame: f });
+    if (!doc.activeElement) return { chain, element: f, stop: "leaf" };
+    at = doc.activeElement;
+  }
+  return { chain, element: at, stop: "leaf" };
+}
+
+/** The window holding the page's keyboard focus, and the frame element it sits in (null for the top). null when the page does
+ *  not hold the focus, and when that cannot be told: a top this document cannot read, or the focus inside a frame of another
+ *  origin, whose window takes no listener of ours. */
+function holder(self: Window): FocusStep | null {
+  const w = walkPageFocus(self);
+  if (w.stop !== "leaf") return null;
+  try { if (!w.chain[0].win.document.hasFocus()) return null; } catch { return null; }
+  return w.chain[w.chain.length - 1];
 }
 
 function follow(self: Window, lost: () => void, atBlur: boolean): () => void {
@@ -50,7 +72,7 @@ function follow(self: Window, lost: () => void, atBlur: boolean): () => void {
     done = true; unhook();
     self.removeEventListener("pagehide", off);
   };
-  const hook = (h: Holder): boolean => {
+  const hook = (h: FocusStep): boolean => {
     try {
       h.win.addEventListener("blur", check);
       if (h.win !== self) h.win.addEventListener("pagehide", away);   // this document's own end is off (below)
@@ -59,7 +81,16 @@ function follow(self: Window, lost: () => void, atBlur: boolean): () => void {
     return true;
   };
   // a blur of the window holding the focus (or the watch's start at a blur): the page lost the focus, or it cannot be told
-  // (lost runs, once, and the watch is off), or the focus moved to another frame of the page (the watch moves with it)
+  // (lost runs, once, and the watch is off), or the focus moved to another frame of the page (the watch moves with it).
+  // THE LIMIT (the review of PR 307, reproduced in the full Chromium): "cannot be told" takes in the focus moving INTO a frame of
+  // another origin, so that ends the gesture as a lost focus. PR 302's rule that a pane focusing itself ends nothing holds for
+  // same-origin panes only: a sandboxed URL-source pane (sandboxed without allow-same-origin, kernel.py's pane frames) focusing
+  // itself by script ends a divider drag by its cancel path (the layout restored, nothing written) and releases the strip's
+  // press-hold. The move itself reads here (the top still has the focus, its active element that frame); what nothing can read is
+  // the rest of the gesture. With the keys in that frame a window switch blurs that frame's window alone, which takes no listener
+  // of ours (a SecurityError), and nothing reaches the top or a same-origin frame: no blur, no focusout, no visibilitychange, only
+  // the top's hasFocus() turning false in silence. No signal then tells a switch from the user still at work in the pane, so going
+  // on would leave a gesture no switch can end; only a timer polling hasFocus() could tell, and this module keys on events only.
   function check(): void {
     if (done) return;
     unhook();

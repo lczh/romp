@@ -45,7 +45,8 @@ driver run walks the whole story in order, each step landing in its own assertio
      emulation off: a press on a tab of column 1's strip, column 2 focusing an element of its page mid-press (a question card
      focusing itself on a push), then a push (a rename): the strip holds its rebuild, the pressed tab stays on the page, and the
      click lands; a window switch mid-press releases the hold (the push's rebuild lands with the button still down), with the
-     focus in column 1 and with it moved to column 2 first.
+     focus in column 1 and with it moved to column 2 first; and a press that became a tab drag, column 2 taking the focus
+     mid-press and closing after the drag, leaves no focus watch behind: the next press is still released by a window switch.
 Skips LOUDLY when the extension deps or a playwright browser are absent (CI installs none). Synthetic only:
 placeholder sids, invented notes-api prompt text, no real session data."""
 import json
@@ -836,8 +837,10 @@ try {
       ws.addEventListener("message", (m) => { if (window.__wsMarker && typeof m.data === "string" && m.data.includes(window.__wsMarker)) window.__wsMarkerSeen = true; });
       return ws; };
     window.WebSocket.prototype = OrigWS.prototype; Object.assign(window.WebSocket, OrigWS);
-    window.__labPressed = null; window.__labBlurs = [];
+    window.__labPressed = null; window.__labBlurs = []; window.__labDrag = { start: 0, end: 0 };
     window.addEventListener("pointerdown", (e) => { window.__labPressed = e.target && e.target.closest ? e.target.closest(".tab") : null; }, true);
+    window.addEventListener("dragstart", () => { window.__labDrag.start++; }, true);
+    window.addEventListener("dragend", () => { window.__labDrag.end++; }, true);
     window.addEventListener("blur", () => { let tf = null; try { tf = top.document.hasFocus(); } catch (e) { tf = "unreadable"; } window.__labBlurs.push({ topHasFocus: tf }); });
   });
   const ph = await ctxH.newPage();
@@ -905,6 +908,43 @@ try {
   out.s13.sibling = await holdLeg("sibling", { sibling: true });
   out.s13.switch = await holdLeg("switch", { switchAway: true });
   out.s13.siblingSwitch = await holdLeg("siblingswitch", { sibling: true, switchAway: true });
+  // the press that becomes a tab drag (the review of PR 307), last since it closes column 2: column 2 takes the focus mid-press,
+  // which arms the strip's watch on column 2's window; the press turns into a native drag, dropped on column 1's content (the
+  // cancel path); then column 2 closes. A watch the drag's end left on would wait at that close for a load that never comes, and
+  // the strip's blur listener, seeing a watch on, would arm none for the next press, so a window switch released nothing
+  out.s13.drag = await (async () => {
+    const r = {};
+    await inCol("f-chat", () => { window.__labDrag = { start: 0, end: 0 }; return 1; });
+    const p = await ptH(cfg.sidT);
+    await ph.mouse.move(p.x, p.y); await ph.mouse.down(); await frameH();
+    r.siblingFocus = await inCol("f-chat-2", probeFocus); await frameH();
+    await ph.mouse.move(p.x + 24, p.y + 6, { steps: 4 });   // past the drag threshold: dragstart in column 1
+    const c1 = await ph.evaluate(() => { const r = document.getElementById("f-chat").getBoundingClientRect(); return { x: r.left + 40, y: r.top + r.height * 0.6 }; });
+    await ph.mouse.move(c1.x, c1.y, { steps: 6 });   // over column 1's content: no strip, no zone of the shell's
+    await ph.mouse.up();
+    await waitH(() => document.getElementById("f-chat").contentWindow.__labDrag.end > 0, null, "step 13: the drag never ended in column 1");
+    r.drag = await inCol("f-chat", () => window.__labDrag);
+    r.focusAtClose = await inCol("f-chat-2", () => document.hasFocus());
+    await ph.evaluate(() => document.querySelector("#chat-pane-2 .col-x").click());
+    await waitH(() => !document.getElementById("f-chat-2"), null, "step 13: column 2 never closed");
+    await waitH(listsH, ["f-chat", cfg.sidB], "step 13: B never came home to column 1");
+    // the next press, a push, a window switch: the switch releases the hold, the push's rebuild landing with the button still down
+    const marker = baseName + "-afterdrag";
+    await inCol("f-chat", (m) => { window.__wsMarker = m; window.__wsMarkerSeen = false; return 1; }, marker);
+    const q = await ptH(cfg.sidT);
+    await ph.mouse.move(q.x, q.y); await ph.mouse.down(); await frameH();
+    r.pressed = await inCol("f-chat", () => ({ tab: window.__labPressed ? window.__labPressed.dataset.id : null, hasFocus: document.hasFocus() }));
+    r.rename = await renameH(cfg.sidR, marker);
+    r.pushed = await ph.waitForFunction(() => document.getElementById("f-chat").contentWindow.__wsMarkerSeen === true, null, { timeout: T }).then(() => true).catch(() => false);
+    await frameH(); await frameH();
+    r.during = { shown: (await labelH(cfg.sidR)) === marker };
+    const away = await ctxH.newPage(); await away.bringToFront();
+    r.switched = { shown: await ph.waitForFunction(([m]) => Array.from(document.getElementById("f-chat").contentDocument.querySelectorAll("#tabs .tab-label")).some((l) => l.textContent.trim() === m), [marker], { timeout: 5000 }).then(() => true).catch(() => false) };
+    await away.close(); await frontH();
+    await ph.mouse.up(); await frameH();
+    r.renameBack = await renameH(cfg.sidR, baseName);
+    return r;
+  })();
   await ctxH.close();
 } catch (e) { out.s13.error = String((e && e.stack) || e).slice(0, 1500); }
 if (browserH) await browserH.close().catch(() => {});
@@ -1374,6 +1414,21 @@ class ServedChatSplit(unittest.TestCase):
         self.assertEqual(c["siblingFocus"], {"active": True, "hasFocus": True}, "column 2's element took the focus mid-press: %r" % c)
         self.assertEqual((c["blurs1"], c["blurs2"]), ([{"topHasFocus": True}], [{"topHasFocus": False}]),
                          "column 1's window blurred at the focus move, the page still focused; the switch blurred column 2's only: %r" % c)
+
+    def test_13c_a_press_that_became_a_tab_drag_leaves_no_focus_watch_behind_for_the_next_press(self):
+        """A press turned into a native tab drag ends at dragend, which releases the hold by hand (the drag swallowed the
+        pointerup). It must take the hold's focus watch off too (the review of PR 307): armed on column 2's window when column 2
+        took the focus mid-press, a watch left on waits, once column 2 closes, for a load that never comes, and the strip's blur
+        listener, seeing a watch on, arms none for the next press, so a window switch mid-press released nothing."""
+        c = self._s13()["drag"]
+        self.assertEqual(c["siblingFocus"], {"active": True, "hasFocus": True}, "column 2's element took the focus mid-press: %r" % c)
+        self.assertEqual(c["drag"], {"start": 1, "end": 1}, "the press became one native drag in column 1, and it ended: %r" % c)
+        self.assertTrue(c["focusAtClose"], "column 2 held the focus when it closed: %r" % c)
+        self.assertEqual(c["pressed"], {"tab": SID_T, "hasFocus": True}, "the next press is on the tab, column 1 holding the focus: %r" % c)
+        self.assertEqual(c["rename"], 200)
+        self.assertTrue(c["pushed"], "the push reached column 1 mid-press: %r" % c)
+        self.assertFalse(c["during"]["shown"], "the strip held its rebuild through the push, before the switch: %r" % c)
+        self.assertTrue(c["switched"]["shown"], "the window switch released the hold, the button still down: the held rebuild landed: %r" % c)
 
     def test_per_tab_hot_keys_switch_to_the_column_holding_the_session_and_the_split_cycles(self):
         # the user 2026-09-10: a hot key per tab (set from its menu; the keycap on the tab is the T379 widget, reading the same
