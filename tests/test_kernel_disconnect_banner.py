@@ -42,9 +42,10 @@ class DisconnectBanner(unittest.TestCase):
         # (test_ws_redial.py runs the schedule)
         self.assertIn("var inWin=Date.now()-foregroundedAt<STALE_MS,eager=false,fast=false;", js)
         self.assertIn("if(inWin){eager=eagerDial;eagerDial=false;fast=true;}", js)   # the FIRST close after a foreground redials now; every further one in the window backs off from 250 ms
-        self.assertIn("if(restartAnnounced)fast=true;", js)   # until the reconnect spends the latch (2026-10-18)
-        self.assertIn("var d=eager?0:nextRedial(fast);redialAt=Date.now()+d;", js)
-        self.assertIn("setTimeout(connect,d);", js)
+        # since 2026-10-18 the timed road is scheduleRedial: parked on an event while the page is hidden or the shell's
+        # socket is down, and an announced restart's tight steps are /version probes (test_ws_redial.py runs it)
+        self.assertIn("scheduleRedial(eager,fast);};", js)
+        self.assertIn("var d=eager?0:nextRedial(fast||probe);redialAt=Date.now()+d;setTimeout(probe?probeKernel:connect,d);}", js)
         self.assertIn("ws.onerror=function(){try{ws.close();}catch(e){}};", js)
         # a RECONNECT no longer silently reloads (the user 2026-07-05): it PROMPTS via raiseStale, and the fresh
         # socket resyncs live. The old auto-reload-on-reopen is gone.
@@ -195,20 +196,21 @@ process.stdout.write(JSON.stringify({
         # starts a closing handshake a dead far side never answers, and the browser holds CLOSING ~60s
         # before onclose — the audited phone panes came back 64s after their own watchdog-close. The bound is
         # PROVISIONAL_MS while a resumed keep awaits its confirming frame, STALE_MS otherwise (review find, 2026-09-08).
-        self.assertIn('if(ws.readyState===1){var bound=resumeProvisional?PROVISIONAL_MS:STALE_MS;if(everConnected&&Date.now()-lastRecv>bound){staleDiag("watchdog-close","quiet");abandon();connect();}return;}', js)
+        self.assertIn('if(ws.readyState===1){var bound=resumeProvisional?PROVISIONAL_MS:STALE_MS;if(everConnected&&Date.now()-lastRecv>bound){staleDiag("watchdog-close","quiet");abandon();redialNow();}return;}', js)
         self.assertIn("function abandon(){var d=ws;if(!d)return;d.onopen=d.onmessage=d.onclose=d.onerror=null;try{d.close();}catch(e){}ws=null;", js)
         self.assertIn('netState("down");try{window.dispatchEvent(new Event("romp:wsdown"));}catch(e){}}', js,
                       "the abandoned socket's onclose is disowned, so abandon() itself does what onclose did (banner + close rule + loader)")
         self.assertIn("if(ws.readyState===0&&Date.now()-connT>15000){try{ws.close();}catch(e){}return;}", js)
         # a lost redial timer is judged against the redial's due time (redialAt), so a backed-off redial is not cut
         # short, and a missing socket (a dial the constructor refused) counts as CLOSED (2026-10-15)
-        self.assertIn("setInterval(function(){beaconTick();if(!ws||ws.readyState===3){if(Date.now()-Math.max(connT,redialAt)>8000)connect();return;}", js)
+        self.assertIn("setInterval(function(){beaconTick();if(!ws||ws.readyState===3){if(waitVis||waitShell){redialNow();return;}"
+                      "if(!probeBusy&&Date.now()-Math.max(connT,redialAt)>8000)connect();return;}", js)
         # a socket held CLOSING is abandoned on the tick after the one that first saw it (2026-10-15)
         self.assertIn("if(ws.readyState===2){if(!closingT)closingT=Date.now();else if(Date.now()-closingT>=CLOSING_MS){", js)
         # the foregrounding fast-path abandons an OPEN-but-quiet socket, or one held CLOSING, and redials it NOW
         # (same 60s CLOSING stall otherwise), aborts a stuck CONNECTING one, and re-dials a closed one
         self.assertIn("if(ws&&(ws.readyState===1||ws.readyState===2))abandon();else{try{if(ws&&ws.readyState===0)ws.close();}catch(e){}}", js)
-        self.assertIn("if(!ws||ws.readyState===3)connect();", js)
+        self.assertIn("if(!ws||ws.readyState===3)redialNow();", js)
 
     def test_error_popover_has_no_reload_button(self):
         # the popover briefly inherited the old offline banner's Reload button; the user called it

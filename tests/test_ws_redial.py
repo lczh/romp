@@ -89,6 +89,22 @@ function diagStamp(m){return m;}function wid(){return "w1";}function reveal(){}
 """
 
 
+# An announced restart's probe (2026-10-18): window.fetch answers /version with ANSWER (null = the kernel is down, the
+# request fails), and settle() lets the promise chain run before the scenario reads the timers.
+PROBE = r"""
+var probes=[],ANSWER=null;window.fetch=function(u){if(u!=="/version")return Promise.reject(new Error("not a probe"));probes.push(u);
+return ANSWER?Promise.resolve({ok:true,json:function(){return Promise.resolve(ANSWER);}}):Promise.reject(new Error("down"));};
+function settle(){return new Promise(function(r){setImmediate(r);});}
+"""
+
+# A pane inside the shell: the parent's read of its socket (SHELL_UP), and the message listener the pane installs, which
+# tell(m, source) drives
+IN_SHELL = r"""
+var SHELL_UP=true;window.parent.__rompShellUp=function(){return SHELL_UP;};
+var winL={};window.addEventListener=function(t,f){(winL[t]=winL[t]||[]).push(f);};
+function tell(m,source){(winL.message||[]).forEach(function(f){f({data:m,source:source});});}
+"""
+
 def _node(src):
     node = shutil.which("node")
     if not node:
@@ -143,20 +159,43 @@ out({second:second,afterSilentOpen:afterSilentOpen,afterFrame:afterFrame});""")
         self.assertEqual(r["afterSilentOpen"], 4000, "a socket that opened and heard nothing is no evidence the kernel is back")
         self.assertEqual(r["afterFrame"], 1000, "a socket that opened and received starts the schedule over")
 
-    def test_an_announced_restart_backs_off_from_250_ms_to_2_s_until_the_kernel_answers_however_long_it_takes(self):
-        # the announcement is the event and the kernel answering again (a socket opening on it) ends it, not a 30 s
-        # window: a restart that ran past 30 s used to fall back to the unannounced schedule and reconnect up to 30 s
-        # after the kernel was back (2026-10-18). The first unannounced drop after the reconnect starts at its 1 s floor.
+    def test_an_announced_restart_probes_on_the_tight_schedule_until_a_new_kernel_answers_and_a_refusal_after_backs_off(self):
+        # (2026-10-18) each tight step is a /version probe, not a dial: the dying kernel's own boot answering (it is still
+        # draining) is not the restart's end, a NEW boot is. The dial that follows is the only one, and its refusal (a token
+        # minted anew across the restart: a 403 the browser reports as a bare close) goes on the ordinary schedule, never
+        # back to the tight one
+        r = _pane(PROBE + r"""
+(async function(){
+open();recv({type:"ka"});recv({type:"restarting",boot:"B1"});drop();var n0=sockets.length;var ds=[due("probeKernel")];
+for(var i=0;i<4;i++){fireRedial("probeKernel");await settle();ds.push(due("probeKernel"));}
+NOW+=120000;ANSWER={boot:"B1"};fireRedial("probeKernel");await settle();var same=due("probeKernel");var whileDown=sockets.length-n0;
+ANSWER={boot:"B2"};fireRedial("probeKernel");await settle();var dialed=sockets.length-n0;
+drop();var refused=[due("connect"),due("probeKernel")];fireRedial("connect");drop();refused.push(due("connect"));
+out({ds:ds,same:same,whileDown:whileDown,dialed:dialed,refused:refused,probes:probes.length});})();""")
+        self.assertEqual(r["ds"], [250, 500, 1000, 2000, 2000], "an announced death keeps a tight schedule, doubling to 2 s")
+        self.assertEqual(r["same"], 2000, "two minutes in, the dying kernel's own boot answering: still the tight one")
+        self.assertEqual(r["whileDown"], 0, "no socket was dialed while no new kernel answered")
+        self.assertEqual(r["probes"], 6)
+        self.assertEqual(r["dialed"], 1, "a new boot answered: one dial")
+        self.assertEqual(r["refused"], [1000, None, 2000], "its refusal is not a restart: dials on the ordinary schedule")
+
+    def test_a_restart_no_kernel_answers_falls_back_to_the_ordinary_schedule_after_its_bound(self):
+        # no event says a restart will never finish, so the count of unanswered tight steps bounds it (without fetch the
+        # dial is the probe, counted the same)
         r = _pane(r"""
-open();recv({type:"ka"});recv({type:"restarting"});var annT=NOW;drop();var ds=[due("connect")];
-for(var i=0;i<4;i++){fireRedial("connect");drop();ds.push(due("connect"));}
-fireRedial("connect");NOW=annT+120000;drop();var late=[due("connect")];fireRedial("connect");drop();late.push(due("connect"));
-fireRedial("connect");open();recv({type:"ka"});drop();var after=[due("connect")];fireRedial("connect");drop();after.push(due("connect"));
-out({ds:ds,late:late,after:after});""")
-        self.assertEqual(r["ds"], [250, 500, 1000, 2000, 2000], "an announced death keeps a tight redial, doubling to 2 s")
-        self.assertEqual(r["late"], [2000, 2000], "two minutes into the restart the redial is still the tight one")
-        self.assertEqual(r["after"], [1000, 2000],
-                         "the reconnect spent the announcement: the next drop goes on the unannounced schedule from its 1 s")
+open();recv({type:"ka"});recv({type:"restarting",boot:"B1"});drop();var first=due("probeKernel");
+for(var i=0;i<60;i++){fireRedial("probeKernel");drop();}
+out({first:first,after:[due("probeKernel"),due("connect")],max:RESTART_STEPS_MAX});""")
+        self.assertEqual(r["first"], 250)
+        self.assertEqual(r["max"], 60)
+        self.assertEqual(r["after"], [None, 1000], "60 unanswered steps: the ordinary schedule from its 1 s floor")
+
+    def test_a_stop_announced_as_one_keeps_the_ordinary_schedule(self):
+        r = _pane(r"""
+open();recv({type:"ka"});recv({type:"restarting",boot:"B1",stopping:true});drop();
+out({d:[due("connect"),due("probeKernel")],latched:restartAnnounced>0});""")
+        self.assertEqual(r["d"], [1000, None], "a stopped kernel is not coming back to answer a tight redial")
+        self.assertFalse(r["latched"])
 
     def test_a_return_to_the_tab_redials_the_first_close_now_and_backs_off_the_rest_from_250_ms(self):
         r = _pane(r"""
@@ -175,6 +214,40 @@ out({wait:wait,n0:n0,at9:at9,lost:lost});""")
         self.assertEqual(r["wait"], 16000)
         self.assertEqual(r["at9"], r["n0"], "9 s into a 16 s wait the watchdog leaves the scheduled redial alone")
         self.assertEqual(r["lost"], r["n0"] + 1, "8 s past the redial's due time with no dial, the timer was lost: the watchdog dials")
+
+
+class PaneWhoDials(unittest.TestCase):
+    """(2026-10-18) A hidden page dials nothing until it is shown, and a pane inside the shell whose socket is down waits
+    for the shell's socket, the page's one probe, instead of dialing on its own."""
+
+    def test_a_hidden_page_dials_nothing_until_it_is_shown_then_dials_once(self):
+        r = _pane(r"""
+open();recv({type:"ka"});hide();drop();var queued=pending("connect").length+pending("probeKernel").length;
+NOW+=600000;tick();tick();var n0=sockets.length;show();var dialed=sockets.length-n0;
+out({queued:queued,ticked:n0,dialed:dialed});""")
+        self.assertEqual(r["queued"], 0, "no redial is scheduled while hidden")
+        self.assertEqual(r["ticked"], 1, "and the watchdog dials nothing for it")
+        self.assertEqual(r["dialed"], 1, "shown: one dial, at once")
+
+    def test_a_pane_waits_for_the_shells_socket_and_dials_once_when_it_opens(self):
+        r = _pane(r"""
+open();recv({type:"ka"});SHELL_UP=false;drop();var queued=pending("connect").length+pending("probeKernel").length;
+NOW+=600000;tick();var n0=sockets.length;
+tell({romp:"kernelUp"},{});var foreign=sockets.length-n0;
+SHELL_UP=true;tell({romp:"kernelUp"},window.parent);var dialed=sockets.length-n0;
+open();recv({type:"ka"});drop();var own=due("connect");
+out({queued:queued,ticked:n0,foreign:foreign,dialed:dialed,own:own});""", pre=IN_SHELL)
+        self.assertEqual(r["queued"], 0, "the shell's socket is down: no redial of its own")
+        self.assertEqual(r["ticked"], 1, "and the watchdog dials nothing while the shell's socket stays down")
+        self.assertEqual(r["foreign"], 0, "a kernelUp from anything but the parent is ignored")
+        self.assertEqual(r["dialed"], 1, "the shell's open: one dial")
+        self.assertEqual(r["own"], 1000, "a drop of this pane alone, with the shell's socket up, redials on its own schedule")
+
+    def test_a_kernel_up_message_it_missed_is_caught_by_the_watchdog(self):
+        r = _pane(r"""
+open();recv({type:"ka"});SHELL_UP=false;drop();var n0=sockets.length;SHELL_UP=true;tick();
+out({dialed:sockets.length-n0});""", pre=IN_SHELL)
+        self.assertEqual(r["dialed"], 1, "the next tick reads the shell's socket up and dials")
 
 
 class PaneClosingAndRefusedDials(unittest.TestCase):
@@ -265,16 +338,43 @@ out({ds:ds,reset:reset,lo:lo,lost:lostCalls});""")
         self.assertEqual(r["lo"], 800, "spread at random, a fifth either way")
         self.assertEqual(r["lost"], 9, "every close tells the API health detail before the redial")
 
-    def test_an_announced_restart_redials_from_250_ms_doubling_to_2_s_until_the_kernel_answers(self):
-        r = _shell(r"""
-open();recv({type:"restarting"});var annT=NOW;drop();var ds=[due("shellWS")];
-for(var i=0;i<4;i++){fireRedial("shellWS");drop();ds.push(due("shellWS"));}
-fireRedial("shellWS");NOW=annT+120000;drop();var late=due("shellWS");
-fireRedial("shellWS");open();recv({type:"ka"});drop();var after=due("shellWS");
-out({ds:ds,late:late,after:after});""")
+    def test_an_announced_restart_probes_on_the_tight_schedule_until_a_new_kernel_answers_and_a_refusal_after_backs_off(self):
+        r = _shell(PROBE + r"""
+(async function(){
+open();recv({type:"restarting",boot:"B1"});drop();var n0=sockets.length;var ds=[due("shellProbe")];
+for(var i=0;i<4;i++){fireRedial("shellProbe");await settle();ds.push(due("shellProbe"));}
+NOW+=120000;fireRedial("shellProbe");await settle();var late=due("shellProbe");var whileDown=sockets.length-n0;
+ANSWER={boot:"B2"};fireRedial("shellProbe");await settle();var dialed=sockets.length-n0;
+drop();var refused=[due("shellWS"),due("shellProbe")];
+out({ds:ds,late:late,whileDown:whileDown,dialed:dialed,refused:refused});})();""")
         self.assertEqual(r["ds"], [250, 500, 1000, 2000, 2000])
-        self.assertEqual(r["late"], 2000, "two minutes into the restart the redial is still the tight one")
-        self.assertEqual(r["after"], 1000, "the reconnect spent the announcement: the next drop starts the unannounced schedule at its floor")
+        self.assertEqual(r["late"], 2000, "two minutes into the restart the step is still the tight one")
+        self.assertEqual(r["whileDown"], 0)
+        self.assertEqual(r["dialed"], 1)
+        self.assertEqual(r["refused"], [1000, None], "a refusal after a new kernel answered dials on the ordinary schedule")
+
+    def test_a_stop_announced_as_one_keeps_the_ordinary_schedule(self):
+        r = _shell(r"""
+open();recv({type:"restarting",boot:"B1",stopping:true});drop();out({d:[due("shellWS"),due("shellProbe")]});""")
+        self.assertEqual(r["d"], [1000, None])
+
+    def test_a_hidden_page_dials_nothing_until_it_is_shown_then_dials_once(self):
+        r = _shell(r"""
+open();recv({type:"ka"});document.visibilityState="hidden";drop();var queued=pending("shellWS").length+pending("shellProbe").length;
+NOW+=600000;tick();tick();var n0=sockets.length;
+document.visibilityState="visible";fire("visibilitychange");var dialed=sockets.length-n0;fire("visibilitychange");
+out({queued:queued,ticked:n0,dialed:dialed,again:sockets.length-n0});""")
+        self.assertEqual(r["queued"], 0, "no redial is scheduled while hidden")
+        self.assertEqual(r["ticked"], 1, "and the watchdog dials nothing for it")
+        self.assertEqual((r["dialed"], r["again"]), (1, 1), "shown: one dial, at once")
+
+    def test_its_socket_is_the_pages_probe_read_by_the_panes_and_its_open_told_to_them(self):
+        r = _shell(r"""
+var up0=window.__rompShellUp();open();var up1=window.__rompShellUp();drop();
+out({up:[up0,up1,window.__rompShellUp()],posted:posted});""",
+                   pre='var posted=[];document.getElementsByTagName=function(t){return t==="iframe"?[{contentWindow:{postMessage:function(m){posted.push(m);}}}]:[];};\n')
+        self.assertEqual(r["up"], [False, True, False])
+        self.assertEqual(r["posted"], [{"romp": "kernelUp"}], "the open is posted to every pane")
 
     def test_an_open_socket_silent_past_30_s_is_abandoned_and_redialed_at_once(self):
         r = _shell(r"""
