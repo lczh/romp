@@ -75970,11 +75970,12 @@ var queuedDiag=0,DIAG_QUEUE_MAX=20;   // clientDiag rows waiting in `queue` for 
 var queuedForeign=0,FOREIGN_QUEUE_MAX=20;   // of those, the window-sender rows (window-sender.ts noteForeign and the timeline boot's copy), which another page's posts cause: capped on their own count, so they never take one of the DIAG_QUEUE_MAX slots this page's own rows keep (under one cap, a foreign page posting into every frame during an outage cut the page's own record of it, the 2026-09-29 review); counted in queuedDiag as well, so the reload hold and the loss line leave them out like every breadcrumb; the cap is noteForeign's NOTE_MAX
 var failedConnects=0,firstFailT=0;   // handshakes that never OPENED since the last open: reported as ONE wsconnfail row on the next open, never one wsclose per redial
 // The redial schedule (2026-10-15; redialMs, _REDIAL_JS): an unannounced drop redials after 1 s, doubling per dial in a row
-// that went unanswered, to 30 s; inside an announced restart or a return to the tab (onclose's two eager windows) it starts
-// at 250 ms and doubles to 2 s instead. redialN counts the dials of the schedule in force and goes back to 0 when an open
-// socket receives a frame, or when the schedule changes (redialFast), so a restart that outlasts its announcement starts
-// the unannounced schedule from its 1 s floor. redialAt: when the scheduled redial is due, the watchdog's reference for a
-// lost timer. closingT: when the watchdog first saw the current socket CLOSING (0 = not seen).
+// that went unanswered, to 30 s; inside an announced restart (from the kernel's restarting frame until a socket opens on it
+// again, however long the restart takes: 2026-10-18) or a return to the tab (onclose's two eager windows) it starts at
+// 250 ms and doubles to 2 s instead. redialN counts the dials of the schedule in force and goes back to 0 when an open
+// socket receives a frame, or when the schedule changes (redialFast), so the first unannounced drop after either window
+// starts from its 1 s floor. redialAt: when the scheduled redial is due, the watchdog's reference for a lost timer.
+// closingT: when the watchdog first saw the current socket CLOSING (0 = not seen).
 var REDIAL_MS=1000,REDIAL_MAX_MS=30000,REDIAL_FAST_MS=250,REDIAL_FAST_MAX_MS=2000,redialN=0,redialFast=false,redialAt=0,closingT=0,CLOSING_MS=5000;
 function redialMs(base,cap,n){var d=Math.min(cap,base*Math.pow(2,Math.min(n,16)));return Math.round(d*(0.8+0.4*Math.random()));}   // _REDIAL_JS, the shell's copy, character for character (test_ws_redial pins the two): written out here, not a template slot, since pane-shim-stale.test.ts renders this template from the kernel's source with slot values of its own
 function nextRedial(fast){if(fast!==redialFast){redialFast=fast;redialN=0;}return fast?redialMs(REDIAL_FAST_MS,REDIAL_FAST_MAX_MS,redialN++):redialMs(REDIAL_MS,REDIAL_MAX_MS,redialN++);}
@@ -76229,8 +76230,9 @@ return;}   // keepalive: stamped lastRecv above and confirmed a resumed keep (re
 // imminent close is EXPECTED — onclose redials eagerly instead of on the blind cadence, and the
 // reconnect skips the stale-banner arm once (the resync is seconds away; a restart that never
 // comes back stays loud through the disconnected state itself, and a SECOND reconnect arms as
-// always — the latch is one-shot). 30s staleness bound so a spent announcement can never drive
-// tight retries forever.
+// always — the latch is one-shot). The tight redial holds until that reconnect opens, however long
+// the restart takes: a 30 s bound on it left a restart that ran longer redialing on the unannounced
+// schedule, up to 30 s after the kernel was back (2026-10-18). The stale-arm skip keeps its 30 s bound.
 if(msg&&msg.type==="restarting"){restartAnnounced=Date.now();staleDiag("restart-announced","");return;}
 // the first REAL frame after a reconnect is the kernel's connect-time push — the resync itself, so the
 // "what you see may be stale" prompt is answered and retires (see clearStale). Keepalives return above.
@@ -76269,7 +76271,7 @@ try{window.dispatchEvent(new Event("romp:wsdown"));}catch(e){}
 if(returnRow&&Date.now()-foregroundedAt<STALE_MS){var rr=returnRow;returnRow=null;rr.resent=true;returnDiag("return",rr);returnAt=returnAt||foregroundedAt;returnBytes=0;}
 var inWin=Date.now()-foregroundedAt<STALE_MS,eager=false,fast=false;   // a close landing within STALE_MS of a foreground (the FIN a frozen tab thawed into; an iOS return): the close IS the event
 if(inWin){eager=eagerDial;eagerDial=false;fast=true;}   // …so the FIRST such close redials NOW; every further close in the same window backs off from 250 ms (a kernel that is down must not be hammered) (2026-09-07)
-if(restartAnnounced&&Date.now()-restartAnnounced<30000)fast=true;   // an announced death keeps its tight redial: from 250 ms, doubling to 2 s
+if(restartAnnounced)fast=true;   // an announced death keeps its tight redial until a socket opens on the kernel again (the reconnect spends the latch): from 250 ms, doubling to 2 s
 var d=eager?0:nextRedial(fast);redialAt=Date.now()+d;   // an unannounced drop outside any return window: from 1 s, doubling to 30 s; both spread at random (redialMs), so the panes and tabs one restart dropped do not redial in step (2026-10-15)
 setTimeout(connect,d);};
 ws.onerror=function(){try{ws.close();}catch(e){}};}
@@ -80436,11 +80438,12 @@ var shellOpened=false;   // T265: this socket's REOPEN is the kernel-restart sig
 // that hears nothing for 30 s, not even the kernel's keepalive (every 10 s), is abandoned and redialed at once; a
 // handshake still pending at 15 s is aborted; a socket seen CLOSING on two ticks 5 s apart is abandoned and redialed; a
 // closed one whose scheduled redial is 8 s overdue (a lost timer) is redialed. A close redials on the panes' schedule
-// (redialMs): from 1 s doubling to 30 s, or from 250 ms doubling to 2 s within 30 s of the kernel announcing its
-// restart, and a frame on an open socket starts it over. Each watchdog action files a watchdog-close row.
+// (redialMs): from 1 s doubling to 30 s, or from 250 ms doubling to 2 s once the kernel has announced its restart, until a
+// socket opens on it again (2026-10-18), and a frame on an open socket starts it over. Each watchdog action files a
+// watchdog-close row.
 """ + _REDIAL_JS + """
 var sws=null,swsConnT=0,swsRecv=0,swsClosingT=0,swsRedialAt=0,swsN=0,swsFast=false,swsRestartAt=0;
-function shellRedial(){var fast=!!swsRestartAt&&Date.now()-swsRestartAt<30000;if(fast!==swsFast){swsFast=fast;swsN=0;}
+function shellRedial(){var fast=!!swsRestartAt;if(fast!==swsFast){swsFast=fast;swsN=0;}   // the announcement holds until an open spends it
 var d=fast?redialMs(250,2000,swsN++):redialMs(1000,30000,swsN++);swsRedialAt=Date.now()+d;setTimeout(shellWS,d);}
 // the API health detail's pause acknowledgment rides this socket: a press it carried cannot be answered now (the
 // redial's ready re-sends the last frame verbatim), so the detail is told before the redial (_LANDING_APIH_JS)

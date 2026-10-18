@@ -143,15 +143,20 @@ out({second:second,afterSilentOpen:afterSilentOpen,afterFrame:afterFrame});""")
         self.assertEqual(r["afterSilentOpen"], 4000, "a socket that opened and heard nothing is no evidence the kernel is back")
         self.assertEqual(r["afterFrame"], 1000, "a socket that opened and received starts the schedule over")
 
-    def test_an_announced_restart_backs_off_from_250_ms_to_2_s_then_the_unannounced_schedule_starts_at_its_floor(self):
+    def test_an_announced_restart_backs_off_from_250_ms_to_2_s_until_the_kernel_answers_however_long_it_takes(self):
+        # the announcement is the event and the kernel answering again (a socket opening on it) ends it, not a 30 s
+        # window: a restart that ran past 30 s used to fall back to the unannounced schedule and reconnect up to 30 s
+        # after the kernel was back (2026-10-18). The first unannounced drop after the reconnect starts at its 1 s floor.
         r = _pane(r"""
 open();recv({type:"ka"});recv({type:"restarting"});var annT=NOW;drop();var ds=[due("connect")];
 for(var i=0;i<4;i++){fireRedial("connect");drop();ds.push(due("connect"));}
-fireRedial("connect");NOW=annT+30001;drop();var after=[due("connect")];fireRedial("connect");drop();after.push(due("connect"));
-out({ds:ds,after:after});""")
+fireRedial("connect");NOW=annT+120000;drop();var late=[due("connect")];fireRedial("connect");drop();late.push(due("connect"));
+fireRedial("connect");open();recv({type:"ka"});drop();var after=[due("connect")];fireRedial("connect");drop();after.push(due("connect"));
+out({ds:ds,late:late,after:after});""")
         self.assertEqual(r["ds"], [250, 500, 1000, 2000, 2000], "an announced death keeps a tight redial, doubling to 2 s")
+        self.assertEqual(r["late"], [2000, 2000], "two minutes into the restart the redial is still the tight one")
         self.assertEqual(r["after"], [1000, 2000],
-                         "a restart that outlasts its announcement goes on from the unannounced schedule's 1 s, not from where the tight one left off")
+                         "the reconnect spent the announcement: the next drop goes on the unannounced schedule from its 1 s")
 
     def test_a_return_to_the_tab_redials_the_first_close_now_and_backs_off_the_rest_from_250_ms(self):
         r = _pane(r"""
@@ -260,14 +265,16 @@ out({ds:ds,reset:reset,lo:lo,lost:lostCalls});""")
         self.assertEqual(r["lo"], 800, "spread at random, a fifth either way")
         self.assertEqual(r["lost"], 9, "every close tells the API health detail before the redial")
 
-    def test_an_announced_restart_redials_from_250_ms_doubling_to_2_s(self):
+    def test_an_announced_restart_redials_from_250_ms_doubling_to_2_s_until_the_kernel_answers(self):
         r = _shell(r"""
 open();recv({type:"restarting"});var annT=NOW;drop();var ds=[due("shellWS")];
 for(var i=0;i<4;i++){fireRedial("shellWS");drop();ds.push(due("shellWS"));}
-fireRedial("shellWS");NOW=annT+30001;drop();var after=due("shellWS");
-out({ds:ds,after:after});""")
+fireRedial("shellWS");NOW=annT+120000;drop();var late=due("shellWS");
+fireRedial("shellWS");open();recv({type:"ka"});drop();var after=due("shellWS");
+out({ds:ds,late:late,after:after});""")
         self.assertEqual(r["ds"], [250, 500, 1000, 2000, 2000])
-        self.assertEqual(r["after"], 1000, "past the announcement's 30 s the unannounced schedule starts at its floor")
+        self.assertEqual(r["late"], 2000, "two minutes into the restart the redial is still the tight one")
+        self.assertEqual(r["after"], 1000, "the reconnect spent the announcement: the next drop starts the unannounced schedule at its floor")
 
     def test_an_open_socket_silent_past_30_s_is_abandoned_and_redialed_at_once(self):
         r = _shell(r"""

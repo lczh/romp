@@ -175,7 +175,7 @@ class ShimSeam(unittest.TestCase):
         # jittered (test_ws_redial.py runs the schedule)
         self.assertIn("var inWin=Date.now()-foregroundedAt<STALE_MS,eager=false,fast=false;", self.js)
         self.assertIn("if(inWin){eager=eagerDial;eagerDial=false;fast=true;}", self.js)   # the FIRST close after a foreground redials now; every further one in the window backs off from 250 ms
-        self.assertIn("if(restartAnnounced&&Date.now()-restartAnnounced<30000)fast=true;", self.js)
+        self.assertIn("if(restartAnnounced)fast=true;", self.js)   # until the reconnect spends the latch (2026-10-18)
         self.assertIn("setTimeout(connect,d);", self.js)
 
     def test_the_announced_reconnect_skips_the_stale_arm_once(self):

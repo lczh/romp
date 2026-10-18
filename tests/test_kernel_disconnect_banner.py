@@ -42,7 +42,7 @@ class DisconnectBanner(unittest.TestCase):
         # (test_ws_redial.py runs the schedule)
         self.assertIn("var inWin=Date.now()-foregroundedAt<STALE_MS,eager=false,fast=false;", js)
         self.assertIn("if(inWin){eager=eagerDial;eagerDial=false;fast=true;}", js)   # the FIRST close after a foreground redials now; every further one in the window backs off from 250 ms
-        self.assertIn("if(restartAnnounced&&Date.now()-restartAnnounced<30000)fast=true;", js)
+        self.assertIn("if(restartAnnounced)fast=true;", js)   # until the reconnect spends the latch (2026-10-18)
         self.assertIn("var d=eager?0:nextRedial(fast);redialAt=Date.now()+d;", js)
         self.assertIn("setTimeout(connect,d);", js)
         self.assertIn("ws.onerror=function(){try{ws.close();}catch(e){}};", js)
