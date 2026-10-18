@@ -65,7 +65,7 @@ function rows(s,what){return s.sent.map(function(x){return JSON.parse(x);}).filt
 function hide(){document.visibilityState="hidden";fire("visibilitychange");}
 function show(){document.visibilityState="visible";fire("visibilitychange");}
 function liveTimers(){return timers.filter(function(t){return t.live;}).map(function(t){return {ms:t.ms,fn:t.fn.name};});}
-function redials(){return liveTimers().filter(function(t){return t.fn==="connect";});}
+function redials(){return liveTimers().filter(function(t){return t.fn==="connect"||t.fn==="probeKernel";});}   // a dial, or an announced restart's /version probe (2026-10-18)
 function count(list,x){return list.filter(function(e){return e===x;}).length;}
 function out(o){process.stdout.write(JSON.stringify(o));}
 """
@@ -234,7 +234,8 @@ timers.length=0;connect();open();recv({type:"restarting"});sock().readyState=3;s
 out({afterForeground:afterForeground,late:late,announced:announced});""")
         self.assertEqual(r["afterForeground"], [{"ms": 0, "fn": "connect"}], "the first close after a foreground: the close IS the event, redial now")
         self.assertEqual(r["late"], [{"ms": 1000, "fn": "connect"}], "the blind schedule's first step (1 s, 2026-10-15) for a close nobody foregrounded into")
-        self.assertEqual(r["announced"], [{"ms": 250, "fn": "connect"}], "T217's announced-death branch is unchanged")
+        self.assertEqual(r["announced"], [{"ms": 250, "fn": "probeKernel"}],
+                         "T217's announced death stays on the tight schedule; its steps are /version probes since 2026-10-18")
 
 
 class OrderedDispatchFifo(unittest.TestCase):

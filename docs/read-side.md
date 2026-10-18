@@ -66,14 +66,21 @@ completed); the feed just paints columns. (Reflected in `docs/judges.md`.)
   stamped and is redialed at the return, and a browser without `resume` behaves
   as before. A close redials on a backed-off schedule: from 1 s doubling to
   30 s for an unannounced drop, from 250 ms doubling to 2 s after the kernel
-  announced its restart (until a socket opens on it again, however long the
-  restart takes) or the person returned to the tab (whose first close redials
-  at once), each delay spread a fifth either way at random so the
+  announced its restart or the person returned to the tab (whose first close
+  redials at once), each delay spread a fifth either way at random so the
   sockets one restart dropped come back apart, and started over once an open
-  socket receives a frame. A socket the browser holds CLOSING is put down on the
-  watchdog tick after the one that first saw it, a dial the browser refuses
-  outright still schedules the next, and the shell page's own socket keeps all
-  of these rules. After a reconnect the shim
+  socket receives a frame. An announced restart's tight steps are `/version`
+  probes rather than dials, until a kernel with a new boot id answers (then one
+  dial, and a refusal of it goes on the 1 s schedule) or 60 steps went
+  unanswered; a kernel the manager is stopping says so in the frame
+  (`stopping`), and its pages keep the 1 s schedule. A hidden page dials
+  nothing until it is shown, then dials at once, and a pane inside the shell
+  whose socket is down waits for the shell's socket, the page's one probe, to
+  open (the shell then calls each pane's `__rompKernelUp`) instead of
+  dialing. A socket the browser holds CLOSING is put down on the watchdog tick
+  after the one that first saw it, a dial the browser refuses outright still
+  schedules the next, and the shell page's own socket keeps all of these
+  rules. After a reconnect the shim
   raises the "what you see may be stale" prompt only on the SECOND `ka` arriving
   before the resync frame — one full heartbeat period, bracketed by two kernel
   heartbeats on that socket with no resync between them (a single `ka` can be a

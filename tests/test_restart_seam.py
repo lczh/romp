@@ -129,6 +129,33 @@ class RestartingBroadcast(unittest.TestCase):
             self.assertEqual(m["type"], "restarting")
             self.assertIn("boot", m, "the boot id rides along — the shim can tell lives apart")
 
+    def test_a_stop_says_so_and_a_restart_does_not(self):
+        # (2026-10-18) the manager notes a stop before its signal; the frame then carries `stopping`, and a page keeps its
+        # ordinary backed-off redial instead of the restart's tight one, since no kernel is coming back to answer it
+        from unittest import mock
+        for stopping, has in ((True, True), (False, False)):
+            sends = []
+            with km._clients_lock:
+                km._clients[:] = [self._client(sends)]
+            with mock.patch.object(km, "_stopping_for_good", lambda: stopping):
+                km._broadcast_restarting()
+            m = json.loads(sends[0])
+            self.assertEqual((m["type"], "stopping" in m), ("restarting", has))
+            if has:
+                self.assertIs(m["stopping"], True)
+
+    def test_only_the_managers_stop_of_this_kernel_reads_as_stopping(self):
+        from unittest import mock
+        for note, want in ((None, False), ({"reason": "stop", "trigger": "stop"}, True), ({"reason": "stop", "trigger": "cli-down"}, True),
+                           ({"reason": "stop"}, True), ({"reason": "stop", "trigger": "refresh"}, False)):
+            with self.subTest(note=note), mock.patch.object(km, "_manager_sigterm_row_for_us", lambda _n=note, **_: _n):
+                self.assertIs(km._stopping_for_good(), want)
+
+        def boom(**_):
+            raise OSError("unreadable")
+        with mock.patch.object(km, "_manager_sigterm_row_for_us", boom):
+            self.assertIs(km._stopping_for_good(), False, "never raises: a note it cannot read reads as a restart")
+
     def test_a_dead_client_never_breaks_the_walk(self):
         sends = []
         with km._clients_lock:
@@ -167,7 +194,8 @@ class ShimSeam(unittest.TestCase):
         self.spin = km._pane_spin("content", "live-ask")
 
     def test_the_restarting_frame_latches(self):
-        self.assertIn('if(msg&&msg.type==="restarting"){restartAnnounced=Date.now();', self.js)
+        self.assertIn('if(msg&&msg.type==="restarting"){if(msg.stopping){', self.js)   # a stop latches nothing (2026-10-18)
+        self.assertIn('restartAnnounced=Date.now();restartBoot=String(msg.boot||"");restartSteps=0;restartOver=false;', self.js)
 
     def test_an_announced_death_redials_tight_and_a_blind_drop_keeps_the_cadence(self):
         # 2026-09-07 added a second tight-redial event (a close within STALE_MS of a foreground) beside T217's
@@ -175,8 +203,8 @@ class ShimSeam(unittest.TestCase):
         # jittered (test_ws_redial.py runs the schedule)
         self.assertIn("var inWin=Date.now()-foregroundedAt<STALE_MS,eager=false,fast=false;", self.js)
         self.assertIn("if(inWin){eager=eagerDial;eagerDial=false;fast=true;}", self.js)   # the FIRST close after a foreground redials now; every further one in the window backs off from 250 ms
-        self.assertIn("if(restartAnnounced)fast=true;", self.js)   # until the reconnect spends the latch (2026-10-18)
-        self.assertIn("setTimeout(connect,d);", self.js)
+        self.assertIn("var probe=!eager&&!!restartAnnounced&&!restartOver&&restartSteps<RESTART_STEPS_MAX;", self.js)   # tight /version probes until a new kernel answers (2026-10-18)
+        self.assertIn("setTimeout(probe?probeKernel:connect,d);", self.js)
 
     def test_the_announced_reconnect_skips_the_stale_arm_once(self):
         self.assertIn("var ann=restartAnnounced&&Date.now()-restartAnnounced<30000;restartAnnounced=0;",
