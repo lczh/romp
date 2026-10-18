@@ -41,6 +41,11 @@ driver run walks the whole story in order, each step landing in its own assertio
      change raises no "Couldn't close" toast;
  12. the hold behind that toast is for the user's own cross: a colEmpty naming a session the kernel still lists, with no
      cross, closes the column and B is on column 1's strip at once, no toast.
+ 13. THE STRIP'S PRESS HOLD ACROSS FRAMES (the review of PR 302), on a page of its own in the full Chromium with its focus
+     emulation off: a press on a tab of column 1's strip, column 2 focusing an element of its page mid-press (a question card
+     focusing itself on a push), then a push (a rename): the strip holds its rebuild, the pressed tab stays on the page, and the
+     click lands; a window switch mid-press releases the hold (the push's rebuild lands with the button still down), with the
+     focus in column 1 and with it moved to column 2 first.
 Skips LOUDLY when the extension deps or a playwright browser are absent (CI installs none). Synthetic only:
 placeholder sids, invented notes-api prompt text, no real session data."""
 import json
@@ -79,6 +84,8 @@ SID_A = "11111111-2222-4333-8444-000000000301"   # "web": column 1's session
 SID_B = "11111111-2222-4333-8444-000000000302"   # "api": the session the move opens a column on
 SID_C = "11111111-2222-4333-8444-000000000303"   # "tests": moved into column 2 beside B for the routing step
 SID_X = "11111111-2222-4333-8444-000000000999"   # a session no column lists (not on the board)
+SID_T = "11111111-2222-4333-8444-000000000304"   # "docs": the tab step 13 presses in column 1
+SID_R = "11111111-2222-4333-8444-000000000305"   # "lint": the session step 13 renames mid-press (the push)
 # six more tabs, so the board is EIGHT sessions: a column served whole takes eight full frames per push, a column served
 # as a view of B takes exactly one (plus a status frame per other tab), and the /perf deltas in step 1 tell the two apart;
 # the column's idle walk visits only its members (tabInView), and its one member is on screen, so no prefetch loads a tab
@@ -804,6 +811,104 @@ out.s12.toasts1 = await toastsIn("f-chat");
 out.s12.log = await shellLog();
 } catch (e) { out.lateError = String((e && e.stack) || e); }
 out.ms = Date.now() - out.t0;
+
+// ---- 13. THE STRIP'S PRESS HOLD ACROSS FRAMES (the review of PR 302): a press on column 1's strip survives another column taking the focus ----
+// A press on the strip holds its rebuild until the release, so a push mid-press cannot take the pressed tab out from under the
+// click (render.ts tabPointerHeld). Another column focusing an element of its page mid-press (its question card focusing itself on
+// a push, focusCardUnlessTyping) blurs column 1's window with the page still focused; the hold was released at that blur, so the
+// push rebuilt the strip under the press and the click on the tab was lost. A window switch mid-press still releases the hold (no
+// pointerup ever comes), with the focus in column 1 and with it moved to column 2 first. Its own page in the FULL Chromium
+// (playwright's chromium channel) with the page's focus emulation off, so the focus is the browser's own and another page brought
+// to the front is a real window switch (the docking kit's (C) page in test_live_dividers_served.py, the same way).
+out.s13 = { t0: Date.now() };
+let browserH = null;
+try {
+  try { browserH = await chromium.launch({ channel: "chromium" }); }
+  catch (e) { throw new Error("the full Chromium (playwright's chromium channel) did not launch: " + String(e).slice(0, 300)); }
+  const ctxH = await browserH.newContext({ viewport: { width: 1400, height: 900 } });
+  // every frame watches the kernel's frames for a marker (a renamed session's new name): the event that says a push has LANDED on
+  // the page, whatever the strip does with it; and records the tab under each press, and every blur of its window with what the
+  // top document reads at that moment
+  await ctxH.addInitScript(() => {
+    window.__wsMarker = null; window.__wsMarkerSeen = false;
+    const OrigWS = window.WebSocket;
+    window.WebSocket = function (...a) { const ws = new OrigWS(...a);
+      ws.addEventListener("message", (m) => { if (window.__wsMarker && typeof m.data === "string" && m.data.includes(window.__wsMarker)) window.__wsMarkerSeen = true; });
+      return ws; };
+    window.WebSocket.prototype = OrigWS.prototype; Object.assign(window.WebSocket, OrigWS);
+    window.__labPressed = null; window.__labBlurs = [];
+    window.addEventListener("pointerdown", (e) => { window.__labPressed = e.target && e.target.closest ? e.target.closest(".tab") : null; }, true);
+    window.addEventListener("blur", () => { let tf = null; try { tf = top.document.hasFocus(); } catch (e) { tf = "unreadable"; } window.__labBlurs.push({ topHasFocus: tf }); });
+  });
+  const ph = await ctxH.newPage();
+  ph.on("pageerror", (e) => { (out.s13.errors = out.s13.errors || []).push(String(e).slice(0, 200)); });
+  await ph.goto(cfg.url, { waitUntil: "domcontentloaded" });   // the strip below is the condition the step waits on
+  out.s13.msGoto = Date.now() - out.s13.t0;
+  const waitH = (fn, arg, why) => ph.waitForFunction(fn, arg, { timeout: T }).catch(() => { throw new Error(why); });
+  const listsH = ([fid, sid]) => { const f = document.getElementById(fid); const d = f && f.contentDocument; return !!d && Array.from(d.querySelectorAll("#tabs .tab[data-id]")).some((t) => t.dataset.id === sid); };
+  await waitH(listsH, ["f-chat", cfg.sidT], "step 13: column 1 never listed the press's tab");
+  out.s13.msStrip = Date.now() - out.s13.t0;
+  await (await ctxH.newCDPSession(ph)).send("Emulation.setFocusEmulationEnabled", { enabled: false });
+  const frontH = async () => { await ph.bringToFront(); await waitH(() => document.hasFocus(), null, "step 13: the page did not get the window's focus"); };
+  await frontH();
+  await ph.evaluate((sid) => window.__rompMoveTab(sid, "new"), cfg.sidB);
+  await waitH(listsH, ["f-chat-2", cfg.sidB], "step 13: column 2 never opened on B");
+  const frameH = () => ph.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => r(1), 0)))));
+  // a column's frame by its element's id, through playwright's own frame (the same object across the column's life)
+  const colFrame = async (fid) => { for (const f of ph.frames()) { if (f === ph.mainFrame()) continue; try { const e = await f.frameElement(); if ((await e.getAttribute("id")) === fid) return f; } catch (e) { /* detached */ } } throw new Error("step 13: no frame " + fid); };
+  const inCol = async (fid, fn, arg) => (await colFrame(fid)).evaluate(fn, arg ?? null);
+  const labelH = (sid) => inCol("f-chat", (sid) => { const t = document.querySelector('#tabs .tab[data-id="' + sid + '"] .tab-label'); return t ? t.textContent.trim() : null; }, sid);
+  const activeH = () => inCol("f-chat", () => { const t = document.querySelector("#tabs .tab.active[data-id]"); return t ? t.dataset.id : null; });
+  const ptH = (sid) => ph.evaluate((sid) => { const f = document.getElementById("f-chat"); const l = f.contentDocument.querySelector('#tabs .tab[data-id="' + sid + '"] .tab-label');
+    if (!l) return null; const fr = f.getBoundingClientRect(), r = l.getBoundingClientRect(); return { x: fr.left + f.clientLeft + r.left + r.width / 2, y: fr.top + f.clientTop + r.top + r.height / 2 }; }, sid);
+  const blursOf = (fid) => inCol(fid, () => window.__labBlurs.splice(0));
+  const renameH = (sid, name) => ph.evaluate(async ([sid, name]) => (await fetch("/rename", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target: sid, name }) })).status, [sid, name]);
+  const probeFocus = () => { let t = document.getElementById("lab-focus-probe");
+    if (!t) { t = document.createElement("textarea"); t.id = "lab-focus-probe"; t.style.cssText = "position:fixed;left:0;top:0;width:4px;height:4px;opacity:0"; document.body.appendChild(t); }
+    t.focus(); return { active: document.activeElement === t, hasFocus: document.hasFocus() }; };
+  const baseName = await labelH(cfg.sidR);
+  // one press on tab T's label in column 1, a push mid-press (session R renamed), the release; `sibling`: column 2 focuses an element of
+  // its page right after the press; `switchAway`: another page brought to the front before the release, then this one back
+  async function holdLeg(label, { sibling = false, switchAway = false } = {}) {
+    const r = { label, sibling, switchAway };
+    if ((await activeH()) === cfg.sidT) { const pa = await ptH(cfg.sidA); await ph.mouse.click(pa.x, pa.y); await waitH((a) => { const d = document.getElementById("f-chat").contentDocument; const t = d.querySelector("#tabs .tab.active[data-id]"); return !!t && t.dataset.id === a; }, cfg.sidA, "step 13: column 1 never went back to A"); }
+    r.activeBefore = await activeH();
+    const marker = baseName + "-" + label;
+    await inCol("f-chat", (m) => { window.__wsMarker = m; window.__wsMarkerSeen = false; window.__labBlurs = []; return 1; }, marker);
+    await inCol("f-chat-2", () => { window.__labBlurs = []; return 1; });
+    const p = await ptH(cfg.sidT); r.at = p;
+    await ph.mouse.move(p.x, p.y); await ph.mouse.down(); await frameH();
+    r.pressed = await inCol("f-chat", () => ({ tab: window.__labPressed ? window.__labPressed.dataset.id : null, hasFocus: document.hasFocus() }));
+    if (sibling) { r.siblingFocus = await inCol("f-chat-2", probeFocus); await frameH(); }
+    r.rename = await renameH(cfg.sidR, marker);
+    r.pushed = await ph.waitForFunction(() => document.getElementById("f-chat").contentWindow.__wsMarkerSeen === true, null, { timeout: T }).then(() => true).catch(() => false);
+    await frameH(); await frameH();
+    r.during = { shown: (await labelH(cfg.sidR)) === marker, pressedConnected: await inCol("f-chat", () => !!(window.__labPressed && window.__labPressed.isConnected)) };
+    if (switchAway) {
+      const away = await ctxH.newPage(); await away.bringToFront();
+      // the release of the hold flushes the push's render a tick later (releaseTabStrip): the new label is the event, bounded
+      r.switched = { shown: await ph.waitForFunction(([m]) => Array.from(document.getElementById("f-chat").contentDocument.querySelectorAll("#tabs .tab-label")).some((l) => l.textContent.trim() === m), [marker], { timeout: 5000 }).then(() => true).catch(() => false) };
+      await away.close(); await frontH();
+    }
+    r.blurs1 = await blursOf("f-chat"); r.blurs2 = await blursOf("f-chat-2");
+    await ph.mouse.up(); await frameH();
+    r.clicked = await ph.waitForFunction((t) => { const d = document.getElementById("f-chat").contentDocument; const a = d.querySelector("#tabs .tab.active[data-id]"); return !!a && a.dataset.id === t; }, cfg.sidT, { timeout: 3000 }).then(() => true).catch(() => false);
+    r.shownAfter = await ph.waitForFunction(([m]) => Array.from(document.getElementById("f-chat").contentDocument.querySelectorAll("#tabs .tab-label")).some((l) => l.textContent.trim() === m), [marker], { timeout: T }).then(() => true).catch(() => false);
+    // back as it was: the name, column 2's probe, the keyboard on the shell
+    r.renameBack = await renameH(cfg.sidR, baseName);
+    await ph.waitForFunction(([m]) => !Array.from(document.getElementById("f-chat").contentDocument.querySelectorAll("#tabs .tab-label")).some((l) => l.textContent.trim() === m), [marker], { timeout: T }).catch(() => {});
+    await inCol("f-chat-2", () => { const t = document.getElementById("lab-focus-probe"); if (t) t.remove(); return 1; });
+    await ph.evaluate(() => { const a = document.activeElement; if (a && a.tagName === "IFRAME") a.blur(); });
+    return r;
+  }
+  out.s13.baseName = baseName;
+  out.s13.sibling = await holdLeg("sibling", { sibling: true });
+  out.s13.switch = await holdLeg("switch", { switchAway: true });
+  out.s13.siblingSwitch = await holdLeg("siblingswitch", { sibling: true, switchAway: true });
+  await ctxH.close();
+} catch (e) { out.s13.error = String((e && e.stack) || e).slice(0, 1500); }
+if (browserH) await browserH.close().catch(() => {});
+out.s13.ms = Date.now() - out.s13.t0;
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -880,7 +985,7 @@ class ServedChatSplit(unittest.TestCase):
         cfg = os.path.join(cls.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"url": "http://127.0.0.1:%d/?token=%s" % (cls.port, cls.token),
-                       "sidA": SID_A, "sidB": SID_B, "sidC": SID_C, "sidX": SID_X, "dragPx": DRAG_PX, "draft": DRAFT, "orphan": ORPHAN_DRAFT, "ackMs": CLOSE_ACK_MS_LAB}, f)
+                       "sidA": SID_A, "sidB": SID_B, "sidC": SID_C, "sidX": SID_X, "sidT": SID_T, "sidR": SID_R, "dragPx": DRAG_PX, "draft": DRAFT, "orphan": ORPHAN_DRAFT, "ackMs": CLOSE_ACK_MS_LAB}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -1227,6 +1332,48 @@ class ServedChatSplit(unittest.TestCase):
         posts = [e for e in s["log"] if e.get("romp") == "colEmpty"]
         self.assertEqual([(e["src"], e["gone"], e.get("crossed")) for e in posts], [("f-chat-2", [SID_B], None)],
                          "the one colEmpty at the shell is the driver's own, from column 2's window, naming no cross: %r" % s["log"])
+
+    def _s13(self):
+        s = self._r()["s13"]
+        self.assertNotIn("error", s, "step 13 raised: %s" % s.get("error"))
+        self.assertEqual(s.get("errors", []), [], "no page error in step 13's page")
+        return s
+
+    def test_13_a_press_on_the_strip_survives_another_column_taking_the_focus_and_its_click_lands(self):
+        """THE STRIP'S PRESS HOLD ACROSS FRAMES (the review of PR 302). A press on column 1's strip holds the strip's rebuild until
+        the release, so a push mid-press cannot take the pressed tab out from under the click. Column 2 focusing an element of its
+        page mid-press (its question card focusing itself on a push) blurred column 1's window, and that blur released the hold:
+        the push then rebuilt the strip under the press and the click on the tab was lost. A blur with the page still focused is
+        the focus moving between frames, which the TOP document reads (page-focus.ts), so the hold stands through it."""
+        c = self._s13()["sibling"]
+        self.assertNotEqual(c["activeBefore"], SID_T, "the pressed tab is not column 1's active one before the click: %r" % c)
+        self.assertEqual(c["pressed"], {"tab": SID_T, "hasFocus": True}, "the press is on the tab, column 1 holding the focus: %r" % c)
+        self.assertEqual(c["siblingFocus"], {"active": True, "hasFocus": True}, "column 2's element took the focus mid-press: %r" % c)
+        self.assertEqual(c["blurs1"], [{"topHasFocus": True}], "column 1's window blurred once, the page still focused: %r" % c)
+        self.assertEqual(c["rename"], 200)
+        self.assertTrue(c["pushed"], "the push reached column 1 mid-press: %r" % c)
+        self.assertFalse(c["during"]["shown"], "the strip held its rebuild through the push: the new name waits for the release: %r" % c)
+        self.assertTrue(c["during"]["pressedConnected"], "the pressed tab is still the one on the page: %r" % c)
+        self.assertTrue(c["clicked"], "the click landed: the pressed tab is column 1's active one: %r" % c)
+        self.assertTrue(c["shownAfter"], "the held rebuild landed after the release: %r" % c)
+
+    def test_13b_a_window_switch_mid_press_releases_the_hold_with_the_focus_in_this_column_or_another(self):
+        """A page put behind another mid-press hears neither a pointerup nor a pointercancel, so the window switch is the release.
+        With the focus in column 1 the switch blurs column 1's window; with the focus moved to column 2 first it blurs column 2's
+        only, and the hold, kept through column 2 taking the focus, is released there (the watch on the window holding the focus)."""
+        s = self._s13()
+        for k in ("switch", "siblingSwitch"):
+            c = s[k]
+            self.assertEqual(c["pressed"], {"tab": SID_T, "hasFocus": True}, "%s: the press is on the tab, column 1 holding the focus: %r" % (k, c))
+            self.assertEqual(c["rename"], 200)
+            self.assertTrue(c["pushed"], "%s: the push reached column 1 mid-press: %r" % (k, c))
+            self.assertFalse(c["during"]["shown"], "%s: the strip held its rebuild through the push, before the switch: %r" % (k, c))
+            self.assertTrue(c["switched"]["shown"], "%s: the window switch released the hold, the button still down: the held rebuild landed: %r" % (k, c))
+        self.assertEqual(s["switch"]["blurs1"], [{"topHasFocus": False}], "the switch blurred column 1's window, the page's focus gone: %r" % s["switch"])
+        c = s["siblingSwitch"]
+        self.assertEqual(c["siblingFocus"], {"active": True, "hasFocus": True}, "column 2's element took the focus mid-press: %r" % c)
+        self.assertEqual((c["blurs1"], c["blurs2"]), ([{"topHasFocus": True}], [{"topHasFocus": False}]),
+                         "column 1's window blurred at the focus move, the page still focused; the switch blurred column 2's only: %r" % c)
 
     def test_per_tab_hot_keys_switch_to_the_column_holding_the_session_and_the_split_cycles(self):
         # the user 2026-09-10: a hot key per tab (set from its menu; the keycap on the tab is the T379 widget, reading the same

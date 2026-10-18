@@ -153,21 +153,22 @@ test("isChatFrame: f-chat and f-chat-<n> are chat columns; a registry pane whose
 
 // Every way a divider drag ends other than a release is a CANCEL, Escape's path (the review of PR 295: the drag heard a move and a
 // release only, so a pointer the browser took, a lost capture or a window put behind another left it live and the next click
-// committed it); the served lab (tests/test_live_dividers_served.py) drives each route with real pointer events.
-test("the engine's divider drag: a pointercancel, a lost capture and the window's blur end it as Escape does, each once", () => {
+// committed it); the served lab (tests/test_live_dividers_served.py) drives each route with real pointer events and a real window switch.
+test("the engine's divider drag: a pointercancel, a lost capture and the page losing the window's focus end it as Escape does, each once", () => {
   const press = ENGINE.slice(ENGINE.indexOf("private onDivPress(e: PointerEvent, d: HTMLElement): void {"), ENGINE.indexOf("private minFrac("));
   assert.match(press, /d\.setPointerCapture\(pid\);/, "the divider captures the press's pointer, so a lost capture is heard");
-  assert.match(press, /const cancel = \(ev: Event\) => \{[\s\S]*?\n\s*if \(ev\.type === "blur" \? this\.div === drag : mine\(ev\)\) this\.endDiv\(false\);\n\s*\};/, "a route ends this drag only, by the cancel path");
-  // a blur with the page still focused is focus moving into one of the shell's own pane frames, not the window losing focus (the
-  // review of PR 296: the chat's question card focusing itself mid-drag snapped the drag back and wrote nothing); the served lab
-  // drives both, a real focus loss and an element of the chat's page focused mid-drag
-  assert.match(press, /const cancel = \(ev: Event\) => \{(?:\n\s*\/\/[^\n]*)*\n\s*if \(ev\.type === "blur" && document\.hasFocus\(\)\) return;\n\s*if \(ev\.type === "blur" \?/, "the page's own focus read first: a blur with the page still focused ends nothing");
+  assert.match(press, /const cancel = \(ev: Event\) => \{ if \(mine\(ev\)\) this\.endDiv\(false\); \};/, "a pointer route ends this drag only, by the cancel path");
   for (const k of ["pointercancel", "lostpointercapture"]) {
     assert.match(press, new RegExp(`window\\.addEventListener\\("${k}", cancel, true\\);`), k + " wired to the cancel");
     assert.match(press, new RegExp(`window\\.removeEventListener\\("${k}", cancel, true\\);`), k + " unwired at the end");
   }
-  assert.match(press, /window\.addEventListener\("blur", cancel\);/, "the window's blur wired to the cancel");
-  assert.match(press, /window\.removeEventListener\("blur", cancel\);\n\s*try \{ if \(d\.hasPointerCapture\(pid\)\) d\.releasePointerCapture\(pid\); \}/, "the listeners off BEFORE the capture is released: the release's own lostpointercapture is never a second end");
+  // the window switch is heard wherever the focus is held (page-focus.ts, its own test): the press keeps the focus where it was, so
+  // with a pane's field focused only that pane's window blurs (the review of PR 302), and a blur with the page still focused, the
+  // focus moving into or between the shell's frames, ends nothing (PR 302)
+  assert.match(press, /const unwatch = watchPageFocus\(window, \(\) => \{ if \(this\.div === drag\) this\.endDiv\(false\); \}\);/, "the page's focus watched for the drag: its loss ends this drag only, by the cancel path");
+  assert.doesNotMatch(press, /addEventListener\("blur"/, "no blur listener of its own: one watch hears the switch, wherever the focus is");
+  assert.match(press, /unwatch\(\);\n\s*try \{ if \(d\.hasPointerCapture\(pid\)\) d\.releasePointerCapture\(pid\); \}/, "the listeners and the watch off BEFORE the capture is released: the release's own lostpointercapture is never a second end");
+  assert.ok(press.indexOf("const unwatch = watchPageFocus(") < press.indexOf("this.divOff = () => {"), "the watch is on before the drag's off switch is set");
 });
 
 // The band's edge runs the shell's grab or nothing (root CLAUDE.md, fail loudly): without window.__rompBandGrab it fell back to
