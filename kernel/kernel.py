@@ -49277,7 +49277,8 @@ def _compact_goal_stores():
             # ...and the notified-cards snapshot's entries for sessions GONE for good: neither alive, nor in
             # that discover window, nor a dead tab kept open, the bound session-order.json wears. The build
             # forgets a card only when its session renders without it, which such a session never does
-            # again (review find on the persist, 2026-09-10). Same rule as above: no owner list, no gone.
+            # again (review find on the persist, 2026-09-10). Same rule as above: no owner list, no gone. A
+            # card still on the board is never gone, whatever its session (2026-10-18).
             _notify_prev_forget_gone(owned)
         except Exception:
             sys.stderr.write("compact: notified snapshot: %s\n" % traceback.format_exc())
@@ -69435,9 +69436,11 @@ def _card_needs_you(a):
 #     rows (the live tab strip, minus the dead read-only tabs the user kept open, which render no cards)
 #     plus the sessions the rendered cards themselves name, save a parked hand-off or a notice card, which
 #     names a session that need not have rendered (_NOTIFY_ROSTER_SKIP). The compaction sweep after each judge pass
-#     forgets it when its session is GONE for good: neither alive, nor with a transcript still in the
-#     discover window, nor a dead tab kept open (_notify_prev_forget_gone, the bound session-order.json
-#     already wears). Such a session never renders again, so the build alone kept its cards forever (a
+#     forgets it when the card is off the board and its session is GONE for good: neither alive, nor with a
+#     transcript still in the discover window, nor a dead tab kept open (_notify_prev_forget_gone, the bound
+#     session-order.json already wears; a card the last build showed is never gone, 2026-10-18, since a notice
+#     card or a parked hand-off stands with no known session behind it). Such a session never renders again,
+#     so the build alone kept its cards forever (a
 #     card cleared from the dashboard while its session was dead left the board without that session
 #     ever rendering without it). So the store holds the live board's notified cards plus those of the
 #     dead sessions still in the discover window, and no more. The bell overrides' prune rides both
@@ -69485,6 +69488,10 @@ _NOTIFY_PREV_WRITE_FAULT = [None]   # the last write failure's text — said onc
 # swap) and the producer's compaction sweep (_notify_prev_forget_gone). Each holds this for its whole
 # read-modify-write, so neither publishes a snapshot built from the other's superseded one.
 _notify_prev_lock = threading.Lock()
+# The card ids the build that last moved the snapshot SHOWED (its cards, and the serving cards it folded into another),
+# rebound by that build under _notify_prev_lock. The sweep reads it under the same lock: a card on the board is not gone,
+# whatever its session (_notify_prev_forget_gone).
+_NOTIFY_BOARD = [frozenset()]
 
 
 def _notify_prev_path():
@@ -69610,14 +69617,21 @@ def _notify_prev_forget_gone(owned):
     such cards forever, and the bell store, pruned against the snapshot since the persist, kept their
     mutes with them. A session merely dead-but-in-window keeps its cards remembered, so its revival
     stays silent; the discover window slides forward only, so a forgotten card never flickers back.
+    A card the last build SHOWED is never forgotten here, whatever its session (2026-10-18): the session
+    is a proxy for the card only for a goal card, which renders for a live session alone. An owner-less
+    notice card (its sid is the reserved word, never a session), a notice card whose owner left the
+    window and a parked hand-off to a recipient that did all stand on the board with no known session
+    behind them; read as gone, each was forgotten after every judge pass, its mute deleted with it, and
+    announced again by the next build. The board's own membership (_NOTIFY_BOARD) decides; once such a
+    card leaves the board, the next sweep forgets it as before.
     Nothing to do before this life's first build: the file is not in memory yet, the first build seeds
     it, and the next sweep bounds it. Returns how many cards were forgotten."""
     if not _NOTIFY_PREV[0]:
         return 0
     known = set(_live_map()) | set(owned) | set(_kept_open)   # outside the lock: liveness may sweep a registry
     with _notify_prev_lock:
-        prev = _NOTIFY_PREV[0]
-        gone = {i for i, e in (prev or {}).items() if e.get("sid") not in known}
+        prev, shown = _NOTIFY_PREV[0], _NOTIFY_BOARD[0]
+        gone = {i for i, e in (prev or {}).items() if e.get("sid") not in known and i not in shown}
         if not gone:
             return 0
         kept = {i: e for i, e in prev.items() if i not in gone}
@@ -69759,6 +69773,7 @@ def _feed_notifications_diff(feed):
             if _notify_card_effective(cards, iid, e["sid"]):   # THIS machine's devices: card > session > its own master
                 out.append((title, body, e["sid"], iid))
     _NOTIFY_PREV[0] = nxt
+    _NOTIFY_BOARD[0] = frozenset(cur) | folded       # what this build showed: the sweep never forgets a card on the board
     _notify_prev_write(nxt)                          # after the marks: the file records what was told
     _prune_notify_cards(set(cur) | set(nxt) | folded)   # a card still remembered, or folded into another, is not gone
     _push_ring_add(ring)                             # after the snapshot moved: a serve re-validates against it (_push_event_current)
