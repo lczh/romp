@@ -10052,8 +10052,8 @@ class SdkSession:
         gen = new_proc_gen()
         # a rewind's CLI: its launch applies a (target, leaf) pair the CLI it replaces was not launched at. Read from the
         # launch itself, never from the gesture that ended the old CLI: a Restart or an Apply now during a rewind's
-        # teardown, or a Restart during its wait for the turn's end, renames the cut, and a stamp keyed on that name took
-        # the rewound CLI for a plain relaunch's
+        # teardown, a Restart during its wait for the turn's end, or an Apply now while a rewind waits for the turn's end
+        # renames the cut, and a stamp keyed on that name took the rewound CLI for a plain relaunch's
         at = getattr(self, "_launch_rewind", None)
         rewound = at is not None and at != getattr(self, "_cli_rewind", None)
         self._cli_rewind = at

@@ -2257,16 +2257,22 @@ class ARewindsFreshCliTakesItsWakeupsWhenARestartOrApplyNowLandsDuringIt(_Harnes
     """A rewind's fresh CLI is the one whose launch applies a (target, leaf) pair with --resume-session-at that the CLI it
     replaces was not launched at, and its stamp hands it the one-shots this session object recorded, as
     ARewindLeavesItsWakeupsToTheFreshCli pins. A Restart or an Apply now that lands while a delete's relaunch is on its way
-    (the old CLI's teardown still running, or the relaunch waiting for the turn's end, which the Restart ends at once by
-    SIGTERM) renames the cut, so the notice the fresh CLI is fed names that gesture (_cut_cause). The fresh CLI is still
+    renames the cut, so the notice the fresh CLI is fed names that gesture (_cut_cause). The roads: a Restart or an Apply
+    now during the old CLI's teardown, a Restart during the relaunch's wait for the turn's end, and an Apply now while the
+    relaunch waits for the turn's end; on the last two the gesture ends the turn at once by SIGTERM. The fresh CLI is still
     launched rewound, and a wakeup armed in the turn the delete removed is not delivered. Before, the stamp read the rewind
     from the renamed cause, took the fresh CLI for a plain relaunch's and left that wakeup to the kernel, which delivered it
     when it came due. The same holds when the CLI being replaced was itself launched for an earlier delete that no turn of
     it has settled yet: the second delete's launch is at a newer leaf. A later relaunch at the pair the replaced CLI was
     launched at is no rewind's (test_a_wakeup_the_rewind_clis_turn_end_lists_is_delivered_after_a_later_picks_relaunch).
-    On every road here the delete is applied, and each test checks that the fresh CLI is launched at the record the delete
-    keeps: on an Apply now road a delete made during a turn is armed by the settle of that turn's result, which comes with
-    no Stop hook; on a Restart road the Stop hook arms it and the SIGTERM ends the turn before any result.
+    Nor is the relaunch of a delete whose flag it finds spent: a record landed past the leaf the delete recorded while the
+    old CLI's teardown was held, so the launch applies no pair and the deleted turn stays, and a wakeup armed in that turn
+    stays the kernel's, which delivers it once
+    (test_a_delete_whose_flag_the_relaunch_finds_spent_resumes_plainly_and_the_wakeup_its_turn_armed_is_delivered_once).
+    On every other road here the delete is applied, and each test checks that the fresh CLI is launched at the record the
+    delete keeps: on an Apply now road during the teardown a delete made during a turn is armed by the settle of that
+    turn's result, which comes with no Stop hook; on a road that waits for the turn's end the Stop hook arms it and the
+    Restart's or the Apply now's SIGTERM ends the turn before any result.
     The REAL run loop against the stand-in client, whose transport process records the SIGTERM, and whose teardown can be
     held, as the EOF teardown of a CLI with a background agent running is, and as the exit of a CLI sent SIGTERM is until it
     comes; every id synthetic, every text invented."""
@@ -2335,18 +2341,20 @@ class ARewindsFreshCliTakesItsWakeupsWhenARestartOrApplyNowLandsDuringIt(_Harnes
         self.assertEqual(self.s._cut_cause, "apply", "the premise: Apply now renamed the cut before the teardown took it")
         c.released.set()
 
-    def _restart_during_the_turn_end_wait(self, c):
-        """the delete's relaunch waits for the end of the turn `c` runs; a Restart ends `c` with SIGTERM at once, and the
-        exit that follows is held until the cause the teardown will take is read"""
+    def _cut_during_the_turn_end_wait(self, c, gesture):
+        """the delete's relaunch waits for the end of the turn `c` runs; a Restart (`gesture` "restart") or an Apply now
+        ("apply") ends `c` with SIGTERM at once, and the exit that follows is held until the cause the teardown will take
+        is read"""
         s = self.s
         self._wait(lambda: s._reconnect_when_idle, "the delete's relaunch waits for the turn's end")
         self.assertEqual((s._cut_cause, s.client), ("rewind", c), "the premise: no relaunch yet")
         seen = self._open_turns_at_sigterm(c)
         c.hold = True
-        self.assertEqual(self.be.relaunch(SID), "")
+        self.assertEqual(self.be.apply_now(SID) if gesture == "apply" else self.be.relaunch(SID), "")
         self._wait(lambda: c.waiting, "the exit of the CLI sent SIGTERM, held")
-        self.assertEqual((c.events, len(seen), s._cut_cause), (["SIGTERM"], 1, "restart"),
-                         "the premise: the Restart sent SIGTERM and renamed the cut before the teardown took it")
+        self.assertEqual((c.events, len(seen), s._cut_cause), (["SIGTERM"], 1, gesture),
+                         "the premise: the %s sent SIGTERM and renamed the cut before the teardown took it"
+                         % ("Apply now" if gesture == "apply" else "Restart"))
         self.assertGreater(seen[0], 0, "the premise: the turn was in flight at the SIGTERM")
         c.released.set()
 
@@ -2396,7 +2404,23 @@ class ARewindsFreshCliTakesItsWakeupsWhenARestartOrApplyNowLandsDuringIt(_Harnes
         self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the running turn's message")
         self.assertTrue(s._rewind_wait, "the premise: a delete made during a turn waits for that turn's end")
         self._stop([self._listed()])             # that turn's Stop hook arms the delete's relaunch
-        self._restart_during_the_turn_end_wait(c1)
+        self._cut_during_the_turn_end_wait(c1, "restart")
+        c2 = self._client(2)
+        self._rewound_at(c2, kept)
+        self._nothing_delivered(c2)
+        self.assertEqual(len(self._Client.instances), 2, "one relaunch")
+
+    def test_a_wakeup_armed_in_a_turn_a_delete_removes_is_not_delivered_after_an_apply_now_while_the_delete_waits_for_the_turns_end(self):
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        kept = self._records()[-1]
+        self._open(c1, "start the notes-api release loop")
+        self._arm()                              # armed in the running turn, which the delete removes
+        self._a_pick_waiting_for_a_background_agent(c1)
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the running turn's message")
+        self.assertTrue(s._rewind_wait, "the premise: a delete made during a turn waits for that turn's end")
+        self._stop([self._listed()])             # that turn's Stop hook arms the delete's relaunch
+        self._cut_during_the_turn_end_wait(c1, "apply")
         c2 = self._client(2)
         self._rewound_at(c2, kept)
         self._nothing_delivered(c2)
@@ -2425,7 +2449,7 @@ class ARewindsFreshCliTakesItsWakeupsWhenARestartOrApplyNowLandsDuringIt(_Harnes
         self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the running turn's message")
         self.assertTrue(s._rewind_wait, "the premise: a delete made during a turn waits for that turn's end")
         self._stop([self._listed()])             # that turn's Stop hook arms the delete's relaunch
-        self._restart_during_the_turn_end_wait(c2)
+        self._cut_during_the_turn_end_wait(c2, "restart")
         c3 = self._client(3)
         self._rewound_at(c3, kept)
         self.assertNotEqual(s._rewind_leaf, first_leaf, "the premise: the second delete is at a newer leaf")
@@ -2445,6 +2469,41 @@ class ARewindsFreshCliTakesItsWakeupsWhenARestartOrApplyNowLandsDuringIt(_Harnes
         self._rewound_at(c2, kept)
         self.assertEqual(c1.events, ["teardown"], "the delete's own teardown, no SIGTERM")
         self._nothing_delivered(c2)
+
+    def test_a_delete_whose_flag_the_relaunch_finds_spent_resumes_plainly_and_the_wakeup_its_turn_armed_is_delivered_once(self):
+        """a delete made while idle, whose teardown is held as the EOF teardown of a CLI with a background agent running
+        is; a record lands during the hold, so the branch has grown past the leaf the delete recorded, and the relaunch's
+        launch finds the flag spent: it resumes plainly, the deleted turn stays, and the fresh CLI is a plain relaunch's,
+        which leaves the wakeup armed in that turn to the kernel"""
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)
+        kept = self._records()[-1]
+        self._open(c1, "start the notes-api release loop")
+        self._arm()                              # armed in the turn the delete names
+        self._stop([self._listed()])
+        self._end_turn(c1)
+        resolved = []
+        self.be.rewind_resolved_cb = lambda sid, outcome: resolved.append(outcome)
+        c1.hold = True
+        self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the turn that armed it")
+        self._wait(lambda: c1.waiting, "the delete's teardown under way and held")
+        self.assertEqual(self.be.pending_cut(SID), kept, "the premise: the delete's cut is pending")
+        self._transcript_append("a record the old CLI writes during its teardown")   # the branch grows past the leaf
+        c1.released.set()
+        c2 = self._client(2)
+        self.assertIsNone((getattr(c2.options, "extra_args", None) or {}).get("resume-session-at"),
+                          "the flag is spent: the relaunch resumes plainly, at no record")
+        self.assertEqual((resolved, s._rewind_to, s._rewind_armed), (["spent"], "", False), "the spent flag is dropped")
+        self.assertEqual(self.be.pending_cut(SID), "", "no cut pending: the deleted turn stays in the conversation")
+        self.assertEqual(c1.events, ["teardown"], "the delete's own teardown, no SIGTERM")
+        self._all_due()
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1,
+                         "a plain relaunch's fresh CLI does not hold the wakeup: the kernel delivers it")
+        self._wait(lambda: self.WAKE in c2.writes, "its prompt fed to the fresh CLI")
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._settle()
+        self.assertEqual(c2.writes.count(self.WAKE), 1, "delivered once")
+        self.assertEqual(len(self._Client.instances), 2, "one relaunch")
 
     def test_a_restart_with_no_rewind_leaves_a_wakeup_not_yet_due_to_the_kernel_which_delivers_it_once(self):
         c1 = self._first_turn()
