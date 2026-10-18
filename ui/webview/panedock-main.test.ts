@@ -100,8 +100,13 @@ test("the engine's divider drag: press geometry, absolute travel, one commit, Es
   assert.doesNotMatch(ENGINE, /\bresize,?\s*serialise,\n\} from "\.\/pane-tree"/, "the tree's resize is not imported by name: dragEdge is the one caller");
   const endDiv = ENGINE.slice(ENGINE.indexOf("private endDiv(commit: boolean, write = true): void {"), ENGINE.indexOf("/** The same set of ids"));
   assert.match(endDiv, /if \(d\.raf\) \{ cancelFrame\(d\.raf\); d\.raf = 0; \}\n\s*if \(commit\) this\.applyDiv\(\);/, "the release cancels the armed frame and lands the last recorded position itself");
-  assert.match(endDiv, /if \(commit\) \{ if \(write\) this\.persist\(\); \}\n\s*else \{/, "one persist on the commit path, and only when the caller writes (a reconcile ending the drag under a toggle writes the corrected layout itself)");
-  assert.match(endDiv, /if \(d\.edge\.fixed && this\.col\) \{ if \(d\.tl0\) this\.col\.style\.setProperty\("--tl", d\.tl0\); else this\.col\.style\.removeProperty\("--tl"\); \}\n\s*this\.lay = d\.start;/, "Escape: the band's height back for the BAND'S edge only, first; then the press tree");
+  assert.match(endDiv, /if \(commit\) \{ if \(write\) this\.persist\(\); if \(d\.band\) d\.band\.save\(\); \}\n\s*else \{/, "one persist on the commit path, and only when the caller writes (a reconcile ending the drag under a toggle writes the corrected layout itself); the band edge's release has the shell remember the height");
+  assert.match(endDiv, /if \(d\.band\) d\.band\.cancel\(\);\n\s*this\.lay = d\.start;/, "Escape: the band's height back (the shell's grab) for the BAND'S edge only, first; then the press tree");
+  // the band's edge runs the shipped gutter's gesture (_LANDING_JS bandGrab), never a copy: the grab taken at the press for the band's
+  // edge alone, each move made the user's height through it, so the shell's autosize keeps the dragged height (2026-10-18)
+  assert.match(ENGINE, /const band: BandGrab \| null = edge\.fixed && typeof grab === "function" \? grab\(\) : null;/, "the band edge takes the shell's grab at the press, a column or row divider none");
+  assert.match(ENGINE, /if \(d\.band\) d\.want = d\.band\.set\(d\.want\);/, "each band move is the user's height in the shell");
+  assert.doesNotMatch(ENGINE, /["']romp-tl-h["']|\bd\.tl0\b|const tl0\b/, "no second copy of the shell's remembered height or its grab-time value");
   assert.match(endDiv, /if \(stored !== serialise\(this\.lay\)\) this\.persist\(\);\n\s*this\.render\(\);\n\s*\}\n\s*\}/, "Escape writes only when the restored layout differs from the stored one, and renders once, on this path only");
   assert.equal((endDiv.match(/this\.render\(\)/g) || []).length, 1, "a committed release renders in applyDiv alone: no second render");
 });
