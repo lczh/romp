@@ -45,7 +45,7 @@ class DisconnectBanner(unittest.TestCase):
         # since 2026-10-18 the timed road is scheduleRedial: parked on an event while the page is hidden or the shell's
         # socket is down, and an announced restart's tight steps are /version probes (test_ws_redial.py runs it)
         self.assertIn("scheduleRedial(eager,fast);};", js)
-        self.assertIn("var d=eager?0:nextRedial(fast||probe);redialAt=Date.now()+d;setTimeout(probe?probeKernel:connect,d);}", js)
+        self.assertIn("var d=eager?0:nextRedial(fast||probe);redialAt=Date.now()+d;dropRedial();redialTimer=setTimeout(probe?probeKernel:connect,d);}", js)   # one scheduled redial at a time (2026-10-18)
         self.assertIn("ws.onerror=function(){try{ws.close();}catch(e){}};", js)
         # a RECONNECT no longer silently reloads (the user 2026-07-05): it PROMPTS via raiseStale, and the fresh
         # socket resyncs live. The old auto-reload-on-reopen is gone.

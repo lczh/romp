@@ -76028,6 +76028,8 @@ function nextRedial(fast){if(fast!==redialFast){redialFast=fast;redialN=0;}retur
 // note) latches nothing. A restart that RESTART_STEPS_MAX tight steps found unanswered is taken as not happening and the
 // ordinary schedule takes over: no event says a restart will never finish, so the count of unanswered steps is the bound.
 var waitVis=false,waitShell=false,restartBoot="",restartSteps=0,restartOver=false,probeBusy=false,RESTART_STEPS_MAX=60;
+var redialTimer=0;   // the ONE scheduled redial (2026-10-18): a dial or probe started by any road (a show, the shell's wake, the watchdog) drops it, and a new schedule replaces it, so show/hide cycles during an outage cannot stack timers
+function dropRedial(){if(redialTimer){clearTimeout(redialTimer);redialTimer=0;}}
 function shellDown(){try{var p=window.parent;if(p&&p!==window&&typeof p.__rompShellUp==="function")return !p.__rompShellUp();}catch(e){}return false;}   // inside the shell, whose socket is not open; a standalone page or a cross-origin host is its own probe
 function sendsOwed(){if(queue.length-queuedDiag-(readyQueued?1:0)>0)return true;   // anything this page asked of the kernel that is still queued for a socket, breadcrumbs and the ready aside
 try{return typeof window.__rompSendsOwed==="function"&&!!window.__rompSendsOwed();}catch(e){return false;}}   // …or a send its kernel never answered, which the bundle posts again on the next socket (render.ts, send-acks.ts owesSends)
@@ -76035,8 +76037,8 @@ function parked(){var owed=sendsOwed();waitVis=!owed&&document.visibilityState==
 function redialNow(){if(!parked())connect();}   // a dial now, unless the page is hidden or the shell's probe owns it
 function scheduleRedial(eager,fast){if(parked())return;   // the timed road: a close's, a refused constructor's, an unanswered probe's
 var probe=!eager&&!!restartAnnounced&&!restartOver&&restartSteps<RESTART_STEPS_MAX;
-var d=eager?0:nextRedial(fast||probe);redialAt=Date.now()+d;setTimeout(probe?probeKernel:connect,d);}
-function probeKernel(){if((ws&&(ws.readyState===0||ws.readyState===1))||probeBusy||parked())return;restartSteps++;
+var d=eager?0:nextRedial(fast||probe);redialAt=Date.now()+d;dropRedial();redialTimer=setTimeout(probe?probeKernel:connect,d);}
+function probeKernel(){if((ws&&(ws.readyState===0||ws.readyState===1))||probeBusy||parked())return;restartSteps++;dropRedial();
 if(typeof window.fetch!=="function"){connect();return;}   // no fetch: the dial is the probe, counted the same
 probeBusy=true;var ac=null,tm=0;try{ac=typeof AbortController==="function"?new AbortController():null;}catch(e){ac=null;}
 if(ac)tm=setTimeout(function(){try{ac.abort();}catch(e){}},5000);
@@ -76258,6 +76260,7 @@ if(buildRaised)return;buildRaised=true;selfBar("A newer romp build is available.
 // and the watchdog returned on a null socket at every tick: nothing dialed again until the person came back to the tab.
 function dialRefused(){ws=null;if(!failedConnects)firstFailT=Date.now();failedConnects++;scheduleRedial(false,false);}
 function connect(){if(ws&&(ws.readyState===0||ws.readyState===1))return;   // one live attempt at a time — a lost timer + the watchdog can both call in
+dropRedial();   // this dial is the attempt any scheduled redial was waiting to make
 if(returnAt)returnRedialed=true;   // a dial inside a return window (whatever path led here) → the return-fresh row says so
 connT=Date.now();closingT=0;var proto=location.protocol==="https:"?"wss://":"ws://";
 var active="";try{var st0=JSON.parse(localStorage.getItem(SK)||"null");active=(st0&&st0.activeId)||"";}catch(e){}
@@ -80512,6 +80515,8 @@ var shellOpened=false;   // T265: this socket's REOPEN is the kernel-restart sig
 """ + _REDIAL_JS + """
 var sws=null,swsConnT=0,swsRecv=0,swsClosingT=0,swsRedialAt=0,swsN=0,swsFast=false,swsRestartAt=0;
 var swsWaitVis=false,swsRestartBoot='',swsSteps=0,swsOver=false,swsProbeBusy=false,SWS_STEPS_MAX=60,swsForeT=0,swsEager=false;
+var swsTimer=0;   // the ONE scheduled redial, as the panes' redialTimer: any dial or probe drops it, a new schedule replaces it
+function shellDropRedial(){if(swsTimer){clearTimeout(swsTimer);swsTimer=0;}}
 // An INSTALLED app wears the needs-you count on its icon, and the count moves on this socket's `badge` frames: a web push carries
 // it only beside a notification, so a card leaving Needs you never reaches a minimised app another way. Hidden, such an app keeps
 // this one socket redialing on the slow schedule (never the tight one); its panes stay parked until it is shown (2026-10-18).
@@ -80522,11 +80527,11 @@ function shellDialNow(){if(!shellHidden())shellWS();}
 function shellRedial(){if(shellHidden())return;
 var hid=document.visibilityState==='hidden';   // still hidden here: an installed app dialing for its badge, on the slow schedule only
 var inWin=!hid&&Date.now()-swsForeT<30000;   // a close within 30 s of a return to the tab, as the panes' onclose reads it
-if(inWin&&swsEager){swsEager=false;swsRedialAt=Date.now();setTimeout(shellWS,0);return;}   // the first one is the FIN the thawed tab woke into: redial now, so the panes waiting on this socket do not wait a second more
+if(inWin&&swsEager){swsEager=false;swsRedialAt=Date.now();shellDropRedial();swsTimer=setTimeout(shellWS,0);return;}   // the first one is the FIN the thawed tab woke into: redial now, so the panes waiting on this socket do not wait a second more
 var probe=!hid&&!!swsRestartAt&&!swsOver&&swsSteps<SWS_STEPS_MAX;   // an announced restart no new kernel has answered yet
 var fast=probe||inWin;if(fast!==swsFast){swsFast=fast;swsN=0;}
-var d=fast?redialMs(250,2000,swsN++):redialMs(1000,30000,swsN++);swsRedialAt=Date.now()+d;setTimeout(probe?shellProbe:shellWS,d);}
-function shellProbe(){if((sws&&(sws.readyState===0||sws.readyState===1))||swsProbeBusy||shellHidden())return;swsSteps++;
+var d=fast?redialMs(250,2000,swsN++):redialMs(1000,30000,swsN++);swsRedialAt=Date.now()+d;shellDropRedial();swsTimer=setTimeout(probe?shellProbe:shellWS,d);}
+function shellProbe(){if((sws&&(sws.readyState===0||sws.readyState===1))||swsProbeBusy||shellHidden())return;swsSteps++;shellDropRedial();
 if(typeof window.fetch!=='function'){shellWS();return;}   // no fetch: the dial is the probe, counted the same
 swsProbeBusy=true;var ac=null,tm=0;try{ac=typeof AbortController==='function'?new AbortController():null;}catch(e){ac=null;}
 if(ac)tm=setTimeout(function(){try{ac.abort();}catch(e){}},5000);
@@ -80537,7 +80542,7 @@ function shellTellUp(){var fs=document.getElementsByTagName?document.getElements
 // redial's ready re-sends the last frame verbatim), so the detail is told before the redial (_LANDING_APIH_JS)
 function shellLost(ws){try{window.__rompApiSocketLost&&window.__rompApiSocketLost();}catch(e){}if(shellSock===ws)shellSock=null;}
 function shellWS(){if(sws&&(sws.readyState===0||sws.readyState===1))return;   // one live attempt at a time: the redial timer and the watchdog can both call in
-swsConnT=Date.now();swsClosingT=0;
+shellDropRedial();swsConnT=Date.now();swsClosingT=0;
 try{var proto=location.protocol==='https:'?'wss://':'ws://';
 var ws=new WebSocket(proto+location.host+'/ws?app=shell&wid='+encodeURIComponent(wid()));}
 catch(e){sws=null;shellFails++;shellRedial();return;}   // a dial the browser refused outright (the constructor threw): the next one is scheduled all the same, where the throw used to end the shell's dialing for the page's life
