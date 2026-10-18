@@ -2381,7 +2381,8 @@ class ARewindsFreshCliTakesItsWakeupsWhenARestartOrApplyNowLandsDuringIt(_Harnes
         self._apply_now_during_the_held_teardown(c1)
         c2 = self._client(2)
         self._rewound_at(c2, kept)
-        note = sb.task_death_notice([{"desc": "review the parser"}], did=sb.CUT_BY["apply"])
+        note = sb.task_death_notice([{"desc": "review the parser", "type": "local_agent", "taskId": "a-sleeper"}],
+                                    did=sb.CUT_BY["apply"])
         self._wait(lambda: c2.writes == [note], "the notice names Apply now")
         self._nothing_delivered(c2)
         self.assertEqual(len(self._Client.instances), 2, "one relaunch")
