@@ -347,8 +347,7 @@ class SocketLife(_Served):
         st, s = self.upgrade("/ws?app=feed&wid=W-ref1&token=" + QMARK, {"Origin": self.origin})
         _drain_close(s)
         self.assertEqual(st, 403)
-        st, s = self.upgrade("/ws?app=chat%3Cb%3E&wid=W-ref2%20%22said%20so%22%3Cscript%3E",   # a cross-site page's chosen strings
-                             {"Cookie": "romp_token=" + km.TOKEN, "Origin": 'http://elsewhere.example "x" <y>'})
+        st, s = self.upgrade("/ws?app=chat%3Cb%3E&wid=W-ref2%20%22said%20so%22%3Cscript%3E")   # a client with no Origin, its own strings
         _drain_close(s)
         self.assertEqual(st, 403)
         st, s = self.upgrade("/ws?app=chat&wid=W-ref3")                    # past the minute's two rows
@@ -362,13 +361,46 @@ class SocketLife(_Served):
         self.assertEqual([(r["wid"], r["data"]["status"]) for r in got], [("W-ref1", 403), ("W-ref2saidsoscript", 403), ("W-ref4", 400)],
                          "a dial's dashboard id is cut to the characters a real one uses: no spaces, quotes or markup")
         self.assertIn("token required", got[0]["data"]["why"])
-        self.assertEqual((got[1]["data"]["why"], got[1]["data"]["app"], got[1]["data"]["origin"]),
-                         ("cross-site origin", "chatb", "http://elsewhere.examplexy"), "the app and the Origin, cut the same way")
+        self.assertEqual((got[1]["data"]["app"], got[1]["data"]["origin"]), ("chatb", ""), "the app, cut the same way")
         self.assertEqual((got[2]["data"]["why"], got[2]["data"]["key"], got[2]["data"]["unfiled"]), ("no upgrade key", False, 1),
                          "the dial the full minute refused, counted onto the next row")
         self.assertEqual([r["data"]["path"] for r in got], ["/ws"] * 3)
         self.assertNotIn("unfiled", got[0]["data"])
         self.assertNotIn(QMARK, self.fp.read_text(encoding="utf-8"), "never the query string")
+
+    def test_a_cross_site_dial_files_no_row_and_is_counted_on_version(self):
+        # any website open in the browser can dial the port, and the gate's refusal needs no credential: a row for each of
+        # those dials turned the file over within a day and took the minute's budget from romp's own pages (2026-10-18).
+        # A cross-site dial is counted, never filed; a refusal whose Origin the gate admits still files its row.
+        km._CONN_ROW_BUDGET = km._RowBudget(1, clock=_Clock())
+        before = dict(km._WS_REFUSED_CROSS_SITE)
+        elsewhere = {"Cookie": "romp_token=" + km.TOKEN, "Origin": "http://elsewhere.example"}
+        for path in ("/ws?app=chat&wid=W-xs1", "/remote/NOHOST/ws?app=chat&wid=W-xs2"):
+            st, s = self.upgrade(path, elsewhere)
+            _drain_close(s)
+            self.assertEqual(st, 403)
+        st, s = self.upgrade("/ws?app=chat&wid=W-own", {"Origin": self.origin})   # romp's own page without its credential
+        _drain_close(s)
+        self.assertEqual(st, 403)
+        got = self.wait_rows("wsrefused")
+        self.assertEqual([r["wid"] for r in got], ["W-own"], "only the dial from the kernel's own origin files a row")
+        self.assertNotIn("unfiled", got[0]["data"], "the cross-site dials took none of the minute's budget")
+        self.assertNotIn("elsewhere", self.fp.read_text(encoding="utf-8"))
+        self.assertEqual(km._WS_REFUSED_CROSS_SITE["count"] - before["count"], 2)
+        self.assertGreater(km._WS_REFUSED_CROSS_SITE["lastT"], 0)
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        try:
+            c.request("GET", "/version")
+            served = json.loads(c.getresponse().read().decode())["wsRefusedCrossSite"]
+        finally:
+            c.close()
+        self.assertEqual(served, km._WS_REFUSED_CROSS_SITE, "the count rides /version, bare numbers")
+
+    def test_a_refusal_row_cuts_the_origin_it_carries(self):
+        # the Origin of a row is one the gate admitted, but a local client chooses the Host it pairs with, so the cut stays
+        self.assertTrue(km._note_ws_refused({"Origin": 'http://elsewhere.example "x" <y>'}, "/ws", {"app": ["chat"]}, 403,
+                                            "token required"))
+        self.assertEqual(self.rows("wsrefused")[0]["data"]["origin"], "http://elsewhere.examplexy")
 
     def test_a_relay_to_no_attached_host_is_a_refusal_naming_the_host(self):
         st, s = self.upgrade("/remote/NOHOST/ws?app=chat&wid=W-relay&token=" + km.TOKEN, {"Origin": self.origin})

@@ -5201,11 +5201,15 @@ frames it received is measured in the panes themselves, by
   answer (502). The row carries the path (a relay's as `/remote/*/ws` with its
   `host`), the app and dashboard id the dial named, the status, the reason,
   whether an upgrade key came, and the Origin header, never the query string.
-  The gate's refusal needs no credential, so any page, a cross-site one
-  included, can make the kernel file one; the app, dashboard id, host and
-  Origin are therefore cut to the characters such a value uses (letters,
-  digits and a few marks such as `.`, `-` and `:`) and to 40 to 100 of them. A
-  handshake whose 101 could not be written files `wsupgradefail`. At most 30 of
+  The gate's refusal needs no credential, so any website open in the browser
+  can dial the port: a dial the gate refuses for a cross-site Origin files no
+  row and is counted instead, on `/version` as `wsRefusedCrossSite` (`count`,
+  and `lastT`, the newest). A refusal whose Origin the gate admits (the
+  kernel's own pages, the editor's webview, a client that sends no Origin)
+  files its row, with the app, dashboard id, host and Origin cut to the
+  characters such a value uses (letters, digits and a few marks such as `.`,
+  `-` and `:`) and to 40 to 100 of them. A handshake whose 101 could not be
+  written files `wsupgradefail`. At most 30 of
   these rows a minute; the dials a full minute turned away are counted onto the
   next row (`unfiled`). A static request files nothing, so a browser that stopped
   reaching the kernel leaves no row, and one that reached it and was turned away
