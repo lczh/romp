@@ -394,6 +394,56 @@ class PruneAndWriteDiscipline(_Base):
         self.assertNotIn(API + ":g1", km._notify_cards(), "api rendered without it: pruned as before")
 
 
+class ACardNamingADeadSessionIsNotItsRender(_Base):
+    """A parked hand-off card carries its DEAD recipient's sid and a notice card its owner's, alive or not;
+    neither is the session's own render. Counted as one, the build read every remembered card of the dead
+    session as cleared: it forgot them, deleted the user's mute on one, and the session's revival announced
+    them all again, the muted card included."""
+    # the card build_feed adds for a send parked to the dead api, and a notice card owned by api
+    PARKED = _card("parked:m1", API, "needs_input", text="Hand-off parked for api (offline)", name="api",
+                   live=False, board="feed", category="needs_input")
+    NOTICE = _card("notice:" + API + ":deploy:1", API, "completed", text="Deploy finished", name="api",
+                   live=False, board="feed", category="completed")
+
+    def setUp(self):
+        super().setUp()
+        km._set_notify_card(API + ":g2", False, API)          # the user muted api's blocked card
+        self.seed_disk({WEB + ":g1": _entry("completed", WEB), API + ":g1": _entry("completed", API),
+                        API + ":g2": _entry("needs_input", API)})
+        self.boot(_feed(_card(WEB + ":g1", WEB, "completed"), sessions=[WEB]))   # api is dead: it did not render
+
+    def _dead_then_revived(self, extra):
+        out = km._feed_notifications(_feed(_card(WEB + ":g1", WEB, "completed"), extra, sessions=[WEB]))
+        self.assertEqual([o[3] for o in out], [extra["itemId"]], "the card itself is news, announced once")
+        self.assertEqual(sorted(i for i in km._NOTIFY_PREV[0] if i.startswith(API + ":")), [API + ":g1", API + ":g2"],
+                         "api did not render: its cards stay remembered")
+        self.assertEqual(sorted(i for i in self.disk() if i.startswith(API + ":")), [API + ":g1", API + ":g2"],
+                         "...on disk too")
+        self.assertIs(km._notify_cards().get(API + ":g2"), False, "the mute on api's card survives")
+        revived = [_card(WEB + ":g1", WEB, "completed"), _card(API + ":g1", API, "completed", name="api"),
+                   _card(API + ":g2", API, "needs_input", name="api")]
+        if extra["itemId"].startswith("notice:"):
+            revived.append(dict(extra, live=True))            # the notice stands; a parked card leaves on revival
+        out = km._feed_notifications(_feed(*revived, sessions=[WEB, API]))
+        self.assertEqual(out, [], "the revival brings back cards already told: nothing is announced again")
+        self.assertIs(km._notify_cards().get(API + ":g2"), False, "and the mute still holds")
+
+    def test_a_parked_handoff_to_a_dead_session(self):
+        self._dead_then_revived(self.PARKED)
+
+    def test_a_notice_card_owned_by_a_dead_session(self):
+        self._dead_then_revived(self.NOTICE)
+
+    def test_the_session_rendering_without_its_cards_still_forgets_them(self):
+        # the skip is about the roster only: once api renders, a card it no longer has is gone, as before
+        km._feed_notifications(_feed(_card(WEB + ":g1", WEB, "completed"), self.PARKED, sessions=[WEB]))
+        km._feed_notifications(_feed(_card(WEB + ":g1", WEB, "completed"),
+                                     _card(API + ":g1", API, "completed", name="api"), sessions=[WEB, API]))
+        self.assertEqual(sorted(i for i in self.disk() if i.startswith(API + ":")), [API + ":g1"],
+                         "api rendered without g2: forgotten")
+        self.assertNotIn(API + ":g2", km._notify_cards(), "and its mute with it")
+
+
 class CorruptOrUnreadableSnapshot(_Base):
     def test_garbage_is_treated_as_absent_with_a_loud_line(self):
         self.path().write_text("{not json")

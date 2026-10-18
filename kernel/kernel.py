@@ -69433,7 +69433,8 @@ def _card_needs_you(a):
 #     A session that did not render at all (not yet revived, dead, off the board) says nothing about its
 #     cards, so they stay remembered and its revival is silent. The roster is the build's `sessions`
 #     rows (the live tab strip, minus the dead read-only tabs the user kept open, which render no cards)
-#     plus the sessions the rendered cards themselves name. The compaction sweep after each judge pass
+#     plus the sessions the rendered cards themselves name, save a parked hand-off or a notice card, which
+#     names a session that need not have rendered (_NOTIFY_ROSTER_SKIP). The compaction sweep after each judge pass
 #     forgets it when its session is GONE for good: neither alive, nor with a transcript still in the
 #     discover window, nor a dead tab kept open (_notify_prev_forget_gone, the bound session-order.json
 #     already wears). Such a session never renders again, so the build alone kept its cards forever (a
@@ -69466,6 +69467,13 @@ def _card_needs_you(a):
 # The desktop notice and the phone push both iterate the list this diff returns, so the one gate covers
 # both legs; _buzz_claim's one-buzz-per-turn-end rule sits after it, unchanged.
 _NOTIFY_COLUMNS = tuple(_CODE_BOARDS["feed"]["notify"])   # the feed board's notify set, the value the snapshot entries are checked against
+# The card families build_feed appends AFTER its per-session derivation (the PARKED HANDOFFS and NOTICE CARDS blocks),
+# keyed by a message or a notice row. Each card's sid names a session (a parked send's dead recipient, a notice's owner,
+# alive or not) without that session having rendered anything this build, so the diff's roster never counts one. Counted,
+# one such card made a dead session read as rendered without its cards: every remembered card of it was forgotten, the
+# user's mutes on them pruned with them, and its revival announced them all again (2026-10-18). A new family attached
+# there, outside the alive loop, joins this list.
+_NOTIFY_ROSTER_SKIP = ("parked:", "notice:")
 # itemId -> {"sid", "column" (the notified column the card was last SEEN in, None while it sits in
 # working), "announced" (the column last announced, None if never), "announcedAt" (seconds)}; the
 # store holds a card while it is in a notified column or carries an announced mark. None = this life's
@@ -69688,9 +69696,10 @@ def _feed_notifications_diff(feed):
             continue                                 # placeholder churn — not a stable card yet
         cur[str(a.get("itemId"))] = a
     # the sessions that RENDERED this build: the live roster minus the dead read-only tabs (they
-    # render no cards), plus whichever session a rendered card names
+    # render no cards), plus whichever session a rendered card of its own names. A parked hand-off or
+    # a notice card is not one (_NOTIFY_ROSTER_SKIP): it names a session that need not have rendered
     roster = ({str(s.get("sid") or "") for s in (feed.get("sessions") or []) if isinstance(s, dict)}
-              - set(_kept_open)) | {str(a.get("sid") or "") for a in cur.values()}
+              - set(_kept_open)) | {str(a.get("sid") or "") for i, a in cur.items() if not i.startswith(_NOTIFY_ROSTER_SKIP)}
     nxt = {i: e for i, e in prev.items() if i not in cur and e.get("sid") not in roster}   # unrendered: remembered,
     #                                                until the sweep finds the session gone for good (_notify_prev_forget_gone)
     # FOLDED, NOT GONE: a worker's serving card that left the board's cards only because the build folded it into its
