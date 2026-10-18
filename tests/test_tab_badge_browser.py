@@ -78,6 +78,28 @@ def blocked_store(sid, k, t0):
     return {"rompUuid": sid, "seq": k + 1, "lastNode": last, "closedTurns": [], "nodes": nodes, "placements": {}, "status": status}
 
 
+def one_stores(sid, t0):
+    """The stores the driver PUBLISHES over the `one` session's (cfg.oneStore0/1/2): oneStore2 adds a second needs-you card, oneStore1
+    clears it (2 -> 1, the live leg; also the closing restore), oneStore0 clears the last (1 -> 0, the keycap leg). A clear is the user's
+    clear, as the kernel files one: a `clear` row in the card's diary and the flags the rollup derives from it, never the node deleted.
+    The lab kernel's judges run while these land, and a stage that loaded the store before a clear rebases onto it at its save: the rebase
+    folds the clear row in, but a node absent from the file is one the lab has not seen, so a deleted card came back with the stage's save
+    and the badge held its count (CI on main, 2026-10-18). tests/test_needs_you_lab_store_writer.py (TabBadgeLabClears) replays each
+    clear against such a stage."""
+    def cleared(store, i):
+        out = json.loads(json.dumps(store))
+        gid = "%s:g%d" % (sid, i)
+        nd = out["nodes"][gid]
+        nd["log"].append({"ev_t": t0 + 120 + i, "src": "user", "kind": "clear", "why": "cleared from the feed", "at": t0 + 120 + i})
+        nd.update(blocked=False, cleared=True)
+        nd.pop("blockWhy", None)
+        out["status"][gid] = "cleared"
+        return out
+    two = blocked_store(sid, 2, t0)
+    one = cleared(two, 1)
+    return {"oneStore2": json.dumps(two), "oneStore1": json.dumps(one), "oneStore0": json.dumps(cleared(one, 0))}
+
+
 DRIVER = r"""
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -289,10 +311,10 @@ out.gearSwitchOff = await openGear({ tabStateBadge: false }); // a chosen off: t
 await setTheme(page, "dark"); await page.waitForTimeout(150);
 const liveBadge = () => page.evaluate((id) => { const b = document.querySelector('#tabs .tab[data-id="' + id + '"] .tab-badge'); return b ? b.textContent : null; }, cfg.one);
 out.live = { start: await liveBadge() };
-fs.writeFileSync(cfg.oneGoalPath, cfg.oneStore2);   // a SECOND blocked root goal -> count 1 to 2
+publishJson(cfg.oneGoalPath, JSON.parse(cfg.oneStore2));   // a SECOND blocked root goal -> count 1 to 2
 await page.waitForFunction((id) => { const b = document.querySelector('#tabs .tab[data-id="' + id + '"] .tab-badge'); return !!b && b.textContent === "2"; }, cfg.one, { timeout: 40000 }).catch(() => errors.push("live: the badge never climbed to 2 after a card was added (no reload)"));
 out.live.added = await liveBadge();
-fs.writeFileSync(cfg.oneGoalPath, cfg.oneStore1);   // clear it -> count 2 to 1
+publishJson(cfg.oneGoalPath, JSON.parse(cfg.oneStore1));   // clear it -> count 2 to 1
 await page.waitForFunction((id) => { const b = document.querySelector('#tabs .tab[data-id="' + id + '"] .tab-badge'); return !!b && b.textContent === "1"; }, cfg.one, { timeout: 40000 }).catch(() => errors.push("live: the badge never dropped back to 1 after the card cleared"));
 out.live.cleared = await liveBadge();
 
@@ -332,7 +354,7 @@ for (const [label, sset] of [["badge", { tabStateBadge: true }], ["ring", { tabS
 //    viewport a keycap tab in badge mode keeps its width AND #tabbar's height when its Needs-you count clears, because the
 //    reserve is on the keycap, not the count. RED at this PR's base, where the reserve was gated on the non-empty badge,
 //    so the tab's width flipped (21px->7px) as the count cleared and the strip's row count flapped. Own context: badge
-//    default + a hot key on `one`; read (tab width, strip height) with the count, clear the count (an empty goal store),
+//    default + a hot key on `one`; read (tab width, strip height) with the count, clear the count (its card cleared),
 //    read again; restore the store (this is the LAST context, so the default page's live legs above are untouched). ──
 out.wrapFlip = {};
 const wrapCtx = await browser.newContext({ viewport: { width: 360, height: 900 } });
@@ -349,11 +371,11 @@ const readWrap = (id) => wp.evaluate((id) => { const t = document.querySelector(
            hasBadge: !!(t && t.querySelector(".tab-badge:not(:empty)")) }; }, id);
 await setTheme(wp, "dark"); await wp.waitForTimeout(200);
 out.wrapFlip.withCount = await readWrap(cfg.one);
-fs.writeFileSync(cfg.oneGoalPath, cfg.oneStore0);   // clear the needs-you card -> count 0, the badge goes
+publishJson(cfg.oneGoalPath, JSON.parse(cfg.oneStore0));   // clear the needs-you card -> count 0, the badge goes
 await wp.waitForFunction((id) => { const t = document.querySelector('#tabs .tab[data-id="' + id + '"]'); return !!t && !t.querySelector(".tab-badge:not(:empty)"); }, cfg.one, { timeout: 40000 }).catch(() => errors.push("wrap: the badge never cleared after the card was removed"));
 await wp.waitForTimeout(200);
 out.wrapFlip.noCount = await readWrap(cfg.one);
-fs.writeFileSync(cfg.oneGoalPath, cfg.oneStore1);   // restore
+publishJson(cfg.oneGoalPath, JSON.parse(cfg.oneStore1));   // restore
 await wrapCtx.close();
 
 process.stdout.write("RESULT:" + JSON.stringify({ ...out, errors }) + "\n");
@@ -448,11 +470,9 @@ class TabBadgeServed(unittest.TestCase):
                 json.dump({"chat": base + "/chat?token=" + self.token, "url": base + "/?token=" + self.token, "token": self.token,
                            "one": SIDS["one"], "few": SIDS["few"], "many": SIDS["many"], "calm": SIDS["calm"], "over": SIDS["over"], "ids": ids,
                            "oneGoalPath": os.path.join(self.lab, "xdg", "romp", "goals", SIDS["one"] + ".json"),
-                           "oneStore0": json.dumps({"rompUuid": SIDS["one"], "seq": 1, "lastNode": None, "closedTurns": [], "nodes": {}, "placements": {}, "status": {}}),
-                           "oneStore1": json.dumps(blocked_store(SIDS["one"], 1, self.t0)),
-                           "oneStore2": json.dumps(blocked_store(SIDS["one"], 2, self.t0))}, f)
+                           **one_stores(SIDS["one"], self.t0)}, f)
             driver = os.path.join(self.lab, "driver.mjs")
-            Path(driver).write_text(DRIVER)
+            Path(driver).write_text(_lab.PUBLISH_JSON_JS + DRIVER)   # the shared publisher: a store write is a temp and a rename, never in place
             p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=400,
                                env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
             if p.returncode == 3 or "browser-launch-failed" in p.stderr:
