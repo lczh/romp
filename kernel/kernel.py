@@ -85295,6 +85295,14 @@ class Handler(BaseHTTPRequestHandler):
                     # its answer verbatim — a refusal, a plain ok, or an ok with `deferred` — never rewritten
                     return self._send(200, json.dumps(res), "application/json")
                 be = Sessions.backend_for(sid)
+                if be is _UNOWNED and not _kernel_knows(sid):
+                    # A name or id no session here has ever had (a typo, a stale name, `--now` read as the name) is
+                    # refused in /apply's words, as the WS ops refuse it (2026-10-18). Both routes used to fall through
+                    # to ok, /end after writing a death record and an idle row under the raw string, so `romp end` and
+                    # `romp interrupt` exited 0 while the session meant kept running. A session that is ours but not
+                    # running still answers below, as before.
+                    return self._send(200, json.dumps({"ok": False, "error":
+                        "no session named %s on this romp kernel" % who}), "application/json")
                 ans = {"ok": True}
                 if u.path == "/interrupt":
                     # the WS op's gate: a stop the backend refused (nothing in flight) paints nothing
