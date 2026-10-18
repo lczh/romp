@@ -475,6 +475,41 @@ out.kitBandGrowEscape = tlFrB ? await bandGrowMidDrag({ escape: true }) : { erro
 out.kitBandGrowStacked = tlFrB ? await bandGrowMidDrag({ dir: "col", far: true }) : { error: "no timeline frame" };
 out.kitBand = await dragBandKit([-40, -20, 30]);
 out.kitBandEscape = await dragBandKit([-30, 20], { escape: true });
+// the kit's BAND edge against the shell's autosize (2026-10-18: a CI run read the band back at its content's height mid-drag, another
+// after the release): the shell re-fits the band to its content on every romp-panes event, and two everyday events fire one, the
+// /version reading (the 30 s poll hands it to the reload core, which re-applies the panes) and a pane's store write (heard by the shell
+// as a storage event: the chat writes one at its first keepalive). Each is fired once with the edge held and once after the release;
+// the band stays at the pointer, then at the dragged height, on the page and in the store, and the shell remembers the height
+// (romp-tl-h) as it does for the shipped gutter's drag. The release leaves the band away from its content's height for the reload below.
+async function bandKitUnderAutosize(dy) {
+  const band = await rect(pb, "#tl-pane"); if (!band) return { error: "no band" };
+  const ds = (await divs()).filter((d) => d.dir === "col" && Math.abs(d.y + d.h - band.y) <= 8); if (!ds.length) return { error: "no band divider", divs: await divs(), band };
+  const feedFrB = frameOfPath(pb, /\/feed(\?|$)/); if (!feedFrB) return { error: "no feed frame" };
+  const d = ds[0]; const x0 = d.x + d.w / 2, y0 = d.y + d.h / 2; const w0 = await writes(pb);
+  await pb.evaluate(() => { if (!window.__labPanesOn) { window.__labPanesOn = true; window.__labPanes = 0; window.addEventListener("romp-panes", () => { window.__labPanes++; }); } });
+  const panes = () => pb.evaluate(() => window.__labPanes);
+  const fire = async () => {
+    const n0 = await panes();
+    await pb.evaluate(() => window.__rompReload.noteVersion({ taskTracking: true }));
+    await feedFrB.evaluate(() => localStorage.setItem("lab-autosize-probe", String(Date.now()) + ":" + Math.random()));
+    await frame(pb); await frame(pb);
+    return (await panes()) - n0;   // the romp-panes events the two fired: the autosize's nudge ran
+  };
+  const read = async () => ({ tl: await tlOf(), band: (await rect(pb, "#tl-pane")).h, writes: await kitWrites(w0) });
+  const kept = async () => ({ stored: await storedLayout(), remembered: await pb.evaluate(() => localStorage.getItem("romp-tl-h")) });
+  const rec = { tl0: await tlOf(), band0: band.h, wanted: band.bottom - (y0 + dy) };
+  await pb.mouse.move(x0, y0); await pb.mouse.down(); await frame(pb);
+  await pb.mouse.move(x0, y0 + dy, { steps: 4 }); await frame(pb); await frame(pb);
+  rec.held = await read();
+  const heldPanes = await fire();
+  rec.heldFired = { ...(await read()), panes: heldPanes };
+  await pb.mouse.up(); await frame(pb); await frame(pb);
+  rec.released = { ...(await read()), ...(await kept()) };
+  const afterPanes = await fire();
+  rec.after = { ...(await read()), ...(await kept()), panes: afterPanes };
+  return rec;
+}
+out.kitBandAutosize = await bandKitUnderAutosize(-50);
 // a reload restores the persisted layout: the rects before and after, and the stored string against the layout after
 {
   const before = await rectsOf(); const storedBefore = await storedLayout();
@@ -845,13 +880,16 @@ class ServedLiveDividers(unittest.TestCase):
             self.assertEqual(t["afterUp"]["writes"], 1, "%s: and writes nothing more" % name)
             self.assertEqual(t["afterUp"]["stored"]["raw"], at["stored"]["raw"])
             self.assertEqual(sorted(t["restored"]["rects"].keys()), sorted(t["before"].keys()), "%s: the pane put back" % name)
-        # a reload restores the persisted layout: the same panes, the columns at their widths (the band's height is content-sized by the
-        # shell's autosize at boot, so a band left at a dragged height comes back at its content's, and the rows above follow it)
+        # a reload restores the persisted layout: the same panes at the same places and sizes. The band was left at a height dragged on
+        # its kit edge, away from its content's (the autosize leg's release), and a dragged height is the user's: the shell remembers it
+        # (romp-tl-h) and applies it at boot ahead of the content fit, under the kit as for the shipped gutter (the user 2026-09-01, who
+        # wanted the dragged band height remembered), so the band and the rows above it come back where they were
         rl = r["kitReload"]
         self.assertEqual(sorted(rl["after"].keys()), sorted(rl["before"].keys()), "a reload shows the same panes: %r" % rl)
+        self.assertGreater(abs(rl["before"]["tl-pane"]["h"] - _px(r["kitBand"]["tl0"])), 15, "the band was left at a dragged height, away from its content's: %r" % rl["before"]["tl-pane"])
         for k2, v in rl["before"].items():
-            for side in ("x", "w"):
-                self._within(rl["after"][k2][side], v[side], 1.5, "a reload restores %s's %s" % (k2, side))
+            for side in ("x", "w", "y", "h"):
+                self._within(rl["after"][k2][side], v[side], 1.5, "a reload restores %s's %s (the band's dragged height included): %r" % (k2, side, rl["after"][k2]))
         self.assertEqual(sorted(_leaves(rl["layoutAfter"]["tree"])), sorted(_leaves(json.loads(rl["storedBefore"])["tree"])), "the layout after the reload holds the leaves the store held before it")
 
     def test_the_band_resized_under_a_column_drag_keeps_its_height_through_the_drag_and_reaches_the_store_once(self):
@@ -924,6 +962,28 @@ class ServedLiveDividers(unittest.TestCase):
         self.assertEqual(be["after"]["tl"], be["tl0"], "Escape restores the height variable")
         self._within(be["after"]["band"], be["band0"], 1.5, "and the band's height")
         self.assertEqual(be["after"]["writes"], 0, "and writes nothing: %r" % be["after"]["writes"])
+
+    def test_the_kits_band_edge_holds_its_height_against_the_shells_autosize_mid_drag_and_after_the_release(self):
+        # 2026-10-18: the kit's band edge wrote the height variable alone, so the shell's autosize, which re-fits the band to its
+        # content unless the user set a height, put the band back at its content's height on its next run: mid-drag, or after the
+        # release, where the kit then copied that height into the store. The /version reading and a pane's store write each run it.
+        r = self._result()
+        b = r["kitBandAutosize"]
+        self.assertNotIn("error", b, b)
+        self.assertGreater(abs(b["wanted"] - b["band0"]), 15, "the drag moves the band: %r" % b)
+        self._within(_px(b["held"]["tl"]), b["wanted"], 4.0, "mid-drag the band's height is the pointer's distance from its bottom: %r" % b["held"])
+        self.assertGreaterEqual(b["heldFired"]["panes"], 2, "the /version reading and the pane's store write each re-ran the panes' apply, the autosize's nudge: %r" % b["heldFired"])
+        self._within(b["heldFired"]["band"], b["held"]["band"], 1.5, "with the edge held, the band stays at the pointer through both: %r" % {k: b[k] for k in ("held", "heldFired")})
+        self.assertEqual(b["heldFired"]["tl"], b["held"]["tl"], "and so does the height variable")
+        self.assertEqual(b["heldFired"]["writes"], 0, "no store write mid-drag")
+        self._within(b["released"]["band"], b["held"]["band"], 1.5, "the release changes nothing on screen")
+        self.assertEqual(b["released"]["writes"], 1, "one store write, at the release")
+        self.assertGreaterEqual(b["after"]["panes"], 2, "after the release, both re-ran the panes' apply again: %r" % b["after"])
+        self._within(b["after"]["band"], b["released"]["band"], 1.5, "after the release the band keeps the dragged height through both: %r" % {k: b[k]["band"] for k in ("released", "after")})
+        self.assertEqual(b["after"]["tl"], b["released"]["tl"], "and so does the height variable")
+        self._within(_fixed_px(b["after"]["stored"]["parsed"]["tree"], "tl-pane"), b["released"]["band"], 1.5, "the stored layout keeps the dragged height: %r" % b["after"]["stored"]["raw"])
+        self.assertEqual(b["after"]["writes"], 1, "and nothing rewrote it")
+        self.assertEqual(b["after"]["remembered"], str(int(_px(b["released"]["tl"]))), "the shell remembers the dragged height (romp-tl-h), as for the shipped gutter's drag")
 
     def test_a_far_drag_on_the_kits_dividers_stops_at_the_panes_minimum_with_the_edge_at_the_clamp(self):
         # the kit's clamp against the press geometry: the pushed pane at the kit's minimum both ways on each divider (120 px, or a

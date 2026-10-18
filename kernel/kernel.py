@@ -77606,20 +77606,31 @@ function tlClamp(px){return Math.max(48,Math.min(Math.round(window.innerHeight*0
 function applyUser(){col.style.setProperty('--tl',tlClamp(tlUser)+'px');}
 if(tlUser)applyUser();
 function autosize(){if(!document.body.classList.contains('po-timeline'))return;if(tlUser){applyUser();return;}var h=tlContentH();if(!h)return;col.style.setProperty('--tl',Math.min(h+2,cap())+'px');}
+// ONE band-height gesture, for the gh gutter below and the docking kit's band edge (panedock-main.ts) alike (2026-10-18): the
+// grab records the height and the remembered one; set() makes each move the user's height, so an autosize that runs
+// mid-gesture or after it (any romp-panes event: a pane's store write heard as a storage event, the /version reading the
+// 30 s poll hands the reload core) re-applies that height instead of the content fit; save() remembers it at the release;
+// cancel() restores both on Escape. The kit's edge used to write --tl alone, so the next autosize put the band back at its
+// content's height, mid-drag or seconds after the release.
+function bandGrab(){var tl0=col.style.getPropertyValue('--tl'),user0=tlUser;
+return{set:function(px){tlUser=tlClamp(px);return tlUser;},
+save:function(){try{if(tlUser)localStorage.setItem(TLK,String(tlUser));}catch(e){}},
+cancel:function(){tlUser=user0;if(tl0)col.style.setProperty('--tl',tl0);else col.style.removeProperty('--tl');}};}
+window.__rompBandGrab=bandGrab;   // the kit's band edge takes its grab here: the same document, so never absent where the kit runs
 var ghh=document.getElementById('gh');
 if(ghh)ghh.addEventListener('mousedown',function(e){e.preventDefault();document.body.classList.add('drag','dragh');
-var tl0=col.style.getPropertyValue('--tl'),user0=tlUser,want=null,raf=0;   // live already; since section 12 one write per animation frame, and Escape restores the grab-time height (and the remembered one)
+var g=bandGrab(),want=null,raf=0;   // live already; since section 12 one write per animation frame, and Escape restores the grab-time height (and the remembered one)
 function apply(){raf=0;if(want===null)return;col.style.setProperty('--tl',want+'px');}
 // max = the viewport share, NEVER the iframe document's scrollHeight: the timeline document fills whatever
 // height the band has, so 'content height' always equals the CURRENT height, and clamping the drag to it made
 // every drag shrink-only, a downward ratchet (2026-09-01)
-function mv(ev){var r=col.getBoundingClientRect();var px=r.bottom-ev.clientY;
-want=tlClamp(px);tlUser=want;if(!raf)raf=frameOnce(apply);}
+function mv(ev){var r=col.getBoundingClientRect();
+want=g.set(r.bottom-ev.clientY);if(!raf)raf=frameOnce(apply);}
 var keysOff=null;
 function end(){document.body.classList.remove('drag','dragh');if(raf)cancelFrame(raf);raf=0;
 window.removeEventListener('mousemove',mv);window.removeEventListener('mouseup',up);if(keysOff){keysOff();keysOff=null;}}
-function up(){end();apply();try{if(tlUser)localStorage.setItem(TLK,String(tlUser));}catch(e){}}   // end() first: the armed frame is cancelled on this path too, then the last recorded position lands itself and is remembered
-function esc(ev){if(ev.key!=='Escape')return;ev.preventDefault();ev.stopPropagation();want=null;tlUser=user0;end();if(tl0)col.style.setProperty('--tl',tl0);else col.style.removeProperty('--tl');}
+function up(){end();apply();g.save();}   // end() first: the armed frame is cancelled on this path too, then the last recorded position lands itself and is remembered
+function esc(ev){if(ev.key!=='Escape')return;ev.preventDefault();ev.stopPropagation();want=null;end();g.cancel();}
 window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);keysOff=dragKeys(esc);});
 // ── pane gutters (chat|outline|feed|files, fixed order) sized by flex-grow. gv-a is always chat|outline; gv-b's
 // left neighbour is the outline when shown else chat (so it's the chat|feed gutter when the outline is off);
