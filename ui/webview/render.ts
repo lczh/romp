@@ -37,6 +37,7 @@ import { openTagContextMenu, openTagRenamePrompt, planTagUnionEdit, tagRenameVer
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip, TAG_BTN_BORDER_CSS } from "./tag-menu";
 import { syncSessionsFromTabMeta, applyMetaToSession, notePendingMeta, PendingTabMeta } from "./tab-meta";
 import { inInputEvent } from "./input-event";
+import { windowFocusedElement } from "./window-focus";   // the window's focus across the shell's pane frames: the question card's focus guard
 import { markerLabel, dayContext, DayWalk, relativeLabel, relativeLines } from "./time-marker";
 import { composeStatusWidgets, folderIconNode, folderLink, type StatusRecord } from "./status-widgets";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
@@ -18961,14 +18962,21 @@ function customHintRow(s: AskSurface): HTMLElement {
 
 // Keep the picker card's keyboard alive across re-renders (each render rebuilds the card), but NEVER yank
 // focus from a user typing in the composer or any input — the footer stays visible now, so a re-mirror must
-// not steal the caret mid-word (the user 2026-07-09).
+// not steal the caret mid-word (the user 2026-07-09). Any input in the WINDOW, not only this page's: on the dashboard
+// this page is one column among several pane frames, and reading its own focus alone, a question arriving here took the
+// keys out of another column's message box mid-sentence (2026-10-18). windowFocusedElement reads the shell's focus; under
+// VS Code's cross-origin top it is this page's own, so the guard there is what it always was. This page's own focus is
+// still read too, so the guard only gained reasons to hold back.
 function focusCardUnlessTyping(card: HTMLElement) {
-  if (!isTypingTarget(document.activeElement) && !askCardElsewhere(card)) card.focus({ preventScroll: true });
+  const here = document.activeElement, there = windowFocusedElement(window);
+  if (isTypingTarget(here) || isTypingTarget(there) || askCardElsewhere(card, here) || askCardElsewhere(card, there)) return;
+  card.focus({ preventScroll: true });
 }
 // …nor from the OTHER surface's card (thread-live-1): the chat's picker repainting under an open popover must not pull
-// the keys away from the thread's picker the reader is stepping through, nor the other way round.
-function askCardElsewhere(card: HTMLElement): boolean {
-  const at = (document.activeElement as HTMLElement | null)?.closest?.(".ask-card") as HTMLElement | null;
+// the keys away from the thread's picker the reader is stepping through, nor the other way round; nor from another
+// column's card, on the same reading of the window's focus.
+function askCardElsewhere(card: HTMLElement, focused: Element | null): boolean {
+  const at = (focused as HTMLElement | null)?.closest?.(".ask-card") as HTMLElement | null;
   return !!at && at !== card && at.parentElement !== card.parentElement;
 }
 
