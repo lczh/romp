@@ -8,16 +8,11 @@
 // document.activeElement, what every caller read before this existed. A frame on the way down that belongs to another
 // origin is returned as itself: the keys are in there, and this page cannot see where.
 
+import { walkPageFocus } from "./page-focus";   // the one walk down the page's frames, shared with the page-focus watch
+
 /** The element the window's keyboard focus is on, read from the top document when this page can reach it. */
 export function windowFocusedElement(win: Window): Element | null {
-  let at: Element | null;
-  try { at = (win.top || win).document.activeElement; }
-  catch { return win.document.activeElement; }   // a cross-origin top (VS Code's webview): this page's own focus, as before
-  while (at && at.tagName === "IFRAME") {   // a frame holds the focus: the element is inside it, one document further down
-    let inner: Document | null = null;
-    try { inner = (at as HTMLIFrameElement).contentDocument; } catch { inner = null; }
-    if (!inner || !inner.activeElement) break;   // another origin's frame: the keys are in there, out of this page's sight
-    at = inner.activeElement;
-  }
-  return at;
+  const w = walkPageFocus(win);
+  if (w.stop === "unreadable-top") return win.document.activeElement;   // a cross-origin top (VS Code's webview): this page's own focus, as before
+  return w.element;   // a frame of another origin on the way down is the frame element itself: the keys are in there, out of this page's sight
 }

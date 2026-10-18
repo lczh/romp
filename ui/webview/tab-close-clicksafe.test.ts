@@ -35,7 +35,27 @@ test("the press guard is armed on #tabs pointerdown and released on pointerup/ca
   assert.doesNotMatch(RENDER, /window\.addEventListener\("blur", releaseTabStrip\)/, "never the bare release: a sibling frame's focus would drop the hold mid-press");
   assert.match(RENDER, /window\.addEventListener\("blur", \(\) => \{\n\s*if \(!tabPointerHeld \|\| tabHoldFocusOff\) return;[^\n]*\n\s*const off = pageBlurred\(window, releaseTabStrip\);\n\s*if \(tabPointerHeld\) tabHoldFocusOff = off;/);
   const rel = RENDER.slice(RENDER.indexOf("function releaseTabStrip(): void {"), RENDER.indexOf("\n}\n", RENDER.indexOf("function releaseTabStrip(): void {")));
-  assert.match(rel, /^function releaseTabStrip\(\): void \{\n\s*if \(tabHoldFocusOff\) \{ tabHoldFocusOff\(\); tabHoldFocusOff = null; \}[^\n]*\n\s*if \(!tabPointerHeld\) return;/, "every release takes the watch off first, held or not");
+  assert.match(rel, /^function releaseTabStrip\(\): void \{\n\s*tabHoldWatchOff\(\);[^\n]*\n\s*if \(!tabPointerHeld\) return;/, "every release takes the watch off first, held or not");
+  assert.match(RENDER, /function tabHoldWatchOff\(\): void \{\n\s*if \(tabHoldFocusOff\) \{ tabHoldFocusOff\(\); tabHoldFocusOff = null; \}\n\}/);
+});
+
+test("a drag's end takes the hold's focus watch off too, the way a pointerup's release does (the review of PR 307)", () => {
+  // A press that became a native drag ends at dragend, never at a pointerup. A watch armed mid-press (a sibling column took the
+  // focus) and left on past the drag kept the blur listener above from arming one for the next press (`|| tabHoldFocusOff`), and
+  // once the column it watched was closed it never ran, so a window switch mid-press released nothing. Driven served:
+  // tests/test_chat_split_served.py step 13's drag leg (test_13c), red without this.
+  const between = (a: string, b: string) => { const i = RENDER.indexOf(a); assert.ok(i >= 0, "anchor moved: " + a); return RENDER.slice(i, RENDER.indexOf(b, i)); };
+  // the group header's drag repaints nothing itself: its end is the very release a pointerup gets
+  const group = between('head.addEventListener("dragend"', "});");
+  assert.match(group, /\n\s*releaseTabStrip\(\);\n\s*$/, "the group drag's end releases through releaseTabStrip");
+  assert.doesNotMatch(group, /tabPointerHeld = false/, "no hand release left in the group drag's end");
+  // the tab's drag releases by hand, since its cancel path FLIPs the strip home through a render of its own that releaseTabStrip's
+  // deferred flush would repeat; the watch goes in the same breath as the hold
+  const tab = between('tab.addEventListener("dragend"', "});");
+  assert.match(tab, /\n\s*tabHoldWatchOff\(\);[^\n]*\n\s*tabPointerHeld = false;/, "the watch off with the hold");
+  assert.doesNotMatch(tab, /releaseTabStrip\(\)/, "no deferred flush on top of the cancel path's FLIP render");
+  // and nowhere else is the hold dropped without its watch: releaseTabStrip and the tab's dragend are the only hand releases
+  assert.equal((RENDER.match(/^\s+tabPointerHeld = false;/gm) || []).length, 2, "releaseTabStrip's and the tab dragend's, each beside the watch off");
 });
 
 test("release flushes a pending rebuild a tick LATER so the click fires against the live node first", () => {
