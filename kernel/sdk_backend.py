@@ -1195,6 +1195,36 @@ def last_cost_state(path, max_line: int = 4 << 20):
     return None
 
 
+def cost_state_after(path, offset: int, max_line: int = 4 << 20):
+    """The LAST `cost-state` record written at or past byte `offset` of the transcript at `path`, as
+    cost_state_watermarks gives it, or None when that stretch holds none (or the file cannot be read, or is
+    shorter than `offset`). A relaunch's SIGTERM notes the transcript's size before it signals; the CLI writes
+    this record as it exits (verified on 2.1.280 under a session host, 2026-10-18: exit code 143, the record's
+    total the last result's plus the cut turn's), so a record past the mark is the ending CLI's own and never an
+    older one it restored. Reads forward from the mark only: the stretch is what the CLI wrote in the seconds it
+    took to exit. A line longer than `max_line` is not a record and is passed over unparsed."""
+    marker = b'"cost-state"'
+    rec = None
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            if f.tell() < offset:
+                return None
+            f.seek(offset)
+            for line in f:
+                if marker not in line or len(line) > max_line:
+                    continue
+                try:
+                    got = cost_state_watermarks(json.loads(line))
+                except (ValueError, OverflowError, TypeError):
+                    continue
+                if got is not None:
+                    rec = got
+    except OSError:
+        return None
+    return rec
+
+
 def rewind_disposition(rewind_to: str, rewind_leaf: str, leaf_now: str) -> str:
     """Should a (re)connect apply a pending conversation rewind? ONE-SHOT and event-guarded:
     "apply"  — a rewind is pending and the transcript's leaf is still the one recorded at
@@ -4203,25 +4233,73 @@ def task_death_notice(tasks: list, cause: str = "a restart or crash", did: str =
     opens on what the person did ("I restarted Claude Code, which cut off …"), so a deliberate cut never
     reads as a crash (2026-10-01: the cause had read "a settings switch or a rewind restarted it" for every
     reconnect, after a settings switch had stopped cutting anything); without it, `cause` is read after
-    "ended" in parentheses and must stand on its own there."""
-    n = len(tasks)
-    descs = "; ".join(d for d in ((t.get("desc") or "").strip() for t in tasks[:4]) if d)
-    one = n == 1
+    "ended" in parentheses and must stand on its own there.
+
+    A cut-off background AGENT (a lifecycle task of type local_agent) gets its own instruction (2026-10-18, wording
+    the user approved): Claude Code keeps its progress, so the session resumes it with SendMessage instead of
+    starting it again. The check-and-relaunch ask, read by an agent, started the subagent over from scratch. The
+    agent's id is named when the row carries it (an Agent task's lifecycle id IS the agent id, see _on_task_event);
+    a list of several pairs each description with its id. Bash commands, monitors and workflow runs keep the
+    check-and-relaunch ask, and a cut of both kinds is one notice: the lead counts each kind, then each kind's
+    descriptions and its own instruction, agents first."""
+    agents = [t for t in tasks if str(t.get("type") or "") == "local_agent"]
+    others = [t for t in tasks if str(t.get("type") or "") != "local_agent"]
+
+    def _count(n, noun):
+        return "%d background %s%s" % (n, noun, "" if n == 1 else "s")
+
+    def _descs(group, ids):
+        items = []
+        for t in group[:4]:
+            d = (t.get("desc") or "").strip()
+            aid = str(t.get("taskId") or "").strip() if ids else ""
+            items.append("%s (%s)" % (d, aid) if d and aid else (d or aid))
+        return "; ".join(i for i in items if i)
+
+    def _agent_ask(group, whose):
+        one = len(group) == 1
+        aid = str(group[0].get("taskId") or "").strip() if one else ""
+        return ("Claude Code kept %s progress: resume %s by sending it a message (SendMessage to %s) instead of starting "
+                "it again." % (whose, "it" if one else "each", aid or "its id"))
+
+    def _task_ask(group, whose):
+        one = len(group) == 1
+        return ("%s completion notification%s will never arrive. Check whether %s still running before relaunching it"
+                % (whose, "" if one else "s", "it is" if one else "each is"))
+
+    groups = [(agents, "agent"), (others, "task")]
+    kinds = [(g, noun) for g, noun in groups if g]
+    counted = " and ".join(_count(len(g), noun) for g, noun in kinds)
+    one = len(tasks) == 1
     # the gist marker rides in the LEADING marker run here (this notice's voice test wants every marker ahead of
     # the prose, one line after it); the restart constants above append theirs — the lift reads either position
-    head = ("<!-- romp-injected --><!-- romp-system --><!-- romp-gist: %d background task%s cut off when the process ended -->"
-            % (n, "" if one else "s"))
-    tail = ("%s completion notification%s will never arrive. Check whether %s still running before relaunching it; "
-            "if %s needed, carry on."
-            % ("Its" if one else "Their", "" if one else "s", "it is" if one else "each is",
-               "it isn't" if one else "they aren't"))
+    head = "<!-- romp-injected --><!-- romp-system --><!-- romp-gist: %s cut off when the process ended -->" % counted
+    if len(kinds) == 1:
+        group, noun = kinds[0]
+        n1 = len(group) == 1
+        listed = _descs(group, ids=noun == "agent" and not n1)
+        if noun == "agent":
+            tail = _agent_ask(group, "its" if n1 else "their") + (" If %s needed any more, carry on."
+                                                                  % ("it isn't" if n1 else "they aren't"))
+        else:
+            tail = _task_ask(group, "Its" if n1 else "Their") + "; if %s needed, carry on." % ("it isn't" if n1 else "they aren't")
+    else:
+        listed, parts = "", []
+        for group, noun in kinds:
+            n1 = len(group) == 1
+            d = _descs(group, ids=noun == "agent" and not n1)
+            label = ("The %s%s: %s. " % (noun, "" if n1 else "s", d)) if d else ""
+            if noun == "agent":
+                parts.append(label + _agent_ask(group, ("its" if n1 else "their") if d else
+                                                ("the agent's" if n1 else "the agents'")))
+            else:
+                parts.append(label + _task_ask(group, ("Its" if n1 else "Their") if d else
+                                               ("The task's" if n1 else "The tasks'")) + ".")
+        tail = " ".join(parts) + " If any of them isn't needed any more, carry on."
     if did:
-        return (head + "[romp] %s, which cut off %d background task%s you had running%s. "
-                % (did, n, "" if one else "s", (": " + descs) if descs else "") + tail)
-    return (head + "[romp] %d background task%s you had running %s "
-            "cut off when the claude process that started %s ended (%s)%s. "
-            % (n, "" if one else "s", "was" if one else "were", "it" if one else "them", cause,
-               (": " + descs) if descs else "") + tail)
+        return head + "[romp] %s, which cut off %s you had running%s. " % (did, counted, (": " + listed) if listed else "") + tail
+    return (head + "[romp] %s you had running %s cut off when the claude process that started %s ended (%s)%s. "
+            % (counted, "was" if one else "were", "it" if one else "them", cause, (": " + listed) if listed else "") + tail)
 
 # The marker only SDK-driven claude CLIs carry (the kernel drives them over stdin); a tmux session's
 # interactive `claude --resume` never has it, so the orphan reap can never touch a tmux CLI.
@@ -6912,6 +6990,7 @@ class SdkSession:
         self._reconnect_when_idle = False        # a rewind asked for the relaunch mid-turn → apply at turn end
         self._relaunch_term = False              # the armed reconnect is a Restart's or an Apply now's: end the CLI with SIGTERM
         self._relaunch_termed = None             # …and the CLI that was sent it, for the loop top's proof that it is gone
+        self._cut_spend_mark = None              # …and where its transcript ended before the signal (_record_cut_spend)
         self._switch_wanted = ""    # a standing ask for a relaunch ("always fast", "retry upgrade", or a pick: "effort", "billing",
         #   "fast mode", …), applied by _try_switch_reconnect the moment the session is QUIET (no turn in flight or queued, no live
         #   subagent or background task), never at a bare turn's end: the deferred road fired at the result and force-killed a CLI
@@ -7662,8 +7741,10 @@ class SdkSession:
         under a session host the host signals its own child (the `signal` frame; the kernel never knows the CLI's pid),
         for a kernel child the SDK transport's own process is terminated. Records what it signalled (_relaunch_termed)
         so the loop top can tell whether that CLI is proven gone. Loud on every outcome; a failure leaves the plain
-        teardown to end the CLI, as before."""
+        teardown to end the CLI, as before. First notes where the transcript ends, for the spend the cut leaves
+        unreported (_record_cut_spend)."""
         self._relaunch_term = False
+        self._mark_cut_spend()
         host = self._host
         if host is not None:
             try:
@@ -7698,6 +7779,73 @@ class SdkSession:
         if kind == "host":
             return getattr(obj, "exit_info", None) is not None
         return getattr(obj, "returncode", None) is not None
+
+    def _mark_cut_spend(self) -> None:
+        """Before a relaunch_now's SIGTERM: where the conversation's transcript ends now, and whether a turn is in
+        flight, so the loop top can read the cost-state record the ending CLI writes on its way out
+        (_record_cut_spend). No conversation yet (no resume_sid), no mark: that CLI has run no turn to report."""
+        self._cut_spend_mark = None
+        if not self.resume_sid:
+            return
+        p = transcript_path(self.cwd, self.resume_sid)
+        try:
+            size = os.path.getsize(p)
+        except OSError:
+            size = 0          # not written yet: the record the CLI writes at its exit starts the file
+        self._cut_spend_mark = (str(p), size, self.inflight > 0)
+
+    def _record_cut_spend(self, gone: bool) -> None:
+        """Record what a relaunch_now cut left unreported (the review of #281, 2026-10-18). The SIGTERM ends the CLI with
+        no result for the running turn, and the next connect resets the spend watermarks (_seed_spend_watermarks), so
+        the cut turn's dollars and tokens, and whatever background agents spent since the last result, were in no
+        spend record, and the spend guard undercounted every mid-turn Restart and Apply now. The authoritative figure is
+        the cost-state record the CLI writes as it exits (the record the spend repair and the connect seed read, and the
+        one the fresh CLI restores): its totals less this CLI's watermarks, the settle's own fold (a counter below its
+        mark folds whole), recorded the way a result's delta is. Read only past the mark _mark_cut_spend took before
+        the signal (cost_state_after), so an older record the CLI restored is never taken for its last one. Not
+        repriced for Subagents at standard speed, and no turns.jsonl row: the turn never settled.
+
+        Loud when the figure cannot be had: the CLI was not proven gone (its record may not be written yet), or it
+        wrote no record although a turn was in flight. A CLI whose watermark is unknown (a host attach before its
+        first result) records nothing, as the settle does for such a result, and says so in the log."""
+        mark, self._cut_spend_mark = getattr(self, "_cut_spend_mark", None), None
+        if not mark:
+            return
+        path, off, turn_open = mark
+        if not gone:
+            self.backend._log("spend (%s): the CLI a relaunch ended with SIGTERM was not proven gone, so the cost-state "
+                              "record it writes on its way out could not be read: what the cut turn spent is not counted"
+                              % self.name, problem=turn_open)
+            return
+        rec = cost_state_after(path, off)
+        if rec is None:
+            self.backend._log("spend (%s): the CLI a relaunch ended with SIGTERM wrote no cost-state record on its way "
+                              "out, so what %s spent since its last result is not counted"
+                              % (self.name, "the cut turn" if turn_open else "it"), problem=turn_open)
+            return
+        if getattr(self, "_spend_first_result", False) and getattr(self, "_spend_baseline", "fresh") in (
+                "attach-pending", "attach-unknown"):
+            self.backend._log("spend (%s): the CLI a relaunch ended carried a total of $%.2f with no watermark on record "
+                              "for it (a host attach before its first result): what the cut turn spent is unknowable "
+                              "and nothing was recorded" % (self.name, rec["total"]), problem=False)
+            return
+        prior = float(self._last_cost_total or 0.0)
+        total = rec["total"]
+        delta = total - prior if total >= prior else total
+        turn_u = {}
+        if rec["tokens"]:
+            for k, _ in self._USAGE_KEYS:
+                v, last = int(rec["tokens"].get(k) or 0), int(self._last_usage_totals.get(k, 0) or 0)
+                turn_u[k] = v - last if v >= last else v
+            self._last_usage_totals = dict(rec["tokens"])
+        self._last_cost_total = total     # folded: a second read of the same record moves nothing
+        if delta <= 0:
+            return                        # nothing spent since the last result (_record_spend folds no zero either)
+        self.backend._record_spend(delta, turn_u, keyed=self.api_key_auth, sid=self.thread_of or self.sid,
+                                   login=getattr(self, "_launched_login", "") or "")
+        self.backend._log("spend (%s): recorded $%.2f the relaunch cut before %s reported it, from the cost-state "
+                          "record the ending CLI wrote (its total $%.2f over the last result's $%.2f)"
+                          % (self.name, delta, "the running turn" if turn_open else "the CLI", total, prior), problem=False)
 
     def _rehead_unlanded_hold(self, u) -> bool:
         """A text the CLI was holding untaken (u: the feed hold) when a relaunch_now ended it with SIGTERM, the CLI now
@@ -10220,6 +10368,15 @@ class SdkSession:
             # a Restart's or an Apply now's SIGTERM (relaunch_now): spent with the connection it was for, and the CLI it
             # went to read for its exit, the proof the held text's road below needs
             termed, self._relaunch_termed, self._relaunch_term = self._relaunch_termed, None, False
+            # what a relaunch_now's cut left unreported, from the record the ending CLI wrote, before the connect below
+            # reseeds the watermarks (a no-op unless _term_for_relaunch took its mark); a fault costs the record, never
+            # the relaunch
+            try:
+                self._record_cut_spend(gone=self._termed_cli_gone(termed))
+            except Exception as e:
+                self._cut_spend_mark = None
+                self.backend._log("spend (%s): recording what the relaunch cut failed (%s: %s); it is not counted"
+                                  % (self.name, type(e).__name__, _mask_ids(e)), problem=True)
             u, self._untaken = self._untaken, None
             if u is not None and keeps and u.get("received"):
                 u["carried"] = True
@@ -13333,7 +13490,9 @@ class SdkSession:
             self._subagents.clear()
             self._wf_agents.clear()
             self._wf_slots.clear()
-            died = sorted((dict(v) for v in self._bg_tasks.values()), key=lambda d: d.get("since") or 0)
+            # with each row's lifecycle id, as _live_bg_tasks gives the other callers: an Agent task's IS the agent id,
+            # which the notice names so the session can resume that agent (task_death_notice)
+            died = sorted((dict(v, taskId=k) for k, v in self._bg_tasks.items()), key=lambda d: d.get("since") or 0)
             self._bg_tasks.clear()
             if getattr(self, "_bg_foreground", None) is not None:   # getattr: __new__-built test doubles
                 self._bg_foreground.clear()

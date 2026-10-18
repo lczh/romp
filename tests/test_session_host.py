@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 import uuid
 from pathlib import Path
@@ -356,6 +357,98 @@ class AdoptedCli(unittest.TestCase):
         a._waitpid()
         self.assertEqual((a.returncode, getattr(a, "exited", None)), (None, True),
                          "gone with the exit unknown: returncode None (the exit frame's word for unknown), never 0")
+
+
+class _Writer:
+    """The kernel connection's writer as _on_client uses it: frames written, a drain, a close."""
+    def __init__(self):
+        self.frames, self.closed = [], False
+
+    def write(self, b):
+        self.frames.extend(sh.FrameReader().feed(b))
+
+    async def drain(self):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+class TheHostSignalsOnlyItsLiveCli(unittest.TestCase):
+    """The review of #281 (2026-10-18): the `signal` frame (a Restart's TERM, Stop's INT and KILL) called os.kill on the
+    CLI's pid number whatever had become of the CLI, so a frame that arrived after the CLI exited and was reaped, in the
+    seconds before the host itself ends, could reach an unrelated process that had been given the same pid. The host now
+    signals only a CLI it has not reaped, and on Linux through a pidfd opened at the spawn, which names the process
+    itself. In-process hosts on a private state root; the children are this test's own short-lived processes."""
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state, True)
+
+    def _host(self):
+        d = Path(self.state) / "hosts" / SID
+        d.mkdir(parents=True, mode=0o700)
+        p = d / "spawn.json"
+        p.write_text(json.dumps({"sid": SID, "name": "web", "version": "abc12345", "state_dir": self.state, "protocol": 1,
+                                 "cli_path": FAKE, "cwd": self.state, "max_buffer_size": 65536}))
+        h = sh.SessionHost(str(p), lease_api={"write_lease": lambda *a, **k: None, "remove_lease": lambda *a, **k: None,
+                                              "proc_start": lambda pid: "1"})
+        self.addCleanup(h.journal.close)
+        return h
+
+    def _frames_through_the_socket_road(self, h, *frames):
+        """Drive the host's own connection handler (_on_client) with an attach and then `frames`, as a kernel would."""
+        async def go():
+            r = asyncio.StreamReader()
+            r.feed_data(b"".join(sh.encode_frame(f) for f in (
+                {"t": "attach", "kernel": {"pid": 4242, "start": "1", "version": "abc12345"}, "ack": -1},) + frames))
+            r.feed_eof()
+            await h._on_client(r, _Writer())
+        asyncio.run(go())
+
+    def _hostlog(self):
+        p = Path(self.state) / "hosts" / SID / "host.log"
+        return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
+
+    def test_a_signal_frame_after_the_cli_exited_and_was_reaped_signals_nothing(self):
+        h = self._host()
+
+        async def spawn_and_reap():
+            t = sh.PipeCliTransport({"cli_path": "true"}, lambda line: None)
+            t.proc = await asyncio.create_subprocess_exec("true")
+            await t.proc.wait()                  # exited AND reaped: its pid is free for any new process now
+            return t
+        h.transport = asyncio.run(spawn_and_reap())
+        h.cli_pid = h.transport.pid
+        with mock.patch.object(sh.os, "kill") as kill, \
+                mock.patch.object(sh.signal, "pidfd_send_signal", create=True) as via_fd:
+            self._frames_through_the_socket_road(h, {"t": "signal", "sig": "TERM"}, {"t": "signal", "sig": "KILL"})
+        self.assertEqual((kill.call_args_list, via_fd.call_args_list), ([], []),
+                         "a reaped CLI's pid may name another process: nothing is signalled")
+        skipped = [r for r in self._hostlog() if r["kind"] == "signal-skipped"]
+        self.assertEqual([r["sig"] for r in skipped], ["TERM", "KILL"], "said in the host log, once per frame")
+        self.assertNotIn("signalled", [r["kind"] for r in self._hostlog()])
+
+    def test_the_pidfd_keeps_a_signal_off_a_reused_pid_even_before_the_host_sees_the_reap(self):
+        # the handle can lag the reap (a child watcher on a thread sets the return code a moment after its waitpid); the
+        # pidfd taken at the spawn names the process itself, so a signal through it fails with ESRCH instead of landing on
+        # whatever process holds the pid next
+        if not (hasattr(os, "pidfd_open") and hasattr(signal, "pidfd_send_signal")):
+            self.skipTest("pidfds are Linux-only")
+        h = self._host()
+        child = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: child.poll() is None and (child.kill(), child.wait()))
+        handle = types.SimpleNamespace(returncode=None, pid=child.pid)
+        h.transport = types.SimpleNamespace(proc=handle)
+        h.cli_pid = child.pid
+        h._open_cli_pidfd()
+        self.addCleanup(lambda: h._cli_pidfd is not None and os.close(h._cli_pidfd))
+        self.assertIsNotNone(h._cli_pidfd, "opened at the spawn, while the child is unreaped")
+        self.assertEqual(h._signal_cli(signal.SIGCONT), "sent", "a live child is signalled through it")
+        child.kill(); child.wait()               # reaped behind the handle's back: returncode still reads None
+        with mock.patch.object(sh.os, "kill") as kill:
+            self.assertEqual(h._signal_cli(signal.SIGTERM), "gone")
+        self.assertEqual(kill.call_args_list, [], "never the bare pid number")
 
 
 class HostProcess(unittest.TestCase):

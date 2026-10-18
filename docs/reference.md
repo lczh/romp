@@ -212,9 +212,12 @@ turn is cut where it stands, its work so far kept in the conversation. Its
 background tasks end with it and the session is told which were cut off; a
 billing or effort change still waiting for the session to go quiet applies with
 the restart. Background subagents stop with the process but are not cancelled:
-the fresh process tells the session which ones did not finish, and the session
-can resume each one where it left off. (Stop's interrupt, by contrast, ends
-them for good: Claude Code records them as stopped by you.) A message you had
+the fresh process tells the session which ones did not finish, and Romp's own
+notice names each one with its id and asks the session to resume it with
+SendMessage instead of starting it again. (Stop's interrupt, by contrast, ends
+them for good: Claude Code records them as stopped by you.) What the cut turn
+had spent is recorded from the cost record the old process writes as it exits,
+so the spend ceiling counts it. A message you had
 queued survives, and so does one the session had received but not yet started:
 the new process takes it first. Until a taken message lands in the
 conversation, the window you sent it from shows it under a header that reads
@@ -1889,7 +1892,13 @@ The notice a session gets when a relaunch cut its background tasks says what
 the person did: "I restarted Claude Code", "I rewound the conversation and
 restarted Claude Code", or "I restarted Claude Code to apply a settings change
 now", followed by the tasks it cut off. A relaunch no gesture asked for (a
-session host that died mid-handover) keeps the plain "a restart or crash".
+session host that died mid-handover) keeps the plain "a restart or crash". A
+cut-off background agent (a subagent) is named with its agent id, and the
+session is told that Claude Code kept its progress and asked to resume it by
+sending it a message (SendMessage to that id) instead of starting it again; a
+Bash command or a monitor keeps the request to check whether it is still
+running before relaunching it. A cut of both kinds is one notice, each kind
+with its own request.
 
 A setting still waiting for its relaunch survives a kernel restart. The kernel
 records which settings wait, and every launch records the settings it carried,
@@ -6297,6 +6306,18 @@ so the zeroed counter stands. Each `turns.jsonl` row carries
 `spendBaseline` (`fresh`, `seeded` or `attach-unknown`). Before this rule every
 restart re-billed each hosted session's lifetime as one turn (2026-09-11: a
 staircase of rows from $436 to $953 on one session across 21 restarts).
+
+A Restart session or an Apply now ends the CLI with SIGTERM, and the turn it
+cuts never reports a result. Before the signal the kernel notes where the
+conversation's transcript ends; once the CLI is proven gone it reads the
+`cost-state` record the CLI wrote past that point as it exited, and records
+that record's totals less the watermarks as the cut's spend, dollars and
+tokens, billed to the session like a turn (no `turns.jsonl` row: the turn never
+settled). The fresh CLI restores the same record, so its first result folds
+over it and nothing is counted twice. A record from before the signal (one the
+CLI restored at its launch) is never taken for the cut's. The kernel log says
+so, as a problem when a turn was in flight, when the CLI was not proven gone or
+wrote no record.
 
 ## Restart metrics
 
