@@ -1455,68 +1455,113 @@ class AReasonSetAsideClearsAtALaunchNotAtAnAttach(psr._Harness):
         self._wait(lambda: len(psr._Client.instances) == 3 and psr._Client.instances[2] is s.client, "the relaunch onto CLI B")
 
 
-class ARestartBesideAWaitingBypassPickRuns(psr._Harness):
-    """A Restart relaunches at once (SdkSession.relaunch_now): the CLI is ended with SIGTERM, never sent the interrupt, and
-    the relaunch takes the ask standing into itself and sets nothing aside. It carries no switch reason, so the waker's
-    last look never cuts it, and a change back while it waits for the old CLI to be gone never withdraws it: the fresh CLI
-    comes up with the mode picked by then and the due retry's pick."""
+CLI_C = {"pid": 4444, "start": "300.5", "spawnedAt": 1700000300}   # room for a relaunch nothing should ask for
 
-    def test_a_change_back_leaves_the_restarts_relaunch_to_run_with_the_due_retrys_pick(self):
+
+class _ARestartEndsTheCliWithSigterm(psr._Harness):
+    """Restart's road since it relaunches at once (SdkSession.relaunch_now), under the scripted host: the host's signal
+    frame is recorded, the CLI it ends is held in its exit until the test lets it go (the teardown waits for it), the
+    release records the host's exit frame, the proof the loop top reads that the CLI is gone, and the interrupt control
+    request, which a Restart never sends, is recorded. The plan has a third CLI, so a relaunch nothing should ask for is
+    counted rather than failing on a plan with no step left."""
+
+    def _restartable(self):
+        """The kernel and its session with the stand-ins in place. Sets self.signals, self.held, self.gone (an Event: set
+        it to let the held CLI exit) and self.interrupts."""
         import asyncio
         from unittest import mock
-        sb.write_reg(self.state, SID, dict(self._reg(), model="opus"))
         be, s = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"},
-                              {"attach": False, "cli": CLI_B, "launch": "spec"}])
-        signals, held, gone, interrupts = [], [], threading.Event(), []
+                              {"attach": False, "cli": CLI_B, "launch": "spec"},
+                              {"attach": False, "cli": CLI_C, "launch": "spec"}])
+        self.signals, self.held, self.gone, self.interrupts = [], [], threading.Event(), []
+        self.addCleanup(self.gone.set)
+        termed = []
         transport_for = be._host_transport_for
 
         async def _with_signal(sess, opts, classes):
             got = await transport_for(sess, opts, classes)
+            host = sess._host
 
             async def _signal(sig):                                   # the host's signal frame: its CLI is sent `sig`
-                signals.append(sig)
-            sess._host.signal = _signal
+                self.signals.append(sig)
+                termed.append(host)
+            host.signal = _signal
             return got
         be._host_transport_for = _with_signal
         real_exit, real_interrupt = psr._Client.__aexit__, psr._Client.interrupt
 
         async def _exit(client, *a):
-            if signals and client is psr._Client.instances[0]:
-                held.append(client)                                   # the teardown waits for the SIGTERM'd CLI to exit
-                while not (gone.is_set() or s.ended):
+            if termed and client is psr._Client.instances[0]:
+                self.held.append(client)                              # the teardown waits for the SIGTERM'd CLI to exit
+                while not (self.gone.is_set() or s.ended):
                     await asyncio.sleep(0.01)
+                termed[0].exit_info = {"code": None, "signal": 15, "cause": "end"}   # its exit frame: proven gone
             return await real_exit(client, *a)
 
         async def _interrupt(client):
-            interrupts.append(client)
+            self.interrupts.append(client)
             return await real_interrupt(client)
         for name, stand_in in (("__aexit__", _exit), ("interrupt", _interrupt)):
             patch = mock.patch.object(psr._Client, name, stand_in)
             patch.start()
             self.addCleanup(patch.stop)
-        c1 = self._connect(s, 1)
+        return be, s
+
+    def _a_turn_left_running(self, s, c1, served=None):
+        """CLI A's first turn, left running, the CLI launched on Opus and reporting it; when `served` names a model, the
+        turn's reply is served on it. A monitor starts, so every relaunch ask waits."""
         s.enqueue("first turn")
         self._wait(lambda: c1.writes == ["first turn"], "the turn fed")
-        self._push(c1, psr._SystemMessage("init", {"model": "claude-x", "permissionMode": "acceptEdits",
+        self._push(c1, psr._SystemMessage("init", {"model": "claude-opus-5", "permissionMode": "acceptEdits",
                                                    "session_id": psr.FSID}, uuid=self._uid()))
+        if served:
+            self._push(c1, psr._AssistantMessage([psr._TextBlock("on it")], model=served, uuid=self._uid()))
         self._push(c1, psr._SystemMessage("task_started", {"task_id": "t-mon", "description": "watch the spend",
                                                            "task_type": "local_bash"}, uuid=self._uid()))
         self._wait(lambda: s.live_work()[1] == 1, "the monitor registered")
+
+    def _a_retry_after_a_fallback(self, s, c1):
+        """Retry upgrades after downgrades on, the session's pick Opus, and CLI A's reply served by Sonnet, a fallback
+        nobody asked for, which arms the retry (_learn_model)."""
+        self.assertEqual(s.chosen_model, "opus", "the premise: the session's pick")
+        self._a_turn_left_running(s, c1, served="claude-sonnet-5")
+        self.assertEqual(s._served_model, "Sonnet 5", "the premise: the session is served a model below its pick")
+
+    @staticmethod
+    def _retry(s):
+        arm = s._upgrade_retry
+        return (arm["from"], arm["to"], arm["attempts"]) if arm else None
+
+
+class ARestartBesideAWaitingBypassPickRuns(_ARestartEndsTheCliWithSigterm):
+    """A Restart relaunches at once (SdkSession.relaunch_now): the CLI is ended with SIGTERM, never sent the interrupt, and
+    the relaunch takes the ask standing into itself. It carries no switch reason, so the waker's last look never cuts it,
+    and a change back while it waits for the old CLI to be gone never withdraws it. A due model retry that stood down to
+    the bypass pick's ask is set aside for that ask and rides the relaunch: the fresh CLI comes up with the mode picked by
+    then and on the pick the retry asks for, and nothing is left set aside."""
+
+    def test_a_change_back_leaves_the_restarts_relaunch_to_run_with_the_due_retrys_pick(self):
+        with open(os.path.join(self.state, sb.RETRY_UPGRADE_STORE), "w") as f:
+            f.write("on\n")
+        sb.write_reg(self.state, SID, dict(self._reg(), model="opus"))
+        be, s = self._restartable()
+        c1 = self._connect(s, 1)
+        self._a_retry_after_a_fallback(s, c1)
         self.assertTrue(be.set_mode(SID, "bypassPermissions"))
         self._settle()
         self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the pick's own ask")
-        with open(os.path.join(self.state, sb.RETRY_UPGRADE_STORE), "w") as f:
-            f.write("on\n")
-        s._upgrade_retry = {"from": "Opus 5", "to": "Sonnet 5", "pick": "opus", "since": 0, "next": 0, "attempts": 0}
+        be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S)     # the kernel's tick, the retry's attempt due
         self.assertEqual(be.relaunch(SID), "")
-        self._wait(lambda: signals == ["TERM"] and held, "the Restart ending CLI A with SIGTERM while its turn runs")
-        self.assertEqual((s._reconnect, s._switch_wanted, s._switch_riders), (True, "", set()),
-                         "the relaunch is armed, the ask standing taken into it and nothing set aside")
+        self._wait(lambda: self.signals == ["TERM"] and self.held, "the Restart ending CLI A with SIGTERM while its turn runs")
+        self.assertEqual((s._reconnect, s._switch_wanted, s._switch_riders, self._retry(s)),
+                         (True, "", {"retry upgrade"}, ("Opus 5", "Sonnet 5", 0)),
+                         "the relaunch is armed and takes the pick's ask into itself, and the due retry, which made no "
+                         "attempt of its own, is set aside for it")
         s.set_mode_live = lambda mode, prev="default": None
         self.assertTrue(be.set_mode(SID, "acceptEdits"))             # changed back while the relaunch waits for CLI A to exit
         armed = s._reconnect
         self.assertTrue(be.set_mode(SID, "bypassPermissions"))       # and picked again
-        gone.set()
+        self.gone.set()
         self.assertTrue(armed, "a change back during the SIGTERM wait leaves the Restart's relaunch armed")
         self._wait(lambda: len(psr._Client.instances) == 2 and psr._Client.instances[1] is s.client,
                    "the Restart's relaunch onto CLI B")
@@ -1524,10 +1569,82 @@ class ARestartBesideAWaitingBypassPickRuns(psr._Harness):
         self.assertEqual(getattr(c2.options, "model", None), "opus", "CLI B runs the pick the retry asks for")
         self.assertEqual((c2.options.permission_mode, self.launched[CLI_B["pid"]]["mode"]),
                          ("bypassPermissions", "bypassPermissions"), "CLI B is launched with the bypass flag")
-        self.assertEqual(interrupts, [], "never the interrupt control request")
+        self.assertEqual(self.interrupts, [], "never the interrupt control request")
         self._wait(lambda: not s.snapshot().get("modePending"), "the pick applied at CLI B's launch")
+        self.assertEqual((s._switch_riders, self._retry(s)), (set(), ("Opus 5", "Sonnet 5", 0)),
+                         "CLI B was launched from the session's state, the retry's pick included: nothing is left set "
+                         "aside, and the retry waits for a reply served on its pick")
         self._settle()
         self.assertEqual(len(psr._Client.instances), 2, "one relaunch: nothing asks for another")
+
+
+class ARestartServesAnAskStandingBesideAWaitingBypassPick(_ARestartEndsTheCliWithSigterm):
+    """The run behind EveryReasonSetAsideForARelaunchIsCounted's EXEMPT entry for SdkSession._do_relaunch_now: a Restart's
+    relaunch clears the ask standing whatever its reason, not only a pick's, because the fresh CLI it launches serves
+    that ask. An ask other than a pick (Always fast's opt-in, a due model retry) stands beside a waiting bypass pick, and
+    Restart runs with a turn in flight: CLI A is ended with SIGTERM and CLI B carries the ask and the bypass flag. Once CLI
+    B's turns end and the kernel's tick runs again, there is still exactly one relaunch, nothing waits or is set aside,
+    and no interrupt was sent. A relaunch that left the ask standing would relaunch a second time for it."""
+
+    def _restart_beside_a_waiting_bypass_pick(self, be, s, why):
+        self.assertTrue(be.set_mode(SID, "bypassPermissions"))
+        self._settle()
+        self.assertEqual((s._switch_wanted, s._mode_pending, s._mode_ask_alone), (why, "bypassPermissions", False),
+                         "the premise: the ask stands, and the bypass pick waits beside it")
+        self.assertEqual(be.relaunch(SID), "")
+        self._wait(lambda: self.signals == ["TERM"] and self.held, "the Restart ending CLI A with SIGTERM while its turn runs")
+        self.assertTrue(s._reconnect, "the Restart's relaunch is armed")
+        self.assertEqual(len(psr._Client.instances), 1, "the relaunch waits for CLI A to exit")
+        self.gone.set()
+        self._wait(lambda: len(psr._Client.instances) == 2 and psr._Client.instances[1] is s.client,
+                   "the Restart's relaunch onto CLI B")
+        c2 = psr._Client.instances[1]
+        self._wait(lambda: not s.snapshot().get("modePending"), "the pick applied at CLI B's launch")
+        self._wait(lambda: c2.writes, "the cut monitor's notice fed to CLI B")
+        for _ in range(3):                                            # CLI B's turns, each ended
+            if s.inflight or s._cli_working:
+                self._push(c2, psr._SystemMessage("init", {"model": "claude-opus-5", "permissionMode": "bypassPermissions",
+                                                           "session_id": psr.FSID}, uuid=self._uid()))
+                self._push(c2, psr._result(uuid=self._uid(), subtype="success", is_error=False, num_turns=1,
+                                           session_id=psr.FSID, duration_ms=1, duration_api_ms=1, total_cost_usd=0.01,
+                                           usage={"input_tokens": 1, "output_tokens": 1}, result="ok",
+                                           parent_tool_use_id=None))
+                self._wait(lambda: s.inflight == 0 and not s._cli_working, "CLI B's turn ended")
+            self._settle()
+        be.retry_model_upgrades(time.time())                          # the kernel's tick carries any ask still standing
+        self._settle(1.0)
+        self.assertEqual(len(psr._Client.instances), 2, "one relaunch: CLI B served the ask, nothing asks for another")
+        self.assertEqual((c2.options.permission_mode, self.launched[CLI_B["pid"]]["mode"]),
+                         ("bypassPermissions", "bypassPermissions"), "CLI B is launched with the bypass flag")
+        reg = self._reg()
+        self.assertEqual((s._switch_wanted, s._switch_ask_pending, s._switch_riders, reg.get("relaunchWait")),
+                         ("", "", set(), None), "nothing waits for a relaunch or is set aside for one")
+        self.assertEqual(self.interrupts, [], "never the interrupt control request")
+        return c2
+
+    def test_always_fast_asking_for_the_opt_in(self):
+        sb.write_reg(self.state, SID, dict(self._reg(), model="opus"))
+        be, s = self._restartable()
+        c1 = self._connect(s, 1)
+        self._a_turn_left_running(s, c1)
+        with open(os.path.join(self.state, sb.ALWAYS_FAST_STORE), "w") as f:
+            f.write("on\n")
+        self.assertEqual(be.apply_model_switches(), 1, "the premise: Always fast asks for the opt-in CLI A lacks")
+        self._restart_beside_a_waiting_bypass_pick(be, s, "always fast")
+        self.assertEqual((self.launched[CLI_A["pid"]].get("fast"), self.launched[CLI_B["pid"]].get("fast")), (False, True),
+                         "CLI B carries the opt-in Always fast asked for")
+
+    def test_a_due_model_retry(self):
+        with open(os.path.join(self.state, sb.RETRY_UPGRADE_STORE), "w") as f:
+            f.write("on\n")
+        sb.write_reg(self.state, SID, dict(self._reg(), model="opus"))
+        be, s = self._restartable()
+        c1 = self._connect(s, 1)
+        self._a_retry_after_a_fallback(s, c1)
+        self.assertEqual(be.retry_model_upgrades(time.time() + sb.RETRY_UPGRADE_S), 1, "the premise: the due retry asks")
+        c2 = self._restart_beside_a_waiting_bypass_pick(be, s, "retry upgrade")
+        self.assertEqual((getattr(c2.options, "model", None), self._retry(s)), ("opus", ("Opus 5", "Sonnet 5", 1)),
+                         "CLI B runs the pick the retry asks for, on the retry's one attempt")
 
 
 class EveryReasonSetAsideForARelaunchIsCounted(unittest.TestCase):
@@ -1554,7 +1671,8 @@ class EveryReasonSetAsideForARelaunchIsCounted(unittest.TestCase):
                                    "and the fresh CLI it launches serves that ask"),
         "SdkSession._do_relaunch_now": ("a Restart's or an Apply now's relaunch at once by SIGTERM clears the ask standing "
                                         "without setting it aside, and the fresh CLI it launches serves that ask, whichever "
-                                        "of the two came first"),
+                                        "of the two came first (a Restart's is run in "
+                                        "ARestartServesAnAskStandingBesideAWaitingBypassPick)"),
     }
     OTHERS = {
         "SdkSession.__init__": "the ask starts empty",
