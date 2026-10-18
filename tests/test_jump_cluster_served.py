@@ -26,9 +26,12 @@ lines long. Asserted in the browser, each move by the deep-link flash landing on
   tall (the phone's 40 inside the hairline, the arrows' touch size), left-aligned, one capsule gap below the column, and
   the page computes the same surface, hairline, shadow and radius for it as for a capsule, in the dark theme and the
   light, with the arrows' chevron at their size, stroke and resting glow; scrolled up on the phone, column and chip
-  together sit between the pane's top and the message box.
+  together sit between the pane's top and the message box. A question waiting at the bottom (the user 2026-10-18,
+  paraphrased: the corner's pills had no room only then): its picker card keeps the thread's left gutter, so the column
+  covers neither the card nor a line of its text, on the desktop and the phone, in either theme.
 With JUMP_SHOTS=<dir> the driver writes the cluster in the dark theme, the light theme and the phone layout (a coarse
-pointer), each also a screen up with the go-to-bottom chip showing (*-up-corner.png). With JUMP_SHOTS_ONLY=1 it writes
+pointer), each also a screen up with the go-to-bottom chip showing (*-up-corner.png), and the corner with the question's
+card up (ask-*.png, phone-ask-*.png). With JUMP_SHOTS_ONLY=1 it writes
 the shots after load and stops, for a before shot of an older build. Skips LOUDLY without the extension deps or a
 Playwright browser. SYNTHETIC fixtures only (placeholder UUIDs, invented prose,
 host TESTHOST)."""
@@ -166,6 +169,56 @@ const openWeb = async (p) => {   // the web tab is the long one; the strip may o
   await p.waitForSelector(`#tabs .tab[data-id="${cfg.sid}"]`, { state: "attached", timeout: 30000 });
   await p.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`).click(), cfg.sid);
 };
+// A QUESTION WAITING ON THE READER (the user 2026-10-18, paraphrased: the corner's pills had no room only when a question was
+// waiting). The picker card is the transcript's tail, the row beside the column, and it sits beside the threads rather than
+// inside one. At the bottom of the transcript the lab dispatches the kernel's own askLive frame (the shape the SDK backend
+// pushes), measures the column against the card and each line of its text in the dark theme and the light, shoots the corner,
+// and clears the question. The kernel's own question frames for the session are held back, so none clears the lab's mid-run.
+const ASK = { kind: "single", header: "Release", question: "Ship the fix to the notes-api exporter now, or hold it for the next release?",
+  options: [{ n: 1, label: "Ship it (Recommended)", desc: "Merge on green and release behind the flag today.", selected: true },
+            { n: 2, label: "Hold for now", selected: false }, { n: 3, label: "Type something.", selected: false }],
+  cursor: 1, cursorFound: true, multiSelect: false, sig: "lab-ask-1" };
+const holdAsks = (p) => p.addInitScript((sid) => {
+  window.addEventListener("message", (e) => { const m = e.data;
+    if (m && (m.type === "askLive" || m.type === "askLiveClear") && m.id === sid && !m.__lab) e.stopImmediatePropagation(); }, true);
+}, cfg.sid);
+const lab = (p, m) => p.evaluate((m) => { window.dispatchEvent(new MessageEvent("message", { data: { ...m, __lab: true } })); }, m);
+const ASKGEO = () => {
+  const R = (e) => { const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom }; };
+  const box = document.getElementById("jump-cluster"), card = document.querySelector("#live-ask .ask-card");
+  const th = Array.from(document.querySelectorAll("#content .thread")).find((e) => e.getClientRects().length > 0);
+  return { shown: !box.hidden && getComputedStyle(box).display !== "none", column: R(box), card: card ? R(card) : null,
+           gutter: th ? th.getBoundingClientRect().left + parseFloat(getComputedStyle(th).paddingLeft) : null,
+           texts: card ? Array.from(card.querySelectorAll(".ask-qtext, .ask-optlabel, .ask-optdesc, .ask-custom-plus, .ask-custom-hint-text"))
+                           .map((e) => ({ cls: e.className, text: e.textContent.slice(0, 24), ...R(e) })) : [] };
+};
+const askStep = async (p, prefix) => {
+  await backDown(p);
+  await lab(p, { type: "askLive", id: cfg.sid, ask: ASK });
+  const up = await p.waitForSelector("#live-ask .ask-card", { timeout: 10000 }).then(() => true).catch(() => false);
+  await p.waitForTimeout(500);   // the reveal's scroll and the column's placement settle
+  const res = { up };
+  await p.mouse.move(300, 60);
+  for (const th of ["dark", "light"]) {   // the default dark, and the light theme as the gear applies it (theme.ts: both classes)
+    await p.evaluate((light) => { document.body.classList.toggle("theme-light", light); document.body.classList.toggle("chat-theme-yatharth", light); }, th === "light");
+    await p.waitForTimeout(300);
+    await p.evaluate(() => { const c = document.getElementById("content"); c.scrollTop = c.scrollHeight; });   // the theme's own strip can move the tail
+    await p.waitForTimeout(300);
+    res[th] = await p.evaluate(ASKGEO);
+    const g = res[th];
+    if (cfg.shots && g.card) {
+      fs.mkdirSync(cfg.shots, { recursive: true });
+      const c = await p.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { w: r.width, b: r.bottom }; });
+      const top = Math.max(0, Math.min(g.column.t, g.card.t) - 40);
+      await p.screenshot({ path: cfg.shots + "/" + prefix + "ask-" + th + ".png", clip: { x: 0, y: top, width: Math.min(c.w, 640), height: c.b - top } });
+    }
+  }
+  await p.evaluate(() => { document.body.classList.remove("theme-light", "chat-theme-yatharth"); });
+  await lab(p, { type: "askLiveClear", id: cfg.sid });
+  await p.waitForSelector("#live-ask .ask-card", { state: "detached", timeout: 10000 }).catch(() => {});
+  return res;
+};
+await holdAsks(page);
 await page.goto(cfg.chat);
 await openWeb(page);
 await settle(cfg.shotsOnly ? null : "#jump-cluster:not([hidden])");
@@ -175,12 +228,14 @@ if (cfg.shotsOnly) {
   await shoot(page, "light");
   await page.evaluate(() => document.body.classList.remove("theme-light"));
   await scrollUp(page); await upCorner(page, "", ["dark", "light"]);
+  await askStep(page, "");
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
-  const pp = await phone.newPage(); await pp.goto(cfg.chat); await openWeb(pp);
+  const pp = await phone.newPage(); await holdAsks(pp); await pp.goto(cfg.chat); await openWeb(pp);
   await pp.waitForSelector("#content .turn-user", { state: "attached", timeout: 60000 }); await pp.waitForTimeout(4000);
   if (cfg.shots) await pp.screenshot({ path: cfg.shots + "/phone.png" });
   await scrollUp(pp); await upCorner(pp, "phone-", ["dark", "light"]);
   if (cfg.shots) await pp.screenshot({ path: cfg.shots + "/phone-up.png" });
+  await askStep(pp, "phone-");
   fs.writeSync(1, "RESULT:" + JSON.stringify({ shotsOnly: true }) + "\n"); await browser.close(); process.exit(0);
 }
 // every deep-link flash as it lands: the uuid of the turn wearing it (the flash is a 1.6s class; a late wait can miss it)
@@ -298,6 +353,8 @@ if (Object.values(out.steps).every((s) => s.ok)) {
   out.counts.reply = await page.evaluate(() => window.__replyLands("tid-c"));
   out.counts.replyInView = await inView(R(140));
 }
+// a question waiting at the bottom: the column covers none of its card
+out.ask = await askStep(page, "");
 // the api tab: a transcript that fits shows no cluster
 await page.evaluate((sid) => { const t = document.querySelector(`#tabs .tab[data-id="${sid}"]`); if (t) t.click(); }, cfg.api);
 await page.waitForTimeout(1500);
@@ -305,6 +362,7 @@ out.api = await page.evaluate(() => ({ hidden: document.getElementById("jump-clu
 // the phone layout: a coarse pointer, all three capsules showing (three replies wait unread at the bottom)
 const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
 const pp = await phone.newPage();
+await holdAsks(pp);
 await pp.goto(cfg.chat);
 await openWeb(pp);
 await pp.waitForSelector("#jump-cluster:not([hidden]) .jc-unread:not([hidden])", { timeout: 60000 }).catch(() => {});
@@ -322,6 +380,8 @@ out.phoneDress.light = await pp.evaluate(DRESS);
 await pp.evaluate(() => document.body.classList.remove("theme-light")); await pp.waitForTimeout(200);
 await upCorner(pp, "phone-", ["dark", "light"]);
 if (cfg.shots) await pp.screenshot({ path: cfg.shots + "/phone-up.png" });
+// the phone, back at the bottom, with a question waiting: the wider column covers none of its card either
+out.phoneAsk = await askStep(pp, "phone-");
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -432,7 +492,15 @@ class ServedJumpCluster(unittest.TestCase):
             k.wait()
         shutil.rmtree(getattr(cls, "lab", ""), ignore_errors=True)
 
+    _result = None
+
     def _drive(self):
+        """The driver runs once for the class; each test reads its own part of the one result."""
+        if ServedJumpCluster._result is None:
+            ServedJumpCluster._result = self._run_driver()
+        return ServedJumpCluster._result
+
+    def _run_driver(self):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "sid": WEB, "api": API,
@@ -552,6 +620,35 @@ class ServedJumpCluster(unittest.TestCase):
         print("COLUMN desktop %sx%s chip %sx%s; phone %sx%s chip %sx%s, top clearance %.0f, message-box clearance %.0f" % (
             s0["rect"]["w"], s0["rect"]["h"], s1["jump"]["w"], s1["jump"]["h"], ph["rect"]["w"], ph["rect"]["h"], pu["jump"]["w"], pu["jump"]["h"],
             pu["rect"]["t"] - pu["content"]["t"], pu["composerTop"] - pu["jump"]["b"]))
+
+    def test_the_column_covers_none_of_a_waiting_question(self):
+        """A question waiting on the reader (the user 2026-10-18, paraphrased: the corner's pills had no room only when a
+        question was waiting): the picker card is the transcript's tail, beside the column in the corner, and keeps the
+        thread's left gutter as the turns do, so the column covers neither the card nor a line of its text, on the desktop and
+        on the phone, in the dark theme and the light. It ran to the pane's left edge and lost its first letters under the
+        column."""
+        r = self._drive()
+        if r.get("shotsOnly"):
+            self.skipTest("optional: JUMP_SHOTS_ONLY wrote the screenshots and ran no assertions")
+        for where, a in (("desktop", r["ask"]), ("phone", r["phoneAsk"])):
+            self.assertTrue(a["up"], "%s: the question's card is up: %r" % (where, a))
+            for theme in ("dark", "light"):
+                g, at = a[theme], "%s %s" % (where, theme)
+                col, card = g["column"], g["card"]
+                self.assertTrue(g["shown"], "%s: the column shows, so the check means something: %r" % (at, g))
+                self.assertIsNotNone(card, "%s: the card is on the page: %r" % (at, g))
+                self.assertTrue(card["t"] < col["b"] and card["b"] > col["t"],
+                                "%s: the card sits beside the column, so the check means something: %r" % (at, g))
+
+                def covers(b):
+                    return b["l"] < col["r"] and b["r"] > col["l"] and b["t"] < col["b"] and b["b"] > col["t"]
+                self.assertFalse(covers(card), "%s: the column covers none of the card: column %r, card %r" % (at, col, card))
+                self.assertGreaterEqual(len(g["texts"]), 5, "%s: the question, both options, a description, the add-your-own hint: %r" % (at, g["texts"]))
+                for t in g["texts"]:
+                    self.assertFalse(covers(t), "%s: the column covers %s %r: column %r, text %r" % (at, t["cls"], t["text"], col, t))
+                self.assertIsNotNone(g["gutter"], g)
+                self.assertLess(abs(card["l"] - g["gutter"]), 0.5,
+                                "%s: the card starts at the thread's gutter, where the turns' column does: %r" % (at, g))
 
     def _same_dress(self, d, glyph_px, rest, where):
         """The go-to-bottom chip and a capsule, as the page computed them: one surface, hairline, shadow and radius, and the

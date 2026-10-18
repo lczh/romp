@@ -34,7 +34,17 @@ test("renderLiveAsk keeps the picker last and reveals it when the user is parked
 
 test("#live-ask is no longer a fixed 42vh mini-region — it flows in the scroll", () => {
   assert.doesNotMatch(CSS, /#live-ask \{[^}]*max-height: 42vh/);
-  assert.match(CSS, /#live-ask \{ padding-bottom: 6px; \}/);
+  assert.match(CSS, /#live-ask \{[^}]*padding: 0 24px 6px \d+px; \}/);
+});
+
+test("#live-ask keeps the thread's left gutter, so the jump cluster floating over it never covers the card", () => {
+  // the host sits beside the threads, not inside one, so it reserves the gutter itself (the user 2026-10-18: the card ran to
+  // the pane's edge under the cluster); the gutter is read off .thread, so the two cannot drift apart
+  const gutter = CSS.match(/\.thread \{[^}]*padding: 0 24px 0 (\d+px)/)?.[1];
+  assert.ok(gutter, ".thread declares its gutter");
+  const host = CSS.match(/#live-ask \{([^}]*)\}/)?.[1] || "";
+  assert.match(host, /max-width: var\(--chat-col\); margin: 0 auto;/, "the thread's column");
+  assert.ok(host.includes(`padding: 0 24px 6px ${gutter};`), `the thread's ${gutter} gutter: ${host}`);
 });
 
 test("'Chat about this' is a selectable answer again (only Type-something / Submit are filtered)", () => {
