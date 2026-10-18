@@ -157,7 +157,11 @@ test("isChatFrame: f-chat and f-chat-<n> are chat columns; a registry pane whose
 test("the engine's divider drag: a pointercancel, a lost capture and the window's blur end it as Escape does, each once", () => {
   const press = ENGINE.slice(ENGINE.indexOf("private onDivPress(e: PointerEvent, d: HTMLElement): void {"), ENGINE.indexOf("private minFrac("));
   assert.match(press, /d\.setPointerCapture\(pid\);/, "the divider captures the press's pointer, so a lost capture is heard");
-  assert.match(press, /const cancel = \(ev: Event\) => \{ if \(ev\.type === "blur" \? this\.div === drag : mine\(ev\)\) this\.endDiv\(false\); \};/, "a route ends this drag only, by the cancel path");
+  assert.match(press, /const cancel = \(ev: Event\) => \{[\s\S]*?\n\s*if \(ev\.type === "blur" \? this\.div === drag : mine\(ev\)\) this\.endDiv\(false\);\n\s*\};/, "a route ends this drag only, by the cancel path");
+  // a blur with the page still focused is focus moving into one of the shell's own pane frames, not the window losing focus (the
+  // review of PR 296: the chat's question card focusing itself mid-drag snapped the drag back and wrote nothing); the served lab
+  // drives both, a real focus loss and an element of the chat's page focused mid-drag
+  assert.match(press, /const cancel = \(ev: Event\) => \{(?:\n\s*\/\/[^\n]*)*\n\s*if \(ev\.type === "blur" && document\.hasFocus\(\)\) return;\n\s*if \(ev\.type === "blur" \?/, "the page's own focus read first: a blur with the page still focused ends nothing");
   for (const k of ["pointercancel", "lostpointercapture"]) {
     assert.match(press, new RegExp(`window\\.addEventListener\\("${k}", cancel, true\\);`), k + " wired to the cancel");
     assert.match(press, new RegExp(`window\\.removeEventListener\\("${k}", cancel, true\\);`), k + " unwired at the end");
