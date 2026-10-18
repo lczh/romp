@@ -76017,7 +76017,9 @@ var REDIAL_MS=1000,REDIAL_MAX_MS=30000,REDIAL_FAST_MS=250,REDIAL_FAST_MAX_MS=200
 function redialMs(base,cap,n){var d=Math.min(cap,base*Math.pow(2,Math.min(n,16)));return Math.round(d*(0.8+0.4*Math.random()));}   // _REDIAL_JS, the shell's copy, character for character (test_ws_redial pins the two): written out here, not a template slot, since pane-shim-stale.test.ts renders this template from the kernel's source with slot values of its own
 function nextRedial(fast){if(fast!==redialFast){redialFast=fast;redialN=0;}return fast?redialMs(REDIAL_FAST_MS,REDIAL_FAST_MAX_MS,redialN++):redialMs(REDIAL_MS,REDIAL_MAX_MS,redialN++);}
 // WHO dials, and on what (2026-10-18). A HIDDEN page dials nothing: its redial waits for the visibilitychange that shows it
-// (waitVis), then goes at once. A pane inside the SHELL whose socket is down dials nothing either (waitShell): the shell's
+// (waitVis), then goes at once. Neither rule parks a page that OWES a send (sendsOwed): a prompt queued during a restart, or one
+// its kernel never answered, keeps the page dialing, hidden or not, until it is delivered; a person who sends and switches
+// away must not come back to an agent that never got the message. A pane inside the SHELL whose socket is down dials nothing either (waitShell): the shell's
 // socket is the page's one probe, and its open is told to every pane (window.__rompKernelUp, called by the shell), the
 // event each pane then dials on, once. During an ANNOUNCED restart each tight step is a /version probe, not a dial (probeKernel): a dial the kernel
 // refuses (a token minted anew across the restart, a 403 the browser reports as a bare close) cannot be told from a kernel
@@ -76027,7 +76029,9 @@ function nextRedial(fast){if(fast!==redialFast){redialFast=fast;redialN=0;}retur
 // ordinary schedule takes over: no event says a restart will never finish, so the count of unanswered steps is the bound.
 var waitVis=false,waitShell=false,restartBoot="",restartSteps=0,restartOver=false,probeBusy=false,RESTART_STEPS_MAX=60;
 function shellDown(){try{var p=window.parent;if(p&&p!==window&&typeof p.__rompShellUp==="function")return !p.__rompShellUp();}catch(e){}return false;}   // inside the shell, whose socket is not open; a standalone page or a cross-origin host is its own probe
-function parked(){waitVis=document.visibilityState==="hidden";waitShell=!waitVis&&shellDown();if(waitVis||waitShell)redialAt=0;return waitVis||waitShell;}
+function sendsOwed(){if(queue.length-queuedDiag-(readyQueued?1:0)>0)return true;   // anything this page asked of the kernel that is still queued for a socket, breadcrumbs and the ready aside
+try{return typeof window.__rompSendsOwed==="function"&&!!window.__rompSendsOwed();}catch(e){return false;}}   // …or a send its kernel never answered, which the bundle posts again on the next socket (render.ts, send-acks.ts owesSends)
+function parked(){var owed=sendsOwed();waitVis=!owed&&document.visibilityState==="hidden";waitShell=!owed&&!waitVis&&shellDown();if(waitVis||waitShell)redialAt=0;return waitVis||waitShell;}
 function redialNow(){if(!parked())connect();}   // a dial now, unless the page is hidden or the shell's probe owns it
 function scheduleRedial(eager,fast){if(parked())return;   // the timed road: a close's, a refused constructor's, an unanswered probe's
 var probe=!eager&&!!restartAnnounced&&!restartOver&&restartSteps<RESTART_STEPS_MAX;
@@ -80507,13 +80511,20 @@ var shellOpened=false;   // T265: this socket's REOPEN is the kernel-restart sig
 // why), and a restart announced as a stop (`stopping`) latches nothing.
 """ + _REDIAL_JS + """
 var sws=null,swsConnT=0,swsRecv=0,swsClosingT=0,swsRedialAt=0,swsN=0,swsFast=false,swsRestartAt=0;
-var swsWaitVis=false,swsRestartBoot='',swsSteps=0,swsOver=false,swsProbeBusy=false,SWS_STEPS_MAX=60;
+var swsWaitVis=false,swsRestartBoot='',swsSteps=0,swsOver=false,swsProbeBusy=false,SWS_STEPS_MAX=60,swsForeT=0,swsEager=false;
+// An INSTALLED app wears the needs-you count on its icon, and the count moves on this socket's `badge` frames: a web push carries
+// it only beside a notification, so a card leaving Needs you never reaches a minimised app another way. Hidden, such an app keeps
+// this one socket redialing on the slow schedule (never the tight one); its panes stay parked until it is shown (2026-10-18).
+function shellBadgeApp(){try{return ('setAppBadge' in navigator)&&(navigator.standalone===true||!!(window.matchMedia&&window.matchMedia('(display-mode: standalone)').matches));}catch(e){return false;}}
 window.__rompShellUp=function(){return !!(shellSock&&shellSock.readyState===1);};   // the panes' read of the page's probe
-function shellHidden(){swsWaitVis=document.visibilityState==='hidden';if(swsWaitVis)swsRedialAt=0;return swsWaitVis;}   // a hidden page parks its redial on the visibilitychange that shows it
+function shellHidden(){swsWaitVis=document.visibilityState==='hidden'&&!shellBadgeApp();if(swsWaitVis)swsRedialAt=0;return swsWaitVis;}   // a hidden page parks its redial on the visibilitychange that shows it
 function shellDialNow(){if(!shellHidden())shellWS();}
 function shellRedial(){if(shellHidden())return;
-var probe=!!swsRestartAt&&!swsOver&&swsSteps<SWS_STEPS_MAX;   // an announced restart no new kernel has answered yet
-var fast=probe;if(fast!==swsFast){swsFast=fast;swsN=0;}
+var hid=document.visibilityState==='hidden';   // still hidden here: an installed app dialing for its badge, on the slow schedule only
+var inWin=!hid&&Date.now()-swsForeT<30000;   // a close within 30 s of a return to the tab, as the panes' onclose reads it
+if(inWin&&swsEager){swsEager=false;swsRedialAt=Date.now();setTimeout(shellWS,0);return;}   // the first one is the FIN the thawed tab woke into: redial now, so the panes waiting on this socket do not wait a second more
+var probe=!hid&&!!swsRestartAt&&!swsOver&&swsSteps<SWS_STEPS_MAX;   // an announced restart no new kernel has answered yet
+var fast=probe||inWin;if(fast!==swsFast){swsFast=fast;swsN=0;}
 var d=fast?redialMs(250,2000,swsN++):redialMs(1000,30000,swsN++);swsRedialAt=Date.now()+d;setTimeout(probe?shellProbe:shellWS,d);}
 function shellProbe(){if((sws&&(sws.readyState===0||sws.readyState===1))||swsProbeBusy||shellHidden())return;swsSteps++;
 if(typeof window.fetch!=='function'){shellWS();return;}   // no fetch: the dial is the probe, counted the same
@@ -80574,7 +80585,8 @@ setInterval(shellWatch,5000);
 // a tab the browser FROZE ran no script, so no frame could stamp swsRecv while it slept: its resume re-bases an OPEN
 // socket's silence, as the panes' resume stamp does, and a socket that stays silent after the thaw is still put down
 document.addEventListener('resume',function(){if(sws&&sws.readyState===1)swsRecv=Date.now();});
-document.addEventListener('visibilitychange',function(){if(swsWaitVis&&document.visibilityState!=='hidden'){swsWaitVis=false;shellWS();}});   // a redial parked while hidden goes now, once
+document.addEventListener('visibilitychange',function(){if(document.visibilityState==='hidden')return;swsForeT=Date.now();swsEager=true;   // the return window shellRedial reads
+if(swsWaitVis){swsWaitVis=false;swsEager=false;shellWS();}});   // a redial parked while hidden goes now, once (and is the return's instant dial)
 // THE HTTP DOOR (2026-10-15), the pane shim's beaconTick twin for the shell's own rows: once no shell socket has been open for
 // 20 s, the shell sends what diagQ holds (oldest first, at most 20 and 16,000 characters, as the panes do) and one `nosocket` row (how long, how many dials never
 // opened, whether the tab is hidden) over plain HTTP to the kernel's POST /client-diag, then at most once a minute while the

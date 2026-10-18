@@ -227,6 +227,38 @@ out({queued:queued,ticked:n0,dialed:dialed});""")
         self.assertEqual(r["ticked"], 1, "and the watchdog dials nothing for it")
         self.assertEqual(r["dialed"], 1, "shown: one dial, at once")
 
+    def test_a_hidden_page_with_a_queued_send_keeps_redialing_until_it_is_delivered(self):
+        # (2026-10-18, the review of #291) a prompt sent while the kernel restarts queues for the socket; the person switches
+        # away. Parked, the page delivered nothing until they came back, and the agent sat idle. A page that owes a send is
+        # never parked: it redials on its schedule, hidden, until the send goes; then it may park
+        r = _pane(r"""
+function step(){if(!pending("connect").length)return false;fireRedial("connect");return true;}   // a dial only when one was scheduled
+open();recv({type:"ka"});drop();send({type:"sendMessage",id:"S1",text:"run the migration",qid:"echo:"+"a".repeat(32)});hide();
+step();drop();var next=due("connect");step();drop();var later=due("connect");
+var delivered=false;if(step()){var s=open();delivered=s.sent.map(function(x){return JSON.parse(x).type;}).indexOf("sendMessage")>=0;drop();}
+out({next:next,later:later,delivered:delivered,after:pending("connect").length+pending("probeKernel").length});""")
+        self.assertEqual((r["next"], r["later"]), (2000, 4000), "hidden, with the send queued: still redialing, on the ordinary schedule")
+        self.assertTrue(r["delivered"], "the socket that opens carries the send")
+        self.assertEqual(r["after"], 0, "nothing owed any more: hidden, it parks")
+
+    def test_a_hidden_page_whose_kernel_never_answered_a_send_keeps_redialing(self):
+        # a send that went out on a socket that died before its kernel answered sits in the bundle's resend queue, not the
+        # shim's: the bundle says so (render.ts __rompSendsOwed), and the page keeps dialing to post it again
+        r = _pane(r"""
+var OWED=true;window.__rompSendsOwed=function(){return OWED;};
+open();recv({type:"ka"});hide();drop();var owed=due("connect");OWED=false;if(owed!==null){fireRedial("connect");drop();}
+out({owed:owed,after:pending("connect").length});""")
+        self.assertEqual(r["owed"], 1000)
+        self.assertEqual(r["after"], 0, "answered: it parks")
+
+    def test_a_pane_owing_a_send_dials_on_its_own_while_the_shells_socket_is_down(self):
+        r = _pane(r"""
+open();recv({type:"ka"});SHELL_UP=false;drop();var parked0=pending("connect").length;
+window.__rompSendsOwed=function(){return true;};tick();var n=sockets.length;
+out({parked0:parked0,n:n});""", pre=IN_SHELL)
+        self.assertEqual(r["parked0"], 0, "nothing owed: it waits for the shell's socket")
+        self.assertEqual(r["n"], 2, "a send owed: the next tick dials, the shell's socket notwithstanding")
+
     def test_a_pane_waits_for_the_shells_socket_and_dials_once_when_it_opens(self):
         r = _pane(r"""
 open();recv({type:"ka"});SHELL_UP=false;drop();var queued=pending("connect").length+pending("probeKernel").length;
@@ -365,6 +397,26 @@ out({queued:queued,ticked:n0,dialed:dialed,again:sockets.length-n0});""")
         self.assertEqual(r["queued"], 0, "no redial is scheduled while hidden")
         self.assertEqual(r["ticked"], 1, "and the watchdog dials nothing for it")
         self.assertEqual((r["dialed"], r["again"]), (1, 1), "shown: one dial, at once")
+
+    def test_the_first_close_after_a_return_to_the_tab_redials_at_once(self):
+        # (2026-10-18) the FIN a thawed tab wakes into: the panes waiting on this socket must not wait a second more
+        r = _shell(r"""
+open();recv({type:"ka"});document.visibilityState="hidden";fire("visibilitychange");NOW+=60000;
+document.visibilityState="visible";fire("visibilitychange");drop();var first=due("shellWS");fireRedial("shellWS");drop();var second=due("shellWS");
+NOW+=31000;fireRedial("shellWS");open();recv({type:"ka"});drop();var late=due("shellWS");   // every fire below has a redial pending on either side of the change
+out({first:first,second:second,late:late});""")
+        self.assertEqual(r["first"], 0, "the first close inside the return window: now")
+        self.assertEqual(r["second"], 250, "the next ones back off from 250 ms, as the panes' do")
+        self.assertEqual(r["late"], 1000, "past the window: the ordinary schedule")
+
+    def test_an_installed_app_keeps_one_slow_dial_while_hidden_for_its_badge(self):
+        # the icon's count moves on this socket's badge frames (a push carries it only beside a notification), so a
+        # minimised installed app keeps this socket redialing, on the slow schedule only, even inside an announced restart
+        r = _shell(r"""
+open();recv({type:"restarting",boot:"B1"});document.visibilityState="hidden";drop();var hidden=[due("shellWS"),due("shellProbe")];
+if(hidden[0]!==null){fireRedial("shellWS");drop();}hidden.push(due("shellWS"));
+out({hidden:hidden});""", pre='navigator.setAppBadge=function(){};window.matchMedia=function(q){return {matches:q.indexOf("standalone")>=0};};\n')
+        self.assertEqual(r["hidden"], [1000, None, 2000], "hidden: one slow dial, never the tight probes")
 
     def test_its_socket_is_the_pages_probe_read_by_the_panes_and_its_open_told_to_them(self):
         r = _shell(r"""

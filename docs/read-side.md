@@ -77,7 +77,11 @@ completed); the feed just paints columns. (Reflected in `docs/judges.md`.)
   nothing until it is shown, then dials at once, and a pane inside the shell
   whose socket is down waits for the shell's socket, the page's one probe, to
   open (the shell then calls each pane's `__rompKernelUp`) instead of
-  dialing. A socket the browser holds CLOSING is put down on the watchdog tick
+  dialing. Neither rule holds back a page that owes a send (one queued for the
+  socket, or one its kernel never answered): it keeps dialing, hidden or not,
+  until the send is delivered. A minimised installed app keeps the shell's
+  socket dialing on the 1 s schedule, since its icon's count arrives on it, and
+  the shell's first close after a return to the tab redials at once. A socket the browser holds CLOSING is put down on the watchdog tick
   after the one that first saw it, a dial the browser refuses outright still
   schedules the next, and the shell page's own socket keeps all of these
   rules. After a reconnect the shim
