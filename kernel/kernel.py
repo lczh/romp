@@ -76042,7 +76042,7 @@ probeBusy=true;var ac=null,tm=0;try{ac=typeof AbortController==="function"?new A
 if(ac)tm=setTimeout(function(){try{ac.abort();}catch(e){}},5000);
 function done(back){probeBusy=false;if(tm)clearTimeout(tm);if(back){restartOver=true;redialNow();}else scheduleRedial(false,false);}   // unanswered: the next tight step, or past the bound the ordinary schedule
 try{window.fetch("/version",{cache:"no-store",signal:ac?ac.signal:undefined}).then(function(r){return r&&r.ok?r.json():null;}).then(function(j){done(!!(j&&j.boot&&String(j.boot)!==restartBoot));},function(){done(false);});}catch(e){done(false);}}
-window.__rompKernelUp=function(){if(waitShell)redialNow();};   // the shell's socket opened, the kernel is back: the shell calls this on each pane's window directly (same origin; no message listener, so nothing another page posts can reach it)
+window.__rompKernelUp=function(){if(!ws||ws.readyState===3)redialNow();};   // EVERY pane whose socket is down dials now, parked or not: one holding an unsent message, never parked, would otherwise wait out its own backoff (2026-10-18); a hidden one with nothing owed parks again in redialNow   // the shell's socket opened, the kernel is back: the shell calls this on each pane's window directly (same origin; no message listener, so nothing another page posts can reach it)
 var beaconQ=[],beaconT=0,beaconBusy=false,beaconGen=0,downT=Date.now(),tickT=0,BEACON_AFTER_MS=20000,BEACON_EVERY_MS=60000,BEACON_ROWS=20,BEACON_CHARS=16000;   // the HTTP door (beaconTick, below): the queued breadcrumbs it may carry, when it last went, whether one is in flight, which open it belongs to; since when this page has had no open socket (0 while one is open, the page's load counting as the start: netState keeps it), and the watchdog's last tick
 // This pane's DASHBOARD id. ?wid= when the host supplies one (the VS Code extension builds its own pane
 // URLs); otherwise the shell's per-tab id from sessionStorage, which is scoped to the browsing context and
@@ -80586,7 +80586,8 @@ setInterval(shellWatch,5000);
 // socket's silence, as the panes' resume stamp does, and a socket that stays silent after the thaw is still put down
 document.addEventListener('resume',function(){if(sws&&sws.readyState===1)swsRecv=Date.now();});
 document.addEventListener('visibilitychange',function(){if(document.visibilityState==='hidden')return;swsForeT=Date.now();swsEager=true;   // the return window shellRedial reads
-if(swsWaitVis){swsWaitVis=false;swsEager=false;shellWS();}});   // a redial parked while hidden goes now, once (and is the return's instant dial)
+if(sws&&sws.readyState===2){swsEager=false;shellAbandon('closing',swsClosingT?Date.now()-swsClosingT:0);return;}   // held CLOSING: put down and dialed now, as the panes do on a return
+if(swsWaitVis||!sws||sws.readyState===3){swsWaitVis=false;swsEager=false;shellWS();}});   // down when shown, parked or on the slow schedule a hidden installed app keeps: dial now, once (and that is the return's instant dial)
 // THE HTTP DOOR (2026-10-15), the pane shim's beaconTick twin for the shell's own rows: once no shell socket has been open for
 // 20 s, the shell sends what diagQ holds (oldest first, at most 20 and 16,000 characters, as the panes do) and one `nosocket` row (how long, how many dials never
 // opened, whether the tab is hidden) over plain HTTP to the kernel's POST /client-diag, then at most once a minute while the

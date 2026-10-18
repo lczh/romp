@@ -273,6 +273,20 @@ out({queued:queued,ticked:n0,early:early,dialed:dialed,own:own});""", pre=IN_SHE
         self.assertEqual(r["dialed"], 1, "the shell's open: one dial, however often it is told")
         self.assertEqual(r["own"], 1000, "a drop of this pane alone, with the shell's socket up, redials on its own schedule")
 
+    def test_the_shells_open_wakes_every_pane_that_is_down_the_one_holding_a_send_most_of_all(self):
+        # (2026-10-18, the review of #292) a pane owing a send is never parked, so a wake that reached only parked panes
+        # left it to its own backoff, up to ~36 s after the shell was back. Every pane whose socket is down dials now; an
+        # open one is left alone
+        r = _pane(r"""
+window.__rompSendsOwed=function(){return true;};
+open();recv({type:"ka"});SHELL_UP=false;drop();var own=due("connect");fireRedial("connect");drop();var backoff=due("connect");
+var n0=sockets.length;SHELL_UP=true;window.__rompKernelUp();var woke=sockets.length-n0;
+open();recv({type:"ka"});window.__rompKernelUp();var again=sockets.length-n0;
+out({own:own,backoff:backoff,woke:woke,again:again});""", pre=IN_SHELL)
+        self.assertEqual((r["own"], r["backoff"]), (1000, 2000), "owing a send: its own schedule while the shell's socket is down")
+        self.assertEqual(r["woke"], 1, "the shell's open: it dials now, not at the end of its 2 s wait")
+        self.assertEqual(r["again"], 1, "an open pane is not dialed again")
+
     def test_a_kernel_up_message_it_missed_is_caught_by_the_watchdog(self):
         r = _pane(r"""
 open();recv({type:"ka"});SHELL_UP=false;drop();var n0=sockets.length;SHELL_UP=true;tick();
@@ -417,6 +431,24 @@ open();recv({type:"restarting",boot:"B1"});document.visibilityState="hidden";dro
 if(hidden[0]!==null){fireRedial("shellWS");drop();}hidden.push(due("shellWS"));
 out({hidden:hidden});""", pre='navigator.setAppBadge=function(){};window.matchMedia=function(q){return {matches:q.indexOf("standalone")>=0};};\n')
         self.assertEqual(r["hidden"], [1000, None, 2000], "hidden: one slow dial, never the tight probes")
+
+    def test_an_installed_app_shown_with_its_socket_down_dials_at_once(self):
+        # (2026-10-18, the review of #292) hidden, an installed app keeps the slow schedule rather than parking, so a return
+        # found nothing parked and waited out that schedule, up to ~36 s, its panes waiting on it. Shown, it dials now
+        r = _shell(r"""
+open();recv({type:"ka"});document.visibilityState="hidden";drop();fireRedial("shellWS");drop();var sched=due("shellWS");
+var n0=sockets.length;document.visibilityState="visible";fire("visibilitychange");
+out({sched:sched,dialed:sockets.length-n0});""", pre='navigator.setAppBadge=function(){};window.matchMedia=function(q){return {matches:q.indexOf("standalone")>=0};};\n')
+        self.assertEqual(r["sched"], 2000, "hidden: the slow schedule")
+        self.assertEqual(r["dialed"], 1, "shown: a dial at once, not at the end of the schedule")
+
+    def test_a_socket_held_closing_when_the_page_is_shown_is_put_down_and_redialed_at_once(self):
+        r = _shell(r"""
+var s=open();recv({type:"ka"});s.stuck=true;s.readyState=2;var n0=sockets.length;
+document.visibilityState="visible";fire("visibilitychange");
+out({dialed:sockets.length-n0,rows:diagRows.map(function(x){return x.what+":"+x.data.why;})});""")
+        self.assertEqual(r["dialed"], 1)
+        self.assertEqual(r["rows"], ["watchdog-close:closing"])
 
     def test_its_socket_is_the_pages_probe_read_by_the_panes_and_its_open_told_to_them(self):
         r = _shell(r"""
