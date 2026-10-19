@@ -33,6 +33,20 @@ export const INTENT_OPS: ReadonlySet<string> = new Set([
   "cancelQueued",
   // other clicks that act on a session, each naming what it acts on (a session, a task, a list of cards)
   "compactSession", "forkSession", "stopTask", "applyNow", "cancelCreate", "askClearMany",
+  // the + picker's create. Dropped, the session the user named never existed, and the reload took its provisional tab
+  // with it, so nothing said so; the web dashboard's socket sends every held op and created it (review find,
+  // 2026-10-19). A held frame never reached the kernel, so the replay is the first delivery, and a create naming a
+  // session that already runs is answered by focusing that session, never by a second one.
+  "createSession",
+  // the same kind of click on one session's tools, each naming what it acts on: the subagent speed switch, an MCP
+  // server's enable, disable or reconnect, the "restore files" rewind, a watch's Cancel (the sibling of stopTask), and
+  // the dismiss on a never-delivered bubble. Dropped, the reloaded page showed the old state with nothing saying the
+  // click was lost. Every op the kernel routes to one session's backend (kernel.py _DRIVE_ID_OPS) is intent but the
+  // read mark commentSeen, and pipe-intent.test.ts holds that list and this one together.
+  "setSubagentStandard", "mcpAction", "rewindFiles", "cancelWatch", "dismissEcho",
+  // the feed's "Run analysis on Opus" button. It is stamped at the click, so the kernel orders a replay against any
+  // later pick and refuses one that is stale.
+  "setJudgeModel",
   // Left out on purpose: clearAll names no cards, so a replay would clear whatever the kernel holds when the
   // socket returns, including cards that arrived while this pane could not show them; dropped, the reload shows
   // every card still there. answerPickerChoice has no consumer (the kernel lists it as a host op and this

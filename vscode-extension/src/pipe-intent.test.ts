@@ -5,6 +5,8 @@
 // replayed op must outlive that same reload (review find, 2026-09-08).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { INTENT_OPS, intentOp, HELD_ACROSS_RELOAD, heldAcrossReload, ReloadHold } from "./pipe-intent";
 
 test("typed-text ops are intent — losing them loses the user's words", () => {
@@ -68,6 +70,66 @@ test("comment-thread ops, a queued message's withdrawal and the other session ge
     "cancelQueued", "compactSession", "forkSession", "stopTask", "applyNow", "cancelCreate", "askClearMany"]) {
     assert.ok(intentOp(t), `${t} must survive a reconnect`);
   }
+});
+
+test("a new session's create and the clicks on a session's tools are intent", () => {
+  // a create made while the kernel restarts was dropped at the reconnect, and the reload took its provisional tab, so
+  // the session the user named never existed and nothing said so; the web dashboard's socket sends every held op and
+  // created it. The subagent speed switch, an MCP server's toggle, the restore-files rewind, a watch's Cancel, a
+  // never-delivered bubble's dismiss and the feed's analysis-model button were dropped the same way (review find,
+  // 2026-10-19).
+  for (const t of ["createSession", "setSubagentStandard", "mcpAction", "rewindFiles", "cancelWatch", "dismissEcho",
+    "setJudgeModel"]) {
+    assert.ok(intentOp(t), `${t} must survive a reconnect`);
+  }
+});
+
+test("every per-session op the kernel routes to a session's backend is intent, save the read mark", () => {
+  // kernel.py _DRIVE_ID_OPS lists the ops that act on one session (a send, a setting, a rewind, a tool's toggle). Four
+  // of them were missing from INTENT_OPS and dropped at the reconnect (review find, 2026-10-19); a new one added there
+  // must be classified here too.
+  const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
+  const m = /\n_DRIVE_ID_OPS = \(([^)]*)\)/.exec(KERNEL);
+  assert.ok(m, "kernel.py's _DRIVE_ID_OPS tuple");
+  const ops = [...m![1].matchAll(/"([A-Za-z]+)"/g)].map((x) => x[1]);
+  assert.ok(ops.includes("sendMessage") && ops.includes("commentSeen"), "the tuple parsed");
+  // commentSeen is a thread's read watermark, posted as its popover opens: the pane's own bookkeeping, not a click
+  const BOOKKEEPING = new Set(["commentSeen"]);
+  assert.deepEqual(ops.filter((t) => !BOOKKEEPING.has(t) && !intentOp(t)), [],
+    "a per-session op dropped at the reconnect is a click lost with nothing saying so");
+});
+
+// Every op a webview posts straight to its host that is NOT intent: view state the reconnect's reload resyncs, the
+// pane's own bookkeeping, or a request the extension host answers itself.
+const NOT_INTENT = [
+  // where the pane is looking, and what it asks the kernel for
+  "ready", "activeTab", "openSession", "openByName", "jumpSession", "requestSessions", "needSlot", "imgRequest", "redial",
+  "loadOlder", "loadAround", "loadTurns", "loadEpisode", "openSubagent", "closeSubagent", "viewReadOnly",
+  "showAskPath", "showOnTimeline", "dotOpen", "dotHover", "hoverHighlight", "focusComposer", "colorSync",
+  "setViewFolds", "setViewOrder",   // published only while the pipe is up (the pane withdraws its publisher on the down edge)
+  // the pane's bookkeeping and audit rows
+  "cardOpened", "clientDiag", "locateDiag", "commentSeen", "commentDropSeen", "commentDropHidden",
+  // the + picker's path completion, and requests the extension host answers on its own
+  "dirComplete", "browseDir", "openLink", "pickFile", "pickResult", "readClipboard", "editorSelection",
+  // left out on purpose: see the test below
+  "clearAll", "answerPickerChoice",
+];
+
+test("every op a webview posts is classified: intent, or named here as not", () => {
+  // createSession and five clicks on a session's tools were posted without ever being classified, and the reconnect
+  // dropped them (review find, 2026-10-19). A new op posted from ui/webview fails here until someone decides which it is.
+  const DIR = path.resolve(process.cwd(), "..", "ui", "webview");
+  const posted = new Set<string>();
+  for (const f of fs.readdirSync(DIR)) {
+    if (!f.endsWith(".ts") || f.endsWith(".test.ts")) continue;
+    for (const m of fs.readFileSync(path.join(DIR, f), "utf8").matchAll(/postMessage(?:\?\.)?\(\{ ?type: "([A-Za-z]+)"/g))
+      posted.add(m[1]);
+  }
+  assert.ok(posted.has("sendMessage") && posted.has("createSession") && posted.has("ready"), "the scan found the webviews' posts");
+  const notIntent = new Set(NOT_INTENT);
+  assert.deepEqual([...posted].filter((t) => !intentOp(t) && !notIntent.has(t)).sort(), [],
+    "add each to INTENT_OPS (pipe-intent.ts) if dropping it at the reconnect loses a click, or to NOT_INTENT above");
+  assert.deepEqual(NOT_INTENT.filter((t) => intentOp(t)), [], "an op is one or the other");
 });
 
 test("Clear all and the resume-picker choice are left out of the replay on purpose", () => {
