@@ -20,7 +20,14 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-KPORTS = ["http://127.0.0.1:29855", "http://127.0.0.1:7878", "http://127.0.0.1:7432"]
+
+def _kernel_base():
+    """The local kernel's base URL, on the port every other `romp` command resolves: ROMP_KERNEL_PORT, then
+    ROMP_SERVE_PORT, else 29855. Only that port is asked. This used to try 29855, 7878 and 7432 in turn and
+    take the first that answered the unauthenticated /version, so when another process held 29855 (the
+    reason to set ROMP_KERNEL_PORT), this romp's serve token went to that process."""
+    port = (os.environ.get("ROMP_KERNEL_PORT") or os.environ.get("ROMP_SERVE_PORT") or "").strip()
+    return "http://127.0.0.1:%s" % (port or "29855")
 
 
 def _token():
@@ -39,13 +46,13 @@ def _token():
 
 def _kernel():
     """The base URL of the running LOCAL kernel (it owns the remote tunnels), or None."""
-    for u in KPORTS:
-        try:
-            with urllib.request.urlopen(u + "/version", timeout=1.5) as r:   # /version is auth-exempt
-                if r.status == 200:
-                    return u
-        except Exception:
-            continue
+    u = _kernel_base()
+    try:
+        with urllib.request.urlopen(u + "/version", timeout=1.5) as r:   # /version is auth-exempt
+            if r.status == 200:
+                return u
+    except Exception:
+        pass
     return None
 
 
@@ -85,7 +92,7 @@ def main(argv):
         return 2
     u = _kernel()
     if not u:
-        sys.stderr.write("romp update: no running kernel found (is romp on? try `romp status`)\n")
+        sys.stderr.write("romp update: no running kernel at %s (is romp on? try `romp status`)\n" % _kernel_base())
         return 2
     hosts = list(argv)
     if not hosts:                                                   # no host → the out-of-date attached remotes

@@ -46,25 +46,33 @@ def _disk_bundles():
     return out
 
 
+def _kernel_base():
+    """This romp's kernel, on the port every other `romp` command resolves: ROMP_KERNEL_PORT, then
+    ROMP_SERVE_PORT, else 29855. A fixed list of ports read whatever answered first as this romp's kernel,
+    another account's included, and missed this one when it ran on a port of its own."""
+    port = (os.environ.get("ROMP_KERNEL_PORT") or os.environ.get("ROMP_SERVE_PORT") or "").strip()
+    return "http://127.0.0.1:%s" % (port or "29855")
+
+
 def _probe_kernel():
     """The running kernel's self-report. Returns ('version', dict) when /version answers,
     ('stale', url) when only /healthz answers (a kernel predating /version → restart it), or
     ('down', None) when nothing is listening."""
     import urllib.request
-    for u in ["http://127.0.0.1:29855", "http://127.0.0.1:7878", "http://127.0.0.1:7432"]:
-        try:
-            with urllib.request.urlopen(u + "/version", timeout=1.5) as resp:
-                d = json.loads(resp.read().decode())
-                d["url"] = u
-                return ("version", d)
-        except Exception:
-            pass
-        try:
-            with urllib.request.urlopen(u + "/healthz", timeout=1.0) as resp:
-                if resp.read(2) == b"ok":
-                    return ("stale", u)
-        except Exception:
-            continue
+    u = _kernel_base()
+    try:
+        with urllib.request.urlopen(u + "/version", timeout=1.5) as resp:
+            d = json.loads(resp.read().decode())
+            d["url"] = u
+            return ("version", d)
+    except Exception:
+        pass
+    try:
+        with urllib.request.urlopen(u + "/healthz", timeout=1.0) as resp:
+            if resp.read(2) == b"ok":
+                return ("stale", u)
+    except Exception:
+        pass
     return ("down", None)
 
 
@@ -149,7 +157,7 @@ def report():
     elif kind == "stale":
         lines.append("kernel   running at %s but predates /version — `romp refresh` to populate" % k)
     else:
-        lines.append("kernel   not reachable — is the manager up? (`romp up` / `romp status`)")
+        lines.append("kernel   not reachable at %s — is the manager up? (`romp up` / `romp status`)" % _kernel_base())
     served = (k.get("bundles") if kind == "version" else {}) or {}
     disk = _disk_bundles()
     lines.append("bundles  (on disk%s):" % (" / served" if served else ""))
