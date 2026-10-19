@@ -9239,10 +9239,11 @@ class SdkSession:
                                   % (self.name, ", ".join(left),
                                      "not carried by the CLI this kernel attached to" if known
                                      else "cannot be vouched for (the host's hello carries no launch record)"))
-        # When the hold above found a mode other than the one `want` read (unrecord), the entry the write above carried
-        # goes, and each record write after it is followed by a fresh read of the mode under self._lock, until a read
-        # agrees with the write before it (_note_pick_waits and _drop_pick_wait read the mark in their registry hold).
-        # No lock is held across a record write.
+        # When the hold above found a mode other than the one `want` read (unrecord), a fresh read of the mode under
+        # self._lock decides the entry the write above carried: it goes unless that read finds bypassPermissions, and
+        # each record write after it is followed by another fresh read under self._lock, until a read agrees with the
+        # write before it (_note_pick_waits and _drop_pick_wait read the mark in their registry hold). No lock is held
+        # across a record write.
         if unrecord:
             held = True                          # the record holds the mode entry as this reconcile last wrote it
             while True:

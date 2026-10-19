@@ -2407,8 +2407,7 @@ class ADropOfAnAskTheCliCarriesLeavesItWhileAPickWaits(_ABypassPickChangedBack):
     """_drop_carried_ask drops the standing relaunch ask only while no pick's pending mark is up (the pending-bypass mark,
     and the effort, billing and fast-mode marks) in the hold where it reads the ask again, as the withdrawal's hold reads
     them (SdkSession._drop_carried_ask): a bypass pick or a billing pick, each of which raises its mark, made at the drop's
-    read of the launch keeps its relaunch ask. The hold reads no value of a pick that raises no mark (the session env,
-    the subagent speed), and these tests make no such pick."""
+    read of the launch keeps its relaunch ask."""
 
     def test_a_bypass_pick_at_the_drops_launch_read_keeps_its_ask(self):
         s = self._session(auth="login")
@@ -2544,6 +2543,7 @@ class TheReconcileOfWaitingPicksClearsNoStandingAsk(_ABypassPickChangedBack):
         made = _made_at_call(s, "launch_values", "_drop_carried_ask", second_pick)
         s._reconcile_waiting_picks(dict(s.launch_values()), True)
         if not made:
+            self.assertEqual(s._switch_wanted, "session env", "the reconcile clears no standing ask")
             second_pick()                                             # the reconcile made no drop: as it returns
         self._run(q)
         self.assertNotEqual(s.launch_values()["env"], s._cli_launch["env"], "the premise: the launch lacks the second pick")
@@ -2603,7 +2603,8 @@ class TheLastLookBeforeATeardownWithdrawsWhatTheWithdrawalWould(_ABypassPickChan
     relaunch was armed for the bypass pick's ask, marked that pick's alone; the pending-bypass mark and every other pick's
     mark are down; no ask of another reason stands and nothing else is on its way; nothing is set aside for it; and the
     launch, read after the quiet read and before the hold, equals the serving CLI's launch record, still the one serving.
-    A withdrawal made while the relaunch is on its way leaves the pick's word for this look."""
+    A withdrawal made while the relaunch is on its way leaves the pick's word for this look, which takes it down when it
+    withdraws the relaunch."""
 
     def test_a_default_pick_before_the_last_look_withdraws_the_relaunch(self):
         q = []
@@ -2612,10 +2613,12 @@ class TheLastLookBeforeATeardownWithdrawsWhatTheWithdrawalWould(_ABypassPickChan
         self.assertTrue(self._relaunched_at_quiet(s, q), "the premise: the pick's relaunch is armed")
         self.assertTrue(self.be.set_mode(SID, "default"))
         self._run(q)
+        self.assertTrue(s._mode_ask_alone, "the premise: the default pick kept the pick's word for the armed relaunch")
         s.inflight = 1                                                # the CLI took a turn before the teardown
         self.assertTrue(s._switch_teardown_check(), "the premise: the waker's last look stood the relaunch down")
         self.assertEqual((s.mode, s.perm_mode, s._mode_pending, s._switch_wanted), ("default", "default", "", ""),
                          "nothing was set aside and the relaunch would change nothing: withdrawn")
+        self.assertFalse(s._mode_ask_alone, "the word that the ask was the pick's alone goes with it")
         self.assertFalse(self._relaunched_at_quiet(s, q), "and nothing is armed at the first quiet moment")
 
     def test_a_reason_set_aside_keeps_the_relaunch_at_the_last_look(self):
@@ -2842,9 +2845,10 @@ class AHandedBackRelaunchIsWithdrawnByTheWithdrawalsRule(_ABypassPickChangedBack
     """When the loop-side re-check finds work and hands the bypass pick's carried ask back
     (SdkSession._re_raise_switch_ask), it withdraws that relaunch instead of raising the ask again when the withdrawal's
     rule holds in its hold (SdkSession._mode_relaunch_withdrawn, which takes the mode read in the hold as the mode of the
-    launch read before it), and a standing ask of the same reason goes with it. A bypass pick made while its ask is
-    carried keeps the word that the ask is its alone when the carried ask was (SdkBackend.set_mode). While the rule does
-    not hold the ask stands for the next quiet moment."""
+    launch read before it), and a standing ask of the same reason goes with it, as does the word that the ask was the
+    pick's alone (_mode_ask_alone). A bypass pick made while its ask is carried keeps the word that the ask is its alone
+    when the carried ask was (SdkBackend.set_mode). While the rule does not hold the ask stands for the next quiet
+    moment."""
 
     def _carried(self, q):
         s = self._session(queued=q)
@@ -2858,12 +2862,14 @@ class AHandedBackRelaunchIsWithdrawnByTheWithdrawalsRule(_ABypassPickChangedBack
         self.assertEqual((s.mode, s.perm_mode, s._mode_pending, s._switch_wanted, s._switch_ask_pending, s._reconnect),
                          ("default", "default", "", "", "", False),
                          "the relaunch would change nothing: withdrawn, with no ask standing")
+        self.assertFalse(s._mode_ask_alone, "the word that the ask was the pick's alone goes with it")
         self.assertFalse(self._relaunched_at_quiet(s, q), "and nothing is armed at the first quiet moment")
 
     def test_a_default_pick_and_then_a_turn_before_the_arm(self):
         q = []
         s = self._carried(q)
         self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertTrue(s._mode_ask_alone, "the premise: the default pick kept the pick's word for the carried ask")
         s.inflight = 1                                                # a turn runs when the loop reaches the arm
         self._run(q)
         self._withdrawn(s, q)
@@ -4707,7 +4713,10 @@ class _LockCensus:
 
     def taken_per_hold(self, held):
         """[{lock: chain}], one per hold of `held` (each `with`, and each acquire() followed to its release): every lock
-        that hold takes, directly or through the calls it makes, with the first chain found from it to the take."""
+        that hold takes, directly or through the calls it makes, with one chain from it to the take: a take in the
+        hold's own body when there is one, else the chain through the call its walk of the hold reaches first. The walk
+        (_own) starts from the hold's last statement and works back to its first, so of two calls in different
+        statements that reach the same lock, the later statement's chain is kept."""
         out = []
         for m, qual, fn, w in self.regions.get(held, ()):
             taken = {}
@@ -4722,15 +4731,6 @@ class _LockCensus:
                         taken.setdefault(lid, ["%s:%d %s (holds %s)" % (m, c.lineno, qual, held)] + chain)
             out.append(taken)
         return out
-
-    def taken_in(self, held):
-        """{lock: chain} for every lock a hold of `held` takes, directly or through the calls it makes, its own
-        acquire() regions included (each followed to its release), with the chain of the first hold that takes it."""
-        taken = {}
-        for per in self.taken_per_hold(held):
-            for lid, chain in per.items():
-                taken.setdefault(lid, chain)
-        return taken
 
     def closure(self, start):
         """{lock: the chain from a hold of `start` to its take} for every lock reachable while `start` is held, the
@@ -4847,9 +4847,12 @@ class NoKernelLockIsTakenWhileASessionLockIsHeld(unittest.TestCase):
     RETAKES: SdkBackend._ensure holds SdkBackend._lock and takes the lock of the session it has just built
     (_adopt_queue_mirror) before that session's thread exists, while a session's own loop thread takes SdkBackend._lock
     under its own lock (drain_holding); the two never meet on one session's lock. Every hold of each lock reached is read
-    for a take of a session lock, with the first chain found from that hold, so a hold of SdkBackend._lock in any
-    function other than SdkBackend._ensure, or one whose chain takes a session lock in any function other than
-    _adopt_queue_mirror, fails; a hold whose calls reach a session lock by two paths shows only the first."""
+    for a take of a session lock, with one chain from that hold (_LockCensus.taken_per_hold), so a hold of
+    SdkBackend._lock in any function other than SdkBackend._ensure, or one whose chain takes a session lock in any
+    function other than _adopt_queue_mirror, fails. A hold whose calls reach a session lock by two paths shows only one
+    of them, the one its walk of the hold reaches first, from the hold's last statement: in SdkBackend._ensure's hold, a
+    second call that reaches a session lock fails when it comes after the _adopt_queue_mirror call and is not shown when
+    it comes before it."""
 
     HELD_AROUND_SDK = ("_sdk_lock", "_FEED_BUILD_LOCK", "_SEND_WRITE_LOCK", "_SETTINGS_LOCK", "_TL_BUILD_LOCK",
                        "_goals_snap_lock", "_pure_feed_lock", "_SESSIONS_LISTING_FLIGHT", "_client_lock",
