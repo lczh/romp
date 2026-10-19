@@ -2238,9 +2238,9 @@ class TheWithdrawalBesideOtherStepsOfTheSession(_ABypassPickChangedBack):
 
 class TheWithdrawalComparesALaunchInTheModeSetModeWasCalledWith(_ABypassPickChangedBack):
     """The withdrawal of the bypass pick's relaunch compares the serving CLI's launch record with a launch in the mode
-    set_mode was called with, the other keys as they read (SdkBackend._withdraw_mode_pick). A mode written by another
-    set_mode by the time the launch is read does not decide it: a mode other than bypassPermissions is switched live, and
-    a bypass pick raises the pending-bypass mark, which the withdrawal's hold reads."""
+    set_mode was called with, the other keys as they read (SdkBackend._withdraw_mode_pick). A mode another set_mode
+    writes does not decide it: a mode other than bypassPermissions is switched live, and a bypass pick raises the
+    pending-bypass mark, which the withdrawal's hold reads."""
 
     def _picked_at_the_launch_read(self, s, before=None, after=None):
         """At the withdrawal's first read of the launch, before() runs, then the read, then after(). Returns a list that
@@ -2396,11 +2396,11 @@ class TheWaitingRecordHoldsTheModeEntryWhileThePendingBypassMarkIsUp(_ABypassPic
 
 class TheLastLookBeforeATeardownWithdrawsWhatTheWithdrawalWould(_ABypassPickChangedBack):
     """When the waker's last look (SdkSession._switch_teardown_check) stands an armed relaunch down, it withdraws it instead
-    of raising its ask again when the withdrawal's rule holds in its hold: the relaunch was armed for the bypass pick's
-    ask, marked that pick's alone; the pending-bypass mark and every other pick's mark are down; no other ask stands or is
-    on its way; nothing is set aside for it; and the launch, read after the quiet read and before the hold, equals the
-    serving CLI's launch record, still the one serving. A withdrawal made while the relaunch is on its way leaves the
-    pick's word for this look."""
+    of raising its ask again when the withdrawal's rule holds in its hold (SdkSession._mode_relaunch_withdrawn): the
+    relaunch was armed for the bypass pick's ask, marked that pick's alone; the pending-bypass mark and every other pick's
+    mark are down; no ask of another reason stands and nothing else is on its way; nothing is set aside for it; and the
+    launch, read after the quiet read and before the hold, equals the serving CLI's launch record, still the one serving.
+    A withdrawal made while the relaunch is on its way leaves the pick's word for this look."""
 
     def test_a_default_pick_before_the_last_look_withdraws_the_relaunch(self):
         q = []
@@ -2462,8 +2462,9 @@ class ARefusedSwitchPutsBypassBackOnlyWhileTheModeReadsIt(_ABypassPickChangedBac
 
     def test_two_picks_at_the_reconciles_read_of_the_confirmed_mode_and_a_refusal(self):
         """The reconcile of waiting picks takes the confirmed mode from the mode of a launch that lacks the bypass flag
-        (SdkSession._reconcile_waiting_picks). acceptEdits and then default are picked at the reconcile's read of the
-        confirmed mode, outside the session lock, and the CLI refuses acceptEdits: the confirmed mode stays the launch's."""
+        (SdkSession._reconcile_waiting_picks). With acceptEdits and then default picked and the CLI refusing acceptEdits,
+        the confirmed mode stays the launch's: the revert's clause the test above pins for the CLI's init
+        (SdkSession._do_set_mode), here for the reconcile's write of the confirmed mode."""
         s = self._session(mode="bypassPermissions", relaunchWait={"why": "bypass mode", "t": 1700000000,
                                                                   "picks": {"mode": {"mode": "bypassPermissions"}}})
         s.inflight = 1                                                # a turn runs
@@ -2632,6 +2633,767 @@ class EachStepActsOnTheAskItsHoldReads(_ABypassPickChangedBack):
         self.assertEqual(s._switch_wanted, "bypass mode", "the record compared is not the one serving: the relaunch stands")
 
 
+# ── the busy re-check's hand-back, the last look's own reason, the reconcile's record write and a reattach ──
+
+class AHandedBackRelaunchIsWithdrawnByTheWithdrawalsRule(_ABypassPickChangedBack):
+    """When the loop-side re-check finds work and hands the bypass pick's carried ask back (SdkSession._re_raise_switch_ask),
+    it withdraws that relaunch instead of raising the ask again when the withdrawal's rule holds in its hold (SdkSession.
+    _mode_relaunch_withdrawn), and a standing ask of the same reason goes with it. A bypass pick made while its ask is
+    carried keeps the word that the ask is its alone when the carried ask was (SdkBackend.set_mode). While the rule does
+    not hold the ask stands for the next quiet moment."""
+
+    def _carried(self, q):
+        s = self._session(queued=q)
+        self._bypass_waits(s, q)
+        s.inflight, s._cli_working = 0, False
+        self.assertTrue(s._try_switch_reconnect(), "the premise: the ask is carried; its arm waits on the loop")
+        self.assertEqual((s._switch_ask_pending, s._switch_wanted), ("bypass mode", ""), "the premise: carried, not armed")
+        return s
+
+    def _withdrawn(self, s, q):
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending, s._switch_wanted, s._switch_ask_pending, s._reconnect),
+                         ("default", "default", "", "", "", False),
+                         "the relaunch would change nothing: withdrawn, with no ask standing")
+        self.assertFalse(self._relaunched_at_quiet(s, q), "and nothing is armed at the first quiet moment")
+
+    def test_a_default_pick_and_then_a_turn_before_the_arm(self):
+        q = []
+        s = self._carried(q)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        s.inflight = 1                                                # a turn runs when the loop reaches the arm
+        self._run(q)
+        self._withdrawn(s, q)
+
+    def test_a_default_pick_and_then_a_turn_the_cli_opened_before_the_arm(self):
+        q = []
+        s = self._carried(q)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        s._cli_working = True                                         # a turn the CLI opened itself
+        self._run(q)
+        self._withdrawn(s, q)
+
+    def test_bypass_picked_again_and_then_default_before_the_arm(self):
+        q = []
+        s = self._carried(q)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(s._switch_wanted, "bypass mode", "the premise: the pick made while its own ask is carried asks")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        s._cli_working = True
+        self._run(q)
+        self._withdrawn(s, q)
+
+    def test_a_default_pick_while_a_reattach_to_the_same_cli_is_armed(self):
+        q = []
+        s = self._carried(q)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.be._on_host_reexec_now(s)                                # a reattach to the same CLI, which launches nothing
+        self.assertTrue((s._reconnect, s._reattach_keeps_cli) == (True, True), "the premise: the reattach is armed")
+        s._cli_working = True
+        self._run(q)
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted, s._switch_ask_pending), ("default", "", "", ""),
+                         "the relaunch would change nothing: withdrawn, with no ask standing")
+
+    def test_bypass_picked_again_before_the_arm_keeps_its_ask(self):
+        """Control: with the pending-bypass mark up, the ask handed back stands, the pick's own."""
+        q = []
+        s = self._carried(q)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        s._cli_working = True
+        self._run(q)
+        self.assertEqual((s._mode_pending, s._switch_wanted, s._mode_ask_alone), ("bypassPermissions", "bypass mode", True),
+                         "the pick waits with its own ask")
+        self.assertTrue(self._relaunched_at_quiet(s, q), "armed at the first quiet moment")
+
+    def test_a_retry_set_aside_keeps_the_relaunch(self):
+        """Control: a reason set aside for the relaunch carried keeps it at the hand-back."""
+        q = []
+        s = self._session(queued=q)
+        self._arm_retry(s)
+        self._bypass_waits(s, q)
+        s.inflight, s._cli_working = 0, False
+        self.assertTrue(s._try_switch_reconnect(), "the premise: carried")
+        self.assertEqual(sorted(s._switch_riders), ["retry upgrade"], "the premise: the carry set the retry aside")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        s._cli_working = True
+        self._run(q)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch keeps its ask")
+        self.assertTrue(self._relaunched_at_quiet(s, q), "armed at the first quiet moment")
+
+    def test_a_launch_record_in_another_mode_keeps_the_relaunch(self):
+        """Control: a launch now that differs from the serving CLI's record keeps the relaunch at the hand-back."""
+        q = []
+        s = self._carried(q)
+        s._cli_launch = dict(s._cli_launch, mode="acceptEdits")      # the serving CLI runs another mode
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        s._cli_working = True
+        self._run(q)
+        self.assertEqual(s._switch_wanted, "bypass mode", "a relaunch that changes the mode keeps its ask")
+
+
+    def test_an_always_fast_ask_handed_back_with_the_picks_word_up_stands(self):
+        """Control: only the bypass pick's relaunch is withdrawn at the hand-back. Always fast's ask, carried after it took
+        the place of the pick's ask and handed back with the pick's word up, stands, and its relaunch carries the opt-in."""
+        q = []
+        s = self._opt_in_lost(q)
+        s.inflight = 1
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self._run(q)
+        s.want_switch_reconnect("always fast")
+        self._run(q)
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("always fast", True),
+                         "the premise: Always fast's ask stands, the pick's word up")
+        s.inflight, s._cli_working = 0, False
+        self.assertTrue(s._try_switch_reconnect(), "the premise: Always fast's ask is carried")
+        self.assertEqual(s._switch_ask_pending, "always fast", "the premise: carried, not armed")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        s._cli_working = True
+        self._run(q)
+        self.assertEqual(s._switch_wanted, "always fast", "Always fast's ask stands")
+        self.assertTrue(self._relaunched_at_quiet(s, q), "armed at the first quiet moment")
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+
+    def test_a_bypass_pick_made_while_another_picks_ask_is_carried_is_not_its_alone(self):
+        """A bypass pick made while another pick's ask is carried is not marked its alone, even after an earlier bypass pick
+        was: the carried ask, handed back while it stands, would stand for that pick too."""
+        q = []
+        s = self._session(queued=q, auth="login")
+        self._bypass_waits(s, q)
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self._run(q)
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("billing", True),
+                         "the premise: the billing pick's ask stands, the earlier pick's word up")
+        s.inflight, s._cli_working = 0, False
+        self.assertTrue(s._try_switch_reconnect(), "the premise: the billing pick's ask is carried")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual((s._switch_wanted, s._switch_ask_pending, s._mode_ask_alone), ("bypass mode", "billing", False),
+                         "the pick's ask stands beside the billing pick's carried ask, not marked its alone")
+
+
+    def test_an_always_fast_ask_handed_back_beside_the_picks_ask_is_set_aside(self):
+        """Control: Always fast's ask, carried and handed back while the bypass pick's ask stands, is set aside for that
+        ask, which keeps the relaunch with the opt-in."""
+        q = []
+        s = self._opt_in_lost(q)
+        s.inflight = 1
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self._run(q)
+        s.want_switch_reconnect("always fast")
+        self._run(q)
+        s.inflight, s._cli_working = 0, False
+        self.assertTrue(s._try_switch_reconnect(), "the premise: Always fast's ask is carried")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual((s._switch_wanted, s._switch_ask_pending), ("bypass mode", "always fast"),
+                         "the premise: the pick's ask stands beside Always fast's carried ask")
+        s._cli_working = True
+        self._run(q)
+        self.assertEqual((s._switch_wanted, sorted(s._switch_riders)), ("bypass mode", ["always fast"]),
+                         "Always fast's ask is set aside for the ask standing")
+        self.assertTrue(self._relaunched_at_quiet(s, q), "armed at the first quiet moment")
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+
+class TheLastLooksRuleBesideEveryOtherState(_ABypassPickChangedBack):
+    """The waker's last look (SdkSession._switch_teardown_check) withdraws a relaunch armed for the bypass pick's ask only
+    when every term of the withdrawal's rule holds in its hold (SdkSession._mode_relaunch_withdrawn); a standing ask of
+    the same reason does not hold the relaunch and goes with it. Each test sets one other term and shows the relaunch
+    kept, or makes a step at a read inside the hold, through the session lock's stand-in (_AHoldEndSessionLock)."""
+
+    def _armed(self, q, **reg):
+        s = self._session(queued=q, **reg)
+        self._bypass_waits(s, q)
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the premise: the pick's relaunch is armed")
+        self.assertEqual((s._reconnect, s._reconnect_switch_why), (True, "bypass mode"), "the premise: armed for the pick")
+        return s
+
+    def _looked(self, s, q):
+        s.inflight = 1                                                # the CLI took a turn before the teardown
+        self.assertTrue(s._switch_teardown_check(), "the premise: the waker's last look stood the relaunch down")
+        self._run(q)
+
+    def test_bypass_then_default_picked_before_the_last_look(self):
+        q = []
+        s = self._armed(q)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(s._switch_wanted, "bypass mode", "the premise: the second pick's ask stands")
+        self._looked(s, q)
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending, s._switch_wanted), ("default", "default", "", ""),
+                         "the relaunch would change nothing: withdrawn with the ask of the same reason")
+        self.assertFalse(self._relaunched_at_quiet(s, q), "and nothing is armed at the first quiet moment")
+
+    def test_an_always_fast_ask_standing_keeps_the_relaunch_with_the_opt_in(self):
+        q = []
+        s = self._opt_in_lost(q)
+        self._bypass_waits(s, q)
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the premise: armed")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        s.want_switch_reconnect("always fast")
+        self.assertEqual(s._switch_wanted, "always fast", "the premise: its ask stands, its step waiting on the loop")
+        s.inflight = 1
+        self.assertTrue(s._switch_teardown_check(), "the premise: the waker's last look stood the relaunch down")
+        self.assertEqual(sorted(s._switch_riders), ["always fast"], "Always fast's ask is set aside for the relaunch")
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the relaunch is armed at the first quiet moment")
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+    def test_a_launch_record_in_another_mode_keeps_the_relaunch(self):
+        q = []
+        s = self._armed(q)
+        s._cli_launch = dict(s._cli_launch, mode="acceptEdits")      # the serving CLI runs another mode
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self._looked(s, q)
+        self.assertEqual(s._switch_wanted, "bypass mode", "a relaunch that changes the mode keeps its ask")
+
+    def test_an_env_pick_keeps_the_relaunch(self):
+        q = []
+        s = self._armed(q)
+        self.assertTrue(self.be.set_env(SID, {"NOTES_API_FLAG": "1"}))
+        self._run(q)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self._looked(s, q)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch an env pick needs keeps its ask")
+        self.assertTrue(self._relaunched_at_quiet(s, q), "and is armed at the first quiet moment")
+
+    def test_bypass_picked_again_keeps_the_relaunch(self):
+        q = []
+        s = self._session(queued=q, mode="bypassPermissions")
+        self.assertEqual(s._cli_launch["mode"], "bypassPermissions", "the premise: the CLI was launched with the flag")
+        self.assertTrue(self.be.set_mode(SID, "default"))            # no client: held, the confirmed mode default
+        self._run(q)
+        self._bypass_waits(s, q)
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the premise: armed")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))   # picked again before the last look
+        self._run(q)
+        self.assertEqual(s._mode_pending, "bypassPermissions", "the premise: the mark is up")
+        self._looked(s, q)
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the waiting bypass pick keeps a relaunch")
+
+    def test_an_ask_that_was_not_the_picks_alone_keeps_the_relaunch(self):
+        q = []
+        s = self._session(queued=q, auth="login")
+        s.inflight = 1
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self._run(q)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self._run(q)
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", False), "the premise: not the pick's alone")
+        self.assertTrue(self.be.set_auth(SID, "login"))
+        self._run(q)
+        self.assertEqual(s._auth_pending, "", "the premise: the billing pick is back to what the CLI runs")
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the premise: armed")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self._looked(s, q)
+        self.assertEqual(s._switch_wanted, "bypass mode", "an ask that was not the pick's alone keeps the relaunch")
+
+    def test_an_effort_mark_up_keeps_the_relaunch(self):
+        q = []
+        s = self._armed(q)
+        orig = s.effort
+        self.assertTrue(self.be.set_effort(SID, "low" if orig != "low" else "high"))
+        self.assertTrue(self.be.set_effort(SID, orig))               # back to what the CLI runs; the mark stays up
+        self._run(q)
+        self.assertTrue(s._effort_pending, "the premise: the effort mark is up")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self._looked(s, q)
+        self.assertEqual(s._switch_wanted, "bypass mode", "with the effort mark up the relaunch keeps its ask")
+
+    def test_an_always_fast_relaunch_armed_keeps_its_ask(self):
+        """Only a relaunch armed for the bypass pick's ask is withdrawn: an Always fast relaunch with the pick's word up
+        keeps its ask."""
+        q = []
+        s = self._opt_in_lost(q)
+        s._mode_ask_alone = True                                      # a word left up for a relaunch on its way
+        s.inflight = 0
+        self.assertEqual(self.be.apply_model_switches(), 1, "the premise: Always fast asks")
+        self._run(q)
+        self.assertEqual((s._reconnect, s._reconnect_switch_why), (True, "always fast"), "the premise: armed")
+        s.inflight = 1
+        self.assertTrue(s._switch_teardown_check())
+        self.assertEqual(s._switch_wanted, "always fast", "the Always fast relaunch keeps its ask")
+
+    def test_bypass_picked_at_the_hold_read_of_the_word_waits_with_its_own_ask(self):
+        q = []
+        s = self._armed(q)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self._run(q)
+        s.inflight = 1
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made = []
+
+        def on_read(who, value):
+            if not made and who == "_mode_relaunch_withdrawn":
+                made.append(1)
+                lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, "bypassPermissions")))
+        _hooked_field(s, "_mode_ask_alone", on_read=on_read)
+        self.assertTrue(s._switch_teardown_check())
+        self._run(q)
+        self.assertEqual(made, [1], "the premise: Bypass was picked at the last look's read of the pick's word")
+        self.assertEqual((s._mode_pending, s._switch_wanted, s._mode_ask_alone), ("bypassPermissions", "bypass mode", True),
+                         "the pick made at that read waits, its ask its own")
+
+    def test_a_default_pick_at_the_holds_first_write_withdraws_the_relaunch(self):
+        q = []
+        s = self._armed(q)
+        s.inflight = 1
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made = []
+
+        def on_write(who, value):
+            if not made and who == "_switch_teardown_check" and value is False:
+                made.append(1)
+                lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        _hooked_field(s, "_reconnect", on_write=on_write)
+        self.assertTrue(s._switch_teardown_check())
+        self._run(q)
+        self.assertEqual(made, [1], "the premise: default was picked at the last look's first write")
+        self.assertFalse(self._relaunched_at_quiet(s, q), "the relaunch would change nothing: nothing is armed")
+
+
+    def test_a_relaunch_waiting_for_the_turns_end_keeps_the_ask_for_it(self):
+        """A relaunch waiting for the turn's end is on its way: the last look raises the bypass pick's ask again, and no line
+        says the relaunch was withdrawn."""
+        q = []
+        s = self._armed(q)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self._run(q)
+        s._reconnect_when_idle = True                                 # a rewind waits for the turn's end
+        lines = []
+        self.be._log = lambda m, *a, **k: lines.append(m)
+        self._looked(s, q)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the ask stands for the relaunch on its way")
+        self.assertEqual([m for m in lines if "withdrawn" in m], [], "no line says the relaunch was withdrawn")
+
+
+class TheWithdrawalsHoldReadsTheMarkAndWhatIsOnItsWayWithItsWrite(_ABypassPickChangedBack):
+    """The withdrawal (SdkBackend._withdraw_mode_pick) reads the pending-bypass mark and what is on its way in the hold
+    where it clears the ask. A relaunch armed for a reattach to the same CLI is not on its way: the reattach launches
+    nothing, and its connect's reconcile asks again only for a pick its CLI lacks."""
+
+    def test_bypass_picked_at_the_holds_read_of_the_mark_keeps_its_ask(self):
+        s = self._session()
+        self._bypass_waits(s)
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made = []
+
+        def on_read(who, value):
+            if not made and who == "_withdraw_mode_pick":
+                made.append(1)
+                lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, "bypassPermissions")))
+        _hooked_field(s, "_mode_pending", on_read=on_read)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(made, [1], "the premise: Bypass was picked at the withdrawal's read of the mark")
+        self.assertEqual((s._mode_pending, s._switch_wanted, s._mode_ask_alone), ("bypassPermissions", "bypass mode", True),
+                         "the pick made at that read waits with its own ask")
+
+    def test_a_carry_at_the_holds_read_of_what_is_on_its_way_carries_nothing(self):
+        q = []
+        s = self._session(queued=q)
+        self._bypass_waits(s, q)
+        s.inflight, s._cli_working = 0, False
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made = []
+
+        def on_read(who, value):
+            if not made and who == "_withdraw_mode_pick":
+                made.append(1)
+                lock.call_free(s._try_switch_reconnect)
+        _hooked_field(s, "_reconnect_when_idle", on_read=on_read)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self._run(q)
+        self.assertEqual(made, [1], "the premise: the carry was made at the withdrawal's read of what is on its way")
+        self.assertEqual((s._switch_wanted, s._switch_ask_pending, s._reconnect), ("", "", False),
+                         "the withdrawn relaunch is neither carried nor armed")
+
+    def test_a_default_pick_while_a_reattach_to_the_same_cli_is_armed(self):
+        s = self._session()
+        self._bypass_waits(s)
+        self.be._on_host_reexec_now(s)
+        self.assertTrue(s._reconnect, "the premise: the reattach is armed")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        s._reconnect, s._reconnect_switch_why = False, ""             # the connect loop's next pass, at its top
+        s._reconcile_waiting_picks(dict(s._cli_launch), False)       # the same CLI, attached again
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending, s._switch_wanted), ("default", "default", "", ""),
+                         "the relaunch would change nothing: withdrawn")
+        self.assertFalse(self._relaunched_at_quiet(s), "and nothing is armed at the first quiet moment")
+
+
+    def test_a_default_pick_while_a_reattach_follows_the_picks_armed_relaunch(self):
+        """A reattach armed after the pick's relaunch was armed for it leaves that relaunch on its way: the withdrawal
+        leaves the pick's word, and the last look that stands the relaunch down withdraws it."""
+        q = []
+        s = self._session(queued=q)
+        self._bypass_waits(s, q)
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the premise: the pick's relaunch is armed")
+        self.be._on_host_reexec_now(s)
+        self.assertEqual((s._reconnect, s._reconnect_switch_why, s._reattach_keeps_cli), (True, "bypass mode", True),
+                         "the premise: a reattach armed beside the pick's relaunch")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self._run(q)
+        s.inflight = 1                                                # the CLI took a turn before the teardown
+        self.assertTrue(s._switch_teardown_check(), "the premise: the waker's last look stood the relaunch down")
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted), ("default", "", ""),
+                         "the relaunch would change nothing: withdrawn")
+        self.assertFalse(self._relaunched_at_quiet(s, q), "and nothing is armed at the first quiet moment")
+
+
+class TheReconcilesRecordWriteKeepsABypassPicksEntry(_ABypassPickChangedBack):
+    """The reconcile of waiting picks writes the registry's waiting record as its registry read found it; while the
+    pending-bypass mark is up and that write carried no mode entry, it writes the entry again through _note_pick_waits,
+    which reads the mark in the registry lock's hold (SdkSession._reconcile_waiting_picks)."""
+
+    def _mode_entry(self):
+        return "mode" in ((sb.read_reg(self.d, SID).get("relaunchWait") or {}).get("picks") or {})
+
+    def test_a_bypass_pick_at_the_reconciles_launch_read_keeps_its_entry(self):
+        s = self._session(relaunchWait={"why": "effort", "t": 1700000000, "picks": {"effort": {"effort": "high"}}})
+        launch = dict(s.launch_values())
+        s.inflight = 1                                                # a turn runs: a bypass pick waits for quiet
+        made = _made_at_call(s, "launch_values", "_reconcile_waiting_picks",
+                             lambda: self.assertTrue(self.be.set_mode(SID, "bypassPermissions")))
+        s._reconcile_waiting_picks(launch, False)
+        self.assertEqual(made, [1], "the premise: Bypass was picked at the reconcile's read of the launch")
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted, self._mode_entry()),
+                         ("bypassPermissions", "bypassPermissions", "bypass mode", True),
+                         "the waiting pick keeps its mode entry")
+
+    def test_a_default_pick_after_it_leaves_no_entry(self):
+        """Control: the entry follows the mark, so a default pick after the reconcile leaves none."""
+        s = self._session(relaunchWait={"why": "effort", "t": 1700000000, "picks": {"effort": {"effort": "high"}}})
+        launch = dict(s.launch_values())
+        s.inflight = 1
+        _made_at_call(s, "launch_values", "_reconcile_waiting_picks",
+                      lambda: self.assertTrue(self.be.set_mode(SID, "bypassPermissions")))
+        s._reconcile_waiting_picks(launch, False)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted, self._mode_entry()), ("default", "", "", False),
+                         "no mark, no relaunch ask and no mode entry")
+
+    def test_a_launch_that_carried_the_pick_leaves_no_entry(self):
+        """Control: the pick the launch carried is applied and its entry goes."""
+        s = self._session()
+        self._bypass_waits(s)
+        self.assertTrue(self._mode_entry(), "the premise: the waiting record holds the mode entry")
+        s._reconcile_waiting_picks(dict(s.launch_values()), True)
+        self.assertEqual((s.perm_mode, s._mode_pending, self._mode_entry()), ("bypassPermissions", "", False),
+                         "applied: the confirmed mode is bypassPermissions, with no mark and no mode entry")
+
+
+    def test_a_record_write_that_carried_the_entry_keeps_its_why_and_time(self):
+        """Control: while the bypass pick waits and the record write carried its entry, the record keeps the why and the
+        time it was written with."""
+        s = self._session(mode="bypassPermissions", effort="max",
+                          relaunchWait={"why": "effort", "t": 1700000000,
+                                        "picks": {"effort": {"effort": "max"}, "mode": {"mode": "bypassPermissions"}}})
+        s._mode_pending = "bypassPermissions"                         # the waiting pick's mark, as a host's restart seeds it
+        s.inflight = 1
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="default", effort="low"), False)
+        self.assertEqual((s._mode_pending, s._switch_wanted), ("bypassPermissions", "effort"),
+                         "the premise: both picks still wait, with the record's reason asked for")
+        wait = sb.read_reg(self.d, SID).get("relaunchWait") or {}
+        self.assertEqual((wait.get("why"), wait.get("t"), sorted(wait.get("picks") or {})),
+                         ("effort", 1700000000, ["effort", "mode"]), "the record as it was written, both picks waiting")
+
+
+class EachHoldThatSetsTheAskReadsWhatItDecidesOn(_ABypassPickChangedBack):
+    """Each hold of the session lock that sets the relaunch ask, the line said for it or a reason set aside reads what it
+    decides on in that hold: want_switch_reconnect's ask and mark, the stand-down to a relaunch on its way, the line said
+    while the session is busy, the line said while it waits for a launch slot, the drop of an ask the serving CLI carries
+    and the arm at a turn's end. Each test makes a step at a read inside the hold, through the session lock's stand-in
+    (_AHoldEndSessionLock), and shows its end."""
+
+    def test_an_always_fast_ask_at_want_switch_reconnects_read_of_the_ask_keeps_its_relaunch(self):
+        s = self._opt_in_lost()
+        s.inflight = 1
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made = []
+
+        def on_read(who, value):
+            if not made and who == "want_switch_reconnect" and s._mode_pending:
+                made.append(1)
+                lock.call_free(lambda: s.want_switch_reconnect("always fast"))
+        _hooked_field(s, "_switch_wanted", on_read=on_read)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(made, [1], "the premise: Always fast asked at the bypass pick's read of the ask")
+        self._change_back(s)
+        after = (s._switch_wanted, sorted(s._switch_riders))
+        self.assertTrue(self._relaunched_at_quiet(s), "the Always fast ask keeps a relaunch: %r" % (after,))
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+    def test_a_default_pick_at_want_switch_reconnects_read_of_the_mark_leaves_no_ask(self):
+        s = self._session()
+        s.inflight = 1
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made = []
+
+        def on_read(who, value):
+            if not made and who == "want_switch_reconnect" and value:
+                made.append(1)
+                lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        _hooked_field(s, "_mode_pending", on_read=on_read)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(made, [1], "the premise: default was picked at want_switch_reconnect's read of the mark")
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted), ("default", "", ""), "no mark and no relaunch ask")
+        self.assertFalse(self._relaunched_at_quiet(s), "and nothing is armed at the first quiet moment")
+
+    def test_an_ask_raised_at_the_stand_downs_check_is_set_aside(self):
+        q = []
+        s = self._session(queued=q)
+        self._bypass_waits(s, q)
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the premise: the pick's relaunch is armed")
+        s.want_switch_reconnect("effort")                             # a pick's ask; its step waits on the loop
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made, reads = [], []
+
+        def on_read(who, value):
+            if who == "_try_switch_reconnect":
+                reads.append(value)
+                if len(reads) == 2 and not made:                      # the stand-down hold's read of the ask
+                    made.append(1)
+                    lock.call_free(lambda: s.want_switch_reconnect("always fast"))
+        _hooked_field(s, "_switch_wanted", on_read=on_read)
+        self._run(q)
+        self.assertEqual(made, [1], "the premise: an ask was raised at the stand-down's check")
+        self.assertEqual((s._switch_wanted, sorted(s._switch_riders)), ("", ["always fast"]),
+                         "the ask raised is set aside for the relaunch on its way")
+
+    def test_a_default_pick_at_the_busy_lines_read_leaves_the_next_ask_its_line(self):
+        s = self._session()
+        lines = []
+        self.be._log = lambda m, *a, **k: lines.append(m)
+        s.inflight = 1
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made, reads = [], []
+
+        def on_read(who, value):
+            if who == "_try_switch_reconnect":
+                reads.append(value)
+                if len(reads) == 2 and not made:                      # the busy line's hold reads the ask
+                    made.append(1)
+                    lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        _hooked_field(s, "_switch_wanted", on_read=on_read)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(made, [1], "the premise: default was picked at the busy line's read of the ask")
+        self.assertEqual((s.mode, s._switch_wanted), ("default", ""), "the premise: withdrawn")
+        start = len(lines)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))   # picked again while the turn runs
+        waiting = "waiting for the session to go quiet"
+        self.assertEqual(len([m for m in lines[start:] if waiting in m]), 1, "the new ask says once what it waits for")
+
+    def _no_free_slot(self, s):
+        slots = self.be._spawn_sem
+        while slots.acquire(blocking=False):
+            pass                                                      # every slot held elsewhere
+        return slots
+
+    def test_a_default_pick_before_the_slot_line_leaves_the_next_ask_its_line(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, mode="default")
+        lines = []
+        self.be._log = lambda m, *a, **k: lines.append(m)
+        slots = self._no_free_slot(s)
+        made = _made_before_call(slots, "take", "_try_switch_reconnect",
+                                 lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(made, [1], "the premise: default was picked before the slot was asked for")
+        self.assertEqual((s.mode, s._switch_wanted), ("default", ""), "the premise: withdrawn")
+        slotline = "waiting for a launch slot"
+        self.assertEqual([m for m in lines if slotline in m], [], "no slot line for a withdrawn ask")
+        start = len(lines)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(len([m for m in lines[start:] if slotline in m]), 1, "the new ask says its slot line once")
+
+    def test_a_default_pick_at_the_slot_lines_read_leaves_the_next_ask_its_line(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, mode="default")
+        lines = []
+        self.be._log = lambda m, *a, **k: lines.append(m)
+        self._no_free_slot(s)
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made, reads = [], []
+
+        def on_read(who, value):
+            if who == "_try_switch_reconnect":
+                reads.append(value)
+                if len(reads) == 2 and not made:                      # the slot line's hold reads the ask
+                    made.append(1)
+                    lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        _hooked_field(s, "_switch_wanted", on_read=on_read)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(made, [1], "the premise: default was picked at the slot line's read of the ask")
+        self.assertEqual((s.mode, s._switch_wanted), ("default", ""), "the premise: withdrawn")
+        start = len(lines)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        slotline = "waiting for a launch slot"
+        self.assertEqual(len([m for m in lines[start:] if slotline in m]), 1, "the new ask says its slot line once")
+
+    def test_an_ask_raised_at_the_drops_read_of_the_ask_stands(self):
+        s = self._session(auth="login")
+        s.inflight = 1
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self.assertEqual(s._switch_wanted, "billing", "the premise: the billing pick's ask")
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made, reads = [], []
+
+        def on_read(who, value):
+            if who == "_drop_carried_ask":
+                reads.append(value)
+                if len(reads) == 2 and not made:                      # the drop's hold reads the ask
+                    made.append(1)
+                    lock.call_free(lambda: s.want_switch_reconnect("always fast"))
+        _hooked_field(s, "_switch_wanted", on_read=on_read)
+        self.assertTrue(self.be.set_auth(SID, "login"))               # the billing pick goes back to what the CLI runs
+        self.assertEqual(made, [1], "the premise: an ask was raised at the drop's read of the ask")
+        self.assertEqual(s._switch_wanted, "always fast", "the ask raised stands")
+
+    def test_a_default_pick_at_the_turn_ends_arm_says_nothing_was_withdrawn(self):
+        """A rewind waiting for the turn's end arms its relaunch at the result (SdkSession._on_message) in one hold; a
+        default pick made at that hold's first write finds a relaunch on its way, and no line says one was withdrawn."""
+        import asyncio
+        s = self._session()
+        self._bypass_waits(s)
+        s._reconnect_when_idle = True                                 # a rewind waits for the turn's end
+        lines = []
+        self.be._log = lambda m, *a, **k: lines.append(m)
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made = []
+
+        def on_write(who, value):
+            if not made and who == "_on_message" and value is False:
+                made.append(1)
+                lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        _hooked_field(s, "_reconnect_when_idle", on_write=on_write)
+        msg = psr._result(uuid="11111111-2222-3333-4444-555555555501", subtype="success", is_error=False, num_turns=1,
+                          session_id=psr.FSID, duration_ms=1, duration_api_ms=1, total_cost_usd=0.01,
+                          usage={"input_tokens": 1, "output_tokens": 1}, result="ok", parent_tool_use_id=None)
+
+        async def read():
+            s._on_message(msg, psr._AssistantMessage, psr._ResultMessage, psr._SystemMessage)
+            await asyncio.sleep(0)
+        asyncio.run(read())
+        self.assertEqual(made, [1], "the premise: default was picked at the arm's first write")
+        self.assertTrue(s._reconnect, "the premise: the rewind's relaunch is armed")
+        self.assertEqual([m for m in lines if "withdrawn" in m], [], "no line says a relaunch was withdrawn")
+
+    def test_a_default_pick_at_the_reconciles_mark_write_leaves_no_ask(self):
+        s = self._session(mode="bypassPermissions", relaunchWait={"why": "bypass mode", "t": 1700000000,
+                                                                  "picks": {"mode": {"mode": "bypassPermissions"}}})
+        s.inflight = 1
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted), ("bypassPermissions", "", ""),
+                         "the premise: the pick on record, its mark not up")
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made = []
+
+        def on_write(who, value):
+            if not made and who == "_reconcile_waiting_picks" and value == "bypassPermissions":
+                made.append(1)
+                lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        _hooked_field(s, "_mode_pending", on_write=on_write)
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="default"), False)
+        self.assertEqual(made, [1], "the premise: default was picked at the reconcile's write of the mark")
+        self.assertEqual((s.mode, s._mode_pending), ("default", ""), "the mode is default, the mark down")
+        self.assertFalse(self._relaunched_at_quiet(s), "and nothing is armed at the first quiet moment")
+
+
+class ADropOfAnAskReadsEveryPicksMark(_ABypassPickChangedBack):
+    """_drop_carried_ask keeps the standing ask while an effort pick's mark or the fast-mode mark is up (SdkSession.
+    _drop_carried_ask)."""
+
+    def test_an_effort_mark_up_keeps_the_ask(self):
+        s = self._session(auth="login")
+        s.inflight = 1
+        orig = s.effort
+        self.assertTrue(self.be.set_effort(SID, "low" if orig != "low" else "high"))
+        self.assertTrue(self.be.set_effort(SID, orig))
+        self.assertTrue(s._effort_pending, "the premise: the effort mark is up")
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self.assertEqual(s._switch_wanted, "billing", "the premise: the billing pick's ask")
+        self.assertTrue(self.be.set_auth(SID, "login"))
+        self.assertEqual(s._switch_wanted, "billing", "with the effort mark up the ask stands")
+
+    def test_a_fast_mark_up_keeps_the_ask_with_the_opt_in(self):
+        """The fast-mode pick's ask, carried and handed back while a billing pick's ask stands, is set aside for it; the
+        billing pick going back to what the CLI runs leaves that ask while the fast-mode mark is up, and the relaunch at
+        the first quiet moment carries the opt-in."""
+        q = []
+        s = self._session(queued=q, auth="login", model="opus")
+        s._cli_launch = dict(s._cli_launch, fast=True)               # launched with the opt-in, lost since
+        s._fast_unlocked, s._fast_off_sent = False, True
+        s.inflight, s._cli_working = 0, False
+        self.assertTrue(self.be.set_fast(SID, "on"))
+        fn, a = q.pop(0)                                              # the ask's step on the loop: the carry, no further
+        fn(*a)
+        self.assertEqual((s._fast_pending, s._switch_ask_pending), ("on", "fast mode"),
+                         "the premise: the fast-mode pick's ask is carried, its arm waiting on the loop")
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self.assertEqual(s._switch_wanted, "billing", "the premise: the billing pick's ask")
+        s.inflight = 1
+        self._run(q)
+        self.assertEqual((s._switch_wanted, sorted(s._switch_riders)), ("billing", ["fast mode"]),
+                         "the premise: the hand-back set the fast-mode reason aside for the billing ask")
+        self.assertTrue(self.be.set_auth(SID, "login"))
+        self._run(q)
+        self.assertEqual(s._switch_wanted, "billing", "with the fast-mode mark up the ask stands")
+        self.assertTrue(self._relaunched_at_quiet(s, q), "armed at the first quiet moment")
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+
+class _StepWhenTheRegistryLockIsTaken:
+    """Stands in for the backend's registry lock: at the first `with` taken by `caller`, step() runs just before the
+    lock is taken."""
+
+    def __init__(self, inner, caller, step):
+        self.inner, self.caller, self.step, self.done = inner, caller, step, False
+
+    def __enter__(self):
+        if not self.done and sys._getframe(1).f_code.co_name == self.caller:
+            self.done = True
+            self.step()
+        return self.inner.__enter__()
+
+    def __exit__(self, *a):
+        return self.inner.__exit__(*a)
+
+    def acquire(self, *a, **k):
+        return self.inner.acquire(*a, **k)
+
+    def release(self):
+        return self.inner.release()
+
+
+class TheWaitingRecordReadsTheMarkInTheRegistryLocksHold(_ABypassPickChangedBack):
+    """_note_pick_waits and _drop_pick_wait read the pending-bypass mark inside the registry lock's hold where they write
+    the record: a pick made just before that lock is taken decides the entry."""
+
+    def _mode_entry(self):
+        return "mode" in ((sb.read_reg(self.d, SID).get("relaunchWait") or {}).get("picks") or {})
+
+    def test_a_default_pick_as_the_record_write_takes_the_lock_leaves_no_entry(self):
+        s = self._session()
+        s.inflight = 1
+        self.be._reg_lock = lock = _StepWhenTheRegistryLockIsTaken(
+            self.be._reg_lock, "_note_pick_waits", lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(lock.done, "the premise: default was picked as the record write took the lock")
+        self.assertEqual((s.mode, s._mode_pending, self._mode_entry()), ("default", "", False), "no mode entry")
+
+    def test_a_bypass_pick_as_the_record_drop_takes_the_lock_keeps_its_entry(self):
+        s = self._session()
+        self._bypass_waits(s)
+        self.be._reg_lock = lock = _StepWhenTheRegistryLockIsTaken(
+            self.be._reg_lock, "_drop_pick_wait", lambda: self.assertTrue(self.be.set_mode(SID, "bypassPermissions")))
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertTrue(lock.done, "the premise: Bypass was picked as the record drop took the lock")
+        self.assertEqual((s.mode, s._mode_pending, self._mode_entry()), ("bypassPermissions", "bypassPermissions", True),
+                         "the waiting pick keeps its entry")
+
+
 class EveryWriteOfTheRelaunchAskIsMadeUnderTheSessionLock(unittest.TestCase):
     """Every write in kernel/ of the standing relaunch ask (_switch_wanted), the line said for it (_switch_wait_said), the
     ask carried (_switch_ask_pending), the turn's-end relaunch (_reconnect_when_idle), the bypass pick's word that the ask
@@ -2781,25 +3543,42 @@ class _LockCensus:
                         "timedelta", "timezone"))
     BACKEND = ("self.backend", "be", "backend", "self._backend")
     SESSION = ("s", "sess", "session", "ss")
+    LOCK_TYPES = ("Lock", "RLock", "Condition", "Semaphore", "BoundedSemaphore")
+    # A callable handed to one of these runs later, on a loop or a thread of its own, never inside the caller's hold.
+    SCHEDULERS = frozenset(("call_soon_threadsafe", "call_soon", "call_later", "call_at", "create_task", "ensure_future",
+                            "run_coroutine_threadsafe", "_schedule_on_loop", "Thread", "Timer", "submit",
+                            "run_in_executor", "add_done_callback", "_call_on_loop"))
     # Bare names that are no def, each read at its source, keyed by (module, function, name): the parameter, local or
     # module handle each is, and what it runs.
     PARAMS = {
-        # its parameter: _boot_attach_settled's `settled`, or a launch slot's release, at each of _ensure's callers
+        # its parameter: _boot_attach_settled's `settled`, or a launch slot's release (_LaunchSlots.release, which hands
+        # the slot over under _LaunchSlots._lock), at each of _ensure's callers
         ("sdk_backend", "SdkBackend._ensure", "on_boot_settled"): (
-            ("nested", "sdk_backend", "SdkBackend._boot_attach_settled", "settled"),),
+            ("nested", "sdk_backend", "SdkBackend._boot_attach_settled", "settled"),
+            ("def", "sdk_backend", "_LaunchSlots.release")),
         ("sdk_backend", "SdkBackend._ensure", "adopt"): (("def", "sdk_backend", "SdkSession._adopt_queue_mirror"),),
         ("sdk_backend", "SdkBackend._boot_attach_settled", "release"): (),   # a launch slot's release (a Semaphore's)
         ("sdk_backend", "lease_state", "start"): (("def", "sdk_backend", "proc_start"),),   # proc_start unless a test's
         ("sdk_backend", "proc_start", "run"): (),                          # subprocess.run unless a test's
         ("sdk_backend", "_ht", "load_source"): (),                         # kernel/loadsource.py's module load
         ("host_transport", "host_lease_state", "load_source"): (),
+        ("sdk_backend", "SdkSession._schedule_on_loop", "closed"): (),   # the loop's is_closed
+    }
+    # Receivers of library classes whose method shares a name with a method of the backend or a session, each read at its
+    # source, keyed by (module, function, receiver): what each is.
+    LIBRARY = {
+        ("sdk_backend", "SdkBackend._lease_open", "t"): "a threading.Thread",
+        ("sdk_backend", "SdkBackend._lease_watch_start", "th"): "a threading.Thread",
+        ("sdk_backend", "SdkBackend._end_host_by_lease", "th"): "a threading.Thread",
+        ("sdk_backend", "SdkSession.start", "self.thread"): "a threading.Thread",
     }
     MODCALLS = {("sdk_backend", "_ht()"): "host_transport", ("host_transport", "sb"): "sdk_backend"}
+    SDK = ("_sdk", "_sdk_locked")   # kernel.py's first-use construction of the backend: a call to either is noted
 
     def __init__(self, kdir):
         import builtins
         self.builtins = set(dir(builtins))
-        self.defs, self.nested, self.aliases, self.classes = {}, {}, {}, set()
+        self.defs, self.nested, self.aliases, self.classes, self.constructed = {}, {}, {}, set(), set()
         takes = []                               # (module, function qual, function node, with/acquire node)
         for path in sorted(Path(kdir).glob("*.py")):
             m = path.stem
@@ -2817,21 +3596,26 @@ class _LockCensus:
             for name, a in list(al.items()):
                 if a[0] == "attr" and a[1] in al and al[a[1]][0] == "mod":
                     al[name] = ("def", al[a[1]][1], a[2])
+        self.methods = {q.split(".", 1)[1] for (m, q) in self.defs if m == "sdk_backend"
+                        and q.split(".", 1)[0] in ("SdkBackend", "SdkSession") and "." in q}
         self.callbacks = self._wiring()
-        self.regions, aliases = {}, {}
+        self.regions, self.unresolved_locks, aliases = {}, set(), {}
         for m, qual, fn, w in takes:
             if (m, qual) not in aliases:
                 aliases[(m, qual)] = self._fn_aliases(m, qual, fn)
             items = [w.func.value] if isinstance(w, ast.Call) else [i.context_expr for i in w.items]
             for e in items:
-                if self._lockish(e):
-                    self.regions.setdefault(self._lock_id(m, self._cls(m, qual), e, aliases[(m, qual)]), []).append(
-                        (m, qual, fn, w))
+                lid = self._lock_id(m, self._cls(m, qual), e, aliases[(m, qual)])
+                if self._lockish(e) or lid in self.constructed:
+                    if lid.startswith("?"):
+                        self.unresolved_locks.add("%s:%d %s" % (m, w.lineno, ast.unparse(e)))
+                    self.regions.setdefault(lid, []).append((m, qual, fn, w))
         self.unclassified, self._memo = set(), {}
 
     def _scan(self, m, tree, takes):
         """One walk of a module: its defs (methods as Class.name), the defs nested in each (keyed by the outermost def),
-        and every `with` and acquire() with the function it is in."""
+        every `with` and acquire() with the function it is in, and every lock it constructs (a module name or a class
+        attribute assigned threading.Lock, RLock, Condition, Semaphore or BoundedSemaphore)."""
         def walk(node, cls, top, qual, fn):
             for ch in ast.iter_child_nodes(node):
                 if isinstance(ch, ast.ClassDef):
@@ -2848,6 +3632,14 @@ class _LockCensus:
                         self.nested.setdefault((m, top, ch.name), ch)
                         walk(ch, cls, top, top + ".<n>." + ch.name, ch)
                     continue
+                if isinstance(ch, ast.Assign) and isinstance(ch.value, ast.Call) and (
+                        getattr(ch.value.func, "attr", None) in self.LOCK_TYPES
+                        or getattr(ch.value.func, "id", None) in self.LOCK_TYPES):
+                    for t in ch.targets:
+                        if isinstance(t, ast.Name) and fn is None:
+                            self.constructed.add("%s.%s" % (m, t.id))
+                        elif isinstance(t, ast.Attribute) and ast.unparse(t.value) == "self" and cls:
+                            self.constructed.add("%s.%s" % (cls, t.attr))
                 if fn is not None and (isinstance(ch, (ast.With, ast.AsyncWith))
                                        or (isinstance(ch, ast.Call) and isinstance(ch.func, ast.Attribute)
                                            and ch.func.attr == "acquire")):
@@ -2921,17 +3713,39 @@ class _LockCensus:
         if isinstance(base, ast.Name):
             return al.get(base.id) or "%s.%s" % (m, base.id)
         if isinstance(base, ast.Attribute):
-            v = ast.unparse(base.value)
-            if v == "self" and cls:
-                return "%s.%s" % (cls, base.attr)
-            if m == "sdk_backend" and v in self.BACKEND:
-                return "SdkBackend." + base.attr
-            if m == "sdk_backend" and v in self.SESSION:
-                return "SdkSession." + base.attr
-            a = self.aliases[m].get(v)
+            owner = self._owner(m, cls, base.value, al)
+            if owner:
+                return "%s.%s" % (owner, base.attr)
+            a = self.aliases[m].get(ast.unparse(base.value))
             if a and a[0] == "mod":
                 return "%s.%s" % (a[1], base.attr)
+            if isinstance(base.value, ast.Name) and (m, base.value.id) in self.classes:
+                return "%s.%s" % (base.value.id, base.attr)        # a class attribute: SdkSession._stream_fail_lock
         return "?%s:%s" % (m, ast.unparse(e))
+
+    def _owner(self, m, cls, e, env):
+        """The class an expression's value is an instance of, where the census can tell: self is its class; in
+        sdk_backend.py the names a module gives the backend and a session (BACKEND, SESSION), and a session's `backend`;
+        a local the function assigned from any of these (env, by name); getattr(x, "attr") as x.attr."""
+        if isinstance(e, ast.Call) and getattr(e.func, "id", "") == "getattr" and len(e.args) >= 2 \
+                and isinstance(e.args[1], ast.Constant):
+            e = ast.Attribute(value=e.args[0], attr=e.args[1].value, ctx=ast.Load())
+        text = ast.unparse(e)
+        if isinstance(e, ast.Name):
+            if e.id == "self":
+                return cls
+            if isinstance(env.get(e.id), tuple) and env[e.id][0] == "owner":
+                return env[e.id][1]
+        if m != "sdk_backend":
+            return None
+        if text in self.BACKEND:
+            return "SdkBackend"
+        if isinstance(e, ast.Name) and e.id in self.SESSION:
+            return "SdkSession"
+        if isinstance(e, ast.Attribute) and e.attr in ("backend", "_backend") \
+                and self._owner(m, cls, e.value, env) == "SdkSession":
+            return "SdkBackend"
+        return None
 
     def _cls(self, m, qual):
         head = qual.split(".<n>.")[0]
@@ -2949,35 +3763,83 @@ class _LockCensus:
         return out
 
     def _fn_aliases(self, m, qual, fn):
-        """The function's local names for a lock (lock = getattr(self, "_lock", None))."""
+        """The function's local names: for a lock (lock = getattr(self, "_lock", None)), and for an object whose class
+        the census can tell (b = self.backend)."""
+        memo = self.__dict__.setdefault("_alias_memo", {})
+        if (m, qual, id(fn)) not in memo:
+            memo[(m, qual, id(fn))] = self._fn_aliases_read(m, qual, fn)
+        return memo[(m, qual, id(fn))]
+
+    def _fn_aliases_read(self, m, qual, fn):
         cls, al = self._cls(m, qual), {}
-        for ch in self._own(fn.body if isinstance(fn.body, list) else [fn.body]):
-            if isinstance(ch, ast.Assign) and len(ch.targets) == 1 and isinstance(ch.targets[0], ast.Name) \
-                    and self._lockish(ch.value):
-                al[ch.targets[0].id] = self._lock_id(m, cls, ch.value, {})
+        for ch in sorted(self._own(fn.body if isinstance(fn.body, list) else [fn.body]),
+                         key=lambda n: getattr(n, "lineno", 0)):
+            if isinstance(ch, ast.Assign) and len(ch.targets) == 1 and isinstance(ch.targets[0], ast.Name):
+                if self._lockish(ch.value):
+                    al[ch.targets[0].id] = self._lock_id(m, cls, ch.value, {})
+                else:
+                    owner = self._owner(m, cls, ch.value, al)
+                    if owner:
+                        al[ch.targets[0].id] = ("owner", owner)
         return al
 
+    def _items(self, n):
+        return [n.func.value] if isinstance(n, ast.Call) else [i.context_expr for i in n.items]
+
     def _events(self, m, qual, fn, body=None):
-        """(locks, calls) made by the function's own body, or by `body` within it."""
-        cls, al = self._cls(m, qual), None
+        """(locks, calls) made by the function's own body, or by `body` within it. A call to kernel._sdk or
+        kernel._sdk_locked is noted as the lock "kernel._sdk()"."""
+        cls, al = self._cls(m, qual), self._fn_aliases(m, qual, fn)
         locks, calls = [], []
         for n in self._own(body if body is not None else (fn.body if isinstance(fn.body, list) else [fn.body])):
             if isinstance(n, (ast.With, ast.AsyncWith)) or (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
                                                               and n.func.attr == "acquire"):
-                items = [n.func.value] if isinstance(n, ast.Call) else [i.context_expr for i in n.items]
-                for e in items:
-                    if self._lockish(e):
-                        al = self._fn_aliases(m, qual, fn) if al is None else al
-                        locks.append((self._lock_id(m, cls, e, al), n))
+                for e in self._items(n):
+                    lid = self._lock_id(m, cls, e, al)
+                    if self._lockish(e) or lid in self.constructed:
+                        locks.append((lid, n))
             if isinstance(n, ast.Call):
                 calls.append(n)
+                if m == "kernel" and getattr(n.func, "id", None) in self.SDK:
+                    locks.append(("kernel._sdk()", n))
         return locks, calls
 
-    def _resolve(self, m, qual, call):
+    def _acquired(self, fn, w):
+        """The nodes a bare acquire() `w` holds its lock over: everything in the function's own body from the acquire's
+        line to the first release() of the same lock after it, or to the function's end."""
+        target = ast.unparse(w.func.value)
+        end = max(getattr(n, "end_lineno", 0) or 0 for n in self._own(fn.body))
+        for n in self._own(fn.body):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "release" \
+                    and ast.unparse(n.func.value) == target and n.lineno > w.lineno:
+                end = min(end, n.lineno)
+        return [n for n in self._own(fn.body) if w.lineno <= getattr(n, "lineno", 0) <= end and n is not w]
+
+    def _callees(self, m, qual, fn, call):
+        """What a call runs now: what its function resolves to, plus each callable handed to it as an argument that
+        resolves to a def or a callback (functools.partial, a key function, a callback handed on), unless the call is a
+        SCHEDULERS one, whose callable runs later and outside the hold."""
+        out = list(self._resolve(m, qual, fn, call))
+        name = getattr(call.func, "attr", None) or getattr(call.func, "id", None)
+        if name not in self.SCHEDULERS:
+            for a in list(call.args) + [k.value for k in call.keywords]:
+                if isinstance(a, (ast.Name, ast.Attribute)):
+                    out.extend(self._resolve(m, qual, fn, ast.Call(func=a, args=[], keywords=[], lineno=call.lineno),
+                                             quiet=True))
+        return out
+
+    def _resolve(self, m, qual, fn, call, quiet=False):
         """((kind, ...), ...): ("def", module, qual), ("nested", module, top, name), or () for a leaf. A call shaped as a
-        callback that neither the wiring nor PARAMS resolves is noted in self.unclassified."""
+        callback that neither the wiring nor PARAMS resolves, and a method of the backend or a session called on an object
+        the census cannot tell the class of, are noted in self.unclassified."""
         f, cls = call.func, self._cls(m, qual)
         top = qual.split(".<n>.")[0]
+        if isinstance(f, ast.Call) and getattr(f.func, "id", "") == "getattr" and len(f.args) >= 2 \
+                and isinstance(f.args[1], ast.Constant):
+            f = ast.Attribute(value=f.args[0], attr=f.args[1].value, ctx=ast.Load())   # getattr(x, "m"[, d])()
+        if isinstance(f, ast.Call) and (getattr(f.func, "attr", None) == "partial" or getattr(f.func, "id", None) == "partial") \
+                and f.args:
+            return self._resolve(m, qual, fn, ast.Call(func=f.args[0], args=[], keywords=[], lineno=call.lineno), quiet)
         if isinstance(f, ast.Name):
             if (m, top, f.id) in self.nested:
                 return (("nested", m, top, f.id),)
@@ -2990,23 +3852,22 @@ class _LockCensus:
                 return (("def", m, f.id + ".__init__"),) if (m, f.id + ".__init__") in self.defs else ()
             if (m, top, f.id) in self.PARAMS:
                 return self.PARAMS[(m, top, f.id)]
-            if f.id in self.builtins or f.id in self.STDLIB:
+            if quiet or f.id in self.builtins or f.id in self.STDLIB:
                 return ()
             self.unclassified.add("%s:%d %s (in %s)" % (m, call.lineno, f.id, qual))
             return ()
         if not isinstance(f, ast.Attribute):
             return ()
         v, attr = ast.unparse(f.value), f.attr
-        owner = (cls if v == "self" else "SdkBackend" if (m == "sdk_backend" and v in self.BACKEND)
-                 else "SdkSession" if (m == "sdk_backend" and v in self.SESSION) else None)
-        if owner and (cls or v != "self"):
+        owner = self._owner(m, cls, f.value, self._fn_aliases(m, qual, fn) if fn is not None else {})
+        if owner:
             if (m, owner + "." + attr) in self.defs:
                 return (("def", m, owner + "." + attr),)
             if owner == "SdkBackend" and attr in self.callbacks:
                 return tuple(("def",) + t for t in self.callbacks[attr])
             if owner == "SdkBackend" and attr in self.unwired:
                 return ()
-            if owner in ("SdkBackend", "SdkSession") and m == "sdk_backend" and not hasattr(set, attr) \
+            if not quiet and owner in ("SdkBackend", "SdkSession") and m == "sdk_backend" and not hasattr(set, attr) \
                     and not hasattr(dict, attr) and not hasattr(list, attr):
                 self.unclassified.add("%s:%d %s.%s (in %s)" % (m, call.lineno, v, attr, qual))
             return ()
@@ -3017,6 +3878,9 @@ class _LockCensus:
             return (("def", self.MODCALLS[(m, v)], attr),) if (self.MODCALLS[(m, v)], attr) in self.defs else ()
         if isinstance(f.value, ast.Name) and (m, f.value.id) in self.classes and (m, f.value.id + "." + attr) in self.defs:
             return (("def", m, f.value.id + "." + attr),)
+        if not quiet and m == "sdk_backend" and (attr in self.methods or attr in self.callbacks) and not any(
+                hasattr(t, attr) for t in (set, dict, list, str, bytes, tuple)) and (m, top, v) not in self.LIBRARY:
+            self.unclassified.add("%s:%d %s.%s on an object of unknown class (in %s)" % (m, call.lineno, v, attr, qual))
         return ()
 
     def _node(self, r):
@@ -3037,7 +3901,7 @@ class _LockCensus:
         locks, calls = self._events(m, qual, fn)
         out, cut = {lid: ["%s:%d %s" % (m, w.lineno, qual)] for lid, w in locks}, False
         for c in calls:
-            for r in self._resolve(m, qual, c):
+            for r in self._callees(m, qual, fn, c):
                 m2, q2, fn2 = self._node(r)
                 taken, cut2 = self._reach(m2, q2, fn2, stack + (key,))
                 cut = cut or cut2
@@ -3047,50 +3911,128 @@ class _LockCensus:
             self._memo[key] = out
         return out, cut
 
+    def taken_in(self, held):
+        """{lock: chain} for every lock a hold of `held` takes, directly or through the calls it makes, its own
+        acquire() regions included (each followed to its release)."""
+        taken = {}
+        for m, qual, fn, w in self.regions.get(held, ()):
+            body = self._acquired(fn, w) if isinstance(w, ast.Call) else w.body
+            locks, calls = self._events(m, qual, fn, body=body)
+            for lid, _w in locks:
+                taken.setdefault(lid, ["%s:%d %s (holds %s)" % (m, w.lineno, qual, held)])
+            for c in calls:
+                for r in self._callees(m, qual, fn, c):
+                    m2, q2, fn2 = self._node(r)
+                    for lid, chain in self._reach(m2, q2, fn2)[0].items():
+                        taken.setdefault(lid, ["%s:%d %s (holds %s)" % (m, c.lineno, qual, held)] + chain)
+        return taken
+
     def closure(self, start):
-        """{lock: the chain from a hold of `start` to its take} for every lock reachable while `start` is held."""
+        """{lock: the chain from a hold of `start` to its take} for every lock reachable while `start` is held, the
+        first-use construction "kernel._sdk()" included. `start` itself is left out (see retakes)."""
         done, todo, found = set(), [start], {}
+        self.retakes = {}
         while todo:
             held = todo.pop()
             if held in done:
                 continue
             done.add(held)
-            for m, qual, fn, w in self.regions.get(held, ()):
-                if isinstance(w, ast.Call):
-                    continue                     # an acquire() call: the region it opens is not tracked
-                locks, calls = self._events(m, qual, fn, body=w.body)
-                taken = {lid: ["%s:%d %s (holds %s)" % (m, w.lineno, qual, held)] for lid, _w in locks}
-                for c in calls:
-                    for r in self._resolve(m, qual, c):
-                        m2, q2, fn2 = self._node(r)
-                        for lid, chain in self._reach(m2, q2, fn2)[0].items():
-                            taken.setdefault(lid, ["%s:%d %s (holds %s)" % (m, c.lineno, qual, held)] + chain)
-                for lid, chain in taken.items():
-                    if lid != held and lid not in found:
-                        found[lid] = chain
-                        todo.append(lid)
+            for lid, chain in self.taken_in(held).items():
+                if lid == start:
+                    self.retakes.setdefault(held, chain)
+                elif lid not in found:
+                    found[lid] = chain
+                    todo.append(lid)
         return found
+
+    def held_around_sdk(self):
+        """{lock: chain} for every lock some hold of which makes a call that can reach kernel._sdk or kernel._sdk_locked:
+        the locks that can be held when a first _sdk() call takes a session lock. From the call graph of every def and
+        nested def in kernel/, searched back from those two."""
+        nodes = [(("def",) + k, k[0], k[1], fn) for k, fn in self.defs.items()]
+        nodes += [(("nested",) + k, k[0], k[1] + ".<n>." + k[2], fn) for k, fn in self.nested.items()]
+        callers = {}
+        for key, m, qual, fn in nodes:
+            for c in self._events(m, qual, fn)[1]:
+                for r in self._callees(m, qual, fn, c):
+                    callers.setdefault(self._node(r)[:2], []).append(((m, qual), c.lineno))
+        toward, todo = {("kernel", t): None for t in self.SDK}, [("kernel", t) for t in self.SDK]
+        while todo:
+            f = todo.pop(0)
+            for g, line in callers.get(f, ()):
+                if g not in toward:
+                    toward[g] = (f, line)
+                    todo.append(g)
+
+        def chain(f):
+            out = []
+            while toward.get(f):
+                nxt, line = toward[f]
+                out.append("%s:%d %s" % (f[0], line, f[1]))
+                f = nxt
+            return out + ["%s.%s" % f]
+        held = {}
+        for lid, regions in self.regions.items():
+            for m, qual, fn, w in regions:
+                body = self._acquired(fn, w) if isinstance(w, ast.Call) else w.body
+                for c in self._events(m, qual, fn, body=body)[1]:
+                    hits = [self._node(r)[:2] for r in self._callees(m, qual, fn, c)]
+                    if m == "kernel" and getattr(c.func, "id", None) in self.SDK:
+                        hits.append(("kernel", c.func.id))
+                    for h in hits:
+                        if h in toward and lid not in held:
+                            held[lid] = ["%s:%d %s (holds %s)" % (m, c.lineno, qual, lid)] + chain(h)
+        return held
+
+    def unresolved_locks_in(self, module):
+        return {u for u in self.unresolved_locks if u.startswith(module + ":")}
 
 
 class NoKernelLockIsTakenWhileASessionLockIsHeld(unittest.TestCase):
     """While a session's lock (SdkSession._lock) is held, no path takes a kernel lock that can be held when a first _sdk()
-    call takes a session lock: _sdk_lock, _FEED_BUILD_LOCK, _SEND_WRITE_LOCK, _SETTINGS_LOCK, _TL_BUILD_LOCK,
-    _goals_snap_lock and _pure_feed_lock (kernel/kernel.py). Under _sdk_lock, _sdk_locked's _migrate_parked_auth calls
-    set_auth, whose billing retarget asks for a relaunch through want_switch_reconnect, which reads and sets the ask under
-    the session lock; so each of those kernel locks comes before the session lock, and none may come after it.
+    call takes a session lock. Under kernel._sdk_lock, _sdk_locked's _migrate_parked_auth calls set_auth, whose billing
+    retarget asks for a relaunch through want_switch_reconnect, which reads and sets the ask under the session lock; so
+    every lock held around a call that can reach _sdk() or _sdk_locked comes before the session lock, and none may come
+    after it.
 
-    The census (_LockCensus) follows every hold of the session lock call by call to its bottom, then every hold of each
-    lock taken there, anywhere in kernel/, until nothing new is reached: any lock taken while one of those is held is
-    reached too. Calls resolve by receiver: self.m to its class's method; in sdk_backend.py the backend's and a session's
-    methods by the names the module gives them (self.backend, be, backend; s, sess, session); a bare name to a nested def
-    of its function, then to its module's def, then to another module's def through an alias. The kernel's callbacks on
-    the backend resolve through the wiring kernel._sdk_locked makes. A call shaped as a callback (an attribute of the
-    backend or a session that is no method, or a bare name that is no def) that resolves through neither fails the census
-    until it is classified in _LockCensus.PARAMS. Calls on other objects (files, events, threads, regex matches) end the
-    path, and a region opened by a bare acquire() is not followed: the census's stated limits."""
+    Both sides are derived from kernel/*.py's source (_LockCensus). The locks held around such a call: every hold of every
+    lock whose calls can reach _sdk() or _sdk_locked in the call graph of every def in kernel/ (held_around_sdk). The locks
+    taken while a session lock is held: every hold of the session lock followed call by call to its bottom, then every
+    hold of each lock taken there, anywhere in kernel/, until nothing new is reached (closure). The two must not meet, and
+    the second may hold only the locks in TAKEN_UNDER_A_SESSION_LOCK, so any other lock taken under a session lock fails
+    whether or not it is held around _sdk() today. HELD_AROUND_SDK names the locks the derivation must find, a premise
+    that it reads the paths at all; it is not the list the test asserts on.
+
+    A lock is any `with` item or acquire() receiver whose name says lock, or that resolves to a name or a class attribute
+    assigned threading.Lock, RLock, Condition, Semaphore or BoundedSemaphore; a lock taken by a bare acquire() is held
+    from that line to the first release() of the same lock after it in the function, or to its end. Calls resolve by
+    receiver: self.m to its class's method; in sdk_backend.py the backend's and a session's methods by the names the module
+    gives them (self.backend, be, backend; s, sess, session), by a session's `backend`, and by a local assigned from any of
+    these; getattr(x, "m"[, default])() as x.m(); a bare name to a nested def of its function, then to its module's def,
+    then to another module's def through an alias. functools.partial(f, ...) and every def or callback handed to a call as
+    an argument count as called, unless the call schedules it to run later (_LockCensus.SCHEDULERS). The kernel's
+    callbacks on the backend resolve through the wiring kernel._sdk_locked makes.
+
+    It fails loudly where it cannot read: a call shaped as a callback (an attribute of the backend or a session that is no
+    method, or a bare name that is no def) that resolves through neither the wiring nor _LockCensus.PARAMS; a method name
+    of the backend or a session called in sdk_backend.py on an object of no class the census can tell, unless
+    _LockCensus.LIBRARY names it; and a lock taken in sdk_backend.py whose owner it cannot tell. Calls on other objects
+    (files, events, threads, regex matches) end the path: the census's stated limits.
+
+    Two more bounds: a session lock's hold never takes a session lock (the lock is not reentrant), and the registry lock
+    (SdkBackend._reg_lock) is never held when a session lock is taken. One pair in both orders is accepted and named in
+    RETAKES: SdkBackend._ensure holds SdkBackend._lock and takes the lock of the session it has just built
+    (_adopt_queue_mirror) before that session's thread exists, while a session's own loop thread takes SdkBackend._lock
+    under its own lock (drain_holding); the two never meet on one session's lock."""
 
     HELD_AROUND_SDK = ("_sdk_lock", "_FEED_BUILD_LOCK", "_SEND_WRITE_LOCK", "_SETTINGS_LOCK", "_TL_BUILD_LOCK",
-                       "_goals_snap_lock", "_pure_feed_lock")
+                       "_goals_snap_lock", "_pure_feed_lock", "_SESSIONS_LISTING_FLIGHT", "_client_lock",
+                       "_AUTO_NUDGE_TICK_LOCK")
+    TAKEN_UNDER_A_SESSION_LOCK = frozenset((
+        "SdkBackend._lock", "SdkBackend._problem_lock", "SdkBackend._reg_lock", "SdkBackend._boot_attach_lock",
+        "_LaunchSlots._lock", "_LaunchSlots._sem", "sdk_backend._HT_LOCK", "sdk_backend._LEASE_EPISODE_LOCK",
+        "kernel._BOOT_MARKS_LOCK"))
+    RETAKES = {"SdkBackend._lock": ("SdkBackend._ensure", "SdkSession._adopt_queue_mirror")}
 
     def test_no_session_lock_hold_reaches_a_kernel_lock_held_around_a_first_sdk_call(self):
         self.maxDiff = None
@@ -3100,15 +4042,25 @@ class NoKernelLockIsTakenWhileASessionLockIsHeld(unittest.TestCase):
         self.assertIn(("kernel", "_mark_boot"), census.callbacks.get("_boot_phase", ()),
                       "the premise: the census read the kernel's wiring of its callbacks")
         found = census.closure("SdkSession._lock")
+        retakes, unclassified = dict(census.retakes), sorted(census.unclassified)
         self.assertIn("SdkBackend._lock", found, "the premise: the census follows calls (drain_holding)")
         self.assertIn("kernel._BOOT_MARKS_LOCK", found,
                       "the premise: the census follows the kernel's callbacks on the backend (_boot_phase, _mark_boot)")
-        for held in self.HELD_AROUND_SDK:
-            self.assertTrue(census.regions.get("kernel." + held), "the premise: kernel.py takes %s" % held)
-        self.assertEqual({lid: found[lid] for lid in sorted(found) if lid.startswith("kernel.")
-                          and lid.split(".", 1)[1] in self.HELD_AROUND_SDK}, {},
-                         "no kernel lock held around a first _sdk() call is taken while a session lock is held")
-        self.assertEqual(sorted(census.unclassified), [], "every call shaped as a callback is classified")
+        held = census.held_around_sdk()
+        self.assertEqual([n for n in self.HELD_AROUND_SDK if "kernel." + n not in held], [],
+                         "the premise: the derivation finds the locks held around a first _sdk() call: %r" % (sorted(held),))
+        self.assertEqual({lid: (found[lid], held[lid]) for lid in sorted(set(found) & set(held))}, {},
+                         "no lock held around a first _sdk() call is taken while a session lock is held")
+        self.assertEqual({lid: found[lid] for lid in sorted(found) if lid not in self.TAKEN_UNDER_A_SESSION_LOCK}, {},
+                         "no other lock is taken while a session lock is held")
+        self.assertEqual({held_: (chain[0].split(" ")[1], chain[-1].split(" ")[1]) for held_, chain in retakes.items()},
+                         self.RETAKES, "a session lock is taken again only under the accepted pair, never under its own "
+                                       "hold: %r" % (retakes,))
+        self.assertNotIn("SdkSession._lock", census.closure("SdkBackend._reg_lock"),
+                         "no session lock is taken while the registry lock is held")
+        self.assertEqual(sorted(census.unresolved_locks_in("sdk_backend")), [],
+                         "every lock taken in sdk_backend.py resolves to its owner")
+        self.assertEqual(unclassified, [], "every call reached while a session lock is held is classified")
 
 
 class AReasonSetAsideClearsAtALaunchNotAtAnAttach(psr._Harness):
