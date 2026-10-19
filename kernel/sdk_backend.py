@@ -9100,8 +9100,7 @@ class SdkSession:
         spawn time for one an earlier kernel made). A pick it does not carry, or that no record can vouch for, still waits:
         its pending mark stays up and the wait-for-quiet relaunch is asked for again (_switch_wanted), carried by the next
         event that leaves the session quiet or the tick behind them, never at once, so the attach's replay lands first and
-        nothing the surviving CLI runs is cut. A standing ask made by picks alone whose every pick the launch carries is
-        dropped at the end (_drop_carried_ask). Loop thread.
+        nothing the surviving CLI runs is cut. Loop thread.
 
         BILLING IS ALWAYS COMPARED (2026-10-07), waiting or not: after a hung kernel was killed mid-switch, sessions whose
         registries said "key" kept running hosted CLIs launched on the login, and only waiting picks were ever compared,
@@ -9240,9 +9239,10 @@ class SdkSession:
                                   % (self.name, ", ".join(left),
                                      "not carried by the CLI this kernel attached to" if known
                                      else "cannot be vouched for (the host's hello carries no launch record)"))
-        # The entry the write above carried goes, and each record write after it is followed by a fresh read of the mode
-        # under self._lock, until the record holds the entry exactly while the pending-bypass mark is up (_note_pick_waits
-        # and _drop_pick_wait read the mark in their registry hold). No lock is held across a record write.
+        # When the hold above found a mode other than the one `want` read (unrecord), the entry the write above carried
+        # goes, and each record write after it is followed by a fresh read of the mode under self._lock, until a read
+        # agrees with the write before it (_note_pick_waits and _drop_pick_wait read the mark in their registry hold).
+        # No lock is held across a record write.
         if unrecord:
             held = True                          # the record holds the mode entry as this reconcile last wrote it
             while True:
@@ -9260,10 +9260,6 @@ class SdkSession:
         # is written again by _note_pick_waits, which reads the mark in the registry lock's hold where it writes.
         if getattr(self, "_mode_pending", "") and "mode" not in still:
             self.backend._note_pick_waits(self, "mode", "bypass mode")
-        # A standing ask made by picks alone whose every pick this launch carries (one raised while no record served, or
-        # while a relaunch was armed) is dropped by _drop_carried_ask's rule: the launch is read again before its hold, and
-        # the hold reads the ask, every pick's mark and the reasons set aside again.
-        self._drop_carried_ask()
         if left or fields or recorded:
             self.backend._poke()
 
@@ -9424,10 +9420,7 @@ class SdkSession:
         The launch is read before the session lock is taken. The hold that drops the ask reads it again, every pick's
         pending mark (the pending-bypass mark, and the effort, billing and fast-mode marks) and the reasons set aside
         (_switch_riders), as the withdrawal's hold reads them (SdkBackend._withdraw_mode_pick): while any mark is up a pick
-        waits for its relaunch, and while a reason is set aside the relaunch is kept for it, so the ask stands.
-
-        Called by SdkBackend._retarget_billing (above) and at the end of the reconcile of waiting picks, once the launch
-        record it read is the serving CLI's (_reconcile_waiting_picks)."""
+        waits for its relaunch, and while a reason is set aside the relaunch is kept for it, so the ask stands."""
         why = getattr(self, "_switch_wanted", "")
         have = getattr(self, "_cli_launch", None)
         if not why or why not in PICK_RELAUNCH_WHYS or not isinstance(have, dict):
