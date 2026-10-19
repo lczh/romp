@@ -8437,10 +8437,13 @@ class SdkSession:
             # CLI never accepted, indefinitely. Revert every layer to the last confirmed mode
             # (snapshot, session, registry — the next connect must not re-apply the refused pick
             # either) and ring the problems so the failed switch is unmissable.
-            # A mode picked after this one is the session's mode and keeps it, with its pending-bypass mark and its
-            # record: the mode is read and the revert written under self._lock, which set_mode also takes when it writes
-            # the mode, the confirmed mode and the mark. The confirmed mode goes back while it still reads this pick, and
-            # to a confirmed bypassPermissions only while the mode reads bypassPermissions too.
+            # A mode other than this pick, picked after it, keeps the session's mode and its pending-bypass mark: the mode
+            # is read and the revert written under self._lock, which set_mode also takes when it writes the mode, the
+            # confirmed mode and the mark. The confirmed mode goes back while it still reads this pick, and to a confirmed
+            # bypassPermissions only while the mode reads bypassPermissions too. The record's mode goes back only while
+            # the record still holds this pick, read and written in one hold of the registry lock
+            # (SdkBackend._revert_reg_mode): set_mode records a mode before its hold of self._lock, so a mode other than
+            # this pick recorded since it keeps its record.
             with self._lock:
                 now = getattr(self, "mode", "") or ""
                 if now == mode or (self.perm_mode == mode and (prev != "bypassPermissions" or now == "bypassPermissions")):
@@ -8448,7 +8451,7 @@ class SdkSession:
                 if now == mode:
                     self.mode = prev
             if now == mode:
-                self.backend._update_reg(self.sid, mode=prev)
+                self.backend._revert_reg_mode(self.sid, mode, prev)
             self.backend._log("set_permission_mode (%s -> %s) refused by the SDK: %s: %s — the switch "
                               "did NOT apply; %s"
                               % (self.name, mode, type(e).__name__, e,
@@ -9097,7 +9100,8 @@ class SdkSession:
         spawn time for one an earlier kernel made). A pick it does not carry, or that no record can vouch for, still waits:
         its pending mark stays up and the wait-for-quiet relaunch is asked for again (_switch_wanted), carried by the next
         event that leaves the session quiet or the tick behind them, never at once, so the attach's replay lands first and
-        nothing the surviving CLI runs is cut. Loop thread.
+        nothing the surviving CLI runs is cut. A standing ask made by picks alone whose every pick the launch carries is
+        dropped at the end (_drop_carried_ask). Loop thread.
 
         BILLING IS ALWAYS COMPARED (2026-10-07), waiting or not: after a hung kernel was killed mid-switch, sessions whose
         registries said "key" kept running hosted CLIs launched on the login, and only waiting picks were ever compared,
@@ -9256,6 +9260,10 @@ class SdkSession:
         # is written again by _note_pick_waits, which reads the mark in the registry lock's hold where it writes.
         if getattr(self, "_mode_pending", "") and "mode" not in still:
             self.backend._note_pick_waits(self, "mode", "bypass mode")
+        # A standing ask made by picks alone whose every pick this launch carries (one raised while no record served, or
+        # while a relaunch was armed) is dropped by _drop_carried_ask's rule: the launch is read again before its hold, and
+        # the hold reads the ask, every pick's mark and the reasons set aside again.
+        self._drop_carried_ask()
         if left or fields or recorded:
             self.backend._poke()
 
@@ -9413,9 +9421,13 @@ class SdkSession:
         the relaunch would apply nothing, so the ask is dropped, with its place in line for a launch slot. An ask with any
         other reason, an ask already handed to a relaunch (_switch_ask_pending), or a CLI no record vouches for stands.
 
-        The launch is read before the session lock is taken. The hold that drops the ask reads it again, and every pick's
-        pending mark (the pending-bypass mark, and the effort, billing and fast-mode marks), as the withdrawal's hold reads
-        them (SdkBackend._withdraw_mode_pick): while any mark is up a pick waits for its relaunch, and the ask stands."""
+        The launch is read before the session lock is taken. The hold that drops the ask reads it again, every pick's
+        pending mark (the pending-bypass mark, and the effort, billing and fast-mode marks) and the reasons set aside
+        (_switch_riders), as the withdrawal's hold reads them (SdkBackend._withdraw_mode_pick): while any mark is up a pick
+        waits for its relaunch, and while a reason is set aside the relaunch is kept for it, so the ask stands.
+
+        Called by SdkBackend._retarget_billing (above) and at the end of the reconcile of waiting picks, once the launch
+        record it read is the serving CLI's (_reconcile_waiting_picks)."""
         why = getattr(self, "_switch_wanted", "")
         have = getattr(self, "_cli_launch", None)
         if not why or why not in PICK_RELAUNCH_WHYS or not isinstance(have, dict):
@@ -9424,7 +9436,7 @@ class SdkSession:
         if any(launch_value(have, k) != want.get(k) for keys in PICK_LAUNCH_KEYS.values() for k in keys):
             return
         with self._lock:
-            if self._switch_wanted != why or any(getattr(self, a, "") for a in (
+            if self._switch_wanted != why or self._switch_riders or any(getattr(self, a, "") for a in (
                     "_mode_pending", "_effort_pending", "_auth_pending", "_fast_pending")):
                 return
             self._switch_wanted = self._switch_wait_said = ""
@@ -21510,6 +21522,19 @@ class SdkBackend:
         except Exception as e:
             self._log("waiting picks (%s): could not record the %s pick: %s" % (getattr(s, "name", s.sid[:8]), pick, e),
                       problem=True)
+
+    def _revert_reg_mode(self, sid: str, refused: str, prev: str) -> bool:
+        """A refused live mode switch's record write (SdkSession._do_set_mode): the registry's mode goes back to `prev` only
+        while it still holds the refused pick, read and written in one hold of the registry lock. set_mode records a mode
+        before it takes the session lock, so a mode other than the refused pick recorded since it keeps its record. True
+        when it wrote."""
+        with self._reg_lock:
+            reg = read_reg(self.state_dir, sid)
+            if reg is None or reg.get("mode") != refused:
+                return False
+            reg["mode"] = prev
+            write_reg(self.state_dir, sid, reg)
+            return True
 
     def set_effort(self, sid: str, value: str) -> bool:
         """Change the reasoning effort. effort is a connect-time CLI flag (--effort) with no SDK runtime
