@@ -147,10 +147,27 @@ await page.addInitScript(() => {
 // null when the key never reaches the window; each variant sets it null before its staging)
 if (variants.some((v) => v.endAt)) await page.addInitScript(() => {
   window.__endRange = null; window.__atEnd = null;
+  // the element a variant's staging reaches (stageEnd), held by keys the page renders: its row's data-uuid and its place among the
+  // selector's matches in that row (in #content, for an element in no row). The page can re-window between any two of the driver's
+  // steps (one frame after a scroll event near the window's edge), emptying the thread and building fresh rows, so a mark set on the
+  // element in one step was gone in the next. Each step finds the element by its keys and acts on it in the same task (__labEndAt);
+  // node is the element the first step that left something on it (a wait met on it, a seek, focus, a press) acted on, and a later step
+  // that finds another element there fails, naming the class and both steps
+  window.__labEnd = null;
+  window.__labEndAt = (step, keep) => {
+    const k = window.__labEnd, c = document.getElementById("content");
+    if (!k) throw new Error("no END_AT element was picked before " + step);
+    const scope = k.uuid == null ? c : c.querySelector('.turn[data-uuid="' + k.uuid + '"]');
+    const t = (scope && scope.querySelectorAll(k.sel)[k.i]) || null, where = k.sel + " (match " + k.i + (k.uuid == null ? " in #content)" : " in row " + k.uuid + ")");
+    if (!t) throw new Error(k.name + ": the END_AT element " + where + " is gone at " + step + ": no rendered row holds it");
+    if (k.node && t !== k.node) throw new Error(k.name + ": the END_AT element " + where + " was rebuilt by a re-window between " + k.step + " and " + step + ", so what " + k.step + " left on it is gone");
+    if (keep && !k.node) { k.node = t; k.step = step; }
+    return t;
+  };
   window.addEventListener("pointerdown", (e) => { window.__endRange = null; if (e.target instanceof Node) { window.__endRange = document.createRange(); window.__endRange.setStart(e.target, 0); } }, true);
   window.addEventListener("keydown", (e) => {
     if (e.key !== "End") return;
-    const t = document.querySelector("[data-lab-end]"), c = document.getElementById("content"), a = document.getSelection().anchorNode, r = window.__endRange, f = document.activeElement;
+    const t = window.__labEnd && window.__labEnd.node, c = document.getElementById("content"), a = document.getSelection().anchorNode, r = window.__endRange, f = document.activeElement;
     window.__atEnd = { inContent: !!t && c.contains(t), focused: !!t && f === t, bodyFocused: f === document.body, anchor: !!a, pressIn: !!t && !!r && t.contains(r.startContainer),
                        pressInContent: !!r && c.contains(r.startContainer),
                        dist: c.scrollHeight - c.scrollTop - c.clientHeight, ch: c.clientHeight,
@@ -291,21 +308,26 @@ if (cfg.legs.includes("nearEnd")) {
   // blank, with no loader and nothing asked, until the reader scrolled again.
   // That gap starts where the middle drop's LAST ask ends: its page's, or the next page's when the page left a gap on screen under its rows
   const P = cfg.pageTurns, m = out.middle && out.middle.asks.length ? out.middle.asks[out.middle.asks.length - 1] : null;
-  const gaps = await page.evaluate(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(); return Array.from(document.querySelectorAll("#content .tx-gap")).filter((g) => g.offsetParent !== null).map((g) => { const b = g.getBoundingClientRect(); return { lo: +g.dataset.lo, hi: +g.dataset.hi, y: b.top - cr.top + c.scrollTop, h: b.height }; }); });
-  const g = gaps.find((x) => m && x.lo === m[1]) || null;
-  if (g) {
+  // the gap is read and the drop written in one task: a re-window in a task between them could move the gap first
+  const a0 = (await asks()).length;
+  holdTurns = true;   // the page's reply waits at the wire until the premise is read (the fill would put the rows under the top first)
+  const { gaps, g, k, turn, drop } = await page.evaluate(([lo, P]) => { const c = document.getElementById("content"), cr = c.getBoundingClientRect();
+    const gaps = Array.from(document.querySelectorAll("#content .tx-gap")).filter((g) => g.offsetParent !== null).map((g) => { const b = g.getBoundingClientRect(); return { lo: +g.dataset.lo, hi: +g.dataset.hi, y: b.top - cr.top + c.scrollTop, h: b.height }; });
+    const g = gaps.find((x) => lo != null && x.lo === lo) || null;
+    if (!g) return { gaps, g };
     const k = Math.floor((g.lo + g.hi) / 2 / P) * P, turn = k + P - 0.35;   // a page in the gap's middle, its last turn, two thirds of the way down
     const drop = Math.round(g.y + g.h * (turn - g.lo) / (g.hi - g.lo));
-    const a0 = (await asks()).length;
-    holdTurns = true;   // the page's reply waits at the wire until the premise is read (the fill would put the rows under the top first)
-    await setTop(drop); await painted();
+    c.scrollTop = drop;
+    return { gaps, g, k, turn, drop }; }, [m ? m[1] : null, P]);
+  if (g) {
+    await painted(); await painted();
     const at = await reading();
     await asksPast(a0, 10000);
     release();
     await asksPast(a0 + 1, 8000);
     await page.waitForTimeout(1500); await painted();
     out.nearEnd = { gap: g, page: [k, k + P], turn, drop, at, after: await reading(), blank: await blankPx(), asks: (await asks()).slice(a0) };
-  } else out.nearEnd = { gap: null, gaps, middleAsk: m };
+  } else { release(); out.nearEnd = { gap: null, gaps, middleAsk: m }; }
 }
 if (cfg.legs.includes("parked")) {
   // ROAD 5: a reader parked in a gap while a page they did not ask for is on the wire. Back to the end; the kernel's history replies are
@@ -345,30 +367,35 @@ if (cfg.legs.includes("long")) {
   if (out.turn) await page.waitForFunction((u) => window.__sent.some((m) => m.type === "locateDiag" && m.anchor === u && m.ok === true), out.turn.anchor, { timeout: 8000 }).catch(() => {});   // the landing's settle has ended
   await page.waitForTimeout(500); await painted();
   const threadSel = '#content .thread[data-session="' + cfg.sid + '"]';
-  const shape = () => page.evaluate((sel) => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(); const t = document.querySelector(sel); const kids = t ? Array.from(t.children) : []; const units = kids.map((k) => k.dataset.unit).filter((u) => u != null).map(Number); const b = t && t.querySelector(".tx-spacer-bot");
-    return { top: !!(t && t.querySelector(".tx-spacer-top")), first: units.length ? Math.min(...units) : null, last: units.length ? Math.max(...units) : null, gaps: kids.filter((k) => k.classList.contains("tx-gap")).map((k) => [+k.dataset.lo, +k.dataset.hi]),
-             bTop: b ? b.getBoundingClientRect().top - cr.top + c.scrollTop : null, bH: b ? b.offsetHeight : null }; }, threadSel);
+  // (f: (b)'s drop, at that fraction down the bottom spacer, written in the task that reads the spacer, and returned as drop)
+  const shape = (f = null) => page.evaluate(([sel, f]) => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(); const t = document.querySelector(sel); const kids = t ? Array.from(t.children) : []; const units = kids.map((k) => k.dataset.unit).filter((u) => u != null).map(Number); const b = t && t.querySelector(".tx-spacer-bot");
+    const s = { top: !!(t && t.querySelector(".tx-spacer-top")), first: units.length ? Math.min(...units) : null, last: units.length ? Math.max(...units) : null, gaps: kids.filter((k) => k.classList.contains("tx-gap")).map((k) => [+k.dataset.lo, +k.dataset.hi]),
+                bTop: b ? b.getBoundingClientRect().top - cr.top + c.scrollTop : null, bH: b ? b.offsetHeight : null };
+    if (f != null && s.bTop != null) { s.drop = Math.round(s.bTop + s.bH * f); c.scrollTop = s.drop; }
+    return s; }, [threadSel, f]);
   out.long = { shape: await shape(), regions: (await reading()).regions };
   // (a) THE RE-WINDOW AND THE ECHO OF ITS OWN WRITE. Seventy short rows above the reader in the window are a band far shorter than the
   // re-window's edge margin (twenty average units), so every scroll here reads as near the window's top edge. One small scroll down
   // re-windows around the row now at the top, and that write moves the view (the rows that left the window are counted in the spacer at
   // the average unit). Its echo reads as near the edge too: it must not re-window again.
   await page.evaluate((sel) => { window.__renders = 0; const t = document.querySelector(sel); window.__renderMo = new MutationObserver((recs) => { if (recs.some((r) => r.type === "childList" && r.removedNodes.length > 0)) window.__renders++; }); if (t) window.__renderMo.observe(t, { childList: true }); }, threadSel);
-  { const w0 = await page.evaluate(() => window.__writes), st0 = (await reading()).st, a0 = (await asks()).length;
-    // the scroll's own position is read in the task that writes it: no scroll event, so no re-window, runs between them (read in a later
-    // task, the re-window could already have moved the view, and the premise below compared its write with itself)
-    const st1 = await page.evaluate((y) => { const c = document.getElementById("content"); c.scrollTop = y; return c.scrollTop; }, st0 + 120);
+  { const w0 = await page.evaluate(() => window.__writes), a0 = (await asks()).length;
+    // the scroll's start and its own position are read in the task that writes it: no scroll event, so no re-window, runs between them
+    // (read in a later task, the re-window could already have moved the view, and the premise below compared its write with itself; read
+    // in an earlier one, a re-window could move the view before the write, which was then no small scroll from where the reader stood)
+    const [st0, st1] = await page.evaluate(() => { const c = document.getElementById("content"), y = c.scrollTop; c.scrollTop = y + 120; return [y, c.scrollTop]; });
     await painted(); await painted(); await page.waitForTimeout(600); await painted();
     out.long.echo = { st0, st1, st2: (await reading()).st, renders: await page.evaluate(() => window.__renders), writes: (await page.evaluate(() => window.__writes)) - w0, asks: (await asks()).slice(a0), shape: await shape() };
     await page.evaluate(() => { if (window.__renderMo) window.__renderMo.disconnect(); }); }
   // (b) A DROP INTO A GAP HELD IN THE BOTTOM SPACER, a fifth of the way down the spacer: past the run's hidden rows, inside the gap below the
   // run. The bottom spacer is walked by each unit's own estimate (a gap's is up to about a million px here, an average unit thousands), so the drop stays
   // where it was dropped, inside that gap, and the page under the viewport top is asked and comes on screen.
-  { const hidden = await shape();
-    if (hidden.bTop != null) {
-      const drop = Math.round(hidden.bTop + hidden.bH * 0.2), a0 = (await asks()).length;
-      holdTurns = true;   // the page's reply waits at the wire until the premise is read
-      await setTop(drop); await painted();
+  // (the spacer is read and the drop written in one task, shape's f: a re-window in a task between them could move the spacer first)
+  { const a0 = (await asks()).length;
+    holdTurns = true;   // the page's reply waits at the wire until the premise is read
+    const { drop, ...hidden } = await shape(0.2);
+    if (drop != null) {
+      await painted(); await painted();
       const at = await reading();
       await asksPast(a0, 10000);
       release();
@@ -377,7 +404,7 @@ if (cfg.legs.includes("long")) {
         underTop: await page.evaluate((sel) => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(); const t = document.querySelector(sel);   // the thread's first child on screen from the top
           const k = t ? Array.from(t.children).find((x) => { const b = x.getBoundingClientRect(); return b.height > 0 && b.bottom > cr.top + 1 && b.top < cr.bottom; }) : null;
           return k ? (k.classList.contains("turn") ? "row" : k.classList.contains("tx-gap") ? "gap" : k.classList.contains("tx-spacer") ? "spacer" : k.className) : null; }, threadSel) };
-    } else out.long.drop = { hidden, noSpacer: true }; }
+    } else { release(); out.long.drop = { hidden, noSpacer: true }; } }
 }
 if (cfg.legs.includes("climb")) {
   // ROAD 8: a reader drops into the head gap, climbs back through the history page by page with the wheel, then presses the
@@ -483,14 +510,17 @@ if (cfg.legs.includes("climb")) {
       await painted(); await page.waitForTimeout(500); await painted();
       return Object.assign(await reading(), { measure: await measure() });
     };
+    // (the drop is computed and written in one task: a re-window in a task between them could move the top spacer first)
     const to = await page.evaluate((into) => {
       const c = document.getElementById("content"), cr = c.getBoundingClientRect(), t = c.querySelector(".tx-spacer-top"), m = window.__rompViewMeasure();
       const tail = (typeof window.__rompRegions === "function" ? window.__rompRegions() : []).find((r) => r.kind === "run" && r.hi == null);
       if (!t || !m || !tail) return null;
       const above = m.winStart - (m.units - tail.n) - into;   // hidden tail units between the drop's unit and the top spacer's end
-      return above > 0 ? Math.round(t.getBoundingClientRect().bottom - cr.top + c.scrollTop - above * (m.heldPx ?? m.avgUnit)) : null;
+      if (!(above > 0)) return null;
+      const y = Math.round(t.getBoundingClientRect().bottom - cr.top + c.scrollTop - above * (m.heldPx ?? m.avgUnit));
+      c.scrollTop = y; return y;
     }, cfg.append.into);
-    if (to != null) { await setTop(to); await page.waitForTimeout(1000); await painted(); }
+    if (to != null) { await painted(); await page.waitForTimeout(1000); await painted(); }
     const dropped = Object.assign(await reading(), { measure: await measure() });
     const first = await land(cfg.append.first, 2);
     const rest = await land(cfg.append.lines, cfg.append.units);
@@ -530,13 +560,16 @@ if (cfg.legs.includes("shown")) {
   const first = { measure: await measure(), long: await thread(cfg.sid), regions: await regions(cfg.sid) };
   if (cfg.legs.includes("rebuild")) {
     // the bounded class: a scroll 20 hidden units above the window's start builds a window of its own over the same units, which sets
-    // the figure afresh (render.ts renderWindowItems); then back to the end, where the show left the reader
+    // the figure afresh (render.ts renderWindowItems); then back to the end, where the show left the reader (the scroll is computed and
+    // written in one task: a re-window in a task between them could move the window's start first)
     const to = await page.evaluate((s) => {
       const c = document.getElementById("content"), cr = c.getBoundingClientRect(), m = window.__rompViewMeasure();
       const t = c.querySelector(`.thread[data-session="${s}"] .tx-spacer-top`);
-      return t && m ? Math.round(t.getBoundingClientRect().bottom - cr.top + c.scrollTop - 20 * (m.heldPx ?? m.avgUnit)) : null;
+      if (!t || !m) return null;
+      const y = Math.round(t.getBoundingClientRect().bottom - cr.top + c.scrollTop - 20 * (m.heldPx ?? m.avgUnit));
+      c.scrollTop = y; return y;
     }, cfg.sid);
-    if (to != null) { await setTop(to); await page.waitForTimeout(2500); await painted(); }
+    if (to != null) { await painted(); await page.waitForTimeout(2500); await painted(); }
     first.rebuilt = { to, measure: await measure() };
     await setTop(1e9); await page.waitForTimeout(1500); await painted();
   }
@@ -593,41 +626,45 @@ if (cfg.legs.includes("end")) {
   // (nShared and lastErr are set right before the first variant starts: every error raised until then is every variant's)
   out.end = { drop, steps, climbed: Object.assign(await reading(), { measure: await measure() }), runTop, nShared: null, lastErr: null, variants: {} };
   // vc.endAt instead of the click: the element at.sel, one wholly on screen, else the rendered one nearest the viewport's centre,
-  // brought to the centre when at.intoView and picked again (a window build the scroll provokes can replace it); its audio staged
-  // (at.media: "loaded" at 0 s and half volume, "ended" seeked to its end, "failed" read once its error is set); then reached by at.way:
-  // "focus" (element.focus), "tab" (Tab at.tab times from the last link before it to at.pre) or "press" (a real click on it, then focus
-  // returned to the page body and the selection emptied). Then, before End: where focus sits against it, the focused node in the
-  // accessibility tree, its audio's state and the distance from the bottom
-  const stageEnd = async (at) => {
-    const pick = () => page.evaluate((sel) => {
+  // brought to the centre when at.intoView, in the task that picks it, and picked again (a window build the scroll provokes can replace
+  // it); its audio staged (at.media: "loaded" at 0 s and half volume, "ended" seeked to its end, "failed" read once its error is set);
+  // then reached by at.way: "focus" (element.focus), "tab" (Tab at.tab times from the last link before it to at.pre) or "press" (a real
+  // click on it, then focus returned to the page body and the selection emptied). Then, before End: where focus sits against it, the
+  // focused node in the accessibility tree, its audio's state and the distance from the bottom. Each step after the pick finds the
+  // element by its keys in the task that acts on it (window.__labEndAt; name: the class, for its failures)
+  const stageEnd = async (at, name) => {
+    const pick = (scroll) => page.evaluate(([sel, name, scroll]) => {
       const c = document.getElementById("content"), cr = c.getBoundingClientRect();
       const all = Array.from(document.querySelectorAll(sel)).filter((e) => c.contains(e) && (e.getClientRects().length > 0 || e.tagName === "AUDIO"));
       const on = all.filter((e) => { const b = e.getBoundingClientRect(); return b.height > 0 && b.top >= cr.top + 4 && b.bottom <= cr.bottom - 4; });
       const mid = (e) => Math.abs(e.getBoundingClientRect().top - cr.top - cr.height / 2);
-      const t = on[0] || all.sort((x, y) => mid(x) - mid(y))[0];
-      document.querySelectorAll("[data-lab-end]").forEach((e) => e.removeAttribute("data-lab-end"));
-      if (t) t.setAttribute("data-lab-end", "1");
-      return t ? (on[0] ? "on screen" : "nearest") : null; }, at.sel);
-    let picked = await pick();
+      const t = on[0] || all.sort((x, y) => mid(x) - mid(y))[0], row = t ? t.closest(".turn[data-uuid]") : null;
+      window.__labEnd = t ? { name, sel, uuid: row ? row.getAttribute("data-uuid") : null, i: Array.from((row || c).querySelectorAll(sel)).indexOf(t), node: null, step: null } : null;
+      if (t && scroll && !on[0]) t.scrollIntoView({ block: "center" });
+      return t ? (on[0] ? "on screen" : "nearest") : null; }, [at.sel, name, scroll && !!at.intoView]);
+    let picked = await pick(true);
     if (at.intoView && picked === "nearest") {
-      await page.evaluate(() => document.querySelector("[data-lab-end]").scrollIntoView({ block: "center" }));
       await painted(); await page.waitForTimeout(1200); await painted();
-      picked = await pick();
+      picked = await pick(false);
     }
     if (!picked) return { picked };
-    const T = "[data-lab-end]";
+    // a wait met on the element, and each action on it, keeps it (__labEndAt's keep): what it leaves there is the staging's
+    const metOn = (step, met) => page.waitForFunction(([step, met]) => {
+      const m = window.__labEndAt(step);
+      if (!(met === "metadata" ? m.readyState >= 1 : met === "end" ? m.ended : !!m.error)) return false;
+      window.__labEndAt(step, true); return true; }, [step, met], { timeout: met === "end" ? 5000 : 15000 }).catch(() => {});
     if (at.media === "loaded" || at.media === "ended") {
-      await page.waitForFunction((s) => document.querySelector(s).readyState >= 1, T, { timeout: 15000 }).catch(() => {});
-      await page.evaluate(([s, end]) => { const m = document.querySelector(s); m.volume = 0.5; m.currentTime = end ? m.duration : 0; }, [T, at.media === "ended"]);
-      if (at.media === "ended") await page.waitForFunction((s) => document.querySelector(s).ended, T, { timeout: 5000 }).catch(() => {});
-    } else if (at.media === "failed") await page.waitForFunction((s) => !!document.querySelector(s).error, T, { timeout: 15000 }).catch(() => {});
-    if (at.way === "focus") await page.evaluate((s) => document.querySelector(s).focus({ preventScroll: true }), T);
+      await metOn("the wait for its clip's metadata", "metadata");
+      await page.evaluate((end) => { const m = window.__labEndAt("its seek", true); m.volume = 0.5; m.currentTime = end ? m.duration : 0; }, at.media === "ended");
+      if (at.media === "ended") await metOn("the wait for its end", "end");
+    } else if (at.media === "failed") await metOn("the wait for its error", "error");
+    if (at.way === "focus") await page.evaluate(() => window.__labEndAt("its focus", true).focus({ preventScroll: true }));
     else if (at.way === "tab") {
-      await page.evaluate(([s, pre]) => { const t = document.querySelector(s); const ps = Array.from(document.querySelectorAll('a[href="' + pre + '"]')).filter((a) => a.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING); if (ps.length) ps[ps.length - 1].focus({ preventScroll: true }); }, [T, at.pre]);
+      await page.evaluate((pre) => { const t = window.__labEndAt("the focus on the link before it", true); const ps = Array.from(document.querySelectorAll('a[href="' + pre + '"]')).filter((a) => a.compareDocumentPosition(t) & Node.DOCUMENT_POSITION_FOLLOWING); if (ps.length) ps[ps.length - 1].focus({ preventScroll: true }); }, at.pre);
       for (let i = 0; i < at.tab; i++) await page.keyboard.press("Tab");
     } else {
-      const p = await page.evaluate((s) => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(), b = document.querySelector(s).getBoundingClientRect();
-        return b.height > 0 && b.top >= cr.top && b.bottom <= cr.bottom ? { x: b.left + Math.min(12, b.width / 2), y: b.top + b.height / 2 } : null; }, T);
+      const p = await page.evaluate(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(), b = window.__labEndAt("its press", true).getBoundingClientRect();
+        return b.height > 0 && b.top >= cr.top && b.bottom <= cr.bottom ? { x: b.left + Math.min(12, b.width / 2), y: b.top + b.height / 2 } : null; });
       if (p) await page.mouse.click(p.x, p.y);
       await painted();
       await page.evaluate(() => { const f = document.activeElement; if (f && f !== document.body && f.blur) f.blur(); document.getSelection().removeAllRanges(); });
@@ -639,10 +676,10 @@ if (cfg.legs.includes("end")) {
       try { ax = (await s.send("Accessibility.getFullAXTree")).nodes.filter((n) => n.role && n.role.value !== "RootWebArea" && (n.properties || []).some((q) => q.name === "focused" && q.value && q.value.value === true)).map((n) => (n.role && n.role.value) + ":" + (n.name && n.name.value)); }
       finally { await s.detach().catch(() => {}); }
     }
-    const staged = await page.evaluate((s) => { const c = document.getElementById("content"), t = document.querySelector(s), f = document.activeElement;
+    const staged = await page.evaluate(() => { const c = document.getElementById("content"), t = window.__labEndAt("the reading before End"), f = document.activeElement;
       return { inContent: c.contains(t), focused: f === t, bodyFocused: f === document.body, anchor: !!document.getSelection().anchorNode,
                dist: c.scrollHeight - c.scrollTop - c.clientHeight, ch: c.clientHeight,
-               media: t instanceof HTMLMediaElement ? { readyState: t.readyState, duration: t.duration, ended: t.ended, currentTime: t.currentTime, paused: t.paused } : null }; }, T);
+               media: t instanceof HTMLMediaElement ? { readyState: t.readyState, duration: t.duration, ended: t.ended, currentTime: t.currentTime, paused: t.paused } : null }; });
     return { picked, ax, staged };
   };
   // every open tool row closed, each by a script click on its fold toggle (a script click dispatches no pointerdown, mousedown or
@@ -828,18 +865,21 @@ if (cfg.legs.includes("end")) {
         else if (vc.endAfter === "selectAll") await page.keyboard.press("Control+A");
         else {
           // (read before Escape: the click count of each press of the double click, whether the last press lies in the reply's paragraph,
-          // and the comment box, its focus and its text)
+          // and the comment box, its focus and its text. The paragraph is held by keys the page renders, its row's data-uuid and its place
+          // among that row's paragraphs, and the press is read by the same keys: a re-window between this task and the double click, or
+          // before the reading, builds the row afresh)
           const w = await page.evaluate(() => { const c = document.getElementById("content"), cr = c.getBoundingClientRect();
             const ps = Array.from(c.querySelectorAll(".turn-assistant .md p")).filter((p) => { const b = p.getBoundingClientRect(); return b.height > 0 && b.top >= cr.top + 20 && b.bottom <= cr.bottom - 20 && /^Answer \d+/.test(p.textContent); });
             const p = ps[Math.floor(ps.length / 2)]; if (!p) return null;
-            window.__labWord = p; window.__downs = []; window.addEventListener("mousedown", (e) => { window.__downs.push(e.detail); }, true);
+            window.__labWordOf = (e) => { const q = e.closest(".md p"), row = q && q.closest(".turn[data-uuid]"); return row ? row.getAttribute("data-uuid") + " " + Array.from(row.querySelectorAll(".md p")).indexOf(q) : null; };
+            window.__labWord = window.__labWordOf(p); window.__downs = []; window.addEventListener("mousedown", (e) => { window.__downs.push(e.detail); }, true);
             const r = document.createRange(), t = document.createTreeWalker(p, NodeFilter.SHOW_TEXT).nextNode(); r.setStart(t, 0); r.setEnd(t, 6); const b = r.getBoundingClientRect();
             return { x: Math.round(b.left + 12), y: Math.round(b.top + b.height / 2) }; });
           if (w) { await page.mouse.dblclick(w.x, w.y); await painted(); await page.waitForTimeout(300); }
           await page.keyboard.press("Control+Slash"); await painted(); await page.waitForTimeout(600);
           await page.keyboard.type("a note"); await page.waitForTimeout(200);
           comment = await page.evaluate(() => { const b = document.querySelector("#cmt-pop .cmt-input"), p = window.__press, pe = p && (p.nodeType === 1 ? p : p.parentElement);
-            return { downs: window.__downs || null, pressOnWord: !!pe && !!window.__labWord && window.__labWord.contains(pe), opened: !!b, focused: !!b && document.activeElement === b, text: b ? b.value : null }; });
+            return { downs: window.__downs || null, pressOnWord: !!pe && !!window.__labWord && window.__labWordOf(pe) === window.__labWord, opened: !!b, focused: !!b && document.activeElement === b, text: b ? b.value : null }; });
           await page.keyboard.press("Escape");
         }
         await painted(); await page.waitForTimeout(300);
@@ -958,7 +998,7 @@ if (cfg.legs.includes("end")) {
       boxRoad.before = await boxRead();
     }
     // where the click left focus, the selection's anchor and the last press (vc.endAt: the staged element's reading)
-    const clicked = vc.endAt ? await stageEnd(vc.endAt) : await page.evaluate(() => { const c = document.getElementById("content"), a = document.getSelection()?.anchorNode; const ae = a && (a.nodeType === 1 ? a : a.parentElement);
+    const clicked = vc.endAt ? await stageEnd(vc.endAt, vc.name) : await page.evaluate(() => { const c = document.getElementById("content"), a = document.getSelection()?.anchorNode; const ae = a && (a.nodeType === 1 ? a : a.parentElement);
       const p = window.__press, pe = p && (p.nodeType === 1 ? p : p.parentElement);
       return { bodyFocused: document.activeElement === document.body, anchor: !!a, anchorInContent: !!ae && c.contains(ae), anchorInFooter: !!ae && !!ae.closest("#footer"),
                pressOnToggle: !!pe && c.contains(pe) && !!pe.closest(".tool-fold-toggle"), pressInContent: !!pe && c.contains(pe),
@@ -993,7 +1033,7 @@ if (cfg.legs.includes("end")) {
     // scroll event from the press on, read by a listener added after the page's own: its time from the press, the position in that event
     // and whether focus was in a media element)
     if (vc.endAt && vc.endAt.scrolls) clicked.armed = await page.evaluate(() => {
-      const c = document.getElementById("content"), t = document.querySelector("[data-lab-end]"), J = window.__endScrolls = { t0: performance.now(), events: [] };
+      const c = document.getElementById("content"), t = window.__labEnd && window.__labEnd.node, J = window.__endScrolls = { t0: performance.now(), events: [] };
       J.on = () => { const f = document.activeElement;
         J.events.push({ t: Math.round(performance.now() - J.t0), st: c.scrollTop, ch: c.clientHeight, sh: c.scrollHeight, active: f ? f.tagName : null, inMedia: f instanceof HTMLMediaElement }); };
       c.addEventListener("scroll", J.on, { passive: true });
@@ -1008,6 +1048,9 @@ if (cfg.legs.includes("end")) {
     // before the page's own)
     if (vc.endPageAfter) await page.evaluate(() => { window.__atPress = null; window.addEventListener("keydown", (e) => {
       if (e.key === "End") window.__atPress = { bodyFocused: document.activeElement === document.body, anchor: !!document.getSelection().anchorNode }; }, true); });
+    // (vc.endAt: the element its staging reached is still the one its row holds, right before the press; a re-window that rebuilt the
+    // row since took focus, a press or a clip's state with the old element, and the road fails here, naming the class)
+    if (vc.endAt) await page.evaluate(() => { window.__labEndAt("End"); });
     await page.keyboard.press("End");
     // the play-control class reads the transcript's scroll events across a fixed window of 4 s; every other class waits for the newest
     // row on screen within a screen of the bottom (endSettle)
