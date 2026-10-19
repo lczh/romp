@@ -140,6 +140,41 @@ test("a comment, a reply and a withdrawal held while the socket is down go out o
   assert.equal(h.stats().reconnects, 1, "the webview still reloads, after the replay");
 });
 
+test("a new session's create and the clicks on a session's tools held while the socket is down go out on the reconnect", async () => {
+  // a create made while the kernel restarts was dropped here, and the reload took its provisional tab with it, so the
+  // session the user named never existed and nothing said so; the web dashboard's socket sends every held op and
+  // created it. The session-tool clicks were dropped the same way (review find, 2026-10-19).
+  const h = await harness("chat");
+  h.sockets[0].close();
+  const held = [
+    { type: "createSession", name: "tests", backend: "sdk", dir: "~/notes-api", host: "" },
+    { type: "setSubagentStandard", id: "api", value: "on" },
+    { type: "mcpAction", id: "api", server: "docs", action: "toggle", enabled: false },
+    { type: "rewindFiles", id: "web", uuid: "11111111-2222-4333-8444-555555555555" },
+    { type: "cancelWatch", id: "web", watchId: "w1" },
+    { type: "dismissEcho", id: "web", uuid: "11111111-2222-4333-8444-666666666666" },
+  ];
+  for (const m of [held[0], { type: "dotHover", id: "web" }, ...held.slice(1)]) h.pipe.send(m);
+  assert.equal(h.pipe.queuedIntents(), held.length, "the down banner counts every one as held");
+  h.timers.shift()!();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const current = h.sockets[1]; current.emit("open");
+  assert.deepEqual(current.sent, held, "each goes out once, in order, before the reload; the hover is view chatter");
+  assert.equal(h.stats().reconnects, 1, "the webview still reloads, after the replay");
+});
+
+test("the feed's analysis-model button held while the socket is down goes out on the reconnect", async () => {
+  const h = await harness("feed");
+  h.sockets[0].close();
+  const pick = { type: "setJudgeModel", model: "opus", gt: 1 };
+  h.pipe.send(pick);
+  h.pipe.send({ type: "hoverHighlight", id: "web" });
+  h.timers.shift()!();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const current = h.sockets[1]; current.emit("open");
+  assert.deepEqual(current.sent, [pick], "the stamped pick is replayed; the hover is view chatter");
+});
+
 test("timeline lane and message deltas preserve the unchanged lane", async () => {
   const h = await harness("timeline"), ws = h.sockets[0];
   ws.frame({ type: "bars", turns: { web: [{ id: "a", n: 1 }], api: [{ id: "b" }] },
