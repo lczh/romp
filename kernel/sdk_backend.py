@@ -7728,12 +7728,13 @@ class SdkSession:
         is fed to the CLI being ended), the SIGTERM marked for the teardown, and every standing ask answered by it."""
         if self.ended:
             return
-        self._reconnect = True
-        self._reconnect_when_idle = False
-        self._relaunch_term = True
-        self._reconnect_switch_why = ""   # nobody's switch: the waker's last look never vetoes it (_switch_teardown_check)
-        self._switch_ask_pending = ""
-        self._switch_wanted = self._switch_wait_said = ""   # this relaunch carries every connect-time value
+        with self._lock:
+            self._reconnect = True
+            self._reconnect_when_idle = False
+            self._relaunch_term = True
+            self._reconnect_switch_why = ""   # nobody's switch: the waker's last look never vetoes it (_switch_teardown_check)
+            self._switch_ask_pending = ""
+            self._switch_wanted = self._switch_wait_said = ""   # this relaunch carries every connect-time value
         self._wake_set()
 
     async def _term_for_relaunch(self, client) -> None:
@@ -7900,19 +7901,21 @@ class SdkSession:
                                       "reconnected, ask again when it is quiet" % self.name)
                     self._re_raise_switch_ask()
                     return
-            self._reconnect = True
-            self._reconnect_switch_why = getattr(self, "_switch_ask_pending", "")   # a standing ask's reconnect, or "" for a rewind's
-            self._switch_ask_pending = ""
-            # this relaunch carries every connect-time value, so an ask still standing is answered by it (the waker's
-            # last look raises it again if it vetoes a standing ask's teardown); left standing, it relaunched the
-            # fresh CLI a second time at its first quiet moment
-            # a reason other than a pick is set aside here, since a veto raises only the carried one again
-            if self._switch_wanted and self._switch_wanted not in PICK_RELAUNCH_WHYS:
-                self._switch_riders.add(self._switch_wanted)
-            self._switch_wanted = self._switch_wait_said = ""
+            with self._lock:
+                self._reconnect = True
+                self._reconnect_switch_why = getattr(self, "_switch_ask_pending", "")   # a standing ask's reconnect, or "" for a rewind's
+                self._switch_ask_pending = ""
+                # this relaunch carries every connect-time value, so an ask still standing is answered by it (the waker's
+                # last look raises it again if it vetoes a standing ask's teardown); left standing, it relaunched the
+                # fresh CLI a second time at its first quiet moment
+                # a reason other than a pick is set aside here, since a veto raises only the carried one again
+                if self._switch_wanted and self._switch_wanted not in PICK_RELAUNCH_WHYS:
+                    self._switch_riders.add(self._switch_wanted)
+                self._switch_wanted = self._switch_wait_said = ""
             self._wake_set()
         elif defer:
-            self._reconnect_when_idle = True   # the cut road (a rewind): the ResultMessage handler fires it when the turn ends
+            with self._lock:
+                self._reconnect_when_idle = True   # the cut road (a rewind): the ResultMessage handler fires it when the turn ends
         else:
             self.backend._log("reconnect (%s): became busy before the reconnect ran; not reconnected, ask "
                               "again when it is quiet" % self.name)
@@ -7921,12 +7924,13 @@ class SdkSession:
     def _re_raise_switch_ask(self):
         """An immediate reconnect a switch asked for was dropped by the loop-side re-check (work registered between the
         quiet read and the run): the ask stands again, so the next live-work event or tick carries it."""
-        why = getattr(self, "_switch_ask_pending", "")
-        self._switch_ask_pending = ""
-        if why and not getattr(self, "_switch_wanted", ""):
-            self._switch_wanted = why
-        elif why and why not in PICK_RELAUNCH_WHYS:
-            self._switch_riders.add(why)   # set aside for the ask standing
+        with self._lock:
+            why = getattr(self, "_switch_ask_pending", "")
+            self._switch_ask_pending = ""
+            if why and not getattr(self, "_switch_wanted", ""):
+                self._switch_wanted = why
+            elif why and why not in PICK_RELAUNCH_WHYS:
+                self._switch_riders.add(why)   # set aside for the ask standing
         self._release_launch_slot()   # nothing launches now: the slot goes to the next relaunch waiting for one
 
     def _release_hold_at_exit(self):
@@ -8554,9 +8558,13 @@ class SdkSession:
         answered without it (_opt_in_cannot_take, 2026-10-09): its report cleared _fast_unlocked, and every live model
         change then asked for a relaunch that carried the same flag and heard the same."""
         try:
-            if self._switch_wanted or getattr(self, "_reconnect_when_idle", False) or getattr(self, "_reconnect", False):
-                if not self.fast_opt and not self._fast_unlocked:   # the ask below, set aside for the relaunch already asked for
-                    self._switch_riders.update(["always fast"] if self.fast_effective() and not self._opt_in_cannot_take() else [])
+            aside = ["always fast"] if self.fast_effective() and not self._opt_in_cannot_take() else []
+            with self._lock:
+                standing = bool(self._switch_wanted or getattr(self, "_reconnect_when_idle", False)
+                                or getattr(self, "_reconnect", False))
+                if standing and not self.fast_opt and not self._fast_unlocked:   # the ask below, set aside for the relaunch already asked for
+                    self._switch_riders.update(aside)
+            if standing:
                 return
             if not getattr(self, "fast_opt", False) and not getattr(self, "_fast_unlocked", False) and self.fast_effective() \
                     and not self._opt_in_cannot_take():
@@ -9282,12 +9290,17 @@ class SdkSession:
         cuts. A machine-wide switch is nobody's gesture on this session (2026-09-17, a session whose three subagents
         and background task died at its turn's end for the flag), and a pick in a menu changes a setting, it does not ask
         to end the work the session is running (2026-10-01, a billing switch across the sessions someone was running), so
-        neither may cut anything. Any thread."""
+        neither may cut anything. Any thread.
+
+        The ask is read and set in one hold of the session lock. The bypass pick's reason ("bypass mode") is set only while
+        the pending-bypass mark, which set_mode raises and lowers under the same lock, is up in that hold."""
         if getattr(self, "ended", False):
             return
-        cur = getattr(self, "_switch_wanted", "")
-        if not (why in PICK_RELAUNCH_WHYS and cur and cur not in PICK_RELAUNCH_WHYS):
-            self._switch_wanted = why   # a pick's reason never hides another one (PICK_RELAUNCH_WHYS)
+        with self._lock:
+            cur = getattr(self, "_switch_wanted", "")
+            waits = why != "bypass mode" or bool(getattr(self, "_mode_pending", ""))
+            if waits and not (why in PICK_RELAUNCH_WHYS and cur and cur not in PICK_RELAUNCH_WHYS):
+                self._switch_wanted = why   # a pick's reason never hides another one (PICK_RELAUNCH_WHYS)
         loop = getattr(self, "loop", None)
         if loop is not None:
             loop.call_soon_threadsafe(self._try_switch_reconnect)
@@ -9298,18 +9311,27 @@ class SdkSession:
         """Apply the standing switch ask if the session is quiet now; otherwise keep it, saying once what it waits for.
         A reconnect already on its way carries the switch's decision, so the ask stands down to it. When the ask is
         carried, the upgrade retry's next attempt counts from here, not from the tick that asked. Loop thread (the
-        hooks and the settle run there; want_switch_reconnect schedules onto it)."""
+        hooks and the settle run there; want_switch_reconnect schedules onto it).
+
+        The quiet read and the launch slot are taken outside the session lock; every write of the ask, of the line said
+        for it and of the reasons set aside is made in a hold that reads the ask again first, and the ask carried is the
+        one that hold reads."""
         why = getattr(self, "_switch_wanted", "")
         if not why or getattr(self, "ended", False):
             return False
         if getattr(self, "_reconnect", False) or getattr(self, "_reconnect_when_idle", False):
-            if why not in PICK_RELAUNCH_WHYS:
-                self._switch_riders.add(why)   # set aside for the relaunch on its way, which a veto may cut
-            self._switch_wanted = self._switch_wait_said = ""
+            with self._lock:
+                if self._switch_wanted == why:
+                    if why not in PICK_RELAUNCH_WHYS:
+                        self._switch_riders.add(why)   # set aside for the relaunch on its way, which a veto may cut
+                    self._switch_wanted = self._switch_wait_said = ""
             return False
         if not self.quiet():
-            if self._switch_wait_said != why:
-                self._switch_wait_said = why
+            with self._lock:
+                say = self._switch_wanted == why and self._switch_wait_said != why
+                if say:
+                    self._switch_wait_said = why
+            if say:
                 self.backend._log("%s (%s): waiting for the session to go quiet before the reconnect — %s running; "
                                   "nothing is cut" % (why, self.name, self._busy_words()))
             return False
@@ -9320,18 +9342,27 @@ class SdkSession:
         slots = self._launch_slots()
         if getattr(self, "loop", None) is not None and slots is not None and not getattr(self, "_launch_slot", False):
             if not slots.take(self):
-                if self._switch_wait_said != "slot:" + why:
-                    self._switch_wait_said = "slot:" + why
+                with self._lock:
+                    say = self._switch_wanted == why and self._switch_wait_said != "slot:" + why
+                    if say:
+                        self._switch_wait_said = "slot:" + why
+                if say:
                     self.backend._log("%s (%s): the session is quiet; waiting for a launch slot (%d CLIs launch at a "
                                       "time across the machine)" % (why, self.name, BOOT_RESUME_CONCURRENCY))
                 return False
             self._launch_slot = True
-        self._switch_wanted = self._switch_wait_said = ""
-        self._switch_ask_pending = why
-        arm = getattr(self, "_upgrade_retry", None)
-        if arm:   # the cadence counts from the reconnect that carried the ask (never earlier than the tick's own stamp)
-            arm["next"] = max(arm.get("next", 0) or 0, time.time() + RETRY_UPGRADE_S)
-            self._switch_riders.add("retry upgrade")   # set aside for the carried relaunch, which a busy re-check or a veto may stop
+        with self._lock:
+            why = self._switch_wanted   # the ask carried is the one this hold reads
+            if why:
+                self._switch_wanted = self._switch_wait_said = ""
+                self._switch_ask_pending = why
+                arm = getattr(self, "_upgrade_retry", None)
+                if arm:   # the cadence counts from the reconnect that carried the ask (never earlier than the tick's own stamp)
+                    arm["next"] = max(arm.get("next", 0) or 0, time.time() + RETRY_UPGRADE_S)
+                    self._switch_riders.add("retry upgrade")   # set aside for the carried relaunch, which a busy re-check or a veto may stop
+        if not why:
+            self._release_launch_slot()   # nothing launches now: the slot goes to the next relaunch waiting for one
+            return False
         self.backend._log("%s (%s): the session is quiet — reconnecting now" % (why, self.name))
         self.request_reconnect(defer=False)   # the loop-side re-check stands: work that registered meanwhile drops it,
         return True                           #   and the next event or tick asks again (the ask is re-raised below)
@@ -9348,7 +9379,10 @@ class SdkSession:
         want = self.launch_values()
         if any(launch_value(have, k) != want.get(k) for keys in PICK_LAUNCH_KEYS.values() for k in keys):
             return
-        self._switch_wanted = self._switch_wait_said = ""
+        with self._lock:
+            if self._switch_wanted != why:
+                return
+            self._switch_wanted = self._switch_wait_said = ""
         if self._launch_slots() is not None:
             self._launch_slots().unwait(self)
         self.backend._log("%s (%s): the running CLI already carries every pick; no relaunch needed" % (why, self.name))
@@ -9372,12 +9406,13 @@ class SdkSession:
                 except Exception as e:
                     self.backend._log("%s (%s): could not lengthen the host's end grace: %s" % (why, self.name, e))
             return False
-        self._reconnect = False
-        self._reconnect_switch_why = ""
-        if self._switch_wanted and self._switch_wanted not in PICK_RELAUNCH_WHYS:
-            self._switch_riders.add(self._switch_wanted)   # replaced by the armed reason below
-        self._switch_wanted = why
-        self._switch_wait_said = why   # the line below says it; no second 'waiting' line for the same ask
+        with self._lock:
+            self._reconnect = False
+            self._reconnect_switch_why = ""
+            if self._switch_wanted and self._switch_wanted not in PICK_RELAUNCH_WHYS:
+                self._switch_riders.add(self._switch_wanted)   # replaced by the armed reason below
+            self._switch_wanted = why
+            self._switch_wait_said = why   # the line below says it; no second 'waiting' line for the same ask
         self._release_launch_slot()    # nothing launches now: the slot goes to the next relaunch waiting for one
         self.backend._log("%s (%s): the CLI started work between the ask and the reconnect — %s; the reconnect stands "
                           "down and the ask waits for the next quiet moment; nothing is cut" % (why, self.name, self._busy_words()))
@@ -9834,11 +9869,15 @@ class SdkSession:
         try:
             if not wants:
                 return
-            if (getattr(self, "_switch_wanted", "") or getattr(self, "_switch_ask_pending", "")
-                    or getattr(self, "_reconnect_when_idle", False) or getattr(self, "_reconnect", False)):
+            aside = ["fast mode" if self.fast_opt else "always fast"] if not self._opt_in_cannot_take() else []
+            with self._lock:
+                standing = bool(getattr(self, "_switch_wanted", "") or getattr(self, "_switch_ask_pending", "")
+                                or getattr(self, "_reconnect_when_idle", False) or getattr(self, "_reconnect", False))
                 # the ask the lines below would make, set aside for the relaunch already asked for
-                if self._fast_off_sent or self._host_is_attach or not self._launch_record or not self._launch_record["fast"]:
-                    self._switch_riders.update(["fast mode" if self.fast_opt else "always fast"] if not self._opt_in_cannot_take() else [])
+                if standing and (self._fast_off_sent or self._host_is_attach or not self._launch_record
+                                 or not self._launch_record["fast"]):
+                    self._switch_riders.update(aside)
+            if standing:
                 return
             if self._opt_in_cannot_take():
                 # Nothing is asked. Said once per CLI in each kernel's life (_say_opt_in_lacking): the kernel that launched
@@ -10544,7 +10583,8 @@ class SdkSession:
                             self._fast_unlocked = bool(launch.get("fast"))   # the launch's own word, not today's rule
                     else:
                         launch, launched_here = self._launch_record, True
-                        self._switch_riders = set()   # a CLI launched from _options, which read every reason set aside
+                        with self._lock:
+                            self._switch_riders = set()   # a CLI launched from _options, which read every reason set aside
                     self._reconcile_waiting_picks(launch, launched_here, spawned_at=self._hello_spawned_at)
                     try:
                         self._sub_std_begin(launch, launched_here)   # the speed check's episode: whether THIS CLI carries the recipe
@@ -10552,16 +10592,18 @@ class SdkSession:
                         self.backend._log("subagent speed (%s): %s" % (self.name, e), problem=True)
                     if held_model:
                         self._sub_std_requalify()   # the model pick sent above, as SdkBackend.set_model requalifies a live one
-                    if fast_moved and bool(self.fast_effective()) != self._fast_unlocked and not (
-                            self._switch_wanted or getattr(self, "_reconnect_when_idle", False)
-                            or getattr(self, "_reconnect", False)):
+                    moved_off = fast_moved and bool(self.fast_effective()) != self._fast_unlocked
+                    with self._lock:
+                        standing = bool(self._switch_wanted or getattr(self, "_reconnect_when_idle", False)
+                                        or getattr(self, "_reconnect", False))
+                        if moved_off and standing:
+                            self._switch_riders.add("fast mode")
+                    if moved_off and not standing:
                         # fast mode changed after _options decided this launch's flag (a toggle during its version read),
                         # and this CLI's flag disagrees: the change applies at a relaunch, once nothing would be cut
                         self.backend._log("fast mode (%s): changed while the launch was being prepared; the session "
                                           "relaunches%s" % (self.name, "" if self.quiet() else " once it is quiet"))
                         self.want_switch_reconnect("fast mode")
-                    elif fast_moved and bool(self.fast_effective()) != self._fast_unlocked:
-                        self._switch_riders.add("fast mode")
                     # PRE-TURN PUBLISH (the user 2026-06-27): pull the live model + context % the INSTANT we
                     # connect — before any turn — so a freshly-created SDK session shows its model and context on
                     # OPEN, like a tmux session does on launch. The old path keyed model/ctx resolution off the
@@ -12546,10 +12588,13 @@ class SdkSession:
                 # teardown is an EOF plus a grace, not a kill: _do_request_reconnect). The arm stays set; the
                 # drained turn's first frame counts that turn (_on_message) and its result fires this.
                 if self._reconnect_when_idle and not self.ended and getattr(self, "_untaken", None) is None:
-                    self._reconnect_when_idle = False
-                    self._reconnect = True     # inputs() holds the queue from here: the wake above cannot feed
-                    self._wake_set()           #   the head to THIS client — the new one takes it (see inputs)
-                    self._switch_wanted = self._switch_wait_said = ""   # a standing ask rides this relaunch
+                    with self._lock:
+                        self._reconnect_when_idle = False
+                        # inputs() holds the queue from here: the wake above cannot feed the head to THIS client — the new
+                        # one takes it (see inputs)
+                        self._reconnect = True
+                        self._switch_wanted = self._switch_wait_said = ""   # a standing ask rides this relaunch
+                    self._wake_set()
                 elif getattr(self, "_switch_wanted", ""):   # a standing ask (a pick, a Model switch): carried only if the
                     self._try_switch_reconnect()   #   session is quiet now — RE-CHECKED here, so the subagents and background
                     #                                tasks this turn launched hold it until the event that ends the last of them
@@ -21085,8 +21130,11 @@ class SdkBackend:
             th = getattr(s, "thread", None)
             if th is not None and not th.is_alive():
                 continue
-            if getattr(s, "_switch_wanted", ""):
-                s._switch_riders.add("retry upgrade")   # set aside for the ask standing
+            with s._lock:
+                standing = bool(getattr(s, "_switch_wanted", ""))
+                if standing:
+                    s._switch_riders.add("retry upgrade")   # set aside for the ask standing
+            if standing:
                 continue                       # an ask stands (the session has not been quiet since): no attempt on top of it
             arm["attempts"] = arm.get("attempts", 0) + 1
             arm["next"] = now + RETRY_UPGRADE_S   # provisional; the carried reconnect re-stamps it (_try_switch_reconnect)
@@ -21126,14 +21174,17 @@ class SdkBackend:
                 want = s.fast_effective()
                 have = bool(getattr(s, "_fast_unlocked", False))
                 guarded = want and not have and s._opt_in_cannot_take()   # the flag rode its launch and did not take
-                if want != have and not guarded and not (getattr(s, "_switch_wanted", "") or getattr(s, "_reconnect_when_idle", False) or getattr(s, "_reconnect", False)):
+                with s._lock:
+                    standing = bool(getattr(s, "_switch_wanted", "") or getattr(s, "_reconnect_when_idle", False)
+                                    or getattr(s, "_reconnect", False))
+                    if want != have and not guarded and standing:
+                        s._switch_riders.add("always fast")   # set aside for the ask standing or the relaunch armed
+                if want != have and not guarded and not standing:
                     self._log("always fast (%s): the switch %s — reconnecting %s the opt-in%s"
                               % (s.name, "wants the flag" if want else "went off", "with" if want else "without",
                                  "" if s.quiet() else " once the session is quiet"))
                     s.want_switch_reconnect("always fast")
                     asked += 1
-                elif want != have and not guarded:
-                    s._switch_riders.add("always fast")   # set aside for the ask standing or the relaunch armed
                 if not getattr(s, "_model_pending", ""):   # a pick still resolving: the live name is the world before it
                     s._arm_if_below_pick()                  # (2026-09-30, the #33 follow-up: armed from it, then a false "back on")
             except Exception as e:
@@ -21300,25 +21351,43 @@ class SdkBackend:
         now (launch_values) equals that record's (launch_value); and no reason other than a pick was set aside for it
         (_switch_riders). set_mode marks the ask the pick's alone when no ask stood but its own and none was carried and not
         yet armed; the reconnect's reconcile marks it when the mode pick is the only one left and no ask stood, whether or
-        not one was carried."""
-        alone = getattr(s, "_mode_ask_alone", False)
-        s._mode_ask_alone = False
+        not one was carried.
+
+        The launch now is read first. Then one hold of the session lock reads the pick's word, the ask, what is on its way
+        and the reasons set aside, and clears the ask; every path that sets the ask or a reason aside does so under the same
+        lock, and the serving CLI's record is checked to be the one the launch was compared with. When the pending-bypass
+        mark is up in that hold, a bypass pick waits again, and the ask and the pick's word are that pick's: nothing is
+        withdrawn. The place in line goes after the hold; an ask raised since then asks again on the session's loop, so its
+        own place in line stands."""
         if read_reg_for_rmw(self.state_dir, s.sid) is None:
             self._log("waiting picks (%s): could not drop the mode pick: the record will not read"
                       % getattr(s, "name", s.sid[:8]), problem=True)
         else:
             self._drop_pick_wait(s, "mode")
-        others = any(getattr(s, a, "") for a in ("_effort_pending", "_auth_pending", "_fast_pending"))   # their relaunch too
-        if (alone and not others and getattr(s, "_switch_wanted", "") == "bypass mode"
-                and s._switch_wanted in PICK_RELAUNCH_WHYS
-                and not (s._switch_ask_pending or s._reconnect or s._reconnect_when_idle)
-                and isinstance(s._cli_launch, dict)
-                and all(launch_value(s._cli_launch, k) == v for k, v in s.launch_values().items())
-                and not s._switch_riders):
-            s._switch_wanted = s._switch_wait_said = ""
+        have = s._cli_launch
+        same = isinstance(have, dict) and all(launch_value(have, k) == v for k, v in s.launch_values().items())
+        with s._lock:
+            withdrew = False
+            if not getattr(s, "_mode_pending", ""):
+                alone = getattr(s, "_mode_ask_alone", False)
+                s._mode_ask_alone = False
+                others = any(getattr(s, a, "") for a in ("_effort_pending", "_auth_pending", "_fast_pending"))   # their relaunch too
+                withdrew = (alone and not others and getattr(s, "_switch_wanted", "") == "bypass mode"
+                            and s._switch_wanted in PICK_RELAUNCH_WHYS
+                            and not (s._switch_ask_pending or s._reconnect or s._reconnect_when_idle)
+                            and same and s._cli_launch is have
+                            and not s._switch_riders)
+                if withdrew:
+                    s._switch_wanted = s._switch_wait_said = ""
+        if withdrew:
             slots = s._launch_slots() if hasattr(s, "_launch_slots") else None
             if slots is not None:
                 slots.unwait(s)
+                with s._lock:
+                    again = bool(getattr(s, "_switch_wanted", ""))
+                schedule = getattr(s, "_schedule_on_loop", None)
+                if again and schedule is not None:
+                    schedule(s._try_switch_reconnect)   # the ask raised since the hold takes its place in line again
             self._log("bypass mode (%s): changed back before it applied; the relaunch is withdrawn" % s.name)
 
     def stop_task(self, sid: str, task_id: str) -> bool:

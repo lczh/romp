@@ -1848,6 +1848,7 @@ class TheModeFieldsAreReadAndWrittenUnderTheSessionLock(_ABypassPickChangedBack)
         kinds = {x[:3] for x in required}
         self.assertTrue({("set_mode", "mode", "w"), ("set_mode", "perm_mode", "r"), ("set_mode", "perm_mode", "w"),
                          ("set_mode", "_mode_pending", "r"), ("set_mode", "_mode_pending", "w"),
+                         ("_withdraw_mode_pick", "_mode_pending", "r"),
                          ("_reconcile_waiting_picks", "mode", "r"), ("_reconcile_waiting_picks", "perm_mode", "w"),
                          ("_reconcile_waiting_picks", "_mode_pending", "w"),
                          ("_do_set_mode", "mode", "r"), ("_do_set_mode", "mode", "w"),
@@ -1858,6 +1859,444 @@ class TheModeFieldsAreReadAndWrittenUnderTheSessionLock(_ABypassPickChangedBack)
                          "the premise: the reconcile read the mode for the waiting pick, for the applied pick, for the "
                          "pick decided again and for the record's entry twice: %r" % (mode_reads,))
         self.assertEqual([x for x in required if not x[3]], [], "each is made under the session lock")
+
+
+# ── the withdrawal and every path that sets the relaunch ask hold the session lock (SdkBackend._withdraw_mode_pick) ──
+
+def _stepped_at_read(s, name, caller, step):
+    """Swap the session's class for one whose `name` is a property that, at the first read made by `caller`, runs step()
+    and then returns the value as it stands after it. Returns a list that holds 1 once step ran."""
+    store = "_stepped_" + name
+    ran = []
+
+    def get(self_):
+        if not ran and sys._getframe(1).f_code.co_name == caller:
+            ran.append(1)
+            step()
+        return self_.__dict__.get(store, "")
+
+    def put(self_, v):
+        self_.__dict__[store] = v
+
+    s.__dict__[store] = s.__dict__.pop(name, "")
+    s.__class__ = type("Stepped", (type(s),), {name: property(get, put)})
+    return ran
+
+
+def _made_at_call(obj, name, caller, step):
+    """Replace obj.`name` with a wrapper that, at its first call made from `caller`, runs the real one, then step(), and
+    returns what the real one returned. Returns a list that holds 1 once step ran."""
+    real = getattr(obj, name)
+    ran = []
+
+    def wrapper(*a, **k):
+        out = real(*a, **k)
+        if not ran and sys._getframe(1).f_code.co_name == caller:
+            ran.append(1)
+            step()
+        return out
+    setattr(obj, name, wrapper)
+    return ran
+
+
+def _made_before_call(obj, name, caller, step):
+    """Replace obj.`name` with a wrapper that, at its first call made from `caller`, runs step() and then the real one.
+    Returns a list that holds 1 once step ran."""
+    real = getattr(obj, name)
+    ran = []
+
+    def wrapper(*a, **k):
+        if not ran and sys._getframe(1).f_code.co_name == caller:
+            ran.append(1)
+            step()
+        return real(*a, **k)
+    setattr(obj, name, wrapper)
+    return ran
+
+
+class TheWithdrawalAndEveryPathThatSetsTheAskHoldTheSessionLock(_ABypassPickChangedBack):
+    """The change back's withdrawal of the bypass pick's relaunch reads the pick's word, the standing relaunch ask, what is
+    on its way and the reasons set aside, and clears the ask, in one hold of the session lock (SdkBackend.
+    _withdraw_mode_pick), and every path that reads the ask and then sets it, or sets a reason aside, does so under that
+    lock. Each test calls set_mode(default), or another path's step, at a read inside one of those paths; through the
+    session lock's stand-in (_AHoldEndSessionLock) a step called inside a hold runs as soon as that hold ends."""
+
+    def _default_picked_at_the_read(self, s, caller, nth=1):
+        """set_mode(default) made at `caller`'s nth read of the standing relaunch ask, through the lock's stand-in.
+        Returns a list that holds 1 once it was made."""
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made, reads = [], []
+
+        def on_read(who, value):
+            if who == caller:
+                reads.append(value)
+                if len(reads) == nth and not made:
+                    made.append(1)
+                    lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        _hooked_field(s, "_switch_wanted", on_read=on_read)
+        return made
+
+    def _keeps_a_relaunch(self, s, made, fast=False):
+        self.assertEqual((made, s.mode, s._mode_pending), ([1], "default", ""), "the premise: set_mode(default) was called")
+        after = (s._switch_wanted, sorted(s._switch_riders))
+        self.assertTrue(self._relaunched_at_quiet(s), "the reason set aside keeps a relaunch, armed at the first quiet "
+                                                      "moment (after the change back: the ask %r, set aside %r)" % after)
+        if fast:
+            self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+    def test_always_fasts_ask_after_a_model_change_keeps_a_relaunch_with_the_opt_in(self):
+        s = self._opt_in_lost()
+        self._bypass_waits(s)
+        made = self._default_picked_at_the_read(s, "_after_model_change")
+        s._after_model_change("Sonnet 5", "Opus 5")
+        self._keeps_a_relaunch(s, made, fast=True)
+
+    def test_the_opt_in_the_clis_report_asks_for_keeps_a_relaunch_with_the_opt_in(self):
+        s = self._opt_in_lost()
+        self._bypass_waits(s)
+        made = self._default_picked_at_the_read(s, "_ask_missing_opt_in")
+        s._adopt_fast_state(dict(LACKS_OPT_IN))                       # this turn's init
+        self._keeps_a_relaunch(s, made, fast=True)
+
+    def test_always_fasts_ask_when_the_switch_flips_keeps_a_relaunch_with_the_opt_in(self):
+        s = self._opt_in_lost()
+        self._bypass_waits(s)
+        made = self._default_picked_at_the_read(s, "apply_model_switches")
+        self.be.apply_model_switches()
+        self._keeps_a_relaunch(s, made, fast=True)
+
+    def test_a_due_model_retry_keeps_a_relaunch(self):
+        s = self._session()
+        self._arm_retry(s)
+        self._bypass_waits(s)
+        made = self._default_picked_at_the_read(s, "retry_model_upgrades", nth=3)   # after the tick's look at the ask
+        self.be.retry_model_upgrades(time.time())
+        self.assertEqual(s._upgrade_retry["attempts"], 0, "the premise: the retry stood down to the ask")
+        self._keeps_a_relaunch(s, made)
+
+    def test_an_ask_raised_at_the_withdrawals_read_of_the_launch_stands(self):
+        s = self._session()
+        self._bypass_waits(s)
+        made = _made_at_call(s, "launch_values", "_withdraw_mode_pick", lambda: s.want_switch_reconnect("always fast"))
+        self._change_back(s)
+        self.assertEqual(made, [1], "the premise: the ask was raised at the withdrawal's read of the launch")
+        self.assertEqual(s._switch_wanted, "always fast", "the ask raised stands")
+
+    def test_a_relaunch_cut_at_the_withdrawals_read_of_the_relaunch_on_its_way_keeps_its_ask_with_the_opt_in(self):
+        q = []
+        s = self._opt_in_lost(q)
+        s.inflight = 0
+        self.assertEqual(self.be.apply_model_switches(), 1, "the premise: Always fast asks")
+        self._run(q)                                                  # its carry, then its arm
+        self.assertEqual((s._reconnect, s._reconnect_switch_why), (True, "always fast"), "the premise: armed")
+        s.inflight = 1                                                # the CLI took a turn before the teardown
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))   # its ask's own step waits on the loop
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the pick's own ask")
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made = _stepped_at_read(s, "_reconnect", "_withdraw_mode_pick", lambda: lock.call_free(s._switch_teardown_check))
+        self._change_back(s)
+        self.assertEqual(made, [1], "the premise: the waker's last look was made at the withdrawal's read")
+        self.assertEqual(s._switch_wanted, "always fast", "the relaunch the waker's last look cut keeps its ask")
+        self.assertTrue(self._relaunched_at_quiet(s, q))
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+    def test_a_relaunch_cut_with_nothing_set_aside_is_withdrawn_at_its_read_of_the_ask(self):
+        q = []
+        s = self._session(queued=q)
+        self._bypass_waits(s, q)
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the premise: the pick's relaunch is armed")
+        s.inflight = 1                                                # the CLI took a turn before the teardown
+        made = self._default_picked_at_the_read(s, "_switch_teardown_check")
+        self.assertTrue(s._switch_teardown_check(), "the premise: the waker's last look cut the relaunch")
+        self.assertEqual((made, s.mode, s._mode_pending), ([1], "default", ""), "the premise: set_mode(default) was called")
+        self.assertEqual(s._switch_wanted, "", "nothing was set aside and the relaunch would change nothing: withdrawn")
+        self.assertFalse(self._relaunched_at_quiet(s, q), "and nothing is armed at the first quiet moment")
+
+    def test_the_bypass_picks_ask_and_its_mark_are_read_in_one_hold(self):
+        s = self._session()
+        s.inflight = 1                                                # a turn runs: the pick waits for quiet
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made = []
+
+        def on_read(who, value):
+            if not made and who == "want_switch_reconnect":
+                made.append(1)
+                lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        _hooked_field(s, "_mode_pending", on_read=on_read)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(made, [1], "the premise: set_mode(default) was called at the ask's read of the mark")
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted), ("default", "", ""),
+                         "the mode is default, with no mark and no relaunch ask")
+
+    def test_a_carry_carries_only_the_ask_its_hold_reads(self):
+        s = self._session()
+        self._bypass_waits(s)
+        s.inflight, s._cli_working = 0, False
+        made = _made_before_call(s, "quiet", "_try_switch_reconnect",
+                                 lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        self.assertFalse(s._try_switch_reconnect(), "nothing is carried")
+        self.assertEqual(made, [1], "the premise: set_mode(default) was called at the carry's quiet read")
+        self.assertEqual((s._switch_wanted, s._switch_ask_pending, s._reconnect), ("", "", False),
+                         "the withdrawn relaunch is neither carried nor armed")
+
+    def _mode_entry(self):
+        return "mode" in ((sb.read_reg(self.d, SID).get("relaunchWait") or {}).get("picks") or {})
+
+    def test_bypass_picked_again_at_the_withdrawals_read_of_the_launch_keeps_its_ask_its_own(self):
+        """The withdrawal is applied before a pick made after the change back: Bypass picked again at the withdrawal's read
+        of the launch waits with its ask its own and its entry on record, as when the withdrawal had run first, so a second
+        change back withdraws it."""
+        s = self._session()
+        self._bypass_waits(s)
+        made = _made_at_call(s, "launch_values", "_withdraw_mode_pick",
+                             lambda: self.assertTrue(self.be.set_mode(SID, "bypassPermissions")))
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(made, [1], "the premise: Bypass was picked again at the withdrawal's read of the launch")
+        self.assertEqual((s._mode_pending, s._switch_wanted, s._mode_ask_alone, self._mode_entry()),
+                         ("bypassPermissions", "bypass mode", True, True),
+                         "the pick made after the change back waits, its ask its own, its entry on record")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual((s._mode_pending, s._switch_wanted, s._mode_ask_alone, self._mode_entry()), ("", "", False, False),
+                         "a second change back withdraws it")
+
+    def test_the_tick_raises_the_bypass_picks_ask_only_while_its_mark_is_up(self):
+        s = self._session()
+        self._bypass_waits(s)
+        made, reads = [], []
+
+        def on_read(who, value):
+            if who == "retry_model_upgrades":
+                reads.append(value)
+                if len(reads) == 2 and not made:                      # the tick has read the ask it asks for again
+                    made.append(1)
+                    self.assertTrue(self.be.set_mode(SID, "default"))
+        _hooked_field(s, "_switch_wanted", on_read=on_read)
+        self.be.retry_model_upgrades(time.time())
+        self.assertEqual((made, reads[:2]), ([1], ["bypass mode", "bypass mode"]),
+                         "the premise: set_mode(default) was called after the tick read the ask")
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted), ("default", "", ""),
+                         "the mode is default, with no mark and no relaunch ask")
+        self.assertFalse(self._relaunched_at_quiet(s), "and nothing is armed at the first quiet moment")
+
+    def test_the_bypass_picks_ask_is_raised_only_while_its_mark_is_up(self):
+        s = self._session()
+        s.inflight = 1                                                # a turn runs: the pick waits for quiet
+        made = _made_at_call(self.be, "_note_pick_waits", "set_mode",
+                             lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(made, [1], "the premise: set_mode(default) was called at the pick's record write")
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted), ("default", "", ""),
+                         "the mode is default, with no mark and no relaunch ask")
+        self.assertFalse(self._relaunched_at_quiet(s), "and nothing is armed at the first quiet moment")
+
+    def test_a_new_ask_says_once_what_it_waits_for(self):
+        s = self._session()
+        lines = []
+        self.be._log = lambda m, *a, **k: lines.append(m)
+        self._bypass_waits(s)
+        made = _made_before_call(s, "quiet", "_try_switch_reconnect",
+                                 lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        start = len(lines)
+        s._try_switch_reconnect()                                     # the next event that ends live work
+        self.assertEqual(made, [1], "the premise: set_mode(default) was called at the step's quiet read")
+        waiting = "waiting for the session to go quiet"
+        self.assertEqual([m for m in lines[start:] if waiting in m], [], "nothing waits once the relaunch is withdrawn")
+        start = len(lines)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))   # picked again while the turn runs
+        self.assertEqual(len([m for m in lines[start:] if waiting in m]), 1, "the new ask says once what it waits for")
+
+
+class ABypassPickMadeAtTheWithdrawalsUnwaitKeepsItsPlaceInLine(_Unit):
+    """A bypass pick made at the withdrawal's step that takes the withdrawn relaunch out of line for a launch slot keeps a
+    place in line, and the freed slot relaunches it (SdkBackend._withdraw_mode_pick)."""
+
+    def test_the_freed_slot_relaunches_the_new_pick(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, mode="default")
+        slots = self.be._spawn_sem
+        while slots.acquire(blocking=False):
+            pass                                             # every slot held elsewhere
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(slots.waiting(s), "the premise: the relaunch waits in line for a slot")
+        made = _made_before_call(slots, "unwait", "_withdraw_mode_pick",
+                                 lambda: self.assertTrue(self.be.set_mode(SID, "bypassPermissions")))
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual(made, [1], "the premise: Bypass was picked again at the withdrawal's step out of line")
+        self.assertEqual((s._mode_pending, s._switch_wanted), ("bypassPermissions", "bypass mode"),
+                         "the pick made after the change back waits with its ask")
+        self.assertTrue(slots.waiting(s), "in line for a slot")
+        slots.release()
+        self.assertEqual(relaunched, [SID], "the freed slot relaunches it")
+
+
+class _ALoop:
+    """Stands in for a session's loop: call_soon_threadsafe queues a callback, and run() runs the queue in order."""
+
+    def __init__(self):
+        self.queued = []
+
+    def is_closed(self):
+        return False
+
+    def call_soon_threadsafe(self, fn, *a):
+        self.queued.append((fn, a))
+
+    def run(self):
+        while self.queued:
+            fn, a = self.queued.pop(0)
+            fn(*a)
+
+
+WITHDRAWAL = ("_withdraw_mode_pick",)   # the change back's withdrawal of the bypass pick's relaunch
+
+
+class TheWithdrawalBesideOtherStepsOfTheSession(_ABypassPickChangedBack):
+    """The change back's withdrawal beside a step of the session that sets a reason aside, a mode picked after it and a
+    session whose loop has closed."""
+
+    def test_a_reason_the_loop_sets_aside_keeps_the_relaunch_with_the_opt_in(self):
+        """A step of the session's loop that sets a reason aside for the ask standing (Always fast's ask after a model
+        change, SdkSession._after_model_change) is made at the withdrawal's read of the reasons set aside: the relaunch
+        keeps that reason, and is armed at the first quiet moment with the opt-in."""
+        loop = _ALoop()
+        s = self._opt_in_lost()
+        s.loop = loop
+        s.inflight = 1                                                # a turn runs: the pick waits for quiet
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        loop.run()
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone, set(s._switch_riders)), ("bypass mode", True, set()),
+                         "the premise: the pick's own ask, nothing set aside")
+        lock = s._lock = _AHoldEndSessionLock(s._lock)                # the step takes the session lock
+        stepped = []
+
+        class SetAsideAtTheRead(set):
+            def __len__(self_):
+                n = set.__len__(self_)
+                if not stepped and sys._getframe(1).f_code.co_name in WITHDRAWAL:
+                    stepped.append(1)
+                    lock.call_free(lambda: s._after_model_change("Sonnet 5", "Opus 5"))
+                return n
+        s._switch_riders = SetAsideAtTheRead()
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        loop.run()
+        self.assertTrue(stepped, "the premise: the loop's step was made at the withdrawal's read of the reasons set aside")
+        after = (s._switch_wanted, sorted(s._switch_riders))
+        s.inflight, s._cli_working = 0, False
+        s._try_switch_reconnect()
+        loop.run()
+        self.assertTrue(s._reconnect, "the reason set aside keeps a relaunch, armed at the first quiet moment (after the "
+                                      "change back: the ask %r, set aside %r)" % after)
+        self.assertTrue(s.launch_values()["fast"], "with the opt-in")
+
+    def _bypass_waits_on(self, loop):
+        s = self._session()
+        s.loop = loop
+        s.inflight = 1                                                # a turn runs: the pick waits for quiet
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        loop.run()
+        self.assertEqual((s._switch_wanted, s._mode_ask_alone), ("bypass mode", True), "the premise: the pick's own ask")
+        return s
+
+    def _mode_entry(self):
+        return "mode" in ((sb.read_reg(self.d, SID).get("relaunchWait") or {}).get("picks") or {})
+
+    def test_a_mode_picked_after_the_change_back_is_switched_to_after_the_withdrawal(self):
+        """The withdrawal is applied before a mode picked after the change back: it is done before the change back's live
+        switch and the later pick's start, and it decides on the launch the change back made, not on the later mode."""
+        loop = _ALoop()
+        s = self._bypass_waits_on(loop)
+        s.client = object()                                           # connected: a live switch is a step on the loop
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertTrue(self.be.set_mode(SID, "acceptEdits"))         # before the loop runs
+        live = []
+        while loop.queued:                                            # the loop, in order; a live switch's own coroutine is
+            fn, a = loop.queued.pop(0)                                # not run here, the ask is noted as it would start
+            if "set_mode_live" in getattr(fn, "__qualname__", ""):
+                live.append(s._switch_wanted)
+            else:
+                fn(*a)
+        self.assertEqual(live, ["", ""], "the relaunch is withdrawn before either live switch starts")
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted), ("acceptEdits", "", ""),
+                         "and stays withdrawn with the mode picked after the change back")
+
+    def test_with_the_loop_closed_the_withdrawal_runs_at_once(self):
+        """A session whose thread has ended and closed its loop withdraws the relaunch at once, as when the withdrawal ran
+        where set_mode was called."""
+        s = self._bypass_waits_on(_ALoop())
+
+        def closed(fn, *a):
+            raise AssertionError("nothing is scheduled on a closed loop")
+        s.loop = types.SimpleNamespace(is_closed=lambda: True, call_soon_threadsafe=closed)
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self.assertEqual((s._mode_pending, s._switch_wanted, self._mode_entry()), ("", "", False),
+                         "the relaunch is withdrawn when set_mode returns")
+
+
+class EveryWriteOfTheRelaunchAskIsMadeUnderTheSessionLock(unittest.TestCase):
+    """Every write in kernel/ of the standing relaunch ask (_switch_wanted), the line said for it (_switch_wait_said), the
+    ask carried (_switch_ask_pending), the turn's-end relaunch (_reconnect_when_idle), the bypass pick's word that the ask
+    is its alone (_mode_ask_alone) and the reasons set aside (_switch_riders, and each call that changes it) is made inside
+    a hold of that session's lock (`with <session>._lock:`, in the same function), the lock the change back's withdrawal
+    holds where it reads and clears them. A session's construction is exempt: no other path reaches the session before
+    it is built."""
+
+    FIELDS = ("_switch_wanted", "_switch_wait_said", "_switch_ask_pending", "_reconnect_when_idle", "_mode_ask_alone",
+              "_switch_riders")
+    CHANGES = ("add", "update", "discard", "remove", "clear", "pop", "difference_update", "intersection_update",
+               "symmetric_difference_update")
+    EXEMPT = ("SdkSession.__init__",)
+
+    def _writes(self):
+        """(place, held) for every write of FIELDS in kernel/: held is whether `with <name>._lock:` encloses it in the same
+        function, <name> being the object written to."""
+        found = []
+
+        def walk(node, qual, held, where):
+            if isinstance(node, ast.ClassDef):
+                for c in node.body:
+                    walk(c, qual + node.name + ".", (), where)
+                return
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for c in node.body:
+                    walk(c, qual + node.name + ".", (), where)   # a body runs when called, under none of its maker's holds
+                return
+            if isinstance(node, ast.Lambda):
+                walk(node.body, qual + "<lambda>.", (), where)
+                return
+            if isinstance(node, (ast.With, ast.AsyncWith)):
+                inner = held + tuple(i.context_expr.value.id for i in node.items
+                                     if isinstance(i.context_expr, ast.Attribute) and i.context_expr.attr == "_lock"
+                                     and isinstance(i.context_expr.value, ast.Name))
+                for i in node.items:
+                    walk(i, qual, held, where)
+                for c in node.body:
+                    walk(c, qual, inner, where)
+                return
+            target = None
+            if isinstance(node, ast.Attribute) and isinstance(node.ctx, (ast.Store, ast.Del)) and node.attr in self.FIELDS:
+                target = node.value
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in self.CHANGES
+                  and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "_switch_riders"):
+                target = node.func.value.value
+            elif (isinstance(node, ast.Call) and getattr(node.func, "id", "") in ("setattr", "delattr")
+                  and len(node.args) > 1 and getattr(node.args[1], "value", None) in self.FIELDS):
+                target = node.args[0]
+            if target is not None and qual.rstrip(".") not in self.EXEMPT:
+                name = getattr(target, "id", None)
+                found.append(("%s:%d %s" % (where, node.lineno, qual.rstrip(".")), name is not None and name in held))
+            for c in ast.iter_child_nodes(node):
+                walk(c, qual, held, where)
+
+        for path in sorted(Path(os.path.dirname(HERE), "kernel").glob("*.py")):
+            text = path.read_text()
+            if any(f in text for f in self.FIELDS):
+                walk(ast.parse(text), "", (), path.name)
+        return found
+
+    def test_each_write_holds_the_session_lock(self):
+        found = self._writes()
+        self.assertGreater(len(found), 20, "the premise: the scan found the writes (%d)" % len(found))
+        self.assertEqual([place for place, held in found if not held], [], "each write is made under the session lock")
 
 
 class AReasonSetAsideClearsAtALaunchNotAtAnAttach(psr._Harness):
