@@ -3960,6 +3960,305 @@ class TheArmDropsAPicksReasonInsteadOfSettingItAside(_ABypassPickChangedBack):
         self.assertEqual(s._switch_wanted, "", "every pick back to what the CLI runs: withdrawn at the last look")
 
 
+class EachArmClearsTheAskInTheHoldThatSetsIt(_ABypassPickChangedBack):
+    """Each arm of a relaunch makes every write of the arm and clears the standing relaunch ask in one hold of the session
+    lock: relaunch_now's arm (SdkSession._do_relaunch_now), the immediate arm (SdkSession._do_request_reconnect) and the
+    arm at a turn's end (SdkSession._on_message). Each test makes a step at the end of the hold that makes one of the
+    arm's writes, through the session lock's stand-in (_AHoldEndSessionLock). With the bypass pick's ask standing and the
+    word that the relaunch reattaches to the same CLI up (_reattach_keeps_cli), the step is a default pick: the relaunch
+    is armed and no line says a relaunch was withdrawn. With the effort pick's ask carried, the step is the Always fast
+    sweep and a bypass pick: the bypass pick's ask is its own."""
+
+    def _default_pick_at_write(self, s, field, caller, value=None):
+        """Hook `field` so that a default pick is made at the end of the hold in which `caller` first writes it (with
+        `value`, when one is given). Returns (made, lines)."""
+        lines = []
+        self.be._log = lambda m, *a, **k: lines.append(m)
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made = []
+
+        def on_write(who, v):
+            if not made and who == caller and (value is None or v == value):
+                made.append(1)
+                lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        _hooked_field(s, field, on_write=on_write)
+        return made, lines
+
+    def _nothing_withdrawn(self, s, made, lines):
+        self.assertEqual(made, [1], "the premise: default was picked at the end of the arm's hold")
+        self.assertTrue(s._reconnect, "the premise: armed")
+        self.assertEqual([m for m in lines if "withdrawn" in m], [], "no line says a relaunch was withdrawn")
+
+    def _relaunch_now(self, field):
+        s = self._session()
+        self._bypass_waits(s)
+        s._reattach_keeps_cli = True
+        made, lines = self._default_pick_at_write(s, field, "_do_relaunch_now")
+        s._do_relaunch_now()
+        self._nothing_withdrawn(s, made, lines)
+
+    # Kills mutant R1.split (kernel/sdk_backend.py:7731-7737 in two holds).
+    def test_relaunch_nows_hold_at_the_arm(self):
+        self._relaunch_now("_reconnect")
+
+    # Kills mutant R1.split (kernel/sdk_backend.py:7731-7737 in two holds).
+    def test_relaunch_nows_hold_at_the_turns_end_arm(self):
+        self._relaunch_now("_reconnect_when_idle")
+
+    # Kills mutant R1.split (kernel/sdk_backend.py:7731-7737 in two holds).
+    def test_relaunch_nows_hold_at_the_term_word(self):
+        self._relaunch_now("_relaunch_term")
+
+    # Kills mutant R1.split (kernel/sdk_backend.py:7731-7737 in two holds).
+    def test_relaunch_nows_hold_at_the_switch_reason(self):
+        self._relaunch_now("_reconnect_switch_why")
+
+    # Kills mutant R1.split (kernel/sdk_backend.py:7731-7737 in two holds).
+    def test_relaunch_nows_hold_at_the_carried_ask(self):
+        self._relaunch_now("_switch_ask_pending")
+
+    def _immediate(self, field):
+        """A switch's relaunch already armed (its reason "always fast"), and the immediate arm run on a quiet session."""
+        s = self._session()
+        self._bypass_waits(s)
+        s._reconnect, s._reconnect_switch_why, s._reattach_keeps_cli = True, "always fast", True
+        s.inflight, s._cli_working, s._untaken = 0, False, None
+        made, lines = self._default_pick_at_write(s, field, "_do_request_reconnect")
+        s._do_request_reconnect(defer=False)
+        self._nothing_withdrawn(s, made, lines)
+
+    # Kills mutant R2.splitA (kernel/sdk_backend.py:7904-7914 in two holds).
+    def test_the_immediate_arms_hold_at_the_arm(self):
+        self._immediate("_reconnect")
+
+    # Kills mutant R2.splitA (kernel/sdk_backend.py:7904-7914 in two holds).
+    def test_the_immediate_arms_hold_at_the_switch_reason(self):
+        self._immediate("_reconnect_switch_why")
+
+    # Kills mutant R2.splitA (kernel/sdk_backend.py:7904-7914 in two holds).
+    def test_the_immediate_arms_hold_at_the_carried_ask(self):
+        self._immediate("_switch_ask_pending")
+
+    # Kills mutant SP.R2.a (kernel/sdk_backend.py:7904-7914 in two holds, split after the arm's write).
+    def test_the_immediate_arms_hold_with_an_effort_picks_ask_carried(self):
+        """The effort pick's ask carried and armed by the immediate arm. At the end of the hold that makes the arm's first
+        write, the Always fast sweep (SdkBackend.apply_model_switches) and then a bypass pick: the sweep finds the
+        relaunch armed and asks nothing, and the bypass pick's ask is its own (_mode_ask_alone)."""
+        q = []
+        s = self._opt_in_lost(q)
+        s.inflight, s._cli_working, s._untaken = 0, False, None
+        orig = s.effort
+        self.assertTrue(self.be.set_effort(SID, "low" if orig != "low" else "high"))
+        while q and s._switch_ask_pending != "effort":
+            fn, a = q.pop(0)
+            fn(*a)
+        self.assertEqual(s._switch_ask_pending, "effort", "the premise: the effort pick's ask is carried")
+        lock = s._lock = _AHoldEndSessionLock(s._lock)
+        made, asked = [], []
+
+        def step():
+            asked.append(self.be.apply_model_switches())
+            s.inflight = 1
+            self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+
+        def on_write(who, value):
+            if not made and who == "_do_request_reconnect" and value is True:
+                made.append(1)
+                lock.call_free(step)
+        _hooked_field(s, "_reconnect", on_write=on_write)
+        while q:
+            fn, a = q.pop(0)
+            fn(*a)
+            if getattr(fn, "__name__", "") == "_do_request_reconnect":
+                break
+        self.assertEqual(made, [1], "the premise: the sweep and the bypass pick were made at the end of the arm's hold")
+        self.assertEqual((asked, s._mode_ask_alone), ([0], True),
+                         "the sweep finds the relaunch armed, and the bypass pick's ask is its own")
+
+    def _turns_end(self, field, value):
+        """A relaunch waiting for the turn's end (_reconnect_when_idle), armed at the turn's result."""
+        import asyncio
+        s = self._session()
+        self._bypass_waits(s)
+        s._reconnect_when_idle = True
+        s._reattach_keeps_cli = True
+        made, lines = self._default_pick_at_write(s, field, "_on_message", value)
+        msg = psr._result(uuid="11111111-2222-3333-4444-555555555501", subtype="success", is_error=False, num_turns=1,
+                          session_id=psr.FSID, duration_ms=1, duration_api_ms=1, total_cost_usd=0.01,
+                          usage={"input_tokens": 1, "output_tokens": 1}, result="ok", parent_tool_use_id=None)
+
+        async def read():                                             # _on_message runs on a running loop
+            s._on_message(msg, psr._AssistantMessage, psr._ResultMessage, psr._SystemMessage)
+        asyncio.run(read())
+        self._nothing_withdrawn(s, made, lines)
+
+    # Kills mutant R17.split (kernel/sdk_backend.py:12660-12665 in two holds).
+    def test_the_turns_end_arms_hold_at_the_turns_end_arm(self):
+        self._turns_end("_reconnect_when_idle", False)
+
+    # Kills mutant R17.split (kernel/sdk_backend.py:12660-12665 in two holds).
+    def test_the_turns_end_arms_hold_at_the_arm(self):
+        self._turns_end("_reconnect", True)
+
+
+class AReasonIsSetAsideOnlyWhileAnAskStands(_ABypassPickChangedBack):
+    """A road that sets a reason aside for a relaunch already asked for does so only while an ask stands or a relaunch is
+    on its way; with neither, it asks for its own relaunch and sets nothing aside (_switch_riders): a model change under
+    Always fast (SdkSession._after_model_change), a report that the CLI lacks the fast-mode opt-in (SdkSession.
+    _adopt_fast_state), a due model retry (SdkBackend.retry_model_upgrades) and a flip of Always fast (SdkBackend.
+    apply_model_switches). The connect's fast-mode ask is TheConnectsFastModeAskSetsNothingAsideWithNoAskStanding."""
+
+    # Kills mutant R6.nocheck (kernel/sdk_backend.py:8603 without its standing check).
+    def test_a_model_change_with_no_ask_standing(self):
+        s = self._opt_in_lost()
+        s.inflight = 1
+        s._after_model_change("Sonnet 5", "Opus 5")
+        self.assertEqual(s._switch_wanted, "always fast", "the premise: Always fast asked")
+        self.assertEqual(s._switch_riders, set(), "nothing is set aside")
+
+    # Kills mutant R14.nocheck (kernel/sdk_backend.py:9946-9947 without its standing check).
+    def test_an_opt_in_report_with_no_ask_standing(self):
+        s = self._opt_in_lost()
+        s.inflight = 1
+        s._adopt_fast_state(dict(LACKS_OPT_IN))
+        self.assertEqual(s._switch_wanted, "always fast", "the premise: the report asked")
+        self.assertEqual(s._switch_riders, set(), "nothing is set aside")
+
+    # Kills mutant R18.nocheck (kernel/sdk_backend.py:21204 without its standing check).
+    def test_a_due_retry_with_no_ask_standing(self):
+        s = self._session()
+        self._arm_retry(s)
+        s.inflight = 1
+        self.be.retry_model_upgrades(time.time())
+        self.assertEqual((s._switch_wanted, s._upgrade_retry["attempts"]), ("retry upgrade", 1), "the premise: asked")
+        self.assertEqual(s._switch_riders, set(), "nothing is set aside")
+
+    # Kills mutant R19.nocheck (kernel/sdk_backend.py:21249 without its standing check).
+    def test_an_always_fast_flip_with_no_ask_standing(self):
+        s = self._opt_in_lost()
+        s.inflight = 1
+        self.assertEqual(self.be.apply_model_switches(), 1, "the premise: Always fast asked")
+        self.assertEqual(s._switch_wanted, "always fast", "the premise: the ask stands")
+        self.assertEqual(s._switch_riders, set(), "nothing is set aside")
+
+
+def _with_its_ask_kept(s, step, kept):
+    """Run step() with the session's relaunch ask kept back: each request_reconnect call step makes goes into `kept`, for
+    the test to make afterwards (s.request_reconnect(**k))."""
+    s.request_reconnect = lambda **k: kept.append(k)
+    try:
+        step()
+    finally:
+        del s.request_reconnect
+
+
+class TheDropOfACarriedAskReadsEveryMarkInItsHold(_ABypassPickChangedBack):
+    """The drop of an ask the serving CLI carries (SdkSession._drop_carried_ask) reads every pick's mark in the hold that
+    drops the ask. A bypass pick made as that hold is entered, its relaunch ask kept back until the drop returns: the
+    pending-bypass mark is up in the hold, so the ask stands and no line says no relaunch is needed."""
+
+    # Kills mutant R12.marksbefore (kernel/sdk_backend.py:9432-9434 reading the marks before the hold).
+    def test_a_bypass_pick_as_the_drops_hold_is_entered(self):
+        q = []
+        s = self._session(queued=q, auth="login")
+        s.inflight = 1
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self._run(q)
+        self.assertEqual(s._switch_wanted, "billing", "the premise: the billing pick's ask stands")
+        lines = []
+        self.be._log = lambda m, *a, **k: lines.append(m)
+        kept = []
+        lock = s._lock = _StepWhenTheLockIsTaken(s._lock, "_drop_carried_ask", lambda: _with_its_ask_kept(
+            s, lambda: self.assertTrue(self.be.set_mode(SID, "bypassPermissions")), kept))
+        self.assertTrue(self.be.set_auth(SID, "login"))               # the billing pick goes back to what the CLI runs
+        self._run(q)
+        self.assertTrue(lock.done, "the premise: Bypass was picked as the drop's hold was entered")
+        self.assertEqual(kept, [{"why": "bypass mode"}], "the premise: the bypass pick's ask was kept back")
+        self.assertEqual((s._mode_pending, s._switch_wanted), ("bypassPermissions", "billing"), "the ask stands")
+        for k in kept:
+            s.request_reconnect(**k)
+        self.assertEqual(s._switch_wanted, "bypass mode", "the bypass pick's ask stands")
+        self.assertEqual([m for m in lines if "no relaunch needed" in m], [], "no line says no relaunch is needed")
+
+
+class TheLastLookReadsTheLaunchAfterItsQuietRead(_ABypassPickChangedBack):
+    """The last look before a teardown (SdkSession._switch_teardown_check) reads the launch after its quiet read. An env
+    value set at the quiet read, the env pick's relaunch ask kept back until the last look returns: the launch read
+    differs from the serving CLI's record, so the bypass pick's relaunch is asked for again and no line says a relaunch
+    was withdrawn."""
+
+    # Kills mutant R13.nowfirst (kernel/sdk_backend.py:9467-9468 read before the quiet read at 9459).
+    def test_an_env_value_set_at_the_quiet_read(self):
+        q = []
+        s = self._session(queued=q)
+        self._bypass_waits(s, q)
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the premise: the pick's relaunch is armed")
+        self.assertTrue(self.be.set_mode(SID, "default"))
+        self._run(q)
+        self.assertTrue(s._mode_ask_alone, "the premise: the pick's word stands for the armed relaunch")
+        s.inflight = 1
+        lines = []
+        self.be._log = lambda m, *a, **k: lines.append(m)
+        kept = []
+        made = _made_before_call(s, "quiet", "_switch_teardown_check", lambda: _with_its_ask_kept(
+            s, lambda: self.assertTrue(self.be.set_env(SID, {"NOTES_API_FLAG": "2"})), kept))
+        self.assertTrue(s._switch_teardown_check(), "the premise: the last look stood the relaunch down")
+        self.assertEqual(made, [1], "the premise: the env value was set at the quiet read")
+        self.assertEqual(kept, [{"why": "session env"}], "the premise: the env pick's ask was kept back")
+        self.assertEqual(s._switch_wanted, "bypass mode", "the bypass pick's relaunch is asked for again")
+        self.assertEqual([m for m in lines if "withdrawn" in m], [], "no line says a relaunch was withdrawn")
+
+
+class ACarryThatFindsNoAskGivesItsSlotBack(_Unit):
+    """The carry's hold (SdkSession._try_switch_reconnect) that finds no ask gives back the launch slot taken before it."""
+
+    @staticmethod
+    def _free(slots):
+        n = 0
+        while slots.acquire(blocking=False):
+            n += 1
+        for _ in range(n):
+            slots.release()
+        return n
+
+    # Kills mutant LV.try.noslot (kernel/sdk_backend.py:9408-9410 without the slot's release).
+    def test_a_default_pick_as_the_carrys_hold_is_entered(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, mode="default")
+        slots = self.be._spawn_sem
+        before = self._free(slots)
+        lock = s._lock = _StepWhenTheLockIsTaken(s._lock, "_try_switch_reconnect",
+                                                 lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(lock.done, "the premise: default was picked as the carry's hold was entered")
+        self.assertEqual((relaunched, s._switch_wanted), ([], ""), "the premise: nothing is carried")
+        self.assertFalse(getattr(s, "_launch_slot", False), "the slot is given back")
+        self.assertEqual(self._free(slots), before, "every slot is free again")
+
+
+class TheWithdrawalSchedulesACarryOnlyWhileAnAskStands(_ABypassPickChangedBack):
+    """After its hold, the withdrawal (SdkBackend._withdraw_mode_pick) gives up the place in line and schedules a carry on
+    the session's loop only while an ask stands. With none, nothing is scheduled, and an ask the reconcile of waiting picks
+    raises afterwards is not carried by the queued steps."""
+
+    # Kills mutant R21.noagain (kernel/sdk_backend.py:21469 without its check of the ask).
+    def test_a_withdrawal_with_no_ask_standing(self):
+        q = []
+        s = self._session(queued=q)
+        s.set_mode_live = lambda mode, prev="default": None
+        self._bypass_waits(s, q)
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "", "the premise: withdrawn")
+        self.assertEqual([fn.__name__ for fn, a in q if getattr(fn, "__name__", "") == "_try_switch_reconnect"], [],
+                         "nothing is scheduled")
+        other = "key" if s.launch_values()["auth"] != "key" else "login"
+        s._reconcile_waiting_picks(dict(s.launch_values(), auth=other), False)
+        self.assertTrue(s._switch_wanted, "the premise: the reconcile raised an ask")
+        s.inflight, s._cli_working = 0, False
+        self._run(q)
+        self.assertEqual((s._switch_ask_pending, s._reconnect), ("", False), "the reconcile's ask is not carried")
+
+
 class EveryWriteOfTheRelaunchAskIsMadeUnderTheSessionLock(unittest.TestCase):
     """Every write in kernel/ of the standing relaunch ask (_switch_wanted), the line said for it (_switch_wait_said), the
     ask carried (_switch_ask_pending), the turn's-end relaunch (_reconnect_when_idle), the bypass pick's word that the ask
@@ -4938,6 +5237,44 @@ class AReasonSetAsideClearsAtALaunchNotAtAnAttach(psr._Harness):
         self.assertEqual(s._switch_wanted, "bypass mode", "the relaunch the retry stood down to stands")
         self._monitor_ends(psr._Client.instances[1])
         self._wait(lambda: len(psr._Client.instances) == 3 and psr._Client.instances[2] is s.client, "the relaunch onto CLI B")
+
+
+class TheConnectsFastModeAskSetsNothingAsideWithNoAskStanding(psr._Harness):
+    """The connect (SdkSession._amain) asks for its own relaunch when fast mode changed after _options decided the
+    launch's flag, and with no ask standing and nothing on its way it sets no reason aside (_switch_riders). The real
+    connect runs against the scripted host; fast mode is turned off as _options returns, on the session's loop, and the
+    test waits for the connect's ask on an event."""
+
+    # Kills mutant R16.nocheck (kernel/sdk_backend.py:10668 without its standing check).
+    def test_fast_mode_turned_off_as_the_options_are_built(self):
+        reg = self._reg()
+        reg.update(auth="login", fast=True)
+        sb.write_reg(self.state, SID, reg)
+        be, s = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"},
+                              {"attach": False, "cli": CLI_B, "launch": "spec"}])
+        be.login_ok = lambda: True
+        options, turned = be._options, []
+
+        def options_then_off(*a, **k):
+            opts = options(*a, **k)
+            if not turned:
+                turned.append(be.set_fast(SID, "off"))
+            return opts
+        be._options = options_then_off
+        asked, seen = threading.Event(), []
+        real = s.want_switch_reconnect
+
+        def want(why):
+            if why == "fast mode" and sys._getframe(1).f_code.co_name == "_amain" and not seen:
+                seen.append(set(s._switch_riders))
+                asked.set()
+            return real(why)
+        s.want_switch_reconnect = want
+        s.start()
+        self.assertTrue(asked.wait(10), "the premise: the connect asked for fast mode")
+        self.assertEqual(turned, [True], "the premise: fast mode was turned off as the options were built")
+        self.assertIs(self.launched[CLI_A["pid"]]["fast"], True, "the premise: the launch record says the flag")
+        self.assertEqual(seen, [set()], "the connect asked with nothing set aside")
 
 
 CLI_C = {"pid": 4444, "start": "300.5", "spawnedAt": 1700000300}   # room for a relaunch nothing should ask for
