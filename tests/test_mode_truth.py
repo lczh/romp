@@ -305,11 +305,11 @@ class RefusedSwitchReverts(_Harness):
         rows = len(self.be.problems())
         real = self.be._withdraw_mode_pick
 
-        def unreadable(s):                        # the record answers no read for the withdraw alone
+        def unreadable(s, *a):                    # the record answers no read for the withdraw alone
             saved = sb.read_reg, sb.read_reg_for_rmw
             sb.read_reg = sb.read_reg_for_rmw = lambda *a, **k: None
             try:
-                return real(s)
+                return real(s, *a)
             finally:
                 sb.read_reg, sb.read_reg_for_rmw = saved
         self.be._withdraw_mode_pick = unreadable
