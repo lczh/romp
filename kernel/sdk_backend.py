@@ -12617,7 +12617,7 @@ class SdkSession:
                 if self._reconnect_when_idle and not self.ended and getattr(self, "_untaken", None) is None:
                     with self._lock:
                         self._reconnect_when_idle = False
-                        # inputs() holds the queue from here: the wake above cannot feed the head to THIS client — the new
+                        # inputs() holds the queue from here: the wake above cannot feed the head to THIS client; the new
                         # one takes it (see inputs)
                         self._reconnect = True
                         self._switch_wanted = self._switch_wait_said = ""   # a standing ask rides this relaunch

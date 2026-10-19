@@ -1745,8 +1745,9 @@ class ARefusedModeSwitchRevertsOnlyItsOwnPick(_ABypassPickChangedBack):
     """A mode switch the CLI refuses puts the mode, the confirmed mode and the registry's mode back to the mode confirmed
     before it only while the session's mode still reads the refused pick. A mode picked after it by a set_mode that has
     returned when the refusal is handled keeps the session's mode, its pending-bypass mark and its registry mode, and the
-    confirmed mode goes back only while it still reads the refused pick. The mode is read and the revert written under
-    the session lock."""
+    confirmed mode goes back only while it still reads the refused pick. That the revert reads the mode and writes in one
+    hold of the session lock is pinned by TheModeFieldsAreReadAndWrittenUnderTheSessionLock and
+    EachModeHoldReadsAndWritesInOneHold, not here."""
 
     def test_a_bypass_pick_keeps_its_mode_mark_and_record(self):
         s = self._session()
@@ -2434,7 +2435,8 @@ class TheLastLookBeforeATeardownWithdrawsWhatTheWithdrawalWould(_ABypassPickChan
 
 class ARefusedSwitchPutsBypassBackOnlyWhileTheModeReadsIt(_ABypassPickChangedBack):
     """A refused switch puts the confirmed mode back to a confirmed bypassPermissions only while the session's mode reads
-    bypassPermissions (SdkSession._do_set_mode): a mode set_mode wrote since keeps its own confirmed mode."""
+    bypassPermissions (SdkSession._do_set_mode): a confirmed mode written since, by the CLI's init or by the reconcile of
+    waiting picks from the mode of a launch, stays."""
 
     def _init_reports(self, s, mode):
         """The CLI's init, read as _on_message reads it, reports `mode` as its permission mode."""
@@ -2457,6 +2459,32 @@ class ARefusedSwitchPutsBypassBackOnlyWhileTheModeReadsIt(_ABypassPickChangedBac
         self.assertEqual((s.mode, s.perm_mode, s._mode_pending, sb.read_reg(self.d, SID).get("mode")),
                          ("default", "acceptEdits", "", "default"),
                          "the mode is default: the confirmed mode stays what the init confirmed, not bypassPermissions")
+
+    def test_two_picks_at_the_reconciles_read_of_the_confirmed_mode_and_a_refusal(self):
+        """The reconcile of waiting picks takes the confirmed mode from the mode of a launch that lacks the bypass flag
+        (SdkSession._reconcile_waiting_picks). acceptEdits and then default are picked at the reconcile's read of the
+        confirmed mode, outside the session lock, and the CLI refuses acceptEdits: the confirmed mode stays the launch's."""
+        s = self._session(mode="bypassPermissions", relaunchWait={"why": "bypass mode", "t": 1700000000,
+                                                                  "picks": {"mode": {"mode": "bypassPermissions"}}})
+        s.inflight = 1                                                # a turn runs
+        self.assertEqual(s.perm_mode, "bypassPermissions", "the premise: the confirmed mode is the bypass pick on record")
+        made = []
+
+        def on_read(caller, value):
+            if (not made and caller == "_reconcile_waiting_picks" and value == "bypassPermissions"
+                    and not s._lock.locked()):
+                made.append(1)
+                self.assertTrue(self.be.set_mode(SID, "acceptEdits"))   # held: no client
+                self.assertTrue(self.be.set_mode(SID, "default"))       # held: no client
+        _hooked_field(s, "perm_mode", on_read=on_read)
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="acceptEdits"), False)
+        self.assertEqual(made, [1], "the premise: both picks were made at the reconcile's read of the confirmed mode")
+        self.assertEqual((s.mode, s.perm_mode), ("default", "acceptEdits"),
+                         "the premise: the reconcile took the confirmed mode from the launch's mode")
+        _refuse_mode_switch(s, "acceptEdits", "bypassPermissions")
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending, sb.read_reg(self.d, SID).get("mode")),
+                         ("default", "acceptEdits", "", "default"),
+                         "the mode is default: the confirmed mode stays the launch's mode, not bypassPermissions")
 
 
 class EachModeHoldReadsAndWritesInOneHold(_ABypassPickChangedBack):
