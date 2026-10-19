@@ -1265,7 +1265,8 @@ _COMMAND_NAME_RE = re.compile(r"^\s*<command-name>([^<]*)</command-name>")
 _COMMAND_NAME_ANY_RE = re.compile(r"<command-name>([^<]*)</command-name>")
 _COMMAND_ARGS_RE = re.compile(r"<command-args>([\s\S]*?)</command-args>")
 _LOCAL_STDOUT_RE = re.compile(r"^\s*<local-command-stdout>([\s\S]*?)</local-command-stdout>")
-_CMD_WRAP_RE = re.compile(r"^\s*<(?:command-(?:name|message|args|contents)|local-command-(?:stdout|caveat))>")
+_LOCAL_STDERR_RE = re.compile(r"^\s*<local-command-stderr>([\s\S]*?)</local-command-stderr>")   # a failed command's output
+_CMD_WRAP_RE = re.compile(r"^\s*<(?:command-(?:name|message|args|contents)|local-command-(?:stdout|stderr|caveat))>")
 # The harness's OWN skill load, twin of the event model's is_skill_load_wrapper (the user 2026-09-10): the
 # CLI loads a skill for the model by itself as a command wrapper with a BARE name, a <skill-format> tag and no
 # <command-args> slot (a typed skill in the new format carries the tag too, with its slot and its slash);
@@ -1386,8 +1387,9 @@ def msg_to_atom(msg, sid, fsid, t, skill_tool_ids=()):
             return {"type": "user", "uuid": u, "session_id": sid, "t": t, "fsid": fsid, "parentUuid": None,
                     "author": "human", "command": name,
                     "message": {"role": "user", "content": [{"type": "text", "text": disp}]}}
-        mout = _LOCAL_STDOUT_RE.match(text)
-        if mout:                                     # the command OUTPUT → a synthetic assistant atom that ENDS the turn
+        mout = _LOCAL_STDOUT_RE.match(text) or _LOCAL_STDERR_RE.match(text)
+        if mout:                                     # the command OUTPUT (stdout, or stderr when it failed) → a synthetic
+            #                                          assistant atom that ENDS the turn
             return {"type": "assistant", "uuid": u, "session_id": sid, "t": t, "fsid": fsid, "parentUuid": None,
                     "command": True,
                     "message": {"role": "assistant",
