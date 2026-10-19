@@ -93,7 +93,7 @@ test("builtInOwner names the behaviour a chord already belongs to — the four A
   assert.equal(builtInOwner("ArrowRight", true), "Go to the next session, from the tab bar");
   assert.equal(builtInOwner("Shift+Enter", false), "New line in the composer");
   assert.equal(builtInOwner("Escape", false), "Leave the composer / close a panel");
-  assert.equal(builtInOwner("Ctrl+C", true), "Interrupt the session (composer)", "literal Ctrl, on a Mac too");
+  assert.equal(builtInOwner("Ctrl+C", true), "Interrupt the session (composer); on Windows and Linux, copies selected text", "literal Ctrl, on a Mac too");
   assert.equal(builtInOwner("Meta+C", true), null, "⌘C is copy, not ours — and not built in");
   assert.equal(builtInOwner("Alt+Shift+ArrowLeft", false), null, "another modifier makes it a different chord");
   assert.equal(builtInOwner("Ctrl+Alt+ArrowLeft", false), null);

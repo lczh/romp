@@ -208,7 +208,7 @@ test("the built-in section keeps the non-command keys — without an Enter-to-se
   // the list lives in the pure module now (2026-09-10): the dialog renders it AND refuses a chord it owns
   assert.match(KEYB, /export const BUILT_IN: Array<\[string, string\]> = \[/);
   assert.match(KEYB, /\["Shift\+Enter", "New line in the composer"\]/);
-  assert.match(KEYB, /\["Ctrl\+C", "Interrupt the session \(composer\)"\]/);
+  assert.match(KEYB, /\["Ctrl\+C", "Interrupt the session \(composer\); on Windows and Linux, copies selected text"\]/);
   assert.match(KEYB, /\["Alt\+Arrows", "Move focus between panes"\]/);
   assert.doesNotMatch(KEYB, /Send message/);
   assert.doesNotMatch(MODAL, /const BUILT_IN/);

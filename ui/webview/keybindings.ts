@@ -108,9 +108,19 @@ export function bindable(chord: string): boolean {
 export const BUILT_IN: Array<[string, string]> = [
   ["Shift+Enter", "New line in the composer"],
   ["Escape", "Leave the composer / close a panel"],
-  ["Ctrl+C", "Interrupt the session (composer)"],
+  ["Ctrl+C", "Interrupt the session (composer); on Windows and Linux, copies selected text"],
   ["Alt+Arrows", "Move focus between panes"],
 ];
+
+// The composer's Ctrl+C row above, as the keydown decision. Literal Control, a terminal-style interrupt of the
+// active session. On a Mac copy is ⌘C, so Ctrl+C always interrupts. On Windows and Linux Ctrl+C IS copy, so with
+// text selected in the box the key falls through to the native copy and only a collapsed caret interrupts (the
+// line the platform's own terminals draw). Shift doesn't matter, as before.
+export function composerCtrlCInterrupts(
+  e: { key: string; ctrlKey: boolean; metaKey: boolean }, selStart: number, selEnd: number, mac: boolean,
+): boolean {
+  return e.ctrlKey && !e.metaKey && (e.key === "c" || e.key === "C") && (mac || selStart === selEnd);
+}
 
 // A command's FIXED key: a built-in the pane owns that does what the command does, shown on the command's own
 // row beside its rebindable chord rather than in the built-in section (the maintainer, 2026-09-23: the arrows

@@ -68,7 +68,7 @@ import { snapshotModel, snapshotHeading, rowWords, type SnapModel, type SnapRow 
 import { rowStillOpen, installSnapshotEscape, reconcileRows } from "./tab-snapshot-view";
 import { tabStateClass, sectionPip, sectionPipMembers, sectionPipTitle } from "./tab-state";
 import { composeTabWidgets, composeTabRing, applyTabBadgeMode, needsYouPhrase, ringSwitch, tabHotkey, miniChord, needsYouWidgetOn } from "./tab-widgets";   // the tab-title widgets (T379): the dot, the context bar and the hot-key keycap compose onto every tab from the registry, and the rings too, one class at a time; miniChord is the chord the strip signature reads; needsYouWidgetOn gates the keycap-room strip class
-import { titleWithKey, keyHint, chordOf, displayChord, editorKeepsKey, effectiveChord, loadOverrides, savedHolder, saveOverride, chatAnswers, CHAT_KEY_COMMANDS, KEYS_EVENT, type Bindings } from "./keybindings";
+import { titleWithKey, keyHint, chordOf, displayChord, editorKeepsKey, effectiveChord, loadOverrides, savedHolder, saveOverride, chatAnswers, composerCtrlCInterrupts, CHAT_KEY_COMMANDS, KEYS_EVENT, type Bindings } from "./keybindings";
 import { hotkeyCommandId, loadTabKeys, rememberTabKey, forgetTabKey, goneTabKeys, renamedTabKeys } from "./tab-keys";   // per-tab hot keys (2026-09-10): the set and its bookkeeping; the keycap on the tab is the T379 widget, read from the same store
 import { notePendingFlag, dropPendingFlag, applyFrameFlags, frameRaw, type PendingFlags, type SessionFlag } from "./flag-pending";   // the per-session view flags' pending guard (review 2026-09-14)
 import { DEFAULT_CHORDS } from "./commands";
@@ -25116,11 +25116,13 @@ function setupComposer() {
       removeCitation(activeId);
       return;
     }
-    // Ctrl+C = terminal-style interrupt of the active session (Control, not Cmd — on
-    // macOS copy is Cmd+C, so this never collides with copy). The host sends Esc to
+    // Ctrl+C = terminal-style interrupt of the active session (Control, not Cmd). On a
+    // Mac copy is Cmd+C, so it always interrupts; on Windows and Linux Ctrl+C is copy, so
+    // with text selected in the box it stays the native copy and only a collapsed caret
+    // interrupts (composerCtrlCInterrupts). The host sends Esc to
     // the pane; here we mirror Claude Code's UI: flash a cue, and drop the just-sent
     // prompt back into the (empty) box so you can edit and resend.
-    if (e.ctrlKey && !e.metaKey && (e.key === "c" || e.key === "C")) {
+    if (composerCtrlCInterrupts(e, ta.selectionStart, ta.selectionEnd, /Mac|iP(hone|ad|od)/.test(navigator.platform || ""))) {
       e.preventDefault();
       if (!activeId || !vscodeApi) return;
       vscodeApi.postMessage({ type: "interrupt", id: activeId });
