@@ -22732,9 +22732,16 @@ class SdkBackend:
             self._land_at_cli_end(sess)   # its CLI ended (a detach's host keeps it): a waiting billing switch lands, before
             #                               anything below starts the session again (the crash heal, the task-death notice);
             #                               a lease that cannot be read lands nothing, its host may still run the old CLI
-        healed = False                    # the crash heal below ran: it starts the session again itself
+        healed = False                    # the crash heal or the attach again below ran: it starts the session again itself
         if not sess.ended and not sess.detached:
-            if sess.inflight > 0 and not sess._interrupted:
+            if sess.inflight > 0 and not sess._interrupted and hosted:
+                # the stream to a host that still runs the CLI broke mid-turn (a host fault, a socket error): the CLI and its
+                # turn run on, so nothing was cut. Attach again the way the boot does for a live host, no notice and no cut
+                # row; the attach adopts the host's open-turn count from its hello. The crash heal here told a running CLI
+                # it had died, inside the turn it was still running, and stamped a crash cut nobody made (2026-10-19)
+                self._reattach_live_host(sess)
+                healed = True
+            elif sess.inflight > 0 and not sess._interrupted:
                 # ABNORMAL death mid-turn (killed / crashed — not a user interrupt, not a clean
                 # ResultMessage finish, not our own shutdown). Do NOT settle 'waiting': that masked
                 # the cut (2026-07-06: reaped sessions settled 'waiting', so last_state_value never
@@ -22795,7 +22802,7 @@ class SdkBackend:
         self._poke()
 
     def _reattach_live_host(self, sess: SdkSession) -> None:
-        """Attach a session again to the live host it lost its stream to while its background tasks run there (see
+        """Attach a session again to the live host it lost its stream to while a turn or its background tasks run there (see
         _on_session_gone). Bounded like the crash heal, and re-armed by the same event, a completed turn: once per loss, so a
         host that faults every attach is not attached in a loop. A loss past the bound is said on the problem ring, and the
         session waits for its next message, which attaches as any send does."""
@@ -22808,8 +22815,8 @@ class SdkBackend:
                       "again until its next message; the host stops an idle CLI nobody is attached to, with its background "
                       "tasks, once its grace runs out" % sess.name, problem=True)
             return
-        self._log("session %s: its stream to its live session host broke with background tasks running there; attaching "
-                  "again" % sess.name)
+        self._log("session %s: its stream to its live session host broke with %s running there; attaching again"
+                  % (sess.name, "a turn" if sess.inflight > 0 else "background tasks"))
         try:
             self._ensure(sid)
         except Exception:

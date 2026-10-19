@@ -5119,7 +5119,8 @@ class BgTaskLifecycle(unittest.TestCase):
     def test_a_stream_lost_under_a_live_host_attaches_again_once_until_a_turn_completes(self):
         # the attach again is bounded the crash heal's way: a second loss before any turn completes (a host that faults
         # every attach) is said on the problem ring and waits for the next message, never a loop; a completed turn re-arms
-        # it. A loss mid-turn goes to the crash heal, which starts the session itself and spends none of this budget.
+        # it. A loss mid-turn is attached again from the same budget, never by the crash heal: the CLI and its turn run on
+        # under the host (2026-10-19).
         s = self._sess()
         be = s.backend
         be._lease_survives = lambda sid, **_: True
@@ -5135,17 +5136,59 @@ class BgTaskLifecycle(unittest.TestCase):
             be._on_session_gone(sess)
 
         lose(inflight=1)
-        self.assertEqual(be._ensured, ["heal"], "mid-turn: the crash heal starts it")
+        self.assertEqual(be._ensured, [s.sid], "mid-turn: attached again, not the crash heal")
+        self.assertFalse(any(p for _, p in logs), "one attach for the loss: its tasks do not spend the budget twice")
         lose()
-        self.assertEqual(be._ensured, ["heal", s.sid], "idle: attached again")
-        lose()
-        self.assertEqual(be._ensured, ["heal", s.sid], "lost again before a turn completed: not attached in a loop")
+        self.assertEqual(be._ensured, [s.sid], "lost again before a turn completed: not attached in a loop")
         self.assertTrue(any(p and "again before a turn finished" in m for m, p in logs), "and said on the problem ring")
         be._turn_completed(s.sid)
         lose()
-        self.assertEqual(be._ensured, ["heal", s.sid, s.sid], "a completed turn re-arms it")
+        self.assertEqual(be._ensured, [s.sid, s.sid], "a completed turn re-arms it: idle, attached again")
         self.assertEqual([t["desc"] for t in sb.read_reg(be.state_dir, s.sid)["bgTasks"]], ["power watcher"],
                          "nothing was said, and the mirror still names the task for the attach's seed")
+
+    def test_a_stream_lost_mid_turn_under_a_live_host_says_no_crash(self):
+        # the kernel's stream to a host that still runs the CLI broke mid-turn (the host faulted on that connection, the
+        # socket dropped): the CLI and its turn run on under the host, so nothing crashed. The session is attached again
+        # the way the boot attaches to a live host: no crash notice fed into the running turn, no crash cut, no crash.heal
+        # row, and the turn still reads working; a second loss before a turn completes files no crash loop either. A CLI
+        # that really died (no live host) still gets the crash heal, which shows these checks see one when it runs.
+        sid = "7a7a7a7a-1111-4222-8333-000000000051"            # private synthetic sid
+
+        def lose_mid_turn(hosted, times):
+            root = tempfile.mkdtemp()
+            _hosts_off(root)
+            be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None)
+            be._lease_survives = lambda sid, **_: hosted
+            be._ensured, logs = [], []
+            be._ensure = lambda sid, on_boot_settled=None: be._ensured.append(sid)
+            be._log = lambda m, problem=None, **_: logs.append(str(m))
+            sb.write_reg(be.state_dir, sid, {"sid": sid, "name": "api", "cwd": "/tmp", "alive": True,
+                                             "queue": ["run the api tests"]})
+            sb.append_state(be.state_dir, sid, "working")
+            for _ in range(times):
+                sess = sb.SdkSession(be, {"sid": sid, "name": "api", "cwd": "/tmp"})
+                sess.inflight = 1
+                be._on_session_gone(sess)
+            with open(os.path.join(root, "states", sid + ".jsonl")) as f:
+                cuts = [r["machineCut"] for r in map(json.loads, filter(str.strip, f)) if r.get("machineCut")]
+            kinds = [k for k in ((sb.parse_problem_row(m) or {}).get("kind") for m in logs) if k]
+            return be, sb.read_reg(be.state_dir, sid).get("queue"), cuts, kinds
+
+        be, queue, cuts, kinds = lose_mid_turn(hosted=True, times=1)
+        self.assertEqual(queue, ["run the api tests"], "no crash notice is fed into the turn that is still running")
+        self.assertEqual(cuts, [], "no crash cut is stamped")
+        self.assertEqual([k for k in kinds if k.startswith("crash.")], [], "no 'claude process died' row is filed")
+        self.assertEqual(sb.last_state_value(be.state_dir, sid), "working", "the open turn still reads working")
+        self.assertEqual(be._ensured, [sid], "attached again")
+        be, queue, cuts, kinds = lose_mid_turn(hosted=True, times=2)
+        self.assertEqual([k for k in kinds if k.startswith("crash.")], [], "a second loss files no crash loop")
+        self.assertEqual((queue, cuts, be._ensured), (["run the api tests"], [], [sid]), "and is not attached in a loop")
+        be, queue, cuts, kinds = lose_mid_turn(hosted=False, times=1)
+        self.assertEqual(queue, [sb.CRASH_RESUME_NUDGE, "run the api tests"], "a CLI that died hears the crash notice")
+        self.assertEqual(cuts, ["crash"])
+        self.assertIn("crash.heal", kinds)
+        self.assertEqual(be._ensured, [sid])
 
     def test_a_threads_crash_resume_hears_dead_tasks_once_after_the_nudge(self):
         # a comment thread's CLI dies mid-turn with the kernel alive: the crash resume spawns the
