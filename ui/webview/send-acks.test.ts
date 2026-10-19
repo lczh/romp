@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { newPending, type PendingSend } from "./send-pending";
-import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, mergeTombstones, pendingFromKept, resendable, resendWire, restoreKept,
+import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, mergeTombstones, owesSends, pendingFromKept, resendable, resendWire, restoreKept,
          restoreTombstones, unanswered, KEPT_MAX, KEPT_MAX_AGE_MS, RESEND_MAX_AGE_MS, TOMB_MAX } from "./send-acks";
 import { dropPending } from "./send-pending";
 import { FederationManager } from "./federation";
@@ -80,6 +80,19 @@ test("a socket whose kernel recognises a resend gets every unanswered send to it
   assert.deepEqual(resendable(m, "TESTHOST", hostOf, on, 1, NOW), [], "once per socket");
   assert.deepEqual(resendable(m, "TESTHOST", hostOf, on, 2, NOW).map((x) => x.p.qid), [qid("2")], "…and again on the next socket");
   assert.deepEqual(resendable(m, "", hostOf, on, 1, NOW).map((x) => x.p.qid), [qid("1")], "the page's own kernel: its own sends");
+});
+
+test("a page owes its kernel a send while one to that kernel is unanswered, young enough to resend and not withdrawn", () => {
+  // the pane shim keeps a hidden page dialing while this holds (kernel.py sendsOwed, render.ts __rompSendsOwed, 2026-10-18)
+  const l = sent(LOCAL, "run the migration", qid("a"));
+  const r = sent(REMOTE, "remote one", qid("b"));
+  assert.equal(owesSends(new Map([[LOCAL, [l]]]), "", hostOf, NOW), true, "an unanswered send to the page's own kernel");
+  assert.equal(owesSends(new Map([[REMOTE, [r]]]), "", hostOf, NOW), false, "another host's send is that host's relay to make");
+  assert.equal(owesSends(new Map([[LOCAL, [l]]]), "", hostOf, NOW, new Set([qid("a")])), false, "withdrawn in some tab");
+  assert.equal(owesSends(new Map([[LOCAL, [l]]]), "", hostOf, NOW + RESEND_MAX_AGE_MS), false, "too old to be sent again");
+  applySendAck([l], qid("a"), true);
+  assert.equal(owesSends(new Map([[LOCAL, [l]]]), "", hostOf, NOW), false, "answered");
+  assert.match(RENDER, /\(window as any\)\.__rompSendsOwed = \(\): boolean => \{/, "the bundle hands the shim its answer");
 });
 
 test("an answer ends the owing: ok clears not confirmed, a refusal keeps it and is never resent", () => {

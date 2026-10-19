@@ -651,8 +651,9 @@ class TickJobsKeyOnAChange(unittest.TestCase):
     def test_the_two_event_keyed_ticks_gate_before_their_parse_and_the_nudge_does_not(self):
         for fn, job in ((km._interrupt_block_tick, "interrupt-block"), (km._clear_done_working_notes, "working-notes")):
             src = inspect.getsource(fn)
-            gate = src.index('_tick_job_check("%s", s, _key)' % job if job == "interrupt-block" else '_tick_job_check("%s", s)' % job)
-            parse = src.index("jd.parsed_session(sid, [s[\"path\"]], now)")   # the interrupt tick hands its own key (T401 (3))
+            gate = src.index('_tick_job_check("%s", s, _key)' % job)   # each hands its own key: the interrupt tick's (T401 (3)), and
+            #                                                            both with the shared files statted at the job's turn (#136)
+            parse = src.index("jd.parsed_session(sid, [s[\"path\"]], now)")
             self.assertLess(gate, parse, "%s: the gate sits before the parse" % job)
             self.assertIn('_tick_job_done("%s", s, files_st)' % job, src, "%s: a completed evaluation is marked done" % job)
         self.assertEqual(inspect.getsource(km._interrupt_block_tick).count('_tick_job_done("interrupt-block", s, files_st)'), 5,

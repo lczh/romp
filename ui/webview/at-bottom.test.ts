@@ -75,7 +75,7 @@ test("render.ts defines atBottom on the shared tolerance and nearBottomForSend o
 
 test("follow mode and the chip read atBottom at every site", () => {
   const follow = [
-    /const stick = content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\) && !v\?\.followHeld;/,          // appendActive (never while a passage landing holds follow mode off)
+    /function followingTail\(content: HTMLElement, v: View \| null \| undefined\): boolean \{\s*\n\s*return content\.scrollHeight > content\.clientHeight \+ 2 && atBottom\(content\) && !v\?\.followHeld;/,   // following the tail: appendActive's stick and the host-offline foot's (never while a passage landing holds follow mode off)
     /const off = c\.scrollHeight > c\.clientHeight \+ 2 && !atBottom\(c\);/,                             // updateJumpBtn
     /followReader\(activeId \? views\.get\(activeId\) : null, c\.scrollTop, atBottom\(c\), pendingBuildRaf != null\);/,   // the scroll record
     /cur\.stick = atBottom\(content\) && !cur\.followHeld;/,                                              // the leaving tab's save (a passage landing's pause keeps its place: HeldKeep)
@@ -95,7 +95,7 @@ test("follow mode and the chip read atBottom at every site", () => {
     /const follow = v\.stick && !v\.followHeld && atBottom\(content\);/,                                     // a re-window under a reader in follow mode at the bottom ends at the bottom (2026-10-15)
   ];
   for (const re of follow) assert.match(RENDER, re, String(re));
-  assert.equal((RENDER.match(/\batBottom\(/g) || []).length, 23, "twenty-two call sites plus the definition (the re-window's follow-mode end at the bottom, 2026-10-15; a re-show at the bottom ends a passage landing's follow pause, 2026-10-15; the scroll listener's end of a passage landing's follow pause, 2026-10-15; the re-show follow rule reads the same true bottom, T262 2026-09-09; the window ask's diagnostic row reads it too, T366; the landing's follow-mode end, T386; the jump cluster's two reads, 2026-09-24; a file tab's held place, 2026-09-30; the live-status foot line's first room, 2026-10-08)");
+  assert.equal((RENDER.match(/\batBottom\(/g) || []).length, 22, "twenty-one call sites plus the definition (the re-window's follow-mode end at the bottom, 2026-10-15; a re-show at the bottom no longer ends a passage landing's follow pause, 2026-10-17: the paused passage stays where the reader left it; the scroll listener's end of a passage landing's follow pause, 2026-10-15; the re-show follow rule reads the same true bottom, T262 2026-09-09; the window ask's diagnostic row reads it too, T366; the landing's follow-mode end, T386; the jump cluster's two reads, 2026-09-24; a file tab's held place, 2026-09-30; the live-status foot line's first room, 2026-10-08)");
 });
 
 test("only the user's own send reveal keeps the 80 px band", () => {

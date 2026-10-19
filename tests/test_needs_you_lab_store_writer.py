@@ -21,12 +21,15 @@ written. At each hold the test acts as the kernel, then lets the writer go:
   - a node gone from the store is named (the store's revision, its node ids, any store moved aside), never a bare TypeError.
 One more test holds the writer earlier, right after it opens the store, and publishes there as the kernel: the edit is kept, because the
 identity comes from that descriptor, not from the path.
-NoInPlaceWrites pins the source, by the spellings its constants list: neither driver that writes a file the kernel reads writes one in
-place, each such write is a publishJson call, and every scene edit of the needs-you driver reads its node through nodeOf.
+NoInPlaceWrites pins the source, by the spellings its constants list: no driver that writes a file the kernel reads (the needs-you
+box's, the comment reopen's, the tab badge's) writes one in place, each such write is a publishJson call, and every scene edit of the
+needs-you driver reads its node through nodeOf.
 TornStoreChain walks the kernel half of the CI red step by step; it describes the kernel, so it passes before the fix and after it
 alike.
+TabBadgeLabClears replays the tab-badge lab's clears against a judge stage that held the store across them (a second CI red on main,
+2026-10-18): a clear the lab writes must survive that stage's save.
 
-Needs node (the lab's own runtime) and skips without it. Synthetic only: a private placeholder sid, invented text."""
+The writer's runs need node (the lab's own runtime) and skip without it. Synthetic only: private placeholder sids, invented text."""
 import ast
 import contextlib
 import io
@@ -52,8 +55,10 @@ jd = load_source("romp_judge", os.path.join(BIN, "romp-judge"))
 BOX = os.path.join(HERE, "test_needs_you_box_chat_served.py")          # the lab whose writer this runs
 LAB = os.path.join(HERE, "test_ship_reship_served.py")                  # the shared publisher's home
 REOPEN = os.path.join(HERE, "test_comment_reopen_reload_browser.py")    # the other lab that writes a store the kernel reads
+TAB_BADGE = os.path.join(HERE, "test_tab_badge_browser.py")            # and the tab-badge lab, which clears needs-you cards in its store
 
 SID = "abababab-4444-5555-6666-777777777777"   # this module's own placeholder sid: no other module's journal can reach it
+TB_SID = "cdcdcdcd-4444-5555-6666-777777777777"   # and TabBadgeLabClears' own
 G1, G6, G7, G9 = (SID + ":g%d" % i for i in (1, 6, 7, 9))
 T0 = 1781100000
 NEW_BRIEF = "the CI job runs the Postgres loader first and the SQLite loader against its fixtures"
@@ -86,6 +91,17 @@ def _read_const(path, name):
                 and isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str)):
             return stmt.value.value
     return None
+
+
+def _lab_funcs(path, *names):
+    """The top-level functions `names` of the module at `path`, compiled alone with json in scope (the served module is never imported,
+    as _read_const says), in the order asked; None for a name the module does not define."""
+    with open(path, encoding="utf-8") as f:
+        tree = ast.parse(f.read(), filename=path)
+    ns = {"json": json}
+    defs = [stmt for stmt in tree.body if isinstance(stmt, ast.FunctionDef) and stmt.name in names]
+    exec(compile(ast.Module(body=defs, type_ignores=[]), path, "exec"), ns)
+    return [ns.get(n) for n in names]
 
 
 def _block(src, name):
@@ -344,13 +360,13 @@ class LabStoreWriter(unittest.TestCase):
 
 class NoInPlaceWrites(unittest.TestCase):
     def test_the_labs_write_no_file_the_kernel_reads_in_place(self):
-        """Every file these two drivers write for the kernel (the goal store, the judge-auth latch, a comments store) goes through the
+        """Every file these drivers write for the kernel (the goal store, the judge-auth latch, a comments store) goes through the
         shared publisher; an in-place write anywhere in them reopens the window the CI red fell into. The pin checks the spellings listed
         at IN_PLACE_WRITES and TRUNCATING_OPEN, and that each known write of a kernel-read file is a publishJson call. And every scene
         edit of the needs-you driver reads its node through nodeOf (the spellings at BARE_NODE), so a lost node is named, never a bare
         TypeError again."""
         spellings = ", ".join(IN_PLACE_WRITES) + ' and an fs open with the flag "w" or "w+"'
-        for path in (BOX, REOPEN):
+        for path in (BOX, REOPEN, TAB_BADGE):
             name = os.path.basename(path)
             with open(path, encoding="utf-8") as f:
                 src = f.read()
@@ -362,6 +378,7 @@ class NoInPlaceWrites(unittest.TestCase):
             self.assertTrue("_lab.PUBLISH_JSON_JS + " in src, "%s: its driver is written with the shared publisher in front" % name)
         self.assertTrue("publishJson(cfg.judgeAuth, " in _read_const(BOX, "DRIVER"), "the judge-auth seed is published too")
         self.assertTrue("publishJson(cfg.store, " in _read_const(REOPEN, "DRIVER"), "the comment-reopen lab's comments store is published too")
+        self.assertTrue("publishJson(cfg.oneGoalPath, " in _read_const(TAB_BADGE, "DRIVER"), "the tab-badge lab's goal store is published too")
         bare = [ln.strip()[:160] for ln in _read_const(BOX, "DRIVER").splitlines() if BARE_NODE.search(ln)]
         self.assertEqual(bare, [], "every scene edit reads the node it edits through nodeOf, so a lost node is named (the spellings checked: "
                          'st.nodes[<key>] and st["nodes"][<key>] other than a node\'s creation) (an alias of st.nodes is not matched)')
@@ -407,6 +424,62 @@ class TornStoreChain(unittest.TestCase):
         after = json.loads(self.store.read_text())
         self.assertNotIn(G6, after["nodes"], "3. the kernel's next save publishes the fresh store: the path holds a store without the "
                          "node, so the driver's next edit met a missing node, not a missing file: %r" % sorted(after["nodes"]))
+
+
+class TabBadgeLabClears(unittest.TestCase):
+    """The tab-badge lab's two clears (tests/test_tab_badge_browser.py: the live leg's 2 -> 1, the keycap leg's 1 -> 0) against a judge
+    stage that holds the store across the clear (CI on main, 2026-10-18: "the badge never dropped back to 1 after the card cleared" and
+    "the badge never cleared after the card was removed", with the lab bracketed back to before that day's merges).
+
+    The lab kernel runs the real judge tiers, and each write the driver makes to the `one` store sets off a pass whose stages (planner,
+    closer, grouper, consolidator, distiller) each load the store and save it. A stage that loaded it before a clear and saves after
+    finds the file moved and rebases onto it (save_goals' CAS). The rebase folds in the other writer's diary rows and adopts the nodes
+    it minted, but a node merely ABSENT from that writer's file is one it has not seen, never one it deleted: the store's deletions are
+    tombstoned (mergedFrom, rewindSwept) and its clears are diary rows. A clear written as a deletion was therefore published back at
+    the stage's save, the card with it, and the badge held its count until the driver's 40 s wait ran out. The kernel's own loader and
+    saver play the stage here, at the one moment that matters, over the stores the lab writes (its one_stores)."""
+
+    def setUp(self):
+        self._saved = jd.STATE
+        self.td = tempfile.TemporaryDirectory()
+        root = Path(self.td.name)
+        (root / "session-hosts").write_text("off\n")
+        jd._rebind_state(root)
+        jd.GOALDIR.mkdir(parents=True, exist_ok=True)
+        self.store = jd.GOALDIR / (TB_SID + ".json")
+
+    def tearDown(self):
+        jd._rebind_state(self._saved)
+        self.td.cleanup()
+
+    def _publish(self, text):
+        """The lab's write, as the shared publisher makes it: a temp beside the store and a rename."""
+        tmp = self.store.with_name(self.store.name + ".tmp.0.0.1")
+        tmp.write_text(text)
+        os.replace(tmp, self.store)
+
+    @staticmethod
+    def _needs_you(store):
+        """The store's needs-you cards: its open root goals that the rollup reads as blocked."""
+        status = store.get("status") or {}
+        return sorted(nid for nid, nd in (store.get("nodes") or {}).items()
+                      if nd.get("parentId") is None and not nd.get("cleared") and status.get(nid) == "blocked")
+
+    def test_a_card_the_lab_clears_stays_cleared_when_a_judge_stage_held_the_store_across_the_clear(self):
+        _, one_stores = _lab_funcs(TAB_BADGE, "blocked_store", "one_stores")
+        self.assertIsNotNone(one_stores, "the lab builds the stores its driver writes in one_stores")
+        stores = one_stores(TB_SID, T0)
+        for before, clear, want in (("oneStore2", "oneStore1", 1), ("oneStore1", "oneStore0", 0)):   # the driver's two clears, in its order
+            with self.subTest(clear=clear):
+                self._publish(stores[before])
+                held = jd.load_goals(TB_SID)                 # a stage's load, mid-pass
+                self.assertEqual(len(self._needs_you(held)), want + 1, "premise: the stage holds the card the lab is about to clear")
+                self._publish(stores[clear])                 # the lab's clear lands
+                self.assertEqual(len(self._needs_you(jd.load_goals(TB_SID))), want, "premise: the clear alone reads as the lab means it")
+                jd.save_goals(TB_SID, held)                  # the stage's save
+                after = self._needs_you(jd.load_goals(TB_SID))
+                self.assertEqual(len(after), want, "%s: the card the lab cleared stays cleared through the stage's save (a deletion is "
+                                 "published back by the rebase, so the badge never moves): %r" % (clear, after))
 
 
 if __name__ == "__main__":

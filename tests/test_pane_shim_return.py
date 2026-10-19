@@ -38,6 +38,7 @@ km = load_source("romp_kernel_shimreturn", os.path.join(BIN, "romp-kernel"))
 # setTimeout for the core that follows in the same file, so nothing here touches a real socket or clock.
 HARNESS = r"""
 var NOW=1000000;Date.now=function(){return NOW;};
+Math.random=function(){return 0.5;};   // the redial's jitter at its midpoint, so a delay reads as its schedule's own value (redialMs)
 var timers=[];var setTimeout=function(fn,ms){timers.push({fn:fn,ms:ms,live:true});return timers.length;};
 var clearTimeout=function(id){if(id&&timers[id-1])timers[id-1].live=false;};
 var intervals=[];var setInterval=function(fn,ms){intervals.push({fn:fn,ms:ms});return intervals.length;};
@@ -64,7 +65,7 @@ function rows(s,what){return s.sent.map(function(x){return JSON.parse(x);}).filt
 function hide(){document.visibilityState="hidden";fire("visibilitychange");}
 function show(){document.visibilityState="visible";fire("visibilitychange");}
 function liveTimers(){return timers.filter(function(t){return t.live;}).map(function(t){return {ms:t.ms,fn:t.fn.name};});}
-function redials(){return liveTimers().filter(function(t){return t.fn==="connect";});}
+function redials(){return liveTimers().filter(function(t){return t.fn==="connect"||t.fn==="probeKernel";});}   // a dial, or an announced restart's /version probe (2026-10-18)
 function count(list,x){return list.filter(function(e){return e===x;}).length;}
 function out(o){process.stdout.write(JSON.stringify(o));}
 """
@@ -224,7 +225,7 @@ out({afterShow:afterShow,ret:rows(sock(),"return").map(function(x){return x.data
 class EagerRedialAfterForeground(unittest.TestCase):
     """§1.1: a close landing within STALE_MS of a foreground is the FIN a frozen tab thawed into — redial now."""
 
-    def test_onclose_within_stale_ms_of_a_foreground_redials_now_else_1500_and_announced_stays_250(self):
+    def test_onclose_within_stale_ms_of_a_foreground_redials_now_else_1000_and_announced_stays_250(self):
         r = _run(r"""
 open();recv({type:"ka"});hide();NOW+=5000;show();
 sock().readyState=3;sock().onclose();var afterForeground=redials();
@@ -232,8 +233,9 @@ timers.length=0;NOW+=60000;connect();open();sock().readyState=3;sock().onclose()
 timers.length=0;connect();open();recv({type:"restarting"});sock().readyState=3;sock().onclose();var announced=redials();
 out({afterForeground:afterForeground,late:late,announced:announced});""")
         self.assertEqual(r["afterForeground"], [{"ms": 0, "fn": "connect"}], "the first close after a foreground: the close IS the event, redial now")
-        self.assertEqual(r["late"], [{"ms": 1500, "fn": "connect"}], "the blind cadence stays for a close nobody foregrounded into")
-        self.assertEqual(r["announced"], [{"ms": 250, "fn": "connect"}], "T217's announced-death branch is unchanged")
+        self.assertEqual(r["late"], [{"ms": 1000, "fn": "connect"}], "the blind schedule's first step (1 s, 2026-10-15) for a close nobody foregrounded into")
+        self.assertEqual(r["announced"], [{"ms": 250, "fn": "probeKernel"}],
+                         "T217's announced death stays on the tight schedule; its steps are /version probes since 2026-10-18")
 
 
 class OrderedDispatchFifo(unittest.TestCase):

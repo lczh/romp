@@ -34,6 +34,7 @@ import {
   edges, has, layout as layoutRects, leaves, move, parse, serialise, setFixed,
 } from "./pane-tree";
 import { paneSourceOk } from "./pane-source";
+import { watchPageFocus } from "./page-focus";
 import {
   BAND, CHAT, DEFAULT_BAND_PX, FEED, FILES, FLEET, GUTTER, LAYOUT_KEY, RING, type Payload, type Shown, type Zone,
   bandPxOf, colNumberOf, crossedSlop, dragEdge, edgeAt, edgeClamp, grabbable, growKey, isChatPane, landingRect, planTabDrop, pressGeometry, reconcileShown, roundRect, seedLayout, zoneAt,
@@ -153,7 +154,11 @@ const CONTROL_SEL = "button,a,input,textarea,select,[role=button],[contenteditab
 const TOP_RUN_SEL = "#tabbar,#tabs,.tab-strip-end,.fileview-bar";
 
 interface Press { pane: PaneId; frame: HTMLIFrameElement | null; win: Window; x0: number; y0: number; armed: boolean; zone: Zone | null }
-interface DivDrag { edge: EdgeRect; x0: number; y0: number; px: number; py: number; want: number | null; raf: number; start: Layout; tl0: string; a0: number; b0: number }
+/** The shell's band-height gesture (_LANDING_JS bandGrab, the one the shipped #gh gutter runs): `set` makes a move's px the user's
+ *  height (the shell's autosize then re-applies it instead of the content fit) and returns it as the shell clamps it, `save`
+ *  remembers it at the release (romp-tl-h), `cancel` restores the grab-time height and the remembered one on Escape. */
+interface BandGrab { set(px: number): number; save(): void; cancel(): void }
+interface DivDrag { edge: EdgeRect; x0: number; y0: number; px: number; py: number; want: number | null; raf: number; start: Layout; band: BandGrab | null; a0: number; b0: number }
 
 function byId(id: string): HTMLElement | null { return document.getElementById(id); }
 /** One layout per animation frame for a divider drag (plans/pane-docking.md section 12): arm `f` for the next frame and return its
@@ -339,18 +344,20 @@ class Engine {
   private reconcile(): void {
     if (!this.on || !this.lay) return;
     const d = this.div;
-    if (d && !d.edge.fixed) {
+    if (d) {
       // a reconcile UNDER a column or row drag (a pane toggled by the rail or the gear, the band re-sized by the shell's
       // autosize): the drag's frames are built from the PRESS tree (applyDiv), so the press tree must learn what changed
       // or the next frame and the commit discard it (the 1927 read: a pane shown mid-drag missing from the store and
       // overlapping, one hidden mid-drag persisted docked and parked, the band dropping to its press px). A change of
       // the LEAF SET ends the drag at its last position, committed: the pointer is still held, but the pair it was
       // sizing is not the pair on the page any more (new information, section 12). The band's px alone is carried
-      // into the press tree, so every later frame and the commit keep it.
+      // into the press tree, so every later frame and the commit keep it. The band's OWN edge ends on a leaf-set change
+      // the same way (the review of PR 295: it ran on past the toggle, more travel kept resizing the band, and the store
+      // kept the hidden pane docked until the release); its frames re-render from the live tree, so its px needs no carry.
       const sh = this.shown();
       const next = reconcileShown(this.lay, sh);
       if (!sameSet(leaves(next.tree), leaves(this.lay.tree)) || !sameSet(next.parked, this.lay.parked)) this.endDiv(true, false);   // landed, not written: the reconcile below writes the corrected layout once
-      else if (sh.band) {
+      else if (!d.edge.fixed && sh.band) {
         d.start = { ...d.start, tree: setFixed(d.start.tree, BAND, sh.bandPx > 0 ? sh.bandPx : DEFAULT_BAND_PX) };
         // the drag's EDGE re-read from the rebased press tree (the 1927 read, round four): under the band's split a divider between
         // stacked panes has its avail, its rect and the pair's sizes move with the band, so the press values would clamp, resize
@@ -685,9 +692,9 @@ class Engine {
     this.render();
   }
 
-  private notify(text: string): void {
+  private notify(text: string, kind = "warn"): void {
     const w = window as any;
-    try { if (w.__rompNotify) w.__rompNotify("warn", text); } catch { /* no notice surface */ }
+    try { if (w.__rompNotify) w.__rompNotify(kind, text); } catch { /* no notice surface */ }
   }
 
   // ── tabs as drop payloads (plans/pane-docking.md section 4; the user 2026-09-19: a tab dragged out of the strip into
@@ -808,19 +815,59 @@ class Engine {
     // Escape restores the press tree live (the band's height too for the band's own edge) and writes only when the restored
     // layout differs from the stored one (a reconcile under the drag deferred its write: reconcile, endDiv). No landing line.
     if (!this.lay) return;
-    const tl0 = this.col ? this.col.style.getPropertyValue("--tl") : "";
+    // the band's own edge is the shipped gutter's gesture on the same height: the shell's grab, so the autosize keeps the dragged height
+    // mid-drag and after the release, and a reload restores it (2026-10-18: a band edge that wrote --tl alone went back to its
+    // content's height at the shell's next autosize, a pane's store write or the /version reading)
+    const grab = (window as any).__rompBandGrab;
+    if (edge.fixed && typeof grab !== "function") {
+      // no grab, no band drag, and said out loud (root CLAUDE.md, fail loudly): the edge without it is the snap-back above, and an
+      // Escape that cannot restore the remembered height. The kit runs only on the shell page after _LANDING_JS defines the grab, so
+      // this is a build that lost it; the band stays where it is rather than half-working
+      console.error("romp pane docking: window.__rompBandGrab (the shell's band-height gesture, _LANDING_JS bandGrab) is missing, so the band's edge does not resize the band");
+      this.notify("The Sessions pane's height can't be dragged: this page is missing the code that resizes it.", "error");
+      return;
+    }
+    const band: BandGrab | null = edge.fixed ? grab() : null;
     // the pair's sizes AT THE PRESS are the drag's frame of reference: every frame applies the pointer's absolute travel to the
     // tree as it was at the press, and the clamp holds against these (the 1927 read: clamping against the tree the drag rewrote
     // every frame shrank the window each frame and the edge stopped at half its range)
     const start = parse(serialise(this.lay)) as Layout;
     const { a0, b0 } = pressGeometry(start.tree, edge);
-    this.div = { edge, x0: e.clientX, y0: e.clientY, px: e.clientX, py: e.clientY, want: null, raf: 0, start, tl0, a0, b0 };
+    const drag: DivDrag = { edge, x0: e.clientX, y0: e.clientY, px: e.clientX, py: e.clientY, want: null, raf: 0, start, band, a0, b0 };
+    this.div = drag;
     document.body.classList.add(RESIZE_CLASS, edge.dir === "row" && !edge.fixed ? RESIZE_X_CLASS : RESIZE_Y_CLASS);   // the divider's own cursor, over every pane
-    const mv = (ev: Event) => this.onDivMove(ev as PointerEvent);
-    const up = () => this.endDiv(true);
+    // the pointer CAPTURED on the divider, so the drag is told when the browser takes the pointer away (lostpointercapture); the
+    // moves and the release reach the window's listeners below either way
+    const pid = e.pointerId;
+    try { d.setPointerCapture(pid); } catch { /* an old engine: the window's listeners still carry the drag */ }
+    const mine = (ev: Event) => this.div === drag && (ev as PointerEvent).pointerId === pid;
+    const mv = (ev: Event) => { if (mine(ev)) this.onDivMove(ev as PointerEvent); };
+    const up = (ev: Event) => { if (mine(ev)) this.endDiv(true); };
+    // every other way the gesture ends is a CANCEL, Escape's path (the kit's convention: the pane drag's pointercancel is its cancel,
+    // cancelPress, and a divider's Escape restores the press): a pointercancel (a touch the browser took for a pan), a lost capture,
+    // and the page losing the window's focus (a page put behind another mid-press gets neither a pointerup nor a pointercancel from
+    // Chromium: the tab strip's hold, render.ts). Before these the drag outlived the gesture: plain mouse movement kept resizing, and
+    // the next click committed it. A cancel restores the press layout and the band's grab-time height, and writes nothing
+    const cancel = (ev: Event) => { if (mine(ev)) this.endDiv(false); };
     // Escape reaches the drag from a focused pane through the engine's own keydown wiring on every pane document (wire, onKey)
     window.addEventListener("pointermove", mv, true); window.addEventListener("pointerup", up, true);
-    this.divOff = () => { window.removeEventListener("pointermove", mv, true); window.removeEventListener("pointerup", up, true); };
+    window.addEventListener("pointercancel", cancel, true); window.addEventListener("lostpointercapture", cancel, true);
+    // The window switch is heard at the blur of the window HOLDING the focus, wherever in the page that is (page-focus.ts): the press
+    // keeps the focus where it was (the default prevented above), so with the chat's composer typed into it is the chat's window
+    // that blurs, and the shell's hears nothing (the review of PR 302: the drag outlived the switch, and plain mouse movement resized
+    // until the next click committed it). A blur with the page still focused is the focus moving to another of its frames (the
+    // chat's question card focusing itself on a re-render, the shell focusing a pane's frame, PR 302), so the drag goes on and the
+    // watch moves with the focus; a pane reloaded under the watch is heard again at its frame's load. The focus held in a
+    // cross-origin pane (a sandboxed URL-source one) at the press cannot be followed, its window taking no listener of ours: a
+    // switch from there goes unheard, as before
+    const unwatch = watchPageFocus(window, () => { if (this.div === drag) this.endDiv(false); });
+    // the listeners go BEFORE the capture is released, so the lostpointercapture that release raises is never heard as a cancel: each
+    // route ends the drag once (the watch's own end runs once, and is off before endDiv goes on)
+    this.divOff = () => {
+      window.removeEventListener("pointermove", mv, true); window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", cancel, true); window.removeEventListener("lostpointercapture", cancel, true); unwatch();
+      try { if (d.hasPointerCapture(pid)) d.releasePointerCapture(pid); } catch { /* the pointer is gone already */ }
+    };
   }
 
   private minFrac(edge: EdgeRect): number { return Math.min(0.25, MIN_PX / Math.max(1, edge.avail)); }
@@ -837,6 +884,7 @@ class Engine {
       if (!box) return;
       const bottom = cb.top + box.y + box.h;
       d.want = Math.max(BAND_MIN, Math.min(Math.round(window.innerHeight * 0.7), Math.round(bottom - e.clientY)));
+      if (d.band) d.want = d.band.set(d.want);   // the user's height from this move on, as the shell holds it
     } else {
       const raw = d.edge.dir === "row" ? e.clientX - d.x0 : e.clientY - d.y0;
       d.want = edgeClamp(d.a0, d.b0, raw, this.minFrac(d.edge) * d.edge.avail);   // against the press geometry, the tree's own minimum in px: the edge follows the pointer to it and no further
@@ -866,8 +914,9 @@ class Engine {
     this.lay = { ...this.lay, tree }; this.render();
   }
 
-  /** End the drag: `commit` lands the last recorded position (and renders), Escape restores; `write` (the release's default) persists
-   *  the commit; a reconcile that ends the drag under a toggled pane lands without writing and writes the corrected layout itself. */
+  /** End the drag: `commit` lands the last recorded position (and renders), a cancel (Escape, a pointercancel, a lost capture, the
+   *  page losing the window's focus) restores; `write` (the release's default) persists the commit; a reconcile that ends the drag under a toggled
+   *  pane lands without writing and writes the corrected layout itself. */
   private endDiv(commit: boolean, write = true): void {
     const d = this.div;
     if (this.divOff) { this.divOff(); this.divOff = null; }
@@ -876,14 +925,15 @@ class Engine {
     if (commit) this.applyDiv();   // the last recorded position lands (and renders) before the write
     this.div = null;
     document.body.classList.remove(RESIZE_CLASS, RESIZE_X_CLASS, RESIZE_Y_CLASS);
-    if (commit) { if (write) this.persist(); }
+    if (commit) { if (write) this.persist(); if (d.band) d.band.save(); }
     else {
-      // Escape (or the kit going off mid-drag): the press tree back, live (rebased with what a reconcile changed under the
-      // drag: reconcile). The band's height variable is restored for the BAND'S edge only, and first, so the style observer's
-      // reconcile reads the restored px and sees no change; a column drag never touched the band, so Escape leaves it (the
-      // 1927 read: the band's content growth undone by an Escape on the chat|feed divider). Nothing written unless the
-      // restored layout differs from the stored one (a band re-sized under the drag: the reconcile deferred its write).
-      if (d.edge.fixed && this.col) { if (d.tl0) this.col.style.setProperty("--tl", d.tl0); else this.col.style.removeProperty("--tl"); }
+      // a cancel (Escape, the gesture lost to the browser, or the kit going off mid-drag): the press tree back, live (rebased with
+      // what a reconcile changed under the drag: reconcile). The band's height variable, and the height the shell remembers, are
+      // restored for the BAND'S edge only (the grab's cancel), and first, so the style observer's reconcile reads the restored px
+      // and sees no change; a column drag never touched the band, so a cancel leaves it (the 1927 read: the band's content growth
+      // undone by an Escape on the chat|feed divider). Nothing written unless the restored layout differs from the stored one (a
+      // band re-sized under the drag: the reconcile deferred its write).
+      if (d.band) d.band.cancel();
       this.lay = d.start;
       let stored: string | null = null;
       try { stored = localStorage.getItem(LAYOUT_KEY); } catch { stored = null; }

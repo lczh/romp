@@ -172,6 +172,18 @@ export function resendable(entries: Iterable<[string, PendingSend[]]>, host: str
   return out;
 }
 
+/** Whether the page still owes a send to `host`'s sessions a delivery it can make: unanswered, young enough to resend, and
+ *  not withdrawn. While it does, the pane shim never parks the page's redial, hidden or not (kernel.py sendsOwed, through
+ *  render.ts __rompSendsOwed): a prompt sent during a restart must reach its agent without the person coming back. */
+export function owesSends(entries: Iterable<[string, PendingSend[]]>, host: string, hostOf: (sid: string) => string,
+                          now: number = Date.now(), withdrawn: ReadonlySet<string> = new Set()): boolean {
+  for (const [sid, list] of entries) {
+    if (hostOf(sid) !== host) continue;
+    for (const p of list) if (unanswered(p) && now - p.ts <= RESEND_MAX_AGE_MS && !withdrawn.has(p.qid as string)) return true;
+  }
+  return false;
+}
+
 /** What a resend posts: the send's own wire, marked as a resend for the kernel's log and the page's journal. */
 export function resendWire(p: PendingSend): Record<string, unknown> {
   return { ...(p.wire as Record<string, unknown>), resend: true };

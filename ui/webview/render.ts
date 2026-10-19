@@ -37,6 +37,7 @@ import { openTagContextMenu, openTagRenamePrompt, planTagUnionEdit, tagRenameVer
 import { openTagMenu, tagMenuButton, syncTagFilter, tagChip, TAG_BTN_BORDER_CSS } from "./tag-menu";
 import { syncSessionsFromTabMeta, applyMetaToSession, notePendingMeta, PendingTabMeta } from "./tab-meta";
 import { inInputEvent } from "./input-event";
+import { windowFocusedElement } from "./window-focus";   // the window's focus across the shell's pane frames: the question card's focus guard
 import { markerLabel, dayContext, DayWalk, relativeLabel, relativeLines } from "./time-marker";
 import { composeStatusWidgets, folderIconNode, folderLink, type StatusRecord } from "./status-widgets";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
@@ -76,7 +77,7 @@ import { StagedStack, quoteReplyBody, stagedPosts, type StagedMsg } from "./stag
 import { isSlashCommand } from "./staged-messages";   // the viewer's message bar refuses a slash command (2026-09-30)
 import { quoteContext, codeLineContext, capQuote, QUOTE_CAP, QUOTE_WORDS_MAX } from "./quote-context";   // a few words go out named, with their sentence or code line (2026-10-14); every quote within the cap
 import { type PendingSend, type TailEvent, OPT_PREFIX, isOptimisticUuid, isKernelEchoUuid, newPending, mintQid, reconcilePending, clearBoundarySeen, queuedCopyToHide, dropPending, bareGroupLabel, sentAtLabel, pendingBody, refusedRestoreText } from "./send-pending";
-import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, mergeTombstones, pendingFromKept, resendable, resendWire, restoreKept,
+import { applySendAck, defaultWire, keptSends, markHostLost, mergeKept, mergeTombstones, owesSends, pendingFromKept, resendable, resendWire, restoreKept,
          restoreTombstones, type Tombstone } from "./send-acks";
 import { type FrameWm, frameOlder, droppedLandedHuman, dropsLandedRow, forgetHeldWm } from "./frame-guard";   // the frame watermark guard (2026-09-22): an older build's frame is ignored, a vanished landed turn is filed; a reconnect forgets the held watermarks
 import { type LandEvent, LandingWatch } from "./send-landing";   // the send-landing invariant (2026-09-23): observation only, around the frame dispatch (landingBefore / landingAfter)
@@ -88,6 +89,7 @@ import { liveNotices, keepReloadNotices, takeReloadNotices } from "./reload-noti
 import { mintProvisionalId, isProvisionalId, provisionalName, adoptsProvisional, focusResolvesProvisional } from "./provisional";
 import { colFromSearch, columnHolds, columnEmptiness, type ColSets } from "./chat-columns";   // the chat split's partition (2026-09-11): which column this page is, which sessions it holds
 import { onlyTag, matchesOnly, onlyWindow } from "./only-filter";
+import { pageBlurred } from "./page-focus";   // the strip's press-hold: a blur ends it only when the page lost the focus (releaseTabStrip)
 import { numberDiff, type DiffRow } from "./diff-lines";
 import { actionParts, toolRowLabel, toolInputText } from "./compact";
 import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
@@ -115,7 +117,7 @@ import { insertAtCaret } from "./composer-insert";
 import { hostNameNodes, hostPartsNodes, hostPrefix, hostOf, hostIsDown, hostIsDialing, hostDownNote } from "./host-prefix";
 import { sessionLabelNodes } from "./host-prefix";   // the viewer's message bar names its session the strip's way (2026-09-30)
 import { bellState, bellClickFields, legacyBellNote, setHubSwitches, hubMaster, sessionBell } from "./bell-follow";   // a linked kernel's bells follow this kernel's switches; a session bell's own setting beats the defaults
-import { menuCard, addMenuItem, addMenuSep, showMenuCard, openContextMenu, closeContextMenu } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy)
+import { menuCard, addMenuItem, addMenuSep, showMenuCard, openContextMenu, closeContextMenu, contextMenuOpen, scrollQuietly, shiftContextMenu } from "./ctx-menu";   // the one menu builder (the v0.16.0 tidy)
 import { focusAfterDismiss, emptyStateParts } from "./pane-focus";   // where focus goes when a tab leaves, and the empty body's line (T357)
 import { MENTION_MAX_ROWS, mentionQuery, rankMentions, mentionMoreNote, mentionToken, insertMention, mentionKeyAction, mentionSegments } from "./composer-mention";   // the @-mention card's rules, pure; the DOM is setupComposer's mention block and markMentions
 import type { MentionCandidate, MentionQuery } from "./composer-mention";
@@ -951,6 +953,12 @@ window.addEventListener("romp:hostAcks", (e: Event) => {
   const h = (e as CustomEvent).detail?.host;
   if (typeof h === "string") resendUnacked(h);
 });
+// The pane shim reads this before it parks its redial (kernel.py sendsOwed): a page that owes its own kernel a send keeps
+// dialing while hidden, so the send goes again on the first socket that opens (2026-10-18).
+(window as any).__rompSendsOwed = (): boolean => {
+  const now = Date.now();
+  return owesSends(pendingSent, "", hostOf, now, new Set(withdrawals(now).map((t) => t.qid)));
+};
 window.addEventListener("romp:hostRelayDown", (e: Event) => {
   const h = (e as CustomEvent).detail?.host;
   if (typeof h === "string" && h) markHostPendingLost(h);
@@ -1009,6 +1017,18 @@ const pendingTabMeta = new Map<string, PendingTabMeta>();
 // kernel sends only the active tab in full and names the rest here, each carrying a status frame instead of
 // a transcript. Declared up here beside tabMeta and closingTabs for the same reason they are: renderTabs reads it.
 const skeletonTabs = newSkeletonState();
+// The strip's scroll anchor while one frame's rebuilds run (stripScrollAnchor, keepStripScroll). Declared up here beside tabMeta for
+// the same reason: renderTabs reads it, and renderTabs can run before the module finishes evaluating.
+type StripAnchor = { box: HTMLElement; keys: string[]; offs: Map<string, number>; st: number };   // st: the box's offset as the strip left it
+let stripAnchorHeld: StripAnchor | null = null;
+let stripAnchorRaf = false;
+// The strip item an open menu was opened on (a tab, or a group header) and where it stood on screen: the rebuild anchors on it and
+// the card follows it (followStripMenu). Up here for the same reason.
+let stripMenuOn: { card: HTMLElement; key: string; x: number; y: number } | null = null;
+// A deliberate navigation's reveal that found no strip on screen (revealActiveTab): owed until the strip's box sizes in. Up here for
+// the same reason.
+let stripRevealOwed = false;
+let stripRevealRo: ResizeObserver | null = null;
 // The skeleton tab the user is LOOKING AT while its full is on the way (showActive's loader branch). Latched for
 // upsert, because on the click path the strip that RELEASES the id (the kernel dropped it from the set when it sent
 // the full) lands BEFORE the full itself, so by the time the frame arrives the id is no longer in the set and
@@ -1677,10 +1697,10 @@ interface Painted { items: DisplayItem[]; sig: (string | undefined)[]; out: (Pai
 /** Where the reader was when they left a tab whose follow mode a passage landing holds off: the turn at the viewport's top and its
  *  offset (captureScrollAnchor). The return restores THAT place and keeps the pause, so text the session wrote meanwhile waits
  *  below under the chip (the user's decision: the passage stays where they were looking), whether the page drew it before the
- *  return or draws it after (the appends keep the place while the pause holds). Nothing written meanwhile puts the reader back
- *  at the bottom, where the re-show's reconcile resumes following (landActive). */
+ *  return or draws it after (the appends keep the place while the pause holds). Nothing written meanwhile puts them back at the
+ *  same place, the pause standing until they go back to the bottom themselves (landActive, releaseFollow). */
 interface HeldKeep { anchor: { uuid: string; y: number } | null }
-interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; followHeld?: boolean; heldKeep?: HeldKeep | null; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; heldPx?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner). followHeld: follow mode paused by a landing on a comment's passage, at the bottom or not, until the reader goes back to the bottom (landOn, releaseFollow); heldKeep: where a held view was left, for the tab's return (HeldKeep)
+interface View { el: HTMLElement; rendered: number; scrollTop: number; stick: boolean; followHeld?: boolean; heldKeep?: HeldKeep | null; floorAt?: number | null; shown: boolean; stale: boolean; rediff?: boolean; painted?: Painted; winStart: number; winEnd?: number; avgTurnH?: number; heldPx?: number; pxPerTurn?: number; spacerCount?: number; spacerCountBot?: number; unitTotal?: number; gapUnits?: Map<number, number>; edgeTop?: number; edgeUp?: boolean; gestureScroll?: boolean; echoOf?: string; working?: boolean; uo?: ResizeObserver; uh?: WeakMap<Element, number>; ro?: ResizeObserver; mo?: MutationObserver; }   // working: the session's state at the last sync, the "worked …" footer's one non-event input (syncViewInner). followHeld: follow mode paused by a landing on a comment's passage, at the bottom or not, until the reader goes back to the bottom (landOn, releaseFollow); heldKeep: where a held view was left, for the tab's return (HeldKeep); floorAt: where the view's bottom edge stood in the thread when the room under a held view was last measured (holdFloor)
 const views = new Map<string, View>();
 
 // Pending pickers (AskUserQuestion / tool-permission) keyed by session id. These
@@ -6787,6 +6807,9 @@ let renderPendingAfterRename = false;
 // dispatches right after pointerup, fires against the still-present node first.
 let tabPointerHeld = false;
 let renderPendingWhilePressed = false;
+// The hold's watch for the page losing the focus once a blur of this window was only the focus moving to another frame of the
+// page (page-focus.ts pageBlurred; the window's blur listener below arms it): its off switch, taken off at every release.
+let tabHoldFocusOff: (() => void) | null = null;
 // The strip's last rendered SIGNATURE (renderTabs): every input the strip paints, as one string. renderTabs
 // runs on every kernel push, and on a board of a few dozen tabs most pushes are tails for tabs that are not
 // active; rebuilding every tab node with its listeners and then reading each one's offsetTop
@@ -6803,9 +6826,16 @@ let tabStripSig = "";
 // too: a native drag swallows the pointerup, so without this a finished drag would leave the strip
 // frozen against pushes until the next unrelated press (see the dragend handler).
 function releaseTabStrip(): void {
+  tabHoldWatchOff();   // first, so any release (a pointerup in this page) takes the watch off
   if (!tabPointerHeld) return;
   tabPointerHeld = false;
   if (renderPendingWhilePressed) { renderPendingWhilePressed = false; setTimeout(() => renderTabs(), 0); }
+}
+// The hold's focus watch off. Every end of the press calls it: releaseTabStrip, and the tab's dragend, which releases the hold
+// by hand (wireTabDrag). A watch that outlived a drag kept the window's blur listener from arming one for the next press, and
+// once the frame it watched was closed it never ran: a window switch mid-press then released nothing (the review of PR 307).
+function tabHoldWatchOff(): void {
+  if (tabHoldFocusOff) { tabHoldFocusOff(); tabHoldFocusOff = null; }
 }
 
 // A SECTION HEADER for the tab strip (tab groups on tags, the user 2026-09-04). It reads as a LABEL,
@@ -6942,15 +6972,13 @@ function makeGroupHead(sec: TabSection, collapsed: boolean, holdsActive: boolean
     hideTabTip();
   });
   // dragend closes the gesture whether it dropped or cancelled: release the click-safe hold the
-  // pointerdown latched (the drag swallowed the pointerup) and flush a push deferred mid-drag
+  // pointerdown latched (the drag swallowed the pointerup). A group's drag ends with no render of its
+  // own, so its release is a pointerup's: the hold and its focus watch off, a push deferred mid-drag flushed a tick later
   head.addEventListener("dragend", () => {
     draggedGroup = null;
     head.classList.remove("dragging");
     document.getElementById("tabs")?.querySelectorAll(".tab-group-head.drop-target").forEach((h) => h.classList.remove("drop-target"));
-    tabPointerHeld = false;
-    const pending = renderPendingWhilePressed;
-    renderPendingWhilePressed = false;
-    if (pending) setTimeout(() => renderTabs(), 0);
+    releaseTabStrip();
   });
   return head;
 }
@@ -7113,12 +7141,14 @@ function wireTabDrag(tab: HTMLElement, id: string): void {
   // released here by hand, covering the whole gesture against pushes (the click-safe rule). A
   // CANCELLED drag re-renders from the untouched order and everything FLIP-animates home — that
   // render also folds in any push that arrived, deferred, mid-drag. A committed drop's reorderTo
-  // already asked for its render; it ran deferred, so flush it.
+  // already asked for its render; it ran deferred, so flush it. By hand, not releaseTabStrip: its
+  // deferred flush would render the cancelled drag's strip a second time, a tick after the FLIP's.
   tab.addEventListener("dragend", () => {
     const cancelled = !tabDragCommitted;
     draggedId = null; draggedEl = null; tabDragCommitted = false;
     tab.classList.remove("dragging");
     clearDragCue();                      // the ring, the leave line and the + badge belong to the gesture, however it ended
+    tabHoldWatchOff();                   // the hold's focus watch goes with the hold (a sibling column took the focus mid-press)
     tabPointerHeld = false;
     const pending = renderPendingWhilePressed;
     renderPendingWhilePressed = false;
@@ -7532,6 +7562,7 @@ function renderTabs() {
   // and the composer's name overlay wears that same fade (T335): re-sync it on the same event, so a background the host
   // rewrote (a VS Code colour-theme switch, which fires no romp event) reaches the box when it reaches the strip
   syncComposerPh();
+  const anchor = stripScrollAnchor(bar);   // where the reader is in a scrolled strip, measured before the wipe and re-applied once the new strip is laid out (keepStripScroll)
   // Preserve TAB-MODE keyboard focus across the rebuild (the user 2026-06-29). renderTabs runs on EVERY kernel
   // push (0.5–3s), and replaceChildren() destroys the focused tab — dropping focus out of the strip (often out
   // of the chat iframe entirely), which silently killed ←/→/Enter nav after a send or any push: you were left
@@ -7780,13 +7811,18 @@ function renderTabs() {
   }
   paintTabRowLines(bar);
   ensureTabRowObserver(bar);
-  // Restore tab-mode focus if a tab held it before this rebuild (see the focus capture above the wipe).
+  keepStripScroll(bar, anchor);
+  followStripMenu(bar);
+  // Restore tab-mode focus if a tab held it before this rebuild (see the focus capture above the wipe). QUIETLY: a repaint is
+  // not a gesture, and a plain focus() scrolls the node into view, which threw a reader who had picked a tab and then scrolled
+  // the strip back to that tab on every push (the user 2026-10-17). The gestures that land here next (a click, an arrow, Escape)
+  // bring the tab into view themselves (focusActiveTab).
   if (focusedGroup !== undefined) {
     const h = Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((x) => x.dataset.group === focusedGroup);
     // the group gone, or now holding the active tab (no stop): the old rule
-    if (h && h.tabIndex >= 0) h.focus(); else focusActiveTab();
-  } else if (focusedGear) (bar.querySelector(".tab-widgets-gear") as HTMLElement | null)?.focus();   // not the active tab: Enter again would drop the caret into the composer
-  else if (refocusTab) focusActiveTab();
+    if (h && h.tabIndex >= 0) h.focus({ preventScroll: true }); else focusActiveTab(true);
+  } else if (focusedGear) (bar.querySelector(".tab-widgets-gear") as HTMLElement | null)?.focus({ preventScroll: true });   // not the active tab: Enter again would drop the caret into the composer
+  else if (refocusTab) focusActiveTab(true);
   stripAftermath(visibleIds, ids);
   // (The Fleet toggle that briefly lived here as a tab-bar pill was removed 2026-06-24: Fleet/Chat are now
   // the rotated toggles in the chat pane's vertical strip — see _LANDING_FLEET_JS — so the pill was redundant.)
@@ -7832,7 +7868,7 @@ function stripAftermath(visibleIds: readonly string[], ids: readonly string[]): 
   const shown = snapView;
   const held = shown ? snapshotHoldsFocus() : false;
   if (snapView) renderSnapshot();
-  if (shown && !snapView) { showActive(); if (held) focusActiveTab(); }
+  if (shown && !snapView) { showActive(); if (held) focusActiveTab(true); }   // quiet: a push ended the view, not a gesture
   // Hiding the LAST visible session must also blank its transcript: a strip with no tabs cannot sit
   // over a hidden session's live chat (the ghost would show exactly what the hide asked to put away).
   // Restored the moment anything is visible again — the placeholder owns the empty state meanwhile.
@@ -7844,6 +7880,78 @@ function stripAftermath(visibleIds: readonly string[], ids: readonly string[]): 
   }
 }
 
+// THE STRIP KEEPS ITS PLACE THROUGH A REBUILD (the user 2026-10-17: with many sessions the strip scrolls, and every update to it
+// threw the reader back to the top). renderTabs rebuilds #tabs whenever its signature changes, and the scroll box (#tabbar) keeps
+// its raw offset across that, so sessions added or removed ABOVE the view slid what the reader was looking at by a row or more.
+// The rebuild anchors instead: before the wipe it notes the items whose top edge is in view (a tab by its id and the group its
+// copy sits in, a header by its tag), and after the new strip is laid out it scrolls by however far the first of them that is
+// still on the strip moved, so that item stays where it was. A strip at its top keeps no anchor (what lands above shows there),
+// except the item an open menu stands on, which holds still under its card there too (the review of #282: at the top, forty
+// sessions added above carried the tab out of the strip, and its card past the window's bottom).
+// The anchor is what the reader SAW: one frame can carry several rebuilds (a tabOrder frame that drops sessions dismisses them
+// one by one, each a rebuild), and the in-between strips are never painted, so the anchor taken at the first of them holds
+// until the next frame (the animation frame is the paint's own event), unless the box was scrolled meanwhile.
+// Only a gesture scrolls the strip otherwise: the rebuild's focus restore is quiet too (focusActiveTab).
+function stripItemKey(c: Element): string | null {   // a declaration, hoisted: renderTabs can run before the module finishes evaluating
+  const e = c as HTMLElement;
+  if (e.classList.contains("tab-group-head")) return "h:" + (e.dataset.group ?? "");
+  return e.classList.contains("tab") && e.dataset.id ? "t:" + e.dataset.id + "\0" + (e.dataset.copy ?? "") : null;
+}
+function stripScrollAnchor(bar: HTMLElement): StripAnchor | null {
+  const box = bar.parentElement;
+  if (!box) return null;
+  const held = stripAnchorHeld;
+  if (held && held.box === box && box.scrollTop === held.st) return held;   // a rebuild earlier in this frame took it: the strip the reader saw
+  stripAnchorHeld = null;
+  const atTop = box.scrollTop <= 0;
+  if (atTop && !stripMenuOn) return null;
+  const top = box.getBoundingClientRect().top + box.clientTop, bottom = top + box.clientHeight;
+  const keys: string[] = [], offs = new Map<string, number>();
+  for (const c of Array.from(bar.children)) {
+    const key = stripItemKey(c);
+    if (!key) continue;
+    const r = c.getBoundingClientRect();
+    if (!r.height || r.top < top - 0.5) continue;
+    if (r.top >= bottom) break;
+    keys.push(key); offs.set(key, r.top - top);
+  }
+  if (!keys.length) return null;
+  const menuAt = stripMenuOn ? keys.indexOf(stripMenuOn.key) : -1;
+  if (atTop) { if (menuAt < 0) return null; keys.splice(0, keys.length, keys[menuAt]); }   // at the top only the menu's item anchors
+  else if (menuAt > 0) keys.unshift(keys.splice(menuAt, 1)[0]);   // an open menu's item first: the card stays over it
+  stripAnchorHeld = { box, keys, offs, st: box.scrollTop };
+  if (!stripAnchorRaf) { stripAnchorRaf = true; requestAnimationFrame(() => { stripAnchorRaf = false; stripAnchorHeld = null; }); }
+  return stripAnchorHeld;
+}
+function keepStripScroll(bar: HTMLElement, a: StripAnchor | null): void {
+  if (!a || bar.parentElement !== a.box) return;
+  const now = new Map<string, Element>();
+  for (const c of Array.from(bar.children)) { const key = stripItemKey(c); if (key && !now.has(key)) now.set(key, c); }
+  const key = a.keys.find((k) => now.has(k));
+  if (key) {   // none: everything that was in view left the strip, and the raw offset stands
+    const top = a.box.getBoundingClientRect().top + a.box.clientTop;
+    const moved = now.get(key)!.getBoundingClientRect().top - top - a.offs.get(key)!;
+    if (Math.abs(moved) >= 0.5) scrollQuietly(a.box, a.box.scrollTop + moved);   // the page's move, not the reader's: an open menu stays up
+  }
+  a.st = a.box.scrollTop;
+}
+// An open menu's item moved under it in the rebuild (re-flowed rows, or a strip at its top, where nothing anchors): the card
+// follows it. Gone from the strip, the card stays where it is (its rows act by id).
+function noteStripMenu(card: HTMLElement, key: string): void {
+  const node = Array.from(document.getElementById("tabs")?.children ?? []).find((c) => stripItemKey(c) === key);
+  const r = node?.getBoundingClientRect();
+  stripMenuOn = r && r.height ? { card, key, x: r.left, y: r.top } : null;
+}
+function followStripMenu(bar: HTMLElement): void {
+  const m = stripMenuOn;
+  if (!m) return;
+  if (contextMenuOpen() !== m.card) { stripMenuOn = null; return; }
+  const node = Array.from(bar.children).find((c) => stripItemKey(c) === m.key);
+  const r = node?.getBoundingClientRect();
+  if (!r || !r.height) return;
+  shiftContextMenu(r.left - m.x, r.top - m.y);
+  m.x = r.left; m.y = r.top;
+}
 // Right-click context menu on a tab. Webviews can't use VS Code's native menus,
 // so this is a small themed floating menu; one open at a time, dismissed by any
 // outside click, Escape, scroll, or losing window focus.
@@ -7882,6 +7990,7 @@ function dismissTabMenu() {
 function onTabMenuClosed() {
   ctxMenuEl = null;
   tagsFlyNewInput = null;
+  stripMenuOn = null;
 }
 
 // Right-clicking a SELECTION in the transcript pops a small menu with Reply (quote
@@ -8808,13 +8917,17 @@ function showTabMenu(e: MouseEvent, id: string, copy?: string) {   // `copy`: th
   // not a dismissal: taller than the window it scrolls inside it, styles.css max-height, 2026-09-13), Tab, the focus leaving,
   // the window's blur; the rows reachable by the arrows; the focus back on the opener at the close (the shared builder)
   ctxMenuEl = showMenuCard(menu, e.clientX, e.clientY, { onClose: onTabMenuClosed });
+  noteStripMenu(ctxMenuEl, "t:" + id + "\0" + (copy ?? ""));   // the card goes where its tab goes through a rebuild
 }
 // A remote host coming or going flips the disconnected marks on its tabs. The federation manager fires
 // this only when the reachable set actually CHANGES (its own /tunnels poll is the event), so this is a
 // repaint per connect/drop, not per poll (the user 2026-07-29). The composer's overlay names the active session
 // with the same host span (T328), so it re-syncs on the same event: its mark would otherwise lag the tab's until
-// the next keystroke, resize, rename or tab switch.
-window.addEventListener("romp-hosts", () => { renderTabs(); syncComposerPh(); });
+// the next keystroke, resize, rename or tab switch. The transcript's host-offline foot is the same mark at the end of the
+// open session, so it follows too: the drop is the event that puts it up, and a host that drops while its session is
+// being read sends nothing else (no frame, no tab switch; a checked-in host has no dial to announce either), so without
+// this the foot waited for whatever repainted the pane next.
+window.addEventListener("romp-hosts", () => { renderTabs(); syncComposerPh(); syncHostOfflineFoot(); });
 // a dial attempt to a remote host began or ended (federation.ts dialEvent): the host-down foot's swirl
 // spins while one is in flight, as of the last /tunnels poll, so it repaints on this event and on nothing else
 window.addEventListener("romp:hostDial", () => { syncHostOfflineFoot(); repaintEmptyStateIfUnfocused(); });   // the unfocused body's "reconnecting" follows the dial state too (T357)
@@ -8916,6 +9029,7 @@ function showTagMenu(x: number, y: number, name: string, folded: boolean | null,
   ctxMenuEl = openTagContextMenu(x, y, { name, members: g.members.length, folded, only, configure: true, overview }, g.color || "", paletteColors,
     { pick: (act) => tagMenuPick(act, name, folded !== null), recolor: (c) => { const u = unionNamed(name); if (u) commitTagUnionEdit(u, { color: c }); } },
     { viaKeyboard, onClose: onTabMenuClosed });
+  if (folded !== null && ctxMenuEl) noteStripMenu(ctxMenuEl, "h:" + name);   // off a strip header: the card goes where the header goes
 }
 function unionNamed(name: string): TagUnion | undefined {
   const g = viewTagUnion(effViews()).find((u) => u.name === name);
@@ -9067,14 +9181,55 @@ function onTabKey(e: KeyboardEvent) {
     focusComposerOrAsk();
   }
 }
-function focusActiveTab() {
+/** Focus the active tab (or the header standing in for it). `quiet`: a repaint restoring the focus it took away, which must not
+ *  scroll the strip; every other caller is a gesture (a click, an arrow, Escape, a send), which brings the tab into view. A
+ *  gesture usually finds the tab already focused, by its own setActive's rebuild restoring the focus quietly, and focus() on
+ *  the focused node scrolls nothing, so the gesture scrolls it into view itself. */
+function focusActiveTab(quiet = false) {
   const bar = document.getElementById("tabs");
+  const focusOn = (node: HTMLElement | null | undefined) => {   // not `land`: that name is the transcript's write family (landing-settle.ts)
+    if (!node) return;
+    if (quiet) node.focus({ preventScroll: true });
+    else if (document.activeElement === node) node.scrollIntoView({ block: "nearest", inline: "nearest" });
+    else node.focus();
+  };
   const tab = bar?.querySelector(`.tab[data-id="${fileTabOpen ?? activeId}"]`) as HTMLElement | null;   // a file tab up is the one shown (2026-09-30)
-  if (tab) { tab.focus(); return; }
+  if (tab) { focusOn(tab); return; }
   // the active tab is folded away under its section: the header is its stand-in (tab-groups.ts)
   const home = activeId ? homeSectionOf(lastStripItems, activeId) : null;
   if (!home || home.name === null || !bar) return;
-  Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name)?.focus();
+  focusOn(Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name));
+}
+/** Bring the active tab (or the header standing in for it) into the strip's view, the focus left where it is. Every deliberate
+ *  navigation calls it (setActive's pick, from the feed, the Sessions pane, a deep link, a notification, the keyboard; a jump to
+ *  the tab already shown): before the strip held its place through rebuilds (keepStripScroll, the quiet focus restore), the
+ *  rebuild's plain focus() did this as a side effect, and with the focus in the strip only. A repaint never calls it. Only the
+ *  strip's own box scrolls, by the least that shows the whole item.
+ *  With no strip on screen (the chat pane hidden, as on the Feed tab of a window one pane wide, where a jump un-hides the pane a
+ *  task after it activates; the phone's hidden strip) the reveal is owed, and paid when the strip's box sizes in: its
+ *  ResizeObserver is that event (the review of #282: the reveal was skipped and never retried, so the jump showed the chat with
+ *  its tab off-screen). */
+function revealActiveTab(): void {
+  const bar = document.getElementById("tabs"), box = bar?.parentElement;
+  if (!bar || !box) return;
+  if (!box.clientHeight) { oweStripReveal(box); return; }
+  stripRevealOwed = false;
+  let node = bar.querySelector(`.tab[data-id="${fileTabOpen ?? activeId}"]`) as HTMLElement | null;
+  if (!node) {   // folded away under its section: the header stands in for it (focusActiveTab's rule)
+    const home = activeId ? homeSectionOf(lastStripItems, activeId) : null;
+    if (home && home.name !== null) node = Array.from(bar.querySelectorAll<HTMLElement>(".tab-group-head")).find((h) => h.dataset.group === home.name) ?? null;
+  }
+  const r = node?.getBoundingClientRect();
+  if (!r || !r.height) return;
+  const top = box.getBoundingClientRect().top + box.clientTop, bottom = top + box.clientHeight;
+  const by = r.top < top ? r.top - top : r.bottom > bottom ? Math.min(r.bottom - bottom, r.top - top) : 0;
+  if (Math.abs(by) >= 0.5) box.scrollTop += by;
+}
+function oweStripReveal(box: HTMLElement): void {
+  stripRevealOwed = true;
+  if (stripRevealRo || typeof ResizeObserver !== "function") return;
+  stripRevealRo = new ResizeObserver(() => { if (stripRevealOwed && box.clientHeight) revealActiveTab(); });
+  stripRevealRo.observe(box);
 }
 /** Open a section that puts a folded-away tab on screen: a session pick names the tab, so its tab must be on
  *  screen. Per holder, since a session under several tags has a copy under each and every copy's fold stands on
@@ -12120,7 +12275,7 @@ function cmtStateChip(th: CommentThread): HTMLElement {
   const stopBtn = () => {
     const b = el("button", "stop-btn cmt-stop");
     (b as HTMLButtonElement).type = "button";
-    b.title = "Stop — interrupt this thread's turn";
+    b.title = "Stop — interrupt this thread's turn; its background agents stop too";
     b.setAttribute("aria-label", "Interrupt this thread");
     b.dataset.act = "cmtinterrupt";
     b.dataset.sid = threadSidOf(th);   // the thread's session (host-prefixed on a linked machine: the stop routes to its kernel)
@@ -13446,6 +13601,14 @@ function atBottom(c: HTMLElement): boolean {
 function nearBottomForSend(c: HTMLElement): boolean {
   return c.scrollHeight - c.scrollTop - c.clientHeight < 80;
 }
+/** Is the reader FOLLOWING the transcript's tail, read BEFORE a change at its end: the content overflows (with slack below, new
+ *  content writes in place and grows a scrollbar, the user 2026-08-25), the view sits at the true bottom (atBottom), and no passage
+ *  landing holds follow mode off (followHeld). One definition for each writer that keeps a following reader at the bottom across a
+ *  change it makes at the tail: the live append (appendActive) and the host-offline foot coming or going outside it
+ *  (syncHostOfflineFoot). The comment popover's list speaks the same rule (cmtFollowing). */
+function followingTail(content: HTMLElement, v: View | null | undefined): boolean {
+  return content.scrollHeight > content.clientHeight + 2 && atBottom(content) && !v?.followHeld;
+}
 
 // EVERY programmatic write to #content.scrollTop goes through here (T262, the user 2026-09-08, whose view "jumps
 // up slightly on my scroll" on a page whose bundle state nobody could see): a write that moved the view files one
@@ -14002,6 +14165,8 @@ function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | 
   const at = alignOn ?? target;
   settleLastInput = 0; settleScrollerHeld = false;   // the input that caused this landing (a click on a link in the scroller) is not evidence for taking it over (round three, low 4); a hold whose release never reached the page (a press held across an alt-tab) does not outlive the landing (round four, low 1)
   readerScrolling = false;   // …nor is a gesture still running: the landing moved the view, the reader's flick is over
+  { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) holdFloor(c, v, false); }   // every landing measures the transcript as it stands: the room a pause kept (holdFloor) goes first
+  if (!mark) releaseFollow();   // any other landing lifts a passage landing's pause
   const land = (writer: string) => { const c = document.getElementById("content"); if (c) scrollElInto(c, at, "start", writer); };
   land("land-on");
   // a landing is the reader's intent to be AT this message: follow mode ends unless the landing put them at the bottom
@@ -14012,6 +14177,7 @@ function landOn(target: HTMLElement, flashKey?: string, alignOn?: HTMLElement | 
   // appends keep the reader's place, the go-to-bottom chip shows once new text is below, and going back to the bottom
   // resumes following as ever (releaseFollow). Any other landing lifts it
   { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) { v.followHeld = !!mark; v.stick = !mark && atBottom(c); } }
+  if (mark) { const c = document.getElementById("content"); const v = activeId ? views.get(activeId) : null; if (c && v) holdFloor(c, v); }   // the paused reader's room, where the land put them (holdFloor)
   if (flashKey == null || flashKey !== flashedAnchor) {   // one flash per navigation (see flashedAnchor)
     if (flashKey != null) flashedAnchor = flashKey;
     // the ALIGNED element flashes: the turn may sit above the viewport when the words are aligned (round one, low 2). A comment
@@ -15662,7 +15828,7 @@ function snapshotHost(): HTMLElement | null {
   // CLICK-SAFE (ui/CLAUDE.md): the rows are rebuilt by renderTabs on every push that changes one, and a rebuild
   // between mousedown and mouseup leaves the click with no row under it. A press on the view latches the
   // STRIP's hold (tabPointerHeld): renderTabs, and renderSnapshot's own rebuild, wait for the release
-  // (pointerup / pointercancel / blur on the window, releaseTabStrip's one path), and the deferred flush
+  // (pointerup / pointercancel / the page losing the focus, releaseTabStrip's one path), and the deferred flush
   // repaints the strip and the view together. One latch for two surfaces one gesture can span.
   host.addEventListener("pointerdown", () => { tabPointerHeld = true; });
   return host;
@@ -16240,6 +16406,9 @@ function landActive(content: HTMLElement | null, v: View): void {
     whenChatVisible(() => { const c = document.getElementById("content"); const vv = activeId ? views.get(activeId) : null; if (c && vv) landActive(c, vv); });
     return;
   }
+  // the room a held view kept under its reader (holdFloor) serves that place alone: every other land measures the transcript as it
+  // stands (a rebuild may be far shorter), and the land below sets it again where it puts a reader still held
+  if (!(v.followHeld && v.heldKeep)) holdFloor(content, v, false);
   sizeSpacers(v);  // the view is now VISIBLE (display set in showActive), so the spacers get a real height
                    // measurement — a tab pre-built while display:none could only fall back until now
   // The durable seek re-arms the per-pass attempt: every render pass retries until it lands, the
@@ -16335,17 +16504,15 @@ function landActive(content: HTMLElement | null, v: View): void {
     }
     else if (v.followHeld && v.heldKeep) {
       // back on a tab a passage landing holds: the place the reader left (HeldKeep), the turn at the top at its offset, never
-      // the session's new bottom; the pause is kept
+      // the session's new bottom; the pause is kept at the bottom too, the chip showing what is written below (the user
+      // 2026-10-17): only the reader ends it (releaseFollow)
       const k = v.heldKeep; v.heldKeep = null;
       if (!(k.anchor && keepPlaceAcrossWindow(content, v, k.anchor))) writeScroll(content, v.scrollTop, "land-saved");
     }
     else if (!v.shown || v.stick) writeScroll(content, content.scrollHeight, "land-bottom", true);
     else writeScroll(content, v.scrollTop, "land-saved");
-    // a passage landing's pause on follow mode never outlives a re-show (the tab coming back, a full rebuild) that leaves the
-    // reader at the bottom: there no chip says text is below, so following is the only truthful state (the review of #251:
-    // back on the tab after a landing, the view sat at the bottom, chipless, and the next text landed below unseen)
-    if (v.followHeld && atBottom(content)) { v.followHeld = false; v.stick = true; }
   }
+  holdFloor(content, v);   // a reader still held stands in room down to the view's bottom edge, wherever the land put them
   v.heldKeep = null;   // a held tab's place serves the one return it was saved for (an anchored landing took it over, or it was used)
   v.shown = true;
   scheduleRailSticky();
@@ -16476,11 +16643,13 @@ function restoreScrollAnchor(content: HTMLElement, v: View, a: { uuid: string; y
 //
 // A sibling of the view element, never a child: syncView counts v.el's children to track what it has
 // rendered, so a foot node inside it would read as transcript.
-function syncHostOfflineFoot(): void {
+//
+// `keepPlace` false: the caller's own scroll maths run next and keep the reader's place across the foot (appendActive).
+function syncHostOfflineFoot(keepPlace = true): void {
   const content = document.getElementById("content");
   if (!content) return;
   const existing = document.getElementById("host-offline-foot");
-  if (!activeId || !hostIsDown(activeId)) { existing?.remove(); return; }
+  if (!activeId || !hostIsDown(activeId)) { if (existing) footChange(content, keepPlace, () => existing.remove()); return; }
   const host = String(activeId).slice(0, String(activeId).indexOf(":"));
   const text = host + " is disconnected — this is the last romp got from it. Reconnecting.";
   // The swirl after "Reconnecting" spins only while romp is actually trying to reach the host (the user
@@ -16497,7 +16666,6 @@ function syncHostOfflineFoot(): void {
   const dialing = hostIsDialing(activeId);
   const key = text + (dialing ? " |dialing" : "");
   if (existing && existing.dataset.text === key) return;
-  existing?.remove();
   // a slim SESSION notice in the warn severity at the transcript's tail (the audit's row 35 — it was a
   // centred italic line, the one row outside the vocabulary); off the rail, so the prose-column indent
   const foot = el("div", "notice-foot");
@@ -16512,7 +16680,24 @@ function syncHostOfflineFoot(): void {
     if (gistEl) gistEl.after(swirl); else card.querySelector(".notice-head")?.appendChild(swirl);
   }
   foot.appendChild(card);
-  content.appendChild(foot);
+  footChange(content, keepPlace, () => { existing?.remove(); content.appendChild(foot); });
+}
+// The foot coming, going or changing OUTSIDE appendActive (the host dropping mid-read, coming back, a dial starting or ending, a
+// re-show) moves the transcript's end with no write of the pane's: the browser keeps scrollTop, so a reader following the tail was
+// left the foot's height above the bottom, the notice mostly under the pane's edge, and no scroll event re-read the go-to-bottom
+// chip (the review of #308). The append's rule, read before the change: a reader following the tail (followingTail) is written to
+// the new bottom; anyone else keeps their scrollTop, and the clamp of a shorter end is claimed as the page's write ("append-raw"'s
+// shape). The chip re-reads after. Only the view on screen has a place to keep: a tab switch syncs the foot before it shows the
+// entering view, whose landing decides where the reader goes and re-reads the chip itself.
+function footChange(content: HTMLElement, keepPlace: boolean, change: () => void): void {
+  const v = activeId ? views.get(activeId) : null;
+  if (!keepPlace || !v || v.el.style.display === "none" || content.clientHeight <= 0) { change(); return; }
+  const stick = followingTail(content, v);
+  const before = content.scrollTop;
+  change();
+  if (stick) writeScroll(content, content.scrollHeight, "host-foot", true, before);
+  else writeScroll(content, before, "host-foot", false, before);
+  updateJumpBtn();
 }
 
 function appendActive() {
@@ -16526,13 +16711,13 @@ function appendActive() {
   // bottom keeps the existing stick; scrolled-up keeps its never-yank rule.
   // follow mode: the TRUE bottom (T262c), never the send band
   // …and never while a passage landing holds follow mode off (followHeld): the reader keeps their place
-  const stick = content.scrollHeight > content.clientHeight + 2 && atBottom(content) && !v?.followHeld;
+  const stick = followingTail(content, v);
   const before = content.scrollTop;
   const heightBefore = content.scrollHeight;
   const distBefore = heightBefore - before - content.clientHeight;
   const anchor = !stick && v ? captureScrollAnchor(content, v) : null;
   syncView(activeId, stick);
-  syncHostOfflineFoot();                 // before the scroll maths: it changes scrollHeight
+  syncHostOfflineFoot(false);            // before the scroll maths: it changes scrollHeight, and they keep the reader's place across it
   updateStatusline();
   // Follow-mode pins the bottom only when there is something new to follow (T262, the user 2026-09-08): a
   // status-only tail changes no content, and pinning on it snapped a reader wheeling up from the tail of a
@@ -16608,7 +16793,45 @@ function resumeAtBottom(c: HTMLElement): void {
  *  as before. */
 function releaseFollow(): void {
   const v = activeId ? views.get(activeId) : null;
-  if (v) { v.followHeld = false; v.heldKeep = null; }
+  const c = document.getElementById("content");
+  if (v) { v.followHeld = false; v.heldKeep = null; if (c) holdFloor(c, v); }   // …and the room the pause kept under the reader goes with it
+}
+/** The room a paused view stands in (the user 2026-10-17: a paused view holds the passage where the reader is looking). A passage
+ *  landing's pause (followHeld) often leaves the reader at the transcript's very end, and the end shrinks there while the session
+ *  writes: the fork control leaves the last drawn reply a frame before the next reply is drawn (26 px a reply in the served lab),
+ *  a notice gives way to a shorter reply, a footer comes off. The browser clamps scrollTop to the shorter end and the view moves by
+ *  the shrink, with nothing to put it back, the pause being the absence of that write. So while the pause holds, the thread
+ *  reaches down to the view's bottom edge at least (its min-height): a shrink under the reader leaves room below the last line,
+ *  and the next text fills that room first. Set where the reader's place is decided (the landing, every scroll of the held view, a
+ *  re-show); cleared with the pause, and before every landing and every land that is not the held tab's return (`on` false), the
+ *  clamp that clearing can cause claimed as the page's write. Rounded up: the room ends at most a pixel under the view, inside
+ *  atBottom's band. While the pause holds the room only grows: a scroll up leaves it where it was, so the transcript's end stays
+ *  below the reader and only their scroll back down to it resumes following (the review of #279: lowered to the view's bottom on
+ *  every scroll, the room met a reader who had scrolled 40 px up, the scroll's end read them as at the bottom, following resumed
+ *  and the view jumped by the room let go). A move that is not the reader's (`reader` false: the browser's scroll anchoring as text
+ *  ABOVE the view shrinks or grows, the page's own compensating writes) carries the room with it: the text moved under the view,
+ *  and the room stays where it was below the view's bottom edge, which is where it stood in the thread (floorAt) moved by as much.
+ *  The review of #280: a room left where it was met a reader 50 px above the end as 300 px left the transcript above them; the
+ *  anchoring kept their passage still, the room stayed 300 px too low, and they could scroll into that much blank space, then
+ *  jump by it as following resumed at its end. */
+function holdFloor(content: HTMLElement, v: View, on = !!v.followHeld, reader = true): void {
+  const el = v.el;
+  if (on) {
+    const r = el.getBoundingClientRect(), h = r.height;
+    if (h <= 0 || content.clientHeight <= 0) return;   // a hidden view has no place to hold
+    const at = content.getBoundingClientRect().top + content.clientTop + content.clientHeight - r.top;   // the view's bottom edge, in the thread
+    let floor = parseFloat(el.style.minHeight) || 0;
+    if (!reader && floor && v.floorAt != null) floor += at - v.floorAt;   // the text moved under the view: the room moves with it
+    v.floorAt = at;
+    const px = Math.max(floor, Math.ceil(h - (content.scrollHeight - content.scrollTop - content.clientHeight))) + "px";
+    if (el.style.minHeight !== px) el.style.minHeight = px;
+    return;
+  }
+  v.floorAt = null;
+  if (!el.style.minHeight) return;
+  const before = content.scrollTop;
+  el.style.minHeight = "";
+  writeScroll(content, content.scrollTop, "hold-floor", false, before);   // a clamp to the shorter end is the page's move, never a gesture
 }
 const jumpBtn = document.createElement("button");
 jumpBtn.id = "jump-bottom";
@@ -17015,7 +17238,9 @@ window.addEventListener("keydown", (e) => {
     // and every gesture-classified scroll after it is theirs until the scroll settles (scrollend) or a landing moves the view.
     // The page's own writes in between (the window sliding under a long flick) do not end it: the momentum runs on through them
     if (cls === "gesture" && gestureEvidence(settleLastInput, Date.now(), settleScrollerHeld)) readerScrolling = true;
-    if ((cls === "gesture" && readerScrolling) || (cls === "write-echo" && (writerIsReader(lastScrollWriter) || lastScrollWriter === "optimistic-send"))) resumeAtBottom(c);
+    const readerMove = (cls === "gesture" && readerScrolling) || (cls === "write-echo" && (writerIsReader(lastScrollWriter) || lastScrollWriter === "optimistic-send"));
+    if (readerMove) resumeAtBottom(c);
+    if (gv?.followHeld) holdFloor(c, gv, true, readerMove);   // the pause stands: the room under the reader follows their place down, never up, and moves with the text a move of nobody's carried (holdFloor)
     // …and while a passage landing settles, ANY move of the view (its re-land, or the browser's own move as the reply under the
     // passage grows) can carry the passage under the box that landing opened: the box steps off it (besideWatch). A reader's
     // own scroll has already ended the settle above, so it never moves the box
@@ -18867,14 +19092,21 @@ function customHintRow(s: AskSurface): HTMLElement {
 
 // Keep the picker card's keyboard alive across re-renders (each render rebuilds the card), but NEVER yank
 // focus from a user typing in the composer or any input — the footer stays visible now, so a re-mirror must
-// not steal the caret mid-word (the user 2026-07-09).
+// not steal the caret mid-word (the user 2026-07-09). Any input in the WINDOW, not only this page's: on the dashboard
+// this page is one column among several pane frames, and reading its own focus alone, a question arriving here took the
+// keys out of another column's message box mid-sentence (2026-10-18). windowFocusedElement reads the shell's focus; under
+// VS Code's cross-origin top it is this page's own, so the guard there is what it always was. This page's own focus is
+// still read too, so the guard only gained reasons to hold back.
 function focusCardUnlessTyping(card: HTMLElement) {
-  if (!isTypingTarget(document.activeElement) && !askCardElsewhere(card)) card.focus({ preventScroll: true });
+  const here = document.activeElement, there = windowFocusedElement(window);
+  if (isTypingTarget(here) || isTypingTarget(there) || askCardElsewhere(card, here) || askCardElsewhere(card, there)) return;
+  card.focus({ preventScroll: true });
 }
 // …nor from the OTHER surface's card (thread-live-1): the chat's picker repainting under an open popover must not pull
-// the keys away from the thread's picker the reader is stepping through, nor the other way round.
-function askCardElsewhere(card: HTMLElement): boolean {
-  const at = (document.activeElement as HTMLElement | null)?.closest?.(".ask-card") as HTMLElement | null;
+// the keys away from the thread's picker the reader is stepping through, nor the other way round; nor from another
+// column's card, on the same reading of the window's focus.
+function askCardElsewhere(card: HTMLElement, focused: Element | null): boolean {
+  const at = (focused as HTMLElement | null)?.closest?.(".ask-card") as HTMLElement | null;
   return !!at && at !== card && at.parentElement !== card.parentElement;
 }
 
@@ -19695,8 +19927,8 @@ function stopButton(state?: ChipState): HTMLElement {
   const stuck = state === "retrying" || state === "blocked";
   // styled tip (tip.ts): a label line + its explanation, so the icon-only square explains itself
   setTip(btn, stuck
-    ? "Stop retrying\ninterrupt this thread and hold its auto-retry off until you send it a message"
-    : "Stop\ninterrupt this session (same as Ctrl+C)");
+    ? "Stop retrying\ninterrupt this thread and hold its auto-retry off until you send it a message; its background agents stop too"
+    : "Stop\ninterrupt this session (same as Ctrl+C); its background agents stop too");
   btn.setAttribute("aria-label", stuck ? "Stop retrying this session" : "Interrupt session");
   btn.appendChild(el("span", "stop-icon"));   // a filled square (CSS), the universal stop glyph
   btn.addEventListener("click", (e) => {
@@ -21451,7 +21683,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   if (!quietActivation) wantFile = null;   // a pick leaves a FILE TAB (leaveFileTab: its discard ask; quietActivation: a restore does not)
   if (fileTabOpen && !quietActivation) {
     if (!leaveFileTab()) return;
-    if (activeId === id && anchor == null && anchorT == null) { if (collapsedTabIds.has(id)) unfoldSectionOf(id); renderTabs(); showActive(); return; }   // the session under the file
+    if (activeId === id && anchor == null && anchorT == null) { if (collapsedTabIds.has(id)) unfoldSectionOf(id); renderTabs(); showActive(); revealActiveTab(); return; }   // the session under the file
   }
   // A session pick ends the section view (the header put it up; the pick names a session) and brings the
   // picked tab on screen: a tab folded away under its header (a row of the view, a feed deep link, the
@@ -21461,6 +21693,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   if (collapsedTabIds.has(id)) unfoldSectionOf(id);   // per holder: see unfoldSectionOf
   if (activeId === id && anchor == null && anchorT == null) {   // already active, nothing to do…
     if (leavingSnap) { renderTabs(); showActive(); }             // …except put its transcript back
+    if (!quietActivation) revealActiveTab();                     // …and its tab on screen: the pick named it
     return;
   }
   navHist.record();   // every real navigation records the spot being LEFT (the user 2026-08-14: Ctrl+M / Ctrl+, walk the trail)
@@ -21520,6 +21753,7 @@ function setActive(id: string, anchor?: string, anchorT?: number, anchorKind?: s
   renderTabs();
   showActive();
   schedulePrebuild(); // warm the OTHER tabs in idle (MRU-first) so the next switch is instant
+  if (!quietActivation) revealActiveTab();   // a pick shows the tab it named; a restore (quietly) keeps the reader's place in the strip
 }
 
 function cycleTab(dir: number) {
@@ -23375,6 +23609,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
     // and three)
     if (activeId === m.id) notifyActive();
     if (m.live && activeId === m.id) {
+      revealActiveTab();   // the jump named the tab already shown: on screen in the strip, as setActive's pick would put it
       // one frame LATER, not now: when this focus is what un-hid the pane (the shell's reveal lands a
       // task after revealSelfPane's postMessage), the pane is still display:none here and scrollHeight
       // is 0 — the jump read as a no-op (the user 2026-08-13). Next frame the layout is real; when the
@@ -25521,10 +25756,14 @@ function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
     // it cuts the stalled turn and marks the thread retry-suppressed, so romp's auto-retry won't relapse.
     // Delegated (not a per-render listener) because the transcript tail rebuilds on every push. Acknowledge
     // at once — disable + relabel — so it never reads as unresponsive while the interrupt is in flight; the
-    // element vanishes on the next push when the storm ends, so no self-restore is needed.
+    // element vanishes on the next push when the storm ends, so no self-restore is needed. The interrupt goes to
+    // the session that OWNS the card (owningSidOf), never simply the active tab: a comment thread's popover draws
+    // the thread's own retrying card through this same renderer, and its stop must cut the THREAD's stalled turn,
+    // not the parent's running one.
     stopRetrying: (el) => {
-      if (!activeId || !vscodeApi) return;
-      vscodeApi.postMessage({ type: "interrupt", id: activeId });
+      const own = owningSidOf(el as HTMLElement);
+      if (!own || !vscodeApi) return;
+      vscodeApi.postMessage({ type: "interrupt", id: own });
       const b = el as HTMLButtonElement;
       b.disabled = true;
       b.textContent = "Stopping…";
@@ -25777,8 +26016,8 @@ function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
   // Click-safe pressing (the user 2026-06-30): hold renderTabs() while a pointer is pressed anywhere on the
   // strip, so a kernel push mid-press can't replaceChildren() out from under the ✕/tab you're clicking and
   // drop the click (see tabPointerHeld). #tabs is stable across every rebuild, so this listener is installed
-  // ONCE. Release on pointerup/cancel (anywhere — a press often ends off the tiny ✕) and on blur (the press
-  // may end in another frame / outside the window, where no pointerup reaches us). The flush is a setTimeout(0)
+  // ONCE. Release on pointerup/cancel (anywhere — a press often ends off the tiny ✕) and on the page losing the
+  // focus (the press may end outside the window, where no pointerup reaches us: below). The flush is a setTimeout(0)
   // so the click — dispatched immediately after pointerup, before the timer — fires against the live node first.
   tabs.addEventListener("pointerdown", () => { tabPointerHeld = true; });
   window.addEventListener("pointerup", releaseTabStrip);
@@ -25790,7 +26029,19 @@ function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
   // dragged node: the live reorder stopped, and the drop moved nothing (2026-09-11, a rename pushed mid-drag in the
   // served lab). The drag state the dragstart handlers set is the tell; a drag of ours in flight keeps the hold.
   window.addEventListener("pointercancel", () => { if (draggedId || draggedGroup) return; releaseTabStrip(); });
-  window.addEventListener("blur", releaseTabStrip);
+  // The window's blur releases the hold only when the PAGE lost the focus: a window switch, which puts the page behind another
+  // mid-press with neither a pointerup nor a pointercancel. A blur that is the focus moving to ANOTHER frame of the page (another
+  // chat column's question card focusing itself on a push, focusCardUnlessTyping) leaves the press held: its pointerup still comes
+  // here, and releasing early let that same push rebuild the strip under the press and lose the click. This frame's own
+  // document.hasFocus() reads false for both, so the TOP document's is read (page-focus.ts; the shell is same-origin), and the
+  // window the focus moved to is watched from then on, so a window switch later in the press still releases. In VS Code's webview
+  // the top is cross-origin and cannot be read: there every blur releases the hold, as it always has, since nothing this page can
+  // read tells the two apart.
+  window.addEventListener("blur", () => {
+    if (!tabPointerHeld || tabHoldFocusOff) return;   // not held, or the watch is on and hears this blur itself
+    const off = pageBlurred(window, releaseTabStrip);
+    if (tabPointerHeld) tabHoldFocusOff = off;   // the page's focus gone: the call released the hold already, and its watch is off
+  });
   // LIVE REORDER (T127, the user 2026-08-27: dragging should push the other tabs into their new
   // locations as you drag, the way browsers do): while a tab drags, its in-flow element moves
   // through the strip's DOM as the pointer crosses the MIDPOINT of the tab under it — the

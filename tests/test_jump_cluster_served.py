@@ -26,9 +26,19 @@ lines long. Asserted in the browser, each move by the deep-link flash landing on
   tall (the phone's 40 inside the hairline, the arrows' touch size), left-aligned, one capsule gap below the column, and
   the page computes the same surface, hairline, shadow and radius for it as for a capsule, in the dark theme and the
   light, with the arrows' chevron at their size, stroke and resting glow; scrolled up on the phone, column and chip
-  together sit between the pane's top and the message box.
+  together sit between the pane's top and the message box. A question waiting at the bottom (the user 2026-10-18,
+  paraphrased: the corner's pills had no room only then): its picker card keeps the thread's left gutter, so the column
+  covers neither the card nor a line of its text, on the desktop and the phone, in either theme; and with a long unbroken
+  path in the question, the question wraps inside the card rather than running past its right edge.
+A second lab (ServedHostOfflineFoot, two kernels): a session on a checked-in TESTHOST whose link drops shows the
+host-offline foot under its last turn with no other event, and the foot keeps the thread's left gutter, so neither the
+column nor the go-to-bottom chip covers it, at the bottom and a few lines up, on the desktop and the phone, in either theme.
+As the foot comes up, a reader at the bottom stays there with the whole foot in view, a reader scrolled up is not moved, and
+a transcript that fit its pane is not yanked as the foot overflows it, the go-to-bottom chip coming up for it at once.
 With JUMP_SHOTS=<dir> the driver writes the cluster in the dark theme, the light theme and the phone layout (a coarse
-pointer), each also a screen up with the go-to-bottom chip showing (*-up-corner.png). With JUMP_SHOTS_ONLY=1 it writes
+pointer), each also a screen up with the go-to-bottom chip showing (*-up-corner.png), the corner with the question's
+card up (ask-*.png, phone-ask-*.png; ask-long-*.png with the long path), and the foot's corner a few lines up
+(foot-*.png, phone-foot-*.png). With JUMP_SHOTS_ONLY=1 it writes
 the shots after load and stops, for a before shot of an older build. Skips LOUDLY without the extension deps or a
 Playwright browser. SYNTHETIC fixtures only (placeholder UUIDs, invented prose,
 host TESTHOST)."""
@@ -166,6 +176,85 @@ const openWeb = async (p) => {   // the web tab is the long one; the strip may o
   await p.waitForSelector(`#tabs .tab[data-id="${cfg.sid}"]`, { state: "attached", timeout: 30000 });
   await p.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`).click(), cfg.sid);
 };
+// A QUESTION WAITING ON THE READER (the user 2026-10-18, paraphrased: the corner's pills had no room only when a question was
+// waiting). The picker card is the transcript's tail, the row beside the column, and it sits beside the threads rather than
+// inside one. At the bottom of the transcript the lab dispatches the kernel's own askLive frame (the shape the SDK backend
+// pushes), measures the column against the card and each line of its text in the dark theme and the light, shoots the corner,
+// and clears the question. The kernel's own question frames for the session are held back, so none clears the lab's mid-run.
+const ASK = { kind: "single", header: "Release", question: "Ship the fix to the notes-api exporter now, or hold it for the next release?",
+  options: [{ n: 1, label: "Ship it (Recommended)", desc: "Merge on green and release behind the flag today.", selected: true },
+            { n: 2, label: "Hold for now", selected: false }, { n: 3, label: "Type something.", selected: false }],
+  cursor: 1, cursorFound: true, multiSelect: false, sig: "lab-ask-1" };
+const holdAsks = (p) => p.addInitScript((sid) => {
+  window.addEventListener("message", (e) => { const m = e.data;
+    if (m && (m.type === "askLive" || m.type === "askLiveClear") && m.id === sid && !m.__lab) e.stopImmediatePropagation(); }, true);
+}, cfg.sid);
+const lab = (p, m) => p.evaluate((m) => { window.dispatchEvent(new MessageEvent("message", { data: { ...m, __lab: true } })); }, m);
+const ASKGEO = () => {
+  const R = (e) => { const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom }; };
+  const box = document.getElementById("jump-cluster"), card = document.querySelector("#live-ask .ask-card");
+  const th = Array.from(document.querySelectorAll("#content .thread")).find((e) => e.getClientRects().length > 0);
+  return { shown: !box.hidden && getComputedStyle(box).display !== "none", column: R(box), card: card ? R(card) : null,
+           gutter: th ? th.getBoundingClientRect().left + parseFloat(getComputedStyle(th).paddingLeft) : null,
+           texts: card ? Array.from(card.querySelectorAll(".ask-qtext, .ask-optlabel, .ask-optdesc, .ask-custom-plus, .ask-custom-hint-text"))
+                           .map((e) => ({ cls: e.className, text: e.textContent.slice(0, 24), ...R(e) })) : [] };
+};
+// A LONG UNBROKEN TOKEN in the question (2026-10-18, the review of #306): a path or URL ran past the card's right border and was
+// clipped at the pane's edge, worse once the card took the gutter. The same card with an invented path in its question: the text
+// as laid out (a range over the question's contents) stays inside the card, and the question's box has nothing to scroll.
+const ASK_LONG = { ...ASK, sig: "lab-ask-2",
+  question: "Overwrite notes-api/services/exporter/fixtures/regenerated_after_the_nightly_sweep/export_rows_through_a_bounded_buffer_with_the_header_written_once_and_the_retry_cap_at_two_minutes_step_149.csv with the regenerated fixture?" };
+const LONGGEO = () => {
+  const card = document.querySelector("#live-ask .ask-card"), q = card && card.querySelector(".ask-qtext");
+  if (!q) return null;
+  const range = document.createRange(); range.selectNodeContents(q);
+  const R = (r) => ({ l: r.left, t: r.top, r: r.right, b: r.bottom });
+  return { card: R(card.getBoundingClientRect()), text: R(range.getBoundingClientRect()), lines: range.getClientRects().length,
+           scrollW: q.scrollWidth, clientW: q.clientWidth, has: q.textContent.includes("step_149.csv") };
+};
+const askStep = async (p, prefix) => {
+  await backDown(p);
+  await lab(p, { type: "askLive", id: cfg.sid, ask: ASK });
+  const up = await p.waitForSelector("#live-ask .ask-card", { timeout: 10000 }).then(() => true).catch(() => false);
+  await p.waitForTimeout(500);   // the reveal's scroll and the column's placement settle
+  const res = { up };
+  await p.mouse.move(300, 60);
+  for (const th of ["dark", "light"]) {   // the default dark, and the light theme as the gear applies it (theme.ts: both classes)
+    await p.evaluate((light) => { document.body.classList.toggle("theme-light", light); document.body.classList.toggle("chat-theme-yatharth", light); }, th === "light");
+    await p.waitForTimeout(300);
+    await p.evaluate(() => { const c = document.getElementById("content"); c.scrollTop = c.scrollHeight; });   // the theme's own strip can move the tail
+    await p.waitForTimeout(300);
+    res[th] = await p.evaluate(ASKGEO);
+    const g = res[th];
+    if (cfg.shots && g.card) {
+      fs.mkdirSync(cfg.shots, { recursive: true });
+      const c = await p.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { w: r.width, b: r.bottom }; });
+      const top = Math.max(0, Math.min(g.column.t, g.card.t) - 40);
+      await p.screenshot({ path: cfg.shots + "/" + prefix + "ask-" + th + ".png", clip: { x: 0, y: top, width: Math.min(c.w, 640), height: c.b - top } });
+    }
+  }
+  await lab(p, { type: "askLive", id: cfg.sid, ask: ASK_LONG });
+  await p.waitForFunction(() => { const q = document.querySelector("#live-ask .ask-qtext"); return !!q && q.textContent.includes("step_149"); }, null, { timeout: 10000 }).catch(() => {});
+  res.long = {};
+  for (const th of ["dark", "light"]) {
+    await p.evaluate((light) => { document.body.classList.toggle("theme-light", light); document.body.classList.toggle("chat-theme-yatharth", light); }, th === "light");
+    await p.waitForTimeout(300);
+    await p.evaluate(() => { const c = document.getElementById("content"); c.scrollTop = c.scrollHeight; });
+    await p.waitForTimeout(300);
+    const g = res.long[th] = await p.evaluate(LONGGEO);
+    if (cfg.shots && g) {
+      fs.mkdirSync(cfg.shots, { recursive: true });
+      const c = await p.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { w: r.width, b: r.bottom }; });
+      const top = Math.max(0, g.card.t - 40);
+      await p.screenshot({ path: cfg.shots + "/" + prefix + "ask-long-" + th + ".png", clip: { x: 0, y: top, width: c.w, height: c.b - top } });
+    }
+  }
+  await p.evaluate(() => { document.body.classList.remove("theme-light", "chat-theme-yatharth"); });
+  await lab(p, { type: "askLiveClear", id: cfg.sid });
+  await p.waitForSelector("#live-ask .ask-card", { state: "detached", timeout: 10000 }).catch(() => {});
+  return res;
+};
+await holdAsks(page);
 await page.goto(cfg.chat);
 await openWeb(page);
 await settle(cfg.shotsOnly ? null : "#jump-cluster:not([hidden])");
@@ -175,12 +264,14 @@ if (cfg.shotsOnly) {
   await shoot(page, "light");
   await page.evaluate(() => document.body.classList.remove("theme-light"));
   await scrollUp(page); await upCorner(page, "", ["dark", "light"]);
+  await askStep(page, "");
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
-  const pp = await phone.newPage(); await pp.goto(cfg.chat); await openWeb(pp);
+  const pp = await phone.newPage(); await holdAsks(pp); await pp.goto(cfg.chat); await openWeb(pp);
   await pp.waitForSelector("#content .turn-user", { state: "attached", timeout: 60000 }); await pp.waitForTimeout(4000);
   if (cfg.shots) await pp.screenshot({ path: cfg.shots + "/phone.png" });
   await scrollUp(pp); await upCorner(pp, "phone-", ["dark", "light"]);
   if (cfg.shots) await pp.screenshot({ path: cfg.shots + "/phone-up.png" });
+  await askStep(pp, "phone-");
   fs.writeSync(1, "RESULT:" + JSON.stringify({ shotsOnly: true }) + "\n"); await browser.close(); process.exit(0);
 }
 // every deep-link flash as it lands: the uuid of the turn wearing it (the flash is a 1.6s class; a late wait can miss it)
@@ -298,6 +389,8 @@ if (Object.values(out.steps).every((s) => s.ok)) {
   out.counts.reply = await page.evaluate(() => window.__replyLands("tid-c"));
   out.counts.replyInView = await inView(R(140));
 }
+// a question waiting at the bottom: the column covers none of its card
+out.ask = await askStep(page, "");
 // the api tab: a transcript that fits shows no cluster
 await page.evaluate((sid) => { const t = document.querySelector(`#tabs .tab[data-id="${sid}"]`); if (t) t.click(); }, cfg.api);
 await page.waitForTimeout(1500);
@@ -305,6 +398,7 @@ out.api = await page.evaluate(() => ({ hidden: document.getElementById("jump-clu
 // the phone layout: a coarse pointer, all three capsules showing (three replies wait unread at the bottom)
 const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
 const pp = await phone.newPage();
+await holdAsks(pp);
 await pp.goto(cfg.chat);
 await openWeb(pp);
 await pp.waitForSelector("#jump-cluster:not([hidden]) .jc-unread:not([hidden])", { timeout: 60000 }).catch(() => {});
@@ -322,6 +416,8 @@ out.phoneDress.light = await pp.evaluate(DRESS);
 await pp.evaluate(() => document.body.classList.remove("theme-light")); await pp.waitForTimeout(200);
 await upCorner(pp, "phone-", ["dark", "light"]);
 if (cfg.shots) await pp.screenshot({ path: cfg.shots + "/phone-up.png" });
+// the phone, back at the bottom, with a question waiting: the wider column covers none of its card either
+out.phoneAsk = await askStep(pp, "phone-");
 fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
 await browser.close();
 process.exit(0);
@@ -432,7 +528,15 @@ class ServedJumpCluster(unittest.TestCase):
             k.wait()
         shutil.rmtree(getattr(cls, "lab", ""), ignore_errors=True)
 
+    _result = None
+
     def _drive(self):
+        """The driver runs once for the class; each test reads its own part of the one result."""
+        if ServedJumpCluster._result is None:
+            ServedJumpCluster._result = self._run_driver()
+        return ServedJumpCluster._result
+
+    def _run_driver(self):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "sid": WEB, "api": API,
@@ -553,6 +657,51 @@ class ServedJumpCluster(unittest.TestCase):
             s0["rect"]["w"], s0["rect"]["h"], s1["jump"]["w"], s1["jump"]["h"], ph["rect"]["w"], ph["rect"]["h"], pu["jump"]["w"], pu["jump"]["h"],
             pu["rect"]["t"] - pu["content"]["t"], pu["composerTop"] - pu["jump"]["b"]))
 
+    def test_the_column_covers_none_of_a_waiting_question(self):
+        """A question waiting on the reader (the user 2026-10-18, paraphrased: the corner's pills had no room only when a
+        question was waiting): the picker card is the transcript's tail, beside the column in the corner, and keeps the
+        thread's left gutter as the turns do, so the column covers neither the card nor a line of its text, on the desktop and
+        on the phone, in the dark theme and the light. It ran to the pane's left edge and lost its first letters under the
+        column."""
+        r = self._drive()
+        if r.get("shotsOnly"):
+            self.skipTest("optional: JUMP_SHOTS_ONLY wrote the screenshots and ran no assertions")
+        for where, a in (("desktop", r["ask"]), ("phone", r["phoneAsk"])):
+            self.assertTrue(a["up"], "%s: the question's card is up: %r" % (where, a))
+            for theme in ("dark", "light"):
+                g, at = a[theme], "%s %s" % (where, theme)
+                col, card = g["column"], g["card"]
+                self.assertTrue(g["shown"], "%s: the column shows, so the check means something: %r" % (at, g))
+                self.assertIsNotNone(card, "%s: the card is on the page: %r" % (at, g))
+                self.assertTrue(card["t"] < col["b"] and card["b"] > col["t"],
+                                "%s: the card sits beside the column, so the check means something: %r" % (at, g))
+
+                def covers(b):
+                    return b["l"] < col["r"] and b["r"] > col["l"] and b["t"] < col["b"] and b["b"] > col["t"]
+                self.assertFalse(covers(card), "%s: the column covers none of the card: column %r, card %r" % (at, col, card))
+                self.assertGreaterEqual(len(g["texts"]), 5, "%s: the question, both options, a description, the add-your-own hint: %r" % (at, g["texts"]))
+                for t in g["texts"]:
+                    self.assertFalse(covers(t), "%s: the column covers %s %r: column %r, text %r" % (at, t["cls"], t["text"], col, t))
+                self.assertIsNotNone(g["gutter"], g)
+                self.assertLess(abs(card["l"] - g["gutter"]), 0.5,
+                                "%s: the card starts at the thread's gutter, where the turns' column does: %r" % (at, g))
+
+    def test_a_long_path_in_a_waiting_question_wraps_inside_its_card(self):
+        """A long unbroken token in a waiting question (2026-10-18, the review of #306: a path or URL ran past the card's right
+        border and was clipped at the pane's edge): the question wraps inside the card, on the desktop and on the phone, in the
+        dark theme and the light. Before .ask-qtext wrapped anywhere, the invented path's line ran past the card on both."""
+        r = self._drive()
+        if r.get("shotsOnly"):
+            self.skipTest("optional: JUMP_SHOTS_ONLY wrote the screenshots and ran no assertions")
+        for where, a in (("desktop", r["ask"]), ("phone", r["phoneAsk"])):
+            for theme in ("dark", "light"):
+                g, at = a["long"][theme], "%s %s" % (where, theme)
+                self.assertIsNotNone(g, "%s: the card with the long question is up: %r" % (at, a))
+                self.assertTrue(g["has"], "%s: it is the long question: %r" % (at, g))
+                self.assertGreater(g["lines"], 2, "%s: the question wraps over several lines: %r" % (at, g))
+                self.assertLessEqual(g["text"]["r"], g["card"]["r"], "%s: no line of the question runs past the card's right edge: %r" % (at, g))
+                self.assertLessEqual(g["scrollW"], g["clientW"], "%s: the question's box has nothing hidden to its right: %r" % (at, g))
+
     def _same_dress(self, d, glyph_px, rest, where):
         """The go-to-bottom chip and a capsule, as the page computed them: one surface, hairline, shadow and radius, and the
         chip's chevron the arrows' own at their size, stroke and resting glow."""
@@ -565,6 +714,340 @@ class ServedJumpCluster(unittest.TestCase):
         for k in ("w", "h", "stroke", "vb", "points", "opacity"):
             self.assertEqual(jg[k], ag[k], "%s: the chip's chevron %s is a down arrow's: %r" % (where, k, d))
         self.assertEqual(jg["opacity"], rest, "%s: resting, as the arrows rest: %r" % (where, jg))
+
+
+# THE HOST-OFFLINE FOOT (2026-10-18). A session on a linked machine whose link drops keeps its transcript on screen, and the
+# transcript says where it ends and why: a slim notice under the last turn (render.ts syncHostOfflineFoot), a sibling of the
+# threads rather than a row inside one. It sits in the go-to-bottom chip's slot at the bottom, and a reader a few lines up has
+# the chip beside it; the foot keeps the thread's left gutter, so neither the chip nor the column above it covers its first
+# letters. The lab is two hermetic kernels: a hub, and a TESTHOST checked in to it (the mobile handshake, no ssh) holding a
+# session long enough to overflow both layouts, and a short one that fits. The pages read the remote sessions while their host
+# answers; then the lab's own TESTHOST kernel is killed by its pid, the hub's health pass reads the host down, and each page's
+# next poll publishes the drop (romp-hosts). Nothing else happens on any page, so the foot coming up at all is the drop's own
+# repaint (before it the foot waited for the next frame or tab switch, and a dropped host sends no frame), and where the
+# reader stands after it is the page's own write as the foot comes up (the review of #308).
+FOOT_SID = "aaaaaaaa-1111-2222-3333-777777777777"   # "web" on TESTHOST
+FOOT_SHORT_SID = "aaaaaaaa-1111-2222-3333-666666666666"   # "api" on TESTHOST: two exchanges, a transcript that fits the pane
+FOOT_HOST = "TESTHOST"
+FOOT_REMOTE = FOOT_HOST + ":" + FOOT_SID
+FOOT_SHORT_REMOTE = FOOT_HOST + ":" + FOOT_SHORT_SID
+FOOT_N = 40
+
+FOOT_DRIVER = r"""
+import { createRequire } from "node:module";
+import fs from "node:fs";
+const require = createRequire(process.env.EXT_PKG);
+const { chromium } = require("playwright");
+const cfg = JSON.parse(fs.readFileSync(process.env.CFG, "utf8"));
+let browser;
+try { browser = await chromium.launch(); }
+catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
+const out = {};
+const open = async (opts, id = cfg.remote) => {   // a remote session's tab on the hub's page (the long one with the column up)
+  const ctx = await browser.newContext(opts);
+  const p = await ctx.newPage();
+  await p.goto(cfg.chat);
+  await p.waitForSelector(`#tabs .tab[data-id="${id}"]`, { state: "attached", timeout: 60000 });
+  await p.evaluate((id) => document.querySelector(`#tabs .tab[data-id="${id}"]`).click(), id);
+  await p.waitForSelector("#content .turn-user", { state: "attached", timeout: 60000 });
+  if (id === cfg.remote) await p.waitForSelector("#jump-cluster:not([hidden])", { timeout: 30000 }).catch(() => {});
+  return p;
+};
+const GEO = () => {
+  const R = (e) => { const r = e.getBoundingClientRect(); return { l: r.left, t: r.top, r: r.right, b: r.bottom }; };
+  const on = (e) => !!e && !e.hidden && getComputedStyle(e).display !== "none";
+  const box = document.getElementById("jump-cluster"), chip = document.getElementById("jump-bottom");
+  const foot = document.getElementById("host-offline-foot"), card = foot && foot.querySelector(".notice");
+  const th = Array.from(document.querySelectorAll("#content .thread")).find((e) => e.getClientRects().length > 0);
+  const pills = [];
+  if (on(box)) pills.push({ what: "column", ...R(box) });
+  if (on(chip)) pills.push({ what: "chip", ...R(chip) });
+  return { pills, card: card ? R(card) : null, text: foot ? foot.textContent : "",
+           gutter: th ? th.getBoundingClientRect().left + parseFloat(getComputedStyle(th).paddingLeft) : null,
+           texts: card ? Array.from(card.querySelectorAll(".notice-glyph, .notice-src, .notice-gist, .host-dial-swirl"))
+                           .map((e) => ({ cls: e.className, text: (e.textContent || "").slice(0, 24), ...R(e) })) : [] };
+};
+const toBottom = (p) => p.evaluate(() => { const c = document.getElementById("content"); c.scrollTop = c.scrollHeight; });
+// at the bottom (the foot in the chip's empty slot), then a few lines up (the chip up beside it), in the dark theme and the light
+const footStep = async (p, prefix) => {
+  const res = {};
+  await p.mouse.move(300, 60);
+  for (const th of ["dark", "light"]) {
+    await p.evaluate((light) => { document.body.classList.toggle("theme-light", light); document.body.classList.toggle("chat-theme-yatharth", light); }, th === "light");
+    await p.waitForTimeout(300);
+    await toBottom(p);
+    await p.waitForSelector("#jump-bottom", { state: "hidden", timeout: 5000 }).catch(() => {});
+    await p.waitForTimeout(300);
+    const bottom = await p.evaluate(GEO);
+    await p.evaluate((d) => { const c = document.getElementById("content"); c.scrollTop = c.scrollHeight - c.clientHeight - d; }, cfg.up);
+    await p.waitForSelector("#jump-bottom:not([hidden])", { timeout: 5000 }).catch(() => {});
+    await p.waitForTimeout(300);
+    const up = await p.evaluate(GEO);
+    res[th] = { bottom, up };
+    if (cfg.shots && up.card) {
+      fs.mkdirSync(cfg.shots, { recursive: true });
+      const c = await p.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { w: r.width, b: r.bottom }; });
+      const top = Math.max(0, Math.min(...up.pills.map((x) => x.t), up.card.t) - 60);
+      await p.screenshot({ path: cfg.shots + "/" + prefix + "foot-" + th + ".png", clip: { x: 0, y: top, width: Math.min(c.w, 640), height: c.b - top } });
+    }
+  }
+  await p.evaluate(() => { document.body.classList.remove("theme-light", "chat-theme-yatharth"); });
+  await toBottom(p);
+  return res;
+};
+// Where the reader stands as the foot comes up (the review of #308): the drop adds the foot at the transcript's end with no
+// append, so the page's own write is all that keeps a reader who follows the tail at the bottom, and all that re-reads the chip.
+const PLACE = () => {
+  const c = document.getElementById("content"), foot = document.getElementById("host-offline-foot"), chip = document.getElementById("jump-bottom");
+  const top = c.getBoundingClientRect().top + c.clientTop, r = foot ? foot.getBoundingClientRect() : null;
+  return { top: c.scrollTop, sh: c.scrollHeight, ch: c.clientHeight, dist: c.scrollHeight - c.scrollTop - c.clientHeight,
+           pane: { t: top, b: top + c.clientHeight }, foot: r ? { t: r.top, b: r.bottom, h: r.height } : null, chip: !!chip && !chip.hidden };
+};
+const settled = (p) => p.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(r, 300)))));
+// the short transcript's pane sized to hold it with a little room to spare (cfg.slack px), so it fits until the foot comes up: its
+// height read where it overflows a short pane (scrollHeight is the pane's own height while nothing overflows), then the pane grown
+const fit = async (p) => {
+  await p.setViewportSize({ width: 1000, height: 320 });
+  await settled(p);
+  const m = await p.evaluate(() => { const c = document.getElementById("content"); return { sh: c.scrollHeight, ch: c.clientHeight, vh: window.innerHeight }; });
+  await p.setViewportSize({ width: 1000, height: Math.ceil(m.vh - m.ch + m.sh + cfg.slack) });
+  await settled(p);
+};
+const desk = await open({ viewport: { width: 1000, height: 700 }, deviceScaleFactor: 2 });
+const phone = await open({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true });
+const away = await open({ viewport: { width: 1000, height: 700 }, deviceScaleFactor: 2 });   // a reader scrolled well up
+const fits = await open({ viewport: { width: 1000, height: 700 }, deviceScaleFactor: 2 }, cfg.shortRemote);   // a transcript that fits
+for (const p of [desk, phone, away]) await toBottom(p);
+await away.evaluate((d) => { const c = document.getElementById("content"); c.scrollTop = c.scrollHeight - c.clientHeight - d; }, cfg.away);
+await fit(fits);
+const legs = { desk, phone, away, fits };
+for (const p of Object.values(legs)) await settled(p);
+out.before = {};
+for (const [k, p] of Object.entries(legs)) out.before[k] = await p.evaluate(PLACE);
+out.footWhileUp = await desk.evaluate(() => !!document.getElementById("host-offline-foot"));
+// the link drops: the lab's TESTHOST kernel goes away (its own pid, nothing matched by name), the hub reads the host down
+process.kill(cfg.remotePid, "SIGKILL");
+for (const p of Object.values(legs)) await p.waitForSelector("#host-offline-foot", { state: "attached", timeout: 60000 }).catch(() => {});
+out.after = {};
+for (const [k, p] of Object.entries(legs)) { await settled(p); out.after[k] = await p.evaluate(PLACE); }
+for (const p of [away, fits]) await p.context().close();
+out.desk = await footStep(desk, "");
+out.phone = await footStep(phone, "phone-");
+fs.writeSync(1, "RESULT:" + JSON.stringify(out) + "\n");
+await browser.close();
+process.exit(0);
+"""
+
+
+def _foot_kernel(lab, name, port, token, sessions):
+    """One hermetic kernel of the foot's lab under `lab`/`name`, serving `sessions` ((sid, name, exchanges) each)."""
+    root = os.path.join(lab, name)
+    state = os.path.join(root, "xdg", "romp")
+    claude = os.path.join(root, "claude")
+    cwd = os.path.join(root, "proj")
+    for d in ("names", "sdk", "states"):
+        os.makedirs(os.path.join(state, d), exist_ok=True)
+    Path(state, "session-hosts").write_text("off\n")   # a lab root of its own: no per-session host process (CLAUDE.md, 2026-09-11)
+    Path(state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
+    fakebin = os.path.join(root, "fakebin")   # the machine's user manager is not the lab's
+    os.makedirs(fakebin)
+    for tool, body in (("systemctl", "exit 0\n"), ("systemd-run", "echo 'no user manager in this lab' >&2\nexit 1\n")):
+        Path(fakebin, tool).write_text("#!/bin/sh\n" + body)
+        os.chmod(os.path.join(fakebin, tool), 0o755)
+    os.makedirs(cwd, exist_ok=True)
+    proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
+    os.makedirs(proj, exist_ok=True)
+    t0 = int(time.time()) - 86400
+    for sid, sname, n in sessions:
+        Path(state, "names", sid).write_text("%s\t%s\t#9cd2ff\t#0c1a2e\n" % (sname, cwd))
+        Path(state, "sdk", sid + ".json").write_text(json.dumps(
+            {"sid": sid, "name": sname, "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": sid, "alive": True,
+             "model": "claude-opus-5", "liveModel": "Opus 5"}))
+        recs, prev = [], None
+        for k in range(n):
+            u, a = "%s-u%03d" % (sid[:8], k), "%s-a%03d" % (sid[:8], k)
+            recs.append({"type": "user", "timestamp": iso(t0 + 600 * k), "uuid": u, "parentUuid": prev, "promptSource": "typed",
+                         "sessionId": sid, "message": {"role": "user", "content": "notes-api: step %d, how does the export look?" % k}})
+            recs.append({"type": "assistant", "timestamp": iso(t0 + 600 * k + 30), "uuid": a, "parentUuid": u, "sessionId": sid,
+                         "message": {"role": "assistant", "model": "claude-opus-5", "stop_reason": "end_turn",
+                                     "content": [{"type": "text", "text": reply_body(k)}]}})
+            prev = a
+        Path(proj, sid + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+    env = _lab.kernel_env(root, claude, os.path.join(lab, "dist"), port, token, ROMP_HOST_NAME=name.upper())
+    env["PATH"] = fakebin + os.pathsep + env.get("PATH", os.environ.get("PATH", ""))
+    log = os.path.join(lab, name + "-kernel.log")
+    proc = subprocess.Popen([os.path.join(BIN, "romp-kernel")], stdout=open(log, "w"), stderr=subprocess.STDOUT, env=env)
+    for _ in range(120):
+        try:
+            urllib.request.urlopen("http://127.0.0.1:%d/healthz" % port, timeout=1)
+            return proc, log
+        except Exception:
+            time.sleep(0.5)
+    proc.kill()
+    proc.wait()
+    raise unittest.SkipTest("hermetic kernel %s never served /healthz here" % name)
+
+
+class ServedHostOfflineFoot(unittest.TestCase):
+    """The host-offline foot beside the jump cluster: the foot keeps the thread's left gutter, so neither the column nor the
+    go-to-bottom chip under it covers the notice or a word of it, at the bottom and a few lines up, on the desktop and the
+    phone, in the dark theme and the light. It started at the pane's 24px, under the 14..38px chip (14..48 on the phone).
+    And where the reader stands as it comes up (the review of #308): two more desktop pages read as the host drops, one
+    scrolled well up the long session, one on a two-exchange session (api) whose pane is sized to hold it with less room than
+    the foot needs. Before the fix a reader at the bottom was left the foot's height above it, most of the foot under the
+    pane's edge, and the chip stayed down."""
+    maxDiff = None
+    UP = 16   # how far above the bottom the reader sits for the second measure: off the true bottom, so the chip is up
+    AWAY = 300   # how far above the bottom the scrolled-up reader sits as the host drops: well past the foot's height
+    SLACK = 12   # the room under the short transcript before the drop: less than the foot, so the foot overflows the pane
+
+    @classmethod
+    def setUpClass(cls):
+        cls.procs = []
+        try:
+            cls._boot()
+        except BaseException:
+            cls.tearDownClass()
+            raise
+
+    @classmethod
+    def _boot(cls):
+        if not os.path.isdir(os.path.join(EXT, "node_modules", "playwright")):
+            raise unittest.SkipTest("extension deps absent (npm ci not run here) — the served guard needs them")
+        probe = subprocess.run(["node", "-e", "const p=require(process.argv[1]);process.stdout.write(p.chromium.executablePath())",
+                                os.path.join(EXT, "node_modules", "playwright")], capture_output=True, text=True)
+        if probe.returncode != 0 or not os.path.exists(probe.stdout.strip()):
+            raise unittest.SkipTest("no playwright browser on this box — the served guard needs one (CI installs none)")
+        cls.lab = tempfile.mkdtemp(prefix="jump-foot-")
+        b = subprocess.run(["node", "esbuild.js"], cwd=EXT, capture_output=True, text=True)
+        if b.returncode != 0:
+            raise unittest.SkipTest("esbuild failed here: " + (b.stderr or b.stdout)[-200:])
+        copy_dist(os.path.join(EXT, "dist"), os.path.join(cls.lab, "dist"))
+        cls.rport, cls.rtoken = _free_port(), "testtok-foot-remote"
+        cls.hport, cls.htoken = _free_port(), "testtok-foot-hub"
+        cls.remote, cls.rlog = _foot_kernel(cls.lab, "testhost", cls.rport, cls.rtoken, [(FOOT_SID, "web", FOOT_N), (FOOT_SHORT_SID, "api", 2)])
+        cls.procs.append(cls.remote)
+        hub, cls.hlog = _foot_kernel(cls.lab, "hub", cls.hport, cls.htoken, [])
+        cls.procs.append(hub)
+        body = json.dumps({"host": FOOT_HOST, "kernelPort": cls.rport, "busPort": _free_port(), "token": cls.rtoken}).encode()
+        req = urllib.request.Request("http://127.0.0.1:%d/checkin?token=%s" % (cls.hport, cls.htoken), data=body,
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if not json.loads(resp.read().decode()).get("ok"):
+                raise unittest.SkipTest("the hub refused the check-in")
+        rows = []
+        for _ in range(60):
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:%d/tunnels?token=%s" % (cls.hport, cls.htoken), timeout=3) as r:
+                    rows = json.loads(r.read().decode()).get("tunnels") or []
+            except Exception:
+                rows = []
+            if any(t.get("host") == FOOT_HOST and t.get("status") == "up" and t.get("hasToken") for t in rows):
+                break
+            time.sleep(0.5)
+        else:
+            raise unittest.SkipTest("the hub never reported the checked-in TESTHOST up: %r" % (rows,))
+
+    @classmethod
+    def tearDownClass(cls):
+        for p in getattr(cls, "procs", []):
+            try:
+                p.kill()
+                p.wait()
+            except Exception:
+                pass
+        shutil.rmtree(getattr(cls, "lab", ""), ignore_errors=True)
+
+    def _drive(self):
+        """The driver's result, run once for the class: the drop it makes is the lab's one, and every test reads its pages."""
+        cls = type(self)
+        if "_result" not in cls.__dict__:
+            try:
+                cls._result = self._run_driver()
+            except BaseException as e:   # a skip or a failure is every test's, not the first one's alone
+                cls._result = e
+        if isinstance(cls._result, BaseException):
+            raise cls._result
+        return cls._result
+
+    def _run_driver(self):
+        cfg = os.path.join(self.lab, "cfg.json")
+        with open(cfg, "w") as f:
+            json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.hport, self.htoken), "remote": FOOT_REMOTE,
+                       "shortRemote": FOOT_SHORT_REMOTE, "remotePid": self.remote.pid, "up": self.UP, "away": self.AWAY,
+                       "slack": self.SLACK, "shots": os.environ.get("JUMP_SHOTS", "")}, f)
+        driver = os.path.join(self.lab, "driver.mjs")
+        with open(driver, "w") as f:
+            f.write(FOOT_DRIVER)
+        p = subprocess.run(["node", driver], capture_output=True, text=True, timeout=300,
+                           env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
+        if p.returncode == 3:
+            raise unittest.SkipTest("no playwright browser on this box — the served guard needs one (CI installs none)")
+        self.assertEqual(p.returncode, 0, "driver failed:\n" + p.stdout[-3000:] + p.stderr[-3000:] + "\nhub:\n" + open(self.hlog).read()[-1500:])
+        line = next((ln for ln in p.stdout.splitlines() if ln.startswith("RESULT:")), None)
+        self.assertIsNotNone(line, "driver printed no result:\n" + p.stdout[-3000:])
+        return json.loads(line[len("RESULT:"):])
+
+    def test_the_pills_cover_none_of_the_host_offline_foot(self):
+        r = self._drive()
+        if os.environ.get("JUMP_SHOTS_ONLY") == "1":
+            self.skipTest("optional: JUMP_SHOTS_ONLY wrote the screenshots and ran no assertions")
+        self.assertFalse(r["footWhileUp"], "no foot while the host answers: %r" % r)
+        for where in ("desk", "phone"):
+            for theme in ("dark", "light"):
+                for pos in ("bottom", "up"):
+                    g, at = r[where][theme][pos], "%s %s %s" % (where, theme, pos)
+                    self.assertIsNotNone(g["card"], "%s: the foot is on the page: %r" % (at, g))
+                    self.assertIn("TESTHOST is disconnected", g["text"], "%s: it is the host-offline foot: %r" % (at, g))
+                    self.assertTrue(any(x["what"] == "column" for x in g["pills"]), "%s: the column shows, so the check means something: %r" % (at, g))
+                    if pos == "up":
+                        self.assertTrue(any(x["what"] == "chip" for x in g["pills"]), "%s: off the bottom the chip is up: %r" % (at, g))
+                        card = g["card"]
+                        self.assertTrue(any(card["t"] < x["b"] and card["b"] > x["t"] for x in g["pills"]),
+                                        "%s: the foot sits beside a pill, so the check means something: %r" % (at, g))
+
+                    def covers(b, x):
+                        return b["l"] < x["r"] and b["r"] > x["l"] and b["t"] < x["b"] and b["b"] > x["t"]
+                    self.assertGreaterEqual(len(g["texts"]), 3, "%s: the glyph, the source label, the sentence: %r" % (at, g["texts"]))
+                    for x in g["pills"]:
+                        self.assertFalse(covers(g["card"], x), "%s: the %s covers none of the foot: %r, foot %r" % (at, x["what"], x, g["card"]))
+                        for t in g["texts"]:
+                            self.assertFalse(covers(t, x), "%s: the %s covers %s %r: %r, text %r" % (at, x["what"], t["cls"], t["text"], x, t))
+                    self.assertIsNotNone(g["gutter"], g)
+                    self.assertLess(abs(g["card"]["l"] - g["gutter"]), 0.5,
+                                    "%s: the foot starts at the thread's gutter, where the turns' column does: %r" % (at, g))
+
+    def test_the_foot_coming_up_keeps_the_reader_where_they_were_following(self):
+        """The drop adds the foot outside the append (the review of #308): a reader at the bottom stays there with the whole foot in
+        view, on the desktop and the phone; a reader scrolled well up is not moved a pixel; a transcript that fit the pane is not
+        yanked when the foot overflows it (the append's slack rule), and the go-to-bottom chip comes up for it at once."""
+        r = self._drive()
+        if os.environ.get("JUMP_SHOTS_ONLY") == "1":
+            self.skipTest("optional: JUMP_SHOTS_ONLY wrote the screenshots and ran no assertions")
+        b, a = r["before"], r["after"]
+        for where in ("desk", "phone"):
+            pre, post = b[where], a[where]
+            self.assertLessEqual(pre["dist"], 1, "%s: the reader sat at the bottom before the drop: %r" % (where, pre))
+            self.assertIsNone(pre["foot"], "%s: no foot while the host answered: %r" % (where, pre))
+            self.assertIsNotNone(post["foot"], "%s: the drop brought the foot up: %r" % (where, post))
+            self.assertLessEqual(post["dist"], 1, "%s: the reader is still at the bottom, the foot under the last turn followed: %r" % (where, post))
+            self.assertGreaterEqual(post["foot"]["t"], post["pane"]["t"] - 0.5, "%s: the foot's top is in view: %r" % (where, post))
+            self.assertLessEqual(post["foot"]["b"], post["pane"]["b"] + 0.5, "%s: the whole foot is in view, none of it under the pane's edge: %r" % (where, post))
+            self.assertFalse(post["chip"], "%s: at the bottom, no go-to-bottom chip: %r" % (where, post))
+        pre, post = b["away"], a["away"]
+        self.assertGreater(pre["dist"], self.AWAY - 2, "the scrolled-up reader sat well above the bottom: %r" % pre)
+        self.assertTrue(pre["chip"], "scrolled up, the chip was up: %r" % pre)
+        self.assertIsNotNone(post["foot"], "the drop brought the foot up: %r" % post)
+        self.assertEqual(post["top"], pre["top"], "a reader scrolled up is not moved: %r -> %r" % (pre, post))
+        self.assertTrue(post["chip"], "…and keeps the chip: %r" % post)
+        pre, post = b["fits"], a["fits"]
+        self.assertLessEqual(pre["sh"], pre["ch"] + 2, "the short transcript fit its pane before the drop: %r" % pre)
+        self.assertFalse(pre["chip"], "nothing to go to the bottom of: %r" % pre)
+        self.assertIsNotNone(post["foot"], "the drop brought the foot up: %r" % post)
+        self.assertGreater(post["sh"], post["ch"] + 2, "the foot overflows the pane, so the check means something: %r" % post)
+        self.assertEqual(post["top"], pre["top"], "a transcript that fit is not yanked as the foot first overflows it: %r -> %r" % (pre, post))
+        self.assertTrue(post["chip"], "the foot below the pane's edge, the chip is up at once, with no scroll to re-read it: %r" % post)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1025,8 +1025,10 @@ class PromptIdAdoptable(unittest.TestCase):
         ad = self._adapter(records)
         recs = [(ad.seq_of[r["uuid"]], r) for r in records]
         self.assertTrue({"pc", "p9", "pd", "ps"} <= ad.prompt_ids, "the premise: the writer read every id")
-        self.assertTrue(all(emi._asm_names_compact(r) for r in records if r.get("promptId") in ("ps", "pa")),
-                        "the premise: the summary and the assistant record each name /compact")
+        self.assertEqual({r["promptId"]: (r["uuid"], emi._asm_names_compact(r)) for r in records if r.get("promptId") in ("ps", "pa")},
+                         {"ps": ("s2", True), "pa": ("x2", True)},
+                         "the premise: the summary wears ps and the assistant record pa, and each names /compact; read off the "
+                         "records, since prompt_ids takes only a user record's id and never holds pa")
         early = emi._asm_doc_compact_pids(ad, recs, ad.seq_of["u3"])
         late = emi._asm_doc_compact_pids(ad, recs, ad.seq_of["w9"] + 1)
         self.assertEqual(({"ps", "pa"} & early, {"ps", "pa"} & late), (set(), set()),

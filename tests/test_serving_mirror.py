@@ -220,10 +220,9 @@ class SyncStamps(unittest.TestCase):
                       "a serving mirror's dispatch frames its prose (T137)")
 
 
-class FoldMatrix(unittest.TestCase):
-    """The view-side fold: a serving-marked mirror top joins the sender's ask card at render —
-    read-only, cross-store, never orphaning — and needs-you BREAKS THROUGH (a blocked serving
-    mirror stands on the board like any needs-you card)."""
+class FoldStores(unittest.TestCase):
+    """The two stores the fold reads, over a temporary state root: the sender web's ask card with
+    its dispatch's tracker row, and the worker api's to-do mirror top."""
 
     def setUp(self):
         km._downtime[:] = []
@@ -300,6 +299,12 @@ class FoldMatrix(unittest.TestCase):
             "placements": {}, "status": {g: "blocked" if blocked else "working"}}))
         return g
 
+
+class FoldMatrix(FoldStores):
+    """The view-side fold: a serving-marked mirror top joins the sender's ask card at render —
+    read-only, cross-store, never orphaning — and needs-you BREAKS THROUGH (a blocked serving
+    mirror stands on the board like any needs-you card)."""
+
     def test_a_working_serving_mirror_folds_into_the_ask_card(self):
         ask, trk = self._sender_store()
         g = self._worker_store()
@@ -334,6 +339,66 @@ class FoldMatrix(unittest.TestCase):
         g = self._worker_store(serving=False)
         asks = km.build_feed(NOW)["asks"]
         self.assertIn(g, {a.get("itemId") for a in asks})
+
+
+class FoldedBells(FoldStores):
+    """A serving card folded into its dispatch's card is still on the board, so the bells' diff keeps
+    what it knows about it (2026-10-16). Before, the diff read the fold as the card leaving: it dropped
+    the card's told mark, so every needs-you, working, needs-you flap with nothing from the user in
+    between announced it again (desktop notice and phone push), and it pruned the user's mute on the
+    card at its first fold, so the muted card rang on its next block. Each case runs a plain mirror
+    card (no serving stamp, never folded) as the control: the same flaps, the same answer."""
+
+    def setUp(self):
+        super().setUp()
+        km._notify_cards_cache.clear()
+        km._NOTIFY_PREV[0] = km._NOTIFY_PREV_DISK[0] = None   # this test's own first build of a life
+        km._set_notify_all(True)                    # the master bell on
+
+    def tearDown(self):
+        km._NOTIFY_PREV[0] = km._NOTIFY_PREV_DISK[0] = None
+        km._notify_cards_cache.clear()
+        super().tearDown()
+
+    def _flaps(self, serving, mute=False):
+        """The first build of a life with the worker's card working, the user's mute on it if asked,
+        then blocked, working, blocked, working, blocked. Returns the builds that announced the card."""
+        self._sender_store()
+        g = self._worker_store(serving=serving)
+        km._feed_notifications(km.build_feed(NOW))  # seeds silently
+        if mute:
+            km._set_notify_card(g, False, WKR)
+        told = []
+        for i, blocked in enumerate((True, False, True, False, True)):
+            self._worker_store(serving=serving, blocked=blocked)
+            feed = km.build_feed(NOW + 10 * (i + 1))
+            cards = {a["itemId"]: a for a in feed["asks"]}
+            if blocked:
+                self.assertEqual(cards[g]["column"], "needs_input", "a blocked card stands on the board")
+            elif serving:
+                self.assertNotIn(g, cards, "a working serving card folds into the sender's card…")
+                self.assertIn(g, {r["id"] for r in cards[SND + ":g1"]["tree"]}, "…as rows of it")
+            else:
+                self.assertEqual(cards[g]["column"], "working")
+                self.assertNotIn("servingFoldedIds", feed, "no join, the frame it always was")
+            if g in [o[3] for o in km._feed_notifications(feed)]:
+                told.append(i)
+            if mute:
+                self.assertIs(km._notify_cards().get(g), False, "the mute stands after build %d" % i)
+        return told
+
+    def test_a_plain_card_is_announced_once(self):
+        self.assertEqual(self._flaps(serving=False), [0])
+
+    def test_a_folded_card_is_announced_once(self):
+        self.assertEqual(self._flaps(serving=True), [0],
+                         "a return to needs-you after a fold, with nothing from the user, is not news")
+
+    def test_a_plain_cards_mute_holds(self):
+        self.assertEqual(self._flaps(serving=False, mute=True), [])
+
+    def test_a_folded_cards_mute_holds(self):
+        self.assertEqual(self._flaps(serving=True, mute=True), [], "the fold does not take the user's mute")
 
 
 if __name__ == "__main__":

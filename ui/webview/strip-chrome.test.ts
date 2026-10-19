@@ -50,7 +50,7 @@ test("the strip's gear opens the settings' Tab strip section directly (T415): no
   assert.doesNotMatch(RENDER, /openRowsMenu|Tab widgets…/, "no menu, no widgets row: the section holds the lock and Tab widgets follows it in the card");
   // the lock's state, its drag rules and its saveSettings road are as they were (tab-lock.test.ts pins them); only the toggle's door moved, twice (T405, T415)
   assert.match(RENDER, /const focusedGear = !!focusedEl\?\.closest\("\.tab-widgets-gear"\);/, "a keyboard press on the gear keeps the focus across the strip's rebuild");
-  assert.match(RENDER, /\} else if \(focusedGear\) \(bar\.querySelector\("\.tab-widgets-gear"\) as HTMLElement \| null\)\?\.focus\(\);/);
+  assert.match(RENDER, /\} else if \(focusedGear\) \(bar\.querySelector\("\.tab-widgets-gear"\) as HTMLElement \| null\)\?\.focus\(\{ preventScroll: true \}\);/);   // quietly: a repaint never scrolls the strip
   assert.doesNotMatch(RENDER, /focusedLock/, "the lock's own focus rule went with the button");
 });
 

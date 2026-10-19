@@ -60,6 +60,24 @@ test("the hold parks a refusal only while the webview is not ready, and releases
   assert.deepEqual(h.release(), [], "…and is not parked on the way");
 });
 
+test("comment-thread ops, a queued message's withdrawal and the other session gestures are intent", () => {
+  // a comment typed while the kernel restarts had its box and draft cleared at the press, and the reload after the
+  // reconnect wiped the page's only copy; a dropped withdrawal let the session take the message the user had pulled
+  // back (review find, 2026-10-17). Each of these is a click the user made, and each names what it acts on.
+  for (const t of ["commentCreate", "commentReply", "commentResolve", "commentDelete", "commentPromote", "commentMerge",
+    "cancelQueued", "compactSession", "forkSession", "stopTask", "applyNow", "cancelCreate", "askClearMany"]) {
+    assert.ok(intentOp(t), `${t} must survive a reconnect`);
+  }
+});
+
+test("Clear all and the resume-picker choice are left out of the replay on purpose", () => {
+  // clearAll names no cards: replayed when the socket returns, it would clear cards that arrived while the pane could
+  // not show them, where a dropped one leaves every card on the reloaded page. answerPickerChoice has no consumer in
+  // the kernel or the extension. If either changes, this is the test to revisit.
+  assert.ok(!intentOp("clearAll"));
+  assert.ok(!intentOp("answerPickerChoice"));
+});
+
 test("view chatter is not intent — the reconnect reload resyncs it", () => {
   for (const t of ["ready", "openSession", "showAskPath", "showOnTimeline", "dotHover",
     "hoverHighlight", "loadOlder", "requestSessions", "openByName", "dotOpen", "imgRequest"]) {

@@ -1,0 +1,42 @@
+<!-- SYNTHETIC fixture (notes-api demo domain): the transcript's tail with a question waiting on the reader, the live
+     picker card (#live-ask .ask-card.ask-live, class for class what render.ts renderSingleCard emits: the question, two
+     numbered options, one with a description, the "add your own" hint) under the last turns of a thread, and the jump
+     cluster in the pane's bottom-left corner over the rail gutter (render.ts updateJumpCluster: the comment and the
+     your-messages capsules). The card is the transcript's tail, so it is the row beside the cluster; the shot shows
+     whether the cluster covers the card's first letters. Run (dark, then the light theme; then a phone-narrow width):
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/ask-card-chat.html \
+           --out /tmp/ask-card/dark.png --size 720x460 \
+           --extra-css 'html,body{height:100%} #content{height:100%;box-sizing:border-box}'
+       ... --body-class "theme-light chat-theme-yatharth" --out /tmp/ask-card/light.png
+       ... --size 390x640 --out /tmp/ask-card/narrow-dark.png
+-->
+<div id="content">
+  <div class="thread">
+    <div class="turn turn-user"><div class="user-bubble">Can the exporter fix go out today?</div></div>
+    <div class="turn"><span class="dot ring"></span><div class="assistant md"><p>The suite is green and the fixtures run under both headers. The only open call is whether to ship now or wait for the next release window.</p></div></div>
+    <div class="turn turn-user"><div class="user-bubble">What do you recommend?</div></div>
+    <div class="turn"><span class="dot ring"></span><div class="assistant md"><p>Shipping now: the change is behind a flag and the rollback is one revert.</p></div></div>
+  </div>
+  <div id="live-ask">
+    <div class="ask-card ask-live" tabindex="0">
+      <div class="ask-qtext">Ship the fix to the notes-api exporter now, or hold it for the next release?</div>
+      <div class="ask-live-opt focus"><span class="ask-optlabel">1. Ship it (Recommended)</span><span class="ask-optdesc">Merge on green and release behind the flag today.</span></div>
+      <div class="ask-live-opt"><span class="ask-optlabel">2. Hold for now</span></div>
+      <div class="ask-custom ask-custom-hint"><span class="ask-custom-plus">+</span><span class="ask-custom-hint-text">add your own — type it in the message box below</span></div>
+    </div>
+  </div>
+</div>
+<!-- bottom-left: the jump cluster over the go-to-bottom chip's slot (render.ts sets its bottom from the pane's edge) -->
+<div class="jump-cluster" id="jump-cluster" style="bottom: 8px">
+  <div class="jc-group jc-cmt" role="group" aria-label="Comments">
+    <button type="button" class="jc-btn" aria-label="Previous comment"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 14.5 12 8.5 18 14.5"/></svg></button>
+    <span class="jc-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 4 A1.5 1.5 0 0 1 4 2.5 H12 A1.5 1.5 0 0 1 13.5 4 V9.4 A1.5 1.5 0 0 1 12 10.9 H7.2 L4.4 13.4 V10.9 H4 A1.5 1.5 0 0 1 2.5 9.4 Z"/></svg></span>
+    <button type="button" class="jc-btn" aria-label="Next comment" disabled><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"/></svg></button>
+  </div>
+  <div class="jc-group jc-mine" role="group" aria-label="Your messages">
+    <button type="button" class="jc-btn" aria-label="Your previous message"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 14.5 12 8.5 18 14.5"/></svg></button>
+    <span class="jc-icon" aria-hidden="true"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="5.2" r="2.6"/><path d="M3.2 13.6 C3.2 10.6 5.2 8.9 8 8.9 C10.8 8.9 12.8 10.6 12.8 13.6"/></svg></span>
+    <button type="button" class="jc-btn" aria-label="Your next message" disabled><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9.5 12 15.5 18 9.5"/></svg></button>
+  </div>
+</div>
+<script>var c = document.getElementById('content'); c.scrollTop = c.scrollHeight;</script>

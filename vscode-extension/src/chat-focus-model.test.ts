@@ -65,5 +65,5 @@ test("renderTabs preserves tab-mode focus across the per-push rebuild (the user 
   // replaceChildren() destroys the focused tab; capture whether a tab held focus, restore it after the rebuild
   // — otherwise ←/→/Enter nav silently died after a send or any kernel push (focus left the strip/iframe).
   assert.match(SRC, /const refocusTab = bar\.contains\(document\.activeElement\);\s*\n\s*bar\.replaceChildren\(\);/);
-  assert.match(SRC, /if \(refocusTab\) focusActiveTab\(\);/);
+  assert.match(SRC, /if \(refocusTab\) focusActiveTab\(true\);/);   // quiet: the repaint's restore never scrolls the strip
 });

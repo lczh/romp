@@ -17,9 +17,11 @@ test("the chat column is fluid (--chat-col), not a hardcoded 820px cap", () => {
 test("the time-marker left gutter is reserved unconditionally, 56px so the day label owns its column", () => {
   // tightened 54→44 (the user 2026-07-05) so the HH:MM times sit nearer the left margin and text gains width;
   // the turn's own text indent also drops 30→24, and the time-marker re-fits the smaller gutter (left/width)
-  assert.match(CSS, /\.thread \{[^}]*padding: 0 24px 0 56px/);
+  // the gutter is one token since 2026-10-18 (the review of #306), declared 56px in both theme blocks; every row pads with it
+  assert.match(CSS, /:root \{[^}]*--thread-gutter: 56px;/);
+  assert.match(CSS, /\.thread \{[^}]*padding: 0 24px 0 var\(--thread-gutter\)/);
   assert.match(CSS, /\.turn \{[^}]*padding-left: 24px/);
-  assert.match(CSS, /\.time-marker \{[\s\S]*?left: -53px; width: 56px/);   // the slot is the whole gutter since T406 (today's "59 min ago" is 55.9px); its right edge, 3px short of the dot, did not move
+  assert.match(CSS, /\.time-marker \{[\s\S]*?left: calc\(3px - var\(--thread-gutter\)\); width: var\(--thread-gutter\)/);   // the slot is the whole gutter since T406 (today's "59 min ago" is 55.9px); its right edge, 3px short of the dot, did not move
   // the statusline shares the same left gutter so its controls stay aligned with the transcript column
-  assert.match(CSS, /\.statusline \{[^}]*padding: 7px 24px 0 56px/);
+  assert.match(CSS, /\.statusline \{[^}]*padding: 7px 24px 0 var\(--thread-gutter\)/);
 });

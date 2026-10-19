@@ -36,16 +36,25 @@ test("the mark still goes on the host token, never the session name", () => {
 });
 
 test("the transcript says why it ends, at the END, where the eye lands", () => {
-  assert.match(RENDER, /function syncHostOfflineFoot\(\): void \{/);
+  assert.match(RENDER, /function syncHostOfflineFoot\(keepPlace = true\): void \{/);
   assert.match(RENDER, /is disconnected — this is the last romp got from it\. Reconnecting\./);
   // 2026-09-08 (the notice-vocabulary pass): a slim SESSION notice in the warn severity — the one row that sat
-  // outside the vocabulary (centred italic); .notice-foot gives it the prose column's indent off the rail
+  // outside the vocabulary (centred italic); .notice-foot lays it out like a thread (below)
   assert.match(RENDER, /foot\.id = "host-offline-foot";/);
   // `live` since 2026-09-10: the row is live while a dial to the host is in flight, and the romp swirl sits after
   // the gist as its flex sibling (host-dial-live.test.ts pins that rule) — the wording itself unchanged
   assert.match(RENDER, /notice\(\{ src: "session", glyph: "api", sev: "warn", gist: text, nested: true, live: dialing,/);
   assert.match(CSS, /\.notice-foot \{/);
   assert.doesNotMatch(CSS, /\.tx-hostoff/);
+});
+
+test("the foot keeps the thread's column and gutter, so the go-to-bottom chip beside it never covers its first letters", () => {
+  // a sibling of the threads, not a row inside one, so it reserves the gutter itself (2026-10-18: it started at the pane's
+  // 24px, and the chip, whose slot it sits beside, covered its glyph whenever the reader was a few lines up; the served lab,
+  // tests/test_jump_cluster_served.py ServedHostOfflineFoot, measures it)
+  const foot = CSS.match(/\n\.notice-foot \{([^}]*)\}/)?.[1] || "";
+  assert.match(foot, /max-width: var\(--chat-col\); margin: 0 auto;/, "the thread's column");
+  assert.ok(foot.includes("padding: 6px 24px 10px var(--thread-gutter);"), `the thread's gutter: ${foot}`);
 });
 
 test("the foot is a SIBLING of the view, never a child of it", () => {
@@ -60,12 +69,24 @@ test("it is not a top banner — one covered the tab strip and was removed", () 
 });
 
 test("it repaints on both render paths, before the scroll maths", () => {
-  assert.match(RENDER, /syncView\(activeId, stick\);\s*\n\s*syncHostOfflineFoot\(\);/);
+  assert.match(RENDER, /syncView\(activeId, stick\);\s*\n\s*syncHostOfflineFoot\(false\);/);
   assert.match(RENDER, /syncHostOfflineFoot\(\);\s*\/\/ the tab we just switched to/);
 });
 
+test("a reader following the tail stays at the bottom as the foot comes or goes, and the chip re-reads (the review of #308)", () => {
+  // outside appendActive (the host dropping mid-read, a dial, a re-show) the browser kept scrollTop as the end moved: a reader at
+  // the bottom was left the foot's height above it with the notice under the pane's edge, and nothing re-read the go-to-bottom chip
+  // (tests/test_jump_cluster_served.py ServedHostOfflineFoot measures it in a browser)
+  const body = RENDER.split("\nfunction footChange(")[1].split("\n}\n")[0];
+  assert.match(body, /if \(!keepPlace \|\| !v \|\| v\.el\.style\.display === "none" \|\| content\.clientHeight <= 0\) \{ change\(\); return; \}/,
+    "only the view on screen has a place to keep; appendActive's own maths, and a switch's landing, decide theirs");
+  assert.match(body, /const stick = followingTail\(content, v\);\s*\n\s*const before = content\.scrollTop;\s*\n\s*change\(\);/, "the append's following read, BEFORE the change");
+  assert.match(body, /if \(stick\) writeScroll\(content, content\.scrollHeight, "host-foot", true, before\);\s*\n\s*else writeScroll\(content, before, "host-foot", false, before\);\s*\n\s*updateJumpBtn\(\);/);
+  assert.match(RENDER, /footChange\(content, keepPlace, \(\) => \{ existing\?\.remove\(\); content\.appendChild\(foot\); \}\);/, "the foot comes up (or is rebuilt) through it");
+});
+
 test("it clears itself the moment the host is back", () => {
-  assert.match(RENDER, /if \(!activeId \|\| !hostIsDown\(activeId\)\) \{ existing\?\.remove\(\); return; \}/);
+  assert.match(RENDER, /if \(!activeId \|\| !hostIsDown\(activeId\)\) \{ if \(existing\) footChange\(content, keepPlace, \(\) => existing\.remove\(\)\); return; \}/);
 });
 
 test("a send into a disconnected session is refused, and the text is KEPT", () => {

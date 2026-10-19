@@ -346,6 +346,52 @@ class HeadlessRoutes(unittest.TestCase):
         self.assertEqual(code, 400)
         self.assertFalse(resp.get("ok"))
 
+    def _nothing_running(self):
+        # no backend owns any sid (the real unowned route) and none lists a live row; the names registry is the module's
+        # temp state, so only a sid a test registers there is one this kernel has had
+        import contextlib
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(km.Sessions, "backend_for", staticmethod(lambda sid: km._UNOWNED)))
+        stack.enter_context(mock.patch.object(km.Sessions, "live", staticmethod(lambda: {})))
+        stack.enter_context(mock.patch.object(km, "_thread_names", lambda: {}))
+        stack.enter_context(mock.patch.object(km, "_host_for_sid", lambda sid: None))
+        stack.enter_context(mock.patch.object(km, "_send_to_app", lambda app, m: None))
+        return stack
+
+    def test_interrupt_and_end_refuse_a_session_this_kernel_never_had(self):
+        # 2026-10-18: a name or id no session here has ever had (a typo, a stale name, or `romp end --now web` posting
+        # `--now`) fell through both routes to ok, and /end wrote a death record and an idle row under the raw string,
+        # so the CLI exited 0 while the session meant kept running. Refused in /apply's words, with nothing written.
+        unknown_sid = "7c0e5a1d-2b3f-4e6a-8d9c-0f1e2d3c4b5a"   # a private synthetic id no test registers
+        with self._nothing_running():
+            for path in ("/interrupt", "/end"):
+                for key, who in (("name", "no-such"), ("name", "--now"), ("id", unknown_sid)):
+                    code, resp = self._post(path, {key: who})
+                    self.assertEqual((code, resp), (200, {"ok": False, "error": "no session named %s on this romp kernel" % who}),
+                                     "%s for %s is refused, never an ok" % (path, who))
+                    self.assertFalse((km.jd.STATE / "gone" / (who + ".json")).exists(), "no death record under the raw string")
+                    self.assertFalse((km.jd.STATE / "states" / (who + ".jsonl")).exists(), "no idle row under the raw string")
+                    self.assertNotIn(who, km._ending_sids, "nothing latched as ending")
+            code, resp = self._post("/end", {"name": "no-such", "when": "idle"})
+        self.assertEqual((code, resp), (200, {"ok": False, "error": "no session named no-such on this romp kernel"}))
+        self.assertNotIn("no-such", km._end_on_idle_load(), "no deferred end recorded for it either")
+
+    def test_a_session_this_kernel_has_that_is_not_running_keeps_its_answers(self):
+        # the other side of the refusal above: a session in the names registry with no backend running it (a dead tab)
+        # is ours, so the routes answer as they always did, and an end records its death
+        sid = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"     # a private synthetic id, registered here only
+        km.NAMES.mkdir(parents=True, exist_ok=True)
+        reg = km.NAMES / sid
+        reg.write_text("web\t/TESTDIR\t\t\n")
+        gone = km.jd.STATE / "gone" / (sid + ".json")
+        states = km.jd.STATE / "states" / (sid + ".jsonl")
+        for p in (reg, gone, states):
+            self.addCleanup(p.unlink, missing_ok=True)
+        with self._nothing_running():
+            self.assertEqual(self._post("/interrupt", {"id": sid}), (200, {"ok": True}))
+            self.assertEqual(self._post("/end", {"id": sid}), (200, {"ok": True}))
+        self.assertTrue(gone.exists(), "the end of a session we have records its death, as before")
+
     def test_apply_route_pushes_a_waiting_pick_through_and_reads_nothing_waiting_as_a_no_op(self):
         # `romp apply <session>` (2026-10-01): the dashboard's Apply now, headless, so a script can push the picks waiting
         # on many sessions through. Nothing waiting is an ok the CLI exits 0 on (applied: false), never a refusal, so a

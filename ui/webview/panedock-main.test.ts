@@ -100,8 +100,13 @@ test("the engine's divider drag: press geometry, absolute travel, one commit, Es
   assert.doesNotMatch(ENGINE, /\bresize,?\s*serialise,\n\} from "\.\/pane-tree"/, "the tree's resize is not imported by name: dragEdge is the one caller");
   const endDiv = ENGINE.slice(ENGINE.indexOf("private endDiv(commit: boolean, write = true): void {"), ENGINE.indexOf("/** The same set of ids"));
   assert.match(endDiv, /if \(d\.raf\) \{ cancelFrame\(d\.raf\); d\.raf = 0; \}\n\s*if \(commit\) this\.applyDiv\(\);/, "the release cancels the armed frame and lands the last recorded position itself");
-  assert.match(endDiv, /if \(commit\) \{ if \(write\) this\.persist\(\); \}\n\s*else \{/, "one persist on the commit path, and only when the caller writes (a reconcile ending the drag under a toggle writes the corrected layout itself)");
-  assert.match(endDiv, /if \(d\.edge\.fixed && this\.col\) \{ if \(d\.tl0\) this\.col\.style\.setProperty\("--tl", d\.tl0\); else this\.col\.style\.removeProperty\("--tl"\); \}\n\s*this\.lay = d\.start;/, "Escape: the band's height back for the BAND'S edge only, first; then the press tree");
+  assert.match(endDiv, /if \(commit\) \{ if \(write\) this\.persist\(\); if \(d\.band\) d\.band\.save\(\); \}\n\s*else \{/, "one persist on the commit path, and only when the caller writes (a reconcile ending the drag under a toggle writes the corrected layout itself); the band edge's release has the shell remember the height");
+  assert.match(endDiv, /if \(d\.band\) d\.band\.cancel\(\);\n\s*this\.lay = d\.start;/, "Escape: the band's height back (the shell's grab) for the BAND'S edge only, first; then the press tree");
+  // the band's edge runs the shipped gutter's gesture (_LANDING_JS bandGrab), never a copy: the grab taken at the press for the band's
+  // edge alone, each move made the user's height through it, so the shell's autosize keeps the dragged height (2026-10-18)
+  assert.match(ENGINE, /const band: BandGrab \| null = edge\.fixed \? grab\(\) : null;/, "the band edge takes the shell's grab at the press, a column or row divider none");
+  assert.match(ENGINE, /if \(d\.band\) d\.want = d\.band\.set\(d\.want\);/, "each band move is the user's height in the shell");
+  assert.doesNotMatch(ENGINE, /["']romp-tl-h["']|\bd\.tl0\b|const tl0\b/, "no second copy of the shell's remembered height or its grab-time value");
   assert.match(endDiv, /if \(stored !== serialise\(this\.lay\)\) this\.persist\(\);\n\s*this\.render\(\);\n\s*\}\n\s*\}/, "Escape writes only when the restored layout differs from the stored one, and renders once, on this path only");
   assert.equal((endDiv.match(/this\.render\(\)/g) || []).length, 1, "a committed release renders in applyDiv alone: no second render");
 });
@@ -111,9 +116,9 @@ test("the engine's divider drag: press geometry, absolute travel, one commit, Es
 // overlapping, one hidden mid-drag persisted docked and parked, the band dropping to its press px, the release persisting it).
 test("the engine's reconcile under a drag: a leaf-set change commits the drag, the band's px is carried into the press tree, no store write mid-drag; the band edge writes its px into the tree first", () => {
   const rec = ENGINE.slice(ENGINE.indexOf("private reconcile(): void {"), ENGINE.indexOf("private persist(): void {"));
-  assert.match(rec, /const d = this\.div;\n\s*if \(d && !d\.edge\.fixed\) \{/, "the rule runs under a column or row drag, never under the band edge's own frames");
+  assert.match(rec, /const d = this\.div;\n\s*if \(d\) \{/, "a leaf-set change ends every divider drag, the band edge's own included (the review of PR 295)");
   assert.match(rec, /if \(!sameSet\(leaves\(next\.tree\), leaves\(this\.lay\.tree\)\) \|\| !sameSet\(next\.parked, this\.lay\.parked\)\) this\.endDiv\(true, false\);/, "a pane shown or hidden mid-drag ends the drag at its last position, landed but not written (the reconcile writes the corrected layout once)");
-  assert.match(rec, /else if \(sh\.band\) \{\n\s*d\.start = \{ \.\.\.d\.start, tree: setFixed\(d\.start\.tree, BAND, sh\.bandPx > 0 \? sh\.bandPx : DEFAULT_BAND_PX\) \};/, "the band's px is carried into the press tree");
+  assert.match(rec, /else if \(!d\.edge\.fixed && sh\.band\) \{\n\s*d\.start = \{ \.\.\.d\.start, tree: setFixed\(d\.start\.tree, BAND, sh\.bandPx > 0 \? sh\.bandPx : DEFAULT_BAND_PX\) \};/, "the band's px is carried into a column or row drag's press tree, never under the band edge's own frames");
   // the drag's edge re-derived from the rebased press tree (round four): a divider under the band's split moves with the band
   assert.match(rec, /const e2 = box \? edgeAt\(d\.start\.tree, box, GUTTER, d\.edge\.path, d\.edge\.i\) : null;/, "the edge re-read at its path");
   assert.match(rec, /d\.x0 \+= e2\.rect\.x - d\.edge\.rect\.x; d\.y0 \+= e2\.rect\.y - d\.edge\.rect\.y;/, "the press origin shifted by the edge's displacement");
@@ -144,4 +149,37 @@ test("isChatFrame: f-chat and f-chat-<n> are chat columns; a registry pane whose
   assert.equal(isChatFrame("f-files"), false); assert.equal(isChatFrame("f-notes"), false);
   assert.equal((ENGINE.match(/isChatFrame\(f\.id\)/g) || []).length, 2, "both sites read it: the strip style's injection and the grab detector's exclusion");
   assert.doesNotMatch(ENGINE, /f\.id\.indexOf\("f-chat-"\) === 0/, "no prefix test remains");
+});
+
+// Every way a divider drag ends other than a release is a CANCEL, Escape's path (the review of PR 295: the drag heard a move and a
+// release only, so a pointer the browser took, a lost capture or a window put behind another left it live and the next click
+// committed it); the served lab (tests/test_live_dividers_served.py) drives each route with real pointer events and a real window switch.
+test("the engine's divider drag: a pointercancel, a lost capture and the page losing the window's focus end it as Escape does, each once", () => {
+  const press = ENGINE.slice(ENGINE.indexOf("private onDivPress(e: PointerEvent, d: HTMLElement): void {"), ENGINE.indexOf("private minFrac("));
+  assert.match(press, /d\.setPointerCapture\(pid\);/, "the divider captures the press's pointer, so a lost capture is heard");
+  assert.match(press, /const cancel = \(ev: Event\) => \{ if \(mine\(ev\)\) this\.endDiv\(false\); \};/, "a pointer route ends this drag only, by the cancel path");
+  for (const k of ["pointercancel", "lostpointercapture"]) {
+    assert.match(press, new RegExp(`window\\.addEventListener\\("${k}", cancel, true\\);`), k + " wired to the cancel");
+    assert.match(press, new RegExp(`window\\.removeEventListener\\("${k}", cancel, true\\);`), k + " unwired at the end");
+  }
+  // the window switch is heard wherever the focus is held (page-focus.ts, its own test): the press keeps the focus where it was, so
+  // with a pane's field focused only that pane's window blurs (the review of PR 302), and a blur with the page still focused, the
+  // focus moving into or between the shell's frames, ends nothing (PR 302)
+  assert.match(press, /const unwatch = watchPageFocus\(window, \(\) => \{ if \(this\.div === drag\) this\.endDiv\(false\); \}\);/, "the page's focus watched for the drag: its loss ends this drag only, by the cancel path");
+  assert.doesNotMatch(press, /addEventListener\("blur"/, "no blur listener of its own: one watch hears the switch, wherever the focus is");
+  assert.match(press, /unwatch\(\);\n\s*try \{ if \(d\.hasPointerCapture\(pid\)\) d\.releasePointerCapture\(pid\); \}/, "the listeners and the watch off BEFORE the capture is released: the release's own lostpointercapture is never a second end");
+  assert.ok(press.indexOf("const unwatch = watchPageFocus(") < press.indexOf("this.divOff = () => {"), "the watch is on before the drag's off switch is set");
+});
+
+// The band's edge runs the shell's grab or nothing (root CLAUDE.md, fail loudly): without window.__rompBandGrab it fell back to
+// writing the height variable alone, the snap-back PR 295 fixed, and Escape could not restore the remembered height, silently. The
+// served lab deletes the hook and drives the edge.
+test("the engine's band edge without the shell's grab: a console error naming the hook, an error notice, and no drag", () => {
+  const press = ENGINE.slice(ENGINE.indexOf("private onDivPress(e: PointerEvent, d: HTMLElement): void {"), ENGINE.indexOf("private minFrac("));
+  const refuse = press.slice(press.indexOf('if (edge.fixed && typeof grab !== "function") {'), press.indexOf("const band: BandGrab"));
+  assert.ok(refuse.length > 0, "the press checks for the grab on the band's edge");
+  assert.match(refuse, /console\.error\("[^"]*window\.__rompBandGrab[^"]*"\);/, "a console error names the missing hook");
+  assert.match(refuse, /this\.notify\("[^"]+", "error"\);/, "and an error notice says the band can't be resized");
+  assert.match(refuse, /return;\n\s*\}\s*$/, "and the press returns: no drag, nothing moves");
+  assert.ok(refuse.indexOf("this.div") < 0, "no drag state is set on that path");
 });

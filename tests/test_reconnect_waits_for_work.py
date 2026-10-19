@@ -346,7 +346,7 @@ class ApplyNowPushesAWaitingPickThrough(_Harness):
                       "had running: watch the spend.", note)
         self._wait(lambda: not s.snapshot()["authPending"], "the pick applied at the connect")
         self.assertEqual((s.snapshot()["relaunchWaits"], s.snapshot()["relaunchCuts"]), ("", ""))
-        self.assertTrue(any(l.startswith("apply now (web): idle, reconnecting now") for l in self.lines), self.lines)
+        self.assertTrue(any(l.startswith("apply now (web): ending its CLI with SIGTERM") for l in self.lines), self.lines)
         self.assertTrue(any("dropped 0 subagents and 1 background task on reconnect (apply)" in l for l in self.lines), self.lines)
 
     def test_with_nothing_waiting_it_changes_nothing(self):
@@ -378,6 +378,193 @@ class ApplyNowPushesAWaitingPickThrough(_Harness):
         plain = sb.task_death_notice([{"desc": "tail the build log"}])
         self._wait(lambda: c3.writes == [plain], "the plain notice")
         self.assertIn("ended (a restart or crash): tail the build log.", plain)
+
+
+class _Proc:
+    """The SDK transport's CLI process as _term_for_relaunch reaches it: SIGTERM ends it at once (the installed CLI exits
+    in about two seconds), and the order of the end and the teardown is recorded on the client."""
+
+    def __init__(self, events):
+        self.pid, self.returncode, self.events = 4242, None, events
+        self.on_term = None    # what the CLI writes on its way out (a test sets it: the cost-state record)
+
+    def terminate(self):
+        self.events.append("SIGTERM")
+        if self.on_term is not None:
+            self.on_term()
+        self.returncode = -15
+
+
+class _SigtermHarness(_Harness):
+    """The harness with a stand-in client whose transport carries a CLI process (_Proc), so _term_for_relaunch's SIGTERM
+    and the teardown are recorded in order on the client."""
+
+    class _Client(_Harness._Client):
+        instances = []
+
+        def __init__(self, options=None, transport=None):
+            super().__init__(options, transport)
+            self.interrupts, self.events = 0, []
+            self._transport = types.SimpleNamespace(_process=_Proc(self.events))
+
+        async def __aexit__(self, *a):
+            self.events.append("teardown")
+            return await super().__aexit__(*a)
+
+        async def interrupt(self):
+            self.interrupts += 1
+
+
+class ARestartEndsTheCliWithSigterm(_SigtermHarness):
+    """Restart session ends the old CLI with SIGTERM, at once, and never sends it the interrupt control request (the user
+    2026-10-17). On the installed CLI that request stops every background agent the session runs, recorded as stopped by
+    the user, which SendMessage then refuses to resume: a pair of agents was lost to a Restart with a turn in flight that
+    way, and an earlier pair to a Stop. SIGTERM records nothing of the kind (verified in a lab on the real CLI: the
+    agent resumed by SendMessage after the relaunch), and unlike the teardown's EOF, which a CLI with a background agent
+    running ignores until the host's end grace runs out, it ends the CLI in seconds. A text the CLI held untaken goes to
+    the fresh CLI once the old one is proven gone; one that landed before the end is not fed twice. The REAL run loop
+    against the stand-in client, whose transport process records the SIGTERM; every id synthetic."""
+
+    def _with_a_background_agent(self, c):
+        self._task(c, "task_started", tid="a-sleeper", description="review the parser", task_type="local_agent")
+        self._wait(lambda: self.s.live_work()[1] == 1, "the background agent registered")
+
+    def test_a_restart_with_a_turn_in_flight_and_a_background_agent_sends_no_interrupt_and_relaunches_now(self):
+        s, c1 = self.s, self._first_turn()
+        self._with_a_background_agent(c1)
+        self.assertEqual(s.inflight, 1, "the turn is in flight")
+        self.assertEqual(self.be.relaunch(SID), "")
+        c2 = self._relaunched()                     # no result frame was ever sent: nothing waits on the turn's end
+        self.assertEqual(c1.interrupts, 0, "never the interrupt control request")
+        self.assertEqual(c1.events, ["SIGTERM", "teardown"], "the CLI is ended with SIGTERM before the connection closes")
+        self.assertTrue(any(l.startswith("relaunch (web): ending its CLI with SIGTERM, which cuts the running turn")
+                            for l in self.lines), self.lines)
+        self._wait(lambda: len(c2.writes) == 1, "romp's own what-was-cut notice, fed to the fresh CLI")
+        note = c2.writes[0]
+        # the cut-off background AGENT is asked to resume (the review of #281, 2026-10-18, wording the user approved):
+        # Claude Code kept its progress and SendMessage resumes it by its id, the task id the CLI gave it; the
+        # check-and-relaunch ask made the session start it over
+        self.assertEqual(note[note.index("[romp]"):],
+                         "[romp] I restarted Claude Code, which cut off 1 background agent you had running: review the "
+                         "parser. Claude Code kept its progress: resume it by sending it a message (SendMessage to "
+                         "a-sleeper) instead of starting it again. If it isn't needed any more, carry on.")
+        self.assertEqual(note, sb.task_death_notice([{"desc": "review the parser", "type": "local_agent",
+                                                      "taskId": "a-sleeper"}], did=sb.CUT_BY["restart"]))
+        self.assertEqual(s.inflight, 1, "the notice's own turn, and nothing stranded from the cut one")
+
+    def test_an_idle_restart_with_a_background_agent_ends_the_cli_with_sigterm_not_an_eof_wait(self):
+        s, c1 = self.s, self._first_turn()
+        self._with_a_background_agent(c1)
+        self._end_turn(c1)
+        self.assertEqual(self.be.relaunch(SID), "")
+        self._relaunched()
+        self.assertEqual(c1.interrupts, 0)
+        self.assertEqual(c1.events, ["SIGTERM", "teardown"],
+                         "an EOF alone leaves a CLI with a background agent running until the host's end grace ends it")
+
+    def test_a_text_the_cli_held_untaken_goes_to_the_fresh_cli_first(self):
+        s, c1 = self.s, self._first_turn()
+        s.enqueue("and cover the empty input too")
+        self._wait(lambda: c1.writes == ["first turn", "and cover the empty input too"], "fed mid-turn")
+        self._wait(lambda: s._untaken is not None, "held: the CLI has not taken it")
+        self.assertEqual(self.be.relaunch(SID), "")
+        c2 = self._relaunched()
+        self._wait(lambda: c2.writes == ["and cover the empty input too"], "the held text, fed to the fresh CLI")
+        self.assertEqual(c1.interrupts, 0)
+        self.assertTrue(any("was holding a fed text it had not run: back at the head of the queue" in l for l in self.lines),
+                        self.lines)
+
+    def test_a_held_text_that_landed_before_the_end_is_not_fed_twice(self):
+        s, c1 = self.s, self._first_turn()
+        s.enqueue("and cover the empty input too")
+        self._wait(lambda: s._untaken is not None and len(c1.writes) == 2, "fed mid-turn and held")
+        self._transcript_append("and cover the empty input too")   # the CLI wrote its record before the SIGTERM
+        self.assertEqual(self.be.relaunch(SID), "")
+        c2 = self._relaunched()
+        self._settle()
+        self.assertEqual(c2.writes, [], "it reached the conversation already: the fresh CLI resumes it, no second copy")
+        self.assertEqual(s.pending(), [])
+
+
+class ARestartRecordsTheCutTurnsSpend(_SigtermHarness):
+    """The review of #281 (2026-10-18): a Restart or an Apply now ends the CLI with SIGTERM and no result ever reports the
+    running turn's cost, and the next connect reseeds the spend watermarks, so the spend guard and the rail never saw
+    what the cut turn spent. The CLI writes a cost-state record on its way out (verified on 2.1.280 under a session host:
+    exit 143, the record's total the last result's plus the cut turn's); the loop top records that record's totals less
+    the watermarks, the way a result's delta is recorded, and only a record written past the transcript's end at the
+    signal counts, so a record the CLI restored at its launch is never taken for its last one. Figures synthetic."""
+
+    def _transcript(self):
+        return sb.transcript_path(self.cwd, FSID)
+
+    def _cost_state(self, total, tokens=None):
+        rec = {"type": "cost-state", "sessionId": FSID, "totalCostUSD": total}
+        if tokens:
+            rec["modelUsage"] = {"claude-x": dict(zip(("inputTokens", "outputTokens", "cacheReadInputTokens",
+                                                       "cacheCreationInputTokens"), tokens), costUSD=total)}
+        with open(self._transcript(), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+
+    def _spend(self):
+        try:
+            d = json.load(open(os.path.join(self.state, "spend.json")))
+        except OSError:
+            return {}
+        return next(iter(d.get("days", {}).values()), {})
+
+    def _second_turn_in_flight(self):
+        s, c1 = self.s, self._first_turn()
+        self._end_turn(c1)                                   # the last result: $0.01 recorded, the watermark at $0.01
+        self.assertAlmostEqual(self._spend().get("usd"), 0.01)
+        s.enqueue("second turn")
+        self._wait(lambda: c1.writes[-1:] == ["second turn"], "the second turn fed")
+        self._init(c1)
+        self._push(c1, _AssistantMessage([_TextBlock("on it")], uuid=self._uid()))
+        self._wait(lambda: getattr(s, "_untaken", None) is None and s.inflight == 1, "the second turn taken and running")
+        self._transcript_append("second turn")
+        return c1
+
+    def test_a_mid_turn_restart_records_what_the_cut_turn_spent_from_the_record_the_ending_cli_wrote(self):
+        c1 = self._second_turn_in_flight()
+        c1._transport._process.on_term = lambda: self._cost_state(0.25, (100, 50, 1000, 10))
+        self.assertEqual(self.be.relaunch(SID), "")
+        self._relaunched()
+        b = self._spend()
+        self.assertAlmostEqual(b.get("usd"), 0.25, msg="the first result's $0.01 and the cut turn's $0.24")
+        self.assertEqual(b.get("turns"), 2)
+        self.assertEqual((b.get("tokIn"), b.get("tokOut"), b.get("tokCacheR"), b.get("tokCacheW")), (101, 51, 1000, 10),
+                         "the cut's tokens beside the first result's flat count")
+        self.assertAlmostEqual(b["bySid"][SID]["usd"], 0.25, msg="billed to the session, like any turn")
+        self.assertTrue(any(l.startswith("spend (web): recorded $0.24 the relaunch cut before the running turn reported")
+                            for l in self.lines), self.lines)
+
+    def test_a_record_written_before_the_signal_is_not_taken_for_the_ending_clis(self):
+        # a record already in the transcript (the one a CLI restores at its launch) sits before the mark: were it read as
+        # the cut's, a CLI that had not restored it would have its whole history recorded as the cut turn
+        c1 = self._second_turn_in_flight()
+        self._cost_state(5.00, (9, 9, 9, 9))
+        self.assertEqual(self.be.relaunch(SID), "")         # and the ending CLI writes none
+        self._relaunched()
+        self.assertAlmostEqual(self._spend().get("usd"), 0.01, msg="nothing taken from the older record")
+        self.assertTrue(any(l.startswith("spend (web): the CLI a relaunch ended with SIGTERM wrote no cost-state record "
+                                         "on its way out, so what the cut turn spent since its last result is not counted")
+                            for l in self.lines), self.lines)
+
+    def test_the_fresh_cli_s_first_result_is_folded_over_the_record_not_counted_twice(self):
+        s, c1 = self.s, self._second_turn_in_flight()
+        c1._transport._process.on_term = lambda: self._cost_state(0.25, (100, 50, 1000, 10))
+        self.assertEqual(self.be.relaunch(SID), "")
+        c2 = self._relaunched()
+        s.enqueue("third turn")
+        self._wait(lambda: c2.writes == ["third turn"], "the third turn fed to the fresh CLI")
+        self._init(c2)
+        self._push(c2, _result(uuid=self._uid(), subtype="success", is_error=False, num_turns=1, session_id=FSID,
+                               duration_ms=1, duration_api_ms=1, total_cost_usd=0.30, result="ok", parent_tool_use_id=None,
+                               usage={"input_tokens": 1, "output_tokens": 1},
+                               model_usage={"claude-x": {"inputTokens": 103, "outputTokens": 52, "cacheReadInputTokens": 1000,
+                                                         "cacheCreationInputTokens": 10, "costUSD": 0.30}}))
+        self._wait(lambda: self._spend().get("turns") == 3, "the third turn's result folded")
+        self.assertAlmostEqual(self._spend().get("usd"), 0.30, msg="the restored record's $0.25 is the seed, not spend again")
 
 
 class WhatTheRelaunchWaitsFor(unittest.TestCase):
@@ -424,7 +611,7 @@ class WhatTheRelaunchWaitsFor(unittest.TestCase):
         self.assertEqual(s.relaunch_cuts(), "", "a queued message survives the relaunch: the fresh CLI takes it")
         s._untaken = {"text": "fed, not taken yet"}
         self.assertEqual(s.relaunch_waits(), "the running turn")
-        self.assertEqual(s.relaunch_cuts(), "", "a fed text the CLI has not taken: the relaunch waits for that turn's end")
+        self.assertEqual(s.relaunch_cuts(), "", "a fed text the CLI has not taken: the fresh CLI takes it first")
         s._untaken = None
         with s._sub_lock:
             s._bg_tasks["t-1"] = {"desc": "watch", "type": "local_bash", "since": 1}

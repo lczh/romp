@@ -13,6 +13,8 @@ The box now moves only when the LANDING re-lands its passage into it (the late f
 it, and never while the pointer is over it or it holds the focus (it steps off once they leave); and every fold any piece
 of the passage sits in opens. And a landing on a passage pauses follow mode (the user 2026-10-15): with the session still
 writing, the passage and its box stay where the reader is looking, uncovered, and scrolling back to the bottom resumes it.
+A paused view holds the passage still in every frame while the session writes, back from another tab too, where only a
+view that was following resumes following (the user 2026-10-17).
 
 A hermetic kernel serves a synthetic chat (the notes-api demo world, session web): 150 exchanges of fourteen-paragraph
 replies, so the page renders only the tail of what it holds. Four threads: reply 149's final paragraph, a passage in a closed
@@ -259,6 +261,20 @@ await page.evaluate(() => { const i = document.querySelector("#cmt-pop .cmt-inpu
 await growComposer(0);
 await page.waitForTimeout(300);
 
+// 11. typing in the message box after a landing on the last reply: the box below grows, the view re-pins the bottom and the
+// passage rises into the thread's box above it; the thread's box steps off it
+await landEnd();
+await page.mouse.move(150, 650);
+await page.waitForTimeout(1500);   // the landing settled
+out.compose0 = { box: await boxNow(), mark: await markNow("tid-end"), h: await page.evaluate(() => document.getElementById("composer-input")?.offsetHeight ?? null) };
+await page.evaluate(() => document.getElementById("composer-input")?.focus());
+await page.keyboard.type("a note on the export");
+for (let i = 0; i < 4; i++) { await page.keyboard.press("Shift+Enter"); await page.keyboard.type("and one more line about the rows"); }   // loop-ok: four more lines typed
+await page.waitForTimeout(600);
+out.compose1 = { box: await boxNow(), mark: await markNow("tid-end"), h: await page.evaluate(() => document.getElementById("composer-input")?.offsetHeight ?? null) };
+await page.evaluate(() => { const t = document.getElementById("composer-input"); if (t) { t.value = ""; t.dispatchEvent(new Event("input", { bubbles: true })); t.blur(); } });
+await page.waitForTimeout(400);
+
 // the session writing: a reply appended to its transcript, waited on until it reaches the page (`pg`)
 const atBottomNow = (pg = page) => pg.evaluate(() => { const c = document.getElementById("content"); return c.scrollHeight - c.scrollTop - c.clientHeight <= 2; });
 const chipNow = (pg = page) => pg.evaluate(() => { const b = document.getElementById("jump-bottom"); return !!b && !b.hidden; });
@@ -272,6 +288,71 @@ const streamOne = async (pg = page, wait = true, paras = 1) => {
   return u;
 };
 const contentRect = () => page.evaluate(() => { const r = document.getElementById("content").getBoundingClientRect(); return { t: Math.round(r.top), b: Math.round(r.bottom) }; });
+
+// 15. the review of #279: paused at the bottom, the tail shrinks 80 px under the reader (a stand-in element leaves the end of the
+// transcript; the room under the paused view keeps the passage still), then the reader wheels UP 40 px. That is a reader off the
+// bottom: still paused, the chip showing, and the next reply moves nothing. Then they wheel down to the bottom: following resumes
+// and the next reply is followed
+await page.evaluate(() => {
+  const th = Array.from(document.querySelectorAll("#content > .thread")).find((t) => t.offsetHeight > 0);
+  const d = document.createElement("div"); d.id = "fx-tail"; d.style.height = "80px"; th?.appendChild(d);
+});
+await landEnd();
+await page.mouse.move(150, 650);
+await page.waitForTimeout(1500);   // the landing settled
+out.shrink0 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), st: await scrollNow() };
+await page.evaluate(() => document.getElementById("fx-tail")?.remove());
+await page.waitForTimeout(400);
+out.shrink1 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), st: await scrollNow() };
+await page.mouse.move(150, 400);
+await page.mouse.wheel(0, -40);
+await page.waitForTimeout(1000);   // past the scroll's end
+out.shrink2 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), chip: await chipNow(), st: await scrollNow() };
+await streamOne();
+await page.waitForTimeout(400);
+out.shrink3 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), chip: await chipNow() };
+for (let i = 0; i < 4; i++) { await page.mouse.wheel(0, 600); await page.waitForTimeout(150); }   // loop-ok: a reader wheeling down to the end
+await page.waitForTimeout(600);
+out.shrink4 = { bottom: await atBottomNow(), chip: await chipNow() };
+await streamOne();
+await page.waitForTimeout(400);
+out.shrink5 = { bottom: await atBottomNow(), chip: await chipNow() };
+
+// 16. the review of #280: paused 50 px above the end (a landing at the bottom, then the reader wheels up 50 px), and 300 px leave
+// the transcript ABOVE the reader (a stand-in element in an earlier reply). The browser's anchoring keeps the passage still; the
+// room under the view moves up with the text, so the reader can scroll no further than the 50 px they had (never into 300 px of
+// blank space), and wheeling down to the end resumes following with no jump as the room is let go
+const roomNow = () => page.evaluate(() => { const c = document.getElementById("content"); return Math.round(c.scrollHeight - c.scrollTop - c.clientHeight); });
+await page.evaluate(() => {
+  const th = Array.from(document.querySelectorAll("#content > .thread")).find((t) => t.offsetHeight > 0);
+  const d = document.createElement("div"); d.id = "fx-above"; d.style.height = "300px"; th?.querySelector(".turn")?.appendChild(d);
+});
+await landEnd();
+await page.mouse.move(150, 650);
+await page.waitForTimeout(1500);   // the landing settled
+await page.mouse.move(150, 400);
+await page.mouse.wheel(0, -50);
+await page.waitForTimeout(1000);   // past the scroll's end
+out.above0 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), room: await roomNow(), st: await scrollNow(),
+               above: await page.evaluate(() => { const d = document.getElementById("fx-above"), c = document.getElementById("content");
+                 return !!d && d.getBoundingClientRect().bottom < c.getBoundingClientRect().top; }) };
+await page.evaluate(() => document.getElementById("fx-above")?.remove());
+await page.waitForTimeout(400);
+out.above1 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), room: await roomNow(), chip: await chipNow() };
+// the blank stretch under the transcript's last line: the view's bottom edge less the bottom of the thread's last drawn element
+const blankNow = () => page.evaluate(() => {
+  const c = document.getElementById("content");
+  const th = Array.from(c.querySelectorAll(":scope > .thread")).find((t) => t.offsetHeight > 0);
+  const last = th ? Array.from(th.children).reverse().find((k) => k.getBoundingClientRect().height > 0) : null;
+  return last ? Math.round(c.getBoundingClientRect().top + c.clientTop + c.clientHeight - last.getBoundingClientRect().bottom) : null;
+});
+out.above1.blank = await blankNow();
+await page.mouse.wheel(0, 200);    // more than the 50 px to the end, less than the 300 px that left
+await page.waitForTimeout(800);   // at the end: following resumes, and the room goes
+out.above2 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), chip: await chipNow(), blank: await blankNow() };
+await streamOne();
+await page.waitForTimeout(400);
+out.above3 = { bottom: await atBottomNow(), chip: await chipNow() };
 
 // 14. the session writes while the reader is on another tab, after a landing at the bottom: back on the tab, the passage is
 // where they left it, follow mode still paused, the chip showing the text below; the next reply does not move it either
@@ -292,11 +373,44 @@ out.away2 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), chip:
 await page.click("#jump-bottom").catch(() => {});   // back to following, for what comes next
 await page.waitForTimeout(600);
 
-// 10. back on the tab after a landing at the bottom: the thread closed, another tab and back, the view at the bottom. It must
-// follow the next reply (or show the chip): a view at the bottom that silently stopped following hides the next text
+// 10. a paused landing at the bottom, the thread closed, another tab and back with nothing written meanwhile: the passage is
+// where the reader left it and the pause stands. Then the session writes, a reply a second for ten seconds: the passage holds
+// still on screen through every frame of it (the view itself never moves, not only the box), and the chip shows the text below
 await landEnd();
 await page.waitForTimeout(1500);   // the landing settled
 await fresh();                    // the thread closed
+await page.mouse.move(150, 650);
+out.held0 = { mark: await markNow("tid-end"), bottom: await atBottomNow() };
+await page.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`)?.click(), cfg.otherSid);
+await page.waitForTimeout(800);
+await page.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`)?.click(), cfg.sid);
+await page.waitForTimeout(800);
+out.held1 = { mark: await markNow("tid-end"), bottom: await atBottomNow(), chip: await chipNow() };
+// the passage's top in every frame from here on: a move of the view lasting one frame is caught, not only one a sample lands on
+await page.evaluate((tid) => {
+  window.__tops = []; window.__topsOn = true; window.__frames = 0;
+  const frame = () => {
+    window.__frames++;
+    const m = document.querySelector(`#content mark.cmt-hl[data-tid="${tid}"]`);
+    const t = m ? Math.round(m.getBoundingClientRect().top * 10) / 10 : null;
+    if (!window.__tops.length || window.__tops[window.__tops.length - 1].t !== t) window.__tops.push({ ms: Math.round(performance.now()), t });
+    if (window.__topsOn) requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}, "tid-end");
+out.held = [];
+for (let i = 0; i < 10; i++) {   // loop-ok: ten replies a second apart, each waited on reaching the page
+  const u = await streamOne();
+  await page.waitForTimeout(1000);
+  out.held.push({ arrived: await page.evaluate((u) => !!document.querySelector(`#content .turn[data-uuid="${u}"]`), u), bottom: await atBottomNow(), chip: await chipNow() });
+}
+out.heldTops = await page.evaluate(() => { window.__topsOn = false; return { frames: window.__frames, tops: window.__tops }; });
+await page.click("#jump-bottom").catch(() => {});   // back to following, the reader's own way, for what comes next
+await page.waitForTimeout(600);
+
+// 10b. a view following at the bottom, another tab and back: at the bottom, following exactly, reply after reply (a view at the
+// bottom that silently stopped following hid the next text below, the review of #251)
+out.follow0 = { bottom: await atBottomNow(), chip: await chipNow() };
 await page.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`)?.click(), cfg.otherSid);
 await page.waitForTimeout(800);
 await page.evaluate((sid) => document.querySelector(`#tabs .tab[data-id="${sid}"]`)?.click(), cfg.sid);
@@ -308,20 +422,6 @@ for (let i = 0; i < 3; i++) {   // loop-ok: three replies, each waited on its ow
   await page.waitForTimeout(400);
   out.tab.push({ bottom: await atBottomNow(), chip: await chipNow() });
 }
-
-// 11. typing in the message box after a landing on the last reply: the box below grows, the view re-pins the bottom and the
-// passage rises into the thread's box above it; the thread's box steps off it
-await landEnd();
-await page.mouse.move(150, 650);
-await page.waitForTimeout(1500);   // the landing settled
-out.compose0 = { box: await boxNow(), mark: await markNow("tid-end"), h: await page.evaluate(() => document.getElementById("composer-input")?.offsetHeight ?? null) };
-await page.evaluate(() => document.getElementById("composer-input")?.focus());
-await page.keyboard.type("a note on the export");
-for (let i = 0; i < 4; i++) { await page.keyboard.press("Shift+Enter"); await page.keyboard.type("and one more line about the rows"); }   // loop-ok: four more lines typed
-await page.waitForTimeout(600);
-out.compose1 = { box: await boxNow(), mark: await markNow("tid-end"), h: await page.evaluate(() => document.getElementById("composer-input")?.offsetHeight ?? null) };
-await page.evaluate(() => { const t = document.getElementById("composer-input"); if (t) { t.value = ""; t.dispatchEvent(new Event("input", { bubbles: true })); t.blur(); } });
-await page.waitForTimeout(400);
 
 // 8. the session goes on writing: replies stream in under the last one from the moment the box opens. The landing paused
 // follow mode, so the view keeps its place: the passage stays clear of the box throughout and, once the landing settled, the
@@ -616,6 +716,36 @@ class ServedCommentPassageReveal(unittest.TestCase):
         self.assertTrue(r["resume1"]["bottom"], "the next reply was followed, the view at the bottom: %r" % r["resume1"])
         self.assertGreater(r["resume1"]["st"], r["resume0"]["st"], "the view moved down with it: %r" % r)
         self.assertFalse(r["resume1"]["chip"], "no chip at the bottom: %r" % r["resume1"])
+        # 15. a scroll up after the tail shrank under a paused view is a reader off the bottom: still paused (the review of #279,
+        # where the room under the view was lowered to meet the reader, the scroll's end read them as at the bottom, following
+        # resumed and the view jumped 40 px); a scroll down to the bottom resumes following
+        s0, s1, s2, s3, s4, s5 = (r["shrink%d" % i] for i in range(6))
+        self.assertTrue(s0["bottom"], "the landing on the last reply put the view at the bottom: %r" % s0)
+        self.assertLess(abs(s1["mark"]["t"] - s0["mark"]["t"]), 3, "the 80 px shrink under the paused view moved nothing: %r -> %r" % (s0, s1))
+        self.assertFalse(s2["bottom"], "40 px up from the bottom is off the bottom: %r" % s2)
+        self.assertTrue(s2["chip"], "…with the chip showing the way back: %r" % s2)
+        self.assertLess(abs((s2["mark"]["t"] - s1["mark"]["t"]) - (s1["st"] - s2["st"])), 3, "the view moved by the reader's scroll alone: %r -> %r" % (s1, s2))
+        self.assertLess(s1["st"] - s2["st"], 60, "…the wheel's 40 px, no jump on top: %r -> %r" % (s1, s2))
+        self.assertLess(abs(s3["mark"]["t"] - s2["mark"]["t"]), 3, "still paused: the next reply moves nothing: %r -> %r" % (s2, s3))
+        self.assertTrue(s3["chip"] and not s3["bottom"], s3)
+        self.assertTrue(s4["bottom"] and not s4["chip"], "the reader wheeled down to the bottom: %r" % s4)
+        self.assertTrue(s5["bottom"] and not s5["chip"], "following resumed: the next reply was followed: %r" % s5)
+        # 16. 300 px leave the transcript above a reader paused 50 px above the end: the passage holds still and the room under
+        # the view moves up with the text, so the reader can still scroll only the 50 px to the end, where following resumes with
+        # no jump (the review of #280: the room stayed where it was, 300 px of blank space below the last line, and the view
+        # jumped by it as following resumed)
+        b0, b1, b2, b3 = (r["above%d" % i] for i in range(4))
+        self.assertTrue(b0["above"], "the stand-in element is above the view: %r" % b0)
+        self.assertFalse(b0["bottom"], "50 px up from the end is off the bottom: %r" % b0)
+        self.assertLess(abs(b0["room"] - 50), 15, "…by the wheel's 50 px: %r" % b0)
+        self.assertLess(abs(b1["mark"]["t"] - b0["mark"]["t"]), 3, "the shrink above moved nothing on screen: %r -> %r" % (b0, b1))
+        self.assertLess(abs(b1["room"] - b0["room"]), 5, "the reader can scroll as far as before, no further: %r -> %r" % (b0, b1))
+        self.assertTrue(b1["chip"] and not b1["bottom"], "still paused: %r" % b1)
+        self.assertTrue(b2["bottom"] and not b2["chip"], "the reader wheeled down to the end: %r" % b2)
+        self.assertLess(b2["blank"], 30, "a wheel past the end shows no blank stretch under the last line: %r" % b2)
+        self.assertLess(abs((b0["mark"]["t"] - b2["mark"]["t"]) - b0["room"]), 5,
+                        "the passage rose by the 50 px to the end, and stayed there as following resumed: %r -> %r" % (b1, b2))
+        self.assertTrue(b3["bottom"] and not b3["chip"], "following resumed: the next reply was followed: %r" % b3)
         # 14. text written while the reader was away from a held tab: back on it, the passage where they left it, still paused
         a0, a1, a2 = r["away0"], r["away1"], r["away2"]
         self.assertTrue(a0["bottom"], "the landing on the last reply put the view at the bottom: %r" % a0)
@@ -626,15 +756,22 @@ class ServedCommentPassageReveal(unittest.TestCase):
         self.assertTrue(a1["chip"], "the chip shows the text below: %r" % a1)
         self.assertEqual(a2["mark"], a1["mark"], "follow mode stays paused: the next reply moves nothing: %r -> %r" % (a1, a2))
         self.assertTrue(a2["chip"] and not a2["bottom"], a2)
-        # 10. back on the tab after a landing at the bottom: the next reply is followed (or the chip says it is below)
-        # (the rule: a view at the bottom follows, or the chip shows; what failed was a view at the bottom with no chip whose
-        # next reply landed below unseen)
-        self.assertTrue(r["tab0"]["bottom"] or r["tab0"]["chip"], r["tab0"])
-        states = [r["tab0"]] + r["tab"]
-        for before, after in zip(states, states[1:]):
-            if before["bottom"] and not before["chip"]:
-                self.assertTrue(after["bottom"], "a view back at the bottom follows again, reply after reply: %r" % states)
-            self.assertTrue(after["bottom"] or after["chip"], "never at neither: %r" % states)
+        # 10. a paused landing at the bottom, another tab and back: the passage where the reader left it, the pause standing; the
+        # session then writes for ten seconds and the passage holds still in every frame, the chip showing the text below
+        h0, h1, hs, tops = r["held0"], r["held1"], r["held"], r["heldTops"]["tops"]
+        self.assertTrue(h0["bottom"], "the landing on the passage's reply put the view at the bottom: %r" % h0)
+        self.assertLess(abs(h1["mark"]["t"] - h0["mark"]["t"]), 4, "back on the tab, the passage is where the reader left it: %r -> %r" % (h0, h1))
+        self.assertTrue(all(x["arrived"] for x in hs), "the replies reached the page: %r" % hs)
+        for x in hs:
+            self.assertTrue(x["chip"] and not x["bottom"], "the pause stands, the chip shows the text below: %r" % hs)
+        self.assertGreater(r["heldTops"]["frames"], 100, "the passage was read in every frame of the ten seconds: %r" % r["heldTops"])
+        moved = [x for x in tops if x["t"] is None or abs(x["t"] - h1["mark"]["t"]) > 2]
+        self.assertEqual(moved, [], "the passage holds still on screen in every frame while the session writes: from %r, %r" % (h1["mark"]["t"], tops))
+        # 10b. a view following at the bottom, another tab and back: at the bottom and following, exactly, reply after reply
+        self.assertTrue(r["follow0"]["bottom"] and not r["follow0"]["chip"], "the go-to-bottom chip put the view back to following: %r" % r["follow0"])
+        self.assertTrue(r["tab0"]["bottom"] and not r["tab0"]["chip"], "back on the tab, the view is at the bottom: %r" % r["tab0"])
+        for x in r["tab"]:
+            self.assertTrue(x["bottom"] and not x["chip"], "the view follows each reply: %r" % r["tab"])
         # 11. the message box grows under a landing on the last reply: the passage stays clear of the thread's box
         c0, c1 = r["compose0"], r["compose1"]
         self.assertGreater(c1["h"], c0["h"] + 40, "the message box grew: %r -> %r" % (c0["h"], c1["h"]))

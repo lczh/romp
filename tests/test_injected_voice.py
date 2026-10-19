@@ -341,6 +341,79 @@ class InjectedBodiesSpeakAsTheUser(unittest.TestCase):
         self.assertIn("I restarted Claude Code, which cut off 1 background task you had running. Its",
                       sb.task_death_notice([{}], did=sb.CUT_BY["restart"]), "no description, no colon")
 
+    def test_a_cut_off_background_agent_is_asked_to_resume_it_not_to_start_it_again(self):
+        # 2026-10-18 (the review of #281, wording the user approved): Claude Code keeps a cut-off background agent's
+        # progress and SendMessage resumes it (verified on 2.1.280 and 2.1.282 after a SIGTERM), but the check-and-
+        # relaunch ask made the session start the agent over. An agent row (type local_agent; its lifecycle id IS the
+        # agent id) gets the resume instruction, its id named when the row has one; Bash commands and monitors keep
+        # the check; a cut of both kinds is one notice with each kind's own instruction. Every id synthetic.
+        import os as _os
+        sb = load_source("romp_sdk_backend_voice", _os.path.join(BIN, "romp_sdk_backend.py"))
+        R = sb.CUT_BY["restart"]
+        a1 = {"desc": "review the parser", "type": "local_agent", "taskId": "a0000000000000001"}
+        a2 = {"desc": "fix the lexer", "type": "local_agent", "taskId": "a0000000000000002"}
+        bash = {"desc": "watch the build", "type": "local_bash", "taskId": "b0000001"}
+        mon = {"desc": "tail the deploy log", "type": "monitor", "taskId": "m0000001"}
+
+        def tail(text):
+            return text[text.index("[romp]"):]
+        self.assertEqual(tail(sb.task_death_notice([a1], did=R)),
+                         "[romp] I restarted Claude Code, which cut off 1 background agent you had running: review the "
+                         "parser. Claude Code kept its progress: resume it by sending it a message (SendMessage to "
+                         "a0000000000000001) instead of starting it again. If it isn't needed any more, carry on.")
+        self.assertEqual(tail(sb.task_death_notice([dict(a1, taskId="")], did=R)),
+                         "[romp] I restarted Claude Code, which cut off 1 background agent you had running: review the "
+                         "parser. Claude Code kept its progress: resume it by sending it a message (SendMessage to its "
+                         "id) instead of starting it again. If it isn't needed any more, carry on.",
+                         "the approved wording exactly, when romp does not know the id")
+        self.assertEqual(tail(sb.task_death_notice([a1, a2], did=R)),
+                         "[romp] I restarted Claude Code, which cut off 2 background agents you had running: review the "
+                         "parser (a0000000000000001); fix the lexer (a0000000000000002). Claude Code kept their progress: "
+                         "resume each by sending it a message (SendMessage to its id) instead of starting it again. If "
+                         "they aren't needed any more, carry on.", "plural: each description paired with its id")
+        # the review of #283: the list stopped at four, so a fifth and sixth agent were cut off with no id to resume them by.
+        # Every agent is listed with its id; the tasks keep the four-item list
+        six = [{"desc": "agent %d" % i, "type": "local_agent", "taskId": "a000000000000000%d" % i} for i in range(1, 7)]
+        self.assertEqual(tail(sb.task_death_notice(six, did=R)),
+                         "[romp] I restarted Claude Code, which cut off 6 background agents you had running: agent 1 "
+                         "(a0000000000000001); agent 2 (a0000000000000002); agent 3 (a0000000000000003); agent 4 "
+                         "(a0000000000000004); agent 5 (a0000000000000005); agent 6 (a0000000000000006). Claude Code kept "
+                         "their progress: resume each by sending it a message (SendMessage to its id) instead of starting "
+                         "it again. If they aren't needed any more, carry on.", "every agent's id, past the fourth")
+        mixed6 = tail(sb.task_death_notice(six + [dict(bash, desc="task %d" % i) for i in range(1, 6)], did=R))
+        self.assertIn("(a0000000000000006). Claude Code kept their progress", mixed6, "every agent's id beside tasks too")
+        self.assertIn("The tasks: task 1; task 2; task 3; task 4. Their completion", mixed6, "the tasks' list keeps its four")
+        mixed = sb.task_death_notice([a1, bash, mon], did=R)
+        self.assertEqual(tail(mixed),
+                         "[romp] I restarted Claude Code, which cut off 1 background agent and 2 background tasks you had "
+                         "running. The agent: review the parser. Claude Code kept its progress: resume it by sending it a "
+                         "message (SendMessage to a0000000000000001) instead of starting it again. The tasks: watch the "
+                         "build; tail the deploy log. Their completion notifications will never arrive. Check whether each "
+                         "is still running before relaunching it. If any of them isn't needed any more, carry on.",
+                         "one notice, each kind with its own instruction")
+        self.assertIn("<!-- romp-gist: 1 background agent and 2 background tasks cut off when the process ended -->", mixed)
+        self.assertIn("<!-- romp-gist: 1 background agent cut off when the process ended -->", sb.task_death_notice([a1]))
+        self.assertIn("[romp] 1 background agent you had running was cut off when the claude process that started it ended "
+                      "(a restart or crash): review the parser. Claude Code kept its progress: resume it by sending it a "
+                      "message (SendMessage to a0000000000000001) instead of starting it again.",
+                      sb.task_death_notice([a1]), "a cut no gesture asked for keeps its lead and gets the same ask")
+        self.assertEqual(tail(sb.task_death_notice([bash], did=R)),
+                         "[romp] I restarted Claude Code, which cut off 1 background task you had running: watch the build. "
+                         "Its completion notification will never arrive. Check whether it is still running before "
+                         "relaunching it; if it isn't needed, carry on.", "a Bash command keeps the check, unchanged")
+        no_descs = tail(sb.task_death_notice([dict(a1, desc=""), dict(bash, desc="")], did=R))
+        self.assertIn("Claude Code kept the agent's progress: resume it", no_descs, "a kind with nothing to list names itself")
+        self.assertIn("The task's completion notification will never arrive", no_descs)
+        for text in (sb.task_death_notice([a1], did=R), sb.task_death_notice([a1, a2]), mixed, no_descs):
+            prose = tail(text)
+            self.assertNotIn("<!--", prose, "markers lead, prose follows")
+            self.assertNotIn("\n", prose, "one line")
+            body = prose.split("]", 1)[1].lower()
+            for word, why in ROMP_WORDS:
+                self.assertNotIn(word, body, "the notice speaks plainly past its prefix (%r: %s)" % (word, why))
+            self.assertNotIn("session", body, "the recipient is \"you\"")
+            self.assertNotRegex(body, r"agent[^.]*before relaunching", "an agent is never asked to be relaunched")
+
     def test_the_untitled_fallback_names_no_romp_object(self):
         # a node with no text still renders SOMETHING; that placeholder must not smuggle in "goal"
         nodes = _nodes()

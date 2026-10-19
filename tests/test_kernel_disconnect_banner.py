@@ -37,11 +37,15 @@ class DisconnectBanner(unittest.TestCase):
         self.assertIn('ws.onopen=function(){lastRecv=Date.now();openT=lastRecv;openSock=this;netState("up");', js)   # lastRecv stamp → heartbeat watchdog; openT/openSock → the close rule + ws
         self.assertIn('ws.onclose=function(ev){netState("down");', js)   # reconnects on close (wsdown loader + retry follow)
         # T217: an ANNOUNCED death redials tight; since 2026-09-07 so does a close landing within STALE_MS
-        # of a foreground (the FIN a frozen tab thawed into); the blind 1.5s stays for unannounced drops
-        self.assertIn("var inWin=Date.now()-foregroundedAt<STALE_MS,d=1500;", js)
-        self.assertIn("if(inWin){d=eagerDial?0:250;eagerDial=false;}", js)   # the FIRST close after a foreground redials now; every further one in the window waits 250 ms
-        self.assertIn("if(restartAnnounced&&Date.now()-restartAnnounced<30000)d=Math.min(d,250);", js)
-        self.assertIn("setTimeout(connect,d);", js)
+        # of a foreground (the FIN a frozen tab thawed into); since 2026-10-15 every redial backs off with
+        # jitter (redialMs), unannounced drops from 1 s to 30 s, the two tight windows from 250 ms to 2 s
+        # (test_ws_redial.py runs the schedule)
+        self.assertIn("var inWin=Date.now()-foregroundedAt<STALE_MS,eager=false,fast=false;", js)
+        self.assertIn("if(inWin){eager=eagerDial;eagerDial=false;fast=true;}", js)   # the FIRST close after a foreground redials now; every further one in the window backs off from 250 ms
+        # since 2026-10-18 the timed road is scheduleRedial: parked on an event while the page is hidden or the shell's
+        # socket is down, and an announced restart's tight steps are /version probes (test_ws_redial.py runs it)
+        self.assertIn("scheduleRedial(eager,fast);};", js)
+        self.assertIn("var d=eager?0:nextRedial(fast||probe);redialAt=Date.now()+d;dropRedial();redialTimer=setTimeout(probe?probeKernel:connect,d);}", js)   # one scheduled redial at a time (2026-10-18)
         self.assertIn("ws.onerror=function(){try{ws.close();}catch(e){}};", js)
         # a RECONNECT no longer silently reloads (the user 2026-07-05): it PROMPTS via raiseStale, and the fresh
         # socket resyncs live. The old auto-reload-on-reopen is gone.
@@ -192,16 +196,21 @@ process.stdout.write(JSON.stringify({
         # starts a closing handshake a dead far side never answers, and the browser holds CLOSING ~60s
         # before onclose — the audited phone panes came back 64s after their own watchdog-close. The bound is
         # PROVISIONAL_MS while a resumed keep awaits its confirming frame, STALE_MS otherwise (review find, 2026-09-08).
-        self.assertIn('if(ws.readyState===1){var bound=resumeProvisional?PROVISIONAL_MS:STALE_MS;if(everConnected&&Date.now()-lastRecv>bound){staleDiag("watchdog-close","quiet");abandon();connect();}return;}', js)
+        self.assertIn('if(ws.readyState===1){var bound=resumeProvisional?PROVISIONAL_MS:STALE_MS;if(everConnected&&Date.now()-lastRecv>bound){staleDiag("watchdog-close","quiet");abandon();redialNow();}return;}', js)
         self.assertIn("function abandon(){var d=ws;if(!d)return;d.onopen=d.onmessage=d.onclose=d.onerror=null;try{d.close();}catch(e){}ws=null;", js)
         self.assertIn('netState("down");try{window.dispatchEvent(new Event("romp:wsdown"));}catch(e){}}', js,
                       "the abandoned socket's onclose is disowned, so abandon() itself does what onclose did (banner + close rule + loader)")
         self.assertIn("if(ws.readyState===0&&Date.now()-connT>15000){try{ws.close();}catch(e){}return;}", js)
-        self.assertIn("if(ws.readyState===3&&Date.now()-connT>8000){connect();}", js)
-        # the foregrounding fast-path abandons an OPEN-but-quiet socket and redials it NOW (same 60s
-        # CLOSING stall otherwise), aborts a stuck CONNECTING one, and re-dials a closed one
-        self.assertIn("if(ws&&ws.readyState===1)abandon();else{try{if(ws&&ws.readyState===0)ws.close();}catch(e){}}", js)
-        self.assertIn("if(!ws||ws.readyState===3)connect();", js)
+        # a lost redial timer is judged against the redial's due time (redialAt), so a backed-off redial is not cut
+        # short, and a missing socket (a dial the constructor refused) counts as CLOSED (2026-10-15)
+        self.assertIn("setInterval(function(){beaconTick();if(!ws||ws.readyState===3){if(waitVis||waitShell){redialNow();return;}"
+                      "if(!probeBusy&&Date.now()-Math.max(connT,redialAt)>8000)connect();return;}", js)
+        # a socket held CLOSING is abandoned on the tick after the one that first saw it (2026-10-15)
+        self.assertIn("if(ws.readyState===2){if(!closingT)closingT=Date.now();else if(Date.now()-closingT>=CLOSING_MS){", js)
+        # the foregrounding fast-path abandons an OPEN-but-quiet socket, or one held CLOSING, and redials it NOW
+        # (same 60s CLOSING stall otherwise), aborts a stuck CONNECTING one, and re-dials a closed one
+        self.assertIn("if(ws&&(ws.readyState===1||ws.readyState===2))abandon();else{try{if(ws&&ws.readyState===0)ws.close();}catch(e){}}", js)
+        self.assertIn("if(!ws||ws.readyState===3)redialNow();", js)
 
     def test_error_popover_has_no_reload_button(self):
         # the popover briefly inherited the old offline banner's Reload button; the user called it

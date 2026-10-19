@@ -51,12 +51,12 @@ test("the sticky stamp reads today's label too, and hides incoming stamps under 
 });
 
 test("the slot is the whole gutter, its right edge unmoved; a plural-hours label wraps before 'ago'; the marker stays out of flow", () => {
-  const thread = CSS.match(/\.thread \{[^}]*padding: 0 24px 0 (\d+)px;/);
-  assert.ok(thread, "the thread's gutter");
-  const slot = CSS.match(/\.time-marker \{\n  position: absolute; top: 13px; left: -(\d+)px; width: (\d+)px;/);
-  assert.ok(slot, "the marker's slot");
-  assert.equal(slot[2], thread[1], "the slot spans the gutter (56px): '59 min ago' is 55.9px and '1 hour ago' 51.9px at the default font");
-  assert.equal(Number(slot[2]) - Number(slot[1]), 3, "the right edge stays 3px short of the dot, where it always was");
+  // the gutter is one token (2026-10-18): the thread pads with it and the slot is sized from it, so the two cannot disagree
+  assert.match(CSS, /\.thread \{[^}]*padding: 0 24px 0 var\(--thread-gutter\);/, "the thread's gutter");
+  assert.match(CSS, /:root \{[^}]*--thread-gutter: 56px;/, "56px: '59 min ago' is 55.9px and '1 hour ago' 51.9px at the default font");
+  const slot = CSS.match(/\.time-marker \{\n  position: absolute; top: 13px; left: calc\((\d+)px - var\(--thread-gutter\)\); width: var\(--thread-gutter\);/);
+  assert.ok(slot, "the marker's slot spans the gutter");
+  assert.equal(Number(slot[1]), 3, "the right edge (left + width) stays 3px short of the dot, where it always was");
   assert.match(CSS, /\.time-marker \{[^}]*white-space: nowrap;/, "the clock time never wraps");
   assert.match(CSS, /\.time-marker\.rel \{ white-space: pre-line; \}/, "a plural-hours label breaks at the newline relativeLines puts before 'ago'");
 });

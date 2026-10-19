@@ -38,14 +38,14 @@ export function settleRestart(sid: string): void {
  *  (_session_chip, and build_session's `opening`), so a state added to ChipState fails to compile here until someone
  *  decides what a restart costs in it. The allow-list this replaced read every state it did not name as free, which
  *  is how a prompt and an API retry restarted with no dialog (the post-merge review of the restart row, 2026-09-24).
- *  A restart cuts the running turn: the relaunch interrupts it and the fresh CLI comes up at its end. */
+ *  A restart cuts the running turn: the relaunch ends the CLI under it at once, and a fresh CLI resumes the conversation. */
 export const RESTART_INTERRUPTS = {
   working: true, compacting: true,  // the chat's own reading of a turn in flight
   needsInput: true,                 // a turn paused on a permission or picker prompt, which the chip ranks above working; the question goes with it
   awaiting: true,                   // needsInput's legacy name, which an older remote kernel still sends: the same prompt
   retrying: true,                   // a turn still open while an API call is auto-retried, also ranked above working
   awaitingBg: true,                 // idle itself, but the background work it dispatched is retired with the client it belongs to (the reconnect's _drop_live_work)
-  interrupting: false,              // a Stop already asked that turn to end: a restart sends nothing more (SdkSession.interrupt with climb=False) and the fresh CLI comes up when it ends
+  interrupting: false,              // a Stop already asked that turn to end: a restart ends it at once, cutting nothing the Stop was not already ending
   clearing: false,                  // a /clear in flight: restarts with no dialog, as it always did; what that costs is not measured
   blocked: false, ready: false, idle: false, closed: false,   // no turn running
   opening: false,                   // the CLI is still starting, before its first turn

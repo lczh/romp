@@ -319,6 +319,15 @@ test("adoptSessionState joins every slice onto what is already here, persists on
   assert.equal(w.HOOKS.persisted, 2, "junk changes nothing");
 });
 
+test("adoptSessionState keeps quotes staged on their own, both those already here and those that arrive", () => {
+  const w = world({ col: "2", sets: { "2": [API] }, activeId: API });
+  w.api.maps.stagedMsgs.push(API, { text: "", cites: [{ quote: "already here" }] });
+  w.api.adoptSessionState(API, { staged: [{ text: "", cites: [{ quote: "moved in" }] }, { text: "with words", cites: [] }] });
+  assert.deepEqual(w.api.maps.stagedMsgs.list(API), [
+    { text: "", cites: [{ quote: "already here" }] }, { text: "", cites: [{ quote: "moved in" }] }, { text: "with words", cites: [] },
+  ], "a column move drops no staged passage");
+});
+
 // ── the strip's arrival, RUN: applyTabOrder itself, with the frames a column receives ─────────────────────────────
 // The vanishing tab (the user 2026-09-12): a tab dragged into a new column vanished from every column and came back
 // about fifteen seconds later behind a "Couldn't close" toast. The chain was client-side: the new column's federation

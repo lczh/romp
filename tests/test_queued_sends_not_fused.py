@@ -1057,113 +1057,100 @@ class OneFedTextAtATime(unittest.TestCase):
         self.assertEqual([w[0] for w in c.writes], ["first turn", "B mid-turn", "C behind B"], "B once, never twice")
         self.assertEqual(c.writes[2][1], "turn-2")
 
-    def test_a_restart_whose_stop_request_fails_sends_no_signal_and_the_held_text_runs_in_the_old_process(self):
-        """A Restart asks the running turn to stop with the polite request alone (SdkBackend.relaunch). When that
-        request FAILED (here the SDK's timeout), _do_interrupt's failure branch, which is Stop's escalation, still
-        SIGINTed the CLI, and the installed CLI answers SIGINT with the interrupted result and an exit that leaves
-        a text it had taken unrun: the text went back to romp's queue, the armed reconnect (which waits for a turn
-        end with nothing held) never fired, and the session was left with no CLI until the next send (the review
-        of #2138, 2026-09-24). Now the failure only logs: the turn runs to its own end, the old process drains the
-        text it holds, and the relaunch follows that drained turn's result with nothing left to feed the new one."""
-        s, c1 = self.s, self._first_turn()
-        s.enqueue("B mid-turn")
-        self._wait(lambda: len(c1.writes) == 2, "B forwarded")
+    def _sigterm_ends(self, client, signals):
+        """The client's CLI process as a Restart ends it (SdkSession.relaunch_now, 2026-10-17): SIGTERM, recorded; the
+        process is gone at once (returncode set), its stream with it. Stop's signal rung is recorded too, so a test can
+        say a Restart never reached it."""
+        def terminate():
+            signals.append("SIGTERM")
+            proc.returncode = -15
+            self._push(client, _EOF)
+        proc = types.SimpleNamespace(pid=4242, returncode=None, terminate=terminate)
+        client._transport = types.SimpleNamespace(_process=proc)
+        self.s._signal_cli = lambda sig, action: signals.append(action)
+        async def no_request():
+            signals.append("interrupt request")
+        client.interrupt = no_request
 
-        async def times_out():
-            raise Exception("Control request timeout: interrupt") from TimeoutError()
-        c1.interrupt = times_out
+    def test_a_restart_mid_turn_flags_no_typed_send_that_landed_and_feeds_it_no_second_time(self):
+        """The running turn's own typed send has landed (the CLI writes its record as it starts the turn), and no build has
+        pruned its echo yet, when a Restart ends the CLI mid-turn. That CLI is proven gone (its exit was waited for), so
+        nothing is still writing and the transcript is final: the drop-mark reads it, marks the send landed, and neither
+        flags it never delivered nor feeds it again. The flag-only road is for a client that may still be writing; a
+        Restart with a turn in flight reaches this teardown on every press since 2026-10-17."""
+        s = self.s
         signals = []
-
-        def signal_cli(sig, action):             # what the installed CLI does on SIGINT: the cut result, then exit
-            signals.append(action)
-            self._interrupted_result(c1)
-            self._push(c1, _EOF)
-        s._signal_cli = signal_cli
+        s.start()
+        self._wait(lambda: s.client is not None, "the first connect")
+        c1 = self._Client.instances[0]
+        self._sigterm_ends(c1, signals)
+        c1.phase = "turn-1"
+        self.assertTrue(self.be.send(SID, "first turn"))
+        self._wait(lambda: c1.writes == [("first turn", "turn-1")], "the typed send fed")
+        self._init(c1)
+        self._assistant(c1)
+        self._wait(lambda: getattr(s, "_untaken", None) is None and s.resume_sid == FSID
+                   and (sb.read_reg(self.state, SID) or {}).get("lastSid") == FSID, "the turn open")
+        self._append(self._user_record("first turn"))
+        self.assertEqual(s.inflight, 1)
         self.assertEqual(self.be.relaunch(SID), "")
-        self._wait(lambda: any("control request failed" in l for l in self.lines), "the stop request failed")
-        self._settle()
-        for t in threading.enumerate():
-            if t.name == "sdk-intr:web":
-                t.join(timeout=10)
-        self.assertEqual(signals, [], "a Restart's failed request sends no signal")
-        self.assertTrue(s.thread.is_alive(), "the old process runs on")
-        self.assertTrue(s._reconnect_when_idle, "the relaunch stays armed for the turn's end")
-        c1.phase = "after-result-1"
-        self._result_frame(c1)                           # the turn ends on its own
-        self._wait(lambda: s.inflight == 0 and s._untaken and s._untaken.get("settled"), "the turn ended with B held")
-        self._settle()
-        self.assertEqual(len(self._Client.instances), 1, "no relaunch while the old process still holds B")
-        c1.phase = "turn-2"
-        self._init(c1)                                   # B's own turn, drained by the old process
-        self._wait(lambda: s._untaken is None and s.inflight == 1, "B drained in the old process")
-        self._result_frame(c1)
-        self._wait(lambda: len(self._Client.instances) == 2 and s.client is self._Client.instances[1],
-                   "the relaunch at the drained turn's result")
+        self._wait(lambda: len(self._Client.instances) == 2 and s.client is self._Client.instances[1], "the relaunch, at once")
         c2 = self._Client.instances[1]
         self._settle()
-        self.assertEqual([w[0] for w in c1.writes], ["first turn", "B mid-turn"], "B ran once, in the old process")
-        self.assertEqual(c2.writes, [], "nothing left over for the new process")
-        self.assertEqual(s.pending(), [])
-        self.assertEqual(signals, [])
+        self.assertEqual(signals, ["SIGTERM"])
+        self.assertEqual(c2.writes, [], "it reached the conversation: no second copy")
+        self.assertFalse(any("never reached its CLI" in l for l in self.lines), self.lines)
+        self.assertFalse(any(e.get("dropped") for e in (sb.read_reg(self.state, SID) or {}).get("echoes") or []),
+                         "no never-delivered flag on a send that landed")
 
-    def test_a_restart_leaves_a_text_queued_behind_a_taken_one_to_the_old_process_and_the_new_one_starts_empty(self):
-        """A Restart pressed through SdkBackend.relaunch itself, with a queue (the review of #2139, 2026-09-24): B is
-        fed mid-turn, so the CLI holds it in its own queue, and C waits behind B's hold. relaunch arms the reconnect
-        and asks the turn to stop, and the request succeeds here. The cut turn's result does not fire the arm, since
-        the CLI still holds B (it keeps its queue across the request); B's own turn begins in the old process, and
-        the feeder, with the arm deferred, feeds C into that turn, to the same client. That turn's end holds C, so
-        the arm waits again; C's own turn ends with nothing held, and the relaunch follows it with nothing left for
-        the new process. Nothing is fed twice, nothing is flagged undelivered, and no signal is sent.
-        The reconnect's side of this is pinned on the cut road itself, request_reconnect(cut=True) alone
-        (test_a_deferred_reconnect_waits_until_the_cli_has_taken_the_text_it_still_holds above, and
-        TheDeferredReconnectTakesTheHeldQueueWithIt in tests/test_sdk_stream_survives_handler_errors.py); none of
-        those cuts a turn with a text held and one queued behind it, so a hold only a Restart raises, or an arm that
-        fires at an interrupted turn's result whatever the CLI holds, is caught here."""
+    def test_a_restart_with_a_text_held_mid_turn_ends_the_cli_with_sigterm_and_the_text_runs_once_in_the_new_one(self):
+        """A Restart sends no stop request and no signal of Stop's ladder: it ends the CLI with SIGTERM at once
+        (relaunch_now; the interrupt request stops the session's background agents for good on the installed CLI,
+        the user 2026-10-17). The CLI drops the text it held mid-turn when it exits, so with that CLI proven gone and
+        no record of the text in its transcript, the text goes to the head of the queue and the new process runs it:
+        once, and never flagged undelivered. (Until then a Restart asked the turn to stop, waited for the turn's end
+        and the old process's drain of the held text, and only then relaunched.)"""
         s, c1 = self.s, self._first_turn()
         signals = []
-        s._signal_cli = lambda sig, action: signals.append(action)   # recorded, never sent: a Restart never reaches it
+        self._sigterm_ends(c1, signals)
+        s.enqueue("B mid-turn")
+        self._wait(lambda: len(c1.writes) == 2 and s._untaken is not None, "B forwarded and held")
+        self.assertEqual(self.be.relaunch(SID), "")
+        self._wait(lambda: len(self._Client.instances) == 2 and s.client is self._Client.instances[1], "the relaunch, at once")
+        c2 = self._Client.instances[1]
+        self._wait(lambda: [w[0] for w in c2.writes] == ["B mid-turn"], "B fed to the new process")
+        self._settle()
+        self.assertEqual(signals, ["SIGTERM"], "no stop request, no SIGINT or SIGKILL: SIGTERM alone")
+        self.assertEqual([w[0] for w in c1.writes], ["first turn", "B mid-turn"], "the old process never ran B")
+        self.assertEqual([w[0] for w in c2.writes], ["B mid-turn"], "B runs once, in the new process")
+        self.assertFalse(any("never reached its CLI" in l for l in self.lines), self.lines)
+
+    def test_a_restart_with_a_text_held_and_one_queued_behind_it_hands_both_to_the_new_process_in_order(self):
+        """B is fed mid-turn, so the CLI holds it in its own queue, and C waits behind B's hold (one fed text at a time).
+        A Restart ends the CLI with SIGTERM: B goes back to the head of the queue, ahead of C, and the new process takes
+        B first and C once B's turn shows, each once, nothing flagged undelivered, and no stop request or Stop signal
+        sent. The same send through the kernel's door (SdkBackend.send) as the composer's."""
+        s, c1 = self.s, self._first_turn()
+        signals = []
+        self._sigterm_ends(c1, signals)
         self.assertTrue(self.be.send(SID, "B mid-turn"))
         self._wait(lambda: len(c1.writes) == 2, "B forwarded")
         self.assertTrue(self.be.send(SID, "C behind B"))
         self._settle()
         self.assertEqual(len(c1.writes), 2, "C waits behind B's hold")
         self.assertEqual(self.be.relaunch(SID), "")
-        self._wait(lambda: s._reconnect_when_idle and s._interrupted, "the relaunch armed and the turn asked to stop")
-        c1.phase = "after-interrupt"
-        self._interrupted_result(c1)
-        self._wait(lambda: s.inflight == 0 and s._untaken and s._untaken.get("settled"),
-                   "the cut turn settled with B still in the CLI's queue")
-        self._settle()
-        self.assertEqual(len(self._Client.instances), 1, "no relaunch at the cut turn's end: the old process holds B")
-        self.assertEqual(s.pending(), ["C behind B"])
-        c1.phase = "turn-2"
-        self._init(c1)                                  # B's own turn, in the old process
-        self._wait(lambda: len(c1.writes) == 3, "C fed into B's turn")
-        self.assertEqual(c1.writes[2], ("C behind B", "turn-2"), "the old process keeps taking the queue")
-        self.assertTrue(s._reconnect_when_idle, "the relaunch stays armed")
-        self.assertEqual(len(self._Client.instances), 1)
-        c1.phase = "after-result-2"
-        self._result_frame(c1)
-        self._wait(lambda: s.inflight == 0 and s._untaken and s._untaken.get("settled"),
-                   "B's turn settled with C still in the CLI's queue")
-        self._settle()
-        self.assertEqual(len(self._Client.instances), 1, "still the old process: it holds C")
-        c1.phase = "turn-3"
-        self._init(c1)                                  # C's own turn, in the old process
-        self._wait(lambda: s._untaken is None and s.inflight == 1, "C drained in the old process")
-        self._result_frame(c1)
-        self._wait(lambda: len(self._Client.instances) == 2 and s.client is self._Client.instances[1],
-                   "the relaunch at the first turn end with nothing held")
+        self._wait(lambda: len(self._Client.instances) == 2 and s.client is self._Client.instances[1], "the relaunch, at once")
         c2 = self._Client.instances[1]
+        c2.phase = "new-1"
+        self._wait(lambda: [w[0] for w in c2.writes] == ["B mid-turn"], "B first, to the new process")
         self._settle()
+        self.assertEqual(s.pending(), ["C behind B"], "C still behind B's hold")
+        self._init(c2)                                  # B's own turn, in the new process
+        self._wait(lambda: [w[0] for w in c2.writes] == ["B mid-turn", "C behind B"], "C fed once B's turn showed")
+        self.assertEqual(signals, ["SIGTERM"])
         self.assertTrue(c1.torn_down)
-        self.assertEqual([w[0] for w in c1.writes], ["first turn", "B mid-turn", "C behind B"], "each once")
-        self.assertEqual(c2.writes, [], "nothing left for the new process")
-        self.assertEqual(s.pending(), [])
-        for text in ("B mid-turn", "C behind B"):
-            echo = next(a for a in self.be.live_atoms(SID) if a.get("_echo_text") == text)
-            self.assertFalse(echo.get("dropped"), "%s is not flagged undelivered" % text)
-        self.assertEqual(signals, [], "a Restart sends no signal")
+        self.assertEqual([w[0] for w in c1.writes], ["first turn", "B mid-turn"], "the old process ran neither")
+        self.assertFalse(any("never reached its CLI" in l for l in self.lines), self.lines)
 
     def test_the_clis_exit_puts_a_held_text_back_at_the_head_of_the_queue_for_the_next_client(self):
         """The one loss event: the CLI's process exits (a crash, a kill, the stop ladder's SIGINT rung, on which

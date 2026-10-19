@@ -65,6 +65,7 @@ SDK_BACKEND_ALLOWED = None        # the backend builds live atoms and reads raw 
 JUDGE_ALLOWED = {
     "_atom_text", "_unit_text", "_seg_launches", "_human_prompt_record", "_awaiting_bg_hold",   # _has_asst_work reads scalars (T358)
     "_relay_turn_text",   # the relayed question's conversation excerpt (T334 follow-on): hydrates the atom it renders
+    "_task_notice",       # an unstamped background task's notice, recognized by its text: hydrates the one atom it reads
     # raw records, the states log, captions
     "transcript_head", "_bg_step", "_bg_unresolved",
     "_skill_load_index",                                # the skill-load boot pass reads raw jsonl rows it json.loads itself (T333)

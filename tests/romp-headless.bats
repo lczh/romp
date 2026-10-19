@@ -779,3 +779,41 @@ PY
     [ "$status" -eq 2 ]
     [[ "$output" == *"usage: romp send"* ]]
 }
+
+@test "romp end --now <session> ends that session; a flag ahead of interrupt's session is a usage error, never the name" {
+    # 2026-10-18: the first word after end or interrupt was always taken as the session, so `romp end --now web`
+    # posted `--now` as the session to end and web kept running. end's two flags count wherever they stand, in the
+    # order typed; interrupt takes none, so a flag ahead of its session stops at usage before anything is sent.
+    start_fake_kernel '{"ok": true}'
+    body_is() {   # $1 = the path the request went to, $2 = its JSON body
+        python3 - "$TEST_DIR/req" "$1" "$2" <<'PY'
+import json, sys
+path, body = open(sys.argv[1]).read().split("\n", 1)
+assert path == sys.argv[2], path
+assert json.loads(body) == json.loads(sys.argv[3]), body
+PY
+    }
+    run "$ROMP_SCRIPT" end --now web
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"romp end: ok (web)"* ]]
+    body_is /end '{"name": "web"}'
+    run "$ROMP_SCRIPT" end --when-idle web
+    [ "$status" -eq 0 ]
+    body_is /end '{"name": "web", "when": "idle"}'
+    run "$ROMP_SCRIPT" end --when-idle web --now
+    [ "$status" -eq 0 ]
+    body_is /end '{"name": "web"}'
+    ROMP_SID="11111111-2222-3333-4444-555555555555" run "$ROMP_SCRIPT" end --now self
+    [ "$status" -eq 0 ]
+    body_is /end '{"id": "11111111-2222-3333-4444-555555555555"}'
+    rm -f "$TEST_DIR/req"
+    run "$ROMP_SCRIPT" interrupt --now web
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"usage: romp interrupt <session>"* ]]
+    run "$ROMP_SCRIPT" end --soon web
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"usage: romp end <session> [--now|--when-idle]"* ]]
+    run "$ROMP_SCRIPT" end --now
+    [ "$status" -eq 2 ]
+    [ ! -e "$TEST_DIR/req" ]   # none of the three reached the kernel
+}

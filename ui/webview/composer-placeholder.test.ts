@@ -54,7 +54,7 @@ test("render.ts: the overlay mirrors the placeholder, wears the identity colour,
   assert.doesNotMatch(CSS, /#composer-ph \.host-prefix/, "no dress of the overlay's own for the host: the global .host-prefix rule, the tab label's, is the one");
   // the host's link dropping or returning flips the span's .off mark on the tab (the romp-hosts event, host-offline.test.ts);
   // the overlay's span is repainted on the same event, so the two never disagree until the next keystroke
-  assert.match(RENDER, /window\.addEventListener\("romp-hosts", \(\) => \{ renderTabs\(\); syncComposerPh\(\); \}\)/);
+  assert.match(RENDER, /window\.addEventListener\("romp-hosts", \(\) => \{ renderTabs\(\); syncComposerPh\(\);/);
   assert.match(fn, /parts\.kind === "named" && !ta\.value/, "the styled form only for the resting placeholder, only while the box is empty");
   assert.match(fn, /ta\.classList\.toggle\("ph-on", show\);/, "the native placeholder goes transparent beneath the overlay");
   assert.match(fn, /const colorBg = \(live\?\.color\?\.bg \|\| meta\?\.color\?\.bg\) \|\| null;/, "the identity colour: the live session's, else the strip's own word on the tab (a skeleton's), never a stale session (skeleton-tabs-wiring)");

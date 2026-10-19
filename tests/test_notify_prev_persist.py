@@ -394,6 +394,147 @@ class PruneAndWriteDiscipline(_Base):
         self.assertNotIn(API + ":g1", km._notify_cards(), "api rendered without it: pruned as before")
 
 
+class ACardNamingADeadSessionIsNotItsRender(_Base):
+    """A parked hand-off card carries its DEAD recipient's sid and a notice card its owner's, alive or not;
+    neither is the session's own render. Counted as one, the build read every remembered card of the dead
+    session as cleared: it forgot them, deleted the user's mute on one, and the session's revival announced
+    them all again, the muted card included."""
+    # the card build_feed adds for a send parked to the dead api, and a notice card owned by api
+    PARKED = _card("parked:m1", API, "needs_input", text="Hand-off parked for api (offline)", name="api",
+                   live=False, board="feed", category="needs_input")
+    NOTICE = _card("notice:" + API + ":deploy:1", API, "completed", text="Deploy finished", name="api",
+                   live=False, board="feed", category="completed")
+
+    def setUp(self):
+        super().setUp()
+        km._set_notify_card(API + ":g2", False, API)          # the user muted api's blocked card
+        self.seed_disk({WEB + ":g1": _entry("completed", WEB), API + ":g1": _entry("completed", API),
+                        API + ":g2": _entry("needs_input", API)})
+        self.boot(_feed(_card(WEB + ":g1", WEB, "completed"), sessions=[WEB]))   # api is dead: it did not render
+
+    def _dead_then_revived(self, extra):
+        out = km._feed_notifications(_feed(_card(WEB + ":g1", WEB, "completed"), extra, sessions=[WEB]))
+        self.assertEqual([o[3] for o in out], [extra["itemId"]], "the card itself is news, announced once")
+        self.assertEqual(sorted(i for i in km._NOTIFY_PREV[0] if i.startswith(API + ":")), [API + ":g1", API + ":g2"],
+                         "api did not render: its cards stay remembered")
+        self.assertEqual(sorted(i for i in self.disk() if i.startswith(API + ":")), [API + ":g1", API + ":g2"],
+                         "...on disk too")
+        self.assertIs(km._notify_cards().get(API + ":g2"), False, "the mute on api's card survives")
+        revived = [_card(WEB + ":g1", WEB, "completed"), _card(API + ":g1", API, "completed", name="api"),
+                   _card(API + ":g2", API, "needs_input", name="api")]
+        if extra["itemId"].startswith("notice:"):
+            revived.append(dict(extra, live=True))            # the notice stands; a parked card leaves on revival
+        out = km._feed_notifications(_feed(*revived, sessions=[WEB, API]))
+        self.assertEqual(out, [], "the revival brings back cards already told: nothing is announced again")
+        self.assertIs(km._notify_cards().get(API + ":g2"), False, "and the mute still holds")
+
+    def test_a_parked_handoff_to_a_dead_session(self):
+        self._dead_then_revived(self.PARKED)
+
+    def test_a_notice_card_owned_by_a_dead_session(self):
+        self._dead_then_revived(self.NOTICE)
+
+    def test_the_session_rendering_without_its_cards_still_forgets_them(self):
+        # the skip is about the roster only: once api renders, a card it no longer has is gone, as before
+        km._feed_notifications(_feed(_card(WEB + ":g1", WEB, "completed"), self.PARKED, sessions=[WEB]))
+        km._feed_notifications(_feed(_card(WEB + ":g1", WEB, "completed"),
+                                     _card(API + ":g1", API, "completed", name="api"), sessions=[WEB, API]))
+        self.assertEqual(sorted(i for i in self.disk() if i.startswith(API + ":")), [API + ":g1"],
+                         "api rendered without g2: forgotten")
+        self.assertNotIn(API + ":g2", km._notify_cards(), "and its mute with it")
+
+
+class TheSweepForgetsOnlyCardsOffTheBoard(_Base):
+    """The compaction sweep bounds the snapshot by forgetting the cards of a session gone for good, and it
+    read "gone" off the session alone: neither alive, nor in the discover window, nor kept open. Three card
+    families stand on the board with no such session behind them: an owner-less notice card (its home is
+    the reserved word, never a session), a notice card whose owner left the discover window, and a parked
+    hand-off to a recipient that did. The sweep forgot each of them after every judge pass while the card
+    still stood, deleted the user's mute on it, and the next build found the card again with no memory of
+    it and announced it again: a phone buzz per pass for a card the user had already been told about. A
+    card on the board is not gone, whatever its session; the sweep forgets only what the last build did
+    not show."""
+    OLD = "11111111-2222-4333-8444-555555555509"   # a session past the discover window, not alive, no tab kept open
+
+    def setUp(self):
+        super().setUp()
+        (jd.STATE / "session-hosts").write_text("off")   # this test mints its own state root (CLAUDE.md)
+        self.seed_disk({WEB + ":g1": _entry("completed", WEB)})   # an install with a snapshot already: web's card was told
+
+    def _ownerless(self):
+        """The real owner-less notice card, as build_feed attaches it."""
+        row, err = km.post_notice("", "backup", "Nightly backup failed", producer="test", needs_you=True)
+        self.assertIsNone(err)
+        cards = km._notice_cards(int(row["t"]), set(), {WEB})
+        self.assertEqual([c["sid"] for c in cards], [km.NOTICE_OWNERLESS_SID])
+        return cards[0]
+
+    def _old_notice(self):
+        return _card("notice:" + self.OLD + ":deploy:1", self.OLD, "completed", text="Deploy finished", name="old",
+                     live=False, board="feed", category="completed")
+
+    def _old_parked(self):
+        return _card("parked:m9", self.OLD, "needs_input", text="Hand-off parked for old (offline)", name="old",
+                     live=False, board="feed", category="needs_input")
+
+    def _board(self, *extra):
+        return _feed(_card(WEB + ":g1", WEB, "completed"), *extra, sessions=[WEB])
+
+    def _sweep(self):
+        """One compaction sweep, as the producer runs it after a judge pass: web alive and in the window, OLD neither."""
+        saved = jd.discover, km._live_map
+        jd.discover = lambda now, window=None, forks=True: [(WEB, "/dev/null", None, "web")]
+        km._live_map = lambda: {WEB: {}}
+        err = io.StringIO()
+        try:
+            with redirect_stderr(err):
+                km._compact_goal_stores()
+        finally:
+            jd.discover, km._live_map = saved
+        return err.getvalue()
+
+    def _announced_once(self, card):
+        iid = card["itemId"]
+        out, _ = self.boot(self._board(card))
+        self.assertEqual([o[3] for o in out], [iid], "the card entering its column is news, once")
+        for n in range(3):
+            self._sweep()
+            self.assertIn(iid, km._NOTIFY_PREV[0], "pass %d: the card is on the board, so the sweep keeps it" % n)
+            self.assertIn(iid, self.disk(), "pass %d: ...on disk too" % n)
+            out = km._feed_notifications(self._board(card))
+            self.assertEqual(out, [], "pass %d: the next build announces nothing again" % n)
+
+    def test_an_ownerless_notice_card_is_announced_once(self):
+        self._announced_once(self._ownerless())
+
+    def test_a_notice_card_of_a_session_past_the_window_is_announced_once(self):
+        self._announced_once(self._old_notice())
+
+    def test_a_parked_handoff_to_a_session_past_the_window_is_announced_once(self):
+        self._announced_once(self._old_parked())
+
+    def test_a_mute_on_a_card_on_the_board_survives_the_sweep(self):
+        card = self._ownerless()
+        km._set_notify_card(card["itemId"], False, card["sid"])   # the user muted it from the card's menu
+        out, _ = self.boot(self._board(card))
+        self.assertEqual(out, [], "muted")
+        self._sweep()
+        self.assertIs(km._notify_cards().get(card["itemId"]), False, "the card is on the board: the mute stays")
+        self.assertEqual(km._feed_notifications(self._board(card)), [], "and still holds at the next build")
+
+    def test_a_card_that_left_the_board_is_still_forgotten(self):
+        # the bound the sweep exists for: these families never count as their session rendering, so once the card
+        # leaves (cleared, expired, delivered) the build keeps its entry and only the sweep lets it go
+        cards = [self._ownerless(), self._old_notice(), self._old_parked()]
+        self.boot(self._board(*cards))
+        km._feed_notifications(self._board())                     # all three cleared from the board
+        self.assertTrue(all(c["itemId"] in km._NOTIFY_PREV[0] for c in cards), "the build alone keeps them")
+        err = self._sweep()
+        self.assertEqual(sorted(km._NOTIFY_PREV[0]), [WEB + ":g1"], "off the board and no session behind them: forgotten")
+        self.assertEqual(sorted(self.disk()), [WEB + ":g1"])
+        self.assertIn("[notify] forgot 3 cards", err)
+
+
 class CorruptOrUnreadableSnapshot(_Base):
     def test_garbage_is_treated_as_absent_with_a_loud_line(self):
         self.path().write_text("{not json")
