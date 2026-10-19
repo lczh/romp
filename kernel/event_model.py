@@ -141,9 +141,10 @@ TEAMMATE_MSG_RE = re.compile(r"^\s*(?:<\w+>\s*)?(?:(?:Another Claude session|A p
 TEAMMATE_BLOCK_RE = re.compile(r"<teammate-message\b([^>]*)>(.*?)</teammate-message>", re.S)
 CROSS_SESSION_BLOCK_RE = re.compile(r"<cross-session-message\b([^>]*)>(.*?)</cross-session-message>", re.S)
 # Claude Code's slash-command transcript wrappers. The INVOCATION (`<command-name>`) and its OUTPUT
-# (`<local-command-stdout>`) become a tracked COMMAND TURN (the user 2026-06-29) — see atoms(); the rest
-# (`<command-message|args|contents>`, `<local-command-caveat>`) stay skipped as harness noise.
-CMD_WRAP_RE = re.compile(r"^\s*<(?:command-(?:name|message|args|contents)|local-command-(?:stdout|caveat))>")
+# (`<local-command-stdout>`, or `<local-command-stderr>` when the command fails) become a tracked COMMAND TURN
+# (the user 2026-06-29) — see atoms(); the rest (`<command-message|args|contents>`, `<local-command-caveat>`)
+# stay skipped as harness noise.
+CMD_WRAP_RE = re.compile(r"^\s*<(?:command-(?:name|message|args|contents)|local-command-(?:stdout|stderr|caveat))>")
 COMMAND_NAME_RE = re.compile(r"^\s*<command-name>([^<]*)</command-name>")           # the slash command itself, e.g. "/usage"
 # ...but the CLI does NOT fix the wrapper ORDER: a built-in writes <command-name> first, while a SKILL /
 # custom command writes <command-message> first ("/jld" → "<command-message>jld</command-message>\n
@@ -156,12 +157,22 @@ COMMAND_NAME_RE = re.compile(r"^\s*<command-name>([^<]*)</command-name>")       
 COMMAND_NAME_ANY_RE = re.compile(r"<command-name>([^<]*)</command-name>")
 COMMAND_ARGS_RE = re.compile(r"<command-args>([\s\S]*?)</command-args>")            # its arguments (often empty)
 LOCAL_STDOUT_RE = re.compile(r"^\s*<local-command-stdout>([\s\S]*?)</local-command-stdout>")   # the command's output
+# ...and its twin when the command FAILS: a custom command, skill or MCP prompt that cannot expand, or a forked
+# command that errors, writes its error as a plain user record (no isMeta) wrapped in <local-command-stderr>. The
+# CLI reads that record as the command's output, never a prompt. Unmatched, it fell through every skip to a human
+# atom: an open turn of its own whose text was the raw tags, read by the judges as a human ask (2026-10-19).
+LOCAL_STDERR_RE = re.compile(r"^\s*<local-command-stderr>([\s\S]*?)</local-command-stderr>")
+
+
+def local_command_output(text):
+    """The match of a slash command's output record, stdout or stderr (group 1 is the output), or None."""
+    return LOCAL_STDOUT_RE.match(text) or LOCAL_STDERR_RE.match(text)
 # A slash command's stdout is captured from the TUI VERBATIM, so it can carry ANSI SGR color codes
 # (e.g. /rate-limit-options prints "\x1b[38;5;114mRemoved monthly spend limit\x1b[39m" in green). The
 # ESC byte is invisible but the "[38;5;114m…[39m" renders as LITERAL text in the chat (the user
 # 2026-07-16). Strip the full CSI/SGR family at the atom source — the one place both the chat and the
-# timeline read — so the codes never reach any renderer. Only local-command-stdout needs this; model
-# API text never contains ANSI.
+# timeline read — so the codes never reach any renderer. Only a command's output (stdout or stderr) needs
+# this; model API text never contains ANSI.
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
@@ -4869,7 +4880,7 @@ class FileAdapter:
                            "author": "human", "command": name,
                            "message": {"role": "user", "content": [{"type": "text", "text": disp}]}}
                     continue
-                mout = LOCAL_STDOUT_RE.match(btext)
+                mout = local_command_output(btext)   # stdout, or stderr when the command failed
                 if mout and u not in replay_uuids:
                     yield {"type": "assistant", "uuid": u, "session_id": rompuuid, "t": ts,
                            "fsid": fsid, "parentUuid": r.get("parentUuid"), "_seq": seq, "command": True,
@@ -7106,7 +7117,7 @@ def _asm_reseat_src(ad, path, recs):
 # whole parse; a compaction landing after the document demotes the tail fold to the restore road, whose tail parse from
 # the cut takes the compaction in, while the tail is under the churn bound's share (2026-09-24; past the share, and until
 # then always, a whole parse, after which the next settle writes a new cut).
-_ASM_CKPT_V = 8                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
+_ASM_CKPT_V = 9                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
 #                                       4: a `turns` section over the pre-cut rows (T323 stage 4c: the lazy index)
 #                                       5: lazy markers carry pc (assistant prose chars) and mid (postal message ids); a turn row
 #                                          carries pcs and hT, a segment row w, mids and hp (T358: the per-cycle walkers read scalars).
@@ -7129,6 +7140,9 @@ _ASM_CKPT_V = 8                       # 2: atom rows carry [offset, len], nt for
 #                                          records' stored verdict is "a", not "r", and the pre-cut atom rows hold the results a v7 document
 #                                          dropped, so a v7 document restores a history the whole parse no longer builds; refused once
 #                                          (`version`) at the deploy boot and rewritten at the next settle, as v7 was
+#                                       9: a failed slash command's <local-command-stderr> record is the command's output atom (kind "o"),
+#                                          not a human user atom (LOCAL_STDERR_RE, 2026-10-19): a v8 document stores the old human row, its
+#                                          own turn and its segment; refused once (`version`) at the deploy boot and rewritten, as v8 was
 _MAT_CAP = _env_or("ROMP_ASM_INDEX_CAP", max(500_000, _machine_memory_bytes() // (32 * 1024)))
 _MAT_LRU = collections.OrderedDict()  # (id(LazyAtoms), row) → (weakref.ref(LazyAtoms), row): eviction drops the memo, never a field
 #                                       in place. The list is held WEAKLY (measured 2026-09-15): a strong reference here kept every
@@ -9716,7 +9730,7 @@ def _hydrate_one(a, rec):
         a["message"] = {"role": "user", "content": [{"type": "text", "text": lz.get("disp", "")}]}
     elif k == "o":
         btext = _text_of(_content(rec.get("message")))
-        m = LOCAL_STDOUT_RE.match(btext)
+        m = local_command_output(btext)
         a["message"] = {"role": "assistant", "content": [{"type": "text", "text": strip_ansi(m.group(1)).strip() if m else ""}],
                         "stop_reason": "end_turn"}
     elif k == "k":
