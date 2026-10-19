@@ -7926,14 +7926,14 @@ class SdkSession:
         quiet read and the run): the ask stands again, so the next live-work event or tick carries it.
 
         The launch is read before the hold. In the hold, the bypass pick's ask handed back is withdrawn instead of raised
-        again when the withdrawal's rule holds (_mode_relaunch_withdrawn), and a standing ask of the same reason goes with
-        it."""
+        again when the withdrawal's rule holds (_mode_relaunch_withdrawn, which takes the mode read in the hold as that
+        launch's mode), and a standing ask of the same reason goes with it."""
         have = getattr(self, "_cli_launch", None)
-        same = isinstance(have, dict) and all(launch_value(have, k) == v for k, v in self.launch_values().items())
+        now = self.launch_values() if isinstance(have, dict) else None
         with self._lock:
             why = getattr(self, "_switch_ask_pending", "")
             self._switch_ask_pending = ""
-            withdrawn = self._mode_relaunch_withdrawn(why, same, have)
+            withdrawn = self._mode_relaunch_withdrawn(why, now, have)
             if withdrawn:
                 self._mode_ask_alone = False
                 self._switch_wanted = self._switch_wait_said = ""
@@ -7946,22 +7946,26 @@ class SdkSession:
             self.backend._log("bypass mode (%s): the relaunch was handed back and the pick it was for was undone, so it is "
                               "withdrawn; nothing is cut" % self.name)
 
-    def _mode_relaunch_withdrawn(self, why, same, have) -> bool:
+    def _mode_relaunch_withdrawn(self, why, now, have) -> bool:
         """Read inside a hold of the session lock that has taken a relaunch out of its place (the last look's stand-down,
         the busy re-check's hand-back): whether that relaunch, asked for by the bypass pick (`why` "bypass mode"), is
         withdrawn instead of asked for again, by the withdrawal's rule (SdkBackend._withdraw_mode_pick). The pending-bypass
         mark is down and the ask was the pick's alone (_mode_ask_alone); no other pick's mark is up; no ask of another
         reason stands; nothing else is on its way (an ask carried, a relaunch armed other than a reattach to the same CLI
         that no switch armed, a relaunch waiting for the turn's end); nothing is set aside for it (_switch_riders); and the
-        launch the caller read before the hold (`same`) equals the serving CLI's launch record (`have`), still the one
-        serving."""
+        launch the caller read before the hold (`now`, None when it read none), with the mode read here as its mode,
+        equals the serving CLI's launch record (`have`), still the one serving. The mode is read in this hold because
+        set_mode writes it under the session lock, as the withdrawal compares the mode set_mode was called with; every
+        other key is the caller's read."""
         return (why == "bypass mode" and not getattr(self, "_mode_pending", "") and getattr(self, "_mode_ask_alone", False)
                 and not any(getattr(self, a, "") for a in ("_effort_pending", "_auth_pending", "_fast_pending"))
                 and getattr(self, "_switch_wanted", "") in ("", why)
                 and not (getattr(self, "_switch_ask_pending", "") or getattr(self, "_reconnect_when_idle", False)
                          or (getattr(self, "_reconnect", False) and (getattr(self, "_reconnect_switch_why", "")
                                                                       or not getattr(self, "_reattach_keeps_cli", False))))
-                and same and getattr(self, "_cli_launch", None) is have and not self._switch_riders)
+                and isinstance(now, dict) and isinstance(have, dict)
+                and all(launch_value(have, k) == v for k, v in dict(now, mode=getattr(self, "mode", "") or "").items())
+                and getattr(self, "_cli_launch", None) is have and not self._switch_riders)
 
     def _release_hold_at_exit(self):
         """THE CLI'S EXIT is the one event on which the CLI loses its prompt queue, and so the one event
@@ -9440,8 +9444,9 @@ class SdkSession:
         On a veto the launch is read after the quiet read and before the hold. In the hold, a relaunch armed for the bypass
         pick's ask is withdrawn instead of asked for again when the withdrawal's rule holds (_mode_relaunch_withdrawn): the
         pending-bypass mark is down and the ask was the pick's alone; no other pick's mark is up; no ask of another reason
-        stands and nothing else is on its way; nothing is set aside for it; and the launch read equals the serving CLI's
-        launch record, still the one serving. A standing ask of the same reason goes with it."""
+        stands and nothing else is on its way; nothing is set aside for it; and the launch read, with the mode read in
+        the hold as its mode, equals the serving CLI's launch record, still the one serving. A standing ask of the same
+        reason goes with it."""
         why = getattr(self, "_reconnect_switch_why", "")
         if not (why and getattr(self, "_reconnect", False)) or getattr(self, "ended", False):
             return False
@@ -9454,12 +9459,11 @@ class SdkSession:
                     self.backend._log("%s (%s): could not lengthen the host's end grace: %s" % (why, self.name, e))
             return False
         have = getattr(self, "_cli_launch", None)
-        same = (why == "bypass mode" and isinstance(have, dict)
-                and all(launch_value(have, k) == v for k, v in self.launch_values().items()))
+        now = self.launch_values() if why == "bypass mode" and isinstance(have, dict) else None
         with self._lock:
             self._reconnect = False
             self._reconnect_switch_why = ""
-            withdrawn = self._mode_relaunch_withdrawn(why, same, have)
+            withdrawn = self._mode_relaunch_withdrawn(why, now, have)
             if withdrawn:
                 self._mode_ask_alone = False
                 self._switch_wanted = self._switch_wait_said = ""
