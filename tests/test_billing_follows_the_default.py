@@ -1412,6 +1412,454 @@ class AChangeBackWithdrawsOnlyARelaunchThatWouldChangeNothing(_ABypassPickChange
         self.assertTrue(self._relaunched_at_quiet(s))
 
 
+class ThePendingBypassMarkFollowsTheLiveMode(_ABypassPickChangedBack):
+    """The pending-bypass mark matches the session's mode. The reconcile of waiting picks reads the mode and sets the
+    mark under the session lock, which set_mode also takes when it writes the mode, and sets the mark only while the
+    mode is bypassPermissions."""
+
+    def test_the_mark_is_raised_only_while_the_mode_is_bypass(self):
+        s = self._session()
+        self._bypass_waits(s)
+        self.assertEqual((s.mode, s._mode_pending), ("bypassPermissions", "bypassPermissions"),
+                         "the premise: the mode is bypassPermissions and the pending-bypass mark is set")
+        real = self.be._update_reg
+        applied = []
+
+        def record(sid, **fields):
+            if not applied and "relaunchWait" in fields:   # the first record write with relaunchWait sets the mode to default
+                applied.append(1)
+                self.assertTrue(self.be.set_mode(SID, "default"))
+            return real(sid, **fields)
+
+        self.be._update_reg = record
+        try:
+            # reconcile against launch values whose mode is default
+            s._reconcile_waiting_picks(dict(s.launch_values(), mode="default"), False)
+        finally:
+            self.be._update_reg = real
+        self.assertTrue(applied, "the record write called set_mode")
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending), ("default", "default", ""),
+                         "the pending-bypass mark matches the session's mode: default, with the mark clear")
+
+
+class TheWaitingModePickFollowsTheMode(_ABypassPickChangedBack):
+    """After its registry write, the reconcile of waiting picks decides the mode pick again against the session's mode
+    as read under the session lock, and sets the pending-bypass mark and the relaunch ask in the same hold: the pick
+    keeps waiting only while the launch lacks that mode. When that mode is not the one the reconcile started from, the
+    mode entry its record write carried is taken back out of the registry's waiting record, with the mode read again
+    under the lock after each record write, until the record holds the entry exactly while the mode reads
+    bypassPermissions."""
+
+    def _reconcile(self, s, at_record="default", launched="default", at_drop=None):
+        """Reconcile against launch values whose mode is `launched` (None: no launch record), with set_mode(at_record)
+        called from the reconcile's first record write that carries relaunchWait and, when `at_drop` is given,
+        set_mode(at_drop) called from the reconcile's own drop of the mode entry before that drop runs. Returns the
+        set_mode calls made, in order."""
+        calls = []
+        real_update, real_drop = self.be._update_reg, self.be._drop_pick_wait
+
+        def record(sid, **fields):
+            if not calls and "relaunchWait" in fields:
+                calls.append(at_record)
+                self.assertTrue(self.be.set_mode(SID, at_record))
+            return real_update(sid, **fields)
+
+        def drop(sess, pick, **fields):
+            if (at_drop and at_drop not in calls and pick == "mode"
+                    and sys._getframe(1).f_code.co_name == "_reconcile_waiting_picks"):
+                calls.append(at_drop)
+                self.assertTrue(self.be.set_mode(SID, at_drop))
+            return real_drop(sess, pick, **fields)
+
+        self.be._update_reg, self.be._drop_pick_wait = record, drop
+        try:
+            s._reconcile_waiting_picks(None if launched is None else dict(s.launch_values(), mode=launched), False)
+        finally:
+            self.be._update_reg, self.be._drop_pick_wait = real_update, real_drop
+        return calls
+
+    def _mode_entry(self):
+        return "mode" in ((sb.read_reg(self.d, SID).get("relaunchWait") or {}).get("picks") or {})
+
+    def test_a_default_mode_leaves_no_mode_entry_and_no_ask(self):
+        s = self._session()
+        self._bypass_waits(s)
+        self.assertTrue(self._mode_entry(), "the premise: the waiting record holds the mode pick")
+        self.assertEqual(self._reconcile(s), ["default"], "the record write called set_mode")
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted, s._mode_ask_alone, self._mode_entry()),
+                         ("default", "", "", False, False),
+                         "the mode is default: no pending-bypass mark, no relaunch ask for the mode pick and no "
+                         "mode entry in the waiting record")
+        self.assertFalse(self._relaunched_at_quiet(s), "nothing asks for a relaunch at the next quiet moment")
+
+    def test_a_bypass_mode_keeps_the_mode_entry(self):
+        s = self._session()
+        self._bypass_waits(s)
+        self.assertEqual(self._reconcile(s, at_drop="bypassPermissions"), ["default", "bypassPermissions"],
+                         "the record write called set_mode(default) and the reconcile's drop called set_mode(bypass)")
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted, self._mode_entry()),
+                         ("bypassPermissions", "bypassPermissions", "bypass mode", True),
+                         "the mode is bypassPermissions: its pick waits, with the mark, the relaunch ask and the "
+                         "mode entry in the waiting record")
+
+    def test_a_mode_the_launch_lacks_keeps_its_relaunch(self):
+        s = self._session(mode="bypassPermissions", relaunchWait={"why": "bypass mode", "t": 1700000000,
+                                                                  "picks": {"mode": {"mode": "bypassPermissions"}}})
+        self.assertEqual((s._mode_pending, s._switch_wanted), ("", ""),
+                         "the premise: the bypass pick is on record, with no mark and no ask in memory")
+        self.assertEqual(self._reconcile(s, at_record="plan", launched="acceptEdits"), ["plan"],
+                         "the record write called set_mode(plan)")
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted), ("plan", "", "bypass mode"),
+                         "the launch lacks plan: the pick asks for its relaunch, with no pending-bypass mark")
+        self.assertTrue(self._relaunched_at_quiet(s), "the relaunch is armed at the next quiet moment")
+
+    def test_a_launch_with_no_record_keeps_its_relaunch_and_drops_the_mode_entry(self):
+        s = self._session()
+        self._bypass_waits(s)
+        self.assertEqual(self._reconcile(s, launched=None), ["default"], "the record write called set_mode")
+        self.assertEqual((s.mode, s._mode_pending, s._mode_ask_alone, self._mode_entry()),
+                         ("default", "", False, False),
+                         "the mode is default: no pending-bypass mark and no mode entry in the waiting record")
+        self.assertTrue(s._switch_wanted, "a CLI no launch record vouches for still relaunches once")
+
+    @staticmethod
+    def _watch(s):
+        """Swap the session's class for one that notes, for every read of `mode` and every write of the pending-bypass
+        mark or the relaunch ask made by the reconcile itself, whether the session lock is held. Returns the notes."""
+        seen = []
+
+        def note(what, self_):
+            if sys._getframe(2).f_code.co_name == "_reconcile_waiting_picks":
+                seen.append((what, self_._lock.locked()))
+
+        def field(name, store, what, on_read=False):
+            def get(self_):
+                if on_read:
+                    note(what, self_)
+                return self_.__dict__.get(store, "")
+
+            def put(self_, v):
+                if not on_read:
+                    note(what, self_)
+                self_.__dict__[store] = v
+            s.__dict__[store] = s.__dict__.pop(name, "")
+            return property(get, put)
+
+        s.__class__ = type("Watched", (type(s),), {"mode": field("mode", "_w_mode", "mode read", on_read=True),
+                                                  "_mode_pending": field("_mode_pending", "_w_mark", "mark set"),
+                                                  "_switch_wanted": field("_switch_wanted", "_w_ask", "ask set")})
+        return seen
+
+    def test_the_mode_is_read_and_the_mark_and_ask_set_under_the_session_lock(self):
+        s = self._session(mode="bypassPermissions", relaunchWait={"why": "bypass mode", "t": 1700000000,
+                                                                  "picks": {"mode": {"mode": "bypassPermissions"}}})
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted), ("bypassPermissions", "", ""),
+                         "the premise: the bypass pick is on record, with no mark and no ask in memory")
+        seen = self._watch(s)
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="default"), False)
+        self.assertEqual((s._mode_pending, s._switch_wanted), ("bypassPermissions", "bypass mode"), "the pick waits")
+        self.assertEqual({w for w, _ in seen}, {"mode read", "mark set", "ask set"}, seen)
+        self.assertTrue(all(held for _, held in seen), "each is made under the session lock: %r" % (seen,))
+
+    def test_the_mode_entry_is_settled_on_reads_under_the_session_lock(self):
+        s = self._session()
+        self._bypass_waits(s)
+        seen = self._watch(s)
+        self.assertEqual(self._reconcile(s), ["default"], "the record write called set_mode")
+        self.assertEqual([w for w, _ in seen], ["mode read", "mode read", "mode read"],
+                         "one read decides the pick, then one read after the record write and one after the drop")
+        self.assertTrue(all(held for _, held in seen), "each read is made under the session lock: %r" % (seen,))
+        self.assertFalse(self._mode_entry())
+
+
+class _AHoldEndSessionLock:
+    """Stands in for a session's lock with the same semantics, plus call_free(fn): fn runs at once while the lock is
+    free, and while it is held fn runs as soon as that hold ends, before anything after the hold."""
+
+    def __init__(self, inner):
+        self.inner, self.queued = inner, []
+
+    def acquire(self, blocking=True, timeout=-1):
+        return self.inner.acquire(blocking, timeout)
+
+    def release(self):
+        self.inner.release()
+        while self.queued:
+            self.queued.pop(0)()
+
+    def locked(self):
+        return self.inner.locked()
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *exc):
+        self.release()
+        return False
+
+    def call_free(self, fn):
+        if self.inner.locked():
+            self.queued.append(fn)
+        else:
+            fn()
+
+
+def _hooked_field(s, name, on_read=None, on_write=None):
+    """Swap the session's class for one whose `name` is a property: on_read(caller, value) runs after each read takes its
+    value, and on_write(caller, value) before each write stores it; `caller` is the name of the function that made the
+    access."""
+    store = "_hooked_" + name
+
+    def get(self_):
+        v = self_.__dict__.get(store, "")
+        if on_read:
+            on_read(sys._getframe(1).f_code.co_name, v)
+        return v
+
+    def put(self_, v):
+        if on_write:
+            on_write(sys._getframe(1).f_code.co_name, v)
+        self_.__dict__[store] = v
+
+    s.__dict__[store] = s.__dict__.pop(name, "")
+    s.__class__ = type("Hooked", (type(s),), {name: property(get, put)})
+
+
+def _refuse_mode_switch(s, mode, prev):
+    """Run the session's live mode switch to `mode` against a client that refuses it (`prev`: the mode confirmed before)."""
+    import asyncio
+
+    async def refuse(_mode):
+        raise RuntimeError("synthetic control request failure")
+    s.client = types.SimpleNamespace(set_permission_mode=refuse)
+    try:
+        asyncio.run(s._do_set_mode(mode, prev))
+    finally:
+        s.client = None
+
+
+class TheModeAndThePendingBypassMarkChangeInOneHold(_ABypassPickChangedBack):
+    """set_mode writes the mode, the confirmed mode and the pending-bypass mark in one hold of the session lock, so a
+    set_mode that takes the lock when another set_mode's hold ends finds that hold's mode and mark together."""
+
+    def test_set_mode_writes_the_mode_and_the_mark_in_one_hold(self):
+        s = self._session()
+        s.inflight = 1                                                # a turn runs: the bypass pick waits for quiet
+        s._lock = lock = _AHoldEndSessionLock(s._lock)
+        called = []
+
+        def on_write(caller, value):
+            if not called and caller == "set_mode" and value == "bypassPermissions":
+                called.append(1)
+                lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        _hooked_field(s, "mode", on_write=on_write)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(called, [1], "set_mode(default) was called at the bypass pick's mode write")
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending), ("default", "default", ""),
+                         "the mode is default: the confirmed mode is default and the pending-bypass mark is clear")
+        self.assertFalse(s.snapshot().get("modePending"), "the badge shows no waiting bypass pick")
+
+
+class TheAppliedModePickFollowsTheMode(_ABypassPickChangedBack):
+    """When the launch carried the mode pick, the reconcile of waiting picks applies it under the session lock, and only
+    while the session's mode still reads the launch's mode: the confirmed mode takes the launch's mode and the
+    pending-bypass mark comes down. A mode set_mode wrote since then keeps the confirmed mode and the mark set_mode left
+    with it."""
+
+    def _reconcile_carrying_the_flag(self, s, mode):
+        """Reconcile against launch values that carry the bypass flag, with set_mode(mode) called at the reconcile's read
+        of the pending-bypass mark after its record write: at once while the session lock is free there, else as soon as
+        the hold ends. Returns whether set_mode was called."""
+        s._lock = lock = _AHoldEndSessionLock(s._lock)
+        launch = dict(s.launch_values())
+        self.assertEqual(launch["mode"], "bypassPermissions", "the premise: the launch carries the bypass flag")
+        recorded, called = [], []
+        real_update, real_dropping = self.be._update_reg, self.be._update_reg_dropping
+
+        def update(sid, **fields):
+            recorded.append(1)
+            return real_update(sid, **fields)
+
+        def dropping(sid, drop=(), **fields):
+            recorded.append(1)
+            return real_dropping(sid, drop=drop, **fields)
+
+        def on_read(caller, value):
+            if recorded and not called and caller == "_reconcile_waiting_picks":
+                called.append(1)
+                lock.call_free(lambda: self.assertTrue(self.be.set_mode(SID, mode)))
+        _hooked_field(s, "_mode_pending", on_read=on_read)
+        self.be._update_reg, self.be._update_reg_dropping = update, dropping
+        try:
+            s._reconcile_waiting_picks(launch, True)
+        finally:
+            self.be._update_reg, self.be._update_reg_dropping = real_update, real_dropping
+        self.assertTrue(recorded, "the premise: the reconcile wrote its record")
+        return bool(called)
+
+    def test_the_confirmed_mode_takes_the_launch_mode_only_while_the_mode_reads_it(self):
+        s = self._session()
+        self._bypass_waits(s)
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending), ("bypassPermissions", "default", "bypassPermissions"),
+                         "the premise: the bypass pick waits")
+        self.assertTrue(self._reconcile_carrying_the_flag(s, "default"), "set_mode(default) was called")
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending), ("default", "default", ""),
+                         "the mode is default: the confirmed mode is default and the pending-bypass mark is clear")
+
+    def test_a_launch_that_carried_the_pick_confirms_it(self):
+        s = self._session()
+        self._bypass_waits(s)
+        s._reconcile_waiting_picks(dict(s.launch_values()), True)
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending), ("bypassPermissions", "bypassPermissions", ""),
+                         "the launch carried the flag: the confirmed mode is bypassPermissions and the mark is clear")
+
+    def test_a_bypass_pick_the_launch_lacks_keeps_its_mark(self):
+        s = self._session(relaunchWait={"why": "bypass mode", "t": 1700000000,
+                                        "picks": {"mode": {"mode": "bypassPermissions"}}})
+        self.assertEqual((s.mode, s._mode_pending), ("default", ""),
+                         "the premise: the mode pick is on record, the mode default and no mark up")
+        s.inflight = 1                                                # a turn runs: a bypass pick waits for quiet
+        real = self.be._update_reg_dropping
+        called = []
+
+        def dropping(sid, drop=(), **fields):
+            out = real(sid, drop=drop, **fields)
+            if not called:
+                called.append(1)
+                self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+            return out
+        self.be._update_reg_dropping = dropping
+        try:
+            s._reconcile_waiting_picks(dict(s.launch_values()), True)    # the launch carries the default mode
+        finally:
+            self.be._update_reg_dropping = real
+        self.assertEqual(called, [1], "set_mode(bypassPermissions) was called after the record write")
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending, s._switch_wanted),
+                         ("bypassPermissions", "default", "bypassPermissions", "bypass mode"),
+                         "the bypass pick waits: the confirmed mode is default, with the mark and the relaunch ask")
+        self.assertIn("mode", (sb.read_reg(self.d, SID).get("relaunchWait") or {}).get("picks") or {},
+                      "the waiting record holds the mode pick")
+
+
+class ARefusedModeSwitchRevertsOnlyItsOwnPick(_ABypassPickChangedBack):
+    """A mode switch the CLI refuses puts the mode, the confirmed mode and the registry's mode back to the mode confirmed
+    before it only while the session's mode still reads the refused pick. A mode picked after it keeps the session's
+    mode, its pending-bypass mark and its registry mode, and the confirmed mode goes back only while it still reads the
+    refused pick. The mode is read and the revert written under the session lock."""
+
+    def test_a_bypass_pick_keeps_its_mode_mark_and_record(self):
+        s = self._session()
+        s.inflight = 1
+        self.assertTrue(self.be.set_mode(SID, "acceptEdits"))       # held: no client
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending), ("bypassPermissions", "acceptEdits", "bypassPermissions"),
+                         "the premise: the bypass pick waits beside the acceptEdits pick")
+        _refuse_mode_switch(s, "acceptEdits", "default")
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending, sb.read_reg(self.d, SID).get("mode")),
+                         ("bypassPermissions", "default", "bypassPermissions", "bypassPermissions"),
+                         "the bypass pick keeps the mode, its mark and the registry's mode; the confirmed mode is default")
+
+    def test_another_pick_keeps_the_mode_and_its_confirmed_mode(self):
+        s = self._session(mode="bypassPermissions")
+        self.assertEqual(s.perm_mode, "bypassPermissions", "the premise: the CLI was launched with the flag")
+        self.assertTrue(self.be.set_mode(SID, "acceptEdits"))       # held: no client
+        self.assertTrue(self.be.set_mode(SID, "plan"))
+        _refuse_mode_switch(s, "acceptEdits", "bypassPermissions")
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending, sb.read_reg(self.d, SID).get("mode")),
+                         ("plan", "plan", "", "plan"),
+                         "the plan pick keeps the mode, the confirmed mode and the registry's mode")
+
+    def test_the_refused_pick_reverts_every_layer(self):
+        s = self._session()
+        self.assertTrue(self.be.set_mode(SID, "acceptEdits"))       # held: no client
+        _refuse_mode_switch(s, "acceptEdits", "default")
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending, sb.read_reg(self.d, SID).get("mode")),
+                         ("default", "default", "", "default"))
+
+
+class TheModeFieldsAreReadAndWrittenUnderTheSessionLock(_ABypassPickChangedBack):
+    """set_mode, the reconcile of waiting picks and a refused switch's revert read and write the mode, the confirmed mode
+    and the pending-bypass mark under the session lock: every read and write of them in set_mode, in its unwait and in
+    the revert, and in the reconcile every read of the mode, every write of the mark and the applied pick's write of the
+    confirmed mode."""
+
+    WATCHED = ("set_mode", "_withdraw_mode_pick", "_do_set_mode", "_reconcile_waiting_picks")
+
+    def _watch(self, s):
+        """Swap the session's class for one that notes each read and write of `mode`, `perm_mode` and `_mode_pending` made
+        by a function in WATCHED, with whether the session lock is held. Returns the notes: (function, field, "r" or
+        "w", held)."""
+        seen = []
+
+        def note(self_, field, op):
+            caller = sys._getframe(2).f_code.co_name
+            if caller in self.WATCHED:
+                seen.append((caller, field, op, self_._lock.locked()))
+
+        def prop(field):
+            store = "_watched_" + field
+
+            def get(self_):
+                note(self_, field, "r")
+                return self_.__dict__.get(store, "")
+
+            def put(self_, v):
+                note(self_, field, "w")
+                self_.__dict__[store] = v
+            s.__dict__[store] = s.__dict__.pop(field, "")
+            return property(get, put)
+
+        s.__class__ = type("Watched", (type(s),), {f: prop(f) for f in ("mode", "perm_mode", "_mode_pending")})
+        return seen
+
+    def test_each_read_and_write_holds_the_session_lock(self):
+        s = self._session()
+        seen = self._watch(s)
+        self._bypass_waits(s)                                         # set_mode: the bypass pick waits
+        s._reconcile_waiting_picks(dict(s.launch_values(), mode="default"), False)   # the launch lacks it: still waits
+        self.assertTrue(self.be.set_mode(SID, "default"))             # set_mode: the mark comes down
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        s._reconcile_waiting_picks(dict(s.launch_values()), True)    # the launch carried it: applied
+        self.assertEqual((s.perm_mode, s._mode_pending), ("bypassPermissions", ""), "the premise: the pick applied")
+        self.assertTrue(self.be.set_mode(SID, "acceptEdits"))         # held: no client
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        _refuse_mode_switch(s, "acceptEdits", "bypassPermissions")   # refused, with another pick standing
+        self.assertTrue(self.be.set_mode(SID, "plan"))                # held: no client
+        _refuse_mode_switch(s, "plan", "default")                    # refused, the session's mode: reverted
+        self.assertEqual(s.mode, "default", "the premise: the refused pick reverted")
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        real = self.be._update_reg
+        called = []
+
+        def record(sid, **fields):
+            if not called and "relaunchWait" in fields:
+                called.append(1)
+                self.assertTrue(self.be.set_mode(SID, "default"))
+            return real(sid, **fields)
+        self.be._update_reg = record
+        try:
+            s._reconcile_waiting_picks(dict(s.launch_values(), mode="default"), False)   # the record's entry settled
+        finally:
+            self.be._update_reg = real
+        self.assertEqual(called, [1], "the premise: the record write called set_mode")
+        required = [x for x in seen if x[0] in ("set_mode", "_withdraw_mode_pick", "_do_set_mode")
+                    or (x[0] == "_reconcile_waiting_picks"
+                        and (x[1], x[2]) in (("mode", "r"), ("_mode_pending", "w"), ("perm_mode", "w")))]
+        kinds = {x[:3] for x in required}
+        self.assertTrue({("set_mode", "mode", "w"), ("set_mode", "perm_mode", "r"), ("set_mode", "perm_mode", "w"),
+                         ("set_mode", "_mode_pending", "r"), ("set_mode", "_mode_pending", "w"),
+                         ("_reconcile_waiting_picks", "mode", "r"), ("_reconcile_waiting_picks", "perm_mode", "w"),
+                         ("_reconcile_waiting_picks", "_mode_pending", "w"),
+                         ("_do_set_mode", "mode", "r"), ("_do_set_mode", "mode", "w"),
+                         ("_do_set_mode", "perm_mode", "r"), ("_do_set_mode", "perm_mode", "w")} <= kinds,
+                        "the premise: every kind of access was made: %r" % (sorted(kinds),))
+        mode_reads = [x for x in required if x[:3] == ("_reconcile_waiting_picks", "mode", "r")]
+        self.assertEqual(len(mode_reads), 5,
+                         "the premise: the reconcile read the mode for the waiting pick, for the applied pick, for the "
+                         "pick decided again and for the record's entry twice: %r" % (mode_reads,))
+        self.assertEqual([x for x in required if not x[3]], [], "each is made under the session lock")
+
+
 class AReasonSetAsideClearsAtALaunchNotAtAnAttach(psr._Harness):
     """The reasons set aside for a relaunch clear when a CLI is launched from the session's state, never at an attach to the
     CLI already running, so a change back after a host re-exec still keeps the relaunch."""

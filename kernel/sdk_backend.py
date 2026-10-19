@@ -8399,12 +8399,22 @@ class SdkSession:
             # CLI never accepted, indefinitely. Revert every layer to the last confirmed mode
             # (snapshot, session, registry — the next connect must not re-apply the refused pick
             # either) and ring the problems so the failed switch is unmissable.
-            self.perm_mode = prev
-            self.mode = prev
-            self.backend._update_reg(self.sid, mode=prev)
+            # A mode picked after this one is the session's mode and keeps it, with its pending-bypass mark and its
+            # record: the mode is read and the revert written under self._lock, which set_mode also takes when it writes
+            # the mode, the confirmed mode and the mark. The confirmed mode goes back while it still reads this pick.
+            with self._lock:
+                now = getattr(self, "mode", "") or ""
+                if now == mode or self.perm_mode == mode:
+                    self.perm_mode = prev
+                if now == mode:
+                    self.mode = prev
+            if now == mode:
+                self.backend._update_reg(self.sid, mode=prev)
             self.backend._log("set_permission_mode (%s -> %s) refused by the SDK: %s: %s — the switch "
-                              "did NOT apply; the mode reverted to %s"
-                              % (self.name, mode, type(e).__name__, e, prev), problem=True)
+                              "did NOT apply; %s"
+                              % (self.name, mode, type(e).__name__, e,
+                                 "the mode reverted to %s" % prev if now == mode else "the mode stays %s, picked since" % now),
+                              problem=True)
             self.backend._poke()
 
     async def _do_refresh_context(self):
@@ -9134,9 +9144,16 @@ class SdkSession:
                 self.fast = "on" if want["fast"] else self.fast   # the launch carried the flag; its init re-asserts the truth
             self._fast_pending = ""
         if "mode" in done:
-            if getattr(self, "_mode_pending", ""):
-                self.perm_mode = want["mode"]   # the launch carried the flag; the connected CLI's next init confirms it
-            self._mode_pending = ""
+            # The pick the launch carried is applied under self._lock, which set_mode also takes when it writes the mode,
+            # the confirmed mode and the pending-bypass mark, and only while the session's mode still reads the mode
+            # `want` read: a mode set since then has set the confirmed mode and the mark itself, in that hold.
+            with self._lock:
+                if (getattr(self, "mode", "") or "") == want["mode"]:
+                    if getattr(self, "_mode_pending", ""):
+                        # the launch carried the flag; the connected CLI's next init confirms it
+                        self.perm_mode = want["mode"]
+                    self._mode_pending = ""
+        unrecord = False
         if left:
             if "effort" in left and not self._effort_pending:
                 self._effort_pending = want["effort"]
@@ -9144,25 +9161,53 @@ class SdkSession:
                 self._auth_pending = want["auth"] or self.effective_auth()
             if "fast" in left and not getattr(self, "_fast_pending", "") and want["fast"]:
                 self._fast_pending = "on"
-            if "mode" in left and not getattr(self, "_mode_pending", "") and want["mode"] == "bypassPermissions":
-                self._mode_pending = want["mode"]
+            # The mode pick is decided again against the session's mode as read under self._lock, which set_mode also
+            # takes when it writes the mode, and the pending-bypass mark and the relaunch ask are set in the same hold.
+            # A mode other than the one `want` read takes the mode entry the record write above carried back out
+            # (below), and the pick stays in `left` only while the launch lacks that mode; the mark is set only while
+            # it is bypassPermissions.
+            with self._lock:
+                live = getattr(self, "mode", "") or ""
+                if "mode" in left and live != want.get("mode"):
+                    unrecord = "mode" in still
+                    if known and launch_value(launch, "mode") == live:
+                        left.remove("mode")
+                if "mode" in left and not getattr(self, "_mode_pending", "") and live == "bypassPermissions":
+                    self._mode_pending = "bypassPermissions"
+                if left and not getattr(self, "_switch_wanted", ""):
+                    # an ask raised here for the mode pick alone is marked that pick's own, which
+                    # SdkBackend._withdraw_mode_pick reads after a kernel restart (it withdraws the ask only when its
+                    # other conditions hold too; unlike set_mode, this does not check for an ask carried and not yet
+                    # armed).
+                    alone = left == ["mode"]
+                    self._switch_wanted = "bypass mode" if alone else why
+                    self._mode_ask_alone = alone
             if ("mode" in left and known and self.perm_mode == "bypassPermissions"
                     and str(launch.get("mode") or "") not in ("", "bypassPermissions")):
                 # construction seeds perm_mode from the reg, which holds the pick; a CLI launched without the flag cannot run
                 # bypass (it refuses the live switch), so its launch mode is the best evidence until its next init, which
                 # corrects any live switch made since that launch
                 self.perm_mode = str(launch.get("mode"))
-            if not getattr(self, "_switch_wanted", ""):
-                # an ask raised here for the mode pick alone is marked that pick's own, which a change back after a kernel
-                # restart reads (SdkBackend._withdraw_mode_pick withdraws the ask only when its other conditions hold too;
-                # unlike set_mode, this does not check for an ask carried and not yet armed).
-                alone = left == ["mode"]
-                self._switch_wanted = "bypass mode" if alone else why
-                self._mode_ask_alone = alone
-            self.backend._log("waiting picks (%s): %s %s; it relaunches once nothing would be cut"
-                              % (self.name, ", ".join(left),
-                                 "not carried by the CLI this kernel attached to" if known
-                                 else "cannot be vouched for (the host's hello carries no launch record)"))
+            if left:
+                self.backend._log("waiting picks (%s): %s %s; it relaunches once nothing would be cut"
+                                  % (self.name, ", ".join(left),
+                                     "not carried by the CLI this kernel attached to" if known
+                                     else "cannot be vouched for (the host's hello carries no launch record)"))
+        # The record's mode entry follows the mode read under self._lock: the entry the write above carried goes, and
+        # each record write after it is followed by a fresh read under the lock, until the record holds the entry
+        # exactly while the mode reads bypassPermissions. No lock is held across a record write.
+        if unrecord:
+            held = True                          # the record holds the mode entry as this reconcile last wrote it
+            while True:
+                with self._lock:
+                    bypass = (getattr(self, "mode", "") or "") == "bypassPermissions"
+                if bypass == held:
+                    break
+                if bypass:
+                    self.backend._note_pick_waits(self, "mode", "bypass mode")
+                else:
+                    self.backend._drop_pick_wait(self, "mode")
+                held = bypass
         if left or fields or recorded:
             self.backend._poke()
 
@@ -21199,40 +21244,52 @@ class SdkBackend:
             write_sdk_default(self.state_dir, mode=mode)   # remember as the seed for the NEXT new session, like model/effort (the user 2026-06-27)
         s = self.sessions.get(sid)
         if s:
-            prev = s.perm_mode      # the last CONFIRMED mode — the revert target if the CLI refuses (T139)
-            s.mode = mode
-            if mode == "bypassPermissions" and (prev != "bypassPermissions" or getattr(s, "_mode_pending", "")):
-                # the CLI REFUSES a live switch INTO bypass unless the process was LAUNCHED with
-                # --dangerously-skip-permissions (probed on CLI 2.1.221, T139: 'Cannot set permission
-                # mode to bypassPermissions because the session was not launched with…'). The honest
-                # apply is the RECONNECT (effort's pattern): the relaunch carries
-                # permission_mode=bypassPermissions, which the SDK maps to the launch flag — resume
-                # continues the conversation and the next init confirms perm_mode.
-                # That relaunch waits for a quiet session (request_reconnect), so perm_mode stays what the running CLI
-                # confirmed and the pick waits as a mark of its own (2026-10-01): the badge's dots, never an early Bypass
-                # that the old CLI's next init then flipped back, and the consult guard's word (_can_use_tool). The ask is
-                # this pick's own when no other stood, so changing back may withdraw it.
-                prior = getattr(s, "_switch_wanted", "")
-                # an ask already carried whose relaunch is not armed yet (_switch_ask_pending) may be another pick's: a busy
-                # re-check hands it back only when no ask stands, so this one would stand for it. A carried ask of this
-                # pick's own counts too: a change back then keeps that relaunch, which carries the mode as it is by then
-                carried = getattr(s, "_switch_ask_pending", "")
-                s._mode_ask_alone = not carried and (not prior
-                                                     or (prior == "bypass mode" and getattr(s, "_mode_ask_alone", False)))
-                s._mode_pending = mode
+            # One hold of the session lock reads the confirmed mode and writes the mode, the confirmed mode and the
+            # pending-bypass mark together. The reconcile of waiting picks and a failed switch's revert read and write
+            # them under the same lock. The hold makes no call that blocks or takes a lock: the record write, the
+            # relaunch ask, the unwait and the live switch all run after it.
+            with s._lock:
+                prev = s.perm_mode      # the last CONFIRMED mode — the revert target if the CLI refuses (T139)
+                s.mode = mode
+                waits = mode == "bypassPermissions" and (prev != "bypassPermissions"
+                                                         or bool(getattr(s, "_mode_pending", "")))
+                if waits:
+                    # the CLI REFUSES a live switch INTO bypass unless the process was LAUNCHED with
+                    # --dangerously-skip-permissions (probed on CLI 2.1.221, T139: 'Cannot set permission
+                    # mode to bypassPermissions because the session was not launched with…'). The honest
+                    # apply is the RECONNECT (effort's pattern): the relaunch carries
+                    # permission_mode=bypassPermissions, which the SDK maps to the launch flag — resume
+                    # continues the conversation and the next init confirms perm_mode.
+                    # That relaunch waits for a quiet session (request_reconnect), so perm_mode stays what the running CLI
+                    # confirmed and the pick waits as a mark of its own (2026-10-01): the badge's dots, never an early Bypass
+                    # that the old CLI's next init then flipped back, and the consult guard's word (_can_use_tool). The ask is
+                    # this pick's own when no other stood, so changing back may withdraw it.
+                    prior = getattr(s, "_switch_wanted", "")
+                    # an ask already carried whose relaunch is not armed yet (_switch_ask_pending) may be another pick's: a busy
+                    # re-check hands it back only when no ask stands, so this one would stand for it. A carried ask of this
+                    # pick's own counts too: a change back then keeps that relaunch, which carries the mode as it is by then
+                    carried = getattr(s, "_switch_ask_pending", "")
+                    s._mode_ask_alone = not carried and (not prior
+                                                         or (prior == "bypass mode" and getattr(s, "_mode_ask_alone", False)))
+                    s._mode_pending = mode
+                    marked = False
+                else:
+                    s.perm_mode = mode      # snapshot reflects it immediately (clears the picker's meta-pending)
+                    marked = bool(getattr(s, "_mode_pending", ""))
+                    s._mode_pending = ""    # the pending-bypass mark comes down with the mode write
+            if waits:
                 self._note_pick_waits(s, "mode", "bypass mode")
                 s.request_reconnect(why="bypass mode")
             else:
-                s.perm_mode = mode      # snapshot reflects it immediately (clears the picker's meta-pending)
-                if getattr(s, "_mode_pending", ""):
-                    self._withdraw_mode_pick(s)   # changed back before the bypass relaunch: the mark comes down; the unwait decides the relaunch
+                if marked:
+                    self._withdraw_mode_pick(s)   # another mode picked while the bypass pick waited: the unwait decides the relaunch
                 s.set_mode_live(mode, prev=prev)
         return True
 
     def _withdraw_mode_pick(self, s) -> None:
-        """The unwait: a bypass pick changed back while its relaunch still waits (2026-10-01). The mark comes down and its
-        entry leaves the registry's waiting record (_drop_pick_wait); a record that will not read files a problem here, since
-        _drop_pick_wait returns on one without a word.
+        """The unwait: a bypass pick changed back while its relaunch still waits (2026-10-01). set_mode has taken the mark
+        down, in the hold where it writes the mode; here its entry leaves the registry's waiting record (_drop_pick_wait), and
+        a record that will not read files a problem, since _drop_pick_wait returns on one without a word.
 
         The unwait withdraws a relaunch only when, with the mode pick undone, the launch it would make differs in nothing from
         what the serving CLI's launch record holds, and the unwait never drops a want that was set aside for the relaunch it
@@ -21244,7 +21301,6 @@ class SdkBackend:
         (_switch_riders). set_mode marks the ask the pick's alone when no ask stood but its own and none was carried and not
         yet armed; the reconnect's reconcile marks it when the mode pick is the only one left and no ask stood, whether or
         not one was carried."""
-        s._mode_pending = ""
         alone = getattr(s, "_mode_ask_alone", False)
         s._mode_ask_alone = False
         if read_reg_for_rmw(self.state_dir, s.sid) is None:
