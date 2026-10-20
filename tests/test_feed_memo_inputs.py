@@ -168,6 +168,8 @@ HELPERS = {
     "_session_started_face": ("sig", ("store",)),
     "jd._done_since": ("sig", ("store",)),
     "jd.review_boundary": ("sig", ("store",)),
+    "_newest_block_ev_t": ("sig", ("store",)),            # the blocked yield's block time: its block rows' ev_t
+
     "_handoff_card_fields": ("sig", ("store", "peers")),
     "_bg_owner_tops": ("sig", ("transcript", "store", "reg", "bg")),
     # the two below reach _bg_live_norm (bgLedger) and _session_stamp_read (lastSid) too, and do not claim `reg` the way

@@ -393,5 +393,41 @@ class UnblockerCompletedSince(UnblockerBase):
         self.assertEqual(self.calls[-1][2], "", "the synth completion is excluded from the section")
 
 
+class BlockEvidenceTime(unittest.TestCase):
+    """jd._block_ev_t, the one rule for WHEN a block was asked: the unblocker's candidates, the feed card's blocked
+    yield and its session-level twin, and the brief's stamps all read it. mt is not block evidence: a retitle, a
+    merge, a duplicate step landing or a to-do sync moves it with nothing new said about the block. Pure over dict
+    nodes; no store on disk."""
+
+    def test_the_newest_block_rows_evidence_time_never_mt(self):
+        nd = {"t": T0, "mt": T0 + 900, "log": [
+            {"ev_t": T0 + 100, "src": "planner", "kind": "block", "at": T0 + 100},
+            {"ev_t": T0 + 200, "src": "planner", "kind": "unblock", "at": T0 + 200},
+            {"ev_t": T0 + 300, "src": "closer", "kind": "block", "at": T0 + 450},
+            {"ev_t": T0 + 500, "src": "agent", "kind": "done", "at": T0 + 500}]}
+        self.assertEqual(jd._block_ev_t(nd), T0 + 300, "the evidence time: not its arrival (450), not mt (900)")
+
+    def test_a_row_without_an_evidence_time_falls_back_to_its_own_filing_time(self):
+        nd = {"t": T0, "mt": T0 + 900, "log": [{"ev_t": None, "src": "agent", "kind": "block", "at": T0 + 120}]}
+        self.assertEqual(jd._block_ev_t(nd), T0 + 120, "the row's own `at`, never the node's mt")
+
+    def test_no_block_row_is_no_time(self):
+        self.assertIsNone(jd._block_ev_t({"t": T0, "mt": T0 + 900, "blocked": True}), "a pre-diary node")
+        self.assertIsNone(jd._block_ev_t({"t": T0, "mt": T0 + 900, "log": [
+            {"ev_t": T0 + 5, "src": "agent", "kind": "done", "at": T0 + 5}]}), "rows, none of them a block")
+
+    def test_the_unblockers_candidates_read_the_same_rule(self):
+        # an mt bumped past the block never moves a candidate's block time; a pre-diary node with no row reads
+        # from its birth, never its mt: an earlier bound shows the examiner more evidence, a later one could hide
+        # the answer
+        a, b = SID + ":a", SID + ":b"
+        store = {"nodes": {
+            a: {"id": a, "parentId": None, "blocked": True, "t": T0, "mt": T0 + 900,
+                "log": [{"ev_t": T0 + 300, "src": "closer", "kind": "block", "at": T0 + 450}]},
+            b: {"id": b, "parentId": None, "blocked": True, "t": T0 + 10, "mt": T0 + 900}}}
+        self.assertEqual({nid: bt for nid, _nd, bt in jd._blocked_sub_candidates(store)},
+                         {a: T0 + 300, b: T0 + 10})
+
+
 if __name__ == "__main__":
     unittest.main()

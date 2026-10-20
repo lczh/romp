@@ -36013,6 +36013,21 @@ def _bg_owner_tops(fsid, path, tasks):
     return out
 
 
+def _newest_block_ev_t(nodes, ids):
+    """When the newest of the blocks a card surfaces was asked (`ids`: its open blocked nodes): the newest
+    jd._block_ev_t across them, the event a yield must POSTDATE. The feed card's blocked yield (to an owned
+    background dispatch, to an open question to a peer) and its session-level twin _owned_yield_why read it.
+    Never mt, which a retitle, a merge, a duplicate step landing or a to-do sync moves with no new
+    information about the block: keyed on mt, a grouper retitle of a yielded card put it back in Needs you
+    with a bell and the old brief.
+
+    0 when `ids` is empty, as the max over no node always was. None when any of them has no block row (a
+    pre-diary node the boot sweep missed): there is no time to prove the yield against, and the block stands,
+    the same conservative default as an unattributable dispatch (a masked needs-you is the costly error)."""
+    ts = [jd._block_ev_t(nodes[x]) for x in ids]
+    return None if None in ts else max(ts, default=0)
+
+
 def _owned_yield_why(sid, path):
     """The SESSION-level twin of the feed card's BLOCKED-YIELD (the user 2026-08-01): a top goal whose
     rolled-up state is blocked, but whose own thread DISPATCHED a live background task AFTER that block,
@@ -36062,11 +36077,11 @@ def _owned_yield_why(sid, path):
     for top, own in owned.items():
         if top not in nodes or status.get(top) != "blocked":
             continue                                # only a BLOCKED top can yield — see the docstring
-        blk = max([nodes[x].get("mt", nodes[x].get("t", 0)) for x in _sub(top)
-                   if nodes[x].get("blocked") and not nodes[x].get("nodeComplete")
-                   and not nodes[x].get("cleared")] or [0])
+        blk = _newest_block_ev_t(nodes, [x for x in _sub(top)
+                                         if nodes[x].get("blocked") and not nodes[x].get("nodeComplete")
+                                         and not nodes[x].get("cleared")])
         if not blk or int(own.get("since") or 0) < blk:
-            continue                                # the dispatch predates the block → proves nothing
+            continue                                # the dispatch predates the block, or its time is unknown → proves nothing
         cand = (int(own["since"]), (own.get("descs") or [None])[0])
         best = cand if best is None else max(best, cand)
     if best is None:
@@ -39517,7 +39532,8 @@ def _feed_goals_keyed(sid):
     hands the store or its nodes to (_segs_seam, _heal_session_tops, _agent_open_set, _parked_rows, _summary_outrun,
     _node_anchor_uuids, _landing_inputs, _node_log_rows, _pure_delegation_top, _goal_awaiting_stamp_full,
     _all_outstanding_delegated, _open_leaves, _handoff_peer_identities, _handoff_card_fields, _session_started_face,
-    _provisional_card, _closer_pending, jd.review_boundary, jd._done_since) write only into their own containers;
+    _provisional_card, _closer_pending, jd.review_boundary, jd._done_since, _newest_block_ev_t) write only into their
+    own containers;
     _apply_rewind_hold works on copies (dict(store), fresh nodes/status maps, copy-on-write re-parents, the re-roll on
     a json deep copy) and already runs on the shared view at _provisional_ledger's and build_session's ledger sites;
     the punch above is the snapshot branch's and replays onto a json copy of the pass memo's entry, never onto the
@@ -50669,9 +50685,10 @@ def _feed_session_key(s, tm, ctx, prev_entry):
         snapshot does not until a punch; None with no journal), the user-gesture mark _user_goal_write[fsid], the
         punch record _goals_snap_done[fsid], the rewind hold (cutT, leaf, at) or None, whether the read FAULTED (an
         EIO or a permissions fault moves no stat)). _feed_goals_keyed, jd.load_goals_shared inside _bg_placed_tops
-        and _session_stamp_read, jd.review_boundary, jd._done_since and every node read. The pass's clock stamp is
-        not a component (2026-09-16): a new snapshot that decodes the same versions is not new information, and the
-        stamp moved every snapshotted session's key twice per pass.
+        and _session_stamp_read, jd.review_boundary, jd._done_since, _newest_block_ev_t (the block rows' ev_t the
+        blocked yield orders against) and every node read. The pass's clock stamp is not a component (2026-09-16): a
+        new snapshot that decodes the same versions is not new information, and the stamp moved every snapshotted
+        session's key twice per pass.
       anchors: _node_anchor_rev[fsid]. The warm-anchor table _node_anchor_uuids serves a cold node from; a chat build's
         resolve for this sid bumps it.
       reg: (_feed_reg_sig(fsid), _chat_ident(STATE/gone/<fsid>.json)). The SDK registry record's state (readable,
@@ -51828,14 +51845,16 @@ def _feed_session_entry(s, ctx):
         _await_ok = bool(sess_awaiting_why)
         _owned_why = None
         _owned_since = None
+        _blk_t = None                            # when the card's newest block was asked; None = unknown (no yield)
         if col == "blocked":
-            _blk_t = max([nodes[x].get("mt", nodes[x]["t"]) for x in _subtree(nid)
-                          if nodes[x].get("blocked") and not _closure_done(x)] or [0])
+            # the block rows' own evidence time, never mt (_newest_block_ev_t): a retitle is not news about the block
+            _blk_t = _newest_block_ev_t(nodes, [x for x in _subtree(nid)
+                                                if nodes[x].get("blocked") and not _closure_done(x)])
             _own = owned.get(nid)
             # The yield stands on ownership + event order ALONE (no session-awaiting gate): under the
             # service split, a placed launch no longer feeds sess_awaiting_why, but a dispatch from
             # the blocked card's own thread still proves the thread moved past the block.
-            _await_ok = bool(_own) and _own["since"] >= _blk_t
+            _await_ok = bool(_own) and _blk_t is not None and _own["since"] >= _blk_t
             if _await_ok:
                 _owned_why = "waiting on a background command%s" % (   # the chip's word for in-harness work (2026-09-05)
                     (": " + _own["descs"][0]) if _own["descs"] else "")
@@ -51883,7 +51902,7 @@ def _feed_session_entry(s, ctx):
             _deleg_since = max([nodes[x].get("t") or 0 for x in _hnodes] or [0]) or None
         if nid != api_top and nid != perm_top and col in ("working", "blocked") and (
                 _await_ok or _stamp_why or _deleg_why
-                or (col == "blocked" and _peer_wait and wmap[fsid]["since"] >= _blk_t)):
+                or (col == "blocked" and _peer_wait and _blk_t is not None and wmap[fsid]["since"] >= _blk_t)):
             col = "awaiting"
         # TRACKED delegation payloads (the user 2026-08-24): a report-back handoff renders as ONE
         # card homed under the DELEGATOR. The sender's card is the PRIMARY — delegTracked names

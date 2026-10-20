@@ -84,6 +84,12 @@ def apierr_line(t, uuid, parent, text="API Error: 500 Internal server error.", s
     return o
 
 
+def block_row(t, why=None):
+    """A planner block's diary row, filed for evidence at `t`: where a blocked node's block time lives (jd._block_ev_t),
+    so a fixture that orders an event against a block carries one, as every diary-era store does."""
+    return {"ev_t": t, "src": "planner", "kind": "block", **({"why": why} if why else {}), "at": t}
+
+
 def _clear_seg_held():
     """The card anchor walk's held aggregates emptied under their lock, as tests/test_feed_session_memo.py's _reset_memo
     empties them (the review after the merge, 2026-10-06). A test that patches a helper the walk reads (the latest prose,
@@ -1598,7 +1604,8 @@ class ViewBuilder(unittest.TestCase):
         nodes = {top: {"id": top, "text": "secure the network", "parentId": None,
                        "nodeComplete": False, "blocked": True,
                        "blockWhy": "bind to the Tailscale IP now, or wait?",
-                       "cleared": False, "trail": [], "t": T0, "mt": T0 + 100}}
+                       "cleared": False, "trail": [], "t": T0, "mt": T0 + 100,
+                       "log": [block_row(T0 + 100, "bind to the Tailscale IP now, or wait?")]}}
         status = {top: "blocked"}
         if owner == "other" or second_top:
             nodes[other] = {"id": other, "text": "run the load campaign", "parentId": None,
@@ -1876,7 +1883,8 @@ class ViewBuilder(unittest.TestCase):
             "nodes": {
                 top: gn(top, "ship the migration", None),
                 blk: gn(blk, "waiting on the peer's confirm", top, blocked=True,
-                        blockWhy="proceed once the peer confirms?", mt=T0 + 9),
+                        blockWhy="proceed once the peer confirms?", mt=T0 + 9,
+                        log=[block_row(T0 + 9, "proceed once the peer confirms?")]),
             },
             "placements": {}, "status": {top: "blocked"}}))
         saved_w, saved_a = km._wait_for_graph, km._session_awaiting
@@ -1892,9 +1900,10 @@ class ViewBuilder(unittest.TestCase):
         self.assertIsNotNone(card["waitingOn"], "the 'Awaiting <peer>' chip is restored (no longer suppressed by the block)")
         self.assertEqual(card["waitingOn"]["peerSid"], "peerY")
 
-    def _peer_wait_block_card(self, block_mt, since):
-        """The card for a top minted at T0 holding a step blocked at `block_mt`, while the session has an
-        unanswered question out to the live peer web, sent at `since` (the postal path only)."""
+    def _peer_wait_block_card(self, block_t, since):
+        """The card for a top minted at T0 holding a step blocked at `block_t` (its block row's evidence time),
+        while the session has an unanswered question out to the live peer web, sent at `since` (the postal
+        path only)."""
         top, blk = (SID + ":top", SID + ":blk")
         def gn(nid, text, parent, **kw):
             d = {"id": nid, "text": text, "parentId": parent, "nodeComplete": False,
@@ -1905,7 +1914,8 @@ class ViewBuilder(unittest.TestCase):
             "nodes": {
                 top: gn(top, "ship the exporter", None),
                 blk: gn(blk, "pick the export format", top, t=T0 + 590, blocked=True,
-                        blockWhy="which export format should ship first?", mt=block_mt),
+                        blockWhy="which export format should ship first?", mt=block_t,
+                        log=[block_row(block_t, "which export format should ship first?")]),
             },
             "placements": {}, "status": {top: "blocked"}}))
         saved_w, saved_a = km._wait_for_graph, km._session_awaiting
@@ -1922,17 +1932,189 @@ class ViewBuilder(unittest.TestCase):
         # EVENT ORDER: the session asked web something at T0+300 and web has not answered; a later turn
         # ended on a decision for the user, blocked at T0+600. The block is the newer evidence, so it is
         # the user's needs-you, not a stale block yielding to the peer wait.
-        card = self._peer_wait_block_card(block_mt=T0 + 600, since=T0 + 300)
+        card = self._peer_wait_block_card(block_t=T0 + 600, since=T0 + 300)
         self.assertEqual((card["column"], card["distillState"], card["awaiting"], card["waitingOn"]),
                          ("needs_input", "blocked", None, None),
                          "a block newer than the open question stays in Needs you, with its brief")
 
     def test_a_block_older_than_the_open_peer_question_still_yields(self):
         # the same card with the order reversed: blocked at T0+600, the question sent at T0+900
-        card = self._peer_wait_block_card(block_mt=T0 + 600, since=T0 + 900)
+        card = self._peer_wait_block_card(block_t=T0 + 600, since=T0 + 900)
         self.assertEqual(card["column"], "working", "the stale block yields to the live peer wait")
         self.assertIsNotNone(card["awaiting"])
         self.assertEqual(card["waitingOn"]["peerSid"], "11111111-2222-3333-4444-eeeeeeeeeeee")
+
+    # ── the block's time is its diary row's evidence time, never mt ──
+    # Both blocked-yield arms (an open question to a peer, a background task the card's own thread launched)
+    # order their event against the block's time. That time was the blocked nodes' max mt, and mt moves on
+    # writes that say nothing about the block: the grouper's retitle and merge, the planner's retitle, a
+    # duplicate step landing on the node, a to-do sync. Any of them, landing after the question or the
+    # dispatch, put a yielded card back in Needs you with a bell and the old brief: a card move on no new
+    # information. A PRIVATE synthetic sid (goal-store fixtures never share the placeholder sid); its store
+    # and override journal live under this test's temp state root, which tearDown removes.
+    BT_SID = "11111111-2222-3333-4444-aaaaaaaa0001"
+    BT_PEER = "11111111-2222-3333-4444-aaaaaaaa0002"
+
+    def _bt_session(self):
+        """Register the private session `api` beside the fixture one: the setUp transcript's shape (one finished
+        turn whose Edit launch, tu_ba1_0, a live background task can name), warmed like the setUp's."""
+        d = Path(self.td.name) / "launch-api"; d.mkdir()
+        pdir = Path(self.td.name) / "projects" / jd.re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(d)))
+        pdir.mkdir(parents=True)
+        recs = [uline(T0, "page the notes-api search results", "bu1", ps="typed"),
+                aline(T0 + 20, "Starting the export run.", "ba1", "bu1", tools=("Edit",), stop="tool_use"),
+                trline(T0 + 25, "tu_ba1_0", "br1", "ba1", content="edited"),
+                aline(T0 + 40, "Offset or cursor pagination?", "ba2", "br1", stop="end_turn")]
+        self.bt_path = pdir / (self.BT_SID + ".jsonl")
+        self.bt_path.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+        (jd.NAMES / self.BT_SID).write_text("api\t%s\t#9cd2ff\n" % str(d))
+        km._parse_cache.pop(str(self.bt_path), None)
+        km._parse(str(self.bt_path), self.BT_SID, NOW)
+
+    def _bt_store(self, diary=True):
+        """(Re)write the private session's store: a top blocked at T0+600 (its block row, unless `diary` is False:
+        a pre-diary node with no row), a mirror of the agent's open to-do, carrying the launch's placement; and an
+        open twin card the grouper can merge into it. Published by rename, as save_goals does, so the rewrite is a
+        new file identity to every memo keyed on one."""
+        top, twin = self.BT_SID + ":g1", self.BT_SID + ":g2"
+        session = em.parse_session(str(self.bt_path), rompuuid=self.BT_SID,
+                                   candidate_files=[str(self.bt_path)], now=NOW)
+        launch_seg = em.segments(session["turns"][0])[0]["id"]     # the segment holding tu_ba1_0
+        ask = "offset or cursor pagination?"
+        nodes = {top: {"id": top, "text": "page the notes-api search results", "parentId": None,
+                       "nodeComplete": False, "blocked": True, "blockWhy": ask, "cleared": False,
+                       "trail": [], "t": T0, "mt": T0 + 600,
+                       "agentTask": {"key": "bt-k1", "status": "open", "raw": "pending"},
+                       "agentBornOpen": True, "servingT": T0},
+                 twin: {"id": twin, "text": "paginate the search endpoint", "parentId": None,
+                        "nodeComplete": False, "blocked": False, "cleared": False, "trail": [],
+                        "t": T0, "mt": T0, "log": []}}
+        if diary:
+            nodes[top]["log"] = [block_row(T0 + 600, ask)]
+        tmp = jd.GOALDIR / (self.BT_SID + ".json.tmp")
+        tmp.write_text(json.dumps({
+            "rompUuid": self.BT_SID, "seq": 2, "lastNode": top, "nodes": nodes,
+            "placements": {launch_seg: top}, "status": {top: "blocked", twin: "working"}}))
+        os.replace(tmp, jd.GOALDIR / (self.BT_SID + ".json"))
+        return top, twin
+
+    def _bt_card(self, top, wait_since=None, bg_since=None):
+        """build_feed's card for the private top, its session idle with an unanswered question out to the live
+        peer web sent at `wait_since` and/or a live background task its own launch started at `bg_since`."""
+        row = {"state": "idle", "since": NOW - 100, "model": "", "effort": "", "context": None,
+               "compactPct": None, "color": None}
+        if bg_since is not None:
+            row["bgTasks"] = [{"desc": "export run", "type": "local_bash", "since": bg_since,
+                               "toolUseId": "tu_ba1_0", "lastTool": ""}]
+        waits = {} if wait_since is None else {self.BT_SID: {
+            "peerSid": self.BT_PEER, "name": "web", "color": None, "inCycle": False,
+            "since": wait_since, "kind": "question"}}
+        km._task_seg_cache.clear()
+        km._BG_TOPS_CACHE.clear()
+        km._SESSION_STAMP_CACHE.clear()
+        saved = (km._live_map, km._wait_for_graph, km._session_awaiting)
+        km._live_map = lambda: {self.BT_SID: row}
+        km._wait_for_graph = lambda now, alive: waits
+        if bg_since is None:
+            km._session_awaiting = lambda sid, path, idle, stamp=False: None   # isolate the POSTAL path
+        try:
+            return next(a for a in km.build_feed(NOW)["asks"] if a["itemId"] == top)
+        finally:
+            km._live_map, km._wait_for_graph, km._session_awaiting = saved
+
+    def _bt_writes(self, top, twin):
+        """The five writes that move the blocked top's mt and say nothing about its block, each through the
+        judge's own code, at clocks after the question and the dispatch (T0+900): [(label, write)]."""
+        def grouper_retitle(st):
+            jd.apply_group(st, [{"id": top}], [{"do": "retitle", "goal": 1,
+                                                "text": "page the notes-api search"}], T0 + 1000)
+
+        def grouper_merge(st):
+            jd.apply_group(st, [{"id": top}, {"id": twin}],
+                           [{"do": "merge", "goal": 2, "into": 1, "why": "the same work twice"}], T0 + 1050)
+
+        def planner_retitle(st):
+            jd.apply_plan(st, "bt-seg-r", T0 + 1100, [{"do": "retitle", "goal": 1,
+                                                        "text": "page the notes-api search results"}],
+                          [{"id": top}])
+
+        def duplicate_landing(st):           # a step restating its card lands on the card: bookkeeping (coerced)
+            jd.apply_plan(st, "bt-seg-d", T0 + 1200, [{"do": "sub", "parentId": top, "coerced": True,
+                                                        "text": st["nodes"][top]["text"], "why": "restates it"}],
+                          [{"id": top}])
+
+        def todo_sync(st):                   # the agent moved its own to-do from pending to in progress
+            plan = [{"key": "bt-k1", "status": "in_progress", "text": "page the notes-api search results",
+                     "activeForm": "Paging the search results"}]
+            with mock.patch.object(jd.em, "task_store_plan", lambda fsid: plan):
+                self.assertTrue(jd._sync_declared_plan(st, {"leafFsid": self.BT_SID}, "bt-seg-t", T0 + 1300))
+
+        return [("grouper retitle", grouper_retitle), ("grouper merge", grouper_merge),
+                ("planner retitle", planner_retitle), ("duplicate landing", duplicate_landing),
+                ("to-do sync", todo_sync)]
+
+    def _bt_hold_through_the_writes(self, **arm):
+        """Each of the five writes on a fresh store: the card yields before it, the write moves the block's mt
+        past the event the card yields to, and the card stays in Working. Then, after all five in a row, a
+        genuinely NEW block leaves for Needs you (new information still moves the card, and the memo re-derives
+        on the block row)."""
+        top, twin = self.BT_SID + ":g1", self.BT_SID + ":g2"
+        writes = self._bt_writes(top, twin)
+        for label, write in writes:
+            with self.subTest(label):
+                self._bt_store()
+                self.assertEqual(self._bt_card(top, **arm)["column"], "working", "%s: the card yields first" % label)
+                self._bt_apply(write)
+                nd = jd.load_goals(self.BT_SID)["nodes"][top]
+                self.assertGreater(nd["mt"], T0 + 900, "%s moved mt past the yield's event (the case)" % label)
+                self.assertTrue(nd["blocked"], "%s: the block itself stands" % label)
+                card = self._bt_card(top, **arm)
+                self.assertEqual((card["column"], card["distillState"] == "blocked"), ("working", False),
+                                 "%s is not new information about the block: the card stays in Working" % label)
+                self.assertIsNotNone(card["awaiting"], label)
+        self._bt_store()
+        for _label, write in writes:
+            self._bt_apply(write)
+        self.assertEqual(self._bt_card(top, **arm)["column"], "working", "all five in a row: still Working")
+        st = jd.load_goals(self.BT_SID)
+        self.assertTrue(jd.record_verdict(st, st["nodes"][top], "planner", "block", T0 + 1400,
+                                          why="opaque or keyset cursors?"))
+        st["nodes"][top]["mt"] = T0 + 1400
+        jd.save_goals(self.BT_SID, st)
+        card = self._bt_card(top, **arm)
+        self.assertEqual((card["column"], card["awaiting"]), ("needs_input", None),
+                         "a block filed after the question or the dispatch is new information: Needs you")
+
+    def _bt_apply(self, write):
+        """One judge write as a pass makes it: load, write, roll up, save."""
+        st = jd.load_goals(self.BT_SID)
+        write(st)
+        jd.rollup_status(st, session_closed=False)
+        jd.save_goals(self.BT_SID, st)
+
+    def test_a_peer_wait_yield_holds_through_writes_that_are_not_news_about_the_block(self):
+        self._bt_session()
+        card = self._bt_card(self._bt_store()[0], wait_since=T0 + 900)
+        self.assertEqual(card["column"], "working", "blocked at T0+600, the question to web at T0+900: yields")
+        self.assertEqual(card["waitingOn"]["peerSid"], self.BT_PEER)
+        self._bt_hold_through_the_writes(wait_since=T0 + 900)
+
+    def test_an_owned_dispatch_yield_holds_through_writes_that_are_not_news_about_the_block(self):
+        self._bt_session()
+        card = self._bt_card(self._bt_store()[0], bg_since=T0 + 900)
+        self.assertEqual(card["column"], "working", "blocked at T0+600, its own launch at T0+900: yields")
+        self.assertIsNotNone(card["awaiting"])
+        self._bt_hold_through_the_writes(bg_since=T0 + 900)
+
+    def test_a_block_with_no_diary_row_has_no_time_and_stands(self):
+        # A pre-diary node the boot sweep missed carries no block row: no block time exists, so neither arm can
+        # prove its event came after the block, and the block stands (the conservative default the
+        # unattributable dispatch already has). Its mt, T0+600 here, is no stand-in for the missing time.
+        self._bt_session()
+        top, _twin = self._bt_store(diary=False)
+        for arm in ({"wait_since": T0 + 900}, {"bg_since": T0 + 900}):
+            card = self._bt_card(top, **arm)
+            self.assertEqual((card["column"], card["awaiting"]), ("needs_input", None), arm)
 
     def test_transcript_only_bg_task_is_not_awaiting_but_live_sources_are(self):
         # A run_in_background launch visible ONLY in the transcript must NOT pin an idle session to a
