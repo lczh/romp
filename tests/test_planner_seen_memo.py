@@ -283,7 +283,7 @@ class PlannerSeenMemo(unittest.TestCase):
         finally:
             jd._rebind_state(self.root)
 
-    PLAN_SESSION_TOKENS_SHA16 = "922ce487873ca7eb"   # 2026-09-23: the work run's content-refusal strike (the stash reset, the strike and the give-up note); a due unit's failed call only, no derivation change
+    PLAN_SESSION_TOKENS_SHA16 = "4da3253ca2b04774"   # 2026-10-20: the known-target menus read past the 20-node cap (nudge, delegation, card-reply continuation); only a unit already due is placed differently, no derivation change
 
     def test_a_change_to_the_plan_session_bumps_the_derivation_or_this_pin(self):
         """Round three, low 3: the derivation bump rule made mechanical. A persisted row asserts the planner had nothing to do
