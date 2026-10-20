@@ -1854,13 +1854,19 @@ loop that schedules a new one every round would delay it forever. The relaunched
 CLI does not keep the wakeup, so the kernel sends the wakeup's prompt when it is
 due, unless the kernel's record of it holds a due time and the session stops its
 loop or schedules a new wakeup before then.
+A kernel restart that keeps the CLI running under its session host leaves the
+wakeups that CLI scheduled to it, and the kernel sends none of them; only when
+nothing on record says which CLI holds them (a wakeup scheduled before the kernel
+recorded that) does the kernel send one when it is due, possibly beside the CLI's own.
 A wakeup scheduled by a /loop given no task is the exception, after a relaunch or
-a kernel restart alike: its prompt is a placeholder that only the CLI that
-scheduled it can turn into the loop's instructions, so the kernel does not send
-it, and when it comes due the error center says that the loop stopped.
+a kernel restart the CLI did not survive alike: its prompt is a placeholder that
+only the CLI that scheduled it can turn into the loop's instructions, so the
+kernel does not send it, and when it comes due the error center says that the
+loop stopped.
 A wakeup first recorded since the session was last revived or the kernel last
-restarted is dropped instead if the old CLI could already have sent it by the
-time the relaunched CLI starts, or if the kernel's record of it does not hold
+restarted without keeping its CLI is dropped instead if the old CLI could
+already have sent it by the time the relaunched CLI starts, or if the kernel's
+record of it does not hold
 the minute Claude Code reported for it. A one-shot scheduled before
 then with no due time on record can be sent twice in some cases after a
 relaunch; for example, one on a daily schedule that the resumed CLI re-arms is
@@ -1870,8 +1876,9 @@ waiting, and a setting still waiting to apply rides that relaunch; the session
 is then told which background tasks were cut off, with a request to check
 whether each is still running before relaunching it. Editing or deleting an
 earlier message leaves to the relaunched CLI each pending wakeup first recorded
-since the session was last revived or the kernel last restarted, and the kernel
-sends none of their prompts, even for a wakeup scheduled in a turn the edit or
+since the session was last revived or the kernel last restarted without keeping
+its CLI, and the kernel sends none of their prompts, even for a wakeup scheduled
+in a turn the edit or
 deletion keeps. A comment thread's session gets none of these prompts from the
 kernel while it is a comment thread; a wakeup still waiting when the thread is
 promoted is sent once it is due.
