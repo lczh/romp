@@ -51806,6 +51806,9 @@ def _feed_session_entry(s, ctx):
         # the peer-wait only applies to a goal that EXISTED when the question was sent — a goal minted
         # AFTER it can't be awaiting that answer (the user 2026-06-28). Scopes the stale session-level
         # wait off unrelated newer goals; if every pre-question goal is resolved, nothing floors.
+        # A BLOCKED top yields to the peer wait only under the same EVENT ORDER as the background-task
+        # arm below: the question must be sent at/after the block (_blk_t). A block filed after the
+        # question is the newer evidence, the user's own call, never hidden as "Awaiting <peer>".
         _peer_wait = (fsid in wmap and nodes[nid]["t"] <= wmap[fsid]["since"])
         # A blocked top yields ONLY to a background task ITS OWN subtree dispatched, and only when
         # that dispatch is NEWER than the block's own evidence. Two guards, both exact:
@@ -51877,7 +51880,8 @@ def _feed_session_entry(s, ctx):
             # the newest outstanding handoff's mint — the last local act before the wait began
             _deleg_since = max([nodes[x].get("t") or 0 for x in _hnodes] or [0]) or None
         if nid != api_top and nid != perm_top and col in ("working", "blocked") and (
-                _await_ok or _stamp_why or _deleg_why or (col == "blocked" and _peer_wait)):
+                _await_ok or _stamp_why or _deleg_why
+                or (col == "blocked" and _peer_wait and wmap[fsid]["since"] >= _blk_t)):
             col = "awaiting"
         # TRACKED delegation payloads (the user 2026-08-24): a report-back handoff renders as ONE
         # card homed under the DELEGATOR. The sender's card is the PRIMARY — delegTracked names
