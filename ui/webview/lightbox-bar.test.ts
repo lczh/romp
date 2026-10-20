@@ -18,7 +18,8 @@ type El = {
   title: string; attrs: Record<string, string>; dataset: Record<string, string>; type: string; href: string; download: string; src: string; alt: string;
   classList: { add: (...c: string[]) => void; remove: (...c: string[]) => void; contains: (c: string) => boolean };
   appendChild: (c: El) => El; append: (...c: El[]) => void; prepend: (...c: El[]) => void; replaceWith: (n: El) => void; remove: () => void;
-  setAttribute: (k: string, v: string) => void; getAttribute: (k: string) => string | null; addEventListener: () => void; querySelector: () => null;
+  setAttribute: (k: string, v: string) => void; getAttribute: (k: string) => string | null; removeAttribute: (k: string) => void; addEventListener: () => void; querySelector: () => null;
+  target?: string; rel?: string;
 };
 function mkEl(tag: string): El {
   const style: Record<string, string> & { setProperty?: (k: string, v: string) => void } = {};
@@ -36,6 +37,8 @@ function mkEl(tag: string): El {
     replaceWith: (n) => { const p = e.parent!; p.children[p.children.indexOf(e)] = n; n.parent = p; },
     remove: () => { const p = e.parent; if (p) p.children.splice(p.children.indexOf(e), 1); },
     setAttribute: (k, v) => { e.attrs[k] = v; }, getAttribute: (k) => (k in e.attrs ? e.attrs[k] : null),
+    // a reflected attribute (download, target, rel) goes with its property, as in the DOM
+    removeAttribute: (k) => { delete e.attrs[k]; if (k in e) (e as unknown as Record<string, string>)[k] = ""; },
     addEventListener: () => {}, querySelector: () => null,
   };
   (e as El & { style: typeof style }).style = style;
@@ -55,30 +58,39 @@ function wins(a: [number, number, number], b: [number, number, number]): boolean
   return a[0] !== b[0] ? a[0] > b[0] : a[1] !== b[1] ? a[1] > b[1] : a[2] > b[2];
 }
 
-type Nav = Array<{ path: string; sid?: string | null; pin?: string }>;
+type Src = { path: string; sid?: string | null; pin?: string } | { url: string; alt?: string };
+type Nav = Src[];
 type Win = { setTimeout: (fn: () => void, ms: number) => number; clearTimeout: (h: number) => void };
-function lift(kind: "img" | "pdf", nav: Nav = [], clipboard: boolean | { write: () => Promise<void> } = false, win?: Win): { body: El; open: (p: string, sid?: string | null, pin?: string) => void; keys: Array<(ev: { key: string; stopPropagation: () => void; preventDefault: () => void }) => void> } {
-  const a = PREVIEW.indexOf("export function openLightbox(path: string, sid?: string | null, pin?: string): void {");
-  const b = PREVIEW.indexOf("\n}\n", a);
-  assert.ok(a > 0 && b > a, "openLightbox: anchors not found; re-anchor");
-  const code = ts(PREVIEW.slice(a, b + 2).replace(/^export /, ""));
+type Key = (ev: { key: string; stopPropagation: () => void; preventDefault: () => void }) => void;
+// openLightbox and the helpers above it (lightboxSrc, sameSource, urlTitle, dataSaveName), lifted as one slice; the
+// sequence's provider records what it was handed (the source's sid, the clicked element)
+function lift(kind: "img" | "pdf", nav: Nav = [], clipboard: boolean | { write: () => Promise<void> } = false, win?: Win,
+              known: { failed?: string[]; tiny?: string[] } = {}): { body: El; open: (p: string, sid?: string | null, pin?: string) => void; openSrc: (src: Src, from?: unknown) => void; keys: Key[]; calls: unknown[][] } {
+  const a = PREVIEW.indexOf("// The bytes a source names");
+  const o = PREVIEW.indexOf("export function openLightbox(src: LightboxSource, from?: Element | null): void {");
+  const b = PREVIEW.indexOf("\n}\n", o);
+  assert.ok(a > 0 && o > a && b > o, "openLightbox: anchors not found; re-anchor");
+  const code = ts(PREVIEW.slice(a, b + 2).replace(/^export /gm, ""));
   const body = mkEl("body");
-  const keys: Array<(ev: { key: string; stopPropagation: () => void; preventDefault: () => void }) => void> = [];
+  const keys: Key[] = [];
+  const calls: unknown[][] = [];
   const document = { createElement: mkEl, getElementById: () => null, body, addEventListener: (_t: string, fn: (ev: unknown) => void) => { keys.push(fn as never); }, removeEventListener: () => {} };
-  const H = { kind, nav, clipboard: !!clipboard, clip: typeof clipboard === "object" ? clipboard : null, window: win || null };
+  const H = { kind, nav, calls, failed: known.failed || [], tiny: known.tiny || [], clipboard: !!clipboard, clip: typeof clipboard === "object" ? clipboard : null, window: win || null };
   const prelude = `
     const previewKind = (p) => H.kind;
     const fileUrl = (p, sid) => "/file?path=" + encodeURIComponent(p) + "&sid=" + (sid || "");
     const wirePinchZoom = (stage, img) => ({ retarget: () => {} });
-    const lightboxNav = H.nav.length ? (() => H.nav) : null;
-    const ICON_DOWNLOAD = '<svg data-icon="download"/>', ICON_COPY = '<svg data-icon="copy"/>', ICON_CHECK = '<svg data-icon="check"/>', ICON_CROSS = '<svg data-icon="cross"/>';
+    const lightboxNav = H.nav.length ? ((sid, from) => { H.calls.push([sid, from]); return H.nav; }) : null;
+    const mdImgFailed = new Set(H.failed), mdImgTiny = new Set(H.tiny);
+    const ICON_DOWNLOAD = '<svg data-icon="download"/>', ICON_COPY = '<svg data-icon="copy"/>', ICON_CHECK = '<svg data-icon="check"/>', ICON_CROSS = '<svg data-icon="cross"/>', ICON_POPOUT = '<svg data-icon="popout"/>';
     const navigator = H.clipboard ? { clipboard: H.clip || { write: () => Promise.resolve() } } : {};
     const fetch = () => Promise.resolve({ blob: () => Promise.resolve({ type: "image/png" }) });
     const ClipboardItem = H.clipboard ? function ClipboardItem() {} : undefined;
     const window = H.window || { setTimeout: () => 1, clearTimeout: () => {} };
   `;
-  const open = (new Function("H", "document", prelude + code + "\nreturn openLightbox;") as (h: unknown, d: unknown) => (p: string, sid?: string | null, pin?: string) => void)(H, document);
-  return { body, open, keys };
+  const openSrc = (new Function("H", "document", prelude + code + "\nreturn openLightbox;") as (h: unknown, d: unknown) => (src: Src, from?: unknown) => void)(H, document);
+  const open = (p: string, sid?: string | null, pin?: string) => openSrc({ path: p, sid, pin });
+  return { body, open, openSrc, keys, calls };
 }
 function column(body: El): El {
   const wrap = body.children[0];
@@ -217,4 +229,89 @@ test("styles (the review's lows): the column keeps a floor of the controls' widt
   assert.match(CSS, /^\.romp-lightbox-inner \{ [^}]*min-width: var\(--lb-acts-w, 0px\);/m, "the floor: the download-and-copy group's width, set by the lightbox when it mounts");
   assert.match(PREVIEW, /const ctl = Array\.from\(group\.children\) as HTMLElement\[\];\s*\n\s*inner\.style\.setProperty\("--lb-acts-w", Math\.ceil\(ctl\.reduce\(\(a, c\) => a \+ c\.getBoundingClientRect\(\)\.width, 0\) \+ 4 \* Math\.max\(0, ctl\.length - 1\) \+ 8\) \+ "px"\);/, "read off the group's own controls (intrinsic widths), once per open, after the mount");
   assert.match(CSS, /^#romp-lightbox \.romp-lightbox-bar \.fileview-dir \{ flex-shrink: 1000; \}/m, "the directory gives up its room first; the basename shrinks only when it does not fit alone");
+});
+
+// ── a URL source (2026-10-20, the user on a phone: a picture a message embeds as markdown never opened the lightbox) ──
+const press = (keys: Key[], key: string) => keys[0]({ key, stopPropagation: () => {}, preventDefault: () => {} });
+function barOf(body: El): { img: El; name: El; dl: El; cue: El | null } {
+  const inner = column(body);
+  const bar = inner.children[0];
+  const acts = bar.children[bar.children.length - 1];
+  return { img: inner.children[1], name: bar.children[0], dl: acts.children[0].children[0], cue: bar.children.length === 3 ? bar.children[1] : null };
+}
+
+test("a URL picture shows from its own URL, titled by its place and file name, and its control opens the original in a disowned tab", () => {
+  const { body, openSrc } = lift("img", [], true);
+  openSrc({ url: "https://img.example.test/charts/run%201/throughput.png?v=2", alt: "throughput over the run" });
+  const { img, name, dl } = barOf(body);
+  assert.equal(img.src, "https://img.example.test/charts/run%201/throughput.png?v=2", "the picture loads from the URL as the message has it");
+  assert.equal(img.alt, "throughput over the run", "its alt is the message's");
+  assert.deepEqual([name.children[0].textContent, name.children[1].textContent], ["img.example.test/charts/run 1/", "throughput.png"],
+    "the place dimmed (host and folders, decoded), the file name whole, the query left to the hover");
+  assert.equal(name.title, "https://img.example.test/charts/run%201/throughput.png?v=2", "the whole URL one hover away");
+  assert.equal(dl.tag, "a");
+  assert.equal(dl.href, "https://img.example.test/charts/run%201/throughput.png?v=2");
+  assert.equal(dl.target, "_blank", "a new tab");
+  assert.equal(dl.rel, "noopener noreferrer", "disowned, as every tab this UI opens");
+  assert.ok(!dl.download, "no download attribute: someone else's server, where the browser would ignore it anyway");
+  assert.equal(dl.title, "Open original");
+  assert.equal(dl.getAttribute("aria-label"), "Open original");
+  assert.ok(dl.innerHTML.includes('data-icon="popout"'), "the file viewer's popout drawing: leaving, not saving");
+});
+
+test("a data: picture has no original a browser will open as a page: it downloads, under image and its type's extension", () => {
+  const { body, openSrc } = lift("img", [], true);
+  openSrc({ url: "data:image/svg+xml;base64,PHN2Zy8+", alt: "colour key" });
+  const { name, dl } = barOf(body);
+  assert.deepEqual([name.children[0].textContent, name.children[1].textContent], ["", "colour key"], "named by its alt text; its bytes never reach the title");
+  assert.equal(dl.download, "image.svg");
+  assert.ok(!dl.target && !dl.rel);
+  assert.equal(dl.title, "Download");
+  assert.ok(dl.innerHTML.includes('data-icon="download"'));
+});
+
+test("ONE sequence holds both kinds: the arrows cross from a URL picture to a file and back, the title and the control re-aimed each step", () => {
+  const nav: Nav = [{ path: "docs/figure.png", sid: "s1", pin: "v1" }, { url: "https://img.example.test/wide.png", alt: "wide" },
+                    { url: "data:image/png;base64,AAAA", alt: "swatch" }];
+  const { body, openSrc, keys, calls } = lift("img", nav, true);
+  const from = { tag: "img" };
+  openSrc({ url: "https://img.example.test/wide.png", alt: "wide" }, from);
+  assert.deepEqual(calls, [[null, from]], "the provider is handed no sid for a URL picture, and the clicked element, which tells the chat which transcript it sits in");
+  let v = barOf(body);
+  assert.equal(v.cue!.textContent, "2/3", "the URL picture found in the sequence by its URL");
+  press(keys, "ArrowLeft");
+  v = barOf(body);
+  assert.equal(v.img.src, "/file?path=docs%2Ffigure.png&sid=s1&pin=v1", "← to the file: its pinned bytes");
+  assert.equal(v.img.alt, "docs/figure.png");
+  assert.deepEqual([v.name.children[0].textContent, v.name.children[1].textContent], ["docs/", "figure.png"]);
+  assert.equal(v.dl.download, "figure.png", "a file downloads again…");
+  assert.ok(!v.dl.target && !v.dl.rel, "…its new-tab dress gone");
+  assert.ok(v.dl.innerHTML.includes('data-icon="download"'));
+  assert.equal(v.cue!.textContent, "1/3");
+  press(keys, "ArrowRight"); press(keys, "ArrowRight");
+  v = barOf(body);
+  assert.equal(v.img.src, "data:image/png;base64,AAAA", "→ → to the data: picture");
+  assert.equal(v.dl.download, "image.png");
+  assert.equal(v.cue!.textContent, "3/3");
+  press(keys, "ArrowRight");
+  assert.equal(barOf(body).cue!.textContent, "3/3", "the end ends");
+  press(keys, "ArrowLeft");
+  v = barOf(body);
+  assert.equal(v.dl.target, "_blank", "back on the URL picture, the control leaves again");
+  assert.ok(v.dl.innerHTML.includes('data-icon="popout"'));
+});
+
+test("a URL that failed to load, or one that loaded glyph-sized, is no stop: no click opens it, so no arrow lands on it", () => {
+  const nav: Nav = [{ url: "https://img.example.test/a.png" }, { url: "https://img.example.test/gone.png" },
+                    { url: "https://img.example.test/badge.png" }, { url: "https://img.example.test/b.png" }];
+  const { body, openSrc } = lift("img", nav, false, undefined, { failed: ["https://img.example.test/gone.png"], tiny: ["https://img.example.test/badge.png"] });
+  openSrc({ url: "https://img.example.test/b.png" });
+  assert.equal(barOf(body).cue!.textContent, "2/2");
+});
+
+test("a file and a URL are never the same picture, whatever the strings", () => {
+  const nav: Nav = [{ url: "/file?path=a.png&sid=s1" }, { path: "a.png", sid: "s1" }];
+  const { body, open } = lift("img", nav);
+  open("a.png", "s1");
+  assert.equal(barOf(body).cue!.textContent, "2/2", "the file entry, not the URL that happens to spell its bytes");
 });

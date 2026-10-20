@@ -14,11 +14,12 @@ test("the index walks EVENTS oldest→newest and threads pins per target", () =>
   const at = RENDER.indexOf("function chatImagesFor(");
   assert.ok(at > 0);
   const body = RENDER.slice(at, RENDER.indexOf("\n}", at));
-  assert.match(body, /for \(const ev of s\.events/, "events, not the DOM — virtualization windows images out");
-  assert.match(body, /out\.push\(\{ path: target, sid, pin: pins\[target\] \}\);/,
+  assert.match(body, /for \(const ev of scope\.events/, "events, not the DOM — virtualization windows images out");
+  assert.match(body, /here\.set\("p:" \+ target, \{ e: \{ path: target, sid: scope\.fileSid, pin: pins\[target\] \}, at \}\);/,
     "the SAME triple the embed's click passes — a step shows that message's pinned bytes");
   assert.match(body, /previewKind\(target\) !== "img"/, "the lightbox's own image gate decides image-ness");
-  assert.match(body, /seen\.has\(target\)/, "one entry per (event, target)");
+  assert.match(body, /const had = here\.get\("p:" \+ target\);/, "one entry per (event, target)");
+  assert.match(body, /for \(const m of mdImages\(text, lex\)\)/, "a message's markdown pictures join the sequence (2026-10-20; lightbox-sequence.test.ts runs it)");
   assert.match(RENDER, /setLightboxNav\(chatImagesFor\);/, "registered once; providerless surfaces keep inert arrows");
 });
 
@@ -37,9 +38,11 @@ test("arrows clamp at the ends, ride the capture listener, and never scroll the 
 test("a step swaps the whole embed identity and resets the zoom (T162 contracts intact)", () => {
   const stepAt = PREVIEW.indexOf("step = (delta: number) => {");
   const step = PREVIEW.slice(stepAt, PREVIEW.indexOf("};", stepAt));
-  assert.match(step, /e\.pin \? "&pin=" \+ encodeURIComponent\(e\.pin\) : ""/, "the new entry's PIN rides the src");
+  assert.match(step, /const next = mkImg\(e\);/, "the new entry's own picture…");
+  assert.match(PREVIEW, /im\.src = lightboxSrc\(e\);/, "…whose src carries the entry's PIN (lightboxSrc)");
+  assert.match(PREVIEW, /e\.pin \? "&pin=" \+ encodeURIComponent\(e\.pin\) : ""/, "the new entry's PIN rides the src");
   assert.match(step, /pzc\.retarget\(next\);/, "zoom resets to the fit view for the new image");
-  assert.match(step, /dl\.href = fileUrl\(e\.path, e\.sid\)/, "…and the download anchor follows");
+  assert.match(step, /aimSave\(e\);/, "…and the save anchor follows, its kind included (lightbox-bar.test.ts runs a mixed sequence)");
   // the retarget re-identities the view for a FRESH element; the stage's listeners are wired once
   assert.match(PREVIEW, /return \{ retarget: \(next: HTMLImageElement\) => \{ img = next; view = pz\.identity\(\); ptrs\.clear\(\); start = null; apply\(\); \} \};/);
 });

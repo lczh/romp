@@ -8,7 +8,7 @@
 
 import { hostOf, bareId } from "./host-prefix";
 import { mediaSrc } from "./media";
-import { ICON_DOWNLOAD, ICON_COPY, ICON_CHECK, ICON_CROSS } from "./icons";   // the shared stroke-family glyphs (T367)
+import { ICON_DOWNLOAD, ICON_COPY, ICON_CHECK, ICON_CROSS, ICON_POPOUT } from "./icons";   // the shared stroke-family glyphs (T367; the popout for a URL picture's original)
 import * as pz from "./pinch";
 
 // Extensions the kernel's _PREVIEW_MIME serves — keep the two lists in step (tests pin both).
@@ -173,7 +173,7 @@ export function openPdfTab(path: string, sid?: string | null): boolean {
 // back to the lightbox so the PDF is never unreachable.
 export function openPdf(path: string, sid?: string | null, ev?: MouseEvent | null): void {
   if (wantsOwnTab(ev) && openPdfTab(path, sid)) return;
-  openLightbox(path, sid);
+  openLightbox({ path, sid });
 }
 
 // Full-view lightbox: dark backdrop, the image at natural-but-capped size or the PDF in the browser's
@@ -261,18 +261,58 @@ function wirePinchZoom(stage: HTMLElement, img: HTMLImageElement): { retarget: (
 // in the chat, like a messaging app) ────────────────────────────────────────────────────────────
 // The image sequence comes from a PROVIDER the chat registers (render.ts walks the session's
 // EVENTS oldest→newest — the DOM misses virtualization-windowed images), each entry the same
-// (path, sid, pin) triple the click path passes, so a step shows THAT message's pinned bytes and
-// can never resurrect the history-rewrite the pin store prevents. Surfaces that register no
-// provider (the feed) keep inert arrows.
-export interface LightboxNavEntry { path: string; sid?: string | null; pin?: string; }
-let lightboxNav: ((sid: string | null | undefined) => LightboxNavEntry[]) | null = null;
-export function setLightboxNav(fn: (sid: string | null | undefined) => LightboxNavEntry[]): void {
+// source the click passes — for a file, the (path, sid, pin) triple, so a step shows THAT message's
+// pinned bytes and can never resurrect the history-rewrite the pin store prevents. Surfaces that
+// register no provider (the feed) keep inert arrows. The provider is handed the clicked element
+// too (`from`): the chat reads off it which transcript the picture sits in (a subagent viewer's, a
+// comment thread's), so the arrows step through the pictures the reader is looking at.
+//
+// A SOURCE is what the lightbox shows (2026-10-20, the user on a phone: a picture a message embeds as
+// markdown never opened the lightbox, only the ones romp draws from a file path did): a FILE the kernel
+// serves, named by its path (the sid resolves a relative one against that session's folder, the pin names
+// the bytes the message saw), or a picture embedded by URL, shown from that URL as the message has it.
+// One lightbox for both, and one sequence: the chat's provider returns both kinds in the order the chat
+// shows them.
+export type LightboxSource = { path: string; sid?: string | null; pin?: string } | { url: string; alt?: string };
+export type LightboxNavEntry = LightboxSource;
+let lightboxNav: ((sid: string | null | undefined, from?: Element | null) => LightboxNavEntry[]) | null = null;
+export function setLightboxNav(fn: (sid: string | null | undefined, from?: Element | null) => LightboxNavEntry[]): void {
   lightboxNav = fn;
 }
 
-export function openLightbox(path: string, sid?: string | null, pin?: string): void {
+// The bytes a source names: a file's through the kernel (pinned when the message pinned them), a URL as it is.
+function lightboxSrc(e: LightboxSource): string {
+  return "url" in e ? e.url : fileUrl(e.path, e.sid) + (e.pin ? "&pin=" + encodeURIComponent(e.pin) : "");
+}
+// Two sources are the same picture: a file by its path and pin (two messages embedding different VERSIONS of one
+// path are different entries), a URL by itself.
+function sameSource(a: LightboxSource, b: LightboxSource): boolean {
+  if ("url" in a || "url" in b) return "url" in a && "url" in b && a.url === b.url;
+  return a.path === b.path && (a.pin || "") === (b.pin || "");
+}
+// The title a URL picture wears in the bar, in the path's two halves: the place dimmed (host and folders), the file
+// name whole, the whole URL one hover away. A data: URL has no place and no name: its alt text names it, else
+// "image" (its bytes, perhaps megabytes of them, never reach the title).
+function urlTitle(e: { url: string; alt?: string }): { dir: string; base: string; full: string } {
+  if (/^data:/i.test(e.url)) { const n = (e.alt || "").trim() || "image"; return { dir: "", base: n, full: n }; }
+  try {
+    const u = new URL(e.url);
+    let p = u.pathname;
+    try { p = decodeURIComponent(p); } catch { /* a malformed escape: the spelling as written */ }
+    const at = u.host + p;
+    const cut = at.lastIndexOf("/");
+    return cut < 0 || cut === at.length - 1 ? { dir: "", base: at, full: e.url } : { dir: at.slice(0, cut + 1), base: at.slice(cut + 1), full: e.url };
+  } catch { return { dir: "", base: e.url, full: e.url }; }
+}
+// The file name a data: picture saves under: "image" and its type's extension (image/png → image.png, svg+xml → svg).
+function dataSaveName(url: string): string {
+  const m = /^data:image\/([a-z0-9.+-]+)/i.exec(url);
+  return "image." + (m ? m[1].toLowerCase().replace(/\+xml$/, "").replace(/^jpeg$/, "jpg") : "png");
+}
+
+export function openLightbox(src: LightboxSource, from?: Element | null): void {
   document.getElementById("romp-lightbox")?.remove();
-  const kind = previewKind(path);
+  const kind = "url" in src ? "img" : previewKind(src.path);
   if (!kind) return;
   const wrap = document.createElement("div");
   wrap.id = "romp-lightbox";
@@ -283,31 +323,32 @@ export function openLightbox(path: string, sid?: string | null, pin?: string): v
   let step: ((delta: number) => void) | null = null;     // arrows step the chat's image sequence (img kind only)
   let cue: HTMLElement | null = null;                    // the compact position mark ("3/17") in the bar
   let curImg: (() => HTMLImageElement) | null = null;    // the img on screen NOW (step rebinds it) — the copy source
-  if (kind === "pdf") {
+  if (kind === "pdf" && !("url" in src)) {
     // a plain click's view (openPdf), and the fallback when a modified click's tab was popup-blocked
     const frame = document.createElement("iframe");
     frame.className = "romp-lightbox-frame";
-    frame.src = fileUrl(path, sid);
-    frame.title = path;
+    frame.src = fileUrl(src.path, src.sid);
+    frame.title = src.path;
     inner.appendChild(frame);
   } else {
     const mkImg = (e: LightboxNavEntry) => {
       const im = document.createElement("img");
       im.className = "romp-lightbox-img";
-      im.src = fileUrl(e.path, e.sid) + (e.pin ? "&pin=" + encodeURIComponent(e.pin) : "");
-      im.alt = e.path;
+      im.src = lightboxSrc(e);
+      im.alt = "url" in e ? e.alt || "" : e.path;          // a file's alt is its path (the artifacts pane's Files control reads it back)
       return im;
     };
-    let img = mkImg({ path, sid, pin });
+    let img = mkImg(src);
     curImg = () => img;
     inner.appendChild(img);
     const pzc = wirePinchZoom(inner, img);
     // the chat's image sequence, oldest→newest (empty on surfaces with no provider): the current
-    // position matches by (path, pin) — two messages embedding different VERSIONS of one path are
-    // different entries — falling back to the path alone for pre-pin history
-    nav = (lightboxNav ? lightboxNav(sid) : []).filter((e) => previewKind(e.path) === "img");
-    at = nav.findIndex((e) => e.path === path && (e.pin || "") === (pin || ""));
-    if (at < 0) at = nav.findIndex((e) => e.path === path);
+    // position matches the source (sameSource), a file falling back to its path alone for pre-pin
+    // history. A URL that failed to load, or a glyph-sized one (mdImgTiny), is no stop: no click opens it
+    nav = (lightboxNav ? lightboxNav("url" in src ? null : src.sid, from) : [])
+      .filter((e) => "url" in e ? !mdImgFailed.has(e.url) && !mdImgTiny.has(e.url) : previewKind(e.path) === "img");
+    at = nav.findIndex((e) => sameSource(e, src));
+    if (at < 0 && !("url" in src)) at = nav.findIndex((e) => !("url" in e) && e.path === src.path);
     step = (delta: number) => {
       if (at < 0 || nav.length < 2) return;
       const n = at + delta;
@@ -318,9 +359,8 @@ export function openLightbox(path: string, sid?: string | null, pin?: string): v
       img.replaceWith(next);
       img = next;
       pzc.retarget(next);                                // a step lands on the fit view, zoom reset
-      setName(e.path);                                   // the two-element title follows the step
-      dl.href = fileUrl(e.path, e.sid) + (e.pin ? "&pin=" + encodeURIComponent(e.pin) : "");
-      dl.download = e.path.slice(e.path.lastIndexOf("/") + 1) || "image";
+      setName(e);                                        // the two-element title follows the step
+      aimSave(e);                                        // …and so does the save control, its kind included
       if (cue) cue.textContent = (at + 1) + "/" + nav.length;
     };
   }
@@ -338,16 +378,15 @@ export function openLightbox(path: string, sid?: string | null, pin?: string): v
   const dir = document.createElement("span"); dir.className = "fileview-dir";
   const base = document.createElement("span"); base.className = "fileview-base";
   name.append(dir, base);
-  const setName = (p: string) => {
-    const cut = p.lastIndexOf("/");
-    dir.textContent = cut >= 0 ? p.slice(0, cut + 1) : "";
-    base.textContent = p.slice(cut + 1);
-    name.title = p;                                       // the full path, one hover away
+  const setName = (e: LightboxSource) => {
+    let t: { dir: string; base: string; full: string };
+    if ("url" in e) t = urlTitle(e);
+    else { const p = e.path, cut = p.lastIndexOf("/"); t = { dir: cut >= 0 ? p.slice(0, cut + 1) : "", base: p.slice(cut + 1), full: p }; }
+    dir.textContent = t.dir;
+    base.textContent = t.base;
+    name.title = t.full;                                  // the full path or URL, one hover away
   };
-  setName(path);
-  // download rides an ANCHOR with the download attribute (the user 2026-08-19): the browser saves
-  // the same bytes the lightbox is showing — the pinned URL when a pin rode in, so a re-generated
-  // file can't swap the image between viewing and saving. The filename is the path's basename.
+  setName(src);
   if (nav.length > 1 && at >= 0) {
     cue = document.createElement("span");
     cue.className = "romp-lightbox-cue";
@@ -358,16 +397,38 @@ export function openLightbox(path: string, sid?: string | null, pin?: string): v
   acts.className = "fileview-acts";
   const group = document.createElement("span");
   group.className = "fileview-group fileview-group-file";
+  // The save control is ONE anchor, aimed per picture (aimSave; a step re-aims it, the kind included). A FILE downloads
+  // through the anchor's download attribute (the user 2026-08-19): the browser saves the same bytes the lightbox is
+  // showing — the pinned URL when a pin rode in, so a re-generated file can't swap the image between viewing and saving
+  // — under the path's basename. A URL picture opens its ORIGINAL in a new tab instead (2026-10-20): the bytes live on
+  // someone else's server, where a download attribute is ignored anyway, and the page that serves them may say more
+  // than the picture; the tab is disowned (noopener noreferrer, the rule for every tab this UI opens) and the chat's
+  // link opener (render.ts) opens it the same way. A data: picture has no original a browser will open as a page, so it
+  // downloads, under "image" and its type's extension. The drawing follows the meaning: the tray to save, the
+  // popout (the file viewer's "Open as a tab") to leave.
   const dl = document.createElement("a");
   dl.className = "fileview-btn fileview-icon romp-lightbox-dl";
-  dl.href = fileUrl(path, sid) + (pin ? "&pin=" + encodeURIComponent(pin) : "");
-  dl.download = path.slice(path.lastIndexOf("/") + 1) || "image";
-  // the tray icon every download control should wear (the composer buttons' stroke family) as an
-  // inline SVG: the old text glyph (U+2B73, arrow-to-bar) has no coverage in the mac system fonts
-  // and rendered as a tofu box instead of an icon (the user 2026-08-19). A literal — no sanitize.
-  dl.innerHTML = ICON_DOWNLOAD;   // icons.ts: the one tray drawing, shared with the file viewer's bar (T367)
-  dl.title = "Download";
-  dl.setAttribute("aria-label", "Download");
+  const aimSave = (e: LightboxSource) => {
+    const leaves = "url" in e && !/^data:/i.test(e.url);
+    dl.href = lightboxSrc(e);
+    if (leaves) {
+      dl.removeAttribute("download");
+      dl.target = "_blank";
+      dl.rel = "noopener noreferrer";
+    } else {
+      dl.download = "url" in e ? dataSaveName(e.url) : e.path.slice(e.path.lastIndexOf("/") + 1) || "image";
+      dl.removeAttribute("target");
+      dl.removeAttribute("rel");
+    }
+    // the tray icon every download control should wear (the composer buttons' stroke family) as an
+    // inline SVG: the old text glyph (U+2B73, arrow-to-bar) has no coverage in the mac system fonts and
+    // rendered as a tofu box instead of an icon (the user 2026-08-19). A literal — no sanitize.
+    dl.innerHTML = leaves ? ICON_POPOUT : ICON_DOWNLOAD;   // icons.ts: one drawing per meaning, shared with the file viewer's bar (T367)
+    const word = leaves ? "Open original" : "Download";
+    dl.title = word;
+    dl.setAttribute("aria-label", word);
+  };
+  aimSave(src);
   dl.onclick = (ev) => ev.stopPropagation();               // saving must not also dismiss
   // copy beside download (the user 2026-08-31): the image ITSELF onto the clipboard. It reads the
   // CURRENT img's src at CLICK time — mkImg bakes the pin param into src and an arrow step rebinds
@@ -381,7 +442,8 @@ export function openLightbox(path: string, sid?: string | null, pin?: string): v
   // (click-safe: every press acknowledges, ui/CLAUDE.md; a large jpeg's decode is not instant), then a
   // check and "Copied", or a cross whose words name the reason, and the button restores itself either
   // way on ONE timer that every swap clears (two presses inside the pulse never let the first wipe the
-  // second's check early; the viewer's copyTimer rule).
+  // second's check early; the viewer's copyTimer rule). A URL picture copies the same way when its host lets
+  // this page read the bytes; one that does not (no CORS) fails in place, its reason in the cross's words.
   const COPY_SVG = ICON_COPY;   // icons.ts: the one two-sheets drawing, shared with the file viewer's bar (T367)
   let cp: HTMLButtonElement | null = null;
   if (curImg && typeof ClipboardItem !== "undefined" && navigator.clipboard && navigator.clipboard.write) {
@@ -653,7 +715,7 @@ export function previewFull(path: string, sid?: string | null, verified = false,
       img.alt = path;
       img.loading = "lazy";       // off-screen figures don't fetch until scrolled near (eager-all, 2026-08-30)
       img.decoding = "async";     // and never decode on the main thread mid-scroll
-      img.onclick = (ev) => { ev.stopPropagation(); openLightbox(path, sid, pin); };
+      img.onclick = (ev) => { ev.stopPropagation(); openLightbox({ path, sid, pin }, img); };
       return img;
     };
     // every tap READS as a tap even when the click lands mid-attempt and build() no-ops on its
@@ -814,10 +876,11 @@ function parkMdImg(img: HTMLImageElement, url: string): void {
 /** The chat's post-pass (render.ts runs it on md() and userMd() output after the sanitize, NEVER through the shared
  *  sanitizer: the file viewer rewrites its images' paths to /file URLs after its own sanitize, and a park inside the
  *  sanitizer removed the src that rewrite keys on, the review's find): an img whose URL is already known to fail is
- *  parked at RENDER, before any fetch. */
+ *  parked at RENDER, before any fetch. Every image it sees is a picture a message embedded, and wears .md-img: the one
+ *  mark the zoom hook below reads, so a picture the file viewer or a hover card draws is never its business. */
 export function mdImgPostPass(root: ParentNode): void {
-  if (!mdImgFailed.size) return;
   for (const img of Array.from(root.querySelectorAll("img")) as HTMLImageElement[]) {
+    img.classList.add("md-img");                     // a picture the message's markdown embeds: the zoom hook's mark (installMdImgZoom)
     const u = img.src || "";
     if (u && mdImgFailed.has(u)) parkMdImg(img, u);
   }
@@ -897,5 +960,43 @@ export function installMdImgHeal(): void {
     if (servedByKernel(src)) {                       // bounded and off the DOM: the caption never moves for it
       if (!mdImgProbe.has(src)) mdImgProbe.set(src, 3);   // the budget rides the URL: a re-rendered turn inherits what is left
     }
+  }, true);
+}
+
+// ── a markdown picture opens the lightbox (2026-10-20, the user on a phone: a picture a message embedded ran off the
+// screen and never zoomed, where the pictures romp draws from a file path did) ─────────────────────────────────────
+// The pictures are the ones mdImgPostPass marks .md-img on md() and userMd() output, the bodies of every chat surface
+// (the transcript, a subagent viewer, a comment thread), and nothing else. ONE pair of document-level listeners,
+// installed once: the transcript rebuilds these images on every push, so nothing hangs on an image (the click-safety
+// rule, ui/CLAUDE.md).
+//   load (capture: a load does not bubble) decides from the picture's NATURAL size whether it zooms, and marks it
+//     .md-img-zoom, the class the zoom cursor rides. A picture under ZOOM_MIN_H px tall is a glyph in a line of text
+//     (a status badge is 20px, an emoji or an icon 16 to 24): zooming it shows nothing more, so it neither zooms nor
+//     stops the lightbox's arrows (mdImgTiny, which the sequence filter reads).
+//   click (capture, so a fold or a bubble around the picture never also toggles under it) opens the lightbox on the
+//     picture, by its URL, handing over the element so the chat's sequence knows which transcript it sits in.
+// A picture inside a link is the LINK's: its click follows the link (render.ts's opener, as it always did) and it wears
+// no zoom cursor, so a linked badge or a thumbnail that points at its page keeps meaning what its author wrote. Web
+// dashboard only, as every preview (canPreview): the VS Code webview loads only data: pictures and has no kernel origin.
+const ZOOM_MIN_H = 32;
+const mdImgTiny = new Set<string>();                // URLs that loaded glyph-sized this page life: no stop in the sequence
+let mdImgZoomOn = false;
+export function mdImgZoomable(img: HTMLImageElement): boolean {
+  return img.classList.contains("md-img") && !img.closest("a") && img.complete && img.naturalHeight >= ZOOM_MIN_H;
+}
+export function installMdImgZoom(): void {
+  if (mdImgZoomOn || !canPreview()) return;        // ensure-once (the click-safety installation rule)
+  mdImgZoomOn = true;
+  document.addEventListener("load", (e) => {
+    const img = e.target as HTMLImageElement | null;
+    if (!img || img.tagName !== "IMG" || !img.classList.contains("md-img")) return;
+    if (img.naturalHeight < ZOOM_MIN_H) mdImgTiny.add(img.src); else mdImgTiny.delete(img.src);
+    img.classList.toggle("md-img-zoom", mdImgZoomable(img));
+  }, true);
+  document.addEventListener("click", (e) => {
+    const img = e.target as HTMLImageElement | null;
+    if (!img || img.tagName !== "IMG" || !mdImgZoomable(img)) return;
+    e.preventDefault(); e.stopPropagation();
+    openLightbox({ url: img.src, alt: img.alt }, img);
   }, true);
 }

@@ -255,7 +255,7 @@ function openPicker(anchor: HTMLElement): void {
 function openLarge(i: number): void {
   if (!listing || !sel.sid) return;
   const imgs = gridItems(listing.items); const it = imgs[i]; if (!it) return;
-  openLightbox(it.path, sel.sid);
+  openLightbox({ path: it.path, sid: sel.sid });
   // the one extra control: send this picture to the Files pane's viewer (the shell's viewFile relay), hidden where no
   // Files control exists; the lightbox's bar is the file viewer's bar, so the button wears its dress
   if (framed && panesAvail.files !== false) {

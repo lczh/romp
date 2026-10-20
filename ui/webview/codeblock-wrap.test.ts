@@ -11,7 +11,10 @@ const BLOCK = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview",
 const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "styles.css"), "utf8");
 
 test("markdown code blocks wrap instead of scrolling sideways", () => {
-  assert.match(CSS, /\.md pre \{[^}]*overflow-x: hidden/);          // the <pre> no longer scrolls horizontally
+  // a fence's lines WRAP (the code's pre-wrap below and the rows' .ct), so it never overflows sideways; the <pre> itself
+  // scrolls only what cannot wrap, a <pre> a message writes in its own HTML, which `hidden` used to cut off (2026-10-20)
+  assert.match(CSS, /^\.md pre \{[^}]*overflow-x: auto/m);
+  assert.match(CSS, /\.md pre code \{[^}]*white-space: pre-wrap; overflow-wrap: anywhere;/);
   assert.match(CSS, /\.md pre code \{[^}]*white-space: pre-wrap/);  // its code wraps
 });
 
