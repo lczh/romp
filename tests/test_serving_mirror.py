@@ -341,6 +341,73 @@ class FoldMatrix(FoldStores):
         self.assertIn(g, {a.get("itemId") for a in asks})
 
 
+class HandoffRowDot(FoldStores):
+    """The "delegated to api" row on web's card names api (who, whoSid, whoColor), so the working dot the feed draws
+    before that name is api's working state (2026-10-20). It was web's own: the dot lit while web worked and api sat
+    idle, and stayed dark while api worked. Each case stages the two transcripts (an unanswered prompt at the tail is an
+    open turn, so a working session), warms both parses (the feed reads them cache-only) and reads the row off the
+    built board; web's own step is the control, its dot web's."""
+
+    def _stage(self, web_open, api_open):
+        pdir = next(p for p in jd.PROJECTS.iterdir() if p.is_dir())
+        for sid, nm, is_open in ((SND, "web", web_open), (WKR, "api", api_open)):
+            recs = [uline(T0, "kick off the panels round", "hu-" + nm, ps="typed"),
+                    aline(T0 + 20, "On it.", "a-" + nm, "hu-" + nm)]
+            if is_open:
+                recs.append(uline(NOW - 20, "now the ranges", "hu2-" + nm, "a-" + nm))
+            p = pdir / (sid + ".jsonl")
+            text = "\n".join(json.dumps(r) for r in recs) + "\n"
+            if p.read_text() != text:                  # a session nothing moved keeps its transcript, so its key stands
+                p.write_text(text)
+        for s in km._alive_sessions(NOW, km._live_map()):
+            km._parse(s["path"], s["sid"], NOW)
+
+    def _rows(self, ask, trk):
+        feed = km.build_feed(NOW)
+        card = next(a for a in feed["asks"] if a.get("itemId") == ask)
+        rows = {r["id"]: r for r in card["tree"]}
+        self.assertEqual((rows[trk]["kind"], rows[trk]["who"], rows[trk]["whoSid"]), ("handoff", "api", WKR),
+                         "the row names api")
+        return feed, card, rows[trk], rows[SND + ":g3"]
+
+    def test_a_working_recipient_lights_the_dot_while_the_sender_idles(self):
+        ask, trk = self._sender_store()
+        self._stage(web_open=False, api_open=True)
+        feed, _card, ho, own = self._rows(ask, trk)
+        self.assertEqual(feed["working"], ["api"], "the board's own dots: api works, web idles")
+        self.assertIs(own["whoWorking"], False, "web's own step: web is idle")
+        self.assertIs(ho["whoWorking"], True, "api is mid-turn: the dot before its name is lit")
+
+    def test_an_idle_recipient_leaves_the_dot_dark_while_the_sender_works(self):
+        ask, trk = self._sender_store()
+        self._stage(web_open=True, api_open=False)
+        feed, _card, ho, own = self._rows(ask, trk)
+        self.assertEqual(feed["working"], ["web"], "the board's own dots: web works, api idles")
+        self.assertIs(own["whoWorking"], True, "web's own step: web is mid-turn")
+        self.assertIs(ho["whoWorking"], False, "api is idle: no dot before its name")
+
+    def test_the_dot_follows_the_recipient_while_the_senders_cards_are_served(self):
+        """Only api moves between the builds below, so web's entry is served from the memo each time (its string the
+        same object): the bit cannot come from web's derivation. And the fold hands web's card out again next build
+        (one clock for every build, so no tint moves and the fold keeps the very object), so the stamp lands on a
+        copy: a frame already built keeps the dot it shipped."""
+        ask, trk = self._sender_store()
+        self._stage(web_open=False, api_open=False)
+        self._rows(ask, trk)
+        _f, _c, ho, _o = self._rows(ask, trk)            # web's entry settled: the peer it names has facts in its key
+        self.assertIs(ho["whoWorking"], False)
+        served = km._feed_memo_get(SND)[1]
+        self._stage(web_open=False, api_open=True)
+        _f, lit, ho, _o = self._rows(ask, trk)
+        self.assertIs(ho["whoWorking"], True, "api started a turn: the dot lights")
+        self._stage(web_open=False, api_open=False)
+        _f, _c, ho, _o = self._rows(ask, trk)
+        self.assertIs(ho["whoWorking"], False, "api's turn ended: the dot goes dark")
+        self.assertIs(km._feed_memo_get(SND)[1], served, "premise: web's cards were served, never re-derived")
+        self.assertIs(next(r for r in lit["tree"] if r["id"] == trk)["whoWorking"], True,
+                      "the earlier frame's row is not rewritten (the stamp is copy on write)")
+
+
 class FoldedBells(FoldStores):
     """A serving card folded into its dispatch's card is still on the board, so the bells' diff keeps
     what it knows about it (2026-10-16). Before, the diff read the fold as the card leaving: it dropped

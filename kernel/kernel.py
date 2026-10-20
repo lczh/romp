@@ -51599,7 +51599,9 @@ def _feed_session_entry(s, ctx):
         # showed a bare text row with no recipient identity and no visible cross-card LINK (the user
         # 2026-08-16, who watched a clear take the linked card with it and had no way to see why).
         # who/whoSid/whoColor become the RECIPIENT's identity for these rows — exact, from the
-        # courier-recorded handoff.peer, never inferred.
+        # courier-recorded handoff.peer, never inferred. Its working dot is the recipient's too, and this
+        # derivation cannot know it (the recipient's working state is no part of this session's key), so the
+        # row ships False here and build_feed stamps the recipient's bit after the session loop (2026-10-20).
         _ho = nd.get("handoff") if isinstance(nd.get("handoff"), dict) else None
         _ho_sid = str(_ho.get("peer") or "") if _ho else ""
         if _ho_sid:
@@ -51617,7 +51619,7 @@ def _feed_session_entry(s, ctx):
                     "who": (_name_of(_ho_sid) or _ho_sid[:8]) if _ho_sid else name,
                     "whoSid": _ho_sid or fsid,
                     "whoColor": _name_color(_ho_sid) if _ho_sid else color,
-                    "whoWorking": who_working, "status": st, "derived": derived,
+                    "whoWorking": who_working and not _ho_sid, "status": st, "derived": derived,
                     # user-cleared sub (nodeOverride op:clear) → renders struck-through + faded with a
                     # "cleared" chip; `status` above stays honest (box = done, the user 2026-07-26)
                     "cleared": bool(nd.get("cleared")),
@@ -52569,6 +52571,7 @@ def build_feed(now, live_map=None):
     # Zero cost when off: no rows read, no key emitted.
     dbg_rows = _judge_error_rows(now) if jd._debug_mode() else None
     asks, working, awaiting = [], [], []
+    working_sids = set()                              # the sids behind `working`: a handoff row's dot reads its recipient's
     serving_folds = []                                # T137: worker mirror cards awaiting the view-side fold
     heal_total = 0                                    # T319: session-started tops nested this build (logged once per rise)
     hidden_total = 0                                  # T333: skill-load tops with no host, hidden from the feed this build
@@ -52645,8 +52648,11 @@ def build_feed(now, live_map=None):
             js = ent[1]                                  # the previous cards, served (prev was read from this string)
         else:
             _feed_derive_recovered(fsid)
+        _nw = len(working)                           # the fold adds the session's name when its dot is working
         _heal, _hid, _cold = _feed_fold_session(fsid, js, dec, now, cmap, _bells, s["name"], asks, working, awaiting,
                                                 bg_services, serving_folds, _fold_tally)
+        if len(working) > _nw:
+            working_sids.add(fsid)
         heal_total += _heal
         hidden_total += _hid
         cold_parse = cold_parse or _cold
@@ -52709,6 +52715,25 @@ def build_feed(now, live_map=None):
                     _done.add(_ri)
                 _c["tree"][_ri].setdefault("children", []).append(_rows[0]["id"])
                 _c["tree"].extend(_rows)
+    # A HANDOFF ROW'S DOT IS ITS RECIPIENT'S (2026-10-20). The "↪ delegated to <peer>" row wears the recipient's identity
+    # (flatten: who, whoSid, whoColor), and the feed lights the dot before that name when the row's whoWorking is set, so
+    # the bit must be the recipient's. It used to be the card owner's own: the dot lit while the sender worked and the
+    # recipient sat idle, and stayed dark while the recipient worked. The sender's derivation cannot stamp it (the
+    # recipient's working state is no part of the sender's key, so a served entry would keep a stale dot), so it ships
+    # False and the bit is stamped here from this build's working set, by sid: the set behind the board's own dots. Copy
+    # on write, as the join above: the cards and rows are the fold's, handed out again next build.
+    for _ci, _c in enumerate(asks):
+        _cc = None
+        for _ri, _r in enumerate(_c.get("tree") or ()):
+            if _r.get("kind") != "handoff" or not _r.get("whoSid"):
+                continue
+            _w = _r["whoSid"] in working_sids
+            if bool(_r.get("whoWorking")) == _w:
+                continue
+            if _cc is None:
+                _cc = asks[_ci] = dict(_c)
+                _cc["tree"] = list(_c["tree"])
+            _cc["tree"][_ri] = dict(_r, whoWorking=_w)
     if cold_parse:
         _warm_fleet_bg(now)                          # a living session wasn't parsed yet → warm it + re-push (dots/anchors)
     # NO caption stream. The feed's cards are TOP-LEVEL GOALS ONLY (read-side.md: Inbox = goal cards;
