@@ -2164,6 +2164,112 @@ class ViewBuilder(unittest.TestCase):
         self.assertEqual((card["column"], card["rejudging"], card["t"]), ("needs_input", False, T0 + 1400),
                          "a block newer than the reply moves the card to Needs you")
 
+    # ── a completed card's time is when its steps' done landed, never mt ──
+    # A completed card shows the newer of its settle time and its done steps' completion times. Those were the
+    # steps' mt, and mt also moves on writes that say nothing about the completion, so a twin merged into a
+    # finished step, a retitle of it, or a step restating it landing on it re-dated the card to the write: it
+    # re-sorted within Completed and its age tint and "Nm ago" reset. The column itself never moved (it is decided
+    # before the time). Same private sid and temp state root as the tests above.
+    def _bt_done_store(self):
+        """(Re)write the private session's store as a COMPLETED card: the top, ruled done at T0+550 and settled at
+        T0+600, with one step mirroring the agent's to-do, which the agent crossed off at T0+600; and an open twin
+        card the grouper can merge into the step. Published by rename, as _bt_store is. Returns (top, step, twin)."""
+        top, twin, step = self.BT_SID + ":g1", self.BT_SID + ":g2", self.BT_SID + ":g3"
+        session = em.parse_session(str(self.bt_path), rompuuid=self.BT_SID,
+                                   candidate_files=[str(self.bt_path)], now=NOW)
+        launch_seg = em.segments(session["turns"][0])[0]["id"]
+        nodes = {top: {"id": top, "text": "page the notes-api search results", "parentId": None,
+                       "nodeComplete": True, "blocked": False, "cleared": False, "doneWhy": "search pages by cursor",
+                       "settledAt": T0 + 600, "settledDone": True, "trail": [], "t": T0, "mt": T0 + 600,
+                       "log": [{"ev_t": T0 + 550, "src": "closer", "kind": "done", "why": "search pages by cursor",
+                                "at": T0 + 550},
+                               {"ev_t": T0 + 600, "src": "romp", "kind": "settle", "at": T0 + 600}]},
+                 step: {"id": step, "text": "switch search to cursor pagination", "parentId": top,
+                        "nodeComplete": True, "blocked": False, "cleared": False, "trail": [], "t": T0 + 20,
+                        "mt": T0 + 600, "agentTask": {"key": "bt-k1", "status": "done", "raw": "completed"},
+                        "agentBornOpen": True, "agentDone": True, "servingT": T0 + 20,
+                        "log": [{"ev_t": T0 + 600, "src": "agent", "kind": "done",
+                                 "why": "the agent crossed it off its own list", "at": T0 + 600}]},
+                 twin: {"id": twin, "text": "add cursor pagination to the search endpoint", "parentId": None,
+                        "nodeComplete": False, "blocked": False, "cleared": False, "trail": [],
+                        "t": T0 + 700, "mt": T0 + 700, "log": []}}
+        tmp = jd.GOALDIR / (self.BT_SID + ".json.tmp")
+        tmp.write_text(json.dumps({
+            "rompUuid": self.BT_SID, "seq": 3, "lastNode": twin, "nodes": nodes,
+            "placements": {launch_seg: top}, "status": {top: "completed", twin: "working"}}))
+        os.replace(tmp, jd.GOALDIR / (self.BT_SID + ".json"))
+        return top, step, twin
+
+    def _bt_todo_sync(self, status, seg_t):
+        """A write for _bt_apply: the to-do sync at `seg_t`, the agent's list holding the step's item at `status`."""
+        plan = [{"key": "bt-k1", "status": status, "text": "switch search to cursor pagination",
+                 "activeForm": "Switching search to cursor pagination"}]
+        def write(st):
+            with mock.patch.object(jd.em, "task_store_plan", lambda fsid: plan):
+                return jd._sync_declared_plan(st, {"leafFsid": self.BT_SID}, "bt-seg-%s" % status, seg_t)
+        return write
+
+    def test_a_completed_card_keeps_its_time_through_writes_that_are_not_news_about_the_completion(self):
+        self._bt_session()
+        top, step, twin = self.BT_SID + ":g1", self.BT_SID + ":g3", self.BT_SID + ":g2"
+
+        def grouper_retitle(st):             # the grouper retitles cards only: this one lands on the top
+            jd.apply_group(st, [{"id": top}], [{"do": "retitle", "goal": 1,
+                                                "text": "page the notes-api search"}], T0 + 1000)
+
+        def grouper_merge(st):               # the open twin folds into the finished step
+            jd.apply_group(st, [{"id": step}, {"id": twin}],
+                           [{"do": "merge", "goal": 2, "into": 1, "why": "the same work twice"}], T0 + 1050)
+
+        def planner_retitle(st):
+            jd.apply_plan(st, "bt-seg-r", T0 + 1100, [{"do": "retitle", "goal": 1,
+                                                        "text": "move search to cursor pagination"}],
+                          [{"id": step}])
+
+        def duplicate_landing(st):           # a step restating the finished step lands on it: bookkeeping (coerced)
+            jd.apply_plan(st, "bt-seg-d", T0 + 1200, [{"do": "sub", "parentId": step, "coerced": True,
+                                                        "text": st["nodes"][step]["text"], "why": "restates it"}],
+                          [{"id": step}])
+
+        # (label, write, the node whose mt the write moves past the completion; None: it moves none)
+        writes = [("grouper retitle", grouper_retitle, top), ("grouper merge", grouper_merge, step),
+                  ("planner retitle", planner_retitle, step), ("duplicate landing", duplicate_landing, step),
+                  # the agent's list still has the item crossed off: the sync leaves a crossed-off mirror alone
+                  # (an OPEN to-do under the card would hold it out of Completed, so this is its only quiet sync)
+                  ("to-do sync", self._bt_todo_sync("completed", T0 + 1300), None)]
+        for label, write, moved in writes:
+            with self.subTest(label):
+                self._bt_done_store()
+                card = self._bt_card(top)
+                self.assertEqual((card["column"], card["t"]), ("completed", T0 + 600),
+                                 "%s: completed, at the step's done" % label)
+                before = jd.load_goals(self.BT_SID)["nodes"][step]["mt"]
+                self._bt_apply(write)
+                nodes = jd.load_goals(self.BT_SID)["nodes"]
+                if moved is not None:
+                    self.assertGreater(nodes[moved]["mt"], T0 + 600, "%s moved mt past the completion (the case)"
+                                       % label)
+                else:
+                    self.assertEqual(nodes[step]["mt"], before, "%s wrote nothing to the crossed-off step" % label)
+                self.assertTrue(nodes[step]["nodeComplete"], "%s: the step is still done" % label)
+                card = self._bt_card(top)
+                self.assertEqual((card["column"], card["t"]), ("completed", T0 + 600),
+                                 "%s is not news about the completion: the card keeps its time" % label)
+        self._bt_done_store()
+        for _label, write, _moved in writes:
+            self._bt_apply(write)
+        card = self._bt_card(top)
+        self.assertEqual((card["column"], card["t"]), ("completed", T0 + 600),
+                         "all five in a row: completed, at the step's done")
+        # a re-done step is news: the agent re-opens its to-do (the card goes back to Working), then crosses it
+        # off again at T0+1400, and the card returns to Completed at the new completion
+        self._bt_apply(self._bt_todo_sync("in_progress", T0 + 1350))
+        self.assertEqual(self._bt_card(top)["column"], "working", "the re-opened to-do holds the card in Working")
+        self._bt_apply(self._bt_todo_sync("completed", T0 + 1400))
+        card = self._bt_card(top)
+        self.assertEqual((card["column"], card["t"]), ("completed", T0 + 1400),
+                         "a newer completion moves the card's time to it")
+
     def test_transcript_only_bg_task_is_not_awaiting_but_live_sources_are(self):
         # A run_in_background launch visible ONLY in the transcript must NOT pin an idle session to a
         # working flavor (the user 2026-07-07: a leftover scrape ghost that might never finish). The LIVE
