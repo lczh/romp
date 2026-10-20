@@ -24,16 +24,21 @@ test("the mark: every picture md() and userMd() render wears .md-img, stamped by
   assert.doesNotMatch(RENDER.slice(RENDER.indexOf("function previewMdClean("), RENDER.indexOf("function showFilePreview(")), /mdImgPostPass/);
 });
 
-test("the predicate: a marked picture, outside any link, loaded at least ZOOM_MIN_H px tall", () => {
+test("the predicate: a marked picture, outside any link or summary, showing a source, loaded at least ZOOM_MIN_H px tall", () => {
   assert.match(PREVIEW, /const ZOOM_MIN_H = 32;/, "a badge is 20px tall, an emoji or an icon 16 to 24: glyphs in a line of text");
   const at = PREVIEW.indexOf("export function mdImgZoomable(");
   const code = ts(PREVIEW.slice(at, PREVIEW.indexOf("\n}\n", at) + 2).replace(/^export /, ""));
   const zoomable = (new Function("ZOOM_MIN_H", code + "\nreturn mdImgZoomable;") as (n: number) => (img: unknown) => boolean)(32);
-  const img = (o: { cls?: string[]; link?: boolean; complete?: boolean; h?: number }) => ({
-    classList: { contains: (c: string) => (o.cls || ["md-img"]).includes(c) }, closest: (s: string) => (s === "a" && o.link ? {} : null),
-    complete: o.complete ?? true, naturalHeight: o.h ?? 450 });
+  const img = (o: { cls?: string[]; link?: boolean; summary?: boolean; complete?: boolean; h?: number; src?: string; currentSrc?: string }) => ({
+    classList: { contains: (c: string) => (o.cls || ["md-img"]).includes(c) },
+    closest: (s: string) => (s.split(/\s*,\s*/).some((one) => (one === "a" && o.link) || (one === "summary" && o.summary)) ? {} : null),
+    complete: o.complete ?? true, naturalHeight: o.h ?? 450,
+    src: o.src ?? "https://img.example.test/wide.png", currentSrc: o.currentSrc ?? o.src ?? "https://img.example.test/wide.png" });
   assert.equal(zoomable(img({})), true, "a markdown picture zooms");
   assert.equal(zoomable(img({ link: true })), false, "a picture inside a link is the link's");
+  assert.equal(zoomable(img({ summary: true })), false, "a picture inside a <summary> is the summary's: its click opens the details (2026-10-20 review)");
+  assert.equal(zoomable(img({ src: "", currentSrc: "https://img.example.test/a.png" })), true, "a srcset alone: it shows its candidate, and zooms on it");
+  assert.equal(zoomable(img({ src: "", currentSrc: "" })), false, "no source at all: nothing a lightbox could show (2026-10-20 review)");
   assert.equal(zoomable(img({ h: 20 })), false, "a 20px badge does not");
   assert.equal(zoomable(img({ h: 32 })), true, "32px and up does");
   assert.equal(zoomable(img({ complete: false, h: 0 })), false, "nothing loaded yet: nothing to show");
@@ -50,7 +55,8 @@ test("the hook: ONE pair of document listeners, installed once, web only; load m
   assert.match(body, /if \(img\.naturalHeight < ZOOM_MIN_H\) mdImgTiny\.add\(img\.src\); else mdImgTiny\.delete\(img\.src\);/, "a glyph is remembered, so the sequence skips it too");
   assert.match(body, /img\.classList\.toggle\("md-img-zoom", mdImgZoomable\(img\)\);/, "the cursor class follows the same predicate the click reads");
   assert.match(body, /document\.addEventListener\("click", \(e\) => \{[\s\S]*?\}, true\);/, "capture: a fold or a bubble around the picture never toggles under it");
-  assert.match(body, /e\.preventDefault\(\); e\.stopPropagation\(\);\s*\n\s*openLightbox\(\{ url: img\.src, alt: img\.alt \}, img\);/, "the URL source, with the element the chat reads its transcript off");
+  assert.match(body, /e\.preventDefault\(\); e\.stopPropagation\(\);\s*\n\s*openLightbox\(\{ url: img\.currentSrc \|\| img\.src, alt: img\.alt \}, img\);/,
+    "the URL the picture SHOWS (a srcset's candidate, else its src; 2026-10-20 review: a srcset alone opened an empty lightbox), with the element the chat reads its transcript off");
   assert.equal((RENDER.match(/installMdImgZoom\(\);/g) || []).length, 1, "render.ts installs it once, beside the heal");
   assert.match(PREVIEW, /\.filter\(\(e\) => "url" in e \? !mdImgFailed\.has\(e\.url\) && !mdImgTiny\.has\(e\.url\) : previewKind\(e\.path\) === "img"\);/,
     "the sequence skips a URL that failed or loaded glyph-sized: no click opens one");

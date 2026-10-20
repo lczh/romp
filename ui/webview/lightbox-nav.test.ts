@@ -15,11 +15,12 @@ test("the index walks EVENTS oldest→newest and threads pins per target", () =>
   assert.ok(at > 0);
   const body = RENDER.slice(at, RENDER.indexOf("\n}", at));
   assert.match(body, /for \(const ev of scope\.events/, "events, not the DOM — virtualization windows images out");
-  assert.match(body, /here\.set\("p:" \+ target, \{ e: \{ path: target, sid: scope\.fileSid, pin: pins\[target\] \}, at \}\);/,
+  assert.match(body, /here\.set\("p:" \+ target, \{ e: \{ path: target, sid: scope\.fileSid, pin: pins\[target\] \}, at, rank: rank\+\+ \}\);/,
     "the SAME triple the embed's click passes — a step shows that message's pinned bytes");
   assert.match(body, /previewKind\(target\) !== "img"/, "the lightbox's own image gate decides image-ness");
-  assert.match(body, /const had = here\.get\("p:" \+ target\);/, "one entry per (event, target)");
-  assert.match(body, /for \(const m of mdImages\(text, lex\)\)/, "a message's markdown pictures join the sequence (2026-10-20; lightbox-sequence.test.ts runs it)");
+  assert.match(body, /\|\| here\.has\("p:" \+ target\)\) return;/, "one entry per (event, target), at its first mention");
+  assert.match(body, /read = \{ text, layout: mdLayout\(text, lex\) \};/, "a message's markdown pictures join the sequence, read once per text (2026-10-20; lightbox-sequence.test.ts runs it)");
+  assert.match(body, /for \(const m of layout\.images\)/);
   assert.match(RENDER, /setLightboxNav\(chatImagesFor\);/, "registered once; providerless surfaces keep inert arrows");
 });
 

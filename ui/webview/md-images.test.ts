@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import { Marked } from "marked";
-import { mdImages } from "./md-images";
+import { mdImages, mdLayout, decodeRefs } from "./md-images";
 import { chatMdExtensions } from "./chat-md";
 
 const chat = new Marked({ gfm: true, breaks: false }, ...chatMdExtensions);
@@ -58,6 +58,70 @@ test("code is never a picture: a span or a fence that shows the syntax", () => {
 test("an HTML <img> in the message: its src as written, character references decoded, its alt", () => {
   const got = mdImages('<p><img alt="curve &amp; fit" src="https://img.example.test/c.png?a=1&amp;b=2"></p>\n\n<img src=\'https://img.example.test/q.png\'>', lex);
   assert.deepEqual(got.map((m) => [m.url, m.alt]), [["https://img.example.test/c.png?a=1&b=2", "curve & fit"], ["https://img.example.test/q.png", ""]]);
+});
+
+test("numeric character references in an HTML <img> decode as the browser decodes them: decimal and hex, src and alt", () => {
+  // the 2026-10-20 review's case: `&#38;` left as written named a URL no picture on the page has (its `#` a fragment)
+  const got = mdImages('<img alt="&#60;fit&#x3E; &#x2014; run 2" src="https://img.example.test/c.png?a=1&#38;b=2&#x26;c=3&#X26;d=4&#38e=5">', lex);
+  assert.deepEqual(got.map((m) => [m.url, m.alt]), [["https://img.example.test/c.png?a=1&b=2&c=3&d=4&e=5", "<fit> — run 2"]]);
+});
+
+test("decodeRefs: the HTML standard's numeric rule, the cases a browser maps (checked against Chromium's own parse)", () => {
+  const cases: [string, string][] = [
+    ["&#38;", "&"], ["&#x26;", "&"], ["&#X26;", "&"], ["&#0038;", "&"], ["&#38", "&"], ["&#65&#66;", "AB"],
+    ["&#39;", "'"], ["&apos;", "'"], ["&amp;&lt;&gt;&quot;", "&<>\""],
+    ["&#128;", "€"], ["&#x9F;", "Ÿ"], ["&#x81;", "\x81"],          // the C1 range is Windows-1252's, its holes as they are
+    ["&#0;", "�"], ["&#xD800;", "�"], ["&#x110000;", "�"], ["&#99999999999999999999;", "�"],
+    ["&#x1F600;", "\u{1F600}"],
+    ["&#;", "&#;"], ["&#x;", "&#x;"], ["&#xg;", "&#xg;"], ["& #38;", "& #38;"],   // no digits: no reference
+  ];
+  for (const [inp, want] of cases) assert.equal(decodeRefs(inp), want, JSON.stringify(inp));
+});
+
+test("a picture inside a <details>'s <summary> is the summary's: no stop, as a linked one, across a blank line too", () => {
+  assert.deepEqual(urls('<details><summary><img src="https://img.example.test/head.png"> Raw counts</summary>\n\n![body](https://img.example.test/body.png)\n\n</details>'),
+    ["https://img.example.test/body.png"], "the summary's picture opens the fold; the body's zooms");
+  assert.deepEqual(urls("<details><summary>\n\n![x](https://img.example.test/x.png)\n\n</summary>\n\n![y](https://img.example.test/y.png)\n\n</details>"),
+    ["https://img.example.test/y.png"], "a summary left open by a blank line still holds the markdown picture after it");
+  assert.deepEqual(urls("<details><summary>Plot\n\n![x](https://img.example.test/x.png)\n\n</details>\n\n![z](https://img.example.test/z.png)"),
+    ["https://img.example.test/z.png"], "a summary never closed ends with its details, as the browser's parse ends it");
+});
+
+test("a picture with no source to name is no stop: a srcset alone, an empty src, an empty href", () => {
+  assert.deepEqual(urls('<img srcset="https://img.example.test/a.png 1x" alt="a"> <img src="" alt="b"> <img src="  "> ![e]()'), []);
+  assert.deepEqual(urls('<img src="https://img.example.test/ok.png" srcset="https://img.example.test/ok2.png 2x">'),
+    ["https://img.example.test/ok.png"], "a src beside a srcset names the picture by its src");
+});
+
+test("figureAt: a path's figure lands after the block that names it, a paragraph that wraps whole", () => {
+  const src = "The split is in docs/figure.png and\n![x](https://img.example.test/x.png) shows the curve.\n\n![y](https://img.example.test/y.png)";
+  const { images, figureAt } = mdLayout(src, lex);
+  const fig = figureAt(src.indexOf("docs/figure.png"));
+  assert.equal(fig, src.indexOf("curve.") + "curve.".length, "the end of the paragraph, past its second line");
+  assert.ok(images[0].at < fig && fig < images[1].at, "so x (on the wrapped line) shows before the figure, y after it");
+  assert.equal(figureAt(-1), src.length, "a mention not in the text: the end");
+});
+
+test("figureAt: a tight list item's figure goes in the item, after anything nested in it; a loose item's after its text", () => {
+  const tight = "- see docs/a.png and\n  ![b](https://img.example.test/b.png) below\n  - inner ![c](https://img.example.test/c.png)\n- next ![d](https://img.example.test/d.png)";
+  const t = mdLayout(tight, lex);
+  const at = t.figureAt(tight.indexOf("docs/a.png"));
+  assert.deepEqual(t.images.map((m) => m.at < at), [true, true, false], "b and the nested c show before the figure, the next item's d after");
+  const loose = "- see docs/a.png\n\n  ![b](https://img.example.test/b.png)\n\n- next";
+  const l = mdLayout(loose, lex);
+  assert.ok(l.figureAt(loose.indexOf("docs/a.png")) < l.images[0].at, "a loose item's text is a paragraph: its figure follows it, before b");
+});
+
+test("figureAt: a quote's paragraph is found under its markers; a table row, code and an unlexed message keep the line's end", () => {
+  const quote = "> see docs/a.png and\n> ![b](https://img.example.test/b.png) here";
+  const q = mdLayout(quote, lex);
+  assert.equal(q.figureAt(quote.indexOf("docs/a.png")), quote.length, "after the quote's paragraph, both its lines");
+  const table = "| k | v |\n|---|---|\n| docs/c.png | x |\n| e | ![e](https://img.example.test/e.png) |";
+  const tb = mdLayout(table, lex);
+  const row = table.indexOf("| docs/c.png");
+  assert.equal(tb.figureAt(table.indexOf("docs/c.png")), table.indexOf("\n", row), "a table row: the row's end");
+  const plain = "one docs/a.png\ntwo docs/b.png";
+  assert.equal(mdLayout(plain, lex).figureAt(0 + plain.indexOf("docs/a.png")), plain.indexOf("\n"), "no picture, never lexed: the line's end");
 });
 
 test("a markdown href goes through marked's own cleanUrl: encodeURI, an author's escapes kept", () => {
