@@ -42,7 +42,7 @@ export function historyBands(marks: readonly number[], stripH: number): Array<{ 
 
 /** The render window's geometry, read off the active view when the ruler paints (render.ts sizeSpacers): the hidden
  *  head [0, winStart) is one top spacer of topH px starting at content-space topY; the hidden tail [winEnd, unitTotal)
- *  one bottom spacer of botH px at botY; avg is the measured row height the spacers were sized by. */
+ *  one bottom spacer of botH px at botY; avg is the figure the spacers sized a hidden unit that is not a gap by (render.ts unitPx). */
 export interface WindowGeometry { winStart: number; winEnd: number; unitTotal: number; topY: number; topH: number; botY: number; botH: number; avg: number }
 
 /** Content-space spans for hovered turns that are RESIDENT but outside the render window (review find on the first

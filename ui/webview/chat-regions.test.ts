@@ -4,7 +4,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { DEFAULT_TURN_PX, GAPS_MAX_PX, GAPS_SHARE, LAYOUT_LIMIT_FALLBACK, OVERLAY_KINDS, gapAt, gapFraction, gapHeight, gapTurnPx, insertRun, landingCancel, landingNotice, pageAt, pagesToAsk, regionsFromRuns, runsOf, splitHeldAgainstFrame, turnsBeforeTail, type Ev, type Gap, type Region, type Run } from "./chat-regions";
+import * as ts from "typescript";
+import { DEFAULT_TURN_PX, GAPS_MAX_PX, GAPS_SHARE, HIDDEN_SHARE, LAYOUT_LIMIT_FALLBACK, OVERLAY_KINDS, gapAt, gapFraction, gapHeight, gapTurnPx, heldUnitPx, insertRun, landingCancel, landingNotice, pageAt, pagesToAsk, regionsFromRuns, runsOf, splitHeldAgainstFrame, turnsBeforeTail, type Ev, type Gap, type Region, type Run } from "./chat-regions";
 
 const ev = (k: string) => ({ uuid: k });
 const run = (lo: number, hi: number | null, keys: string[]): Run => ({ kind: "run", lo, hi, events: keys.map(ev) });
@@ -93,6 +94,101 @@ test("the gaps together stand under the browser's layout limit: a long session's
   assert.ok(gapHeight(long[0] as Gap, per6) <= limit6x * GAPS_SHARE + 1, "a smaller measured limit draws the gaps smaller: " + gapHeight(long[0] as Gap, per6));
 });
 
+test("a held run's hidden units share one budget with the gaps, a short session keeps the measure (2026-10-02)", () => {
+  // the budget at Chrome's limit on a 2x display (LAYOUT_LIMIT_FALLBACK, the smallest the reports have shown): half of it, written out
+  // here, so the share's value is pinned by the assertion below rather than read back from the constant it checks
+  const max = LAYOUT_LIMIT_FALLBACK / 2;
+  assert.equal(HIDDEN_SHARE, 0.5, "the estimates' share of the layout limit is half");
+  const units = (n: number, kind = "event") => Array.from({ length: n }, () => ({ kind }));
+  // a short session: its units at the measured average stand far under the budget beside a small gap, so they take the measure
+  assert.equal(heldUnitPx([{ kind: "gap" }, ...units(250)], 60, 5_000, max), 60);
+  // a reader who climbed back through a long session from a tall tail: the gaps at their bound and 1,001 held units at an average of
+  // 21,600 px would stand 26 million px together, past the limit; the units' figure is lowered until gaps and units fill the budget
+  const climbed = [{ kind: "gap" }, ...units(1000), { kind: "toolgroup" }, { kind: "gap" }];
+  const per = heldUnitPx(climbed, 21_600, GAPS_MAX_PX, max);
+  assert.ok(GAPS_MAX_PX + 1001 * 21_600 > LAYOUT_LIMIT_FALLBACK, "(at the measure they would pass the limit)");
+  assert.equal(per, (max - GAPS_MAX_PX) / 1001, "the budget's rest after the gaps, over every unit that is not a gap, rendered or hidden");
+  assert.ok(GAPS_MAX_PX + 1001 * per <= max + 1e-6, "…so the gaps and the held units stand at most the budget together");
+  // at the edge: 100 units beside the gaps at their bound, at an average half a percent past, then half a percent under, the rest's share
+  const room = max - GAPS_MAX_PX, hundred = [{ kind: "gap" }, ...units(100)];
+  assert.equal(heldUnitPx(hundred, (room / 100) * 1.005, GAPS_MAX_PX, max), room / 100, "half a percent past the rest's share: lowered to it");
+  assert.equal(heldUnitPx(hundred, (room / 100) * 0.995, GAPS_MAX_PX, max), (room / 100) * 0.995, "half a percent under the rest's share: the measure");
+  assert.equal(heldUnitPx([{ kind: "gap" }], 21_600, GAPS_MAX_PX, max), 21_600, "no held unit: the measure");
+  assert.equal(heldUnitPx(climbed, 21_600, max + 10, max), 0, "gaps past the budget leave the held units no height, never a negative one");
+});
+
+test("the spacers and every walk over them take the bounded figure for a hidden held unit (2026-10-02)", () => {
+  // Source pins: they guard the text, read with the compiler's own parser (as writer-census.ts reads render.ts) so a comment is never
+  // taken for code, and a reverted line left behind as a comment cannot satisfy them. The served climb
+  // (tests/test_long_history_height_browser.py LongHistoryClimb) executes sizeSpacers, the figure's setting (renderWindowItems and
+  // heldPxOf: its estimates check, at most 4 px past half the limit, also fails when heldPxOf drops the gaps' sum, and its check that
+  // the figure stays put while the window moves fails when heldPxOf counts the hidden units alone), the go-to-bottom chip's walk into
+  // the bottom spacer (unitAtScroll, hiddenUnitTop) and the keyed paint's re-size of the bottom spacer for replies that land below the
+  // window (sizeBottomSpacer: its append test, test_rows_appended_below_the_window_take_the_held_figure_until_the_next_build). The 12x
+  // lab (UnreachableEndSettles) executes heldPxOf's measured limit: its estimates check fails when the fallback limit stands in for
+  // it. The 2x landing (LongHistoryHeight) executes heldPxOf's average unit: its check of the figure a hidden row takes fails when
+  // heldPxOf reads the px per turn in its place. The two-session lab (LongHistoryBuiltHidden) executes the first-measure recompute in
+  // sizeSpacers: a view built while hidden, then shown (the first measure of both figures), and a settings change while it is hidden,
+  // then the switch back (the average unit's alone). Over a taller tail (LongHistoryBuiltHiddenBounded) the bound engages at the
+  // show, and its check that the show takes the figure the next window build sets fails when the recompute drops the bound or runs
+  // before the gaps are re-mapped. turnUnderTop, yOfTurn, preJumpIntoGap, the ruler's band and the recompute's px-per-turn term are
+  // guarded by these pins only.
+  const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+  const sf = ts.createSourceFile("render.ts", RENDER, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  // CODE: the source with every comment blanked to spaces, its line breaks kept, so the text pins below match code only
+  const ranges = new Map<number, number>();
+  const collect = (n: ts.Node): void => {
+    for (const r of [...(ts.getLeadingCommentRanges(RENDER, n.getFullStart()) ?? []), ...(ts.getTrailingCommentRanges(RENDER, n.getEnd()) ?? [])]) ranges.set(r.pos, r.end);
+    for (const c of n.getChildren(sf)) if (c.kind < ts.SyntaxKind.FirstJSDocNode || c.kind > ts.SyntaxKind.LastJSDocNode) collect(c);   // a doc comment is blanked whole, as its owner's leading comment
+  };
+  collect(sf);
+  let CODE = "", at = 0;
+  for (const [pos, end] of [...ranges].sort((a, b) => a[0] - b[0])) { if (pos < at) continue; CODE += RENDER.slice(at, pos) + RENDER.slice(pos, end).replace(/[^\n]/g, " "); at = end; }
+  CODE += RENDER.slice(at);
+  assert.equal(CODE.length, RENDER.length);
+  assert.ok(ranges.size > 1000 && RENDER.split("/**").length > 100 && !CODE.includes("/**"), "the comments are found and blanked, every doc comment with them");
+  const fn = (head: string) => { const i = CODE.indexOf(head); assert.ok(i >= 0, head); return CODE.slice(i, CODE.indexOf("\n}\n", i)); };
+  assert.match(CODE, /v\.gapUnits = gapUnitsOf\(items, v\.pxPerTurn\);\s*\n\s*v\.heldPx = heldPxOf\(v, items\);/, "the figure is set with the spacer map (renderWindowItems)");
+  assert.match(fn("function sizeSpacers("), /const hadPerTurn = v\.pxPerTurn != null, hadAvg = v\.avgTurnH != null;\s*\n\s*measureRows\(v\);/, "a first measure is read off the figures as they stood before measureRows (executed: LongHistoryBuiltHidden)");
+  assert.match(fn("function sizeSpacers("), /if \(\(\(!hadPerTurn && v\.pxPerTurn != null\) \|\| \(!hadAvg && v\.avgTurnH != null\)\) && v\.painted\) v\.heldPx = heldPxOf\(v, v\.painted\.items\);/, "…and the figure is set again on a first measure (executed: LongHistoryBuiltHidden, and LongHistoryBuiltHiddenBounded for the bound; its px-per-turn term by this pin only)");
+  assert.match(fn("function heldPxOf("), /if \(v\.gapUnits\) for \(const h of v\.gapUnits\.values\(\)\) gaps \+= h;\s*\n\s*return heldUnitPx\(items, v\.avgTurnH \?\? 60, gaps, layoutLimitPx\(\) \* HIDDEN_SHARE\);/, "off the gaps as the spacer map draws them, under a share of the measured limit (executed: LongHistoryClimb, LongHistoryHeight for the average unit, and UnreachableEndSettles for the measured limit)");
+  assert.match(CODE, /function unitPx\(v: View\): number \{ return v\.heldPx \?\? v\.avgTurnH \?\? 60; \}/, "unitPx: the held figure, else the measured average, else 60");
+  for (const head of ["function sizeSpacers(", "function hiddenUnitTop(", "function unitAtScroll(", "function yOfTurn("]) assert.match(fn(head), /const avg = unitPx\(v\);/, head);
+  assert.match(fn("function turnUnderTop("), /\bavg = unitPx\(v\);/, "turnUnderTop: avg = unitPx(v)");
+  assert.match(fn("function sizeBottomSpacer("), /hiddenHeight\(v, total - \(v\.spacerCountBot \?\? 0\), total, unitPx\(v\)\)/, "the bottom spacer re-sized by the keyed paint (executed: LongHistoryClimb's append test)");
+  assert.match(fn("function preJumpIntoGap("), /const avg = unitPx\(v\), own = hiddenHeight\(v, idx, idx \+ 1, avg\);/, "the landing's place for a gap inside a spacer");
+  assert.match(fn("function paintGlowRuler("), /botH: botSp \? botSp\.offsetHeight : 0,\s*\n\s*avg: unitPx\(v\) \}\)\);/, "the ruler's band for a hovered unit inside a spacer");
+  // The census: every READ of the raw average (any `.avgTurnH` that is not an assignment's target), by the function it is read in. A
+  // read anywhere else is a spacer estimate or a walk that must take unitPx(v), or a new reader to name here.
+  const owner = (n: ts.Node): string => {
+    let hook: string | null = null;
+    for (let p: ts.Node | undefined = n.parent; p; p = p.parent) {
+      if ((ts.isFunctionDeclaration(p) || ts.isMethodDeclaration(p)) && p.name) return p.name.getText(sf);
+      if (!hook && (ts.isArrowFunction(p) || ts.isFunctionExpression(p)) && ts.isBinaryExpression(p.parent) && ts.isPropertyAccessExpression(p.parent.left)) hook = p.parent.left.name.text;
+    }
+    return hook ?? "(module)";
+  };
+  const reads: Record<string, number> = {}, routes: string[] = [];
+  const where = (n: ts.Node) => (sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1) + ": " + n.parent.getText(sf).slice(0, 80);
+  const visit = (n: ts.Node): void => {
+    if (ts.isPropertyAccessExpression(n) && n.name.text === "avgTurnH") {
+      const written = ts.isBinaryExpression(n.parent) && n.parent.left === n && n.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken;
+      if (!written) { const k = owner(n); reads[k] = (reads[k] ?? 0) + 1; }
+    } else if (ts.isIdentifier(n) && n.text === "avgTurnH" && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) && !(ts.isPropertySignature(n.parent) && n.parent.name === n)) routes.push(where(n));
+    else if ((ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && n.text === "avgTurnH") routes.push(where(n));
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  assert.deepEqual(routes, [], "the raw average is reached as a property only (a destructure, a shorthand or a string key would pass the census unread)");
+  assert.deepEqual(reads, {
+    heldPxOf: 1, unitPx: 1,            // the figure's own two reads
+    sizeSpacers: 2, measureRows: 1,    // null checks: a first measure (hadAvg and the recompute's), and measuring once
+    contentOffsetFrame: 1,             // the scrollbar marks' frame, for a unit its cache holds no height for (a gap is never cached) while it sums; it places marks only, no walk or jump reads it
+    virtualizeToViewport: 1,           // the re-window's margin, a distance into rendered rows, which stand at their real height
+    __rompViewMeasure: 1,              // the long-history lab's read of the measures
+  }, "every read of the raw average, by the function that reads it");
+});
+
 test("a reader INSIDE a gap asks for the page holding their turn, page-aligned and clipped to the gap (2026-10-01)", () => {
   assert.deepEqual(pageAt({ lo: 0, hi: 2005 }, 1344.6, 16), { lo: 1344, hi: 1360 }, "the page around the turn under the viewport top");
   assert.deepEqual(pageAt({ lo: 16, hi: 2005 }, 20, 16), { lo: 16, hi: 32 }, "an aligned page");
@@ -108,9 +204,9 @@ test("every gap height render.ts draws goes through the bound (2026-10-01): the 
   const calls = RENDER.split("\n").filter((l) => !l.startsWith("import ")).join("\n");
   assert.equal((calls.match(/gapTurnPx\(/g) || []).length, (calls.match(/gapTurnPx\([^;\n]*?, gapsMaxPx\(\)\)/g) || []).length, "every figure takes the measured bound (a third argument)");
   assert.match(RENDER, /const per = gapTurnPx\(items, pxPerTurn, gapsMaxPx\(\)\);[^\n]*\n\s*for \(let u = 0; u < items\.length; u\+\+\) \{ const it = items\[u\]; if \(it\.kind === "gap"\) gu\.set\(u, gapHeight\(it, per\)\); \}/, "the spacer map (gapUnitsOf)");
-  assert.match(RENDER, /g\.style\.height = gapHeight\(it, gapTurnPx\(s\.regions \?\? \[\], v\.pxPerTurn, gapsMaxPx\(\)\)\) \+ "px";/, "the gap element");
-  assert.match(RENDER, /"gap\|" \+ it\.lo \+ "\|" \+ it\.hi \+ "\|" \+ it\.before \+ "\|" \+ gapTurnPx\(s\.regions \?\? \[\], v\.pxPerTurn, gapsMaxPx\(\)\) \+ "\|"/, "a gap unit's signature names the figure it is drawn at, so a change repaints it");
-  assert.equal((RENDER.match(/v\.gapUnits\?\.get\(u\) \?\? gapHeight\(it, gapTurnPx\(items, v\.pxPerTurn, gapsMaxPx\(\)\)\)/g) || []).length, 2, "the two scroll walks' fallbacks");
+  assert.match(RENDER, /g\.style\.height = gapHeight\(it, gapTurnPx\(s\.regions \?\? \[\], v\.pxPerTurn, gapsMaxPx\(\)\)\) \+ "px";/, "the gap element (drawn and measured in a browser by tests/test_long_history_height_browser.py UnreachableEndSettles)");
+  assert.match(RENDER, /"gap\|" \+ it\.lo \+ "\|" \+ it\.hi \+ "\|" \+ it\.before \+ "\|" \+ gapTurnPx\(s\.regions \?\? \[\], v\.pxPerTurn, gapsMaxPx\(\)\) \+ "\|"/, "a gap unit's signature names the figure it is drawn at, so a change repaints it (this pin guards the source text only)");
+  assert.equal((RENDER.match(/v\.gapUnits\?\.get\(u\) \?\? gapHeight\(it, gapTurnPx\(items, v\.pxPerTurn, gapsMaxPx\(\)\)\)/g) || []).length, 2, "the two scroll walks' fallbacks (this pin guards the source text only)");
   // the bound is a share of the limit MEASURED by a fixed probe, forgotten on a resize (a zoom change is one)
   assert.match(RENDER, /function gapsMaxPx\(\): number \{ return gapsBoundHeld \?\? layoutLimitPx\(\) \* GAPS_SHARE; \}/, "the share of the measured limit (a served lab may hold another figure)");
   // the held figure has ONE writer, the lab's hook: one assignment to it in render.ts, any assignment operator at any spacing (the
@@ -171,9 +267,9 @@ test("every walk over the units hidden above the window starts where the top spa
   const hut = body("function hiddenUnitTop("), uas = body("function unitAtScroll("), tut = body("function turnUnderTop("), yot = body("function yOfTurn("), pj = body("function preJumpIntoGap(");
   assert.match(hut, /let y = topSpacerY\(v, content\);\s*\n\s*for \(let k = 0; k < u; k\+\+\)/, "hiddenUnitTop");
   assert.match(uas, /topY = topSpacerY\(v, content\);\s*\n\s*if \(st < topY \+ topH\)/, "unitAtScroll: inside the spacer by where it starts");
-  assert.match(uas, /return Math\.max\(0, Math\.floor\(\(st - topY\) \/ avg\)\);\s*\n\s*let y = topY;/, "…and walks from there, by its own heights or the average");
+  assert.match(uas, /return Math\.max\(0, Math\.floor\(\(st - topY\) \/ avg\)\);\s*\n\s*let y = topY;/, "…and walks from there, by its own heights or unitPx");
   assert.match(tut, /topY = topSpacerY\(v, content\);\s*\n\s*if \(spacer && top < topY \+ topH\)/, "turnUnderTop: inside the spacer by where it starts");
-  assert.match(tut, /const at = Math\.max\(top, topY\), avg = v\.avgTurnH \?\? 60; let y = topY;/, "…walks from there, a top in the padding above it read as its start");
+  assert.match(tut, /const at = Math\.max\(top, topY\), avg = [^;]+; let y = topY;/, "…walks from there, a top in the padding above it read as its start");
   assert.match(yot, /let y = topSpacerY\(v, content\);/, "yOfTurn's hidden walk");
   assert.match(pj, /if \(idx < \(v\.winStart \?\? 0\)\) y = topSpacerY\(v, content\) \+ hiddenHeight\(v, 0, idx, avg\) \+ frac \* own;/, "preJumpIntoGap's hidden road");
   const walks: [string, string][] = [["unitAtScroll", uas], ["turnUnderTop", tut], ["yOfTurn", yot]];

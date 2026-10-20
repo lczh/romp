@@ -43,16 +43,16 @@ test("renderWindowItems renders [unitStart, unitEnd) with a TOP and a BOTTOM spa
   assert.match(RENDER, /v\.spacerCount = unitStart; v\.spacerCountBot = total - unitEnd;/);
 });
 
-test("sizeSpacers sizes BOTH spacers by hidden-unit count × avg, caching only a visible measurement", () => {
+test("sizeSpacers sizes BOTH spacers by the hidden units' estimates, caching only a visible measurement", () => {
   assert.match(RENDER, /function sizeSpacers\(v: View\): void/);
-  assert.match(RENDER, /const topAfter = top \? hiddenHeight\(v, 0, v\.spacerCount \?\? 0, avg\) : 0, botAfter = bot \? hiddenHeight\(v, total - \(v\.spacerCountBot \?\? 0\), total, avg\) : 0;/, "both spacers by the hidden units' own heights: a gap's estimate, else the average (T386 stage 2)");
+  assert.match(RENDER, /const topAfter = top \? hiddenHeight\(v, 0, v\.spacerCount \?\? 0, avg\) : 0, botAfter = bot \? hiddenHeight\(v, total - \(v\.spacerCountBot \?\? 0\), total, avg\) : 0;/, "both spacers by the hidden units' own heights: a gap's estimate, else sizeSpacers' avg (T386 stage 2; this pin reads the name only: chat-regions.test.ts, 'the spacers and every walk over them take the bounded figure for a hidden held unit (2026-10-02)', pins that avg to unitPx)");
   assert.match(RENDER, /if \(top\) top\.style\.height = topAfter \+ "px";\s*\n\s*if \(bot\) bot\.style\.height = botAfter \+ "px";/);
   assert.match(RENDER, /if \(h > 0 && n > 0\) v\.avgTurnH = h \/ n;/);   // don't cache a display:none 0
 });
 
-test("unitAtScroll maps a spacer by avg height and a rendered row by its data-unit", () => {
+test("unitAtScroll maps a spacer by the hidden units' estimates and a rendered row by its data-unit", () => {
   assert.match(RENDER, /function unitAtScroll\(v: View, content: HTMLElement\): number/);
-  assert.match(RENDER, /if \(st < topY \+ topH\) \{[^\n]*\n\s*if \(!v\.gapUnits\) return Math\.max\(0, Math\.floor\(\(st - topY\) \/ avg\)\);/, "in the top spacer (from where it starts, topSpacerY: chat-regions.test.ts): the average when no gap sits in it, else a walk over the hidden units' heights (T386 stage 2)");
+  assert.match(RENDER, /if \(st < topY \+ topH\) \{[^\n]*\n\s*if \(!v\.gapUnits\) return Math\.max\(0, Math\.floor\(\(st - topY\) \/ avg\)\);/, "in the top spacer (from where it starts, topSpacerY: chat-regions.test.ts): a division by unitAtScroll's avg while no gap is mapped (v.gapUnits unset), else a walk over the hidden units' heights (T386 stage 2; this pin reads the name only: chat-regions.test.ts, 'the spacers and every walk over them take the bounded figure for a hidden held unit (2026-10-02)', pins that avg to unitPx)");
   assert.match(RENDER, /if \(st < t0 \+ c\.offsetHeight\) return lastUnit;/);                  // straddling a rendered row
   assert.match(RENDER, /return \(v\.winEnd \?\? 0\) \+ Math\.floor\(\(st - bTop\) \/ avg\);/);  // in the bottom spacer
 });
