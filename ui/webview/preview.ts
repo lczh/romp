@@ -10,6 +10,7 @@ import { hostOf, bareId } from "./host-prefix";
 import { mediaSrc } from "./media";
 import { ICON_DOWNLOAD, ICON_COPY, ICON_CHECK, ICON_CROSS, ICON_POPOUT } from "./icons";   // the shared stroke-family glyphs (T367; the popout for a URL picture's original)
 import * as pz from "./pinch";
+import { opensInLightbox } from "./md-images";   // the schemes a picture opens on: the click's and the arrows' one rule
 
 // Extensions the kernel's _PREVIEW_MIME serves — keep the two lists in step (tests pin both).
 const IMG_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
@@ -984,13 +985,16 @@ export function installMdImgHeal(): void {
 // picture inside a <details>'s <summary> is the summary's by the same rule: its click opens or closes the details
 // (2026-10-20 review: the click's preventDefault swallowed the toggle). A picture opens on what it SHOWS, currentSrc:
 // a srcset's candidate when it has one, else its src. One with neither shows nothing a lightbox could, and never zooms
-// (2026-10-20 review: a srcset with no src opened an empty lightbox whose "Open original" was the dashboard itself). Web
-// dashboard only, as every preview (canPreview): the VS Code webview loads only data: pictures and has no kernel origin.
+// (2026-10-20 review: a srcset with no src opened an empty lightbox whose "Open original" was the dashboard itself). And
+// it opens only on the schemes the arrows' sequence keeps (opensInLightbox): the sanitizer checks a srcset's first
+// candidate alone, so a later one could name a javascript: or data:text/html URL, and the browser may pick it; such a
+// picture never loads, but the click refuses it by rule rather than by that accident. Web dashboard only, as every
+// preview (canPreview): the VS Code webview loads only data: pictures and has no kernel origin.
 const ZOOM_MIN_H = 32;
 const mdImgTiny = new Set<string>();                // URLs that loaded glyph-sized this page life: no stop in the sequence
 let mdImgZoomOn = false;
 export function mdImgZoomable(img: HTMLImageElement): boolean {
-  return img.classList.contains("md-img") && !img.closest("a, summary") && !!(img.currentSrc || img.src) && img.complete && img.naturalHeight >= ZOOM_MIN_H;
+  return img.classList.contains("md-img") && !img.closest("a, summary") && opensInLightbox(img.currentSrc || img.src) && img.complete && img.naturalHeight >= ZOOM_MIN_H;
 }
 export function installMdImgZoom(): void {
   if (mdImgZoomOn || !canPreview()) return;        // ensure-once (the click-safety installation rule)

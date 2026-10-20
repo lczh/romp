@@ -11,7 +11,9 @@
 // render, and the same walk records the blocks a path's figure renders after (mdLayout's figureAt). `url` is what the
 // page's <img> carries before the browser resolves it: marked writes a markdown href through its cleanUrl (encodeURI
 // with a percent sign kept as written), and an HTML <img src> keeps its attribute as the browser's parser reads it
-// (imgAttrs). No DOM is needed: under node the attributes are read by pattern and decoded by the standard's rule.
+// (imgAttrs). Which `<` in the message's raw HTML opens a tag is read the way the browser's tokenizer reads it
+// (htmlImages), the same code in the browser and under node; only the attributes' decoding uses the browser's parser
+// when there is one.
 import type { Token } from "marked";
 
 export interface MdImage { url: string; alt: string; at: number; }
@@ -55,15 +57,21 @@ export function decodeRefs(v: string): string {
   });
 }
 
+/** An address the lightbox opens a picture on: a web address or a data: picture, the schemes the arrows' sequence keeps
+ *  (render.ts chatImagesFor) and the only ones a click opens (preview.ts mdImgZoomable). Anything else, a javascript: or
+ *  a data:text/html URL that a srcset candidate could name, opens nothing. `url` is resolved: an <img>'s currentSrc or
+ *  src, or a markdown URL resolved against the page. */
+export function opensInLightbox(url: string): boolean {
+  return /^(https?:|data:image\/)/i.test(url);
+}
+
 // An HTML <img>'s src and alt as the page's <img> has them. In the browser that is the browser's own HTML parser, run on
 // the tag alone in a detached <template>: its content is inert (nothing fetches, nothing runs), and the parse is the one
-// the sanitizer's DOMPurify ran on the message, so every character reference decodes as it did there, named or numeric,
-// and the first of two `src`s wins, as there. Under node (the unit tests) there is no parser: the attributes are read by
-// pattern and decodeRefs decodes them. A null src: the tag has none (a srcset alone), so there is no URL to name.
-const SRC = /\bsrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i;
-const ALT = /\balt\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i;
+// the sanitizer's DOMPurify ran on the message, so every character reference decodes as it did there, named or numeric.
+// Under node (the unit tests) there is no parser: the attributes are the ones htmlImages read off the tag, and decodeRefs
+// decodes them. A null src: the tag has none (a srcset alone), so there is no URL to name.
 let tpl: HTMLTemplateElement | null = null;
-function imgAttrs(tag: string, attrs: string): { src: string | null; alt: string } {
+function imgAttrs(tag: string, attrs: Map<string, string>): { src: string | null; alt: string } {
   if (typeof document !== "undefined" && typeof document.createElement === "function") {
     tpl = tpl || document.createElement("template");
     if (tpl.content) {
@@ -72,32 +80,116 @@ function imgAttrs(tag: string, attrs: string): { src: string | null; alt: string
       if (img) return { src: img.getAttribute("src"), alt: img.getAttribute("alt") || "" };
     }
   }
-  const s = SRC.exec(attrs), a = ALT.exec(attrs);
-  return { src: s ? decodeRefs(s[1] ?? s[2] ?? s[3] ?? "") : null, alt: a ? decodeRefs(a[1] ?? a[2] ?? a[3] ?? "") : "" };
+  const s = attrs.get("src"), a = attrs.get("alt");
+  return { src: s === undefined ? null : decodeRefs(s), alt: a === undefined ? "" : decodeRefs(a) };
 }
 
-// One pass over an HTML fragment's tags: an <a> opens a link (its pictures are the link's), </a> closes it; a <summary>
-// opens a fold's head (its pictures are the summary's: a click on one opens the fold), </summary> or the fold's own
-// </details> closes it; every other <img> with a src yields it. `link` carries across the inline HTML tokens of one
-// paragraph, where `<a href>`, the picture and `</a>` arrive as three tokens; `fold` across blocks too, since a blank
-// line inside a summary leaves it open in the browser's parse.
-const TAG = /<(\/?)(a|img|summary|details)\b([^>]*)>/gi;
-function htmlImages(raw: string, at: number, link: { n: number }, fold: { n: number }, out: MdImage[]): void {
-  TAG.lastIndex = 0;
-  for (let m = TAG.exec(raw); m; m = TAG.exec(raw)) {
-    const tag = m[2].toLowerCase(), close = !!m[1];
-    if (tag === "a") { link.n = Math.max(0, link.n + (close ? -1 : 1)); continue; }
-    if (tag === "summary") { fold.n = Math.max(0, fold.n + (close ? -1 : 1)); continue; }
-    if (tag === "details") { if (close) fold.n = 0; continue; }
-    if (close || link.n > 0 || fold.n > 0) continue;
-    const { src, alt } = imgAttrs(m[0], m[3]);
+// The message's raw HTML read the way the browser's tokenizer reads it (the HTML standard's tokenization), because the
+// page is that parse: which `<` opens a tag, and which text is a comment or an element's raw text that no tag inside can
+// open (2026-10-20 review: a scan for the text `<summary>` found one inside a comment and inside an attribute value, and
+// every picture after it in the message lost its arrows; an <img> commented out was a stop the page never shows). So:
+//   a comment runs from `<!--` to the first `-->` or `--!>` (`<!-->` and `<!--->` are whole, empty ones); `<!`, `<?` and
+//   `</` before anything but a letter open a bogus comment that the next `>` ends; a tag's attribute values, quoted or
+//   not, are the tag's own text; and the contents of script, style, textarea, title, xmp, iframe, noembed and noframes
+//   are text up to the element's end tag (plaintext's, to the end), as are noscript's, which the sanitizer drops with
+//   everything in it. The same code runs in the browser and under node.
+// On the tags that remain: an <a> opens a link (its pictures are the link's), </a> closes it; a <summary> opens a fold's
+// head (its pictures are the summary's: a click on one opens the fold), </summary> or the fold's own </details> closes
+// it; every other <img> with a src is a picture. The state carries across the message's HTML tokens: `link` across the
+// inline tokens of one paragraph (`<a href>`, the picture and `</a>` arrive as three; the walk drops it at a block),
+// `fold` across blocks too, since a blank line inside a summary leaves it open in the browser's parse, and `skip` (an
+// unclosed comment, "--", or the raw-text element being read) for as long as the browser's parse stays in it, which
+// also hides the markdown pictures rendered inside it.
+interface HtmlState { link: number; fold: number; skip: string; }
+const RAW_TEXT = new Set(["script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"]);
+const isSpace = (c: string) => c === " " || c === "\n" || c === "\t" || c === "\r" || c === "\f";
+const isLetter = (c: string) => /^[a-z]$/i.test(c);
+// A tag from just past its `<` or `</`: its name and attributes (the first of two with one name wins, as in the browser),
+// and the offset past its `>`; null when the text ends inside the tag (the browser drops such a tag).
+function readTag(raw: string, p: number): { name: string; attrs: Map<string, string>; end: number } | null {
+  const n = raw.length, start = p;
+  while (p < n && !isSpace(raw[p]) && raw[p] !== "/" && raw[p] !== ">") p++;
+  const name = raw.slice(start, p).toLowerCase(), attrs = new Map<string, string>();
+  for (;;) {
+    while (p < n && (isSpace(raw[p]) || raw[p] === "/")) p++;          // a stray `/` between attributes is skipped too
+    if (p >= n) return null;
+    if (raw[p] === ">") return { name, attrs, end: p + 1 };
+    const a = p++;                                                       // a name's first character may be `=`
+    while (p < n && !isSpace(raw[p]) && raw[p] !== "/" && raw[p] !== ">" && raw[p] !== "=") p++;
+    const key = raw.slice(a, p).toLowerCase();
+    while (p < n && isSpace(raw[p])) p++;
+    let val = "";
+    if (raw[p] === "=") {
+      p++;
+      while (p < n && isSpace(raw[p])) p++;
+      const q = raw[p];
+      if (q === "\"" || q === "'") {
+        const e = raw.indexOf(q, p + 1);
+        if (e < 0) return null;
+        val = raw.slice(p + 1, e);
+        p = e + 1;
+      } else {
+        const v = p;
+        while (p < n && !isSpace(raw[p]) && raw[p] !== ">") p++;
+        val = raw.slice(v, p);
+      }
+    }
+    if (!attrs.has(key)) attrs.set(key, val);
+  }
+}
+function htmlImages(raw: string, at: number, st: HtmlState, out: MdImage[]): void {
+  const n = raw.length;
+  let i = 0;
+  while (i < n) {
+    if (st.skip) {                                     // inside a comment or a raw-text element: find where it ends
+      if (st.skip === "plaintext") return;
+      const end = st.skip === "--" ? /--!?>/g : new RegExp("</" + st.skip + "(?=[\\t\\n\\f\\r />])", "gi");
+      end.lastIndex = i;
+      const m = end.exec(raw);
+      if (!m) return;                                  // the rest of this token is its text
+      i = st.skip === "--" ? m.index + m[0].length : m.index;   // an element's end tag is a tag: read below
+      st.skip = "";
+      continue;
+    }
+    const lt = raw.indexOf("<", i);
+    if (lt < 0) return;
+    const c = raw[lt + 1] || "";
+    if (raw.startsWith("<!--", lt)) {
+      if (raw[lt + 4] === ">") i = lt + 5;             // <!-->
+      else if (raw.startsWith("->", lt + 4)) i = lt + 6;   // <!--->
+      else { st.skip = "--"; i = lt + 4; }
+      continue;
+    }
+    if (c === "/" && raw[lt + 2] === ">") { i = lt + 3; continue; }   // `</>` is dropped
+    if (c === "!" || c === "?" || (c === "/" && lt + 2 < n && !isLetter(raw[lt + 2]))) {   // a bogus comment
+      const gt = raw.indexOf(">", lt + 2);
+      if (gt < 0) return;
+      i = gt + 1;
+      continue;
+    }
+    const close = c === "/";
+    if (!isLetter(close ? raw[lt + 2] || "" : c)) { i = lt + 1; continue; }   // a `<` that opens nothing is text
+    const tag = readTag(raw, lt + (close ? 2 : 1));
+    if (!tag) return;
+    i = tag.end;
+    if (close) {
+      if (tag.name === "a") st.link = Math.max(0, st.link - 1);
+      else if (tag.name === "summary") st.fold = Math.max(0, st.fold - 1);
+      else if (tag.name === "details") st.fold = 0;
+      continue;
+    }
+    if (tag.name === "a") { st.link++; continue; }
+    if (tag.name === "summary") { st.fold++; continue; }
+    if (RAW_TEXT.has(tag.name)) { st.skip = tag.name; continue; }
+    if (tag.name !== "img" || st.link > 0 || st.fold > 0) continue;
+    const { src, alt } = imgAttrs(raw.slice(lt, tag.end), tag.attrs);
     if (src === null || !src.trim()) continue;          // no src, or an empty one (the page's own address): nothing to step to
-    out.push({ url: src, alt, at: at + m.index });
+    out.push({ url: src, alt, at: at + lt });
   }
 }
 
-/** Every picture `src` embeds outside a link and a summary, in document order, and where its path figures land. Cheap
- *  for the common message: one that names no picture (`![` or `<img`) is never lexed. */
+/** Every picture `src` embeds outside a link, a summary and a comment, in document order, and where its path figures
+ *  land. Cheap for the common message: one that names no picture (`![` or `<img`) is never lexed. */
 export function mdLayout(src: string, lex: (s: string) => Token[]): MdLayout {
   const blocks: { start: number; end: number; land: number }[] = [];   // the leaf blocks a figure lands after, in order
   const figureAt = (mention: number): number => {
@@ -110,7 +202,7 @@ export function mdLayout(src: string, lex: (s: string) => Token[]): MdLayout {
   let tokens: Token[];
   try { tokens = lex(src); } catch { return { images: [], figureAt }; }
   const out: MdImage[] = [];
-  const link = { n: 0 }, fold = { n: 0 };
+  const st: HtmlState = { link: 0, fold: 0, skip: "" };
   let from = 0;                                        // where the token being walked starts, at the latest
   const find = (raw: string): number => {
     const i = raw ? src.indexOf(raw, from) : -1;
@@ -142,22 +234,22 @@ export function mdLayout(src: string, lex: (s: string) => Token[]): MdLayout {
         const at = find(tok.raw);
         const im = tok as Token & { href: string; text: string };
         const url = cleanUrl(im.href);
-        if (!linked && !fold.n && url) out.push({ url, alt: im.text || "", at });   // an empty href names the page itself: no picture
+        if (!linked && !st.fold && !st.skip && url) out.push({ url, alt: im.text || "", at });   // an empty href names the page itself: no picture
         from = at + tok.raw.length;
         continue;
       }
       if (tok.type === "html") {
         const at = find(tok.raw);
-        if (linked) link.n++;                          // an <img> inside a markdown link's text is the link's too
-        htmlImages(tok.raw, at, link, fold, out);
-        if (linked) link.n = Math.max(0, link.n - 1);
+        if (linked) st.link++;                         // an <img> inside a markdown link's text is the link's too
+        htmlImages(tok.raw, at, st, out);
+        if (linked) st.link = Math.max(0, st.link - 1);
         from = at + tok.raw.length;
         continue;
       }
       if (tok.type === "link") { find(tok.raw); walk(tok.tokens, true, item); continue; }
       if (tok.type === "list") {
         for (const it of tok.items || []) {
-          link.n = 0;                                  // a link opened in raw HTML never spans blocks (nor items)
+          st.link = 0;                                 // a link opened in raw HTML never spans blocks (nor items)
           const sp = locate(it.raw);
           if (sp) from = sp.start;
           walk((it as Tok).tokens, linked, tok.loose ? null : { end: sp ? sp.end : -1 });
@@ -168,7 +260,7 @@ export function mdLayout(src: string, lex: (s: string) => Token[]): MdLayout {
       // the blocks a figure lands after: a paragraph, a heading, a list item's text (an inline text token, between
       // `<a href>` and its picture, carries no tokens of its own and is none of these)
       if (tok.type === "paragraph" || tok.type === "heading" || (tok.type === "text" && tok.tokens)) {
-        link.n = 0;
+        st.link = 0;
         const sp = locate(tok.raw);
         if (sp) {
           blocks.push({ start: sp.start, end: sp.end, land: tok.type === "text" && item && item.end >= 0 ? item.end : sp.end });

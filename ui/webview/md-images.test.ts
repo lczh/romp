@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import { Marked } from "marked";
-import { mdImages, mdLayout, decodeRefs } from "./md-images";
+import { mdImages, mdLayout, decodeRefs, opensInLightbox } from "./md-images";
 import { chatMdExtensions } from "./chat-md";
 
 const chat = new Marked({ gfm: true, breaks: false }, ...chatMdExtensions);
@@ -87,6 +87,57 @@ test("a picture inside a <details>'s <summary> is the summary's: no stop, as a l
     ["https://img.example.test/z.png"], "a summary never closed ends with its details, as the browser's parse ends it");
 });
 
+// The raw HTML is read as the browser's tokenizer reads it (2026-10-20 review of the summary rule: a scan for the TEXT
+// `<summary>` opened a fold inside a comment or an attribute value, and every later picture in the message lost its
+// arrows while the page still showed it and let it zoom). Every message in these five tests was checked against Chromium:
+// the page's pictures, rendered and sanitized as the chat does, outside any link or summary, are these stops.
+test("the text `<summary>` inside a comment opens no fold: the pictures after it are still stops", () => {
+  assert.deepEqual(urls("Note <!-- <summary> --> here\n\n![a](https://img.example.test/a.png)"), ["https://img.example.test/a.png"],
+    "an inline comment, then a markdown picture");
+  assert.deepEqual(urls('<!-- <details><summary> -->\n\n<img src="https://img.example.test/b.png">\n\n![c](https://img.example.test/c.png)'),
+    ["https://img.example.test/b.png", "https://img.example.test/c.png"], "a block comment, then an HTML picture and a markdown one");
+  assert.deepEqual(urls("<!-- a -- b --!> <summary> --> ![d](https://img.example.test/d.png)"), [],
+    "`--!>` ends a comment as `-->` does, so the summary after it is a real one");
+});
+
+test("the text `<summary>` inside an attribute value opens no fold", () => {
+  assert.deepEqual(urls('Note <span title="<summary>">x</span> here ![a](https://img.example.test/a.png)'), ["https://img.example.test/a.png"]);
+  assert.deepEqual(urls("<div data-x='<summary>' class=y>\n<img src=\"https://img.example.test/b.png\">\n</div>\n\n![c](https://img.example.test/c.png)"),
+    ["https://img.example.test/b.png", "https://img.example.test/c.png"], "a block's tag, single-quoted");
+  assert.deepEqual(urls('<span title="a > <summary> b">x</span> ![d](https://img.example.test/d.png)'), ["https://img.example.test/d.png"],
+    "a `>` inside a quoted value does not end the tag");
+});
+
+test("an <img> the page never shows is no stop: commented out, inside an attribute value, inside raw text", () => {
+  assert.deepEqual(urls('see <!-- <img src="https://img.example.test/c.png"> --> ok'), [], "an inline comment");
+  assert.deepEqual(urls('<!--\n<img src="https://img.example.test/c.png">\n-->\n\n![a](https://img.example.test/a.png)'),
+    ["https://img.example.test/a.png"], "a block comment; the picture after it still counts");
+  assert.deepEqual(urls("<span title='<img src=\"https://img.example.test/t.png\">'>x</span>"), [], "an attribute value");
+  assert.deepEqual(urls('<textarea><img src="https://img.example.test/t.png"></textarea> <img src="https://img.example.test/u.png">'),
+    ["https://img.example.test/u.png"], "a textarea's contents are text up to its end tag");
+  assert.deepEqual(urls('<noscript><img src="https://img.example.test/n.png"></noscript> ok'), [], "noscript's go with it in the sanitizer");
+  assert.deepEqual(urls("<div>\n<!-- draft\n\n![h](https://img.example.test/h.png)\n\n</div>"), [],
+    "a comment left open runs on through the markdown after it, as the browser's parse does");
+  assert.deepEqual(urls('<!--> <img src="https://img.example.test/e.png"> <!---> <img src="https://img.example.test/f.png">'),
+    ["https://img.example.test/e.png", "https://img.example.test/f.png"], "`<!-->` and `<!--->` are whole, empty comments");
+  assert.deepEqual(urls('<!x <img src="https://img.example.test/g.png"> <img src="https://img.example.test/k.png">'),
+    ["https://img.example.test/k.png"], "a bogus comment ends at the first `>`, the first picture's own");
+});
+
+test("a real <summary> still holds its picture, beside a comment that only mentions one", () => {
+  assert.deepEqual(urls('<!-- <summary> -->\n\n<details><summary><img src="https://img.example.test/head.png"> Plot</summary>\n\n![body](https://img.example.test/body.png)\n\n</details>'),
+    ["https://img.example.test/body.png"], "the summary's picture opens its fold; the body's zooms");
+  assert.deepEqual(urls('<details><summary title="</summary>"><img src="https://img.example.test/head.png"></summary></details>\n\n![z](https://img.example.test/z.png)'),
+    ["https://img.example.test/z.png"], "an attribute that spells `</summary>` closes nothing");
+});
+
+test("an HTML <img>'s src is its own attribute, not text that spells one inside another", () => {
+  assert.deepEqual(mdImages('<img title="src=https://img.example.test/no.png" src="https://img.example.test/yes.png" alt=\'a "b"\'>', lex)
+    .map((m) => [m.url, m.alt]), [["https://img.example.test/yes.png", 'a "b"']]);
+  assert.deepEqual(urls('<img src="https://img.example.test/first.png" SRC="https://img.example.test/second.png">'),
+    ["https://img.example.test/first.png"], "the first of two src attributes wins, in any case");
+});
+
 test("a picture with no source to name is no stop: a srcset alone, an empty src, an empty href", () => {
   assert.deepEqual(urls('<img srcset="https://img.example.test/a.png 1x" alt="a"> <img src="" alt="b"> <img src="  "> ![e]()'), []);
   assert.deepEqual(urls('<img src="https://img.example.test/ok.png" srcset="https://img.example.test/ok2.png 2x">'),
@@ -139,4 +190,11 @@ test("a message that names no picture is never lexed", () => {
   assert.deepEqual(mdImages("plain prose with [a link](https://example.test) and `code`", counting), []);
   assert.deepEqual(mdImages("", counting), []);
   assert.equal(lexed, 0);
+});
+
+test("opensInLightbox: a web address or a data: picture; never a script, a page or anything else", () => {
+  for (const u of ["https://img.example.test/a.png", "http://img.example.test/a.png", "HTTPS://img.example.test/a.png",
+    "data:image/png;base64,AAAA", "data:image/svg+xml,%3Csvg%3E"]) assert.equal(opensInLightbox(u), true, u);
+  for (const u of ["javascript:alert(1)", "JavaScript:alert(1)", "data:text/html,<p>x</p>", "data:,x", "blob:https://img.example.test/1",
+    "file:///tmp/x.png", "vbscript:x", ""]) assert.equal(opensInLightbox(u), false, u);
 });

@@ -9,7 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { Marked } from "marked";
-import { mdLayout } from "./md-images";
+import { mdLayout, opensInLightbox } from "./md-images";
 import { keyOf } from "./chat-window";
 import { chatMdExtensions } from "./chat-md";
 
@@ -39,8 +39,8 @@ function lift(sessions: Map<string, { events: Ev[] }>, thread: { sid: string; th
   `;
   const H = { sessions, thread };
   const counting = { lexer: (src: string) => { lexed.n++; return marked.lexer(src); } };
-  return (new Function("H", "marked", "mdLayout", "keyOf", prelude + code + "\nreturn chatImagesFor;") as
-    (h: unknown, m: unknown, f: unknown, k: unknown) => (sid: string | null, from?: Fake | null) => Entry[])(H, counting, mdLayout, keyOf);
+  return (new Function("H", "marked", "mdLayout", "keyOf", "opensInLightbox", prelude + code + "\nreturn chatImagesFor;") as
+    (h: unknown, m: unknown, f: unknown, k: unknown, o: unknown) => (sid: string | null, from?: Fake | null) => Entry[])(H, counting, mdLayout, keyOf, opensInLightbox);
 }
 // a clicked element, as far as the scope reads it: which ancestor it sits under
 function inside(sel: Record<string, unknown>): Fake {
