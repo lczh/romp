@@ -7,6 +7,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { opensInLightbox } from "./md-images";
 
 const requireCjs = createRequire(__filename);
 const UI = path.resolve(process.cwd(), "..", "ui", "webview");
@@ -28,7 +29,8 @@ test("the predicate: a marked picture, outside any link or summary, showing a so
   assert.match(PREVIEW, /const ZOOM_MIN_H = 32;/, "a badge is 20px tall, an emoji or an icon 16 to 24: glyphs in a line of text");
   const at = PREVIEW.indexOf("export function mdImgZoomable(");
   const code = ts(PREVIEW.slice(at, PREVIEW.indexOf("\n}\n", at) + 2).replace(/^export /, ""));
-  const zoomable = (new Function("ZOOM_MIN_H", code + "\nreturn mdImgZoomable;") as (n: number) => (img: unknown) => boolean)(32);
+  const zoomable = (new Function("ZOOM_MIN_H", "opensInLightbox", code + "\nreturn mdImgZoomable;") as
+    (n: number, ok: (u: string) => boolean) => (img: unknown) => boolean)(32, opensInLightbox);
   const img = (o: { cls?: string[]; link?: boolean; summary?: boolean; complete?: boolean; h?: number; src?: string; currentSrc?: string }) => ({
     classList: { contains: (c: string) => (o.cls || ["md-img"]).includes(c) },
     closest: (s: string) => (s.split(/\s*,\s*/).some((one) => (one === "a" && o.link) || (one === "summary" && o.summary)) ? {} : null),
@@ -39,6 +41,12 @@ test("the predicate: a marked picture, outside any link or summary, showing a so
   assert.equal(zoomable(img({ summary: true })), false, "a picture inside a <summary> is the summary's: its click opens the details (2026-10-20 review)");
   assert.equal(zoomable(img({ src: "", currentSrc: "https://img.example.test/a.png" })), true, "a srcset alone: it shows its candidate, and zooms on it");
   assert.equal(zoomable(img({ src: "", currentSrc: "" })), false, "no source at all: nothing a lightbox could show (2026-10-20 review)");
+  // the click opens on what the picture shows, and a srcset candidate past the first is one the sanitizer never read: the
+  // click keeps to the schemes the arrows keep (opensInLightbox), whatever the browser picked (2026-10-20 review)
+  assert.equal(zoomable(img({ currentSrc: "javascript:alert(1)" })), false, "a javascript: candidate never opens");
+  assert.equal(zoomable(img({ currentSrc: "data:text/html,<p>page</p>" })), false, "nor a data: page");
+  assert.equal(zoomable(img({ src: "javascript:alert(1)", currentSrc: "" })), false, "nor a src the browser shows as it is");
+  assert.equal(zoomable(img({ currentSrc: "data:image/png;base64,AAAA" })), true, "a data: picture does");
   assert.equal(zoomable(img({ h: 20 })), false, "a 20px badge does not");
   assert.equal(zoomable(img({ h: 32 })), true, "32px and up does");
   assert.equal(zoomable(img({ complete: false, h: 0 })), false, "nothing loaded yet: nothing to show");

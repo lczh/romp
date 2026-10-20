@@ -96,7 +96,7 @@ import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
 import { injectedHead, type InjectedSource } from "./injected-source";
 import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, subHeadParts, subWaitTail, openIconSvg, pinIconSvg, type SubMeta, type AgentGist, type AgentGistRow, type GistLine } from "./subagent-view";
 import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, installMdImgZoom, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
-import { mdLayout, type MdLayout } from "./md-images";   // the pictures a message's markdown embeds, off its text, and where its path figures land: the lightbox's sequence (chatImagesFor)
+import { mdLayout, opensInLightbox, type MdLayout } from "./md-images";   // the pictures a message's markdown embeds, off its text, and where its path figures land: the lightbox's sequence (chatImagesFor)
 import { openFileClick } from "./file-view";                  // a clicked file WITH its gesture (pdf-new-tab.test.ts)
 import { fileLinkRoute, browseRoute, type BrowseRoute } from "./file-route";   // where a file or folder click opens: here, or the Files pane (file-route.test.ts, browse-route.test.ts)
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
@@ -2552,7 +2552,7 @@ function chatImagesFor(sid: string | null | undefined, from?: Element | null): L
     for (const m of layout.images) {
       let url = "";
       try { url = new URL(m.url, document.baseURI).href; } catch { continue; }
-      if (!/^(https?:|data:image\/)/i.test(url) || here.has("u:" + url)) continue;   // what the sanitizer lets an <img> load
+      if (!opensInLightbox(url) || here.has("u:" + url)) continue;   // a web address or a data: picture, as a click opens
       here.set("u:" + url, { e: { url, alt: m.alt }, at: m.at, rank: rank++ });
     }
     out.push(...Array.from(here.values()).sort((x, y) => x.at - y.at || x.rank - y.rank).map((h) => h.e));
