@@ -78,7 +78,9 @@ test("the effort and fast pickers draw the row behind a rule under the choices, 
   assert.match(menu, /const waitingPick: WaitingPick \| null = kind === "effort" \? "effort" : kind === "fast" \? "fast" : null;/);
   assert.match(menu, /if \(waitingPick && applyNowOffered\(s\.status, waitingPick\)\) \{\s*\n\s*menu\.appendChild\(el\("div", "meta-sep"\)\);\s*\n\s*menu\.appendChild\(applyNowRow\("meta", s\.status, \(\) => \{ closeMetaMenu\(\); applyNowFor\(opSid, waitingPick\); \}\)\);/);
   const thread = RENDER.slice(RENDER.indexOf("function threadMetaStatus("), RENDER.indexOf("function cmtStateChip("));
-  assert.doesNotMatch(thread, /Pending|relaunch/, "a thread's status carries no pending mark, so its pickers draw no row");
+  // a waiting bypass pick's mark rides (2026-10-01), and the mode picker offers no Apply now; no effort, fast or billing mark does
+  assert.doesNotMatch(thread, /effortPending|fastPending|authPending|relaunchCuts/,
+    "a thread's status carries no effort, fast or billing mark, so its pickers draw no row");
   assert.match(CSS, /\.meta-sep \{ height: 1px; margin: 4px 6px; background: var\(--box-border\); \}/, "the tab menu's rule, in the picker");
 });
 

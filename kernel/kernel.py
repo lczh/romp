@@ -21503,6 +21503,9 @@ def _comment_frame_entry(th, be, now, live_map=None, thread_live=None):
                     "effort": (reg.get("effort") or "") if reg else "",
                     "sinceEpoch": since_ms,
                     "mode": str(meta.get("mode") or ""), "fast": str(meta.get("fast") or ""),
+                    # a bypass pick waiting for its relaunch (2026-10-01): the popover's mode badge wears the chat's dots,
+                    # and its picker's Bypass row says what the relaunch waits for
+                    "modePending": bool(meta.get("modePending")), "relaunchWaits": str(meta.get("relaunchWaits") or ""),
                     "modelFallback": (meta.get("modelFallback") if meta.get("modelFallback") is not None
                                       else (be.fallback_row_for_reg(reg) if (be is not None and reg and hasattr(be, "fallback_row_for_reg")) else None)),   # the popover picker's requested-model mark (2026-09-17)
                     # the same rank tints the chat statusline's badges wear (the user 2026-08-25,
@@ -25467,6 +25470,7 @@ def _sdk_live_norm(st):
             "relaunchWaits": st.get("relaunchWaits") or "",   # what a pick's relaunch waits for ("2 background tasks"), "" when nothing
             "relaunchCuts": st.get("relaunchCuts") or "",   # …and what Apply now would end to push it through ("" when nothing)
             "color": (st.get("color") or None), "mode": st.get("mode", ""), "backend": "sdk",
+            "modePending": bool(st.get("modePending")),   # a bypass pick waiting for its relaunch → the mode badge's dots
             "subagents": st.get("subagents") or [],   # live Task subagents (SDK only) → lane pill
             # a thinking stretch streaming now ({"t", "quiet"?}, sdk_backend _thinking_row) → the
             # liveStatus frame's "Thinking · 14s" label only; no build reads it (_CHAT_ROW_UNKEYED)
@@ -47838,6 +47842,10 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   "retryTries": _retry_gate_state(sid)[0] or None,
                   "backend": _session_backend(sid, tm),
                   "model": tm["model"], "effort": tm["effort"], "mode": tm.get("mode", ""),
+                  # a bypass pick waiting for the relaunch that carries the flag (2026-10-01): "mode" stays the one the
+                  # running CLI confirmed (after a kernel restart that keeps the CLI, see the backend's _mode_pending), and
+                  # the badge wears dots, with relaunchWaits in the picker and the tab's hover
+                  "modePending": bool(tm.get("modePending")),
                   # fast-mode badge (SDK sessions; the CLI's init reports on/off/cooldown, "" = unknown →
                   # no badge — a row without the field stays ""). A non-empty
                   # disabled_reason means /fast would refuse, so the chat hides the toggle.
@@ -61350,7 +61358,8 @@ def _compact_boundary_scan(path, since, size):
 
 def _light_status(sid, path, tm, now):
     """A skeleton tab's status without a build, from the sources the built chip reads that need no parse: the backend's live
-    row (its live-prompt, retrying, working and compacting words, its since, backend, model, effort, mode), the api-error
+    row (its live-prompt, retrying, working and compacting words, its since, backend, model, effort, mode, a waiting bypass
+    pick's mark and what its relaunch waits for), the api-error
     tail read (_api_error: cached, tail-first, the same call build_session makes, so blocked and its on-you legs paint as
     they would built), the awaiting stamps and rows (_session_awaiting with the judge's stamp, the built chip's own call),
     the backend's compaction bracket, and the retry ladder. What it cannot state is the transcript-derived open turn: the
@@ -61424,7 +61433,10 @@ def _light_status(sid, path, tm, now):
             "apiRefusal": bool(aerr and aerr.get("refusal")),
             "retrySuppressed": _session_retry_suppressed(sid), "retryNextAt": int(next_at) or None, "retryTries": tries or None,
             "backend": _session_backend(sid, tm), "model": tm.get("model", ""), "effort": tm.get("effort", ""),
-            "mode": tm.get("mode", "")}
+            "mode": tm.get("mode", ""),
+            # a bypass pick waiting for its relaunch (2026-10-01), as build_session states it: a skeleton tab's hover says
+            # the pick and what its relaunch waits for, never the bare mode
+            "modePending": bool(tm.get("modePending")), "relaunchWaits": tm.get("relaunchWaits") or ""}
 
 
 def _send_light_status(c, sid, light, wordless_only=False):

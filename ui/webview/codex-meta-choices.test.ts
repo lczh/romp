@@ -112,6 +112,13 @@ function slice(start: string, fnAt?: string): string {
   assert.ok(a > 0 && f >= a && stop > f, "anchors not found; render.ts moved " + start.slice(0, 40) + "; re-anchor");
   return RENDER.slice(a, stop);
 }
+/** a top-level array constant of render.ts, from its declaration to the "\n];\n" that closes it */
+function sliceArray(start: string): string {
+  const a = RENDER.indexOf(start);
+  const stop = RENDER.indexOf("\n];\n", a) + 4;
+  assert.ok(a > 0 && stop > a, "anchors not found; render.ts moved " + start.slice(0, 40) + "; re-anchor");
+  return RENDER.slice(a, stop);
+}
 const transpile = (ts: string): string => requireCjs("esbuild").transformSync(ts, { loader: "ts" }).code;
 
 // The loader, lifted from render.ts and transpiled (the models-rev.test.ts idiom): the codex section's
@@ -236,6 +243,7 @@ class FakeEl {
   remove(): void { this.parent?.removeChild(this); }
   replaceChildren(...ns: Kid[]): void { for (const c of [...this.children]) this.removeChild(c); this.append(...ns); }
   get firstElementChild(): FakeEl | null { return (this.children.find((c) => c instanceof FakeEl) as FakeEl | undefined) ?? null; }
+  get lastChild(): Kid | null { return this.children[this.children.length - 1] ?? null; }
   get textContent(): string { return this.children.map((c) => c.textContent).join(""); }
   set textContent(v: string) { this.replaceChildren(); if (v) this.appendChild(new FakeText(v)); }
   get innerHTML(): string { return this.html; }
@@ -309,7 +317,9 @@ function liftMenu(opts: { thread?: { th: unknown; status: any }; vscodeApi?: { p
     slice("function isCurrentMeta(kind: MetaKind, st: Status, value: string): boolean {"),   // the real ✓ rule (by value): a row order the tests move must never lose it
     sliceMod("export function metaDots(): HTMLElement {"),   // the dots live in status-controls.ts (T415 part two)
     slice("const MODEL_CHOICES: {", "function loadModelChoices(): void {"),
-    "const META_CHOICES = {model: MODEL_CHOICES, effort: EFFORT_CHOICES}; const CODEX_MODE_CHOICES = [];",
+    sliceArray("const MODE_CHOICES: MetaChoice[] = ["),   // the SDK mode rows, for the waiting bypass pick's words (2026-10-01)
+    sliceMod("export function modeWaitText(st: MetaStatus): string {"),
+    "const META_CHOICES = {mode: MODE_CHOICES, model: MODEL_CHOICES, effort: EFFORT_CHOICES}; const CODEX_MODE_CHOICES = [];",
     sliceMod("export function metaButton(kind: MetaKind, text: string, forSid: string | null | undefined, hooks: MetaHooks): HTMLElement {").replace("function metaButton(", "function buildMetaButton("),
     // the chat's wrapper (render.ts META_HOOKS / metaButton, pinned by settings-previews.test.ts): the picker as the press hook
     "const META_HOOKS = { onPress: (kind, btn, forSid) => toggleMetaMenu(kind, btn, forSid), pending: () => false };",
@@ -875,4 +885,77 @@ test("executed: a refused effort pick's dots end on the settingRefused frame, no
   assert.ok(api.metaPending.has(`${SID}:effort`), "no kind named: no mark touched");
   assert.equal(repaints(), 2, "no kind named: no repaint either, the frame only toasts");
   assert.equal(toasts.length, 5);
+});
+
+// A bypass pick waits for the relaunch that carries the flag (2026-10-01), and the mode picker's Bypass row says what that
+// relaunch waits for, in a line of its own after the row's label and tagline, while the ✓ stays on the mode the CLI runs.
+// No other row takes the words, and no row does once no bypass pick waits (modePending false). A comment thread's popover
+// opens the same menu from its own status: render.ts's threadMetaStatus, lifted here, carries the frame's mark into it.
+// EXECUTED over the lifted menu.
+const WAITING_SDK = { state: "ready", sinceEpoch: null, backend: "sdk", mode: "acceptEdits", model: "Opus 5", effort: "high",
+                      modePending: true, relaunchWaits: "2 background tasks" };
+// the words are modeWaitText's, whose wording status-controls.test.ts pins; the menu must draw what it returns, where it should
+const modeWaitText = new Function(transpile(sliceMod("export function modeWaitText(st: MetaStatus): string {")) + "\nreturn modeWaitText;")();
+const WAIT_LINE = (st: any) => "meta-item-sub meta-item-wait: " + modeWaitText(st);
+// the rows by value, never by label (mode-selector.test.ts owns MODE_CHOICES' labels): render.ts's own list, lifted
+const MODE_CHOICES: { label: string; value: string }[] =
+  new Function(transpile(sliceArray("const MODE_CHOICES: MetaChoice[] = [")) + "\nreturn MODE_CHOICES;")();
+const BYPASS_ROW = MODE_CHOICES.findIndex((c) => c.value === "bypassPermissions");
+const modeLabel = (value: string) => MODE_CHOICES.find((c) => c.value === value)!.label;
+function modeRows(menu: FakeEl) {
+  return menu.querySelectorAll(".meta-item").map((r) => ({
+    head: r.firstElementChild!.textContent, current: r.classes().includes("current"),
+    lines: r.children.filter((c): c is FakeEl => c instanceof FakeEl).map((c) => c.className + ": " + c.textContent) }));
+}
+function modeBadge(api: any, body: FakeEl, forSid: string | null) {
+  const sl = new FakeEl("div"); sl.id = "statusline";
+  const btn = api.metaButton("mode", "Accept", forSid) as FakeEl;
+  btn.rect = { left: 500, top: 760, right: 560, bottom: 776 };
+  sl.appendChild(btn); body.appendChild(sl);
+  return btn;
+}
+
+test("executed: a waiting bypass pick's words sit under the Bypass row alone, after its own lines, and only while it waits", () => {
+  const { api, sessions, body } = liftMenu();
+  sessions.set(SID, { status: { ...WAITING_SDK } }); api.active = SID;
+  const btn = modeBadge(api, body, null);
+  api.toggleMetaMenu("mode", btn, null);
+  const rows = modeRows(api.menu as FakeEl);
+  assert.ok(BYPASS_ROW >= 0, "the premise: MODE_CHOICES has the Bypass row");
+  assert.deepEqual(rows.map((r) => r.head), MODE_CHOICES.map((c) => c.label), "an SDK session's menu: every mode row, in order");
+  assert.deepEqual(rows.filter((r) => r.current).map((r) => r.head), [modeLabel(WAITING_SDK.mode)],
+                   "the ✓ stays on the mode the CLI runs");
+  const bypass = rows[BYPASS_ROW];
+  assert.ok(modeWaitText(WAITING_SDK).includes(WAITING_SDK.relaunchWaits), "the premise: the words carry the kernel's relaunchWaits");
+  assert.deepEqual(bypass.lines.slice(-1), [WAIT_LINE(WAITING_SDK)], "the words, last, under the row's own label and tagline");
+  assert.equal(bypass.lines.length, 3);
+  assert.deepEqual(rows.filter((_, i) => i !== BYPASS_ROW).map((r) => r.lines.filter((l) => l.includes("meta-item-wait"))),
+                   MODE_CHOICES.slice(1).map(() => []), "no other row");
+  api.closeMetaMenu();
+  sessions.set(SID, { status: { ...WAITING_SDK, relaunchWaits: "" } });
+  api.toggleMetaMenu("mode", btn, null);
+  assert.deepEqual(modeRows(api.menu as FakeEl)[BYPASS_ROW].lines.slice(-1), [WAIT_LINE({ ...WAITING_SDK, relaunchWaits: "" })],
+                   "nothing holds it");
+  api.closeMetaMenu();
+  sessions.set(SID, { status: { ...WAITING_SDK, modePending: false } });
+  api.toggleMetaMenu("mode", btn, null);
+  assert.equal((api.menu as FakeEl).querySelectorAll(".meta-item-wait").length, 0, "no pick waits: no words on any row");
+});
+
+test("executed: a comment thread's popover carries the frame's mark into the same menu (threadMetaStatus, lifted)", () => {
+  const tms = new Function("threadChipState", transpile(slice("function threadMetaStatus(th: CommentThread): Status {")) + "\nreturn threadMetaStatus;")(
+    () => "ready");
+  const TSID = "11111111-2222-4333-8444-777777777777";
+  const th = { tid: "t-1", sid: TSID, state: "", mode: "acceptEdits", model: "Opus 5", effort: "high", modePending: true,
+               relaunchWaits: "1 background task" };
+  const status = tms(th);
+  assert.equal(status.modePending, true, "the badge's dots ride the popover's status");
+  assert.equal(status.relaunchWaits, "1 background task");
+  assert.equal(tms({ ...th, modePending: undefined, relaunchWaits: undefined }).modePending, false, "a frame without the mark");
+  const { api, body } = liftMenu({ thread: { th, status } });
+  const btn = modeBadge(api, body, TSID);
+  api.toggleMetaMenu("mode", btn, TSID);
+  const rows = modeRows(api.menu as FakeEl);
+  assert.deepEqual(rows[BYPASS_ROW].lines.slice(-1), [WAIT_LINE(status)]);
+  assert.deepEqual(rows.filter((r) => r.current).map((r) => r.head), [modeLabel(th.mode)]);
 });

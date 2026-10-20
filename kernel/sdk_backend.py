@@ -1790,6 +1790,12 @@ PICK_RELAUNCH_WHYS = frozenset({"effort", "billing", "billing default", "session
                                 "subagent speed"})
 
 
+def new_proc_gen() -> str:
+    """A fresh PROCESS GENERATION stamp (SdkSession.proc_gen): a uuid, never a clock, since two stamps minted in the same
+    millisecond aliased a rounded timestamp; the time prefix is for humans reading regs."""
+    return "%d.%s" % (int(time.time()), uuid.uuid4().hex[:10])
+
+
 def env_digest(env) -> str:
     """A short digest of a session's per-session env, for the launch record: the values never leave the reg."""
     try:
@@ -5132,6 +5138,63 @@ def wakeup_due_epoch(cron: str, armed_t: float) -> "float | None":
     return due.timestamp()
 
 
+def wakeup_earliest_fire(entry) -> "float | None":
+    """The earliest moment the CLI could have fired a ScheduleWakeup one-shot on record: 60 s before its scheduledFor, the
+    minute the CLI's call returned in its tool result (_sched_tool_hook records it). CLI 2.1.288 fires a wakeup less
+    than 60 s before that minute at the earliest. None when the entry has no scheduledFor."""
+    try:
+        at = float(entry.get("scheduledFor") or 0) if isinstance(entry, dict) else 0.0
+    except (TypeError, ValueError):
+        return None
+    return at - 60.0 if at > 0 else None
+
+
+def cli_generations(s) -> "set[str]":
+    """The process generations whose one-shots session object `s`'s live CLI fires or rules on: its own (proc_gen), and, while
+    a rewind's stamp could not hand that CLI the armed timers (_rewind_owed, until a Stop hook's record or a later stamp),
+    every generation the object minted."""
+    gens = {str(s.proc_gen)}
+    if getattr(s, "_rewind_owed", False):
+        gens |= {str(g) for g in (getattr(s, "_minted_gens", ()) or ())}
+    return gens
+
+
+def minted_generations(s) -> "set[str]":
+    """Every process generation session object `s` minted: at construction and at each fresh CLI's stamp."""
+    return {str(g) for g in (getattr(s, "_minted_gens", ()) or ())}
+
+
+def earlier_objects_wakeup(c, mine) -> bool:
+    """A one-shot entry (its callers check that) that an earlier session object first recorded: its firstGen, which a Stop
+    hook's listing keeps beside the live generation, is none of `mine` (minted_generations of the object reading it)."""
+    return bool(c.get("firstGen")) and str(c["firstGen"]) not in mine
+
+
+def to_first_gen(c) -> dict:
+    """The entry back under the generation that first recorded it (firstGen)."""
+    out = {k: v for k, v in c.items() if k != "firstGen"}
+    out["procGen"] = str(c.get("firstGen"))
+    return out
+
+
+def lost_due_shots(reg: dict, live_gens, now: float, unheld=None) -> list:
+    """The one-shots on `reg` that are past due and recorded under no generation in `live_gens`: what deliver_lost_wakeups
+    sends. With `unheld` (minted_generations of a session object whose live CLI's stamp could not move the armed timers),
+    one under a live generation that an earlier session object first recorded counts too: no stamp handed it to that CLI."""
+    out = []
+    for c in reg.get("sessionCrons") or []:
+        if not isinstance(c, dict) or c.get("recurring"):
+            continue
+        if str(c.get("procGen") or "") in live_gens and not (unheld is not None and earlier_objects_wakeup(c, unheld)):
+            continue                              # a live CLI's one-shot: that CLI fires it, or its Stop hook rules on it
+        due = c.get("dueEpoch")
+        if not due:                               # legacy entry without the exact date → reconstruct
+            due = wakeup_due_epoch(c.get("cron"), float(c.get("armedAt") or reg.get("sessionCronsAt") or (now - 3600)))
+        if due is not None and now >= float(due) + 5:
+            out.append(c)
+    return out
+
+
 def _cron_field(spec: str, lo: int, hi: int) -> "set[int] | None":
     """One 5-field cron field as the set of ints it names (vixie shapes: *, steps, ranges, lists),
     or None for anything outside that grammar — the caller stands down rather than guessing."""
@@ -6486,8 +6549,13 @@ class SdkSession:
         # its delivery. Exact ownership, no grace-window guessing (review of #769, 2026-08-28).
         # A uuid, never a clock: two objects born in the same millisecond aliased a rounded
         # timestamp (CI caught it), and aliased generations would hand a live process's timer to
-        # the kernel. The time prefix is for humans reading regs, not for identity.
-        self.proc_gen = "%d.%s" % (int(time.time()), uuid.uuid4().hex[:10])
+        # the kernel. The time prefix is for humans reading regs, not for identity. Minted again by
+        # _fresh_cli_stamp, never for an attach.
+        self.proc_gen = new_proc_gen()
+        self._minted_gens = {self.proc_gen}   # every generation this object minted (_hand_one_shots_to, minted_generations)
+        # The launch ledger's generation (bgLedger procGen): minted with this object and never at a fresh CLI, so a
+        # relaunch leaves the previous CLI's ledger entries as they were
+        self._ledger_gen = self.proc_gen
         self.resume_sid = reg.get("lastSid") or None  # resume target after a restart/crash
         # A FORK being born (backend.fork): lastSid points at the PARENT's transcript and forkOf marks the
         # resume as a fork, so _options adds fork_session (+ the resume-session-at cut) and the CLI copies
@@ -6816,12 +6884,26 @@ class SdkSession:
         #   connect-time env, no runtime control) — mirrors _effort_pending's dots + notice
         self._fast_pending = ""      # "on" while the first fast-mode opt-in waits for its relaunch: the fast badge's dots
         #   (2026-10-01; it used to flip to On at the pick, before the flag had reached any CLI)
+        self._mode_pending = ""      # "bypassPermissions" while a bypass pick waits for the relaunch that carries the flag: the
+        #   mode badge's dots and its wait words, and the consult guard's word that this CLI does not run bypass yet
+        #   (2026-10-01). perm_mode stays the mode the running CLI confirmed: it used to take the pick at once, so the badge
+        #   read Bypass, the old CLI's consults filed contract-breach problem rows, and its next init flipped the mode back.
+        #   After a kernel restart that keeps the CLI, construction seeds perm_mode from the reg, which
+        #   holds the pick, so it reads Bypass until the reconnect's reconcile takes the attached CLI's launch mode (from a
+        #   host too old to report that launch, or a launch record that names no mode, until the CLI's next init). From
+        #   that reconcile until the CLI's next init, perm_mode is the launch mode, which a live switch since that launch
+        #   leaves stale
+        self._mode_ask_alone = False   # the bypass pick raised the standing relaunch ask itself (no other ask stood), or
+        #   after a kernel restart the connect's reconcile raised it for that pick alone: a change back before it applies may
+        #   withdraw it (SdkBackend.set_mode)
         # waiting picks a session host carried across the restart: their marks stand from construction (the reconcile at
         # the connect decides from the attached CLI's launch record whether they are applied)
         if "effort" in _waiting:
             self._effort_pending = self.effort or DEFAULT_EFFORT
         if "fast" in _waiting:
             self._fast_pending = "on"
+        if "mode" in _waiting and self.mode == "bypassPermissions":
+            self._mode_pending = self.mode
         self._launch_record = None   # what the last launch from _options carried (launch_values then, and fastGuess)
         self._hello_launch = None    # the connected host's echo of its spawn's launch record (cli.launch), this connect only
         self._cwd_request_open = False   # move()'s set_cwd round trip is in flight: quiet() holds a relaunch back for it
@@ -6920,8 +7002,24 @@ class SdkSession:
         #   the sessions it was applied to (2026-10-01). Nothing that waits here is cut.
         self._switch_wait_said = ""  # the ask the 'waiting for quiet' line was said for, once per ask
         self._switch_ask_pending = ""  # the switch ask handed to request_reconnect(defer=False) and not yet armed or dropped
+        self._switch_riders = set()    # the reasons other than a pick that were set aside for the ask standing or the relaunch
+        #                                armed: a change back keeps that relaunch while any is here (SdkBackend._withdraw_mode_pick),
+        #                                and only a CLI launched from this session's state clears them (_amain)
         self._cut_cause = ""           # the gesture behind a cut relaunch not yet torn down (CUT_BY's key: restart, rewind,
         #                                apply), handed by request_reconnect(cut=True, cause=…); the teardown takes it
+        self._launch_rewind = None     # the (target, leaf) pair this connect's launch applies with --resume-session-at, None
+        #                                when it applies none (_options); an attach reaches a CLI an earlier launch made
+        self._cli_rewind = None        # the pair the CLI this object last stamped was launched at: a fresh CLI launched at a
+        #                                pair its predecessor was not is a rewind's, and its stamp hands it the one-shots
+        #                                this object first recorded, less those it drops (_fresh_cli_stamp)
+        self._rewind_owed = False      # a rewind's stamp could not hand them over: until a Stop hook records the armed set or
+        #                                a later stamp moves it, every generation this object minted is the live CLI's
+        #                                (cli_generations), and that later stamp hands them over as the rewind's would
+        self._rewind_ids = set()       # ids of the one-shots a rewind's stamp handed over, until a Stop hook records the
+        #                                armed set: a later stamp before then hands them to its fresh CLI again
+        self._stamp_failed = False     # the live CLI's stamp could not move the armed timers: until a Stop hook records the
+        #                                armed set or a later stamp moves it, an earlier session object's one-shot under
+        #                                the live generation is not that CLI's (lost_due_shots)
         self._reconnect_switch_why = ""  # the armed reconnect carries a standing ask (its why): the waker's last look reads it
         self._fallback_cause = str(reg.get("fallbackCause") or "")   # "safeguards" once the CLI's refusal frame named the standing fallback (model_fallback_row)
         self._served_model = str(reg.get("servedModel") or reg.get("liveModel") or "")   # the model the API last SERVED a parent reply on (the picker's mark)
@@ -7573,7 +7671,12 @@ class SdkSession:
         does (want_switch_reconnect, `why` naming it in the log) and is carried the moment nothing would be cut:
         no turn in flight or queued, no live subagent, no background task, no question waiting on the user
         (quiet()), at the exact events that end that work, never on a timer. The pick's pending marks
-        (effortPending, authPending) stay up meanwhile, and relaunch_waits() says what holds them.
+        (effortPending, authPending, fastPending, modePending) stay up meanwhile, and relaunch_waits() says what holds
+        them. An armed timer does not hold it (a dynamic /loop re-arms a one-shot every round and would never read
+        quiet): _fresh_cli_stamp gives the relaunch's fresh CLI a new process generation when it moves the armed timers,
+        so a ScheduleWakeup one-shot on record with its due time and the minute the CLI named, which the old CLI could not
+        have fired by the fresh CLI's start and the fresh CLI does not carry, is the kernel's to deliver at that time
+        (deliver_lost_wakeups), except while the session is a comment thread's, which that sweep skips.
 
         `cut=True`: the road that ACCEPTS what it cuts, for a rewind (the edited message is held until a rewound CLI
         is up, and the leaf it targets must not move under a later turn). Now when idle, else at the end of the
@@ -7629,12 +7732,13 @@ class SdkSession:
         is fed to the CLI being ended), the SIGTERM marked for the teardown, and every standing ask answered by it."""
         if self.ended:
             return
-        self._reconnect = True
-        self._reconnect_when_idle = False
-        self._relaunch_term = True
-        self._reconnect_switch_why = ""   # nobody's switch: the waker's last look never vetoes it (_switch_teardown_check)
-        self._switch_ask_pending = ""
-        self._switch_wanted = self._switch_wait_said = ""   # this relaunch carries every connect-time value
+        with self._lock:
+            self._reconnect = True
+            self._reconnect_when_idle = False
+            self._relaunch_term = True
+            self._reconnect_switch_why = ""   # nobody's switch: the waker's last look never vetoes it (_switch_teardown_check)
+            self._switch_ask_pending = ""
+            self._switch_wanted = self._switch_wait_said = ""   # this relaunch carries every connect-time value
         self._wake_set()
 
     async def _term_for_relaunch(self, client) -> None:
@@ -7801,16 +7905,21 @@ class SdkSession:
                                       "reconnected, ask again when it is quiet" % self.name)
                     self._re_raise_switch_ask()
                     return
-            self._reconnect = True
-            self._reconnect_switch_why = getattr(self, "_switch_ask_pending", "")   # a standing ask's reconnect, or "" for a rewind's
-            self._switch_ask_pending = ""
-            # this relaunch carries every connect-time value, so an ask still standing is answered by it (the waker's
-            # last look raises it again if it vetoes a standing ask's teardown); left standing, it relaunched the
-            # fresh CLI a second time at its first quiet moment
-            self._switch_wanted = self._switch_wait_said = ""
+            with self._lock:
+                self._reconnect = True
+                self._reconnect_switch_why = getattr(self, "_switch_ask_pending", "")   # a standing ask's reconnect, or "" for a rewind's
+                self._switch_ask_pending = ""
+                # this relaunch carries every connect-time value, so an ask still standing is answered by it (the waker's
+                # last look raises it again if it vetoes a standing ask's teardown); left standing, it relaunched the
+                # fresh CLI a second time at its first quiet moment
+                # a reason other than a pick is set aside here, since a veto raises only the carried one again
+                if self._switch_wanted and self._switch_wanted not in PICK_RELAUNCH_WHYS:
+                    self._switch_riders.add(self._switch_wanted)
+                self._switch_wanted = self._switch_wait_said = ""
             self._wake_set()
         elif defer:
-            self._reconnect_when_idle = True   # the cut road (a rewind): the ResultMessage handler fires it when the turn ends
+            with self._lock:
+                self._reconnect_when_idle = True   # the cut road (a rewind): the ResultMessage handler fires it when the turn ends
         else:
             self.backend._log("reconnect (%s): became busy before the reconnect ran; not reconnected, ask "
                               "again when it is quiet" % self.name)
@@ -7818,12 +7927,49 @@ class SdkSession:
 
     def _re_raise_switch_ask(self):
         """An immediate reconnect a switch asked for was dropped by the loop-side re-check (work registered between the
-        quiet read and the run): the ask stands again, so the next live-work event or tick carries it."""
-        why = getattr(self, "_switch_ask_pending", "")
-        self._switch_ask_pending = ""
-        if why and not getattr(self, "_switch_wanted", ""):
-            self._switch_wanted = why
+        quiet read and the run): the ask stands again, so the next live-work event or tick carries it.
+
+        The launch is read before the hold. In the hold, the bypass pick's ask handed back is withdrawn instead of raised
+        again when the withdrawal's rule holds (_mode_relaunch_withdrawn, which takes the mode read in the hold as that
+        launch's mode), and a standing ask of the same reason goes with it."""
+        have = getattr(self, "_cli_launch", None)
+        now = self.launch_values() if isinstance(have, dict) else None
+        with self._lock:
+            why = getattr(self, "_switch_ask_pending", "")
+            self._switch_ask_pending = ""
+            withdrawn = self._mode_relaunch_withdrawn(why, now, have)
+            if withdrawn:
+                self._mode_ask_alone = False
+                self._switch_wanted = self._switch_wait_said = ""
+            elif why and not getattr(self, "_switch_wanted", ""):
+                self._switch_wanted = why
+            elif why and why not in PICK_RELAUNCH_WHYS:
+                self._switch_riders.add(why)   # set aside for the ask standing
         self._release_launch_slot()   # nothing launches now: the slot goes to the next relaunch waiting for one
+        if withdrawn:
+            self.backend._log("bypass mode (%s): the relaunch was handed back and the pick it was for was undone, so it is "
+                              "withdrawn; nothing is cut" % self.name)
+
+    def _mode_relaunch_withdrawn(self, why, now, have) -> bool:
+        """Read inside a hold of the session lock that has taken a relaunch out of its place (the last look's stand-down,
+        the busy re-check's hand-back): whether that relaunch, asked for by the bypass pick (`why` "bypass mode"), is
+        withdrawn instead of asked for again, by the withdrawal's rule (SdkBackend._withdraw_mode_pick). The pending-bypass
+        mark is down and the ask was the pick's alone (_mode_ask_alone); no other pick's mark is up; no ask of another
+        reason stands; nothing else is on its way (an ask carried, a relaunch armed other than a reattach to the same CLI
+        that no switch armed, a relaunch waiting for the turn's end); nothing is set aside for it (_switch_riders); and the
+        launch the caller read before the hold (`now`, None when it read none), with the mode read here as its mode,
+        equals the serving CLI's launch record (`have`), still the one serving. The mode is read in this hold because
+        set_mode writes it under the session lock, as the withdrawal compares the mode set_mode was called with; every
+        other key is the caller's read."""
+        return (why == "bypass mode" and not getattr(self, "_mode_pending", "") and getattr(self, "_mode_ask_alone", False)
+                and not any(getattr(self, a, "") for a in ("_effort_pending", "_auth_pending", "_fast_pending"))
+                and getattr(self, "_switch_wanted", "") in ("", why)
+                and not (getattr(self, "_switch_ask_pending", "") or getattr(self, "_reconnect_when_idle", False)
+                         or (getattr(self, "_reconnect", False) and (getattr(self, "_reconnect_switch_why", "")
+                                                                      or not getattr(self, "_reattach_keeps_cli", False))))
+                and isinstance(now, dict) and isinstance(have, dict)
+                and all(launch_value(have, k) == v for k, v in dict(now, mode=getattr(self, "mode", "") or "").items())
+                and getattr(self, "_cli_launch", None) is have and not self._switch_riders)
 
     def _release_hold_at_exit(self):
         """THE CLI'S EXIT is the one event on which the CLI loses its prompt queue, and so the one event
@@ -8295,12 +8441,26 @@ class SdkSession:
             # CLI never accepted, indefinitely. Revert every layer to the last confirmed mode
             # (snapshot, session, registry — the next connect must not re-apply the refused pick
             # either) and ring the problems so the failed switch is unmissable.
-            self.perm_mode = prev
-            self.mode = prev
-            self.backend._update_reg(self.sid, mode=prev)
+            # A mode other than this pick, picked after it, keeps the session's mode and its pending-bypass mark: the mode
+            # is read and the revert written under self._lock, which set_mode also takes when it writes the mode, the
+            # confirmed mode and the mark. The confirmed mode goes back while it still reads this pick, and to a confirmed
+            # bypassPermissions only while the mode reads bypassPermissions too. The record's mode goes back only while
+            # the record still holds this pick, read and written in one hold of the registry lock
+            # (SdkBackend._revert_reg_mode): set_mode records a mode before its hold of self._lock, so a mode other than
+            # this pick recorded since it keeps its record.
+            with self._lock:
+                now = getattr(self, "mode", "") or ""
+                if now == mode or (self.perm_mode == mode and (prev != "bypassPermissions" or now == "bypassPermissions")):
+                    self.perm_mode = prev
+                if now == mode:
+                    self.mode = prev
+            if now == mode:
+                self.backend._revert_reg_mode(self.sid, mode, prev)
             self.backend._log("set_permission_mode (%s -> %s) refused by the SDK: %s: %s — the switch "
-                              "did NOT apply; the mode reverted to %s"
-                              % (self.name, mode, type(e).__name__, e, prev), problem=True)
+                              "did NOT apply; %s"
+                              % (self.name, mode, type(e).__name__, e,
+                                 "the mode reverted to %s" % prev if now == mode else "the mode stays %s, picked since" % now),
+                              problem=True)
             self.backend._poke()
 
     async def _do_refresh_context(self):
@@ -8440,7 +8600,13 @@ class SdkSession:
         answered without it (_opt_in_cannot_take, 2026-10-09): its report cleared _fast_unlocked, and every live model
         change then asked for a relaunch that carried the same flag and heard the same."""
         try:
-            if self._switch_wanted or getattr(self, "_reconnect_when_idle", False) or getattr(self, "_reconnect", False):
+            aside = ["always fast"] if self.fast_effective() and not self._opt_in_cannot_take() else []
+            with self._lock:
+                standing = bool(self._switch_wanted or getattr(self, "_reconnect_when_idle", False)
+                                or getattr(self, "_reconnect", False))
+                if standing and not self.fast_opt and not self._fast_unlocked:   # the ask below, set aside for the relaunch already asked for
+                    self._switch_riders.update(aside)
+            if standing:
                 return
             if not getattr(self, "fast_opt", False) and not getattr(self, "_fast_unlocked", False) and self.fast_effective() \
                     and not self._opt_in_cannot_take():
@@ -8961,7 +9127,8 @@ class SdkSession:
         wait = reg.get("relaunchWait") if isinstance(reg.get("relaunchWait"), dict) else {}
         recorded = wait.get("picks") if isinstance(wait.get("picks"), dict) else {}
         picks = [p for p in recorded if p in PICK_LAUNCH_KEYS]
-        for name, mark in (("effort", "_effort_pending"), ("billing", "_auth_pending"), ("fast", "_fast_pending")):
+        for name, mark in (("effort", "_effort_pending"), ("billing", "_auth_pending"), ("fast", "_fast_pending"),
+                           ("mode", "_mode_pending")):
             if getattr(self, mark, "") and name not in picks:
                 picks.append(name)               # a pending mark the record lacks (a pick made before the record existed)
         billing_waited = "billing" in picks      # a switch was waiting (the landing's evidence when `replaced` is unknown)
@@ -9026,6 +9193,17 @@ class SdkSession:
             if getattr(self, "_fast_pending", ""):
                 self.fast = "on" if want["fast"] else self.fast   # the launch carried the flag; its init re-asserts the truth
             self._fast_pending = ""
+        if "mode" in done:
+            # The pick the launch carried is applied under self._lock, which set_mode also takes when it writes the mode,
+            # the confirmed mode and the pending-bypass mark, and only while the session's mode still reads the mode
+            # `want` read: a mode set since then has set the confirmed mode and the mark itself, in that hold.
+            with self._lock:
+                if (getattr(self, "mode", "") or "") == want["mode"]:
+                    if getattr(self, "_mode_pending", ""):
+                        # the launch carried the flag; the connected CLI's next init confirms it
+                        self.perm_mode = want["mode"]
+                    self._mode_pending = ""
+        unrecord = False
         if left:
             if "effort" in left and not self._effort_pending:
                 self._effort_pending = want["effort"]
@@ -9033,12 +9211,60 @@ class SdkSession:
                 self._auth_pending = want["auth"] or self.effective_auth()
             if "fast" in left and not getattr(self, "_fast_pending", "") and want["fast"]:
                 self._fast_pending = "on"
-            if not getattr(self, "_switch_wanted", ""):
-                self._switch_wanted = why
-            self.backend._log("waiting picks (%s): %s %s; it relaunches once nothing would be cut"
-                              % (self.name, ", ".join(left),
-                                 "not carried by the CLI this kernel attached to" if known
-                                 else "cannot be vouched for (the host's hello carries no launch record)"))
+            # The mode pick is decided again against the session's mode as read under self._lock, which set_mode also
+            # takes when it writes the mode, and the pending-bypass mark and the relaunch ask are set in the same hold.
+            # A mode other than the one `want` read takes the mode entry the record write above carried back out
+            # (below), and the pick stays in `left` only while the launch lacks that mode; the mark is set only while
+            # it is bypassPermissions.
+            with self._lock:
+                live = getattr(self, "mode", "") or ""
+                if "mode" in left and live != want.get("mode"):
+                    unrecord = "mode" in still
+                    if known and launch_value(launch, "mode") == live:
+                        left.remove("mode")
+                if "mode" in left and not getattr(self, "_mode_pending", "") and live == "bypassPermissions":
+                    self._mode_pending = "bypassPermissions"
+                if left and not getattr(self, "_switch_wanted", ""):
+                    # an ask raised here for the mode pick alone is marked that pick's own, which
+                    # SdkBackend._withdraw_mode_pick reads after a kernel restart (it withdraws the ask only when its
+                    # other conditions hold too; unlike set_mode, this does not check for an ask carried and not yet
+                    # armed).
+                    alone = left == ["mode"]
+                    self._switch_wanted = "bypass mode" if alone else why
+                    self._mode_ask_alone = alone
+            if ("mode" in left and known and self.perm_mode == "bypassPermissions"
+                    and str(launch.get("mode") or "") not in ("", "bypassPermissions")):
+                # construction seeds perm_mode from the reg, which holds the pick; a CLI launched without the flag cannot run
+                # bypass (it refuses the live switch), so its launch mode is the best evidence until its next init, which
+                # corrects any live switch made since that launch
+                self.perm_mode = str(launch.get("mode"))
+            if left:
+                self.backend._log("waiting picks (%s): %s %s; it relaunches once nothing would be cut"
+                                  % (self.name, ", ".join(left),
+                                     "not carried by the CLI this kernel attached to" if known
+                                     else "cannot be vouched for (the host's hello carries no launch record)"))
+        # When the hold above found a mode other than the one `want` read (unrecord), a fresh read of the mode under
+        # self._lock decides the entry the write above carried: it goes unless that read finds bypassPermissions, and
+        # each record write after it is followed by another fresh read under self._lock, until a read agrees with the
+        # write before it (_note_pick_waits and _drop_pick_wait read the mark in their registry hold). No lock is held
+        # across a record write.
+        if unrecord:
+            held = True                          # the record holds the mode entry as this reconcile last wrote it
+            while True:
+                with self._lock:
+                    bypass = (getattr(self, "mode", "") or "") == "bypassPermissions"
+                if bypass == held:
+                    break
+                if bypass:
+                    self.backend._note_pick_waits(self, "mode", "bypass mode")
+                else:
+                    self.backend._drop_pick_wait(self, "mode")
+                held = bypass
+        # The record write above writes the mode entry only as the registry read found it, so a bypass pick's entry written
+        # since that read is not in it. While the pending-bypass mark is up and that write carried no mode entry, the entry
+        # is written again by _note_pick_waits, which reads the mark in the registry lock's hold where it writes.
+        if getattr(self, "_mode_pending", "") and "mode" not in still:
+            self.backend._note_pick_waits(self, "mode", "bypass mode")
         if left or fields or recorded:
             self.backend._poke()
 
@@ -9113,12 +9339,17 @@ class SdkSession:
         cuts. A machine-wide switch is nobody's gesture on this session (2026-09-17, a session whose three subagents
         and background task died at its turn's end for the flag), and a pick in a menu changes a setting, it does not ask
         to end the work the session is running (2026-10-01, a billing switch across the sessions someone was running), so
-        neither may cut anything. Any thread."""
+        neither may cut anything. Any thread.
+
+        The ask is read and set in one hold of the session lock. The bypass pick's reason ("bypass mode") is set only while
+        the pending-bypass mark, which set_mode raises and lowers under the same lock, is up in that hold."""
         if getattr(self, "ended", False):
             return
-        cur = getattr(self, "_switch_wanted", "")
-        if not (why in PICK_RELAUNCH_WHYS and cur and cur not in PICK_RELAUNCH_WHYS):
-            self._switch_wanted = why   # a pick's reason never hides another one (PICK_RELAUNCH_WHYS)
+        with self._lock:
+            cur = getattr(self, "_switch_wanted", "")
+            waits = why != "bypass mode" or bool(getattr(self, "_mode_pending", ""))
+            if waits and not (why in PICK_RELAUNCH_WHYS and cur and cur not in PICK_RELAUNCH_WHYS):
+                self._switch_wanted = why   # a pick's reason never hides another one (PICK_RELAUNCH_WHYS)
         loop = getattr(self, "loop", None)
         if loop is not None:
             loop.call_soon_threadsafe(self._try_switch_reconnect)
@@ -9129,16 +9360,27 @@ class SdkSession:
         """Apply the standing switch ask if the session is quiet now; otherwise keep it, saying once what it waits for.
         A reconnect already on its way carries the switch's decision, so the ask stands down to it. When the ask is
         carried, the upgrade retry's next attempt counts from here, not from the tick that asked. Loop thread (the
-        hooks and the settle run there; want_switch_reconnect schedules onto it)."""
+        hooks and the settle run there; want_switch_reconnect schedules onto it).
+
+        The quiet read and the launch slot are taken outside the session lock; every write of the ask, of the line said
+        for it and of the reasons set aside is made in a hold that reads the ask again first, and the ask carried is the
+        one that hold reads."""
         why = getattr(self, "_switch_wanted", "")
         if not why or getattr(self, "ended", False):
             return False
         if getattr(self, "_reconnect", False) or getattr(self, "_reconnect_when_idle", False):
-            self._switch_wanted = self._switch_wait_said = ""
+            with self._lock:
+                if self._switch_wanted == why:
+                    if why not in PICK_RELAUNCH_WHYS:
+                        self._switch_riders.add(why)   # set aside for the relaunch on its way, which a veto may cut
+                    self._switch_wanted = self._switch_wait_said = ""
             return False
         if not self.quiet():
-            if self._switch_wait_said != why:
-                self._switch_wait_said = why
+            with self._lock:
+                say = self._switch_wanted == why and self._switch_wait_said != why
+                if say:
+                    self._switch_wait_said = why
+            if say:
                 self.backend._log("%s (%s): waiting for the session to go quiet before the reconnect — %s running; "
                                   "nothing is cut" % (why, self.name, self._busy_words()))
             return False
@@ -9149,17 +9391,27 @@ class SdkSession:
         slots = self._launch_slots()
         if getattr(self, "loop", None) is not None and slots is not None and not getattr(self, "_launch_slot", False):
             if not slots.take(self):
-                if self._switch_wait_said != "slot:" + why:
-                    self._switch_wait_said = "slot:" + why
+                with self._lock:
+                    say = self._switch_wanted == why and self._switch_wait_said != "slot:" + why
+                    if say:
+                        self._switch_wait_said = "slot:" + why
+                if say:
                     self.backend._log("%s (%s): the session is quiet; waiting for a launch slot (%d CLIs launch at a "
                                       "time across the machine)" % (why, self.name, BOOT_RESUME_CONCURRENCY))
                 return False
             self._launch_slot = True
-        self._switch_wanted = self._switch_wait_said = ""
-        self._switch_ask_pending = why
-        arm = getattr(self, "_upgrade_retry", None)
-        if arm:   # the cadence counts from the reconnect that carried the ask (never earlier than the tick's own stamp)
-            arm["next"] = max(arm.get("next", 0) or 0, time.time() + RETRY_UPGRADE_S)
+        with self._lock:
+            why = self._switch_wanted   # the ask carried is the one this hold reads
+            if why:
+                self._switch_wanted = self._switch_wait_said = ""
+                self._switch_ask_pending = why
+                arm = getattr(self, "_upgrade_retry", None)
+                if arm:   # the cadence counts from the reconnect that carried the ask (never earlier than the tick's own stamp)
+                    arm["next"] = max(arm.get("next", 0) or 0, time.time() + RETRY_UPGRADE_S)
+                    self._switch_riders.add("retry upgrade")   # set aside for the carried relaunch, which a busy re-check or a veto may stop
+        if not why:
+            self._release_launch_slot()   # nothing launches now: the slot goes to the next relaunch waiting for one
+            return False
         self.backend._log("%s (%s): the session is quiet — reconnecting now" % (why, self.name))
         self.request_reconnect(defer=False)   # the loop-side re-check stands: work that registered meanwhile drops it,
         return True                           #   and the next event or tick asks again (the ask is re-raised below)
@@ -9168,7 +9420,12 @@ class SdkSession:
         """A pick went back to what the serving CLI runs (SdkBackend._retarget_billing; loop thread): when the standing
         relaunch ask was made by picks alone (PICK_RELAUNCH_WHYS) and that CLI's launch record already carries every pick,
         the relaunch would apply nothing, so the ask is dropped, with its place in line for a launch slot. An ask with any
-        other reason, an ask already handed to a relaunch (_switch_ask_pending), or a CLI no record vouches for stands."""
+        other reason, an ask already handed to a relaunch (_switch_ask_pending), or a CLI no record vouches for stands.
+
+        The launch is read before the session lock is taken. The hold that drops the ask reads it again, every pick's
+        pending mark (the pending-bypass mark, and the effort, billing and fast-mode marks) and the reasons set aside
+        (_switch_riders), as the withdrawal's hold reads them (SdkBackend._withdraw_mode_pick): while any mark is up a pick
+        waits for its relaunch, and while a reason is set aside the relaunch is kept for it, so the ask stands."""
         why = getattr(self, "_switch_wanted", "")
         have = getattr(self, "_cli_launch", None)
         if not why or why not in PICK_RELAUNCH_WHYS or not isinstance(have, dict):
@@ -9176,7 +9433,11 @@ class SdkSession:
         want = self.launch_values()
         if any(launch_value(have, k) != want.get(k) for keys in PICK_LAUNCH_KEYS.values() for k in keys):
             return
-        self._switch_wanted = self._switch_wait_said = ""
+        with self._lock:
+            if self._switch_wanted != why or self._switch_riders or any(getattr(self, a, "") for a in (
+                    "_mode_pending", "_effort_pending", "_auth_pending", "_fast_pending")):
+                return
+            self._switch_wanted = self._switch_wait_said = ""
         if self._launch_slots() is not None:
             self._launch_slots().unwait(self)
         self.backend._log("%s (%s): the running CLI already carries every pick; no relaunch needed" % (why, self.name))
@@ -9188,7 +9449,14 @@ class SdkSession:
         stands down and the switch's ask stands again for the next quiet moment. False = proceeding: the end grace on
         this connection's host is raised to SWITCH_END_GRACE_S first, so a turn that starts in the instant left between
         here and the `end` is finished, not killed at 120 s. A Restart's or a rewind's reconnect (no switch why) is never
-        touched here: that road accepts what it cuts."""
+        touched here: that road accepts what it cuts.
+
+        On a veto the launch is read after the quiet read and before the hold. In the hold, a relaunch armed for the bypass
+        pick's ask is withdrawn instead of asked for again when the withdrawal's rule holds (_mode_relaunch_withdrawn): the
+        pending-bypass mark is down and the ask was the pick's alone; no other pick's mark is up; no ask of another reason
+        stands and nothing else is on its way; nothing is set aside for it; and the launch read, with the mode read in
+        the hold as its mode, equals the serving CLI's launch record, still the one serving. A standing ask of the same
+        reason goes with it."""
         why = getattr(self, "_reconnect_switch_why", "")
         if not (why and getattr(self, "_reconnect", False)) or getattr(self, "ended", False):
             return False
@@ -9200,11 +9468,25 @@ class SdkSession:
                 except Exception as e:
                     self.backend._log("%s (%s): could not lengthen the host's end grace: %s" % (why, self.name, e))
             return False
-        self._reconnect = False
-        self._reconnect_switch_why = ""
-        self._switch_wanted = why
-        self._switch_wait_said = why   # the line below says it; no second 'waiting' line for the same ask
+        have = getattr(self, "_cli_launch", None)
+        now = self.launch_values() if why == "bypass mode" and isinstance(have, dict) else None
+        with self._lock:
+            self._reconnect = False
+            self._reconnect_switch_why = ""
+            withdrawn = self._mode_relaunch_withdrawn(why, now, have)
+            if withdrawn:
+                self._mode_ask_alone = False
+                self._switch_wanted = self._switch_wait_said = ""
+            else:
+                if self._switch_wanted and self._switch_wanted not in PICK_RELAUNCH_WHYS:
+                    self._switch_riders.add(self._switch_wanted)   # replaced by the armed reason below
+                self._switch_wanted = why
+                self._switch_wait_said = why   # the line below says it; no second 'waiting' line for the same ask
         self._release_launch_slot()    # nothing launches now: the slot goes to the next relaunch waiting for one
+        if withdrawn:
+            self.backend._log("%s (%s): the CLI started work before the relaunch, which stands down; the pick it was for "
+                              "was undone, so it is withdrawn; nothing is cut" % (why, self.name))
+            return True
         self.backend._log("%s (%s): the CLI started work between the ask and the reconnect — %s; the reconnect stands "
                           "down and the ask waits for the next quiet moment; nothing is cut" % (why, self.name, self._busy_words()))
         return True
@@ -9660,8 +9942,15 @@ class SdkSession:
         try:
             if not wants:
                 return
-            if (getattr(self, "_switch_wanted", "") or getattr(self, "_switch_ask_pending", "")
-                    or getattr(self, "_reconnect_when_idle", False) or getattr(self, "_reconnect", False)):
+            aside = ["fast mode" if self.fast_opt else "always fast"] if not self._opt_in_cannot_take() else []
+            with self._lock:
+                standing = bool(getattr(self, "_switch_wanted", "") or getattr(self, "_switch_ask_pending", "")
+                                or getattr(self, "_reconnect_when_idle", False) or getattr(self, "_reconnect", False))
+                # the ask the lines below would make, set aside for the relaunch already asked for
+                if standing and (self._fast_off_sent or self._host_is_attach or not self._launch_record
+                                 or not self._launch_record["fast"]):
+                    self._switch_riders.update(aside)
+            if standing:
                 return
             if self._opt_in_cannot_take():
                 # Nothing is asked. Said once per CLI in each kernel's life (_say_opt_in_lacking): the kernel that launched
@@ -9901,7 +10190,32 @@ class SdkSession:
         awaiting and its held sends all stand; before the fix every boot re-stamped every attached session, re-arming the
         planner's persisted memo and the evidence gate and reading the live CLIs' running tasks as ghosts). `mark_echoes` is
         False on a DELIBERATE reconnect inside a live thread (the waker's effort or model change), whose forwarded sends land
-        through the resume."""
+        through the resume.
+        A new PROCESS GENERATION, too (proc_gen, 2026-10-01): an armed timer's record names the CLI that armed it, and that
+        CLI is gone. Under the kept generation a pick that relaunched a quiet session lost its ScheduleWakeup one-shot:
+        deliver_lost_wakeups read the record as the live CLI's to fire, and the fresh CLI, which does not re-arm it, had its
+        first Stop hook drop the record. Minted here, so never for an attach to a CLI that lives on, and taken by
+        _hand_one_shots_to in the locked section that moves the armed timers (a reg that will not read, or a write that
+        fails, keeps the old generation). That step drops the outgoing generation's one-shots with a due time that a
+        generation of this object first recorded, when their earliest fire (wakeup_earliest_fire) has passed by this stamp
+        or is not known, leaves one an earlier session object first recorded the kernel's, and gives the others
+        with no due time the new generation. After a rewind (an edit or a delete: a launch at a --resume-session-at pair
+        the CLI it replaces was not launched at, whatever gesture ended that CLI) every other one-shot a generation of
+        this object first recorded takes it too: nothing here tells a wakeup armed in a turn
+        the rewind discards from one armed in a turn it keeps, so the kernel delivers neither, and the first Stop hook of
+        the CLI holding them keeps only the ones it lists; a stamp before that hook hands them to its fresh CLI again
+        (_rewind_ids). A rewind whose step fails leaves every generation this object minted the live CLI's (_rewind_owed)
+        instead, and the next stamp before a Stop hook hands their one-shots over as the rewind's would have."""
+        gen = new_proc_gen()
+        # a rewind's CLI: its launch applies a (target, leaf) pair the CLI it replaces was not launched at. Read from the
+        # launch itself, never from the gesture that ended the old CLI: a Restart or an Apply now during a rewind's
+        # teardown, a Restart during its wait for the turn's end, or an Apply now while a rewind waits for the turn's end
+        # renames the cut, and a stamp keyed on that name took the rewound CLI for a plain relaunch's
+        at = getattr(self, "_launch_rewind", None)
+        rewound = at is not None and at != getattr(self, "_cli_rewind", None)
+        self._cli_rewind = at
+        rewound = rewound or getattr(self, "_rewind_owed", False)
+        self._hand_one_shots_to(gen, rewound)
         prev = (read_reg(self.backend.state_dir, self.sid) or {}).get("spawnedAt")
         # work kept for a reattach that reached a NEW CLI instead (the host died during its re-exec and the connect spawned
         # again): it ran in the old CLI and ended with it, so it is retired here, the session told, as at any teardown
@@ -9917,6 +10231,82 @@ class SdkSession:
                 self.backend._mark_dropped_echoes(self.sid, self.pending_meta() or self.pending())
             except Exception as e:                       # bookkeeping over the live tail: a raise here is no launch fault, the
                 self.backend._log("dropped-echo marking (%s) failed: %s: %s" % (self.name, type(e).__name__, e))   # connect goes on
+
+    def _hand_one_shots_to(self, gen: str, rewound: bool) -> bool:
+        """The armed-set half of a fresh CLI's new generation: True once `gen` is the live one. The outgoing generation
+        is the live one (cli_generations: after a rewind whose hand-off failed, every generation this object minted). A
+        one-shot with a due time that it holds and a generation of this object first recorded is dropped when its earliest
+        fire (wakeup_earliest_fire) has passed by now or is not known, and otherwise stays the kernel's to deliver when it
+        is due. One with a due time that an earlier session object first recorded (firstGen, which a Stop hook's listing
+        keeps) is not dropped: it stays the kernel's to deliver when it is due, as it was before the listing. After a rewind
+        (`rewound`) every other one-shot a generation of this object first recorded takes `gen`, so the kernel delivers
+        none of them and the first Stop hook of the CLI holding them keeps only the ones it lists. The handed ids stay in
+        _rewind_ids until that Stop hook, so a stamp before it hands them to its own fresh CLI. A one-shot the outgoing
+        generation holds with no due time that a generation of this object first recorded takes `gen` the same way: a
+        one-shot cron, which a resumed CLI re-arms while its time is still ahead (checked on CLI 2.1.288), or a wakeup whose
+        call-time record the turn end did not take. One with no due time that an earlier session object first recorded goes
+        back under that object's generation (to_first_gen). The records
+        move and `gen` becomes live in one section under the registry lock, the lock deliver_lost_wakeups holds while it
+        reads them with the live generation. False, with a problem logged, when the reg will not read or the
+        write fails: nothing moved, the old generation stays live, and, before the lock is let go, _stamp_failed is set
+        (and _rewind_owed after a rewind), which the sweep and the next Stop hook read."""
+        old = self.proc_gen
+        mine = set(getattr(self, "_minted_gens", ()) or ()) | {old}
+        outgoing = cli_generations(self)
+        carried = set(getattr(self, "_rewind_ids", ()) or ())
+        now = time.time()
+
+        def one_shot(c):
+            return isinstance(c, dict) and not c.get("recurring")
+
+        def may_have_fired(c):
+            if not (one_shot(c) and c.get("dueEpoch") and str(c.get("procGen") or "") in outgoing):
+                return False
+            if earlier_objects_wakeup(c, mine):
+                return False
+            at = wakeup_earliest_fire(c)
+            return at is None or now >= at
+
+        def rewinds(c):
+            if not one_shot(c):
+                return False
+            g = str(c.get("procGen") or "")
+            first = str(c.get("firstGen") or g)
+            return (rewound and g in mine and first in mine) or (g in outgoing and str(c.get("id") or "") in carried)
+
+        def handed(c):
+            return rewinds(c) or (one_shot(c) and str(c.get("procGen") or "") in outgoing and not c.get("dueEpoch"))
+
+        def stays(c):
+            return (one_shot(c) and not c.get("dueEpoch") and str(c.get("procGen") or "") in outgoing
+                    and earlier_objects_wakeup(c, mine))
+        try:
+            with self.backend._reg_lock:
+                try:
+                    reg = read_reg_for_rmw(self.backend.state_dir, self.sid)
+                    if reg is None:
+                        raise OSError("reg unreadable")
+                    crons = reg.get("sessionCrons") or []
+                    kept = [c for c in crons if not may_have_fired(c)]
+                    moved = [to_first_gen(c) if stays(c) else dict(c, procGen=gen) if handed(c) else c for c in kept]
+                    if moved != crons:
+                        reg["sessionCrons"] = moved
+                        write_reg(self.backend.state_dir, self.sid, reg)
+                except Exception:
+                    self._stamp_failed = True      # under the lock: no sweep reads the live generations before these
+                    if rewound:
+                        self._rewind_owed = True
+                    raise
+                self.proc_gen, self._minted_gens, self._rewind_owed, self._stamp_failed = gen, mine | {gen}, False, False
+                self._rewind_ids = {str(c.get("id") or "") for c in kept if rewinds(c)}
+        except Exception as e:
+            self.backend._log("fresh CLI (%s): the armed timers were not moved, so this CLI keeps the old generation: "
+                              "%s: %s" % (self.name, type(e).__name__, e), problem=True)
+            return False
+        if len(kept) != len(crons):
+            self.backend._log("fresh CLI (%s): %d one-shot(s) the old CLI may already have fired dropped"
+                              % (self.name, len(crons) - len(kept)))
+        return True
 
     def _run(self):
         try:
@@ -10266,6 +10656,8 @@ class SdkSession:
                             self._fast_unlocked = bool(launch.get("fast"))   # the launch's own word, not today's rule
                     else:
                         launch, launched_here = self._launch_record, True
+                        with self._lock:
+                            self._switch_riders = set()   # a CLI launched from _options, which read every reason set aside
                     self._reconcile_waiting_picks(launch, launched_here, spawned_at=self._hello_spawned_at)
                     try:
                         self._sub_std_begin(launch, launched_here)   # the speed check's episode: whether THIS CLI carries the recipe
@@ -10273,9 +10665,13 @@ class SdkSession:
                         self.backend._log("subagent speed (%s): %s" % (self.name, e), problem=True)
                     if held_model:
                         self._sub_std_requalify()   # the model pick sent above, as SdkBackend.set_model requalifies a live one
-                    if fast_moved and bool(self.fast_effective()) != self._fast_unlocked and not (
-                            self._switch_wanted or getattr(self, "_reconnect_when_idle", False)
-                            or getattr(self, "_reconnect", False)):
+                    moved_off = fast_moved and bool(self.fast_effective()) != self._fast_unlocked
+                    with self._lock:
+                        standing = bool(self._switch_wanted or getattr(self, "_reconnect_when_idle", False)
+                                        or getattr(self, "_reconnect", False))
+                        if moved_off and standing:
+                            self._switch_riders.add("fast mode")
+                    if moved_off and not standing:
                         # fast mode changed after _options decided this launch's flag (a toggle during its version read),
                         # and this CLI's flag disagrees: the change applies at a relaunch, once nothing would be cut
                         self.backend._log("fast mode (%s): changed while the launch was being prepared; the session "
@@ -12265,10 +12661,13 @@ class SdkSession:
                 # teardown is an EOF plus a grace, not a kill: _do_request_reconnect). The arm stays set; the
                 # drained turn's first frame counts that turn (_on_message) and its result fires this.
                 if self._reconnect_when_idle and not self.ended and getattr(self, "_untaken", None) is None:
-                    self._reconnect_when_idle = False
-                    self._reconnect = True     # inputs() holds the queue from here: the wake above cannot feed
-                    self._wake_set()           #   the head to THIS client — the new one takes it (see inputs)
-                    self._switch_wanted = self._switch_wait_said = ""   # a standing ask rides this relaunch
+                    with self._lock:
+                        self._reconnect_when_idle = False
+                        # inputs() holds the queue from here: the wake above cannot feed the head to THIS client; the new
+                        # one takes it (see inputs)
+                        self._reconnect = True
+                        self._switch_wanted = self._switch_wait_said = ""   # a standing ask rides this relaunch
+                    self._wake_set()
                 elif getattr(self, "_switch_wanted", ""):   # a standing ask (a pick, a Model switch): carried only if the
                     self._try_switch_reconnect()   #   session is quiet now — RE-CHECKED here, so the subagents and background
                     #                                tasks this turn launched hold it until the event that ends the last of them
@@ -12365,6 +12764,15 @@ class SdkSession:
         # and never block a bypass session on an ask. Other modes keep asking: when the CLI
         # consults under default/plan/acceptEdits, an ask IS the honest behavior for whatever its
         # own evaluation could not auto-decide.
+        # A BYPASS PICK WAITING FOR ITS RELAUNCH (_mode_pending, 2026-10-01) is the declared intent too, but the CLI asking
+        # does not run bypass (the pick waits for the relaunch that carries the flag), so its consult is honest, not a
+        # breach: auto-allowed with a plain log line (a plan's approval, routed above, still asks). The contract row below is
+        # filed whenever perm_mode reads bypass and no bypass pick waits. Before this, the pick set perm_mode at once, so the
+        # old CLI's consults filed that row.
+        if getattr(self, "_mode_pending", "") == "bypassPermissions":
+            self.backend._log("permission consult while bypass mode waits for its relaunch (%s, tool %s): this CLI does not "
+                              "run bypass yet; auto-allowed per the declared mode" % (self.name, tool_name))
+            return PermissionResultAllow(behavior="allow")
         if self.perm_mode == "bypassPermissions":
             self.backend._log("permission consult under bypassPermissions (%s, tool %s) — the CLI's "
                               "contract says this cannot happen; auto-allowed per the declared mode"
@@ -12571,58 +12979,98 @@ class SdkSession:
         try:
             crons = inp.get("session_crons") if isinstance(inp, dict) else None
             if isinstance(crons, list):
-                prev = read_reg_for_rmw(self.backend.state_dir, self.sid)
-                if prev is None:
-                    # the except below logs it — skip, never wipe the armed set (field-gutting class)
-                    raise OSError("reg unreadable — session_crons record skipped rather than wiping the armed set")
-                nw = time.time()
-                known = {c.get("id"): c for c in (prev.get("sessionCrons") or []) if isinstance(c, dict)}
-                # Adoption pool for the CALL-TIME records (_sched_tool_hook): a toolhook entry knows the
-                # EXACT dueEpoch but minted its own id; the payload entry carries the CLI's id but no
-                # date. Marry them by prompt + near-due so the reg ends with the CLI's id AND the exact
-                # date, and the toolhook duplicate drops.
-                toolhook = [c for c in (prev.get("sessionCrons") or [])
-                            if isinstance(c, dict) and c.get("src") == "toolhook"]
+                # the read, the merge and the write are one section under the registry lock the lost-wakeup sweep strips
+                # under (deliver_lost_wakeups): read apart, a one-shot it stripped and sent between them was written back,
+                # and the next sweep sent it again
+                moved = False
+                with self.backend._reg_lock:
+                    prev = read_reg_for_rmw(self.backend.state_dir, self.sid)
+                    if prev is None:
+                        # the except below logs it: skip, never wipe the armed set (field-gutting class)
+                        raise OSError("reg unreadable: session_crons record skipped rather than wiping the armed set")
+                    nw = time.time()
+                    known = {c.get("id"): c for c in (prev.get("sessionCrons") or []) if isinstance(c, dict)}
+                    # Adoption pool for the CALL-TIME records (_sched_tool_hook): a toolhook entry knows the
+                    # EXACT dueEpoch but minted its own id; the payload entry carries the CLI's id but no
+                    # date. Marry them by prompt + near-due so the reg ends with the CLI's id AND the exact
+                    # date, and the toolhook duplicate drops.
+                    toolhook = [c for c in (prev.get("sessionCrons") or [])
+                                if isinstance(c, dict) and c.get("src") == "toolhook"]
 
-                def adopt(c):
-                    p = str(c.get("prompt") or "")[:500]
-                    hint = wakeup_due_epoch(str(c.get("schedule") or c.get("cron") or ""),
-                                            float((known.get(str(c.get("id") or "")) or {}).get("armedAt") or nw))
-                    for t in toolhook:
-                        if t.get("prompt") == p and (hint is None or abs(float(t.get("dueEpoch") or 0) - hint) < 90):
-                            return t
-                    return None
+                    def match(c):
+                        p = str(c.get("prompt") or "")[:500]
+                        hint = wakeup_due_epoch(str(c.get("schedule") or c.get("cron") or ""),
+                                                float((known.get(str(c.get("id") or "")) or {}).get("armedAt") or nw))
+                        for t in toolhook:
+                            if t.get("prompt") == p and (hint is None or abs(float(t.get("dueEpoch") or 0) - hint) < 90):
+                                return t
+                        return None
 
-                slim = []
-                for c in crons:
-                    if not isinstance(c, dict):
-                        continue
-                    src = adopt(c) or known.get(str(c.get("id") or "")) or {}
-                    slim.append({"id": str(c.get("id") or ""), "cron": str(c.get("schedule") or c.get("cron") or ""),
-                                 "prompt": str(c.get("prompt") or "")[:500], "kind": str(c.get("kind") or ""),
-                                 "recurring": bool(c.get("recurring")),
-                                 # armedAt/dueEpoch/procGen ride each ENTRY from its first record (the
-                                 # call-time hook when it saw the arm; else first-seen here), so a
-                                 # one-shot's due moment never shifts when later turns rewrite the set
-                                 "armedAt": float(src.get("armedAt") or nw),
-                                 "dueEpoch": (float(src["dueEpoch"]) if src.get("dueEpoch") else None),
-                                 "procGen": str(src.get("procGen") or self.proc_gen)})
-                # MERGE, don't overwrite: a recycled process LOSES ScheduleWakeup one-shots (verified
-                # live 2026-08-28), so the fresh process's payload lacks them — and blindly writing the
-                # payload would erase the very record deliver_lost_wakeups needs. An absent one-shot
-                # survives while ITS PROCESS GENERATION is gone (the CLI that could have fired it no
-                # longer exists, so absence from a NEW process's payload is not evidence it fired) —
-                # ownership is exact, no due-time guessing. A one-shot recorded by the LIVE generation
-                # and absent from its own payload genuinely fired or was cancelled: it drops.
-                have = {c.get("id") for c in slim}
-                adopted = {id(t) for c in crons if isinstance(c, dict) for t in [adopt(c)] if t is not None}
-                for c in (prev.get("sessionCrons") or []):
-                    if (isinstance(c, dict) and not c.get("recurring") and c.get("id") not in have
-                            and id(c) not in adopted
-                            and str(c.get("procGen") or "") != self.proc_gen):
-                        slim.append(c)
-                if slim != prev.get("sessionCrons"):
-                    self.backend._update_reg(self.sid, sessionCrons=slim, sessionCronsAt=int(nw))
+                    # a call-time record two listed entries match (a one-shot cron with a pending wakeup's prompt and minute)
+                    # marries neither, since nothing here tells which of them is the wakeup
+                    hits = {}
+                    for c in crons:
+                        t = match(c) if isinstance(c, dict) else None
+                        if t is not None:
+                            hits[id(t)] = hits.get(id(t), 0) + 1
+
+                    def adopt(c):
+                        t = match(c)
+                        return t if t is not None and hits.get(id(t)) == 1 else None
+
+                    slim = []
+                    for c in crons:
+                        if not isinstance(c, dict):
+                            continue
+                        src = adopt(c) or known.get(str(c.get("id") or "")) or {}
+                        slim.append({"id": str(c.get("id") or ""), "cron": str(c.get("schedule") or c.get("cron") or ""),
+                                     "prompt": str(c.get("prompt") or "")[:500], "kind": str(c.get("kind") or ""),
+                                     "recurring": bool(c.get("recurring")),
+                                     # armedAt/dueEpoch ride each ENTRY from its first record (the
+                                     # call-time hook when it saw the arm; else first-seen here), so a
+                                     # one-shot's due moment never shifts when later turns rewrite the set
+                                     "armedAt": float(src.get("armedAt") or nw),
+                                     "dueEpoch": (float(src["dueEpoch"]) if src.get("dueEpoch") else None),
+                                     # …but procGen is the LIVE generation: the CLI that lists the entry in its own
+                                     # payload is the one that fires it (2026-10-01), so an entry an earlier session
+                                     # object recorded, listed by the CLI this object attached to, is not the kernel's
+                                     # to deliver beside that CLI
+                                     "procGen": self.proc_gen})
+                        if src.get("scheduledFor"):
+                            slim[-1]["scheduledFor"] = src["scheduledFor"]   # rides from the call-time record, as dueEpoch does
+                        # the generation that first recorded it rides along when it is not the live one, so the stamp,
+                        # the sweep and the next Stop hook tell an earlier session object's entry from this object's own
+                        # (earlier_objects_wakeup, _hand_one_shots_to)
+                        first = str(src.get("firstGen") or src.get("procGen") or self.proc_gen)
+                        if first != str(self.proc_gen):
+                            slim[-1]["firstGen"] = first
+                    # MERGE, don't overwrite: a recycled process LOSES ScheduleWakeup one-shots (verified
+                    # live 2026-08-28), so the fresh process's payload lacks them, and blindly writing the
+                    # payload would erase the very record deliver_lost_wakeups needs. An absent one-shot
+                    # survives while ITS PROCESS GENERATION is gone (absence from a NEW process's payload
+                    # is not evidence it fired): ownership is exact, no due-time guessing. A one-shot under a
+                    # LIVE generation (cli_generations) and absent from that CLI's payload drops: that CLI does
+                    # not carry it. One that an earlier session object first recorded, at the first turn end of
+                    # a CLI whose stamp could not move the armed timers (_stamp_failed), goes back to that
+                    # object's generation: no stamp handed it to that CLI.
+                    have = {c.get("id") for c in slim}
+                    adopted = {id(t) for c in crons if isinstance(c, dict) for t in [adopt(c)] if t is not None}
+                    live_gens = cli_generations(self)
+                    unheld = minted_generations(self) if getattr(self, "_stamp_failed", False) else None
+                    for c in (prev.get("sessionCrons") or []):
+                        if (isinstance(c, dict) and not c.get("recurring") and c.get("id") not in have
+                                and id(c) not in adopted):
+                            if str(c.get("procGen") or "") not in live_gens:
+                                slim.append(c)
+                            elif unheld is not None and earlier_objects_wakeup(c, unheld):
+                                slim.append(to_first_gen(c))
+                    if slim != prev.get("sessionCrons"):
+                        write_reg(self.backend.state_dir, self.sid,
+                                  dict(prev or {"sid": self.sid}, sessionCrons=slim, sessionCronsAt=int(nw)))
+                        moved = True
+                    # this CLI's turn end recorded the armed set, so the one-shots a rewind handed over are ruled on
+                    self._rewind_ids, self._rewind_owed, self._stamp_failed = set(), False, False
+                if moved:
                     self._cron_prompts_refresh()       # the armed set moved under the gate's cache
         except Exception as e:
             self.backend._log("stop hook (%s): session_crons record failed: %s" % (self.name, e))
@@ -12647,7 +13095,7 @@ class SdkSession:
                     tid = str(e.get("tid") or "")
                     if tid and tid in running:
                         kept.append(e)
-                    elif str(e.get("procGen") or "") != self.proc_gen:
+                    elif str(e.get("procGen") or "") != self._ledger_gen:
                         ended.append({"tid": e.get("tid"), "why": "processDied", "at": nw})
                     elif tid and e.get("tool") == "bash":
                         # only SHELLS are proven to ride the payload (probe 2026-08-28) — a monitor
@@ -12662,7 +13110,7 @@ class SdkSession:
                         kept.append({"tid": tid, "toolUseId": None, "tool": str(t.get("type") or "shell"),
                                      "desc": str(t.get("description") or "")[:300], "armedAt": nw,
                                      "deadlineEpoch": None, "persistent": False,
-                                     "procGen": self.proc_gen, "agentId": None, "src": "stopReconcile"})
+                                     "procGen": self._ledger_gen, "agentId": None, "src": "stopReconcile"})
                 lr0 = self._ledger_read()
                 if lr0 is not None and (kept != lr0[0] or ended != lr0[1]):
                     self._ledger_write(kept, ended)
@@ -12720,47 +13168,66 @@ class SdkSession:
             if not isinstance(targs, dict):
                 return {}
             nw = time.time()
-            prev = read_reg_for_rmw(self.backend.state_dir, self.sid)
-            if prev is None:
-                self.backend._log("sched tool hook (%s): reg unreadable — skipping this record "
-                                  "rather than wiping the armed set" % self.name)
-                return {}
-            cur = [c for c in (prev.get("sessionCrons") or []) if isinstance(c, dict)]
-            if tname == "ScheduleWakeup":
-                if targs.get("stop"):
-                    # a dynamic loop ending: drop this session's pending toolhook one-shots — the CLI
-                    # cancels its own pending wakeup on stop, and keeping ours would fabricate a wake
-                    cur = [c for c in cur if not (c.get("src") == "toolhook" and not c.get("recurring"))]
-                    self.backend._update_reg(self.sid, sessionCrons=cur, sessionCronsAt=int(nw))
-                    self._cron_prompts_refresh()
-                    return {}
-                delay = targs.get("delaySeconds")
-                prompt = str(targs.get("prompt") or "")[:500]
-                if not isinstance(delay, (int, float)) or delay <= 0 or not prompt:
-                    return {}
-                due = nw + max(60.0, min(3600.0, float(delay)))   # the runtime clamps to [60, 3600]
-                # ONE pending wakeup per session, matching ScheduleWakeup's own semantics (arming
-                # replaces the previous pending wakeup): drop earlier toolhook one-shots first
-                cur = [c for c in cur if not (c.get("src") == "toolhook" and not c.get("recurring"))]
-                cur.append({"id": "toolhook-%d" % int(due), "cron": "", "prompt": prompt,
+
+            def loop_wakeup(c):
+                # the session's ONE pending loop wakeup, which a stop ends and a new arm replaces, whichever generation
+                # recorded it (2026-10-01): the call-time record, or the entry the turn's Stop hook adopted from it under the
+                # CLI's id, which drops src and keeps dueEpoch.
+                # A dueEpoch comes only from a ScheduleWakeup call-time record. A wakeup whose
+                # call-time record was never seen carries none, so a stop or a new arm leaves it: a relaunch hands it to the
+                # fresh CLI when a generation of this session object first recorded it, and an earlier session object's
+                # stays the kernel's (_hand_one_shots_to)
+                return not c.get("recurring") and (c.get("src") == "toolhook" or bool(c.get("dueEpoch")))
+
+            def edit(cur):
+                # the armed set this call leaves, or None when the call records nothing
+                if tname == "ScheduleWakeup":
+                    if targs.get("stop"):
+                        # a dynamic loop ending: drop this session's pending wakeup. The CLI cancels its own
+                        # on stop, and keeping ours would fabricate a wake
+                        return [c for c in cur if not loop_wakeup(c)]
+                    delay = targs.get("delaySeconds")
+                    prompt = str(targs.get("prompt") or "")[:500]
+                    if not isinstance(delay, (int, float)) or delay <= 0 or not prompt:
+                        return None
+                    due = nw + max(60.0, min(3600.0, float(delay)))   # the runtime clamps to [60, 3600]
+                    wake = {"id": "toolhook-%d" % int(due), "cron": "", "prompt": prompt,
                             "kind": str(targs.get("reason") or "")[:120], "recurring": False,
-                            "armedAt": nw, "dueEpoch": due, "procGen": self.proc_gen, "src": "toolhook"})
-            elif tname == "CronCreate":
-                nm = str(targs.get("name") or targs.get("id") or ("cron-%d" % int(nw)))
-                cur = [c for c in cur if c.get("id") != nm]
-                cur.append({"id": nm, "cron": str(targs.get("schedule") or ""),
-                            "prompt": str(targs.get("prompt") or "")[:500], "kind": "cron",
-                            "recurring": True, "armedAt": nw, "dueEpoch": None,
-                            "procGen": self.proc_gen, "src": "toolhook"})
-            elif tname == "CronDelete":
-                nm = str(targs.get("name") or targs.get("id") or "")
-                if not nm:
-                    return {}
-                cur = [c for c in cur if c.get("id") != nm]
-            else:
-                return {}
-            self.backend._update_reg(self.sid, sessionCrons=cur, sessionCronsAt=int(nw))
-            self._cron_prompts_refresh()               # an arm or delete: the gate's cache follows it
+                            "armedAt": nw, "dueEpoch": due, "procGen": self.proc_gen, "src": "toolhook"}
+                    res = (inp or {}).get("tool_response")
+                    at = res.get("scheduledFor") if isinstance(res, dict) else None
+                    if isinstance(at, (int, float)) and not isinstance(at, bool) and math.isfinite(at) and at > 0:
+                        wake["scheduledFor"] = float(at) / 1000.0   # the minute the CLI set, from its tool result (epoch ms):
+                        #                                             what wakeup_earliest_fire reads, whenever this hook ran
+                    # ONE pending wakeup per session, matching ScheduleWakeup's own semantics (arming
+                    # replaces the previous pending wakeup): drop the earlier one first
+                    return [c for c in cur if not loop_wakeup(c)] + [wake]
+                if tname == "CronCreate":
+                    nm = str(targs.get("name") or targs.get("id") or ("cron-%d" % int(nw)))
+                    return [c for c in cur if c.get("id") != nm] + [
+                        {"id": nm, "cron": str(targs.get("schedule") or ""),
+                         "prompt": str(targs.get("prompt") or "")[:500], "kind": "cron",
+                         "recurring": True, "armedAt": nw, "dueEpoch": None,
+                         "procGen": self.proc_gen, "src": "toolhook"}]
+                if tname == "CronDelete":
+                    nm = str(targs.get("name") or targs.get("id") or "")
+                    return [c for c in cur if c.get("id") != nm] if nm else None
+                return None
+
+            # the read, the change and the write are one section under the registry lock the lost-wakeup sweep strips
+            # under (deliver_lost_wakeups): read apart, a one-shot it stripped and sent between them was written back,
+            # and the next sweep sent it again
+            with self.backend._reg_lock:
+                prev = read_reg_for_rmw(self.backend.state_dir, self.sid)
+                cur = None if prev is None else edit([c for c in (prev.get("sessionCrons") or []) if isinstance(c, dict)])
+                if cur is not None:
+                    write_reg(self.backend.state_dir, self.sid,
+                              dict(prev or {"sid": self.sid}, sessionCrons=cur, sessionCronsAt=int(nw)))
+            if prev is None:
+                self.backend._log("sched tool hook (%s): reg unreadable: skipping this record "
+                                  "rather than wiping the armed set" % self.name)
+            elif cur is not None:
+                self._cron_prompts_refresh()               # an arm or delete: the gate's cache follows it
         except Exception as e:
             self.backend._log("sched tool hook (%s): %s" % (self.name, e))
         return {}
@@ -13027,7 +13494,7 @@ class SdkSession:
             entry = {"tid": tid or None, "toolUseId": tuid,
                      "tool": tname.lower(), "desc": desc, "armedAt": int(nw),
                      "deadlineEpoch": deadline, "persistent": persistent,
-                     "procGen": self.proc_gen,
+                     "procGen": self._ledger_gen,
                      "agentId": str((inp or {}).get("agent_id") or "") or None, "src": "hook"}
             live = [e for e in live
                     if not (tid and str(e.get("tid")) == tid)
@@ -13658,7 +14125,11 @@ class SdkSession:
                 # …and what pushing it through now would end ("2 background tasks"): the Apply now row's sub-line and
                 # confirm (relaunch_cuts)
                 "relaunchCuts": self.relaunch_cuts(),
-                "mode": self.perm_mode, "ctx": self._ctx_pct(), "ctxTokens": self._ctx_tokens,
+                # the mode the running CLI confirmed (perm_mode; see _mode_pending for the windows after a kernel restart),
+                # and a bypass pick still waiting for the relaunch that carries the flag (2026-10-01): the mode badge's dots
+                # and its wait words (relaunchWaits) instead of an early Bypass
+                "mode": self.perm_mode, "modePending": bool(getattr(self, "_mode_pending", "")),
+                "ctx": self._ctx_pct(), "ctxTokens": self._ctx_tokens,
                 "ctxOver": self._ctx_over,   # the % above is CLAMPED — true when the CLI reported 100+
                 #   (tokens exceed the current model's window, e.g. right after a 1M→200k switch)
                 "summary": "",
@@ -17793,11 +18264,13 @@ class SdkBackend:
         # (a crash-heal resume mid-rewind-turn must not re-rewind). _rewind_armed releases the held edit
         # turn to THIS client (the inputs() gate).
         sess._rewind_armed = False
+        sess._launch_rewind = None
         disp = rewind_disposition(sess._rewind_to, sess._rewind_leaf,
                                   last_record_uuid(transcript_path(sess.cwd, sess.resume_sid or sess.sid)))
         if disp == "apply":
             kw.setdefault("extra_args", {})["resume-session-at"] = sess._rewind_to   # merge-safe beside the fork's args
             sess._rewind_armed = True
+            sess._launch_rewind = (sess._rewind_to, sess._rewind_leaf)   # the pair this launch applies (_fresh_cli_stamp)
         elif disp == "spent":
             sess._rewind_to = sess._rewind_leaf = ""
             sess._rewind_bare = False
@@ -20023,14 +20496,17 @@ class SdkBackend:
         return 0
 
     def session_meta(self, sid: str) -> dict:
-        """{'mode','fast'} from the live snapshot ({} unknown) — the comments frame's statusline
-        parity: the popover shows the chat statusline's FULL element set (the user 2026-08-25)."""
+        """{'mode','fast','modePending','relaunchWaits','modelFallback'} from the live snapshot ({} unknown), for the comments
+        frame's statusline parity: the popover shows the chat statusline's FULL element set (the user 2026-08-25)."""
         with self._lock:
             s = self.sessions.get(sid)
         if s and s.thread.is_alive():
             try:
                 snap = s.snapshot()
                 return {"mode": str(snap.get("mode") or ""), "fast": str(snap.get("fast") or ""),
+                        # a bypass pick waiting for its relaunch (2026-10-01): the popover's mode badge wears the chat's dots
+                        # and its picker's Bypass row says what the relaunch waits for
+                        "modePending": bool(snap.get("modePending")), "relaunchWaits": str(snap.get("relaunchWaits") or ""),
                         "modelFallback": snap.get("modelFallback")}   # the popover's picker wears the requested-model mark too (2026-09-17)
             except Exception:
                 return {}
@@ -20242,8 +20718,8 @@ class SdkBackend:
         over every session); any other string is the reason, verbatim for the user.
 
         A pick waits while a standing relaunch ask is up (_switch_wanted, the Model switch's asks included, since any
-        relaunch carries them), while a pending mark is (effortPending, authPending, the fast opt-in), or, for a
-        session with no live object, while the registry records a waiting pick (relaunchWait; its connect is the
+        relaunch carries them), while a pending mark is (effortPending, authPending, the fast opt-in, a bypass pick), or,
+        for a session with no live object, while the registry records a waiting pick (relaunchWait; its connect is the
         relaunch, and carries it)."""
         reg = read_reg(self.state_dir, sid)
         if not reg:
@@ -20251,7 +20727,7 @@ class SdkBackend:
         with self._lock:
             s = self.sessions.get(sid)
         live = s is not None and any(getattr(s, a, "") for a in ("_switch_wanted", "_effort_pending", "_auth_pending",
-                                                                  "_fast_pending"))
+                                                                  "_fast_pending", "_mode_pending"))
         wait = reg.get("relaunchWait") if isinstance(reg.get("relaunchWait"), dict) else {}
         if not live and not (s is None and wait.get("picks")):
             return NOTHING_TO_APPLY
@@ -20729,7 +21205,11 @@ class SdkBackend:
             th = getattr(s, "thread", None)
             if th is not None and not th.is_alive():
                 continue
-            if getattr(s, "_switch_wanted", ""):
+            with s._lock:
+                standing = bool(getattr(s, "_switch_wanted", ""))
+                if standing:
+                    s._switch_riders.add("retry upgrade")   # set aside for the ask standing
+            if standing:
                 continue                       # an ask stands (the session has not been quiet since): no attempt on top of it
             arm["attempts"] = arm.get("attempts", 0) + 1
             arm["next"] = now + RETRY_UPGRADE_S   # provisional; the carried reconnect re-stamps it (_try_switch_reconnect)
@@ -20769,7 +21249,12 @@ class SdkBackend:
                 want = s.fast_effective()
                 have = bool(getattr(s, "_fast_unlocked", False))
                 guarded = want and not have and s._opt_in_cannot_take()   # the flag rode its launch and did not take
-                if want != have and not guarded and not (getattr(s, "_switch_wanted", "") or getattr(s, "_reconnect_when_idle", False) or getattr(s, "_reconnect", False)):
+                with s._lock:
+                    standing = bool(getattr(s, "_switch_wanted", "") or getattr(s, "_reconnect_when_idle", False)
+                                    or getattr(s, "_reconnect", False))
+                    if want != have and not guarded and standing:
+                        s._switch_riders.add("always fast")   # set aside for the ask standing or the relaunch armed
+                if want != have and not guarded and not standing:
                     self._log("always fast (%s): the switch %s — reconnecting %s the opt-in%s"
                               % (s.name, "wants the flag" if want else "went off", "with" if want else "without",
                                  "" if s.quiet() else " once the session is quiet"))
@@ -20885,21 +21370,111 @@ class SdkBackend:
             write_sdk_default(self.state_dir, mode=mode)   # remember as the seed for the NEXT new session, like model/effort (the user 2026-06-27)
         s = self.sessions.get(sid)
         if s:
-            prev = s.perm_mode      # the last CONFIRMED mode — the revert target if the CLI refuses (T139)
-            s.mode = mode
-            s.perm_mode = mode      # snapshot reflects it immediately (clears the picker's meta-pending)
-            if mode == "bypassPermissions" and prev != "bypassPermissions":
-                # the CLI REFUSES a live switch INTO bypass unless the process was LAUNCHED with
-                # --dangerously-skip-permissions (probed on CLI 2.1.221, T139: 'Cannot set permission
-                # mode to bypassPermissions because the session was not launched with…'). The honest
-                # apply is the RECONNECT (effort's pattern): the relaunch carries
-                # permission_mode=bypassPermissions, which the SDK maps to the launch flag — resume
-                # continues the conversation and the next init confirms perm_mode.
+            # One hold of the session lock reads the confirmed mode and writes the mode, the confirmed mode and the
+            # pending-bypass mark together. The reconcile of waiting picks and a failed switch's revert read and write
+            # them under the same lock. The hold makes no call that blocks or takes a lock: the record write, the
+            # relaunch ask, the unwait and the live switch all run after it.
+            with s._lock:
+                prev = s.perm_mode      # the last CONFIRMED mode: the revert target if the CLI refuses (T139)
+                s.mode = mode
+                waits = mode == "bypassPermissions" and (prev != "bypassPermissions"
+                                                         or bool(getattr(s, "_mode_pending", "")))
+                if waits:
+                    # the CLI REFUSES a live switch INTO bypass unless the process was LAUNCHED with
+                    # --dangerously-skip-permissions (probed on CLI 2.1.221, T139: 'Cannot set permission
+                    # mode to bypassPermissions because the session was not launched with…'). The honest
+                    # apply is the RECONNECT (effort's pattern): the relaunch carries
+                    # permission_mode=bypassPermissions, which the SDK maps to the launch flag; resume
+                    # continues the conversation and the next init confirms perm_mode.
+                    # That relaunch waits for a quiet session (request_reconnect), so perm_mode stays what the running CLI
+                    # confirmed and the pick waits as a mark of its own (2026-10-01): the badge's dots, never an early Bypass
+                    # that the old CLI's next init then flipped back, and the consult guard's word (_can_use_tool). The ask is
+                    # this pick's own when no other stood, so changing back may withdraw it.
+                    prior = getattr(s, "_switch_wanted", "")
+                    # an ask already carried whose relaunch is not armed yet (_switch_ask_pending) may be another pick's: a busy
+                    # re-check hands it back only when no ask stands, so this one would stand for it. A carried ask that
+                    # was this pick's alone keeps the word, as a standing one does: the busy re-check then applies the
+                    # withdrawal's rule to the ask it hands back (SdkSession._re_raise_switch_ask)
+                    carried = getattr(s, "_switch_ask_pending", "")
+                    own = getattr(s, "_mode_ask_alone", False)
+                    s._mode_ask_alone = ((not carried or (carried == "bypass mode" and own))
+                                         and (not prior or (prior == "bypass mode" and own)))
+                    s._mode_pending = mode
+                    marked = False
+                else:
+                    s.perm_mode = mode      # snapshot reflects it immediately (clears the picker's meta-pending)
+                    marked = bool(getattr(s, "_mode_pending", ""))
+                    s._mode_pending = ""    # the pending-bypass mark comes down with the mode write
+            if waits:
                 self._note_pick_waits(s, "mode", "bypass mode")
                 s.request_reconnect(why="bypass mode")
             else:
+                if marked:
+                    self._withdraw_mode_pick(s, mode)   # another mode picked while the bypass pick waited: the unwait decides
                 s.set_mode_live(mode, prev=prev)
         return True
+
+    def _withdraw_mode_pick(self, s, mode) -> None:
+        """The unwait: a bypass pick changed back while its relaunch still waits (2026-10-01). set_mode has taken the mark
+        down, in the hold where it writes the mode; here its entry leaves the registry's waiting record (_drop_pick_wait, which
+        leaves it while the mark is up again), and a record that will not read files a problem, since _drop_pick_wait returns
+        on one without a word.
+
+        The unwait withdraws a relaunch only when, with the mode pick undone, the launch it would make differs in nothing from
+        what the serving CLI's launch record holds, and the unwait never drops a want that was set aside for the relaunch it
+        withdraws. So the standing relaunch ask goes, with its place in line for a launch slot, only when all of these hold:
+        it is marked the pick's alone (_mode_ask_alone), no other pick's mark is up, and it is still named "bypass mode", a
+        pick's reason (PICK_RELAUNCH_WHYS); no relaunch is on its way (_switch_ask_pending, _reconnect_when_idle, or
+        _reconnect unless it is a reattach to the same CLI that no switch armed, _reattach_keeps_cli with no
+        _reconnect_switch_why: a reattach launches nothing, and its connect's reconcile asks again for each pick its CLI
+        lacks); the serving CLI's launch record is known (_cli_launch), so a CLI no record vouches for keeps it; every key
+        of a launch now (launch_values), with the mode set_mode was called with (`mode`) as its mode, equals that record's
+        (launch_value); and no reason other than a pick was set aside for it (_switch_riders). set_mode marks the ask the
+        pick's alone when no ask stood and none was carried and not yet armed, other than its own marked its alone; the
+        reconnect's reconcile marks it when the mode pick is the only one left and no ask stood, whether or not one was
+        carried.
+
+        The launch now is read first. A mode another set_mode writes after it does not decide the relaunch: a mode other than
+        bypassPermissions is switched live, and a bypass pick raises the pending-bypass mark. Then one hold of the session lock
+        reads the pick's word, the ask, what is on its way and the reasons set aside, and clears the ask; every path that sets
+        the ask or a reason aside does so under the same lock, and the serving CLI's record is checked to be the one the launch
+        was compared with. When the pending-bypass mark is up in that hold, a bypass pick waits again, and the ask and the
+        pick's word are that pick's: nothing is withdrawn. While a relaunch is on its way the hold leaves the pick's word as it
+        is, for the step that may stand that relaunch down: the waker's last look before its teardown
+        (SdkSession._switch_teardown_check) and the busy re-check that hands a carried ask back (SdkSession.
+        _re_raise_switch_ask) each apply the same rule (SdkSession._mode_relaunch_withdrawn). The place in line goes after
+        the hold; an ask raised since then asks again on the session's loop, so its own place in line stands."""
+        if read_reg_for_rmw(self.state_dir, s.sid) is None:
+            self._log("waiting picks (%s): could not drop the mode pick: the record will not read"
+                      % getattr(s, "name", s.sid[:8]), problem=True)
+        else:
+            self._drop_pick_wait(s, "mode")
+        have = s._cli_launch
+        now = dict(s.launch_values(), mode=mode)
+        same = isinstance(have, dict) and all(launch_value(have, k) == v for k, v in now.items())
+        with s._lock:
+            withdrew = False
+            if not getattr(s, "_mode_pending", ""):
+                alone = getattr(s, "_mode_ask_alone", False)
+                others = any(getattr(s, a, "") for a in ("_effort_pending", "_auth_pending", "_fast_pending"))   # their relaunch too
+                on_way = bool(s._switch_ask_pending or s._reconnect_when_idle
+                              or (s._reconnect and (s._reconnect_switch_why or not getattr(s, "_reattach_keeps_cli", False))))
+                if not on_way:
+                    s._mode_ask_alone = False
+                withdrew = (alone and not others and getattr(s, "_switch_wanted", "") == "bypass mode"
+                            and s._switch_wanted in PICK_RELAUNCH_WHYS and not on_way
+                            and same and s._cli_launch is have
+                            and not s._switch_riders)
+                if withdrew:
+                    s._switch_wanted = s._switch_wait_said = ""
+        if withdrew:
+            slots = s._launch_slots() if hasattr(s, "_launch_slots") else None
+            if slots is not None:
+                slots.unwait(s)
+                schedule = getattr(s, "_schedule_on_loop", None)
+                if getattr(s, "_switch_wanted", "") and schedule is not None:
+                    schedule(s._try_switch_reconnect)   # the ask raised since the hold takes its place in line again
+            self._log("bypass mode (%s): changed back before it applied; the relaunch is withdrawn" % s.name)
 
     def stop_task(self, sid: str, task_id: str) -> bool:
         s = self.sessions.get(sid)
@@ -20925,10 +21500,17 @@ class SdkBackend:
         """Persist that `pick` (PICK_LAUNCH_KEYS) waits for its relaunch, with the values it asks for: the reg's
         `relaunchWait` {why, t, picks: {pick: {launch key: value}}}. A session host keeps the CLI across a kernel restart,
         and the kernel that attaches to it reads this to tell a pick the CLI never got from one it did
-        (SdkSession._reconcile_waiting_picks, which also drops each entry the moment a launch carries it). Locked RMW."""
+        (SdkSession._reconcile_waiting_picks, which also drops each entry the moment a launch carries it). Locked RMW.
+
+        The mode entry is written only while the pending-bypass mark is up, read as a plain attribute in the registry lock's
+        hold (no session lock is taken under the registry lock): set_mode raises and lowers the mark in its own hold,
+        _drop_pick_wait leaves the entry while the mark is up, and the reconcile of waiting picks writes the entry again
+        after its own record write while the mark is up (SdkSession._reconcile_waiting_picks)."""
         try:
             vals = s.launch_values()
             with self._reg_lock:
+                if pick == "mode" and not getattr(s, "_mode_pending", ""):
+                    return
                 reg = read_reg(self.state_dir, s.sid)
                 if reg is None:
                     return
@@ -20940,6 +21522,19 @@ class SdkBackend:
         except Exception as e:
             self._log("waiting picks (%s): could not record the %s pick: %s" % (getattr(s, "name", s.sid[:8]), pick, e),
                       problem=True)
+
+    def _revert_reg_mode(self, sid: str, refused: str, prev: str) -> bool:
+        """A refused live mode switch's record write (SdkSession._do_set_mode): the registry's mode goes back to `prev` only
+        while it still holds the refused pick, read and written in one hold of the registry lock. set_mode records a mode
+        before it takes the session lock, so a mode other than the refused pick recorded since it keeps its record. True
+        when it wrote."""
+        with self._reg_lock:
+            reg = read_reg(self.state_dir, sid)
+            if reg is None or reg.get("mode") != refused:
+                return False
+            reg["mode"] = prev
+            write_reg(self.state_dir, sid, reg)
+            return True
 
     def set_effort(self, sid: str, value: str) -> bool:
         """Change the reasoning effort. effort is a connect-time CLI flag (--effort) with no SDK runtime
@@ -21450,9 +22045,12 @@ class SdkBackend:
 
     def _drop_pick_wait(self, s, pick: str, **fields) -> None:
         """Take `pick` out of the reg's relaunchWait (the record a kernel attaching to a surviving CLI reads), dropping
-        the record when nothing else waits, with `fields` in the same locked write."""
+        the record when nothing else waits, with `fields` in the same locked write. The mode entry stays while the
+        pending-bypass mark is up, read as a plain attribute in the registry lock's hold (_note_pick_waits)."""
         try:
             with self._reg_lock:
+                if pick == "mode" and getattr(s, "_mode_pending", ""):
+                    return
                 reg = read_reg(self.state_dir, s.sid)
                 if reg is None:
                     return
@@ -21866,41 +22464,45 @@ class SdkBackend:
         OWNERSHIP IS BY PROCESS GENERATION, not by guessing from timing (review of #769, 2026-08-28:
         the first cut used a 90s grace + an inflight check, and both were blind to turns the CLI's own
         scheduler starts — a genuinely-fired wakeup whose turn outlasted the grace got delivered a
-        second time, mid-turn). Every recorded entry carries procGen, the stamp of the CLI process
-        that armed it. That generation still live → the CLI itself will fire it at due; the kernel
-        NEVER touches it, however late the record looks. That generation gone → no process can ever
-        fire it; the kernel owns it outright and delivers at due (a small 5s grace covers clock skew
+        second time, mid-turn). Every recorded entry carries procGen, the generation of the CLI that
+        is to fire it: the CLI that armed it, the CLI whose Stop hook last listed it, or the fresh CLI
+        it was handed to (_hand_one_shots_to). That generation still live → the record is the live
+        CLI's: that CLI fires it or its Stop hook rules on it, and the kernel NEVER touches it, however
+        late the record looks, except, while the live CLI's stamp could not move the armed timers, one
+        that an earlier session object first recorded (lost_due_shots). That generation
+        gone → the kernel owns it outright and delivers at due (a small 5s grace covers clock skew
         between the stamp and this sweep, not any behavioral window)."""
         now = time.time()
         fired = 0
-        for reg in list_regs(self.state_dir):
-            if not reg.get("alive") or reg.get("threadOf"):
+        for row in list_regs(self.state_dir):
+            if not row.get("alive") or row.get("threadOf"):
                 continue
-            crons = reg.get("sessionCrons") or []
-            shots = [c for c in crons if isinstance(c, dict) and not c.get("recurring")]
-            if not shots:
-                continue
-            sid = reg["sid"]
+            if not lost_due_shots(row, set(), now):
+                continue                          # no one-shot past due by the listing's row: no read and no lock
+            sid = row["sid"]
             with self._lock:
                 s = self.sessions.get(sid)
-                live_gen = s.proc_gen if (s and s.thread.is_alive()) else None
-            due_shots = []
-            for c in shots:
-                if live_gen is not None and str(c.get("procGen") or "") == live_gen:
-                    continue                      # its arming process is alive — the CLI fires it, not us
-                due = c.get("dueEpoch")
-                if not due:                       # legacy entry without the exact date → reconstruct
-                    due = wakeup_due_epoch(c.get("cron"),
-                                           float(c.get("armedAt") or reg.get("sessionCronsAt") or (now - 3600)))
-                if due is not None and now >= float(due) + 5:
-                    due_shots.append(c)
-            if not due_shots:
-                continue
-            keep = [c for c in crons if c not in due_shots]
-            try:                                  # strip FIRST — a send failure must not re-fire forever;
-                self._update_reg(sid, sessionCrons=keep)   # the loss is logged loudly below instead
-            except Exception as e:
-                self._log("lost-wakeup (%s): reg strip failed, not delivering: %s" % (reg.get("name") or sid[:13], e))
+            # the decision and the strip read the reg and the live generation together, under the registry lock a fresh
+            # CLI's stamp holds while it moves the armed timers and takes its new generation (_hand_one_shots_to), so a
+            # sweep cannot straddle the stamp; the row above only picks the regs to read
+            due_shots, err = [], None
+            with self._reg_lock:
+                reg = read_reg_for_rmw(self.state_dir, sid)
+                live_gens = cli_generations(s) if (s and s.thread.is_alive()) else set()
+                unheld = minted_generations(s) if getattr(s, "_stamp_failed", False) else None
+                if reg is None:
+                    err = "reg unreadable"
+                elif reg.get("alive") and not reg.get("threadOf"):
+                    due_shots = lost_due_shots(reg, live_gens, now, unheld)
+                    if due_shots:
+                        crons = reg.get("sessionCrons") or []
+                        reg["sessionCrons"] = [c for c in crons if c not in due_shots]
+                        try:                      # strip FIRST: a send failure must not re-fire forever;
+                            write_reg(self.state_dir, sid, reg)   # the loss is logged loudly below instead
+                        except Exception as e:
+                            err = e
+            if err is not None:
+                self._log("lost-wakeup (%s): reg strip failed, not delivering: %s" % (row.get("name") or sid[:13], err))
                 continue
             for c in due_shots:
                 ok = False

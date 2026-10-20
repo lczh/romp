@@ -124,6 +124,36 @@ test("with the chat's hooks a click reaches the picker with the kind, the badge 
   assert.equal(typeof btns[0]._tipText, "string", "with a picker the badge wears its tip");
 });
 
+test("a waiting bypass pick: the mode badge wears dots for the server's modePending, never for the click heuristic alone, and its words say what it waits for", () => {
+  // A bypass pick relaunches the CLI with the flag and the relaunch waits for a quiet session (2026-10-01). Before, the badge read
+  // Bypass at once and flipped back at the old CLI's next turn with no mark; now `mode` stays the mode the running CLI confirmed
+  // (the backend's _mode_pending names the windows after a kernel restart) and the pick is a mark.
+  const meta = mk("span");
+  const st: any = { mode: "acceptEdits", model: "Opus 5", effort: "high", modePending: true, relaunchWaits: "2 background tasks" };
+  SC.syncMetaControls(meta, st, null, {});
+  let mode = meta.querySelectorAll(".meta-btn")[0];
+  assert.equal(mode.dataset.kind, "mode");
+  assert.ok(mode.querySelector(".meta-label .meta-dots"), "the switching dots in the mode badge, not an early Bypass");
+  assert.equal(mode._cls.has("meta-pending"), true);
+  assert.equal(SC.modeWaitText(st), "applies after 2 background tasks", "the Billing sub-line's words, from the kernel's relaunchWaits");
+  assert.equal(SC.modeWaitText({ ...st, relaunchWaits: "" }), "applying…", "nothing holds it: the relaunch is on its way");
+  assert.equal(SC.modeWaitText({ ...st, modePending: false }), "", "no pick waits: no words");
+  // the pick and a change back each move the word the click heuristic compares, so neither leaves the badge pending
+  assert.equal(SC.metaCurrent("mode", st), "bypassPermissions");
+  assert.equal(SC.metaCurrent("mode", { ...st, modePending: false }), "acceptEdits");
+  // the relaunch lands: the badge reads the mode the new CLI runs
+  SC.syncMetaControls(meta, { ...st, mode: "bypassPermissions", modePending: false, relaunchWaits: "" }, null, {});
+  mode = meta.querySelectorAll(".meta-btn")[0];
+  assert.equal(mode.querySelector(".meta-label").textContent, SC.prettyMode("bypassPermissions"));
+  assert.equal(mode._cls.has("meta-pending"), false);
+  // a pick of a mode that switches live wears the heuristic's dim for its sub-second, never the dots
+  SC.syncMetaControls(meta, { mode: "acceptEdits", model: "Opus 5", effort: "high" }, null, { pending: (kind: string) => kind === "mode" });
+  mode = meta.querySelectorAll(".meta-btn")[0];
+  assert.equal(mode._cls.has("meta-pending"), true);
+  assert.equal(mode.querySelector(".meta-dots"), null);
+  assert.equal(mode.querySelector(".meta-label").textContent, SC.prettyMode("acceptEdits"));
+});
+
 test("a Codex session with no effort picked yet gets the effort badge, reading the bare kind until a level lands; an SDK session without one gets none", () => {
   // A Codex session is born with no effort of its own (the registry holds "" and the engine applies its default), and the
   // badge appeared only once a level was set, so the menu that would set one had no button to open it (2026-09-16).

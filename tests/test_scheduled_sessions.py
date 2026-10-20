@@ -318,6 +318,82 @@ class LostWakeupDelivery(_Backend):
         self.assertAlmostEqual(rec[0]["dueEpoch"], time.time() + 300, delta=30,
                                msg="…wearing the toolhook's exact due date")
 
+    def test_a_loop_stop_ends_its_wakeup_at_the_call_so_a_restart_before_the_turn_ends_sends_nothing(self):
+        # the stop drops the loop's wakeup at the call, the entry the Stop hook adopted under the CLI's id included
+        # (2026-10-01): when the kernel restarts before that turn ends (a session host keeps the CLI), the turn's Stop hook
+        # reaches a new generation, which keeps an absent one-shot as lost, so an entry left for that hook to drop would be
+        # delivered as a stopped loop's next round
+        with open(os.path.join(self.d, "session-hosts"), "w") as f:
+            f.write("off")                        # this root is outside the runner's belt (CLAUDE.md, 2026-09-11)
+        self._reg()
+        s = sb.SdkSession(self.be, sb.read_reg(self.d, SID))
+        asyncio.run(s._sched_tool_hook({"tool_name": "ScheduleWakeup",
+                                        "tool_input": {"delaySeconds": 300, "prompt": "the tick"}}, None, None))
+        due = time.localtime(time.time() + 300)
+        asyncio.run(s._stop_hook({"session_crons": [{"id": "cli-42", "schedule": "%d %d * * *" % (due[4], due[3]),
+                                                     "prompt": "the tick", "recurring": False}]}, None, None))
+        rec = (sb.read_reg(self.d, SID) or {}).get("sessionCrons")
+        self.assertEqual([(c["id"], c.get("src"), c["procGen"]) for c in rec], [("cli-42", None, s.proc_gen)],
+                         "the premise: adopted under the CLI's id, the live generation's")
+        asyncio.run(s._sched_tool_hook({"tool_name": "ScheduleWakeup", "tool_input": {"stop": True}}, None, None))
+        self.assertEqual((sb.read_reg(self.d, SID) or {}).get("sessionCrons"), [], "ended at the call")
+        fresh = sb.SdkSession(self.be, sb.read_reg(self.d, SID))   # the restart: a new generation takes the turn's end
+        asyncio.run(fresh._stop_hook({"session_crons": []}, None, None))
+        reg = sb.read_reg(self.d, SID)
+        sb.write_reg(self.d, SID, dict(reg, sessionCrons=[dict(c, dueEpoch=time.time() - 30)
+                                                          for c in reg.get("sessionCrons") or []]))
+        sent = []
+        self.be.send = lambda sid, text: sent.append(text) or True
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self.assertEqual(sent, [], "no round for a loop that was stopped")
+
+
+class ANewWakeupReplacesOnlyTheLoopsWakeup(_Backend):
+    """Arming a ScheduleWakeup drops the session's pending wakeup and no cron."""
+
+    def _sess(self):
+        with open(os.path.join(self.d, "session-hosts"), "w") as f:
+            f.write("off")                        # this root is outside the runner's belt (CLAUDE.md, 2026-09-11)
+        self._reg()
+        return sb.SdkSession(self.be, sb.read_reg(self.d, SID))
+
+    def _ids(self):
+        return sorted(c["id"] for c in (sb.read_reg(self.d, SID) or {}).get("sessionCrons") or [])
+
+    def _cron_create(self, s):
+        asyncio.run(s._sched_tool_hook({"tool_name": "CronCreate",
+                                        "tool_input": {"name": "notes-api-hourly", "schedule": "0 * * * *",
+                                                       "prompt": "check the notes-api queue"}}, "tu-cron", None))
+
+    def _wakeup(self, s):
+        asyncio.run(s._sched_tool_hook({"tool_name": "ScheduleWakeup",
+                                        "tool_input": {"delaySeconds": 300, "prompt": "the next notes-api round"}},
+                                       "tu-wake", None))
+
+    def test_a_new_wakeup_keeps_a_listed_one_shot_cron_and_a_listed_recurring_cron(self):
+        s = self._sess()
+        self._cron_create(s)
+        cron = {"id": "job-1", "schedule": "30 14 * * *", "prompt": "post the notes-api status", "recurring": False}
+        hourly = {"id": "notes-api-hourly", "schedule": "0 * * * *", "prompt": "check the notes-api queue", "recurring": True}
+        asyncio.run(s._stop_hook({"session_crons": [cron, hourly]}, None, None))
+        rec = {c["id"]: c for c in sb.read_reg(self.d, SID)["sessionCrons"]}
+        self.assertEqual(sorted(rec), ["job-1", "notes-api-hourly"], "the premise: both on record")
+        self.assertFalse(rec["job-1"].get("dueEpoch") or rec["job-1"].get("src"), "the premise: a one-shot the payload listed")
+        self._wakeup(s)
+        ids = self._ids()
+        self.assertIn("job-1", ids)
+        self.assertIn("notes-api-hourly", ids)
+        self.assertEqual(len([i for i in ids if i.startswith("toolhook-")]), 1, "the new wakeup")
+
+    def test_a_new_wakeup_keeps_a_cron_create_record_from_the_same_turn(self):
+        s = self._sess()
+        self._cron_create(s)
+        rec = {c["id"]: c for c in sb.read_reg(self.d, SID)["sessionCrons"]}
+        self.assertEqual((rec["notes-api-hourly"].get("src"), rec["notes-api-hourly"].get("recurring")), ("toolhook", True),
+                         "the premise: the call-time record, not yet listed by a Stop hook")
+        self._wakeup(s)
+        self.assertIn("notes-api-hourly", self._ids())
+
 
 class ProducerRunsTheSweep(unittest.TestCase):
     def test_the_producer_calls_ensure_scheduled(self):

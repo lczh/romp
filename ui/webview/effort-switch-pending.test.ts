@@ -15,7 +15,7 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 test("the effort badge shows switching-dots while a reconnect is pending, like the model badge", () => {
   assert.match(RENDER, /effortPending\?: boolean;/);   // status carries it
   assert.match(MODULE, /\(kind === "effort" && !!st\.effortPending\)/);          // effort feeds `pending`
-  assert.match(MODULE, /const showDots = pending && \(kind === "model" \|\| kind === "effort" \|\| kind === "fast"\);/);   // dots for both reconnect-style badges (billing moved to the tab menu, 2026-08-09)
+  assert.match(MODULE, /const showDots = pending && \(kind === "model" \|\| kind === "effort" \|\| kind === "fast"[^;]*\);/);   // dots for the reconnect-style badges (billing moved to the tab menu, 2026-08-09; the mode badge's clause is status-controls.test.ts's)
 });
 
 test("a live reconnect has its own ChatEvent kind, dispatched to renderReconnecting", () => {

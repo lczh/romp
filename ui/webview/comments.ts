@@ -42,6 +42,8 @@ export type CommentThread = {
   unreachable?: boolean | null;   // a broken thread (missing transcript / lost cut): the kernel owes nothing and says so (T237)
   sinceEpoch?: number;        // ms epoch the thread's current state began — the popover chip's timer
   mode?: string;              // the thread's permission mode — the popover statusline's Auto badge
+  modePending?: boolean;      // a bypass pick waiting for its relaunch (2026-10-01): the popover's mode badge wears dots
+  relaunchWaits?: string;     //   …and what that relaunch waits for, said in the popover picker's Bypass row
   fast?: string;              // fast-mode state ("on"/"off"/"cooldown"; "" = unknown → no badge)
   modelFallback?: { pick: string; pickValue: string; live: string; cause: string; category?: string;
                     retry: { on: boolean; everyMin: number; armed: boolean; nextIn: number | null; attempts: number } } | null;   // the requested-model mark (render.ts ModelFallback)
