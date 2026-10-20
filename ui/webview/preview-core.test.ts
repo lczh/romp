@@ -38,7 +38,7 @@ test("preview.ts: kind classification, kernel /file URL, and hide-but-heal unver
 
 test("preview.ts: lightbox is a singleton overlay — img or native-viewer iframe, Esc/backdrop closes", () => {
   assert.match(PREVIEW, /document\.getElementById\("romp-lightbox"\)\?\.remove\(\);/, "reopening replaces, never stacks");
-  assert.match(PREVIEW, /frame\.src = fileUrl\(path, sid\);/, "pdf → iframe → the browser's own viewer");
+  assert.match(PREVIEW, /frame\.src = fileUrl\(src\.path, src\.sid\);/, "pdf → iframe → the browser's own viewer (a file source only: a URL picture is never a PDF)");
   assert.match(PREVIEW, /if \(ev\.key === "Escape"\)/);
   assert.match(PREVIEW, /wrap\.onclick = \(ev\) => \{ if \(ev\.target === wrap\) dismiss\(\); \};/, "backdrop closes; content clicks don't");
 });
@@ -47,7 +47,7 @@ test("chat: a mentioned image/PDF grows a FULL render at its mention, deduped an
   // (the user 2026-07-20: full renders replaced the 2026-07-08 thumbnails in the chat; the user
   // 2026-08-15: figures moved from a tail strip to the mentioning block —
   // chat-inline-preview.test.ts pins the placement shape)
-  assert.match(RENDER, /import \{ previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, mdImgPostPass, setLightboxNav, type LightboxNavEntry \} from "\.\/preview";/);
+  assert.match(RENDER, /import \{ previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, installMdImgZoom, mdImgPostPass, setLightboxNav, type LightboxNavEntry \} from "\.\/preview";/);
   assert.match(RENDER, /if \(previewKind\(open\) && !previewable\.includes\(open\) && !\(skipThumbs && skipThumbs\.includes\(open\)\)\) \{/, "collected while linkifying — same detection, no second regex pass; an in-bubble image never re-renders");
   assert.match(RENDER, /if \(previewable\.length\) \{/, "both surfaces now — VS Code images ride the host data-URL flow");
   assert.match(RENDER, /for \(const p of previewable\) renderFig\(p\);/,
@@ -68,9 +68,12 @@ test("the lightbox offers a download beside the close, saving the same bytes it 
   // can't swap the image between viewing and saving — dressed exactly like the ✕ beside it.
   const at = PREVIEW.indexOf("export function openLightbox");
   const body = PREVIEW.slice(at, PREVIEW.indexOf("\n}", at));
-  assert.ok(body.indexOf('dl.href = fileUrl(path, sid) + (pin ? "&pin=" + encodeURIComponent(pin) : "")') > 0,
+  // the shown picture and the saved one are the SAME url, one helper for both (lightboxSrc), pin included
+  assert.ok(PREVIEW.indexOf('return "url" in e ? e.url : fileUrl(e.path, e.sid) + (e.pin ? "&pin=" + encodeURIComponent(e.pin) : "");') > 0,
+    "a file's bytes through the kernel, pinned when the message pinned them");
+  assert.ok(body.indexOf("im.src = lightboxSrc(e);") > 0 && body.indexOf("dl.href = lightboxSrc(e);") > 0,
     "the download url matches the shown image, pin included");
-  assert.ok(body.indexOf('dl.download = path.slice(path.lastIndexOf("/") + 1) || "image"') > 0,
+  assert.ok(body.indexOf('e.path.slice(e.path.lastIndexOf("/") + 1) || "image"') > 0,
     "saved under the file's own basename");
   assert.ok(body.indexOf("dl.onclick = (ev) => ev.stopPropagation()") > 0,
     "saving must not also dismiss the lightbox");
@@ -80,7 +83,7 @@ test("the lightbox offers a download beside the close, saving the same bytes it 
   assert.ok(body.indexOf('inner.prepend(bar);') > 0, "the bar precedes the picture (T385; lightbox-bar.test.ts runs the builder and reads the order)");
   // an inline TRAY SVG, not a codepoint: "⭳" (U+2B73) has no coverage in the mac system fonts and
   // rendered as a tofu box (the user 2026-08-19). Same stroke family as the composer's buttons.
-  assert.ok(body.indexOf("dl.innerHTML = ICON_DOWNLOAD") > 0, "the tray glyph from icons.ts (T367: one drawing, shared with the file viewer's bar)");
+  assert.ok(body.indexOf("dl.innerHTML = leaves ? ICON_POPOUT : ICON_DOWNLOAD;") > 0, "the tray glyph from icons.ts (T367: one drawing, shared with the file viewer's bar); a URL picture's original wears the viewer's popout");
   const ICONS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "icons.ts"), "utf8");
   assert.ok(ICONS.indexOf('<polyline points="7 10 12 15 17 10"/>') > 0, "the arrow-into-tray glyph");
   assert.ok(body.indexOf("\u2b73") < 0 && body.indexOf("⭳") < 0, "the uncovered codepoint is gone");

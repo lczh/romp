@@ -721,7 +721,7 @@ test("a PDF takes the lightbox's exact iframe treatment, aimed at the already-fe
   const PREVIEW = web("preview.ts");
   // the reference: openLightbox's pdf arm is a PLAIN iframe — className, src, title, no sandbox
   // attributes to mirror or forget
-  assert.match(PREVIEW, /frame\.className = "romp-lightbox-frame";\s*\n\s*frame\.src = fileUrl\(path, sid\);\s*\n\s*frame\.title = path;/);
+  assert.match(PREVIEW, /frame\.className = "romp-lightbox-frame";\s*\n\s*frame\.src = fileUrl\(src\.path, src\.sid\);\s*\n\s*frame\.title = src\.path;/);
   const pdfFn = VIEW.split("function pdfBlock")[1].split("/** Bind the pane's WS poster")[0];
   assert.match(pdfFn, /el\("iframe", "fileview-frame"\)/);
   assert.match(pdfFn, /frame\.src = objUrl;/, "the blob URL — the bytes were already fetched once");

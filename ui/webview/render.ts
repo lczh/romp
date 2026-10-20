@@ -95,7 +95,8 @@ import { actionParts, toolRowLabel, toolInputText } from "./compact";
 import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
 import { injectedHead, type InjectedSource } from "./injected-source";
 import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, subHeadParts, subWaitTail, openIconSvg, pinIconSvg, type SubMeta, type AgentGist, type AgentGistRow, type GistLine } from "./subagent-view";
-import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
+import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, installMdImgZoom, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
+import { mdImages } from "./md-images";   // the pictures a message's markdown embeds, off its text: the lightbox's sequence (chatImagesFor)
 import { openFileClick } from "./file-view";                  // a clicked file WITH its gesture (pdf-new-tab.test.ts)
 import { fileLinkRoute, browseRoute, type BrowseRoute } from "./file-route";   // where a file or folder click opens: here, or the Files pane (file-route.test.ts, browse-route.test.ts)
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
@@ -1913,6 +1914,10 @@ document.addEventListener("click", (e) => {
   // would leave every click on that link dead until a click elsewhere.
   if (!a.draggable && selectionOpenIn(a)) { e.preventDefault(); return; }
   const href = a.getAttribute("href") || "";
+  // The lightbox's save control when it DOWNLOADS (preview.ts openLightbox: a file, or a data: picture): the browser's
+  // own download, never a tab. A data: href reads as an absolute URL below, and a tab cannot open one. Its "Open original"
+  // (no download attribute) is a link like any other and opens below, disowned.
+  if (a.hasAttribute("download") && a.closest("#romp-lightbox")) return;
   if (href.startsWith("#")) {
     // An in-page anchor in a message (a footnote's back link, `[section](#install)` over the reply's own `<a name>`):
     // the sanitizer prefixes every author id and name user-content- (md-sanitize.ts, GitHub's rule) and leaves the
@@ -2461,6 +2466,7 @@ function healPathImgs(): void {
 // the page shim fires romp:wsup when THIS pane's kernel socket reconnects (kernel.py ws.onopen) —
 // the same kernel-is-back event a hostUp is for a federated tunnel; heal everything on it
 window.addEventListener("romp:wsup", () => { retryFailedPreviews(); refreshSettledPreviews(); healPathImgs(); });
+installMdImgZoom();   // a markdown picture opens the lightbox (preview.ts; once, document-level)
 installMdImgHeal();   // markdown-inline <img> failures are PARKED (capture-phase, once) and heal on the reconnect-class events (T291c);
 //                       md() and userMd() run mdImgPostPass on their own output, so a re-render parks a known-failed image before it fetches
 // The page's own bundle build, filed once per page load (T291c, the user's 2026-09-09 report could not tell the
@@ -2481,24 +2487,60 @@ installMdImgHeal();   // markdown-inline <img> failures are PARKED (capture-phas
 // (the user 2026-07-15). Skip the caption then; the in-text link already opens it.
 // The lightbox's arrow-navigation sequence (2026-08-29): every image embed in this chat, oldest
 // to newest, from the session's EVENTS — the DOM misses virtualization-windowed turns. Each entry
-// carries the same (path, sid, pin) triple the embed's own click passes, so a step renders that
-// message's pinned bytes (never the live file — the history-rewrite guard extends to navigation).
-// One entry per (event, target): a message mentioning one image twice is one stop.
-function chatImagesFor(sid: string | null | undefined): LightboxNavEntry[] {
-  const s = sid ? sessions.get(sid) : null;
-  if (!s) return [];
+// carries the same source the embed's own click passes: a path preview's (path, sid, pin) triple, so a
+// step renders that message's pinned bytes (never the live file — the history-rewrite guard extends to
+// navigation), and a markdown picture's URL (2026-10-20, the user on a phone: those never opened the
+// lightbox; md-images.ts reads them off the message's text with the chat's own lexer). One entry per
+// (event, picture): a message naming one picture twice is one stop.
+// Within a message the entries go in the order the message shows them: a markdown picture renders where it
+// is written, a path's figure renders after the block that first mentions it (linkifyFileUris), which for
+// the lines a reply is made of is the end of that line, and a user's attached pictures after the text.
+// WHICH chat (`from`, the clicked picture): the transcript it sits in. A subagent viewer's own transcript
+// (its files resolve in its parent's folder, renderingOwnerSid's rule) and an open comment thread's
+// messages are what the reader is stepping through, not the session the click's sid names; without an
+// element (a PDF card, the artifacts pane's own provider), the sid's chat, as before.
+function lightboxScope(sid: string | null | undefined, from?: Element | null): { events: ChatEvent[]; fileSid: string } | null {
+  if (from && from.closest("#cmt-pop")) {
+    const cur = openCommentThread();
+    if (cur) return { events: (cur.th.events || []) as ChatEvent[], fileSid: cur.sid };
+  }
+  const view = (from?.closest(".thread[data-session]") as HTMLElement | null)?.dataset.session || sid || null;
+  const s = view ? sessions.get(view) : null;
+  if (!s || !view) return null;
+  return { events: s.events, fileSid: subParts(view)?.parentId ?? view };
+}
+function chatImagesFor(sid: string | null | undefined, from?: Element | null): LightboxNavEntry[] {
+  const scope = lightboxScope(sid, from);
+  if (!scope) return [];
   const out: LightboxNavEntry[] = [];
-  for (const ev of s.events as (ChatEvent & { images?: { src: string; path?: string }[]; pathLinks?: Record<string, string>; spacePaths?: string[]; pathPins?: Record<string, string> })[]) {
+  const lex = (t: string) => marked.lexer(t);
+  for (const ev of scope.events as (ChatEvent & { md?: string; images?: { src: string; path?: string }[]; pathLinks?: Record<string, string>; spacePaths?: string[]; pathPins?: Record<string, string> })[]) {
+    const text = (ev.kind === "user" || ev.kind === "assistant") && typeof ev.md === "string" ? ev.md : "";
     const pins = ev.pathPins || {};
-    const seen = new Set<string>();
-    const add = (target: string) => {
-      if (!target || seen.has(target) || previewKind(target) !== "img") return;
-      seen.add(target);
-      out.push({ path: target, sid, pin: pins[target] });
+    const here = new Map<string, { e: LightboxNavEntry; at: number }>();   // picture → its entry and where it shows
+    const lineEnd = (tok: string): number => {
+      const i = text.indexOf(tok);
+      if (i < 0) return text.length;
+      const n = text.indexOf("\n", i);
+      return n < 0 ? text.length : n;
     };
-    for (const im of ev.images || []) if (im.path) add(im.path);
-    for (const tok of Object.keys(ev.pathLinks || {})) add((ev.pathLinks as Record<string, string>)[tok]);
-    for (const sp of ev.spacePaths || []) add(sp);
+    const attached = new Set((ev.images || []).map((im) => im.path || ""));   // an attached picture's path in the text is a link, no figure (skipThumbs)
+    const add = (target: string, at: number, own = false) => {
+      if (!target || previewKind(target) !== "img" || (!own && attached.has(target))) return;
+      const had = here.get("p:" + target);
+      if (had) { had.at = Math.min(had.at, at); return; }
+      here.set("p:" + target, { e: { path: target, sid: scope.fileSid, pin: pins[target] }, at });
+    };
+    for (const tok of Object.keys(ev.pathLinks || {})) add((ev.pathLinks as Record<string, string>)[tok], lineEnd(tok));
+    for (const sp of ev.spacePaths || []) add(sp, lineEnd(sp));
+    for (const im of ev.images || []) if (im.path) add(im.path, text.length + 1, true);   // attached pictures follow the text
+    for (const m of mdImages(text, lex)) {
+      let url = "";
+      try { url = new URL(m.url, document.baseURI).href; } catch { continue; }
+      if (!/^(https?:|data:image\/)/i.test(url) || here.has("u:" + url)) continue;   // what the sanitizer lets an <img> load
+      here.set("u:" + url, { e: { url, alt: m.alt }, at: m.at });
+    }
+    out.push(...Array.from(here.values()).sort((x, y) => x.at - y.at).map((h) => h.e));
   }
   return out;
 }
@@ -11175,7 +11217,7 @@ function closeCommentPop(): void {
 document.addEventListener("mousedown", (ev) => {
   const pop = document.getElementById("cmt-pop");
   if (!pop || pop.contains(ev.target as Node)) return;
-  if ((ev.target as HTMLElement).closest?.(".meta-menu, #fork-prompt")) return;
+  if ((ev.target as HTMLElement).closest?.(".meta-menu, #fork-prompt, #romp-lightbox")) return;   // …and the lightbox a picture in the thread opened: closing it returns to the thread
   closeCommentPop();
 }, true);
 

@@ -3278,7 +3278,9 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 }
 .md pre {
   background: var(--box-bg); border: 1px solid var(--box-border); border-radius: 6px;
-  padding: 11px 14px; margin: 0.6em 0; overflow-x: hidden; overflow-y: auto;   /* WRAP, don't scroll sideways */
+  padding: 11px 14px; margin: 0.6em 0; overflow-x: auto; overflow-y: auto;   /* a fence WRAPS (below), so it never scrolls sideways; a
+     <pre> a message writes in its own HTML keeps its lines as written and scrolls inside its box past the bubble's edge,
+     where `hidden` cut the rest of each line off with no way to reach it (2026-10-20) */
 }
 .md pre code {
   background: none; padding: 0; display: block;
@@ -3324,7 +3326,26 @@ pre.has-copy:hover .code-copy, .code-copy:focus-visible { opacity: 0.9; }
 .code-copy:hover { color: var(--fg); border-color: var(--dim); }
 .code-copy.copied { color: var(--green); border-color: var(--green); opacity: 1; }
 @media (hover: none) { .code-copy { opacity: 0.8; } }   /* touch: no hover state, so keep it visible */
-.md table { border-collapse: collapse; margin: 0.6em 0; }
+/* A message never widens its bubble (the user 2026-10-20, reading on a phone: a picture ran off the right edge, and
+   #content's overflow-x: hidden left the rest of it out of reach). A table is a block as wide as its columns need,
+   capped at the body and scrolling inside its own box past that, whole words kept (overflow-wrap: normal against the
+   body's anywhere, which squeezed a wide table's columns to one letter each on a phone and still overflowed): the file
+   viewer's treatment. border-collapse is inherited by the anonymous table box the block wraps, so the cell borders still
+   collapse. The media rules below cap a picture, a video or a frame at the body. A comment thread's plain reply
+   (.cmt-msg.agent, the one md() body without .md) takes the same caps. */
+.md table { border-collapse: collapse; margin: 0.6em 0; display: block; width: max-content; max-width: 100%; overflow-x: auto; overflow-wrap: normal; }
+.cmt-msg.agent table { display: block; width: max-content; max-width: 100%; overflow-x: auto; overflow-wrap: normal; }
+.cmt-msg.agent pre { overflow-x: auto; }
+/* Media at the body's width, its ratio kept (height: auto), at the lowest specificity, so a class's own rule always
+   wins (.path-full-img's and .user-img's 320px caps). The one height left as written: an <img> or <video> given a
+   height and NO width, whose author sized it by height (a 40px logo); with a width as well, height: auto lets the width
+   attribute and the picture's ratio set the height, so the cap shrinks it whole. A frame has no ratio of its own
+   (height: auto would collapse it to 150px), so it is capped in width only. */
+:where(.md, .cmt-msg.agent) :where(img, video, iframe) { max-width: 100%; }
+:where(.md, .cmt-msg.agent) :where(img, video):where(:not([height]), [width]) { height: auto; }
+/* a markdown picture that opens the lightbox (preview.ts installMdImgZoom marks it on load: not in a link, not
+   glyph-sized), with the path preview's own cursor */
+.md-img-zoom { cursor: zoom-in; }
 .md th, .md td { border: 1px solid var(--box-border); padding: 4px 10px; text-align: left; }
 .md th { background: var(--box-bg); }
 

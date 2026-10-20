@@ -23,7 +23,8 @@ test("the button exists only where the clipboard API does — honest absence, ne
 test("copy reads the CURRENT img's src at click time — pin rides, arrow-stepping needs no retarget", () => {
   assert.match(PREVIEW, /const src = curImg!\(\)\.src;/);
   // the pin param is baked into src by mkImg…
-  assert.match(PREVIEW, /im\.src = fileUrl\(e\.path, e\.sid\) \+ \(e\.pin \? "&pin=" \+ encodeURIComponent\(e\.pin\) : ""\);/);
+  assert.match(PREVIEW, /im\.src = lightboxSrc\(e\);/);
+  assert.match(PREVIEW, /return "url" in e \? e\.url : fileUrl\(e\.path, e\.sid\) \+ \(e\.pin \? "&pin=" \+ encodeURIComponent\(e\.pin\) : ""\);/);
   // …and step() rebinds the closure variable the accessor reads
   assert.match(PREVIEW, /img\.replaceWith\(next\);\s*\n\s*img = next;/);
 });

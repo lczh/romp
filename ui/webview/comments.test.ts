@@ -364,7 +364,8 @@ test("picking a model/effort never reads as an outside press — the box stays p
   // statusline's menus), so the outside-press closer must exempt them: it used to close the popover
   // on mousedown and null pendingCommentAnchor before the item's click could land the pick, and a
   // click on the break-out dialog's Cancel stranded the user the same way (the user 2026-08-18)
-  assert.match(UI, /if \(!pop \|\| pop\.contains\(ev\.target as Node\)\) return;\s*\n\s*if \(\(ev\.target as HTMLElement\)\.closest\?\.\("\.meta-menu, #fork-prompt"\)\) return;\s*\n\s*closeCommentPop\(\);/);
+  // (and the lightbox a picture in the thread opened, 2026-10-20: closing it returns to the thread)
+  assert.match(UI, /if \(!pop \|\| pop\.contains\(ev\.target as Node\)\) return;\s*\n\s*if \(\(ev\.target as HTMLElement\)\.closest\?\.\("\.meta-menu, #fork-prompt, #romp-lightbox"\)\) return;[^\n]*\n\s*closeCommentPop\(\);/);
   // and the surviving popover shows the pick THROUGH the chat's own builder (2026-08-25 parity):
   // the shared menu's click arms the sid-scoped pending dots, and the frame-driven refresh re-runs
   // syncMetaControls on the popover's row exactly as the chat's tick does

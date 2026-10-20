@@ -86,7 +86,7 @@ test("the gesture decides: a plain click is in-app, a Cmd/Ctrl-click or a middle
 
 test("wiring: every click on a PDF carries its gesture; modified → the tab, plain or blocked → the in-app view", () => {
   // the card's click → openPdf(path, sid, ev) → the tab on a modified click, else (or when blocked) the lightbox
-  assert.match(PREVIEW, /export function openPdf\(path: string, sid\?: string \| null, ev\?: MouseEvent \| null\): void \{\n  if \(wantsOwnTab\(ev\) && openPdfTab\(path, sid\)\) return;\n  openLightbox\(path, sid\);\n\}/);
+  assert.match(PREVIEW, /export function openPdf\(path: string, sid\?: string \| null, ev\?: MouseEvent \| null\): void \{\n  if \(wantsOwnTab\(ev\) && openPdfTab\(path, sid\)\) return;\n  openLightbox\(\{ path, sid \}\);\n\}/);
   const pf = PREVIEW.slice(PREVIEW.indexOf("export function previewFull"));
   assert.match(pf, /box\.onclick = \(ev\) => \{ ev\.stopPropagation\(\); openPdf\(path, sid, ev\); \};/);
   assert.match(pf, /box\.onmousedown = \(ev\) => \{ if \(ev\.button === 1\) ev\.preventDefault\(\); \};/,
