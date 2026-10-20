@@ -166,7 +166,7 @@ HELPERS = {
     "_open_leaves": ("sig", ("store",)),
     "_parked_rows": ("sig", ("store",)),
     "_session_started_face": ("sig", ("store",)),
-    "jd._done_since": ("sig", ("store",)),
+    "jd._done_since": ("sig", ("store",)),               # a completed card's time and its reviewed-earlier rows: the done rows' ev_t
     "jd.review_boundary": ("sig", ("store",)),
     "_newest_block_ev_t": ("sig", ("store",)),            # the blocked yield's block time: its block rows' ev_t
     "jd._block_since": ("sig", ("store",)),               # a blocked card's time, which the re-judging latch reads: the same rows' ev_t
