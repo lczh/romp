@@ -1854,6 +1854,10 @@ loop that schedules a new one every round would delay it forever. The relaunched
 CLI does not keep the wakeup, so the kernel sends the wakeup's prompt when it is
 due, unless the kernel's record of it holds a due time and the session stops its
 loop or schedules a new wakeup before then.
+A wakeup scheduled by a /loop given no task is the exception, after a relaunch or
+a kernel restart alike: its prompt is a placeholder that only the CLI that
+scheduled it can turn into the loop's instructions, so the kernel does not send
+it, and when it comes due the error center says that the loop stopped.
 A wakeup first recorded since the session was last revived or the kernel last
 restarted is dropped instead if the old CLI could already have sent it by the
 time the relaunched CLI starts, or if the kernel's record of it does not hold

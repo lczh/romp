@@ -5115,6 +5115,19 @@ def recurring_crons(reg):
     return [c for c in (reg.get("sessionCrons") or []) if isinstance(c, dict) and c.get("recurring")]
 
 
+# Claude Code's /loop placeholders: the prompt a /loop given no task passes to ScheduleWakeup (<<autonomous-loop-dynamic>>)
+# or CronCreate (<<autonomous-loop>>), or their loop.md counterparts when a loop-tasks file exists. The CLI's scheduler
+# swaps one for the loop's instructions when the timer fires (CLI 2.1.282: resolveLoopDefaultFire, called only from the
+# scheduler's fire handlers); a user message carrying one reaches the model as the bare placeholder, and the chat shows it
+# as a message from the user. The set is the CLI's own isLoopDefaultSentinel: an exact match on these four, no pattern.
+LOOP_SENTINELS = frozenset({"<<autonomous-loop>>", "<<autonomous-loop-dynamic>>", "<<loop.md>>", "<<loop.md-dynamic>>"})
+
+
+def is_loop_sentinel(prompt) -> bool:
+    """`prompt` is one of Claude Code's /loop placeholders (LOOP_SENTINELS), compared exactly, as the CLI compares it."""
+    return isinstance(prompt, str) and prompt in LOOP_SENTINELS
+
+
 def wakeup_due_epoch(cron: str, armed_t: float) -> "float | None":
     """The due moment of a ONE-SHOT wakeup cron ("<min> <hour> * * *", the shape ScheduleWakeup mints
     from delaySeconds, local time) — the first occurrence of H:M at/after the arm record. Any other
@@ -22471,7 +22484,15 @@ class SdkBackend:
         late the record looks, except, while the live CLI's stamp could not move the armed timers, one
         that an earlier session object first recorded (lost_due_shots). That generation
         gone → the kernel owns it outright and delivers at due (a small 5s grace covers clock skew
-        between the stamp and this sweep, not any behavioral window)."""
+        between the stamp and this sweep, not any behavioral window).
+
+        A wakeup whose prompt is one of Claude Code's /loop placeholders (is_loop_sentinel) is stripped
+        the same way and NEVER sent: only the scheduler of the CLI that armed it expands the placeholder
+        into the loop's instructions, so sent as a message it reached the model bare and showed in the
+        chat as the user's (CLI 2.1.282, read from its source; the relaunch roads of 2026-10-11 made it
+        reachable at every pick). No route lets a fresh CLI re-arm it in its own scheduler (session
+        timers live in the CLI's memory, and no control request schedules one), so the loop ends there,
+        and the error center says so."""
         now = time.time()
         fired = 0
         for row in list_regs(self.state_dir):
@@ -22505,6 +22526,12 @@ class SdkBackend:
                 self._log("lost-wakeup (%s): reg strip failed, not delivering: %s" % (row.get("name") or sid[:13], err))
                 continue
             for c in due_shots:
+                if is_loop_sentinel(c.get("prompt")):
+                    self._log("lost-wakeup (%s): a /loop wakeup (one-shot %s) could not be carried across the relaunch: its "
+                              "prompt is Claude Code's placeholder %s, which only the CLI that scheduled it can expand, so it "
+                              "was not sent and the loop has stopped (start it again with /loop)"
+                              % (reg.get("name") or sid[:13], c.get("id") or "?", c.get("prompt")), problem=True)
+                    continue
                 ok = False
                 try:
                     ok = bool(self.send(sid, c.get("prompt") or ""))

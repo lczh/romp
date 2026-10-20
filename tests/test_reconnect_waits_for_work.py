@@ -803,28 +803,6 @@ class AWakeupSurvivesThePicksRelaunch(_Harness):
         self._wait(lambda: c2.writes == ["check the notes-api build again"], "the wakeup's prompt, fed to the fresh CLI")
         self.assertEqual(self._one_shots(), [], "stripped first, so it is never delivered twice")
 
-    SENTINEL = "<<autonomous-loop-dynamic>>"                 # what an autonomous /loop passes to ScheduleWakeup
-
-    def test_after_a_quiet_picks_relaunch_the_kernel_sends_an_autonomous_loops_wakeup_as_its_placeholder_text(self):
-        s, c1 = self.s, self._first_turn()
-        self._end_turn(c1)
-        self._on_loop(s._sched_tool_hook(_wake_call(600, self.SENTINEL), "tu-wake", None))
-        self.assertTrue(self.be.set_effort(SID, "high"))
-        c2 = self._relaunched()
-        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # the fresh CLI's first turn end
-        self._all_due()
-        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
-        self._wait(lambda: c2.writes == [self.SENTINEL], "the placeholder text, fed to the fresh CLI")
-
-    def test_after_a_kernel_restart_the_kernel_sends_an_autonomous_loops_wakeup_as_its_placeholder_text(self):
-        entry = {"id": "toolhook-1", "cron": "", "prompt": self.SENTINEL, "kind": "", "recurring": False,
-                 "armedAt": time.time() - 660, "dueEpoch": time.time() - 60, "procGen": "gen-before-the-restart",
-                 "src": "toolhook"}
-        self._edit_reg(lambda reg: dict(reg, sessionCrons=[entry]))
-        c1 = self._first_turn()
-        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
-        self._wait(lambda: self.SENTINEL in c1.writes, "the placeholder text, fed to the CLI")
-
     def test_a_comment_threads_wakeup_armed_before_a_picks_relaunch_is_not_delivered_after_it(self):
         """deliver_lost_wakeups skips a comment thread's session (threadOf), so it does not deliver the wakeup the old CLI
         armed."""
@@ -1211,6 +1189,131 @@ class AWakeupSurvivesThePicksRelaunch(_Harness):
         self._all_due()
         self.assertEqual(self.be.deliver_lost_wakeups(), 0, "the live CLI fires its own; nothing is the kernel's")
         self.assertEqual(c2.writes, [])
+
+
+class ALoopPlaceholderWakeupIsNeverSentAsAMessage(_Harness):
+    """An autonomous /loop (one given no task) passes one of Claude Code's placeholders as its wakeup's prompt, and only
+    the scheduler of the CLI that armed the wakeup swaps it for the loop's instructions when the wakeup fires: CLI 2.1.282
+    resolves it on that fire path alone (resolveLoopDefaultFire), so a user message carrying it reached the model as the
+    bare placeholder, and the chat showed it as a message from the user. The kernel cannot carry such a wakeup across a
+    relaunch: when the CLI that armed it is gone and the wakeup comes due, the lost-wakeup sweep strips it, sends nothing,
+    and says in the error center that the loop could not be carried across the relaunch. Every road a fresh CLI comes by
+    is covered (a setting's relaunch, Restart session, Apply now, a kernel restart), and on each an ordinary prompt is
+    still sent exactly once."""
+
+    WAKE = "check the notes-api build again"
+    SENTINEL = "<<autonomous-loop-dynamic>>"                 # what an autonomous /loop passes to ScheduleWakeup
+
+    def _one_shots(self):
+        return [c for c in (sb.read_reg(self.state, SID) or {}).get("sessionCrons") or [] if not c.get("recurring")]
+
+    def _armed_then_replaced(self, road, prompt):
+        """the first CLI arms a wakeup with `prompt` in a turn that ends, `road` replaces that CLI, and the fresh CLI's first
+        turn end lists no timer; the fresh CLI's client, with every one-shot on record past due"""
+        s, c1 = self.s, self._first_turn()
+        if road == "apply now":
+            self._with_a_background_task(c1)              # a pick waits for it, and Apply now pushes the pick through
+        self._on_loop(s._sched_tool_hook(_wake_call(600, prompt), "tu-wake", None))
+        self._end_turn(c1)
+        if road == "pick":
+            self.assertTrue(self.be.set_effort(SID, "high"))
+        elif road == "restart":
+            self.assertEqual(self.be.relaunch(SID), "")
+        else:
+            self.assertTrue(self.be.set_auth(SID, "login"))
+            self._settle()
+            self.assertEqual(len(self._Client.instances), 1, "the premise: the pick waits for the background task")
+            self.assertEqual(self.be.apply_now(SID), "")
+        c2 = self._relaunched()
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # the fresh CLI's turn end
+        self.assertEqual([c["prompt"] for c in self._one_shots()], [prompt], "the premise: the kernel holds the wakeup")
+        self._all_due()
+        return c2
+
+    def _after_a_kernel_restart(self, *prompts):
+        """wakeups an earlier session object recorded (their CLI ended with the old kernel), past due, and the session's
+        fresh CLI in its first turn"""
+        entries = [{"id": "toolhook-%d" % i, "cron": "", "prompt": p, "kind": "", "recurring": False,
+                    "armedAt": time.time() - 660, "dueEpoch": time.time() - 60, "procGen": "gen-before-the-restart",
+                    "src": "toolhook"} for i, p in enumerate(prompts, 1)]
+        self._edit_reg(lambda reg: dict(reg, sessionCrons=entries))
+        return self._first_turn()
+
+    def _sent(self, c, text):
+        """how many times `text` reached the CLI behind client `c` or waits in the session's queue for it"""
+        return c.writes.count(text) + self.s.pending().count(text)
+
+    def _loss_rows(self):
+        return [p["text"] for p in self.be.problems() if "could not be carried across the relaunch" in p["text"]]
+
+    def _not_sent(self, c, *prompts):
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0, "nothing delivered")
+        self._settle(0.3)
+        for p in prompts:
+            self.assertEqual(self._sent(c, p), 0, "the placeholder never reaches the CLI as a message: %s" % p)
+        self.assertEqual(self._one_shots(), [], "stripped, so no later sweep comes back to it")
+        rows = self._loss_rows()
+        self.assertEqual(len(rows), len(prompts), self.be.problems())
+        for p, row in zip(prompts, rows):
+            self.assertTrue(row.startswith("lost-wakeup (web): "), row)
+            self.assertIn(p, row)
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self.assertEqual(len(self._loss_rows()), len(prompts), "said once")
+
+    def _sent_once(self, c, prompt):
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self._sent(c, prompt) == 1, "the wakeup's prompt, sent to the fresh CLI")
+        self.assertEqual(self.be.deliver_lost_wakeups(), 0)
+        self._settle(0.3)
+        self.assertEqual(self._sent(c, prompt), 1, "exactly once")
+        self.assertEqual(self._loss_rows(), [])
+
+    def test_a_settings_relaunch_does_not_send_a_loops_placeholder_and_says_the_loop_stopped(self):
+        self._not_sent(self._armed_then_replaced("pick", self.SENTINEL), self.SENTINEL)
+
+    def test_a_restart_does_not_send_a_loops_placeholder_and_says_the_loop_stopped(self):
+        self._not_sent(self._armed_then_replaced("restart", self.SENTINEL), self.SENTINEL)
+
+    def test_apply_now_does_not_send_a_loops_placeholder_and_says_the_loop_stopped(self):
+        self._not_sent(self._armed_then_replaced("apply now", self.SENTINEL), self.SENTINEL)
+
+    def test_a_kernel_restart_sends_none_of_claude_codes_four_placeholders_and_says_each_loop_stopped(self):
+        placeholders = ("<<autonomous-loop-dynamic>>", "<<autonomous-loop>>", "<<loop.md-dynamic>>", "<<loop.md>>")
+        self._not_sent(self._after_a_kernel_restart(*placeholders), *placeholders)
+
+    def test_a_settings_relaunch_still_sends_an_ordinary_wakeup_once(self):
+        self._sent_once(self._armed_then_replaced("pick", self.WAKE), self.WAKE)
+
+    def test_a_restart_still_sends_an_ordinary_wakeup_once(self):
+        self._sent_once(self._armed_then_replaced("restart", self.WAKE), self.WAKE)
+
+    def test_apply_now_still_sends_an_ordinary_wakeup_once(self):
+        self._sent_once(self._armed_then_replaced("apply now", self.WAKE), self.WAKE)
+
+    def test_a_kernel_restart_still_sends_an_ordinary_wakeup_once(self):
+        self._sent_once(self._after_a_kernel_restart(self.WAKE), self.WAKE)
+
+    def test_beside_a_loops_placeholder_an_ordinary_wakeup_is_still_sent_once(self):
+        c1 = self._after_a_kernel_restart(self.SENTINEL, self.WAKE)
+        self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self._sent(c1, self.WAKE) == 1, "the ordinary wakeup's prompt")
+        self._settle(0.3)
+        self.assertEqual((self._sent(c1, self.WAKE), self._sent(c1, self.SENTINEL)), (1, 0))
+        self.assertEqual(len(self._loss_rows()), 1)
+
+
+class ClaudeCodesLoopPlaceholders(unittest.TestCase):
+    """is_loop_sentinel matches the CLI's own test (isLoopDefaultSentinel, CLI 2.1.282): an exact match on four strings, no
+    pattern, so a prompt that only looks like one is an ordinary prompt, which the CLI's scheduler would also send as is."""
+
+    def test_the_four_placeholders_match(self):
+        for p in ("<<autonomous-loop>>", "<<autonomous-loop-dynamic>>", "<<loop.md>>", "<<loop.md-dynamic>>"):
+            self.assertTrue(sb.is_loop_sentinel(p), p)
+
+    def test_anything_else_does_not(self):
+        for p in ("", "<<autonomous-loop-dynamic>> ", " <<autonomous-loop>>", "<<AUTONOMOUS-LOOP>>", "<<loop>>",
+                  "<<autonomous-loop-dynamic>>\n", "run <<loop.md>> now", "check the notes-api build again", None, 7):
+            self.assertFalse(sb.is_loop_sentinel(p), repr(p))
 
 
 class AWakeupTheOldCliCouldHaveFiredIsDropped(_Harness):
