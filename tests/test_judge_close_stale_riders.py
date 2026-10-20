@@ -18,7 +18,8 @@ crediting the riders the message does not name (ReplySubject), a rider is shown 
 descendant riding the same call pruned (RiderHistory), and a rider's BLOCK journals the newest segment
 time in the history it was shown, so a block from evidence older than the user's latest reply stands
 down (HistoryAnchor, LiftAnchor), while a rider's done keeps the turn's time, so a newer pause or
-lift in its own diary never hides it (RiderDone).
+lift in its own diary never hides it (RiderDone), and so does a status rider's block that the closer
+says this reply asks: a new question about another open card reaches the user (StatusRiderReplyBlock).
 
 Synthetic only: a private invented sid (never the shared placeholder; its override journal is removed
 in tearDown), the notes-api demo world, invented goal titles and questions, session hosts off."""
@@ -540,6 +541,127 @@ class RiderDone(_Closer):
         jd._close_turn(s, turns[1], seg_by_id=seg_by_id)
         self.assertIn("1. Publish the changelog entry", self.calls[0]["menu"])
         self.assertTrue(top.get("nodeComplete"), "the status reply's done lands")
+
+
+class StatusRiderReplyBlock(_Closer):
+    """A status reply about one card asks the user a NEW question about another open card. The closer
+    tags that block as coming from the reply, so it journals the ruling turn's time: anchored to the
+    card's older history instead, it sorted behind a newer row in the card's own diary (a lift, a
+    re-engage, the floor of a reply the planner ruled off-topic) and was dropped, leaving the card
+    working with the question never asked. An untagged or history block keeps the history anchor
+    (HistoryAnchor), and only a status rider's tag counts."""
+    BLOCK = ('{"done": [], "block": [{"goal": 1, "why": "Send the published changelog entry to the mailing '
+             'list too?"%s}]}')
+    STATUS = (T_OTHER, _followup("gU", "Is the web login timeout fix merged?"),
+              "Yes: the login timeout fix is merged. The search page changelog entry is published too; "
+              "should I also send it to the mailing list?")
+    NOTE = ('Add "from" to each block entry for this goal: "reply" when this turn\'s reply itself asks the '
+            'question, "history" when the question comes only from the goal\'s history.')
+
+    def _close(self, turns, s, seg_by_id, card, tag):
+        self.assertEqual(jd._turn_menu(turns[-1], s), [], "fixture: the turn's own goal is already ruled")
+        self.assertEqual([nd["id"] for nd in jd._status_report_candidates(s, turns[-1])], [card["id"]],
+                         "fixture: the card rides as a status rider")
+        self.assertEqual([n["id"] for n, _w in jd._lift_riders(s)], [], "fixture: not a lift rider")
+        self.reply = self.BLOCK % ((', "from": "%s"' % tag) if tag else "")
+        jd._close_turn(s, turns[-1], seg_by_id=seg_by_id)
+        self.assertIn("1. Publish the search page changelog entry", self.calls[0]["menu"], "fixture: the card is #1")
+
+    def _assert_lands(self, turns, card):
+        self.assertTrue(card.get("blocked"), "the status reply's new question reaches the user")
+        self.assertEqual(self._closer_rows(card, "block")[-1]["ev_t"], turns[-1]["t"],
+                         "the block journals the turn whose reply asked it")
+        self.assertEqual(self._stale_closes(card["id"]), [])
+
+    def _lifted(self):
+        # the card's old question was lifted by the unblocker and the closer has looked since
+        turns, segs, s, seg_by_id = self._parse([
+            (T0, "Write the notes-api changelog entry for the search page.", "Entry written. Publish it as written?"),
+            self.STATUS])
+        card = _node(s, "gL", "Publish the search page changelog entry", trail=[segs[0]["id"]], closerLookT=NOW,
+                     log=[_row("block", "closer", T0, why="Publish the entry as written?"),
+                          _row("unblock", "unblocker", T_LIFT, why="the user said yes on another card")])
+        s["placements"][segs[0]["id"]] = card["id"]
+        _other_card(s, segs[1]["id"])
+        return turns, s, seg_by_id, card
+
+    def test_the_status_note_asks_where_a_block_comes_from(self):
+        turns, s, seg_by_id, card = self._lifted()
+        self._close(turns, s, seg_by_id, card, None)
+        self.assertIn(self.NOTE, self.calls[0]["menu"])
+
+    def test_after_an_unblocker_lift(self):
+        turns, s, seg_by_id, card = self._lifted()
+        self._close(turns, s, seg_by_id, card, "reply")
+        self._assert_lands(turns, card)
+
+    def test_after_a_pivoted_reply(self):
+        # the user's reply on the card was ruled a new thread and filed elsewhere; its floor stays newer
+        # than the card's own history
+        turns, segs, s, seg_by_id = self._parse([
+            (T0, "Write the notes-api changelog entry for the search page.", "Entry drafted."),
+            (T_REPLY, _followup("gL", "Unrelated: bump the web app's node version."), "Bumped node to 22."),
+            self.STATUS])
+        card = _node(s, "gL", "Publish the search page changelog entry", trail=[segs[0]["id"]], closerLookT=NOW,
+                     log=[_row("reopen", "user", T_REPLY - 1, msg=True),
+                          _row("dismiss", "planner", T_REPLY, why="the reply started its own thread")])
+        _node(s, "gN", "Bump the web app's node version", t=T_REPLY, trail=[segs[1]["id"]],
+              log=[_row("done", "closer", T_REPLY, why="bumped")])
+        s["placements"].update({segs[0]["id"]: card["id"], segs[1]["id"]: _gid("gN")})
+        _other_card(s, segs[2]["id"])
+        self.assertEqual(card.get("followupAt"), T_REPLY - 1, "fixture: the reply's floor")
+        self._close(turns, s, seg_by_id, card, "reply")
+        self._assert_lands(turns, card)
+
+    def test_after_a_stop_and_re_engage(self):
+        turns, segs, s, seg_by_id = self._parse([
+            (T0, "Write the notes-api changelog entry for the search page.", "Entry drafted."),
+            self.STATUS])
+        card = _node(s, "gL", "Publish the search page changelog entry", trail=[segs[0]["id"]], closerLookT=NOW,
+                     log=[_row("block", "interrupt", T0 + 400, why="you stopped this session mid-turn"),
+                          _row("unblock", "user", T0 + 1000, why="you re-engaged")])
+        s["placements"][segs[0]["id"]] = card["id"]
+        _other_card(s, segs[1]["id"])
+        self._close(turns, s, seg_by_id, card, "reply")
+        self._assert_lands(turns, card)
+
+    def _assert_stands_down(self, card):
+        self.assertFalse(card.get("blocked"), "a block from the card's old history stands down")
+        self.assertEqual(len(self._closer_rows(card, "block")), 1, "only the original block")
+        self.assertTrue(self._stale_closes(card["id"]), "the stand-down is logged, naming the card")
+
+    def test_a_block_tagged_history_keeps_the_history_anchor(self):
+        turns, s, seg_by_id, card = self._lifted()
+        self._close(turns, s, seg_by_id, card, "history")
+        self._assert_stands_down(card)
+
+    def test_an_untagged_block_keeps_the_history_anchor(self):
+        turns, s, seg_by_id, card = self._lifted()
+        self._close(turns, s, seg_by_id, card, None)
+        self._assert_stands_down(card)
+
+    def test_a_reply_tag_on_a_lift_rider_keeps_the_history_anchor(self):
+        # only status riders are asked where a block comes from: a lift rider is ruled from its history
+        turns, segs, s, seg_by_id = self._parse([
+            (T0, "Write the notes-api changelog entry for the search page.", "Entry written. Publish it as written?"),
+            (T_OTHER, "Check the web build.", "The web build is green.")])
+        card = _node(s, "gL", "Publish the search page changelog entry", trail=[segs[0]["id"]],
+                     log=[_row("block", "closer", T0, why="Publish the entry as written?"),
+                          _row("unblock", "unblocker", T_LIFT, why="the user said yes on the card")])
+        s["placements"][segs[0]["id"]] = card["id"]
+        self.assertEqual([n["id"] for n, _w in jd._lift_riders(s)], [card["id"]], "fixture: a lift rider")
+        self.reply = self.BLOCK % ', "from": "reply"'
+        jd._close_turn(s, turns[1], seg_by_id=seg_by_id)
+        self.assertNotIn('Add "from"', self.calls[0]["menu"], "no status note on a turn without status riders")
+        self._assert_stands_down(card)
+
+    def test_the_tag_is_read_per_goal_first_entry_wins(self):
+        self.assertEqual(jd._close_reply_blocks(
+            '{"done": [], "block": [{"goal": 2, "why": "a?", "from": "Reply"}, {"goal": 3, "why": "b?"},'
+            ' {"goal": 2, "why": "c?", "from": "history"}, {"goal": 4, "why": "d?", "from": "history"},'
+            ' {"goal": 3, "why": "e?", "from": "reply"}]}'), {2})
+        self.assertEqual(jd._close_reply_blocks("not json"), set())
+        self.assertEqual(jd._close_reply_blocks('{"done": [], "block": "junk"}'), set())
 
 
 if __name__ == "__main__":

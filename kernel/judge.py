@@ -15130,6 +15130,29 @@ def _parse_close(raw, menu_len):
             "awaiting": _collect(obj.get("awaiting"), skip=set(done) | set(block), kinds=True)}
 
 
+def _close_reply_blocks(raw):
+    """The goal numbers whose block entry in the closer's reply says its question is asked in THIS
+    turn's reply ("from": "reply", 2026-10-20), first entry per goal as _parse_close keeps it. Only the
+    status riders are asked to say where a block comes from (_close_turn); any other value, or none,
+    reads as goal history, so an untagged block keeps its history anchor."""
+    obj = _json_obj(raw)
+    items = obj.get("block") if isinstance(obj, dict) else None
+    out, seen = set(), set()
+    for it in items if isinstance(items, list) else []:
+        if not isinstance(it, dict):
+            continue
+        try:
+            n = int(it.get("goal"))
+        except (TypeError, ValueError):
+            continue
+        if n in seen:
+            continue
+        seen.add(n)
+        if str(it.get("from") or "").strip().lower() == "reply":
+            out.add(n)
+    return out
+
+
 def closer_llm(turn_text, menu_text, goal_history="", lift_whys=""):
     """The closer's {"done":[...], "block":[...]} verdict from the TRIAGE-tier model (Sonnet) over a turn
     + the touched open-goals menu. goal_history (the user 2026-07-01), when non-empty, is each touched
@@ -15825,11 +15848,14 @@ def _close_turn(store, turn, samples=None, seg_by_id=None):
                       "ends by asking the user for a decision or go-ahead. A reply that declines or "
                       "defers a goal's ask is not a completion either: leave that goal open (or block "
                       "it, if the decline itself asks the user), and say the reply declined it. A goal "
-                      "the reply does not clearly cover is a considered omission, not a completion."
+                      "the reply does not clearly cover is a considered omission, not a completion. "
+                      "Add \"from\" to each block entry for %s: \"reply\" when this turn's reply itself "
+                      "asks the question, \"history\" when the question comes only from the goal's history."
                       % ("s" if len(tflagged) > 1 else "",
                          ", ".join("#%d" % i for i in tflagged),
                          "are" if len(tflagged) > 1 else "is",
-                         "each" if len(tflagged) > 1 else "it"))
+                         "each" if len(tflagged) > 1 else "it",
+                         "these goals" if len(tflagged) > 1 else "this goal"))
     # the reply's own subject is off the menu and the turn lists no goal of its own (2026-10-15), most
     # often because the planner ruled the subject before this call: with only riders listed, a reply about
     # it had its outcome or its question credited to whichever rider fit best (a verdict attaches by menu
@@ -15928,9 +15954,15 @@ def _close_turn(store, turn, samples=None, seg_by_id=None):
     # every RIDER is ruled from the goal history it was shown, so a block on one anchors to that
     # history's newest segment (_close_ev, 2026-10-15), and a block computed from evidence older than the
     # user's latest reply stands down below instead of re-asking what the reply answered. A rider this
-    # turn's own follow-up names is ruled from the reply itself and keeps the turn's time.
+    # turn's own follow-up names is ruled from the reply itself and keeps the turn's time. So does a
+    # STATUS rider's block the closer says this reply asks (2026-10-20): anchored to its older history, a
+    # new question the reply put to the user sorted behind any newer row in the card's diary (a lift, a
+    # re-engage, the floor of an off-topic reply) and was dropped, leaving the card working. An untagged
+    # or history block keeps the anchor, so a re-asked old question still stands down.
+    asked = _close_reply_blocks(raw)
     hist_t = {i: newest[i] for i in range(n_touched + 1, len(menu) + 1)
-              if i in newest and menu[i - 1]["id"] not in targets}
+              if i in newest and menu[i - 1]["id"] not in targets
+              and not (i in asked and menu[i - 1]["id"] in status_ids)}
     for kind in ("done", "block"):
         for i in list(out.get(kind) or {}):
             nd = menu[i - 1]
