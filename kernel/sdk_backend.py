@@ -5279,8 +5279,8 @@ def interrupt_action(level: int, channel_up: bool) -> tuple[str, int]:
     press never repeats a rung that already failed to produce the settle event. Level 0 with a live
     channel → the polite control request; a press with no channel, or after an unsettled request →
     SIGINT the CLI; beyond that → SIGKILL (its stream death runs the existing crash-heal + resume).
-    The episode resets to 0 when a turn settles (ResultMessage) or a fresh turn starts. Pure for tests;
-    returns (action, new_level)."""
+    The episode resets to 0 when a turn settles (ResultMessage), a fresh turn starts, or, with no turn
+    to settle, the CLI answers the request (_do_interrupt). Pure for tests; returns (action, new_level)."""
     if channel_up and level == 0:
         return ("control", 1)
     if level <= 1:
@@ -8270,6 +8270,16 @@ class SdkSession:
                                  name=f"sdk-intr:{self.name}", daemon=True).start()
                 with self._lock:
                     self._intr_level = max(self._intr_level, 2)
+        else:
+            # The CLI answered the request. With no turn to settle (nothing in flight, the CLI not working) that
+            # answer IS the settle event the ladder waits for: the polite rung did not fail, so its episode ends
+            # and the next press starts polite again. Left at rung 1, a second Ctrl+C in an idle composer sent
+            # SIGINT, which ends the CLI and its background tasks, and a third sent SIGKILL. A turn in flight keeps
+            # its rung for its own ResultMessage to reset, a later press that already signalled keeps its rung,
+            # and a refused request (above) still escalates on the next press.
+            with self._lock:
+                if self._intr_level == 1 and self.inflight == 0 and not getattr(self, "_cli_working", False):
+                    self._intr_level = 0
         # The completed control round-trip IS the settle when nothing is in flight. A stop can race the
         # turn's own death (the user 2026-07-20: stop pressed one second after the turn died of its
         # API-retry storm) — the ResultMessage had already settled inflight to 0 and cleared the flag,
