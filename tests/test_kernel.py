@@ -1892,6 +1892,48 @@ class ViewBuilder(unittest.TestCase):
         self.assertIsNotNone(card["waitingOn"], "the 'Awaiting <peer>' chip is restored (no longer suppressed by the block)")
         self.assertEqual(card["waitingOn"]["peerSid"], "peerY")
 
+    def _peer_wait_block_card(self, block_mt, since):
+        """The card for a top minted at T0 holding a step blocked at `block_mt`, while the session has an
+        unanswered question out to the live peer web, sent at `since` (the postal path only)."""
+        top, blk = (SID + ":top", SID + ":blk")
+        def gn(nid, text, parent, **kw):
+            d = {"id": nid, "text": text, "parentId": parent, "nodeComplete": False,
+                 "blocked": False, "cleared": False, "trail": [], "t": T0, "mt": T0}
+            d.update(kw); return d
+        (jd.GOALDIR / (SID + ".json")).write_text(json.dumps({
+            "rompUuid": SID, "seq": 2, "lastNode": top,
+            "nodes": {
+                top: gn(top, "ship the exporter", None),
+                blk: gn(blk, "pick the export format", top, t=T0 + 590, blocked=True,
+                        blockWhy="which export format should ship first?", mt=block_mt),
+            },
+            "placements": {}, "status": {top: "blocked"}}))
+        saved_w, saved_a = km._wait_for_graph, km._session_awaiting
+        km._wait_for_graph = lambda now, alive: {SID: {
+            "peerSid": "11111111-2222-3333-4444-eeeeeeeeeeee", "name": "web", "color": None,
+            "inCycle": False, "since": since, "kind": "question"}}
+        km._session_awaiting = lambda sid, path, idle, stamp=False: None      # isolate the POSTAL path
+        try:
+            return next(a for a in km.build_feed(NOW)["asks"] if a["itemId"] == top)
+        finally:
+            km._wait_for_graph, km._session_awaiting = saved_w, saved_a
+
+    def test_a_block_filed_after_an_open_peer_question_stays_needs_you(self):
+        # EVENT ORDER: the session asked web something at T0+300 and web has not answered; a later turn
+        # ended on a decision for the user, blocked at T0+600. The block is the newer evidence, so it is
+        # the user's needs-you, not a stale block yielding to the peer wait.
+        card = self._peer_wait_block_card(block_mt=T0 + 600, since=T0 + 300)
+        self.assertEqual((card["column"], card["distillState"], card["awaiting"], card["waitingOn"]),
+                         ("needs_input", "blocked", None, None),
+                         "a block newer than the open question stays in Needs you, with its brief")
+
+    def test_a_block_older_than_the_open_peer_question_still_yields(self):
+        # the same card with the order reversed: blocked at T0+600, the question sent at T0+900
+        card = self._peer_wait_block_card(block_mt=T0 + 600, since=T0 + 900)
+        self.assertEqual(card["column"], "working", "the stale block yields to the live peer wait")
+        self.assertIsNotNone(card["awaiting"])
+        self.assertEqual(card["waitingOn"]["peerSid"], "11111111-2222-3333-4444-eeeeeeeeeeee")
+
     def test_transcript_only_bg_task_is_not_awaiting_but_live_sources_are(self):
         # A run_in_background launch visible ONLY in the transcript must NOT pin an idle session to a
         # working flavor (the user 2026-07-07: a leftover scrape ghost that might never finish). The LIVE
