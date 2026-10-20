@@ -2552,8 +2552,9 @@ class TheReconcileOfWaitingPicksClearsNoStandingAsk(_ABypassPickChangedBack):
 
 
 def _the_clis_init_reports(s, mode):
-    """The CLI's init, read as SdkSession._on_message reads it on the session's running loop, reports `mode` as its
-    permission mode."""
+    """SdkSession._on_message reads a CLI init that reports `mode` as its permission mode. The call is made inside a
+    coroutine under asyncio.run, which makes a new event loop for it (not the session's loop) and closes that loop when
+    the coroutine returns."""
     import asyncio
     SM = type("SystemMessage", (), {"__init__": lambda self_, st, d: setattr(self_, "__dict__",
                                                                                  {"subtype": st, "data": d})})
@@ -2756,9 +2757,10 @@ class ARefusedSwitchPutsBypassBackOnlyWhileTheModeReadsIt(_ABypassPickChangedBac
 
 class ARefusedSwitchRevertsTheConfirmedModeByEachTermOfItsRule(_ABypassPickChangedBack):
     """A refused switch (SdkSession._do_set_mode) puts the confirmed mode back to the mode confirmed before the refused
-    pick when the confirmed mode reads the refused pick and either that earlier mode is not bypassPermissions or the
-    session's mode reads bypassPermissions. Each test reaches one of the two terms, with the session's mode another
-    pick's."""
+    pick when the session's mode still reads the refused pick, or when the confirmed mode reads the refused pick and
+    either that earlier mode is not bypassPermissions or the session's mode reads bypassPermissions. Each test reaches
+    one of these three terms with the other two false: two with the session's mode another pick's, and one with the
+    session's mode the refused pick, a pick made from a confirmed bypassPermissions."""
 
     # Kills mutant AUTO.drop.8447.8449.1 (kernel/sdk_backend.py:8449 without `now == "bypassPermissions"`).
     def test_a_bypass_pick_waiting_when_a_pick_made_from_bypass_is_refused(self):
@@ -2783,6 +2785,17 @@ class ARefusedSwitchRevertsTheConfirmedModeByEachTermOfItsRule(_ABypassPickChang
         _refuse_mode_switch(s, "plan", "default")
         self.assertEqual((s.mode, s.perm_mode), ("acceptEdits", "default"),
                          "the confirmed mode reads the refused pick: it goes back to default")
+
+    # Kills mutant LOST.8447.8449.19.0 (kernel/sdk_backend.py:8449 without `now == mode`).
+    def test_a_pick_made_from_bypass_refused_while_the_mode_reads_it(self):
+        s = self._session(mode="bypassPermissions")
+        self.assertEqual(s.perm_mode, "bypassPermissions", "the premise: the CLI was launched with the flag")
+        self.assertTrue(self.be.set_mode(SID, "plan"))              # held: no client
+        self.assertEqual((s.mode, s.perm_mode), ("plan", "plan"),
+                         "the premise: the mode and the confirmed mode read plan")
+        _refuse_mode_switch(s, "plan", "bypassPermissions")
+        self.assertEqual((s.mode, s.perm_mode), ("bypassPermissions", "bypassPermissions"),
+                         "the session's mode reads the refused pick: the confirmed mode goes back to bypassPermissions")
 
     # Equivalent mutant AUTO.drop.8447.8448.1 (SdkSession._do_set_mode, kernel/sdk_backend.py:8448, `or ""` dropped from
     # the read of the mode): `x or ""` differs from x only when x is a false value other than "", and the session's mode
