@@ -7392,7 +7392,8 @@ def open_menu(store, cap=20):
     here, so the planner kept burying new asks under it instead of minting a fresh card. settledDone is the
     same durable marker rollup_status stamps for "completed" and _reopen clears for a genuine follow-up, so
     sealing on it matches exactly what the board shows as done. Cap 20 covers every real session (max ~18
-    open goals) while bounding the prompt on a pathological one, so topic-matching can scan the WHOLE list."""
+    open goals) while bounding the prompt on a pathological one, so topic-matching can scan the WHOLE list.
+    cap=None keeps every open node: a caller that already knows its target reads that (_scoped_menu)."""
     nodes = store["nodes"]
     vc = _view_cleared()                               # ids the user crossed off the feed (cleared.jsonl) — SEALED too:
     #                                                    a goal you cleared must never get new sub/amend work, even if a
@@ -7434,7 +7435,8 @@ def open_menu(store, cap=20):
 
     opens = [nd for nid, nd in nodes.items() if not _sealed(nid)]
     opens.sort(key=lambda nd: nd.get("t", 0))           # (follow-up stub nodes retired 2026-07-07: an
-    opens = opens[-cap:]                                # unanswered user reopen holds the top open instead)
+    if cap is not None:                                 # unanswered user reopen holds the top open instead)
+        opens = opens[-cap:]
     # Tree order (the user 2026-07-08, card-first filing): group each card's open subtree under it,
     # depth-first, cards oldest-first — so _menu_text can render real structure and the planner picks
     # a CARD, not a leaf from a flat list. A node whose parent fell outside the menu (sealed ancestor
@@ -7455,6 +7457,22 @@ def open_menu(store, cap=20):
     for r in roots:
         _dfs(r)
     return out
+
+
+def _scoped_menu(store, target, cap=20):
+    """The menu for a planner call that already knows its card (a nudge reply, a delegation filed under
+    the courier's goal): the TARGET first (#1), then its open descendants oldest-first. Read from the
+    UNCAPPED open set: a filter over the capped open_menu lost a target older than the session's 20
+    newest open nodes, so its nudge reply was never placed (each pass appended another reopen row and
+    saved) and a delegation to it was retired as if the user had cleared the card. The cap still bounds
+    the prompt: past it the target keeps its newest open descendants. Empty when the target itself is
+    not open (view-cleared, or under a sealed ancestor)."""
+    sub = [nd for nd in open_menu(store, cap=None)
+           if nd["id"] == target or _top_ancestor(store["nodes"], nd["id"]) == target]
+    sub.sort(key=lambda nd: (nd["id"] != target, nd.get("t", 0)))
+    if not sub or sub[0]["id"] != target:
+        return []
+    return sub if len(sub) <= cap else sub[:1] + sub[1 - cap:]
 
 
 def _menu_text(store, menu):
@@ -12745,10 +12763,8 @@ def _plan_session(fsid, path, now):
                 continue                              # courier hasn't run yet (UNSET) → stay re-examinable ('fyi' was
                 #                                       already retired in the collection loop, so it never reaches here)
             _reopen(store, target, by="delegation", now=seg_t)    # unseal if the closer already flat-completed G (refused if view-cleared)
-            sub = [nd for nd in open_menu(store)       # SCOPED menu: G + its open descendants, G first (menu #1)
-                   if nd["id"] == target or _top_ancestor(store["nodes"], nd["id"]) == target]
-            sub.sort(key=lambda nd: (nd["id"] != target, nd.get("t", 0)))
-            if not sub or sub[0]["id"] != target:
+            sub = _scoped_menu(store, target)          # SCOPED menu: G + its open descendants, G first (menu #1)
+            if not sub:
                 # G is view-cleared (the user crossed it off the feed) — _reopen refused to unseal it, so it's
                 # PERMANENTLY out of the menu. That's final, never plantable → RETIRE the #d unit (the user
                 # 2026-06-22, via link_audit) instead of a bare skip, else it eats a fairness slot every pass.
@@ -12829,10 +12845,8 @@ def _plan_session(fsid, path, now):
                     save_goals(fsid, store)
                     continue
                 _reopen(store, target, by="nudge", now=seg_t)         # unseal if the closer already completed it (refused if view-cleared)
-                sub = [nd for nd in open_menu(store)       # SCOPED menu: the goal + its open descendants, goal first (#1)
-                       if nd["id"] == target or _top_ancestor(store["nodes"], nd["id"]) == target]
-                sub.sort(key=lambda nd: (nd["id"] != target, nd.get("t", 0)))
-                if not sub or sub[0]["id"] != target:
+                sub = _scoped_menu(store, target)      # SCOPED menu: the goal + its open descendants, goal first (#1)
+                if not sub:
                     continue                          # goal not open (e.g. view-cleared) → don't plan
                 hist = _goal_work_text(store, seg_by_id, target, GOAL_HISTORY_CHARS)
                 # name the menu items that mirror the agent's OWN still-open to-dos: the note (plan_llm) makes
@@ -12937,6 +12951,12 @@ def _plan_session(fsid, path, now):
                 _reopen(store, followup, by="followup", now=seg_t)
                 menu = open_menu(store)                # rebuilt: the reopen just unsealed the target
                 gi2 = next((i for i, nd in enumerate(menu, 1) if nd["id"] == followup), None)
+                if gi2 is None and any(nd["id"] == followup for nd in open_menu(store, cap=None)):
+                    # open, but older than the 20 newest open nodes, so the cap left it out: append it, as
+                    # the first menu above does (nothing below goes to the model). Without this the reply
+                    # fell through to free placement and landed on some other card or a fresh one.
+                    menu = menu + [store["nodes"][followup]]
+                    gi2 = len(menu)
                 if gi2:
                     retitle = next((o for o in ops if o["do"] == "retitle" and o.get("goal") == gi), None)
                     desc = next((o for o in ops if o.get("text") and o["do"] != "retitle"), None)   # reuse the
