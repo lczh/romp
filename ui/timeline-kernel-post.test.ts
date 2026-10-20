@@ -138,7 +138,7 @@ test("executed: the token rides the header from the kernel's 0600 file, the port
   assert.match(kp, /readFileSync\(at\('serve-port'\)/, "the port is the kernel's own record first…");
   assert.match(kp, /e\.code !== 'ENOENT'\) return unreadable\('port record'/, "…an unreadable record is said, never read as 'not running'…");
   assert.match(kp, /envVar = pick\('ROMP_KERNEL_PORT'\) \? 'ROMP_KERNEL_PORT' : \(pick\('ROMP_SERVE_PORT'\) \? 'ROMP_SERVE_PORT' : ''\);\s*\n\s*envRaw = envVar \? pick\(envVar\) : '29855';/,
-    "…and only a MISSING record falls to the CLI's resolution: the environment in _kernel_urls' order, else bin/romp's one default");
+    "…and only a MISSING record falls to the environment, in _kernel_urls' order, else bin/romp's one default");
   assert.match(kp, /bin\/romp's default, \$\{ROMP_KERNEL_PORT:-29855\}/, "the comment names the rule the panel actually mirrors");
   assert.match(kp, /require\('http'\)\.request\(/, "Node's http, not fetch: no CORS preflight from Obsidian's app:// origin can read as a kernel that is down");
 });
@@ -207,8 +207,8 @@ test("executed: a socket that drops after the headers settles the promise (never
   assert.match(kp, /res\.on\('error', dropped\); res\.on\('aborted', dropped\); res\.on\('close', dropped\);/, "every way a response can die after its headers is handled, behind the done guard");
 });
 
-test("executed: no serve-port record → the CLI's port (env, else 29855) is tried; a kernel there takes the write, an old kernel there is named, nothing there is the combined down text (review find, 2026-09-08)", async () => {
-  // a running kernel that predates the record: the write lands through the CLI's port
+test("executed: no serve-port record → the environment's port (else 29855) is tried; a kernel there takes the write, an old kernel there is named, nothing there is the combined down text (review find, 2026-09-08)", async () => {
+  // a running kernel that predates the record: the write lands through the environment's port
   const k = await kernel(() => ({ status: 200, body: { ok: true, id: SID, flag: "hideFromFeed", value: true } }));
   try {
     await asObsidian({ token: TOKEN, envPort: k.port }, async () => {
@@ -789,14 +789,14 @@ test("executed: before the token leaves this panel the port must prove itself ov
   assert.ok(pv.includes("if (st === 200 && text.trim() === 'ok' && /^\\d+\\.\\d+$/.test(boot)) return finish({ ok: true, boot });"),
     "the frozen liveness body and the kernel identity header (X-Romp-Boot: <pid>.<epoch>), both required");
   // the fallback is STATED, in the panel, the kernel's record docstring and the reference, as what it is
-  assert.match(SRC, /the port the CLI resolves: ROMP_KERNEL_PORT, then ROMP_SERVE_PORT, else 29855\. Record or fallback,\s*\n\s*\/\/ the port must first PROVE itself a romp kernel/, "the panel's comment");
+  assert.match(SRC, /the environment's port: ROMP_KERNEL_PORT, then ROMP_SERVE_PORT, else 29855\. Record or fallback,\s*\n\s*\/\/ the port must first PROVE itself a romp kernel/, "the panel's comment");
   assert.doesNotMatch(SRC, /the port from the kernel's own\s*\n\s*\/\/ record \(never a guess\)/, "the sentence that was untrue is gone");
   const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
-  assert.match(KERNEL, /the panel tries the port the CLI resolves -- ROMP_KERNEL_PORT,\s*\n\s*then ROMP_SERVE_PORT, else 29855/, "the serve-port record's docstring");
+  assert.match(KERNEL, /the panel tries the environment's port -- ROMP_KERNEL_PORT,\s*\n\s*then ROMP_SERVE_PORT, else 29855/, "the serve-port record's docstring");
   assert.match(KERNEL, /the panel first asks the port to prove itself over GET \/healthz/, "and it names the proof");
   assert.doesNotMatch(KERNEL, /never guessing a port or falling back to a write the kernel cannot check/, "the record's untrue sentence is gone");
   const DOCS = fs.readFileSync(path.resolve(process.cwd(), "..", "docs", "reference.md"), "utf8");
-  assert.match(DOCS, /it tries the port the command line resolves, `ROMP_KERNEL_PORT`, then\s*\n`ROMP_SERVE_PORT`, else `29855`/, "the reference");
+  assert.match(DOCS, /it tries the port the environment names, `ROMP_KERNEL_PORT`, then\s*\n`ROMP_SERVE_PORT`, else `29855`/, "the reference");
   assert.match(DOCS, /`GET \/healthz` with no token, on `127\.0\.0\.1` only, must answer `200 ok` with\s*\nthe kernel's `X-Romp-Boot` identity before the token is sent/);
 });
 

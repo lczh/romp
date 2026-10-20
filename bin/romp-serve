@@ -30,8 +30,9 @@ KERNEL="${ROMP_KERNEL_BIN:-$ROMP_DIR/bin/romp-kernel}"
 # ROMP_SERVE_PORT and ROMP_KERNEL_PORT are TWO SPELLINGS OF ONE VALUE: the port the kernel
 # listens on. The split is historical and role-based, not semantic. ROMP_SERVE_PORT is the
 # service-facing spelling (romp-manager, romp-service's unit, the wake hook, the VS Code
-# extension); ROMP_KERNEL_PORT is the process-facing one (kernel.py, the postal bus, every
-# `romp` CLI verb). This script is the seam between them, so it is where they have to agree.
+# extension); ROMP_KERNEL_PORT is the process-facing one (kernel.py, the postal bus, bin/romp's
+# kernel verbs; romp update and romp version read both, in romp-manager's order, ROMP_SERVE_PORT
+# first). This script is the seam between them, so it is where they have to agree.
 #
 # It used to read only ROMP_SERVE_PORT and then unconditionally OVERWRITE ROMP_KERNEL_PORT
 # from it. Someone renumbering a second kernel by the documented knob alone (docs/reference.md

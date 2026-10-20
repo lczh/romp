@@ -10,6 +10,7 @@ owed — instead of reading restart logs. No filesystem paths are printed (priva
 """
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -46,19 +47,66 @@ def _disk_bundles():
     return out
 
 
+# What JavaScript's Number() drops from both ends of a string (ECMA-262's StrWhiteSpaceChar: white space and
+# line terminators), and the literals it reads from what remains: a decimal, with an optional sign, fraction
+# and exponent, or Infinity; or a 0x, 0o or 0b integer.
+_JS_SPACE = ("\t\n\v\f\r \xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+             "\u2028\u2029\u202f\u205f\u3000\ufeff")
+_JS_NUMBER = re.compile(r"[+-]?(?:Infinity|(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)"
+                        r"|0[xX][0-9a-fA-F]+|0[oO][0-7]+|0[bB][01]+")
+
+
+def _js_number(value):
+    """The number JavaScript's Number() reads from the string `value`, or None where it reads NaN; an empty
+    or all-space string reads as 0."""
+    s = value.strip(_JS_SPACE)
+    if not s:
+        return 0.0
+    if not _JS_NUMBER.fullmatch(s):
+        return None
+    base = {"0x": 16, "0o": 8, "0b": 2}.get(s[:2].lower())
+    if not base:
+        return float(s)
+    try:
+        return float(int(s[2:], base))
+    except OverflowError:                       # past the largest double, which Number() reads as Infinity
+        return float("inf")
+
+
+def _kernel_port():
+    """The kernel's port as (port, value), read from the environment as bin/romp-manager reads it when it starts
+    the kernel: `Number(ROMP_SERVE_PORT) || Number(ROMP_KERNEL_PORT) || 29855`. So ROMP_SERVE_PORT, then
+    ROMP_KERNEL_PORT, else 29855: each value is decoded as UTF-8, as node decodes the environment, and read as
+    Number() reads it (_js_number), and a value read as 0, or not as a number, counts as unset. `port` is the
+    number read, as an int, when it is a port a kernel can listen on (a whole number from 1 to 65535), else
+    None; `value` is the value it was read from, trimmed as Number() trims it."""
+    for name in (b"ROMP_SERVE_PORT", b"ROMP_KERNEL_PORT"):
+        raw = os.environb.get(name)
+        if raw is None:
+            continue
+        value = raw.decode("utf-8", "replace").strip(_JS_SPACE)
+        n = _js_number(value)
+        if n:
+            return (int(n) if n.is_integer() and 0 < n < 65536 else None), value
+    return 29855, "29855"
+
+
 def _kernel_base():
-    """This romp's kernel, on the port every other `romp` command resolves: ROMP_KERNEL_PORT, then
-    ROMP_SERVE_PORT, else 29855. A fixed list of ports read whatever answered first as this romp's kernel,
-    another account's included, and missed this one when it ran on a port of its own."""
-    port = (os.environ.get("ROMP_KERNEL_PORT") or os.environ.get("ROMP_SERVE_PORT") or "").strip()
-    return "http://127.0.0.1:%s" % (port or "29855")
+    """This romp's kernel, on the port _kernel_port() reads, or naming the value it read when that is not a port
+    a kernel can listen on (then nothing is asked). Only that one port is asked; a fixed list of ports used to be
+    tried in turn, taking whatever answered first."""
+    port, value = _kernel_port()
+    return "http://127.0.0.1:%s" % (value if port is None else port)
 
 
 def _probe_kernel():
     """The running kernel's self-report. Returns ('version', dict) when /version answers,
     ('stale', url) when only /healthz answers (a kernel predating /version → restart it), or
-    ('down', None) when nothing is listening."""
+    ('down', None) when nothing is listening. Nothing is asked when _kernel_port() reads no port a kernel
+    can listen on: that is ('down', None) too."""
     import urllib.request
+    if _kernel_port()[0] is None:
+        return ("down", None)
     u = _kernel_base()
     try:
         with urllib.request.urlopen(u + "/version", timeout=1.5) as resp:
