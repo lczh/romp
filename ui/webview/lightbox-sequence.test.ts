@@ -9,7 +9,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
 import { Marked } from "marked";
-import { mdImages } from "./md-images";
+import { mdLayout } from "./md-images";
+import { keyOf } from "./chat-window";
 import { chatMdExtensions } from "./chat-md";
 
 const requireCjs = createRequire(__filename);
@@ -23,7 +24,8 @@ type Fake = { closest: (sel: string) => unknown };
 const WEB = "aaaaaaaa-1111-2222-3333-444444444444";
 const SUB = WEB + "/agent/a0123456789abcdef";
 
-function lift(sessions: Map<string, { events: Ev[] }>, thread: { sid: string; th: { events: Ev[] } } | null = null) {
+// `lexed` counts the lexer's runs (the chat's marked singleton's lexer, as chatImagesFor calls it)
+function lift(sessions: Map<string, { events: Ev[] }>, thread: { sid: string; th: { events: Ev[] } } | null = null, lexed = { n: 0 }) {
   const a = RENDER.indexOf("function lightboxScope(");
   const z = RENDER.indexOf("\n}\n", RENDER.indexOf("function chatImagesFor("));
   assert.ok(a > 0 && z > a, "lightboxScope/chatImagesFor: anchors not found; re-anchor");
@@ -35,9 +37,10 @@ function lift(sessions: Map<string, { events: Ev[] }>, thread: { sid: string; th
     const sessions = H.sessions;
     const document = { baseURI: "https://dash.example.test/chat" };
   `;
-  const H = { sessions, thread, marked, mdImages };
-  return (new Function("H", "marked", "mdImages", prelude + code + "\nreturn chatImagesFor;") as
-    (h: unknown, m: unknown, f: unknown) => (sid: string | null, from?: Fake | null) => Entry[])(H, marked, mdImages);
+  const H = { sessions, thread };
+  const counting = { lexer: (src: string) => { lexed.n++; return marked.lexer(src); } };
+  return (new Function("H", "marked", "mdLayout", "keyOf", prelude + code + "\nreturn chatImagesFor;") as
+    (h: unknown, m: unknown, f: unknown, k: unknown) => (sid: string | null, from?: Fake | null) => Entry[])(H, counting, mdLayout, keyOf);
 }
 // a clicked element, as far as the scope reads it: which ancestor it sits under
 function inside(sel: Record<string, unknown>): Fake {
@@ -45,7 +48,7 @@ function inside(sel: Record<string, unknown>): Fake {
 }
 const show = (es: Entry[]) => es.map((e) => e.url ? "url:" + e.url.replace("https://img.example.test/", "") : "path:" + e.path + (e.pin ? "@" + e.pin : ""));
 
-test("within a message: a markdown picture where it is written, a path's figure at the end of the line that names it", () => {
+test("within a message: a markdown picture where it is written, a path's figure after the paragraph that names it", () => {
   const ev: Ev = { kind: "assistant", uuid: "a1",
     md: "The run:\n\n![throughput](https://img.example.test/wide.png)\n\nThe split is in docs/figure.png and ![inline](https://img.example.test/inline.png) beside it.\n\n![after](https://img.example.test/after.png)",
     pathLinks: { "docs/figure.png": "docs/figure.png" }, pathPins: { "docs/figure.png": "v1" } };
@@ -53,6 +56,84 @@ test("within a message: a markdown picture where it is written, a path's figure 
   assert.deepEqual(show(nav), ["url:wide.png", "url:inline.png", "path:docs/figure.png@v1", "url:after.png"],
     "the inline picture on the mentioning line renders inside its paragraph, the figure after it");
   assert.equal(nav[2].sid, WEB, "the file resolves in the session's folder");
+});
+
+test("a paragraph that wraps onto a second line: the picture written there shows ahead of the figure, as the page has it", () => {
+  // the 2026-10-20 review's case: the end of the mentioning LINE put the figure ahead of a picture the paragraph shows first
+  const ev: Ev = { kind: "assistant", uuid: "a1",
+    md: "The p95 split per region is in docs/figure.png and\n![soft](https://img.example.test/soft.png) shows the hourly curve.\n\n![next](https://img.example.test/next.png)",
+    pathLinks: { "docs/figure.png": "docs/figure.png" } };
+  assert.deepEqual(show(lift(new Map([[WEB, { events: [ev] }]]))(WEB)), ["url:soft.png", "path:docs/figure.png", "url:next.png"]);
+});
+
+test("lists, table rows and one-line paragraphs keep their order: a figure after its item, its row, its line", () => {
+  const ev: Ev = { kind: "assistant", uuid: "a1", md: [
+    "- first docs/a.png",
+    "- second ![b](https://img.example.test/b.png)",
+    "",
+    "| k | v |",
+    "|---|---|",
+    "| docs/c.png | x |",
+    "| e | ![e](https://img.example.test/e.png) |",
+    "",
+    "One line names docs/f.png and ![g](https://img.example.test/g.png) beside it.",
+    "",
+    "![h](https://img.example.test/h.png)",
+  ].join("\n"), pathLinks: { "docs/a.png": "docs/a.png", "docs/c.png": "docs/c.png", "docs/f.png": "docs/f.png" } };
+  assert.deepEqual(show(lift(new Map([[WEB, { events: [ev] }]]))(WEB)),
+    ["path:docs/a.png", "url:b.png", "path:docs/c.png", "url:e.png", "url:g.png", "path:docs/f.png", "url:h.png"]);
+});
+
+test("a list item's figure goes at the item's end, after what is nested in it; a quote's paragraph is one block", () => {
+  const ev: Ev = { kind: "assistant", uuid: "a1", md: [
+    "- outer names docs/a.png",
+    "  - inner ![b](https://img.example.test/b.png)",
+    "- next ![c](https://img.example.test/c.png)",
+    "",
+    "> quoted docs/d.png and",
+    "> ![e](https://img.example.test/e.png) here",
+  ].join("\n"), pathLinks: { "docs/a.png": "docs/a.png", "docs/d.png": "docs/d.png" } };
+  assert.deepEqual(show(lift(new Map([[WEB, { events: [ev] }]]))(WEB)),
+    ["url:b.png", "path:docs/a.png", "url:c.png", "url:e.png", "path:docs/d.png"]);
+});
+
+test("figures after the same block go in linkifyFileUris's order: the spaced paths, then the others by where they are mentioned", () => {
+  const ev: Ev = { kind: "assistant", uuid: "a1", md: "Both docs/y.png and `my plot.png` and docs/z.png, with\n![c](https://img.example.test/c.png).",
+    spacePaths: ["my plot.png"], pathLinks: { "docs/z.png": "docs/z.png", "docs/y.png": "docs/y.png" } };   // z resolved first: key order is not mention order
+  assert.deepEqual(show(lift(new Map([[WEB, { events: [ev] }]]))(WEB)), ["url:c.png", "path:my plot.png", "path:docs/y.png", "path:docs/z.png"]);
+});
+
+test("each message is read once: more opens lex nothing again, a re-sent transcript neither, an edit re-reads that message alone", () => {
+  const evs: Ev[] = Array.from({ length: 6 }, (_, i) => ({ kind: "assistant", uuid: "a" + i,
+    md: `Run ${i}:\n\n![r${i}](https://img.example.test/r${i}.png)\n\nThe notes are in docs/f${i}.png`, pathLinks: { [`docs/f${i}.png`]: `docs/f${i}.png` } }));
+  evs.push({ kind: "assistant", uuid: "p0", md: "no picture in this one, docs/f0.png", pathLinks: { "docs/f0.png": "docs/f0.png" } });
+  const s = { events: evs };
+  const lexed = { n: 0 };
+  const sub = { events: [{ kind: "assistant", uuid: "s0", md: "![s](https://img.example.test/sub.png)" }] as Ev[] };
+  const nav = lift(new Map([[WEB, s], [SUB, sub]]), null, lexed);
+  const fresh = () => lift(new Map([[WEB, { events: s.events }]]))(WEB);   // an uncached read of the same events
+  const first = nav(WEB);
+  assert.equal(lexed.n, 6, "the first open reads each message that names a picture, once");
+  assert.deepEqual(first, fresh());
+  for (let k = 0; k < 5; k++) assert.deepEqual(nav(WEB), first);
+  const fromSub = inside({ ".thread[data-session]": { dataset: { session: SUB } } });
+  nav(null, fromSub); nav(null, fromSub);
+  assert.equal(lexed.n, 7, "five more opens read nothing again; the subagent viewer's transcript is read once, on its own");
+  nav(WEB);
+  assert.equal(lexed.n, 7, "…and does not cost the session's");
+  s.events = evs.map((e) => ({ ...e }));                // a full frame: the same messages as new objects
+  assert.deepEqual(nav(WEB), first);
+  assert.equal(lexed.n, 7, "a re-sent transcript's unchanged messages are not read again");
+  s.events = s.events.slice();
+  s.events[2] = { ...s.events[2], md: s.events[2].md + "\n\n![more](https://img.example.test/more.png)" };   // an edit, or a reply streaming in
+  s.events.push({ kind: "assistant", uuid: "a9", md: "![late](https://img.example.test/late.png)" });     // and one new message
+  const edited = nav(WEB);
+  assert.equal(lexed.n, 9, "the edited message and the new one are read, and nothing else");
+  assert.deepEqual(edited, fresh(), "the result is what an uncached read gives");
+  assert.deepEqual(show(edited).slice(4, 8), ["url:r2.png", "path:docs/f2.png", "url:more.png", "url:r3.png"]);
+  assert.equal(show(edited).at(-1), "url:late.png");
+  nav(WEB);
+  assert.equal(lexed.n, 9);
 });
 
 test("one stop per picture per message; a linked picture, code and a non-image path are no stops; messages oldest first", () => {

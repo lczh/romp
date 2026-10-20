@@ -309,6 +309,17 @@ test("a URL that failed to load, or one that loaded glyph-sized, is no stop: no 
   assert.equal(barOf(body).cue!.textContent, "2/2");
 });
 
+test("a picture showing a srcset's candidate opens on it, and is the sequence's entry for its src", () => {
+  const nav: Nav = [{ url: "https://img.example.test/a.png" }, { url: "https://img.example.test/dense.png" }, { url: "https://img.example.test/b.png" }];
+  const { body, openSrc, keys } = lift("img", nav);
+  openSrc({ url: "https://img.example.test/dense@2x.png" }, { tagName: "IMG", src: "https://img.example.test/dense.png" });
+  const v = barOf(body);
+  assert.equal(v.img.src, "https://img.example.test/dense@2x.png", "the lightbox shows what the page showed");
+  assert.equal(v.cue!.textContent, "2/3", "…and the arrows still know where it sits");
+  press(keys, "ArrowRight");
+  assert.equal(barOf(body).img.src, "https://img.example.test/b.png");
+});
+
 test("a file and a URL are never the same picture, whatever the strings", () => {
   const nav: Nav = [{ url: "/file?path=a.png&sid=s1" }, { path: "a.png", sid: "s1" }];
   const { body, open } = lift("img", nav);

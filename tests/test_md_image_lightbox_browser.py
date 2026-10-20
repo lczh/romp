@@ -18,6 +18,12 @@ The driver, at a desktop width and at a phone width, in the dark theme and the l
   the linked picture following its link and the badge staying put (neither wears the zoom cursor);
   the subagent viewer's picture stepping to its own path preview, and the comment popover's picture opening the
   lightbox with the popover still there when the lightbox closes.
+A second session, api, holds the edge cases a review of the first cut reproduced (2026-10-20), read on a desktop at a
+device pixel ratio of 2: a paragraph that wraps a picture onto the line after a path's mention (the picture is the stop
+before the figure), a picture with a 2x srcset (it opens on the candidate it shows, at its place in the arrows), a
+picture drawn from a srcset alone (it opens on it, its "Open original" the picture, never the dashboard), a src whose
+query is written with numeric character references (a stop the click finds, no phantom beside it), and a picture in a
+<details>'s <summary> (its click opens the details; no zoom, no stop).
 
 MDLB_DIST=<dir> serves another tree's UI bundle (the red run's before); MDLB_SHOTS=<dir> writes the reply at both widths
 in both themes and the open lightbox; MDLB_DUMP=<path> writes the whole measurement. Skips LOUDLY without the extension
@@ -52,6 +58,7 @@ import test_ship_reship_served as _lab   # noqa: E402  the lab kernel's environm
 from test_comment_relay_mark_served import user, agent, iso, _free_port   # noqa: E402  the same synthetic records
 
 WEB = "aaaaaaaa-1111-2222-3333-4d1a6e1b0c55"
+API = "cccccccc-1111-2222-3333-4d1a6e1b0c55"
 THREAD = "bbbbbbbb-1111-2222-3333-4d1a6e1b0c55"
 AGENT_ID = "a0123456789abcdef"                             # the shape the kernel's agent-id pattern admits
 PASSAGE = "Cache the notes-api list responses for thirty seconds, keyed by the query string."
@@ -115,6 +122,16 @@ def _reply_a2(host, badge, swatch):
             "[![dashboard card](%s/card.png)](%s/page). The colour key: ![colour key](%s)") % (badge, host, host, swatch)
 
 
+def _reply_b0(host):
+    return ("The p95 split per region is in docs/figure.png and\n"
+            "![soft wrap](%(h)s/hit.png?v=soft) shows the hourly curve.\n\n"
+            "The dense card <img src=\"%(h)s/card.png?v=dense\" srcset=\"%(h)s/card.png?v=dense2 2x\" alt=\"dense card\"> "
+            "and one drawn from a srcset alone <img srcset=\"%(h)s/card.png?v=srcset 1x\" alt=\"srcset only\">\n\n"
+            "Its query written with references <img src=\"%(h)s/card.png?v=num&#38;w=2&#x26;h=3\" alt=\"numeric ref\">\n\n"
+            "<details><summary><img src=\"%(h)s/hit.png?v=summary\" alt=\"fold picture\"> Raw counts</summary>\n\n"
+            "The raw counts per region.\n\n</details>\n") % {"h": host}
+
+
 DRIVER = r"""
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -128,10 +145,11 @@ if (cfg.shots) fs.mkdirSync(cfg.shots, { recursive: true });
 const THEMES = { dark: "classic", light: "yatharth-light" };   // the settings store's key, read by theme.ts at boot
 const WIDE = 'img[alt="throughput over the run"]';
 
-const open = async (theme, phone) => {
+// o.dpr: a desktop at that device pixel ratio; o.hash: the page's #only= filter; o.ready: the picture that says the chat is up
+const open = async (theme, phone, o = {}) => {
   const ctx = await browser.newContext(phone
     ? { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true }
-    : { viewport: { width: 1100, height: 800 } });
+    : { viewport: { width: 1100, height: 800 }, deviceScaleFactor: o.dpr || 1 });
   await ctx.addInitScript(({ t }) => {
     try { localStorage.setItem("romp:settings", JSON.stringify({ theme: t })); } catch (e) {}
     window.__opened = [];
@@ -140,11 +158,12 @@ const open = async (theme, phone) => {
   const page = await ctx.newPage();
   const errs = [];
   page.on("pageerror", (e) => errs.push(String(e && e.stack || e).slice(0, 600)));
-  await page.goto(cfg.chat);
-  await page.waitForSelector(WIDE, { timeout: 60000 });
+  const ready = o.ready || WIDE;
+  await page.goto(cfg.chat + (o.hash || ""));
+  await page.waitForSelector(ready, { timeout: 60000 });
   await page.waitForFunction(() => Array.from(document.querySelectorAll("#content img")).filter((i) => i.closest(".md")).every((i) => i.complete),
     null, { timeout: 30000 }).catch(() => {});
-  await page.waitForFunction((sel) => { const i = document.querySelector(sel); return !!(i && i.complete && i.naturalWidth > 0); }, WIDE, { timeout: 30000 });
+  await page.waitForFunction((sel) => { const i = document.querySelector(sel); return !!(i && i.complete && i.naturalWidth > 0); }, ready, { timeout: 30000 });
   await page.waitForFunction(() => { const i = document.querySelector(".path-full-img"); return !!(i && i.complete && i.naturalWidth > 0); }, null, { timeout: 30000 });
   await page.waitForTimeout(250);
   return { ctx, page, errs };
@@ -326,6 +345,61 @@ for (const theme of ["dark", "light"]) {
   await ctx.close();
 }
 
+// ── the second session (api) on a dense screen: the review's edge cases ──
+{
+  const SOFT = 'img[alt="soft wrap"]';
+  const { ctx, page, errs } = await open("dark", false, { dpr: 2, hash: "#only=api", ready: SOFT });
+  const leg = async (name, fn) => { try { await fn(); } catch (e) { out[name + "Err"] = String(e).slice(0, 400); await page.keyboard.press("Escape").catch(() => {}); } };
+  out.api = {};
+  out.api.cursor = await page.evaluate(() => { const cur = (q) => { const e = document.querySelector(q); return e ? getComputedStyle(e).cursor : null; };
+    return { soft: cur('img[alt="soft wrap"]'), dense: cur('img[alt="dense card"]'), srcset: cur('img[alt="srcset only"]'), num: cur('img[alt="numeric ref"]'), fold: cur('img[alt="fold picture"]') }; });
+  await leg("apiSoft", async () => {
+    await page.click(SOFT);
+    out.api.softOpen = await settle(page);
+    out.api.softRight = await press(page, "ArrowRight");
+    out.api.softRight2 = await press(page, "ArrowRight");
+    await page.keyboard.press("Escape"); await page.waitForTimeout(120);
+  });
+  await leg("apiPath", async () => {
+    await page.click(".turn-assistant:has(" + SOFT + ") .path-full-img");
+    out.api.pathOpen = await settle(page);
+    out.api.pathLeft = await press(page, "ArrowLeft");
+    await page.keyboard.press("Escape"); await page.waitForTimeout(120);
+  });
+  await leg("apiDense", async () => {
+    await page.click('img[alt="dense card"]');
+    out.api.denseOpen = await settle(page);
+    out.api.denseShown = await page.evaluate(() => document.querySelector('img[alt="dense card"]').currentSrc);
+    await page.keyboard.press("Escape"); await page.waitForTimeout(120);
+  });
+  await leg("apiSrcset", async () => {
+    await page.click('img[alt="srcset only"]');
+    out.api.srcsetOpen = await settle(page);
+    await page.evaluate(() => { window.__opened = []; });
+    await page.click("#romp-lightbox .romp-lightbox-dl", { timeout: 5000 });
+    await page.waitForTimeout(150);
+    out.api.srcsetOriginal = await page.evaluate(() => window.__opened);
+    await page.keyboard.press("Escape"); await page.waitForTimeout(120);
+  });
+  await leg("apiNum", async () => {
+    await page.click('img[alt="numeric ref"]');
+    out.api.numOpen = await settle(page);
+    out.api.numShown = await page.evaluate(() => document.querySelector('img[alt="numeric ref"]').src);
+    out.api.numLeft = await press(page, "ArrowLeft");
+    await page.keyboard.press("Escape"); await page.waitForTimeout(120);
+  });
+  await leg("apiFold", async () => {
+    const shut = await page.evaluate(() => !document.querySelector('img[alt="fold picture"]').closest("details").open);
+    await page.click('img[alt="fold picture"]');
+    await page.waitForTimeout(250);
+    out.api.fold = { shutBefore: shut, lightbox: !(await lbGone(page)),
+      open: await page.evaluate(() => document.querySelector('img[alt="fold picture"]').closest("details").open) };
+    await page.keyboard.press("Escape"); await page.waitForTimeout(80);
+  });
+  out.errs.apiDense = errs;
+  await ctx.close();
+}
+
 fs.writeFileSync(cfg.out, JSON.stringify(out));
 await browser.close();
 console.log("RESULT: ok");
@@ -381,6 +455,13 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
         Path(state, "sdk", WEB + ".json").write_text(json.dumps(
             {"sid": WEB, "name": "web", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": WEB, "alive": True,
              "model": "claude-opus-5", "liveModel": "Opus 5"}))
+        Path(state, "names", API).write_text("api\t%s\t#c8f0b4\t#132a10\n" % cwd)
+        Path(state, "sdk", API + ".json").write_text(json.dumps(
+            {"sid": API, "name": "api", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": API, "alive": True,
+             "model": "claude-opus-5", "liveModel": "Opus 5"}))
+        # web first in the shared tab order (a tab drag's file), so a plain load still opens on web; the api leg asks for its
+        # session through the page's #only= filter
+        Path(state, "session-order.json").write_text(json.dumps([WEB, API]))
         Path(state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
         t0 = int(time.time()) - 3600
         h = cls.origin2
@@ -402,6 +483,9 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
         proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
         os.makedirs(proj, exist_ok=True)
         Path(proj, WEB + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in parent))
+        api = [user(t0 - 7200, "v0", None, "where does the p95 split per region live?", API),
+               agent(t0 - 7195, "b0", "v0", _reply_b0(h), API)]
+        Path(proj, API + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in api))
         sub = Path(proj, WEB, "subagents")
         sub.mkdir(parents=True, exist_ok=True)
         sub_recs = [{"type": "user", "timestamp": iso(t0 + 122), "uuid": "s0", "parentUuid": None,
@@ -601,6 +685,54 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
             self.assertIsNotNone(r[key], key)
             self.assertEqual(r[key]["src"], self.origin2 + "/wide.png", key)
             self.assertGreater(r[key]["natural"], 0, key)
+
+    def test_a_wrapped_paragraph_steps_to_its_picture_before_the_figure_after_it(self):
+        r = self._run()
+        a = r["api"]
+        self.assertNotIn("apiSoftErr", r, r.get("apiSoftErr"))
+        self.assertNotIn("apiPathErr", r, r.get("apiPathErr"))
+        self.assertEqual(a["softOpen"]["cue"], "1/4", "the api chat's stops: the wrapped picture, the figure, the dense card, the "
+                         "referenced one (the srcset-only picture names no src; the summary's is its fold's): " + json.dumps(a["softOpen"]))
+        self.assertIn("figure.png", a["softRight"]["src"], "→ from the picture on the wrapped line to the figure the page shows after the paragraph")
+        self.assertEqual(a["softRight"]["cue"], "2/4")
+        self.assertEqual(a["softRight2"]["src"], self.origin2 + "/card.png?v=dense", "→ again: the next paragraph's picture")
+        self.assertEqual(a["pathOpen"]["cue"], "2/4", "the figure's own click sees the same order")
+        self.assertEqual(a["pathLeft"]["src"], self.origin2 + "/hit.png?v=soft", "…and steps back to the picture above it")
+
+    def test_a_picture_opens_on_the_srcset_candidate_it_shows(self):
+        r = self._run()
+        a = r["api"]
+        self.assertNotIn("apiDenseErr", r, r.get("apiDenseErr"))
+        self.assertEqual(a["denseShown"], self.origin2 + "/card.png?v=dense2", "the dense screen shows the 2x candidate")
+        self.assertEqual(a["denseOpen"]["src"], self.origin2 + "/card.png?v=dense2", "the lightbox opens on what the page showed")
+        self.assertEqual(a["denseOpen"]["cue"], "3/4", "…at its place in the arrows, which name it by its src")
+        self.assertNotIn("apiSrcsetErr", r, r.get("apiSrcsetErr"))
+        s = a["srcsetOpen"]
+        self.assertIsNotNone(s, "a picture drawn from a srcset alone opens the lightbox")
+        self.assertEqual(s["src"], self.origin2 + "/card.png?v=srcset", "on the picture it shows, never an empty source: " + json.dumps(s))
+        self.assertGreater(s["natural"], 0)
+        self.assertEqual((s["ctl"]["aria"], s["ctl"]["href"]), ("Open original", self.origin2 + "/card.png?v=srcset"),
+                         "its Open original is the picture, never the dashboard's own page")
+        self.assertEqual(a["srcsetOriginal"], [[self.origin2 + "/card.png?v=srcset", "_blank", "noopener,noreferrer"]])
+        self.assertEqual(a["cursor"]["srcset"], "zoom-in", json.dumps(a["cursor"]))
+
+    def test_a_src_written_with_numeric_references_is_the_stop_its_click_finds(self):
+        r = self._run()
+        a = r["api"]
+        self.assertNotIn("apiNumErr", r, r.get("apiNumErr"))
+        self.assertEqual(a["numShown"], self.origin2 + "/card.png?v=num&w=2&h=3", "the page's <img> decoded the references")
+        self.assertEqual(a["numOpen"]["src"], a["numShown"])
+        self.assertEqual(a["numOpen"]["cue"], "4/4", "the sequence names it as the page does: the click finds it, and no phantom follows")
+        self.assertEqual(a["numLeft"]["src"], self.origin2 + "/card.png?v=dense", "← steps to the picture before it")
+
+    def test_a_picture_in_a_summary_opens_its_details(self):
+        r = self._run()
+        a = r["api"]
+        self.assertNotIn("apiFoldErr", r, r.get("apiFoldErr"))
+        self.assertEqual(a["fold"], {"shutBefore": True, "lightbox": False, "open": True},
+                         "the summary's picture keeps the summary's click: the details open, no lightbox")
+        self.assertNotEqual(a["cursor"]["fold"], "zoom-in", "…and it wears no zoom cursor")
+        self.assertEqual(a["cursor"]["soft"], "zoom-in")
 
     def test_no_page_errors(self):
         r = self._run()

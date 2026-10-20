@@ -349,6 +349,10 @@ export function openLightbox(src: LightboxSource, from?: Element | null): void {
       .filter((e) => "url" in e ? !mdImgFailed.has(e.url) && !mdImgTiny.has(e.url) : previewKind(e.path) === "img");
     at = nav.findIndex((e) => sameSource(e, src));
     if (at < 0 && !("url" in src)) at = nav.findIndex((e) => !("url" in e) && e.path === src.path);
+    // a picture that shows a srcset's candidate opens on what it shows (currentSrc), while the sequence, read off the
+    // text, names its src: it is that entry (a step back to it shows the src)
+    const own = from && (from as HTMLImageElement).tagName === "IMG" ? (from as HTMLImageElement).src : "";
+    if (at < 0 && "url" in src && own) at = nav.findIndex((e) => "url" in e && e.url === own);
     step = (delta: number) => {
       if (at < 0 || nav.length < 2) return;
       const n = at + delta;
@@ -976,13 +980,17 @@ export function installMdImgHeal(): void {
 //   click (capture, so a fold or a bubble around the picture never also toggles under it) opens the lightbox on the
 //     picture, by its URL, handing over the element so the chat's sequence knows which transcript it sits in.
 // A picture inside a link is the LINK's: its click follows the link (render.ts's opener, as it always did) and it wears
-// no zoom cursor, so a linked badge or a thumbnail that points at its page keeps meaning what its author wrote. Web
+// no zoom cursor, so a linked badge or a thumbnail that points at its page keeps meaning what its author wrote. A
+// picture inside a <details>'s <summary> is the summary's by the same rule: its click opens or closes the details
+// (2026-10-20 review: the click's preventDefault swallowed the toggle). A picture opens on what it SHOWS, currentSrc:
+// a srcset's candidate when it has one, else its src. One with neither shows nothing a lightbox could, and never zooms
+// (2026-10-20 review: a srcset with no src opened an empty lightbox whose "Open original" was the dashboard itself). Web
 // dashboard only, as every preview (canPreview): the VS Code webview loads only data: pictures and has no kernel origin.
 const ZOOM_MIN_H = 32;
 const mdImgTiny = new Set<string>();                // URLs that loaded glyph-sized this page life: no stop in the sequence
 let mdImgZoomOn = false;
 export function mdImgZoomable(img: HTMLImageElement): boolean {
-  return img.classList.contains("md-img") && !img.closest("a") && img.complete && img.naturalHeight >= ZOOM_MIN_H;
+  return img.classList.contains("md-img") && !img.closest("a, summary") && !!(img.currentSrc || img.src) && img.complete && img.naturalHeight >= ZOOM_MIN_H;
 }
 export function installMdImgZoom(): void {
   if (mdImgZoomOn || !canPreview()) return;        // ensure-once (the click-safety installation rule)
@@ -990,13 +998,13 @@ export function installMdImgZoom(): void {
   document.addEventListener("load", (e) => {
     const img = e.target as HTMLImageElement | null;
     if (!img || img.tagName !== "IMG" || !img.classList.contains("md-img")) return;
-    if (img.naturalHeight < ZOOM_MIN_H) mdImgTiny.add(img.src); else mdImgTiny.delete(img.src);
+    if (img.src) { if (img.naturalHeight < ZOOM_MIN_H) mdImgTiny.add(img.src); else mdImgTiny.delete(img.src); }   // by src: the sequence's name for it
     img.classList.toggle("md-img-zoom", mdImgZoomable(img));
   }, true);
   document.addEventListener("click", (e) => {
     const img = e.target as HTMLImageElement | null;
     if (!img || img.tagName !== "IMG" || !mdImgZoomable(img)) return;
     e.preventDefault(); e.stopPropagation();
-    openLightbox({ url: img.src, alt: img.alt }, img);
+    openLightbox({ url: img.currentSrc || img.src, alt: img.alt }, img);
   }, true);
 }
