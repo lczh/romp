@@ -2270,6 +2270,73 @@ class ViewBuilder(unittest.TestCase):
         self.assertEqual((card["column"], card["t"]), ("completed", T0 + 1400),
                          "a newer completion moves the card's time to it")
 
+    # A step folded done under a finished node (rolled down: the rollup marks it rolledUp) has no done row of its
+    # own, so its completion time fell back to its mt, and the same writes re-dated the card through it. Its
+    # completion is its finished ancestor's: the top's settle, or a done step inside the card, both already in the
+    # card's time.
+    def _bt_rolled_store(self, only=False):
+        """_bt_done_store's completed card with open steps for the completion to roll down. By default the finished
+        step g3 holds an open sub-step g4 (rolled down by g3's done) and the top an open step g5 beside g3 (rolled
+        down by the top's). With `only`, g3 is an open step instead, so the card's one inner completion is rolled
+        down. One rollup, as a judge pass makes it, marks them. Returns (top, the rolled-down ids, twin)."""
+        top, step, twin = self._bt_done_store()
+        p = jd.GOALDIR / (self.BT_SID + ".json")
+        st = json.loads(p.read_text())
+
+        def open_step(nid, parent, text, t):
+            st["nodes"][nid] = {"id": nid, "text": text, "parentId": parent, "nodeComplete": False,
+                                "blocked": False, "cleared": False, "trail": [], "t": t, "mt": t, "log": []}
+        if only:
+            open_step(step, top, "switch search to cursor pagination", T0 + 20)
+            rolled = [step]
+        else:
+            open_step(self.BT_SID + ":g4", step, "keep the page size at 50", T0 + 30)
+            open_step(self.BT_SID + ":g5", top, "note the cursor format in the docs", T0 + 40)
+            rolled = [self.BT_SID + ":g4", self.BT_SID + ":g5"]
+        tmp = jd.GOALDIR / (self.BT_SID + ".json.tmp")
+        tmp.write_text(json.dumps(st))
+        os.replace(tmp, p)
+        self._bt_apply(lambda st: None)
+        nodes = jd.load_goals(self.BT_SID)["nodes"]
+        for x in rolled:
+            self.assertTrue(nodes[x].get("rolledUp") and nodes[x]["nodeComplete"], "%s is rolled down" % x)
+            self.assertFalse(any(e.get("kind") == "done" for e in nodes[x]["log"]), "%s has no done row" % x)
+        return top, rolled, twin
+
+    def test_a_rolled_down_step_does_not_date_its_completed_card(self):
+        self._bt_session()
+
+        def merge_into(target):              # the open twin folds into a rolled-down step: its mt moves
+            def write(st):
+                jd.apply_group(st, [{"id": target}, {"id": self.BT_SID + ":g2"}],
+                               [{"do": "merge", "goal": 2, "into": 1, "why": "the same work twice"}], T0 + 1050)
+            return write
+
+        cases = [(False, self.BT_SID + ":g4", "under the finished step"),
+                 (False, self.BT_SID + ":g5", "beside the finished step"),
+                 (True, self.BT_SID + ":g3", "the card's only step")]
+        for only, target, label in cases:
+            with self.subTest(label):
+                top, rolled, _twin = self._bt_rolled_store(only=only)
+                self.assertIn(target, rolled)
+                card = self._bt_card(top)
+                self.assertEqual((card["column"], card["t"]), ("completed", T0 + 600),
+                                 "%s: completed, at the settle and the step's done" % label)
+                self._bt_apply(merge_into(target))
+                nodes = jd.load_goals(self.BT_SID)["nodes"]
+                self.assertGreater(nodes[target]["mt"], T0 + 600, "%s: the merge moved its mt (the case)" % label)
+                self.assertTrue(nodes[target].get("rolledUp") and nodes[target]["nodeComplete"],
+                                "%s: still rolled down" % label)
+                card = self._bt_card(top)
+                self.assertEqual((card["column"], card["t"]), ("completed", T0 + 600),
+                                 "%s: a merge into a rolled-down step is not news, the card keeps its time" % label)
+        # the card whose one inner completion is rolled down is dated by its top's settle (T0+600), not the top's
+        # done row (T0+550) and not the newest mt under it (the merge's T0+1050)
+        top = self.BT_SID + ":g1"
+        nd = jd.load_goals(self.BT_SID)["nodes"][top]
+        self.assertEqual((nd["settledAt"], jd._done_since(nd)), (T0 + 600, T0 + 550))
+        self.assertEqual(self._bt_card(top)["t"], nd["settledAt"])
+
     def test_transcript_only_bg_task_is_not_awaiting_but_live_sources_are(self):
         # A run_in_background launch visible ONLY in the transcript must NOT pin an idle session to a
         # working flavor (the user 2026-07-07: a leftover scrape ghost that might never finish). The LIVE

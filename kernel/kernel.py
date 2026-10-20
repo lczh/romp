@@ -50685,11 +50685,12 @@ def _feed_session_key(s, tm, ctx, prev_entry):
         snapshot does not until a punch; None with no journal), the user-gesture mark _user_goal_write[fsid], the
         punch record _goals_snap_done[fsid], the rewind hold (cutT, leaf, at) or None, whether the read FAULTED (an
         EIO or a permissions fault moves no stat)). _feed_goals_keyed, jd.load_goals_shared inside _bg_placed_tops
-        and _session_stamp_read, jd.review_boundary, jd._done_since (the done rows' ev_t, a completed card's time and
-        its reviewed-earlier rows), _newest_block_ev_t (the block rows' ev_t the blocked yield orders against),
-        jd._block_since (the same rows' ev_t, a blocked card's time) and every node read. The pass's clock stamp is
-        not a component (2026-09-16): a new snapshot that decodes the same versions is not new information, and the
-        stamp moved every snapshotted session's key twice per pass.
+        and _session_stamp_read, jd.review_boundary, jd._done_since (the done rows' ev_t: a completed card's time,
+        read for its done steps that are not rolled down, and its reviewed-earlier rows), _newest_block_ev_t (the
+        block rows' ev_t the blocked yield orders against), jd._block_since (the same rows' ev_t, a blocked card's
+        time) and every node read. The pass's clock stamp is not a component (2026-09-16): a new snapshot that
+        decodes the same versions is not new information, and the stamp moved every snapshotted session's key twice
+        per pass.
       anchors: _node_anchor_rev[fsid]. The warm-anchor table _node_anchor_uuids serves a cold node from; a chat build's
         resolve for this sid bumps it.
       reg: (_feed_reg_sig(fsid), _chat_ident(STATE/gone/<fsid>.json)). The SDK registry record's state (readable,
@@ -51992,8 +51993,14 @@ def _feed_session_entry(s, ctx):
             # writes that say nothing about the completion (a grouper merge into the step, a planner retitle, a
             # duplicate step landing on it), and keyed on mt each re-dated the card to the write, re-sorting it
             # within Completed and resetting its age tint and "Nm ago". Same time as the takeaway's stamps and
-            # the reviewed-earlier fold. A node with no done row (pre-diary, or rolled down) keeps mt/t.
-            dts = [jd._done_since(nodes[x]) for x in _subtree(nid) if x != nid and _closure_done(x)]
+            # the reviewed-earlier fold. A pre-diary node with no done row keeps mt/t. A ROLLED-DOWN node
+            # (rolledUp: folded done under a finished ancestor) is skipped: it has no completion of its own,
+            # so its time could only be its mt (or a done row from before a reopen), and it was completed by
+            # the top, whose settledAt is in the max below, or by a done step in this subtree, which is in dts.
+            # Judges skip sealed subtrees and open to-dos are never rolled down, so it carries no later news.
+            # Keyed on the marker, not on "no done row": a step re-opened after a done keeps that old row.
+            dts = [jd._done_since(nodes[x]) for x in _subtree(nid)
+                   if x != nid and _closure_done(x) and not nodes[x].get("rolledUp")]
             # settledAt = when the card actually ENTERED the Completed column (the judge stamps it ONCE at
             # settlement — NOT re-bumped by a no-op re-judge, verified stable while the umbrella mt drifted;
             # it can lag the done op's mt by many segments). The column sorts by `t` oldest-at-top, so a
