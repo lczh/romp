@@ -948,8 +948,8 @@ const ROMP_BLUE = '#9cd2ff';
 // what every refused write says when no kernel answers (_kernelPost): the panel never writes the state
 // files itself, so with romp down the gesture lands nowhere, and this is the whole of what happened
 const KERNEL_DOWN = 'the kernel is not running; start romp and try again';
-// ...and when the state dir holds no serve-port record at all, so the port was the CLI's default or
-// environment: a kernel older than this panel writes the token and no record (the live kernel lags
+// ...and when the state dir holds no serve-port record at all, so the port was the environment's or
+// the default: a kernel older than this panel writes the token and no record (the live kernel lags
 // the checkout until `romp refresh`, and the plugin loads this file on its own), so "not running" alone
 // would be false against one that is
 const KERNEL_DOWN_NO_RECORD = 'the kernel is not running, or the one running predates this panel and left no port record; start or restart romp and try again';
@@ -5797,7 +5797,7 @@ class TimelinePanel {
   // race this removes. Same-user trust boundary as every kernel client: the serve token comes from the
   // kernel's 0600 file and rides the X-Romp-Token header (never a URL). The port is the kernel's own
   // record (serve-port), or, with NO record (a kernel older than this panel wrote the token and no port),
-  // the port the CLI resolves: ROMP_KERNEL_PORT, then ROMP_SERVE_PORT, else 29855. Record or fallback,
+  // the environment's port: ROMP_KERNEL_PORT, then ROMP_SERVE_PORT, else 29855. Record or fallback,
   // the port must first PROVE itself a romp kernel before any token leaves this panel (_kernelProve: GET
   // /healthz with no token, on 127.0.0.1 only, answered 200 "ok" with the X-Romp-Boot identity), and the
   // POST then rides the connection that proved itself; a port that answers as anything else, a stale
@@ -5829,9 +5829,9 @@ class TimelinePanel {
   // {ok:true, …}; ok:false carries the KERNEL'S words when a kernel ruled — a 200 with ok:false is its
   // own refusal (`refusal`: the full sentence the dashboards see), a 4xx with ok:false its typed
   // complaint, a 401/403 the token it would not take — and `unreachable` when NO romp kernel took the
-  // request: nothing answering (KERNEL_DOWN, or KERNEL_DOWN_NO_RECORD when the port was the CLI's
-  // default rather than the kernel's record), a record or token file this panel could not read, a
-  // kernel that predates the route (a 404), or some other local service that now owns the recorded
+  // request: nothing answering (KERNEL_DOWN, or KERNEL_DOWN_NO_RECORD when the port was the environment's
+  // or the default rather than the kernel's record), a record or token file this panel could not read,
+  // a kernel that predates the route (a 404), or some other local service that now owns the recorded
   // port (`foreign`: a port that fails the identity check before the POST, or a 2xx that is not a romp
   // answer; read as accepted, that left the optimistic toggle re-applied on every push until a value
   // that never comes, the silent divergence this change exists to remove). The token leaves this panel
@@ -5853,8 +5853,8 @@ class TimelinePanel {
     try { port = parseInt(h.fs.readFileSync(at('serve-port'), 'utf8'), 10); }
     catch (e) {
       if (!e || e.code !== 'ENOENT') return unreadable('port record', at('serve-port'), e);
-      // no record: a kernel older than this panel writes the token and no port. Resolve the port the way
-      // the CLI does — the environment in the CLI's order (ROMP_KERNEL_PORT, then
+      // no record: a kernel older than this panel writes the token and no port. Resolve the port from the
+      // environment, in this panel's order (ROMP_KERNEL_PORT, then
       // ROMP_SERVE_PORT; an empty value is unset), else bin/romp's default, ${ROMP_KERNEL_PORT:-29855}
       // (this panel probes no older ports) — and try it; only a
       // refused connection then reads as down. An unusable override is refused, never silently replaced
@@ -5906,7 +5906,7 @@ class TimelinePanel {
               return finish({ ok: true, status: st, body: j });
             if (st >= 200 && st < 300)           // a 2xx that no romp kernel sent
               return finish({ ok: false, status: st, unreachable: true, foreign: true, error: where + ' answered, but not as a romp kernel' });
-            if (st === 404)                      // a romp kernel from before these routes, found on the CLI's port
+            if (st === 404)                      // a romp kernel from before these routes, found on the fallback port
               return finish({ ok: false, status: st, unreachable: true, error: 'the kernel on ' + where + ' predates this panel and has no ' + route + ' route; restart romp (`romp refresh`) and try again' });
             return finish({ ok: false, status: st, error: 'the kernel on ' + where + ' answered HTTP ' + st });
           });

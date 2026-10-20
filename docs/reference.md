@@ -89,7 +89,7 @@ kernel writes beside `serve-token` in the state directory once its socket is
 bound; with a record nothing answers on, the panel refuses the gesture and says
 the kernel is not running rather than writing a file the kernel cannot check.
 With no record at all (a kernel older than the panel wrote the token and no
-port) it tries the port the command line resolves, `ROMP_KERNEL_PORT`, then
+port) it tries the port the environment names, `ROMP_KERNEL_PORT`, then
 `ROMP_SERVE_PORT`, else `29855`, and its refusal says so when nothing answers
 there. Record or fallback, the panel first asks the port to prove itself: a
 `GET /healthz` with no token, on `127.0.0.1` only, must answer `200 ok` with

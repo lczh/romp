@@ -3006,7 +3006,7 @@ def _persist_serve_port(port):
     routes below (_state_write_route) rather than writing the state files itself. With a record that
     nothing answers on, the panel treats the kernel as not running and refuses the gesture visibly,
     never falling back to a write the kernel cannot check. With NO record (a kernel older than this
-    one wrote the token and no port) the panel tries the port the CLI resolves -- ROMP_KERNEL_PORT,
+    one wrote the token and no port) the panel tries the environment's port -- ROMP_KERNEL_PORT,
     then ROMP_SERVE_PORT, else 29855 -- and says so in its refusal when nothing answers there. Record
     or fallback, the panel first asks the port to prove itself over GET /healthz (a 200 "ok" carrying
     X-Romp-Boot, on 127.0.0.1 only) with no token, and sends its token only to a port that did; a
