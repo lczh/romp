@@ -2551,6 +2551,66 @@ class TheReconcileOfWaitingPicksClearsNoStandingAsk(_ABypassPickChangedBack):
         self.assertTrue(self._relaunched_at_quiet(s, q), "armed at the first quiet moment")
 
 
+def _the_clis_init_reports(s, mode):
+    """The CLI's init, read as SdkSession._on_message reads it on the session's running loop, reports `mode` as its
+    permission mode."""
+    import asyncio
+    SM = type("SystemMessage", (), {"__init__": lambda self_, st, d: setattr(self_, "__dict__",
+                                                                                 {"subtype": st, "data": d})})
+    init = SM("init", {"model": "claude-x", "permissionMode": mode})
+
+    async def read():
+        s._on_message(init, type("A", (), {}), type("R", (), {}), SM)
+    asyncio.run(read())
+
+
+class TheReconcileDecidesTheModePickFromWhatItReadsInItsHolds(_ABypassPickChangedBack):
+    """The reconcile of waiting picks (SdkSession._reconcile_waiting_picks) takes the launch's mode as the confirmed
+    mode for a mode pick the launch carries only while the pending-bypass mark is up, and decides the mode pick again in
+    its hold only while that pick is still waiting. One test reconciles a mode entry on record while the mark is down:
+    the entry goes, and the confirmed mode stays what the CLI's init reported. The other picks the launch's mode as the
+    reconcile's hold is entered, with no mode pick waiting and the billing pick left: the reconcile returns and asks for
+    the billing pick's relaunch."""
+
+    # Kills mutant AUTO.true.9196.9198 (kernel/sdk_backend.py:9198 without its check of the mark).
+    def test_a_mode_entry_on_record_with_the_mark_down(self):
+        s = self._session(relaunchWait={"why": "bypass mode", "t": 1700000000,
+                                        "picks": {"mode": {"mode": "bypassPermissions"}}})
+        self.assertEqual((s.mode, s._mode_pending), ("default", ""), "the premise: the mode is default, the mark down")
+        self.assertTrue(self.be.set_mode(SID, "acceptEdits"))       # held: no client
+        self.assertTrue(self.be.set_mode(SID, "default"))           # held: no client
+        _the_clis_init_reports(s, "acceptEdits")
+        self.assertEqual(s.perm_mode, "acceptEdits", "the premise: the CLI's init reported acceptEdits")
+        s._reconcile_waiting_picks(dict(s._cli_launch), False)
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending), ("default", "acceptEdits", ""),
+                         "the confirmed mode stays what the CLI's init reported")
+        self.assertNotIn("relaunchWait", sb.read_reg(self.d, SID), "the mode entry goes")
+
+    # Kills mutant AUTO.drop.9215.9217.0 (kernel/sdk_backend.py:9217 without `"mode" in left`).
+    def test_the_launchs_mode_picked_as_the_reconciles_hold_is_entered(self):
+        s = self._session()
+        self.assertTrue(self.be.set_mode(SID, "plan"))              # held: no client
+        other = "key" if s._cli_launch["auth"] != "key" else "login"
+        launch = dict(s._cli_launch, auth=other)                      # the default mode, on the other billing
+        lock = s._lock = _StepWhenTheLockIsTaken(s._lock, "_reconcile_waiting_picks",
+                                                 lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        s._reconcile_waiting_picks(launch, False)
+        self.assertTrue(lock.done, "the premise: default was picked as the reconcile's hold was entered")
+        self.assertEqual((s.mode, s._mode_pending, s._switch_wanted), ("default", "", "billing"),
+                         "the billing pick's relaunch is asked for")
+
+    # Equivalent mutants AUTO.drop.9196.9197.1, AUTO.drop.9215.9216.1 and AUTO.drop.9250.9251.1
+    # (SdkSession._reconcile_waiting_picks, kernel/sdk_backend.py:9197, 9216 and 9251, `or ""` dropped from each read of
+    # the mode): the session's mode is never a false value other than "", as the note beside
+    # ARefusedSwitchRevertsTheConfirmedModeByEachTermOfItsRule shows for AUTO.drop.8447.8448.1, so `x or ""` is x at
+    # each read.
+    # Equivalent mutant AUTO.drop.9215.9221.1 (the same function, kernel/sdk_backend.py:9221, the check that the
+    # pending-bypass mark is down dropped): the mutant also writes "bypassPermissions" into the mark when the mark is
+    # up. Every write of the mark stores "" (:6883, :9201, :21401) or "bypassPermissions" (the literal at :9222, and at
+    # :6902 and :21396 a value checked to equal "bypassPermissions"), so a mark that is up already holds
+    # "bypassPermissions", and the mutant writes the value the mark holds.
+
+
 class TheWaitingRecordHoldsTheModeEntryWhileThePendingBypassMarkIsUp(_ABypassPickChangedBack):
     """The registry's waiting record (relaunchWait) gains the mode entry only while the pending-bypass mark is up and loses
     it only while the mark is down: _note_pick_waits and _drop_pick_wait read the mark in the hold of the registry lock in
@@ -2692,6 +2752,46 @@ class ARefusedSwitchPutsBypassBackOnlyWhileTheModeReadsIt(_ABypassPickChangedBac
         self.assertEqual((s.mode, s.perm_mode, s._mode_pending, sb.read_reg(self.d, SID).get("mode")),
                          ("default", "acceptEdits", "", "default"),
                          "the mode is default: the confirmed mode stays the launch's mode, not bypassPermissions")
+
+
+class ARefusedSwitchRevertsTheConfirmedModeByEachTermOfItsRule(_ABypassPickChangedBack):
+    """A refused switch (SdkSession._do_set_mode) puts the confirmed mode back to the mode confirmed before the refused
+    pick when the confirmed mode reads the refused pick and either that earlier mode is not bypassPermissions or the
+    session's mode reads bypassPermissions. Each test reaches one of the two terms, with the session's mode another
+    pick's."""
+
+    # Kills mutant AUTO.drop.8447.8449.1 (kernel/sdk_backend.py:8449 without `now == "bypassPermissions"`).
+    def test_a_bypass_pick_waiting_when_a_pick_made_from_bypass_is_refused(self):
+        s = self._session(mode="bypassPermissions")
+        self.assertEqual(s.perm_mode, "bypassPermissions", "the premise: the CLI was launched with the flag")
+        self.assertTrue(self.be.set_mode(SID, "plan"))              # held: no client
+        s.inflight = 1                                                # a turn runs: the bypass pick waits for quiet
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual((s.mode, s.perm_mode, s._mode_pending), ("bypassPermissions", "plan", "bypassPermissions"),
+                         "the premise: the bypass pick waits")
+        _refuse_mode_switch(s, "plan", "bypassPermissions")
+        self.assertEqual((s.mode, s.perm_mode), ("bypassPermissions", "bypassPermissions"),
+                         "the confirmed mode goes back to bypassPermissions, which the session's mode reads")
+
+    # Kills mutant AUTO.drop.8447.8449.0 (kernel/sdk_backend.py:8449 without `prev != "bypassPermissions"`).
+    def test_another_pick_made_when_an_init_reported_the_refused_pick(self):
+        s = self._session()
+        self.assertTrue(self.be.set_mode(SID, "plan"))              # held: no client
+        self.assertTrue(self.be.set_mode(SID, "acceptEdits"))       # held: no client
+        _the_clis_init_reports(s, "plan")
+        self.assertEqual((s.mode, s.perm_mode), ("acceptEdits", "plan"), "the premise: the CLI's init reported plan")
+        _refuse_mode_switch(s, "plan", "default")
+        self.assertEqual((s.mode, s.perm_mode), ("acceptEdits", "default"),
+                         "the confirmed mode reads the refused pick: it goes back to default")
+
+    # Equivalent mutant AUTO.drop.8447.8448.1 (SdkSession._do_set_mode, kernel/sdk_backend.py:8448, `or ""` dropped from
+    # the read of the mode): `x or ""` differs from x only when x is a false value other than "", and the session's mode
+    # is never one. Its writers store a true value: construction (:6533, `or "acceptEdits"`); set_mode (:21373), whose
+    # one caller, the setMode route (kernel/kernel.py:24541), passes str() of a value it has checked is true, and str()
+    # of a true JSON value is never empty; and this revert (:8452), which stores prev, the confirmed mode set_mode read
+    # (:21372, carried by :21408 and the held picks). Every write of the confirmed mode stores a true value too: the
+    # mode (:6774), prev (:8450), the launch's mode, compared equal to the mode read in that hold (:9200), a value whose
+    # str() is not empty (:9236), the init's mode `or` the confirmed mode (:12038), and set_mode's mode (:21399).
 
 
 class EachModeHoldReadsAndWritesInOneHold(_ABypassPickChangedBack):
@@ -3700,6 +3800,36 @@ class TheWaitingRecordReadsTheMarkInTheRegistryLocksHold(_ABypassPickChangedBack
                          "the waiting pick keeps its entry")
 
 
+class ADropOfAnotherPicksEntryIsMadeWhileTheMarkIsUp(_ABypassPickChangedBack):
+    """The drop of a pick's entry from the waiting record (SdkBackend._drop_pick_wait) leaves an entry while the
+    pending-bypass mark is up only for the mode pick: while the bypass pick waits, a billing pick of what the CLI was
+    launched with drops the billing entry and the pending billing flag, and the mode entry stays."""
+
+    # Kills mutant AUTO.drop.22045.22046.0 (kernel/sdk_backend.py:22046 without `pick == "mode"`).
+    def test_a_billing_pick_of_what_the_cli_runs_while_the_bypass_pick_waits(self):
+        q = []
+        s = self._session(queued=q, auth="login")
+        s.inflight = 1
+        self.assertTrue(self.be.set_auth(SID, "key"))
+        self._run(q)
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self._run(q)
+        reg = sb.read_reg(self.d, SID)
+        self.assertEqual((sorted(reg["relaunchWait"]["picks"]), bool(reg.get("authPending")), s._mode_pending),
+                         (["billing", "mode"], True, "bypassPermissions"), "the premise: both picks wait")
+        self.assertTrue(self.be.set_auth(SID, "login"))               # a billing pick of what the CLI runs
+        self._run(q)
+        reg = sb.read_reg(self.d, SID)
+        self.assertEqual((sorted(reg["relaunchWait"]["picks"]), bool(reg.get("authPending"))), (["mode"], False),
+                         "the billing entry and the pending billing flag go; the bypass pick's entry stays")
+
+    # Equivalent mutants AUTO.drop.21505.21512.1 (SdkBackend._note_pick_waits, kernel/sdk_backend.py:21512) and
+    # AUTO.drop.22045.22052.1 (SdkBackend._drop_pick_wait, kernel/sdk_backend.py:22052), `or {}` dropped from
+    # `dict(wait.get("picks") or {}) if isinstance(wait.get("picks"), dict) else {}`: the operand is evaluated only when
+    # wait.get("picks") is a dict (wait is a plain dict, so both reads return the same object), and for any dict x,
+    # dict(x or {}) equals dict(x), an empty x included.
+
+
 class TheHandBacksRuleBesideEveryOtherState(_ABypassPickChangedBack):
     """The busy re-check's hand-back (SdkSession._re_raise_switch_ask) keeps the bypass pick's carried ask when a term
     of the withdrawal's rule does not hold in its hold (SdkSession._mode_relaunch_withdrawn): each test reaches one such
@@ -3778,6 +3908,64 @@ class TheHandBacksRuleBesideEveryOtherState(_ABypassPickChangedBack):
         s._re_raise_switch_ask()
         self.assertEqual(s._switch_wanted, "bypass mode", "the ask stands for the relaunch on its way")
         self.assertEqual([m for m in lines if "withdrawn" in m], [], "no line says the relaunch was withdrawn")
+
+
+class TheHandBackSetsAsideOnlyAReasonOtherThanAPicks(_ABypassPickChangedBack):
+    """The busy re-check's hand-back (SdkSession._re_raise_switch_ask) sets the carried ask aside (_switch_riders) only
+    when it is not a pick's reason (PICK_RELAUNCH_WHYS) and another ask stands: a pick's carried ask handed back beside
+    the bypass pick's standing ask is not set aside, and a hand-back that finds no carried ask (a second carry took the
+    ask, and the first arm handed it back) sets nothing aside."""
+
+    # Kills mutants AUTO.drop.7933.7942.1 and AUTO.true.7933.7942 (kernel/sdk_backend.py:7942, a pick's reason).
+    def test_a_picks_carried_ask_handed_back_beside_the_bypass_picks_ask(self):
+        q = []
+        s = self._session(queued=q)
+        s.inflight = 1
+        self.assertTrue(self.be.set_effort(SID, "low" if s.effort != "low" else "high"))
+        self._run(q)
+        self.assertEqual(s._switch_wanted, "effort", "the premise: the effort pick's ask stands")
+        s.inflight, s._cli_working = 0, False
+        self.assertTrue(s._try_switch_reconnect(), "the premise: the ask is carried; its arm waits on the loop")
+        self.assertEqual(s._switch_ask_pending, "effort", "the premise: carried")
+        s.inflight = 1
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertEqual(s._switch_wanted, "bypass mode", "the premise: the bypass pick's ask stands")
+        s.inflight, s._cli_working = 0, True                          # the arm's re-check finds the CLI at work
+        self._run(q)
+        self.assertEqual((s._reconnect, s._switch_ask_pending, s._switch_wanted), (False, "", "bypass mode"),
+                         "the premise: the carried ask was handed back")
+        self.assertEqual(s._switch_riders, set(), "the effort pick's reason is not set aside")
+
+    # Kills mutants AUTO.drop.7933.7942.0 and AUTO.true.7933.7942 (kernel/sdk_backend.py:7942, no carried ask).
+    def test_a_hand_back_that_finds_no_carried_ask(self):
+        q = []
+        s = self._session(queued=q)
+        s.inflight, s._cli_working = 0, False
+        self.assertTrue(self.be.set_effort(SID, "low" if s.effort != "low" else "high"))
+        self.assertTrue(self.be.set_env(SID, {"NOTES_API_FLAG": "2"}))
+        self.assertEqual([getattr(fn, "__name__", "") for fn, a in q], ["_try_switch_reconnect"] * 2,
+                         "the premise: two carries are queued")
+        fn, a = q.pop(0)
+        fn(*a)                                                        # the first carry: its arm waits behind the second
+        self.assertEqual(s._switch_ask_pending, "session env", "the premise: carried")
+        self.assertTrue(self.be.set_auth(SID, "key" if s.launch_values()["auth"] != "key" else "login"))
+        fn, a = q.pop(0)
+        fn(*a)                                                        # the second carry takes the billing pick's ask
+        self.assertEqual(s._switch_ask_pending, "billing", "the premise: the second carry holds the billing pick's ask")
+        s._cli_working = True                                         # both arms' re-checks find the CLI at work
+        self._run(q)
+        self.assertEqual((s._reconnect, s._switch_ask_pending, s._switch_wanted), (False, "", "billing"),
+                         "the premise: the billing pick's ask was handed back")
+        self.assertEqual(s._switch_riders, set(), "nothing is set aside")
+
+    # Equivalent mutant AUTO.drop.7933.7940.0 (SdkSession._re_raise_switch_ask, kernel/sdk_backend.py:7940, the check
+    # that a carried ask was read dropped): the mutant takes another branch only when the carried ask read in the hold
+    # (why) is false and no ask stands (_switch_wanted is false), and there it writes why into _switch_wanted. Every
+    # write of either field in kernel/ stores "" or a true value: a literal; a value the writer checked; the reconcile's
+    # reason at :9229 (`wait.get("why") or` a literal, :9167); and want_switch_reconnect's reason at :9348, which each
+    # caller passes as a literal, as `why or "a settings change"` (:7693) or as _switch_wanted after checking it
+    # (:21188). So both are "" there, and the mutant writes "" over "". SdkSession defines no property or __setattr__ a
+    # write reaches.
 
 
 class EachTermOfTheWithdrawalsRuleIsReadAtBothSteps(_ABypassPickChangedBack):
@@ -4142,6 +4330,72 @@ class AReasonIsSetAsideOnlyWhileAnAskStands(_ABypassPickChangedBack):
         self.assertEqual(s._switch_riders, set(), "nothing is set aside")
 
 
+class AReasonIsSetAsideOnlyForWhatARelaunchWouldChange(_ABypassPickChangedBack):
+    """With an ask standing, a road that would otherwise ask for its own relaunch sets its reason aside (_switch_riders)
+    only when a relaunch would change what it asks for. A model change under Always fast
+    (SdkSession._after_model_change) sets nothing aside while the CLI runs the fast-mode opt-in or the session's own
+    Fast pick stands; a report that the CLI lacks the opt-in (SdkSession._ask_missing_opt_in) sets Always fast aside
+    when the CLI's launch record lacks the flag; and a flip of Always fast (SdkBackend.apply_model_switches) that
+    changes nothing sets nothing aside. With nothing set aside, the bypass pick's relaunch is withdrawn when default is
+    picked."""
+
+    # Kills mutant AUTO.drop.8600.8603.2 (kernel/sdk_backend.py:8603 without `not self._fast_unlocked`).
+    def test_a_model_change_with_the_opt_in_running(self):
+        Path(self.d, sb.ALWAYS_FAST_STORE).write_text("on\n")
+        s = self._session(model="opus")
+        self.assertTrue(s._cli_launch["fast"], "the premise: the CLI was launched with the opt-in")
+        s._fast_unlocked, s._fast_off_sent = True, False
+        self._bypass_waits(s)
+        s._after_model_change("Sonnet 5", "Opus 5")
+        self.assertEqual(s._switch_riders, set(), "the CLI runs the opt-in: nothing is set aside")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "", "the bypass pick's relaunch is withdrawn")
+
+    # Kills mutant AUTO.drop.8600.8603.1 (kernel/sdk_backend.py:8603 without `not self.fast_opt`).
+    def test_a_model_change_under_the_sessions_own_fast_pick(self):
+        s = self._session(model="opus")
+        s.fast_opt = True
+        s._fast_unlocked, s._fast_off_sent = False, True
+        self.assertTrue(s.fast_effective(), "the premise: fast mode is wanted")
+        self._bypass_waits(s)
+        s._after_model_change("Sonnet 5", "Opus 5")
+        self.assertEqual(s._switch_riders, set(), "the session's own Fast pick asks for itself: nothing is set aside")
+
+    # Kills mutant AUTO.drop.9942.9946.3 (kernel/sdk_backend.py:9946-9947 without `not self._launch_record["fast"]`).
+    def test_an_opt_in_report_on_a_launch_without_the_flag(self):
+        s = self._session(model="opus")
+        self.assertFalse(s._cli_launch["fast"], "the premise: the CLI was launched without the opt-in")
+        s._launch_record = dict(s._cli_launch)                        # the launch record SdkBackend._options keeps
+        Path(self.d, sb.ALWAYS_FAST_STORE).write_text("on\n")
+        s._fast_unlocked, s._fast_off_sent, s._host_is_attach = False, False, False
+        self.assertTrue(s.fast_effective(), "the premise: Always fast wants the opt-in")
+        self._bypass_waits(s)
+        s._adopt_fast_state(dict(LACKS_OPT_IN))
+        self.assertEqual(s._switch_wanted, "bypass mode", "the premise: no ask of its own beside the standing one")
+        self.assertEqual(s._switch_riders, {"always fast"}, "the opt-in is set aside for the relaunch asked for")
+
+    # Kills mutant AUTO.drop.21246.21249.0 (kernel/sdk_backend.py:21249 without `want != have`).
+    def test_an_always_fast_flip_that_changes_nothing(self):
+        s = self._session()
+        self._bypass_waits(s)
+        self.assertEqual((bool(s.fast_effective()), bool(s._fast_unlocked)), (False, False),
+                         "the premise: Always fast changes nothing for this session")
+        self.assertEqual(self.be.apply_model_switches(), 0)
+        self.assertEqual(s._switch_riders, set(), "nothing is set aside")
+        self._change_back(s)
+        self.assertEqual(s._switch_wanted, "", "the bypass pick's relaunch is withdrawn")
+
+    # Equivalent mutant AUTO.drop.9942.9946.2 (SdkSession._ask_missing_opt_in, kernel/sdk_backend.py:9946, the operand
+    # `not self._launch_record` dropped): the two differ only when _launch_record is false at that read; for a non-empty
+    # dict that operand is False and both go on to `not self._launch_record["fast"]`. _launch_record has two writers:
+    # construction (None, :6903) and SdkBackend._options (:18477), which stores dict(launch_now, fastGuess=...), never
+    # empty, and nothing empties it. _ask_missing_opt_in is called only by SdkSession._adopt_fast_state (:9881), whose
+    # callers are the connect's initialize answer (_do_adopt_server_info, :10051, scheduled at :10692 inside the
+    # connect's client) and an init message (:12041, read from a connected client's stream through
+    # _handle_stream_message). Each connect of _amain calls _options (:10568) before it makes a client, and makes none
+    # when _options raises, so _launch_record is that dict whenever :9946 is reached.
+
+
 def _with_its_ask_kept(s, step, kept):
     """Run step() with the session's relaunch ask kept back: each request_reconnect call step makes goes into `kept`, for
     the test to make afterwards (s.request_reconnect(**k))."""
@@ -4209,6 +4463,25 @@ class TheLastLookReadsTheLaunchAfterItsQuietRead(_ABypassPickChangedBack):
         self.assertEqual([m for m in lines if "withdrawn" in m], [], "no line says a relaunch was withdrawn")
 
 
+class TheLastLookSetsAsideOnlyAReasonOtherThanAPicks(_ABypassPickChangedBack):
+    """When the last look before a teardown (SdkSession._switch_teardown_check) stands an armed relaunch down and raises
+    its ask again, a standing ask of a pick's reason (PICK_RELAUNCH_WHYS) is not set aside (_switch_riders): the
+    relaunch asked for again carries every pick."""
+
+    # Kills mutant AUTO.drop.9469.9477.1 (kernel/sdk_backend.py:9477 without `not in PICK_RELAUNCH_WHYS`).
+    def test_an_env_picks_ask_standing_at_the_last_look(self):
+        q = []
+        s = self._session(queued=q)
+        self._bypass_waits(s, q)
+        self.assertTrue(self._relaunched_at_quiet(s, q), "the premise: the pick's relaunch is armed")
+        s.inflight = 1
+        self.assertTrue(self.be.set_env(SID, {"NOTES_API_FLAG": "2"}))
+        self.assertEqual(s._switch_wanted, "session env", "the premise: the env pick's ask stands beside the relaunch")
+        self.assertTrue(s._switch_teardown_check(), "the premise: the last look stood the relaunch down")
+        self.assertEqual((s._switch_wanted, s._switch_riders), ("bypass mode", set()),
+                         "the bypass pick's relaunch is asked for again, and the env pick's reason is not set aside")
+
+
 class ACarryThatFindsNoAskGivesItsSlotBack(_Unit):
     """The carry's hold (SdkSession._try_switch_reconnect) that finds no ask gives back the launch slot taken before it."""
 
@@ -4236,6 +4509,33 @@ class ACarryThatFindsNoAskGivesItsSlotBack(_Unit):
         self.assertEqual(self._free(slots), before, "every slot is free again")
 
 
+class ACarryThatFindsNoAskSetsNothingAside(_Unit):
+    """The carry's hold (SdkSession._try_switch_reconnect) that finds no ask sets nothing aside and leaves an armed
+    model retry's schedule as it was."""
+
+    # Kills mutant AUTO.true.9399.9401 (kernel/sdk_backend.py:9401 with its check of the ask made True).
+    def test_a_default_pick_as_the_carrys_hold_is_entered_with_a_retry_armed(self):
+        relaunched = []
+        s = self._quiet(SID, "web", relaunched, mode="default")
+        Path(self.d, sb.RETRY_UPGRADE_STORE).write_text("on\n")
+        s._upgrade_retry = {"from": "Opus 5", "to": "Sonnet 5", "pick": "opus", "since": 0, "next": 0, "attempts": 0}
+        lock = s._lock = _StepWhenTheLockIsTaken(s._lock, "_try_switch_reconnect",
+                                                 lambda: self.assertTrue(self.be.set_mode(SID, "default")))
+        self.assertTrue(self.be.set_mode(SID, "bypassPermissions"))
+        self.assertTrue(lock.done, "the premise: default was picked as the carry's hold was entered")
+        self.assertEqual((relaunched, s._switch_wanted), ([], ""), "the premise: nothing is carried")
+        self.assertEqual((s._switch_riders, s._upgrade_retry["next"]), (set(), 0),
+                         "nothing is set aside and the retry's schedule is as it was")
+
+    # Equivalent mutant AUTO.drop.9399.9406.1 (SdkSession._try_switch_reconnect, kernel/sdk_backend.py:9406, `or 0`
+    # dropped from `max(arm.get("next", 0) or 0, time.time() + RETRY_UPGRADE_S)`): with t = time.time() + 600.0, which
+    # is positive, max(x or 0, t) and max(x, t) differ only when x is None, "" or an empty container, on which the
+    # mutant raises; for 0, 0.0 or False both are t. "next" never holds one of those: _upgrade_retry lives in memory
+    # only (None at construction, :6839) and is made at :9587 with "next" = now + RETRY_UPGRADE_S, and "next" is written
+    # only at :21209 (now + RETRY_UPGRADE_S) and at :9406 (this max, which returns t, 0 or a true value). A sum with the
+    # number RETRY_UPGRADE_S is never None, "" or a container.
+
+
 class TheWithdrawalSchedulesACarryOnlyWhileAnAskStands(_ABypassPickChangedBack):
     """After its hold, the withdrawal (SdkBackend._withdraw_mode_pick) gives up the place in line and schedules a carry on
     the session's loop only while an ask stands. With none, nothing is scheduled, and an ask the reconcile of waiting picks
@@ -4257,6 +4557,16 @@ class TheWithdrawalSchedulesACarryOnlyWhileAnAskStands(_ABypassPickChangedBack):
         s.inflight, s._cli_working = 0, False
         self._run(q)
         self.assertEqual((s._switch_ask_pending, s._reconnect), ("", False), "the reconcile's ask is not carried")
+
+
+# Equivalent mutant AUTO.drop.21449.21458.3 (SdkBackend._withdraw_mode_pick, kernel/sdk_backend.py:21459, the operand
+# `s._switch_wanted in PICK_RELAUNCH_WHYS` dropped): the operand is reached only after `getattr(s, "_switch_wanted", "")
+# == "bypass mode"` holds in the same hold of the session lock, "bypass mode" is in the constant PICK_RELAUNCH_WHYS, and
+# every write of _switch_wanted is made under that lock (EveryWriteOfTheRelaunchAskIsMadeUnderTheSessionLock), so the
+# second read returns the same value and the operand is always True there.
+# Equivalent mutant AUTO.split.21449.21451 (the same function, the hold at :21449 split before :21451): the first hold
+# would only assign the local `withdrew = False` and reads or writes nothing the session lock guards, so every read and
+# write of the session's fields is made in one hold, as at the head.
 
 
 class EveryWriteOfTheRelaunchAskIsMadeUnderTheSessionLock(unittest.TestCase):
