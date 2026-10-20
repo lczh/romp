@@ -69,10 +69,15 @@ class OwnedYieldAwaiting(unittest.TestCase):
         km._SESSION_STAMP_CACHE.clear()
         self.td.cleanup()
 
-    def _store(self, status="blocked", blocked=True, blk_t=BLOCKED):
+    def _store(self, status="blocked", blocked=True, blk_t=BLOCKED, diary=True):
+        # a diary-era node: the block's own row carries its evidence time (`diary=False` is a pre-diary node
+        # the boot sweep missed, whose block time is unknown)
         nd = {"id": TOP, "text": "run the batch", "parentId": None, "nodeComplete": False,
               "blocked": blocked, "blockWhy": "need your call" if blocked else None,
               "cleared": False, "trail": [], "t": BORN, "mt": blk_t}
+        if diary:
+            nd["log"] = ([{"ev_t": blk_t, "src": "planner", "kind": "block", "why": "need your call", "at": blk_t}]
+                         if blocked else [])
         (km.jd.GOALDIR / (SID + ".json")).write_text(json.dumps(
             {"rompUuid": SID, "seq": 1, "lastNode": TOP, "placements": {},
              "status": {TOP: status}, "nodes": {TOP: nd}}))
@@ -105,6 +110,28 @@ class OwnedYieldAwaiting(unittest.TestCase):
     def test_a_dispatch_that_predates_the_block_proves_nothing(self):
         # the block is the NEWER event: the thread has not moved past it, so this is a genuine needs-you
         self._store(blk_t=DISPATCH + 50)
+        self.assertIsNone(km._owned_yield_why(SID, self.path))
+
+    def test_a_retitle_after_the_dispatch_is_not_news_about_the_block(self):
+        # The twin of the feed card's rule, and the same flaw: the block's time was the node's mt, which a
+        # grouper retitle moves with nothing new said about the block. Retitled after the dispatch, the node's
+        # mt outran it, the session surfaces dropped to READY, and the card read Needs you again. The block's
+        # time is its diary row's evidence time (jd._block_ev_t).
+        self._store()
+        self.assertEqual(km._owned_yield_why(SID, self.path), "waiting on a background command: " + DESC)
+        st = km.jd.load_goals(SID)
+        km.jd.apply_group(st, [{"id": TOP}], [{"do": "retitle", "goal": 1, "text": "run the nightly batch"}],
+                          DISPATCH + 100)
+        km.jd.save_goals(SID, st)
+        self.assertEqual(km.jd.load_goals(SID)["nodes"][TOP]["mt"], DISPATCH + 100,
+                         "the retitle moved mt past the dispatch: the case under test")
+        self.assertEqual(km._owned_yield_why(SID, self.path), "waiting on a background command: " + DESC,
+                         "the yield still stands: a retitle is not new information about the block")
+
+    def test_a_block_with_no_diary_row_has_no_time_and_stands(self):
+        # A pre-diary node the boot sweep missed carries no block row, so no block time exists to prove the
+        # dispatch outran. Its mt is no stand-in, so the block stands, as it does for an unattributable launch.
+        self._store(diary=False)
         self.assertIsNone(km._owned_yield_why(SID, self.path))
 
     def test_a_service_under_a_working_goal_stays_furniture(self):

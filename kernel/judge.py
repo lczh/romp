@@ -11399,12 +11399,35 @@ def _wait_end_ev(e):
     return e.get("endEv") or e.get("at") or e.get("ev_t") or 0
 
 
+def _block_ev_t(nd):
+    """WHEN this node's block was asked: the newest BLOCK row's evidence time (ev_t), read from the diary
+    because mt is not block evidence. mt moves on writes that say nothing about the block: a grouper retitle
+    or merge, a planner retitle, a duplicate step landing on the node, a to-do sync. A card ruled on by
+    comparing an event against mt therefore moved on a retitle, with no new information.
+
+    The one rule for every reader that orders an event against a block: the unblocker's candidates
+    (_blocked_sub_candidates), the feed card's blocked yield and its session-level twin (kernel
+    _newest_block_ev_t), and the brief's stamps (_block_since).
+
+    A row with no ev_t falls back to its OWN filing time (`at`), never to the node's mt. No current writer
+    files one: record_verdict always journals the ev_t it is given, every block writer passes one, the boot
+    sweep's synthesized row carries one, and a judge block with no ev_t could not land anyway (the fold
+    needs t > floor >= 0). A row with neither time asserts nothing about when, and is skipped.
+
+    None when the node has no timed block row: a pre-diary node the boot sweep missed, which
+    record_verdict and _materialize_node already report as `unmigrated-node`. No block time exists for
+    it, so each caller decides what an unknown block time means for its question."""
+    ts = [t for t in ((e.get("ev_t") or e.get("at")) for e in (nd.get("log") or [])
+                      if e.get("kind") == "block") if t]
+    return max(ts) if ts else None
+
+
 def _block_since(nd):
-    """The node's newest BLOCK event time (ev_t, arrival fallback) — when its ask was actually
-    asked. Feeds the brief's per-paragraph "Nm ago" stamps (the user 2026-07-24); mt/t fallback
-    for legacy nodes with no diary rows."""
-    ts = [(e.get("ev_t") or e.get("at") or 0) for e in (nd.get("log") or []) if e.get("kind") == "block"]
-    return max(ts) if ts else (nd.get("mt") or nd.get("t") or 0)
+    """The node's newest BLOCK event time (_block_ev_t: ev_t, arrival fallback) — when its ask was
+    actually asked. Feeds the brief's per-paragraph "Nm ago" stamps (the user 2026-07-24); mt/t
+    fallback for legacy nodes with no diary rows (a display stamp, never an ordering input)."""
+    bt = _block_ev_t(nd)
+    return bt if bt is not None else (nd.get("mt") or nd.get("t") or 0)
 
 
 def _done_since(nd):
@@ -16720,8 +16743,10 @@ def _blocked_sub_candidates(store):
         if next((e.get("src") for e in reversed(nd.get("log") or [])
                  if e.get("kind") == "block"), None) == "interrupt":
             continue                    # a procedural stop-block: only the user's re-engagement lifts it
-        block_t = max((e.get("ev_t") or 0 for e in (nd.get("log") or []) if e.get("kind") == "block"),
-                      default=nd.get("mt", nd.get("t", 0)))
+        block_t = _block_ev_t(nd)       # the block row's evidence time, the rule the feed's blocked yield reads too
+        if block_t is None:             # no block row (a pre-diary straggler): read from the node's birth, never
+            block_t = nd.get("t") or 0  # its mt. An earlier bound shows the examiner more evidence; a later one
+            #                             could hide the answer
         out.append((nid, nd, block_t))
     return out
 
