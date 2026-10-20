@@ -39532,8 +39532,8 @@ def _feed_goals_keyed(sid):
     hands the store or its nodes to (_segs_seam, _heal_session_tops, _agent_open_set, _parked_rows, _summary_outrun,
     _node_anchor_uuids, _landing_inputs, _node_log_rows, _pure_delegation_top, _goal_awaiting_stamp_full,
     _all_outstanding_delegated, _open_leaves, _handoff_peer_identities, _handoff_card_fields, _session_started_face,
-    _provisional_card, _closer_pending, jd.review_boundary, jd._done_since, _newest_block_ev_t) write only into their
-    own containers;
+    _provisional_card, _closer_pending, jd.review_boundary, jd._done_since, jd._block_since, _newest_block_ev_t) write
+    only into their own containers;
     _apply_rewind_hold works on copies (dict(store), fresh nodes/status maps, copy-on-write re-parents, the re-roll on
     a json deep copy) and already runs on the shared view at _provisional_ledger's and build_session's ledger sites;
     the punch above is the snapshot branch's and replays onto a json copy of the pass memo's entry, never onto the
@@ -50686,9 +50686,9 @@ def _feed_session_key(s, tm, ctx, prev_entry):
         punch record _goals_snap_done[fsid], the rewind hold (cutT, leaf, at) or None, whether the read FAULTED (an
         EIO or a permissions fault moves no stat)). _feed_goals_keyed, jd.load_goals_shared inside _bg_placed_tops
         and _session_stamp_read, jd.review_boundary, jd._done_since, _newest_block_ev_t (the block rows' ev_t the
-        blocked yield orders against) and every node read. The pass's clock stamp is not a component (2026-09-16): a
-        new snapshot that decodes the same versions is not new information, and the stamp moved every snapshotted
-        session's key twice per pass.
+        blocked yield orders against), jd._block_since (the same rows' ev_t, a blocked card's time) and every node
+        read. The pass's clock stamp is not a component (2026-09-16): a new snapshot that decodes the same versions is
+        not new information, and the stamp moved every snapshotted session's key twice per pass.
       anchors: _node_anchor_rev[fsid]. The warm-anchor table _node_anchor_uuids serves a cold node from; a chat build's
         resolve for this sid bumps it.
       reg: (_feed_reg_sig(fsid), _chat_ident(STATE/gone/<fsid>.json)). The SDK registry record's state (readable,
@@ -51973,9 +51973,9 @@ def _feed_session_entry(s, ctx):
                     await_count = _n if isinstance(_n, int) and _n > 0 else None
                     break
         # The card's TIME reflects its CURRENT STATE, not when the goal was minted: a COMPLETED card
-        # shows when it was completed, a BLOCKED card when it was blocked — the mt of the most-recent
-        # such node in its subtree — else (working/awaiting) its LAST ACTIVITY (the newest mt anywhere in
-        # its subtree, _fsubmax). Keying the time badge to the mint `t` made a goal OPENED hours ago but
+        # shows when it was completed, a BLOCKED card when it was blocked — the newest block row's evidence
+        # time among its open blocked nodes (below) — else (working/awaiting) its LAST ACTIVITY (the newest
+        # mt anywhere in its subtree, _fsubmax). Keying the time badge to the mint `t` made a goal OPENED hours ago but
         # FINISHED moments ago read as "done hours ago" (the user 2026-06-19); the same pin made a WORKING
         # goal you JUST replied to still read "15m ago" instead of freshening — a reply advances the goal's
         # mt, so the card must too (the user 2026-07-01). `created` keeps the true mint time for the record.
@@ -51996,7 +51996,13 @@ def _feed_session_entry(s, ctx):
             cand = max([nodes[nid].get("settledAt") or 0] + dts)   # settle time OR a real late-completing leaf
             disp_t = cand or disp_t                                # both absent (legacy/childless) → keep _fsubmax
         elif col == "blocked":
-            bts = [nodes[x].get("mt", nodes[x]["t"]) for x in _subtree(nid)
+            # WHEN THE BLOCK WAS ASKED (jd._block_since: the newest block row's ev_t), never mt. mt moves on
+            # writes that say nothing about the block (a grouper retitle or merge, a planner retitle, a duplicate
+            # step landing, a to-do sync), and the re-judging latch below orders the plain reply against this
+            # time: keyed on mt, a retitle after the reply put a card the unblocker had not yet re-examined back
+            # in Needs you, and the unblocker's lift then moved it out again, while the card's age jumped to the
+            # retitle. Same time as the brief's "Nm ago" stamps. A node with no block row (pre-diary) keeps mt/t.
+            bts = [jd._block_since(nodes[x]) for x in _subtree(nid)
                    if nodes[x].get("blocked") and not _closure_done(x)]
             if bts:
                 disp_t = max(bts)

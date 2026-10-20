@@ -1955,9 +1955,11 @@ class ViewBuilder(unittest.TestCase):
     BT_SID = "11111111-2222-3333-4444-aaaaaaaa0001"
     BT_PEER = "11111111-2222-3333-4444-aaaaaaaa0002"
 
-    def _bt_session(self):
+    def _bt_session(self, reply_t=None):
         """Register the private session `api` beside the fixture one: the setUp transcript's shape (one finished
-        turn whose Edit launch, tu_ba1_0, a live background task can name), warmed like the setUp's."""
+        turn whose Edit launch, tu_ba1_0, a live background task can name), warmed like the setUp's. `reply_t`
+        adds a second, finished turn opened by a PLAIN typed reply at that time (no card marker: the user talking on
+        the thread), the reply the re-judging latch orders against the block."""
         d = Path(self.td.name) / "launch-api"; d.mkdir()
         pdir = Path(self.td.name) / "projects" / jd.re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(d)))
         pdir.mkdir(parents=True)
@@ -1965,6 +1967,9 @@ class ViewBuilder(unittest.TestCase):
                 aline(T0 + 20, "Starting the export run.", "ba1", "bu1", tools=("Edit",), stop="tool_use"),
                 trline(T0 + 25, "tu_ba1_0", "br1", "ba1", content="edited"),
                 aline(T0 + 40, "Offset or cursor pagination?", "ba2", "br1", stop="end_turn")]
+        if reply_t is not None:
+            recs += [uline(reply_t, "cursor, but keep the page size at 50", "bu2", "ba2", ps="typed"),
+                     aline(reply_t + 15, "Noted: cursor pagination, 50 per page.", "ba3", "bu2", stop="end_turn")]
         self.bt_path = pdir / (self.BT_SID + ".jsonl")
         self.bt_path.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
         (jd.NAMES / self.BT_SID).write_text("api\t%s\t#9cd2ff\n" % str(d))
@@ -1980,6 +1985,7 @@ class ViewBuilder(unittest.TestCase):
         session = em.parse_session(str(self.bt_path), rompuuid=self.BT_SID,
                                    candidate_files=[str(self.bt_path)], now=NOW)
         launch_seg = em.segments(session["turns"][0])[0]["id"]     # the segment holding tu_ba1_0
+        later = [sg["id"] for tn in session["turns"][1:] for sg in em.segments(tn)]   # a reply turn's (_bt_session)
         ask = "offset or cursor pagination?"
         nodes = {top: {"id": top, "text": "page the notes-api search results", "parentId": None,
                        "nodeComplete": False, "blocked": True, "blockWhy": ask, "cleared": False,
@@ -1994,7 +2000,8 @@ class ViewBuilder(unittest.TestCase):
         tmp = jd.GOALDIR / (self.BT_SID + ".json.tmp")
         tmp.write_text(json.dumps({
             "rompUuid": self.BT_SID, "seq": 2, "lastNode": top, "nodes": nodes,
-            "placements": {launch_seg: top}, "status": {top: "blocked", twin: "working"}}))
+            "placements": {launch_seg: top, **{sg: top for sg in later}},
+            "status": {top: "blocked", twin: "working"}}))
         os.replace(tmp, jd.GOALDIR / (self.BT_SID + ".json"))
         return top, twin
 
@@ -2115,6 +2122,47 @@ class ViewBuilder(unittest.TestCase):
         for arm in ({"wait_since": T0 + 900}, {"bg_since": T0 + 900}):
             card = self._bt_card(top, **arm)
             self.assertEqual((card["column"], card["awaiting"]), ("needs_input", None), arm)
+
+    # ── the re-judging latch orders the reply against the block's time, never mt ──
+    # A plain reply after a block moves the card to Working ("Re-judging…") until the unblocker has looked at the
+    # reply (blockCheckT). The latch compared the reply with the card's displayed time, which was the blocked
+    # nodes' max mt, so any of the five writes above, landing after the reply, put the card back in Needs you
+    # before the unblocker had looked, and a later lift moved it out again: Working, Needs you with a bell,
+    # Working, on no new information. The card's time jumped to the write too, re-sorting it in Needs you.
+    # Same private sid and temp state root as the yield tests above.
+    def test_a_rejudging_card_holds_through_writes_that_are_not_news_about_the_block(self):
+        self._bt_session(reply_t=T0 + 800)            # blocked at T0+600 (the store), the plain reply at T0+800
+        top, twin = self.BT_SID + ":g1", self.BT_SID + ":g2"
+        writes = self._bt_writes(top, twin)
+        for label, write in writes:
+            with self.subTest(label):
+                self._bt_store()
+                card = self._bt_card(top)
+                self.assertEqual((card["column"], card["rejudging"], card["t"]), ("working", True, T0 + 600),
+                                 "%s: the reply moves the card to Working, re-judging, at the block's time" % label)
+                self._bt_apply(write)
+                nd = jd.load_goals(self.BT_SID)["nodes"][top]
+                self.assertGreater(nd["mt"], T0 + 800, "%s moved mt past the reply (the case)" % label)
+                self.assertTrue(nd["blocked"], "%s: the block itself stands" % label)
+                self.assertIsNone(nd.get("blockCheckT"), "%s: the unblocker has not looked at the reply" % label)
+                card = self._bt_card(top)
+                self.assertEqual((card["column"], card["rejudging"]), ("working", True),
+                                 "%s is not new information about the block: still Working, re-judging" % label)
+                self.assertEqual(card["t"], T0 + 600, "%s: the card keeps the block's time" % label)
+        self._bt_store()
+        for _label, write in writes:
+            self._bt_apply(write)
+        card = self._bt_card(top)
+        self.assertEqual((card["column"], card["rejudging"], card["t"]), ("working", True, T0 + 600),
+                         "all five in a row: still Working, re-judging, at the block's time")
+        # a block filed AFTER the reply is new information: Needs you, at the new block's time
+        st = jd.load_goals(self.BT_SID)
+        self.assertTrue(jd.record_verdict(st, st["nodes"][top], "planner", "block", T0 + 1400,
+                                          why="opaque or keyset cursors?"))
+        jd.save_goals(self.BT_SID, st)
+        card = self._bt_card(top)
+        self.assertEqual((card["column"], card["rejudging"], card["t"]), ("needs_input", False, T0 + 1400),
+                         "a block newer than the reply moves the card to Needs you")
 
     def test_transcript_only_bg_task_is_not_awaiting_but_live_sources_are(self):
         # A run_in_background launch visible ONLY in the transcript must NOT pin an idle session to a
