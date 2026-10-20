@@ -1858,6 +1858,20 @@ A kernel restart that keeps the CLI running under its session host leaves the
 wakeups that CLI scheduled to it, and the kernel sends none of them; only when
 nothing on record says which CLI holds them (a wakeup scheduled before the kernel
 recorded that) does the kernel send one when it is due, possibly beside the CLI's own.
+That record names the CLI by its process id and start time and by the machine's
+boot (Linux's boot id, macOS's boot time), so a CLI started after a reboot that
+happens to carry an old CLI's process id and start time is not taken for it; a
+record from before the kernel recorded the boot counts as nothing on record.
+Before the session reattaches, the kernel reads the session host's lease to learn
+which CLI it runs. While that lease cannot be read and may still be a live host's,
+the kernel holds the wakeups on record as that CLI's: on every check until the
+lease reads again, or until it has gone 12 seconds without a rewrite, after which
+the kernel sends each one that is due. A lease whose age cannot be read either is
+held until it reads. The error center's row about the lease says a wakeup is held.
+If the kernel cannot update its record of the wakeups when a relaunch replaces
+the CLI, the error center says so; the relaunched CLI still counts as a new
+process, and until its first turn ends the kernel keeps in memory which wakeups it
+would have handed over or dropped, so it sends the rest when they are due.
 A wakeup scheduled by a /loop given no task is the exception, after a relaunch or
 a kernel restart the CLI did not survive alike: its prompt is a placeholder that
 only the CLI that scheduled it can turn into the loop's instructions, so the

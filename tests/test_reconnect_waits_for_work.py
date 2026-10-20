@@ -1130,7 +1130,8 @@ class AWakeupSurvivesThePicksRelaunch(_Harness):
         self.assertTrue(self.be.set_effort(SID, "medium"))
         self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the second relaunch")
         c3 = self._Client.instances[2]
-        self.assertEqual(s.proc_gen, gen, "the premise: the second stamp could not read the armed timers")
+        self.assertNotEqual(s.proc_gen, gen, "the premise: the second stamp, which could not read the armed timers, gave "
+                                             "its CLI a generation of its own")
         self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # that CLI's turn end
         self.assertEqual([c["procGen"] for c in self._one_shots()], [armed_by], "kept at that turn end")
         self._all_due()
@@ -1549,17 +1550,41 @@ class AWakeupTheOldCliCouldHaveFiredIsDropped(_Harness):
         c2 = self._restart_cutting(c1)
         new = [p["text"] for p in self.be.problems()[rows:]]
         self.assertEqual(len([t for t in new if "armed timers" in t]), 1, new)
-        self.assertEqual(s.proc_gen, gen, "the old generation kept")
+        self.assertNotEqual(s.proc_gen, gen, "the fresh CLI takes a generation of its own all the same")
         self.assertEqual(self._delivered(c2), 0)
         self.assertNotIn(self.WAKE, c2.writes)
 
-    def test_a_stamp_that_cannot_read_the_armed_timers_files_a_problem_row_keeps_the_old_generation_and_delivers_nothing(self):
+    def test_a_stamp_that_cannot_read_the_armed_timers_files_a_problem_row_and_delivers_nothing_the_old_cli_fired(self):
         self._a_fired_wakeup_then_a_restart_whose_stamp_fails("read_reg_for_rmw", lambda *a, **k: None)
 
-    def test_a_stamp_whose_armed_timer_write_fails_files_a_problem_row_keeps_the_old_generation_and_delivers_nothing(self):
+    def test_a_stamp_whose_armed_timer_write_fails_files_a_problem_row_and_delivers_nothing_the_old_cli_fired(self):
         def full(*a, **k):
             raise OSError("no space left on device")
         self._a_fired_wakeup_then_a_restart_whose_stamp_fails("write_reg", full)
+
+    def _a_restart_whose_stamp_fails_with_a_wakeup_not_yet_due(self, name, stand_in):
+        """a wakeup this session object armed ten minutes out, which the old CLI cannot have fired, then a Restart whose
+        stamp cannot move the armed timers. Before the fix the fresh CLI ran under the old CLI's generation, so its first
+        turn end dropped the wakeup it never held as its own, and nothing sent it (the review of #326)"""
+        c1 = self._first_turn()
+        self._arm(c1, self.WAKE)
+        s, gen = self.s, self.s.proc_gen
+        self._inside_the_hand_off(name, stand_in)
+        rows = len(self.be.problems())
+        self.assertEqual(self.be.relaunch(SID), "")
+        c2 = self._relaunched()
+        self.assertEqual(len([p for p in self.be.problems()[rows:] if "armed timers were not moved" in p["text"]]), 1,
+                         "the stamp's failure is filed")
+        self._on_loop(s._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # the fresh CLI's turn end
+        self.assertEqual([c["prompt"] for c in self._one_shots()], [self.WAKE], "the fresh CLI never held it: on record")
+        self.assertEqual(self._delivered(c2), 1)
+        self._wait(lambda: c2.writes == [self.WAKE], "the wakeup's prompt, fed to the fresh CLI")
+        self.assertNotEqual(s.proc_gen, gen, "the fresh CLI runs under a generation of its own")
+
+    def test_a_restart_whose_stamp_cannot_read_the_armed_timers_still_delivers_a_wakeup_not_yet_due_once(self):
+        """(a stamp with that wakeup alone on record moves nothing, so here it writes nothing that could fail; the write's
+        failure is pinned after a kernel restart's attach in tests/test_pick_survives_restart.py)"""
+        self._a_restart_whose_stamp_fails_with_a_wakeup_not_yet_due("read_reg_for_rmw", lambda *a, **k: None)
 
     def test_a_sweep_that_read_the_registry_before_a_restarts_stamp_sends_nothing_the_old_cli_fired(self):
         c1 = self._first_turn()
@@ -1781,8 +1806,8 @@ class ARewindLeavesItsWakeupsToTheFreshCli(_Harness):
         gen, rows = s.proc_gen, len(self.be.problems())
         self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the turn that armed it")
         self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the rewind's relaunch")
-        self.assertEqual((s.proc_gen, len([p for p in self.be.problems()[rows:] if "armed timers" in p["text"]])), (gen, 1),
-                         "the premise: the stamp could not read the armed timers")
+        self.assertEqual((s.proc_gen != gen, len([p for p in self.be.problems()[rows:] if "armed timers" in p["text"]])),
+                         (True, 1), "the premise: the stamp could not read the armed timers")
         self._nothing_delivered(self._Client.instances[2])
 
     def test_a_wakeup_a_delete_removed_is_dropped_at_a_later_relaunch_when_the_deletes_stamp_could_not_read_it(self):
@@ -1800,7 +1825,7 @@ class ARewindLeavesItsWakeupsToTheFreshCli(_Harness):
         gen = s.proc_gen
         self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the turn that armed it")
         self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the rewind's relaunch")
-        self.assertEqual(s.proc_gen, gen, "the premise: the delete's stamp could not read the armed timers")
+        self.assertNotEqual(s.proc_gen, gen, "the premise: the delete's stamp could not read the armed timers")
         sb.read_reg_for_rmw = real
         self._edit_reg(lambda reg: dict(reg, sessionCrons=[dict(c, scheduledFor=time.time() + 30) for c in reg["sessionCrons"]]))
         self.assertTrue(self.be.set_effort(SID, "medium"))
@@ -1821,7 +1846,7 @@ class ARewindLeavesItsWakeupsToTheFreshCli(_Harness):
         gen = s.proc_gen
         self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the second turn")
         c2 = self._relaunched()
-        self.assertEqual(s.proc_gen, gen, "the premise: the delete's stamp could not read the armed timers")
+        self.assertNotEqual(s.proc_gen, gen, "the premise: the delete's stamp could not read the armed timers")
         sb.read_reg_for_rmw = real
         self.assertTrue(self.be.set_effort(SID, "high"))
         self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "a pick's relaunch")
@@ -1938,7 +1963,7 @@ class ARewindLeavesItsWakeupsToTheFreshCli(_Harness):
             self.assertEqual(self.be.relaunch(SID), "")
         fresh = self._relaunched()
         if failing:
-            self.assertEqual(s.proc_gen, gen, "the premise: the stamp kept the old generation")
+            self.assertNotEqual(s.proc_gen, gen, "the premise: a stamp that could not read still gives a new generation")
         return fresh
 
     def _in_the_minute(self, relaunch):
@@ -1974,8 +1999,9 @@ class ARewindLeavesItsWakeupsToTheFreshCli(_Harness):
     def test_a_wakeup_an_earlier_session_object_recorded_and_the_cli_listed_is_delivered_once_after_a_quiet_picks_relaunch_whose_stamp_cannot_read_it(self):
         fresh = self._with_a_stamp_that_cannot_read_it("pick")
         self._stop()                             # that CLI's first turn end lists nothing
-        self.assertEqual([(c["procGen"], "firstGen" in c) for c in self._one_shots()], [("gen-before-the-restart", False)],
-                         "the record back under the earlier session object's generation")
+        self.assertEqual([(c["procGen"] != self.s.proc_gen, c.get("firstGen")) for c in self._one_shots()],
+                         [(True, "gen-before-the-restart")],
+                         "the kernel's, as a stamp that wrote leaves it: under the old CLI's generation, which no CLI holds")
         self._delivered_once(fresh)
 
     def test_a_wakeup_an_earlier_session_object_recorded_and_the_cli_listed_is_delivered_once_after_a_delete_whose_stamp_cannot_read_it(self):
@@ -2050,7 +2076,7 @@ class ARewindLeavesItsWakeupsToTheFreshCli(_Harness):
             self._wait(lambda: s._untaken is None and s.inflight == 1, "the edit's turn open")
             self._end_turn(fresh)
         if failing:
-            self.assertEqual(s.proc_gen, gen, "the premise: the stamp kept the old generation")
+            self.assertNotEqual(s.proc_gen, gen, "the premise: a stamp that could not read still gives a new generation")
         return fresh
 
     def _its_minute_passes(self):
@@ -2199,7 +2225,7 @@ class ARewindLeavesItsWakeupsToTheFreshCli(_Harness):
         self._inside_the_hand_off("read_reg_for_rmw", lambda *a, **k: None)
         self._restart_cutting_the_turn(c2)
         c3 = self._third_client()
-        self.assertEqual(s.proc_gen, gen, "the premise: the stamp kept the old generation")
+        self.assertNotEqual(s.proc_gen, gen, "the premise: a stamp that could not read still gives a new generation")
         self._all_due()
         self.assertEqual(self.be.deliver_lost_wakeups(), 0, "the CLI that listed it fired it")
         self._stop()                             # the fresh CLI's first turn end lists nothing
@@ -2309,7 +2335,7 @@ class ARewindLeavesItsWakeupsToTheFreshCli(_Harness):
         gen = s.proc_gen
         self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the turn that armed it")
         self._relaunched()
-        self.assertEqual(s.proc_gen, gen, "the premise: the delete's stamp could not read the armed timers")
+        self.assertNotEqual(s.proc_gen, gen, "the premise: the delete's stamp could not read the armed timers")
         sb.read_reg_for_rmw = real
         self.assertTrue(self.be.set_effort(SID, "high"))
         self._wait(lambda: len(self._Client.instances) == 3 and self._Client.instances[2] is s.client, "the later relaunch")
@@ -2345,7 +2371,7 @@ class ARewindLeavesItsWakeupsToTheFreshCli(_Harness):
         gen = s.proc_gen
         self.assertEqual(self.be.rollback(SID, kept), (True, ""), "delete the second turn")
         c2 = self._relaunched()
-        self.assertEqual(s.proc_gen, gen, "the premise: the delete's stamp could not read the armed timers")
+        self.assertNotEqual(s.proc_gen, gen, "the premise: the delete's stamp could not read the armed timers")
         sb.read_reg_for_rmw = real
         self._turn(c2, "tighten the notes-api search")
         self._stop()                             # that turn's end
