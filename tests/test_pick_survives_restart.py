@@ -217,9 +217,11 @@ class _Harness(unittest.TestCase):
                       else sess.launch_values() if how == "current" else how)
             if how == "spec":
                 self.launched[step["cli"]["pid"]] = dict(launch)
-            be._on_host_hello(sess, {"host": {"pid": 9000, "start": "1.0", "version": be.code_version},
-                                     "cli": dict(step["cli"], fsid=FSID, login="", launch=launch),
-                                     "journal": {"next": 0}, "parked": [], "inflight": 0})
+            hello = {"host": {"pid": 9000, "start": "1.0", "version": be.code_version},
+                     "cli": dict(step["cli"], fsid=FSID, login="", launch=launch),
+                     "journal": {"next": 0}, "parked": [], "inflight": 0}
+            sess._host.hello = hello                       # kept on the transport before the backend reads it, as
+            be._on_host_hello(sess, hello)                 # HostTransport.connect keeps it
             return None                                    # the stand-in client reads no transport
         be._host_transport_for = _transport_for
         s = sb.SdkSession(be, dict(sb.read_reg(self.state, SID)))
@@ -382,8 +384,8 @@ class ABypassPickWaitingAcrossARestart(_Harness):
     reads the mode that CLI was launched with (until its next init reports any live switch since), not the pick beside its
     own mark (a host too old to report that launch, or a launch record that names no mode, leaves the pick until the CLI's
     next init). A change back after the attach withdraws the relaunch the reconcile raised for that pick alone when
-    SdkBackend._withdraw_mode_pick's other conditions hold, as in the test below. The attach mints no new process generation (the session keeps the one it was built with); the relaunch onto a fresh CLI takes a
-    new one."""
+    SdkBackend._withdraw_mode_pick's other conditions hold, as in the test below. The attach mints no new process generation:
+    the session takes the one CLI A holds (cliGen), and the relaunch onto a fresh CLI takes a new one."""
 
     def test_the_mode_mark_survives_the_restart_and_the_relaunch_onto_a_fresh_cli_applies_it(self):
         be1, s1 = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"}])
@@ -395,17 +397,17 @@ class ABypassPickWaitingAcrossARestart(_Harness):
         snap = s1.snapshot()
         self.assertEqual((snap["mode"], snap.get("modePending")), ("acceptEdits", True), "CLI A's own mode, and the pick's mark")
         self.assertEqual((self._reg().get("relaunchWait") or {}).get("picks"), {"mode": {"mode": "bypassPermissions"}})
+        gen = s1.proc_gen                                 # the generation CLI A holds
         self._end_kernel(s1)
 
         be2, s2 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"},
                                 {"attach": False, "cli": CLI_B, "launch": "spec"}], survives=True)
         self.assertEqual(getattr(s2, "_mode_pending", ""), "bypassPermissions", "the mark stands from construction")
-        gen = s2.proc_gen
         c2 = self._connect(s2, 2)
         self._settle()
         self.assertEqual(len(_Client.instances), 2, "attached, not relaunched: the surviving monitor is still running")
-        self.assertEqual(s2.proc_gen, gen, "an attach mints no new generation: a timer CLI A arms in this kernel's life "
-                                           "stays its own to fire")
+        self.assertEqual(s2.proc_gen, gen, "an attach mints no new generation: it takes CLI A's, so a timer CLI A armed "
+                                           "under either kernel stays its own to fire")
         self.assertTrue(s2.snapshot().get("modePending"), "CLI A was launched without the flag: the pick still waits")
         self.assertEqual(s2.snapshot()["mode"], "acceptEdits",
                          "the mode CLI A was launched with, not the pick construction seeded from the reg")
@@ -812,6 +814,220 @@ class AnAttachBesideAPendingDeleteLeavesNothingForALaterFreshCli(_Harness):
                                                                   for c in reg.get("sessionCrons") or []]))
         self.assertEqual(be2.deliver_lost_wakeups(), 1, "CLI C does not carry the wakeup: the kernel delivers it")
         self._wait(lambda: self.WAKE in c4.writes, "its prompt, fed to CLI C")
+
+
+class AWakeupTheSurvivingCliHoldsIsLeftToIt(_Harness):
+    """A ScheduleWakeup one-shot lives in the memory of the CLI that armed it, and its record names the process generation
+    (procGen) that decides who fires it: the CLI holding the live generation, or the kernel's lost-wakeup sweep once no CLI
+    holds it. Under a session host the CLI outlives the session object that recorded the wakeup (a kernel restart, a stream
+    lost mid-turn), and the object built to attach to it again minted a generation of its own, so until that CLI's first
+    turn end the sweep read the CLI's own wakeup as lost: an ordinary wakeup was sent twice, by the sweep and by the CLI,
+    and an autonomous /loop's wakeup filed a false "the loop has stopped" row while the CLI went on looping. The scripted
+    host plays CLI A's spawn under the first session object and the attach to CLI A under the next. When nothing on record
+    says which generation the attached CLI holds, the kernel still sends the wakeup once it is due, as before."""
+
+    WAKE = "check the notes-api build again"
+    SENTINEL = "<<autonomous-loop-dynamic>>"                 # what an autonomous /loop passes to ScheduleWakeup
+    HOST_A = {"pid": 9100, "start": "90.5"}                   # the host that keeps CLI A
+
+    def _one_shots(self):
+        return [c for c in self._reg().get("sessionCrons") or [] if not c.get("recurring")]
+
+    def _on(self, s, coro):
+        return asyncio.run_coroutine_threadsafe(coro, s.loop).result(5)
+
+    def _open(self, s, c):
+        self._push(c, _SystemMessage("init", {"model": "claude-x", "permissionMode": "acceptEdits", "session_id": FSID},
+                                     uuid=self._uid()))
+        self._push(c, _AssistantMessage([_TextBlock("on it")], uuid=self._uid()))
+        self._wait(lambda: s._cli_working or s.inflight == 1, "the turn open")
+
+    def _close(self, s, c):
+        self._push(c, _result(uuid=self._uid(), subtype="success", is_error=False, num_turns=1, session_id=FSID,
+                              duration_ms=1, duration_api_ms=1, total_cost_usd=0.01,
+                              usage={"input_tokens": 1, "output_tokens": 1}, result="ok", parent_tool_use_id=None))
+        self._wait(lambda: s.inflight == 0 and not s._cli_working, "the turn settled")
+
+    def _turn_arming(self, s, c, prompt):
+        """a turn on CLI A that arms a wakeup ten minutes out (the call-time hook), lists it at its Stop hook, and ends"""
+        s.enqueue("start the notes-api watch")
+        self._wait(lambda: "start the notes-api watch" in c.writes, "the turn fed")
+        self._open(s, c)
+        t = time.time()
+        self._on(s, s._sched_tool_hook({"tool_name": "ScheduleWakeup", "tool_input": {"delaySeconds": 600, "prompt": prompt},
+                                        "tool_response": {"scheduledFor": int(-(-(t + 600) // 60) * 60 * 1000),
+                                                          "clampedDelaySeconds": 600, "wasClamped": False}},
+                                       "tu-wake", None))
+        due = time.localtime(t + 600)
+        self._on(s, s._stop_hook({"session_crons": [{"id": "a1b2c3d4", "schedule": "%d %d * * *" % (due[4], due[3]),
+                                                     "prompt": prompt, "recurring": False}],
+                                  "background_tasks": []}, None, None))
+        self._close(s, c)
+        self.assertEqual([c["prompt"] for c in self._one_shots()], [prompt], "the premise: the wakeup on record")
+
+    def _all_due(self, be):
+        with be._reg_lock:
+            reg = sb.read_reg(self.state, SID)
+            sb.write_reg(self.state, SID, dict(reg, sessionCrons=[dict(c, dueEpoch=time.time() - 30)
+                                                                  for c in reg.get("sessionCrons") or []]))
+
+    def _armed_on_cli_a(self, prompt):
+        """the first session object spawns CLI A, a turn arms a wakeup with `prompt`, and the object's thread ends while
+        the host keeps CLI A (the kernel's drain)"""
+        be1, s1 = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"}])
+        c1 = self._connect(s1, 1)
+        self._turn_arming(s1, c1, prompt)
+        self._end_kernel(s1)
+        return be1, s1
+
+    def _restarted(self, prompt, cli=CLI_A):
+        """CLI A arms a wakeup with `prompt` under the first kernel; the kernel restarts and the next one attaches to `cli`
+        (CLI A again, unless the test says otherwise; CLI B is a spawn, its host having died with CLI A); then the wakeup
+        is past due. The second kernel's backend, session and client"""
+        self._armed_on_cli_a(prompt)
+        be2, s2 = self._kernel([{"attach": cli is not CLI_B, "cli": cli, "launch": "same" if cli is CLI_A else None}],
+                               survives=cli is not CLI_B)
+        c2 = self._connect(s2, 2)
+        self._settle()
+        self.assertEqual(len(_Client.instances), 2, "the premise: one connect, no relaunch")
+        self._all_due(be2)
+        return be2, s2, c2
+
+    def _kernel_sent(self, s, c, text):
+        return c.writes.count(text) + s.pending().count(text)
+
+    def _loop_rows(self, be):
+        return [p["text"] for p in be.problems() if "could not be carried across the relaunch" in p["text"]]
+
+    @contextlib.contextmanager
+    def _host_keeps(self, cli):
+        """a lease naming `cli`, held by a live host, as the session host writes it; the lease classifier reads proc_start
+        from the module registered as romp_sdk_backend, so this module's backend stands in under that key (as AReattachAtBoot
+        does)"""
+        alive = {cli["pid"]: cli["start"], self.HOST_A["pid"]: self.HOST_A["start"]}
+        sb.write_lease(self.state, {"sid": SID, "fsid": FSID, "name": "web", "pid": cli["pid"], "start": cli["start"],
+                                    "version": "", "t": time.time(), "holder": dict(self.HOST_A, kind="host")})
+        prev = sys.modules.get("romp_sdk_backend")
+        sys.modules["romp_sdk_backend"] = sb
+        try:
+            with mock.patch.object(sb, "proc_start", lambda p, run=None: alive.get(p)):
+                yield
+        finally:
+            if prev is None:
+                sys.modules.pop("romp_sdk_backend", None)
+            else:
+                sys.modules["romp_sdk_backend"] = prev
+
+    # -- the gap --
+    def test_after_a_kernel_restart_an_ordinary_wakeup_the_attached_cli_holds_is_sent_once_by_that_cli(self):
+        be2, s2, c2 = self._restarted(self.WAKE)
+        self.assertEqual(be2.deliver_lost_wakeups(), 0, "CLI A still holds the wakeup and fires it itself")
+        self._settle(0.3)
+        self.assertEqual(self._kernel_sent(s2, c2, self.WAKE), 0, "the kernel sends no copy beside CLI A's own")
+        self.assertEqual([c["prompt"] for c in self._one_shots()], [self.WAKE], "left on record for CLI A to rule on")
+        # CLI A fires it: its prompt hook sees the wakeup's prompt, its own turn runs, and its Stop hook lists no timer
+        self._on(s2, s2._prompt_submit_hook({"prompt": self.WAKE}, None, None))
+        self._open(s2, c2)
+        self._on(s2, s2._stop_hook({"session_crons": [], "background_tasks": []}, None, None))
+        self._close(s2, c2)
+        self.assertEqual(self._one_shots(), [], "the turn end of the CLI that fired it takes it off the record")
+        self.assertEqual(be2.deliver_lost_wakeups(), 0)
+        self._settle(0.3)
+        self.assertEqual(self._kernel_sent(s2, c2, self.WAKE), 0)
+
+    def test_after_a_kernel_restart_an_autonomous_loops_wakeup_the_attached_cli_holds_files_no_loop_stopped_row(self):
+        be2, s2, c2 = self._restarted(self.SENTINEL)
+        self.assertEqual(be2.deliver_lost_wakeups(), 0)
+        self.assertEqual(self._loop_rows(be2), [], "CLI A's loop goes on: nothing has stopped")
+        self.assertEqual([c["prompt"] for c in self._one_shots()], [self.SENTINEL], "left on record for CLI A to rule on")
+        self.assertEqual(self._kernel_sent(s2, c2, self.SENTINEL), 0)
+
+    def test_before_the_attach_the_sweep_leaves_the_wakeup_to_the_cli_a_live_host_still_runs(self):
+        """the sweep can run after a kernel restart before the session's attach (the boot's attach stagger): the host's
+        lease names CLI A, so the wakeup is still CLI A's"""
+        self._armed_on_cli_a(self.WAKE)
+        be2, s2 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"}], survives=True)
+        self._all_due(be2)
+        with self._host_keeps(CLI_A):
+            self.assertEqual(be2.deliver_lost_wakeups(), 0, "a live host still runs CLI A, which holds the wakeup")
+        self._settle(0.3)
+        self.assertEqual(len(_Client.instances), 1, "nothing attached to send it")
+        self.assertEqual([c["prompt"] for c in self._one_shots()], [self.WAKE])
+
+    def test_a_session_object_built_again_inside_one_kernel_for_the_same_cli_leaves_its_wakeup_to_it(self):
+        """the road of a stream lost under a live host (SdkBackend._reattach_live_host): this kernel builds a new session
+        object for the session (_ensure) and attaches it to the CLI the host kept"""
+        be, s1 = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"},
+                               {"attach": True, "cli": CLI_A, "launch": "same"}])
+        c1 = self._connect(s1, 1)
+        self._turn_arming(s1, c1, self.WAKE)
+        self._end_kernel(s1)
+        s1b = be._ensure(SID)
+        self.sessions.append(s1b)
+        self.assertIsNot(s1b, s1, "the premise: a new session object")
+        self._wait(lambda: len(_Client.instances) == 2 and _Client.instances[1] is s1b.client, "the attach to CLI A")
+        c2 = _Client.instances[1]
+        self._settle()
+        self._all_due(be)
+        self.assertEqual(be.deliver_lost_wakeups(), 0, "CLI A still holds the wakeup")
+        self._settle(0.3)
+        self.assertEqual(self._kernel_sent(s1b, c2, self.WAKE), 0)
+
+    def test_a_cli_attached_with_no_record_gets_one_at_its_turn_end_and_the_next_restart_leaves_its_wakeup_to_it(self):
+        """the registry an older kernel left records no generation for CLI A; its first turn end under this kernel does,
+        so after the next restart the wakeup it armed meanwhile stays its own"""
+        be1, s1 = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"}])
+        self._connect(s1, 1)
+        self._end_kernel(s1)
+        reg = self._reg()
+        sb.write_reg(self.state, SID, {k: v for k, v in reg.items() if k != "cliGen"})
+        be2, s2 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"}], survives=True)
+        c2 = self._connect(s2, 2)
+        self._turn_arming(s2, c2, self.WAKE)
+        self.assertEqual(self._reg().get("cliGen"), {"cli": "%s:%s" % (CLI_A["pid"], CLI_A["start"]), "gen": s2.proc_gen})
+        self._end_kernel(s2)
+        be3, s3 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"}], survives=True)
+        c3 = self._connect(s3, 3)
+        self._settle()
+        self._all_due(be3)
+        self.assertEqual(be3.deliver_lost_wakeups(), 0, "CLI A still holds the wakeup")
+        self._settle(0.3)
+        self.assertEqual(self._kernel_sent(s3, c3, self.WAKE), 0)
+
+    # -- what stays as it was --
+    def test_before_the_attach_a_live_hosts_lease_naming_another_cli_leaves_the_wakeup_the_kernels(self):
+        self._armed_on_cli_a(self.WAKE)
+        be2, s2 = self._kernel([{"attach": False, "cli": CLI_B, "launch": None}])
+        self._all_due(be2)
+        with self._host_keeps(CLI_B):
+            self.assertEqual(be2.deliver_lost_wakeups(), 1, "CLI B never held it: the kernel sends it")
+        self._wait(lambda: len(_Client.instances) == 2 and self.WAKE in _Client.instances[1].writes, "its prompt, fed to CLI B")
+
+    def test_a_fresh_cli_in_place_of_the_one_that_armed_it_leaves_the_wakeup_the_kernels(self):
+        be2, s2, c2 = self._restarted(self.WAKE, cli=CLI_B)
+        self.assertEqual(be2.deliver_lost_wakeups(), 1, "CLI B never held it: the kernel sends it")
+        self._wait(lambda: self._kernel_sent(s2, c2, self.WAKE) == 1, "its prompt, fed to CLI B")
+
+    def test_with_no_record_of_the_generation_the_attached_cli_holds_the_kernel_still_sends_the_wakeup_when_due(self):
+        """a registry an older kernel wrote: the wakeup under a generation nothing ties to CLI A. The kernel cannot tell
+        that CLI A holds it, so it sends it when due rather than risk losing it (CLI A may send it too)"""
+        self._armed_on_cli_a(self.WAKE)
+        reg = self._reg()
+        sb.write_reg(self.state, SID, dict({k: v for k, v in reg.items() if k != "cliGen"},
+                                           sessionCrons=[dict(c, procGen="gen-of-an-older-kernel")
+                                                         for c in reg.get("sessionCrons") or []]))
+        be2, s2 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"}], survives=True)
+        c2 = self._connect(s2, 2)
+        self._settle()
+        self._all_due(be2)
+        self.assertEqual(be2.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self._kernel_sent(s2, c2, self.WAKE) == 1, "its prompt, fed to CLI A")
+
+    def test_a_hello_that_names_no_cli_leaves_the_wakeup_the_kernels(self):
+        """a host older than the CLI identity in its hello: nothing ties the attached CLI to the generation on record"""
+        be2, s2, c2 = self._restarted(self.WAKE, cli={})
+        self.assertEqual(be2.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self._kernel_sent(s2, c2, self.WAKE) == 1, "its prompt, fed to the attached CLI")
 
 
 class _AlwaysTimesOut(_Client):

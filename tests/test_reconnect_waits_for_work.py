@@ -1464,7 +1464,10 @@ class AWakeupTheOldCliCouldHaveFiredIsDropped(_Harness):
         self._wait(lambda: self.WAKE in c1.writes, "its prompt fed")
 
     def test_a_past_due_wakeup_an_earlier_session_object_recorded_is_delivered_after_the_cli_fires_it_before_a_turn_end(self):
-        """the attached CLI fires it itself, and the sweep, run before any turn of that CLI ends, delivers it as well"""
+        """nothing on record ties the CLI to the wakeup's generation (no cliGen: an older kernel's registry, or a CLI with
+        no host identity), so the sweep, run before any turn of that CLI ends, delivers it even though the CLI fires it
+        itself: possibly twice, never lost. With the record, an attach to the same CLI takes its generation and the sweep
+        leaves the wakeup to it (tests/test_pick_survives_restart.py, AWakeupTheSurvivingCliHoldsIsLeftToIt)"""
         t = time.time()
         entry = {"id": "toolhook-1", "cron": "", "prompt": self.WAKE, "kind": "", "recurring": False,
                  "armedAt": t - 610, "dueEpoch": t - 10, "scheduledFor": t - 10, "procGen": "gen-before-the-restart",
