@@ -984,7 +984,8 @@ class AWakeupTheSurvivingCliHoldsIsLeftToIt(_Harness):
         be2, s2 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"}], survives=True)
         c2 = self._connect(s2, 2)
         self._turn_arming(s2, c2, self.WAKE)
-        self.assertEqual(self._reg().get("cliGen"), {"cli": "%s:%s" % (CLI_A["pid"], CLI_A["start"]), "gen": s2.proc_gen})
+        self.assertEqual(self._reg().get("cliGen"), {"cli": "%s:%s" % (CLI_A["pid"], CLI_A["start"]),
+                                                     "boot": sb.machine_boot_id(), "gen": s2.proc_gen})
         self._end_kernel(s2)
         be3, s3 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"}], survives=True)
         c3 = self._connect(s3, 3)
@@ -1028,6 +1029,190 @@ class AWakeupTheSurvivingCliHoldsIsLeftToIt(_Harness):
         be2, s2, c2 = self._restarted(self.WAKE, cli={})
         self.assertEqual(be2.deliver_lost_wakeups(), 1)
         self._wait(lambda: self._kernel_sent(s2, c2, self.WAKE) == 1, "its prompt, fed to the attached CLI")
+
+    # -- the review of #326: a fresh CLI whose stamp cannot write, a CLI of another boot, an unreadable lease --
+    OTHER_BOOT = "22222222-3333-4444-5555-666666666666"    # an earlier boot of the machine (invented)
+
+    def _failing_hand_off(self):
+        """the fresh-CLI stamp's write of the armed timers (_hand_one_shots_to's) fails as a full disk does; every other
+        write goes through"""
+        real = sb.write_reg
+
+        def write(*a, **k):
+            if sys._getframe(1).f_code.co_name == "_hand_one_shots_to":
+                raise OSError("no space left on device")
+            return real(*a, **k)
+        sb.write_reg = write
+        self.addCleanup(setattr, sb, "write_reg", real)
+
+    def _recorded_in(self, boot):
+        """the registry's record of the generation CLI A holds, as from boot `boot` of the machine (None: a record that names
+        no boot, as a kernel before the boot was recorded wrote it)"""
+        reg = self._reg()
+        cg = {k: v for k, v in reg["cliGen"].items() if k != "boot"}
+        if boot is not None:
+            cg["boot"] = boot
+        sb.write_reg(self.state, SID, dict(reg, cliGen=cg))
+        return cg["gen"]
+
+    def test_after_a_restart_a_relaunch_whose_stamp_cannot_write_leaves_the_wakeup_the_attached_cli_held_to_the_kernel(self):
+        """the attach took CLI A's generation; a pick then relaunches onto CLI B, and the stamp that gives CLI B a generation
+        of its own cannot write the registry. Before the fix CLI B ran under CLI A's generation, so its first turn end
+        dropped CLI A's wakeup as its own: CLI B never held it, and nothing sent it"""
+        self._armed_on_cli_a(self.WAKE)
+        be2, s2 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"},
+                                {"attach": False, "cli": CLI_B, "launch": "spec"}], survives=True)
+        self._connect(s2, 2)
+        self._settle()
+        taken = s2.proc_gen
+        self.assertEqual([c["procGen"] for c in self._one_shots()], [taken], "the premise: the attach took CLI A's generation")
+        rows = len(be2.problems())
+        self._failing_hand_off()
+        self.assertTrue(be2.set_effort(SID, "high"))
+        self._wait(lambda: len(_Client.instances) == 3 and _Client.instances[2] is s2.client, "the relaunch onto CLI B")
+        c3 = _Client.instances[2]
+        self.assertEqual(len([p for p in be2.problems()[rows:] if "armed timers were not moved" in p["text"]]), 1,
+                         "the stamp's failure is filed")
+        self._on(s2, s2._stop_hook({"session_crons": [], "background_tasks": []}, None, None))   # CLI B's first turn end
+        self.assertEqual([c["prompt"] for c in self._one_shots()], [self.WAKE], "CLI B never held it: it stays on record")
+        self._all_due(be2)
+        self.assertEqual(be2.deliver_lost_wakeups(), 1, "the kernel sends it")
+        self._wait(lambda: self._kernel_sent(s2, c3, self.WAKE) == 1, "its prompt, fed to CLI B")
+        self.assertNotEqual(s2.proc_gen, taken, "CLI B runs under a generation of its own")
+
+    def test_a_record_of_a_cli_from_another_boot_is_not_taken_and_the_kernel_sends_the_wakeup(self):
+        """the CLI's start is counted in clock ticks since boot, so after a reboot a fresh CLI can carry the pid and start a
+        record from before it names. Here the hello names CLI A's pair, and the record of the generation CLI A held is from
+        another boot: it names no CLI of this one, so nothing is taken and the kernel sends the wakeup when due"""
+        self._armed_on_cli_a(self.WAKE)
+        self.assertEqual(self._reg()["cliGen"].get("boot"), sb.machine_boot_id(), "the premise: the record names this boot")
+        recorded = self._recorded_in(self.OTHER_BOOT)
+        be2, s2 = self._kernel([{"attach": False, "cli": CLI_A, "launch": None}])
+        c2 = self._connect(s2, 2)
+        self._settle()
+        self.assertNotEqual(s2.proc_gen, recorded, "nothing taken")
+        self._all_due(be2)
+        self.assertEqual(be2.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self._kernel_sent(s2, c2, self.WAKE) == 1, "its prompt, fed to the CLI")
+
+    def test_before_the_attach_a_lease_naming_the_pid_and_start_of_a_cli_from_another_boot_leaves_the_wakeup_the_kernels(self):
+        self._armed_on_cli_a(self.WAKE)
+        self._recorded_in(self.OTHER_BOOT)
+        be2, s2 = self._kernel([{"attach": False, "cli": CLI_A, "launch": None}])
+        self._all_due(be2)
+        with self._host_keeps(CLI_A):
+            self.assertEqual(be2.deliver_lost_wakeups(), 1, "the record names a CLI of another boot: the kernel sends it")
+        self._wait(lambda: len(_Client.instances) == 2 and self.WAKE in _Client.instances[1].writes, "its prompt, fed")
+
+    def test_a_record_that_names_no_boot_is_not_taken_and_the_kernel_sends_the_wakeup_when_due(self):
+        """a record from a kernel before the boot was recorded cannot tell this boot's CLI from an earlier boot's, so the
+        kernel delivers the wakeup when due, as before any record (possibly beside CLI A's own); the attached CLI's next
+        turn end records the boot"""
+        self._armed_on_cli_a(self.WAKE)
+        recorded = self._recorded_in(None)
+        be2, s2 = self._kernel([{"attach": True, "cli": CLI_A, "launch": "same"}], survives=True)
+        c2 = self._connect(s2, 2)
+        self._settle()
+        self.assertNotEqual(s2.proc_gen, recorded, "nothing taken")
+        self._all_due(be2)
+        self.assertEqual(be2.deliver_lost_wakeups(), 1)
+        self._wait(lambda: self._kernel_sent(s2, c2, self.WAKE) == 1, "its prompt, fed to CLI A")
+        self._on(s2, s2._stop_hook({"session_crons": [], "background_tasks": []}, None, None))
+        self.assertEqual(self._reg().get("cliGen"), {"cli": "%s:%s" % (CLI_A["pid"], CLI_A["start"]),
+                                                     "boot": sb.machine_boot_id(), "gen": s2.proc_gen})
+
+    def test_before_the_attach_an_unreadable_lease_holds_the_wakeup_until_it_goes_stale_and_its_row_says_so(self):
+        """the lease the sweep reads is not a lease record and was rewritten moments ago, so a live host may still run CLI A
+        behind it: the wakeup on record as CLI A's is held on every pass, not one, and the lease's problem row says a wakeup
+        is held. Once the file has gone LEASE_TTL_S without a rewrite no host beats behind it, and the kernel sends it"""
+        self._armed_on_cli_a(self.WAKE)
+        be2, s2 = self._kernel([{"attach": False, "cli": CLI_B, "launch": None}])
+        self._all_due(be2)
+        path = str(sb.lease_path(self.state, SID))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("{not a lease record")
+        for _ in range(3):
+            self.assertEqual(be2.deliver_lost_wakeups(), 0, "a live host may still run CLI A behind the lease")
+        rows = [p["text"] for p in be2.problems() if "cannot read the session host's lease" in p["text"]]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIn("a wakeup on record as that CLI's included", rows[0])
+        old = time.time() - sb.LEASE_TTL_S - 5
+        os.utime(path, (old, old))
+        self.assertEqual(be2.deliver_lost_wakeups(), 1, "nothing has rewritten the lease for LEASE_TTL_S: no host holds it")
+        self._wait(lambda: len(_Client.instances) == 2 and self.WAKE in _Client.instances[1].writes, "its prompt, fed to CLI B")
+
+
+class TheMachinesBoot(unittest.TestCase):
+    """machine_boot_id: what a CLI identity carries beside its pid and start (cliGen), read once per process"""
+
+    def setUp(self):
+        sb._BOOT_ID.clear()
+        self.addCleanup(sb._BOOT_ID.clear)
+
+    def test_on_linux_it_is_the_kernels_boot_id(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        p = os.path.join(d, "boot_id")
+        with open(p, "w") as f:
+            f.write("33333333-4444-5555-6666-777777777777\n")
+        with mock.patch.object(sb, "BOOT_ID_PATH", p):
+            self.assertEqual(sb.machine_boot_id(), "33333333-4444-5555-6666-777777777777")
+
+    def test_on_macos_it_is_the_moment_kern_boottime_names(self):
+        self.assertEqual(sb.boot_id_from_boottime("{ sec = 1790000000, usec = 250000 } Mon Sep 21 10:13:20 2026\n"),
+                         "kern.boottime:1790000000.250000")
+        self.assertEqual(sb.boot_id_from_boottime("sysctl: unknown oid 'kern.boottime'"), "")
+
+    def test_with_no_boot_to_read_no_record_is_written_and_none_is_taken(self):
+        with mock.patch.object(sb, "BOOT_ID_PATH", "/nonexistent/boot_id"), \
+                mock.patch.object(sb, "boot_id_from_boottime", lambda text: ""):
+            self.assertEqual(sb.machine_boot_id(), "")
+            self.assertIsNone(sb.cli_gen_record("4242:100.5", "gen-1"))
+            self.assertIsNone(sb.held_cli_generation({"cliGen": {"cli": "4242:100.5", "boot": "", "gen": "gen-1"}},
+                                                     "4242:100.5"))
+
+
+class OneSessionsFailureLeavesTheSweepToTheOthers(unittest.TestCase):
+    """The lost-wakeup sweep read each session's host lease before the registry lock with nothing around it, so a raise
+    there ended the pass, and every session after it kept its due wakeup unsent for as long as the raise recurred. Each
+    session's part is guarded: the failure is filed in the error center and the pass goes on."""
+
+    SID2 = "11111111-2222-3333-4444-cccccccccc32"        # this module's second synthetic sid
+
+    def setUp(self):
+        self.state = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state, True)
+        with open(os.path.join(self.state, "session-hosts"), "w") as f:
+            f.write("off")                       # this root is outside the runner's belt
+        self.be = sb.SdkBackend(self.state, "/bin/true", lambda *a, **k: None, log=lambda m, **k: None)
+        due = time.time() - 30
+        for sid, name, prompt in ((SID, "web", "check the notes-api build again"), (self.SID2, "api", "rerun the api tests")):
+            sb.write_reg(self.state, sid, {
+                "sid": sid, "name": name, "alive": True, "cwd": self.state,
+                "cliGen": {"cli": "4242:100.5", "gen": "gen-of-a-gone-cli"},   # so the sweep reads the session's lease
+                "sessionCrons": [{"id": "wake-" + name, "cron": "", "prompt": prompt, "kind": "", "recurring": False,
+                                  "armedAt": due - 600, "dueEpoch": due, "procGen": "gen-of-a-gone-cli"}]})
+
+    def test_a_raise_on_one_session_leaves_the_others_wakeup_sent_and_is_filed(self):
+        sent = []
+        self.be.send = lambda sid, text, **k: sent.append((sid, text)) or True
+        real = self.be._host_held_cli
+
+        def held(sid):
+            if sid == SID:
+                raise OSError("the lease directory went away")
+            return real(sid)
+        self.be._host_held_cli = held
+        regs = sorted(sb.list_regs(self.state), key=lambda r: r["sid"] != SID)   # the failing session first
+        with mock.patch.object(sb, "list_regs", lambda *a, **k: regs):
+            self.assertEqual(self.be.deliver_lost_wakeups(), 1)
+        self.assertEqual(sent, [(self.SID2, "rerun the api tests")])
+        rows = [p["text"] for p in self.be.problems() if "checking this session's wakeups failed" in p["text"]]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIn("lost-wakeup (web)", rows[0])
+        self.assertEqual([c["prompt"] for c in (sb.read_reg(self.state, SID) or {}).get("sessionCrons") or []],
+                         ["check the notes-api build again"], "still on record for the next pass")
 
 
 class _AlwaysTimesOut(_Client):

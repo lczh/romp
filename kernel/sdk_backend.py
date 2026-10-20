@@ -5190,32 +5190,107 @@ def to_first_gen(c) -> dict:
     return out
 
 
+def stamp_plan(c, outgoing, mine, carried, rewound: bool, now: float) -> str:
+    """What a fresh CLI's stamp (SdkSession._hand_one_shots_to) does with entry `c` of the armed set: "drop" (a one-shot with
+    a due time under an `outgoing` generation, cli_generations, that a generation of the object first recorded, whose
+    earliest fire, wakeup_earliest_fire, has passed by `now` or is not known: the old CLI may have fired it), "first" (one
+    with no due time under an outgoing generation that an earlier session object first recorded: back under that object's
+    generation, to_first_gen), "rewind" (after a rewind, `rewound`, every other one-shot a generation of the object, `mine`,
+    first recorded, and one under an outgoing generation whose id a rewind's stamp handed over with no Stop hook since,
+    `carried`), "hand" (any other one-shot with no due time under an outgoing generation), or "" (left as it is: the
+    kernel's to deliver when due once its generation is gone). The last three take the fresh CLI's generation. One rule for
+    the stamp's write and for what a stamp that could not write keeps in memory (_unstamped, stamp_owes)."""
+    if not isinstance(c, dict) or c.get("recurring"):
+        return ""
+    g = str(c.get("procGen") or "")
+    out, due, earlier = g in outgoing, c.get("dueEpoch"), earlier_objects_wakeup(c, mine)
+    if due and out and not earlier:
+        at = wakeup_earliest_fire(c)
+        if at is None or now >= at:
+            return "drop"
+    if not due and out and earlier:
+        return "first"
+    first = str(c.get("firstGen") or g)
+    if (rewound and g in mine and first in mine) or (out and str(c.get("id") or "") in carried):
+        return "rewind"
+    return "hand" if out and not due else ""
+
+
+def stamp_owes(c, unstamped) -> bool:
+    """Entry `c` is the live CLI's to rule on although no record says so: a fresh CLI's stamp that could not write the armed
+    set (`unstamped`: SdkSession._unstamped, the inputs of each such stamp since the last Stop hook) would have handed it to
+    that CLI or dropped it (stamp_plan). That CLI's first Stop hook drops it unless it lists it, and the sweep leaves it."""
+    return any(stamp_plan(c, *u) in ("drop", "rewind", "hand") for u in (unstamped or ()))
+
+
+# Where Linux keeps this boot's id: a uuid the kernel mints at every boot.
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
+_BOOT_ID: list = []          # machine_boot_id's answer, once one is read
+
+
+def boot_id_from_boottime(text) -> str:
+    """The boot id `sysctl -n kern.boottime` prints on macOS ("{ sec = 1790000000, usec = 250000 } Mon …"): its seconds and
+    microseconds, which name the boot's moment; "" when `text` holds neither."""
+    m = re.search(r"\bsec\s*=\s*(\d+)\s*,\s*usec\s*=\s*(\d+)", str(text or ""))
+    return "kern.boottime:%s.%s" % m.groups() if m else ""
+
+
+def machine_boot_id() -> str:
+    """This machine's current boot, which a CLI identity must carry beside its "pid:start" (cli_gen_record): the start is
+    counted in clock ticks since boot (proc_start), so a CLI started after a reboot can carry the very pid and start a
+    record from before the reboot names. Linux's BOOT_ID_PATH; elsewhere (macOS) kern.boottime, read with sysctl
+    (boot_id_from_boottime). "" when neither reads, and then no record names a CLI of this boot (held_cli_generation).
+    Read once per process: a process never outlives its boot."""
+    if _BOOT_ID:
+        return _BOOT_ID[0]
+    try:
+        with open(BOOT_ID_PATH) as f:
+            got = f.read().strip()
+    except OSError:
+        try:
+            got = boot_id_from_boottime(subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True,
+                                                       timeout=5).stdout)
+        except Exception:
+            got = ""
+    if got:
+        _BOOT_ID[:] = [got]
+    return got
+
+
 def cli_gen_record(cli, gen):
-    """The registry's cliGen: which process generation the CLI `cli` ("pid:start", a session host's) holds, or None for a
-    CLI with no identity (a kernel child, or a host too old to name its CLI), whose generation no later session object can
-    take."""
-    return {"cli": str(cli), "gen": str(gen)} if cli and gen else None
+    """The registry's cliGen: which process generation the CLI `cli` ("pid:start", a session host's) holds, with the boot it
+    runs in (machine_boot_id), or None for a CLI with no identity (a kernel child, a host too old to name its CLI, a machine
+    whose boot cannot be read), whose generation no later session object can take."""
+    boot = machine_boot_id()
+    return {"cli": str(cli), "boot": boot, "gen": str(gen)} if cli and gen and boot else None
 
 
 def held_cli_generation(reg: dict, cli) -> "str | None":
     """The generation the registry records the CLI `cli` ("pid:start") as holding (cliGen), or None when the record names
-    another CLI or none."""
+    another CLI or none, or a CLI of another boot of this machine (its pid and start can recur after a reboot), or names no
+    boot (a record from before the boot was recorded: unknown, so the kernel delivers that CLI's one-shots when due)."""
     cg = reg.get("cliGen") if isinstance(reg, dict) else None
     if not cli or not isinstance(cg, dict) or not cg.get("gen") or str(cg.get("cli") or "") != str(cli):
+        return None
+    boot = machine_boot_id()
+    if not boot or str(cg.get("boot") or "") != boot:
         return None
     return str(cg["gen"])
 
 
-def lost_due_shots(reg: dict, live_gens, now: float, unheld=None) -> list:
+def lost_due_shots(reg: dict, live_gens, now: float, unheld=None, unstamped=None) -> list:
     """The one-shots on `reg` that are past due and recorded under no generation in `live_gens`: what deliver_lost_wakeups
     sends. With `unheld` (minted_generations of a session object whose live CLI's stamp could not move the armed timers),
-    one under a live generation that an earlier session object first recorded counts too: no stamp handed it to that CLI."""
+    one under a live generation that an earlier session object first recorded counts too: no stamp handed it to that CLI.
+    One that such a stamp would have handed to that CLI or dropped (`unstamped`, stamp_owes) does not: that CLI rules on it."""
     out = []
     for c in reg.get("sessionCrons") or []:
         if not isinstance(c, dict) or c.get("recurring"):
             continue
         if str(c.get("procGen") or "") in live_gens and not (unheld is not None and earlier_objects_wakeup(c, unheld)):
             continue                              # a live CLI's one-shot: that CLI fires it, or its Stop hook rules on it
+        if stamp_owes(c, unstamped):
+            continue                              # the same, by what a stamp that could not write would have recorded
         due = c.get("dueEpoch")
         if not due:                               # legacy entry without the exact date → reconstruct
             due = wakeup_due_epoch(c.get("cron"), float(c.get("armedAt") or reg.get("sessionCronsAt") or (now - 3600)))
@@ -7051,6 +7126,9 @@ class SdkSession:
         self._stamp_failed = False     # the live CLI's stamp could not move the armed timers: until a Stop hook records the
         #                                armed set or a later stamp moves it, an earlier session object's one-shot under
         #                                the live generation is not that CLI's (lost_due_shots)
+        self._unstamped = []           # the inputs of each fresh CLI's stamp that could not move the armed timers, until a
+        #                                Stop hook records the armed set: what each would have handed to its CLI or dropped
+        #                                is the live CLI's to rule on (stamp_owes), as the write would have recorded
         self._reconnect_switch_why = ""  # the armed reconnect carries a standing ask (its why): the waker's last look reads it
         self._fallback_cause = str(reg.get("fallbackCause") or "")   # "safeguards" once the CLI's refusal frame named the standing fallback (model_fallback_row)
         self._served_model = str(reg.get("servedModel") or reg.get("liveModel") or "")   # the model the API last SERVED a parent reply on (the picker's mark)
@@ -10237,7 +10315,9 @@ class SdkSession:
         deliver_lost_wakeups read the record as the live CLI's to fire, and the fresh CLI, which does not re-arm it, had its
         first Stop hook drop the record. Minted here, so never for an attach to a CLI that lives on, and taken by
         _hand_one_shots_to in the locked section that moves the armed timers (a reg that will not read, or a write that
-        fails, keeps the old generation). That step drops the outgoing generation's one-shots with a due time that a
+        fails, still gives the fresh CLI the new generation: under the old one, the first Stop hook of a CLI that never held
+        a pending wakeup dropped it as its own, the review of #326). That step drops the outgoing generation's one-shots
+        with a due time that a
         generation of this object first recorded, when their earliest fire (wakeup_earliest_fire) has passed by this stamp
         or is not known, leaves one an earlier session object first recorded the kernel's, and gives the others
         with no due time the new generation. After a rewind (an edit or a delete: a launch at a --resume-session-at pair
@@ -10281,7 +10361,8 @@ class SdkSession:
         session object mints a generation of its own, and before this every attach by one read the CLI's own wakeups as
         lost until that CLI's first turn end: the kernel sent an ordinary wakeup beside the CLI's own fire, and filed a
         false "the loop has stopped" row for an autonomous /loop's. Nothing on record for that CLI (a registry an older
-        kernel wrote, a stamp that could not move the armed timers, a host too old to name its CLI) leaves this object's
+        kernel wrote, a stamp that could not move the armed timers, a host too old to name its CLI, a record of a CLI of
+        another boot or of no recorded boot: held_cli_generation) leaves this object's
         own generation, and the kernel delivers those one-shots when due, as before: possibly twice, never lost. True when
         taken. Under the registry lock, which the sweep reads the live generations under."""
         with self.backend._reg_lock:
@@ -10295,7 +10376,8 @@ class SdkSession:
         return True
 
     def _hand_one_shots_to(self, gen: str, rewound: bool, cli: str = "") -> bool:
-        """The armed-set half of a fresh CLI's new generation: True once `gen` is the live one. The outgoing generation
+        """The armed-set half of a fresh CLI's new generation, which is the live one once this returns: True when the armed
+        set's record moved with it. Each entry's fate is stamp_plan's. The outgoing generation
         is the live one (cli_generations: after a rewind whose hand-off failed, every generation this object minted). A
         one-shot with a due time that it holds and a generation of this object first recorded is dropped when its earliest
         fire (wakeup_earliest_fire) has passed by now or is not known, and otherwise stays the kernel's to deliver when it
@@ -10313,38 +10395,18 @@ class SdkSession:
         "pid:start" under a host, with `gen`), so a session object built later to attach to that same CLI takes its
         generation (SdkBackend._fresh_cli_decision's survivor) instead of reading the CLI's own one-shots as lost; a kernel
         child (no `cli`) drops the record, since it dies with this kernel. False, with a problem logged, when the reg will
-        not read or the write fails: nothing moved, the old generation stays live, and, before the lock is let go,
-        _stamp_failed is set (and _rewind_owed after a rewind), which the sweep and the next Stop hook read."""
+        not read or the write fails: nothing moved on record, and, before the lock is let go, `gen` becomes the live
+        generation all the same, _stamp_failed is set (and _rewind_owed after a rewind), and the step's inputs join
+        _unstamped, which the sweep and the next Stop hook read: the one-shots the step would have handed to the fresh CLI or
+        dropped are that CLI's to rule on (stamp_owes), and the rest are the kernel's to deliver when due, as the write would
+        have left them. The fresh CLI never runs under the outgoing generation: it does not hold the wakeups that generation
+        names, and under it the CLI's first Stop hook dropped a pending one it never held (the review of #326, after a
+        kernel restart's attach took the surviving CLI's generation; the same held for a wakeup the object armed itself)."""
         old = self.proc_gen
         mine = set(getattr(self, "_minted_gens", ()) or ()) | {old}
         outgoing = cli_generations(self)
         carried = set(getattr(self, "_rewind_ids", ()) or ())
         now = time.time()
-
-        def one_shot(c):
-            return isinstance(c, dict) and not c.get("recurring")
-
-        def may_have_fired(c):
-            if not (one_shot(c) and c.get("dueEpoch") and str(c.get("procGen") or "") in outgoing):
-                return False
-            if earlier_objects_wakeup(c, mine):
-                return False
-            at = wakeup_earliest_fire(c)
-            return at is None or now >= at
-
-        def rewinds(c):
-            if not one_shot(c):
-                return False
-            g = str(c.get("procGen") or "")
-            first = str(c.get("firstGen") or g)
-            return (rewound and g in mine and first in mine) or (g in outgoing and str(c.get("id") or "") in carried)
-
-        def handed(c):
-            return rewinds(c) or (one_shot(c) and str(c.get("procGen") or "") in outgoing and not c.get("dueEpoch"))
-
-        def stays(c):
-            return (one_shot(c) and not c.get("dueEpoch") and str(c.get("procGen") or "") in outgoing
-                    and earlier_objects_wakeup(c, mine))
         try:
             with self.backend._reg_lock:
                 try:
@@ -10352,8 +10414,10 @@ class SdkSession:
                     if reg is None:
                         raise OSError("reg unreadable")
                     crons = reg.get("sessionCrons") or []
-                    kept = [c for c in crons if not may_have_fired(c)]
-                    moved = [to_first_gen(c) if stays(c) else dict(c, procGen=gen) if handed(c) else c for c in kept]
+                    plan = [(c, stamp_plan(c, outgoing, mine, carried, rewound, now)) for c in crons]
+                    kept = [c for c, p in plan if p != "drop"]
+                    moved = [to_first_gen(c) if p == "first" else dict(c, procGen=gen) if p in ("rewind", "hand") else c
+                             for c, p in plan if p != "drop"]
                     held = cli_gen_record(cli, gen)
                     if moved != crons or reg.get("cliGen") != held:
                         reg["sessionCrons"] = moved
@@ -10366,12 +10430,16 @@ class SdkSession:
                     self._stamp_failed = True      # under the lock: no sweep reads the live generations before these
                     if rewound:
                         self._rewind_owed = True
+                    self._unstamped = list(getattr(self, "_unstamped", ()) or ()) + [
+                        (frozenset(outgoing), frozenset(mine), frozenset(carried), bool(rewound), now)]
+                    self.proc_gen, self._minted_gens = gen, mine | {gen}
                     raise
                 self.proc_gen, self._minted_gens, self._rewind_owed, self._stamp_failed = gen, mine | {gen}, False, False
-                self._rewind_ids = {str(c.get("id") or "") for c in kept if rewinds(c)}
+                self._rewind_ids = {str(c.get("id") or "") for c, p in plan if p == "rewind"}
         except Exception as e:
-            self.backend._log("fresh CLI (%s): the armed timers were not moved, so this CLI keeps the old generation: "
-                              "%s: %s" % (self.name, type(e).__name__, e), problem=True)
+            self.backend._log("fresh CLI (%s): the armed timers were not moved (%s: %s); this CLI runs under a process "
+                              "generation of its own all the same, and until its first turn end the kernel keeps in memory "
+                              "which of them it holds" % (self.name, type(e).__name__, e), problem=True)
             return False
         if len(kept) != len(crons):
             self.backend._log("fresh CLI (%s): %d one-shot(s) the old CLI may already have fired dropped"
@@ -13122,16 +13190,19 @@ class SdkSession:
                     # LIVE generation (cli_generations) and absent from that CLI's payload drops: that CLI does
                     # not carry it. One that an earlier session object first recorded, at the first turn end of
                     # a CLI whose stamp could not move the armed timers (_stamp_failed), goes back to that
-                    # object's generation: no stamp handed it to that CLI.
+                    # object's generation: no stamp handed it to that CLI. One such a stamp would have handed to this
+                    # CLI or dropped (_unstamped, stamp_owes) drops, as it would under the generation the write gave it.
                     have = {c.get("id") for c in slim}
                     adopted = {id(t) for c in crons if isinstance(c, dict) for t in [adopt(c)] if t is not None}
                     live_gens = cli_generations(self)
                     unheld = minted_generations(self) if getattr(self, "_stamp_failed", False) else None
+                    unstamped = getattr(self, "_unstamped", None)
                     for c in (prev.get("sessionCrons") or []):
                         if (isinstance(c, dict) and not c.get("recurring") and c.get("id") not in have
                                 and id(c) not in adopted):
                             if str(c.get("procGen") or "") not in live_gens:
-                                slim.append(c)
+                                if not stamp_owes(c, unstamped):
+                                    slim.append(c)
                             elif unheld is not None and earlier_objects_wakeup(c, unheld):
                                 slim.append(to_first_gen(c))
                     # …and which generation this CLI holds (cliGen): its turn end has just put every one-shot it lists
@@ -13145,8 +13216,9 @@ class SdkSession:
                             rec["cliGen"] = held
                         write_reg(self.backend.state_dir, self.sid, rec)
                         moved = True
-                    # this CLI's turn end recorded the armed set, so the one-shots a rewind handed over are ruled on
-                    self._rewind_ids, self._rewind_owed, self._stamp_failed = set(), False, False
+                    # this CLI's turn end recorded the armed set, so the one-shots a rewind handed over, or a stamp that
+                    # could not write would have, are ruled on
+                    self._rewind_ids, self._rewind_owed, self._stamp_failed, self._unstamped = set(), False, False, []
                 if moved:
                     self._cron_prompts_refresh()       # the armed set moved under the gate's cache
         except Exception as e:
@@ -19441,13 +19513,15 @@ class SdkBackend:
         elif age is None:
             self._log(head + ", nor can its age, so it is never treated as stale. Until it reads, the kernel cannot tell "
                       "whether a host still runs this session's CLI, so it starts nothing beside it and leaves everything "
-                      "that CLI may own as it stands. Check that file and its directory",
+                      "that CLI may own as it stands, a wakeup on record as that CLI's included, which it holds rather than "
+                      "send beside that CLI's own. Check that file and its directory",
                       problem=True, key=("lease-unreadable", sid))
         else:
             self._log(head + ", last written %.0f s ago. A live host rewrites it every %.0f s, so until it reads, or goes "
                       "%.0f s without a rewrite and is treated as stale, the kernel cannot tell whether a host still runs "
-                      "this session's CLI: it starts nothing beside it and leaves everything that CLI may own as it stands. "
-                      "A file that stays unreadable is still being rewritten, and ending the session stops the host that "
+                      "this session's CLI: it starts nothing beside it and leaves everything that CLI may own as it stands, "
+                      "a wakeup on record as that CLI's included, which it holds rather than send beside that CLI's own. A "
+                      "file that stays unreadable is still being rewritten, and ending the session stops the host that "
                       "serves it" % (max(0.0, age), LEASE_HEARTBEAT_S, LEASE_TTL_S),
                       problem=True, key=("lease-unreadable", sid))
 
@@ -22568,7 +22642,9 @@ class SdkBackend:
         late the record looks, except, while the live CLI's stamp could not move the armed timers, one
         that an earlier session object first recorded (lost_due_shots). That generation
         gone → the kernel owns it outright and delivers at due (a small 5s grace covers clock skew
-        between the stamp and this sweep, not any behavioral window).
+        between the stamp and this sweep, not any behavioral window), except one that a stamp which
+        could not write would have handed to the live CLI or dropped (stamp_owes). Each session is
+        checked on its own: a failure on one is filed in the error center and the pass goes on.
 
         A wakeup whose prompt is one of Claude Code's /loop placeholders (is_loop_sentinel) is stripped
         the same way and NEVER sent: only the scheduler of the CLI that armed it expands the placeholder
@@ -22580,63 +22656,79 @@ class SdkBackend:
         now = time.time()
         fired = 0
         for row in list_regs(self.state_dir):
-            if not row.get("alive") or row.get("threadOf"):
-                continue
-            if not lost_due_shots(row, set(), now):
-                continue                          # no one-shot past due by the listing's row: no read and no lock
-            sid = row["sid"]
-            with self._lock:
-                s = self.sessions.get(sid)
-            # the CLI a live session host still runs for this session (its lease), read before the registry lock: until a
-            # session object attaches to it and takes its generation (_take_cli_generation; after a kernel restart that
-            # waits for the boot's attach stagger, after a stream lost under a live host for the attach again), the
-            # generation the registry records that CLI as holding is still live. A lease that cannot be read while a
-            # holder may still rewrite it (None) keeps the recorded generation live this pass; a stale one does not
-            host_cli = self._host_held_cli(sid) if row.get("cliGen") else ""
-            # the decision and the strip read the reg and the live generation together, under the registry lock a fresh
-            # CLI's stamp holds while it moves the armed timers and takes its new generation (_hand_one_shots_to), so a
-            # sweep cannot straddle the stamp; the row above only picks the regs to read
-            due_shots, err = [], None
-            with self._reg_lock:
-                reg = read_reg_for_rmw(self.state_dir, sid)
-                live_gens = cli_generations(s) if (s and s.thread.is_alive()) else set()
-                if reg is not None and host_cli != "":
-                    cg = reg.get("cliGen") if isinstance(reg.get("cliGen"), dict) else {}
-                    held = held_cli_generation(reg, host_cli) if host_cli else (str(cg.get("gen") or "") or None)
-                    if held:
-                        live_gens = live_gens | {held}
-                unheld = minted_generations(s) if getattr(s, "_stamp_failed", False) else None
-                if reg is None:
-                    err = "reg unreadable"
-                elif reg.get("alive") and not reg.get("threadOf"):
-                    due_shots = lost_due_shots(reg, live_gens, now, unheld)
-                    if due_shots:
-                        crons = reg.get("sessionCrons") or []
-                        reg["sessionCrons"] = [c for c in crons if c not in due_shots]
-                        try:                      # strip FIRST: a send failure must not re-fire forever;
-                            write_reg(self.state_dir, sid, reg)   # the loss is logged loudly below instead
-                        except Exception as e:
-                            err = e
-            if err is not None:
-                self._log("lost-wakeup (%s): reg strip failed, not delivering: %s" % (row.get("name") or sid[:13], err))
-                continue
-            for c in due_shots:
-                if is_loop_sentinel(c.get("prompt")):
-                    self._log("lost-wakeup (%s): a /loop wakeup (one-shot %s) could not be carried across the relaunch: its "
-                              "prompt is Claude Code's placeholder %s, which only the CLI that scheduled it can expand, so it "
-                              "was not sent and the loop has stopped (start it again with /loop)"
-                              % (reg.get("name") or sid[:13], c.get("id") or "?", c.get("prompt")), problem=True)
+            try:
+                if not row.get("alive") or row.get("threadOf"):
                     continue
-                ok = False
-                try:
-                    ok = bool(self.send(sid, c.get("prompt") or ""))
-                except Exception as e:
-                    self._log("lost-wakeup (%s): delivery raised: %s" % (reg.get("name") or sid[:13], e))
-                self._log("lost-wakeup (%s): one-shot %s was due %.0fs ago with no process to fire it — %s"
-                          % (reg.get("name") or sid[:13], c.get("id") or "?",
-                             now - (wakeup_due_epoch(c.get("cron"), float(c.get("armedAt") or now)) or now),
-                             "prompt delivered" if ok else "DELIVERY FAILED (prompt lost — see above)"))
-                fired += 1
+                if not lost_due_shots(row, set(), now):
+                    continue                          # no one-shot past due by the listing's row: no read and no lock
+                sid = row["sid"]
+                with self._lock:
+                    s = self.sessions.get(sid)
+                # the CLI a live session host still runs for this session (its lease), read before the registry lock:
+                # until a session object attaches to it and takes its generation (_take_cli_generation; after a kernel
+                # restart that waits for the boot's attach stagger, after a stream lost under a live host for the attach
+                # again), the generation the registry records that CLI as holding is still live. A lease that cannot be
+                # read while a holder may still rewrite it (None) keeps the recorded generation live, and that CLI's
+                # wakeups held, on every pass until the lease reads again or goes LEASE_TTL_S without a rewrite: a stale
+                # lease holds no host (_host_lease), and the next pass sends what is due. One whose age cannot be read is
+                # never stale, so it holds them until it reads. The lease's problem row (_lease_episode) says so
+                host_cli = self._host_held_cli(sid) if row.get("cliGen") else ""
+                # the decision and the strip read the reg and the live generation together, under the registry lock a
+                # fresh CLI's stamp holds while it moves the armed timers and takes its new generation
+                # (_hand_one_shots_to), so a sweep cannot straddle the stamp; the row above only picks the regs to read
+                due_shots, err = [], None
+                with self._reg_lock:
+                    reg = read_reg_for_rmw(self.state_dir, sid)
+                    alive = bool(s and s.thread.is_alive())
+                    live_gens = cli_generations(s) if alive else set()
+                    if reg is not None and host_cli != "":
+                        cg = reg.get("cliGen") if isinstance(reg.get("cliGen"), dict) else {}
+                        # the CLI the lease names, or, with the lease unreadable, the one the record names: either way of
+                        # this boot only (held_cli_generation)
+                        held = held_cli_generation(reg, host_cli or str(cg.get("cli") or ""))
+                        if held:
+                            live_gens = live_gens | {held}
+                    unheld = minted_generations(s) if getattr(s, "_stamp_failed", False) else None
+                    unstamped = getattr(s, "_unstamped", None) if alive else None
+                    if reg is None:
+                        err = "reg unreadable"
+                    elif reg.get("alive") and not reg.get("threadOf"):
+                        due_shots = lost_due_shots(reg, live_gens, now, unheld, unstamped)
+                        if due_shots:
+                            crons = reg.get("sessionCrons") or []
+                            reg["sessionCrons"] = [c for c in crons if c not in due_shots]
+                            try:                      # strip FIRST: a send failure must not re-fire forever;
+                                write_reg(self.state_dir, sid, reg)   # the loss is logged loudly below instead
+                            except Exception as e:
+                                err = e
+                if err is not None:
+                    self._log("lost-wakeup (%s): reg strip failed, not delivering: %s" % (row.get("name") or sid[:13], err))
+                    continue
+                for c in due_shots:
+                    if is_loop_sentinel(c.get("prompt")):
+                        self._log("lost-wakeup (%s): a /loop wakeup (one-shot %s) could not be carried across the relaunch: "
+                                  "its prompt is Claude Code's placeholder %s, which only the CLI that scheduled it can "
+                                  "expand, so it was not sent and the loop has stopped (start it again with /loop)"
+                                  % (reg.get("name") or sid[:13], c.get("id") or "?", c.get("prompt")), problem=True)
+                        continue
+                    ok = False
+                    try:
+                        ok = bool(self.send(sid, c.get("prompt") or ""))
+                    except Exception as e:
+                        self._log("lost-wakeup (%s): delivery raised: %s" % (reg.get("name") or sid[:13], e))
+                    self._log("lost-wakeup (%s): one-shot %s was due %.0fs ago with no process to fire it — %s"
+                              % (reg.get("name") or sid[:13], c.get("id") or "?",
+                                 now - (wakeup_due_epoch(c.get("cron"), float(c.get("armedAt") or now)) or now),
+                                 "prompt delivered" if ok else "DELIVERY FAILED (prompt lost — see above)"))
+                    fired += 1
+            except Exception as e:
+                # one session's failure (its lease read, its registry row, a record the sweep cannot read) is that
+                # session's alone: it is filed, and the pass goes on to every other session, whose wakeups an
+                # unguarded raise here left unsent for as long as it recurred
+                who = str(row.get("name") or str(row.get("sid") or "?")[:13]) if isinstance(row, dict) else "?"
+                self._log("lost-wakeup (%s): checking this session's wakeups failed (%s: %s); the other sessions' were "
+                          "checked, and this one is checked again on the next pass" % (who, type(e).__name__, e),
+                          problem=True, key=("lost-wakeup-sweep", str(row.get("sid") if isinstance(row, dict) else "")))
         return fired
 
     def live_sessions(self) -> dict[str, dict]:
