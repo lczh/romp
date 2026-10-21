@@ -2919,6 +2919,44 @@ class SpendRecord(unittest.TestCase):
         self.assertLessEqual(len(kept), 90)
         self.assertIn(self._today(), kept)
 
+    def test_an_unreadable_ledger_is_reported_and_left_as_it_is(self):
+        # A torn or non-object spend.json used to read as an empty ledger, and the turn's write replaced weeks of
+        # buckets with that one turn, silently. The kernel's reader and the spend tools refuse such a file; the
+        # recorder now reports it and writes nothing, so the history is still there to repair.
+        SID = "aaaa1111-spend-torn-1"
+        for raw in ('{"days": {"2020-01-01": {"usd": 5.0, "turns": 2}}, "hours": {"2020-01-01T09": ', "[]"):
+            self.p.write_text(raw)
+            self.be._record_spend(1.0, {"input_tokens": 5}, sid=SID)
+            self.be._record_spend(0.5, sid=SID)
+            self.assertEqual(self.p.read_text(), raw, "the unreadable ledger is never rewritten with this turn alone")
+        rows = [r for r in self.be.problems() if r.get("key") == "spend-ledger-unreadable"]
+        self.assertEqual(len(rows), 1, "one problem row, counted on every turn it skips")
+        self.assertEqual(rows[0]["count"], 4)
+        self.assertIn("spend.json could not be read", rows[0]["first"])
+
+    def test_other_top_level_keys_survive_the_write(self):
+        # spend-repair records its folded repairs INSIDE spend.json (repairJournal.folded); a turn's write kept only
+        # days and hours, so the next turn dropped the mark that stops a repair from being folded twice
+        journal = {"folded": [1760000000.5]}
+        self.p.write_text(json.dumps({"days": {"2020-01-01": {"usd": 1.0, "turns": 1}}, "hours": {},
+                                      "repairJournal": journal}))
+        self.be._record_spend(0.02, sid="aaaa1111-spend-torn-2")
+        o = json.loads(self.p.read_text())
+        self.assertEqual(o.get("repairJournal"), journal)
+        self.assertEqual(sorted(o["days"]), sorted({"2020-01-01", self._today()}))
+
+    def test_the_kernel_writes_through_its_own_temp_name(self):
+        # spend-rebuild --apply runs beside a live kernel and writes through spend.json.tmp; when the kernel shared
+        # that name, two overlapping writes could interleave in one file and rename a torn ledger into place
+        src = open(os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                                "cli", "spend_rebuild.py")).read()
+        self.assertIn('p.with_name("spend.json.tmp")', src, "the fixture below mirrors the rebuild tool's temp name")
+        theirs = Path(self.d) / "spend.json.tmp"
+        theirs.write_text('{"days": {"2020-01-01": ')          # the rebuild tool's write, mid-flight
+        self.be._record_spend(0.02, sid="aaaa1111-spend-torn-3")
+        self.assertEqual(theirs.read_text(), '{"days": {"2020-01-01": ', "the kernel never touches the tool's temp file")
+        self.assertIn(self._today(), json.loads(self.p.read_text())["days"])
+
     def test_by_sid_attribution_with_keyed_split(self):
         # T100 (the nightly optimizer's accepted ask): key-billed cost PER SESSION. Two sids, one
         # keyed and one login — the bucket totals stay whole, and each sid carries its own keyed
