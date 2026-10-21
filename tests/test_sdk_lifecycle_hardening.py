@@ -967,6 +967,59 @@ class WriteRegConcurrency(unittest.TestCase):
         self.assertEqual(strays, [], "failed/completed writes leave no temp litter")
 
 
+class DeadWriterTemps(unittest.TestCase):
+    """The ledger, the registry, the leases and the API-health state are each written whole through a temp of the
+    writer's own, `<file>.<pid>.<8 hex>.tmp`, so a process killed between the write and the rename (SIGKILL, the OOM
+    killer) leaves a temp behind, and with a fresh name per write nothing ever reused or removed it. The kernel's start
+    removes the ones whose writer is dead and keeps every one whose writer is alive or is itself (a write in progress, the
+    outgoing kernel's at a restart, a session host's lease): the pid decides, never the file's age."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        (self.d / "session-hosts").write_text("off")     # its own state root: no session hosts
+        for sub in ("sdk", sb.LEASE_DIR):
+            (self.d / sub).mkdir()
+        self.sid = "11111111-2222-3333-4444-dddddddddddd"
+        self.dead = _P + 7                                # above pid_max: never a live process
+        self.live = os.getppid()                          # the process that started this one: alive while it waits
+
+    def _boot(self):
+        with mock.patch.object(sb.SdkBackend, "_boot_reconcile"), \
+             mock.patch.object(sb.SdkBackend, "_sweep_canary_leftovers"):
+            sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None, reconcile=True)
+
+    def _files(self):
+        return sorted(str(p.relative_to(self.d)) for p in self.d.rglob("*")
+                      if p.is_file() and (p.name.endswith(".tmp") or p.name == "spend.json"))
+
+    def test_the_kernels_start_removes_a_dead_writers_temps_and_keeps_a_live_ones(self):
+        (self.d / "spend.json").write_text('{"days": {}}')
+        dead = ["spend.json.%d.0badc0de.tmp" % self.dead,
+                "sdk/%s.json.%d.deadbeef.tmp" % (self.sid, self.dead),
+                "%s/%s.json.%d.deadbeef.tmp" % (sb.LEASE_DIR, self.sid, self.dead),
+                "%s.%d.feedface.tmp" % (sb.API_HEALTH_STATE_FILE, self.dead)]
+        kept = ["spend.json",
+                "spend.json.%d.c0ffee00.tmp" % os.getpid(),             # this process: another thread's write
+                "spend.json.%d.c0ffee01.tmp" % self.live,               # a live process's write in progress
+                "sdk/%s.json.%d.cafef00d.tmp" % (self.sid, self.live),
+                "%s/%s.json.%d.cafef00d.tmp" % (sb.LEASE_DIR, self.sid, self.live),
+                "spend.json.tmp",                                       # a fixed name: no pid to judge it by
+                "notes.json.%d.deadbeef.tmp" % self.dead,               # no writer here names that file
+                "sdk/%s.json.%d.not-hex.tmp" % (self.sid, self.dead)]   # not a name these writers mint
+        for name in dead + kept:
+            if name != "spend.json":
+                (self.d / name).write_text("half a write")
+        self._boot()
+        self.assertEqual(self._files(), sorted(kept))
+
+    def test_a_plain_construction_sweeps_nothing(self):
+        # the sweep is the kernel's start, as the rest of the boot reconcile is; a test or ad-hoc backend leaves files be
+        name = "spend.json.%d.0badc0de.tmp" % self.dead
+        (self.d / name).write_text("half a write")
+        sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None)
+        self.assertTrue((self.d / name).exists())
+
+
 class BootReconcileResilience(unittest.TestCase):
     def test_one_bad_session_does_not_strand_the_rest(self):
         """Live 2026-07-06: a write_reg race on the FIRST session aborted two whole reconcile

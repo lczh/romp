@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import difflib
 import errno
+import fnmatch
 import hashlib
 import json
 import math
@@ -2820,6 +2821,51 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+# The writer-unique temp every whole-file writer here publishes through, beside the file it replaces:
+# "<file>.<writer pid>.<8 hex>.tmp" (write_reg, write_lease, _record_spend, ApiHealth's state file and salt).
+_WRITER_TEMP_RE = re.compile(r"(?P<file>.+)\.(?P<pid>[0-9]+)\.[0-9a-f]{8}\.tmp")
+
+
+def _sweep_dead_writer_temps(d, file_pat: str) -> int:
+    """Remove the writer-unique temps in directory `d` of a file matching `file_pat` (an fnmatch pattern) whose writer is
+    DEAD: a process killed between writing its temp and renaming it (SIGKILL, the OOM killer). A fresh name per write
+    means nothing reuses such a temp, so each death leaves one more. A temp whose writer pid is alive, or is this
+    process (another thread's write), is a write in progress and stays: unlinking it would fail that writer's rename.
+    The pid decides, never the file's age, which says nothing about whether its write is done; a pid reused since only
+    keeps a leftover longer. Returns how many it removed; never raises."""
+    n = 0
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return 0
+    for name in names:
+        m = _WRITER_TEMP_RE.fullmatch(name)
+        if not m or not fnmatch.fnmatchcase(m.group("file"), file_pat):
+            continue                                    # not a name these writers mint: not ours to remove
+        pid = int(m.group("pid"))
+        try:
+            if pid == os.getpid() or _pid_alive(pid):
+                continue
+        except (OverflowError, ValueError):
+            continue                                    # no process can have that pid: not a name we minted
+        try:
+            os.unlink(os.path.join(d, name))
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
+def sweep_dead_writer_temps(state_dir) -> int:
+    """At the kernel's start: the dead writers' temps of the files under the state root written through one (see
+    _sweep_dead_writer_temps). The previous kernel is the usual writer, and the outgoing one at a restart may still be
+    alive, so its temps stay until a later start. Returns how many it removed."""
+    root = Path(state_dir)
+    return sum(_sweep_dead_writer_temps(d, pat) for d, pat in (
+        (root, "spend.json"), (root, API_HEALTH_STATE_FILE), (root, API_HEALTH_SALT_FILE),
+        (root / "sdk", "*.json"), (root / LEASE_DIR, "*.json")))
+
+
 TEST_ROOT_PREFIX = "romp-tests-"
 TEST_ROOT_OWNER_MARKER = "romp-tests-owner.json"    # tests/__init__.py writes it at mint time (conftest.py did until 2026-09-14)
 TEST_ROOT_TOMBSTONE = ".sweeping"                   # a root renamed to <name>.sweeping is ours to finish deleting
@@ -3020,21 +3066,9 @@ class ApiHealth:
         between creating its temp and linking it. Harmless clutter otherwise, but it accumulates in a
         state dir that is never otherwise cleaned. A temp whose writer pid is alive — or our own pid: a
         sibling instance in this process — is a mint in progress and stays; unlinking it would turn
-        that writer's link into FileNotFoundError and leave it unsalted for its life. Never raises."""
-        try:
-            for t in p.parent.glob(p.name + ".*.tmp"):
-                try:
-                    pid = int(t.name[len(p.name) + 1:].split(".", 1)[0])
-                except ValueError:
-                    continue                            # not a name we minted: not ours to remove
-                if pid == os.getpid() or _pid_alive(pid):
-                    continue
-                try:
-                    t.unlink()
-                except OSError:
-                    pass
-        except OSError:
-            pass
+        that writer's link into FileNotFoundError and leave it unsalted for its life. Never raises. The kernel's start
+        sweeps the same temps (sweep_dead_writer_temps)."""
+        _sweep_dead_writer_temps(p.parent, p.name)
 
     def auth_label(self, source, *, key_fp: str = "", launched_keyed: bool = False,
                    login_id: str = "", display: str = "") -> str:
@@ -14956,6 +14990,11 @@ class SdkBackend:
         # CLIs, resume cut turns, deliver persisted queues. In a thread: it spawns claude processes
         # and must not block construction (the WS handler constructs this backend lazily).
         if reconcile:
+            # a writer killed between writing its temp and renaming it left the temp behind, one more per death (#341 gave
+            # every write a fresh name); the pid says whose write is still going, so this is a directory listing, done here
+            n = sweep_dead_writer_temps(self.state_dir)
+            if n:
+                self._log("boot: removed %d temp file(s) left by writers that died mid-write" % n)
             # a version-canary probe killed with the last kernel left its temp directories and transcripts behind
             threading.Thread(target=self._sweep_canary_leftovers, name="canary-sweep", daemon=True).start()
             threading.Thread(target=self._boot_reconcile, args=(regs,),

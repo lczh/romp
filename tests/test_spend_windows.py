@@ -245,6 +245,21 @@ class RailWindowsInTheViewersZone(SpendWindows):
         (km.jd.STATE / "spend.json").unlink()
         self.assertIsNone(km._spend_hours_payload())
 
+    @unittest.skipIf(os.geteuid() == 0, "root can search a directory with its search bit cleared")
+    def test_a_ledger_that_cannot_even_be_looked_up_names_the_remedy_too(self):
+        # the lookup itself can fail with something other than not-found (here the state directory denies search), and
+        # the recorder then reads nothing either, so this hover names the file and the remedy as the parse failure's does
+        self._ledger({_day(0): self._bucket(1.0)})
+        state = km.jd.STATE
+        os.chmod(state, 0o600)
+        try:
+            hp = km._spend_hours_payload()
+        finally:
+            os.chmod(state, 0o700)
+        self.assertEqual(hp, {"error": "the spend ledger could not be read (Permission denied); romp records no spend "
+                                       "until %s is fixed or moved aside" % km._tilde(str(state / "spend.json"))})
+        self.assertEqual(km._spend_win(hp, "UTC"), {"error": hp["error"]}, "carried through, never a confident $0")
+
     def test_a_peers_hours_are_composed_in_this_viewers_zone(self):
         # the remote poll asks for the raw hours (/usage?hours=1) and /usage/fleet builds the windows itself
         src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
