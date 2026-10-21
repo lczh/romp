@@ -12879,9 +12879,45 @@ def _plan_session(fsid, path, now):
                 # stalled-open-todos-nudge.md, the user 2026-07-02).
                 _agent_nums = [i + 1 for i, _snd in enumerate(sub)
                                if (store["nodes"].get(_snd["id"], {}).get("agentTask") or {}).get("status") == "open"]
-                ops = _parse_plan(plan_llm(text, _menu_text(store, sub), nudge=True,
-                                           goal_history=hist, goal_num=1, agent_open_nums=_agent_nums,
-                                           bundled=len(targets) > 1), len(sub)) or []
+                _judge_ctx.last_call_fail = None       # a stale stash must never charge THIS target (the work-run's rule)
+                raw = plan_llm(text, _menu_text(store, sub), nudge=True,
+                               goal_history=hist, goal_num=1, agent_open_nums=_agent_nums,
+                               bundled=len(targets) > 1)
+                ops = _parse_plan(raw, len(sub))
+                if ops is None:
+                    # NO RULING IS NOT AN EMPTY RULING (2026-10-21). A call that failed (a 529, a usage limit,
+                    # a timeout, the retry pause) or a reply that did not parse used to fall through as empty
+                    # ops, so the apply below wrote placements[_pkey] = None: the reply retired for good, and
+                    # the kernel, reading a placed key as "the planner ruled and it did not resolve", filed
+                    # its needs-your-direction block on a goal whose reply said nothing was needed. The
+                    # work-run's two guards, per target: a transient failure leaves the unit due with no
+                    # write; a refusal or a parse reject takes a PLAN_PARSE_RETRIES strike and retires the
+                    # target unresolved only once the strikes run out. Either way the BUNDLE stops here: its
+                    # bare key, ordered last, is the one the kernel reads for every target, so placing it
+                    # after skipping this target would read this target as ruled too.
+                    strike, last = "parse", None
+                    if not raw:
+                        _judge_ctx.stage_incomplete = True     # the unit stays due: no stamp for this pass
+                        last = getattr(_judge_ctx, "last_call_fail", None)
+                        if getattr(_judge_ctx, "paused", False) or not (isinstance(last, dict) and last.get("refusal")):
+                            break                      # transient, already logged upstream: retry next pass
+                        strike = "refusal"
+                    else:
+                        _log_judge_error("planner", fsid, "parse", note="reply tail: %r" % raw[-160:], seg=seg_id)
+                    fails = store.setdefault("parseFails", {})
+                    fails[_pkey] = fails.get(_pkey, 0) + 1
+                    if fails[_pkey] < PLAN_PARSE_RETRIES:
+                        save_goals(fsid, store)        # the strike's write is the re-arm; retry next pass
+                        break
+                    fails.pop(_pkey, None)
+                    _log_judge_error("planner", fsid, "give-up", seg=seg_id, goal=target,
+                                     note="%d %s; the nudge reply was retired unresolved" % (
+                                         PLAN_PARSE_RETRIES,
+                                         "parse rejects" if strike == "parse" else "content refusals (%r)"
+                                         % str((last or {}).get("note") or "")[:100]))
+                    ops = []
+                else:
+                    store.get("parseFails", {}).pop(_pkey, None)   # ruled → forget any earlier strikes
                 # the must-resolve note pushes DONE/BLOCK on the goal; a MINT is re-rooted as a sub under it, and a
                 # genuine-progress SUB files under it too. Skips drop. NO empty-reply fallback (the user 2026-06-22):
                 # an unresolved nudge applies NOTHING — apply_plan with empty ops marks the phase processed
