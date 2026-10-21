@@ -1186,42 +1186,80 @@ export function makeVideoStill(v: HTMLVideoElement, url: string, solo: boolean):
 }
 
 // A picture or a video STANDS ALONE (2026-10-21, the review of the shared picture box: a picture in the middle of a
-// sentence became a framed block that split the sentence into three lines) when nothing else shows on its LINE. A line of
-// its parent ends at a line break: a <br> (the user's markdown, breaks:true), a newline in a text node (assistant markdown,
-// breaks:false, where the source's soft break is a "\n" the page shows as a space), or, in a parent that holds blocks (the
-// message's root, a list item, a cell), a block. So `![plot](url)` with `*Figure 1: …*` on the next line, one paragraph and
-// the common agent shape, stands alone and takes the box with the caption under it (the review of #343: the solo rule
-// read the caption as text beside it, and the picture went inline with the caption at its bottom edge); so does each of
-// two pictures on lines of their own, and a picture under a lead-in line. Text on the picture's own line, before it or
-// after it, keeps it inline: "Build ![ok](u) is green" and "![ok](u) means passing" are sentences it is a word of, and a
-// block would split them. Only a picture that stands alone wears the box as a block (styles.css .md-solo); one inline
-// with text stays in its line, capped and, when it zooms, with the zoom cursor. Read off the sanitized DOM at render (the
-// post-pass), so it never waits on a load and never flips.
-const BLOCK_TAGS = /^(P|DIV|UL|OL|DL|PRE|TABLE|BLOCKQUOTE|H[1-6]|HR|DETAILS|FIGURE|SECTION|ARTICLE|ASIDE|HEADER|FOOTER|NAV|ADDRESS)$/;
+// sentence became a framed block that split the sentence into three lines) when nothing else shows on its LINE. So
+// `![plot](url)` with `*Figure 1: …*` on the next line, one paragraph and the common agent shape, stands alone and takes
+// the box with the caption under it (the review of #343: the solo rule read the caption as text beside it, and the
+// picture went inline with the caption at its bottom edge); so does each of two pictures on lines of their own, and a
+// picture under a lead-in line. Text on the picture's own line, before it or after it, keeps it inline: "Build ![ok](u)
+// is green" and "![ok](u) means passing" are sentences it is a word of, and a block would split them. Only a picture that
+// stands alone wears the box as a block (styles.css .md-solo); one inline with text stays in its line, capped and, when
+// it zooms, with the zoom cursor. Read off the sanitized DOM at render (the post-pass), so it never waits on a load and
+// never flips.
+// Where a line ends (the review of #349, 2026-10-21, which found a README's side-by-side pictures stacked and a bold
+// picture splitting its sentence):
+//   - at a <br> (the user's markdown, breaks:true; an agent's hard break), and, in a container that holds blocks (the
+//     message's root, a <div>, a list item, a cell), at a block;
+//   - at a newline in a text node only where the author's line breaks there (newlineEndsLine): a soft break in a
+//     paragraph, list item or heading marked wrote (assistant markdown, breaks:false, where the page shows it as a space
+//     but the source put the next thing on a line of its own), and any newline in a <pre>. In the author's own HTML a
+//     newline between tags is a space, so `<p>\n<img width="45%">\n<img width="45%">\n</p>` keeps its pictures side by side;
+//   - never at an inline wrapper's edge: a bold, italic or linked picture is part of the line its wrapper sits on, so the
+//     walk climbs out of the wrappers (`The **![x](u)** result` stays one sentence).
+// When it stands alone and a <br> ends its line, that <br> (and no other) takes .md-solo-end, the one styles.css hides
+// under a box, which ends the line itself.
+const BLOCK_TAGS = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|CENTER|DD|DETAILS|DIALOG|DIR|DIV|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|HGROUP|HR|LI|MAIN|MENU|NAV|OL|P|PRE|SECTION|SUMMARY|TABLE|UL)$/;
+const INLINE_WRAPS = /^(A|ABBR|B|BDI|BDO|CITE|CODE|DEL|DFN|EM|FONT|I|INS|KBD|MARK|PICTURE|Q|S|SAMP|SMALL|SPAN|STRIKE|STRONG|SUB|SUP|TIME|U|VAR)$/;
+const SHOWS_NOTHING = /^(SOURCE|TRACK|WBR)$/;       // a <picture>'s sources, a video's tracks, a break opportunity
+// Whether a newline in a text node of `box` ends a line. Marked writes the content of a paragraph, a list item and a
+// heading flush against its tags, so a newline there is the markdown's own soft break. The author's HTML gives itself away
+// by its padding: content opening on a line of its own after the tag (`<p>\n`, `<p align="center">\n  `), or closing on
+// one after inline content (`…<img>\n</p>`; marked does end a list item on a newline, but after its nested list, a
+// block). There, and in any other container (the root, a <div>, a cell), a newline is a space. A raw `<p><img>\n<img></p>`
+// with no padding at all reads as markdown's own lines and stacks: the DOM cannot tell the two apart.
+function newlineEndsLine(box: Element): boolean {
+  const tag = box.tagName.toUpperCase();
+  if (tag === "PRE") return true;                    // the page itself breaks there
+  if (!/^(P|LI|H[1-6])$/.test(tag)) return false;
+  const kids = box.childNodes;
+  const pad = (n: ChildNode | undefined): boolean => !!n && n.nodeType === 3 && (n.textContent || "").includes("\n") && !(n.textContent || "").trim();
+  const prev = kids[kids.length - 2];
+  const afterBlock = !!prev && prev.nodeType === 1 && BLOCK_TAGS.test((prev as Element).tagName.toUpperCase());
+  return !pad(kids[0]) && !(pad(kids[kids.length - 1]) && !afterBlock);
+}
 export function mdSolo(el: Element): boolean {
-  const p = el.parentElement;
-  if (!p) return false;
-  const kids = Array.from(p.childNodes);
-  const at = kids.indexOf(el as ChildNode);
-  const blocksEnd = p.tagName.toUpperCase() !== "P";
-  // walk from el toward one end of its line: true when that end comes with nothing shown on the way
-  const clear = (step: 1 | -1): boolean => {
-    for (let i = at + step; i >= 0 && i < kids.length; i += step) {
-      const n = kids[i];
-      if (n.nodeType === 3) {
-        const t = n.textContent || "";
-        const nl = step > 0 ? t.indexOf("\n") : t.lastIndexOf("\n");
-        if ((nl < 0 ? t : step > 0 ? t.slice(0, nl) : t.slice(nl + 1)).trim()) return false;   // words on its line
-        if (nl >= 0) return true;                      // the soft break ends the line
-        continue;
+  let box = el.parentElement;
+  if (!box) return false;
+  while (INLINE_WRAPS.test(box.tagName.toUpperCase()) && box.parentElement) box = box.parentElement;   // the line's container
+  const newlines = newlineEndsLine(box);
+  const blocksEnd = box.tagName.toUpperCase() !== "P";
+  // walk from el toward one end of its line, out through the wrappers it sits in: the <br> when one ends the line, true
+  // at any other end with nothing shown on the way, false at anything shown
+  const end = (step: 1 | -1): Element | boolean => {
+    for (let at = el; ; at = at.parentElement as Element) {
+      const p = at.parentElement as Element;
+      const kids = Array.from(p.childNodes);
+      for (let i = kids.indexOf(at as ChildNode) + step; i >= 0 && i < kids.length; i += step) {
+        const n = kids[i];
+        if (n.nodeType === 3) {
+          const t = n.textContent || "";
+          const nl = !newlines ? -1 : step > 0 ? t.indexOf("\n") : t.lastIndexOf("\n");
+          if ((nl < 0 ? t : step > 0 ? t.slice(0, nl) : t.slice(nl + 1)).trim()) return false;   // words on its line
+          if (nl >= 0) return true;                    // the soft break ends the line
+          continue;
+        }
+        if (n.nodeType !== 1) continue;                // a comment shows nothing
+        const tag = (n as Element).tagName.toUpperCase();
+        if (SHOWS_NOTHING.test(tag)) continue;
+        if (tag === "BR") return n as Element;         // a break ends it
+        return blocksEnd && BLOCK_TAGS.test(tag);      // so does a block; anything else is on it
       }
-      if (n.nodeType !== 1) continue;                  // a comment shows nothing
-      const tag = (n as Element).tagName.toUpperCase();
-      return tag === "BR" || (blocksEnd && BLOCK_TAGS.test(tag));   // a break or a block ends it; anything else is on it
+      if (p === box) return true;                      // the container's edge
     }
-    return true;                                       // the parent's edge
   };
-  return clear(-1) && clear(1);
+  const after = end(1);
+  if (after === false || end(-1) === false) return false;
+  if (after !== true) after.classList.add("md-solo-end");
+  return true;
 }
 
 /** The address a message's <video> plays, resolved against the page: its src, else its first <source>'s (the one a
