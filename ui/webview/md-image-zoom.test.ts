@@ -25,6 +25,40 @@ test("the mark: every picture md() and userMd() render wears .md-img, stamped by
   assert.doesNotMatch(RENDER.slice(RENDER.indexOf("function previewMdClean("), RENDER.indexOf("function showFilePreview(")), /mdImgPostPass/);
 });
 
+test("the post-pass, RUN: a URL that loaded picture-sized wears the picture box from its next render, unless a link, a summary or a park says otherwise", () => {
+  // the transcript rebuilds a streaming turn's pictures on every push; a box that waited for each fresh element's load
+  // would step the turn's height (inline to block) on every push, so the remembered verdict is stamped at render
+  const fn = (name: string) => { const at = PREVIEW.indexOf(name); return ts(PREVIEW.slice(at, PREVIEW.indexOf("\n}\n", at) + 2).replace(/^export /, "")); };
+  const code = fn("function parkMdImg(") + fn("export function mdImgPostPass(");
+  const run = (new Function("mdImgFailed", "mdImgPicture", "opensInLightbox", code + "\nreturn mdImgPostPass;") as
+    (f: Set<string>, p: Set<string>, ok: (u: string) => boolean) => (root: unknown) => void);
+  const img = (src: string, o: { link?: boolean; summary?: boolean } = {}) => {
+    const cls = new Set<string>(), attrs = new Map<string, string>([["src", src]]);
+    return { cls, dataset: {} as Record<string, string>,
+      get src() { return attrs.get("src") || ""; },
+      hasAttribute: (a: string) => attrs.has(a), removeAttribute: (a: string) => { attrs.delete(a); },
+      classList: { add: (c: string) => cls.add(c), remove: (c: string) => cls.delete(c), contains: (c: string) => cls.has(c) },
+      closest: (q: string) => (q.split(/\s*,\s*/).some((one) => (one === "a" && o.link) || (one === "summary" && o.summary)) ? {} : null) };
+  };
+  const H = "https://img.example.test/";
+  const big = img(H + "trace.png"), fresh = img(H + "new.png"), badge = img(H + "badge.svg"), linked = img(H + "trace.png", { link: true }),
+    folded = img(H + "trace.png", { summary: true }), gone = img(H + "gone.png"), page = img("javascript:alert(1)");
+  const all = [big, fresh, badge, linked, folded, gone, page];
+  run(new Set([H + "gone.png"]), new Set([H + "trace.png", H + "gone.png", "javascript:alert(1)"]), opensInLightbox)({ querySelectorAll: () => all });
+  for (const i of all) assert.ok(i.cls.has("md-img"), "every picture wears the mark");
+  assert.ok(big.cls.has("md-img-zoom"), "a URL that loaded picture-sized: the box at once");
+  assert.ok(!fresh.cls.has("md-img-zoom"), "a URL never loaded: the load decides");
+  assert.ok(!badge.cls.has("md-img-zoom"), "a URL that loaded glyph-sized is not remembered as a picture");
+  assert.ok(!linked.cls.has("md-img-zoom"), "a linked picture is the link's: no box, no zoom cursor");
+  assert.ok(!folded.cls.has("md-img-zoom"), "a summary's picture is the summary's");
+  assert.ok(gone.cls.has("md-img-failed") && !gone.cls.has("md-img-zoom") && gone.src === "", "a parked URL is a caption, not a picture");
+  assert.ok(!page.cls.has("md-img-zoom"), "a scheme the lightbox never opens is no picture to box");
+  // the park clears the box when a boxed picture's URL fails after it was stamped
+  const late = img(H + "late.png"); late.cls.add("md-img"); late.cls.add("md-img-zoom");
+  (new Function("mdImgFailed", fn("function parkMdImg(") + "\nreturn parkMdImg;")(new Set()) as (i: unknown, u: string) => void)(late, H + "late.png");
+  assert.ok(late.cls.has("md-img-failed") && !late.cls.has("md-img-zoom"), "a picture parked after it loaded loses the box");
+});
+
 test("the predicate: a marked picture, outside any link or summary, showing a source, loaded at least ZOOM_MIN_H px tall", () => {
   assert.match(PREVIEW, /const ZOOM_MIN_H = 32;/, "a badge is 20px tall, an emoji or an icon 16 to 24: glyphs in a line of text");
   const at = PREVIEW.indexOf("export function mdImgZoomable(");
@@ -62,6 +96,8 @@ test("the hook: ONE pair of document listeners, installed once, web only; load m
   assert.match(body, /document\.addEventListener\("load", \(e\) => \{[\s\S]*?\}, true\);/, "load does not bubble: the capture phase sees it");
   assert.match(body, /if \(img\.naturalHeight < ZOOM_MIN_H\) mdImgTiny\.add\(img\.src\); else mdImgTiny\.delete\(img\.src\);/, "a glyph is remembered, so the sequence skips it too");
   assert.match(body, /img\.classList\.toggle\("md-img-zoom", mdImgZoomable\(img\)\);/, "the cursor class follows the same predicate the click reads");
+  assert.match(body, /if \(img\.src\) \{ if \(img\.naturalHeight < ZOOM_MIN_H\) mdImgPicture\.delete\(img\.src\); else mdImgPicture\.add\(img\.src\); \}/,
+    "a picture-sized URL is remembered, so the post-pass stamps the box on its next render");
   assert.match(body, /document\.addEventListener\("click", \(e\) => \{[\s\S]*?\}, true\);/, "capture: a fold or a bubble around the picture never toggles under it");
   assert.match(body, /e\.preventDefault\(\); e\.stopPropagation\(\);\s*\n\s*openLightbox\(\{ url: img\.currentSrc \|\| img\.src, alt: img\.alt \}, img\);/,
     "the URL the picture SHOWS (a srcset's candidate, else its src; 2026-10-20 review: a srcset alone opened an empty lightbox), with the element the chat reads its transcript off");
@@ -78,7 +114,7 @@ test("the lightbox's own anchors and the comment popover: a data: download is th
     "a press inside the lightbox a thread's picture opened does not close the thread");
 });
 
-test("styles: media capped at the body at zero specificity, a table and a <pre> scroll inside it, the zoom cursor", () => {
+test("styles: media capped at the body at zero specificity, a table and a <pre> scroll inside it", () => {
   assert.match(CSS, /^:where\(\.md, \.cmt-msg\.agent\) :where\(img, video, iframe\) \{ max-width: 100%; \}$/m);
   assert.match(CSS, /^:where\(\.md, \.cmt-msg\.agent\) :where\(img, video\):where\(:not\(\[height\]\), \[width\]\) \{ height: auto; \}$/m,
     "the ratio kept; a height given with no width stays as written; a frame (no ratio of its own) keeps its height");
@@ -91,5 +127,21 @@ test("styles: media capped at the body at zero specificity, a table and a <pre> 
   assert.match(pre, /overflow-x: auto;/, "a <pre> the message writes in HTML scrolls instead of being cut off");
   assert.doesNotMatch(pre, /overflow-x: hidden/);
   assert.match(CSS, /\.md pre code \{[^}]*white-space: pre-wrap;/, "a fence still WRAPS, so it never scrolls sideways");
-  assert.match(CSS, /^\.md-img-zoom \{ cursor: zoom-in; \}$/m, "the path preview's own cursor");
+});
+
+test("ONE picture box: a markdown picture and the path preview share every declaration, each written once", () => {
+  // the user 2026-10-21, who wanted both kinds sized and dressed like the path preview: the two classes sit in the same
+  // selector lists, so neither can drift from the other. The size caps every markdown picture (.md-img, a badge far under
+  // both caps); the box, the frame and the zoom cursor dress the ones a click zooms (.md-img-zoom), as the path preview
+  assert.match(CSS, /^\.path-full-img, \.md-img \{ max-width: 100%; max-height: 320px; object-fit: contain; \}$/m,
+    "the size: the bubble's width, 320px tall, the ratio kept");
+  assert.match(CSS, /^\.path-full-img, \.md-img-zoom \{ display: block; border-radius: 8px; cursor: zoom-in;\n  border: 1px solid rgba\(255, 255, 255, 0\.14\); background: rgba\(0, 0, 0, 0\.25\); \}$/m,
+    "the box: block, rounded, framed, the zoom cursor");
+  assert.match(CSS, /^\.path-full-img:hover, \.md-img-zoom:hover \{ border-color: var\(--accent\); \}$/m, "the hover");
+  // and no other rule styles either kind on its own, so there is no second copy to drift
+  const rules = [...CSS.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)].map((m) => m[1].trim());
+  const names = /\.(?:path-full-img|md-img|md-img-zoom)(?![-\w])/;
+  assert.deepEqual(rules.filter((sel) => names.test(sel)),
+    [".path-full-img, .md-img", ".path-full-img, .md-img-zoom", ".path-full-img:hover, .md-img-zoom:hover"],
+    "the three shared rules are the only ones naming either picture");
 });

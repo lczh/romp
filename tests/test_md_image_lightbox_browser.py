@@ -24,6 +24,12 @@ before the figure), a picture with a 2x srcset (it opens on the candidate it sho
 picture drawn from a srcset alone (it opens on it, its "Open original" the picture, never the dashboard), a src whose
 query is written with numeric character references (a stop the click finds, no phantom beside it), and a picture in a
 <details>'s <summary> (its click opens the details; no zoom, no stop).
+A third session, tests, holds one reply that puts the two kinds of picture side by side (2026-10-21, the user wanting a
+markdown picture sized and dressed like the path preview): a mention of docs/figure.png, a trace 400x1600 and a heat map
+1800x1200 from the outside host, a 20px badge in a sentence and a picture inside a link. Read at a desktop width and a
+phone width in both themes: the two pictures within 320px and the bubble, their ratio kept, and their computed display,
+radius, margins, frame, background and cursor those of the path preview beside them; the badge inline at its natural
+size, and neither it nor the linked picture wearing the zoom cursor.
 
 MDLB_DIST=<dir> serves another tree's UI bundle (the red run's before); MDLB_SHOTS=<dir> writes the reply at both widths
 in both themes and the open lightbox; MDLB_DUMP=<path> writes the whole measurement. Skips LOUDLY without the extension
@@ -59,6 +65,7 @@ from test_comment_relay_mark_served import user, agent, iso, _free_port   # noqa
 
 WEB = "aaaaaaaa-1111-2222-3333-4d1a6e1b0c55"
 API = "cccccccc-1111-2222-3333-4d1a6e1b0c55"
+TESTS = "dddddddd-1111-2222-3333-4d1a6e1b0c55"
 THREAD = "bbbbbbbb-1111-2222-3333-4d1a6e1b0c55"
 AGENT_ID = "a0123456789abcdef"                             # the shape the kernel's agent-id pattern admits
 PASSAGE = "Cache the notes-api list responses for thirty seconds, keyed by the query string."
@@ -79,7 +86,8 @@ def _data_url(png):
 
 
 HOSTED = {"/wide.png": _png(1800, 450, (40, 120, 200)), "/card.png": _png(300, 200, (200, 90, 40)),
-          "/hit.png": _png(280, 180, (60, 160, 90))}
+          "/hit.png": _png(280, 180, (60, 160, 90)), "/tall.png": _png(400, 1600, (200, 100, 40)),
+          "/big.png": _png(1800, 1200, (40, 120, 200))}
 
 
 class _Host(BaseHTTPRequestHandler):
@@ -130,6 +138,16 @@ def _reply_b0(host):
             "Its query written with references <img src=\"%(h)s/card.png?v=num&#38;w=2&#x26;h=3\" alt=\"numeric ref\">\n\n"
             "<details><summary><img src=\"%(h)s/hit.png?v=summary\" alt=\"fold picture\"> Raw counts</summary>\n\n"
             "The raw counts per region.\n\n</details>\n") % {"h": host}
+
+
+def _reply_c0(host, badge):
+    return ("The latency split per region is in docs/figure.png.\n\n"
+            "The trace of one slow request, top to bottom:\n\n"
+            "![request trace](%(h)s/tall.png)\n\n"
+            "The heat map of the whole run:\n\n"
+            "![run heat map](%(h)s/big.png)\n\n"
+            "Deploy ![deploy passing](%(b)s) is green, and the thumbnail links to the board: "
+            "[![board thumbnail](%(h)s/big.png?v=linked)](%(h)s/page)\n") % {"h": host, "b": badge}
 
 
 DRIVER = r"""
@@ -400,6 +418,44 @@ for (const theme of ["dark", "light"]) {
   await ctx.close();
 }
 
+// ── the third session (tests): a markdown picture in the path preview's box, at both widths in both themes ──
+out.box = {};
+const TALL = 'img[alt="request trace"]';
+for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
+  const key = (phone ? "phone" : "desktop") + theme[0].toUpperCase() + theme.slice(1);
+  try {
+    const { ctx, page, errs } = await open(theme, phone, { hash: "#only=tests", ready: TALL });
+    await page.waitForFunction(() => ['img[alt="run heat map"]', 'img[alt="board thumbnail"]', 'img[alt="deploy passing"]']
+      .every((s) => { const i = document.querySelector(s); return !!(i && i.complete && i.naturalWidth > 0); }), null, { timeout: 30000 });
+    await page.waitForTimeout(150);
+    out.box[key] = await page.evaluate((sel) => {
+      const tall = document.querySelector(sel);
+      const body = tall.closest(".assistant");
+      body.scrollIntoView({ block: "start" });
+      const one = (e) => {
+        if (!e) return null;
+        const b = e.getBoundingClientRect(), cs = getComputedStyle(e);
+        const bw = (side) => parseFloat(cs["border" + side + "Width"]) || 0;
+        return { left: b.left, right: b.right, w: b.width, h: b.height, cw: b.width - bw("Left") - bw("Right"), ch: b.height - bw("Top") - bw("Bottom"),
+                 nw: e.naturalWidth, nh: e.naturalHeight, inLink: !!e.closest("a"),
+                 style: { display: cs.display, radius: cs.borderRadius, margin: [cs.marginTop, cs.marginRight, cs.marginBottom, cs.marginLeft].join(" "),
+                          cursor: cs.cursor, objectFit: cs.objectFit, border: [cs.borderTopWidth, cs.borderTopStyle, cs.borderTopColor].join(" "),
+                          background: cs.backgroundColor } };
+      };
+      const b = body.getBoundingClientRect();
+      return { body: { left: b.left, right: b.right, w: b.width }, path: one(body.querySelector(".path-full-img")), tall: one(tall),
+               large: one(body.querySelector('img[alt="run heat map"]')), badge: one(body.querySelector('img[alt="deploy passing"]')),
+               linked: one(body.querySelector('img[alt="board thumbnail"]')), bodyClass: document.body.className };
+    }, TALL);
+    await shot(page, "box-" + key + "-top");
+    await page.evaluate(() => document.querySelector('img[alt="run heat map"]').scrollIntoView({ block: "start" }));
+    await page.waitForTimeout(100);
+    await shot(page, "box-" + key + "-bottom");
+    out.errs["box" + key] = errs;
+    await ctx.close();
+  } catch (e) { out.box[key + "Err"] = String(e).slice(0, 400); }
+}
+
 fs.writeFileSync(cfg.out, JSON.stringify(out));
 await browser.close();
 console.log("RESULT: ok");
@@ -459,9 +515,13 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
         Path(state, "sdk", API + ".json").write_text(json.dumps(
             {"sid": API, "name": "api", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": API, "alive": True,
              "model": "claude-opus-5", "liveModel": "Opus 5"}))
-        # web first in the shared tab order (a tab drag's file), so a plain load still opens on web; the api leg asks for its
-        # session through the page's #only= filter
-        Path(state, "session-order.json").write_text(json.dumps([WEB, API]))
+        Path(state, "names", TESTS).write_text("tests\t%s\t#ffd59c\t#2e1f0c\n" % cwd)
+        Path(state, "sdk", TESTS + ".json").write_text(json.dumps(
+            {"sid": TESTS, "name": "tests", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": TESTS, "alive": True,
+             "model": "claude-opus-5", "liveModel": "Opus 5"}))
+        # web first in the shared tab order (a tab drag's file), so a plain load still opens on web; the api and tests legs
+        # ask for their session through the page's #only= filter
+        Path(state, "session-order.json").write_text(json.dumps([WEB, API, TESTS]))
         Path(state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
         t0 = int(time.time()) - 3600
         h = cls.origin2
@@ -486,6 +546,9 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
         api = [user(t0 - 7200, "v0", None, "where does the p95 split per region live?", API),
                agent(t0 - 7195, "b0", "v0", _reply_b0(h), API)]
         Path(proj, API + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in api))
+        tests = [user(t0 - 3600, "w0", None, "show me the slow request's trace next to the latency split", TESTS),
+                 agent(t0 - 3595, "c0", "w0", _reply_c0(h, cls.badge), TESTS)]
+        Path(proj, TESTS + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in tests))
         sub = Path(proj, WEB, "subagents")
         sub.mkdir(parents=True, exist_ok=True)
         sub_recs = [{"type": "user", "timestamp": iso(t0 + 122), "uuid": "s0", "parentUuid": None,
@@ -733,6 +796,36 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
                          "the summary's picture keeps the summary's click: the details open, no lightbox")
         self.assertNotEqual(a["cursor"]["fold"], "zoom-in", "…and it wears no zoom cursor")
         self.assertEqual(a["cursor"]["soft"], "zoom-in")
+
+    def test_a_markdown_picture_wears_the_path_previews_box_at_either_width_in_either_theme(self):
+        r = self._run()
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
+            b = r["box"][key]
+            table = "\n  %s: %s" % (key, json.dumps(b))
+            self.assertIsNotNone(b["path"], "the path preview rendered beside the markdown pictures" + table)
+            self.assertEqual(b["path"]["style"]["cursor"], "zoom-in", table)
+            for name, (nw, nh) in (("tall", (400, 1600)), ("large", (1800, 1200))):
+                m = b[name]
+                self.assertEqual((m["nw"], m["nh"]), (nw, nh), name + " loaded from the lab's outside host" + table)
+                self.assertLessEqual(m["h"], 320.5, "the %s picture stays within the path preview's 320px%s" % (name, table))
+                self._inside(m, b["body"], "the %s picture" % name, table)
+                self.assertAlmostEqual(m["cw"] / m["ch"], nw / nh, delta=0.02 * nw / nh, msg="…keeping its ratio" + table)
+                self.assertEqual(m["style"], b["path"]["style"],
+                                 "the %s picture wears the path preview's box: display, radius, margins, frame, background, cursor%s" % (name, table))
+            self.assertGreaterEqual(b["tall"]["h"], 319.5, "the tall picture is bounded by the 320px cap itself" + table)
+            badge = b["badge"]
+            self.assertEqual((badge["w"], badge["h"]), (88, 20), "the badge keeps its natural size" + table)
+            self.assertEqual(badge["style"]["display"], "inline", "…in its line of text, not a block of its own" + table)
+            self.assertNotEqual(badge["style"]["cursor"], "zoom-in", "…and does not say it zooms" + table)
+            self.assertTrue(badge["style"]["border"].startswith("0px"), "…with no frame" + table)
+            linked = b["linked"]
+            self.assertTrue(linked["inLink"], table)
+            self.assertNotEqual(linked["style"]["cursor"], "zoom-in", "the linked picture wears its link's cursor" + table)
+            self.assertLessEqual(linked["h"], 320.5, "…at the same 320px cap" + table)
+            self._inside(linked, b["body"], "the linked picture", table)
+        self.assertIn("theme-light", r["box"]["phoneLight"]["bodyClass"].split(), "the light legs ran in the light theme")
+        self.assertIn("chat-theme-yatharth", r["box"]["desktopLight"]["bodyClass"].split())
 
     def test_no_page_errors(self):
         r = self._run()
