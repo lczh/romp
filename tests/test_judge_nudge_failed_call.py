@@ -31,6 +31,14 @@ evicting the goal's whole earlier history, and a blocked goal read Working after
   - once the planner serves, the reply is placed once, with the one reopen that rides its ruling;
   - a reply held by a failure that never strikes (no refusal flag, no pause) is said ONCE in the error log,
     naming the reply, not once per pass.
+
+And an older wedge (the review of #345; it predates #334): a reply about a card the user cleared before the
+planner ruled stopped at the no-menu exit, and once the card was archived at the no-target exit, both without
+marking the reply handled, so the kernel's placement gate held every later nudge in the session. Under test:
+  - the reply is dropped on the pass that meets it (nothing filed, no card moved), the gate opens, and the
+    session's other Working card is nudged on the next look; the same with the card archived, and in a bundle;
+  - undoing the clear does not replay the dropped reply: the kernel retires that nudge moot, with no block;
+  - a reply about a card still on the board is planned as before.
 All fixtures are SYNTHETIC: a private placeholder uuid, the notes-api demo, invented reply text."""
 import json
 import os
@@ -483,9 +491,14 @@ class NoMenuTakesTheReopenBack(_Base):
         jd.save_goals(SID, store)
 
     def test_a_goal_with_no_menu_keeps_no_reopen(self):
-        self._seg()
+        seg, _ = self._seg()
         self.assertEqual(jd._scoped_menu(jd.load_goals(SID), G2), [], "premise: the sealed step has no menu")
-        for _ in range(3):
+        self._pass()
+        self.assertIsNone(self._placements().get(seg, "absent"),
+                          "the no-menu exit retires the reply on the pass that meets it, so it cannot hold the "
+                          "session's later nudges (the review of #345); a later pass's settle reaching the step "
+                          "was the only thing that retired it here before")
+        for _ in range(2):
             self._pass()
         self.assertEqual(self.calls, [], "premise: the planner is never asked")
         nodes = jd.load_goals(SID)["nodes"]
@@ -495,6 +508,183 @@ class NoMenuTakesTheReopenBack(_Base):
         self.assertTrue(nodes[G1].get("nodeComplete"), "the completed card stays completed")
         self.assertEqual([e.get("kind") for e in nodes[G1].get("log") or [] if e.get("kind") in ("reopen", "unblock")],
                          [], "and nothing reopened it")
+
+
+class _Cleared(_Base):
+    # The user clears the card a nudge reply is about BEFORE the planner rules on it (the review of #345, which
+    # reproduced it; the bug predates #334). The reopen bounces off the clear, the card has no menu, and that exit
+    # used to stop without marking the reply handled; once the compaction archived the card, the no-target exit did
+    # the same. The kernel's placement gate reads every unhandled unit of the session, so it answered
+    # "planner-queue" on every tick: the session's other Working cards were never nudged again, with nothing on
+    # screen to say why. The reply is dropped now, the way the delegation branch drops one filed under a cleared
+    # goal: nothing filed, no card moved, the gate open. The session here: one genuine turn (the arm), then the
+    # nudge about G1 and its reply; G2 is the session's other Working card, never nudged.
+    TARGETS = (G1,)
+    ARM_T = T - 600
+
+    def setUp(self):
+        super().setUp()
+        Path(self.td, "session-hosts").write_text("off")   # a state root this test mints (the conftest belt)
+        recs = [{"type": "user", "uuid": "h1", "parentUuid": None, "timestamp": _iso(self.ARM_T),
+                 "message": {"role": "user", "content": "Run the notes-api eval, then rebuild the search index."}},
+                {"type": "assistant", "uuid": "h2", "parentUuid": "h1", "timestamp": _iso(self.ARM_T + 5),
+                 "message": {"role": "assistant", "stop_reason": "end_turn",
+                             "content": [{"type": "text", "text": "Started both; the eval is running."}]}}]
+        with open(self.path) as f:
+            nudge = [json.loads(l) for l in f if l.strip()]
+        nudge[0]["parentUuid"] = "h2"
+        with open(self.path, "w") as f:
+            f.write("\n".join(json.dumps(r) for r in recs + nudge) + "\n")
+        store = jd.load_goals(SID)
+        store["nodes"][G2] = _top(G2, "Rebuild the notes-api search index")
+        store["status"][G2] = "working"
+        store["seq"] = 2
+        sess = jd.parsed_session(SID, [self.path], time.time())
+        for seg, phase in [(u[0], u[1]) for u in jd.plan_units(sess, store) if u[1] != "nudge"]:
+            store["placements"][jd._unit_key(seg, phase)] = G1   # the genuine turn was planned long ago
+        jd.save_goals(SID, store)
+        self.arm = next(tn["id"] for tn in sess["turns"] if not km._turn_romp_injected(tn))
+        # the nudge that asked about G1, fired off the genuine turn: the kernel's own record of it
+        (jd.STATE / "auto-nudge.json").write_text(json.dumps(
+            {"enabled": True, "nudged": {G1: {"count": 1, "lastTurnId": self.arm, "at": T - 5}}}))
+        km._autonudge_cache.clear()
+        km._TICK_SEEN.clear()
+        self.sent = []
+        test = self
+
+        class _Backend:
+            def send(self, sid, body):
+                test.sent.append(body)
+        self._kpatch = {
+            "_sessions": lambda now: [{"sid": SID, "path": self.path}],
+            "_session_flag": lambda sid, flag: False, "_compacting_now": lambda *a, **k: False,
+            "_api_error": lambda path: None, "_session_working": lambda turns: False,
+            "_interrupt_suppresses_nudge": lambda *a, **k: False, "_backend_queued": lambda sid: False,
+            "_backend_rewind_pending": lambda sid: False, "_last_state": lambda sid: ("", 0),
+            "_session_awaiting": lambda *a, **k: False, "_closer_settled": lambda *a: True,
+            "_revivers_pending": lambda *a: "", "_pending_ops": {},
+            "_last_assistant_report": lambda path, cap=4000: ("", None),   # no redundancy judge
+            "_debt_reminder_outcomes": lambda sid, lt, now: None,
+            "_fire_debt_reminder": lambda sid, now, alive_ids: False}
+        self._ksaved = {n: getattr(km, n) for n in self._kpatch}
+        for n, v in self._kpatch.items():
+            setattr(km, n, v)
+        self._backend_saved = km.Sessions.backend_for
+        km.Sessions.backend_for = staticmethod(lambda sid: _Backend())
+
+    def tearDown(self):
+        for n, v in self._ksaved.items():
+            setattr(km, n, v)
+        km.Sessions.backend_for = self._backend_saved
+        km._autonudge_cache.clear()
+        km._TICK_SEEN.clear()
+        super().tearDown()
+
+    def _clear(self):
+        km._clear_all([G1])                         # the user's cross-off: the clears log, the flag, the journal
+        nd = jd.load_goals(SID)["nodes"][G1]
+        self.assertTrue(nd.get("cleared"), "premise: the card is cleared")
+
+    def _gate_shut(self, sess):
+        store, _f = jd.load_goals_shared_or_fault(SID)
+        return km._nudge_placement_gate(SID, sess["turns"], store)
+
+    def _tick(self, now=None):
+        nudged = dict(km._auto_nudge_data().get("nudged", {}))
+        return km._auto_nudge_session({"sid": SID, "path": self.path}, now or time.time(), {}, nudged, {})
+
+    def _assert_dropped_and_unblocked(self, seg, sess):
+        self.assertEqual(self.calls, [], "the planner is never asked about a card the user cleared")
+        pl = self._placements()
+        self.assertIn(seg, pl, "the reply is handled: dropped, not left due")
+        self.assertIsNone(pl[seg], "with nothing filed")
+        self.assertFalse(self._gate_shut(sess), "the placement gate opens: no unhandled unit is left")
+        n = len(self.calls)
+        for _ in range(2):
+            self._pass()
+        self.assertEqual(len(self.calls), n, "and the dropped reply is never re-collected")
+        self.assertIs(self._tick(), True, "the session's next look fires")
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("<!-- romp-goal-id: %s -->" % G2, self.sent[0], "the nudge asks about the other Working card")
+        self.assertNotIn("<!-- romp-goal-id: %s -->" % G1, self.sent[0], "never about the cleared one")
+
+
+class ClearedTargetRetires(_Cleared):
+    def test_a_reply_about_a_cleared_card_is_dropped_and_the_session_nudges_again(self):
+        seg, sess = self._seg()
+        self.assertTrue(self._gate_shut(sess), "premise: the unruled reply holds the gate shut")
+        self.assertEqual(self._tick(), "planner-queue", "premise: so the session's look stops there")
+        self._clear()
+        before = jd.load_goals(SID)["nodes"][G1]
+        self._pass()
+        nd = jd.load_goals(SID)["nodes"][G1]
+        self.assertEqual(_rows(nd.get("log") or []), _rows(before.get("log") or []),
+                         "no card moves: the cleared card's diary is as the clear left it")
+        self.assertTrue(nd.get("cleared"))
+        self._assert_dropped_and_unblocked(seg, sess)
+
+    def test_the_same_once_the_cleared_card_is_archived(self):
+        seg, sess = self._seg()
+        self._clear()
+        self.assertEqual(km._compact_goal_store(SID), 1, "premise: the compaction moves the cleared card")
+        self.assertNotIn(G1, jd.load_goals(SID)["nodes"], "premise: the reply's target is gone from the store")
+        self._pass()
+        self.assertNotIn(G1, jd.load_goals(SID)["nodes"], "and the pass brings nothing back")
+        self._assert_dropped_and_unblocked(seg, sess)
+
+    def test_undoing_the_clear_does_not_replay_the_dropped_reply(self):
+        # The cost of dropping it: a restored card does not get the reply planned. The kernel then reads the
+        # nudge as superseded (the clear and the undo are user verdicts filed after the reply), retiring it moot,
+        # not blocking: the card comes back Working with no needs-you block and no chip.
+        seg, sess = self._seg()
+        self._clear()
+        self._pass()
+        self.assertIsNone(self._placements().get(seg, "absent"), "premise: the reply was dropped")
+        km._undo_clear()
+        nd = jd.load_goals(SID)["nodes"][G1]
+        self.assertFalse(nd.get("cleared"), "premise: the undo restored the card")
+        self.assertEqual(jd.load_goals(SID)["status"].get(G1), "working")
+        self._pass()
+        self.assertEqual(self.calls, [], "the restored card's dropped reply is not planned")
+        self._tick()
+        rec = km._auto_nudge_data()["nudged"][G1]
+        self.assertTrue(rec.get("moot"), "the kernel retires the answered nudge as moot")
+        self.assertFalse(rec.get("failed"), "not as a failed one")
+        nd = jd.load_goals(SID)["nodes"][G1]
+        self.assertFalse(nd.get("blocked"), "no needs-you block on the restored card")
+        self.assertEqual([e for e in nd.get("log") or [] if e.get("src") == "nudge"], [])
+        self.assertNotIn("<!-- romp-goal-id: %s -->" % G1, "".join(self.sent),
+                         "and it is not asked again off the same turn: the next genuine turn re-arms it")
+
+    def test_a_served_reply_is_still_planned_as_before(self):
+        seg, sess = self._seg()
+        self.replies = [AWAITING]
+        self._pass()
+        self.assertEqual(self.calls, ["planner"], "an uncleared card's reply goes to the planner")
+        self.assertIn(seg, self._placements())
+        log = jd.load_goals(SID)["nodes"][G1].get("log") or []
+        self.assertEqual([e.get("kind") for e in log], ["reopen", "awaiting"], "and its verdict lands")
+        self.assertFalse(self._gate_shut(sess))
+
+
+class ClearedTargetInABundle(_Cleared):
+    # One nudge asked about both cards and the user cleared G1, the bundle's FIRST target, whose key is the bare
+    # one the kernel reads for the whole unit. G2's ruling used to land under its #n2 key while the bare key stayed
+    # unplaced, so the gate stayed shut as in the single-card case.
+    TARGETS = (G1, G2)
+
+    def test_the_live_card_is_planned_and_the_cleared_one_dropped(self):
+        seg, sess = self._seg()
+        self._clear()
+        self.replies = [AWAITING]
+        self._pass()
+        self.assertEqual(self.calls, ["planner"], "only the card still on the board is planned")
+        pl = self._placements()
+        self.assertIn(seg + "#n2", pl, "G2's ruling lands under its own key")
+        self.assertIsNone(pl.get(seg, "absent"), "and the cleared card's bare key is retired with nothing filed")
+        self.assertFalse(self._gate_shut(sess), "so the gate opens")
+        self.assertEqual([e.get("kind") for e in jd.load_goals(SID)["nodes"][G2].get("log") or []],
+                         ["reopen", "awaiting"], "G2 gets its verdict")
 
 
 class HeldReplyIsSaidOnce(_Base):

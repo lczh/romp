@@ -12906,7 +12906,15 @@ def _plan_session(fsid, path, now):
                        if t in store["nodes"]] \
                 or ([followup] if followup and followup in store["nodes"] else [])
             if not targets:
-                continue                              # no resolvable target → skip (re-examinable)
+                # No target left in the store: the card was cleared and the compaction archived it (or a merge
+                # folded it into another). RETIRE the reply, the way the delegation branch retires one filed
+                # under a cleared goal: left unplaced, it was "re-examinable" forever, and the kernel's placement
+                # gate, which reads every unhandled unit of the session, held every later nudge in the session
+                # behind it with nothing on screen to say why (the review of #345). Nothing is filed and no card
+                # moves; an undo of the clear restores the card without this reply.
+                store["placements"][seg_id] = None
+                save_goals(fsid, store)
+                continue
             for target, _pkey in _bundle_keys(seg_id, targets):
                 if _placed_key(store["placements"], _pkey, live):
                     continue                          # this target already ruled (crash-resume mid-bundle)
@@ -12953,8 +12961,15 @@ def _plan_session(fsid, path, now):
                 _undo_reopen = _reopen_provisional(store, target, by="nudge", now=seg_t)
                 sub = _scoped_menu(store, target)      # SCOPED menu: the goal + its open descendants, goal first (#1)
                 if not sub:
+                    # The goal is not open: the user cleared it (the reopen bounced off the clear), or it sits under
+                    # a sealed card. No later pass has a menu either, short of the user undoing the clear, so take
+                    # the reopen back and RETIRE this target's key (the delegation branch's cleared-goal exit): a
+                    # bare continue left the reply unplaced for good, and the kernel's placement gate held every
+                    # later nudge in the session behind it (the review of #345).
                     _undo_reopen()
-                    continue                          # goal not open (e.g. view-cleared) → don't plan
+                    store["placements"][_pkey] = None
+                    save_goals(fsid, store)
+                    continue
                 hist = _goal_work_text(store, seg_by_id, target, GOAL_HISTORY_CHARS)
                 # name the menu items that mirror the agent's OWN still-open to-dos: the note (plan_llm) makes
                 # the planner block at least one of them when the reply names a blocker instead of continuing —

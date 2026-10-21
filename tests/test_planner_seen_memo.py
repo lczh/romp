@@ -283,7 +283,7 @@ class PlannerSeenMemo(unittest.TestCase):
         finally:
             jd._rebind_state(self.root)
 
-    PLAN_SESSION_TOKENS_SHA16 = "99b776a26e02c8ca"   # 2026-10-21: a nudge reply's ruling with no op to apply undoes its reopen too (the review of #340); it changes only what a due unit's pass writes, so a store with no unit due reads the same, no derivation change
+    PLAN_SESSION_TOKENS_SHA16 = "4b1939ef469668ad"   # 2026-10-21: a nudge reply about a cleared or archived card is retired instead of left unplaced (the review of #345); a row is recorded only for a pass that collected no unit, and that reply was always collected, so no standing row covers a session it changes: no derivation change
 
     def test_a_change_to_the_plan_session_bumps_the_derivation_or_this_pin(self):
         """Round three, low 3: the derivation bump rule made mechanical. A persisted row asserts the planner had nothing to do
