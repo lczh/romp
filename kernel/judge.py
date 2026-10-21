@@ -1225,9 +1225,10 @@ def pass_watermark(tier, fsid):
 #  close       parse pair + candidates; store trio; gone marker, reg spawnedAt, _sdk_owned, cleared.jsonl,
 #              stall slice. Clock: the bg-launch expiry.
 #  unblock     parse pair + candidates (due = the parse's ended turns); store trio (load_goals,
-#              _blocked_sub_candidates, _newest_done_at, _completed_since). The candidate scan comes
-#              first, so about half the sessions never reach the parse, yet the pair re-arms them on
-#              every transcript append at one load each: accepted (about 10 ms per pass), stated here.
+#              _blocked_sub_candidates, _newest_done_at, _block_filed_at, _completed_since). The
+#              candidate scan comes first, so about half the sessions never reach the parse, yet the
+#              pair re-arms them on every transcript append at one load each: accepted (about 10 ms
+#              per pass), stated here.
 #  group       store trio (_group_tops, _overgrown_tops, _group_sig read the store), cleared.jsonl
 #              (_group_tops -> _view_cleared). NO parse: it is read only after a relink, which follows a
 #              model call, which follows a store change. The archive stays in: compaction rewrites it
@@ -16648,7 +16649,8 @@ def _completed_since(store, oldest_block, exclude):
     turns had scrolled out of the 9k tail was re-liftable at every later examine once the completions
     rode along). Synth settle rows are excluded — an episode-boundary settle asserts the conversation
     ended, not that work was delivered — and so are the due nodes themselves (their own history is
-    not sibling evidence)."""
+    not sibling evidence). `oldest_block` is a FILING time (the oldest _block_filed_at among the due
+    blocks), read against each done's own filing time."""
     rows = []
     for nid, nd in store["nodes"].items():
         if nid in exclude:
@@ -16676,6 +16678,17 @@ def _newest_done_at(store):
     return max((r.get("at") or 0 for nd in store["nodes"].values()
                 for r in (nd.get("log") or [])
                 if r.get("kind") == "done" and not r.get("synth")), default=0)
+
+
+def _block_filed_at(nd, bt):
+    """WHEN this node's block was FILED: its newest block row's `at` (arrival domain), floored at bt, the
+    block's evidence time. The done arm and the completed-since cut compare a done's filing time, so they
+    read the block's filing time too. Read against bt instead, a closer's block (ev_t = the turn's trigger,
+    filed minutes later) counted as "completed since the block" the done the SAME reply filed, and the
+    unblocker re-examined a block it had just been handed, on the evidence it was filed from. bt stays the
+    floor, so a row with no `at` reads as before. _block_ev_t stays the evidence-time rule: the turn arm
+    and the conversation since the block read it."""
+    return max([bt] + [e.get("at") or 0 for e in (nd.get("log") or []) if e.get("kind") == "block"])
 
 
 def _parse_unblock(raw, n):
@@ -16762,7 +16775,9 @@ def _unblock_session(fsid, path, now):
       - a new DONE verdict FILED in this session — blockCheckDoneT, arrival-time domain (the user
         2026-08-08): a completion is the event that can supersede a blocked ask, and it can arrive
         with no new turn at all (a late closer filing on an idle session). Verdicts file once, so
-        the gate re-arms only on genuinely new filings — no flapping.
+        the gate re-arms only on genuinely new filings — no flapping. "New" means filed after the
+        block was FILED (_block_filed_at), not after its evidence time: the closer files a block
+        and the reply's dones together, minutes after the turn they rule on.
 
     Write discipline (the user 2026-07-11): the model call takes seconds and save_goals is a
     last-writer-wins atomic publish, so NO store copy is held across the call — the scan's load is
@@ -16782,16 +16797,18 @@ def _unblock_session(fsid, path, now):
     ended_ts = [turn.get("t") or 0 for turn in turns if not _turn_open(turn, turns)]
     newest = max(ended_ts, default=0)
     newest_done = _newest_done_at(scan)
+    filed = {nid: _block_filed_at(nd, bt) for nid, nd, bt in cands}   # done filings compare to the block's filing
     due = [(nid, nd, bt) for nid, nd, bt in cands
            if newest > max(bt, nd.get("blockCheckT") or 0)
-           or newest_done > max(bt, nd.get("blockCheckDoneT") or 0)]
+           or newest_done > max(filed[nid], nd.get("blockCheckDoneT") or 0)]
     if not due:
         return []
     oldest_block = min(bt for _nid, _nd, bt in due)
     since = "\n\n".join(_unit_text(turn["atoms"]) for turn in turns
                         if (turn.get("t") or 0) > oldest_block and not _turn_open(turn, turns))
     since = since[-UNBLOCK_HISTORY_CHARS:]
-    completed = _completed_since(scan, oldest_block, {nid for nid, _nd, _bt in due})
+    completed = _completed_since(scan, min(filed[nid] for nid, _nd, _bt in due),
+                                 {nid for nid, _nd, _bt in due})
     if not since.strip() and not completed:
         return []
     blocks_text = "\n".join("%d. %s\n   blocked on: %s" % (i, nd.get("text") or "(goal)",
