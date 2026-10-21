@@ -20,6 +20,8 @@ The driver, at a desktop width and at a phone width, in the dark theme and the l
 and on the desktop in the dark theme, the arrows: the clip, the local file, the linked clip and the picture in page order,
 each step stopping the video it leaves; the local file's preview loading through /file and its range requests answered
 206 (the browser's own media requests, and a closed `bytes=0-1` probe, Safari's first ask); the linked clip's preview.
+A second session, api, posts a <video> with its caption on the next line (the review of #343, 2026-10-21): at both widths
+in both themes the clip keeps the box, with the caption directly under it.
 
 CVP_DIST=<dir> serves another tree's UI bundle (the red run's before); CVP_SHOTS=<dir> writes the reply at both widths in
 both themes and the open lightbox; CVP_DUMP=<path> writes the whole measurement. Skips LOUDLY without the extension deps
@@ -53,6 +55,7 @@ import test_ship_reship_served as _lab   # noqa: E402  the lab kernel's environm
 from test_comment_relay_mark_served import user, agent, iso, _free_port   # noqa: E402  the same synthetic records
 
 WEB = "aaaaaaaa-1111-2222-3333-5e1d0c1a9b77"
+API = "cccccccc-1111-2222-3333-5e1d0c1a9b77"
 
 
 def _png(w, h, rgb):
@@ -137,6 +140,14 @@ def _reply(host):
             "<video controls width=\"100%%\" src=\"%(h)s/clip.mp4\"></video>\n\n"
             "The error state is in media/walkthrough.webm, and the hosted copy is at %(h)s/demo.mp4 for the review.\n\n"
             "![the signup form](%(h)s/form.png)\n") % {"h": host}
+
+
+def _reply_captioned(host):
+    # the review of #343 (2026-10-21): a <video> with its caption on the next line is one paragraph, and the clip keeps the
+    # box with the caption under it, as a picture does
+    return ("The checkout flow, recorded:\n\n"
+            "<video controls src=\"%(h)s/demo.mp4?v=cap\"></video>\n"
+            "*Clip 2: checkout, from the cart to the receipt.*\n") % {"h": host}
 
 
 DRIVER = r"""
@@ -303,6 +314,44 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
   } catch (e) { leg.err = String(e && e.stack || e).slice(0, 600); }
   if (ctx) await ctx.close();
 }
+// the second session (api): a video with its caption on the next line, at both widths in both themes
+out.caption = {};
+const CAP = '.assistant video[src^="' + cfg.host + '/demo.mp4?v=cap"]';
+for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
+  const key = (phone ? "phone" : "desktop") + theme[0].toUpperCase() + theme.slice(1);
+  let ctx = null;
+  try {
+    ctx = await browser.newContext(phone
+      ? { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true }
+      : { viewport: { width: 1100, height: 800 } });
+    await ctx.addInitScript(({ t }) => { try { localStorage.setItem("romp:settings", JSON.stringify({ theme: t })); } catch (e) {} }, { t: THEMES[theme] });
+    const page = await ctx.newPage();
+    const errs = [];
+    page.on("pageerror", (e) => errs.push(String(e && e.stack || e).slice(0, 600)));
+    await page.goto(cfg.chat + "#only=api");
+    await page.waitForSelector(CAP, { timeout: 60000 });
+    await page.waitForFunction((s) => { const v = document.querySelector(s); return !!(v && v.readyState >= 1); }, CAP, { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(300);
+    out.caption[key] = await page.evaluate((s) => {
+      const v = document.querySelector(s), wrap = v.parentElement, cs = getComputedStyle(v);
+      v.closest(".assistant").scrollIntoView({ block: "start" });
+      const b = v.getBoundingClientRect();
+      let cap = null;
+      for (let n = wrap.nextSibling; n && !cap; n = n.nextSibling) {
+        if (n.nodeName === "BR" || !(n.textContent || "").trim()) continue;
+        const r = document.createRange(); r.selectNodeContents(n);
+        const x = Array.from(r.getClientRects()).find((q) => q.width > 0);
+        cap = x ? { left: x.left, top: x.top, text: (n.textContent || "").trim().slice(0, 40) } : { missing: true };
+      }
+      return { wrap: wrap.className, natural: [v.videoWidth, v.videoHeight], video: { left: b.left, top: b.top, bottom: b.bottom, h: b.height },
+               style: { display: cs.display, radius: cs.borderRadius, border: [cs.borderTopWidth, cs.borderTopStyle].join(" ") }, cap,
+               bodyClass: document.body.className };
+    }, CAP);
+    await shot(page, key + "-caption", ".turn-assistant:has(" + CAP + ")");
+    out.errs["caption" + key] = errs;
+  } catch (e) { out.caption[key] = { err: String(e && e.stack || e).slice(0, 600) }; }
+  if (ctx) await ctx.close();
+}
 fs.writeFileSync(cfg.out, JSON.stringify(out));
 await browser.close();
 console.log("RESULT: ok");
@@ -367,6 +416,12 @@ class ServedChatVideoPreview(unittest.TestCase):
         Path(state, "sdk", WEB + ".json").write_text(json.dumps(
             {"sid": WEB, "name": "web", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": WEB, "alive": True,
              "model": "claude-opus-5", "liveModel": "Opus 5"}))
+        Path(state, "names", API).write_text("api\t%s\t#c8f0b4\t#132a10\n" % cwd)
+        Path(state, "sdk", API + ".json").write_text(json.dumps(
+            {"sid": API, "name": "api", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": API, "alive": True,
+             "model": "claude-opus-5", "liveModel": "Opus 5"}))
+        # web first in the shared tab order, so a plain load still opens on web; the caption legs ask for api (#only=)
+        Path(state, "session-order.json").write_text(json.dumps([WEB, API]))
         Path(state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
         t0 = int(time.time()) - 3600
         recs = [user(t0, "u0", None, "record the notes-api signup flow so the review can watch it", WEB),
@@ -374,6 +429,9 @@ class ServedChatVideoPreview(unittest.TestCase):
         proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
         os.makedirs(proj, exist_ok=True)
         Path(proj, WEB + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in recs))
+        api = [user(t0 - 7200, "v0", None, "record the checkout flow too", API),
+               agent(t0 - 7160, "b0", "v0", _reply_captioned(cls.origin2), API)]
+        Path(proj, API + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in api))
         cls.port, cls.token = _free_port(), "testtok-chatvideo"
         env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST")
         cls.klog = os.path.join(cls.lab, "kernel.log")
@@ -481,6 +539,29 @@ class ServedChatVideoPreview(unittest.TestCase):
             self.assertLessEqual(m["page"]["docScrollW"], m["page"]["docClientW"], "the page never scrolls sideways" + table)
         light = self._leg("phoneLight")["m"]["bodyClass"].split()
         self.assertIn("theme-light", light, "the light legs ran in the light theme")
+        self.assertIn("chat-theme-yatharth", light)
+
+    def test_a_video_with_its_caption_on_the_next_line_keeps_the_box_with_the_caption_under_it(self):
+        # the review of #343 (2026-10-21): the solo rule read the caption as text beside the clip, so the still went
+        # inline and unframed with the caption at its bottom edge; the caption's line break leaves it alone on its line
+        res = self._run()
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            m = res["caption"][key]
+            table = "\n  %s: %s" % (key, json.dumps(m))
+            self.assertNotIn("err", m, table)
+            self.assertEqual(m["natural"], [1920, 1080], "the clip's metadata loaded" + table)
+            self.assertIn("md-solo", m["wrap"].split(), "a caption on the next line leaves the clip alone on its line" + table)
+            self.assertEqual(m["style"]["display"], "block", table)
+            self.assertEqual(m["style"]["radius"], "8px", "rounded like the path preview" + table)
+            self.assertTrue(m["style"]["border"].startswith("1px solid"), "framed like the path preview" + table)
+            self.assertLessEqual(m["video"]["h"], 320.5, table)
+            c = m["cap"]
+            self.assertTrue(c and c.get("text", "").startswith("Clip 2"), "the caption rendered" + table)
+            self.assertGreaterEqual(c["top"], m["video"]["bottom"] - 0.5, "the caption sits UNDER the clip" + table)
+            self.assertLess(c["top"] - m["video"]["bottom"], 12, "…directly under it" + table)
+            self.assertAlmostEqual(c["left"], m["video"]["left"], delta=1.5, msg="…at the clip's left edge" + table)
+        light = res["caption"]["phoneLight"]["bodyClass"].split()
+        self.assertIn("theme-light", light)
         self.assertIn("chat-theme-yatharth", light)
 
     def test_a_tap_opens_the_lightbox_playing_the_clip_with_its_controls(self):

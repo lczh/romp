@@ -1,15 +1,17 @@
 <!-- SYNTHETIC fixture: an agent reply carrying things wider than its bubble — a markdown picture 1800px wide (an
      inline SVG data: URL, so the page needs no server), a sixteen-column table, a raw <pre> line and a fenced block —
      plus a user bubble with a wide picture, for eyeballing that nothing widens the bubble or runs off the pane's right
-     edge (2026-10-20). Invented content (notes-api demo domain). Run at a phone width and a desktop width, in each theme:
+     edge (2026-10-20). Each picture is alone on its line and wears the classes the real page gives it (preview.ts
+     mdImgPostPass and the load hook: .md-img .md-solo .md-img-zoom), so it renders in the picture box there and here.
+     Invented content (notes-api demo domain). Run at a phone width and a desktop width, in each theme:
        tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/chat-wide-content.html \
            --out /tmp/wide-phone.png --size 390x900 [--body-class "theme-light chat-theme-yatharth"]
 -->
 <div id="content" style="height: 100vh"><div class="thread">
 <div class="turn turn-user"><div class="user-bubble md"><p>how did the notes-api load test go? the run's chart:</p>
-<p><img alt="run chart" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='300'%3E%3Crect width='1800' height='300' fill='%23c86428'/%3E%3C/svg%3E"></p></div></div>
+<p><img class="md-img md-solo md-img-zoom" alt="run chart" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='300'%3E%3Crect width='1800' height='300' fill='%23c86428'/%3E%3C/svg%3E"></p></div></div>
 <div class="turn turn-assistant"><div class="assistant md"><p>The load test finished. Throughput over the run:</p>
-<p><img class="md-img md-img-zoom" alt="throughput over the run" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='450'%3E%3Crect width='1800' height='450' fill='%232878c8'/%3E%3C/svg%3E"></p>
+<p><img class="md-img md-solo md-img-zoom" alt="throughput over the run" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='450'%3E%3Crect width='1800' height='450' fill='%232878c8'/%3E%3C/svg%3E"></p>
 <p>The latency split per region:</p>
 <table><thead><tr><th>region</th><th>p50</th><th>p75</th><th>p90</th><th>p95</th><th>p99</th><th>p99.9</th><th>max</th><th>rps</th><th>errors</th><th>retries</th><th>timeouts</th><th>cache hits</th><th>cache misses</th><th>queue depth</th><th>cpu</th></tr></thead>
 <tbody><tr><td>us-east-1</td><td>12ms</td><td>15ms</td><td>21ms</td><td>28ms</td><td>44ms</td><td>90ms</td><td>212ms</td><td>1840</td><td>0</td><td>3</td><td>0</td><td>91%</td><td>9%</td><td>4</td><td>61%</td></tr>

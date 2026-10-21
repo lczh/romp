@@ -70,6 +70,8 @@ class _FakeRemoteFileHandler(BaseHTTPRequestHandler):
     video_ctype = "video/mp4"   # what this remote CLAIMS a video is (a hostile one lies)
     video_crange = None         # a hostile remote's Content-Range on its 206, in place of the true one
     video_truncate = False      # half the promised body then a clean close, as the route does when the file shrank
+    video_clen = None           # a hostile remote's Content-Length on its video reply, in place of the true one
+    dl_clen = None              # …and on its download reply
 
     def _opener_policy(self):
         # A real romp kernel answers through Handler._send, which sends Cross-Origin-Opener-Policy on every response it
@@ -85,7 +87,7 @@ class _FakeRemoteFileHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", _FakeRemoteFileHandler.dl_ctype)
             self.send_header("Content-Disposition", _FakeRemoteFileHandler.dl_disp)
-            self.send_header("Content-Length", str(len(BIN_BYTES)))
+            self.send_header("Content-Length", _FakeRemoteFileHandler.dl_clen or str(len(BIN_BYTES)))
             self.end_headers()
             if not head:
                 if _FakeRemoteFileHandler.dl_truncate:
@@ -121,7 +123,7 @@ class _FakeRemoteFileHandler(BaseHTTPRequestHandler):
             body = VIDEO_BYTES[start:end + 1]
             self.send_response(status)
             self.send_header("Content-Type", _FakeRemoteFileHandler.video_ctype)
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", _FakeRemoteFileHandler.video_clen or str(len(body)))
             self.send_header("Accept-Ranges", "bytes")
             if status == 206:
                 self.send_header("Content-Range", _FakeRemoteFileHandler.video_crange or "bytes %d-%d/%d" % (start, end, n))
@@ -273,6 +275,8 @@ class RemoteFileRelay(unittest.TestCase):
         _FakeRemoteFileHandler.video_ctype = "video/mp4"
         _FakeRemoteFileHandler.video_crange = None
         _FakeRemoteFileHandler.video_truncate = False
+        _FakeRemoteFileHandler.video_clen = None
+        _FakeRemoteFileHandler.dl_clen = None
         self._saved_remotes = dict(km._remotes)
 
     def tearDown(self):
@@ -711,6 +715,38 @@ class RemoteFileRelay(unittest.TestCase):
         status, body, _ = self._video("bytes=0-1")
         self.assertEqual(status, 502)
         self.assertEqual(body, b"malformed partial reply from gpu1")
+
+    # A Content-Length the relay cannot read as a length: past Python's int() digit limit (4,300; one more raises, and
+    # the browser got a 500 with a traceback, the review of the video relay, 2026-10-21), signed, spaced, or not a
+    # number at all. Each is a reply this relay cannot frame, so it is the same 502 as a reply carrying no length,
+    # whole or partial, sent before any header goes out.
+    HOSTILE_LENGTHS = ("9" * 4301, "1" + "0" * 30, "-5", "+5", "0x10", "1_000")
+
+    def test_a_video_reply_whose_length_is_not_a_bounded_decimal_502s(self):
+        for clen in self.HOSTILE_LENGTHS:
+            for rng in (None, "bytes=0-1"):
+                _FakeRemoteFileHandler.video_clen = clen
+                status, body, msg = self._video(rng)
+                self.assertEqual((status, body), (502, b"reply from gpu1 carried no length"), (clen[:12], len(clen), rng))
+
+    def test_a_download_whose_length_is_not_a_bounded_decimal_502s_before_any_header(self):
+        # the download arm forwarded the remote's Content-Length verbatim and converted it only after the body, so a
+        # hostile one reached the browser as a header and then raised; it is refused up front, as the video arm does
+        for clen in self.HOSTILE_LENGTHS:
+            _FakeRemoteFileHandler.dl_clen = clen
+            rec = _RelayRecorder()
+            km.Handler._relay_download(rec, "gpu1", self.fake.server_address[1], REMOTE_TOKEN,
+                                       {"path": ["/tmp/data.bin"], "download": ["1"]})
+            self.assertEqual(rec.status, 502, (clen[:12], len(clen)))
+            self.assertNotIn("Content-Disposition", rec.headers, "nothing of the 200 went out")
+
+    def test_the_largest_bounded_length_still_relays(self):
+        # the bound is a length no file reaches (a 16-digit byte count is 9 PB), never a cap on a real one
+        self.assertEqual(km._relay_length("9" * 16), 9999999999999999)
+        self.assertIsNone(km._relay_length("9" * 17))
+        self.assertEqual(km._relay_length("0"), 0)
+        self.assertEqual(km._relay_length(str(len(VIDEO_BYTES))), len(VIDEO_BYTES))
+        self.assertIsNone(km._relay_length(None))
 
     def test_head_relays_the_real_length_and_ranges_under_our_type(self):
         _FakeRemoteFileHandler.video_ctype = "text/html"

@@ -33,6 +33,11 @@ Thinking, and the working dot on its tab wears a ring. A running tool counts its
 running subagent shows its tool calls and tokens, and a finished thought says how
 many tokens it took.
 
+Pictures and videos show inside the message, scaled down to fit, and so do the
+picture and video files a message names by path and the videos it links to. A
+click opens one large, where a video plays with its controls, and the arrow keys
+step through every picture and video in the chat.
+
 The message box also supports attachments, session names and recall. A file
 dropped anywhere on the pane attaches to the next message, `@` and the first
 letters of a session's name list the live sessions that match, and picking one
@@ -44,11 +49,6 @@ passage selected there becomes a quote in the viewer's own message bar, which
 writes to the session the file came from; ⌘⏎ stages it with the chat's staged
 messages and ⏎ sends. While the viewer is open, typing, pasting and dictation go
 to its bar.
-
-A picture or a video in a message shows at the size of a mentioned file's
-preview, as does a path or a link to a video file. A click opens it large, where
-a video plays with its controls, and the arrow keys step through every picture
-and video in the chat.
 
 The viewer's pop-out button keeps the file open as a tab, right after the
 session it came from. File tabs sit in the strip with your sessions, the arrows

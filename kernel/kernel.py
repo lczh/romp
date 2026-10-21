@@ -64911,6 +64911,15 @@ _TEXT_MAX_BYTES = 2 * 1024 * 1024                # 2 MB of source is already pas
 _DOWNLOAD_CHUNK = 256 * 1024                     # fixed stream chunk: bounded memory whatever the file size
 
 
+def _relay_length(v):
+    """A remote kernel's Content-Length as a byte count, or None when it is not one this relay can frame a reply by:
+    absent, or anything but one to sixteen ASCII digits (a 16-digit count is 9 PB, past any file). The bound comes
+    BEFORE int(): a remote that sent more than 4,300 digits made int() raise, and the browser got a 500 with a
+    traceback instead of the relay's 502 (the review of the video relay, 2026-10-21). Read by the streamed arms,
+    _relay_video_body and _relay_download, before any header goes out."""
+    return int(v) if v is not None and re.fullmatch(r"[0-9]{1,16}", v) else None
+
+
 def _attachment_disposition(name, kind="attachment"):
     """Content-Disposition for the download path — and, with kind="inline", for a PDF served to its own
     browser tab (the tab's title and a Save's name come from it; 2026-09-06). The basename lands inside a
@@ -88726,6 +88735,11 @@ class Handler(BaseHTTPRequestHandler):
                 _demand_redial(host, "timeout")
                 return self._send(502, b"" if head else ("tunnel to %s is not answering — re-dialing now" % host),
                                   "text/plain")
+            want = _relay_length(clen)
+            if clen is not None and want is None:
+                # a length this relay cannot forward or count against (not a bounded decimal): refused while a clean
+                # 502 is still possible, as the video arm does, rather than passed to the browser and converted after
+                return self._send(502, b"" if head else ("reply from %s carried no usable length" % host), "text/plain")
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Disposition",
@@ -88755,7 +88769,7 @@ class Handler(BaseHTTPRequestHandler):
                     copied += len(chunk)
             except (OSError, http.client.HTTPException):
                 self.close_connection = True
-            if clen is not None and copied < int(clen):
+            if want is not None and copied < want:
                 # A remote that truncates CLEANLY — its own _file_download sends short and closes
                 # when the file shrank mid-stream — ends the read with b'' and NO exception, so the
                 # except above never sees it. The Content-Length already forwarded is now a broken
@@ -88780,7 +88794,8 @@ class Handler(BaseHTTPRequestHandler):
         streamed reply cannot be measured before it is sent, so a reply without one is refused), the mtimes, and on a
         206 a Content-Range in the exact byte-arithmetic shape, else a 502 as on the image arm. The headers go out
         through _send with the length, so the reply carries the security set like every 200 the relay sends."""
-        if not re.fullmatch(r"[0-9]+", clen or ""):
+        want = _relay_length(clen)              # a bounded decimal, or the reply cannot be framed
+        if want is None:
             return self._send(502, "reply from %s carried no length" % host, "text/plain")
         extra = {k: v for k, v in (("Last-Modified", lastmod), ("X-Romp-Mtime-Ns", r_ns)) if v}
         extra["Accept-Ranges"] = "bytes"
@@ -88790,7 +88805,6 @@ class Handler(BaseHTTPRequestHandler):
             extra["Content-Range"] = crange
             if getattr(self, "_cors_origin", None):
                 extra["Access-Control-Expose-Headers"] = "Content-Range"
-        want = int(clen)
         self._send(status, b"", ctype, cache="no-cache", headers=extra, length=want)
         # Headers are out, so a second status line is no longer possible: a tunnel that dies mid-stream, a remote
         # that sends short and closes cleanly (http.client answers that with b'' and no exception) and a browser
