@@ -4001,7 +4001,7 @@ body.drop-over::after { content: ""; position: fixed; inset: 0; pointer-events: 
    one: a tall or a full-size one stays within 320px and the bubble, its ratio kept (width and height auto, and
    object-fit for one whose author fixed a width, which a max-height cannot shrink whole), while a badge or an icon, far
    under both caps, keeps its natural size in its line of text. The BOX (block, rounded, framed) dresses one that opens
-   in the lightbox AND stands alone in its paragraph (.md-solo, preview.ts mdSolo; a path's figure always does): a
+   in the lightbox AND stands alone on its line (.md-solo, preview.ts mdSolo; a path's figure always does): a
    picture inside a sentence stays on its line rather than splitting the sentence around a framed block (the review of
    this box, 2026-10-21). The ZOOM CURSOR marks everything a click opens, inline or not: .md-img-zoom (preview.ts: shown
    32px tall and up, outside any link or <summary>) and every still; so a badge stays a glyph, a linked picture keeps its
@@ -4020,6 +4020,10 @@ body.drop-over::after { content: ""; position: fixed; inset: 0; pointer-events: 
 .md-video { display: block; width: auto; height: auto; }
 .md-video-still { position: relative; display: inline-block; max-width: 100%; vertical-align: top; line-height: 0; }
 .md-video-still.md-solo { display: block; width: fit-content; }
+/* A box that stands alone ends its own line, so a <br> right after it (the user's markdown keeps its line breaks, so a
+   caption typed on the next line follows one) would add a blank line between the picture and its caption (the review of
+   #343, 2026-10-21). Only the boxed forms: a picture that does not zoom stays inline, and its <br> is its line break. */
+.md-img-zoom.md-solo + br, .md-video-still.md-solo + br { display: none; }
 .md-video-still::after { content: ""; position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; margin: -22px 0 0 -22px;
   border-radius: 50%; pointer-events: none; background: rgba(0, 0, 0, 0.55) no-repeat 55% 50% / 18px 18px
   url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18'%3E%3Cpath d='M4 2.5v13l11-6.5z' fill='%23fff'/%3E%3C/svg%3E"); }

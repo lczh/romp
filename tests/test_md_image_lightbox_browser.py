@@ -29,7 +29,10 @@ markdown picture sized and dressed like the path preview): a mention of docs/fig
 1800x1200 from the outside host, a 20px badge in a sentence and a picture inside a link. Read at a desktop width and a
 phone width in both themes: the two pictures within 320px and the bubble, their ratio kept, and their computed display,
 radius, margins, frame, background and cursor those of the path preview beside them; the badge inline at its natural
-size, and neither it nor the linked picture wearing the zoom cursor.
+size, and neither it nor the linked picture wearing the zoom cursor. The same session holds the solo rule's cases (the
+review of #343, 2026-10-21): a picture with its caption on the next line, in the reply and in the user's own message (a
+soft break and a <br>), keeps the box with the caption directly under it; two pictures on lines of their own each keep
+it; a picture with words after it, or before it, on its own line stays inline.
 
 MDLB_DIST=<dir> serves another tree's UI bundle (the red run's before); MDLB_SHOTS=<dir> writes the reply at both widths
 in both themes and the open lightbox; MDLB_DUMP=<path> writes the whole measurement. Skips LOUDLY without the extension
@@ -151,7 +154,20 @@ def _reply_c0(host, badge):
             "Deploy ![deploy passing](%(b)s) is green, and the thumbnail links to the board: "
             "[![board thumbnail](%(h)s/big.png?v=linked)](%(h)s/page)\n\n"
             "Trace ![inline trace](%(h)s/tall.png?v=mid) here.\n\n"
-            "<img height=\"20\" src=\"%(h)s/big.png?v=h20\" alt=\"squashed heat map\">\n") % {"h": host, "b": badge}
+            "<img height=\"20\" src=\"%(h)s/big.png?v=h20\" alt=\"squashed heat map\">\n\n"
+            # the review of #343 (2026-10-21): a picture with its caption on the next line is ONE paragraph, and it keeps the
+            # box with the caption under it; two pictures on lines of their own each keep it; a picture with words on its
+            # own line, after it or before it, stays inline
+            "![captioned heat map](%(h)s/big.png?v=cap)\n"
+            "*Figure 1: requests per hour across the run.*\n\n"
+            "![first panel](%(h)s/tall.png?v=p1)\n"
+            "![second panel](%(h)s/big.png?v=p2)\n\n"
+            "![leading trace](%(h)s/tall.png?v=lead) is the slowest request.\n\n"
+            "The slowest request: ![trailing trace](%(h)s/tall.png?v=tail)\n") % {"h": host, "b": badge}
+
+
+# the user's own message (breaks:true, so its line break is a <br>): a picture with a caption on the next line
+USER_CAPTIONED = "here is the one from yesterday's run:\n![user heat map](%s/big.png?v=user)\nFigure 2: the same run, per region."
 
 
 DRIVER = r"""
@@ -429,7 +445,8 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
   const key = (phone ? "phone" : "desktop") + theme[0].toUpperCase() + theme.slice(1);
   try {
     const { ctx, page, errs } = await open(theme, phone, { hash: "#only=tests", ready: TALL });
-    await page.waitForFunction(() => ['img[alt="run heat map"]', 'img[alt="board thumbnail"]', 'img[alt="deploy passing"]', 'img[alt="inline trace"]', 'img[alt="squashed heat map"]']
+    await page.waitForFunction(() => ['img[alt="run heat map"]', 'img[alt="board thumbnail"]', 'img[alt="deploy passing"]', 'img[alt="inline trace"]', 'img[alt="squashed heat map"]',
+      'img[alt="captioned heat map"]', 'img[alt="first panel"]', 'img[alt="second panel"]', 'img[alt="leading trace"]', 'img[alt="trailing trace"]', 'img[alt="user heat map"]']
       .every((s) => { const i = document.querySelector(s); return !!(i && i.complete && i.naturalWidth > 0); }), null, { timeout: 30000 });
     await page.waitForTimeout(150);
     out.box[key] = await page.evaluate((sel) => {
@@ -455,15 +472,36 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
         return { before: box(e.previousSibling, true), after: box(e.nextSibling, false), img: { left: i.left, right: i.right, top: i.top, bottom: i.bottom } };
       };
       const mid = body.querySelector('img[alt="inline trace"]');
+      // a picture's caption: the first box of the first thing shown after it past any <br> (its line's words, or the
+      // caption's under it), so the driver can tell beside from below
+      const caption = (e) => {
+        for (let n = e && e.nextSibling; n; n = n.nextSibling) {
+          if (n.nodeName === "BR" || !(n.textContent || "").trim()) continue;
+          const r = document.createRange(); r.selectNodeContents(n);
+          const x = Array.from(r.getClientRects()).find((q) => q.width > 0);
+          return x ? { left: x.left, right: x.right, top: x.top, bottom: x.bottom, text: (n.textContent || "").trim().slice(0, 40) } : null;
+        }
+        return null;
+      };
+      const pic = (alt, root) => { const e = (root || body).querySelector('img[alt="' + alt + '"]'); const m = one(e); if (m) { m.top = e.getBoundingClientRect().top; m.bottom = e.getBoundingClientRect().bottom; m.cls = e.className; m.next = caption(e); } return m; };
+      const lead = body.querySelector('img[alt="leading trace"]'), trail = body.querySelector('img[alt="trailing trace"]');
       return { body: { left: b.left, right: b.right, w: b.width }, path: one(body.querySelector(".path-full-img")), tall: one(tall),
                large: one(body.querySelector('img[alt="run heat map"]')), badge: one(body.querySelector('img[alt="deploy passing"]')),
                linked: one(body.querySelector('img[alt="board thumbnail"]')), midline: one(mid), midlineLine: mid ? line(mid) : null,
-               squashed: one(body.querySelector('img[alt="squashed heat map"]')), bodyClass: document.body.className };
+               squashed: one(body.querySelector('img[alt="squashed heat map"]')),
+               captioned: pic("captioned heat map"), panel1: pic("first panel"), panel2: pic("second panel"),
+               leading: pic("leading trace"), leadingLine: lead ? line(lead) : null, trailing: pic("trailing trace"), trailingLine: trail ? line(trail) : null,
+               userPic: pic("user heat map", document), bodyClass: document.body.className };
     }, TALL);
     await shot(page, "box-" + key + "-top");
     await page.evaluate(() => document.querySelector('img[alt="run heat map"]').scrollIntoView({ block: "start" }));
     await page.waitForTimeout(100);
     await shot(page, "box-" + key + "-bottom");
+    for (const [alt, name] of [["captioned heat map", "caption"], ["first panel", "panels"], ["leading trace", "lines"], ["user heat map", "user-caption"]]) {
+      await page.evaluate((a) => document.querySelector('img[alt="' + a + '"]').scrollIntoView({ block: "start" }), alt);
+      await page.waitForTimeout(100);
+      await shot(page, "box-" + key + "-" + name);
+    }
     out.errs["box" + key] = errs;
     await ctx.close();
   } catch (e) { out.box[key + "Err"] = String(e).slice(0, 400); }
@@ -560,7 +598,9 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
                agent(t0 - 7195, "b0", "v0", _reply_b0(h), API)]
         Path(proj, API + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in api))
         tests = [user(t0 - 3600, "w0", None, "show me the slow request's trace next to the latency split", TESTS),
-                 agent(t0 - 3595, "c0", "w0", _reply_c0(h, cls.badge), TESTS)]
+                 agent(t0 - 3595, "c0", "w0", _reply_c0(h, cls.badge), TESTS),
+                 user(t0 - 3500, "w1", "c0", USER_CAPTIONED % h, TESTS),
+                 agent(t0 - 3495, "c1", "w1", "That one matches the heat map above.", TESTS)]
         Path(proj, TESTS + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in tests))
         sub = Path(proj, WEB, "subagents")
         sub.mkdir(parents=True, exist_ok=True)
@@ -866,6 +906,55 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
             self.assertEqual(q["style"]["display"], "inline", "a glyph, not a block on a line of its own" + table)
             self.assertTrue(q["style"]["border"].startswith("0px"), "…with no frame" + table)
             self.assertNotEqual(q["style"]["cursor"], "zoom-in", "…and no zoom" + table)
+
+    def test_a_picture_with_its_caption_on_the_next_line_keeps_the_box_with_the_caption_under_it(self):
+        # the review of #343 (2026-10-21): `![plot](url)` with `*Figure 1: …*` on the next line, the common agent shape, is
+        # one paragraph, and the solo rule read the caption as text beside the picture: inline, unframed, the caption at its
+        # bottom edge to its right (x=560 on the desktop). Assistant markdown joins the two with a soft break, the user's
+        # with a <br>; both keep the box, and the caption sits under the picture at the paragraph's left edge
+        r = self._run()
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
+            b = r["box"][key]
+            for name, text in (("captioned", "Figure 1"), ("userPic", "Figure 2")):
+                m = b[name]
+                table = "\n  %s %s: %s" % (key, name, json.dumps(m))
+                self.assertEqual((m["nw"], m["nh"]), (1800, 1200), "the captioned picture loaded" + table)
+                self.assertIn("md-solo", m["cls"].split(), "a caption on the next line leaves the picture alone on its line" + table)
+                self.assertEqual(m["style"], b["path"]["style"], "…so it wears the path preview's box: block, rounded, framed" + table)
+                self.assertLessEqual(m["h"], 320.5, "…within 320px" + table)
+                c = m["next"]
+                self.assertIsNotNone(c, "the caption rendered" + table)
+                self.assertTrue(c["text"].startswith(text), table)
+                self.assertGreaterEqual(c["top"], m["bottom"] - 0.5, "the caption sits UNDER the picture, not beside it" + table)
+                self.assertLess(c["top"] - m["bottom"], 12, "…directly under it: no blank line between" + table)
+                self.assertAlmostEqual(c["left"], m["left"], delta=1.5, msg="…starting at the picture's left edge" + table)
+
+    def test_two_pictures_on_lines_of_their_own_each_keep_the_box_and_words_on_a_pictures_line_keep_it_inline(self):
+        r = self._run()
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
+            b = r["box"][key]
+            table = "\n  %s: %s" % (key, json.dumps({k: b[k] for k in ("panel1", "panel2", "leading", "leadingLine", "trailing", "trailingLine")}))
+            p1, p2 = b["panel1"], b["panel2"]
+            for name, m in (("first", p1), ("second", p2)):
+                self.assertIn("md-solo", m["cls"].split(), "the %s of two pictures on lines of their own stands alone%s" % (name, table))
+                self.assertEqual(m["style"], b["path"]["style"], "…and wears the box" + table)
+            self.assertGreaterEqual(p2["top"], p1["bottom"] - 0.5, "the second sits under the first" + table)
+            for name, ln, side in (("leading", b["leadingLine"], "after"), ("trailing", b["trailingLine"], "before")):
+                m = b[name]
+                self.assertEqual((m["nw"], m["nh"]), (400, 1600), "the %s picture loaded%s" % (name, table))
+                self.assertNotIn("md-solo", m["cls"].split(), "words on its own line: the %s picture is a word in a sentence%s" % (name, table))
+                self.assertEqual(m["style"]["display"], "inline", "…so it stays inline" + table)
+                self.assertTrue(m["style"]["border"].startswith("0px"), "…unframed" + table)
+                self.assertEqual(m["style"]["cursor"], "zoom-in", "…and still says it zooms" + table)
+                self.assertIsNotNone(ln[side], table)
+                if side == "after":
+                    self.assertGreaterEqual(ln["after"]["left"], ln["img"]["right"] - 1, "the words after it sit to its right" + table)
+                    self.assertLess(ln["after"]["top"], ln["img"]["bottom"], "…on its line" + table)
+                else:
+                    self.assertLessEqual(ln["before"]["right"], ln["img"]["left"] + 1, "the words before it sit to its left" + table)
+                    self.assertLess(ln["before"]["top"], ln["img"]["bottom"], "…on its line" + table)
 
     def test_no_page_errors(self):
         r = self._run()

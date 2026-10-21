@@ -952,12 +952,12 @@ function parkMdImg(img: HTMLImageElement, url: string): void {
  *  parked at RENDER, before any fetch. Every image it sees is a picture a message embedded, and wears .md-img: the one
  *  mark the zoom hook below reads, so a picture the file viewer or a hover card draws is never its business. One whose
  *  URL already loaded, and that will show picture-sized, takes .md-img-zoom here too, so a re-render draws it in the
- *  picture box at once (mdImgDims and shownHeightOf, below); one alone in its paragraph takes .md-solo, the box's block
+ *  picture box at once (mdImgDims and shownHeightOf, below); one alone on its line takes .md-solo, the box's block
  *  form (mdSolo). Its videos become the chat's still (mdVideoPostPass). */
 export function mdImgPostPass(root: ParentNode): void {
   for (const img of Array.from(root.querySelectorAll("img")) as HTMLImageElement[]) {
     img.classList.add("md-img");                     // a picture the message's markdown embeds: the zoom hook's mark (installMdImgZoom)
-    if (mdSolo(img)) img.classList.add("md-solo");   // alone in its paragraph: the box as a block, when it zooms (2026-10-21)
+    if (mdSolo(img)) img.classList.add("md-solo");   // alone on its line: the box as a block, when it zooms (2026-10-21)
     const u = img.src || "";
     const d = u ? mdImgDims.get(u) : undefined;
     if (u && mdImgFailed.has(u)) parkMdImg(img, u);
@@ -1136,7 +1136,7 @@ export function installMdImgZoom(): void {
 // A <video> a message writes (`<video controls width="100%" src="…mp4">`, the shape an agent posts), a mentioned path to a
 // video file (previewFull) and a link to one (previewVideoUrl) all show ONE still: the clip's first frame in the picture
 // box (the shared rules in styles.css: the bubble's width and 320px tall at most, its ratio kept; framed and a block when
-// it stands alone in its paragraph), a play badge over it and the zoom cursor. No native controls: they would fight the
+// it stands alone on its line), a play badge over it and the zoom cursor. No native controls: they would fight the
 // tap that opens the lightbox, where it plays with its controls (openLightbox). Muted, and never playing by itself.
 //   width/height attributes never stretch it: the still's own rule sets both auto (styles.css .md-video), which a
 //     presentational width="100%" loses to, so a 1920x1080 clip shows at 569x320 in a wide bubble as a picture would.
@@ -1163,7 +1163,7 @@ function sizeLikeClip(v: HTMLVideoElement, d: { w: number; h: number } | undefin
 }
 /** Turn `v` (in the page or in the sanitizer's detached document) into the chat's still of the clip at `url`, wrapped in
  *  the element that carries the badge and takes the tap; returns the wrapper, which takes `v`'s place when `v` has one.
- *  `solo`: it stands alone in its paragraph (mdSolo), so it wears the box as a block. */
+ *  `solo`: it stands alone on its line (mdSolo), so it wears the box as a block. */
 export function makeVideoStill(v: HTMLVideoElement, url: string, solo: boolean): HTMLElement {
   const doc = v.ownerDocument;
   for (const a of ["controls", "autoplay", "loop"]) v.removeAttribute(a);   // the lightbox plays it; the chat never does
@@ -1185,26 +1185,43 @@ export function makeVideoStill(v: HTMLVideoElement, url: string, solo: boolean):
   return still;
 }
 
-// A picture or a video STANDS ALONE in its paragraph (2026-10-21, the review of the shared picture box: a picture in the
-// middle of a sentence became a framed block that split the sentence into three lines): nothing but whitespace (and a
-// line break) beside it in its parent, or, in a parent that holds blocks (the message's root, a list item, a cell), only
-// blocks. Only then does it wear the box as a block (styles.css .md-solo); one inline with text stays in its line, capped
-// and, when it zooms, with the zoom cursor. Read off the sanitized DOM at render (the post-pass), so it never waits on a
-// load and never flips.
+// A picture or a video STANDS ALONE (2026-10-21, the review of the shared picture box: a picture in the middle of a
+// sentence became a framed block that split the sentence into three lines) when nothing else shows on its LINE. A line of
+// its parent ends at a line break: a <br> (the user's markdown, breaks:true), a newline in a text node (assistant markdown,
+// breaks:false, where the source's soft break is a "\n" the page shows as a space), or, in a parent that holds blocks (the
+// message's root, a list item, a cell), a block. So `![plot](url)` with `*Figure 1: …*` on the next line, one paragraph and
+// the common agent shape, stands alone and takes the box with the caption under it (the review of #343: the solo rule
+// read the caption as text beside it, and the picture went inline with the caption at its bottom edge); so does each of
+// two pictures on lines of their own, and a picture under a lead-in line. Text on the picture's own line, before it or
+// after it, keeps it inline: "Build ![ok](u) is green" and "![ok](u) means passing" are sentences it is a word of, and a
+// block would split them. Only a picture that stands alone wears the box as a block (styles.css .md-solo); one inline
+// with text stays in its line, capped and, when it zooms, with the zoom cursor. Read off the sanitized DOM at render (the
+// post-pass), so it never waits on a load and never flips.
 const BLOCK_TAGS = /^(P|DIV|UL|OL|DL|PRE|TABLE|BLOCKQUOTE|H[1-6]|HR|DETAILS|FIGURE|SECTION|ARTICLE|ASIDE|HEADER|FOOTER|NAV|ADDRESS)$/;
 export function mdSolo(el: Element): boolean {
   const p = el.parentElement;
   if (!p) return false;
-  for (const n of Array.from(p.childNodes)) {
-    if (n === el) continue;
-    if (n.nodeType === 3) { if ((n.textContent || "").trim()) return false; continue; }
-    if (n.nodeType !== 1) continue;                    // a comment shows nothing
-    const tag = (n as Element).tagName.toUpperCase();
-    if (tag === "BR") continue;
-    if (p.tagName.toUpperCase() !== "P" && BLOCK_TAGS.test(tag)) continue;
-    return false;
-  }
-  return true;
+  const kids = Array.from(p.childNodes);
+  const at = kids.indexOf(el as ChildNode);
+  const blocksEnd = p.tagName.toUpperCase() !== "P";
+  // walk from el toward one end of its line: true when that end comes with nothing shown on the way
+  const clear = (step: 1 | -1): boolean => {
+    for (let i = at + step; i >= 0 && i < kids.length; i += step) {
+      const n = kids[i];
+      if (n.nodeType === 3) {
+        const t = n.textContent || "";
+        const nl = step > 0 ? t.indexOf("\n") : t.lastIndexOf("\n");
+        if ((nl < 0 ? t : step > 0 ? t.slice(0, nl) : t.slice(nl + 1)).trim()) return false;   // words on its line
+        if (nl >= 0) return true;                      // the soft break ends the line
+        continue;
+      }
+      if (n.nodeType !== 1) continue;                  // a comment shows nothing
+      const tag = (n as Element).tagName.toUpperCase();
+      return tag === "BR" || (blocksEnd && BLOCK_TAGS.test(tag));   // a break or a block ends it; anything else is on it
+    }
+    return true;                                       // the parent's edge
+  };
+  return clear(-1) && clear(1);
 }
 
 /** The address a message's <video> plays, resolved against the page: its src, else its first <source>'s (the one a
