@@ -17,6 +17,17 @@ Under test, the work-run's two guards now applied per nudge target:
     retires the target unresolved, with one give-up row (a refusal must not retry forever);
   - in a BUNDLED nudge the bare key, ordered last, is the one the kernel reads for every target, so a
     failure on any target stops the bundle before that key is placed.
+
+And the regression that change brought (the review of #334): the nudge branch reopens the goal BEFORE the
+planner call, because the call's menu is read from the reopened goal, so a call that failed and stopped the
+branch with no write still left that reopen in the store, and the save at the end of the pass published it.
+Every failed pass appended another identical "reopened (nudge)" row: 70 passes left 64 of them (LOG_CAP),
+evicting the goal's whole earlier history, and a blocked goal read Working after one failed call. Under test:
+  - no ruling, no reopen: a failed call, a struck reply and a give-up leave the goal's diary as it was, and a
+    pass that changes nothing writes nothing;
+  - once the planner serves, the reply is placed once, with the one reopen that rides its ruling;
+  - a reply held by a failure that never strikes (no refusal flag, no pause) is said ONCE in the error log,
+    naming the reply, not once per pass.
 All fixtures are SYNTHETIC: a private placeholder uuid, the notes-api demo, invented reply text."""
 import json
 import os
@@ -54,13 +65,14 @@ def _iso(ep):
     return datetime.fromtimestamp(ep, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
-def _top(gid, text):
+def _top(gid, text, log=()):
     return {"id": gid, "text": text, "parentId": None, "nodeComplete": False, "blocked": False,
-            "cleared": False, "trail": [], "t": 1000, "mt": 2000, "log": []}
+            "cleared": False, "trail": [], "t": 1000, "mt": 2000, "log": [dict(e) for e in log]}
 
 
 class _Base(unittest.TestCase):
     TARGETS = (G1,)
+    HISTORY = ()                                  # earlier diary rows on G1, all before the nudge (T)
 
     def setUp(self):
         self.td = tempfile.mkdtemp()
@@ -68,18 +80,23 @@ class _Base(unittest.TestCase):
         jd._rebind_state(Path(self.td))          # GOALDIR, ERRORS and every derived dir move too
         jd._judge_ctx.last_call_fail = None
         jd._judge_ctx.paused = False
+        jd._NUDGE_HELD.clear()                   # the per-process held-reply count: a fresh store, a fresh count
         titles = {G1: "Run the notes-api eval", G2: "Rebuild the notes-api search index"}
         jd.save_goals(SID, {"rompUuid": SID, "seq": len(self.TARGETS), "placementsV": jd.PLACEMENTS_V,
-                            "nodes": {g: _top(g, titles[g]) for g in self.TARGETS},
+                            "nodes": {g: _top(g, titles[g], self.HISTORY if g == G1 else ())
+                                      for g in self.TARGETS},
                             "placements": {}, "status": {g: "working" for g in self.TARGETS},
                             "lastNode": self.TARGETS[-1]})
-        self.calls, self.replies, self.refuse = [], [], False
+        self.calls, self.replies, self.refuse, self.pause = [], [], False, False
         self._saved = (jd._judge_run_impl, jd.opener_llm, jd._group_store)
 
         def fake_impl(model, sys_prompt, user, **k):
             # the real plan_llm and the real _judge_run wrapper still run; only the model call is faked
             self.calls.append(k.get("judge"))
             jd._judge_ctx.paused = False
+            if self.pause:                         # the retry pause / rate gate: skipped, no call went out
+                jd._judge_ctx.paused = True
+                return ""
             if self.refuse:
                 jd._judge_ctx.last_call_fail = {"note": REFUSAL, "model": model, "refusal": True}
                 return ""
@@ -103,6 +120,12 @@ class _Base(unittest.TestCase):
     def tearDown(self):
         (jd._judge_run_impl, jd.opener_llm, jd._group_store) = self._saved
         jd._judge_ctx.last_call_fail = None
+        jd._judge_ctx.paused = False
+        jd._NUDGE_HELD.clear()
+        try:                                       # this sid's override journal (the goal-store fixtures rule)
+            (jd._overrides_dir() / (SID + ".jsonl")).unlink()
+        except OSError:
+            pass
         jd._rebind_state(self._old_state)
         shutil.rmtree(self.td, ignore_errors=True)
 
@@ -235,6 +258,163 @@ class Bundle(_Base):
         self._pass()
         self.assertEqual(len(self.calls), 3, "the next pass asks only about the target still owed")
         self.assertIn(seg, self._placements())
+
+
+# Earlier history on the goal: a question asked and answered, five times over, all before the nudge. Enough
+# rows that an eviction would show, every one of them older than the reply.
+_ASKED = [r for i in range(5) for r in (
+    {"ev_t": 1100 + 20 * i, "src": "planner", "kind": "block", "why": "needs the notes-api staging token (%d)" % i,
+     "at": 1100 + 20 * i},
+    {"ev_t": 1110 + 20 * i, "src": "user", "kind": "unblock", "why": "answered in the session (%d)" % i,
+     "at": 1110 + 20 * i})]
+OUTAGE = 70                                        # passes with every call failing: past LOG_CAP (64) reopen rows
+
+
+def _rows(log):
+    return [(e.get("src"), e.get("kind"), e.get("why")) for e in log]
+
+
+class NoRulingNoReopen(_Base):
+    HISTORY = tuple(_ASKED)
+
+    def _log(self):
+        return list(jd.load_goals(SID)["nodes"][G1].get("log") or [])
+
+    def _reopens(self):
+        return [e for e in self._log() if e.get("kind") == "reopen"]
+
+    def test_an_outage_adds_no_reopen_rows_and_keeps_the_history(self):
+        seg, _ = self._seg()
+        self.assertEqual(_rows(self._log()), _rows(_ASKED), "premise: the history loads as written")
+        for _ in range(OUTAGE):
+            self._pass()
+        self.assertEqual(len(self.calls), OUTAGE, "every pass asked again: the reply stayed due")
+        self.assertNotIn(seg, self._placements())
+        self.assertEqual(self._reopens(), [],
+                         "no ruling, no reopen: a failed call must leave no reopen row (70 passes left 64)")
+        self.assertEqual(_rows(self._log()), _rows(_ASKED), "and every earlier row survives")
+        self.assertFalse(jd.load_goals(SID)["nodes"][G1].get("logTrunc"), "nothing was evicted")
+
+    def test_a_failing_pass_writes_nothing(self):
+        self._seg()
+        self._pass()
+        store = jd.GOALDIR / (SID + ".json")
+        body = store.read_bytes()
+        for _ in range(5):
+            self._pass()
+        self.assertEqual(store.read_bytes(), body, "a pass whose only news is a failed call publishes nothing")
+
+    def test_once_the_planner_serves_the_reply_is_placed_once_with_one_reopen(self):
+        seg, _ = self._seg()
+        for _ in range(OUTAGE):
+            self._pass()
+        self.replies = [AWAITING]                  # the outage ends
+        self._pass()
+        self.assertIn(seg, self._placements(), "the reply is ruled")
+        log = self._log()
+        self.assertEqual(_rows(log[:len(_ASKED)]), _rows(_ASKED), "with the history intact")
+        self.assertEqual([(e.get("src"), e.get("why")) for e in self._reopens()], [("planner", "reopened (nudge)")],
+                         "and exactly the one reopen that rides the ruling")
+        self.assertEqual([e.get("kind") for e in log[len(_ASKED):]], ["reopen", "awaiting"],
+                         "nothing else landed on the goal")
+        n = len(self.calls)
+        for _ in range(3):
+            self._pass()
+        self.assertEqual(len(self.calls), n, "placed once: the reply is never planned again")
+        self.assertEqual(_rows(self._log()), _rows(log), "and the diary does not grow")
+
+    def test_struck_replies_and_the_give_up_add_no_reopen_rows(self):
+        seg, _ = self._seg()
+        for _ in range(jd.PLAN_PARSE_RETRIES):
+            self.replies = ["I think the goal is still going."]   # served, but no JSON: a strike each
+            self._pass()
+        self.assertIn(seg, self._placements(), "premise: the capping strike retired the reply")
+        self.assertEqual(self._reopens(), [], "a strike's save and the give-up carry no ruling, so no reopen")
+        self.assertEqual(_rows(self._log()), _rows(_ASKED))
+
+
+class FullDiary(_Base):
+    # a diary already at LOG_CAP: the reopen's append evicts the oldest row, so taking the reopen back by
+    # popping the row it appended would still lose that one; the undo restores the goal as it stood
+    HISTORY = tuple({"ev_t": 1000 + i, "src": "planner" if i % 2 == 0 else "user",
+                     "kind": "block" if i % 2 == 0 else "unblock", "why": "row %d" % i, "at": 1000 + i}
+                    for i in range(jd.LOG_CAP))
+
+    def test_a_failed_call_on_a_full_diary_loses_no_row(self):
+        self._seg()
+        self._pass()
+        nd = jd.load_goals(SID)["nodes"][G1]
+        self.assertEqual(_rows(nd.get("log") or []), _rows(self.HISTORY), "the oldest row is still there")
+        self.assertFalse(nd.get("logTrunc"), "and nothing reads as evicted")
+
+
+class BlockedGoalStaysBlocked(_Base):
+    # a block that landed while the reply waited to be planned (its evidence just before the nudge, filed
+    # just after it fired): the nudge's reopen unblocks, so a reopen that outlived its failed call moved the
+    # card from Needs-you to Working on no new information
+    HISTORY = (dict(_ASKED[0], ev_t=T - 1, at=T + 1),)
+
+    def setUp(self):
+        super().setUp()
+        store = jd.load_goals(SID)
+        jd._materialize_node(store["nodes"][G1])  # the flag cache from the diary, as a rollup derives it
+        jd.save_goals(SID, store)
+
+    def test_a_failed_call_does_not_move_the_card(self):
+        seg, _ = self._seg()
+        self.assertTrue(jd.load_goals(SID)["nodes"][G1].get("blocked"), "premise: the goal is blocked")
+        for _ in range(3):
+            self._pass()
+        nd = jd.load_goals(SID)["nodes"][G1]
+        self.assertNotIn(seg, self._placements())
+        self.assertTrue(nd.get("blocked"), "no ruling: the card stays where it was")
+        self.assertEqual([e.get("kind") for e in nd.get("log") or []], ["block"])
+
+
+class HeldReplyIsSaidOnce(_Base):
+    def _held(self):
+        return self._errors("nudge-held")
+
+    def test_an_unflagged_failure_streak_is_said_once_naming_the_reply(self):
+        seg, _ = self._seg()
+        for _ in range(OUTAGE):
+            self._pass()                           # a failure with no refusal flag (Codex's never carries one)
+        held = self._held()
+        self.assertEqual(len(held), 1, "one row for the held reply, not one per pass")
+        self.assertEqual((held[0]["seg"], held[0]["goal"]), (seg, G1), "naming the reply and its goal")
+        self.assertIn("Run the notes-api eval", held[0]["note"])
+        self.assertIn("%d passes" % jd.PLAN_PARSE_RETRIES, held[0]["note"])
+
+    def test_a_blip_says_nothing(self):
+        seg, _ = self._seg()
+        for _ in range(jd.PLAN_PARSE_RETRIES - 1):
+            self._pass()
+        self.replies = [AWAITING]
+        self._pass()
+        self.assertIn(seg, self._placements())
+        self.assertEqual(self._held(), [], "a failure the next passes recover from is not a held reply")
+
+    def test_a_pause_is_not_a_failure(self):
+        self._seg()
+        self.pause = True                          # the retry pause: the call never went out, already announced
+        for _ in range(jd.PLAN_PARSE_RETRIES + 2):
+            self._pass()
+        self.assertEqual(self._held(), [])
+
+    def test_the_kind_is_documented(self):
+        doc = (Path(BIN).parent / "docs" / "judges.md").read_text()
+        self.assertIn("nudge-held", doc, "docs/judges.md lists every judge-errors kind")
+        self.assertIn('"nudge-held"', jd._log_judge_error.__doc__, "and so does the row contract")
+
+    def test_a_served_reply_restarts_the_count(self):
+        self._seg()
+        for _ in range(jd.PLAN_PARSE_RETRIES - 1):
+            self._pass()
+        self.replies = ["not json"]                # the call is served (a strike), so the streak ends
+        self._pass()
+        for _ in range(jd.PLAN_PARSE_RETRIES - 1):
+            self._pass()
+        self.assertEqual(self._held(), [], "two short streaks are not one long one")
 
 
 if __name__ == "__main__":

@@ -283,7 +283,7 @@ class PlannerSeenMemo(unittest.TestCase):
         finally:
             jd._rebind_state(self.root)
 
-    PLAN_SESSION_TOKENS_SHA16 = "e07c10f56d05c3af"   # 2026-10-21: a nudge reply whose planner call fails or does not parse stays due (a strike, no retire); a store with no unit due reads the same, no derivation change
+    PLAN_SESSION_TOKENS_SHA16 = "f2daab09003d3ad6"   # 2026-10-21: a nudge reply's reopen stands only beside the planner's ruling (every exit with none undoes it) and a held reply is said once; a store with no unit due reads the same, no derivation change
 
     def test_a_change_to_the_plan_session_bumps_the_derivation_or_this_pin(self):
         """Round three, low 3: the derivation bump rule made mechanical. A persisted row asserts the planner had nothing to do
