@@ -148,7 +148,11 @@ test("the spacers and every walk over them take the bounded figure for a hidden 
   assert.equal(CODE.length, RENDER.length);
   assert.ok(ranges.size > 1000 && RENDER.split("/**").length > 100 && !CODE.includes("/**"), "the comments are found and blanked, every doc comment with them");
   const fn = (head: string) => { const i = CODE.indexOf(head); assert.ok(i >= 0, head); return CODE.slice(i, CODE.indexOf("\n}\n", i)); };
-  assert.match(CODE, /v\.gapUnits = gapUnitsOf\(items, v\.pxPerTurn\);\s*\n\s*if \(!keepHeld \|\| v\.heldPx == null\) v\.heldPx = heldPxOf\(v, items\);/, "the figure is set with the spacer map (renderWindowItems), unless the build keeps it");
+  assert.match(CODE, /v\.gapUnits = gapUnitsOf\(items, v\.pxPerTurn\);\s*\n\s*const firstMeasure = \(!hadPerTurn && v\.pxPerTurn != null\) \|\| \(!hadAvg && v\.avgTurnH != null\);\s*\n\s*if \(!keepHeld \|\| v\.heldPx == null \|\| firstMeasure\) v\.heldPx = heldPxOf\(v, items\);/, "the figure is set with the spacer map (renderWindowItems), unless the build keeps it");
+  // …and a build that makes the view's first measure sets it whatever the caller asked (2026-10-21): a view built hidden holds the figure
+  // off the 60 px fallback, and a rebuild that keeps it at the first show measured here, before sizeSpacers' own first-measure check
+  // (which then found the measure made) could set it. The figures are read before this build's measureRows, as sizeSpacers reads them
+  assert.match(fn("function renderWindowItems("), /const hadPerTurn = v\.pxPerTurn != null, hadAvg = v\.avgTurnH != null;\s*\n\s*measureRows\(v\);/, "renderWindowItems reads the figures before its measure");
   // a rebuild over the units the top spacer stands for keeps the figure, so the scrollTop its callers put back names the same place
   // (2026-10-21; executed: LongHistoryToggleKeepsPlace, a tool run toggled after replies land); every other build sets it
   assert.match(fn("function syncViewInner("), /const keepHeld = !!v\.painted && sameUnits\(v\.painted\.items, items, 0, ws\);\s*\n\s*renderWindowItems\(v, s, items, ws, we, working, keepHeld\);/, "the rebuild keeps the figure over the same units above the window");
@@ -194,6 +198,7 @@ test("the spacers and every walk over them take the bounded figure for a hidden 
   assert.deepEqual(reads, {
     heldPxOf: 1, unitPx: 1,            // the figure's own two reads
     sizeSpacers: 2, measureRows: 1,    // null checks: a first measure (hadAvg and the recompute's), and measuring once
+    renderWindowItems: 2,              // …and the first measure a window build makes (hadAvg and the recompute's, 2026-10-21)
     contentOffsetFrame: 1,             // the scrollbar marks' frame, for a unit its cache holds no height for (a gap is never cached) while it sums; it places marks only, no walk or jump reads it
     virtualizeToViewport: 1,           // the re-window's margin, a distance into rendered rows, which stand at their real height
     __rompViewMeasure: 1,              // the long-history lab's read of the measures

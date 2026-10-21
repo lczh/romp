@@ -130,6 +130,24 @@ test("a new message while scrolled UP keeps the viewport put (no backwards jump)
   assert.match(RENDER, /const ws = keepTop \? \(v\.winStart \?\? 0\)/);
 });
 
+test("a rebuild whose caller puts the reader back by raw scrollTop keeps the window's top (2026-10-21)", () => {
+  // read as a reader at the tail, the rebuild widened a window narrower than WINDOW_TAIL (the re-window around the last unit leaves 71)
+  // by units the top spacer held, and the raw scrollTop missed by them (executed for the toggle: tests/test_long_history_height_browser.py
+  // ROAD 12's tail). The toggle keeps it whatever the reader's follow mode; a fill's fallback keeps it; the tab's land-saved (showActive,
+  // and the idle prebuild before the return) keeps it through the view's follow mode, a follower landing at the bottom either way
+  const fn = (head: string) => { const i = RENDER.indexOf(head); assert.ok(i >= 0, head); return RENDER.slice(i, RENDER.indexOf("\n}\n", i)); };
+  assert.match(fn("function toggleToolGroup("), /if \(v\) v\.stale = true; syncView\(activeId, false\); \}/);
+  assert.match(fn("function toggleToolGroup("), /writeScroll\(content, top, "toolgroup-toggle", false, top\);[\s\S]*updateJumpBtn\(\);/, "…and the chip re-reads the bottom an expand moved");
+  assert.match(RENDER, /syncView\(activeId!, v\.stick\); landActive\(content, v\);/);
+  assert.match(RENDER, /syncView\(target, vv\.stick\);/);
+  assert.match(RENDER, /syncView\(id, v\?\.stick\); \/\/ build the hidden view now/);
+  assert.match(RENDER, /else syncView\(sid, false\);\s*\n\s*\} finally \{ fillBuilding = false; \}/);
+  // the census: a call that names no follow mode is the revive failure's, a first build (its view's rendered mark reset)
+  const bare = [...RENDER.matchAll(/\bsyncView\(([^(),]+)\)/g)].map((m) => m[0]);
+  assert.deepEqual(bare, ["syncView(id)"], "only the revive failure's sync names no follow mode");
+  assert.match(RENDER, /if \(v\) \{ v\.rendered = 0; v\.stale = true; \}   \/\/ the placeholder re-renders with the failure text\s*\n\s*if \(activeId === id\) \{ syncView\(id\); showActive\(\); \}/);
+});
+
 test("an oversized view (window grew past the cap) re-collapses to the tail on switch", () => {
   // `!reshow &&` leads since T249: the re-collapse is a SWITCH rule, never applied to a re-show of the view on screen
   assert.match(RENDER, /if \(!reshow && !pendingAnchor && pendingAnchorT == null\s*\n?\s*&& v\.el\.querySelectorAll\("\.turn"\)\.length > WINDOW_CAP\) \{/);
