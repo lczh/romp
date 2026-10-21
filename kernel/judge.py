@@ -11101,15 +11101,18 @@ def _reopen_provisional(store, gid, by="?", now=None):
     reopened goal (the menu is the goal's OPEN subtree, so the reopen's unseal, unblock and unroll change what
     the planner is shown), yet the reopen belongs to the planner's ruling on the reply and may stand only
     beside it. The exits that carry no ruling (a call that failed, a reply that did not parse, a refusal, the
-    give-up those strikes end in, a plan that stood down at the write) still reach a save, the strike's re-arm
-    or the one at the end of the pass, so a reopen left in memory there was published. Each failed pass then
-    appended another identical "reopened (nudge)" row: 70 passes left 64 (LOG_CAP), the goal's earlier
-    history evicted with them, and a blocked card read Working after one failed call, a move on no new
-    information (the review of #334; the settle-row loop rollup_status' container sweep documents is the
-    same shape). The undo puts back, in place, every node _reopen can write (the goal, its ancestor chain,
-    its subtree) as it stood before the reopen, rows a LOG_CAP eviction dropped included, which popping the
-    appended row could not restore. It must run before anything else writes those nodes; a caller that keeps
-    the reopen simply never calls it."""
+    give-up those strikes end in, a goal with no menu, a ruling with no op to apply, a plan that stood down at
+    the write) still reach a save, the strike's re-arm or the one at the end of the pass, so a reopen left in
+    memory there was published. Each failed pass then appended another identical "reopened (nudge)" row: 70
+    passes left 64 (LOG_CAP), the goal's earlier history evicted with them, and a blocked card read Working
+    after one failed call, a move on no new information (the review of #334; the settle-row loop
+    rollup_status' container sweep documents is the same shape). The undo puts back, in place, every node
+    _reopen can write (the goal, its ancestor chain, its subtree) as it stood before the reopen, rows a LOG_CAP
+    eviction dropped included, which popping the appended row could not restore. It must run before anything
+    else writes those nodes; a caller that keeps the reopen simply never calls it. It runs once: one reply can
+    reach two exits (the give-up's empty plan is a ruling with no op, and that plan can still stand down at
+    the write), and a second call does nothing, so it can never lay the snapshot back over a write made since
+    the first (the review of #340)."""
     nodes = store["nodes"]
     kids = {}
     for k, v in nodes.items():
@@ -11137,6 +11140,7 @@ def _reopen_provisional(store, gid, by="?", now=None):
                 if nd is not None:
                     nd.clear()
                     nd.update(saved)
+        was.clear()                                    # once (docstring): a second exit finds nothing to put back
     return undo
 
 
@@ -11169,7 +11173,8 @@ def nudge_pipeline_row(e):
     """True for a diary row the NUDGE PIPELINE ITSELF wrote: the procedural src=="nudge" block, and the
     reply-placement's own unseal — _reopen(by="nudge") files "reopened (nudge)" on the target and
     "unblocked by reopen (nudge)" on its ancestors, on EVERY reply the planner rules on (may_apply gates
-    reopen on view-cleared only; an exit with no ruling undoes it, _reopen_provisional). The moot supersede
+    reopen on view-cleared only; an exit with no ruling, or a ruling with no op, undoes it,
+    _reopen_provisional). The moot supersede
     guard (kernel _mark_nudge_failed) must not read these as "a real judge ruled on newer evidence": the
     reopen's filing time always postdates the response turn, so counting it mooted every placed-but-
     unresolved nudge reply — the escalation ladder's terminal rung went dead the day the guard shipped.
@@ -13018,6 +13023,13 @@ def _plan_session(fsid, path, now):
                 ops = _strip_unevidenced_dones(ops, _tseg, fsid, seg_id)   # a nudge no work followed can't be
                 #                                           resolved off nothing — the goal stays open
                 #                                           and re-nudgeable
+                if not ops:
+                    # A RULING WITH NO OP IS NO NEWS ON THE GOAL (the review of #340): a skip-only reply (the
+                    # planner found no work to file), dones all stripped as unevidenced, or the give-up's empty
+                    # plan. The apply below still retires the reply (placements[_pkey] = None, which the kernel
+                    # reads as ruled, so it is not re-planned), but files nothing on the goal, so the reopen has
+                    # no verdict to stand beside: kept, it alone moved a blocked card to Working.
+                    _undo_reopen()
                 if apply_plan_guarded(fsid, path, store, seg_id, seg_t, ops, sub,
                                       place_key=_pkey, prompt_uuid=trig, quote=vq):
                     placed += 1
