@@ -15,7 +15,7 @@ test("a switch with no change is a NO-OP (the cached DOM is revealed), in compac
 });
 
 test("a stale view re-renders the CURRENT window (not a full transcript rebuild); compact mode takes the keyed paint like normal mode", () => {
-  assert.match(RENDER, /if \(!v\.stale && tailDiff\(v, s, items, working, wasAtTail\)\) return v;[\s\S]*?renderWindowItems\(v, s, items, ws, we, working\); v\.stale = false; return v;/);
+  assert.match(RENDER, /if \(!v\.stale && tailDiff\(v, s, items, working, wasAtTail\)\) return v;[\s\S]*?renderWindowItems\(v, s, items, ws, we, working, keepHeld\); v\.stale = false; return v;/);
   assert.doesNotMatch(RENDER, /if \(settings\.compact \|\| v\.stale\) \{/, "compact mode rebuilt the whole window on every frame until 2026-09-23");
 });
 

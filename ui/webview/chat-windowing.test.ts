@@ -36,7 +36,7 @@ test("every rendered row is tagged data-unit, so the scroll↔unit map can locat
 });
 
 test("renderWindowItems renders [unitStart, unitEnd) with a TOP and a BOTTOM spacer", () => {
-  assert.match(RENDER, /function renderWindowItems\(v: View, s: Session, items: DisplayItem\[\], unitStart: number, unitEnd: number, working: boolean\): void/);
+  assert.match(RENDER, /function renderWindowItems\(v: View, s: Session, items: DisplayItem\[\], unitStart: number, unitEnd: number, working: boolean, keepHeld = false\): void/);
   assert.match(RENDER, /if \(unitStart > 0\) v\.el\.appendChild\(el\("div", "tx-spacer tx-spacer-top"\)\);/);
   assert.match(RENDER, /if \(unitEnd < total\) v\.el\.appendChild\(el\("div", "tx-spacer tx-spacer-bot"\)\);/);
   assert.match(RENDER, /v\.winStart = unitStart; v\.winEnd = unitEnd;/);
@@ -108,7 +108,8 @@ test("syncView: a pure tab switch is a NO-OP render (reveal the cached DOM)", ()
 
 test("syncView: a stale view re-renders the CURRENT window; every other change is the keyed paint, which grows only the bottom spacer while browsing", () => {
   // a stale view (tool-group toggle, units above the window reshaped) re-renders where the user is; compact mode no longer does on every frame
-  assert.match(RENDER, /if \(!v\.stale && tailDiff\(v, s, items, working, wasAtTail\)\) return v;[\s\S]*?renderWindowItems\(v, s, items, ws, we, working\);/);
+  // (it keeps the held figure over the same units above the window: chat-regions.test.ts pins keepHeld)
+  assert.match(RENDER, /if \(!v\.stale && tailDiff\(v, s, items, working, wasAtTail\)\) return v;[\s\S]*?renderWindowItems\(v, s, items, ws, we, working, keepHeld\);/);
   // browsing history away from the tail: appended units land below the window → the bottom spacer grows, the top one stands
   assert.match(RENDER, /const we = atTail \? total : Math\.min\(v\.winEnd \?\? total, total\);/);
   assert.match(RENDER, /if \(bot && v\.spacerCountBot !== botCount\) sizeBottomSpacer\(v, bot, top\);/);
