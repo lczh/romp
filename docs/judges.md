@@ -482,6 +482,18 @@ While the account usage window is exhausted, the rate gate skips every call
 across every session and logs one `rate-limited` row per window; gate skips count
 toward nothing.
 
+- **A nudge reply's reopen stands only beside a ruling.** The planner reads a
+  nudge reply against its goal reopened, since its menu is the goal's open
+  subtree, but every exit that applies no ruling takes the reopen back before
+  the store is saved: a failed call, a reply that did not parse, a refusal,
+  the give-up those strikes end in, and a plan that stands down at the write.
+  Before that, each failed pass published one more identical reopen row, and
+  an outage evicted the goal's whole earlier history. A transient failure
+  takes no strike, as in the work run, so it can hold the reply, and with it
+  the session's later nudges, for as long as it lasts; after
+  `PLAN_PARSE_RETRIES` such passes in a row one `nudge-held` row names the
+  reply's segment and goal, once per streak.
+
 - **The closer bounds its own call and its own sweep.** Behind a turn's own
   goals the closer carries *riders*: open work nominated from elsewhere (a goal
   whose recorded steps are all finished, a starved leaf, a lifted card, and on
@@ -644,7 +656,8 @@ permission/API-error floors: one interrupt at a time, the present event first.
   `fastReason`; an error envelope that carried the readback leaves a zero-cost
   row marked `err`, which the cost rollup skips),
   `STATE/judge-errors.jsonl` (the row contract above; kinds are parse,
-  call, give-up, sweep-cut, cite-miss, rate-limited, task-store, history-unreadable,
+  call, give-up, nudge-held (a nudge reply a transient failure has held for
+  `PLAN_PARSE_RETRIES` passes, once per streak), sweep-cut, cite-miss, rate-limited, task-store, history-unreadable,
   task-key-collision (a duplicated to-do mirror key, reconciled per node
   and surfaced loudly), store-unreadable: a goals file that cannot be read,
   filed once per fault episode and ended by the next successful read,

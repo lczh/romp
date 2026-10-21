@@ -1065,7 +1065,9 @@ def _log_judge_error(judge, fsid, err, note=None, goal=None, seg=None):
              "parse" (the model's own text, rejected by the parser), "give-up" (fail cap hit, quiet
              until the event named in the note re-arms it), "deferred" (the courier skipped a peer
              message this pass because its call came back empty — usage-limited/API error — and will
-             retry it until the 48h horizon; surfaced only in debug), "cite-miss", "rate-limited",
+             retry it until the 48h horizon; surfaced only in debug), "nudge-held" (a nudge reply whose planner
+             call has failed transiently PLAN_PARSE_RETRIES passes in a row: it stays due with no give-up,
+             said once per streak, not per pass — _nudge_reply_held), "cite-miss", "rate-limited",
              "unmigrated-node", "task-store" (the live task store exists but can't be read —
              plan-sync skipped for the pass rather than silently folding the transcript),
              "scratch" (the judge scratch cwd can't be made private — call skipped, never rerouted
@@ -11093,14 +11095,85 @@ def _reopen(store, gid, by="?", now=None, msg=False):
         stack.extend(kids.get(c, []))                  # none → open; a rolled-away block resurfaces) rules
 
 
+def _reopen_provisional(store, gid, by="?", now=None):
+    """_reopen for a caller that must READ the reopened tree before it knows the reopen should stand; returns
+    the undo. The nudge branch of _plan_session is the caller (2026-10-21): its planner call is built from the
+    reopened goal (the menu is the goal's OPEN subtree, so the reopen's unseal, unblock and unroll change what
+    the planner is shown), yet the reopen belongs to the planner's ruling on the reply and may stand only
+    beside it. The exits that carry no ruling (a call that failed, a reply that did not parse, a refusal, the
+    give-up those strikes end in, a plan that stood down at the write) still reach a save, the strike's re-arm
+    or the one at the end of the pass, so a reopen left in memory there was published. Each failed pass then
+    appended another identical "reopened (nudge)" row: 70 passes left 64 (LOG_CAP), the goal's earlier
+    history evicted with them, and a blocked card read Working after one failed call, a move on no new
+    information (the review of #334; the settle-row loop rollup_status' container sweep documents is the
+    same shape). The undo puts back, in place, every node _reopen can write (the goal, its ancestor chain,
+    its subtree) as it stood before the reopen, rows a LOG_CAP eviction dropped included, which popping the
+    appended row could not restore. It must run before anything else writes those nodes; a caller that keeps
+    the reopen simply never calls it."""
+    nodes = store["nodes"]
+    kids = {}
+    for k, v in nodes.items():
+        kids.setdefault(v.get("parentId"), []).append(k)
+    reach, seen = [], set()
+    x = (nodes.get(gid) or {}).get("parentId")
+    while x in nodes and x not in seen:                # the ancestors _reopen unblocks
+        seen.add(x)
+        reach.append(x)
+        x = nodes[x].get("parentId")
+    stack = [gid] if gid in nodes else []
+    while stack:                                       # the goal and the subtree it unrolls
+        c = stack.pop()
+        if c not in seen:
+            seen.add(c)
+            reach.append(c)
+            stack.extend(kids.get(c, []))
+    was = {nid: copy.deepcopy(dict(nodes[nid])) for nid in reach}
+    _reopen(store, gid, by=by, now=now)
+
+    def undo():
+        with _authority():
+            for nid, saved in was.items():
+                nd = nodes.get(nid)
+                if nd is not None:
+                    nd.clear()
+                    nd.update(saved)
+    return undo
+
+
+_NUDGE_HELD = {}                         # (fsid, nudge place key) -> passes in a row its planner call failed
+#                                          transiently in THIS process (_nudge_reply_held); dropped once a call is
+#                                          served, so it holds only replies a failure is holding right now
+
+
+def _nudge_reply_held(fsid, seg_id, pkey, goal, title, last):
+    """Count one more pass on which a nudge reply's planner call failed TRANSIENTLY (nothing served, not a
+    pause skip, not a content refusal) and, at the PLAN_PARSE_RETRIES-th pass in a row, say ONCE that the reply
+    is held. Such a failure takes no strike and has no give-up, by the work-run's deliberate rule (its recovery
+    is the outage ending, and a usage window must not burn a reply's tries), so a failure that never ends
+    holds the reply due for good, and with it every later nudge in the session: an unplaced unit silences
+    them. A Codex-engine failure never carries the refusal flag, so a repeating one is exactly that case (the
+    review of #334). The call is logged upstream on every pass; this row is the reply's, one per streak,
+    carrying its segment and goal so the card's diagnostics join it. A count, never a clock, like the planner's
+    other bounds; the caller drops the count when a call is served, and a kernel restart starts it over."""
+    k = (fsid, pkey)
+    n = _NUDGE_HELD[k] = _NUDGE_HELD.get(k, 0) + 1
+    if n == PLAN_PARSE_RETRIES:
+        _log_judge_error("planner", fsid, "nudge-held", seg=seg_id, goal=goal,
+                         note="the planner call on the nudge reply for %r has failed %d passes in a row (%s); the "
+                              "reply stays due and is retried every pass with no give-up, and this session's "
+                              "nudges wait until a call is served"
+                              % (str(title or "")[:80], n, str((last or {}).get("note") or "no reply")[:120]))
+
+
 def nudge_pipeline_row(e):
     """True for a diary row the NUDGE PIPELINE ITSELF wrote: the procedural src=="nudge" block, and the
     reply-placement's own unseal — _reopen(by="nudge") files "reopened (nudge)" on the target and
-    "unblocked by reopen (nudge)" on its ancestors, on EVERY placed reply (may_apply gates reopen on
-    view-cleared only). The moot supersede guard (kernel _mark_nudge_failed) must not read these as "a
-    real judge ruled on newer evidence": the reopen's filing time always postdates the response turn,
-    so counting it mooted every placed-but-unresolved nudge reply — the escalation ladder's terminal
-    rung went dead the day the guard shipped. The audited card (the user 2026-07-30) sat correctly
+    "unblocked by reopen (nudge)" on its ancestors, on EVERY reply the planner rules on (may_apply gates
+    reopen on view-cleared only; an exit with no ruling undoes it, _reopen_provisional). The moot supersede
+    guard (kernel _mark_nudge_failed) must not read these as "a real judge ruled on newer evidence": the
+    reopen's filing time always postdates the response turn, so counting it mooted every placed-but-
+    unresolved nudge reply — the escalation ladder's terminal rung went dead the day the guard shipped.
+    The audited card (the user 2026-07-30) sat correctly
     blocked-on-you, the reply-placement's reopen lifted the block, the planner resolved only a sibling
     question and left the goal working, and the evaluator then stood down moot on the strength of that
     same reopen row: no chip, no block, the anti-loop arm pinned, the card parked in Working with no
@@ -12868,9 +12941,14 @@ def _plan_session(fsid, path, now):
                     store["placements"][_pkey] = None
                     save_goals(fsid, store)
                     continue
-                _reopen(store, target, by="nudge", now=seg_t)         # unseal if the closer already completed it (refused if view-cleared)
+                # unseal if the closer already completed it (refused if view-cleared). PROVISIONAL until the
+                # planner rules (2026-10-21): the menu below is read from the reopened goal, but the reopen
+                # belongs to the ruling, so every exit below that applies no ruling takes it back before the
+                # store is saved (_reopen_provisional has the incident: a row per failed pass, history evicted)
+                _undo_reopen = _reopen_provisional(store, target, by="nudge", now=seg_t)
                 sub = _scoped_menu(store, target)      # SCOPED menu: the goal + its open descendants, goal first (#1)
                 if not sub:
+                    _undo_reopen()
                     continue                          # goal not open (e.g. view-cleared) → don't plan
                 hist = _goal_work_text(store, seg_by_id, target, GOAL_HISTORY_CHARS)
                 # name the menu items that mirror the agent's OWN still-open to-dos: the note (plan_llm) makes
@@ -12894,16 +12972,24 @@ def _plan_session(fsid, path, now):
                     # write; a refusal or a parse reject takes a PLAN_PARSE_RETRIES strike and retires the
                     # target unresolved only once the strikes run out. Either way the BUNDLE stops here: its
                     # bare key, ordered last, is the one the kernel reads for every target, so placing it
-                    # after skipping this target would read this target as ruled too.
+                    # after skipping this target would read this target as ruled too. And NO RULING, NO REOPEN:
+                    # every one of these exits, the give-up included, applies no ruling, so the reopen goes
+                    # first, before the strike's save or the pass's.
+                    _undo_reopen()
                     strike, last = "parse", None
                     if not raw:
                         _judge_ctx.stage_incomplete = True     # the unit stays due: no stamp for this pass
                         last = getattr(_judge_ctx, "last_call_fail", None)
-                        if getattr(_judge_ctx, "paused", False) or not (isinstance(last, dict) and last.get("refusal")):
+                        paused = getattr(_judge_ctx, "paused", False)
+                        if paused or not (isinstance(last, dict) and last.get("refusal")):
+                            if not paused:             # a pause skip sent no call: the pause says itself
+                                _nudge_reply_held(fsid, seg_id, _pkey, target,
+                                                  store["nodes"][target].get("text"), last)
                             break                      # transient, already logged upstream: retry next pass
                         strike = "refusal"
                     else:
                         _log_judge_error("planner", fsid, "parse", note="reply tail: %r" % raw[-160:], seg=seg_id)
+                    _NUDGE_HELD.pop((fsid, _pkey), None)   # a call came back (a reject, a refusal): no streak
                     fails = store.setdefault("parseFails", {})
                     fails[_pkey] = fails.get(_pkey, 0) + 1
                     if fails[_pkey] < PLAN_PARSE_RETRIES:
@@ -12918,6 +13004,7 @@ def _plan_session(fsid, path, now):
                     ops = []
                 else:
                     store.get("parseFails", {}).pop(_pkey, None)   # ruled → forget any earlier strikes
+                    _NUDGE_HELD.pop((fsid, _pkey), None)           # …and any failure streak
                 # the must-resolve note pushes DONE/BLOCK on the goal; a MINT is re-rooted as a sub under it, and a
                 # genuine-progress SUB files under it too. Skips drop. NO empty-reply fallback (the user 2026-06-22):
                 # an unresolved nudge applies NOTHING — apply_plan with empty ops marks the phase processed
@@ -12935,6 +13022,9 @@ def _plan_session(fsid, path, now):
                                       place_key=_pkey, prompt_uuid=trig, quote=vq):
                     placed += 1
                     _group_store(store, fsid, now)
+                else:
+                    _undo_reopen()                     # the plan stood down at the write (a rewound-away or
+                    #                                    pending-cut prompt): nothing applied, so no reopen
                 save_goals(fsid, store)
             continue
         if followup and followup in store["nodes"]:   # tagged follow-up: file under the target — a STRONG
