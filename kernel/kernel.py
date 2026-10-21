@@ -53791,6 +53791,15 @@ _SPEND_HOURS_SPAN = 33 * 24     # the hours any viewer's "this month" can reach:
 _SPEND_HOURS_MEMO = [None]      # [(the ledger file's stamp and the current hour, the payload)]: one parse per change or hour
 
 
+def _spend_ledger_unreadable(p, e) -> dict:
+    """The rail hover's error for a ledger that exists but cannot be looked up, read or parsed. The recorder (sdk_backend
+    _record_spend) records nothing while it stands, so every such failure names the file and how recording resumes; it
+    never moves the file itself, which would hide the corruption."""
+    return {"error": "the spend ledger could not be %s (%s); romp records no spend until %s is fixed or moved aside"
+                     % ("parsed" if isinstance(e, ValueError) else "read", getattr(e, "strerror", None) or e,
+                        _tilde(str(p)))}
+
+
 def _spend_hours_payload(now=None):
     """This host's spend by ABSOLUTE hour over the last _SPEND_HOURS_SPAN hours, the raw material for the rail's two
     windows in any viewer's own zone (_spend_win; the reviewer 2026-10-08: "today" read off each kernel's local clock, so
@@ -53812,7 +53821,7 @@ def _spend_hours_payload(now=None):
     except FileNotFoundError:
         return None
     except OSError as e:
-        return {"error": "the spend ledger could not be read: %s" % (e.strerror or e)}
+        return _spend_ledger_unreadable(p, e)       # the lookup itself failed (a directory that denies search)
     key = (str(p), stt.st_mtime_ns, stt.st_size, int(now // 3600))
     held = _SPEND_HOURS_MEMO[0]
     if held and held[0] == key:
@@ -53822,11 +53831,7 @@ def _spend_hours_payload(now=None):
         if not isinstance(d, dict):
             raise ValueError("not an object")
     except Exception as e:
-        # the recorder (sdk_backend _record_spend) records nothing while the file stands, so the hover says how to resume;
-        # it never moves the file itself, which would hide the corruption
-        return {"error": "the spend ledger could not be %s (%s); romp records no spend until %s is fixed or moved aside"
-                         % ("parsed" if isinstance(e, ValueError) else "read", getattr(e, "strerror", None) or e,
-                            _tilde(str(p)))}
+        return _spend_ledger_unreadable(p, e)
     hours = d.get("hours") if isinstance(d.get("hours"), dict) else {}
     days = d.get("days") if isinstance(d.get("days"), dict) else {}
     h_now = int(now // 3600)
