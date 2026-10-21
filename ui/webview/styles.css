@@ -3994,18 +3994,36 @@ body.drop-over::after { content: ""; position: fixed; inset: 0; pointer-events: 
    scale as a user-message picture (.user-img's 320px cap — one size per information type); a PDF gets
    its native inline viewer (preview.ts previewFull). */
 .path-full { display: block; }
-/* ONE picture box: a mentioned file's figure (.path-full-img) and a picture a message's markdown embeds (.md-img, which
-   preview.ts mdImgPostPass stamps) share these rules, every declaration written once, so the two cannot drift (the user
-   2026-10-21, who wanted both kinds sized and dressed like the path preview). The SIZE rule caps every markdown picture:
-   a tall or a full-size one stays within 320px and the bubble, its ratio kept (width and height auto, and object-fit for
-   one whose author fixed a width, which a max-height cannot shrink whole), while a badge or an icon, far under both
-   caps, keeps its natural size in its line of text. The BOX (block, rounded, framed, the zoom cursor) dresses only a
-   picture a click opens in the lightbox, .md-img-zoom (preview.ts: 32px tall and up, outside any link or <summary>), so
-   a badge stays inline, a linked picture keeps its link's cursor, and nothing says it zooms unless it does. */
-.path-full-img, .md-img { max-width: 100%; max-height: 320px; object-fit: contain; }
-.path-full-img, .md-img-zoom { display: block; border-radius: 8px; cursor: zoom-in;
+/* ONE picture box: a mentioned file's figure (.path-full-img), a picture a message's markdown embeds (.md-img, which
+   preview.ts mdImgPostPass stamps) and a video's still (.md-video, preview.ts makeVideoStill: a message's <video>, a
+   mentioned video file, a link to one) share these rules, every declaration written once, so none can drift (the user
+   2026-10-21, who wanted pictures and then videos sized and dressed like the path preview). The SIZE rule caps every
+   one: a tall or a full-size one stays within 320px and the bubble, its ratio kept (width and height auto, and
+   object-fit for one whose author fixed a width, which a max-height cannot shrink whole), while a badge or an icon, far
+   under both caps, keeps its natural size in its line of text. The BOX (block, rounded, framed) dresses one that opens
+   in the lightbox AND stands alone in its paragraph (.md-solo, preview.ts mdSolo; a path's figure always does): a
+   picture inside a sentence stays on its line rather than splitting the sentence around a framed block (the review of
+   this box, 2026-10-21). The ZOOM CURSOR marks everything a click opens, inline or not: .md-img-zoom (preview.ts: shown
+   32px tall and up, outside any link or <summary>) and every still; so a badge stays a glyph, a linked picture keeps its
+   link's cursor, and nothing says it zooms unless it does. */
+.path-full-img, .md-img, .md-video { max-width: 100%; max-height: 320px; object-fit: contain; }
+.path-full-img, .md-img-zoom.md-solo, .md-solo > .md-video { display: block; border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.14); background: rgba(0, 0, 0, 0.25); }
-.path-full-img:hover, .md-img-zoom:hover { border-color: var(--accent); }
+.path-full-img, .md-img-zoom, .md-video-still { cursor: zoom-in; }
+.path-full-img:hover, .md-img-zoom.md-solo:hover, .md-solo:hover > .md-video { border-color: var(--accent); }
+/* The still's own anatomy (no size or frame of its own: those are the rules above). Width and height auto win over the
+   width="100%" an agent writes on a <video>: an author rule beats a presentational attribute at any specificity, so the
+   clip is the picture box's size (569x320 for 1920x1080 in a wide bubble), never the bubble's width. The wrapper carries
+   the play badge (a <video> draws no pseudo-element) and takes the tap; it shrinks to the video (inline-block in a
+   line of text, a block of the video's own width when it stands alone), so the badge sits on the frame's centre. The
+   badge is drawn on the clip itself, so it reads the same in either theme. */
+.md-video { display: block; width: auto; height: auto; }
+.md-video-still { position: relative; display: inline-block; max-width: 100%; vertical-align: top; line-height: 0; }
+.md-video-still.md-solo { display: block; width: fit-content; }
+.md-video-still::after { content: ""; position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; margin: -22px 0 0 -22px;
+  border-radius: 50%; pointer-events: none; background: rgba(0, 0, 0, 0.55) no-repeat 55% 50% / 18px 18px
+  url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18'%3E%3Cpath d='M4 2.5v13l11-6.5z' fill='%23fff'/%3E%3C/svg%3E"); }
+.md-video-still:hover::after { background-color: rgba(0, 0, 0, 0.72); }
 .path-full-pdfcard { display: inline-flex; align-items: center; gap: 7px; padding: 7px 11px;
   border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.14); background: rgba(0, 0, 0, 0.25); }
 .path-full-pdfcard:hover { border-color: var(--accent); }
@@ -4044,6 +4062,7 @@ body.drop-over::after { content: ""; position: fixed; inset: 0; pointer-events: 
 .romp-lightbox-img { max-width: 92vw; max-height: 82vh; object-fit: contain; border-radius: 8px; align-self: center;
   box-shadow: var(--shadow-modal);
   transform-origin: 0 0; will-change: transform; }   /* pinch-zoom renders translate+scale from this corner (T162; pinch.ts) */
+.romp-lightbox-video { background: #000; }   /* a video in the same capped box (preview.ts openLightbox, 2026-10-21); black behind its letterbox */
 /* the stage owns every touch gesture (T162): pinch must zoom the IMAGE, never the page — the bar's
    buttons still tap fine (touch-action only disables the browser's own gestures) */
 .romp-lightbox-inner { touch-action: none; }

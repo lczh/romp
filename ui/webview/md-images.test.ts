@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import { Marked } from "marked";
-import { mdImages, mdLayout, decodeRefs, opensInLightbox } from "./md-images";
+import { mdImages, mdLayout, decodeRefs, opensInLightbox, isVideoUrl } from "./md-images";
 import { chatMdExtensions } from "./chat-md";
 
 const chat = new Marked({ gfm: true, breaks: false }, ...chatMdExtensions);
@@ -197,4 +197,77 @@ test("opensInLightbox: a web address or a data: picture; never a script, a page 
     "data:image/png;base64,AAAA", "data:image/svg+xml,%3Csvg%3E"]) assert.equal(opensInLightbox(u), true, u);
   for (const u of ["javascript:alert(1)", "JavaScript:alert(1)", "data:text/html,<p>x</p>", "data:,x", "blob:https://img.example.test/1",
     "file:///tmp/x.png", "vbscript:x", ""]) assert.equal(opensInLightbox(u), false, u);
+});
+
+// ── videos (2026-10-21, the user wanting a chat video treated like a picture) ─────────────────────────────────────────
+test("opensInLightbox for a video: a web address on another site, or this kernel's file route; never data:, blob: or a script", () => {
+  const here = "https://dash.example.test";
+  for (const u of ["https://media.example.test/demo.mp4", "http://media.example.test/clip.webm?x=1", "https://media.example.test/stream",
+    here + "/file?path=out%2Fdemo.mp4&sid=11111111-2222-3333-4444-555555555555", here + "/remote/TESTHOST/file?path=demo.mov"])
+    assert.equal(opensInLightbox(u, "video", here), true, u);
+  for (const u of ["data:video/mp4;base64,AAAA", "blob:https://dash.example.test/1", "javascript:alert(1)", "JavaScript:alert(1)",
+    "file:///tmp/demo.mp4", "", "not a url", here + "/chat", here + "/api/sessions", here + "/remote/TESTHOST/ws", here + "/files"])
+    assert.equal(opensInLightbox(u, "video", here), false, u);
+  // the picture rule is untouched: the kind defaults to a picture, and a data: picture still opens
+  assert.equal(opensInLightbox("data:image/png;base64,AAAA"), true);
+  assert.equal(opensInLightbox(here + "/chat"), true, "a picture's rule is the scheme alone, as before");
+  assert.equal(opensInLightbox("data:video/mp4;base64,AAAA"), false, "…and a data: video is no picture either");
+});
+
+test("isVideoUrl: a web address whose path ends in .mp4, .webm or .mov", () => {
+  for (const u of ["https://media.example.test/demo.mp4", "https://media.example.test/a/b/Clip.WEBM", "http://media.example.test/x.mov?t=3#frag"])
+    assert.equal(isVideoUrl(u), true, u);
+  for (const u of ["https://media.example.test/demo.mp4/page", "https://media.example.test/?f=demo.mp4", "https://media.example.test/demo.mp3",
+    "demo.mp4", "/file?path=demo.mp4", "javascript:x.mp4", "data:video/mp4;base64,AAAA", "https://media.example.test/.mp4dir/x"])
+    assert.equal(isVideoUrl(u), false, u);
+});
+
+test("a <video> is a stop where it is written, named by its src or its first <source>; a linked or folded one is not", () => {
+  const src = [
+    "The run:",
+    "",
+    "<video controls width=\"100%\" src=\"https://media.example.test/run.mp4\"></video>",
+    "",
+    "![after](https://img.example.test/after.png)",
+    "",
+    "<video controls>",
+    "  <source src=\"https://media.example.test/alt.webm\" type=\"video/webm\">",
+    "  <source src=\"https://media.example.test/alt.mp4\" type=\"video/mp4\">",
+    "  <img src=\"https://img.example.test/fallback.png\">",
+    "</video>",
+    "",
+    "<a href=\"https://ci.example.test/run\"><video src=\"https://media.example.test/linked.mp4\"></video></a>",
+    "",
+    "<details><summary><video src=\"https://media.example.test/folded.mp4\"></video></summary>x</details>",
+  ].join("\n");
+  const got = mdImages(src, lex);
+  assert.deepEqual(got.map((m) => [m.url, !!m.video]), [
+    ["https://media.example.test/run.mp4", true], ["https://img.example.test/after.png", false], ["https://media.example.test/alt.webm", true]],
+    "the first source names a sourced video; its fallback picture is never shown, so never a stop; a linked or folded video is its link's or fold's");
+  assert.equal(got[0].at, src.indexOf("<video controls width"), "where the video is written");
+  assert.ok(got[2].at === src.indexOf("<video controls>\n"), "a sourced video stands where its <video> opens");
+});
+
+test("a link to a video file renders its still after its block: videoLinks, at a path figure's place", () => {
+  const src = "The demo is at https://media.example.test/demo.mp4 and\n![x](https://img.example.test/x.png) beside it.\n\n"
+    + "[the long take](https://media.example.test/long.webm)\n\n`https://media.example.test/code.mp4` stays code.\n\n"
+    + "<a href=\"https://media.example.test/raw.mov\">raw</a>\n\n[again](https://media.example.test/demo.mp4)\n\n"
+    + "<video src=\"https://media.example.test/shown.mp4\"></video> and [its link](https://media.example.test/shown.mp4)\n\n"
+    + "[a page](https://media.example.test/page)";
+  const { images, videoLinks } = mdLayout(src, lex);
+  assert.deepEqual(videoLinks.map((m) => m.url), ["https://media.example.test/demo.mp4", "https://media.example.test/long.webm",
+    "https://media.example.test/raw.mov"], "autolinked, markdown and HTML links; the first to a URL alone; none in code; none a <video> shows; no page link");
+  assert.ok(videoLinks.every((m) => m.video), "each a video");
+  const x = images.find((m) => m.url.endsWith("x.png"))!;
+  assert.ok(x.at < videoLinks[0].at, "the wrapped paragraph's picture shows before the link's still, which lands after the paragraph");
+  assert.equal(videoLinks[0].at, src.indexOf("beside it.") + "beside it.".length);
+});
+
+test("a message that names a video file is read; one that names none still is not lexed", () => {
+  let lexed = 0;
+  const counting = (s: string) => { lexed++; return lex(s); };
+  assert.equal(mdLayout("see https://media.example.test/demo.mp4", counting).videoLinks.length, 1);
+  assert.equal(lexed, 1);
+  assert.deepEqual(mdLayout("see https://media.example.test/page", counting).videoLinks, []);
+  assert.equal(lexed, 1, "no picture, no video, no video file: never lexed");
 });

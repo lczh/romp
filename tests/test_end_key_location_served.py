@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Whether the chat page takes End or leaves it to the browser, and what End then scrolls or moves, executed in a real browser on
 test_end_key_served.py's lab (its kernel, its sessions, its transcript and its driver's helpers) with classic scrollbars and, added to
-web's transcript, a Bash call with a short output, a reply with two videos (one with controls, one with none and a tabindex) and an
+web's transcript, a Bash call with a short output, a reply with two videos (one with controls, its clip written into the message as a
+data: address, one with none and a tabindex) and an
 audio whose clip holds no frames, an incoming question by mail whose long body has a link in its first line (its sent row in the postal
 log), and a long reply. One driver run, on the page's own keys:
   1. a click on a line of the reply, then a press on the scrollbar of the opened Bash output box, then End; the same with the scrollbar
@@ -18,13 +19,17 @@ log), and a long reply. One driver run, on the page's own keys:
 Listeners the lab adds on the window after the page's own record whether the page took each End (defaultPrevented) and the times of
 the last selectionchange and the last pointerdown. Skips LOUDLY without the extension deps or a Playwright browser. SYNTHETIC fixtures
 only (the notes-api demo world)."""
+import base64
+import io
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 import time
 import unittest
+import wave
 from pathlib import Path
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -35,8 +40,24 @@ import test_file_tabs_served as F   # noqa: E402
 BAR = "#" * 44
 MAIL = ("Which of the notes-api rules should stay? The list is in [the rules page](https://example.test/rules).\n\n"
         + "".join("- rule %d: the handler keeps the note's id and title\n" % i for i in range(1, 61)))
+
+
+def _tone_data_url():
+    """Three seconds of a tone as a data: address, 8-bit at 8 kHz so the message stays small. The video with controls plays
+    it: since 2026-10-21 the chat turns a video on a web address into a still that opens the lightbox and has no controls
+    (preview.ts makeVideoStill), so the transcript's video with its own controls is one the lightbox never opens, a clip
+    written into the message, which plays where it is."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(1)
+        w.setframerate(8000)
+        w.writeframes(bytes(int(128 + 100 * math.sin(2 * math.pi * 440 * i / 8000)) for i in range(3 * 8000)))
+    return "data:audio/wav;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
 VIDEOS = ("Clips of the notes api, two as video and one as audio.\n\n"
-          '<video id="lab-video" controls src="https://media.test/clip.wav"></video>\n\n'
+          '<video id="lab-video" controls src="' + _tone_data_url() + '"></video>\n\n'
           '<video id="lab-video-bare" tabindex="0" src="https://media.test/clip.wav"></video>\n\n'
           '<audio id="lab-empty" controls src="https://media.test/empty.wav"></audio>')
 TAIL = "The rest of the plan for the notes api.\n\n" + "".join("- Step line %d: the handler writes the note back.\n" % i for i in range(1, 81))

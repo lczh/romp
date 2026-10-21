@@ -6733,6 +6733,28 @@ the message box of the session you are looking at; a dashed ring shows the pane 
 while you drag, and in a split each column takes its own drops. Dropped anywhere else on the
 dashboard, a file is refused (the cursor says so) rather than opened in place of the page.
 
+### Pictures and videos in a message
+
+A picture a message embeds, a file it mentions and a video it posts share one box: as wide as
+the message at most and 320 pixels tall at most, the shape kept. One that stands alone in its
+paragraph is framed; one written inside a sentence stays on its line, and one shown under 32
+pixels tall (a badge, or a large picture given a small height) is part of the text and does not
+open. A picture inside a link follows the link, and one in a fold's heading opens the fold.
+
+A video shows its first frame with a play button over it, muted and never playing by itself,
+whatever the message asked for (`<video controls width="100%">` included). A path to an
+`.mp4`, `.webm` or `.mov` file, and a link to one on the web, show the same frame under the
+paragraph that names them. Clicking or tapping opens the video large and starts it with sound,
+since the click is the go-ahead the browser asks for; if the browser declines, it waits with its
+controls showing. Closing it, or stepping to the next picture, stops it.
+
+The arrow keys step through every picture and video in the chat in the order the chat shows
+them. The control in the bar opens a web address's original in a new tab and downloads a file.
+Only a web address or a file the kernel serves opens this way: a video written as a `data:`
+address plays where it is, with its own controls. Files play through the kernel's `/file`
+route, and a remote session's through its relay, both answering the byte-range requests a
+browser makes to start and seek a video (Safari plays nothing without them), with no size cap.
+
 ### Quoting a passage into the composer
 
 The file viewer, over the chat and as a file tab, has a message bar at its foot addressed

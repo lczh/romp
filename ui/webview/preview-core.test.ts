@@ -17,8 +17,13 @@ const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "bin", "romp-ke
 test("preview.ts: kind classification, kernel /file URL, and hide-but-heal unverified renders", () => {
   // the client's renderable-extension list must stay in step with the kernel's _PREVIEW_MIME
   assert.match(PREVIEW, /IMG_EXT = new Set\(\["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"\]\)/);
-  assert.match(KERNEL, /_PREVIEW_MIME = dict\(_IMG_MIME, \*\*\{"\.pdf": "application\/pdf"\}\)/,
-               "kernel allowlist = image mimes + pdf; the client mirrors it");
+  assert.match(KERNEL, /_PREVIEW_MIME = dict\(_IMG_MIME, \*\*\{"\.pdf": "application\/pdf"\}, \*\*_VIDEO_MIME\)/,
+               "kernel allowlist = image mimes + pdf + video; the client mirrors it");
+  // …and its videos (2026-10-21): the client's VIDEO_EXT (md-images.ts) is the kernel's _VIDEO_MIME, extension for extension
+  const MDI = fs.readFileSync(path.join(UI, "md-images.ts"), "utf8");
+  assert.match(MDI, /export const VIDEO_EXT: ReadonlySet<string> = new Set\(\["mp4", "webm", "mov"\]\);/);
+  assert.match(KERNEL, /_VIDEO_MIME = \{"\.mp4": "video\/mp4", "\.webm": "video\/webm", "\.mov": "video\/quicktime"\}/);
+  assert.match(PREVIEW, /if \(VIDEO_EXT\.has\(ext\)\) return "video";/);
   assert.match(PREVIEW, /if \(ext === "pdf"\) return "pdf";/);
   // bytes come from the kernel's /file endpoint, path percent-encoded, sid for cwd-relative
   // resolution — routed through the /remote/<host>/file relay when the sid wears a host prefix
@@ -47,7 +52,7 @@ test("chat: a mentioned image/PDF grows a FULL render at its mention, deduped an
   // (the user 2026-07-20: full renders replaced the 2026-07-08 thumbnails in the chat; the user
   // 2026-08-15: figures moved from a tail strip to the mentioning block —
   // chat-inline-preview.test.ts pins the placement shape)
-  assert.match(RENDER, /import \{ previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, installMdImgZoom, mdImgPostPass, setLightboxNav, type LightboxNavEntry \} from "\.\/preview";/);
+  assert.match(RENDER, /import \{ previewKind, previewFull, previewVideoUrl, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, installMdImgZoom, mdImgPostPass, setLightboxNav, type LightboxNavEntry \} from "\.\/preview";/);
   assert.match(RENDER, /if \(previewKind\(open\) && !previewable\.includes\(open\) && !\(skipThumbs && skipThumbs\.includes\(open\)\)\) \{/, "collected while linkifying — same detection, no second regex pass; an in-bubble image never re-renders");
   assert.match(RENDER, /if \(previewable\.length\) \{/, "both surfaces now — VS Code images ride the host data-URL flow");
   assert.match(RENDER, /for \(const p of previewable\) renderFig\(p\);/,
@@ -58,7 +63,7 @@ test("chat: a mentioned image/PDF grows a FULL render at its mention, deduped an
 test("the chat sheet carries the lightbox + preview styles (the feed no longer previews)", () => {
   assert.match(CHAT_CSS, /#romp-lightbox \{ position: fixed; inset: 0; z-index: 1300;/);
   assert.match(CHAT_CSS, /\.path-thumb-tag \{ font-size: 0\.72em;/, "the PDF card's label (previewFull)");
-  assert.match(CHAT_CSS, /^\.path-full-img, \.md-img \{ max-width: 100%; max-height: 320px;/m, "the full render's image scale, the picture box a markdown picture shares");
+  assert.match(CHAT_CSS, /^\.path-full-img, \.md-img, \.md-video \{ max-width: 100%; max-height: 320px;/m, "the full render's image scale, the picture box a markdown picture and a video's still share");
   assert.match(CHAT_CSS, /\.path-thumbs \{ display: flex; flex-wrap: wrap;/, "the chat strip container");
 });
 

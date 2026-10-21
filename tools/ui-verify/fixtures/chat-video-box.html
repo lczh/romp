@@ -1,0 +1,20 @@
+<!-- SYNTHETIC fixture: videos in a chat reply wearing the picture box (2026-10-21), for eyeballing the still that
+     preview.ts makeVideoStill builds: a message's <video controls width="100%"> (the shape an agent posts) after the
+     post-pass (no controls, muted, the wrapper that carries the play badge, alone in its paragraph so framed as a block),
+     a mentioned video file's still in the path preview's strip, a picture written inside a sentence (inline, the zoom
+     cursor, no frame) and an <img height="20"> of a large picture (a glyph: no zoom, no box). A static page plays nothing,
+     so each video's first frame is an inline SVG poster of the clip's 1920x1080 size (the poster sets the same intrinsic
+     size the frame would). Invented content (notes-api demo domain). Run at a phone width and a desktop width, in each theme:
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/chat-video-box.html \
+           --out /tmp/video-box-phone.png --size 390x1400 [--body-class "theme-light chat-theme-yatharth"]
+-->
+<div id="content" style="min-height: 100vh"><div class="thread">
+<div class="turn turn-assistant"><div class="assistant md"><p>The signup flow, recorded:</p>
+<p><span class="md-video-still md-solo" data-video="https://media.example.test/signup.mp4"><video class="md-video" width="100%" muted="" playsinline="" preload="metadata" poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080'%3E%3Crect width='1920' height='1080' fill='%232a6fb0'/%3E%3Crect x='300' y='340' width='400' height='400' fill='%23f0c040'/%3E%3Ctext x='1760' y='170' font-size='120' font-family='sans-serif' font-weight='bold' fill='%23fff'%3E0%3C/text%3E%3C/svg%3E"></video></span></p>
+<p>The error state is in <span class="file-uri-link">media/walkthrough.webm</span>.</p>
+<div class="path-thumbs"><span class="path-full" title="media/walkthrough.webm"><span class="md-video-still md-solo" data-video="/file?path=media%2Fwalkthrough.webm"><video class="md-video" muted="" playsinline="" preload="metadata" poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080'%3E%3Crect width='1920' height='1080' fill='%233c7a52'/%3E%3Crect x='900' y='300' width='600' height='420' fill='%23e8e2d0'/%3E%3C/svg%3E"></video></span></span></div>
+<p>Trace <img class="md-img md-img-zoom" alt="inline trace" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='1600'%3E%3Crect width='400' height='1600' fill='%23c86428'/%3E%3Crect x='40' y='40' width='320' height='1520' fill='%23e8a070'/%3E%3C/svg%3E"> here, and the heat map at a glance:</p>
+<img class="md-img md-solo" height="20" alt="squashed heat map" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+<p>That is the whole run.</p>
+</div></div>
+</div></div>

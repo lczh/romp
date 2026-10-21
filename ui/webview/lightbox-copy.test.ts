@@ -15,8 +15,11 @@ const CSS = fs.readFileSync(
 
 test("the button exists only where the clipboard API does — honest absence, never a dead control", () => {
   assert.match(PREVIEW, /if \(curImg && typeof ClipboardItem !== "undefined" && navigator\.clipboard && navigator\.clipboard\.write\) \{/);
-  // img kind only: curImg is set in the img branch; the pdf branch never sets it
-  assert.match(PREVIEW, /let curImg: \(\(\) => HTMLImageElement\) \| null = null;/);
+  // img kind only: curImg is set in the img branch (a video's too since 2026-10-21, whose button is hidden); the pdf
+  // branch never sets it
+  assert.match(PREVIEW, /let curImg: \(\(\) => HTMLImageElement \| HTMLVideoElement\) \| null = null;/);
+  assert.match(PREVIEW, /if \(isVideoSource\(src\)\) btn\.style\.display = "none";/, "a video has no picture to copy");
+  assert.match(PREVIEW, /if \(cp\) cp\.style\.display = isVideoSource\(e\) \? "none" : "";/, "…and a step onto a picture shows the button again");
   assert.match(PREVIEW, /curImg = \(\) => img;/);
 });
 

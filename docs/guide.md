@@ -45,6 +45,11 @@ writes to the session the file came from; ⌘⏎ stages it with the chat's stage
 messages and ⏎ sends. While the viewer is open, typing, pasting and dictation go
 to its bar.
 
+A picture or a video in a message shows at the size of a mentioned file's
+preview, as does a path or a link to a video file. A click opens it large, where
+a video plays with its controls, and the arrow keys step through every picture
+and video in the chat.
+
 The viewer's pop-out button keeps the file open as a tab, right after the
 session it came from. File tabs sit in the strip with your sessions, the arrows
 step through them, and your other devices show the same ones.

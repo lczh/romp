@@ -14,13 +14,22 @@
 // (imgAttrs). Which `<` in the message's raw HTML opens a tag is read the way the browser's tokenizer reads it
 // (htmlImages), the same code in the browser and under node; only the attributes' decoding uses the browser's parser
 // when there is one.
+//
+// A video is a stop too (2026-10-21, the user wanting a chat video to open in the same lightbox as a picture): a <video>
+// the message writes, named by its src or its first <source>, where it is written, and a LINK to a video file (isVideoUrl),
+// whose preview renders after its block the way a path's figure does (videoLinks).
 import type { Token } from "marked";
 
-export interface MdImage { url: string; alt: string; at: number; }
+export interface MdImage { url: string; alt: string; at: number; video?: boolean; }
 
 /** One message's reading for the lightbox: its pictures, and where a path it mentions shows its figure. */
 export interface MdLayout {
+  /** The pictures and the videos the message embeds, in document order (a video carries `video: true`). */
   images: MdImage[];
+  /** The links to a video file (isVideoUrl) the message writes outside code: each renders a preview after its block, as a
+   *  path's figure does (render.ts linkifyFileUris), so `at` is that figure's place (figureAt of the link), ordered
+   *  against `images`. The first link to a URL alone, and none to a URL a <video> in the message already shows. */
+  videoLinks: MdImage[];
   /** Where the figure of a path first mentioned at offset `mention` renders, as an offset the caller orders against the
    *  pictures' `at`. render.ts linkifyFileUris puts a figure after the paragraph or heading that names the path (BLOCK_SEL),
    *  or INSIDE a list item, at its end, after anything nested in it (a loose item's text is a paragraph of its own). So
@@ -60,9 +69,37 @@ export function decodeRefs(v: string): string {
 /** An address the lightbox opens a picture on: a web address or a data: picture, the schemes the arrows' sequence keeps
  *  (render.ts chatImagesFor) and the only ones a click opens (preview.ts mdImgZoomable). Anything else, a javascript: or
  *  a data:text/html URL that a srcset candidate could name, opens nothing. `url` is resolved: an <img>'s currentSrc or
- *  src, or a markdown URL resolved against the page. */
-export function opensInLightbox(url: string): boolean {
-  return /^(https?:|data:image\/)/i.test(url);
+ *  src, or a markdown URL resolved against the page.
+ *
+ *  A VIDEO (kind "video", 2026-10-21, the user wanting a chat video treated like a picture) opens on less: a web address
+ *  on another site, or on this page's own origin the kernel's file route alone (/file, a remote session's
+ *  /remote/<host>/file), never a data:, blob: or javascript: URL. The lightbox plays it and its "Open original" opens it
+ *  in a tab of its own, so a same-origin address elsewhere (a dashboard route) is no video to play or to open; and a
+ *  data: clip, which the sanitizer lets a <video> carry, keeps its own controls in the message instead. The picture rule
+ *  above is untouched. `here` is the page's origin (the unit tests pass one; the page reads its own). */
+export function opensInLightbox(url: string, kind: "img" | "video" = "img",
+    here: string | null = typeof location !== "undefined" ? location.origin : null): boolean {
+  if (kind !== "video") return /^(https?:|data:image\/)/i.test(url);
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  if (!here || u.origin !== here) return true;                     // another site's video
+  return u.pathname === "/file" || /^\/remote\/[^/]+\/file$/.test(u.pathname);   // this kernel's: its file route alone
+}
+
+/** The extensions a chat treats as a video file: a link or a path that ends in one shows a playable still (preview.ts).
+ *  The kernel's /file serves exactly these (kernel _VIDEO_MIME; preview-core.test.ts pins the pair). */
+export const VIDEO_EXT: ReadonlySet<string> = new Set(["mp4", "webm", "mov"]);
+
+/** A link whose target is a video file: a web address whose PATH ends in one of VIDEO_EXT (a query or a fragment after it
+ *  is the server's business). Relative or schemeless hrefs are never one: a link's preview loads from where it points,
+ *  and only an absolute web address says where that is. */
+export function isVideoUrl(href: string): boolean {
+  let u: URL;
+  try { u = new URL(href); } catch { return false; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  const p = u.pathname, dot = p.lastIndexOf(".");
+  return dot > p.lastIndexOf("/") && VIDEO_EXT.has(p.slice(dot + 1).toLowerCase());
 }
 
 // An HTML <img>'s src and alt as the page's <img> has them. In the browser that is the browser's own HTML parser, run on
@@ -70,17 +107,18 @@ export function opensInLightbox(url: string): boolean {
 // the sanitizer's DOMPurify ran on the message, so every character reference decodes as it did there, named or numeric.
 // Under node (the unit tests) there is no parser: the attributes are the ones htmlImages read off the tag, and decodeRefs
 // decodes them. A null src: the tag has none (a srcset alone), so there is no URL to name.
+// The same reading serves a <video>'s and a <source>'s src and an <a>'s href (`name`, 2026-10-21): one parse, one decode.
 let tpl: HTMLTemplateElement | null = null;
-function imgAttrs(tag: string, attrs: Map<string, string>): { src: string | null; alt: string } {
+function imgAttrs(tag: string, attrs: Map<string, string>, name = "src"): { src: string | null; alt: string } {
   if (typeof document !== "undefined" && typeof document.createElement === "function") {
     tpl = tpl || document.createElement("template");
     if (tpl.content) {
       tpl.innerHTML = tag;
       const img = tpl.content.firstElementChild;
-      if (img) return { src: img.getAttribute("src"), alt: img.getAttribute("alt") || "" };
+      if (img) return { src: img.getAttribute(name), alt: img.getAttribute("alt") || "" };
     }
   }
-  const s = attrs.get("src"), a = attrs.get("alt");
+  const s = attrs.get(name), a = attrs.get("alt");
   return { src: s === undefined ? null : decodeRefs(s), alt: a === undefined ? "" : decodeRefs(a) };
 }
 
@@ -100,7 +138,12 @@ function imgAttrs(tag: string, attrs: Map<string, string>): { src: string | null
 // `fold` across blocks too, since a blank line inside a summary leaves it open in the browser's parse, and `skip` (an
 // unclosed comment, "--", or the raw-text element being read) for as long as the browser's parse stays in it, which
 // also hides the markdown pictures rendered inside it.
-interface HtmlState { link: number; fold: number; skip: string; }
+// A <video> (2026-10-21) is a stop like a picture, named by its src or, without one, by its first <source>'s, the one the
+// browser tries first; `video` is the element being read (whether it is named yet), and while it is open nothing else
+// inside it is a stop, since a browser that plays video shows none of an element's other children (its fallback). It
+// closes at </video> or at the end of the block (a </p> closes it in the browser's parse). `links`: the video files a
+// raw <a href> points at, outside a fold, which render after the block as a link written in markdown does.
+interface HtmlState { link: number; fold: number; skip: string; video: { named: boolean; at: number } | null; links: MdImage[]; }
 const RAW_TEXT = new Set(["script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes", "noscript", "plaintext"]);
 const isSpace = (c: string) => c === " " || c === "\n" || c === "\t" || c === "\r" || c === "\f";
 const isLetter = (c: string) => /^[a-z]$/i.test(c);
@@ -176,11 +219,33 @@ function htmlImages(raw: string, at: number, st: HtmlState, out: MdImage[]): voi
       if (tag.name === "a") st.link = Math.max(0, st.link - 1);
       else if (tag.name === "summary") st.fold = Math.max(0, st.fold - 1);
       else if (tag.name === "details") st.fold = 0;
+      else if (tag.name === "video") st.video = null;
       continue;
     }
-    if (tag.name === "a") { st.link++; continue; }
+    if (tag.name === "a") {
+      if (!st.link && !st.fold && !st.video) {        // a link to a video file renders its preview after the block
+        const { src: href } = imgAttrs(raw.slice(lt, tag.end), tag.attrs, "href");
+        if (href && isVideoUrl(href.trim())) st.links.push({ url: href.trim(), alt: "", at: at + lt, video: true });
+      }
+      st.link++;
+      continue;
+    }
     if (tag.name === "summary") { st.fold++; continue; }
     if (RAW_TEXT.has(tag.name)) { st.skip = tag.name; continue; }
+    if (tag.name === "source" && st.video && !st.video.named) {
+      const { src } = imgAttrs(raw.slice(lt, tag.end), tag.attrs);
+      if (src && src.trim()) { st.video.named = true; out.push({ url: src, alt: "", at: st.video.at, video: true }); }
+      continue;
+    }
+    if (st.video) continue;                             // inside a <video>: its fallback, never shown
+    if (tag.name === "video") {
+      if (st.link > 0 || st.fold > 0) continue;         // a linked or folded video is the link's or the fold's, as a picture is
+      const { src } = imgAttrs(raw.slice(lt, tag.end), tag.attrs);
+      const named = !!(src && src.trim());
+      st.video = { named, at: at + lt };
+      if (named) out.push({ url: src as string, alt: "", at: at + lt, video: true });
+      continue;
+    }
     if (tag.name !== "img" || st.link > 0 || st.fold > 0) continue;
     const { src, alt } = imgAttrs(raw.slice(lt, tag.end), tag.attrs);
     if (src === null || !src.trim()) continue;          // no src, or an empty one (the page's own address): nothing to step to
@@ -198,11 +263,12 @@ export function mdLayout(src: string, lex: (s: string) => Token[]): MdLayout {
     const n = src.indexOf("\n", mention);
     return n < 0 ? src.length : n;
   };
-  if (!src || !/!\[|<img/i.test(src)) return { images: [], figureAt };
+  // a message that names no picture, no video and no video file is never lexed
+  if (!src || !/!\[|<img|<video|\.(?:mp4|webm|mov)\b/i.test(src)) return { images: [], videoLinks: [], figureAt };
   let tokens: Token[];
-  try { tokens = lex(src); } catch { return { images: [], figureAt }; }
+  try { tokens = lex(src); } catch { return { images: [], videoLinks: [], figureAt }; }
   const out: MdImage[] = [];
-  const st: HtmlState = { link: 0, fold: 0, skip: "" };
+  const st: HtmlState = { link: 0, fold: 0, skip: "", video: null, links: [] };
   let from = 0;                                        // where the token being walked starts, at the latest
   const find = (raw: string): number => {
     const i = raw ? src.indexOf(raw, from) : -1;
@@ -234,7 +300,7 @@ export function mdLayout(src: string, lex: (s: string) => Token[]): MdLayout {
         const at = find(tok.raw);
         const im = tok as Token & { href: string; text: string };
         const url = cleanUrl(im.href);
-        if (!linked && !st.fold && !st.skip && url) out.push({ url, alt: im.text || "", at });   // an empty href names the page itself: no picture
+        if (!linked && !st.fold && !st.skip && !st.video && url) out.push({ url, alt: im.text || "", at });   // an empty href names the page itself: no picture
         from = at + tok.raw.length;
         continue;
       }
@@ -246,10 +312,19 @@ export function mdLayout(src: string, lex: (s: string) => Token[]): MdLayout {
         from = at + tok.raw.length;
         continue;
       }
-      if (tok.type === "link") { find(tok.raw); walk(tok.tokens, true, item); continue; }
+      if (tok.type === "link") {
+        const at = find(tok.raw);
+        const url = cleanUrl((tok as Token & { href: string }).href || "");
+        // a link (or an autolinked address) to a video file, outside a fold, a comment and a <video>: its preview renders
+        // after the block, as a path's figure does (render.ts linkifyFileUris)
+        if (!linked && !st.fold && !st.skip && !st.video && url && isVideoUrl(url)) st.links.push({ url, alt: "", at, video: true });
+        walk(tok.tokens, true, item);
+        continue;
+      }
       if (tok.type === "list") {
         for (const it of tok.items || []) {
           st.link = 0;                                 // a link opened in raw HTML never spans blocks (nor items)
+          st.video = null;                             // …nor does a <video> a paragraph opened
           const sp = locate(it.raw);
           if (sp) from = sp.start;
           walk((it as Tok).tokens, linked, tok.loose ? null : { end: sp ? sp.end : -1 });
@@ -261,6 +336,7 @@ export function mdLayout(src: string, lex: (s: string) => Token[]): MdLayout {
       // `<a href>` and its picture, carries no tokens of its own and is none of these)
       if (tok.type === "paragraph" || tok.type === "heading" || (tok.type === "text" && tok.tokens)) {
         st.link = 0;
+        st.video = null;
         const sp = locate(tok.raw);
         if (sp) {
           blocks.push({ start: sp.start, end: sp.end, land: tok.type === "text" && item && item.end >= 0 ? item.end : sp.end });
@@ -277,7 +353,16 @@ export function mdLayout(src: string, lex: (s: string) => Token[]): MdLayout {
     }
   };
   walk(tokens, false, null);
-  return { images: out, figureAt };
+  // each video link's preview lands where a path's figure would (figureAt), the first link to a URL alone, and none for a
+  // URL a <video> in the message already shows
+  const shown = new Set(out.filter((m) => m.video).map((m) => m.url));
+  const videoLinks: MdImage[] = [];
+  for (const l of st.links) {
+    if (shown.has(l.url)) continue;
+    shown.add(l.url);
+    videoLinks.push({ ...l, at: figureAt(l.at) });
+  }
+  return { images: out, videoLinks, figureAt };
 }
 
 /** The pictures alone (mdLayout's). */

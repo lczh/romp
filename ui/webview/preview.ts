@@ -10,17 +10,19 @@ import { hostOf, bareId } from "./host-prefix";
 import { mediaSrc } from "./media";
 import { ICON_DOWNLOAD, ICON_COPY, ICON_CHECK, ICON_CROSS, ICON_POPOUT } from "./icons";   // the shared stroke-family glyphs (T367; the popout for a URL picture's original)
 import * as pz from "./pinch";
-import { opensInLightbox } from "./md-images";   // the schemes a picture opens on: the click's and the arrows' one rule
+import { opensInLightbox, VIDEO_EXT } from "./md-images";   // the schemes a picture or a video opens on: the click's and the arrows' one rule
 
-// Extensions the kernel's _PREVIEW_MIME serves — keep the two lists in step (tests pin both).
+// Extensions the kernel's _PREVIEW_MIME serves — keep the two lists in step (tests pin both). Video's are VIDEO_EXT
+// (md-images.ts), the kernel's _VIDEO_MIME.
 const IMG_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg"]);
 
-export type PreviewKind = "img" | "pdf";
+export type PreviewKind = "img" | "pdf" | "video";
 
 export function previewKind(path: string): PreviewKind | null {
   const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
   if (IMG_EXT.has(ext)) return "img";
   if (ext === "pdf") return "pdf";
+  if (VIDEO_EXT.has(ext)) return "video";
   return null;
 }
 
@@ -188,7 +190,7 @@ export function openPdf(path: string, sid?: string | null, ev?: MouseEvent | nul
 // browser's own page-zoom out of it. The CLOSE gesture is untouched by construction: dismissal
 // stays tap-on-BACKDROP (target === wrap) and the ✕ — every pinch/pan pointer is CAPTURED by the
 // stage, so a drag that ends anywhere can never read as a backdrop tap.
-function wirePinchZoom(stage: HTMLElement, img: HTMLImageElement): { retarget: (next: HTMLImageElement) => void } {
+function wirePinchZoom(stage: HTMLElement, img: HTMLElement): { retarget: (next: HTMLElement) => void } {
   let view = pz.identity();
   const ptrs = new Map<number, { x: number; y: number }>();
   let start: { view: pz.PinchView; d: number } | null = null;   // two-pointer gesture snapshot
@@ -211,6 +213,7 @@ function wirePinchZoom(stage: HTMLElement, img: HTMLImageElement): { retarget: (
   const q = (e: PointerEvent) => ({ x: e.clientX - rest!.left, y: e.clientY - rest!.top });
   stage.addEventListener("pointerdown", (e) => {
     if ((e.target as HTMLElement).closest(".romp-lightbox-bar")) return;   // the bar's buttons own their taps
+    if (img.tagName === "VIDEO") return;   // a video's own controls own its taps (a capture here would take the scrub bar's drag); no zoom
     ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
     try { stage.setPointerCapture(e.pointerId); } catch { /* a pointer gone between event and capture — the move/up handlers still see bubbled events */ }
     measure();
@@ -255,7 +258,7 @@ function wirePinchZoom(stage: HTMLElement, img: HTMLImageElement): { retarget: (
   stage.addEventListener("pointercancel", lift);
   // stepping the lightbox swaps the img element: re-identity the view for the fresh element —
   // the stage's listeners are wired ONCE (steps must never stack handlers), only the target moves
-  return { retarget: (next: HTMLImageElement) => { img = next; view = pz.identity(); ptrs.clear(); start = null; apply(); } };
+  return { retarget: (next: HTMLElement) => { img = next; view = pz.identity(); ptrs.clear(); start = null; apply(); } };
 }
 
 // ── lightbox arrow navigation (the user 2026-08-29: arrow keys step to the previous/next picture
@@ -274,7 +277,10 @@ function wirePinchZoom(stage: HTMLElement, img: HTMLImageElement): { retarget: (
 // the bytes the message saw), or a picture embedded by URL, shown from that URL as the message has it.
 // One lightbox for both, and one sequence: the chat's provider returns both kinds in the order the chat
 // shows them.
-export type LightboxSource = { path: string; sid?: string | null; pin?: string } | { url: string; alt?: string };
+// A VIDEO is a source too (2026-10-21, the user wanting a chat video treated like a picture): a file whose path names one
+// (previewKind "video"), or an address flagged `video` (an address alone cannot say: a <video> may play a URL with no
+// extension). The lightbox plays it with its controls, and the arrows step through pictures and videos alike.
+export type LightboxSource = { path: string; sid?: string | null; pin?: string } | { url: string; alt?: string; video?: boolean };
 export type LightboxNavEntry = LightboxSource;
 let lightboxNav: ((sid: string | null | undefined, from?: Element | null) => LightboxNavEntry[]) | null = null;
 export function setLightboxNav(fn: (sid: string | null | undefined, from?: Element | null) => LightboxNavEntry[]): void {
@@ -285,6 +291,10 @@ export function setLightboxNav(fn: (sid: string | null | undefined, from?: Eleme
 function lightboxSrc(e: LightboxSource): string {
   return "url" in e ? e.url : fileUrl(e.path, e.sid) + (e.pin ? "&pin=" + encodeURIComponent(e.pin) : "");
 }
+// Whether a source is a video: an address flagged so, a file by its extension.
+function isVideoSource(e: LightboxSource): boolean {
+  return "url" in e ? !!e.video : previewKind(e.path) === "video";
+}
 // Two sources are the same picture: a file by its path and pin (two messages embedding different VERSIONS of one
 // path are different entries), a URL by itself.
 function sameSource(a: LightboxSource, b: LightboxSource): boolean {
@@ -294,7 +304,7 @@ function sameSource(a: LightboxSource, b: LightboxSource): boolean {
 // The title a URL picture wears in the bar, in the path's two halves: the place dimmed (host and folders), the file
 // name whole, the whole URL one hover away. A data: URL has no place and no name: its alt text names it, else
 // "image" (its bytes, perhaps megabytes of them, never reach the title).
-function urlTitle(e: { url: string; alt?: string }): { dir: string; base: string; full: string } {
+function urlTitle(e: { url: string; alt?: string; video?: boolean }): { dir: string; base: string; full: string } {
   if (/^data:/i.test(e.url)) { const n = (e.alt || "").trim() || "image"; return { dir: "", base: n, full: n }; }
   try {
     const u = new URL(e.url);
@@ -312,8 +322,9 @@ function dataSaveName(url: string): string {
 }
 
 export function openLightbox(src: LightboxSource, from?: Element | null): void {
-  document.getElementById("romp-lightbox")?.remove();
-  const kind = "url" in src ? "img" : previewKind(src.path);
+  for (const v of Array.from(document.querySelectorAll("#romp-lightbox video"))) stopVideo(v as HTMLVideoElement);   // a reopen silences what played…
+  document.getElementById("romp-lightbox")?.remove();                                                                 // …and replaces it
+  const kind = "url" in src ? (src.video ? "video" : "img") : previewKind(src.path);
   if (!kind) return;
   const wrap = document.createElement("div");
   wrap.id = "romp-lightbox";
@@ -323,7 +334,7 @@ export function openLightbox(src: LightboxSource, from?: Element | null): void {
   let at = -1;
   let step: ((delta: number) => void) | null = null;     // arrows step the chat's image sequence (img kind only)
   let cue: HTMLElement | null = null;                    // the compact position mark ("3/17") in the bar
-  let curImg: (() => HTMLImageElement) | null = null;    // the img on screen NOW (step rebinds it) — the copy source
+  let curImg: (() => HTMLImageElement | HTMLVideoElement) | null = null;   // the picture or video on screen NOW (step rebinds it) — the copy source
   if (kind === "pdf" && !("url" in src)) {
     // a plain click's view (openPdf), and the fallback when a modified click's tab was popup-blocked
     const frame = document.createElement("iframe");
@@ -332,7 +343,22 @@ export function openLightbox(src: LightboxSource, from?: Element | null): void {
     frame.title = src.path;
     inner.appendChild(frame);
   } else {
-    const mkImg = (e: LightboxNavEntry) => {
+    // A video plays here (2026-10-21): its controls, inline on iOS (playsinline, or the phone takes it full screen), the
+    // whole file buffered as it plays (preload auto: it was opened to be watched). It shares the picture's class, so it
+    // sits in the same capped box (.romp-lightbox-img), at the clip's own size from the first frame when the chat measured
+    // it already (sizeLikeClip). The tap that opened it starts it (openLightbox's end); a step onto one leaves it paused.
+    const mkImg = (e: LightboxNavEntry): HTMLImageElement | HTMLVideoElement => {
+      if (isVideoSource(e)) {
+        const v = document.createElement("video");
+        v.className = "romp-lightbox-img romp-lightbox-video";
+        v.controls = true;
+        v.playsInline = true;
+        v.preload = "auto";
+        sizeLikeClip(v, videoDims.get(lightboxSrc(e)));
+        v.src = lightboxSrc(e);
+        v.setAttribute("aria-label", "url" in e ? e.alt || "video" : e.path);
+        return v;
+      }
       const im = document.createElement("img");
       im.className = "romp-lightbox-img";
       im.src = lightboxSrc(e);
@@ -347,7 +373,7 @@ export function openLightbox(src: LightboxSource, from?: Element | null): void {
     // position matches the source (sameSource), a file falling back to its path alone for pre-pin
     // history. A URL that failed to load, or a glyph-sized one (mdImgTiny), is no stop: no click opens it
     nav = (lightboxNav ? lightboxNav("url" in src ? null : src.sid, from) : [])
-      .filter((e) => "url" in e ? !mdImgFailed.has(e.url) && !mdImgTiny.has(e.url) : previewKind(e.path) === "img");
+      .filter((e) => "url" in e ? !mdImgFailed.has(e.url) && !mdImgTiny.has(e.url) : previewKind(e.path) === "img" || previewKind(e.path) === "video");
     at = nav.findIndex((e) => sameSource(e, src));
     if (at < 0 && !("url" in src)) at = nav.findIndex((e) => !("url" in e) && e.path === src.path);
     // a picture that shows a srcset's candidate opens on what it shows (currentSrc), while the sequence, read off the
@@ -361,9 +387,11 @@ export function openLightbox(src: LightboxSource, from?: Element | null): void {
       at = n;
       const e = nav[at];
       const next = mkImg(e);
+      if (img.tagName === "VIDEO") stopVideo(img as HTMLVideoElement);   // stepping away from a video stops it (2026-10-21)
       img.replaceWith(next);
       img = next;
       pzc.retarget(next);                                // a step lands on the fit view, zoom reset
+      if (cp) cp.style.display = isVideoSource(e) ? "none" : "";   // a video has no picture to copy
       setName(e);                                        // the two-element title follows the step
       aimSave(e);                                        // …and so does the save control, its kind included
       if (cue) cue.textContent = (at + 1) + "/" + nav.length;
@@ -464,6 +492,7 @@ export function openLightbox(src: LightboxSource, from?: Element | null): void {
       if (ms !== null) copyTimer = window.setTimeout(() => say(COPY_SVG, "Copy image", "", null), ms);
     };
     say(COPY_SVG, "Copy image", "", null);
+    if (isVideoSource(src)) btn.style.display = "none";   // a video has no picture to copy; a step onto a picture shows it again
     btn.onclick = (ev) => {
       ev.stopPropagation();                                // copying must not also dismiss
       say(COPY_SVG, "Copy image", "", null);               // a press inside the last pulse: its check and its restore timer go, so the restore never wipes this press's dim (review, round two)
@@ -495,7 +524,12 @@ export function openLightbox(src: LightboxSource, from?: Element | null): void {
   if (cue) bar.append(name, cue, acts); else bar.append(name, acts);
   inner.prepend(bar);                                      // FIRST in the column: above the picture and the PDF frame
   wrap.appendChild(inner);
-  const dismiss = () => { wrap.remove(); document.removeEventListener("keydown", onKey, true); };
+  // closing stops a video (2026-10-21): its sound and its download end with the lightbox, not some stable state later
+  const dismiss = () => {
+    const cur = curImg ? curImg() : null;
+    if (cur && cur.tagName === "VIDEO") stopVideo(cur as HTMLVideoElement);
+    wrap.remove(); document.removeEventListener("keydown", onKey, true);
+  };
   const onKey = (ev: KeyboardEvent) => {
     if (ev.key === "Escape") { ev.stopPropagation(); dismiss(); return; }
     if (ev.ctrlKey || ev.altKey || ev.metaKey) return;   // a modified arrow is a chord (the shell's session pair), not a step: two capture
@@ -509,6 +543,13 @@ export function openLightbox(src: LightboxSource, from?: Element | null): void {
   wrap.onclick = (ev) => { if (ev.target === wrap) dismiss(); };   // backdrop closes; content clicks don't
   document.addEventListener("keydown", onKey, true);
   document.body.appendChild(wrap);
+  // AUTOPLAY ON OPEN (2026-10-21): a video opened by a tap or a click starts playing, sound on. That click is the user's
+  // gesture, which every browser's autoplay policy accepts (openLightbox runs inside the click handler, synchronously),
+  // so no muted-autoplay workaround is needed. A browser that declines anyway (a stricter policy, a low-power mode)
+  // leaves it paused with its controls showing, which is what a refusal should look like; the rejection is the browser's
+  // answer, not an error to report. A step onto a video by the arrows never starts it: browsing is not watching.
+  const first = curImg ? curImg() : null;
+  if (first && first.tagName === "VIDEO") { const pl = (first as HTMLVideoElement).play(); if (pl) pl.catch(() => { /* declined: paused, controls up */ }); }
   // the column's FLOOR (review, round two): a picture narrower than the download-and-copy group (about 68px) let the group run
   // out of the column to the left, since the bar contributes no intrinsic width (contain: inline-size: the picture sets the
   // column, never the path text). The floor is the GROUP's own width, read off its controls (their widths are intrinsic:
@@ -541,6 +582,32 @@ export function previewFull(path: string, sid?: string | null, verified = false,
   const box = document.createElement("span");
   box.className = "path-full" + (kind === "pdf" ? " pdf" : "");
   box.title = path;
+  if (kind === "video") {
+    // A mentioned video file (2026-10-21): the chat's still (makeVideoStill), its bytes from /file like a picture's, which
+    // answers a video's Range requests (Safari and iOS play nothing without them). Never pinned: the kernel's mention pins
+    // are pictures only (a clip would fill the pin store), so a re-recorded clip shows its newest take. Its failure follows
+    // the picture's rule: a path the kernel verified fails VISIBLY, with a tap to retry and the reconnect-class heal; an
+    // unverified one hides and stays healable (a later success shows it again).
+    const url = fileUrl(path, sid);
+    const v = document.createElement("video");
+    v.setAttribute("src", url);
+    const still = makeVideoStill(v, url, true);
+    still.onclick = (ev) => { ev.stopPropagation(); openLightbox({ path, sid }, v); };
+    box.appendChild(still);
+    v.addEventListener("error", () => {
+      const retry = () => { box.style.display = ""; box.textContent = ""; box.appendChild(still); v.load(); };
+      settledPreviews.set(box, retry);                     // the link coming back is new information: one more try
+      if (!verified) { box.style.display = "none"; return; }
+      const wait = mkWait(box);
+      const chip = document.createElement("span");
+      chip.className = "path-full-retry";
+      chip.textContent = "⚠ video unavailable — tap to retry";
+      chip.title = path;
+      chip.onclick = (ev) => { ev.stopPropagation(); retry(); };
+      wait.appendChild(chip);
+    });
+    return box;
+  }
   if (kind === "pdf") {
     box.classList.add("path-full-pdfcard");
     const tag = document.createElement("span");
@@ -884,15 +951,19 @@ function parkMdImg(img: HTMLImageElement, url: string): void {
  *  sanitizer removed the src that rewrite keys on, the review's find): an img whose URL is already known to fail is
  *  parked at RENDER, before any fetch. Every image it sees is a picture a message embedded, and wears .md-img: the one
  *  mark the zoom hook below reads, so a picture the file viewer or a hover card draws is never its business. One whose
- *  URL already loaded picture-sized takes .md-img-zoom here too, so a re-render draws it in the picture box at once
- *  (mdImgPicture, below). */
+ *  URL already loaded, and that will show picture-sized, takes .md-img-zoom here too, so a re-render draws it in the
+ *  picture box at once (mdImgDims and shownHeightOf, below); one alone in its paragraph takes .md-solo, the box's block
+ *  form (mdSolo). Its videos become the chat's still (mdVideoPostPass). */
 export function mdImgPostPass(root: ParentNode): void {
   for (const img of Array.from(root.querySelectorAll("img")) as HTMLImageElement[]) {
     img.classList.add("md-img");                     // a picture the message's markdown embeds: the zoom hook's mark (installMdImgZoom)
+    if (mdSolo(img)) img.classList.add("md-solo");   // alone in its paragraph: the box as a block, when it zooms (2026-10-21)
     const u = img.src || "";
+    const d = u ? mdImgDims.get(u) : undefined;
     if (u && mdImgFailed.has(u)) parkMdImg(img, u);
-    else if (u && mdImgPicture.has(u) && !img.closest("a, summary") && opensInLightbox(u)) img.classList.add("md-img-zoom");
+    else if (d && shownHeightOf(img, d) >= ZOOM_MIN_H && !img.closest("a, summary") && opensInLightbox(u)) img.classList.add("md-img-zoom");
   }
+  mdVideoPostPass(root);                             // and its videos become the still that opens the lightbox (2026-10-21)
 }
 /** A URL the kernel actually answers (/file, a remote relay's /file, /media): a file an agent is still writing or a
  *  relay behind a blip may come back with no reconnect event, so those get a BOUNDED probe on the per-message path
@@ -978,12 +1049,12 @@ export function installMdImgHeal(): void {
 // (the transcript, a subagent viewer, a comment thread), and nothing else. ONE pair of document-level listeners,
 // installed once: the transcript rebuilds these images on every push, so nothing hangs on an image (the click-safety
 // rule, ui/CLAUDE.md).
-//   load (capture: a load does not bubble) decides from the picture's NATURAL size whether it zooms, and marks it
-//     .md-img-zoom, the class the zoom cursor and the path preview's picture box ride (styles.css). A picture under
-//     ZOOM_MIN_H px tall is a glyph in a line of text (a status badge is 20px, an emoji or an icon 16 to 24): zooming it
-//     shows nothing more, so it neither zooms, nor wears the box, nor stops the lightbox's arrows (mdImgTiny, which the
-//     sequence filter reads). A URL that loaded picture-sized is remembered (mdImgPicture), so the post-pass stamps
-//     .md-img-zoom on the next render of it before it is on the page: the transcript rebuilds a streaming turn's
+//   load (capture: a load does not bubble) decides from the height the picture SHOWS at whether it zooms, and marks it
+//     .md-img-zoom, the class the zoom cursor rides, and with .md-solo the path preview's picture box (styles.css). A
+//     picture under ZOOM_MIN_H px tall is a glyph in a line of text (a status badge is 20px, an emoji or an icon 16 to
+//     24): zooming it shows nothing more, so it neither zooms, nor wears the box, nor stops the lightbox's arrows
+//     (mdImgTiny, which the sequence filter reads). A URL that loaded is remembered with its natural size (mdImgDims), so
+//     the post-pass stamps .md-img-zoom on the next render of it before it is on the page: the transcript rebuilds a streaming turn's
 //     pictures on every push, and a box that waited for each fresh element's load would step the turn's height a
 //     few px (inline to block) on every push. The load still rules on each element, so the stamp is only a head start.
 //   click (capture, so a fold or a bubble around the picture never also toggles under it) opens the lightbox on the
@@ -998,12 +1069,29 @@ export function installMdImgHeal(): void {
 // candidate alone, so a later one could name a javascript: or data:text/html URL, and the browser may pick it; such a
 // picture never loads, but the click refuses it by rule rather than by that accident. Web dashboard only, as every
 // preview (canPreview): the VS Code webview loads only data: pictures and has no kernel origin.
+// The threshold is the height the picture SHOWS at, not its file's (2026-10-21, the review of the shared box: an
+// `<img height="20">` of a large picture is a glyph in its line, and judging it by its natural height turned it into a
+// 20px framed blob on a line of its own). img.height is that: the rendered content height of a picture on the page, the
+// natural height of one that is not rendered (a closed fold, a hidden tab), where no better answer exists. Before a
+// picture is on the page (the post-pass, on a re-render), its height is read off what sizes it: its height attribute,
+// else its width attribute through the remembered natural ratio, else the natural height (shownHeightOf); its load then
+// rules on the element itself, so that reading is only a head start.
 const ZOOM_MIN_H = 32;
 const mdImgTiny = new Set<string>();                // URLs that loaded glyph-sized this page life: no stop in the sequence
-const mdImgPicture = new Set<string>();             // URLs that loaded picture-sized this page life: a re-render wears the box at once
+const mdImgDims = new Map<string, { w: number; h: number }>();   // natural sizes of the URLs that loaded this page life: a re-render wears the box at once
 let mdImgZoomOn = false;
+const attrPx = (v: string | null): number | null => {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(?:px)?\s*$/i.exec(v || "");   // a length in pixels; a percentage says nothing here
+  return m ? parseFloat(m[1]) : null;
+};
+export function shownHeightOf(img: Element, d: { w: number; h: number }): number {
+  const h = attrPx(img.getAttribute("height")), w = attrPx(img.getAttribute("width"));
+  if (h !== null) return h;
+  if (w !== null && d.w > 0) return w * d.h / d.w;
+  return d.h;
+}
 export function mdImgZoomable(img: HTMLImageElement): boolean {
-  return img.classList.contains("md-img") && !img.closest("a, summary") && opensInLightbox(img.currentSrc || img.src) && img.complete && img.naturalHeight >= ZOOM_MIN_H;
+  return img.classList.contains("md-img") && !img.closest("a, summary") && opensInLightbox(img.currentSrc || img.src) && img.complete && img.naturalHeight > 0 && img.height >= ZOOM_MIN_H;
 }
 export function installMdImgZoom(): void {
   if (mdImgZoomOn || !canPreview()) return;        // ensure-once (the click-safety installation rule)
@@ -1011,14 +1099,162 @@ export function installMdImgZoom(): void {
   document.addEventListener("load", (e) => {
     const img = e.target as HTMLImageElement | null;
     if (!img || img.tagName !== "IMG" || !img.classList.contains("md-img")) return;
-    if (img.src) { if (img.naturalHeight < ZOOM_MIN_H) mdImgTiny.add(img.src); else mdImgTiny.delete(img.src); }   // by src: the sequence's name for it
-    if (img.src) { if (img.naturalHeight < ZOOM_MIN_H) mdImgPicture.delete(img.src); else mdImgPicture.add(img.src); }   // …and the post-pass's
+    if (img.src && img.naturalHeight > 0) {
+      if (img.height < ZOOM_MIN_H) mdImgTiny.add(img.src); else mdImgTiny.delete(img.src);   // by src: the sequence's name for it
+      mdImgDims.set(img.src, { w: img.naturalWidth, h: img.naturalHeight });               // …and the post-pass's
+    }
     img.classList.toggle("md-img-zoom", mdImgZoomable(img));
   }, true);
+  // a video still's clip size, remembered by its address the moment its metadata lands (videoDims), so the next render of
+  // it is laid out at that size from the start (loadedmetadata does not bubble: the capture phase sees it)
+  document.addEventListener("loadedmetadata", (e) => {
+    const v = e.target as HTMLVideoElement | null;
+    if (!v || v.tagName !== "VIDEO" || !v.classList.contains("md-video")) return;
+    const url = (v.parentElement as HTMLElement | null)?.dataset.video || "";
+    if (url && v.videoWidth > 0 && v.videoHeight > 0) videoDims.set(url, { w: v.videoWidth, h: v.videoHeight });
+  }, true);
   document.addEventListener("click", (e) => {
-    const img = e.target as HTMLImageElement | null;
+    const t = e.target as Element | null;
+    // a message's video still (mdVideoPostPass): the tap opens the lightbox on its clip, which plays there. A path's or a
+    // link's still (inside .path-full) carries its own click, with the file's source (previewFull, previewVideoUrl).
+    const still = t && t.closest ? t.closest(".md-video-still") as HTMLElement | null : null;
+    if (still && !still.closest(".path-full") && still.dataset.video && opensInLightbox(still.dataset.video, "video")) {
+      const v = still.querySelector("video");
+      e.preventDefault(); e.stopPropagation();
+      openLightbox({ url: still.dataset.video, video: true }, v);
+      return;
+    }
+    const img = t as HTMLImageElement | null;
     if (!img || img.tagName !== "IMG" || !mdImgZoomable(img)) return;
     e.preventDefault(); e.stopPropagation();
     openLightbox({ url: img.currentSrc || img.src, alt: img.alt }, img);
   }, true);
+}
+
+// ── a chat video: a STILL that opens the lightbox (2026-10-21, the user wanting a video in the chat treated like a picture:
+// the same compact box, a tap to see it large) ─────────────────────────────────────────────────────────────────────────
+// A <video> a message writes (`<video controls width="100%" src="…mp4">`, the shape an agent posts), a mentioned path to a
+// video file (previewFull) and a link to one (previewVideoUrl) all show ONE still: the clip's first frame in the picture
+// box (the shared rules in styles.css: the bubble's width and 320px tall at most, its ratio kept; framed and a block when
+// it stands alone in its paragraph), a play badge over it and the zoom cursor. No native controls: they would fight the
+// tap that opens the lightbox, where it plays with its controls (openLightbox). Muted, and never playing by itself.
+//   width/height attributes never stretch it: the still's own rule sets both auto (styles.css .md-video), which a
+//     presentational width="100%" loses to, so a 1920x1080 clip shows at 569x320 in a wide bubble as a picture would.
+//   preload="metadata": the browser fetches the header and the first frame, never the whole file.
+//   playsinline: iOS otherwise takes a video full screen the moment it plays.
+//   "#t=0.001" on its address (STILL_FRAGMENT): iOS Safari paints no frame for a never-played video without a poster;
+//     a media fragment that starts it a millisecond in makes Safari fetch and show that frame, and desktop browsers paint
+//     the same frame. An address that carries a fragment already keeps the author's. The lightbox plays the address
+//     without it, from the start.
+// `url` is the address the lightbox opens (no fragment), carried as the still's data-video: the key of the remembered
+// size (videoDims) and, for a message's still, what the document-level click opens (installMdImgZoom).
+const STILL_FRAGMENT = "#t=0.001";
+// The size a clip showed at, by its address, for this page life. The transcript rebuilds a streaming turn's DOM on every
+// push, and a fresh <video> lays out at the browser's default 300x150 until its metadata lands, so each rebuild would step
+// the turn's height twice. A still whose clip the page has measured is laid out at that size from the start: size
+// containment with the clip's dimensions as its intrinsic size and its ratio (sizeLikeClip), so the picture box's caps
+// scale it exactly as they scale the loaded clip. The lightbox's video uses it too.
+const videoDims = new Map<string, { w: number; h: number }>();
+function sizeLikeClip(v: HTMLVideoElement, d: { w: number; h: number } | undefined): void {
+  if (!d || !(d.w > 0) || !(d.h > 0)) return;
+  v.style.setProperty("contain", "size");
+  v.style.setProperty("contain-intrinsic-size", d.w + "px " + d.h + "px");
+  v.style.setProperty("aspect-ratio", d.w + " / " + d.h);
+}
+/** Turn `v` (in the page or in the sanitizer's detached document) into the chat's still of the clip at `url`, wrapped in
+ *  the element that carries the badge and takes the tap; returns the wrapper, which takes `v`'s place when `v` has one.
+ *  `solo`: it stands alone in its paragraph (mdSolo), so it wears the box as a block. */
+export function makeVideoStill(v: HTMLVideoElement, url: string, solo: boolean): HTMLElement {
+  const doc = v.ownerDocument;
+  for (const a of ["controls", "autoplay", "loop"]) v.removeAttribute(a);   // the lightbox plays it; the chat never does
+  v.setAttribute("muted", "");                       // the attribute rides a serialization (md() hands back HTML) …
+  v.muted = true;                                    // … and the property holds where the element lives on
+  v.setAttribute("playsinline", "");
+  v.setAttribute("preload", "metadata");
+  v.classList.add("md-video");
+  for (const el of [v, ...Array.from(v.querySelectorAll("source"))]) {
+    const a = el.getAttribute("src");
+    if (a && !a.includes("#")) el.setAttribute("src", a + STILL_FRAGMENT);
+  }
+  sizeLikeClip(v, videoDims.get(url));
+  const still = doc.createElement("span");
+  still.className = "md-video-still" + (solo ? " md-solo" : "");
+  still.dataset.video = url;
+  if (v.parentNode) v.replaceWith(still);
+  still.appendChild(v);
+  return still;
+}
+
+// A picture or a video STANDS ALONE in its paragraph (2026-10-21, the review of the shared picture box: a picture in the
+// middle of a sentence became a framed block that split the sentence into three lines): nothing but whitespace (and a
+// line break) beside it in its parent, or, in a parent that holds blocks (the message's root, a list item, a cell), only
+// blocks. Only then does it wear the box as a block (styles.css .md-solo); one inline with text stays in its line, capped
+// and, when it zooms, with the zoom cursor. Read off the sanitized DOM at render (the post-pass), so it never waits on a
+// load and never flips.
+const BLOCK_TAGS = /^(P|DIV|UL|OL|DL|PRE|TABLE|BLOCKQUOTE|H[1-6]|HR|DETAILS|FIGURE|SECTION|ARTICLE|ASIDE|HEADER|FOOTER|NAV|ADDRESS)$/;
+export function mdSolo(el: Element): boolean {
+  const p = el.parentElement;
+  if (!p) return false;
+  for (const n of Array.from(p.childNodes)) {
+    if (n === el) continue;
+    if (n.nodeType === 3) { if ((n.textContent || "").trim()) return false; continue; }
+    if (n.nodeType !== 1) continue;                    // a comment shows nothing
+    const tag = (n as Element).tagName.toUpperCase();
+    if (tag === "BR") continue;
+    if (p.tagName.toUpperCase() !== "P" && BLOCK_TAGS.test(tag)) continue;
+    return false;
+  }
+  return true;
+}
+
+/** The address a message's <video> plays, resolved against the page: its src, else its first <source>'s (the one a
+ *  browser tries first; md-images.ts names the same one in the arrows' sequence). Null when it names none. */
+function mdVideoUrl(v: HTMLVideoElement): string | null {
+  const own = (v.getAttribute("src") || "").trim();
+  const a = own || ((v.querySelector("source[src]") as HTMLSourceElement | null)?.getAttribute("src") || "").trim();
+  if (!a) return null;
+  try { return new URL(a, document.baseURI).href; } catch { return null; }
+}
+
+/** The chat's post-pass over a message's videos (mdImgPostPass runs it): none ever starts by itself or with sound, and
+ *  every one the lightbox may open (opensInLightbox's video rule: a web address on another site, or this kernel's file
+ *  route) becomes the still. Any other keeps its own controls, so it still plays in the message: a data: clip (the
+ *  sanitizer lets a <video> carry one, the lightbox never opens one), one inside a link or a fold's <summary> (whose click
+ *  is theirs, as a picture's is), and every video in the VS Code webview, where no preview reaches the kernel. */
+function mdVideoPostPass(root: ParentNode): void {
+  for (const v of Array.from(root.querySelectorAll("video")) as HTMLVideoElement[]) {
+    v.removeAttribute("autoplay");
+    v.setAttribute("muted", "");
+    v.setAttribute("playsinline", "");
+    // already a still (a pass that ran twice): its wrapper carries the address, a data- attribute no author can write (the
+    // sanitizer drops every data-*), so a span an author dressed in the class is no reason to skip
+    if ((v.parentElement as HTMLElement | null)?.dataset?.video) continue;
+    const url = mdVideoUrl(v);
+    if (!url || v.closest("a, summary") || !canPreview() || !opensInLightbox(url, "video")) { v.setAttribute("controls", ""); continue; }
+    makeVideoStill(v, url, mdSolo(v));
+  }
+}
+
+/** A LINK to a video file in a message (isVideoUrl: a web address whose path ends in .mp4, .webm or .mov) renders the still
+ *  after its block, as a mentioned path's figure does (render.ts linkifyFileUris hands it the link; md-images.ts names it
+ *  in the arrows' sequence at the same place). Null where the lightbox would not open it, or with no kernel to reach. */
+export function previewVideoUrl(url: string): HTMLElement | null {
+  if (!canPreview() || !opensInLightbox(url, "video")) return null;
+  const box = document.createElement("span");
+  box.className = "path-full";
+  box.title = url;
+  const v = document.createElement("video");
+  v.setAttribute("src", url);
+  const still = makeVideoStill(v, url, true);
+  still.onclick = (ev) => { ev.stopPropagation(); openLightbox({ url, video: true }, v); };
+  box.appendChild(still);
+  return box;
+}
+
+/** Stop a video for good: paused, its source dropped and the load reset, so neither its sound nor its download outlives
+ *  the view that showed it (the lightbox's close and step, a reopen). */
+export function stopVideo(v: HTMLVideoElement): void {
+  try { v.pause(); } catch { /* a detached element */ }
+  v.removeAttribute("src");
+  try { v.load(); } catch { /* nothing to reset */ }
 }
