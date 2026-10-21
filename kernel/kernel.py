@@ -53822,7 +53822,11 @@ def _spend_hours_payload(now=None):
         if not isinstance(d, dict):
             raise ValueError("not an object")
     except Exception as e:
-        return {"error": "the spend ledger could not be read: %s" % e}
+        # the recorder (sdk_backend _record_spend) records nothing while the file stands, so the hover says how to resume;
+        # it never moves the file itself, which would hide the corruption
+        return {"error": "the spend ledger could not be %s (%s); romp records no spend until %s is fixed or moved aside"
+                         % ("parsed" if isinstance(e, ValueError) else "read", getattr(e, "strerror", None) or e,
+                            _tilde(str(p)))}
     hours = d.get("hours") if isinstance(d.get("hours"), dict) else {}
     days = d.get("days") if isinstance(d.get("days"), dict) else {}
     h_now = int(now // 3600)

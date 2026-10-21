@@ -237,7 +237,10 @@ class RailWindowsInTheViewersZone(SpendWindows):
     def test_an_unreadable_ledger_says_so_and_no_ledger_is_nothing(self):
         (km.jd.STATE / "spend.json").write_text("{not json")
         hp = km._spend_hours_payload()
-        self.assertTrue(hp.get("error", "").startswith("the spend ledger could not be read"), hp)
+        self.assertTrue(hp.get("error", "").startswith("the spend ledger could not be parsed ("), hp)
+        # the recorder writes nothing while the file stands, so the hover names the file and how recording resumes
+        self.assertTrue(hp["error"].endswith("; romp records no spend until %s is fixed or moved aside"
+                                             % km._tilde(str(km.jd.STATE / "spend.json"))), hp)
         self.assertEqual(km._spend_win(hp, "UTC"), {"error": hp["error"]}, "carried through, never a confident $0")
         (km.jd.STATE / "spend.json").unlink()
         self.assertIsNone(km._spend_hours_payload())
