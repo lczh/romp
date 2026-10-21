@@ -25,6 +25,9 @@ Every failed pass appended another identical "reopened (nudge)" row: 70 passes l
 evicting the goal's whole earlier history, and a blocked goal read Working after one failed call. Under test:
   - no ruling, no reopen: a failed call, a struck reply and a give-up leave the goal's diary as it was, and a
     pass that changes nothing writes nothing;
+  - the same for the other exits that apply nothing (the review of #340): a goal with no menu, a plan that
+    stands down at the write (after a ruling, or after the give-up, which undoes twice), and a served
+    ruling with no op, which still retires the reply once but leaves a blocked goal blocked;
   - once the planner serves, the reply is placed once, with the one reopen that rides its ruling;
   - a reply held by a failure that never strikes (no refusal flag, no pause) is said ONCE in the error log,
     naming the reply, not once per pass.
@@ -348,10 +351,10 @@ class FullDiary(_Base):
         self.assertFalse(nd.get("logTrunc"), "and nothing reads as evicted")
 
 
-class BlockedGoalStaysBlocked(_Base):
+class _Blocked(_Base):
     # a block that landed while the reply waited to be planned (its evidence just before the nudge, filed
-    # just after it fired): the nudge's reopen unblocks, so a reopen that outlived its failed call moved the
-    # card from Needs-you to Working on no new information
+    # just after it fired): the nudge's reopen unblocks, so a reopen that outlived its exit moved the card
+    # from Needs-you to Working on no new information
     HISTORY = (dict(_ASKED[0], ev_t=T - 1, at=T + 1),)
 
     def setUp(self):
@@ -360,6 +363,14 @@ class BlockedGoalStaysBlocked(_Base):
         jd._materialize_node(store["nodes"][G1])  # the flag cache from the diary, as a rollup derives it
         jd.save_goals(SID, store)
 
+    def _assert_unmoved(self, why):
+        nd = jd.load_goals(SID)["nodes"][G1]
+        self.assertTrue(nd.get("blocked"), why)
+        self.assertEqual([e.get("kind") for e in nd.get("log") or []], ["block"],
+                         "the diary as it was: no reopen row, nothing else")
+
+
+class BlockedGoalStaysBlocked(_Blocked):
     def test_a_failed_call_does_not_move_the_card(self):
         seg, _ = self._seg()
         self.assertTrue(jd.load_goals(SID)["nodes"][G1].get("blocked"), "premise: the goal is blocked")
@@ -369,6 +380,121 @@ class BlockedGoalStaysBlocked(_Base):
         self.assertNotIn(seg, self._placements())
         self.assertTrue(nd.get("blocked"), "no ruling: the card stays where it was")
         self.assertEqual([e.get("kind") for e in nd.get("log") or []], ["block"])
+
+
+SKIP = '{"ops":[{"do":"skip","why":"the reply reports no new work"}]}'
+
+
+class NoOpRulingKeepsNoReopen(_Blocked):
+    # The planner served the reply and it parsed, but the plan carries nothing to apply: a skip-only reply (the
+    # planner's "no real work here", which the nudge branch drops), or one whose done verdicts were all
+    # stripped because the segment holds no work to evidence them. The reply retires (placements[seg] = None,
+    # so the kernel reads it as ruled and nothing loops), but no verdict lands on the goal, so the reopen that
+    # was read for the menu has nothing to stand beside: kept, it alone moved a blocked card to Working.
+    def test_a_skip_only_reply_leaves_the_goal_blocked_and_retires_once(self):
+        seg, sess = self._seg()
+        self.replies = [SKIP]
+        self._pass()
+        self.assertEqual(self.calls, ["planner"], "premise: the planner was asked and served")
+        pl = self._placements()
+        self.assertIn(seg, pl, "the ruling retires the reply")
+        self.assertIsNone(pl[seg], "with nothing placed")
+        self._assert_unmoved("a ruling with no op is no new information: the card stays in Needs-you")
+        self.assertTrue(self._ready(sess, G1), "the kernel's gate reads the reply as ruled, so it is not re-asked")
+        for _ in range(3):
+            self._pass()
+        self.assertEqual(self.calls, ["planner"], "retired once: the reply is never planned again")
+        self._assert_unmoved("and later passes leave the card alone")
+
+
+class StandDownTakesTheReopenBack(_Blocked):
+    # a rewind lands DURING the planner call (the unit loop's own check, before the call, saw the prompt live),
+    # so apply_plan_guarded stands down at the write: "away" retires the reply, "pending" defers it. Nothing is
+    # applied, so the reopen goes too.
+    def setUp(self):
+        super().setUp()
+        self.away, self.cut = False, None
+        self._rewound = jd._rewound_away
+        jd._rewound_away = lambda *a, **k: self.away
+        served = jd._judge_run_impl
+
+        def call_then_cut(*a, **k):
+            out = served(*a, **k)
+            if self.cut is not None:
+                self.away = self.cut           # the rewind armed while the model was answering
+            return out
+        jd._judge_run_impl = call_then_cut
+
+    def tearDown(self):
+        jd._rewound_away = self._rewound
+        super().tearDown()
+
+    def _stood_down(self, seg, kind="rewind-stand-down"):
+        return [r for r in self._errors(kind) if r.get("seg") == seg]   # plan-sync logs its own, segment-less
+
+    def test_a_ruling_that_stands_down_takes_its_reopen_back(self):
+        seg, _ = self._seg()
+        self.replies, self.cut = [AWAITING], True
+        self._pass()
+        self.assertEqual(self.calls, ["planner"])
+        self.assertEqual(len(self._stood_down(seg)), 1, "premise: the reply's write stood down")
+        self.assertIsNone(self._placements().get(seg, "absent"), "and retired the reply")
+        self._assert_unmoved("a ruling that never landed must not move the card")
+
+    def test_a_ruling_deferred_by_a_pending_cut_takes_its_reopen_back(self):
+        seg, _ = self._seg()
+        self.replies, self.cut = [AWAITING], "pending"
+        self._pass()
+        self.assertEqual(len(self._stood_down(seg, "rewind-stand-down-pending")), 1, "premise: the write deferred")
+        self.assertNotIn(seg, self._placements(), "the reply stays due")
+        self._assert_unmoved("a deferred ruling must not move the card")
+
+    def test_a_give_up_that_then_stands_down_undoes_once_and_cleanly(self):
+        # the give-up undoes the reopen, then its empty plan stands down at the write and the branch undoes again
+        seg, _ = self._seg()
+        cap = jd.PLAN_PARSE_RETRIES
+        for i in range(cap):
+            self.replies = ["I think the goal is still going."]
+            if i == cap - 1:
+                self.cut = True                # the capping strike's call is the one the rewind lands during
+            self._pass()
+        self.assertEqual(len(self._errors("give-up")), 1, "premise: the strikes ran out")
+        self.assertEqual(len(self._stood_down(seg)), 1, "premise: and the give-up's write stood down")
+        self.assertIsNone(self._placements().get(seg, "absent"))
+        self._assert_unmoved("two undos of one reopen leave the card exactly as it was")
+
+
+class NoMenuTakesTheReopenBack(_Base):
+    # The nudge names a blocked step whose card already completed. Its reopen writes (a reopen row, the block
+    # lifted), but a step under a sealed card is not open, so the scoped menu is empty and the branch stops
+    # without asking the planner. Kept, that reopen was published by every pass's save: a row per pass.
+    TARGETS = (G2,)
+
+    def setUp(self):
+        super().setUp()
+        store = jd.load_goals(SID)
+        nodes = store["nodes"]
+        nodes[G1] = _top(G1, "Ship the notes-api release",
+                         log=[{"ev_t": 1500, "src": "planner", "kind": "done", "why": "released", "at": 1500}])
+        nodes[G2] = dict(_top(G2, nodes[G2]["text"], log=[dict(_ASKED[0], ev_t=T - 1, at=T + 1)]), parentId=G1)
+        for g in (G1, G2):
+            jd._materialize_node(nodes[g])
+        store["status"] = {G1: "completed"}
+        jd.save_goals(SID, store)
+
+    def test_a_goal_with_no_menu_keeps_no_reopen(self):
+        self._seg()
+        self.assertEqual(jd._scoped_menu(jd.load_goals(SID), G2), [], "premise: the sealed step has no menu")
+        for _ in range(3):
+            self._pass()
+        self.assertEqual(self.calls, [], "premise: the planner is never asked")
+        nodes = jd.load_goals(SID)["nodes"]
+        self.assertTrue(nodes[G2].get("blocked"), "the step stays blocked")
+        self.assertEqual([e.get("kind") for e in nodes[G2].get("log") or []], ["block"],
+                         "no reopen row, and none added per pass")
+        self.assertTrue(nodes[G1].get("nodeComplete"), "the completed card stays completed")
+        self.assertEqual([e.get("kind") for e in nodes[G1].get("log") or [] if e.get("kind") in ("reopen", "unblock")],
+                         [], "and nothing reopened it")
 
 
 class HeldReplyIsSaidOnce(_Base):

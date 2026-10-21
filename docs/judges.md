@@ -486,7 +486,10 @@ toward nothing.
   nudge reply against its goal reopened, since its menu is the goal's open
   subtree, but every exit that applies no ruling takes the reopen back before
   the store is saved: a failed call, a reply that did not parse, a refusal,
-  the give-up those strikes end in, and a plan that stands down at the write.
+  the give-up those strikes end in, a goal with no menu, a ruling with no op
+  to apply (a skip, or done verdicts stripped as unevidenced), and a plan that
+  stands down at the write. A ruling with no op still retires the reply, but
+  files nothing on the goal, so a blocked card stays in Needs-you.
   Before that, each failed pass published one more identical reopen row, and
   an outage evicted the goal's whole earlier history. A transient failure
   takes no strike, as in the work run, so it can hold the reply, and with it
