@@ -393,6 +393,89 @@ class UnblockerCompletedSince(UnblockerBase):
         self.assertEqual(self.calls[-1][2], "", "the synth completion is excluded from the section")
 
 
+class SameReplyDones(UnblockerBase):
+    """A done the closer files in the SAME reply as a block is not news to that block. The closer journals both
+    rows with ev_t = the turn's trigger and `at` = when it filed them, minutes later. The done arm and the
+    completed-since cut read a done's filing time, so they read the block's filing time too (_block_filed_at):
+    read against the block's evidence time, a reply saying "docs updated, shall I deploy?" armed a second look
+    at the deploy question on the very evidence it was asked from, and a lift there moved the card back to
+    Working on nothing new. The block rows in the classes above are filed at their evidence time, so none of
+    them could see this. Fixtures synthetic."""
+
+    HOLD = '{"verdicts": [{"n": 1, "do": "hold", "why": ""}]}'
+
+    def _closer_reply(self, later=(), older_block=False):
+        """Two open tops, an ended turn at T0+100 (plus any `later` turns), and the REAL closer writer filing
+        the docs done and the deploy block from that turn in one reply, the done first in menu order.
+        older_block adds a third top blocked (and filed) at T0+50, before the reply.
+        Returns the deploy node id, the transcript path and the block's filing time."""
+        docs, deploy, region = SID + ":g1", SID + ":g2", SID + ":g3"
+        nodes = {docs: {"id": docs, "text": "update the docs", "parentId": None,
+                        "nodeComplete": False, "blocked": False, "cleared": False,
+                        "trail": [], "t": T0, "mt": T0, "log": []},
+                 deploy: {"id": deploy, "text": "deploy the notes-api release", "parentId": None,
+                          "nodeComplete": False, "blocked": False, "cleared": False,
+                          "trail": [], "t": T0, "mt": T0, "log": []}}
+        if older_block:
+            why = "which region should the notes-api run in?"
+            nodes[region] = {"id": region, "text": "pick the notes-api region", "parentId": None,
+                             "nodeComplete": False, "blocked": True, "blockWhy": why, "cleared": False,
+                             "trail": [], "t": T0, "mt": T0 + 50,
+                             "log": [{"ev_t": T0 + 50, "src": "planner", "kind": "block", "why": why,
+                                      "at": T0 + 50}]}
+        jd.save_goals(SID, {"rompUuid": SID, "seq": 3, "lastNode": deploy, "placements": {}, "status": {},
+                            "nodes": nodes})
+        path = self._transcript([(T0 + 100, "update the docs for the release",
+                                  "Docs updated. Shall I deploy to prod now?")] + list(later))
+        store = jd.load_goals(SID)
+        jd.apply_close(store, [store["nodes"][docs], store["nodes"][deploy]],
+                       {"done": {1: "docs updated"}, "block": {2: "deploy to prod now?"}, "awaiting": {}},
+                       t=T0 + 100, touched=2)
+        jd.save_goals(SID, store)
+        store = jd.load_goals(SID)
+        self.assertTrue(store["nodes"][docs]["nodeComplete"], "the closer filed the done")
+        self.assertTrue(store["nodes"][deploy]["blocked"], "and the block, in the same reply")
+        row = [e for e in store["nodes"][deploy]["log"] if e.get("kind") == "block"][-1]
+        self.assertEqual(row["ev_t"], T0 + 100, "the block's evidence time is the turn")
+        self.assertGreater(row["at"], T0 + 100, "its filing time is later, as a closer files it")
+        return deploy, path, row["at"]
+
+    def test_the_replys_own_done_neither_arms_nor_lifts(self):
+        deploy, path, _filed = self._closer_reply()
+        self._stub('{"verdicts": [{"n": 1, "do": "lift", "why": "the docs work was done anyway"}]}')
+        self.assertEqual(jd._unblock_session(SID, path, NOW), [])
+        self.assertEqual(self.calls, [], "nothing was filed or said after the block: no second look")
+        self.assertTrue(jd.load_goals(SID)["nodes"][deploy]["blocked"], "the card stays in Needs-you")
+
+    def test_a_done_filed_after_the_block_still_arms_and_rides_alone(self):
+        deploy, path, filed = self._closer_reply()
+        self._add_completed_sibling(done_at=filed + 60, why="changelog written", title="write the changelog")
+        self._stub(self.HOLD)
+        self.assertEqual(jd._unblock_session(SID, path, NOW), [])
+        self.assertEqual(len(self.calls), 1, "a done filed after the block is new: examined")
+        self.assertEqual(self.calls[0][2], "- write the changelog: changelog written",
+                         "only the later completion rides; the block's own reply's done is not news to it")
+
+    def test_a_later_turn_arms_without_the_replys_own_done_riding(self):
+        deploy, path, _filed = self._closer_reply(later=[(T0 + 900, "what else is left?", "only the deploy")])
+        self._stub(self.HOLD)
+        self.assertEqual(jd._unblock_session(SID, path, NOW), [])
+        self.assertEqual(len(self.calls), 1, "a newer ended turn arms, as ever")
+        self.assertIn("what else is left?", self.calls[0][1], "the conversation since the block is shown")
+        self.assertEqual(self.calls[0][2], "", "the block's own reply's done is not shown as completed since it")
+
+    def test_an_older_block_due_on_the_replys_done_does_not_take_the_new_one_along(self):
+        # the reply's done IS news to a block filed before the reply, so that one is examined; the block the reply
+        # filed is not due, and a lift in that call can only name the older one
+        deploy, path, _filed = self._closer_reply(older_block=True)
+        self._stub(self.HOLD)
+        self.assertEqual(jd._unblock_session(SID, path, NOW), [])
+        self.assertEqual(len(self.calls), 1, "the older block is examined on the later done")
+        self.assertIn("which region should the notes-api run in?", self.calls[0][0])
+        self.assertNotIn("deploy to prod now?", self.calls[0][0], "the reply's own block is not re-examined")
+        self.assertIn("- update the docs: docs updated", self.calls[0][2], "the done rides for the older block")
+
+
 class BlockEvidenceTime(unittest.TestCase):
     """jd._block_ev_t, the one rule for WHEN a block was asked: the unblocker's candidates, the feed card's blocked
     yield and its session-level twin, and the brief's stamps all read it. mt is not block evidence: a retitle, a
@@ -410,6 +493,18 @@ class BlockEvidenceTime(unittest.TestCase):
     def test_a_row_without_an_evidence_time_falls_back_to_its_own_filing_time(self):
         nd = {"t": T0, "mt": T0 + 900, "log": [{"ev_t": None, "src": "agent", "kind": "block", "at": T0 + 120}]}
         self.assertEqual(jd._block_ev_t(nd), T0 + 120, "the row's own `at`, never the node's mt")
+
+    def test_the_done_arms_floor_is_the_block_rows_filing_time(self):
+        # the unblocker's done arm and completed-since cut read a done's filing time, so they read the block's
+        # filing time (_block_filed_at), floored at its evidence time; the evidence rule itself is unchanged
+        nd = {"t": T0, "mt": T0 + 900, "log": [
+            {"ev_t": T0 + 100, "src": "planner", "kind": "block", "at": T0 + 100},
+            {"ev_t": T0 + 300, "src": "closer", "kind": "block", "at": T0 + 450},
+            {"ev_t": T0 + 500, "src": "agent", "kind": "done", "at": T0 + 600}]}
+        self.assertEqual(jd._block_ev_t(nd), T0 + 300)
+        self.assertEqual(jd._block_filed_at(nd, T0 + 300), T0 + 450, "the filing: not the evidence, not a done")
+        legacy = {"log": [{"ev_t": T0 + 300, "src": "closer", "kind": "block"}]}
+        self.assertEqual(jd._block_filed_at(legacy, T0 + 300), T0 + 300, "no filing time: the evidence time")
 
     def test_no_block_row_is_no_time(self):
         self.assertIsNone(jd._block_ev_t({"t": T0, "mt": T0 + 900, "blocked": True}), "a pre-diary node")
