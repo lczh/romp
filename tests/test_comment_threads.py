@@ -3074,6 +3074,24 @@ class CommentOps(CommentBase):
         self.assertIn(("resume", tid), self.be.calls, "the reply is the explicit gesture that wakes it")
         self.assertEqual(km._comment_thread(PARENT, tid)["status"], "open")
 
+    def test_a_reply_wakes_an_open_thread_the_parents_end_shut_down(self):
+        # Ending the parent shuts its open threads' CLIs down (_comment_kill_all: the kill writes alive=False into the
+        # thread's reg and leaves its row open). The reply wakes the thread before it sends, or after the parent's
+        # revive every reply was refused as unreachable while the thread still showed as open (2026-10-21).
+        _, tid = km._comment_create(PARENT, "a1", "exponential backoff", "Why?")
+        reg = {"sid": tid, "name": "parent-comment-1", "cwd": self.cdir, "lastSid": tid, "alive": False,
+               "threadOf": PARENT}
+        (jd.SDKDIR / (tid + ".json")).write_text(json.dumps(reg))
+        self.be.calls.clear()
+        self.assertIsNone(km._comment_reply(PARENT, tid, "one more question"))
+        self.assertEqual(self.be.calls, [("resume", tid), ("send", tid)], "woken first, then the reply")
+        self.assertEqual(km._comment_thread(PARENT, tid)["status"], "open")
+        # a thread whose CLI is up is not resumed: the wake is keyed on the dead row, not on every reply
+        (jd.SDKDIR / (tid + ".json")).write_text(json.dumps({**reg, "alive": True}))
+        self.be.calls.clear()
+        self.assertIsNone(km._comment_reply(PARENT, tid, "and the cap?"))
+        self.assertEqual(self.be.calls, [("send", tid)])
+
     def test_delete_interrupts_the_inflight_reply_before_the_kill(self):
         # deleting a thread mid-generation must STOP the work, not just its cue (the user 2026-08-17)
         _, tid = km._comment_create(PARENT, "a1", "exponential backoff", "Why?")
@@ -3415,6 +3433,29 @@ class ForkDoorsLeaveTheHistoryToTheCli(CommentBase):
         self.assertEqual(kw["resume"], tid)
         self.assertTrue(kw["env"][sb.RESUME_SOURCE_ALIVE_ENV].startswith(tid + "|"),
                         "the broken-out session still skips the parent's copied history on every connect")
+
+    def test_a_thread_the_parents_end_shut_down_answers_a_reply_after_the_revive(self):
+        # Rides this class's real SdkBackend. The End door shuts the thread's CLI down with the parent's
+        # (_comment_kill_all) and leaves its row open; the parent's revive brings back the parent alone, so the reply is
+        # what wakes the thread. Before it did, the real _ensure refused the dead row and every reply read "couldn't
+        # reach this thread's session" while the thread still showed as open (2026-10-21).
+        err, tid = km._comment_create(PARENT, "a1", "exponential backoff", "Why?")
+        self.assertIsNone(err)
+        stand_in, real_ensure = self.rbe._ensure, sb.SdkBackend._ensure.__get__(self.rbe)
+        # a dead row takes the real _ensure (it refuses, starting nothing); a live one takes the suite's stand-in
+        self.rbe._ensure = lambda sid, on_boot_settled=None: (
+            stand_in(sid) if (sb.read_reg(self.rbe.state_dir, sid) or {}).get("alive") else real_ensure(sid))
+        self.rbe.kill(PARENT)                                   # the End door: the parent, then its threads
+        km._comment_kill_all(PARENT, self.rbe)
+        self.assertIs(self._reg(tid).get("alive"), False)
+        self.assertEqual(km._comment_thread(PARENT, tid)["status"], "open")
+        self.assertTrue(self.rbe.resume("parent", PARENT))      # the revive door's resume, for the parent alone
+        self.assertIs(self._reg(tid).get("alive"), False)
+        self.sent.clear()
+        self.assertIsNone(km._comment_reply(PARENT, tid, "one more question"))
+        self.assertEqual([s for s, _ in self.sent], [tid])
+        self.assertIs(self._reg(tid).get("alive"), True)
+        self.assertIsNone(km._comment_reply(PARENT, tid, "still there?"), "and every later reply lands too")
 
 
 class ExchangeLatchReplacedThePushCount(unittest.TestCase):

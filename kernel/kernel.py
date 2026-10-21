@@ -22387,7 +22387,10 @@ def _comment_reply(parent_sid, tid, text):
     refused with the reason, and a new comment starts a new thread; this retires the 2026-08-22
     "replying reopens a resolved thread" arm. A RELAYED (merged) thread is not closed: T145 (the user
     2026-08-28) keeps it talkable — a reply is the explicit gesture that continues it, and the next
-    relay carries only the new tail. Returns an error string or None."""
+    relay carries only the new tail. An OPEN thread whose CLI the parent's End shut down
+    (_comment_kill_all: its reg reads alive False, its row still 'open') is woken the same way, or
+    after the parent's revive every reply to it was refused as unreachable while it still showed as
+    open (2026-10-21). Returns an error string or None."""
     be = Sessions.backend_for(parent_sid)
     if not hasattr(be, "fork"):
         return "threads need a Claude Code session."
@@ -22399,10 +22402,12 @@ def _comment_reply(parent_sid, tid, text):
             return "this thread is now the session '%s'; continue there." % (row.get("promotedName") or "")
         return _comment_status_refusal(prior)
     tsid = th["sid"]
-    if prior == "merged":
+    reg = _thread_reg(tsid)
+    if prior == "merged" or reg.get("alive") is False:
         # a RELAYED thread stays talkable (T145): the explicit reply continues it — the CLI comes
-        # back for exactly this gesture, and a later relay sends only the new tail past relayedT
-        reg = _thread_reg(tsid)
+        # back for exactly this gesture, and a later relay sends only the new tail past relayedT.
+        # An open thread the parent's End shut down comes back on the same gesture (only the
+        # explicit alive=False a kill writes; a thread with no reg at all is gone, and refused below)
         be.resume(reg.get("name") or ("thread-" + tsid[:8]), tsid)   # alive again; names/ untouched
         _lift_end_latch(tsid)                                        # ...and any End latch on its sid lifts with it (2026-09-21)
     if not _user_send(be, tsid, str(text)):
