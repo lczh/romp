@@ -62,17 +62,18 @@ LongHistoryBuiltHiddenBounded, the same two sessions over LongHistoryClimb's tal
 unit measured at its first show would stand past the room the gaps leave in half the limit. A scroll above the window after that show
 builds a window over the same units, and a hidden row must take, at the show, the figure that build sets.
 
-LongHistoryToggleKeepsPlace, at 2x over a tail whose every turn opens its reply with a tool run, tall enough that hidden rows take the
-held figure (ROAD 12, 2026-10-21): the reader drops into the tail run, its lower rows rendered and the units above them hidden in the top
-spacer, and puts a collapsed tool run's row 200 px under the viewport top; one reply lands, the reader expands the run; three more land,
-the reader collapses it. Each toggle must leave the row where it was clicked, within 2 px, and the held figure and the top spacer where
-they stood (the toggle's rebuild recomputed the figure over the landed replies, which lowered it, and the top spacer shrank under the
-reader). Then ROAD 12's tail: the reader goes back into the history and returns to the end by the chip, where the page re-windows
-around the last unit and leaves fewer than 80 units rendered (WINDOW_TAIL); a tool run in the last turns, put 200 px under the
-viewport top, and a run that lands at the true bottom with the reader following, must each keep their row through an expand, within
-2 px (the toggle's rebuild read the window as the tail window and widened it to 80 units, the top spacer then short by the units it
-rendered); after a collapse at the true bottom the reader follows the next turn. LongHistoryToggleKeepsPlaceUnbounded runs the same
-roads over a shorter tail, where hidden rows take the average unit, which a new unit does not move.
+LongHistoryToggleKeepsPlace, at 8x over a tail whose every turn opens its reply with a tool run, tall enough that hidden rows take the
+held figure (ROAD 12, 2026-10-21; the scale keeps the rows the road renders few, as the class says): the reader drops into the tail run,
+its lower rows rendered and the units above them hidden in the top spacer, and puts a collapsed tool run's row 200 px under the viewport
+top; one reply lands, the reader expands the run; three more land, the reader collapses it. Each toggle must leave the row where it was
+clicked, within 2 px, and the held figure and the top spacer where they stood (the toggle's rebuild recomputed the figure over the
+landed replies, which lowered it, and the top spacer shrank under the reader). Then ROAD 12's tail: the reader goes back into the
+history and returns to the end by the chip, where the page re-windows around the last unit and leaves fewer than 80 units rendered
+(WINDOW_TAIL); a tool run in the last turns, put 200 px under the viewport top, and a run that lands at the true bottom with the reader
+following, must each keep their row through an expand, within 2 px (the toggle's rebuild read the window as the tail window and widened
+it to 80 units, the top spacer then short by the units it rendered); after a collapse at the true bottom the reader follows the next
+turn. LongHistoryToggleKeepsPlaceUnbounded runs the same roads at 2x over a shorter tail, where hidden rows take the average unit, which
+a new unit does not move.
 
 UnreachableEndSettles, at a forced 12x scale (limit 2,796,202), with replies tall enough that the thread stands at the limit and its
 newest row is out of reach. The page must settle there: no re-window on the echo of its own write (the loop that re-rendered the view
@@ -2064,18 +2065,28 @@ class _ToggleKeepsPlace(_LongHistoryLab):
 
 
 class LongHistoryToggleKeepsPlace(_ToggleKeepsPlace, unittest.TestCase):
-    """ROAD 12 over a tail twice LongHistoryClimb's height (the wire tail holds half as many turns, four events each with the tool
-    run), where the units the page holds at its landing, at the average unit it measured, pass the room the gaps leave in half the
-    limit: hidden units take the held figure, which every new unit lowers. Before the rebuild kept it, the expand after one reply moved
-    the row 14,487 px up the screen (64 hidden units above the window, the figure 230 px lower), and the collapse after three more
-    41,705 px."""
-    TALL_LINES = 4800
+    """ROAD 12 at 8x (a layout limit of 4,194,304 px) over a tail whose units, at the average unit the page measured off them, pass the
+    room the gaps leave in half that limit by about a third (the wire tail holds half as many turns as LongHistoryClimb's, four events
+    each with the tool run): hidden units take the held figure, which every new unit lowers.
+
+    The scale is the lab's, not the bug's: the bound is a share of whatever limit the page measures, so a quarter of 2x's limit takes a
+    quarter of the tail's height for the same margin. At 2x the margin took 4,800-line replies, and the window a drop builds (render.ts
+    WINDOW_RADIUS units each way, some forty of them replies) held about 200,000 code rows, so every toggle, drop and chip press of the
+    road cost seconds of style and layout. Once ROAD 12's tail joined the legs, the class's driver took 107 to 233 s in CI against its
+    300 s kill; with 1,200-line replies at 8x it takes under a third of what it took at 2x on the same box (2026-10-21).
+
+    Before the rebuild kept the figure, the expand after one reply moved the row 3,622 px up the screen and the collapse after three
+    more 10,426 px (14,487 px and 41,705 px at 2x); before the toggle kept the window's top, the expand of a run in the last turns after
+    a return to the end moved it 17,538 px, and of a run at the true tail 11,691 px (68,260 px and 45,507 px at 2x)."""
+    SCALE = 8
+    TALL_LINES = 1200
     BOUND = True
 
 
 class LongHistoryToggleKeepsPlaceUnbounded(_ToggleKeepsPlace, unittest.TestCase):
-    """ROAD 12 over LongHistoryHeight's tail, where the units at the average unit stand under that room: hidden units take the average
-    unit, which a new unit does not move, and the row stands still through the toggles whether or not the rebuild keeps the figure."""
+    """ROAD 12 at 2x over LongHistoryHeight's tail, where the units at the average unit stand under that room: hidden units take the
+    average unit, which a new unit does not move, and the row stands still through the toggles whether or not the rebuild keeps the
+    figure."""
     TALL_LINES = 600
     BOUND = False
 
