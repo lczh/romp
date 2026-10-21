@@ -148,7 +148,18 @@ test("the spacers and every walk over them take the bounded figure for a hidden 
   assert.equal(CODE.length, RENDER.length);
   assert.ok(ranges.size > 1000 && RENDER.split("/**").length > 100 && !CODE.includes("/**"), "the comments are found and blanked, every doc comment with them");
   const fn = (head: string) => { const i = CODE.indexOf(head); assert.ok(i >= 0, head); return CODE.slice(i, CODE.indexOf("\n}\n", i)); };
-  assert.match(CODE, /v\.gapUnits = gapUnitsOf\(items, v\.pxPerTurn\);\s*\n\s*v\.heldPx = heldPxOf\(v, items\);/, "the figure is set with the spacer map (renderWindowItems)");
+  assert.match(CODE, /v\.gapUnits = gapUnitsOf\(items, v\.pxPerTurn\);\s*\n\s*if \(!keepHeld \|\| v\.heldPx == null\) v\.heldPx = heldPxOf\(v, items\);/, "the figure is set with the spacer map (renderWindowItems), unless the build keeps it");
+  // a rebuild over the units the top spacer stands for keeps the figure, so the scrollTop its callers put back names the same place
+  // (2026-10-21; executed: LongHistoryToggleKeepsPlace, a tool run toggled after replies land); every other build sets it
+  assert.match(fn("function syncViewInner("), /const keepHeld = !!v\.painted && sameUnits\(v\.painted\.items, items, 0, ws\);\s*\n\s*renderWindowItems\(v, s, items, ws, we, working, keepHeld\);/, "the rebuild keeps the figure over the same units above the window");
+  const builds: string[] = [], keeps: string[] = [];
+  const calls = (n: ts.Node): void => {
+    if (ts.isCallExpression(n) && n.expression.getText(sf) === "renderWindowItems") { builds.push(n.getText(sf)); if (n.arguments.length > 6) keeps.push(n.getText(sf)); }
+    ts.forEachChild(n, calls);
+  };
+  calls(sf);
+  assert.ok(builds.length >= 7, "the window builds are found: " + builds.length);
+  assert.deepEqual(keeps, ["renderWindowItems(v, s, items, ws, we, working, keepHeld)"], "the rebuild is the one build that may keep the figure; the re-window, a fill, a landing and a first build set it");
   assert.match(fn("function sizeSpacers("), /const hadPerTurn = v\.pxPerTurn != null, hadAvg = v\.avgTurnH != null;\s*\n\s*measureRows\(v\);/, "a first measure is read off the figures as they stood before measureRows (executed: LongHistoryBuiltHidden)");
   assert.match(fn("function sizeSpacers("), /if \(\(\(!hadPerTurn && v\.pxPerTurn != null\) \|\| \(!hadAvg && v\.avgTurnH != null\)\) && v\.painted\) v\.heldPx = heldPxOf\(v, v\.painted\.items\);/, "…and the figure is set again on a first measure (executed: LongHistoryBuiltHidden, and LongHistoryBuiltHiddenBounded for the bound; its px-per-turn term by this pin only)");
   assert.match(fn("function heldPxOf("), /if \(v\.gapUnits\) for \(const h of v\.gapUnits\.values\(\)\) gaps \+= h;\s*\n\s*return heldUnitPx\(items, v\.avgTurnH \?\? 60, gaps, layoutLimitPx\(\) \* HIDDEN_SHARE\);/, "off the gaps as the spacer map draws them, under a share of the measured limit (executed: LongHistoryClimb, LongHistoryHeight for the average unit, and UnreachableEndSettles for the measured limit)");

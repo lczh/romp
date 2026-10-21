@@ -14587,7 +14587,15 @@ function syncViewInner(id: string, atBottom?: boolean): View {
   const ws = keepTop ? (v.winStart ?? 0)
                      : wasAtTail ? Math.max(0, total - span) : Math.min(v.winStart ?? 0, Math.max(0, total - 1));
   const we = (wasAtTail || keepTop) ? total : Math.min(v.winEnd ?? total, total);
-  renderWindowItems(v, s, items, ws, we, working); v.stale = false; return v;
+  // The held figure stands when the units above the window are the ones it was painted over (2026-10-21). This rebuild's callers
+  // put the reader back at the scrollTop they read before it (toggleToolGroup; landActive's land-saved on a tab's return), which
+  // names the same place only while the top spacer stands as it was, and over the same units at the same figure it does, to the
+  // pixel. Recomputed here, the figure took in every reply landed since the last build (each new unit lowers it), and the top
+  // spacer shrank by the units it holds times the drop: a tool run toggled mid-history after three replies landed moved its row
+  // about 40,000 px up the screen. The builds that put the reader back on a row set it afresh: the re-window, a fill, a landing, a
+  // first build.
+  const keepHeld = !!v.painted && sameUnits(v.painted.items, items, 0, ws);
+  renderWindowItems(v, s, items, ws, we, working, keepHeld); v.stale = false; return v;
 }
 
 /** The keyed paint (unit-diff.ts, 2026-09-23): the painted window brought up to date by repainting IN PLACE only the units whose
@@ -14952,7 +14960,9 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
 
 // Full (re)build of the window [unitStart, unitEnd) with head/tail spacers. Does NOT touch scroll (callers
 // anchor). prevEpoch for the first rendered unit chains off the real prior event so its time-marker is right.
-function renderWindowItems(v: View, s: Session, items: DisplayItem[], unitStart: number, unitEnd: number, working: boolean): void {
+// keepHeld: the held units' figure (heldPx) stands as it is, for a rebuild over the units the top spacer already stands for whose
+// caller puts the reader back by pixels (syncViewInner); every other build sets it afresh (heldPxOf).
+function renderWindowItems(v: View, s: Session, items: DisplayItem[], unitStart: number, unitEnd: number, working: boolean, keepHeld = false): void {
   const total = items.length;
   unitStart = Math.max(0, Math.min(unitStart, total));
   unitEnd = Math.max(unitStart, Math.min(unitEnd, total));
@@ -14978,7 +14988,7 @@ function renderWindowItems(v: View, s: Session, items: DisplayItem[], unitStart:
   // top spacer grew by 180,000 px on a send on a long transcript)
   measureRows(v);
   v.gapUnits = gapUnitsOf(items, v.pxPerTurn);
-  v.heldPx = heldPxOf(v, items);   // the held units' figure, off the gaps just mapped (heldPxOf)
+  if (!keepHeld || v.heldPx == null) v.heldPx = heldPxOf(v, items);   // the held units' figure, off the gaps just mapped (heldPxOf)
   sizeSpacers(v);
 }
 /** The tallest box this browser lays out, in CSS px, at the current scale and zoom (2026-10-01): a fixed-position probe asked for a
@@ -15008,12 +15018,15 @@ function gapsMaxPx(): number { return gapsBoundHeld ?? layoutLimitPx() * GAPS_SH
 if (typeof window !== "undefined") (window as any).__rompGapsBound = (px: number | null): void => { gapsBoundHeld = typeof px === "number" && px > 0 ? px : null; };
 /** The px a hidden unit of a held run stands for (chat-regions.ts heldUnitPx): v.avgTurnH ?? 60, lowered when the gaps as the
  *  spacer map draws them and the held runs' units at that figure would pass their share of the measured layout limit together
- *  (HIDDEN_SHARE). Set at each window build (renderWindowItems) and on a first measure (sizeSpacers), off the units the window is
- *  painted from; read by the spacers and every walk over them (unitPx). The keyed paint (tailDiff) keeps it, so the top spacer it
- *  leaves standing and the walks over that spacer still agree; units it appends below the window take the figure as it stands, which
- *  can pass the share, by at most their count times the figure, until the next build (the served climb appends replies below the
- *  window and reads both: tests/test_long_history_height_browser.py LongHistoryClimb,
- *  test_rows_appended_below_the_window_take_the_held_figure_until_the_next_build). */
+ *  (HIDDEN_SHARE). Set at each window build that puts the reader back on a row (renderWindowItems: the re-window, a fill, a landing,
+ *  a first build) and on a first measure (sizeSpacers), off the units the window is painted from; read by the spacers and every walk
+ *  over them (unitPx). The keyed paint (tailDiff) keeps it, so the top spacer it leaves standing and the walks over that spacer still
+ *  agree, and so does a rebuild over the units the top spacer stands for (syncViewInner: a tool run's toggle, a tab's return), whose
+ *  caller puts the reader back by pixels (2026-10-21). Units appended below the window take the figure as it stands, which can pass
+ *  the share, by at most their count times the figure, until the next build that sets it (the served climb appends replies below
+ *  the window and reads both: tests/test_long_history_height_browser.py LongHistoryClimb,
+ *  test_rows_appended_below_the_window_take_the_held_figure_until_the_next_build; LongHistoryToggleKeepsPlace toggles a tool run
+ *  after replies land and reads the row it clicked). */
 function heldPxOf(v: View, items: DisplayItem[]): number {
   let gaps = 0;
   if (v.gapUnits) for (const h of v.gapUnits.values()) gaps += h;
