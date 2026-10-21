@@ -15,6 +15,11 @@ const PREVIEW = fs.readFileSync(path.join(UI, "preview.ts"), "utf8");
 const RENDER = fs.readFileSync(path.join(UI, "render.ts"), "utf8");
 const CSS = fs.readFileSync(path.join(UI, "styles.css"), "utf8");
 const ts = (code: string): string => requireCjs("esbuild").transformSync(code, { loader: "ts" }).code;
+// the solo rule's source, RUN by the tests below: its tag lists, newlineEndsLine and mdSolo, one stretch of preview.ts
+const SOLO_CODE = (() => {
+  const at = PREVIEW.indexOf("const BLOCK_TAGS = "), fnAt = PREVIEW.indexOf("export function mdSolo(", at);
+  return ts(PREVIEW.slice(at, PREVIEW.indexOf("\n}\n", fnAt) + 2).replace(/^export /m, ""));
+})();
 
 test("the mark: every picture md() and userMd() render wears .md-img, stamped by the chat's post-pass and no other renderer", () => {
   const at = PREVIEW.indexOf("export function mdImgPostPass(root: ParentNode): void {");
@@ -51,8 +56,8 @@ test("the post-pass, RUN: a URL that loaded picture-sized wears the zoom from it
   // box), and the height judged is the one it will SHOW at (its attributes through the remembered natural size)
   const fn = (name: string) => { const at = PREVIEW.indexOf(name); return ts(PREVIEW.slice(at, PREVIEW.indexOf("\n}\n", at) + 2).replace(/^export /, "")); };
   const line = (start: string) => { const at = PREVIEW.indexOf(start); return ts(PREVIEW.slice(at, PREVIEW.indexOf("\n", PREVIEW.indexOf("};", at)) + 1)); };
-  const code = line("const attrPx = ") + ts(PREVIEW.slice(PREVIEW.indexOf("const BLOCK_TAGS = "), PREVIEW.indexOf("\n", PREVIEW.indexOf("const BLOCK_TAGS = ")) + 1)) + fn("function parkMdImg(") + fn("export function mdImgPostPass(")
-    + fn("export function shownHeightOf(") + fn("export function mdSolo(");
+  const code = line("const attrPx = ") + SOLO_CODE + fn("function parkMdImg(") + fn("export function mdImgPostPass(")
+    + fn("export function shownHeightOf(");
   let videos = 0;
   const run = (new Function("mdImgFailed", "mdImgDims", "opensInLightbox", "ZOOM_MIN_H", "mdVideoPostPass", code + "\nreturn mdImgPostPass;") as
     (f: Set<string>, d: Map<string, { w: number; h: number }>, ok: (u: string) => boolean, min: number, v: () => void) => (root: unknown) => void);
@@ -95,10 +100,7 @@ test("the solo rule, RUN: a picture or a video stands alone when nothing else is
   // joined by a soft break (assistant markdown, breaks:false: a "\n" in a text node) or a <br> (the user's, breaks:true),
   // and the picture lost its box, inline with the caption beside its bottom edge. A line ends at either break, and, in a
   // parent that holds blocks, at a block
-  const at = PREVIEW.indexOf("export function mdSolo(");
-  const code = ts(PREVIEW.slice(PREVIEW.indexOf("const BLOCK_TAGS = "), PREVIEW.indexOf("\n", PREVIEW.indexOf("const BLOCK_TAGS = ")) + 1))
-    + ts(PREVIEW.slice(at, PREVIEW.indexOf("\n}\n", at) + 2).replace(/^export /, ""));
-  const solo = new Function(code + "\nreturn mdSolo;")() as (e: unknown) => boolean;
+  const solo = new Function(SOLO_CODE + "\nreturn mdSolo;")() as (e: unknown) => boolean;
   const H = "https://img.example.test/";
   const pic = (n: string) => el("img", { src: H + n + ".png" });
   const cap = () => el("em", {}, "Figure 1: requests per hour across the run.");
@@ -144,6 +146,75 @@ test("the solo rule, RUN: a picture or a video stands alone when nothing else is
   const w = el("video", { src: H + "clip.mp4" });
   el("p", {}, "Watch ", w, " first.");
   assert.equal(solo(w), false, "a video in a sentence does not");
+});
+
+test("where a line ends, RUN: a newline only where the author's line breaks, a bold picture in its sentence, and only the <br> that ends the picture's line marked", () => {
+  // the review of #349 (2026-10-21) reproduced three leftovers of the solo rule: a README's two half-width pictures in raw
+  // HTML stacked as framed blocks (every newline counted, the HTML source's own included), a bold picture mid-sentence
+  // was framed (its parent <strong> held nothing else), and a hard break inside a caption was hidden as the picture's
+  const solo = new Function(SOLO_CODE + "\nreturn mdSolo;")() as (e: unknown) => boolean;
+  const H = "https://img.example.test/";
+  const pic = (n: string) => el("img", { src: H + n + ".png" });
+  const marked = (n: FNode) => (n.cls as Set<string>).has("md-solo-end");
+  const pair = (what: string, want: boolean, build: (a: FNode, b: FNode) => FNode) => {
+    const a = pic("a"), b = pic("b");
+    build(a, b);
+    assert.deepEqual([solo(a), solo(b)], [want, want], what);
+  };
+  // the author's own HTML lays out by HTML's rules: a newline between its tags is a space, so the pictures sit side by side
+  pair("the README layout, its <p> opened and closed on lines of their own", false, (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
+  pair("…indented under an align", false, (a, b) => el("p", { align: "center" }, "\n  ", a, "\n  ", b, "\n"));
+  pair("…opened on a line of its own only", false, (a, b) => el("p", {}, "\n", a, "\n", b));
+  pair("…closed on a line of its own only", false, (a, b) => el("p", {}, a, "\n", b, "\n"));
+  pair("…a raw list item, padded the same way", false, (a, b) => el("li", {}, "\n", a, "\n", b, "\n"));
+  pair("…in a <div>", false, (a, b) => el("div", { align: "center" }, a, "\n", b));
+  pair("…a raw HTML block of two <img> lines, at the message's root", false, (a, b) => el("body", {}, a, "\n", b));
+  pair("…in a table cell", false, (a, b) => el("td", {}, a, "\n", b));
+  { const a = pic("a"); el("body", {}, el("p", {}, "before"), "\n", a, "\nFigure 1: requests per hour.", el("p", {}, "after"));
+    assert.equal(solo(a), false, "a raw picture with words after a source newline: the page shows them on one line"); }
+  // markdown's own lines still end at its soft breaks (#349's case): marked writes paragraphs, list items and headings flush
+  pair("markdown's ![a](u)\\n![b](u): each on a line of its own", true, (a, b) => el("p", {}, a, "\n", b));
+  pair("…in a tight list item", true, (a, b) => el("li", {}, a, "\n", b));
+  { const a = pic("a"); el("li", {}, a, "\nThe plot of the run.", el("ul", {}, el("li", {}, "a sub-point")), "\n");
+    assert.equal(solo(a), true, "a tight list item ends on a newline after its nested list: a block's, no padding"); }
+  { const a = pic("a"); el("h2", {}, "Results\n", a); assert.equal(solo(a), true, "a heading written on two lines (setext)"); }
+  { const a = pic("a"); el("pre", {}, "line one\n", a, "\nline three"); assert.equal(solo(a), true, "a <pre>, where the page breaks at every newline"); }
+  // what shows nothing, and blocks the author's HTML ends a line with
+  { const a = pic("a"); el("p", {}, "\n", el("picture", {}, "\n  ", el("source", { srcset: H + "dark.png" }), "\n  ", a, "\n"), "\n");
+    assert.equal(solo(a), true, "a <picture>'s sources show nothing: its picture stands alone"); }
+  { const a = pic("a"); el("figure", {}, "\n", a, "\n", el("figcaption", {}, "Figure 1: requests per hour."), "\n");
+    assert.equal(solo(a), true, "a <figcaption> is a block under its picture"); }
+  { const a = pic("a"); el("details", {}, el("summary", {}, "The plot"), "\n", a, "\n");
+    assert.equal(solo(a), true, "…and so is a <summary> above it"); }
+  // an inline wrapper is part of the line it sits on: the walk climbs out of it (`The **![x](u)** result`)
+  const one = (what: string, want: boolean, build: (a: FNode) => FNode) => { const a = pic("a"); build(a); assert.equal(solo(a), want, what); };
+  one("a bold picture in the middle of a sentence", false, (a) => el("p", {}, "The ", el("strong", {}, a), " result is the slowest."));
+  one("…bold and italic", false, (a) => el("p", {}, "The ", el("em", {}, el("strong", {}, a)), " result"));
+  one("…words after it only", false, (a) => el("p", {}, el("strong", {}, a), " is the slowest."));
+  one("…words before it inside the bold", false, (a) => el("p", {}, el("strong", {}, "Note: ", a)));
+  one("a linked picture ending a sentence", false, (a) => el("p", {}, "The board: ", el("a", { href: H }, a)));
+  one("a struck-through picture between words", false, (a) => el("p", {}, "Was ", el("del", {}, a), " before"));
+  one("a bold picture alone, its caption on the next line", true, (a) => el("p", {}, el("strong", {}, a), "\n", el("em", {}, "Figure 1: requests per hour.")));
+  one("…bold and italic", true, (a) => el("p", {}, el("em", {}, el("strong", {}, a)), "\nFigure 1: requests per hour."));
+  one("…an italic around the picture and its caption", true, (a) => el("p", {}, el("em", {}, a, "\nFigure 1: requests per hour.")));
+  // the <br> that ends the picture's line, and only it, is marked: a hard break inside the caption (two spaces, a
+  // backslash or a raw <br>, all one <br>) is the caption's own line break
+  { const a = pic("a"), inCap = el("br");
+    el("p", {}, a, "\nFigure 1: requests per hour.", inCap, "\nSource: the nightly load run.");
+    assert.ok(solo(a) && !marked(inCap), "agent markdown: the soft break ends the picture's line; the caption's own break is not the picture's"); }
+  { const a = pic("a"), end = el("br"), inCap = el("br");
+    el("p", {}, a, end, "\nFigure 1: requests per hour.", inCap, "\nSource: the nightly load run.");
+    assert.ok(solo(a) && marked(end) && !marked(inCap), "the user's markdown: the first <br> ends the picture's line, the second is the caption's"); }
+  { const a = pic("a"), end = el("br"); el("p", {}, el("em", {}, el("strong", {}, a)), end, "Figure 1: requests per hour.");
+    assert.ok(solo(a) && marked(end), "a bold picture's line ends at the <br> after its wrapper"); }
+  { const a = pic("a"), b = pic("b"), endA = el("br"), endB = el("br"); el("p", {}, a, endA, b, endB, "Figure 1: both panels.");
+    assert.ok(solo(a) && solo(b) && marked(endA) && marked(endB), "two pictures on lines of their own: each marks its own line's end"); }
+  { const a = pic("a"), lead = el("br"); el("p", {}, "The trace:", lead, a);
+    assert.ok(solo(a) && !marked(lead), "the <br> before a picture ends the lead-in's line, not the picture's"); }
+  { const a = pic("a"), after = el("br"); el("p", {}, "The trace ", a, after, "Figure 1: requests per hour.");
+    assert.ok(!solo(a) && !marked(after), "a picture that is a word in a sentence marks nothing"); }
+  { const v = el("video", { src: H + "clip.mp4" }), end = el("br"); el("p", {}, v, end, el("em", {}, "Clip 1: the signup flow."));
+    assert.ok(solo(v) && marked(end), "a video's line end is marked the same way"); }
 });
 
 test("the predicate: a marked picture, outside any link or summary, showing a source, SHOWN at least ZOOM_MIN_H px tall", () => {
@@ -245,10 +316,16 @@ test("ONE picture box: a markdown picture, a video's still and the path preview 
   assert.deepEqual(rules.filter((r) => names.test(r.sel)).map((r) => r.sel),
     [".path-full-img, .md-img, .md-video", ".path-full-img, .md-img-zoom.md-solo, .md-solo > .md-video",
      ".path-full-img, .md-img-zoom, .md-video-still", ".path-full-img:hover, .md-img-zoom.md-solo:hover, .md-solo:hover > .md-video",
-     ".md-video", ".md-video-still.md-solo", ".md-img-zoom.md-solo + br, .md-video-still.md-solo + br"],
+     ".md-video", ".md-video-still.md-solo", ":is(.md-img-zoom, .md-video-still).md-solo + br.md-solo-end",
+     ":has(> :is(.md-img-zoom, .md-video-still).md-solo:last-child) + br.md-solo-end,\n:has(> :last-child > :is(.md-img-zoom, .md-video-still).md-solo:last-child) + br.md-solo-end"],
     "the four shared rules, the still's two anatomy rules and the boxed forms' line break are the only ones naming any of them");
-  assert.match(CSS, /^\.md-img-zoom\.md-solo \+ br, \.md-video-still\.md-solo \+ br \{ display: none; \}$/m,
-    "a box ends its own line: the <br> after it (a caption on the user's next line) adds no blank line; only the boxed forms (the review of #343)");
+  // a box ends its own line: the <br> that ends that line (a caption on the user's next line) adds no blank line; only the
+  // boxed forms (the review of #343). Only the <br> mdSolo marked: a bare `+ br` passes over text, and hid the hard break
+  // INSIDE a caption, running its two lines together (the review of #349)
+  assert.match(CSS, /^:is\(\.md-img-zoom, \.md-video-still\)\.md-solo \+ br\.md-solo-end \{ display: none; \}$/m, "the box's own line end");
+  assert.match(CSS, /^:has\(> :is\(\.md-img-zoom, \.md-video-still\)\.md-solo:last-child\) \+ br\.md-solo-end,\n:has\(> :last-child > :is\(\.md-img-zoom, \.md-video-still\)\.md-solo:last-child\) \+ br\.md-solo-end \{ display: none; \}$/m,
+    "…after the bold or italic around a box, whose last element it is (its own rule: a browser without :has() drops only it)");
+  for (const r of rules) assert.doesNotMatch(r.sel, /\+\s*br(?!\.md-solo-end)/, "no rule hides a <br> mdSolo did not mark: " + r.sel);
   assert.match(CSS, /^\.md-video \{ display: block; width: auto; height: auto; \}$/m,
     "an author rule's auto beats the width=\"100%\" an agent writes on a <video>: the clip is the picture box's size, never the bubble's");
   for (const r of rules.filter((x) => names.test(x.sel) && !/^\.path-full-img/.test(x.sel)))

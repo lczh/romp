@@ -88652,7 +88652,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(416, body, "text/plain", cache="no-cache", headers=unsat)
             return self._send(status, body, "text/plain", cache="no-cache")
         if head:
-            # mirror _file_preview's HEAD: the remote's verdict + real length, no body
+            # mirror _file_preview's HEAD: the remote's verdict + real length, no body. The length is checked as the
+            # streamed arms check it (_relay_length): a value that is not a bounded decimal was passed to the browser
+            # as it came (the review of #349, 2026-10-21), so it is refused with a 502 like theirs
+            if clen is not None and _relay_length(clen) is None:
+                return self._send(502, b"", "text/plain")
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             if clen is not None:
@@ -88731,9 +88735,19 @@ class Handler(BaseHTTPRequestHandler):
                     body = b"" if head else resp.read(_TEXT_MAX_BYTES)
                     return self._send(resp.status, body, "text/plain", cache="no-cache")
                 clen = resp.getheader("Content-Length")
+                framed = resp.getheader("Transfer-Encoding")
             except (OSError, http.client.HTTPException):
                 _demand_redial(host, "timeout")
                 return self._send(502, b"" if head else ("tunnel to %s is not answering — re-dialing now" % host),
+                                  "text/plain")
+            if clen is not None and framed is not None:
+                # A reply framed two ways (the review of #349, 2026-10-21): http.client reads a chunked body to its end
+                # and ignores the length, so this relay advertised the remote's length and then copied every chunk past
+                # it, and the browser read the excess as the start of its next response on this connection. RFC 9112
+                # (6.3) says such a reply ought to be handled as an error, and that a forwarder passing it on must drop
+                # the length first; this relay refuses it, while a clean 502 is still possible. The remote's own route
+                # never sends one: _file_download frames every reply by its length.
+                return self._send(502, b"" if head else ("reply from %s carried both a length and a transfer encoding" % host),
                                   "text/plain")
             want = _relay_length(clen)
             if clen is not None and want is None:

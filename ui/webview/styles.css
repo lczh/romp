@@ -4020,10 +4020,16 @@ body.drop-over::after { content: ""; position: fixed; inset: 0; pointer-events: 
 .md-video { display: block; width: auto; height: auto; }
 .md-video-still { position: relative; display: inline-block; max-width: 100%; vertical-align: top; line-height: 0; }
 .md-video-still.md-solo { display: block; width: fit-content; }
-/* A box that stands alone ends its own line, so a <br> right after it (the user's markdown keeps its line breaks, so a
-   caption typed on the next line follows one) would add a blank line between the picture and its caption (the review of
-   #343, 2026-10-21). Only the boxed forms: a picture that does not zoom stays inline, and its <br> is its line break. */
-.md-img-zoom.md-solo + br, .md-video-still.md-solo + br { display: none; }
+/* A box that stands alone ends its own line, so the <br> that ends that line (the user's markdown keeps its line breaks,
+   so a caption typed on the next line follows one) would add a blank line between the picture and its caption (the
+   review of #343, 2026-10-21). preview.ts mdSolo marks that one <br> .md-solo-end, and no other: a hard break inside the
+   caption, after its first line's words, stays (the review of #349: a bare `+ br` passes over text, so it hid that break
+   and ran the caption's two lines together). Only under the boxed forms: a picture that does not zoom stays inline, and
+   its <br> is its line break. The marked <br> follows the box itself, or the bold or italic around it, whose last
+   element the box then is (a second rule: a browser without :has() drops only that one). */
+:is(.md-img-zoom, .md-video-still).md-solo + br.md-solo-end { display: none; }
+:has(> :is(.md-img-zoom, .md-video-still).md-solo:last-child) + br.md-solo-end,
+:has(> :last-child > :is(.md-img-zoom, .md-video-still).md-solo:last-child) + br.md-solo-end { display: none; }
 .md-video-still::after { content: ""; position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; margin: -22px 0 0 -22px;
   border-radius: 50%; pointer-events: none; background: rgba(0, 0, 0, 0.55) no-repeat 55% 50% / 18px 18px
   url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 18 18'%3E%3Cpath d='M4 2.5v13l11-6.5z' fill='%23fff'/%3E%3C/svg%3E"); }

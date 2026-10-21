@@ -72,6 +72,8 @@ class _FakeRemoteFileHandler(BaseHTTPRequestHandler):
     video_truncate = False      # half the promised body then a clean close, as the route does when the file shrank
     video_clen = None           # a hostile remote's Content-Length on its video reply, in place of the true one
     dl_clen = None              # …and on its download reply
+    png_clen = None             # …and on its picture reply (the HEAD a preview probes with)
+    dl_chunked = False          # a download reply framed two ways: Transfer-Encoding: chunked AND a (short) Content-Length
 
     def _opener_policy(self):
         # A real romp kernel answers through Handler._send, which sends Cross-Origin-Opener-Policy on every response it
@@ -83,6 +85,20 @@ class _FakeRemoteFileHandler(BaseHTTPRequestHandler):
 
     def _serve(self, head):
         _FakeRemoteFileHandler.requests.append(self.path)
+        if "download=1" in self.path and "data.bin" in self.path and _FakeRemoteFileHandler.dl_chunked:
+            # a hostile or broken remote: the whole file in chunks, under a length that claims a few bytes
+            self.send_response(200)
+            self.send_header("Content-Type", _FakeRemoteFileHandler.dl_ctype)
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Content-Length", "10")
+            self.end_headers()
+            if not head:
+                for at in range(0, len(BIN_BYTES), 4096):
+                    part = BIN_BYTES[at:at + 4096]
+                    self.wfile.write(b"%x\r\n%s\r\n" % (len(part), part))
+                self.wfile.write(b"0\r\n\r\n")
+                self.close_connection = True
+            return
         if "download=1" in self.path and "data.bin" in self.path:
             self.send_response(200)
             self.send_header("Content-Type", _FakeRemoteFileHandler.dl_ctype)
@@ -211,7 +227,7 @@ class _FakeRemoteFileHandler(BaseHTTPRequestHandler):
             return
         self.send_response(200)
         self.send_header("Content-Type", _FakeRemoteFileHandler.ctype)
-        self.send_header("Content-Length", str(len(PNG_BYTES)))
+        self.send_header("Content-Length", _FakeRemoteFileHandler.png_clen or str(len(PNG_BYTES)))
         if not head:
             self._opener_policy()
         self.end_headers()
@@ -277,6 +293,8 @@ class RemoteFileRelay(unittest.TestCase):
         _FakeRemoteFileHandler.video_truncate = False
         _FakeRemoteFileHandler.video_clen = None
         _FakeRemoteFileHandler.dl_clen = None
+        _FakeRemoteFileHandler.png_clen = None
+        _FakeRemoteFileHandler.dl_chunked = False
         self._saved_remotes = dict(km._remotes)
 
     def tearDown(self):
@@ -739,6 +757,39 @@ class RemoteFileRelay(unittest.TestCase):
                                        {"path": ["/tmp/data.bin"], "download": ["1"]})
             self.assertEqual(rec.status, 502, (clen[:12], len(clen)))
             self.assertNotIn("Content-Disposition", rec.headers, "nothing of the 200 went out")
+
+    def test_a_head_whose_length_is_not_a_bounded_decimal_502s(self):
+        # the HEAD a preview probes with passed the remote's Content-Length to the browser as it came, the one arm the
+        # bounded-decimal check had not reached (the review of #349, 2026-10-21); a picture's and a video's alike
+        self._register("gpu1", self.fake.server_address[1])
+        for clen in self.HOSTILE_LENGTHS:
+            _FakeRemoteFileHandler.png_clen = clen
+            status, body, msg = self._get_msg("/remote/gpu1/file?path=%2Ftmp%2Fplot.png", method="HEAD")
+            self.assertEqual((status, body), (502, b""), (clen[:12], len(clen)))
+            self.assertNotEqual(msg.get("Content-Length"), clen, "the hostile length never reaches the browser")
+            _FakeRemoteFileHandler.video_clen = clen
+            status, body, msg = self._video(method="HEAD")
+            self.assertEqual((status, body), (502, b""), ("video", clen[:12], len(clen)))
+        _FakeRemoteFileHandler.png_clen = _FakeRemoteFileHandler.video_clen = None
+        status, _, msg = self._get_msg("/remote/gpu1/file?path=%2Ftmp%2Fplot.png", method="HEAD")
+        self.assertEqual((status, msg.get("Content-Length")), (200, str(len(PNG_BYTES))), "a real length still passes")
+
+    def test_a_download_framed_both_chunked_and_by_length_502s_before_any_header(self):
+        # http.client reads a chunked body to its end and ignores the length, so the relay advertised the remote's
+        # Content-Length (10) and then copied the whole file after it: the excess was the start of the browser's next
+        # response on a keep-alive connection (the review of #349, 2026-10-21). Refused up front, a clean 502
+        _FakeRemoteFileHandler.dl_chunked = True
+        for head in (False, True):
+            rec = _RelayRecorder()
+            km.Handler._relay_download(rec, "gpu1", self.fake.server_address[1], REMOTE_TOKEN,
+                                       {"path": ["/tmp/data.bin"], "download": ["1"]}, head=head)
+            self.assertEqual(rec.status, 502, "head" if head else "get")
+            self.assertNotIn("Content-Disposition", rec.headers, "nothing of the 200 went out")
+            self.assertNotIn(BIN_BYTES[:64], b"".join(rec.writes), "no byte of the file went out")
+        # over HTTP too: the browser sees the relay's 502 and its reason
+        self._register("gpu1", self.fake.server_address[1])
+        status, body, _ = self._get("/remote/gpu1/file?path=%2Ftmp%2Fdata.bin&download=1")
+        self.assertEqual((status, body), (502, b"reply from gpu1 carried both a length and a transfer encoding"))
 
     def test_the_largest_bounded_length_still_relays(self):
         # the bound is a length no file reaches (a 16-digit byte count is 9 PB), never a cap on a real one
