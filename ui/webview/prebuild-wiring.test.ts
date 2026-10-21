@@ -33,11 +33,11 @@ test("a pass YIELDS to the active tab's build and is chunked to the idle deadlin
 test("a pass builds each off-screen tab's hidden DOM via ensureView + syncView", () => {
   assert.match(RENDER, /function runPrebuild\(deadline: IdleDeadline\): void/);
   // ensureView, then (a re-collapse of an overgrown hidden view — #934 fold), then syncView
-  assert.match(RENDER, /ensureView\(id\);[\s\S]*?syncView\(id\);/);
+  assert.match(RENDER, /ensureView\(id\);[\s\S]*?syncView\(id, v\?\.stick\);/);
   assert.match(RENDER, /v\.el\.querySelectorAll\("\.turn"\)\.length > WINDOW_CAP\) \{\s*\n\s*v\.rendered = 0; v\.winStart = 0;/,
     "an overgrown hidden view is re-collapsed to the tail window in idle, off the click path");
   // one malformed tab must not abort pre-building the rest
-  assert.match(RENDER, /try \{[\s\S]*ensureView\(id\);[\s\S]*syncView\(id\);[\s\S]*\} catch/);
+  assert.match(RENDER, /try \{[\s\S]*ensureView\(id\);[\s\S]*syncView\(id, v\?\.stick\);[\s\S]*\} catch/);
   // restore the render-key so nothing keys off a pre-built tab after the pass
   assert.match(RENDER, /const savedRenderingSid = renderingSid;[\s\S]*renderingSid = savedRenderingSid;/);
 });

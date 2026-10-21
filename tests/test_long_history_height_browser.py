@@ -67,8 +67,12 @@ held figure (ROAD 12, 2026-10-21): the reader drops into the tail run, its lower
 spacer, and puts a collapsed tool run's row 200 px under the viewport top; one reply lands, the reader expands the run; three more land,
 the reader collapses it. Each toggle must leave the row where it was clicked, within 2 px, and the held figure and the top spacer where
 they stood (the toggle's rebuild recomputed the figure over the landed replies, which lowered it, and the top spacer shrank under the
-reader). LongHistoryToggleKeepsPlaceUnbounded runs the same road over a shorter tail, where hidden rows take the average unit, which a
-new unit does not move.
+reader). Then ROAD 12's tail: the reader goes back into the history and returns to the end by the chip, where the page re-windows
+around the last unit and leaves fewer than 80 units rendered (WINDOW_TAIL); a tool run in the last turns, put 200 px under the
+viewport top, and a run that lands at the true bottom with the reader following, must each keep their row through an expand, within
+2 px (the toggle's rebuild read the window as the tail window and widened it to 80 units, the top spacer then short by the units it
+rendered); after a collapse at the true bottom the reader follows the next turn. LongHistoryToggleKeepsPlaceUnbounded runs the same
+roads over a shorter tail, where hidden rows take the average unit, which a new unit does not move.
 
 UnreachableEndSettles, at a forced 12x scale (limit 2,796,202), with replies tall enough that the thread stands at the limit and its
 newest row is out of reach. The page must settle there: no re-window on the echo of its own write (the loop that re-rendered the view
@@ -118,6 +122,7 @@ BASE = 1789000000
 LAYOUT_LIMIT_1X = 33_554_432   # the tallest box Chromium lays out at a 1x scale (2^25 layout units)
 JUMP_TURN = 600       # the early turn the jump-to-turn leg lands on
 PAGE_TURNS = 16       # the kernel's history page (kernel.py PAGE_TURNS)
+WINDOW_TAIL = 80      # render.ts WINDOW_TAIL: the units a fresh view renders at the tail
 FALLBACK_SHARE_PX = 16_777_216 // 4   # chat-regions.ts LAYOUT_LIMIT_FALLBACK times GAPS_SHARE: the bound UnreachableEndInsideAGapSettles holds the gaps at
 SID2 = "cccccccc-1111-2222-3333-666666666666"   # LongHistoryBuiltHidden's second session, "api": short
 SHORT_TURNS = 15      # its turns
@@ -609,7 +614,8 @@ if (cfg.legs.includes("keep")) {
     const c = document.getElementById("content"), cr = c.getBoundingClientRect(), t = c.querySelector(".tx-spacer-top");
     const line = c.querySelector(`.toolgroup-line[data-gkey="${k}"]`), row = line && line.closest(".turn-toolgroup"), b = row ? row.getBoundingClientRect() : null;
     return { y: b ? Math.round((b.top - cr.top) * 100) / 100 : null, expanded: row ? row.classList.contains("expanded") : null, members: row ? c.querySelectorAll(".tg-child").length : null,
-             st: c.scrollTop, topPx: t ? parseFloat(t.style.height) || 0 : null, measure: window.__rompViewMeasure() };
+             st: c.scrollTop, dist: c.scrollHeight - c.scrollTop - c.clientHeight, ch: c.clientHeight, topPx: t ? parseFloat(t.style.height) || 0 : null,
+             measure: window.__rompViewMeasure() };
   }, key);
   // a drop onto a unit hidden in a spacer, by its estimate (the held figure for every hidden unit between it and the window, none of
   // them a gap: the head gap is the first unit, above every unit dropped on), computed and written in one task (a re-window in a task
@@ -638,16 +644,16 @@ if (cfg.legs.includes("keep")) {
     return r ? { key: r.querySelector(".toolgroup-line").dataset.gkey, unit: +r.dataset.unit, measure: m } : null;
   }) : null;
   // the reader puts the run's row 200 px under the viewport top (a write computed and made in one task), before each leg
-  const place = async () => {
+  const place = async (key = placed.key) => {
     const y = await page.evaluate((k) => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(), l = c.querySelector(`.toolgroup-line[data-gkey="${k}"]`), r = l && l.closest(".turn-toolgroup");
-      if (!r) return null; const y = Math.round(r.getBoundingClientRect().top - cr.top + c.scrollTop - 200); c.scrollTop = y; return y; }, placed.key);
+      if (!r) return null; const y = Math.round(r.getBoundingClientRect().top - cr.top + c.scrollTop - 200); c.scrollTop = y; return y; }, key);
     if (y != null) { await painted(); await settlePage("ROAD 12's place"); await page.waitForTimeout(300); await painted(); }
     return y;
   };
   // a click on the run's caret, read after its frames have run
-  const click = async () => {
+  const click = async (key = placed.key) => {
     const p = await page.evaluate((k) => { const l = document.querySelector(`#content .toolgroup-line[data-gkey="${k}"]`); if (!l) return null;
-      const b = (l.querySelector(".toolgroup-caret") || l).getBoundingClientRect(); return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }; }, placed.key);
+      const b = (l.querySelector(".toolgroup-caret") || l).getBoundingClientRect(); return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }; }, key);
     if (p) { await page.mouse.click(p.x, p.y); await painted(); await page.waitForTimeout(300); await painted(); }
     return p;
   };
@@ -661,7 +667,61 @@ if (cfg.legs.includes("keep")) {
     const pressed = await click(), toggled = await keepAt(placed.key);
     legs.push({ replies: leg.replies, units: leg.units, at, before, landed, toggled, pressed });
   }
-  out.keep = { first, to, placed, legs };
+  // ROAD 12's tail (2026-10-21): a tool run toggled in the last turns after a return to the end keeps its row. The reader goes back
+  // into the history (cfg.keep.first's drop again) and returns to the end by the go-to-bottom chip, where the page re-windows around
+  // the last unit and leaves fewer than WINDOW_TAIL units rendered (the window's top is the radius above the last unit). Scrolled: the
+  // newest collapsed tool run in that window is put 200 px under the viewport top by the reader's write and its toggle clicked.
+  // Following: the reader goes back and returns again, a turn whose short reply opens with a tool run lands at the true bottom (the
+  // reader follows it), the run is expanded there, the chip takes the reader back to the bottom, the run is collapsed, and one more
+  // turn lands, which the reader must follow. Each reading is keepAt's, with the reader's distance from the bottom
+  let tail = null;
+  if (placed && K.tail) {
+    const chip = async (what) => { await page.click("#jump-bottom", { timeout: 5000 }).catch(() => {}); await painted(); await settlePage(what); await page.waitForTimeout(500); await painted(); };
+    const ret = async (what) => {
+      const back = await dropOn(K.first, what + ": back into the history");
+      await chip(what + ": the chip");
+      return Object.assign(await page.evaluate(() => { const c = document.getElementById("content"); return { st: c.scrollTop, dist: c.scrollHeight - c.scrollTop - c.clientHeight, measure: window.__rompViewMeasure() }; }), { back });
+    };
+    // the newest tool run in the window (the largest unit): its key, unit, and whether it stands expanded
+    const newestRun = () => page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll("#content .turn-toolgroup")).filter((r) => r.dataset.unit != null && r.querySelector('.toolgroup-line[data-gkey^="tg:"]'));
+      rows.sort((a, b) => +b.dataset.unit - +a.dataset.unit);
+      const r = rows[0];
+      return r ? { key: r.querySelector(".toolgroup-line").dataset.gkey, unit: +r.dataset.unit, expanded: r.classList.contains("expanded") } : null;
+    });
+    const land = async (leg) => {
+      fs.appendFileSync(K.transcript, fs.readFileSync(leg.file, "utf8"));
+      const met = await page.waitForFunction((u) => !!document.querySelector(`#content .turn[data-uuid="${u}"]`), leg.reply, { timeout: 20000 }).then(() => true, () => false);
+      await painted(); await page.waitForTimeout(500); await painted();
+      return met;
+    };
+    const newestAt = (u) => page.evaluate((uu) => { const c = document.getElementById("content"), cr = c.getBoundingClientRect(), r = c.querySelector(`.turn[data-uuid="${uu}"]`), b = r ? r.getBoundingClientRect() : null;
+      return { rendered: !!r, onScreen: !!b && b.bottom > cr.top + 1 && b.top < cr.bottom - 1, dist: c.scrollHeight - c.scrollTop - c.clientHeight, measure: window.__rompViewMeasure() }; }, u);
+    const scrolled = { end: await ret("ROAD 12's tail") };
+    scrolled.run = await newestRun();
+    if (scrolled.run) {
+      scrolled.at = await place(scrolled.run.key);
+      scrolled.before = await keepAt(scrolled.run.key);
+      scrolled.pressed = await click(scrolled.run.key);
+      scrolled.after = await keepAt(scrolled.run.key);
+    }
+    const following = { end: await ret("ROAD 12's tail, following") };
+    following.landed = await land(K.tail.tool);
+    following.run = await newestRun();
+    if (following.run) {
+      following.before = await keepAt(following.run.key);
+      following.expand = await click(following.run.key);
+      following.expanded = await keepAt(following.run.key);
+      await chip("ROAD 12's tail: back to the bottom");
+      following.bottom = await keepAt(following.run.key);
+      following.collapse = await click(following.run.key);
+      following.collapsed = await keepAt(following.run.key);
+      const met = await land(K.tail.after);
+      following.next = Object.assign(await newestAt(K.tail.after.reply), { met });
+    }
+    tail = { scrolled, following };
+  }
+  out.keep = { first, to, placed, legs, tail };
 }
 if (cfg.legs.includes("shown")) {
   // ROAD 10 (the class's second session): a view built while hidden takes its measures when it is first shown. When the page lands on
@@ -1426,6 +1486,38 @@ class _LongHistoryLab:
             path = os.path.join(cls.lab, "keep-%d.jsonl" % len(cls.keep_legs))
             Path(path).write_text("".join(json.dumps(r) + "\n" for r in leg))
             cls.keep_legs.append({"file": path, "replies": n, "units": 2 * n})   # a prompt and a text reply: two display units a turn
+        # ROAD 12's tail, chained on from the last leg's reply: a turn whose short reply opens with a tool run (two Bash calls, as the
+        # tall turns' do), which the reader toggles at the true tail, then one more turn, which must follow
+        cls.keep_tail = None
+        if cls.KEEP_REPLIES:
+            tool, after = [], []
+            for recs_, with_tools in ((tool, True), (after, False)):
+                ts_u = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(BASE + 2 * k))
+                ts_a = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(BASE + 2 * k + 1))
+                u = "11111111-2222-3333-4444-%012d" % (2 * k)
+                a = "22222222-3333-4444-5555-%012d" % (2 * k + 1)
+                recs_.append({"type": "user", "uuid": u, "parentUuid": prev, "sessionId": SID, "timestamp": ts_u,
+                              "message": {"role": "user", "content": "question number %d about the notes api" % k}})
+                parent = u
+                for j in range(2 if with_tools else 0):
+                    t, r = "77777777-8888-9999-aaaa-%012d" % (2 * k + j), "88888888-9999-aaaa-bbbb-%012d" % (2 * k + j)
+                    recs_.append({"type": "assistant", "uuid": t, "parentUuid": parent, "timestamp": ts_a, "sessionId": SID,
+                                  "message": {"role": "assistant", "model": "claude-fable-5-1", "stop_reason": "tool_use",
+                                              "content": [{"type": "tool_use", "id": "toolu_t%d_%d" % (k, j), "name": "Bash",
+                                                           "input": {"command": "python3 notes.py --index %d --part %d" % (k, j)}}]}})
+                    recs_.append({"type": "user", "uuid": r, "parentUuid": t, "timestamp": ts_a, "sessionId": SID,
+                                  "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_t%d_%d" % (k, j),
+                                                                           "content": "index %d part %d: ok" % (k, j)}]}})
+                    parent = r
+                recs_.append({"type": "assistant", "uuid": a, "parentUuid": parent, "sessionId": SID, "timestamp": ts_a,
+                              "message": {"role": "assistant", "model": "claude-fable-5-1", "stop_reason": "end_turn",
+                                          "content": [{"type": "text", "text": "Answer %d: the handler reads the note by id and returns it." % k}]}})
+                prev, k = a, k + 1
+            cls.keep_tail = {}
+            for name, recs_ in (("tool", tool), ("after", after)):
+                path = os.path.join(cls.lab, "keep-tail-%s.jsonl" % name)
+                Path(path).write_text("".join(json.dumps(r) + "\n" for r in recs_))
+                cls.keep_tail[name] = {"file": path, "reply": recs_[-1]["uuid"]}
         # the reply ROAD 9 lands last, chained on the last appended one by the driver with its turn left open: a tall reply, as the
         # tail's are, taller than the held figure
         kt = TURNS + 1 + cls.APPEND_TURNS
@@ -1499,7 +1591,8 @@ class _LongHistoryLab:
                 "append": {"transcript": cls.transcript, "first": cls.append_first, "lines": cls.append_lines,
                            "units": 2 * cls.APPEND_TURNS, "newest": cls.append_newest, "into": cls.APPEND_INTO, "tall": cls.append_tall}
                 if cls.APPEND_TURNS else None,
-                "keep": {"transcript": cls.transcript, "first": cls.KEEP_FIRST, "at": cls.KEEP_AT, "legs": cls.keep_legs} if cls.KEEP_REPLIES else None}
+                "keep": {"transcript": cls.transcript, "first": cls.KEEP_FIRST, "at": cls.KEEP_AT, "legs": cls.keep_legs, "tail": cls.keep_tail}
+                if cls.KEEP_REPLIES else None}
 
     @classmethod
     def _drive(cls, cfg, timeout):
@@ -1913,6 +2006,61 @@ class _ToggleKeepsPlace(_LongHistoryLab):
         for g in self._legs():
             self.assertEqual((g["toggled"]["measure"]["heldPx"], g["toggled"]["topPx"]), (g["landed"]["measure"]["heldPx"], g["landed"]["topPx"]),
                              "the held figure and the top spacer stand through the toggle: " + self._moved(g))
+
+    def _tail(self, which):
+        """ROAD 12's tail, one of its two roads ("scrolled" or "following"), its premise checked first: the reader went back into the
+        history by a drop into a spacer and returned to the end by the chip, where the page left a window over the end holding fewer than
+        WINDOW_TAIL units (the re-window's radius above the last unit), the reader at the true bottom."""
+        t = (self._result()["keep"].get("tail") or {}).get(which)
+        self.assertTrue(t, "ROAD 12's tail ran: %r" % self._result()["keep"].get("tail"))
+        e, m = t["end"], t["end"]["measure"]
+        self.assertTrue(e["back"], "%s: the reader went back into the history by a drop into a spacer: %r" % (which, e))
+        self.assertEqual(m["winEnd"], m["units"], "%s: the return to the end left a window over the end: %r" % (which, m))
+        self.assertLess(m["winEnd"] - m["winStart"], WINDOW_TAIL, "%s: …holding fewer than WINDOW_TAIL units: %r" % (which, m))
+        self.assertLessEqual(e["dist"], 2, "%s: …with the reader at the true bottom: %r" % (which, e))
+        if self.BOUND:
+            self.assertTrue(m["heldPx"] is not None and m["heldPx"] < m["avgUnit"] - 1, "hidden units take the held figure, under the average unit: %r" % m)
+        return t
+
+    @staticmethod
+    def _shift(b, a):
+        return "the row moved from %.2f px to %.2f px under the viewport top (the window %r to %r, then %r to %r; the top spacer %r px, then %r px)" % (
+            b["y"], a["y"], b["measure"]["winStart"], b["measure"]["winEnd"], a["measure"]["winStart"], a["measure"]["winEnd"], b["topPx"], a["topPx"])
+
+    def test_a_tool_run_in_the_last_turns_toggled_after_a_return_to_the_end_keeps_its_row(self):
+        # the #347 reviewer's case (2026-10-21): the toggle's rebuild read the window as the tail window and widened it to WINDOW_TAIL
+        # units, rendering the units above it that the top spacer held, and the toggle put back the raw scrollTop, so the top spacer
+        # stood short by those units at the held figure (render.ts toggleToolGroup keeps the window's top)
+        t = self._tail("scrolled")
+        b, a = t.get("before"), t.get("after")
+        self.assertTrue(t["run"] and b and b["y"] is not None and abs(b["y"] - 200) <= 2 and b["expanded"] is False,
+                        "the newest tool run stood collapsed 200 px under the viewport top: %r" % t)
+        self.assertEqual((b["measure"]["winStart"], b["measure"]["winEnd"]), (t["end"]["measure"]["winStart"], t["end"]["measure"]["winEnd"]),
+                         "…in the window the return built (the reader's write did not re-window): %r then %r" % (t["end"]["measure"], b["measure"]))
+        self.assertTrue(t["pressed"] and a["expanded"] is True and a["measure"]["units"] == b["measure"]["units"], "the click expanded the run, no unit landing: %r" % t)
+        self.assertLessEqual(abs(a["y"] - b["y"]), 2, "the expand: " + self._shift(b, a))
+
+    def test_a_tool_run_toggled_at_the_true_tail_keeps_its_row(self):
+        # the same rebuild with the reader following at the true bottom: the turn that landed there grew the window by its units, still
+        # short of WINDOW_TAIL, and the expand widened it the same way
+        t = self._tail("following")
+        b, a = t.get("before"), t.get("expanded")
+        self.assertTrue(t["landed"] and t["run"] and b and b["dist"] <= 2 and b["expanded"] is False and b["y"] is not None and 0 <= b["y"] < b["ch"] - 20,
+                        "a turn with a tool run landed at the true bottom, the reader following it, its run collapsed on screen: %r" % t)
+        self.assertLess(b["measure"]["winEnd"] - b["measure"]["winStart"], WINDOW_TAIL, "…the window still under WINDOW_TAIL units: %r" % b["measure"])
+        self.assertTrue(t["expand"] and a["expanded"] is True, "the click expanded the run: %r" % t)
+        self.assertLessEqual(abs(a["y"] - b["y"]), 2, "the expand at the true tail: " + self._shift(b, a))
+
+    def test_after_a_toggle_at_the_true_tail_the_reader_follows_the_next_turn(self):
+        # the toggle keeps the window's top and its end at the end: a reader at the true bottom after the collapse follows a turn that
+        # lands next (render.ts appendActive)
+        t = self._tail("following")
+        c, n = t.get("collapsed"), t.get("next")
+        self.assertTrue(t.get("bottom") and t["bottom"]["dist"] <= 2 and t["bottom"]["expanded"] is True, "the chip took the reader back to the bottom, the run expanded: %r" % t.get("bottom"))
+        self.assertTrue(t.get("collapse") and c and c["expanded"] is False and c["dist"] <= 2, "the click collapsed the run, the reader still at the bottom: %r" % c)
+        self.assertTrue(n and n["met"] and n["rendered"], "the next turn landed and rendered: %r" % n)
+        self.assertEqual(n["measure"]["winEnd"], n["measure"]["units"], "…in the window over the end: %r" % n["measure"])
+        self.assertTrue(n["onScreen"] and n["dist"] <= 2, "…and the reader followed it to the bottom: %r" % n)
 
 
 class LongHistoryToggleKeepsPlace(_ToggleKeepsPlace, unittest.TestCase):

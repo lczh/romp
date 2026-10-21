@@ -20,5 +20,5 @@ test("a stale view re-renders the CURRENT window (not a full transcript rebuild)
 });
 
 test("toggling a tool group forces a re-render past the cache (sets stale) — an expand still repaints", () => {
-  assert.match(RENDER, /if \(activeId\) \{ const v = views\.get\(activeId\); if \(v\) v\.stale = true; syncView\(activeId\); \}/);
+  assert.match(RENDER, /if \(activeId\) \{ const v = views\.get\(activeId\); if \(v\) v\.stale = true; syncView\(activeId, false\); \}/);
 });

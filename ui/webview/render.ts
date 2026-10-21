@@ -14517,11 +14517,15 @@ function syncView(id: string, atBottom?: boolean): View {
 }
 
 function syncViewInner(id: string, atBottom?: boolean): View {
-  // atBottom (passed by appendActive): false ⇒ the user is scrolled UP reading. The keyed paint (tailDiff) touches the
+  // atBottom (appendActive's follow read; the view's follow mode from showActive and the idle prebuild): false ⇒ the user is
+  // scrolled UP reading. The keyed paint (tailDiff) touches the
   // tail units alone and never evicts the window top, so the content above the viewport stands on its own; on the
   // REBUILD branch below (a stale view, a shape change above the window, a spacer coming or going) atBottom === false
   // keeps winStart, so the content above the viewport is unchanged there too and the caller's anchor restore lands.
   // true/undefined ⇒ the rebuild is free to evict the top (we're at the bottom, or it's a non-append sync).
+  // A caller that puts the reader back by raw scrollTop passes false (2026-10-21): toggleToolGroup always, a fill's fallback, and
+  // the tab's land-saved through the view's follow mode. Read as a reader at the tail, the rebuild widened a window narrower than
+  // WINDOW_TAIL (the re-window around the last unit leaves 71) by units the top spacer held, and the raw scrollTop missed by them.
   renderingSid = id;          // so renderSystem can key the pinned card's persisted open-state by session
   renderingOwnerSid = id;     // preview/image URLs bake THIS session's id (host prefix included), never activeId's
   const subOf = subParts(id);
@@ -15005,9 +15009,15 @@ function renderWindowItems(v: View, s: Session, items: DisplayItem[], unitStart:
   // Measured FIRST (2026-09-23): the estimate read px-per-turn before the paint that measures it, so a view's first build sized
   // its gaps at the default and its next rebuild at the measured figure, a jump of the gap's turns times the difference (the
   // top spacer grew by 180,000 px on a send on a long transcript)
+  // The figures as they stood BEFORE this measure (2026-10-21): a build that makes the view's first measure sets the held figure
+  // whatever the caller asked, as sizeSpacers does on a first measure. A view built while hidden measures nothing and holds the
+  // figure off the 60 px fallback; marked stale before its first show (a subagent viewer off screen), that show is a rebuild that
+  // keeps the figure, its measure ran here, and sizeSpacers' own first-measure check then found the measure already made.
+  const hadPerTurn = v.pxPerTurn != null, hadAvg = v.avgTurnH != null;
   measureRows(v);
   v.gapUnits = gapUnitsOf(items, v.pxPerTurn);
-  if (!keepHeld || v.heldPx == null) v.heldPx = heldPxOf(v, items);   // the held units' figure, off the gaps just mapped (heldPxOf)
+  const firstMeasure = (!hadPerTurn && v.pxPerTurn != null) || (!hadAvg && v.avgTurnH != null);
+  if (!keepHeld || v.heldPx == null || firstMeasure) v.heldPx = heldPxOf(v, items);   // the held units' figure, off the gaps just mapped (heldPxOf)
   sizeSpacers(v);
 }
 /** The tallest box this browser lays out, in CSS px, at the current scale and zoom (2026-10-01): a fixed-position probe asked for a
@@ -15038,7 +15048,7 @@ if (typeof window !== "undefined") (window as any).__rompGapsBound = (px: number
 /** The px a hidden unit of a held run stands for (chat-regions.ts heldUnitPx): v.avgTurnH ?? 60, lowered when the gaps as the
  *  spacer map draws them and the held runs' units at that figure would pass their share of the measured layout limit together
  *  (HIDDEN_SHARE). Set at each window build that puts the reader back on a row (renderWindowItems: the re-window, a fill, a landing,
- *  a first build) and on a first measure (sizeSpacers), off the units the window is painted from; read by the spacers and every walk
+ *  a first build) and on a first measure (sizeSpacers, or the build that makes it), off the units the window is painted from; read by the spacers and every walk
  *  over them (unitPx). The keyed paint (tailDiff) keeps it, so the top spacer it leaves standing and the walks over that spacer still
  *  agree, and so does a rebuild over the units the top spacer stands for (syncViewInner: a tool run's toggle, a tab's return), whose
  *  caller puts the reader back by pixels (2026-10-21). Units appended below the window take the figure as it stands, which can pass
@@ -15328,13 +15338,22 @@ function toggleToolGroup(key: string): void {
   const top = content ? content.scrollTop : 0;
   // the expand/collapse changes the DOM without changing the event set, so mark the view stale to force
   // the compact rebuild past the cache guard (a plain tab switch leaves stale false → reuses the cache).
-  if (activeId) { const v = views.get(activeId); if (v) v.stale = true; syncView(activeId); }
+  // `false`: the rebuild keeps the window's top whatever the reader's follow mode (2026-10-21). The write below puts back the raw
+  // scrollTop, which names the same place only while the content above the reader stands as it was; read as a reader at the tail, the
+  // rebuild widened a window narrower than WINDOW_TAIL (the re-window around the last unit leaves 71 units after End, the chip or a
+  // scroll to the end) by rendering units the top spacer held at the held figure, and a run toggled in the last turns moved its row
+  // 68,000 px down the screen on a long session (tests/test_long_history_height_browser.py ROAD 12's tail). The window still
+  // ends at the end, so a reader following the tail follows what lands next.
+  if (activeId) { const v = views.get(activeId); if (v) v.stale = true; syncView(activeId, false); }
   // `top` is also the write's origin: a collapse makes the transcript shorter, the browser clamps a bottom reader at the forced
   // layout before this write runs, and a write that read the clamped value would move nothing, file no row and set no marker,
   // leaving the clamp's own scroll event to file as a gesture (see writeScroll)
   if (content) writeScroll(content, top, "toolgroup-toggle", false, top);
   refillOpenCommentPop();   // the popover renders the same units — its copy of this run must flip too
   scheduleRailSticky();
+  // the go-to-bottom chip re-reads the bottom (2026-10-21): an expand at the true bottom leaves the reader its rows above the new end
+  // with no scroll event (the write above moves nothing), so the chip stayed hidden and the reader had no way back but a scroll
+  updateJumpBtn();
 }
 
 // Re-render every view from scratch (used when a setting like compact flips): reset each view so the
@@ -15591,7 +15610,7 @@ function runPrebuild(deadline: IdleDeadline): void {
           && v.el.querySelectorAll(".turn").length > WINDOW_CAP) {
         v.rendered = 0; v.winStart = 0; v.avgTurnH = undefined; v.stick = true;
       }
-      syncView(id); // build the hidden view now, off the critical path
+      syncView(id, v?.stick); // build the hidden view now, off the critical path (its top kept for the return's land-saved)
       built++;
     } catch { /* one malformed tab must not break idle pre-building of the rest */ }
   }
@@ -16417,8 +16436,10 @@ function showActive(keep?: { uuid: string; y: number } | null) {
   // the "Loading transcript…" hint — so it renders synchronously below via syncView, never deferred. The
   // `length > 0` guard is what stops a zero-event session from flashing (or sticking on) "Loading…".
   const heavy = s.events.length > 0 && (v.el.childNodes.length === 0 || (settings.compact && (v.rendered !== s.events.length || v.stale)));
+  // Both builds pass the view's follow mode (2026-10-21): a reader not following lands by pixels (landActive's land-saved), which needs
+  // the window's top kept through the rebuild (syncViewInner).
   if (!heavy) {
-    syncView(activeId!); landActive(content, v);
+    syncView(activeId!, v.stick); landActive(content, v);
     if (keepAnchor) keepPlaceAcrossWindow(content, v, keepAnchor);   // the line being read stays put across the rebuild (T249; T262l for a re-windowed view)
     return;
   }
@@ -16438,7 +16459,7 @@ function showActive(keep?: { uuid: string; y: number } | null) {
     const vv = views.get(target);
     if (!vv || !sessions.has(target)) return;
     const cc = document.getElementById("content");
-    syncView(target);                   // the heavy build now (clears the loading hint)
+    syncView(target, vv.stick);         // the heavy build now (clears the loading hint)
     landActive(cc, vv);
     if (keepAnchor && cc) keepPlaceAcrossWindow(cc, vv, keepAnchor);   // same keep on the deferred path (T249; T262l)
   });
@@ -22901,7 +22922,7 @@ function fillInPlace(sid: string, v: View | undefined): void {
   fillBuilding = atLimit;   // the gap elements this rebuild makes are the page's own (quietGaps), at the limit only
   try {
     if (u >= 0) renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting");
-    else syncView(sid);
+    else syncView(sid, false);
   } finally { fillBuilding = false; }
   // a visible row that survived the rebuild goes back to its exact offset; otherwise (no row on screen, or the anchor row gone: a turn
   // anchored on a resultUuid or a word key no event carries, round five medium A) the point under the viewport top is put back by its
