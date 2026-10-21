@@ -17667,9 +17667,22 @@ class SdkBackend:
             except FileNotFoundError:
                 d = {}
             except Exception as ex:
-                self._log("spend record: spend.json could not be read (%s), so this turn's cost was not recorded "
-                          "and the file was left as it is rather than rewritten with this turn alone"
-                          % ex, problem=True, key="spend-ledger-unreadable")
+                # Recording stays stopped until a person fixes or moves the file, and both repair tools refuse it too,
+                # so the row names the file and the way forward. Nothing here moves it: an automatic move would hide the
+                # corruption this row exists to show. The rebuild clause says only what spend_rebuild does on a ledger
+                # started afresh (it recounts the token columns of the buckets the ledger holds, adds none before its
+                # first, never touches dollars or turns; tests/test_spend_rebuild.py pins each).
+                home, shown = os.path.expanduser("~"), str(p)
+                if shown.startswith(home + os.sep):
+                    shown = "~" + shown[len(home):]       # the UI shows home as ~, as the kernel's _tilde does
+                self._log("spend record: %s could not be %s (%s). This turn's cost was not recorded, and no turn's will "
+                          "be until the file is fixed or moved aside; it is left as it is, so the history in it "
+                          "survives. Move it aside (rename it) and the next turn starts a new ledger. romp spend-rebuild "
+                          "--apply can then recount from the transcripts the token counts of the days and hours the new "
+                          "ledger covers; it adds no earlier day or hour and recovers no dollars or turn counts."
+                          % (shown, "parsed" if isinstance(ex, ValueError) else "read",
+                             getattr(ex, "strerror", None) or ex),     # an OSError's text repeats the path in full
+                          problem=True, key="spend-ledger-unreadable")
                 return
             days = d.get("days") if isinstance(d.get("days"), dict) else {}
             hours = d.get("hours") if isinstance(d.get("hours"), dict) else {}
@@ -17727,14 +17740,21 @@ class SdkBackend:
             # hour buckets: 800 kept, a month of hours on a machine that spends every hour — the rolling 5h/7d windows read
             # them, and the rail builds "today" and "this month" in each viewer's own zone from them (2026-10-08)
             _fold(hours, hour, 800)
+            # every other top-level key rides along (spend-repair's repairJournal marks live here), and the temp is this
+            # write's own, the writer-unique name write_reg and write_lease use: _rl_lock holds one process's threads
+            # apart, but two kernels on one state directory (the outgoing and the incoming one at a restart) shared a
+            # name fixed per kernel, and spend-rebuild --apply, run beside a live kernel, writes spend.json.tmp
+            tmp = p.with_name("%s.%d.%s.tmp" % (p.name, os.getpid(), uuid.uuid4().hex[:8]))
             try:
-                # every other top-level key rides along (spend-repair's repairJournal marks live here), and the
-                # tmp name is the kernel's own: spend-rebuild --apply, run beside a live kernel, writes spend.json.tmp
-                tmp = self.state_dir / "spend.json.kernel.tmp"
                 tmp.write_text(json.dumps(dict(d, days=days, hours=hours)))
                 os.replace(tmp, p)
             except Exception as ex:
                 self._log("spend record failed: %s" % ex)
+            finally:
+                try:                                    # never leave a stray temp on a failed write
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
 
     def _persist_login_evidence(self, sess, **fields) -> None:

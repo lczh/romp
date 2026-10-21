@@ -2882,6 +2882,7 @@ class SpendRecord(unittest.TestCase):
 
     def setUp(self):
         self.d = tempfile.mkdtemp()
+        _hosts_off(self.d)                    # its own state root: hosts off, as the runner's floored root has them
         self.be = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None)
         self.p = Path(self.d) / "spend.json"
 
@@ -2932,7 +2933,48 @@ class SpendRecord(unittest.TestCase):
         rows = [r for r in self.be.problems() if r.get("key") == "spend-ledger-unreadable"]
         self.assertEqual(len(rows), 1, "one problem row, counted on every turn it skips")
         self.assertEqual(rows[0]["count"], 4)
-        self.assertIn("spend.json could not be read", rows[0]["first"])
+        self.assertIn("spend.json could not be parsed", rows[0]["first"])
+
+    def test_the_unreadable_ledger_row_names_the_file_and_the_way_forward(self):
+        # Recording stays stopped until someone fixes or moves the file, and both repair tools refuse an unreadable
+        # ledger, so a row that only said "could not be read" left the user with no way forward. It names the file
+        # (home shown as ~) and the remedy, and claims for the rebuild tool only what it does on a ledger started
+        # afresh: tests/test_spend_rebuild.py pins the token recount, no bucket before the first, dollars and turns kept.
+        self.p.write_text('{"days": {"2020-01-01": ')
+        with mock.patch.dict(os.environ, {"HOME": os.path.dirname(self.d)}):
+            self.be._record_spend(1.0, sid="aaaa1111-spend-torn-4")
+        rows = [r for r in self.be.problems() if r.get("key") == "spend-ledger-unreadable"]
+        self.assertEqual(len(rows), 1)
+        row = rows[0]["first"]
+        self.assertIn("~/%s/spend.json could not be parsed (" % os.path.basename(self.d), row, "the file, by its path")
+        self.assertIn("no turn's will be until the file is fixed or moved aside", row, "recording stays stopped, and why")
+        self.assertIn("Move it aside (rename it) and the next turn starts a new ledger", row, "the way forward")
+        self.assertIn("romp spend-rebuild --apply can then recount from the transcripts the token counts of the days and "
+                      "hours the new ledger covers; it adds no earlier day or hour and recovers no dollars or turn counts",
+                      row, "what the rebuild tool recovers, and no more")
+        self.assertEqual(self.p.read_text(), '{"days": {"2020-01-01": ', "the remedy is the user's to apply, never automatic")
+        self.p.rename(Path(self.d) / "spend.json.unreadable")       # the remedy, applied by hand
+        self.be._record_spend(0.5, sid="aaaa1111-spend-torn-4")
+        self.assertEqual(json.loads(self.p.read_text())["days"][self._today()]["turns"], 1, "recording resumes")
+
+    def test_two_kernel_processes_never_share_a_temp_file(self):
+        # _rl_lock holds one process's threads apart; two kernels on one state directory (the outgoing and the incoming
+        # one at a restart) shared a temp name fixed per kernel, so one's os.replace could publish the other's half-written
+        # ledger. Each write goes through its own temp, the module's writer-unique name (write_reg, write_lease).
+        temps, real = [], os.replace
+
+        def spy(src, dst):
+            if Path(dst) == self.p:
+                temps.append(Path(src))
+            return real(src, dst)
+        for pid in (4101, 4102):
+            with mock.patch.object(sb.os, "getpid", return_value=pid), mock.patch.object(sb.os, "replace", spy):
+                self.be._record_spend(0.02, sid="aaaa1111-spend-torn-5")
+        self.assertEqual(len(temps), 2)
+        self.assertNotEqual(temps[0], temps[1], "two processes, two temp files")
+        self.assertEqual({t.parent for t in temps}, {self.p.parent}, "beside the ledger, so the rename stays atomic")
+        self.assertEqual([n for n in os.listdir(self.d) if n.endswith(".tmp")], [], "no temp is left behind")
+        self.assertEqual(json.loads(self.p.read_text())["days"][self._today()]["turns"], 2)
 
     def test_other_top_level_keys_survive_the_write(self):
         # spend-repair records its folded repairs INSIDE spend.json (repairJournal.folded); a turn's write kept only
