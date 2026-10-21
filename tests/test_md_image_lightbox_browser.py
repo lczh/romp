@@ -34,7 +34,10 @@ review of #343, 2026-10-21): a picture with its caption on the next line, in the
 soft break and a <br>), keeps the box with the caption directly under it; two pictures on lines of their own each keep
 it; a picture with words after it, or before it, on its own line stays inline. And the review of #349's (2026-10-21): a
 caption of two lines joined by a hard break (two spaces, a backslash, a <br>) keeps both lines; two half-width pictures
-in a raw HTML <p> sit side by side, unframed; a bold picture in the middle of a sentence stays in it.
+in a raw HTML <p> sit side by side, unframed; a bold picture in the middle of a sentence stays in it. And the review of
+#351's (2026-10-21): a raw <img> alone on its line with a caption on the next (at the message's root, and in a padded
+<p align="center"> with an <em> caption) keeps the box with the caption under it; two raw <img> lines a blank line apart
+each keep the box, stacked; two raw <img> lines at the root with no blank line between sit side by side, as in a <p>.
 
 MDLB_DIST=<dir> serves another tree's UI bundle (the red run's before); MDLB_SHOTS=<dir> writes the reply at both widths
 in both themes and the open lightbox; MDLB_DUMP=<path> writes the whole measurement. Skips LOUDLY without the extension
@@ -180,7 +183,21 @@ def _reply_c0(host, badge):
             "Source: the nightly load run.\n\n"
             "<p>\n<img width=\"45%%\" src=\"%(h)s/big.png?v=sideL\" alt=\"side left\">\n"
             "<img width=\"45%%\" src=\"%(h)s/big.png?v=sideR\" alt=\"side right\">\n</p>\n\n"
-            "The **![bold trace](%(h)s/tall.png?v=bold)** result is the slowest request.\n") % {"h": host, "b": badge}
+            "The **![bold trace](%(h)s/tall.png?v=bold)** result is the slowest request.\n\n"
+            # the review of #351 (2026-10-21): an agent's raw <img> alone on its line with a caption on the next (a raw HTML
+            # block, loose at the message's root) keeps the box with the caption under it, and so does one in a padded
+            # <p align="center"> with an <em> caption on the line under it; two raw <img> lines a blank line apart each keep
+            # the box, stacked; two raw <img> lines with no blank line between, at the root, are a row as in a <p>
+            "<img src=\"%(h)s/big.png?v=raw\" width=\"300\" alt=\"raw captioned\">\n"
+            "Figure 6: requests per hour, from the raw picture.\n\n"
+            "<p align=\"center\">\n  <img src=\"%(h)s/big.png?v=centre\" width=\"300\" alt=\"centred captioned\">\n"
+            "  <em>Figure 7: the same run, centred.</em>\n</p>\n\n"
+            "<img src=\"%(h)s/big.png?v=rawA\" width=\"240\" alt=\"raw first\">\n\n"
+            "<img src=\"%(h)s/big.png?v=rawB\" width=\"240\" alt=\"raw second\">\n\n"
+            "The two runs side by side:\n\n"
+            "<img width=\"45%%\" src=\"%(h)s/big.png?v=rootL\" alt=\"root left\">\n"
+            "<img width=\"45%%\" src=\"%(h)s/big.png?v=rootR\" alt=\"root right\">\n\n"
+            "That is the whole run.\n") % {"h": host, "b": badge}
 
 
 # the user's own message (breaks:true, so its line break is a <br>): a picture with a caption on the next line
@@ -464,7 +481,8 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
     const { ctx, page, errs } = await open(theme, phone, { hash: "#only=tests", ready: TALL });
     await page.waitForFunction(() => ['img[alt="run heat map"]', 'img[alt="board thumbnail"]', 'img[alt="deploy passing"]', 'img[alt="inline trace"]', 'img[alt="squashed heat map"]',
       'img[alt="captioned heat map"]', 'img[alt="first panel"]', 'img[alt="second panel"]', 'img[alt="leading trace"]', 'img[alt="trailing trace"]', 'img[alt="user heat map"]',
-      'img[alt="spaces caption"]', 'img[alt="backslash caption"]', 'img[alt="br caption"]', 'img[alt="side left"]', 'img[alt="side right"]', 'img[alt="bold trace"]']
+      'img[alt="spaces caption"]', 'img[alt="backslash caption"]', 'img[alt="br caption"]', 'img[alt="side left"]', 'img[alt="side right"]', 'img[alt="bold trace"]',
+      'img[alt="raw captioned"]', 'img[alt="centred captioned"]', 'img[alt="raw first"]', 'img[alt="raw second"]', 'img[alt="root left"]', 'img[alt="root right"]']
       .every((s) => { const i = document.querySelector(s); return !!(i && i.complete && i.naturalWidth > 0); }), null, { timeout: 30000 });
     await page.waitForTimeout(150);
     out.box[key] = await page.evaluate((sel) => {
@@ -530,6 +548,8 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
                spaces: twoLines("spaces caption"), backslash: twoLines("backslash caption"), brCap: twoLines("br caption"),
                sideL: pic("side left"), sideR: pic("side right"),
                bold: pic("bold trace"), boldLine: bold ? line(bold.parentElement) : null,
+               rawCap: pic("raw captioned"), centreCap: pic("centred captioned"), rawA: pic("raw first"), rawB: pic("raw second"),
+               rootL: pic("root left"), rootR: pic("root right"),
                bodyClass: document.body.className };
     }, TALL);
     await shot(page, "box-" + key + "-top");
@@ -537,7 +557,9 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
     await page.waitForTimeout(100);
     await shot(page, "box-" + key + "-bottom");
     for (const [alt, name] of [["captioned heat map", "caption"], ["first panel", "panels"], ["leading trace", "lines"], ["user heat map", "user-caption"],
-                               ["spaces caption", "two-line-caption"], ["side left", "side-by-side"], ["bold trace", "bold"]]) {
+                               ["spaces caption", "two-line-caption"], ["side left", "side-by-side"], ["bold trace", "bold"],
+                               ["raw captioned", "raw-caption"], ["centred captioned", "raw-centred-caption"], ["raw first", "raw-blank-line"],
+                               ["root left", "raw-row"]]) {
       await page.evaluate((a) => document.querySelector('img[alt="' + a + '"]').scrollIntoView({ block: "start" }), alt);
       await page.waitForTimeout(100);
       await shot(page, "box-" + key + "-" + name);
@@ -1042,6 +1064,59 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
             p1, p2 = b["panel1"], b["panel2"]
             self.assertTrue("md-solo" in p1["cls"].split() and "md-solo" in p2["cls"].split(), table)
             self.assertGreaterEqual(p2["top"], p1["bottom"] - 0.5, "markdown's two lines still stack" + table)
+            # the review of #351 (2026-10-21): two raw <img> lines at the message's root, no blank line between, are the same
+            # row: the newline between two pictures of the author's HTML is a space
+            rl, rr = b["rootL"], b["rootR"]
+            rtable = "\n  %s: %s" % (key, json.dumps({"rootL": rl, "rootR": rr, "body": b["body"]}))
+            for m in (rl, rr):
+                self.assertEqual((m["nw"], m["nh"]), (1800, 1200), "the root row's picture loaded" + rtable)
+                self.assertNotIn("md-solo", m["cls"].split(), "it shares its line with the other" + rtable)
+                self.assertEqual(m["style"]["display"], "inline", "…inline" + rtable)
+                self.assertTrue(m["style"]["border"].startswith("0px"), "…unframed" + rtable)
+            self.assertAlmostEqual(rl["top"], rr["top"], delta=1, msg="the root row: the two tops level" + rtable)
+            self.assertGreaterEqual(rr["left"], rl["right"] - 1, "…side by side" + rtable)
+
+    def test_a_raw_picture_alone_on_its_line_keeps_the_box_with_its_caption_under_it(self):
+        # the review of #351 (2026-10-21): #351 read every newline of the author's HTML as a space, so an agent's raw
+        # `<img src="…">` with `Figure 6: …` on the next line (a raw HTML block, loose at the message's root) went inline,
+        # unframed, the caption beside its bottom edge, and a padded `<p align="center">` put a picture's <em> caption beside
+        # it. A newline there ends the picture's line unless another picture opens the next: the box, the caption under it
+        r = self._run()
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
+            b = r["box"][key]
+            for name, text in (("rawCap", "Figure 6"), ("centreCap", "Figure 7")):
+                m = b[name]
+                table = "\n  %s %s: %s" % (key, name, json.dumps(m))
+                self.assertEqual((m["nw"], m["nh"]), (1800, 1200), "the raw picture loaded" + table)
+                self.assertIn("md-solo", m["cls"].split(), "alone on its source line" + table)
+                self.assertEqual(m["style"], b["path"]["style"], "…so it wears the path preview's box: block, rounded, framed" + table)
+                self.assertLessEqual(m["h"], 320.5, "…within 320px" + table)
+                self._inside(m, b["body"], "the raw picture", table)
+                c = m["next"]
+                self.assertIsNotNone(c, "the caption rendered" + table)
+                self.assertTrue(c["text"].startswith(text), table)
+                self.assertGreaterEqual(c["top"], m["bottom"] - 0.5, "the caption sits UNDER the picture, not beside it" + table)
+                self.assertLess(c["top"] - m["bottom"], 12, "…directly under it" + table)
+            c, m = b["rawCap"]["next"], b["rawCap"]
+            self.assertAlmostEqual(c["left"], m["left"], delta=1.5, msg="…starting at the picture's left edge" + "\n  %s: %s" % (key, json.dumps(m)))
+
+    def test_two_raw_pictures_a_blank_line_apart_each_keep_the_box_stacked(self):
+        # the review of #351 (2026-10-21): two raw <img> lines with a blank line between them (which ends a raw HTML block
+        # in markdown's source) went inline, unframed and touching. Each stands alone: boxed, the second under the first
+        r = self._run()
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
+            b = r["box"][key]
+            a, c = b["rawA"], b["rawB"]
+            table = "\n  %s: %s" % (key, json.dumps({"rawA": a, "rawB": c, "body": b["body"]}))
+            for name, m in (("first", a), ("second", c)):
+                self.assertEqual((m["nw"], m["nh"]), (1800, 1200), "the %s picture loaded%s" % (name, table))
+                self.assertIn("md-solo", m["cls"].split(), "the %s picture stands alone%s" % (name, table))
+                self.assertEqual(m["style"], b["path"]["style"], "…boxed like the path preview" + table)
+                self._inside(m, b["body"], "the %s picture" % name, table)
+            self.assertGreaterEqual(c["top"], a["bottom"] - 0.5, "the second sits UNDER the first: stacked" + table)
+            self.assertAlmostEqual(c["left"], a["left"], delta=1.5, msg="…at the same left edge" + table)
 
     def test_a_bold_picture_in_a_sentence_stays_on_its_line(self):
         # the review of #349 (2026-10-21): `The **![x](u)** result` framed the picture as a block and split the sentence,

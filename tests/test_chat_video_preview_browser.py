@@ -21,7 +21,10 @@ and on the desktop in the dark theme, the arrows: the clip, the local file, the 
 each step stopping the video it leaves; the local file's preview loading through /file and its range requests answered
 206 (the browser's own media requests, and a closed `bytes=0-1` probe, Safari's first ask); the linked clip's preview.
 A second session, api, posts a <video> with its caption on the next line (the review of #343, 2026-10-21): at both widths
-in both themes the clip keeps the box, with the caption directly under it.
+in both themes the clip keeps the box, with the caption directly under it. A third session, tests, posts a reply of raw
+<video>s (the review of #351, 2026-10-21), read the same way: written on one line, as a block with its open tag on a line of its own, and with its <source> on lines of its
+own, each with a caption on the next line, the clip keeps the box with the caption under it; two blocks a blank line apart
+each keep it, stacked; two clips on consecutive lines of a padded <p> stay inline and unframed.
 
 CVP_DIST=<dir> serves another tree's UI bundle (the red run's before); CVP_SHOTS=<dir> writes the reply at both widths in
 both themes and the open lightbox; CVP_DUMP=<path> writes the whole measurement. Skips LOUDLY without the extension deps
@@ -56,6 +59,7 @@ from test_comment_relay_mark_served import user, agent, iso, _free_port   # noqa
 
 WEB = "aaaaaaaa-1111-2222-3333-5e1d0c1a9b77"
 API = "cccccccc-1111-2222-3333-5e1d0c1a9b77"
+TESTS = "dddddddd-1111-2222-3333-5e1d0c1a9b77"
 
 
 def _png(w, h, rgb):
@@ -148,6 +152,25 @@ def _reply_captioned(host):
     return ("The checkout flow, recorded:\n\n"
             "<video controls src=\"%(h)s/demo.mp4?v=cap\"></video>\n"
             "*Clip 2: checkout, from the cart to the receipt.*\n") % {"h": host}
+
+
+def _reply_raw(host):
+    # the review of #351 (2026-10-21): a <video> an agent writes as a raw HTML block (its open tag alone on its line, or
+    # its <source> on lines of their own, so loose at the message's root) with its caption on the next line keeps the box
+    # with the caption under it, as the one-line form (a paragraph) always has; two such blocks a blank line apart each
+    # keep it, stacked; two <video>s on consecutive lines of a padded <p> (the README layout) stay inline, unframed
+    return ("The three flows, recorded:\n\n"
+            "<video controls width=\"100%%\" src=\"%(h)s/demo.mp4?v=line\"></video>\n"
+            "Clip 3: signup, written on one line.\n\n"
+            "<video controls width=\"100%%\" src=\"%(h)s/demo.mp4?v=block\">\n</video>\n"
+            "Clip 4: checkout, written as a block.\n\n"
+            "<video controls width=\"100%%\">\n  <source src=\"%(h)s/demo.mp4?v=source\" type=\"video/mp4\">\n</video>\n"
+            "Clip 5: the receipt, from its source.\n\n"
+            "<video controls width=\"100%%\" src=\"%(h)s/demo.mp4?v=blankA\">\n</video>\n\n"
+            "<video controls width=\"100%%\" src=\"%(h)s/demo.mp4?v=blankB\">\n</video>\n\n"
+            "The two side by side:\n\n"
+            "<p>\n<video width=\"45%%\" src=\"%(h)s/demo.mp4?v=rowL\"></video>\n"
+            "<video width=\"45%%\" src=\"%(h)s/demo.mp4?v=rowR\"></video>\n</p>\n") % {"h": host}
 
 
 DRIVER = r"""
@@ -352,6 +375,58 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
   } catch (e) { out.caption[key] = { err: String(e && e.stack || e).slice(0, 600) }; }
   if (ctx) await ctx.close();
 }
+// the third session (tests): the raw <video>s (the review of #351), at both widths in both themes
+out.raw = {};
+const RAW = ["line", "block", "source", "blankA", "blankB", "rowL", "rowR"];
+for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
+  const key = (phone ? "phone" : "desktop") + theme[0].toUpperCase() + theme.slice(1);
+  let ctx = null;
+  try {
+    ctx = await browser.newContext(phone
+      ? { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true }
+      : { viewport: { width: 1100, height: 800 } });
+    await ctx.addInitScript(({ t }) => { try { localStorage.setItem("romp:settings", JSON.stringify({ theme: t })); } catch (e) {} }, { t: THEMES[theme] });
+    const page = await ctx.newPage();
+    const errs = [];
+    page.on("pageerror", (e) => errs.push(String(e && e.stack || e).slice(0, 600)));
+    await page.goto(cfg.chat + "#only=tests");
+    await page.waitForSelector('.assistant video[src^="' + cfg.host + '/demo.mp4?v=line"]', { timeout: 60000 });
+    // the raw reply (the review of #351): each still by the address its clip names, its caption the first thing shown after it
+    await page.waitForFunction(({ h, names }) => names.every((n) => {
+      const s = document.querySelector('.assistant [src^="' + h + '/demo.mp4?v=' + n + '"]'); const v = s && s.closest("video"); return !!(v && v.readyState >= 1); }),
+      { h: cfg.host, names: RAW }, { timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(200);
+    out.raw[key] = await page.evaluate(({ h, names }) => {
+      const one = (n) => {
+        const s = document.querySelector('.assistant [src^="' + h + '/demo.mp4?v=' + n + '"]'), v = s && s.closest("video");
+        if (!v) return { missing: true };
+        const wrap = v.parentElement, cs = getComputedStyle(v), b = v.getBoundingClientRect();
+        let cap = null;
+        for (let x = wrap.nextSibling; x && !cap; x = x.nextSibling) {
+          if (x.nodeName === "BR" || !(x.textContent || "").trim()) continue;
+          if (x.nodeType === 1 && (x.querySelector("video") || x.nodeName === "P")) break;   // the next clip or paragraph: no caption
+          const r = document.createRange(); r.selectNodeContents(x);
+          const q = Array.from(r.getClientRects()).find((y) => y.width > 0);
+          cap = q ? { left: q.left, top: q.top, text: (x.textContent || "").trim().slice(0, 40) } : { missing: true };
+        }
+        return { wrap: wrap.className, wrapDisplay: getComputedStyle(wrap).display, natural: [v.videoWidth, v.videoHeight],
+                 video: { left: b.left, right: b.right, top: b.top, bottom: b.bottom, h: b.height },
+                 style: { display: cs.display, radius: cs.borderRadius, border: [cs.borderTopWidth, cs.borderTopStyle].join(" ") }, cap };
+      };
+      const body = document.querySelector('.assistant [src^="' + h + '/demo.mp4?v=line"]').closest(".assistant").getBoundingClientRect();
+      const out = { body: { left: body.left, right: body.right } };
+      for (const n of names) out[n] = one(n);
+      return out;
+    }, { h: cfg.host, names: RAW });
+    for (const [n, name] of [["block", "raw-caption"], ["blankA", "raw-blank-line"], ["rowL", "raw-row"]]) {
+      await page.evaluate(({ h, n }) => document.querySelector('.assistant [src^="' + h + '/demo.mp4?v=' + n + '"]').closest("video").scrollIntoView({ block: "start" }), { h: cfg.host, n });
+      await page.waitForTimeout(120);
+      await shot(page, key + "-" + name);
+    }
+    out.errs["raw" + key] = errs;
+  } catch (e) { out.raw[key] = { err: String(e && e.stack || e).slice(0, 600) }; }
+  if (ctx) await ctx.close();
+}
 fs.writeFileSync(cfg.out, JSON.stringify(out));
 await browser.close();
 console.log("RESULT: ok");
@@ -420,8 +495,13 @@ class ServedChatVideoPreview(unittest.TestCase):
         Path(state, "sdk", API + ".json").write_text(json.dumps(
             {"sid": API, "name": "api", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": API, "alive": True,
              "model": "claude-opus-5", "liveModel": "Opus 5"}))
-        # web first in the shared tab order, so a plain load still opens on web; the caption legs ask for api (#only=)
-        Path(state, "session-order.json").write_text(json.dumps([WEB, API]))
+        Path(state, "names", TESTS).write_text("tests\t%s\t#ffd59c\t#2e1f0c\n" % cwd)
+        Path(state, "sdk", TESTS + ".json").write_text(json.dumps(
+            {"sid": TESTS, "name": "tests", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": TESTS, "alive": True,
+             "model": "claude-opus-5", "liveModel": "Opus 5"}))
+        # web first in the shared tab order, so a plain load still opens on web; the caption legs ask for api, the raw legs
+        # for tests (#only=)
+        Path(state, "session-order.json").write_text(json.dumps([WEB, API, TESTS]))
         Path(state, "usage.json").write_text(json.dumps({"five_hour": {"pct": 10}, "seven_day": {"pct": 10}}))
         t0 = int(time.time()) - 3600
         recs = [user(t0, "u0", None, "record the notes-api signup flow so the review can watch it", WEB),
@@ -432,6 +512,9 @@ class ServedChatVideoPreview(unittest.TestCase):
         api = [user(t0 - 7200, "v0", None, "record the checkout flow too", API),
                agent(t0 - 7160, "b0", "v0", _reply_captioned(cls.origin2), API)]
         Path(proj, API + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in api))
+        tests = [user(t0 - 7000, "w0", None, "record the three flows as their own clips", TESTS),
+                 agent(t0 - 6960, "c0", "w0", _reply_raw(cls.origin2), TESTS)]
+        Path(proj, TESTS + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in tests))
         cls.port, cls.token = _free_port(), "testtok-chatvideo"
         env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST")
         cls.klog = os.path.join(cls.lab, "kernel.log")
@@ -563,6 +646,69 @@ class ServedChatVideoPreview(unittest.TestCase):
         light = res["caption"]["phoneLight"]["bodyClass"].split()
         self.assertIn("theme-light", light)
         self.assertIn("chat-theme-yatharth", light)
+
+    def _raw(self, key):
+        m = self._run()["raw"][key]
+        self.assertNotIn("err", m, m.get("err"))
+        return m
+
+    def test_a_raw_video_block_with_its_caption_on_the_next_line_keeps_the_box_with_the_caption_under_it(self):
+        # the review of #351 (2026-10-21): #351 read every newline of the author's HTML as a space, so a <video> written as
+        # a raw HTML block (its open tag, or its <source>, on a line of its own: loose at the message's root) went inline
+        # and unframed with its caption beside the clip's bottom edge. A newline there ends the clip's line unless another
+        # picture or video opens the next; the one-line <video …></video>, a paragraph, keeps the box as it always has
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            r = self._raw(key)
+            for name, text in (("line", "Clip 3"), ("block", "Clip 4"), ("source", "Clip 5")):
+                m = r[name]
+                table = "\n  %s %s: %s" % (key, name, json.dumps(m))
+                self.assertNotIn("missing", m, "the clip rendered" + table)
+                self.assertEqual(m["natural"], [1920, 1080], "the clip's metadata loaded" + table)
+                self.assertIn("md-solo", m["wrap"].split(), "alone on its source line" + table)
+                self.assertEqual(m["wrapDisplay"], "block", table)
+                self.assertEqual(m["style"]["radius"], "8px", "rounded like the path preview" + table)
+                self.assertTrue(m["style"]["border"].startswith("1px solid"), "framed like the path preview" + table)
+                self.assertLessEqual(m["video"]["h"], 320.5, table)
+                self.assertGreaterEqual(m["video"]["left"], r["body"]["left"] - 0.5, "inside the bubble" + table)
+                self.assertLessEqual(m["video"]["right"], r["body"]["right"] + 0.5, "inside the bubble" + table)
+                c = m["cap"]
+                self.assertTrue(c and c.get("text", "").startswith(text), "the caption rendered" + table)
+                self.assertGreaterEqual(c["top"], m["video"]["bottom"] - 0.5, "the caption sits UNDER the clip, not beside it" + table)
+                self.assertLess(c["top"] - m["video"]["bottom"], 12, "…directly under it" + table)
+                self.assertAlmostEqual(c["left"], m["video"]["left"], delta=1.5, msg="…at the clip's left edge" + table)
+
+    def test_two_raw_video_blocks_a_blank_line_apart_each_keep_the_box_stacked(self):
+        # the review of #351 (2026-10-21): two <video> blocks a blank line apart (which ends a raw HTML block in markdown's
+        # source) went inline and unframed. Each stands alone: boxed, the second under the first
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            r = self._raw(key)
+            a, b = r["blankA"], r["blankB"]
+            table = "\n  %s: %s" % (key, json.dumps({"blankA": a, "blankB": b}))
+            for name, m in (("first", a), ("second", b)):
+                self.assertNotIn("missing", m, "the %s clip rendered%s" % (name, table))
+                self.assertEqual(m["natural"], [1920, 1080], "the %s clip's metadata loaded%s" % (name, table))
+                self.assertIn("md-solo", m["wrap"].split(), "the %s clip stands alone%s" % (name, table))
+                self.assertEqual(m["wrapDisplay"], "block", table)
+                self.assertTrue(m["style"]["border"].startswith("1px solid"), "…framed" + table)
+            self.assertGreaterEqual(b["video"]["top"], a["video"]["bottom"] - 0.5, "the second sits UNDER the first" + table)
+            self.assertAlmostEqual(b["video"]["left"], a["video"]["left"], delta=1.5, msg="…at the same left edge" + table)
+
+    def test_two_videos_on_consecutive_lines_of_a_padded_p_stay_inline_unframed(self):
+        # #351's fix, kept: in the author's HTML a newline between two clips is a space, so the README layout
+        # `<p>\n<video>\n<video>\n</p>` lays them out inline, unframed (a still is the picture box's size whatever its width
+        # attribute says, so two 16:9 stills at 320px tall wrap in any bubble narrower than both)
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            r = self._raw(key)
+            for name in ("rowL", "rowR"):
+                m = r[name]
+                table = "\n  %s %s: %s" % (key, name, json.dumps(m))
+                self.assertNotIn("missing", m, "the clip rendered" + table)
+                self.assertEqual(m["natural"], [1920, 1080], "the clip's metadata loaded" + table)
+                self.assertIn("md-video-still", m["wrap"].split(), table)
+                self.assertNotIn("md-solo", m["wrap"].split(), "it shares its line with the other clip" + table)
+                self.assertEqual(m["wrapDisplay"], "inline-block", "…so it stays inline" + table)
+                self.assertTrue(m["style"]["border"].startswith("0px"), "…unframed" + table)
+                self.assertLessEqual(m["video"]["right"], r["body"]["right"] + 0.5, "inside the bubble" + table)
 
     def test_a_tap_opens_the_lightbox_playing_the_clip_with_its_controls(self):
         clip = self.origin2 + "/clip.mp4"

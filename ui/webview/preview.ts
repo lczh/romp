@@ -1195,14 +1195,19 @@ export function makeVideoStill(v: HTMLVideoElement, url: string, solo: boolean):
 // stands alone wears the box as a block (styles.css .md-solo); one inline with text stays in its line, capped and, when
 // it zooms, with the zoom cursor. Read off the sanitized DOM at render (the post-pass), so it never waits on a load and
 // never flips.
-// Where a line ends (the review of #349, 2026-10-21, which found a README's side-by-side pictures stacked and a bold
-// picture splitting its sentence):
+// Where a line ends (the reviews of #349 and #351, 2026-10-21: a README's side-by-side pictures stacked, a bold picture
+// split its sentence, and then an agent's raw <img> with its caption on the next line lost its box):
 //   - at a <br> (the user's markdown, breaks:true; an agent's hard break), and, in a container that holds blocks (the
 //     message's root, a <div>, a list item, a cell), at a block;
-//   - at a newline in a text node only where the author's line breaks there (newlineEndsLine): a soft break in a
-//     paragraph, list item or heading marked wrote (assistant markdown, breaks:false, where the page shows it as a space
-//     but the source put the next thing on a line of its own), and any newline in a <pre>. In the author's own HTML a
-//     newline between tags is a space, so `<p>\n<img width="45%">\n<img width="45%">\n</p>` keeps its pictures side by side;
+//   - at a newline in a text node with nothing shown between it and the picture, with one exception. Where marked wrote
+//     the line (a paragraph, list item or heading, flush against its tags: newlineEndsLine) and in a <pre>, every such
+//     newline ends it, so markdown's `![a](u)\n![b](u)` stacks. In the author's own HTML (a raw HTML block at the
+//     message's root, a padded `<p>\n…\n</p>`, a <div>, a cell, a quote) it ends the line too, UNLESS the next thing
+//     shown across it is another picture or video (an <img>, a <video>, or an inline wrapper that shows only those:
+//     mediaOnly) and no blank line parts the two: pictures on consecutive lines of HTML sit in one row, as HTML lays
+//     them out. So `<img src="…">\nFigure 1: …` keeps the box with the caption under it, so does a <video> block,
+//     `<p>\n<img width="45%">\n<img width="45%">\n</p>` keeps its pictures side by side, and two raw <img> lines with a
+//     blank line between them (which, in markdown's source, ends a raw HTML block) stack, each in its box;
 //   - never at an inline wrapper's edge: a bold, italic or linked picture is part of the line its wrapper sits on, so the
 //     walk climbs out of the wrappers (`The **![x](u)** result` stays one sentence).
 // When it stands alone and a <br> ends its line, that <br> (and no other) takes .md-solo-end, the one styles.css hides
@@ -1210,12 +1215,14 @@ export function makeVideoStill(v: HTMLVideoElement, url: string, solo: boolean):
 const BLOCK_TAGS = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|CENTER|DD|DETAILS|DIALOG|DIR|DIV|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|HGROUP|HR|LI|MAIN|MENU|NAV|OL|P|PRE|SECTION|SUMMARY|TABLE|UL)$/;
 const INLINE_WRAPS = /^(A|ABBR|B|BDI|BDO|CITE|CODE|DEL|DFN|EM|FONT|I|INS|KBD|MARK|PICTURE|Q|S|SAMP|SMALL|SPAN|STRIKE|STRONG|SUB|SUP|TIME|U|VAR)$/;
 const SHOWS_NOTHING = /^(SOURCE|TRACK|WBR)$/;       // a <picture>'s sources, a video's tracks, a break opportunity
-// Whether a newline in a text node of `box` ends a line. Marked writes the content of a paragraph, a list item and a
+const BLANK_LINE = /\n[ \t]*\n/;                     // markdown's blank line: spaces and tabs only (a &nbsp; line is not one)
+// Whether EVERY newline in a text node of `box` ends a line. Marked writes the content of a paragraph, a list item and a
 // heading flush against its tags, so a newline there is the markdown's own soft break. The author's HTML gives itself away
 // by its padding: content opening on a line of its own after the tag (`<p>\n`, `<p align="center">\n  `), or closing on
 // one after inline content (`…<img>\n</p>`; marked does end a list item on a newline, but after its nested list, a
-// block). There, and in any other container (the root, a <div>, a cell), a newline is a space. A raw `<p><img>\n<img></p>`
-// with no padding at all reads as markdown's own lines and stacks: the DOM cannot tell the two apart.
+// block). There, and in any other container (the root, a <div>, a cell, a quote), a newline between two pictures is a
+// space (mdSolo). A raw `<p><img>\n<img></p>` with no padding at all reads as markdown's own lines and stacks: the DOM
+// cannot tell the two apart.
 function newlineEndsLine(box: Element): boolean {
   const tag = box.tagName.toUpperCase();
   if (tag === "PRE") return true;                    // the page itself breaks there
@@ -1226,6 +1233,20 @@ function newlineEndsLine(box: Element): boolean {
   const afterBlock = !!prev && prev.nodeType === 1 && BLOCK_TAGS.test((prev as Element).tagName.toUpperCase());
   return !pad(kids[0]) && !(pad(kids[kids.length - 1]) && !afterBlock);
 }
+// A picture or a video, or an inline wrapper (a link, a bold, a <picture>, a still's span) that shows only those.
+function mediaOnly(n: Element): boolean {
+  const tag = n.tagName.toUpperCase();
+  if (tag === "IMG" || tag === "VIDEO") return true;
+  if (!INLINE_WRAPS.test(tag)) return false;
+  let any = false;
+  for (const k of Array.from(n.childNodes)) {
+    if (k.nodeType === 3) { if ((k.textContent || "").trim()) return false; continue; }
+    if (k.nodeType !== 1 || SHOWS_NOTHING.test((k as Element).tagName.toUpperCase())) continue;
+    if (!mediaOnly(k as Element)) return false;
+    any = true;
+  }
+  return any;
+}
 export function mdSolo(el: Element): boolean {
   let box = el.parentElement;
   if (!box) return false;
@@ -1233,8 +1254,12 @@ export function mdSolo(el: Element): boolean {
   const newlines = newlineEndsLine(box);
   const blocksEnd = box.tagName.toUpperCase() !== "P";
   // walk from el toward one end of its line, out through the wrappers it sits in: the <br> when one ends the line, true
-  // at any other end with nothing shown on the way, false at anything shown
+  // at any other end with nothing shown on the way, false at anything shown. `blank`, in the author's HTML once a newline
+  // is passed (null before): whether a blank line was among the whitespace since el. Read one text node at a time: the
+  // parser makes one node of a run of source whitespace, and two nodes side by side are a comment the sanitizer removed,
+  // which held a line of its own
   const end = (step: 1 | -1): Element | boolean => {
+    let blank: boolean | null = null;
     for (let at = el; ; at = at.parentElement as Element) {
       const p = at.parentElement as Element;
       const kids = Array.from(p.childNodes);
@@ -1242,15 +1267,23 @@ export function mdSolo(el: Element): boolean {
         const n = kids[i];
         if (n.nodeType === 3) {
           const t = n.textContent || "";
-          const nl = !newlines ? -1 : step > 0 ? t.indexOf("\n") : t.lastIndexOf("\n");
+          if (blank !== null) {
+            if (t.trim()) return true;                 // words on the next line: el's ended at the newline
+            blank = blank || BLANK_LINE.test(t);
+            continue;
+          }
+          const nl = step > 0 ? t.indexOf("\n") : t.lastIndexOf("\n");
           if ((nl < 0 ? t : step > 0 ? t.slice(0, nl) : t.slice(nl + 1)).trim()) return false;   // words on its line
-          if (nl >= 0) return true;                    // the soft break ends the line
+          if (nl < 0) continue;
+          if (newlines || t.trim()) return true;       // markdown's soft break or a <pre>'s line; or words on the next line
+          blank = BLANK_LINE.test(t);                  // the author's HTML: the next thing shown decides
           continue;
         }
         if (n.nodeType !== 1) continue;                // a comment shows nothing
         const tag = (n as Element).tagName.toUpperCase();
         if (SHOWS_NOTHING.test(tag)) continue;
         if (tag === "BR") return n as Element;         // a break ends it
+        if (blank !== null) return blank || !mediaOnly(n as Element);   // a picture on the next line is in its row
         return blocksEnd && BLOCK_TAGS.test(tag);      // so does a block; anything else is on it
       }
       if (p === box) return true;                      // the container's edge

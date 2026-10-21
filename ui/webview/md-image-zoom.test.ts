@@ -170,8 +170,10 @@ test("where a line ends, RUN: a newline only where the author's line breaks, a b
   pair("…in a <div>", false, (a, b) => el("div", { align: "center" }, a, "\n", b));
   pair("…a raw HTML block of two <img> lines, at the message's root", false, (a, b) => el("body", {}, a, "\n", b));
   pair("…in a table cell", false, (a, b) => el("td", {}, a, "\n", b));
+  // …but a newline there still ends a picture's line when words, not another picture, open the next one (the review of
+  // #351: the test below)
   { const a = pic("a"); el("body", {}, el("p", {}, "before"), "\n", a, "\nFigure 1: requests per hour.", el("p", {}, "after"));
-    assert.equal(solo(a), false, "a raw picture with words after a source newline: the page shows them on one line"); }
+    assert.equal(solo(a), true, "a raw picture with words on the next source line: its caption, under it"); }
   // markdown's own lines still end at its soft breaks (#349's case): marked writes paragraphs, list items and headings flush
   pair("markdown's ![a](u)\\n![b](u): each on a line of its own", true, (a, b) => el("p", {}, a, "\n", b));
   pair("…in a tight list item", true, (a, b) => el("li", {}, a, "\n", b));
@@ -215,6 +217,81 @@ test("where a line ends, RUN: a newline only where the author's line breaks, a b
     assert.ok(!solo(a) && !marked(after), "a picture that is a word in a sentence marks nothing"); }
   { const v = el("video", { src: H + "clip.mp4" }), end = el("br"); el("p", {}, v, end, el("em", {}, "Clip 1: the signup flow."));
     assert.ok(solo(v) && marked(end), "a video's line end is marked the same way"); }
+});
+
+test("an author's raw HTML, RUN: a picture or a video alone on its source line ends its line there, unless another picture opens the next line", () => {
+  // the review of #351 (2026-10-21), through the real marked, DOMPurify and mdSolo: #351 read every newline in the author's
+  // HTML as a space, so an agent's raw `<img src="…">` with `Figure 1: …` on the next line (a raw HTML block, loose at the
+  // message's root) lost its box and the caption sat beside its bottom edge; so did a <video> block; two raw <img> lines a
+  // blank line apart touched, unframed; and a padded `<p align="center">` put a picture's <em> caption beside it. A newline
+  // there ends the line, unless the next thing shown across it is another picture or video with no blank line between:
+  // the README's row, which #351 fixed, stays a row
+  const solo = new Function(SOLO_CODE + "\nreturn mdSolo;")() as (e: unknown) => boolean;
+  const H = "https://img.example.test/";
+  const marked = (n: FNode) => (n.cls as Set<string>).has("md-solo-end");
+  const kinds: [string, (n: string) => FNode][] = [
+    ["a picture", (n) => el("img", { src: H + n + ".png", width: "300" })],
+    ["a video", (n) => el("video", { controls: "", width: "100%" }, "\n  ", el("source", { src: H + n + ".mp4", type: "video/mp4" }), "\n")],
+    ["a video's still", (n) => el("span", { class: "md-video-still" }, el("video", { src: H + n + ".mp4" }))],
+  ];
+  for (const [kind, mk] of kinds) {
+    const media = (n: string): [FNode, FNode] => { const m = mk(n); return [m, m.tagName === "SPAN" ? m.childNodes![0] : m]; };
+    const one = (what: string, want: boolean, build: (a: FNode) => FNode) => { const [a, at] = media("a"); build(a); assert.equal(solo(at), want, kind + ": " + what); };
+    const pair = (what: string, want: boolean, build: (a: FNode, b: FNode) => FNode) => {
+      const [a, at] = media("a"), [b, bt] = media("b");
+      build(a, b);
+      assert.deepEqual([solo(at), solo(bt)], [want, want], kind + ": " + what);
+    };
+    // 1. alone on its source line, a caption on the next: it ends its line, the caption goes under it
+    one("a raw block after a paragraph, its caption on the next line", true,
+      (a) => el("body", {}, el("p", {}, "Here is the plot:"), "\n", a, "\nFigure 1: requests per hour.\n\n", el("p", {}, "After."), "\n"));
+    one("…opening the message", true, (a) => el("body", {}, a, "\nFigure 1: requests per hour."));
+    one("…its caption an <em>", true, (a) => el("body", {}, a, "\n", el("em", {}, "Figure 1: requests per hour.")));
+    one("…its caption an <em> on an indented line", true, (a) => el("body", {}, a, "\n  ", el("em", {}, "Figure 1: requests per hour."), "\n"));
+    pair("two captioned in one raw block: each line ends at its newline", true,
+      (a, b) => el("body", {}, a, "\nFigure 1: the first run.\n", b, "\nFigure 2: the second run."));
+    one("a padded <p align=\"center\"> with an <em> caption under it", true,
+      (a) => el("p", { align: "center" }, "\n  ", a, "\n  ", el("em", {}, "Figure 1: the run."), "\n"));
+    one("…in a <div>", true, (a) => el("div", {}, "\n", a, "\nFigure 1: the run.\n"));
+    one("…in a quote", true, (a) => el("blockquote", {}, "\n", a, "\nFigure 1: the run.\n"));
+    one("…in a cell", true, (a) => el("td", {}, a, "\nFigure 1: the run."));
+    one("…a lead-in line above it in the same raw block", true, (a) => el("body", {}, el("strong", {}, "The run:"), "\n", a, "\n"));
+    // 2. a blank line between two (markdown ends a raw HTML block there): each ends its line, stacked and boxed
+    pair("two raw lines a blank line apart, at the message's root", true, (a, b) => el("body", {}, a, "\n\n", b));
+    pair("…between paragraphs", true, (a, b) => el("body", {}, el("p", {}, "Lead."), "\n", a, "\n\n", b, "\n\n", el("p", {}, "After."), "\n"));
+    pair("…a blank line holding spaces and a tab", true, (a, b) => el("body", {}, a, "\n  \t\n", b));
+    pair("…inside a padded <p>", true, (a, b) => el("p", {}, "\n", a, "\n\n", b, "\n"));
+    pair("…inside a <div>", true, (a, b) => el("div", { align: "center" }, "\n", a, "\n\n", b, "\n"));
+    // 3. pictures on consecutive lines of HTML: one row, as HTML lays them out (#351's fix)
+    pair("the README layout, <p>\\n<img>\\n<img>\\n</p>", false, (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
+    pair("…indented under an align", false, (a, b) => el("p", { align: "center" }, "\n  ", a, "\n  ", b, "\n"));
+    pair("…in a <div>", false, (a, b) => el("div", { align: "center" }, "\n", a, "\n", b, "\n"));
+    pair("…two raw lines at the message's root", false, (a, b) => el("body", {}, a, "\n", b));
+    pair("…in a cell", false, (a, b) => el("td", {}, a, "\n", b));
+    pair("…an &nbsp; line between them (no blank line in markdown's source)", false, (a, b) => el("p", { align: "center" }, "\n  ", a, "\n   \n  ", b, "\n"));
+    pair("…a comment between them", false, (a, b) => el("p", {}, "\n", a, "\n", { nodeType: 8, textContent: "x" }, "\n", b, "\n"));
+    pair("…the second in a link", false, (a, b) => el("p", {}, "\n", a, "\n", el("a", { href: H }, b), "\n"));
+    pair("…the second bold", false, (a, b) => el("p", {}, "\n", a, "\n", el("strong", {}, b), "\n"));
+    pair("…a caption line after the row", false, (a, b) => el("p", {}, "\n", a, "\n", b, "\n", el("em", {}, "Figure 1: both runs."), "\n"));
+    // and a <br> on the next line ends it as it always did, marked under the box
+    { const [a, at] = media("a"), end = el("br");
+      el("p", { align: "center" }, "\n  ", a, "\n  ", end, "\n  ", el("em", {}, "Figure 1: the run."), "\n");
+      assert.ok(solo(at) && marked(end), kind + ": a padded <p> with a <br> on the line after: alone, the <br> its line's end"); }
+    // words on its own line keep it inline, in the author's HTML as in markdown
+    one("words after it on its source line", false, (a) => el("body", {}, a, " is the slowest request.\n"));
+    one("words before it on its source line", false, (a) => el("p", {}, "\nThe trace ", a, "\n"));
+  }
+  // a picture and a video on consecutive lines are one row too
+  { const a = el("img", { src: H + "a.png" }), v = el("video", { src: H + "b.mp4" });
+    el("p", {}, "\n", a, "\n", v, "\n");
+    assert.deepEqual([solo(a), solo(v)], [false, false], "a picture and a video on consecutive lines of HTML: one row"); }
+  // what counts as a picture across the newline: one that shows only pictures (a <picture>'s sources show nothing)
+  { const a = el("img", { src: H + "a.png" }), p = el("picture", {}, "\n", el("source", { srcset: H + "d.png" }), "\n", el("img", { src: H + "b.png" }), "\n");
+    el("p", {}, "\n", a, "\n", p, "\n");
+    assert.equal(solo(a), false, "a <picture> on the next line is a picture"); }
+  { const a = el("img", { src: H + "a.png" });
+    el("p", {}, "\n", a, "\n", el("a", { href: H }, el("img", { src: H + "b.png" }), " the board"), "\n");
+    assert.equal(solo(a), true, "a link holding a picture AND words is not: the line ends"); }
 });
 
 test("the predicate: a marked picture, outside any link or summary, showing a source, SHOWN at least ZOOM_MIN_H px tall", () => {
