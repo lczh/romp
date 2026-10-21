@@ -18769,10 +18769,12 @@ def _list_dir(raw, sid=None, hidden=False, limit=DIR_LIST_MAX):
                 if not is_dir:
                     # SIZE-AWARE (2026-09-06): the same caps /file applies, so a row the view route would 413
                     # is download-only up front — a PDF can open in its own tab (a modified click), and an oversize one would
-                    # otherwise land that tab on the refusal instead of the viewer that offered the save
+                    # otherwise land that tab on the refusal instead of the viewer that offered the save. A video has
+                    # no cap to break (/file streams it, 2026-10-21), so it is viewable at any size.
                     _m = _PREVIEW_MIME.get(os.path.splitext(e.name)[1].lower())
                     row["viewable"] = (bool(_m) and size <= _PREVIEW_MAX_BYTES) \
-                        or (not _m and _is_text_path(e.name) and size <= _TEXT_MAX_BYTES)
+                        or (not _m and _is_text_path(e.name) and size <= _TEXT_MAX_BYTES) \
+                        or _m in _VIDEO_TYPES
                 (dirs if is_dir else files).append(row)
     except OSError as ex:
         return dict(err_ctx,
@@ -64758,7 +64760,15 @@ _img_cache = {}                                  # "path:mtime:size" → dataURL
 #      served as an image (an <img> never runs its scripts; a tab NAVIGATED to one is a document, which
 #      _media_policy_headers below sandboxes); the files are the user's own, written by their own agents,
 #      on their own machine.
-_PREVIEW_MIME = dict(_IMG_MIME, **{".pdf": "application/pdf"})
+# VIDEO joined the allowlist on 2026-10-21 (the user, who wanted a screen recording an agent mentions to play
+# in the chat the way a mentioned plot shows): the three containers a browser's <video> plays. Video is the
+# one STREAMED media kind: the route answers it in _DOWNLOAD_CHUNK pieces and honours every single byte
+# range (_range_spec), because a <video> seeks by Range and a recording routinely runs past the slurp cap
+# below. So _PREVIEW_MAX_BYTES does not apply to a video, and _VIDEO_TYPES is how each reader of the cap
+# tells one apart. Pins and the hover popover stay image-only (_pin_mention, _slice_kind read _IMG_MIME).
+_VIDEO_MIME = {".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime"}
+_VIDEO_TYPES = frozenset(_VIDEO_MIME.values())
+_PREVIEW_MIME = dict(_IMG_MIME, **{".pdf": "application/pdf"}, **_VIDEO_MIME)
 
 
 def _media_policy_headers(mime):
@@ -64782,7 +64792,80 @@ def _media_policy_headers(mime):
     return {"Content-Security-Policy": "sandbox"} if mime == _IMG_MIME[".svg"] else {}
 
 
-_PREVIEW_MAX_BYTES = 50_000_000                  # a plot/report, not a dataset — bigger 413s (fail loudly)
+_PREVIEW_MAX_BYTES = 50_000_000                  # a plot/report, not a dataset — bigger 413s (fail loudly); never a video (streamed)
+
+# ---- byte ranges on the media half of /file (2026-10-21). Until video, the route honoured one form, the
+#      resume client's `bytes=N-` with N > 0 (preview.ts resumeFetch), and served anything else whole. A
+#      <video> needs the rest of RFC 9110's single-range grammar: Safari and iOS open a video with
+#      `bytes=0-1` and refuse to play a source that answers that probe with a 200 of the whole file, and
+#      every browser seeks with `bytes=a-` or `bytes=a-b`. One range only: a multi-range ask would need a
+#      multipart/byteranges reply that no media element sends, and ignoring the header (a 200 of the whole
+#      file) is what RFC 9110 allows for a range a server will not serve. Text never reads a range: the
+#      viewer slurps it.
+_RANGE_RE = re.compile(r"^bytes=(?:(\d{1,20})-(\d{0,20})|-(\d{1,20}))$", re.I)
+
+
+def _range_spec(header):
+    """The ONE byte range a Range header asks for, before the file's size is known: (first, last) for
+    `bytes=first-last`, (first, None) for `bytes=first-`, (None, n) for the suffix `bytes=-n` (the last n
+    bytes). None for anything that is not exactly one valid range: no header, another unit, a list, garbage,
+    or last < first; the caller then ignores the header and serves the whole file (RFC 9110 lets a server
+    ignore a Range it will not serve). The digit runs are bounded so int() never sees a header-sized number.
+    Read by the local route and by the /remote relay, which forwards the re-serialised form (_range_header)
+    so nothing but byte arithmetic reaches the remote."""
+    m = _RANGE_RE.match((header or "").strip())
+    if not m:
+        return None
+    if m.group(3) is not None:
+        return (None, int(m.group(3)))
+    first = int(m.group(1))
+    last = int(m.group(2)) if m.group(2) else None
+    if last is not None and last < first:
+        return None
+    return (first, last)
+
+
+def _range_header(spec):
+    """A _range_spec written back as the header it parsed from, in canonical form: what the relay forwards."""
+    first, last = spec
+    if first is None:
+        return "bytes=-%d" % last
+    return "bytes=%d-%s" % (first, "" if last is None else last)
+
+
+def _range_window(spec, size):
+    """A _range_spec resolved against a file of `size` bytes: (start, end), both inclusive, or None when the
+    range is valid but cannot be satisfied (it starts at or past the end, or asks for a suffix of no bytes, or
+    the file is empty), which the route answers 416 with `Content-Range: bytes */size`. An end past the file is
+    clamped to its last byte, and a suffix longer than the file is the whole file (RFC 9110 14.1.2)."""
+    first, last = spec
+    if size <= 0:
+        return None
+    if first is None:
+        if last == 0:
+            return None
+        return (max(0, size - last), size - 1)
+    if first >= size:
+        return None
+    return (first, size - 1 if last is None else min(last, size - 1))
+
+
+def _stream_span(wfile, fp, start, length):
+    """Write `length` bytes of the file at `fp`, from byte `start`, to `wfile` in _DOWNLOAD_CHUNK pieces, never
+    holding more than one chunk. True when every byte went out; False when the file ran short (it shrank after
+    its size was read), which the caller answers by closing the connection: the Content-Length already sent is
+    a promise it can no longer keep, and a closed connection is a visibly failed load where an open one hangs
+    (_file_download's reasoning)."""
+    remaining = length
+    with open(fp, "rb") as f:
+        f.seek(start)
+        while remaining > 0:
+            chunk = f.read(min(_DOWNLOAD_CHUNK, remaining))
+            if not chunk:
+                return False
+            wfile.write(chunk)
+            remaining -= len(chunk)
+    return True
 
 # ---- …and the SOURCE/TEXT half of the same route (the user 2026-08-08). Clicking a file link used to
 #      post openFile, which runs an opener on the KERNEL's machine — useless when you are reading the
@@ -83643,11 +83726,14 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _send(self, code, body, ctype, cache=None, headers=None, opener_policy=True):
+    def _send(self, code, body, ctype, cache=None, headers=None, opener_policy=True, length=None):
         body = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(code)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
+        # `length` (2026-10-21): the header block of a STREAMED reply, whose caller writes the body itself once this
+        # returns (a video through /file and through the /remote relay). The block carries that body's length and
+        # `body` is empty; routing those headers through here is what keeps every guarantee below on them.
+        self.send_header("Content-Length", str(len(body) if length is None else length))
         _security_headers(self.send_header, opener_policy)
         for k, v in (headers or {}).items():
             self.send_header(k, v)
@@ -83807,7 +83893,11 @@ class Handler(BaseHTTPRequestHandler):
 
         Also serves SOURCE/TEXT (the user 2026-08-08) so the viewer can show a file to a browser that is
         nowhere near the kernel's machine — its own, much smaller cap, and a NUL sniff so a binary that
-        slipped past the name allowlist 415s instead of arriving as mojibake."""
+        slipped past the name allowlist 415s instead of arriving as mojibake.
+
+        And VIDEO (2026-10-21): streamed rather than slurped, so it has no size cap, every single byte range
+        is honoured (_range_spec) and its replies say so with Accept-Ranges, which is what lets a <video>
+        seek, and lets Safari play at all."""
         fp = _resolve_open_path((q.get("path") or [""])[0], (q.get("sid") or [None])[0])
         if (q.get("download") or [""])[0] == "1":
             return self._file_download(fp, head=head)
@@ -83837,8 +83927,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(415, b"" if head else
                               "not viewable in the browser: %s" % _tilde(fp), "text/plain")
         size = os.path.getsize(fp)
+        video = mime in _VIDEO_TYPES             # streamed below, so the slurp cap is not its limit
         cap = _TEXT_MAX_BYTES if text else _PREVIEW_MAX_BYTES
-        if size > cap:
+        if size > cap and not video:
             msg = "too large to show: %s (%s, limit %s)" % (_tilde(fp), _human_bytes(size), _human_bytes(cap))
             if not head and mime == "application/pdf" and self._is_navigation():
                 # A PDF opens in its OWN TAB now (preview.ts openPdfTab, 2026-09-06), decided by extension
@@ -83867,6 +83958,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("X-Romp-Mtime-Ns", mtime_ns)
             if mime == "application/pdf":                     # the probe agrees with the GET (below) on the tab's name
                 self.send_header("Content-Disposition", _attachment_disposition(os.path.basename(fp), kind="inline"))
+            if video:                                         # a <video> seeks by Range only where the server says it may
+                self.send_header("Accept-Ranges", "bytes")
             self.send_header("X-Content-Type-Options", "nosniff")   # _send's guarantee, restated on the HEAD path
             for k, v in _media_policy_headers(mime).items():        # sandbox on an SVG (see _media_policy_headers)
                 self.send_header(k, v)
@@ -83876,37 +83969,45 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Vary", "Origin")
             self.end_headers()
             return
-        # RESUME (the user 2026-08-16, on flaky wifi): a preview fetch that dies mid-transfer used to
-        # restart from byte 0 on every retry, so a large figure never finished arriving over a link
-        # that keeps dropping. The chat's resumable retry asks for the REST with `Range: bytes=N-`
-        # (the one suffix form; anything else is served whole as a plain 200, which the client treats
-        # as a restart). MEDIA only — the text viewer slurps. Past-the-end asks get 416 so a client
-        # holding a stale offset restarts cleanly instead of appending garbage.
-        rng = None
-        if not text:
-            m = re.match(r"^bytes=(\d+)-$", (getattr(self, "headers", None) or {}).get("Range") or "")
-            if m:
-                rng = int(m.group(1))
-        if rng:
-            if rng >= size:
-                return self._send(416, "range starts past the end: %d >= %d" % (rng, size), "text/plain")
-            with open(fp, "rb") as f:
-                f.seek(rng)
-                raw = f.read()
-            self.send_response(206)
-            self.send_header("Content-Type", mime)
-            self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Content-Range", "bytes %d-%d/%d" % (rng, size - 1, size))
-            self.send_header("X-Content-Type-Options", "nosniff")
-            for k, v in _media_policy_headers(mime).items():        # sandbox on an SVG (see _media_policy_headers)
-                self.send_header(k, v)
-            self.send_header("Cache-Control", "no-cache")
-            if getattr(self, "_cors_origin", None):
-                self.send_header("Access-Control-Allow-Origin", self._cors_origin)
-                self.send_header("Access-Control-Expose-Headers", "Content-Range")
-                self.send_header("Vary", "Origin")
-            self.end_headers()
-            self.wfile.write(raw)
+        # RANGES, on MEDIA only (the text viewer slurps). Born as RESUME (the user 2026-08-16, on flaky wifi):
+        # a preview fetch that dies mid-transfer used to restart from byte 0 on every retry, so a large figure
+        # never finished arriving over a link that keeps dropping, and the chat's resumable retry asks for the
+        # REST with `Range: bytes=N-`. Widened to every single range for video (2026-10-21; the grammar and its
+        # reasons are _range_spec's): Safari probes a video with `bytes=0-1`, and a seek asks for `a-` or
+        # `a-b`. Anything that is not one valid range is ignored and the file served whole as a plain 200,
+        # which the resume client treats as a restart. A valid range the file cannot satisfy is a 416 naming
+        # the size, so a client holding a stale offset restarts cleanly instead of appending garbage.
+        spec = None if text else _range_spec((getattr(self, "headers", None) or {}).get("Range"))
+        win = _range_window(spec, size) if spec else None
+        cors_range = {"Access-Control-Expose-Headers": "Content-Range"} if getattr(self, "_cors_origin", None) else {}
+        if spec and not win:
+            unsat = {"Content-Range": "bytes */%d" % size}
+            unsat.update(cors_range)
+            return self._send(416, "range not satisfiable: the file is %d bytes" % size, "text/plain", headers=unsat)
+        # The headers every MEDIA success carries beyond _send's own, streamed or slurped (text builds its own).
+        extra = {"Last-Modified": lastmod, "X-Romp-Mtime-Ns": mtime_ns}
+        extra.update(_media_policy_headers(mime))            # sandbox on an SVG (see _media_policy_headers)
+        if win or video:
+            # STREAMED: every 206, and a video's 200 whatever its size. The headers go out through _send, so a
+            # streamed reply carries every guarantee a slurped one does (the security set with the opener
+            # policy, nosniff, the cookie, CORS), and the body follows in chunks (_stream_span): a video can be
+            # gigabytes, and _send's whole-body write would hold all of it in this kernel at once.
+            start, end = win or (0, size - 1)
+            if video:
+                extra["Accept-Ranges"] = "bytes"
+            if win:
+                extra["Content-Range"] = "bytes %d-%d/%d" % (start, end, size)
+                extra.update(cors_range)
+            self._send(206 if win else 200, b"", mime, cache="no-cache", headers=extra, length=end - start + 1)
+            # Past the header block a second status line is impossible, so every failure from here on (the file
+            # shrank, a read failed, or the browser went away, which a <video> does on every seek) ends the
+            # same way: this connection closed short of the length promised, never a 500 written into a body.
+            try:
+                whole = _stream_span(self.wfile, fp, start, end - start + 1)
+            except OSError:
+                whole = False
+            if not whole:
+                self.close_connection = True
             return
         with open(fp, "rb") as f:
             raw = f.read()
@@ -83926,8 +84027,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, body, mime, cache="no-cache",
                               headers={"Last-Modified": lastmod, "X-Romp-Mtime-Ns": mtime_ns,
                                        "X-Romp-Text-Utf8": u8})
-        extra = {"Last-Modified": lastmod, "X-Romp-Mtime-Ns": mtime_ns}
-        extra.update(_media_policy_headers(mime))            # sandbox on an SVG (see _media_policy_headers)
         if mime == "application/pdf":
             # INLINE, with the file's name (2026-09-06): a PDF opens in its own browser tab now (preview.ts
             # openPdfTab), and the browser titles that tab and names a Save from this header — without it
@@ -88464,20 +88563,27 @@ class Handler(BaseHTTPRequestHandler):
             mime = "text/plain; charset=utf-8"
         if not mime:
             return self._send(404, b"" if head else "not found", "text/plain")
+        video = mime in _VIDEO_TYPES             # streamed through below, never slurped (_VIDEO_MIME)
         if rtok:
             q["token"] = [rtok]      # the remote's own credential; whatever the browser sent means nothing there
         conn = http.client.HTTPConnection("127.0.0.1", int(port), timeout=15)
+        stream = False               # a video's 200/206 keeps the connection for the copy below, which closes it
         try:
-            # The resumable retry's Range rides through (the user 2026-08-16): the SAME suffix form the
-            # local route honors, validated here so the relay forwards byte arithmetic and nothing else.
+            # The browser's Range rides through: born as the resumable retry's suffix form (the user 2026-08-16),
+            # widened to every single range the local route honours (a <video> probes and seeks with them,
+            # 2026-10-21). Parsed and re-serialised here (_range_spec, _range_header) so the relay forwards
+            # byte arithmetic and nothing else; a header that is not one valid range is dropped, and the remote
+            # serves the whole file, as the local route would.
             hdrs = {}
-            _rng = (getattr(self, "headers", None) or {}).get("Range") or ""
-            if not head and re.match(r"^bytes=\d+-$", _rng):
+            _spec = None if head else _range_spec((getattr(self, "headers", None) or {}).get("Range"))
+            if _spec:
+                _rng = _range_header(_spec)
                 hdrs["Range"] = _rng
             conn.request("HEAD" if head else "GET", "/file?" + urlencode(q, doseq=True), headers=hdrs)
             resp = conn.getresponse()
-            body = b"" if head else resp.read(_PREVIEW_MAX_BYTES + 1)
             status, ctype = resp.status, mime          # OUR mime, never resp.getheader("Content-Type")
+            stream = video and not head and status in (200, 206)
+            body = b"" if head or stream else resp.read(_PREVIEW_MAX_BYTES + 1)
             clen = resp.getheader("Content-Length")
             # These three are MIRRORED, unlike Content-Type: they are data about the remote's file
             # (the save-conflict floor and the Edit gate ride on them), not instructions to this
@@ -88488,14 +88594,24 @@ class Handler(BaseHTTPRequestHandler):
             r_u8 = resp.getheader("X-Romp-Text-Utf8")
             crange = resp.getheader("Content-Range") or ""
         except (OSError, http.client.HTTPException) as e:
+            stream = False                       # nothing to copy: the finally closes the connection
             _demand_redial(host, "refused" if isinstance(e, ConnectionRefusedError) else "timeout")
             return self._send(502, b"" if head else ("tunnel to %s is not answering — re-dialing now" % host),
                               "text/plain")
         finally:
+            if not stream:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+        if stream:
             try:
-                conn.close()
-            except OSError:
-                pass
+                return self._relay_video_body(host, resp, status, ctype, clen, crange, lastmod, r_ns)
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
         if len(body) > _PREVIEW_MAX_BYTES:       # backstop only — the remote's own cap 413s long before this
             return self._send(413, b"" if head else "too large to preview", "text/plain")
         if status not in (200, 206):
@@ -88513,6 +88629,13 @@ class Handler(BaseHTTPRequestHandler):
                                                        os.path.basename(rp), q,
                                                        route="/remote/%s/file" % quote(host, safe="")),
                                   "text/html; charset=utf-8", cache="no-cache")
+            if status == 416 and re.match(r"^bytes \*/\d+$", crange):
+                # A range the remote's file cannot satisfy: its size rides back (2026-10-21), in the one shape
+                # that is size arithmetic and nothing else, so a <video> holding a stale range learns the length.
+                unsat = {"Content-Range": crange}
+                if getattr(self, "_cors_origin", None):
+                    unsat["Access-Control-Expose-Headers"] = "Content-Range"
+                return self._send(416, body, "text/plain", cache="no-cache", headers=unsat)
             return self._send(status, body, "text/plain", cache="no-cache")
         if head:
             # mirror _file_preview's HEAD: the remote's verdict + real length, no body
@@ -88526,6 +88649,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("X-Romp-Mtime-Ns", r_ns)
             if status == 200 and mime == "application/pdf":   # the tab's name — OURS, from the requested path
                 self.send_header("Content-Disposition", _attachment_disposition(os.path.basename(rp), kind="inline"))
+            if video:                                         # OURS too: this relay serves every range it forwards
+                self.send_header("Accept-Ranges", "bytes")
             self.send_header("X-Content-Type-Options", "nosniff")   # _send's guarantee, restated on the HEAD path
             for k, v in _media_policy_headers(mime).items():        # the SVG sandbox, from OUR mime like the type
                 self.send_header(k, v)
@@ -88637,6 +88762,46 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
             except OSError:
                 pass
+
+    def _relay_video_body(self, host, resp, status, ctype, clen, crange, lastmod, r_ns):
+        """The VIDEO arm of _remote_file (2026-10-21): the remote's 200 or 206 STREAMED through chunk by chunk, the
+        _relay_download pattern, where images and PDFs are read whole. A video has no size cap (the local route streams
+        it, _VIDEO_MIME), so buffering one here would hold a whole recording in this kernel. The caller has read only
+        the remote's status line and headers and owns the connection, which it closes once this returns.
+
+        Everything that tells this browser how to treat the bytes is OURS, as on every relay arm: the type derived from
+        the requested extension (`ctype`), and Accept-Ranges, since this relay forwards every single range. What is
+        MIRRORED is data about the remote's file: its Content-Length (the remote's own route always sends one, and a
+        streamed reply cannot be measured before it is sent, so a reply without one is refused), the mtimes, and on a
+        206 a Content-Range in the exact byte-arithmetic shape, else a 502 as on the image arm. The headers go out
+        through _send with the length, so the reply carries the security set like every 200 the relay sends."""
+        if not re.fullmatch(r"[0-9]+", clen or ""):
+            return self._send(502, "reply from %s carried no length" % host, "text/plain")
+        extra = {k: v for k, v in (("Last-Modified", lastmod), ("X-Romp-Mtime-Ns", r_ns)) if v}
+        extra["Accept-Ranges"] = "bytes"
+        if status == 206:
+            if not re.match(r"^bytes \d+-\d+/\d+$", crange):
+                return self._send(502, "malformed partial reply from %s" % host, "text/plain")
+            extra["Content-Range"] = crange
+            if getattr(self, "_cors_origin", None):
+                extra["Access-Control-Expose-Headers"] = "Content-Range"
+        want = int(clen)
+        self._send(status, b"", ctype, cache="no-cache", headers=extra, length=want)
+        # Headers are out, so a second status line is no longer possible: a tunnel that dies mid-stream, a remote
+        # that sends short and closes cleanly (http.client answers that with b'' and no exception) and a browser
+        # that went away all end the same way, with this connection closed short of the length promised.
+        copied = 0
+        try:
+            while copied < want:
+                chunk = resp.read(min(_DOWNLOAD_CHUNK, want - copied))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                copied += len(chunk)
+        except (OSError, http.client.HTTPException):
+            pass
+        if copied < want:
+            self.close_connection = True
 
     def _push_one(self, client, only=None):
         """The connect push to one client: the whole board for a `ready`, the asked tabs alone for a needFull (`only`, see

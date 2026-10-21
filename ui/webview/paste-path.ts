@@ -18,6 +18,8 @@ export function pastedFilePath(text: string): { path: string } | null {
   }
   s = s.replace(/\\([ ()'"&])/g, "$1");                    // terminal-escaped spaces & friends
   if (!/^[/~]/.test(s)) return null;                       // absolute or ~ only — a bare word is prose
-  if (!previewKind(s)) return null;                        // only kinds /file serves (img + pdf)
+  const k = previewKind(s);
+  if (k !== "img" && k !== "pdf") return null;              // only the kinds an attachment carries (img + pdf); /file serves a video
+  //                                                           too since 2026-10-21, but a clip is no attachment a session can read
   return { path: s };
 }

@@ -102,7 +102,8 @@ test("a failed preview heals on the next kernel push (a link failure: on the rec
 });
 
 test("the chat uses the FULL render on web, and the host data-URL flow for images in VS Code", () => {
-  assert.match(RENDER, /const full = canPreview\(\) \? previewFull\(p, renderingOwnerSid \?\? activeId, kernelVerified\.has\(p\), \(pathPins \|\| \{\}\)\[p\]\)\s*\n\s*: previewKind\(p\) === "img" \? buildPathImg\(p, renderingOwnerSid \?\? activeId\) : null;/);
+  // a link to a video file renders its still there too (previewVideoUrl, 2026-10-21); a path goes through previewFull
+  assert.match(RENDER, /const full = videoLinks\.has\(p\) \? previewVideoUrl\(p\)\s*\n\s*: canPreview\(\) \? previewFull\(p, renderingOwnerSid \?\? activeId, kernelVerified\.has\(p\), \(pathPins \|\| \{\}\)\[p\]\)\s*\n\s*: previewKind\(p\) === "img" \? buildPathImg\(p, renderingOwnerSid \?\? activeId\) : null;/);
   assert.doesNotMatch(RENDER, /previewThumb/, "the chat no longer renders mention thumbnails — full renders now");
 });
 
@@ -198,9 +199,10 @@ test("a flaky link finishes the picture ACROSS retries: resume, narrate progress
   assert.match(CSS, /\.path-load-note \{ font-size: 0\.86em;/);
   // no artificial deadline anywhere: patience is the point — only a real error ends an attempt
   assert.doesNotMatch(pf, /AbortController|setTimeout\([^,]*abort/i, "no client-side fetch deadline");
-  // the kernel side: /file honors the one suffix form and the federation relay passes 206 through
-  assert.match(KERNEL, /re\.match\(r"\^bytes=\(\\d\+\)-\$", \(getattr\(self, "headers", None\) or \{\}\)\.get\("Range"\) or ""\)/);
-  assert.match(KERNEL, /self\.send_header\("Content-Range", "bytes %d-%d\/%d" % \(rng, size - 1, size\)\)/);
+  // the kernel side: /file honors a single byte range on media (the suffix form this retry sends among them; every form
+  // since 2026-10-21, when Safari's video probe needed the closed one) and the federation relay passes 206 through
+  assert.match(KERNEL, /spec = None if text else _range_spec\(\(getattr\(self, "headers", None\) or \{\}\)\.get\("Range"\)\)/);
+  assert.match(KERNEL, /extra\["Content-Range"\] = "bytes %d-%d\/%d" % \(start, end, size\)/);
   assert.match(KERNEL, /hdrs\["Range"\] = _rng/, "the relay forwards the browser's range to the remote");
   assert.match(KERNEL, /re\.match\(r"\^bytes \\d\+-\\d\+\/\\d\+\$", crange\)/, "and mirrors only byte arithmetic back");
 });

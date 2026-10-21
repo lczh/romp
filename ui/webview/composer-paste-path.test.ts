@@ -51,11 +51,14 @@ test("pastedFilePath rejects everything that is prose, partial, or unservable", 
   assert.equal(pastedFilePath("/tmp/data.csv"), null);
   assert.equal(pastedFilePath("/tmp/somedir"), null);
   assert.equal(pastedFilePath(""), null);
+  // a video file: /file serves it since 2026-10-21 (the chat's still), but a clip is no attachment a session reads
+  assert.equal(pastedFilePath("/tmp/demo.mp4"), null);
+  assert.equal(pastedFilePath("/tmp/demo.webm"), null);
 });
 
 test("the allowlist is previewKind's, imported — never a third copy to drift", () => {
   assert.match(PASTE, /import \{ previewKind \} from "\.\/preview";/);
-  assert.match(PASTE, /if \(!previewKind\(s\)\) return null;/);
+  assert.match(PASTE, /const k = previewKind\(s\);\n  if \(k !== "img" && k !== "pdf"\) return null;/);
 });
 
 test("a path-shaped paste is verified on the PAGE's own kernel and converted, web only", () => {

@@ -201,11 +201,17 @@ class FilePreviewEndpoint(unittest.TestCase):
         code, _, _ = self._req_range("/file?path=" + urllib.parse.quote(self.png), "bytes=%d-" % (len(PNG) + 5))
         self.assertEqual(code, 416)
 
-    def test_a_non_suffix_range_is_served_whole(self):
-        # only the one suffix form is honored; anything else means a plain 200 the client treats as a restart
-        code, _, body = self._req_range("/file?path=" + urllib.parse.quote(self.png), "bytes=0-5")
-        self.assertEqual(code, 200)
-        self.assertEqual(body, PNG)
+    def test_a_closed_range_is_served_as_exactly_its_bytes(self):
+        # Until 2026-10-21 only the resume client's `bytes=N-` was honoured, and this closed form came back as a
+        # whole 200. Video changed that: Safari opens a <video> with `bytes=0-1` and will not play a source that
+        # answers the probe with the whole file, so every single range is served now, on every media type. The
+        # resume client never sends this form and is unchanged (test_a_suffix_range_resumes_mid_file above).
+        code, hdrs, body = self._req_range("/file?path=" + urllib.parse.quote(self.png), "bytes=0-5")
+        self.assertEqual(code, 206)
+        self.assertEqual(body, PNG[:6])
+        self.assertEqual(hdrs.get("Content-Range"), "bytes 0-5/%d" % len(PNG))
+        self.assertEqual(hdrs.get("Content-Length"), "6")
+        self.assertIsNone(hdrs.get("Accept-Ranges"), "only a video advertises ranges; an image never asked to")
 
     def test_text_ignores_range(self):
         # the viewer slurps text; a range on it is served whole
@@ -254,6 +260,190 @@ class FilePreviewEndpoint(unittest.TestCase):
         self.assertEqual(body, b"")
         code, _, _ = self._req("/file?path=" + urllib.parse.quote(self.bin), method="HEAD")
         self.assertEqual(code, 415, "HEAD carries the same exists-but-unviewable verdict as GET")
+
+
+# synthetic "video" bytes: any bytes will do, since the route never decodes them, and every offset is distinguishable
+VIDEO = bytes(range(256)) * 40
+
+
+class VideoServing(unittest.TestCase):
+    """Video on /file (2026-10-21; the user wanted a screen recording an agent mentions to play in the chat the way a
+    mentioned plot shows). The three containers a browser's <video> plays are served with their video type, every
+    single byte range RFC 9110 defines is honoured (a <video> seeks by Range, and Safari opens one with `bytes=0-1`,
+    refusing a source that answers that probe with the whole file), the replies say so with Accept-Ranges, and the
+    body is streamed, so the 50 MB slurp cap that guards images and PDFs does not apply to a recording."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
+        cls.port = cls.srv.server_address[1]
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.clips = {}
+        for ext in ("mp4", "webm", "mov"):
+            cls.clips[ext] = os.path.join(cls.tmp.name, "clip." + ext)
+            with open(cls.clips[ext], "wb") as f:
+                f.write(VIDEO)
+        cls.mp4 = cls.clips["mp4"]
+        cls.png = os.path.join(cls.tmp.name, "plot.png")
+        with open(cls.png, "wb") as f:
+            f.write(PNG)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.tmp.cleanup()
+
+    def _req(self, path, method="GET", rng=None, headers=None):
+        # the raw header MESSAGE, so a header sent twice is seen twice
+        url = "http://127.0.0.1:%d/file?path=%s" % (self.port, urllib.parse.quote(path))
+        h = dict(headers or {"X-Romp-Token": TOKEN})
+        if rng is not None:
+            h["Range"] = rng
+        req = urllib.request.Request(url, method=method, headers=h)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.headers, r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, e.read()
+
+    def _partial(self, rng, start, end):
+        code, msg, body = self._req(self.mp4, rng=rng)
+        self.assertEqual(code, 206, rng)
+        self.assertEqual(body, VIDEO[start:end + 1], rng)
+        self.assertEqual(msg.get("Content-Range"), "bytes %d-%d/%d" % (start, end, len(VIDEO)), rng)
+        self.assertEqual(msg.get("Content-Length"), str(end - start + 1), rng)
+        self.assertEqual(msg.get("Content-Type"), "video/mp4", rng)
+        self.assertEqual(msg.get("Accept-Ranges"), "bytes", rng)
+        self.assertEqual(msg.get("X-Content-Type-Options"), "nosniff", rng)
+        self.assertEqual(msg.get("Cache-Control"), "no-cache", rng)
+
+    def test_each_container_is_served_as_its_video_type_and_says_it_takes_ranges(self):
+        for ext, mime in (("mp4", "video/mp4"), ("webm", "video/webm"), ("mov", "video/quicktime")):
+            code, msg, body = self._req(self.clips[ext])
+            self.assertEqual(code, 200, ext)
+            self.assertEqual(body, VIDEO, ext)
+            self.assertEqual(msg.get("Content-Type"), mime, ext)
+            self.assertEqual(msg.get("Content-Length"), str(len(VIDEO)), ext)
+            self.assertEqual(msg.get("Accept-Ranges"), "bytes", ext)
+            self.assertEqual(msg.get("X-Content-Type-Options"), "nosniff", ext)
+            self.assertEqual(msg.get("Cache-Control"), "no-cache", ext)
+            self.assertTrue(msg.get("Last-Modified"), ext)
+            self.assertEqual(msg.get("X-Romp-Mtime-Ns"), str(os.stat(self.clips[ext]).st_mtime_ns), ext)
+            self.assertIsNone(msg.get("X-Romp-Text-Utf8"), "the text marker never rides media")
+        # an image and a PDF still advertise nothing: a PDF viewer would start making range requests on the header
+        code, msg, _ = self._req(self.png)
+        self.assertEqual((code, msg.get("Accept-Ranges")), (200, None))
+
+    def test_a_videos_own_tab_carries_the_opener_policy_once(self):
+        # The streamed 200 is a document when a tab is navigated to it, so it carries what every /file 200 does
+        # (tests/test_kernel_auth_hardening.py OpenerIsolation): one Cross-Origin-Opener-Policy, on a bare request
+        # and on each navigation shape a browser sends, which is where it reads the policy.
+        from tests.document_navigations import NAVIGATIONS, credential
+        for how, nav in NAVIGATIONS:
+            code, msg, body = self._req(self.mp4, headers=dict(nav, **credential(nav, TOKEN)))
+            self.assertEqual((code, body), (200, VIDEO), how)
+            self.assertEqual(msg.get_all("Cross-Origin-Opener-Policy"), ["same-origin-allow-popups"], how)
+            self.assertIn("frame-ancestors 'self'", msg.get_all("Content-Security-Policy") or [], how)
+
+    def test_head_reports_the_type_the_real_length_and_ranges_without_the_bytes(self):
+        code, msg, body = self._req(self.mp4, method="HEAD")
+        self.assertEqual((code, body), (200, b""))
+        self.assertEqual(msg.get("Content-Type"), "video/mp4")
+        self.assertEqual(msg.get("Content-Length"), str(len(VIDEO)))
+        self.assertEqual(msg.get("Accept-Ranges"), "bytes")
+        self.assertEqual(msg.get("X-Content-Type-Options"), "nosniff")
+
+    def test_safaris_two_byte_probe_gets_exactly_two_bytes(self):
+        self._partial("bytes=0-1", 0, 1)
+
+    def test_every_single_range_form_is_honoured(self):
+        n = len(VIDEO)
+        self._partial("bytes=0-", 0, n - 1)                   # from the start: a 206 of the whole file, not a 200
+        self._partial("bytes=100-199", 100, 199)              # closed, mid file
+        self._partial("bytes=4000-", 4000, n - 1)             # open-ended: a seek
+        self._partial("bytes=-100", n - 100, n - 1)           # suffix: the last 100 bytes (where an mp4 keeps its index)
+        self._partial("bytes=-%d" % (n + 500), 0, n - 1)      # a suffix longer than the file is the whole file
+        self._partial("bytes=10-999999", 10, n - 1)           # an end past the file is clamped to its last byte
+        self._partial("bytes=%d-%d" % (n - 1, n - 1), n - 1, n - 1)   # the last byte alone
+
+    def test_a_range_the_file_cannot_satisfy_416s_naming_the_size(self):
+        n = len(VIDEO)
+        for rng in ("bytes=%d-" % n, "bytes=%d-%d" % (n + 10, n + 20), "bytes=-0"):
+            code, msg, _ = self._req(self.mp4, rng=rng)
+            self.assertEqual(code, 416, rng)
+            self.assertEqual(msg.get("Content-Range"), "bytes */%d" % n, rng)
+
+    def test_anything_but_one_valid_range_is_ignored_and_the_file_served_whole(self):
+        # RFC 9110 lets a server ignore a Range it will not serve; a plain 200 is also what the resume client reads
+        # as a restart. A list of ranges, a backwards range, another unit, garbage.
+        for rng in ("bytes=0-1,5-9", "bytes=9-5", "items=0-1", "bytes=abc", "bytes=-", "bytes=", "0-1"):
+            code, msg, body = self._req(self.mp4, rng=rng)
+            self.assertEqual((code, body), (200, VIDEO), rng)
+            self.assertIsNone(msg.get("Content-Range"), rng)
+
+    def test_the_slurp_cap_guards_images_but_never_a_streamed_video(self):
+        with mock.patch.object(km, "_PREVIEW_MAX_BYTES", len(PNG) - 1):
+            self.assertGreater(len(VIDEO), km._PREVIEW_MAX_BYTES)
+            code, _, _ = self._req(self.png)
+            self.assertEqual(code, 413, "an image over the cap still refuses loudly")
+            code, msg, body = self._req(self.mp4)
+            self.assertEqual((code, body), (200, VIDEO), "a video over the cap streams")
+            self.assertEqual(msg.get("Content-Length"), str(len(VIDEO)))
+            self._partial("bytes=0-1", 0, 1)
+            code, msg, _ = self._req(self.mp4, method="HEAD")
+            self.assertEqual((code, msg.get("Content-Length")), (200, str(len(VIDEO))))
+
+    def test_the_image_resume_is_unchanged(self):
+        # the chat's resumable retry (preview.ts) sends only `bytes=N-` with N > 0 and stitches the rest on
+        code, msg, body = self._req(self.png, rng="bytes=10-")
+        self.assertEqual(code, 206)
+        self.assertEqual(body, PNG[10:])
+        self.assertEqual(msg.get("Content-Range"), "bytes 10-%d/%d" % (len(PNG) - 1, len(PNG)))
+        self.assertEqual(msg.get("Content-Type"), "image/png")
+        code, msg, _ = self._req(self.png, rng="bytes=%d-" % (len(PNG) + 5))
+        self.assertEqual(code, 416, "a stale offset still restarts cleanly")
+        self.assertEqual(msg.get("Content-Range"), "bytes */%d" % len(PNG))
+
+    def test_the_listing_marks_a_video_viewable_at_any_size(self):
+        # _list_dir's verdict follows /file's caps; a video has none, so a recording over the image cap is still a row
+        # the viewer opens rather than a download-only one
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("long.mp4", "huge.png"):
+                with open(os.path.join(d, name), "wb") as f:
+                    f.truncate(km._PREVIEW_MAX_BYTES + 1)        # sparse: the verdict reads st_size only
+            rows = {r["name"]: r for r in km._list_dir(d)["entries"]}
+        self.assertTrue(rows["long.mp4"]["viewable"])
+        self.assertFalse(rows["huge.png"]["viewable"], "an image over the cap stays download-only")
+
+
+class RangeGrammar(unittest.TestCase):
+    """_range_spec and _range_window, the parse and the resolution the local route and the relay share, as a table."""
+
+    def test_the_grammar(self):
+        spec = km._range_spec
+        self.assertEqual(spec("bytes=0-1"), (0, 1))
+        self.assertEqual(spec("bytes=5-"), (5, None))
+        self.assertEqual(spec("bytes=-7"), (None, 7))
+        self.assertEqual(spec(" bytes=3-3 "), (3, 3))
+        for bad in (None, "", "bytes=", "bytes=-", "bytes=4-2", "bytes=0-1,4-5", "bytes=0-1, 4-5", "items=0-1",
+                    "bytes=a-b", "bytes 0-1", "bytes=0-1;x", "bytes=" + "9" * 40 + "-"):
+            self.assertIsNone(spec(bad), bad)
+
+    def test_resolution_against_a_size(self):
+        win = km._range_window
+        self.assertEqual(win((0, 1), 10), (0, 1))
+        self.assertEqual(win((5, None), 10), (5, 9))
+        self.assertEqual(win((5, 500), 10), (5, 9))
+        self.assertEqual(win((None, 3), 10), (7, 9))
+        self.assertEqual(win((None, 30), 10), (0, 9))
+        for unsat in (((10, None), 10), ((10, 12), 10), ((None, 0), 10), ((0, 0), 0), ((None, 5), 0)):
+            self.assertIsNone(win(*unsat), unsat)
+
+    def test_the_relay_forwards_the_canonical_form_of_what_it_parsed(self):
+        for h in ("bytes=0-1", "bytes=5-", "bytes=-7"):
+            self.assertEqual(km._range_header(km._range_spec(h)), h)
+        self.assertEqual(km._range_header(km._range_spec("BYTES=05-9")), "bytes=5-9")
 
 
 class FileDownloadEndpoint(unittest.TestCase):
@@ -390,6 +580,76 @@ class DownloadStreams(unittest.TestCase):
             with mock.patch.object(km.os.path, "getsize", lambda p: real_getsize(p) + 1000):
                 km.Handler._file_download(rec, fp)
         self.assertTrue(rec.close_connection, "short bytes must close the connection, not hang it")
+
+
+class _PreviewRecorder:
+    """Just enough Handler surface for a direct _file_preview call. Unlike _DownloadRecorder, `headers` is the REQUEST's
+    (a Range rides there, as on the real Handler) and the response's land in `sent`; every wfile.write is recorded, so
+    the test sees the chunking itself."""
+
+    def __init__(self, request_headers=None):
+        self.headers = dict(request_headers or {})
+        self.writes, self.sent, self.status = [], {}, None
+        self.close_connection = False
+        self.wfile = _StreamSink(self.writes)
+
+    def send_response(self, code):
+        self.status = code
+
+    def send_header(self, k, v):
+        self.sent[k] = v
+
+    def end_headers(self):
+        pass
+
+    _send = km.Handler._send      # the header block of a streamed reply goes out through the real _send
+
+
+class VideoStreams(unittest.TestCase):
+    """A video's body (its 200 and any 206) is streamed in fixed chunks, never slurped: a recording can be gigabytes, and
+    _send's whole-body write would hold all of it in the kernel that self-hosts the sessions. Pins the chunked WRITES."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fp = os.path.join(self.tmp.name, "clip.mp4")
+        self.data = bytes(range(256)) * ((3 * km._DOWNLOAD_CHUNK) // 256) + b"tail"
+        with open(self.fp, "wb") as f:
+            f.write(self.data)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _serve(self, request_headers=None):
+        rec = _PreviewRecorder(request_headers)
+        km.Handler._file_preview(rec, {"path": [self.fp]})
+        body = [w for w in rec.writes if w]      # _send writes the empty body of the header block
+        return rec, body
+
+    def test_the_200_arrives_as_bounded_chunks_never_one_slurp(self):
+        rec, body = self._serve()
+        self.assertEqual(rec.status, 200)
+        self.assertEqual(rec.sent.get("Content-Type"), "video/mp4")
+        self.assertEqual(rec.sent.get("Content-Length"), str(len(self.data)))
+        self.assertGreater(len(body), 1, "one write means the file was slurped")
+        self.assertTrue(all(len(w) <= km._DOWNLOAD_CHUNK for w in body))
+        self.assertEqual(b"".join(body), self.data)
+        self.assertFalse(rec.close_connection, "a whole body keeps the connection")
+
+    def test_a_206_across_chunk_boundaries_streams_exactly_its_span(self):
+        start = km._DOWNLOAD_CHUNK - 7
+        rec, body = self._serve({"Range": "bytes=%d-" % start})
+        self.assertEqual(rec.status, 206)
+        self.assertEqual(rec.sent.get("Content-Range"), "bytes %d-%d/%d" % (start, len(self.data) - 1, len(self.data)))
+        self.assertGreater(len(body), 1)
+        self.assertEqual(b"".join(body), self.data[start:])
+
+    def test_a_video_that_shrinks_mid_stream_closes_rather_than_hanging(self):
+        real_getsize = os.path.getsize
+        with mock.patch.object(km.os.path, "getsize", lambda p: real_getsize(p) + 1000):
+            rec, body = self._serve()
+        self.assertEqual(rec.sent.get("Content-Length"), str(len(self.data) + 1000), "the promise went out first")
+        self.assertEqual(b"".join(body), self.data, "the bytes that exist still pass")
+        self.assertTrue(rec.close_connection, "short of the promised length must close, not hang")
 
 
 class AttachmentDisposition(unittest.TestCase):

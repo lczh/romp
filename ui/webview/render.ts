@@ -95,8 +95,8 @@ import { actionParts, toolRowLabel, toolInputText } from "./compact";
 import { parseAgentNotif, notifHead, type AgentNotif } from "./agent-notif";
 import { injectedHead, type InjectedSource } from "./injected-source";
 import { subTabId, isSubId, subParts, subLabel, gistLines, stepLines, stepsNote, agentFoldLabel, subHeadParts, subWaitTail, openIconSvg, pinIconSvg, type SubMeta, type AgentGist, type AgentGistRow, type GistLine } from "./subagent-view";
-import { previewKind, previewFull, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, installMdImgZoom, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
-import { mdLayout, opensInLightbox, type MdLayout } from "./md-images";   // the pictures a message's markdown embeds, off its text, and where its path figures land: the lightbox's sequence (chatImagesFor)
+import { previewKind, previewFull, previewVideoUrl, canPreview, fileUrl, retryFailedPreviews, refreshSettledPreviews, installMdImgHeal, installMdImgZoom, mdImgPostPass, setLightboxNav, type LightboxNavEntry } from "./preview";
+import { mdLayout, opensInLightbox, isVideoUrl, type MdLayout } from "./md-images";   // the pictures a message's markdown embeds, off its text, and where its path figures land: the lightbox's sequence (chatImagesFor)
 import { openFileClick } from "./file-view";                  // a clicked file WITH its gesture (pdf-new-tab.test.ts)
 import { fileLinkRoute, browseRoute, type BrowseRoute } from "./file-route";   // where a file or folder click opens: here, or the Files pane (file-route.test.ts, browse-route.test.ts)
 // initFileView rides its OWN line: the import above is pinned verbatim by file-view.test.ts
@@ -2540,7 +2540,8 @@ function chatImagesFor(sid: string | null | undefined, from?: Element | null): L
     let rank = 0;
     const attached = new Set((ev.images || []).map((im) => im.path || ""));   // an attached picture's path in the text is a link, no figure (skipThumbs)
     const add = (target: string, at: number, own = false) => {
-      if (!target || previewKind(target) !== "img" || (!own && attached.has(target)) || here.has("p:" + target)) return;   // a figure renders at its first mention
+      const k = target ? previewKind(target) : null;   // a picture's figure or a video's still (2026-10-21); a PDF's card is no stop
+      if (!target || (k !== "img" && k !== "video") || (!own && attached.has(target)) || here.has("p:" + target)) return;   // a figure renders at its first mention
       here.set("p:" + target, { e: { path: target, sid: scope.fileSid, pin: pins[target] }, at, rank: rank++ });
     };
     const byMention = (toks: string[]) => toks.map((tok) => ({ tok, m: text.indexOf(tok) }))
@@ -2549,11 +2550,13 @@ function chatImagesFor(sid: string | null | undefined, from?: Element | null): L
     for (const { tok, m } of byMention(ev.spacePaths || [])) add(tok, layout.figureAt(m));
     for (const { tok, m } of byMention(Object.keys(links))) add(links[tok], layout.figureAt(m));
     for (const im of ev.images || []) if (im.path) add(im.path, text.length + 1, true);   // attached pictures follow the text
-    for (const m of layout.images) {
+    // the pictures and videos the message embeds where it writes them, then the still each link to a video file renders
+    // after its block (md-images.ts videoLinks; render.ts linkifyFileUris draws it there, after the block's path figures)
+    for (const m of [...layout.images, ...layout.videoLinks]) {
       let url = "";
       try { url = new URL(m.url, document.baseURI).href; } catch { continue; }
-      if (!opensInLightbox(url) || here.has("u:" + url)) continue;   // a web address or a data: picture, as a click opens
-      here.set("u:" + url, { e: { url, alt: m.alt }, at: m.at, rank: rank++ });
+      if (!opensInLightbox(url, m.video ? "video" : "img") || here.has("u:" + url)) continue;   // as a click opens: a picture's schemes, a video's narrower ones
+      here.set("u:" + url, { e: m.video ? { url, alt: m.alt, video: true } : { url, alt: m.alt }, at: m.at, rank: rank++ });
     }
     out.push(...Array.from(here.values()).sort((x, y) => x.at - y.at || x.rank - y.rank).map((h) => h.e));
   }
@@ -2964,6 +2967,21 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
       mentionAt.set(open, link);
     }
   }
+  // A LINK to a video file (2026-10-21, the user wanting a chat video treated like a picture): a web address whose path
+  // ends in .mp4, .webm or .mov (isVideoUrl) renders the video's still after its block, the way a mentioned path's figure
+  // does, in the same strip after the block's path figures. The links md-images.ts names in the arrows' sequence and no
+  // others: outside code (a whole-backtick URL stays code), a fold's <summary> and a <video>, the first link to a URL, and
+  // none to a URL a <video> in the message already shows as a still.
+  const videoLinks = new Set<string>();
+  const shownVideos = new Set(Array.from(root.querySelectorAll(".md-video-still[data-video]")).map((e) => (e as HTMLElement).dataset.video || ""));
+  for (const a of Array.from(root.querySelectorAll("a[href]")) as HTMLAnchorElement[]) {
+    if (a.classList.contains("url-code-link") || a.closest("pre, code, summary, video")) continue;
+    const href = a.href;
+    if (!isVideoUrl(href) || shownVideos.has(href) || videoLinks.has(href)) continue;
+    videoLinks.add(href);
+    previewable.push(href);
+    mentionAt.set(href, a);
+  }
   // A mentioned image/PDF renders FULL-SIZE at its MENTION — the figure lands right after the
   // paragraph/list item that names it, like figures in a document (the user 2026-08-15, whose four
   // captioned plots all collected at the message's tail, far from the prose describing each; the
@@ -2988,7 +3006,8 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
     const BLOCK_SEL = "p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th";
     const strips = new Map<HTMLElement, HTMLElement>();   // figure anchor → its strip (same block shares one)
     const renderFig = (p: string): HTMLElement | null => {
-      const full = canPreview() ? previewFull(p, renderingOwnerSid ?? activeId, kernelVerified.has(p), (pathPins || {})[p])
+      const full = videoLinks.has(p) ? previewVideoUrl(p)
+        : canPreview() ? previewFull(p, renderingOwnerSid ?? activeId, kernelVerified.has(p), (pathPins || {})[p])
         : previewKind(p) === "img" ? buildPathImg(p, renderingOwnerSid ?? activeId) : null;
       if (!full) return null;
       const block = mentionAt.get(p)?.closest(BLOCK_SEL) as HTMLElement | null;

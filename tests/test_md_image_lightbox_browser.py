@@ -141,13 +141,17 @@ def _reply_b0(host):
 
 
 def _reply_c0(host, badge):
+    # the last two lines are the review of the shared box (2026-10-21): a picture in the middle of a sentence stays on its
+    # line, and an <img height="20"> of a large picture, alone on its line, shows 20px tall, so it is a glyph, not a box
     return ("The latency split per region is in docs/figure.png.\n\n"
             "The trace of one slow request, top to bottom:\n\n"
             "![request trace](%(h)s/tall.png)\n\n"
             "The heat map of the whole run:\n\n"
             "![run heat map](%(h)s/big.png)\n\n"
             "Deploy ![deploy passing](%(b)s) is green, and the thumbnail links to the board: "
-            "[![board thumbnail](%(h)s/big.png?v=linked)](%(h)s/page)\n") % {"h": host, "b": badge}
+            "[![board thumbnail](%(h)s/big.png?v=linked)](%(h)s/page)\n\n"
+            "Trace ![inline trace](%(h)s/tall.png?v=mid) here.\n\n"
+            "<img height=\"20\" src=\"%(h)s/big.png?v=h20\" alt=\"squashed heat map\">\n") % {"h": host, "b": badge}
 
 
 DRIVER = r"""
@@ -425,7 +429,7 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
   const key = (phone ? "phone" : "desktop") + theme[0].toUpperCase() + theme.slice(1);
   try {
     const { ctx, page, errs } = await open(theme, phone, { hash: "#only=tests", ready: TALL });
-    await page.waitForFunction(() => ['img[alt="run heat map"]', 'img[alt="board thumbnail"]', 'img[alt="deploy passing"]']
+    await page.waitForFunction(() => ['img[alt="run heat map"]', 'img[alt="board thumbnail"]', 'img[alt="deploy passing"]', 'img[alt="inline trace"]', 'img[alt="squashed heat map"]']
       .every((s) => { const i = document.querySelector(s); return !!(i && i.complete && i.naturalWidth > 0); }), null, { timeout: 30000 });
     await page.waitForTimeout(150);
     out.box[key] = await page.evaluate((sel) => {
@@ -443,9 +447,18 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
                           background: cs.backgroundColor } };
       };
       const b = body.getBoundingClientRect();
+      // the text on either side of a picture written inside a sentence: the last box of the text before it and the first of
+      // the text after it, so the driver can tell whether all three share one line
+      const line = (e) => {
+        const box = (n, last) => { if (!n) return null; const r = document.createRange(); r.selectNodeContents(n); const rs = r.getClientRects(); const x = rs.length ? rs[last ? rs.length - 1 : 0] : null; return x && { left: x.left, right: x.right, top: x.top, bottom: x.bottom }; };
+        const i = e.getBoundingClientRect();
+        return { before: box(e.previousSibling, true), after: box(e.nextSibling, false), img: { left: i.left, right: i.right, top: i.top, bottom: i.bottom } };
+      };
+      const mid = body.querySelector('img[alt="inline trace"]');
       return { body: { left: b.left, right: b.right, w: b.width }, path: one(body.querySelector(".path-full-img")), tall: one(tall),
                large: one(body.querySelector('img[alt="run heat map"]')), badge: one(body.querySelector('img[alt="deploy passing"]')),
-               linked: one(body.querySelector('img[alt="board thumbnail"]')), bodyClass: document.body.className };
+               linked: one(body.querySelector('img[alt="board thumbnail"]')), midline: one(mid), midlineLine: mid ? line(mid) : null,
+               squashed: one(body.querySelector('img[alt="squashed heat map"]')), bodyClass: document.body.className };
     }, TALL);
     await shot(page, "box-" + key + "-top");
     await page.evaluate(() => document.querySelector('img[alt="run heat map"]').scrollIntoView({ block: "start" }));
@@ -826,6 +839,33 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
             self._inside(linked, b["body"], "the linked picture", table)
         self.assertIn("theme-light", r["box"]["phoneLight"]["bodyClass"].split(), "the light legs ran in the light theme")
         self.assertIn("chat-theme-yatharth", r["box"]["desktopLight"]["bodyClass"].split())
+
+    def test_a_picture_inside_a_sentence_stays_on_its_line_and_a_squashed_one_is_a_glyph(self):
+        # the review of the shared box (2026-10-21): the box's block layout split a sentence around a mid-sentence picture,
+        # and a large picture written with height="20" became a 20px framed blob on a line of its own (the zoom judged its
+        # file's height, not the one it shows at)
+        r = self._run()
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
+            b = r["box"][key]
+            table = "\n  %s: %s" % (key, json.dumps({k: b[k] for k in ("midline", "midlineLine", "squashed", "body")}))
+            m, ln = b["midline"], b["midlineLine"]
+            self.assertEqual((m["nw"], m["nh"]), (400, 1600), "the mid-sentence picture loaded" + table)
+            self.assertEqual(m["style"]["display"], "inline", "a picture inside a sentence stays inline" + table)
+            self.assertTrue(m["style"]["border"].startswith("0px"), "…unframed" + table)
+            self.assertEqual(m["style"]["cursor"], "zoom-in", "…and still says it zooms" + table)
+            self.assertLessEqual(m["h"], 320.5, "…within the same 320px cap" + table)
+            self.assertIsNotNone(ln["before"], table)
+            self.assertIsNotNone(ln["after"], table)
+            self.assertLessEqual(ln["before"]["right"], ln["img"]["left"] + 1, "the words before it sit to its left" + table)
+            self.assertGreaterEqual(ln["after"]["left"], ln["img"]["right"] - 1, "the words after it sit to its right" + table)
+            self.assertAlmostEqual(ln["before"]["bottom"], ln["after"]["bottom"], delta=1, msg="…on the same line: the sentence is not split" + table)
+            q = b["squashed"]
+            self.assertEqual((q["nw"], q["nh"]), (1800, 1200), "the squashed picture is the large one" + table)
+            self.assertAlmostEqual(q["h"], 20, delta=0.5, msg="shown at its height attribute" + table)
+            self.assertEqual(q["style"]["display"], "inline", "a glyph, not a block on a line of its own" + table)
+            self.assertTrue(q["style"]["border"].startswith("0px"), "…with no frame" + table)
+            self.assertNotEqual(q["style"]["cursor"], "zoom-in", "…and no zoom" + table)
 
     def test_no_page_errors(self):
         r = self._run()

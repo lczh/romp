@@ -17,10 +17,10 @@ test("the index walks EVENTS oldest→newest and threads pins per target", () =>
   assert.match(body, /for \(const ev of scope\.events/, "events, not the DOM — virtualization windows images out");
   assert.match(body, /here\.set\("p:" \+ target, \{ e: \{ path: target, sid: scope\.fileSid, pin: pins\[target\] \}, at, rank: rank\+\+ \}\);/,
     "the SAME triple the embed's click passes — a step shows that message's pinned bytes");
-  assert.match(body, /previewKind\(target\) !== "img"/, "the lightbox's own image gate decides image-ness");
+  assert.match(body, /\(k !== "img" && k !== "video"\)/, "the lightbox's own kind gate decides: a picture or a video (2026-10-21), never a PDF");
   assert.match(body, /\|\| here\.has\("p:" \+ target\)\) return;/, "one entry per (event, target), at its first mention");
   assert.match(body, /read = \{ text, layout: mdLayout\(text, lex\) \};/, "a message's markdown pictures join the sequence, read once per text (2026-10-20; lightbox-sequence.test.ts runs it)");
-  assert.match(body, /for \(const m of layout\.images\)/);
+  assert.match(body, /for \(const m of \[\.\.\.layout\.images, \.\.\.layout\.videoLinks\]\)/, "pictures, videos, and the stills a video link renders");
   assert.match(RENDER, /setLightboxNav\(chatImagesFor\);/, "registered once; providerless surfaces keep inert arrows");
 });
 
@@ -45,7 +45,9 @@ test("a step swaps the whole embed identity and resets the zoom (T162 contracts 
   assert.match(step, /pzc\.retarget\(next\);/, "zoom resets to the fit view for the new image");
   assert.match(step, /aimSave\(e\);/, "…and the save anchor follows, its kind included (lightbox-bar.test.ts runs a mixed sequence)");
   // the retarget re-identities the view for a FRESH element; the stage's listeners are wired once
-  assert.match(PREVIEW, /return \{ retarget: \(next: HTMLImageElement\) => \{ img = next; view = pz\.identity\(\); ptrs\.clear\(\); start = null; apply\(\); \} \};/);
+  assert.match(PREVIEW, /return \{ retarget: \(next: HTMLElement\) => \{ img = next; view = pz\.identity\(\); ptrs\.clear\(\); start = null; apply\(\); \} \};/);
+  // stepping away from a video stops it (2026-10-21): its sound and its download end with the step
+  assert.match(step, /if \(img\.tagName === "VIDEO"\) stopVideo\(img as HTMLVideoElement\);[^\n]*\n\s*img\.replaceWith\(next\);/);
 });
 
 test("the position cue wears the house sub scale and only shows for a real sequence", () => {

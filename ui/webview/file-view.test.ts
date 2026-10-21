@@ -780,6 +780,63 @@ test("an image 200 that fails to DECODE swaps to the failure pane: plain words +
   assert.doesNotMatch(pdfFn, /addEventListener/, "no synthetic failure signal invented for the iframe");
 });
 
+// ── video (2026-10-21): once /file answers video/* (the kernel's _VIDEO_MIME), the fetch pipeline would have read a
+// recording as text into the code view, or, taken as a blob, held all of it in the page before a frame showed. A video
+// verdict reads NOTHING: the fetch's body is cancelled and one <video> streams from the route's own URL, seeking by the
+// Range requests the kernel honours (tests/test_kernel_preview.py VideoServing). ──
+test("a VIDEO verdict reads no body and renders one streaming <video> at the route's URL, failing into words + Download", () => {
+  // executed: what each verdict takes from the response — a video takes nothing, and every other kind is as it was
+  const take = (ct: string): "nothing" | "blob" | "text" =>
+    ct.startsWith("video/") ? "nothing" : ct.startsWith("image/") || ct.startsWith("application/pdf") ? "blob" : "text";
+  for (const ct of ["video/mp4", "video/webm", "video/quicktime"]) assert.equal(take(ct), "nothing", ct);
+  assert.equal(take("image/png"), "blob");
+  assert.equal(take("application/pdf"), "blob");
+  assert.equal(take("text/plain; charset=utf-8"), "text");
+  // executed: the paint happens once — a repaint never rebuilds the element under a playing video
+  let built = 0;
+  let box: string | null = null;
+  const paint = () => { if (box) return; built++; box = "video"; };
+  paint(); paint(); paint();
+  assert.equal(built, 1);
+  // replica ↔ source: the flag reads the KERNEL's header, decided before the blob/text choice, and the body is
+  // cancelled rather than read; null carries "nothing to take" to the landing, which paints
+  const openFn = VIEW.split("export function openFileView")[1].split("function offersDownload")[0];
+  assert.match(VIEW, /isVideo = ct\.startsWith\("video\/"\);\n\s*if \(isVideo\) \{\n\s*void r\.body\?\.cancel\(\)\.catch\(\(\) => \{ \/\* already settled \*\/ \}\);\n\s*return Promise\.resolve\(null\);\n\s*\}\n\s*return isImage \|\| isPdf \? r\.blob\(\) : r\.text\(\);/);
+  assert.match(openFn, /if \(t === null\) \{\n\s*if \(wrap\.isConnected\) renderBody\(\);/);
+  assert.ok(openFn.indexOf("if (t === null) {") < openFn.indexOf("if (t instanceof Blob) {"), "the video landing is taken before any blob or text");
+  // the render arm: built once, from the route's URL (never an object URL), before the img/PDF branch
+  const videoArm = VIEW.split("if (isVideo) {\n      // Video mode")[1].split("if (isImage || isPdf) {")[0];
+  assert.ok(videoArm, "the video arm sits ahead of the img/PDF branch in renderBody");
+  assert.match(videoArm, /if \(videoBox\) return;/);
+  assert.match(videoArm, /videoBox = videoBlock\(fileUrl\(path, sid\), path, videoFailed\);/);
+  assert.match(videoArm, /body\.replaceChildren\(videoBox\);/);
+  assert.doesNotMatch(videoArm, /objUrl|innerHTML/);
+  for (const keeper of ["dl.", "copy.", "close.", "gh."]) assert.ok(!videoArm.includes(keeper), keeper + " is never re-hidden for a video");
+  // the element: controls, playsinline (iOS would take it full screen), metadata only until played, the image's box and
+  // cap, and its error event armed BEFORE src so no failure slips past
+  const vidFn = VIEW.split("function videoBlock")[1].split("// The PDF body")[0];
+  assert.match(vidFn, /^\(src: string, path: string, onFail: \(\) => void\)/);
+  assert.match(vidFn, /el\("div", "fileview-imgbox"\)/);
+  assert.match(vidFn, /el\("video", "fileview-img"\)/);
+  assert.match(vidFn, /video\.controls = true;/);
+  assert.match(vidFn, /video\.preload = "metadata";/);
+  assert.match(vidFn, /video\.setAttribute\("playsinline", ""\);/);
+  assert.match(vidFn, /video\.addEventListener\("error", onFail, \{ once: true \}\);\s*\n\s*video\.src = src;/);
+  assert.doesNotMatch(vidFn, /innerHTML|createObjectURL/);
+  for (const SHEET of [FEED_CSS, CHAT_CSS]) assert.match(SHEET, /\.fileview-img \{[^}]*max-height: 82vh[^}]*\}/);
+  // the failure continuation is the decode-failure idiom: words, the path, the Download the view could not be
+  const failFn = (openFn.split("const videoFailed = ")[1] || "").split("\n  };")[0];
+  assert.ok(failFn, "videoFailed lives in the open viewer's closure — it needs body and dlUrl");
+  assert.match(failFn, /if \(!wrap\.isConnected\) return;/);
+  assert.match(failFn, /el\("div", "fileview-err"\)/);
+  assert.match(failFn, /will not play in this browser/);
+  assert.match(failFn, /hint\.textContent = path;/);
+  assert.match(failFn, /startDownload\(dlUrl, offer\)/);
+  assert.match(failFn, /body\.replaceChildren\(why\);/);
+  // a <video> has no honest text to quote: the seed stands down, right after the img/PDF gate
+  assert.match(VIEW, /if \(\(isImage \|\| isPdf\) && !\(svgSource && svgText !== null\)\) return;\n\s*if \(isVideo\) return;/);
+});
+
 // executed: the gutter is a SIBLING of the code, so selecting the code copies it without line numbers
 test("the line gutter numbers every line and drops a trailing newline's phantom line", () => {
   const lines = (text: string): string[] => {

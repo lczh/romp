@@ -41,6 +41,9 @@ function mkEl(tag: string): El {
     removeAttribute: (k) => { delete e.attrs[k]; if (k in e) (e as unknown as Record<string, string>)[k] = ""; },
     addEventListener: () => {}, querySelector: () => null,
   };
+  (e as El & { tagName: string }).tagName = tag.toUpperCase();   // the lightbox tells a video from a picture by its tag
+  if (tag === "video") (e as El & { play: () => Promise<void>; played: number }).played = 0;
+  if (tag === "video") (e as El & { play: () => Promise<void>; played: number }).play = () => { (e as El & { played: number }).played++; return Promise.resolve(); };
   (e as El & { style: typeof style }).style = style;
   (e as El & { getBoundingClientRect: () => unknown }).getBoundingClientRect = () => ({ left: 0, right: 30, top: 0, bottom: 22, width: 30, height: 22 });   // the floor measurement reads the group's controls
   return e;
@@ -58,14 +61,14 @@ function wins(a: [number, number, number], b: [number, number, number]): boolean
   return a[0] !== b[0] ? a[0] > b[0] : a[1] !== b[1] ? a[1] > b[1] : a[2] > b[2];
 }
 
-type Src = { path: string; sid?: string | null; pin?: string } | { url: string; alt?: string };
+type Src = { path: string; sid?: string | null; pin?: string } | { url: string; alt?: string; video?: boolean };
 type Nav = Src[];
 type Win = { setTimeout: (fn: () => void, ms: number) => number; clearTimeout: (h: number) => void };
 type Key = (ev: { key: string; stopPropagation: () => void; preventDefault: () => void }) => void;
 // openLightbox and the helpers above it (lightboxSrc, sameSource, urlTitle, dataSaveName), lifted as one slice; the
 // sequence's provider records what it was handed (the source's sid, the clicked element)
-function lift(kind: "img" | "pdf", nav: Nav = [], clipboard: boolean | { write: () => Promise<void> } = false, win?: Win,
-              known: { failed?: string[]; tiny?: string[] } = {}): { body: El; open: (p: string, sid?: string | null, pin?: string) => void; openSrc: (src: Src, from?: unknown) => void; keys: Key[]; calls: unknown[][] } {
+function lift(kind: "img" | "pdf" | "video", nav: Nav = [], clipboard: boolean | { write: () => Promise<void> } = false, win?: Win,
+              known: { failed?: string[]; tiny?: string[] } = {}): { body: El; open: (p: string, sid?: string | null, pin?: string) => void; openSrc: (src: Src, from?: unknown) => void; keys: Key[]; calls: unknown[][]; stopped: El[] } {
   const a = PREVIEW.indexOf("// The bytes a source names");
   const o = PREVIEW.indexOf("export function openLightbox(src: LightboxSource, from?: Element | null): void {");
   const b = PREVIEW.indexOf("\n}\n", o);
@@ -74,12 +77,15 @@ function lift(kind: "img" | "pdf", nav: Nav = [], clipboard: boolean | { write: 
   const body = mkEl("body");
   const keys: Key[] = [];
   const calls: unknown[][] = [];
-  const document = { createElement: mkEl, getElementById: () => null, body, addEventListener: (_t: string, fn: (ev: unknown) => void) => { keys.push(fn as never); }, removeEventListener: () => {} };
-  const H = { kind, nav, calls, failed: known.failed || [], tiny: known.tiny || [], clipboard: !!clipboard, clip: typeof clipboard === "object" ? clipboard : null, window: win || null };
+  const stopped: El[] = [];
+  const document = { createElement: mkEl, getElementById: () => null, querySelectorAll: () => [], body, addEventListener: (_t: string, fn: (ev: unknown) => void) => { keys.push(fn as never); }, removeEventListener: () => {} };
+  const H = { kind, nav, calls, stopped, failed: known.failed || [], tiny: known.tiny || [], clipboard: !!clipboard, clip: typeof clipboard === "object" ? clipboard : null, window: win || null };
   const prelude = `
     const previewKind = (p) => H.kind;
     const fileUrl = (p, sid) => "/file?path=" + encodeURIComponent(p) + "&sid=" + (sid || "");
     const wirePinchZoom = (stage, img) => ({ retarget: () => {} });
+    const stopVideo = (v) => { H.stopped.push(v); };
+    const videoDims = new Map(), sizeLikeClip = () => {};
     const lightboxNav = H.nav.length ? ((sid, from) => { H.calls.push([sid, from]); return H.nav; }) : null;
     const mdImgFailed = new Set(H.failed), mdImgTiny = new Set(H.tiny);
     const ICON_DOWNLOAD = '<svg data-icon="download"/>', ICON_COPY = '<svg data-icon="copy"/>', ICON_CHECK = '<svg data-icon="check"/>', ICON_CROSS = '<svg data-icon="cross"/>', ICON_POPOUT = '<svg data-icon="popout"/>';
@@ -90,7 +96,7 @@ function lift(kind: "img" | "pdf", nav: Nav = [], clipboard: boolean | { write: 
   `;
   const openSrc = (new Function("H", "document", prelude + code + "\nreturn openLightbox;") as (h: unknown, d: unknown) => (src: Src, from?: unknown) => void)(H, document);
   const open = (p: string, sid?: string | null, pin?: string) => openSrc({ path: p, sid, pin });
-  return { body, open, openSrc, keys, calls };
+  return { body, open, openSrc, keys, calls, stopped } as ReturnType<typeof lift>;
 }
 function column(body: El): El {
   const wrap = body.children[0];
@@ -325,4 +331,39 @@ test("a file and a URL are never the same picture, whatever the strings", () => 
   const { body, open } = lift("img", nav);
   open("a.png", "s1");
   assert.equal(barOf(body).cue!.textContent, "2/2", "the file entry, not the URL that happens to spell its bytes");
+});
+
+// ── a video in the lightbox (2026-10-21, the user wanting a chat video treated like a picture) ──────────────────────
+test("a video opens playing with its controls, steps with the pictures, and stops when the reader steps away or closes", () => {
+  const nav: Nav = [{ url: "https://img.example.test/a.png" }, { url: "https://media.example.test/demo.mp4", video: true }, { path: "out/take.webm", sid: "s1" }];
+  const { body, openSrc, keys, stopped } = lift("video", nav, true);
+  openSrc({ url: "https://media.example.test/demo.mp4", video: true });
+  let v = barOf(body);
+  const vid = v.img as El & { controls?: boolean; playsInline?: boolean; preload?: string; played?: number };
+  assert.equal(vid.tag, "video", "the stage holds a video");
+  assert.equal(vid.src, "https://media.example.test/demo.mp4", "from the address as the message has it, no first-frame fragment");
+  assert.ok(classes(vid).includes("romp-lightbox-img") && classes(vid).includes("romp-lightbox-video"), "the picture's capped box, and the video's own background");
+  assert.equal(vid.controls, true, "played with its own controls");
+  assert.equal(vid.playsInline, true, "inline on iOS");
+  assert.equal(vid.played, 1, "the tap that opened it starts it (autoplay on open)");
+  assert.equal(v.cue!.textContent, "2/3", "a stop in the chat's one sequence");
+  assert.equal(v.dl.getAttribute("aria-label") || v.dl.title, "Open original", "a web address's control opens the original");
+  const copy = () => column(body).children[0].children[column(body).children[0].children.length - 1].children[0].children[1] as El & { style: Record<string, string> };
+  assert.equal(copy().style.display, "none", "a video has no picture to copy");
+  press(keys, "ArrowLeft");
+  v = barOf(body);
+  assert.equal(v.img.tag, "img", "← the picture before it");
+  assert.deepEqual(stopped, [vid], "stepping away stopped the video");
+  assert.equal(copy().style.display, "", "the copy button is back for a picture");
+  press(keys, "ArrowRight");
+  press(keys, "ArrowRight");
+  v = barOf(body);
+  const take = v.img as El & { played?: number };
+  assert.equal(take.tag, "video", "→ → a video FILE: a path whose extension says video");
+  assert.equal(take.src, "/file?path=out%2Ftake.webm&sid=s1", "its bytes through the kernel's file route");
+  assert.equal(take.played, 0, "a step onto a video leaves it paused: browsing is not watching");
+  assert.equal(v.dl.download, "take.webm", "a file downloads under its own name");
+  press(keys, "Escape");
+  assert.deepEqual(stopped.slice(-1), [take], "closing stops what is on screen");
+  assert.equal(body.children.length, 0, "and the lightbox is gone");
 });

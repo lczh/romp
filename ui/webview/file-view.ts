@@ -713,6 +713,8 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
   let isImage = false;                        // image/* → one <img> at an object URL
   let isPdf = false;                          // application/pdf → the lightbox's iframe treatment
   let isSvgImage = false;                     // image/svg+xml exactly — unlocks the Source toggle
+  let isVideo = false;                        // video/* → one <video> that streams from the route itself (videoBlock)
+  let videoBox: HTMLElement | null = null;    // built once, so a repaint never restarts a playing video
   let svgSource = false;                      // the SVG Source view is up (the highlighted XML)
   let svgText: string | null = null;          // the decoded SVG bytes, read once on first toggle
   let mediaBlob: Blob | null = null;          // the fetched bytes — the Source toggle decodes THESE
@@ -1043,6 +1045,22 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
     why.appendChild(offer);
     body.replaceChildren(why);
   };
+  // …and its video twin (2026-10-21): a container this browser cannot play (a codec it lacks, a .mov from a camera) or
+  // a load that died fires the <video>'s own error event, where the element would otherwise sit as a dead black box.
+  const videoFailed = () => {
+    if (!wrap.isConnected) return;              // settled after a close/replace — paint nothing
+    const why = el("div", "fileview-err");
+    why.textContent = "this video will not play in this browser — its format may not be supported here, or the file is mid-write";
+    const hint = el("div", "fileview-err-hint");
+    hint.textContent = path;
+    why.appendChild(hint);
+    const offer = el("button", "fileview-btn fileview-err-dl") as HTMLButtonElement;
+    offer.type = "button"; offer.textContent = "Download";
+    offer.title = "Save this file to your device";
+    offer.addEventListener("click", () => startDownload(dlUrl, offer));
+    why.appendChild(offer);
+    body.replaceChildren(why);
+  };
 
   // The view group takes no gap when every control in it is hidden (edit mode hides the format pair too). Its
   // state is derived from the controls' own hidden states, so it is read after the last of them is decided: at
@@ -1071,6 +1089,16 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
     syncViewGroup();
     saveBtn.hidden = !editing;
     cancelBtn.hidden = !editing;
+    if (isVideo) {
+      // Video mode (2026-10-21). Painted ONCE, when the kernel's verdict lands: a later repaint must not rebuild the
+      // element under a video that is playing, or that settled on its failure pane. Edit, the format pair, the Source
+      // toggle and the text size are all hidden by their own arms above (no text ever lands); Download, Copy path, the
+      // GitHub link, ✕ and the dir-link keep working, as over a picture.
+      if (videoBox) return;
+      videoBox = videoBlock(fileUrl(path, sid), path, videoFailed);
+      body.replaceChildren(videoBox);
+      return;
+    }
     if (isImage || isPdf) {
       // Media mode. The quote gesture gates off the RENDERED views only: a chip's label anchors to
       // text and an <img>/iframe body has none (affordance honesty: no real target, no affordance —
@@ -1151,6 +1179,7 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
     // surface; the SVG SOURCE view is a real text view and quotes like any other (renderBody's
     // media gate, same rule).
     if ((isImage || isPdf) && !(svgSource && svgText !== null)) return;
+    if (isVideo) return;                                   // a <video> has no text either, and no Source view
     const sel = window.getSelection();
     if (!sel || sel.isCollapsed || !sel.anchorNode || !box.contains(sel.anchorNode)) return;
     const picked = sel.toString().trim();
@@ -1334,7 +1363,7 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
   };
   let pendingLine: number | null = opts && typeof opts.line === "number" && opts.line > 0 ? Math.floor(opts.line) : null;
 
-  fetch(fileUrl(path, sid), { cache: "no-store" }).then((r): Promise<string | Blob> => {
+  fetch(fileUrl(path, sid), { cache: "no-store" }).then((r): Promise<string | Blob | null> => {
     // Every failure says WHY, in the pane, rather than leaving a blank one: the kernel distinguishes
     // "not a type I serve" from "too big" from "not text after all", and that is exactly what the
     // person who clicked needs to know (a 413 names the size and the cap). The status rides along so
@@ -1356,9 +1385,22 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
     isImage = ct.startsWith("image/");
     isPdf = ct.startsWith("application/pdf");
     isSvgImage = ct === "image/svg+xml";
+    // A VIDEO (2026-10-21) is the one verdict whose bytes this fetch never reads: a recording can be gigabytes, and a
+    // blob of it would sit whole in the page before a frame showed. The headers were all this request was for, so its
+    // body is cancelled (the kernel streams, so at most a chunk or two crossed the wire) and the <video> asks the same
+    // URL itself, with the Range requests it seeks by (videoBlock). null tells the next step there is nothing to take.
+    isVideo = ct.startsWith("video/");
+    if (isVideo) {
+      void r.body?.cancel().catch(() => { /* already settled */ });
+      return Promise.resolve(null);
+    }
     return isImage || isPdf ? r.blob() : r.text();
   }).then((t) => {
     if (!up()) return;                                        // closed while it was in flight
+    if (t === null) {
+      if (wrap.isConnected) renderBody();                     // the video arm builds its element from the route's URL
+      return;
+    }
     if (t instanceof Blob) {
       // Minted only now — a viewer closed (above) or REPLACED mid-flight creates nothing to leak,
       // and never clobbers the new open's mediaUrlLive registration.
@@ -1881,6 +1923,25 @@ function imgBlock(objUrl: string, path: string, onDecodeFail: () => void): HTMLE
   img.src = objUrl;
   img.alt = path;
   box.appendChild(img);
+  return box;
+}
+
+// The video body (2026-10-21): ONE <video> aimed at the /file URL itself, never a blob, so the browser streams it with
+// the Range requests the kernel honours, starting with only the metadata (the first frame and the duration), and
+// seeks without the whole file ever sitting in the page. It wears the image's box and cap (.fileview-imgbox,
+// .fileview-img), so a picture and a recording present one way. playsinline keeps iOS from taking it full screen on
+// play. The element's own error event (a codec this browser lacks, a load that died) goes to onFail, armed before src
+// so no event can slip past, where the open viewer swaps in its failure pane with the Download; the caller owns it.
+function videoBlock(src: string, path: string, onFail: () => void): HTMLElement {
+  const box = el("div", "fileview-imgbox");
+  const video = el("video", "fileview-img") as HTMLVideoElement;
+  video.controls = true;
+  video.preload = "metadata";
+  video.setAttribute("playsinline", "");
+  video.setAttribute("aria-label", path);
+  video.addEventListener("error", onFail, { once: true });
+  video.src = src;
+  box.appendChild(video);
   return box;
 }
 

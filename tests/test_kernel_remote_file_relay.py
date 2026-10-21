@@ -14,6 +14,7 @@ These tests run the real Handler against a fake "remote kernel" (an HTTP server 
 session state touched.
 """
 import os
+import re
 import socket
 import threading
 import unittest
@@ -51,6 +52,9 @@ SVG_BYTES = (b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1">'
 # the download fixture: NUL-ridden, off every view allowlist, and BIGGER than one relay stream chunk,
 # so the pass-through provably crosses a chunk boundary intact
 BIN_BYTES = bytes(range(256)) * ((km._DOWNLOAD_CHUNK // 256) + 60)
+# the video fixture (2026-10-21): synthetic bytes, never decoded by anything here, and bigger than one stream chunk so
+# the relay's streamed copy provably crosses a chunk boundary intact
+VIDEO_BYTES = bytes(range(255, -1, -1)) * ((km._DOWNLOAD_CHUNK // 256) + 40)
 
 
 class _FakeRemoteFileHandler(BaseHTTPRequestHandler):
@@ -58,16 +62,21 @@ class _FakeRemoteFileHandler(BaseHTTPRequestHandler):
     path=/tmp/plot.png and BIN_BYTES for path=/tmp/data.bin&download=1 (recording the request
     lines), 404s anything else."""
     requests = []               # class-level: the recorded request lines
+    ranges = []                 # …and the Range header each video request carried ("" for none)
     ctype = "image/png"         # what this remote CLAIMS the bytes are (a hostile one lies)
     dl_ctype = "application/octet-stream"          # …and the download-side claims (a hostile one lies)
     dl_disp = 'attachment; filename="data.bin"'
     dl_truncate = False         # short body then a clean close, as _file_download sends when the file shrank
+    video_ctype = "video/mp4"   # what this remote CLAIMS a video is (a hostile one lies)
+    video_crange = None         # a hostile remote's Content-Range on its 206, in place of the true one
+    video_truncate = False      # half the promised body then a clean close, as the route does when the file shrank
 
     def _opener_policy(self):
         # A real romp kernel answers through Handler._send, which sends Cross-Origin-Opener-Policy on every response it
-        # builds: the GET 200 of a file and every refusal (404, 413). Its HEAD and 206 replies are written header by
-        # header and carry none. The relay sends its own copy through its own _send, so a relay that also mirrored the
-        # remote's would send the header twice, and a browser applies no policy from a doubled header.
+        # builds: the GET 200 of a file, every refusal (404, 413), and since 2026-10-21 its streamed replies (a video's
+        # 200, any 206). Its HEAD replies are written header by header and carry none. The relay sends its own copy
+        # through its own _send, so a relay that also mirrored the remote's would send the header twice, and a browser
+        # applies no policy from a doubled header.
         self.send_header("Cross-Origin-Opener-Policy", OPENER_POLICY)
 
     def _serve(self, head):
@@ -85,6 +94,46 @@ class _FakeRemoteFileHandler(BaseHTTPRequestHandler):
                     self.close_connection = True
                 else:
                     self.wfile.write(BIN_BYTES)
+            return
+        if "clip.mp4" in self.path:
+            # the remote's own video route, as _file_preview answers it: one byte range honoured (the same forms the
+            # relay forwards), a 416 naming the size for one past the end, otherwise the whole file
+            rng = self.headers.get("Range") or ""
+            _FakeRemoteFileHandler.ranges.append(rng)
+            n = len(VIDEO_BYTES)
+            status, start, end = 200, 0, n - 1
+            m = re.match(r"^bytes=(\d*)-(\d*)$", rng)
+            if m and m.group(1):
+                status, start = 206, int(m.group(1))
+                end = min(int(m.group(2)), n - 1) if m.group(2) else n - 1
+            elif m and m.group(2):
+                status, start = 206, max(0, n - int(m.group(2)))
+            if start >= n:
+                body = b"range not satisfiable: the file is %d bytes" % n
+                self.send_response(416)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Range", "bytes */%d" % n)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if not head:
+                    self.wfile.write(body)
+                return
+            body = VIDEO_BYTES[start:end + 1]
+            self.send_response(status)
+            self.send_header("Content-Type", _FakeRemoteFileHandler.video_ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Accept-Ranges", "bytes")
+            if status == 206:
+                self.send_header("Content-Range", _FakeRemoteFileHandler.video_crange or "bytes %d-%d/%d" % (start, end, n))
+            if not head:
+                self._opener_policy()       # a real kernel's streamed replies go out through its _send
+            self.end_headers()
+            if not head:
+                if _FakeRemoteFileHandler.video_truncate:
+                    self.wfile.write(body[: len(body) // 2])
+                    self.close_connection = True
+                else:
+                    self.wfile.write(body)
             return
         if "chart.svg" in self.path:
             # the remote's own .svg: whole, or the tail a suffix Range asks for (its _file_preview's 206 shape).
@@ -205,6 +254,7 @@ class _RelayRecorder:
         pass
 
     _send = km.Handler._send      # the error paths route through the real _send, captured by the fakes
+    _relay_video_body = km.Handler._relay_video_body   # a direct _remote_file call reaches the video arm through self
 
 
 class RemoteFileRelay(unittest.TestCase):
@@ -219,6 +269,10 @@ class RemoteFileRelay(unittest.TestCase):
         _FakeRemoteFileHandler.dl_ctype = "application/octet-stream"
         _FakeRemoteFileHandler.dl_disp = 'attachment; filename="data.bin"'
         _FakeRemoteFileHandler.dl_truncate = False
+        _FakeRemoteFileHandler.ranges = []
+        _FakeRemoteFileHandler.video_ctype = "video/mp4"
+        _FakeRemoteFileHandler.video_crange = None
+        _FakeRemoteFileHandler.video_truncate = False
         self._saved_remotes = dict(km._remotes)
 
     def tearDown(self):
@@ -588,6 +642,117 @@ class RemoteFileRelay(unittest.TestCase):
         status, _, msg = self._get_msg("/remote/gpu1/file?path=%2Ftmp%2Fplot.png")
         self.assertEqual(status, 200)
         self.assertNotIn("sandbox", csp(msg), csp(msg))
+
+    # ── video (2026-10-21): a remote session's recording plays through the relay as a local one does. Every single
+    # range the local route honours is forwarded (re-serialised, so byte arithmetic and nothing else reaches the
+    # remote), the remote's 200/206 is STREAMED back rather than read whole (a recording has no size cap), and the
+    # headers that tell this browser how to treat the bytes are ours: the type from the requested extension,
+    # Accept-Ranges because this relay serves every range it forwards. ──
+
+    VIDEO_PATH = "/remote/gpu1/file?path=%2Ftmp%2Fclip.mp4"
+
+    def _video(self, rng=None, method="GET"):
+        self._register("gpu1", self.fake.server_address[1])
+        return self._get_msg(self.VIDEO_PATH, method=method, headers={"Range": rng} if rng is not None else None)
+
+    def _relayed_partial(self, rng, start, end):
+        status, body, msg = self._video(rng)
+        n = len(VIDEO_BYTES)
+        self.assertEqual(status, 206, rng)
+        self.assertEqual(body, VIDEO_BYTES[start:end + 1], rng)
+        self.assertEqual(msg.get("Content-Range"), "bytes %d-%d/%d" % (start, end, n), rng)
+        self.assertEqual(msg.get("Content-Length"), str(end - start + 1), rng)
+        self.assertEqual(msg.get("Content-Type"), "video/mp4", rng)
+        self.assertEqual(msg.get("Accept-Ranges"), "bytes", rng)
+        self.assertEqual(msg.get("X-Content-Type-Options"), "nosniff", rng)
+
+    def test_a_remote_video_relays_whole_under_our_type_with_ranges_advertised(self):
+        _FakeRemoteFileHandler.video_ctype = "text/html"           # a lying remote: its type never reaches the browser
+        status, body, msg = self._video()
+        self.assertEqual(status, 200)
+        self.assertEqual(body, VIDEO_BYTES, "bigger than one stream chunk, so the copy crossed a boundary intact")
+        self.assertEqual(msg.get("Content-Type"), "video/mp4")
+        self.assertEqual(msg.get("Content-Length"), str(len(VIDEO_BYTES)))
+        self.assertEqual(msg.get("Accept-Ranges"), "bytes")
+        self.assertEqual(msg.get("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(_FakeRemoteFileHandler.ranges, [""], "no Range asked, none forwarded")
+
+    def test_a_relayed_video_carries_the_openers_policy_once(self):
+        for how, (body, msg) in self._relayed_coop("/tmp/clip.mp4", 200).items():
+            self.assertEqual(body, VIDEO_BYTES, how)
+            self.assertEqual(msg.get("Content-Type"), "video/mp4", how)
+
+    def test_safaris_two_byte_probe_is_forwarded_and_its_partial_reply_mirrored(self):
+        self._relayed_partial("bytes=0-1", 0, 1)
+        self.assertEqual(_FakeRemoteFileHandler.ranges, ["bytes=0-1"])
+
+    def test_every_single_range_form_is_forwarded(self):
+        n = len(VIDEO_BYTES)
+        self._relayed_partial("bytes=-100", n - 100, n - 1)          # the suffix: the last 100 bytes
+        self._relayed_partial("bytes=5000-", 5000, n - 1)            # a seek
+        self._relayed_partial("bytes=10-99", 10, 99)                 # closed
+        self._relayed_partial("bytes=0-", 0, n - 1)
+        self.assertEqual(_FakeRemoteFileHandler.ranges, ["bytes=-100", "bytes=5000-", "bytes=10-99", "bytes=0-"])
+
+    def test_a_header_that_is_not_one_valid_range_is_dropped_never_forwarded(self):
+        for rng in ("bytes=0-1,5-9", "bytes=9-5", "items=0-1", "bytes=0-1; evil=1"):
+            status, body, msg = self._video(rng)
+            self.assertEqual((status, body), (200, VIDEO_BYTES), rng)
+        self.assertEqual(_FakeRemoteFileHandler.ranges, ["", "", "", ""], "the remote saw no Range at all")
+
+    def test_a_remote_416_passes_through_with_its_size(self):
+        status, _, msg = self._video("bytes=%d-" % (len(VIDEO_BYTES) + 5))
+        self.assertEqual(status, 416)
+        self.assertEqual(msg.get("Content-Range"), "bytes */%d" % len(VIDEO_BYTES))
+        self.assertEqual(msg.get("Content-Type"), "text/plain", "the remote's prose, labelled as prose")
+
+    def test_a_partial_reply_whose_range_is_not_byte_arithmetic_502s(self):
+        _FakeRemoteFileHandler.video_crange = "bytes 0-/<script>"
+        status, body, _ = self._video("bytes=0-1")
+        self.assertEqual(status, 502)
+        self.assertEqual(body, b"malformed partial reply from gpu1")
+
+    def test_head_relays_the_real_length_and_ranges_under_our_type(self):
+        _FakeRemoteFileHandler.video_ctype = "text/html"
+        status, body, msg = self._video(method="HEAD")
+        self.assertEqual((status, body), (200, b""))
+        self.assertEqual(msg.get("Content-Type"), "video/mp4")
+        self.assertEqual(msg.get("Content-Length"), str(len(VIDEO_BYTES)))
+        self.assertEqual(msg.get("Accept-Ranges"), "bytes")
+
+    def test_a_video_past_the_slurp_cap_still_relays_while_an_image_does_not(self):
+        # the backstop 413 guards the slurped arm (images, PDFs) only: a streamed video holds one chunk at a time
+        from unittest import mock
+        with mock.patch.object(km, "_PREVIEW_MAX_BYTES", 4):
+            status, body, _ = self._video()
+            self.assertEqual((status, body), (200, VIDEO_BYTES))
+            self._relayed_partial("bytes=0-1", 0, 1)
+            status, body, _ = self._get("/remote/gpu1/file?path=%2Ftmp%2Fplot.png")
+            self.assertEqual((status, body), (413, b"too large to preview"))
+
+    def test_the_relayed_video_arrives_as_bounded_chunks_never_one_slurp(self):
+        # direct call, so the WRITES are visible: the over-HTTP tests above only see the reassembled body
+        self._register("gpu1", self.fake.server_address[1])
+        rec = _RelayRecorder()
+        km.Handler._remote_file(rec, "gpu1", "path=%2Ftmp%2Fclip.mp4")
+        body = [w for w in rec.writes if w]          # _send writes the empty body of the header block
+        self.assertEqual(rec.status, 200)
+        self.assertEqual(rec.headers.get("Content-Length"), str(len(VIDEO_BYTES)))
+        self.assertGreater(len(body), 1, "one write means the reply was slurped")
+        self.assertTrue(all(len(w) <= km._DOWNLOAD_CHUNK for w in body))
+        self.assertEqual(b"".join(body), VIDEO_BYTES)
+        self.assertFalse(rec.close_connection)
+
+    def test_a_remote_that_truncates_a_video_cleanly_closes_this_connection_short(self):
+        # the remote sends half and closes cleanly (http.client reads b'' with no exception): only counting the
+        # copied bytes against the forwarded Content-Length spots the broken promise (the download arm's reasoning)
+        _FakeRemoteFileHandler.video_truncate = True
+        self._register("gpu1", self.fake.server_address[1])
+        rec = _RelayRecorder()
+        km.Handler._remote_file(rec, "gpu1", "path=%2Ftmp%2Fclip.mp4")
+        self.assertEqual(rec.headers.get("Content-Length"), str(len(VIDEO_BYTES)))
+        self.assertEqual(b"".join(rec.writes), VIDEO_BYTES[: len(VIDEO_BYTES) // 2])
+        self.assertTrue(rec.close_connection, "short of the forwarded length must CLOSE, or the browser hangs")
 
 
 if __name__ == "__main__":
