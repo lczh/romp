@@ -2822,21 +2822,28 @@ def _pid_alive(pid: int) -> bool:
 
 
 # The writer-unique temp every whole-file writer here publishes through, beside the file it replaces:
-# "<file>.<writer pid>.<8 hex>.tmp" (write_reg, write_lease, _record_spend, ApiHealth's state file and salt).
+# "<file>.<writer pid>.<8 hex>.tmp" (write_reg, write_lease, _record_spend, ApiHealth's state file and salt, and
+# logins.write_record's stored-login records).
 _WRITER_TEMP_RE = re.compile(r"(?P<file>.+)\.(?P<pid>[0-9]+)\.[0-9a-f]{8}\.tmp")
 
 
-def _sweep_dead_writer_temps(d, file_pat: str) -> int:
+def _sweep_dead_writer_temps(d, file_pat: str, failed: dict | None = None) -> int:
     """Remove the writer-unique temps in directory `d` of a file matching `file_pat` (an fnmatch pattern) whose writer is
     DEAD: a process killed between writing its temp and renaming it (SIGKILL, the OOM killer). A fresh name per write
     means nothing reuses such a temp, so each death leaves one more. A temp whose writer pid is alive, or is this
     process (another thread's write), is a write in progress and stays: unlinking it would fail that writer's rename.
     The pid decides, never the file's age, which says nothing about whether its write is done; a pid reused since only
-    keeps a leftover longer. Returns how many it removed; never raises."""
+    keeps a leftover longer. Returns how many it removed; never raises. A directory that exists but cannot be listed,
+    and a temp that could not be removed, are added to `failed` when the caller passes one ({"list": [(dir, error)],
+    "unlink": [(dir, error)]}); a directory that does not exist and a temp gone before its turn are no failure."""
     n = 0
     try:
         names = os.listdir(d)
-    except OSError:
+    except FileNotFoundError:
+        return 0                                        # no such directory yet (no login ever stored): nothing to sweep
+    except OSError as e:
+        if failed is not None:
+            failed.setdefault("list", []).append((str(d), e))
         return 0
     for name in names:
         m = _WRITER_TEMP_RE.fullmatch(name)
@@ -2851,19 +2858,45 @@ def _sweep_dead_writer_temps(d, file_pat: str) -> int:
         try:
             os.unlink(os.path.join(d, name))
             n += 1
-        except OSError:
-            pass
+        except FileNotFoundError:
+            pass                                        # gone already (the salt mint's own sweep, on another thread)
+        except OSError as e:
+            if failed is not None:
+                failed.setdefault("unlink", []).append((str(d), e))
     return n
 
 
-def sweep_dead_writer_temps(state_dir) -> int:
+def _sweep_failure_text(rows) -> tuple:
+    """(the directories, deduplicated in order, joined; the first error as `Type: reason`) for one kind of sweep failure."""
+    dirs = ", ".join(dict.fromkeys(d for d, _ in rows))
+    e = rows[0][1]
+    return dirs, "%s: %s" % (type(e).__name__, getattr(e, "strerror", None) or e)
+
+
+def sweep_dead_writer_temps(state_dir, log=None) -> int:
     """At the kernel's start: the dead writers' temps of the files under the state root written through one (see
     _sweep_dead_writer_temps). The previous kernel is the usual writer, and the outgoing one at a restart may still be
-    alive, so its temps stay until a later start. Returns how many it removed."""
+    alive, so its temps stay until a later start. Every directory here is written only by processes on this machine,
+    so a pid in a temp's name is one of its processes: the stored logins included, which every door (the web form,
+    `romp login`, a link relayed from another machine) has this machine's kernel write. Each kind of failure (a directory
+    that cannot be listed, temps that cannot be removed) goes to `log` once, naming its directories, however many files
+    it covers. Returns how many it removed."""
     root = Path(state_dir)
-    return sum(_sweep_dead_writer_temps(d, pat) for d, pat in (
+    failed: dict = {}
+    n = sum(_sweep_dead_writer_temps(d, pat, failed) for d, pat in (
         (root, "spend.json"), (root, API_HEALTH_STATE_FILE), (root, API_HEALTH_SALT_FILE),
-        (root / "sdk", "*.json"), (root / LEASE_DIR, "*.json")))
+        (root / "sdk", "*.json"), (root / LEASE_DIR, "*.json"),
+        (root / _logins.LOGINS_DIR, "[0-9a-f]" * 12 + ".json")))   # logins.record_path: <12-hex id>.json
+    if log and failed.get("list"):
+        dirs, why = _sweep_failure_text(failed["list"])
+        log("boot: could not list %s to remove the temp files writers that died mid-write left there (%s); "
+            "they stay until a later start can" % (dirs, why))
+    if log and failed.get("unlink"):
+        dirs, why = _sweep_failure_text(failed["unlink"])
+        k = len(failed["unlink"])
+        log("boot: could not remove %d temp file%s left by writers that died mid-write, in %s (%s); "
+            "they stay until a later start can" % (k, "" if k == 1 else "s", dirs, why))
+    return n
 
 
 TEST_ROOT_PREFIX = "romp-tests-"
@@ -14990,11 +15023,7 @@ class SdkBackend:
         # CLIs, resume cut turns, deliver persisted queues. In a thread: it spawns claude processes
         # and must not block construction (the WS handler constructs this backend lazily).
         if reconcile:
-            # a writer killed between writing its temp and renaming it left the temp behind, one more per death (#341 gave
-            # every write a fresh name); the pid says whose write is still going, so this is a directory listing, done here
-            n = sweep_dead_writer_temps(self.state_dir)
-            if n:
-                self._log("boot: removed %d temp file(s) left by writers that died mid-write" % n)
+            self._boot_sweep_writer_temps()
             # a version-canary probe killed with the last kernel left its temp directories and transcripts behind
             threading.Thread(target=self._sweep_canary_leftovers, name="canary-sweep", daemon=True).start()
             threading.Thread(target=self._boot_reconcile, args=(regs,),
@@ -15006,6 +15035,22 @@ class SdkBackend:
         # in-progress sessions). A session that genuinely FINISHED a turn before the restart already logged
         # "waiting" (ResultMessage), so it stays nudge-eligible. The dormant in-flight→waiting DISPLAY heal lives
         # independently in live_sessions, so the feed/fleet still render dormant sessions as waiting.
+
+    def _boot_sweep_writer_temps(self) -> None:
+        """The kernel's start removes the temps writers killed mid-write left behind (sweep_dead_writer_temps; #341 gave
+        every write a fresh name, so each death leaves one more). The pid says whose write is still going, so it is a
+        directory listing, done in the constructor. Best-effort and never fatal: the kernel marks a backend whose
+        constructor raised unavailable for its whole life (_sdk_locked), so a fault here would cost every session for
+        the sake of a cleanup. A failure is a problem row (the error center, and stderr through the kernel's log wire),
+        and the boot goes on; the leftovers wait for a later start."""
+        try:
+            n = sweep_dead_writer_temps(self.state_dir, log=lambda m: self._log(m, problem=True))
+            if n:
+                self._log("boot: removed %d temp file(s) left by writers that died mid-write" % n)
+        except Exception as e:
+            self._log("boot: removing the temp files writers that died mid-write left failed on %s: %s, at %s; the kernel "
+                      "starts without it and they stay until a later start" % (type(e).__name__, _mask_ids(e), _compact_tb(e)),
+                      problem=True)
 
     def _say_settings_unreadable(self, e) -> None:
         """One problem row per process: the operator's Claude Code settings cannot be read just now (Claude Code
