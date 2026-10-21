@@ -68,6 +68,7 @@ let browser;
 try { browser = await chromium.launch(); }
 catch (e) { console.error("browser-launch-failed: " + e); process.exit(3); }
 const page = await browser.newPage({ viewport: { width: 1100, height: 760 }, deviceScaleFactor: 2 });
+await page.clock.setFixedTime(cfg.nowMs);   // the page's Date.now() is the epoch the fixture was stamped from; timers keep running
 await page.goto(cfg.chat);
 await page.waitForSelector("#tabs .tab-group-head", { timeout: 30000 });
 await page.waitForTimeout(800);
@@ -125,7 +126,7 @@ await page.evaluate(() => document.body.classList.remove("theme-light")); await 
 // folded row stands in for web's hidden tab in the selected tab's box. A second click opens the row again.
 const infraHead = '#tabs .tab-group-head[data-group="infra"]';
 const thread = () => page.evaluate((id) => { const t = document.querySelector('#content .thread[data-session="' + id + '"]'); if (!t) return null;
-  const r = t.getBoundingClientRect(); return { display: getComputedStyle(t).display, h: Math.round(r.height), text: t.textContent.replace(/\s+/g, " ").slice(0, 600) }; }, cfg.web);
+  const r = t.getBoundingClientRect(); return { display: getComputedStyle(t).display, h: Math.round(r.height), text: t.textContent.replace(/\s+/g, " ").slice(0, 600), now: Date.now() }; }, cfg.web);
 const foldedIs = (f) => page.waitForFunction(([s, f]) => { const h = document.querySelector(s); return !!h && h.dataset.folded === f; }, [infraHead, f], { timeout: 10000 }).then(() => true).catch(() => false);
 out.threadBefore = await thread();
 await page.click(infraHead);
@@ -225,7 +226,11 @@ class ServedTabOverviewMode(unittest.TestCase):
         os.makedirs(cwd, exist_ok=True)
         proj = os.path.join(claude, "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(cwd)))
         os.makedirs(proj, exist_ok=True)
-        t0 = int(time.time()) - 900
+        # ONE epoch for the fixture and the page's clock (pinned to it, the day-divider lab's convention): the rows read
+        # "15 min ago" at every read, so the fold's same-transcript check cannot see the label tick to "16 min ago" when a
+        # wall-clock minute turns between its two reads (CI, 2026-10-20 and 2026-10-21)
+        cls.now = time.time()
+        t0 = int(cls.now) - 900
         for i, (name, sid) in enumerate(SIDS.items()):
             bg, fg = COLORS[name]
             Path(state, "names", sid).write_text("%s\t%s\t%s\t%s\n" % (name, cwd, bg, fg))
@@ -278,7 +283,7 @@ class ServedTabOverviewMode(unittest.TestCase):
         cfg = os.path.join(self.lab, "cfg.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "web": SIDS["web"], "docs": SIDS["docs"], "tests": SIDS["tests"],
-                       "shots": os.environ.get("SNAP_SHOTS", "")}, f)
+                       "nowMs": int(self.now * 1000), "shots": os.environ.get("SNAP_SHOTS", "")}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -328,6 +333,8 @@ class ServedTabOverviewMode(unittest.TestCase):
         self.assertNotEqual(th["display"], "none", "…shown: %r" % th)
         self.assertGreater(th["h"], 0, "…with a height: %r" % th)
         self.assertIn("web side of the notes-api", th["text"], "…and it is web's: %r" % th)
+        self.assertEqual((r["threadBefore"]["now"], th["now"]), (int(self.now * 1000),) * 2,
+                         "both reads see the page's clock pinned at the fixture's epoch, so no relative stamp can tick between them")
         self.assertEqual(th["text"], r["threadBefore"]["text"], "the same transcript as before the click")
         self.assertTrue(fi["standIn"], "the folded row stands in for the hidden tab: %r" % fi)
         self.assertEqual(fi["bg"], f["activeFill"], "…in the selected tab's fill: %r" % fi)
