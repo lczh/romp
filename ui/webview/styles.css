@@ -3337,15 +3337,12 @@ pre.has-copy:hover .code-copy, .code-copy:focus-visible { opacity: 0.9; }
 .cmt-msg.agent table { display: block; width: max-content; max-width: 100%; overflow-x: auto; overflow-wrap: normal; }
 .cmt-msg.agent pre { overflow-x: auto; }
 /* Media at the body's width, its ratio kept (height: auto), at the lowest specificity, so a class's own rule always
-   wins (.path-full-img's and .user-img's 320px caps). The one height left as written: an <img> or <video> given a
+   wins (the picture box's and .user-img's 320px caps). The one height left as written: an <img> or <video> given a
    height and NO width, whose author sized it by height (a 40px logo); with a width as well, height: auto lets the width
    attribute and the picture's ratio set the height, so the cap shrinks it whole. A frame has no ratio of its own
    (height: auto would collapse it to 150px), so it is capped in width only. */
 :where(.md, .cmt-msg.agent) :where(img, video, iframe) { max-width: 100%; }
 :where(.md, .cmt-msg.agent) :where(img, video):where(:not([height]), [width]) { height: auto; }
-/* a markdown picture that opens the lightbox (preview.ts installMdImgZoom marks it on load: not in a link, not
-   glyph-sized), with the path preview's own cursor */
-.md-img-zoom { cursor: zoom-in; }
 .md th, .md td { border: 1px solid var(--box-border); padding: 4px 10px; text-align: left; }
 .md th { background: var(--box-bg); }
 
@@ -3997,9 +3994,18 @@ body.drop-over::after { content: ""; position: fixed; inset: 0; pointer-events: 
    scale as a user-message picture (.user-img's 320px cap — one size per information type); a PDF gets
    its native inline viewer (preview.ts previewFull). */
 .path-full { display: block; }
-.path-full-img { display: block; max-width: 100%; max-height: 320px; border-radius: 8px; cursor: zoom-in;
-  border: 1px solid rgba(255, 255, 255, 0.14); object-fit: contain; background: rgba(0, 0, 0, 0.25); }
-.path-full-img:hover { border-color: var(--accent); }
+/* ONE picture box: a mentioned file's figure (.path-full-img) and a picture a message's markdown embeds (.md-img, which
+   preview.ts mdImgPostPass stamps) share these rules, every declaration written once, so the two cannot drift (the user
+   2026-10-21, who wanted both kinds sized and dressed like the path preview). The SIZE rule caps every markdown picture:
+   a tall or a full-size one stays within 320px and the bubble, its ratio kept (width and height auto, and object-fit for
+   one whose author fixed a width, which a max-height cannot shrink whole), while a badge or an icon, far under both
+   caps, keeps its natural size in its line of text. The BOX (block, rounded, framed, the zoom cursor) dresses only a
+   picture a click opens in the lightbox, .md-img-zoom (preview.ts: 32px tall and up, outside any link or <summary>), so
+   a badge stays inline, a linked picture keeps its link's cursor, and nothing says it zooms unless it does. */
+.path-full-img, .md-img { max-width: 100%; max-height: 320px; object-fit: contain; }
+.path-full-img, .md-img-zoom { display: block; border-radius: 8px; cursor: zoom-in;
+  border: 1px solid rgba(255, 255, 255, 0.14); background: rgba(0, 0, 0, 0.25); }
+.path-full-img:hover, .md-img-zoom:hover { border-color: var(--accent); }
 .path-full-pdfcard { display: inline-flex; align-items: center; gap: 7px; padding: 7px 11px;
   border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.14); background: rgba(0, 0, 0, 0.25); }
 .path-full-pdfcard:hover { border-color: var(--accent); }

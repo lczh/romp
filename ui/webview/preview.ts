@@ -877,17 +877,21 @@ function parkMdImg(img: HTMLImageElement, url: string): void {
   img.dataset.mdSrc = url;
   if (img.hasAttribute("src")) img.removeAttribute("src");   // no src: the browser shows the alt text and fetches nothing
   img.classList.add("md-img-failed");
+  img.classList.remove("md-img-zoom");               // a caption, not a picture: no picture box, no zoom cursor
 }
 /** The chat's post-pass (render.ts runs it on md() and userMd() output after the sanitize, NEVER through the shared
  *  sanitizer: the file viewer rewrites its images' paths to /file URLs after its own sanitize, and a park inside the
  *  sanitizer removed the src that rewrite keys on, the review's find): an img whose URL is already known to fail is
  *  parked at RENDER, before any fetch. Every image it sees is a picture a message embedded, and wears .md-img: the one
- *  mark the zoom hook below reads, so a picture the file viewer or a hover card draws is never its business. */
+ *  mark the zoom hook below reads, so a picture the file viewer or a hover card draws is never its business. One whose
+ *  URL already loaded picture-sized takes .md-img-zoom here too, so a re-render draws it in the picture box at once
+ *  (mdImgPicture, below). */
 export function mdImgPostPass(root: ParentNode): void {
   for (const img of Array.from(root.querySelectorAll("img")) as HTMLImageElement[]) {
     img.classList.add("md-img");                     // a picture the message's markdown embeds: the zoom hook's mark (installMdImgZoom)
     const u = img.src || "";
     if (u && mdImgFailed.has(u)) parkMdImg(img, u);
+    else if (u && mdImgPicture.has(u) && !img.closest("a, summary") && opensInLightbox(u)) img.classList.add("md-img-zoom");
   }
 }
 /** A URL the kernel actually answers (/file, a remote relay's /file, /media): a file an agent is still writing or a
@@ -975,9 +979,13 @@ export function installMdImgHeal(): void {
 // installed once: the transcript rebuilds these images on every push, so nothing hangs on an image (the click-safety
 // rule, ui/CLAUDE.md).
 //   load (capture: a load does not bubble) decides from the picture's NATURAL size whether it zooms, and marks it
-//     .md-img-zoom, the class the zoom cursor rides. A picture under ZOOM_MIN_H px tall is a glyph in a line of text
-//     (a status badge is 20px, an emoji or an icon 16 to 24): zooming it shows nothing more, so it neither zooms nor
-//     stops the lightbox's arrows (mdImgTiny, which the sequence filter reads).
+//     .md-img-zoom, the class the zoom cursor and the path preview's picture box ride (styles.css). A picture under
+//     ZOOM_MIN_H px tall is a glyph in a line of text (a status badge is 20px, an emoji or an icon 16 to 24): zooming it
+//     shows nothing more, so it neither zooms, nor wears the box, nor stops the lightbox's arrows (mdImgTiny, which the
+//     sequence filter reads). A URL that loaded picture-sized is remembered (mdImgPicture), so the post-pass stamps
+//     .md-img-zoom on the next render of it before it is on the page: the transcript rebuilds a streaming turn's
+//     pictures on every push, and a box that waited for each fresh element's load would step the turn's height a
+//     few px (inline to block) on every push. The load still rules on each element, so the stamp is only a head start.
 //   click (capture, so a fold or a bubble around the picture never also toggles under it) opens the lightbox on the
 //     picture, by its URL, handing over the element so the chat's sequence knows which transcript it sits in.
 // A picture inside a link is the LINK's: its click follows the link (render.ts's opener, as it always did) and it wears
@@ -992,6 +1000,7 @@ export function installMdImgHeal(): void {
 // preview (canPreview): the VS Code webview loads only data: pictures and has no kernel origin.
 const ZOOM_MIN_H = 32;
 const mdImgTiny = new Set<string>();                // URLs that loaded glyph-sized this page life: no stop in the sequence
+const mdImgPicture = new Set<string>();             // URLs that loaded picture-sized this page life: a re-render wears the box at once
 let mdImgZoomOn = false;
 export function mdImgZoomable(img: HTMLImageElement): boolean {
   return img.classList.contains("md-img") && !img.closest("a, summary") && opensInLightbox(img.currentSrc || img.src) && img.complete && img.naturalHeight >= ZOOM_MIN_H;
@@ -1003,6 +1012,7 @@ export function installMdImgZoom(): void {
     const img = e.target as HTMLImageElement | null;
     if (!img || img.tagName !== "IMG" || !img.classList.contains("md-img")) return;
     if (img.src) { if (img.naturalHeight < ZOOM_MIN_H) mdImgTiny.add(img.src); else mdImgTiny.delete(img.src); }   // by src: the sequence's name for it
+    if (img.src) { if (img.naturalHeight < ZOOM_MIN_H) mdImgPicture.delete(img.src); else mdImgPicture.add(img.src); }   // …and the post-pass's
     img.classList.toggle("md-img-zoom", mdImgZoomable(img));
   }, true);
   document.addEventListener("click", (e) => {

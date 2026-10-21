@@ -132,7 +132,7 @@ test("imgRequest carries the OWNING session id so relative paths resolve against
 });
 
 test("full-size images wear the user-image scale — one size per information type", () => {
-  assert.match(CSS, /\.path-full-img \{[^}]*max-height: 320px/);
+  assert.match(CSS, /\.path-full-img(, [^{]+)? \{[^}]*max-height: 320px/, "the picture box (shared with a markdown picture)");
   assert.match(CSS, /\.user-img \{[^}]*max-height: 320px/);
   assert.match(CSS, /\.path-full-pdfcard \{/);
 });
