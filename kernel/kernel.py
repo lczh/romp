@@ -51817,8 +51817,12 @@ def _feed_session_entry(s, ctx):
         col = status.get(nid, "working")
         if col == "cleared" or nid in cleared:
             continue
-        if _pure_delegation_top(nodes, nid, sid=fsid, path=s["path"]):   # whole top is just peer
-            continue                                 # handoffs → coordination, not an inbox card
+        # A top whose every leaf is a peer handoff is coordination, not an inbox card, except the top a live floor
+        # keys on (a permission or picker prompt, an API error, the judges' refused login): the floor files its card
+        # on that top, and the blocked placeholder below stands down once perm_top is set, so skipping it left a
+        # session stopped on the user with no card anywhere (the rule T333 gives a hidden top, above).
+        if nid not in (perm_top, api_top, jauth_top) and _pure_delegation_top(nodes, nid, sid=fsid, path=s["path"]):
+            continue
         # AWAITING floor (event-based, the user 2026-06-22): a session paused on dispatched/delegated
         # work is a WORKING flavor, never needs-input. Floor a working OR stale-blocked top to awaiting
         # from (a) the session-level awaiting signal (live subagents / SDK states overlay),
