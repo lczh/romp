@@ -191,7 +191,9 @@ def read_record(state_dir, login_id: str):
 
 def write_record(state_dir, rec: dict) -> None:
     """Write one record whole (a writer-unique temp in the same directory, then os.replace, the kernel's
-    _atomic_write idiom). Metadata only: a caller that puts a token in here has misread the module."""
+    _atomic_write idiom). Metadata only: a caller that puts a token in here has misread the module. A writer killed
+    before its rename leaves the temp; the kernel's start removes it once that pid is dead (sdk_backend's
+    sweep_dead_writer_temps matches this exact name, so keep the two in step)."""
     lid = str(rec.get("id") or "")
     if not ID_RE.match(lid):
         raise ValueError("a login record needs a 12-hex id")

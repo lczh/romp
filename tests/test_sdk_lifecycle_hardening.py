@@ -983,10 +983,13 @@ class DeadWriterTemps(unittest.TestCase):
         self.dead = _P + 7                                # above pid_max: never a live process
         self.live = os.getppid()                          # the process that started this one: alive while it waits
 
-    def _boot(self):
+    def _boot(self, log=None):
         with mock.patch.object(sb.SdkBackend, "_boot_reconcile"), \
              mock.patch.object(sb.SdkBackend, "_sweep_canary_leftovers"):
-            sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None, reconcile=True)
+            return sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None, log=log, reconcile=True)
+
+    def _rows(self, be, needle):
+        return [r["text"] for r in be.problems() if needle in r["text"]]
 
     def _files(self):
         return sorted(str(p.relative_to(self.d)) for p in self.d.rglob("*")
@@ -1018,6 +1021,80 @@ class DeadWriterTemps(unittest.TestCase):
         (self.d / name).write_text("half a write")
         sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None)
         self.assertTrue((self.d / name).exists())
+
+    def test_a_sweep_that_raises_costs_the_boot_nothing_but_an_error_row(self):
+        # cleanup is best-effort: a raise out of the sweep used to leave the constructor, and the kernel marks a backend
+        # whose construction raised unavailable for its whole life (_sdk_locked), so no session could run
+        lines = []
+        with mock.patch.object(sb, "sweep_dead_writer_temps", side_effect=RuntimeError("synthetic sweep fault")), \
+             mock.patch.object(sb.SdkBackend, "_boot_reconcile") as br, \
+             mock.patch.object(sb.SdkBackend, "_sweep_canary_leftovers"):
+            be = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None, log=lines.append, reconcile=True)
+            deadline = time.time() + 5
+            while br.call_count == 0 and time.time() < deadline:
+                time.sleep(0.01)                     # the reconcile runs on its own thread
+        self.assertEqual(br.call_count, 1, "the rest of the boot (the reconcile that resumes sessions) still runs")
+        rows = self._rows(be, "synthetic sweep fault")
+        self.assertEqual(len(rows), 1, "one error-center row: %r" % be.problems())
+        self.assertIn("RuntimeError", rows[0])
+        self.assertTrue(any("synthetic sweep fault" in m for m in lines), "and the kernel log line (stderr, through the kernel's wire)")
+
+    def test_a_failed_delete_is_said_once_per_boot_with_its_directories(self):
+        names = ["spend.json.%d.0badc0de.tmp" % self.dead,
+                 "sdk/%s.json.%d.deadbeef.tmp" % (self.sid, self.dead),
+                 "sdk/%s.json.%d.deadbee0.tmp" % (self.sid, self.dead)]
+        for name in names:
+            (self.d / name).write_text("half a write")
+        real_unlink, mark = os.unlink, ".%d." % self.dead
+
+        def refuse(p, *a, **k):
+            if mark in os.path.basename(str(p)):
+                raise PermissionError(13, "Permission denied", str(p))
+            return real_unlink(p, *a, **k)
+        lines = []
+        with mock.patch.object(sb.os, "unlink", side_effect=refuse):
+            be = self._boot(log=lines.append)
+        rows = self._rows(be, "could not remove")
+        self.assertEqual(len(rows), 1, "one row for the kind, never one per file: %r" % be.problems())
+        self.assertIn("3 temp file", rows[0])
+        self.assertIn(str(self.d / "sdk"), rows[0])
+        self.assertIn("PermissionError", rows[0])
+        self.assertEqual(sum("could not remove" in m for m in lines), 1, "and one kernel log line")
+        self.assertTrue(all((self.d / n).exists() for n in names))
+
+    def test_an_unlistable_directory_is_said_once_and_a_missing_one_not_at_all(self):
+        # the logins directory does not exist in this root (no login was ever stored): that is no failure to report
+        (self.d / sb.LEASE_DIR / ("%s.json.%d.deadbeef.tmp" % (self.sid, self.dead))).write_text("half a write")
+        real_listdir, leases = os.listdir, str(self.d / sb.LEASE_DIR)
+
+        def deny(p="."):
+            if str(p) == leases:
+                raise PermissionError(13, "Permission denied", str(p))
+            return real_listdir(p)
+        with mock.patch.object(sb.os, "listdir", side_effect=deny):
+            be = self._boot()
+        rows = self._rows(be, "could not list")
+        self.assertEqual(len(rows), 1, "%r" % be.problems())
+        self.assertIn(leases, rows[0])
+        self.assertNotIn(sb._logins.LOGINS_DIR, rows[0])
+
+    def test_a_dead_writers_login_record_temp_is_removed_and_a_live_ones_kept(self):
+        # the stored-login records are written through the same writer-unique temp (logins.write_record): leave one
+        # behind with the real writer (its rename fails), then name it as a dead and as a live process would have
+        lid = "0123456789ab"
+        with mock.patch.object(sb._logins.os, "replace", side_effect=OSError(28, "No space left on device")):
+            with self.assertRaises(OSError):
+                sb._logins.write_record(self.d, {"id": lid, "label": "web"})
+        ld = self.d / sb._logins.LOGINS_DIR
+        (left,) = os.listdir(ld)
+        mine = ".%d." % os.getpid()
+        self.assertIn(mine, left)
+        dead, live = left.replace(mine, ".%d." % self.dead), left.replace(mine, ".%d." % self.live)
+        os.rename(ld / left, ld / dead)
+        (ld / live).write_text("half a write")
+        (ld / ("notes.json.%d.deadbeef.tmp" % self.dead)).write_text("not a record's name")
+        self._boot()
+        self.assertEqual(sorted(os.listdir(ld)), sorted([live, "notes.json.%d.deadbeef.tmp" % self.dead]))
 
 
 class BootReconcileResilience(unittest.TestCase):
