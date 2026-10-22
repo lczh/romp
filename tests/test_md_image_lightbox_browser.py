@@ -41,10 +41,14 @@ each keep the box, stacked; two raw <img> lines at the root at 45% each with no 
 a <p>. And the review of #353's (2026-10-22): raw pictures on consecutive lines each keep the box, stacked, unless every one
 gives a percentage width and the percentages add up to 100 at most: three with no widths, the caption on the line after
 the last directly under it; two at 60%; one at 45% beside one with no width. And the review of #355's (2026-10-22): the
-rule counts 3 for every space shown between a row's pictures, so rows the spaces push past the line stack, each boxed
-(4 x 25%, 2 x 50%, 49.5 x 2, 33 x 3, and a README pair with an &nbsp; spacer line at 45% and at 48%), while 48 x 2, 31 x 3
-and the spacer pair at 38% stay side by side on the phone in the light theme; and a <br> alone on the line after a
-markdown picture leaves no blank line above its caption.
+rule counts the spaces shown between a row's pictures, so rows the spaces push past the line stack, each boxed (4 x 25%,
+2 x 50%, 49.5 x 2, 33 x 3, and a README pair with an &nbsp; spacer line at 45% and at 48%); and a <br> alone on the line
+after a markdown picture leaves no blank line above its caption. And the review of #356's (2026-10-22), read on two
+narrower phones too, 320px and 360px wide (216px and 256px bubbles): at 4 a space, 31 x 3, 48.5 x 2 and the spacer pair at
+38% stack, each boxed, where 3 a space let them wrap there unframed, while 48 x 2, 30 x 3 and the spacer pair at 36% stay
+side by side on every phone in both themes; and a tiled row has its line to itself, so a caption on the line after it
+(raw at the message's root, or an <em> in a <p>) starts under the row, and a lead-in line before it ends above the row,
+as a <br> before the caption always made it.
 
 MDLB_DIST=<dir> serves another tree's UI bundle (the red run's before); MDLB_SHOTS=<dir> writes the reply at both widths
 in both themes and the open lightbox; MDLB_DUMP=<path> writes the whole measurement. Skips LOUDLY without the extension
@@ -216,28 +220,50 @@ def _reply_c0(host, badge):
             "<img width=\"60%%\" src=\"%(h)s/big.png?v=wideR\" alt=\"wide right\">\n</p>\n\n"
             "<p>\n<img width=\"45%%\" src=\"%(h)s/big.png?v=halfA\" alt=\"half given\">\n"
             "<img src=\"%(h)s/big.png?v=halfB\" alt=\"half not given\">\n</p>\n\n"
-            # the review of #355 (2026-10-22): rows whose percentages add up to 100 at most still wrapped into a stack with no
-            # frame, once the spaces between their pictures pushed them over. A row tiles only when its shares and 3 for each
-            # space shown between its pictures fit the line: these stack, each in its box (4 x 25 and 2 x 50 wrap at every
-            # width, 49.5 x 2 and 33 x 3 on a phone, and the README pair with an &nbsp; spacer line at 45 and 48 on a phone
-            # in the light theme), and these stay side by side (48 x 2, 31 x 3 and the spacer pair at 38)
+            # the reviews of #355 and #356 (2026-10-22): rows whose percentages add up to 100 at most still wrapped into a
+            # stack with no frame, once the spaces between their pictures pushed them over. A row tiles only when its shares
+            # and 4 for each space shown between its pictures fit the line (_ROWS, below, says which stack and which tile)
             + "".join("<p%s>\n%s\n</p>\n\n" % (align, gap.join("<img width=\"%s%%%%\" src=\"%%(h)s/big.png?v=%s%d\" alt=\"%s %d\">" % (w, key, i, key, i)
                                                        for i in range(n)))
                       for key, w, n, gap, align in _ROWS)
             + "![br next line](%(h)s/big.png?v=brNext)\n<br>\nFigure 9: requests per hour, a break line above.\n\n"
             "![br then caption](%(h)s/big.png?v=brCap)\n<br>Figure 10: requests per hour, the break before it.\n\n"
-            "That is the whole run.\n") % {"h": host, "b": badge}
+            # the review of #356 (2026-10-22): a caption on the line after a tiled row started beside the last picture's
+            # bottom corner, and a lead-in line before one pushed its last picture onto a line of its own. A tiled row has
+            # its line to itself: words on the line after it start under it, and words on the line before it end above it.
+            # A <br> before the caption ends the row's line as it always did
+            + "".join(_ROW_TEXT[k] for k in TEXT_ROWS)
+            + "That is the whole run.\n") % {"h": host, "b": badge}
 
 
-# the review of #355's rows (2026-10-22): key, each picture's percentage, how many, what stands between them, the <p>'s
-# attributes. The first six wrap at a phone width in at least one theme, so they stack, boxed; the last three fit
+# the review of #355's rows and #356's (2026-10-22): key, each picture's percentage, how many, what stands between them,
+# the <p>'s attributes. STACKED_ROWS wrap at some phone width in at least one theme (a 390px, 360px or 320px phone), so
+# they stack, boxed; TILED_ROWS fit the 320px phone's 216px bubble in the light theme, where a space is 3.62% of the line
 SPACER = "\n&nbsp; &nbsp; &nbsp;\n"
 _ROWS = [("quarter", "25", 4, "\n", ""), ("halves", "50", 2, "\n", ""), ("nearhalf", "49.5", 2, "\n", ""), ("third", "33", 3, "\n", ""),
          ("spaced45", "45", 2, SPACER, " align=\"center\""), ("spaced48", "48", 2, SPACER, " align=\"center\""),
-         ("tile48", "48", 2, "\n", ""), ("tile31", "31", 3, "\n", ""), ("spaced38", "38", 2, SPACER, " align=\"center\"")]
-STACKED_ROWS = ("quarter", "halves", "nearhalf", "third", "spaced45", "spaced48")
-TILED_ROWS = ("tile48", "tile31", "spaced38")
+         ("tile48", "48", 2, "\n", ""), ("tile31", "31", 3, "\n", ""), ("spaced38", "38", 2, SPACER, " align=\"center\""),
+         ("tile485", "48.5", 2, "\n", ""), ("tile30", "30", 3, "\n", ""), ("spaced36", "36", 2, SPACER, " align=\"center\"")]
+STACKED_ROWS = ("quarter", "halves", "nearhalf", "third", "spaced45", "spaced48", "tile31", "spaced38", "tile485")
+TILED_ROWS = ("tile48", "tile30", "spaced36")
+WIDE_KEYS = ("desktopDark", "desktopLight", "phoneDark", "phoneLight")
+NARROW_KEYS = ("phone320Dark", "phone320Light", "phone360Dark", "phone360Light")
+NARROW_BUBBLE = {"phone320": 216, "phone360": 256}
 ROW_ALTS = {key: ["%s %d" % (key, i) for i in range(n)] for key, _w, n, _g, _a in _ROWS}
+# the review of #356's (2026-10-22): two at 45% with words on the line after the row (a raw caption at the message's root,
+# an <em> caption in a <p>), with a lead-in line before it, and with a <br> before the caption (#356's own shape). A row's
+# pictures are "<key> 0" and "<key> 1" by alt, and TEXT_WORDS holds how its words open
+def _text_row(key, before, after, open_="", close=""):
+    pics = "\n".join("<img width=\"45%%%%\" src=\"%%(h)s/big.png?v=%s%d\" alt=\"%s %d\">" % (key, i, key, i) for i in range(2))
+    return open_ + before + pics + after + close
+_ROW_TEXT = {
+    "capRoot": _text_row("capRoot", "", "\nFigure 11: both runs, side by side.\n\n"),
+    "capEm": _text_row("capEm", "\n", "\n<em>Figure 12: both runs, side by side.</em>\n", "<p>", "</p>\n\n"),
+    "leadIn": _text_row("leadIn", "\nBoth runs, side by side:\n", "\n", "<p>", "</p>\n\n"),
+    "capBr": _text_row("capBr", "\n", "\n<br>\nFigure 13: both runs, a break before it.\n", "<p>", "</p>\n\n"),
+}
+TEXT_ROWS = ("capRoot", "capEm", "leadIn", "capBr")
+TEXT_WORDS = {"capRoot": "Figure 11", "capEm": "Figure 12", "leadIn": "Both runs", "capBr": "Figure 13"}
 
 
 # the user's own message (breaks:true, so its line break is a <br>): a picture with a caption on the next line
@@ -257,10 +283,11 @@ if (cfg.shots) fs.mkdirSync(cfg.shots, { recursive: true });
 const THEMES = { dark: "classic", light: "yatharth-light" };   // the settings store's key, read by theme.ts at boot
 const WIDE = 'img[alt="throughput over the run"]';
 
-// o.dpr: a desktop at that device pixel ratio; o.hash: the page's #only= filter; o.ready: the picture that says the chat is up
+// o.dpr: a desktop at that device pixel ratio; o.hash: the page's #only= filter; o.ready: the picture that says the chat is up;
+// o.width: a phone that wide (390 when unset)
 const open = async (theme, phone, o = {}) => {
   const ctx = await browser.newContext(phone
-    ? { viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true }
+    ? { viewport: { width: o.width || 390, height: 844 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true }
     : { viewport: { width: 1100, height: 800 }, deviceScaleFactor: o.dpr || 1 });
   await ctx.addInitScript(({ t }) => {
     try { localStorage.setItem("romp:settings", JSON.stringify({ theme: t })); } catch (e) {}
@@ -273,8 +300,10 @@ const open = async (theme, phone, o = {}) => {
   const ready = o.ready || WIDE;
   await page.goto(cfg.chat + (o.hash || ""));
   await page.waitForSelector(ready, { timeout: 60000 });
-  await page.waitForFunction(() => Array.from(document.querySelectorAll("#content img")).filter((i) => i.closest(".md")).every((i) => i.complete),
-    null, { timeout: 30000 }).catch(() => {});
+  // every picture the page shows, loaded; one in another session's chat, which this page holds but does not show (a
+  // path preview there may never load), is not waited on: it kept most legs waiting out the whole 30 s (2026-10-22)
+  await page.waitForFunction(() => Array.from(document.querySelectorAll("#content img")).filter((i) => i.closest(".md") && i.getClientRects().length > 0)
+    .every((i) => i.complete), null, { timeout: 30000 }).catch(() => {});
   await page.waitForFunction((sel) => { const i = document.querySelector(sel); return !!(i && i.complete && i.naturalWidth > 0); }, ready, { timeout: 30000 });
   await page.waitForFunction(() => { const i = document.querySelector(".path-full-img"); return !!(i && i.complete && i.naturalWidth > 0); }, null, { timeout: 30000 });
   await page.waitForTimeout(250);
@@ -515,10 +544,13 @@ for (const theme of ["dark", "light"]) {
 // ── the third session (tests): a markdown picture in the path preview's box, at both widths in both themes ──
 out.box = {};
 const TALL = 'img[alt="request trace"]';
-for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
-  const key = (phone ? "phone" : "desktop") + theme[0].toUpperCase() + theme.slice(1);
+// and on the narrow phones (the review of #356, 2026-10-22): 320px wide, a 216px bubble, and 360px, 256px, where a space of
+// the light theme's monospace prose is the largest share of the line any phone shows
+for (const [theme, phone, width] of [["dark", false], ["dark", true], ["light", false], ["light", true],
+                                     ["dark", true, 320], ["light", true, 320], ["dark", true, 360], ["light", true, 360]]) {
+  const key = (phone ? "phone" + (width || "") : "desktop") + theme[0].toUpperCase() + theme.slice(1);
   try {
-    const { ctx, page, errs } = await open(theme, phone, { hash: "#only=tests", ready: TALL });
+    const { ctx, page, errs } = await open(theme, phone, { hash: "#only=tests", ready: TALL, width });
     await page.waitForFunction((more) => ['img[alt="run heat map"]', 'img[alt="board thumbnail"]', 'img[alt="deploy passing"]', 'img[alt="inline trace"]', 'img[alt="squashed heat map"]',
       'img[alt="captioned heat map"]', 'img[alt="first panel"]', 'img[alt="second panel"]', 'img[alt="leading trace"]', 'img[alt="trailing trace"]', 'img[alt="user heat map"]',
       'img[alt="spaces caption"]', 'img[alt="backslash caption"]', 'img[alt="br caption"]', 'img[alt="side left"]', 'img[alt="side right"]', 'img[alt="bold trace"]',
@@ -526,9 +558,9 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
       'img[alt="stack first"]', 'img[alt="stack second"]', 'img[alt="stack third"]', 'img[alt="wide left"]', 'img[alt="wide right"]', 'img[alt="half given"]',
       'img[alt="half not given"]', 'img[alt="br next line"]', 'img[alt="br then caption"]'].concat(more)
       .every((s) => { const i = document.querySelector(s); return !!(i && i.complete && i.naturalWidth > 0); }),
-      Object.values(cfg.rows).flat().map((a) => 'img[alt="' + a + '"]'), { timeout: 30000 });
+      Object.values(cfg.rows).concat(Object.values(cfg.textRows)).flat().map((a) => 'img[alt="' + a + '"]'), { timeout: 30000 });
     await page.waitForTimeout(150);
-    out.box[key] = await page.evaluate(({ sel, rows }) => {
+    out.box[key] = await page.evaluate(({ sel, rows, textRows, said }) => {
       const tall = document.querySelector(sel);
       const body = tall.closest(".assistant");
       body.scrollIntoView({ block: "start" });
@@ -580,6 +612,21 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
         m.brs = Array.from(e.parentElement.querySelectorAll("br")).map((b) => ({ cls: b.className, display: getComputedStyle(b).display }));
         return m;
       };
+      // the first line box of the words `what` in the container of the picture `alt` (the review of #356: a caption beside
+      // a tiled row's last picture, or under the row)
+      const words = (alt, what) => {
+        const e = body.querySelector('img[alt="' + alt + '"]');
+        if (!e) return null;
+        const walk = document.createTreeWalker(e.parentElement, NodeFilter.SHOW_TEXT);
+        for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+          const i = (n.textContent || "").indexOf(what);
+          if (i < 0) continue;
+          const r = document.createRange(); r.setStart(n, i); r.setEnd(n, i + what.length);
+          const x = Array.from(r.getClientRects()).find((q) => q.width > 0);
+          return x ? { left: x.left, right: x.right, top: x.top, bottom: x.bottom } : null;
+        }
+        return null;
+      };
       const bold = body.querySelector('img[alt="bold trace"]');
       return { body: { left: b.left, right: b.right, w: b.width }, path: one(body.querySelector(".path-full-img")), tall: one(tall),
                large: one(body.querySelector('img[alt="run heat map"]')), badge: one(body.querySelector('img[alt="deploy passing"]')),
@@ -597,8 +644,10 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
                wideL: pic("wide left"), wideR: pic("wide right"), halfA: pic("half given"), halfB: pic("half not given"),
                rows: Object.fromEntries(Object.entries(rows).map(([k, alts]) => [k, alts.map((a) => pic(a))])),
                brNext: pic("br next line"), brThen: pic("br then caption"),
+               // a row with words on the line after it or before it: its pictures, and the first line box of the words
+               text: Object.fromEntries(Object.entries(textRows).map(([k, alts]) => [k, { pics: alts.map((a) => pic(a)), words: words(alts[0], said[k]) }])),
                bodyClass: document.body.className };
-    }, { sel: TALL, rows: cfg.rows });
+    }, { sel: TALL, rows: cfg.rows, textRows: cfg.textRows, said: cfg.words });
     await shot(page, "box-" + key + "-top");
     await page.evaluate(() => document.querySelector('img[alt="run heat map"]').scrollIntoView({ block: "start" }));
     await page.waitForTimeout(100);
@@ -608,7 +657,9 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
                                ["raw captioned", "raw-caption"], ["centred captioned", "raw-centred-caption"], ["raw first", "raw-blank-line"],
                                ["root left", "raw-row"], ["stack first", "raw-stack"], ["wide left", "raw-over-100"], ["half given", "raw-half-given"],
                                ["quarter 0", "raw-quarters"], ["third 0", "raw-thirds"], ["spaced45 0", "readme-spacer-45"], ["tile31 0", "raw-tile-31"],
-                               ["spaced38 0", "readme-spacer-38"], ["br next line", "br-next-line"]]) {
+                               ["spaced38 0", "readme-spacer-38"], ["br next line", "br-next-line"], ["tile485 0", "raw-tile-48.5"],
+                               ["tile30 0", "raw-tile-30"], ["spaced36 0", "readme-spacer-36"], ["capRoot 0", "caption-after-row"],
+                               ["capEm 0", "em-caption-after-row"], ["leadIn 0", "lead-in-before-row"], ["capBr 0", "br-before-caption-after-row"]]) {
       await page.evaluate((a) => document.querySelector('img[alt="' + a + '"]').scrollIntoView({ block: "start" }), alt);
       await page.waitForTimeout(100);
       await shot(page, "box-" + key + "-" + name);
@@ -780,7 +831,8 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
         out = os.path.join(cls.lab, "result.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (cls.port, cls.token), "sid": WEB, "tid": "tid-1",
-                       "agentId": AGENT_ID, "out": out, "shots": os.environ.get("MDLB_SHOTS", ""), "rows": ROW_ALTS}, f)
+                       "agentId": AGENT_ID, "out": out, "shots": os.environ.get("MDLB_SHOTS", ""), "rows": ROW_ALTS,
+                       "textRows": {k: ["%s %d" % (k, i) for i in range(2)] for k in TEXT_ROWS}, "words": TEXT_WORDS}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -1094,9 +1146,10 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
         # the review of #349 (2026-10-21): every newline counted as a line end, the HTML source's own included, so the
         # README layout `<p>\n<img width="45%">\n<img width="45%">\n</p>` stacked two framed blocks. In the author's
         # HTML a newline between pictures that give percentage widths adding up to 100 at most (90 here: the review of
-        # #353 kept only such a row) is a space: one row, unframed. Markdown's own `![a](u)\n![b](u)` still stacks
+        # #353 kept only such a row) is a space: one row, unframed, on the narrowest phone too. Markdown's own
+        # `![a](u)\n![b](u)` still stacks
         r = self._run()
-        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+        for key in WIDE_KEYS + NARROW_KEYS:
             self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
             b = r["box"][key]
             left, right = b["sideL"], b["sideR"]
@@ -1205,11 +1258,13 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
         # the review of #355 (2026-10-22): the tile rule summed the percentages alone, so rows adding up to 100 at most
         # still wrapped into a stack with no frame once the spaces between their pictures pushed them over: 4 x 25% and
         # 2 x 50% at every width, 49.5 x 2 and 33 x 3 on a phone, and a README's pair with an `&nbsp; &nbsp; &nbsp;` line
-        # between at 45% and 48% on a phone (the second picture offset by the spacer). A row tiles only when its shares
-        # plus 3 for every space shown between its pictures add up to 100 at most (preview.ts TILE_GAP); these do not, so
-        # each picture stands alone in its box, stacked, at every width in both themes
+        # between at 45% and 48% on a phone (the second picture offset by the spacer). Then the review of #356: at 3 for a
+        # space, three at 31% and the spacer pair at 38% wrapped on a 320px phone in the light theme, and two at 48.5% on
+        # a 360px one. A row tiles only when its shares plus 4 for every space shown between its pictures add up to 100
+        # at most (preview.ts TILE_GAP); these do not, so each picture stands alone in its box, stacked, at every width in
+        # both themes
         r = self._run()
-        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+        for key in WIDE_KEYS + NARROW_KEYS:
             self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
             b = r["box"][key]
             for row in STACKED_ROWS:
@@ -1226,11 +1281,12 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
                     self.assertAlmostEqual(lower["left"], upper["left"], delta=1.5, msg="…at the same left edge, no spacer offsetting it" + table)
 
     def test_a_row_that_fits_with_its_spaces_stays_side_by_side_on_a_phone_in_either_theme(self):
-        # the other side of the rule above, checked against the layout where the line is shortest and a space widest: the
-        # phone's 286px bubble in the light theme, whose prose is monospace (a space 7.8px, 2.74% of the line). Two at 48%,
-        # three at 31%, and the README's spacer pair at 38% (seven spaces between) stay one row, unframed, inside the bubble
+        # the other side of the rule above, checked against the layout where the line is shortest and a space widest: a
+        # 320px phone's 216px bubble in the light theme, whose prose is monospace (a space 7.8px, 3.62% of the line). Two
+        # at 48%, three at 30%, and the README's spacer pair at 36% (seven spaces between) stay one row, unframed, inside
+        # the bubble, there and at every other width
         r = self._run()
-        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+        for key in WIDE_KEYS + NARROW_KEYS:
             self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
             b = r["box"][key]
             for row in TILED_ROWS:
@@ -1245,6 +1301,80 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
                 for left, right in zip(run, run[1:]):
                     self.assertAlmostEqual(right["top"], left["top"], delta=1, msg="side by side: one line" + table)
                     self.assertGreater(right["left"], left["right"] - 0.5, "…in order, left to right" + table)
+
+    def test_on_a_narrow_phone_every_row_stacks_in_its_box_or_stays_on_one_line(self):
+        # the review of #356 (2026-10-22): TILE_GAP was 3, calibrated on a 390px phone's 286px bubble, and held only down to
+        # a 261px one; on a 320px phone (216px) in the light theme three at 31%, the README spacer pair at 38% (its second
+        # picture 24px off) and two at 48.5% wrapped into an UNFRAMED, offset stack, and two at 48.5% on a 360px phone
+        # (256px). Whatever the verdict, a row of the author's pictures is never that: each picture boxed under the one
+        # before, or every one on the row's line inside the bubble, unframed. Read on every row the chat holds
+        r = self._run()
+        for key in NARROW_KEYS:
+            self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
+            b = r["box"][key]
+            self.assertAlmostEqual(b["body"]["w"], NARROW_BUBBLE[key[:8]], delta=1,
+                                   msg="%s: the bubble this phone shows (the review measured it)" % key)
+            rows = dict(b["rows"], side=[b["sideL"], b["sideR"]], root=[b["rootL"], b["rootR"]],
+                        **{k: t["pics"] for k, t in b["text"].items()})
+            for row, run in rows.items():
+                table = "\n  %s %s: %s" % (key, row, json.dumps({"row": run, "body": b["body"]}))
+                for m in run:
+                    self.assertIsNotNone(m, "rendered" + table)
+                    self.assertEqual((m["nw"], m["nh"]), (1800, 1200), "loaded" + table)
+                    self._inside(m, b["body"], row, table)
+                solo = ["md-solo" in m["cls"].split() for m in run]
+                if all(solo):
+                    for m in run:
+                        self.assertEqual(m["style"], b["path"]["style"], "stacked, each in the path preview's box" + table)
+                    for upper, lower in zip(run, run[1:]):
+                        self.assertGreaterEqual(lower["top"], upper["bottom"] - 0.5, "…each UNDER the one before" + table)
+                        self.assertAlmostEqual(lower["left"], upper["left"], delta=1.5, msg="…at the same left edge" + table)
+                else:
+                    self.assertFalse(any(solo), "a row is tiled whole or not at all" + table)
+                    for m in run:
+                        self.assertTrue(m["style"]["border"].startswith("0px"), "tiled: unframed" + table)
+                    for left, right in zip(run, run[1:]):
+                        self.assertAlmostEqual(right["top"], left["top"], delta=1, msg="…and on ONE line: it never wraps" + table)
+                        self.assertGreater(right["left"], left["right"] - 0.5, "…left to right" + table)
+        # and the verdicts are the markup's, the same as on the wide screens
+        for key in NARROW_KEYS:
+            b = r["box"][key]
+            for row in STACKED_ROWS:
+                self.assertTrue(all("md-solo" in m["cls"].split() for m in b["rows"][row]), "%s %s stacks" % (key, row))
+            for row in TILED_ROWS:
+                self.assertFalse(any("md-solo" in m["cls"].split() for m in b["rows"][row]), "%s %s tiles" % (key, row))
+
+    def test_words_on_the_line_after_a_tiled_row_start_under_it_and_a_lead_in_ends_above_it(self):
+        # the review of #356 (2026-10-22): on a desktop, a raw caption on the line after a tiled row (two at 45%) started
+        # beside the last picture's bottom-right corner, its rest wrapping underneath, and a lead-in line before a row put
+        # its second picture on a line of its own. A tiled row has its line to itself: the caption starts under the row at
+        # its left edge, directly, and the lead-in ends above it, the row side by side and unframed either way, as it is
+        # with a <br> typed before the caption (#356's shape, kept). Every width in both themes
+        r = self._run()
+        for key in WIDE_KEYS + NARROW_KEYS:
+            self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
+            b = r["box"][key]
+            for row in TEXT_ROWS:
+                t = b["text"][row]
+                run, w = t["pics"], t["words"]
+                table = "\n  %s %s: %s" % (key, row, json.dumps({"row": run, "words": w, "body": b["body"]}))
+                for m in run:
+                    self.assertEqual((m["nw"], m["nh"]), (1800, 1200), "loaded" + table)
+                    self.assertNotIn("md-solo", m["cls"].split(), "the row is tiled" + table)
+                    self.assertTrue(m["style"]["border"].startswith("0px"), "…unframed" + table)
+                    self._inside(m, b["body"], row, table)
+                left, right = run
+                self.assertAlmostEqual(right["top"], left["top"], delta=1, msg="…side by side, on one line" + table)
+                self.assertGreater(right["left"], left["right"] - 0.5, "…left to right" + table)
+                self.assertAlmostEqual(left["left"], b["body"]["left"], delta=1.5, msg="…starting the line" + table)
+                self.assertIsNotNone(w, "the words rendered" + table)
+                if row == "leadIn":
+                    self.assertLessEqual(w["bottom"], left["top"] + 0.5, "the lead-in ends ABOVE the row" + table)
+                else:
+                    bottom = max(m["bottom"] for m in run)
+                    self.assertGreaterEqual(w["top"], bottom - 0.5, "the caption starts UNDER the row, not beside it" + table)
+                    self.assertLess(w["top"] - bottom, 12, "…directly under it" + table)
+                self.assertAlmostEqual(w["left"], left["left"], delta=1.5, msg="…at the row's left edge" + table)
 
     def test_a_br_on_the_line_after_a_picture_leaves_no_blank_line_above_its_caption(self):
         # the review of #355 (2026-10-22), from #351: agent markdown's `![a](u)\n<br>\nCaption` and `![a](u)\n<br>Caption`

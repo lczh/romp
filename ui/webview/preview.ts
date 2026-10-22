@@ -1205,7 +1205,7 @@ export function makeVideoStill(v: HTMLVideoElement, url: string, solo: boolean):
 //     message's root, a padded `<p>\n…\n</p>`, a <div>, a cell, a quote) it ends the line too, UNLESS the next thing
 //     shown across it is another picture or video (an <img>, a <video>, or an inline wrapper that shows only those:
 //     mediaOnly), no blank line parts the two, and the row they make is one the author TILED (rowTiles: every one in it
-//     a picture with a percentage width, the percentages and the spaces between them fitting the line on a phone). So
+//     a picture with a percentage width, the percentages and the spaces between them fitting a 320px phone's line). So
 //     `<img src="…">\nFigure 1: …` keeps the box with the caption under it, so does a <video> block,
 //     `<p>\n<img width="45%">\n<img width="45%">\n</p>` (the README's row) keeps its pictures side by side, and raw
 //     pictures or videos on consecutive lines with no such widths stack, each in its box, as do two raw <img> lines with
@@ -1215,6 +1215,9 @@ export function makeVideoStill(v: HTMLVideoElement, url: string, solo: boolean):
 //     consecutive lines lost their frame), so a row stays a row only where its markup says it fits;
 //   - never at an inline wrapper's edge: a bold, italic or linked picture is part of the line its wrapper sits on, so the
 //     walk climbs out of the wrappers (`The **![x](u)** result` stays one sentence).
+// A row the author tiled has its line to itself, since its fit counts its pictures and spaces alone: words on the line of
+// the author's HTML after it or before it (a caption, a lead-in) start a line of their own, at a <br> put in at that
+// newline (.md-row-break; the review of #356, 2026-10-22). Pictures that stand alone need none: their box ends the line.
 // When it stands alone and a <br> ends its line, that <br> (and no other) takes .md-solo-end, the one styles.css hides
 // under a box, which ends the line itself. So does a <br> alone on the line after markdown's soft break, nothing but white
 // space before it (`![a](u)\n<br>\nCaption`, the review of #355, 2026-10-22: the soft break had ended the line already,
@@ -1261,13 +1264,17 @@ function mediaOnly(n: Element): boolean {
 // The line a tiled row must fit (the review of #355, 2026-10-22, measured in Chromium on the real stylesheet): its
 // percentages, plus TILE_GAP for every space shown on the row, since a row whose shares add up to 100 still wraps when the
 // spaces between its pictures push it over (two at 50% wrap at every width; 4 x 25% too; 49.5 x 2 and 33 x 3 on a phone).
-// A space is widest in the light theme, whose assistant prose is monospace: 7.8px at 13px, 2.74% of the phone's 286px
-// bubble (Inter's is 4px in the dark one), and a markup rule has to hold for both. 3 keeps that with room, down to a 261px
-// bubble. A run of collapsible white space shows as one space (the newline between two <img> lines); every other space
-// the parser leaves stands alone (a README's `&nbsp; &nbsp; &nbsp;` spacer line is seven: four runs and three &nbsp;),
-// an em space and an ideographic space two. Read off the markup, so the verdict is the same at every width and in either
-// theme: a row the phone in the light theme would wrap stacks everywhere, each picture in its box.
-const TILE_GAP = 3;
+// A space is widest in the light theme, whose assistant prose is monospace: 7.8px at 13px (Inter's is 4px in the dark
+// one), and a markup rule has to hold for both. The narrowest bubble is a 320px phone's, 216px, where that space is 3.62%
+// of the line (the review of #356, 2026-10-22: at 3, three at 31%, the README spacer pair at 38% and two at 48.5% wrapped
+// there into a stack with no frame, and two at 48.5% on a 360px phone's 256px bubble). 4 is the smallest whole number
+// that holds there, and with room, down to a 195px bubble; a value nearer 3.62 would sit on the 216px line's edge and tile
+// little more (five at 17%, a spacer pair at 37%). A run of collapsible white space shows as one space (the newline
+// between two <img> lines); every other space the parser leaves stands alone (a README's `&nbsp; &nbsp; &nbsp;` spacer
+// line is seven: four runs and three &nbsp;), an em space and an ideographic space two. Read off the markup, so the
+// verdict is the same at every width and in either theme: a row the narrowest phone in the light theme would wrap stacks
+// everywhere, each picture in its box.
+const TILE_GAP = 4;
 const COLLAPSES = /[ \t\n\r\f]/;                     // CSS's collapsible white space
 const EM_WIDE = /[\u2001\u2003\u3000]/;              // an em quad, an em space, an ideographic space
 // Whether the author TILED el's row (2026-10-22): every picture in it gives its width as a share of the line, a `width`
@@ -1339,14 +1346,18 @@ export function mdSolo(el: Element): boolean {
   const pre = box.tagName.toUpperCase() === "PRE";
   const blocksEnd = box.tagName.toUpperCase() !== "P";
   let tiled: boolean | null = null;                  // rowTiles of el's row, read once, when a picture opens the next line
+  // what the last walk saw besides its verdict: `row`, it stopped at a picture or video of el's row; `cut`, it crossed a
+  // newline of the author's HTML into words, at this text node in this parent (where a tiled row's line ends: below)
+  const last = { row: false, cut: null as [Element, ChildNode] | null };
   // walk from el toward one end of its line, out through the wrappers it sits in: the <br> when one ends the line, true
   // at any other end with nothing shown on the way, false at anything shown. `blank`, in the author's HTML once a newline
-  // is passed (null before): whether a blank line was among the whitespace since el. `soft`, forward past markdown's soft
-  // break with only white space since: the next line holds nothing yet, so a <br> there ends el's line too. Read one text
-  // node at a time: the parser makes one node of a run of source whitespace, and two nodes side by side are a comment the
-  // sanitizer removed, which held a line of its own
+  // is passed (null before): whether a blank line was among the whitespace since el, `nl` the text node of that newline.
+  // `soft`, forward past markdown's soft break with only white space since: the next line holds nothing yet, so a <br>
+  // there ends el's line too. Read one text node at a time: the parser makes one node of a run of source whitespace, and
+  // two nodes side by side are a comment the sanitizer removed, which held a line of its own
   const end = (step: 1 | -1): Element | boolean => {
-    let blank: boolean | null = null, soft = false;
+    let blank: boolean | null = null, soft = false, nl: [Element, ChildNode] | null = null;
+    last.row = false; last.cut = null;
     for (let at = el; ; at = at.parentElement as Element) {
       const p = at.parentElement as Element;
       for (let n = step > 0 ? at.nextSibling : at.previousSibling; n; n = step > 0 ? n.nextSibling : n.previousSibling) {
@@ -1357,19 +1368,23 @@ export function mdSolo(el: Element): boolean {
             continue;
           }
           if (blank !== null) {
-            if (t.trim()) return true;                 // words on the next line: el's ended at the newline
+            if (t.trim()) { last.cut = nl; return true; }   // words on the next line: el's ended at the newline
             blank = blank || BLANK_LINE.test(t);
             continue;
           }
-          const nl = step > 0 ? t.indexOf("\n") : t.lastIndexOf("\n");
-          if ((nl < 0 ? t : step > 0 ? t.slice(0, nl) : t.slice(nl + 1)).trim()) return false;   // words on its line
-          if (nl < 0) continue;
+          const i = step > 0 ? t.indexOf("\n") : t.lastIndexOf("\n");
+          if ((i < 0 ? t : step > 0 ? t.slice(0, i) : t.slice(i + 1)).trim()) return false;   // words on its line
+          if (i < 0) continue;
           if (newlines || t.trim()) {                  // markdown's soft break or a <pre>'s line; or words on the next line
-            if (t.trim() || step < 0 || pre) return true;
+            if (t.trim() || step < 0 || pre) {
+              if (!newlines && t.trim()) last.cut = [p, n];
+              return true;
+            }
             soft = true;                               // …unless a <br> is all the next line holds before its words
             continue;
           }
           blank = BLANK_LINE.test(t);                  // the author's HTML: the next thing shown decides
+          nl = [p, n];
           continue;
         }
         if (n.nodeType !== 1) continue;                // a comment shows nothing
@@ -1378,19 +1393,45 @@ export function mdSolo(el: Element): boolean {
         if (tag === "BR") return n as Element;         // a break ends it
         if (soft) return true;                         // anything else shown opens the next line
         if (blank !== null) {                          // a picture on the next line is in its row, when the author tiled it
-          if (blank || !mediaOnly(n as Element)) return true;
+          if (!mediaOnly(n as Element)) {              // words on the next line (a block is no word: it ends a line itself)
+            if (!BLOCK_TAGS.test(tag)) last.cut = nl;
+            return true;
+          }
+          if (blank) return true;
           if (tiled === null) tiled = rowTiles(el, box);
+          last.row = tiled;
           return !tiled;
         }
-        return blocksEnd && BLOCK_TAGS.test(tag);      // so does a block; anything else is on it
+        if (blocksEnd && BLOCK_TAGS.test(tag)) return true;   // so does a block; anything else is on it
+        last.row = mediaOnly(n as Element);            // a picture beside el on its source line: its row
+        return false;
       }
       if (p === box) return true;                      // the container's edge
     }
   };
-  const after = end(1);
-  if (after === false || end(-1) === false) return false;
-  if (after !== true) after.classList.add("md-solo-end");
-  return true;
+  const after = end(1), rowAfter = last.row, cutAfter = last.cut;
+  if (after === false && !rowAfter) return false;   // words on its line: it is one of them
+  const before = end(-1), rowBefore = last.row, cutBefore = last.cut;
+  if (after !== false && before !== false) {
+    if (after !== true) after.classList.add("md-solo-end");
+    return true;
+  }
+  // el shares its line with a picture of its row. A row the author tiled fits its line only when it has the line to
+  // itself (rowTiles counts its pictures and spaces, nothing else), so words across a newline beside it in the author's
+  // HTML start a line of their own (the review of #356, 2026-10-22: a caption on the line after a pair of `<img width="45%">`
+  // started beside the last picture's bottom corner, and a lead-in line before one pushed its last picture onto a line
+  // of its own). A
+  // <br> goes in at that newline, the way a <br> the author typed there ends the line (and still does: the walk stops at
+  // one first), so the row stays side by side and the words go under it or above it. Marked .md-row-break, never
+  // .md-solo-end: it is the line's only end, and nothing hides it
+  const breakAt = (c: [Element, ChildNode], step: 1 | -1): void => {
+    const br = el.ownerDocument.createElement("br");
+    br.classList.add("md-row-break");
+    c[0].insertBefore(br, step > 0 ? c[1] : c[1].nextSibling);
+  };
+  if (cutAfter && rowBefore && (tiled ?? (tiled = rowTiles(el, box)))) breakAt(cutAfter, 1);
+  if (cutBefore && rowAfter && (tiled ?? (tiled = rowTiles(el, box)))) breakAt(cutBefore, -1);
+  return false;
 }
 
 /** The address a message's <video> plays, resolved against the page: its src, else its first <source>'s (the one a

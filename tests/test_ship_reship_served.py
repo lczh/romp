@@ -33,8 +33,8 @@ The guards here:
   * LabKernelEnv, which runs everywhere: a lab kernel's environment is built from names (kernel_env,
     which every lab that boots a kernel uses), never from a copy of the runner's: a live kernel's
     exports planted in the runner (ROMP_MANAGER_PID, ROMP_SERVE_HOST, its sid) are absent, the run's
-    floor and the lab's own names present, and the lab kernel's postal bus is a port of its own that
-    is never started.
+    floor and the lab's own names present, the lab kernel's postal bus is a port of its own that
+    is never started, and its CLI is /bin/false unless the lab names one, whatever the runner exports.
   * RelaunchEnv, which runs everywhere: the relaunch stanza the lab writes to its cfg.json for the
     driver's relaunch of the kernel carries only the names the relaunched kernel needs (a name
     planted in the lab kernel's environment as a probe is absent, and so is a ROMP_TESTS_ name, the
@@ -151,9 +151,16 @@ def _free_port():
 # resolves the service.env default under XDG_CONFIG_HOME) and, of what tests/conftest.py sets for every child of the
 # run, TMPDIR, the private root conftest gives the run's temp files, GIT_CONFIG_GLOBAL and
 # GIT_CONFIG_NOSYSTEM, which keep the kernel's boot-time git (the build sha, the release-tag probe) off the
-# developer's git configuration, and the four ROMP_ names of its floor the lab does not set itself:
-# ROMP_SERVICE_ENV_FILE and ROMP_SERVICE_ENV (no real service.env), ROMP_CLAUDE_BIN (no real claude CLI) and
-# ROMP_CLI_SCOPE (no systemd-run). The lab's own names go over those, and a postal bus of its own: ROMP_POSTAL_PORT
+# developer's git configuration, and three ROMP_ names of its floor the lab does not set itself:
+# ROMP_SERVICE_ENV_FILE and ROMP_SERVICE_ENV (no real service.env) and ROMP_CLI_SCOPE (no systemd-run). The CLI
+# binary is never the runner's (2026-10-22): ROMP_CLAUDE_BIN is /bin/false, the value conftest's floor gives it under
+# pytest, whatever the runner exports, and a lab that runs a CLI names its own as a seam (a fake, a login mock). Run
+# outside pytest from a session, the runner's ROMP_CLAUDE_BIN is the live CLI the session runs on, and a reviewer's
+# harness that booted served labs that way had their lab kernels run the real CLI on the labs' synthetic sessions for
+# seven minutes, at the API's prices. The kernel and the judges read that name first and
+# fall back to PATH only when it is unset (kernel.py _claude_bin, judge.py _judge_claude_bin), so the floor covers
+# PATH's claude too; ROMP_CLI_REAL, the scope wrapper's pointer, is not on the list at all.
+# The lab's own names go over those, and a postal bus of its own: ROMP_POSTAL_PORT
 # at a free port with ROMP_POSTAL_PEERS=0 and ROMP_POSTAL_CLIENT_ONLY=1, so the kernel's boot-time ensure starts
 # nothing there (client-only applies in the legacy singleton scheme alone, postal_service.is_client_only).
 # The environment the driver hands the kernel it relaunches rides the lab's cfg.json, a file, so it is narrowed once
@@ -166,11 +173,12 @@ RELAUNCH_ENV_EXCLUDED_PREFIXES = ("ROMP_TESTS_",)
 RELAUNCH_ENV_NAMES = frozenset(("CLAUDE_CONFIG_DIR", "PATH", "HOME", "TMPDIR",
                                 "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"))
 KERNEL_ENV_NAMES = RELAUNCH_ENV_NAMES | frozenset(("ROMP_SERVICE_ENV_FILE", "ROMP_SERVICE_ENV",
-                                                    "ROMP_CLAUDE_BIN", "ROMP_CLI_SCOPE",
+                                                    "ROMP_CLI_SCOPE",
                                                     # #1735: so the suite's ROMP_GC_FREEZE=off floor reaches every lab
                                                     # kernel (no silent collector change across the served labs); a lab
                                                     # that means to exercise the freeze sets it on in its own kernel env
                                                     "ROMP_GC_FREEZE", "ROMP_GC_FREEZE_LOAD_TREES"))
+LAB_CLAUDE_BIN = "/bin/false"   # a lab kernel's CLI unless the lab names one: empty stdout, the dead-CLI row (tests/conftest.py)
 
 
 def kernel_env(lab, claude, dist, port, token, **seams):
@@ -180,8 +188,8 @@ def kernel_env(lab, claude, dist, port, token, **seams):
     by name. The kernel the lab starts gets it by process; the driver's relaunch gets relaunch_env() of it, through
     the stanza relaunch_cfg() writes to the lab's cfg.json."""
     env = {k: v for k, v in os.environ.items() if k in KERNEL_ENV_NAMES or k.startswith("XDG_")}
-    env.setdefault("ROMP_CLAUDE_BIN", "/bin/false")   # the conftest floor for a bare run: a lab kernel's judges never reach a real CLI
-    env.update(XDG_STATE_HOME=os.path.join(lab, "xdg"), CLAUDE_CONFIG_DIR=claude,
+    env.update(ROMP_CLAUDE_BIN=LAB_CLAUDE_BIN,   # never the runner's CLI: a lab that runs one passes it as a seam
+               XDG_STATE_HOME=os.path.join(lab, "xdg"), CLAUDE_CONFIG_DIR=claude,
                ROMP_MANAGER_PORT="1", ROMP_KERNEL_NO_OPEN="1",
                ROMP_SERVE_TOKEN=token, ROMP_KERNEL_PORT=str(port),
                ROMP_DIST_DIR=dist,
@@ -652,6 +660,22 @@ class LabKernelEnv(unittest.TestCase):
         # client-only applies in the legacy singleton scheme alone (postal_service.is_client_only), so both names go
         # in: the kernel's boot-time ensure then starts nothing on that port
         self.assertEqual((env["ROMP_POSTAL_PEERS"], env["ROMP_POSTAL_CLIENT_ONLY"]), ("0", "1"))
+
+    def test_the_runners_claude_cli_never_reaches_a_lab_kernel_unless_the_lab_names_one(self):
+        # 2026-10-22, the review of #356: a harness that booted served labs outside pytest, from a session, handed the
+        # session's own CLI to their lab kernels (kernel_env took ROMP_CLAUDE_BIN from the runner), and they ran the real
+        # CLI on synthetic sessions for seven minutes. Planted here as a session's shell carries them, over the run's
+        # floor, so the verdict is the one a bare run gets: the lab kernel's CLI is /bin/false
+        live = {"ROMP_CLAUDE_BIN": os.path.join(self.LAB, "live", "bin", "claude"),
+                "ROMP_CLI_REAL": os.path.join(self.LAB, "live", "bin", "claude")}
+        env = self._env({**self.FLOOR, **live})
+        self.assertEqual(env.get("ROMP_CLAUDE_BIN"), "/bin/false", "the runner's CLI reached the lab kernel")
+        self.assertNotIn("ROMP_CLI_REAL", env, "the scope wrapper's pointer to the runner's CLI reached the lab kernel")
+        self.assertEqual(relaunch_env(env).get("ROMP_CLAUDE_BIN"), "/bin/false", "…or the kernel the driver relaunches")
+        # a lab that runs a CLI of its own (a fake, a login mock) names it, and that one wins, relaunch included
+        fake = os.path.join(self.LAB, "bin", "claude")
+        env = self._env({**self.FLOOR, **live}, ROMP_CLAUDE_BIN=fake)
+        self.assertEqual((env["ROMP_CLAUDE_BIN"], relaunch_env(env)["ROMP_CLAUDE_BIN"]), (fake, fake))
 
     def test_a_labs_own_seams_go_over_the_names(self):
         # names of the lab's own (ROMP_WS_KEEPALIVE, ROMP_HOST_NAME), one kernel_env sets for every lab
