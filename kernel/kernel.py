@@ -69146,22 +69146,32 @@ def _board_path(bid):
 # read then, and its views-dirty mark fires as before), and every later _boards() and _boards_data() on that thread answers
 # from that one read until the build returns; the frame's `boards` and the bells read the same definitions. The read waits
 # for the first ask, which comes after the build's start stamp (_build_feed_locked's `started`, the dirty floor): a define
-# whose file lands before the read is read by this build, and one landing after it marks the views dirty after the start, so
-# the next check rebuilds. The read is per thread: a handler's define, remove or GET reads the store as before, and the
-# doors' check-then-write reads it fresh (fresh=True) even on a thread inside a build.
+# whose file lands before the read is read by this build. The doors mark the views dirty themselves; a file rewritten in
+# place (a shell redirection, an editor) after the read is caught by the block's closing re-key, one more _boards_data() as
+# the block returns: the memo's key has moved, so it marks the views dirty after the start and the next check rebuilds. The
+# view signature reads no stat under STATE/boards, so without that re-key such an edit would wait for the five-second bucket,
+# where the per-card reads after the frame used to catch it. Two reads per build, whatever the card count. The read is per
+# thread: a handler's define, remove or GET reads the store as before, and the doors' check-then-write reads it fresh
+# (fresh=True) even on a thread inside a build.
 _BOARDS_BUILD = threading.local()    # .read: None outside a build; False in one before its first ask; then (data, every board)
 
 
 @contextlib.contextmanager
 def _boards_read_once():
-    """Read the board store once for the block, at its first ask (see ONE READ PER FEED BUILD above). Nested inside another,
-    the outer block's read stands."""
+    """Read the board store once for the block, at its first ask, and key the memo once more as the block returns, so an
+    edit after the read marks the views dirty (see ONE READ PER FEED BUILD above). Nested inside another, the outer block's
+    read stands."""
     if getattr(_BOARDS_BUILD, "read", None) is not None:
         yield
         return
     _BOARDS_BUILD.read = False
     try:
         yield
+        took = _BOARDS_BUILD.read
+        _BOARDS_BUILD.read = None
+        if took:
+            _boards_data()     # the closing re-key: a file rewritten in place after the read has moved the memo's key, and
+            #                    the move marks the views dirty after the build's start, as the per-card reads used to
     finally:
         _BOARDS_BUILD.read = None
 

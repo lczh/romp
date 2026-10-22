@@ -493,9 +493,10 @@ class OneReadPerBuild(unittest.TestCase):
     """The board store is read ONCE per feed build (2026-10-22). The needs-you set, the box's rows, the per-session counts, the
     badge and the bell diff each asked _boards() once per card, and every ask listed the boards directory and stat'd its files
     to key the memo: thousands of directory reads per build on a board of a thousand cards. The pusher's build now reads the
-    store once as it starts and answers every per-card read from that read. The bells, the pushes, the badge, the rows and the
-    snapshot come out as the per-card reads made them; an edit reaches the next build; another thread, and the doors' own
-    check-then-write, read the store as it stands."""
+    store at its first ask, answers every per-card read from that read, and keys the memo once more as it returns. The bells,
+    the pushes, the badge, the rows and the snapshot come out as the per-card reads made them; an edit after the read marks
+    the views dirty and reaches the next build; another thread, and the doors' own check-then-write, read the store as it
+    stands."""
 
     def setUp(self):
         self.w = World()
@@ -565,7 +566,7 @@ class OneReadPerBuild(unittest.TestCase):
                         "snapshot": json.loads(json.dumps(km._NOTIFY_PREV[0])), "boards": feed["boards"]})
         return out
 
-    def test_a_build_lists_the_boards_directory_once_whatever_the_card_count(self):
+    def test_a_build_lists_the_boards_directory_twice_whatever_the_card_count(self):
         bdir, real, seen = str(km._board_dir()), os.listdir, []
 
         def listdir(p="."):
@@ -581,7 +582,8 @@ class OneReadPerBuild(unittest.TestCase):
                 self.step = step
                 with mock.patch.object(km.os, "listdir", listdir):
                     self._push(2000 + 10 * k)
-                self.assertEqual(len(seen), 1, "%d cards, build %d: the boards directory listed once, not once per card and question" % (n, k))
+                self.assertEqual(len(seen), 2, "%d cards, build %d: the boards directory listed twice (the build's read and its closing "
+                                               "re-key), not once per card and question" % (n, k))
             self.assertTrue(self.fired, "the second build rang: the bell diff ran its per-card reads")
 
     def test_the_bells_pushes_badge_rows_and_snapshot_are_the_per_card_reads(self):
@@ -599,13 +601,35 @@ class OneReadPerBuild(unittest.TestCase):
         self.assertTrue(all(build["badge"] and build["badge"][0] > 0 for build in per_card))
         self.assertEqual(per_card[-1]["boards"], {"notes": NOTES})
 
-    def test_an_edit_after_the_builds_read_reaches_the_next_build_and_another_thread_reads_it_at_once(self):
+    def test_an_edit_after_the_builds_read_marks_the_views_dirty_reaches_the_next_build_and_another_thread_reads_it_at_once(self):
         self.n, self.step = 2, 0                                    # a feed goal in working, a notes card in kept
-        fp, seen = km.jd.STATE / "boards" / "notes.json", {}
+        fp = km.jd.STATE / "boards" / "notes.json"
         self._push(3000)                                            # the silent seed
         dirt = len(self.w.dirty)
+        # after the build's read, kept joins notes' notify set by a rewrite in place, and nothing in the build reads the store again
+        self.during = lambda: fp.write_text(json.dumps(dict(NOTES, notify=["new", "kept"])))
+        del self.fired[:]
+        feed = self._push(3010)
+        self.assertEqual(len(self.w.dirty), dirt + 1, "the build's closing re-key saw the edit and marked the views dirty once, after "
+                                                      "the build started: the next check rebuilds instead of serving this frame until the bucket")
+        self.assertEqual(feed["boards"]["notes"]["notify"], ["new"], "the frame's boards are the read the bells used")
+        self.assertEqual(self.fired, [], "kept was outside the set this build read")
+        self.during = None
+        feed = self._push(3020)
+        self.assertEqual(feed["boards"]["notes"]["notify"], ["new", "kept"])
+        self.assertEqual(self.fired, [("Romp: api", "Completed: result 1 is in")], "the next build reads the edit, and the card in kept rings once")
+        # an edit after the build started but before its first ask is that build's: the read waits for the ask, so a define's
+        # file landing before it is read, and one landing after it is the closing re-key's (the dirty floor is the build's start)
+        self.before = lambda: fp.write_text(json.dumps(NOTES))
+        del self.fired[:]
+        feed = self._push(3030)
+        self.assertEqual(feed["boards"]["notes"]["notify"], ["new"], "the build read the store at its first ask, after the edit")
+        self.assertEqual(self.fired, [])
+        self.before = None
+        # inside a build, its thread keeps the build's read while another thread and a fresh read see the file as it stands
+        seen = {}
 
-        def edit():                                                 # after the build's read: kept joins notes' notify set, in place
+        def probe():
             fp.write_text(json.dumps(dict(NOTES, notify=["new", "kept"])))
             other = []
             t = threading.Thread(target=lambda: other.append(km._boards_data()["notes"]["notify"]))
@@ -614,25 +638,10 @@ class OneReadPerBuild(unittest.TestCase):
             seen["this thread"] = km._boards()["notes"]["notify"]
             seen["fresh"] = km._boards_data(fresh=True)["notes"]["notify"]
 
-        self.during = edit
-        del self.fired[:]
-        feed = self._push(3010)
+        self.during = probe
+        self._push(3040)
         self.assertEqual(seen, {"other thread": ["new", "kept"], "this thread": ["new"], "fresh": ["new", "kept"]},
                          "the build keeps its one read; another thread and a fresh read see the file as it stands")
-        self.assertEqual(feed["boards"]["notes"]["notify"], ["new"], "the frame's boards are the read the bells used")
-        self.assertEqual(self.fired, [], "kept was outside the set this build read")
-        self.assertGreater(len(self.w.dirty), dirt, "the edit, read mid-build, marked the views dirty: the next build comes")
-        self.during = None
-        feed = self._push(3020)
-        self.assertEqual(feed["boards"]["notes"]["notify"], ["new", "kept"])
-        self.assertEqual(self.fired, [("Romp: api", "Completed: result 1 is in")], "the next build reads the edit, and the card in kept rings once")
-        # an edit after the build started but before its first ask is that build's: the read waits for the ask, so a define's
-        # file landing before it is read, and one landing after it marks the views dirty after the build's start (the dirty floor)
-        self.before = lambda: fp.write_text(json.dumps(NOTES))
-        del self.fired[:]
-        feed = self._push(3030)
-        self.assertEqual(feed["boards"]["notes"]["notify"], ["new"], "the build read the store at its first ask, after the edit")
-        self.assertEqual(self.fired, [])
 
     def test_the_doors_read_the_store_fresh_inside_a_build(self):
         scratch = dict(NOTES, id="scratch", title="Scratch")
@@ -650,6 +659,18 @@ class OneReadPerBuild(unittest.TestCase):
             World.reset_memos()
             self.assertEqual(km.remove_board("scratch"), (True, None), "remove finds the board the store holds")
         self.assertNotIn("scratch", km._boards())
+
+    def test_a_build_that_raises_releases_its_read(self):
+        def boom():
+            raise RuntimeError("a synthetic build failure")
+
+        self.during = boom                                          # after the build's read
+        km._built_feed[:] = [None, None, 0.0, 0.0]
+        with self.assertRaises(RuntimeError):
+            km._cached_feed(4000, {}, "sig-4000")
+        self.assertIsNone(getattr(km._BOARDS_BUILD, "read", None), "the read ends with the build, even one that raised")
+        (km.jd.STATE / "boards" / "notes.json").write_text(json.dumps(dict(NOTES, notify=["new", "kept"])))
+        self.assertEqual(km._boards()["notes"]["notify"], ["new", "kept"], "this thread reads the store again after the failed build")
 
 
 class TheDoors(unittest.TestCase):
