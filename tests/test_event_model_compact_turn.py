@@ -123,6 +123,58 @@ def _claude_summary(t, uuid, parent):
             "message": {"role": "user", "content": "This session is being continued from a previous one..."}}
 
 
+STOP = "[Request interrupted by user]"
+
+
+def _stop(t, uuid, parent):
+    """The CLI's own stop record, as it writes one when the person stops a model call: a user record
+    whose one text block reads the stop marker."""
+    return {"type": "user", "timestamp": _iso(t), "uuid": uuid, "parentUuid": parent,
+            "message": {"role": "user", "content": [{"type": "text", "text": STOP}]}}
+
+
+def _tool_use(t, uuid, parent, tid):
+    return {"type": "assistant", "timestamp": _iso(t), "uuid": uuid, "parentUuid": parent,
+            "message": {"role": "assistant", "content": [{"type": "tool_use", "id": tid, "name": "Bash",
+                                                          "input": {"command": "ls"}}],
+                        "stop_reason": "tool_use"}}
+
+
+def _tool_result(t, uuid, parent, tid):
+    return {"type": "user", "timestamp": _iso(t), "uuid": uuid, "parentUuid": parent,
+            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid,
+                                                     "content": "ok"}]}}
+
+
+def _stop_after_compaction(now, earlier_stop=False, replayed_copy=False):
+    """An automatic compaction in the middle of a tool loop, then a stop pressed during the model call
+    that follows it, before the model writes any record, then the person's next prompt: "continue", the
+    text of an earlier prompt. `earlier_stop` opens the session with a prompt the person also stopped, so
+    the second stop's text is a repeat as well; `replayed_copy` puts a restored copy of the earlier
+    prompt between the summary and the stop."""
+    t0, t1 = now - 3600, now - 60
+    recs, first_parent = [], None
+    if earlier_stop:
+        recs += [_user(t0 - 50, "u0", None, "start the build"),
+                 _stop(t0 - 40, "i0", "u0")]
+        first_parent = "i0"
+    recs += [_user(t0, "u1", first_parent, "continue"),
+             _assistant(t0 + 30, "a1", "u1", "done."),
+             _user(t0 + 100, "u2", "a1", "fix the parser"),
+             _tool_use(t0 + 110, "a2", "u2", "toolu_1"),
+             _tool_result(t0 + 120, "r2", "a2", "toolu_1"),
+             _claude_boundary(t1, "cb1", "r2"),
+             _claude_summary(t1, "cs1", "cb1")]
+    stop_parent = "cs1"
+    if replayed_copy:
+        recs.append(_user(t1 + 1, "u2r", "cs1", "fix the parser"))   # the restored tail: a copy of u2
+        stop_parent = "u2r"
+    recs += [_stop(t1 + 20, "i1", stop_parent),            # the stop, before any record of the model's
+             _user(t1 + 40, "u3", "i1", "continue"),        # the person's next prompt, a repeated text
+             _assistant(t1 + 60, "a3", "u3", "carrying on")]
+    return recs
+
+
 def _manual_compact_lines(t_issue, t_done, tag, parent):
     """The on-disk tail of a LIVE manual /compact, the shape the golden module's manual_compact_lines
     models (verified against the live corpus 2026-08-19; every value here synthetic): the boundary and
@@ -286,6 +338,70 @@ class RepeatedPromptAfterBoundary(unittest.TestCase):
                          ["summary of the conversation so far",
                           "This session is being continued from a previous one..."],
                          "each card carries its own summary; the auto pair's never lands on the manual card")
+
+    def test_a_repeated_prompt_after_a_stop_in_the_restore_window_survives(self):
+        # The window opened at the summary used to close only at the model's first record. A stop pressed
+        # before that record left it open, so the person's next prompt, parented at the stop, was read as a
+        # replay when its text repeated an earlier one: dropped, and its reply filed under the stop's turn.
+        # The stop now closes the window (a stop copy inside a restored tail does too; the tradeoff test
+        # below pins that side).
+        turns = _turns(_stop_after_compaction(int(time.time())))
+        uuids = [a.get("uuid") for a in self._flat(turns)]
+        self.assertIn("i1", uuids, "the stop renders")
+        self.assertIn("u3", uuids, "the prompt sent after the stop is a message the person sent, not a replay")
+        self.assertEqual(self._utexts(turns).count("continue"), 2, "both asks render")
+        self.assertEqual((self._holder(turns, "a3").get("trigger") or {}).get("uuid"), "u3",
+                         "the reply files under the prompt that asked for it, not under the stop")
+
+    def test_a_second_stop_in_the_restore_window_and_the_prompt_after_it_survive(self):
+        # With an earlier stop anywhere in the session, the stop's own text is a repeat too: the open window
+        # dropped the stop as well, and the reply became the compaction's triggerless continuation.
+        turns = _turns(_stop_after_compaction(int(time.time()), earlier_stop=True))
+        uuids = [a.get("uuid") for a in self._flat(turns)]
+        self.assertIn("i0", uuids, "the first stop renders")
+        self.assertIn("i1", uuids, "the second stop is a stop the person pressed, not a replay of the first")
+        self.assertIn("u3", uuids, "the prompt sent after the stop renders")
+        self.assertEqual(self._utexts(turns).count(STOP), 2, "both stops render")
+        holder = self._holder(turns, "a3")
+        self.assertEqual((holder.get("trigger") or {}).get("uuid"), "u3",
+                         "the reply files under its prompt, not as the compaction turn's continuation")
+        self.assertNotIn("cb1", [a.get("uuid") for a in holder["atoms"]])
+
+    def test_a_replayed_copy_before_the_stop_still_dedupes(self):
+        # The stop closes the window where it lands, never earlier: a restored copy written between the
+        # summary and the stop is still restored context.
+        turns = _turns(_stop_after_compaction(int(time.time()), replayed_copy=True))
+        uuids = [a.get("uuid") for a in self._flat(turns)]
+        self.assertNotIn("u2r", uuids, "the replayed copy before the stop is restored context")
+        self.assertIn("u2", uuids, "the original survives")
+        self.assertIn("i1", uuids, "the stop renders")
+        self.assertIn("u3", uuids, "the prompt sent after the stop renders")
+        self.assertEqual(self._utexts(turns).count("fix the parser"), 1, "the original only, no copy")
+        self.assertEqual((self._holder(turns, "a3").get("trigger") or {}).get("uuid"), "u3")
+
+    def test_a_restored_tail_carrying_a_stop_copy_closes_the_window_there(self):
+        # The ACCEPTED TRADEOFF of closing the window at a stop. A restored tail that replays a stop the
+        # person pressed before the compaction closes the window at that copy, so the copies after it
+        # render as new asks. Nothing on the records tells this copy from a stop pressed after the
+        # compaction (same text, same parenting), and no live restore window held a textual replayed
+        # record when it was measured, while a stop pressed before the model's first record is a live
+        # shape. Changing either side of this is a decision, and this test makes it a visible one.
+        now = int(time.time())
+        t0, t1 = now - 3600, now - 60
+        recs = [_user(t0, "u1", None, "start the build"),
+                _stop(t0 + 10, "i0", "u1"),
+                _user(t0 + 100, "u2", "i0", "fix the parser"),
+                _assistant(t0 + 110, "a2", "u2", "on it"),
+                _claude_boundary(t1, "cb1", "a2"),
+                _claude_summary(t1, "cs1", "cb1"),
+                _stop(t1 + 1, "i0r", "cs1"),                       # the restored tail: a copy of i0
+                _user(t1 + 1, "u2r", "i0r", "fix the parser"),     # and a copy of u2
+                _assistant(t1 + 60, "a3", "u2r", "carrying on")]
+        turns = _turns(recs)
+        uuids = [a.get("uuid") for a in self._flat(turns)]
+        self.assertIn("i0r", uuids, "the stop copy closes the window and renders")
+        self.assertIn("u2r", uuids, "the copy after the stop copy is outside the window and renders")
+        self.assertEqual((self._holder(turns, "a3").get("trigger") or {}).get("uuid"), "u2r")
 
 
 PID = "aaaaaaaa-1111-2222-3333-444444444444"

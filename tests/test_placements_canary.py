@@ -235,7 +235,11 @@ class PlacementIdentityCanary(unittest.TestCase):
         # v15 (2026-09-23, the parallel tool batch keep): this fixture makes no parallel tool calls, so every
         # pinned id and atom is UNCHANGED; the bump seals transcripts that DO carry a batch, whose results of every
         # call but the last rejoin the set (tests/test_parallel_tool_batch.py covers the keep itself).
-        self.assertEqual(jd.PLACEMENTS_V, 15, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=15: "
+        # v16 (2026-10-22, the stop record closes the restore window): this fixture carries no stop record, so
+        # every pinned id and atom is UNCHANGED; the bump seals transcripts where a stop fell between an automatic
+        # compaction and the model's first record, whose repeated prompt after it now rejoins the set
+        # (tests/test_event_model_compact_turn.py covers the window itself).
+        self.assertEqual(jd.PLACEMENTS_V, 16, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=16: "
                          "re-pin the ids and this version together, in the same commit")
 
 
