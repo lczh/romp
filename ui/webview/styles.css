@@ -4022,7 +4022,8 @@ body.drop-over::after { content: ""; position: fixed; inset: 0; pointer-events: 
 .md-video-still.md-solo { display: block; width: fit-content; }
 /* A box that stands alone ends its own line, so the <br> that ends that line (the user's markdown keeps its line breaks,
    so a caption typed on the next line follows one) would add a blank line between the picture and its caption (the
-   review of #343, 2026-10-21). preview.ts mdSolo marks that one <br> .md-solo-end, and no other: a hard break inside the
+   review of #343, 2026-10-21; and a <br> alone on the line after markdown's soft break, `![a](u)\n<br>\nCaption`, the
+   review of #355). preview.ts mdSolo marks that one <br> .md-solo-end, and no other: a hard break inside the
    caption, after its first line's words, stays (the review of #349: a bare `+ br` passes over text, so it hid that break
    and ran the caption's two lines together). Only under the boxed forms: a picture that does not zoom stays inline, and
    its <br> is its line break. The marked <br> follows the box itself, or the bold or italic around it, whose last

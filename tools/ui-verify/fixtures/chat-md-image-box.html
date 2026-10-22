@@ -12,11 +12,15 @@
      pictures on consecutive lines each stand alone (.md-solo, stacked) unless every one gives a percentage width and the
      percentages add up to 100 at most, as the half-width pair above does: three with no widths and a caption on the line
      after the last, two at 60%, and one at 45% over one with no width.
+     Then the review of #355 (2026-10-22): a row tiles only when its percentages plus 3 for every space shown between its
+     pictures fit the line, so four at 25% and a README pair at 45% with an &nbsp; spacer line stand alone (.md-solo,
+     stacked), while three at 31% and the spacer pair at 38% stay side by side; and a <br> alone on the line after a
+     picture's soft break is its line's end (.md-solo-end), so its caption sits under the box with no blank line.
      The classes are the ones preview.ts mdImgPostPass and the load hook put on the real page. Pictures are inline SVG
      data: URLs, so the page needs no server. Invented content (notes-api demo domain).
      Run at a phone width and a desktop width, in each theme:
        tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/chat-md-image-box.html \
-           --out /tmp/md-box-phone.png --size 390x3900 [--body-class "theme-light chat-theme-yatharth"]
+           --out /tmp/md-box-phone.png --size 390x5200 [--body-class "theme-light chat-theme-yatharth"]
 -->
 <div id="content" style="min-height: 100vh"><div class="thread">
 <div class="turn turn-assistant"><div class="assistant md"><p>The latency split per region is in <span class="file-uri-link">docs/figure.png</span>.</p>
@@ -57,6 +61,30 @@ Figure 8: three runs, one under another.
 <img class="md-img md-solo md-img-zoom" width="45%" alt="half given" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
 <img class="md-img md-solo md-img-zoom" alt="half not given" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
 </p>
+<p>
+<img class="md-img md-solo md-img-zoom" width="25%" alt="quarter 0" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+<img class="md-img md-solo md-img-zoom" width="25%" alt="quarter 1" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+<img class="md-img md-solo md-img-zoom" width="25%" alt="quarter 2" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+<img class="md-img md-solo md-img-zoom" width="25%" alt="quarter 3" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+</p>
+<p align="center">
+<img class="md-img md-solo md-img-zoom" width="45%" alt="spaced45 0" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+&nbsp; &nbsp; &nbsp;
+<img class="md-img md-solo md-img-zoom" width="45%" alt="spaced45 1" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+</p>
+<p>
+<img class="md-img md-img-zoom" width="31%" alt="tile31 0" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+<img class="md-img md-img-zoom" width="31%" alt="tile31 1" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+<img class="md-img md-img-zoom" width="31%" alt="tile31 2" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+</p>
+<p align="center">
+<img class="md-img md-img-zoom" width="38%" alt="spaced38 0" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+&nbsp; &nbsp; &nbsp;
+<img class="md-img md-img-zoom" width="38%" alt="spaced38 1" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+</p>
+<p><img class="md-img md-solo md-img-zoom" alt="br next line" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+<br class="md-solo-end">
+Figure 9: requests per hour, a break line above.</p>
 <p>That is the whole run.</p>
 </div></div>
 </div></div>

@@ -1205,18 +1205,24 @@ export function makeVideoStill(v: HTMLVideoElement, url: string, solo: boolean):
 //     message's root, a padded `<p>\n…\n</p>`, a <div>, a cell, a quote) it ends the line too, UNLESS the next thing
 //     shown across it is another picture or video (an <img>, a <video>, or an inline wrapper that shows only those:
 //     mediaOnly), no blank line parts the two, and the row they make is one the author TILED (rowTiles: every one in it
-//     a picture with a percentage width, the percentages adding up to 100 at most). So `<img src="…">\nFigure 1: …` keeps
-//     the box with the caption under it, so does a <video> block, `<p>\n<img width="45%">\n<img width="45%">\n</p>`
-//     (the README's row) keeps its pictures side by side, and raw pictures or videos on consecutive lines with no such
-//     widths stack, each in its box, as do two raw <img> lines with a blank line between them (which, in markdown's
-//     source, ends a raw HTML block). The user's request that a message's pictures and videos look and size like the
+//     a picture with a percentage width, the percentages and the spaces between them fitting the line on a phone). So
+//     `<img src="…">\nFigure 1: …` keeps the box with the caption under it, so does a <video> block,
+//     `<p>\n<img width="45%">\n<img width="45%">\n</p>` (the README's row) keeps its pictures side by side, and raw
+//     pictures or videos on consecutive lines with no such widths stack, each in its box, as do two raw <img> lines with
+//     a blank line between them (which, in markdown's source, ends a raw HTML block). The user's request that a message's pictures and videos look and size like the
 //     path preview wins over a README's layout (2026-10-22, the review of #353: three raw pictures too wide to share a
 //     line wrapped into a stack with no frame, a caption beside the last one's bottom edge, and raw <video>s on
 //     consecutive lines lost their frame), so a row stays a row only where its markup says it fits;
 //   - never at an inline wrapper's edge: a bold, italic or linked picture is part of the line its wrapper sits on, so the
 //     walk climbs out of the wrappers (`The **![x](u)** result` stays one sentence).
 // When it stands alone and a <br> ends its line, that <br> (and no other) takes .md-solo-end, the one styles.css hides
-// under a box, which ends the line itself.
+// under a box, which ends the line itself. So does a <br> alone on the line after markdown's soft break, nothing but white
+// space before it (`![a](u)\n<br>\nCaption`, the review of #355, 2026-10-22: the soft break had ended the line already,
+// so that <br> went unmarked and left a blank line between the box and its caption). Words before a <br> make it the
+// caption's own line break, never marked.
+// Each walk steps from sibling to sibling (the review of #355: a message of 1,000 raw <img> lines took 2.28 s a render
+// when every picture copied its parent's children and walked its whole row; 0.48 s before #355), so it costs what it
+// passes before its line ends.
 const BLOCK_TAGS = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|CENTER|DD|DETAILS|DIALOG|DIR|DIV|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|HGROUP|HR|LI|MAIN|MENU|NAV|OL|P|PRE|SECTION|SUMMARY|TABLE|UL)$/;
 const INLINE_WRAPS = /^(A|ABBR|B|BDI|BDO|CITE|CODE|DEL|DFN|EM|FONT|I|INS|KBD|MARK|PICTURE|Q|S|SAMP|SMALL|SPAN|STRIKE|STRONG|SUB|SUP|TIME|U|VAR)$/;
 const SHOWS_NOTHING = /^(SOURCE|TRACK|WBR)$/;       // a <picture>'s sources, a video's tracks, a break opportunity
@@ -1252,73 +1258,104 @@ function mediaOnly(n: Element): boolean {
   }
   return any;
 }
-// The pictures and videos in el's ROW in the author's HTML: el and every one reached from it, either way and out through
-// the wrappers it sits in, across nothing shown but whitespace with no blank line in it (a newline included: this is the
-// row HTML would lay out). The same walk as mdSolo's, so it stops where that one would.
-function rowOf(el: Element, box: Element): Element[] {
-  const row: Element[] = [el];
-  const take = (n: Element): void => {
-    const tag = n.tagName.toUpperCase();
-    if (tag === "IMG" || tag === "VIDEO") row.push(n);
-    else for (const k of Array.from(n.childNodes)) if (k.nodeType === 1) take(k as Element);
+// The line a tiled row must fit (the review of #355, 2026-10-22, measured in Chromium on the real stylesheet): its
+// percentages, plus TILE_GAP for every space shown on the row, since a row whose shares add up to 100 still wraps when the
+// spaces between its pictures push it over (two at 50% wrap at every width; 4 x 25% too; 49.5 x 2 and 33 x 3 on a phone).
+// A space is widest in the light theme, whose assistant prose is monospace: 7.8px at 13px, 2.74% of the phone's 286px
+// bubble (Inter's is 4px in the dark one), and a markup rule has to hold for both. 3 keeps that with room, down to a 261px
+// bubble. A run of collapsible white space shows as one space (the newline between two <img> lines); every other space
+// the parser leaves stands alone (a README's `&nbsp; &nbsp; &nbsp;` spacer line is seven: four runs and three &nbsp;),
+// an em space and an ideographic space two. Read off the markup, so the verdict is the same at every width and in either
+// theme: a row the phone in the light theme would wrap stacks everywhere, each picture in its box.
+const TILE_GAP = 3;
+const COLLAPSES = /[ \t\n\r\f]/;                     // CSS's collapsible white space
+const EM_WIDE = /[\u2001\u2003\u3000]/;              // an em quad, an em space, an ideographic space
+// Whether the author TILED el's row (2026-10-22): every picture in it gives its width as a share of the line, a `width`
+// attribute in percent (`<img width="45%">`, as a README sets pictures side by side), and the shares and the spaces between
+// them (TILE_GAP) fit the line. The row is el and every picture or video reached from it, either way and out through the
+// wrappers it sits in, across nothing shown but white space with no blank line in it (a newline included: this is the row
+// HTML would lay out): the same walk as mdSolo's, so it stops where that one would. It also stops at the first picture
+// without a percentage width and once the total passes 100, so a long run of raw <img> lines costs a step a picture.
+// Read off the markup alone, never off a layout, so it never waits on a load and never flips. A video never tiles: the
+// picture box sizes a still whatever its width attribute says (styles.css .md-video), so two "45%" clips are two
+// full-size stills, wider together than most bubbles. Nor does a width in a style: the sanitizer keeps a style's colours
+// only, so none reaches the page.
+const PCT_WIDTH = /^\s*(\d+(?:\.\d+)?)%/;          // HTML's own reading of a dimension: digits, then "%" right after
+function rowTiles(el: Element, box: Element): boolean {
+  let total = 0, run = false;                        // run: a run of collapsible white space passed, not yet counted
+  // a picture of the row: its share, and the space before it; false once the row cannot tile
+  const pic = (m: Element): boolean => {
+    const w = m.tagName.toUpperCase() === "IMG" ? PCT_WIDTH.exec(m.getAttribute("width") || "") : null;
+    if (!w) return false;
+    total += parseFloat(w[1]) + (run ? TILE_GAP : 0);
+    run = false;
+    return total <= 100;
   };
+  // white space on the row: a run counts once something shown follows it (a run at the row's end starts its line, or
+  // hangs at its end); a space the parser leaves, an &nbsp;, counts where it stands
+  const gap = (t: string): boolean => {
+    for (const c of t) {
+      if (COLLAPSES.test(c)) { run = true; continue; }
+      total += (run ? TILE_GAP : 0) + (EM_WIDE.test(c) ? 2 : 1) * TILE_GAP;
+      run = false;
+    }
+    return total <= 100;
+  };
+  // a picture, or a wrapper that shows only pictures (mediaOnly), in the walk's order
+  const take = (n: Element, step: 1 | -1): boolean => {
+    const tag = n.tagName.toUpperCase();
+    if (tag === "IMG" || tag === "VIDEO") return pic(n);
+    for (let k = step > 0 ? n.firstChild : n.lastChild; k; k = step > 0 ? k.nextSibling : k.previousSibling) {
+      if (k.nodeType === 3 ? !gap(k.textContent || "") : k.nodeType === 1 && !SHOWS_NOTHING.test((k as Element).tagName.toUpperCase()) && !take(k as Element, step)) return false;
+    }
+    return true;
+  };
+  if (!pic(el)) return false;
   for (const step of [1, -1] as const) {
+    run = false;
     walk: for (let at = el; ; at = at.parentElement as Element) {
       const p = at.parentElement as Element;
-      const kids = Array.from(p.childNodes);
-      for (let i = kids.indexOf(at as ChildNode) + step; i >= 0 && i < kids.length; i += step) {
-        const n = kids[i];
+      for (let n = step > 0 ? at.nextSibling : at.previousSibling; n; n = step > 0 ? n.nextSibling : n.previousSibling) {
         if (n.nodeType === 3) {
           const t = n.textContent || "";
           if (t.trim() || BLANK_LINE.test(t)) break walk;   // words, or a blank line: the row ends there
+          if (!gap(t)) return false;
           continue;
         }
         if (n.nodeType !== 1 || SHOWS_NOTHING.test((n as Element).tagName.toUpperCase())) continue;
         if (!mediaOnly(n as Element)) break walk;
-        take(n as Element);
+        if (!take(n as Element, step)) return false;
       }
       if (p === box) break;
     }
   }
-  return row;
-}
-// Whether the author TILED a row (2026-10-22): every picture in it gives its width as a share of the line, a `width`
-// attribute in percent (`<img width="45%">`, as a README sets pictures side by side), and the shares add up to the line at
-// most. Read off the markup alone, never off a layout, so it never waits on a load and never flips. A video never tiles:
-// the picture box sizes a still whatever its width attribute says (styles.css .md-video), so two "45%" clips are two
-// full-size stills, wider together than most bubbles. Nor does a width in a style: the sanitizer keeps a style's colours
-// only, so none reaches the page.
-const PCT_WIDTH = /^\s*(\d+(?:\.\d+)?)%/;          // HTML's own reading of a dimension: digits, then "%" right after
-function rowTiles(row: Element[]): boolean {
-  let sum = 0;
-  for (const m of row) {
-    const w = m.tagName.toUpperCase() === "IMG" ? PCT_WIDTH.exec(m.getAttribute("width") || "") : null;
-    if (!w) return false;
-    sum += parseFloat(w[1]);
-  }
-  return sum <= 100;
+  return true;
 }
 export function mdSolo(el: Element): boolean {
   let box = el.parentElement;
   if (!box) return false;
   while (INLINE_WRAPS.test(box.tagName.toUpperCase()) && box.parentElement) box = box.parentElement;   // the line's container
   const newlines = newlineEndsLine(box);
+  const pre = box.tagName.toUpperCase() === "PRE";
   const blocksEnd = box.tagName.toUpperCase() !== "P";
   let tiled: boolean | null = null;                  // rowTiles of el's row, read once, when a picture opens the next line
   // walk from el toward one end of its line, out through the wrappers it sits in: the <br> when one ends the line, true
   // at any other end with nothing shown on the way, false at anything shown. `blank`, in the author's HTML once a newline
-  // is passed (null before): whether a blank line was among the whitespace since el. Read one text node at a time: the
-  // parser makes one node of a run of source whitespace, and two nodes side by side are a comment the sanitizer removed,
-  // which held a line of its own
+  // is passed (null before): whether a blank line was among the whitespace since el. `soft`, forward past markdown's soft
+  // break with only white space since: the next line holds nothing yet, so a <br> there ends el's line too. Read one text
+  // node at a time: the parser makes one node of a run of source whitespace, and two nodes side by side are a comment the
+  // sanitizer removed, which held a line of its own
   const end = (step: 1 | -1): Element | boolean => {
-    let blank: boolean | null = null;
+    let blank: boolean | null = null, soft = false;
     for (let at = el; ; at = at.parentElement as Element) {
       const p = at.parentElement as Element;
-      const kids = Array.from(p.childNodes);
-      for (let i = kids.indexOf(at as ChildNode) + step; i >= 0 && i < kids.length; i += step) {
-        const n = kids[i];
+      for (let n = step > 0 ? at.nextSibling : at.previousSibling; n; n = step > 0 ? n.nextSibling : n.previousSibling) {
         if (n.nodeType === 3) {
           const t = n.textContent || "";
+          if (soft) {
+            if (t.trim()) return true;                 // words open the next line: el's ended at the soft break
+            continue;
+          }
           if (blank !== null) {
             if (t.trim()) return true;                 // words on the next line: el's ended at the newline
             blank = blank || BLANK_LINE.test(t);
@@ -1327,7 +1364,11 @@ export function mdSolo(el: Element): boolean {
           const nl = step > 0 ? t.indexOf("\n") : t.lastIndexOf("\n");
           if ((nl < 0 ? t : step > 0 ? t.slice(0, nl) : t.slice(nl + 1)).trim()) return false;   // words on its line
           if (nl < 0) continue;
-          if (newlines || t.trim()) return true;       // markdown's soft break or a <pre>'s line; or words on the next line
+          if (newlines || t.trim()) {                  // markdown's soft break or a <pre>'s line; or words on the next line
+            if (t.trim() || step < 0 || pre) return true;
+            soft = true;                               // …unless a <br> is all the next line holds before its words
+            continue;
+          }
           blank = BLANK_LINE.test(t);                  // the author's HTML: the next thing shown decides
           continue;
         }
@@ -1335,9 +1376,10 @@ export function mdSolo(el: Element): boolean {
         const tag = (n as Element).tagName.toUpperCase();
         if (SHOWS_NOTHING.test(tag)) continue;
         if (tag === "BR") return n as Element;         // a break ends it
+        if (soft) return true;                         // anything else shown opens the next line
         if (blank !== null) {                          // a picture on the next line is in its row, when the author tiled it
           if (blank || !mediaOnly(n as Element)) return true;
-          if (tiled === null) tiled = rowTiles(rowOf(el, box));
+          if (tiled === null) tiled = rowTiles(el, box);
           return !tiled;
         }
         return blocksEnd && BLOCK_TAGS.test(tag);      // so does a block; anything else is on it
