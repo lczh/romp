@@ -6,12 +6,14 @@
      sentence (.md-img only) and a picture inside a link after words on its line (.md-img only: no zoom, no box). Then the
      review of #349 (2026-10-21): the heat map with a caption of two lines joined by a hard break (the picture's line ends
      at the soft break, so its <br> is the caption's and stays), two half-width pictures in a raw HTML <p> (side by side:
-     neither .md-solo) and a bold trace in the middle of a sentence (inline: no .md-solo).
+     neither .md-solo) and a bold trace in the middle of a sentence (inline: no .md-solo). Then the review of #351
+     (2026-10-21): a raw <img> at the message's root with its caption on the next source line (.md-solo, the caption under
+     it) and two raw <img> lines a blank line apart (each .md-solo, stacked).
      The classes are the ones preview.ts mdImgPostPass and the load hook put on the real page. Pictures are inline SVG
      data: URLs, so the page needs no server. Invented content (notes-api demo domain).
      Run at a phone width and a desktop width, in each theme:
        tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/chat-md-image-box.html \
-           --out /tmp/md-box-phone.png --size 390x2200 [--body-class "theme-light chat-theme-yatharth"]
+           --out /tmp/md-box-phone.png --size 390x2700 [--body-class "theme-light chat-theme-yatharth"]
 -->
 <div id="content" style="min-height: 100vh"><div class="thread">
 <div class="turn turn-assistant"><div class="assistant md"><p>The latency split per region is in <span class="file-uri-link">docs/figure.png</span>.</p>
@@ -31,6 +33,13 @@ Figure 3: requests per hour.<br>Source: the nightly load run.</p>
 <img class="md-img md-img-zoom" width="45%" alt="side right" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
 </p>
 <p>The <strong><img class="md-img md-img-zoom" alt="bold trace" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='1600'%3E%3Crect width='400' height='1600' fill='%23c86428'/%3E%3Crect x='40' y='40' width='320' height='1520' fill='%23e8a070'/%3E%3C/svg%3E"></strong> result is the slowest request.</p>
+<img class="md-img md-solo md-img-zoom" width="300" alt="raw captioned" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+Figure 6: requests per hour, from the raw picture.
+
+<img class="md-img md-solo md-img-zoom" width="240" alt="raw first" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+
+<img class="md-img md-solo md-img-zoom" width="240" alt="raw second" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
+
 <p>That is the whole run.</p>
 </div></div>
 </div></div>
