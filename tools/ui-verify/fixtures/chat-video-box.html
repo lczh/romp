@@ -4,11 +4,12 @@
      a mentioned video file's still in the path preview's strip, a picture written inside a sentence (inline, the zoom
      cursor, no frame), an <img height="20"> of a large picture (a glyph: no zoom, no box), and a <video> written as a raw
      HTML block with its caption on the next source line (at the message's root: framed as a block, the caption under it;
-     the review of #351, 2026-10-21). A static page plays nothing,
+     the review of #351, 2026-10-21), then two <video> blocks on consecutive lines and a picture with a clip on the line
+     under it (each framed as a block, stacked: the review of #353, 2026-10-22). A static page plays nothing,
      so each video's first frame is an inline SVG poster of the clip's 1920x1080 size (the poster sets the same intrinsic
      size the frame would). Invented content (notes-api demo domain). Run at a phone width and a desktop width, in each theme:
        tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/chat-video-box.html \
-           --out /tmp/video-box-phone.png --size 390x1400 [--body-class "theme-light chat-theme-yatharth"]
+           --out /tmp/video-box-phone.png --size 390x2400 [--body-class "theme-light chat-theme-yatharth"]
 -->
 <div id="content" style="min-height: 100vh"><div class="thread">
 <div class="turn turn-assistant"><div class="assistant md"><p>The signup flow, recorded:</p>
@@ -19,6 +20,14 @@
 <img class="md-img md-solo" height="20" alt="squashed heat map" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1800' height='1200'%3E%3Crect width='1800' height='1200' fill='%232878c8'/%3E%3Crect x='100' y='100' width='1600' height='1000' fill='%2370a8e0'/%3E%3C/svg%3E">
 <span class="md-video-still md-solo" data-video="https://media.example.test/checkout.mp4"><video class="md-video" width="100%" muted="" playsinline="" preload="metadata" poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080'%3E%3Crect width='1920' height='1080' fill='%232a6fb0'/%3E%3Crect x='300' y='340' width='400' height='400' fill='%23f0c040'/%3E%3Ctext x='1760' y='170' font-size='120' font-family='sans-serif' font-weight='bold' fill='%23fff'%3E0%3C/text%3E%3C/svg%3E"></video></span>
 Clip 2: checkout, written as a block.
+<p>Two more, one under the other:</p>
+<span class="md-video-still md-solo" data-video="https://media.example.test/cart.mp4"><video class="md-video" width="100%" muted="" playsinline="" preload="metadata" poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080'%3E%3Crect width='1920' height='1080' fill='%232a6fb0'/%3E%3Crect x='300' y='340' width='400' height='400' fill='%23f0c040'/%3E%3Ctext x='1760' y='170' font-size='120' font-family='sans-serif' font-weight='bold' fill='%23fff'%3E0%3C/text%3E%3C/svg%3E"></video></span>
+<span class="md-video-still md-solo" data-video="https://media.example.test/receipt.mp4"><video class="md-video" width="100%" muted="" playsinline="" preload="metadata" poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080'%3E%3Crect width='1920' height='1080' fill='%232a6fb0'/%3E%3Crect x='300' y='340' width='400' height='400' fill='%23f0c040'/%3E%3Ctext x='1760' y='170' font-size='120' font-family='sans-serif' font-weight='bold' fill='%23fff'%3E0%3C/text%3E%3C/svg%3E"></video></span>
+<p>The form, and the flow through it:</p>
+<p>
+<img class="md-img md-solo md-img-zoom" alt="signup form" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='640' height='400'%3E%3Crect width='640' height='400' fill='%2354b204'/%3E%3Crect x='60' y='60' width='520' height='280' fill='%23e8f0d8'/%3E%3C/svg%3E">
+<span class="md-video-still md-solo" data-video="https://media.example.test/signup-flow.mp4"><video class="md-video" width="100%" muted="" playsinline="" preload="metadata" poster="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1920' height='1080'%3E%3Crect width='1920' height='1080' fill='%232a6fb0'/%3E%3Crect x='300' y='340' width='400' height='400' fill='%23f0c040'/%3E%3Ctext x='1760' y='170' font-size='120' font-family='sans-serif' font-weight='bold' fill='%23fff'%3E0%3C/text%3E%3C/svg%3E"></video></span>
+</p>
 <p>That is the whole run.</p>
 </div></div>
 </div></div>

@@ -6738,10 +6738,12 @@ dashboard, a file is refused (the cursor says so) rather than opened in place of
 A picture a message embeds, a file it mentions and a video it posts share one box: as wide
 as the message at most and 320 pixels tall at most, the shape kept. One on a line of its own
 is framed, and a caption written on the next line sits under it; one with words before or
-after it on its line stays on that line, as do pictures an HTML layout sets side by side,
-and one shown under 32 pixels tall (a badge, or a large picture given a small height) is
-part of the text and does not open. A picture inside a link follows the link, and one in a
-fold's heading opens the fold.
+after it on its line stays on that line, and one shown under 32 pixels tall (a badge, or a
+large picture given a small height) is part of the text and does not open. Pictures and
+videos written in HTML on consecutive lines each get a line and a frame of their own, unless
+every one is a picture with a percentage width and the percentages add up to 100 at most, as
+in a README's `<img width="45%">` pair: those stay side by side, unframed. A picture inside a
+link follows the link, and one in a fold's heading opens the fold.
 
 A video shows its first frame with a play button over it, muted and never playing by itself,
 whatever the message asked for (`<video controls width="100%">` included). A path to an
