@@ -62819,14 +62819,43 @@ def _page_live_record(sid, events, rec):
                    "pl_at": tuple((u, l, p) for u, _md, l, p in pl), "pl_check": None}}
 
 
-def _page_agents_moved(sid, cards, ctx):
+def _page_agent_trees(cards, ctx):
+    """What the cards' agent-file answers are served from, sampled now: {transcript: (its own subagents root, the own
+    tree's name index (_agent_tree_index), and, when a card of these rests outside the own tree, the project's merged
+    sibling name map (_agent_project_holders), else None)}. Each object is assembled again exactly when a listing it was
+    built from changed, and _subagent_file's held answer for a name is a function of them (the own index alone for a file
+    the own tree holds), so the same objects mean the answer stands."""
+    out = {}
+    for mp in {c[0] for c in cards if c[4]}:
+        got = ctx.get(("own-index", mp))
+        if got is None:
+            own = str(_subagents_dir(mp))
+            dirs, stats = _subagent_tree(own)
+            got = ctx[("own-index", mp)] = (own, _agent_tree_index(own, dirs, stats) if dirs else None)
+        own, idx = got
+        sib = None                                # this page's own question: does a card of it rest on the siblings
+        if any(c[0] == mp and c[4] and (c[5] is None or not c[5].startswith(own + os.sep)) for c in cards):
+            proj = str(Path(mp).parent)
+            sib = ctx.get(("siblings", proj))
+            if sib is None:
+                sib = ctx[("siblings", proj)] = _agent_project_holders(proj)[3]
+        out[mp] = (own, idx, sib)
+    return out
+
+
+def _page_agents_moved(sid, rec, ctx):
     """True when an Agent card a cached page holds would be stamped differently now, by the same reads _stamp_agents
     made, as its record noted them (mp, sp, toolUseId, whether the ack named no id, the id, the file, its stat key, and
     for a background launch its scan row and the state the card took): the sidecar map names another id for a launch whose
-    ack named none; the agent's file is found elsewhere or nowhere (_subagent_file, served from its name index), or has
-    changed since its steps were folded; the launch's scan row moved (its report landed); or, while that row runs, its
-    liveness flipped (_agent_alive over the live row now). `ctx` holds the live map and the per-path sidecar maps and scan
-    rows, read once for all the pages one probe checks."""
+    ack named none; the agent's file is found elsewhere or nowhere (_subagent_file), or has changed since its steps were
+    folded; the launch's scan row moved (its report landed); or, while that row runs, its liveness flipped (_agent_alive
+    over the live row now). A file's place is asked again only when a tree it was answered from moved (_page_agent_trees,
+    sampled BEFORE the asks and kept on the record once every card held: the own tree's index for a file the own tree
+    holds, the sibling map too for one it does not), so a settled page costs a stat per card for them. `ctx` holds the
+    live map and the per-path sidecar maps, scan rows and tree objects, read once for all the pages one probe checks."""
+    cards = rec["agents"]
+    trees = _page_agent_trees(cards, ctx)
+    held = rec.get("trees") or {}
     for mp, sp, tid, needs_meta, aid, ap, akey, bg in cards:
         if needs_meta:
             meta = ctx.get(("meta", mp))
@@ -62835,9 +62864,12 @@ def _page_agents_moved(sid, cards, ctx):
             if (meta.get(tid) or {}).get("agentId") != aid:
                 return True
         if aid:
-            now_ap = _subagent_file(mp, aid)
-            if (str(now_ap) if now_ap is not None else None) != ap:
-                return True
+            own, idx, sib = trees[mp]
+            was = held.get(mp)
+            if was is None or was[1] is not idx or ((ap is None or not ap.startswith(own + os.sep)) and was[2] is not sib):
+                now_ap = _subagent_file(mp, aid)
+                if (str(now_ap) if now_ap is not None else None) != ap:
+                    return True
             if ap is not None and _chat_stat_key(ap) != akey:
                 return True
         if bg is not None:
@@ -62854,6 +62886,7 @@ def _page_agents_moved(sid, cards, ctx):
                     ctx[("spawned", sid)] = _sdk_spawned_at(sid)
                 if _agent_alive(row, aid, ctx["live_map"].get(sid), ctx[("spawned", sid)]) != (bg[1] == "running"):
                     return True
+    rec["trees"] = trees                          # every place stands under these trees: from here a stat per card
     return False
 
 
@@ -62875,7 +62908,7 @@ def _page_live_moved(sid, rec, ctx):
         if own:
             _live_scope.subagent_trees = ctx.setdefault("trees", {})
         try:
-            if _page_agents_moved(sid, rec["agents"], ctx):
+            if _page_agents_moved(sid, rec, ctx):
                 return True
         finally:
             if own:

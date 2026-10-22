@@ -22,7 +22,8 @@ emptied, before and after the tree changes; (8) a path token named in several me
 once; (9) the name index is bounded by the alive sessions' project directories; (10) a cached history page follows the
 live inputs its cards read that its key leaves out (an agent's file landing or growing, its report landing, its
 liveness flipping, its sidecar naming it, a notification's output tail, a path token's file appearing), with or without
-a judge publish, and only the pages holding the change are rendered again, by a click or by the warm. Red on stock: (3)
+a judge publish, and only the pages holding the change are rendered again, by a click or by the warm; a page whose
+check found everything standing asks no agent's place again until a tree its cards rest on moves. Red on stock: (3)
 to (6) and (8); (10) is red without the pages' live-input record (on stock, too, when no publish comes between).
 Synthetic fixtures only: placeholder ids, the notes-api demo world, a temp directory."""
 import json
@@ -704,6 +705,24 @@ class PagesFollowTheirLiveInputs(PagesEqualAColdRender):
     def test_it_shows_after_a_publish_that_stamps_no_seam_too(self):
         self._landing(publish=True)
 
+    def test_a_file_of_the_same_name_earlier_in_the_own_tree_takes_the_card(self):
+        """A card the own tree holds rests on the own tree's index alone: a file of its name landing earlier in the walk
+        order (flat, where the card's is nested) is the one a cold render reads, so the card is asked again."""
+        nested = self.aids[1]                              # under web's workflows/, page 0
+
+        def change():
+            (self.own / ("agent-%s.jsonl" % nested)).write_text(AGENT_RECORDS + self.MORE)
+            self.touch(self.own)
+        before, after = self._check(change, lambda e: e.get("toolUseId") == "toolu_launch_1", 1)
+        self.assertEqual((before.get("stepsTotal"), after.get("stepsTotal")), (1, 2))
+
+    def test_an_agents_file_landing_in_its_own_tree_shows_too(self):
+        missing = self.aids[11]                            # no file anywhere, page 0; it lands nested in web's own tree
+        before, after = self._check(lambda: self.put(self.own / "workflows" / "wf_00000000000000cc", missing),
+                                    lambda e: e.get("toolUseId") == "toolu_launch_11", 1)
+        self.assertNotIn("stepsTotal", before)
+        self.assertEqual(after.get("stepsTotal"), 1)
+
     def test_an_agents_file_growing_moves_its_steps(self):
         grows = self.own / ("agent-%s.jsonl" % self.aids[4])
 
@@ -763,6 +782,26 @@ class PagesFollowTheirLiveInputs(PagesEqualAColdRender):
         before, after = self._check(change, lambda e: e.get("uuid") == "u1", 3)
         self.assertNotIn("reports/run-1.md", before.get("pathLinks") or {})
         self.assertIn("reports/run-1.md", after.get("pathLinks") or {})
+
+    def test_a_checked_page_asks_no_agents_place_until_a_tree_it_rests_on_moves(self):
+        """The cost side: once a page's check has found every place standing it keeps the tree objects they were answered
+        from, so the next checks cost a stat per card and ask no place; an agent landing in a sibling tree (one no card
+        names) asks again the cards that rest on the siblings, finds them standing, and renders nothing."""
+        self._serve()
+        self._serve()                                      # the first check asks every place and keeps the trees
+        calls, real = [], km._subagent_file
+
+        def spy(path, aid):
+            calls.append(aid)
+            return real(path, aid)
+        with mock.patch.object(km, "_subagent_file", spy):
+            pages, n = self._serve()
+            self.assertEqual((n, calls), (0, []), "a settled page: nothing rendered, no place asked")
+            self.put(self.proj / FORK / "subagents" / "workflows" / "wf_00000000000000bb", "a00000000000000b1")
+            again, n = self._serve()
+        self.assertEqual((again, n), (pages, 0), "no card's place moved: the same pages, nothing rendered")
+        self.assertIn(self.aids[2], calls, "a card resting on the siblings was asked again")
+        self.assertNotIn(self.aids[0], calls, "a card the own tree holds was not")
 
     def test_the_warm_renders_again_only_the_page_whose_input_moved(self):
         if hasattr(km._PERF_STATS, "pusher"):
