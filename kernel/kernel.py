@@ -36684,14 +36684,14 @@ def _bg_tasks(path, spawned_at=None, live=None, sid=None):
 # (mtime, size) keys, the transcript's own launch↔notification pairing, and the SDK's live sets.
 _AGENT_ID_RE = re.compile(r"^a[0-9a-f]{16}$")
 _SUBAGENT_META_CACHE = {}       # subagents dir -> (dir mtime_ns, {toolUseId: {agentId, agentType, description, spawnDepth}})
-_SUBAGENT_FILE_CACHE = {}       # (parent transcript, agentId) -> (the tree's stamps, the agent file's path or None): the walk, once per change
+_SUBAGENT_FILE_CACHE = {}       # (parent transcript, agentId) -> (own tree's token, siblings' token, the agent file or None)
 _AGENT_GIST_CACHE = {}          # agent jsonl path -> em.fold_records entry (the Agent head's steps fold state)
 _AGENT_LAUNCH_CACHE = {}        # parent jsonl path -> em.fold_records entry (foreground launches + their settles)
 _SUBAGENT_FRAMES = {}           # (sid, agentId) -> (change key, frame, serialized) — shared by every client with it open
 SUBAGENT_EVENT_CAP = 300        # events shipped per viewer frame — a bounded TAIL, honest about the cut (the episode fold's rule)
 SUBAGENT_STEPS_CAP = 200        # tool calls shipped on the Agent head (agentSteps) — the newest; stepsTotal says the true count
 # THE WALK MEMO (2026-09-16): subagents root -> (its directories in walk order, their identities), one entry per root, shared by
-# every reader of the tree (_subagent_dirs, _subagent_meta_map, _find_agent_file, the feed key's _subagent_dirs_ident). Before
+# every reader of the tree (_subagent_dirs, _subagent_meta_map, _agent_tree_cands, the feed key's _subagent_dirs_ident). Before
 # it every call ran os.walk over the tree (up to 330 directories, 3,600 files on the measured box), several calls per session
 # per build from the feed, timeline and chat builds and the nudge walk, and a pusher stack sample put a tenth of its push-stage
 # samples inside that walk. Bounded by ownership, not by a count: _subagent_trees_forget drops every root no alive session's
@@ -36764,8 +36764,8 @@ def _subagent_tree(d):
     fresh-None-equals-stored-None never serves a stale tree. One difference from os.walk, stated: a directory that exists
     but cannot be listed (EACCES) stays in the list, where os.walk dropped it, unvouched, so the tree is walked on every
     call until it can be listed (today's cost, and the chmod that opens it is seen at once); no consumer's output changes
-    (_subagent_meta_map's listing of it fails and is skipped, _find_agent_file finds no file in it, the feed key folds one
-    more identity).
+    (_subagent_meta_map's listing of it fails and is skipped, the agent-file lookup tests the name in it directly, the
+    feed key folds one more identity).
 
     THE CYCLE SCOPE (2026-09-18). The event is one pusher cycle (or one jobs pass, or one connect push's chat loop on a
     handler thread), which opens `_live_scope.subagent_trees`: {root path: (directories, stats)}, exactly what this
@@ -36775,19 +36775,20 @@ def _subagent_tree(d):
     (_stamp_agents, _awaiting_live_rows, _awaiting_nest, through _subagent_meta_map), the feed key's
     _subagent_dirs_ident, the derivation's _session_awaiting, and a viewer frame's agent-file re-walk on a cache miss
     (its first open, or after a file landed in a directory the walk read), which samples the root through
-    _find_agent_file (the frame's hit-path re-stats through _dir_stamps are a separate route, a follow-up); 63k
+    _agent_tree_cands (a hit on the agent-file memo samples its roots the same way since 2026-10-22); 63k
     validations and 5.2M lstats over 3.9k cycles live, of which the ~39,500 outside the feed key are the candidates,
     an estimated 30-50% of all validations being re-samples of a root another reader had taken in the same cycle, the
     `scoped` tally measuring the realized share. A
     directory change landing after the sample is invisible to the rest of the cycle and seen by the next cycle's fresh
     sample, the one-cycle lag _sessions' mtime and _live_scope.snapshot already accept. Exact across the boundary because
     every scoped sample carries a stamp per directory it listed (the stats), so a reader that folds those stamps into its
-    own memo (_subagent_meta_map's key, _subagent_file's stamps, the feed key's identities, the chat build's taskout notes)
+    own memo (_subagent_meta_map's key, the agent-file name index, the feed key's identities, the chat build's taskout notes)
     mismatches next cycle when the tree moved and re-derives, never a stale hit; an EMPTY answer (nothing at the root, or
-    not a directory) carries no stamp and is therefore NOT scoped: _subagent_file_walk stamps the root itself with a fresh
-    _dir_stamp and reads its listing through _find_agent_file, and served an older empty sample it would memoize a nested
-    agent's miss under a stamp newer than the listing it read, a stale miss that outlives the cycle because
-    _subagent_file's hit path re-stats and never re-walks; so such a root costs each caller its one lstat, as before. The
+    not a directory) carries no stamp and is therefore NOT scoped: the agent-file walk this was written against (replaced
+    on 2026-10-22 by the name index, whose memo keys on the sample itself) stamped the root with a fresh stat and read its
+    listing through the walk memo, and served an older empty sample it would memoize a nested agent's miss under a stamp
+    newer than the listing it read, a stale miss that outlived the cycle; so such a root costs each caller its one lstat,
+    as before. The
     `stats` list is shared by every reader of the cycle and read-only by contract, as _sessions' rows are (the readers
     zip, iterate or copy it). Outside a scope every call samples afresh, as _live_map, _sessions, _path_of and
     _auth_avail_status behave (a WS viewer handler, GET /feed.json read fresh)."""
@@ -36802,8 +36803,8 @@ def _subagent_tree(d):
     if scope is not None and out[0]:
         # only an answer with at least one directory is scoped (2026-09-18): it carries a stamp per directory it listed,
         # so a reader folding those stamps into its own memo re-derives next cycle; the two zero-directory answers carry
-        # none, and a scoped empty answer would let _subagent_file_walk memoize a nested agent's miss under the root's
-        # fresh stamp for good (its hit path re-stats and never re-walks)
+        # none, and a scoped empty answer let the agent-file walk of the time memoize a nested agent's miss under the
+        # root's fresh stamp for good (its hit path re-stated and never re-walked)
         scope[d] = out
     return out
 
@@ -36886,11 +36887,21 @@ def _subagent_trees_forget(alive):
     departed sessions (the adversarial review's finding). Called as a belt after every feed build's loop and from the
     tracking-off frame too. Iterates a snapshot and pops with a default: _subagent_tree inserts from the pusher's chat
     builds, the WS handlers' viewer frames and the HTTP handlers at once, and a comprehension over the live dict raises
-    RuntimeError under a concurrent insert (the _prov_ledger_memo_evict and _intr_marks_forget precedent)."""
+    RuntimeError under a concurrent insert (the _prov_ledger_memo_evict and _intr_marks_forget precedent). The agent-file
+    name index (_agent_tree_index, _agent_project_holders, 2026-10-22) is bounded by the alive sessions' PROJECT
+    directories instead: a sibling fsid's tree is read again on every history page that holds one of its agents, and its
+    listings are what spares those reads, so they stay while a session in that project is alive."""
     owned = {str(_subagents_dir(s["path"])) for s in alive if s.get("path")}
     for d in list(_SUBAGENT_TREES):
         if d not in owned and _SUBAGENT_TREES.pop(d, None) is not None:
             _SUBAGENT_TREE_STATS["evict"] += 1
+    projects = {str(Path(str(s["path"])).parent) for s in alive if s.get("path")}
+    for d in list(_AGENT_TREE_NAMES):
+        if os.path.dirname(os.path.dirname(d)) not in projects:
+            _AGENT_TREE_NAMES.pop(d, None)
+    for d in list(_AGENT_PROJECT_KIDS):
+        if d not in projects:
+            _AGENT_PROJECT_KIDS.pop(d, None)
 
 
 def _subagent_tree_memo_report():
@@ -36971,21 +36982,6 @@ def _subagent_meta_map(path):
     return out
 
 
-def _dir_stamp(sd):
-    """(dir, mtime_ns) for one directory, a stat (None when missing)."""
-    try:
-        return (sd, os.stat(sd).st_mtime_ns)
-    except OSError:
-        return (sd, None)
-
-
-def _dir_stamps(dirs):
-    """(dir, mtime_ns) for each directory, once each, stats only: the resolver's memo key as a hit re-takes it. A file
-    landing in a directory moves that directory's mtime; a directory appearing moves its parent's; so the directories a
-    walk READ are exactly what a later hit must re-stat, and nothing is listed on a hit."""
-    return tuple(_dir_stamp(sd) for sd in dict.fromkeys(dirs))
-
-
 def _subagent_meta(path, agent_id, apath=None):
     """One agent's sidecar (agentType, description, spawnDepth, toolUseId) read directly, beside the agent's own file
     wherever that was found (a workflow agent's sits under workflows/wf_<id>/, T355; `apath` when the caller resolved it
@@ -37000,71 +36996,286 @@ def _subagent_meta(path, agent_id, apath=None):
     return meta if isinstance(meta, dict) else {}
 
 
-def _find_agent_file(subdir, name, read=None):
-    """`name` anywhere under the subagents directory `subdir`, one level or deeper (workflows/wf_<id>/agent-<id>.jsonl),
-    no symlink followed or taken, and never a file reached THROUGH a symlink (its real path stays under the tree's);
-    None when absent. `read` collects the directories walked."""
+# ── the agent-file lookup's name index (2026-10-22) ─────────────────────────────────────────────────────────────────────
+# _subagent_file answers "where is agent-<id>.jsonl?" for every Agent card a chat build or a history page renders, and the
+# pusher's history warm (_warm_history_pages) renders pages of old history holding many such cards. The walk it memoized
+# tested every directory of the session's tree with isfile and, for an agent whose file sits under the fsid a resumed
+# session came from, every sibling fsid's tree in the project too; and its memo was keyed on the stamp of every directory
+# that walk had read, re-taken on each hit. On a box whose sessions keep landing workflow agents some stamp moved every
+# cycle, so each card re-walked the project, and the memo was emptied outright past 1,024 entries. Now every directory's
+# agent-file names are listed once per change of its identity (_stat_ident, the walk memo's stamp), a tree's index is
+# assembled from those listings and served for the cycle's sample (_agent_tree_index), the project's sibling trees are
+# validated once per cycle (_agent_project_holders), and an answer is held for as long as the directories that could
+# change it FOR THAT NAME stand: a workflow agent landing elsewhere leaves every other card's answer in place.
+_AGENT_TREE_NAMES = {}      # subagents root -> [{directory: (identity listed under or None, agent-file names)}, last index]
+_AGENT_PROJECT_KIDS = {}    # project directory -> [identity listed under or None, its fsids' subagents roots, last merge]
+_SUBAGENT_FILE_MAX = 16384  # agent-file answers held in _SUBAGENT_FILE_CACHE; past it the oldest quarter goes
+
+
+def _agent_dir_names(cache, sd, st, racy_from):
+    """The agent-<id>.jsonl names directly in the directory `sd` that are regular files (a symlink, a directory or any other
+    kind of entry by that name is never an agent file: _agent_first_file's test), listed under `st`, the lstat the tree
+    sample took BEFORE this listing, and memoized in `cache` on the directory's identity (_stat_ident): an entry landing,
+    leaving or changing kind moves the directory's mtime and ctime. Vouched only when the listing completed and both stamps
+    are older than the racy window (_SUBAGENT_DIR_RACY_NS, the walk memo's rule: an entry landing in the stamp's own tick
+    would not move it), so an unvouched listing is taken again at the next sample. None when the directory cannot be listed
+    (the walk memo keeps such a directory in the tree): a lookup then tests the name in it directly. Returns (names or None,
+    vouched)."""
+    ident = _stat_ident(st)
+    hit = cache.get(sd)
+    if hit is not None and hit[0] is not None and hit[0] == ident:
+        return hit[1], True
+    names, ok = set(), True
+    try:
+        with os.scandir(sd) as it:
+            for e in it:
+                if e.name.startswith("agent-") and e.name.endswith(".jsonl"):
+                    try:
+                        if e.is_file(follow_symlinks=False):
+                            names.add(e.name)
+                    except OSError:
+                        ok = False
+                        names.add(e.name)                 # its kind unknown: kept, the lookup's own test decides
+        names = frozenset(names)
+    except OSError:
+        ok, names = False, None
+    vouched = ok and st is not None and max(st.st_mtime_ns, st.st_ctime_ns) < racy_from
+    cache[sd] = (ident if vouched else None, names)
+    return names, vouched
+
+
+def _agent_tree_index(root, dirs, stats):
+    """The agent-file index of the subagents tree at `root`, from its sample (dirs, stats: _subagent_tree's answer): (dirs,
+    {name: the positions in dirs whose listing holds it}, the positions of directories that could not be listed). Served as
+    it stands for the same sample (a cycle scope hands every reader one stats list) and for a fresh sample whose directories
+    and identities are the last index's with every listing vouched; otherwise assembled again from the per-directory
+    listings (_agent_dir_names), each reused while its directory's identity stands, so an agent landing re-lists the one
+    directory it landed in."""
+    ent = _AGENT_TREE_NAMES.get(root)
+    if ent is None:
+        ent = _AGENT_TREE_NAMES[root] = [{}, None]
+    last = ent[1]
+    if last is not None and last[0] is stats:
+        return last[3]
+    shape = (tuple(dirs), tuple(_stat_ident(s) for s in stats))
+    if last is not None and last[2] and last[1] == shape:
+        ent[1] = (stats, shape, True, last[3])
+        return last[3]
+    racy_from = time.time_ns() - _SUBAGENT_DIR_RACY_NS
+    cache, at, opaque, vouched_all = ent[0], {}, [], True
+    for pos, (sd, st) in enumerate(zip(dirs, stats)):
+        names, vouched = _agent_dir_names(cache, sd, st, racy_from)
+        vouched_all = vouched_all and vouched
+        if names is None:
+            opaque.append(pos)
+            continue
+        for n in names:
+            at.setdefault(n, []).append(pos)
+    if len(cache) > len(dirs):
+        keep = set(dirs)
+        for gone in [d for d in list(cache) if d not in keep]:   # a directory that left the tree leaves its listing
+            cache.pop(gone, None)
+    idx = (shape[0], {n: tuple(p) for n, p in at.items()}, tuple(opaque))
+    ent[1] = (stats, shape, vouched_all, idx)
+    return idx
+
+
+def _agent_index_cands(idx, name):
+    """(the directories of the index `idx` that may hold `name`, in the tree's walk order: those whose listing holds it and
+    every directory that could not be listed; whether one could not be listed)."""
+    dirs, at, opaque = idx
+    pos = at.get(name, ())
+    if opaque:
+        pos = sorted(set(pos).union(opaque))
+    return tuple(dirs[p] for p in pos), bool(opaque)
+
+
+def _agent_tree_cands(subdir, name):
+    """_agent_index_cands for the subagents tree at `subdir` from its current sample, or None when there is no tree (nothing
+    at the root, or not a directory: not this session's tree, never listed)."""
     dirs, stats = _subagent_tree(str(subdir))
-    if read is not None:
-        read.extend((sd, st.st_mtime_ns) for sd, st in zip(dirs, stats))   # stamped as read: each directory's stat from
-        #                                                                    BEFORE its listing (the memo's own), never re-taken after
-    real_root = os.path.realpath(str(subdir))
-    for root in dirs:
+    if not dirs:
+        return None
+    return _agent_index_cands(_agent_tree_index(str(subdir), dirs, stats), name)
+
+
+def _agent_first_file(subdir, name, cands):
+    """The first of `cands` (directories of the tree at `subdir`, in walk order) holding `name` as a regular file, never a
+    symlink and never a file reached THROUGH one (its real path stays under the tree's), taken fresh; None when none does."""
+    real_root = None
+    for root in cands:
         cand = os.path.join(root, name)
-        if os.path.isfile(cand) and not os.path.islink(cand) and os.path.realpath(cand).startswith(real_root + os.sep):
-            return Path(cand)
+        if os.path.isfile(cand) and not os.path.islink(cand):
+            if real_root is None:
+                real_root = os.path.realpath(str(subdir))
+            if os.path.realpath(cand).startswith(real_root + os.sep):
+                return Path(cand)
     return None
+
+
+def _agent_project_kids(proj):
+    """The subagents roots of the directories in the project directory `proj` (<proj>/<fsid>/subagents for each entry that
+    is a directory, a symlink counted when it points at one, as Path.is_dir answers), in name order: the sibling trees
+    _subagent_file reads when an agent's file is not under its session's own. Memoized on the project directory's identity
+    (an fsid directory appearing or leaving moves it); a listing is not vouched when it met a symlink (its target can change
+    kind without moving the directory), failed part way (the roots before the failure stand, as the walk's loop read
+    them) or falls in the racy window. () when the directory cannot be read."""
+    try:
+        st = os.stat(proj)
+    except OSError:
+        _AGENT_PROJECT_KIDS.pop(proj, None)
+        return ()
+    ident = _stat_ident(st)
+    ent = _AGENT_PROJECT_KIDS.get(proj)
+    if ent is not None and ent[0] is not None and ent[0] == ident:
+        return ent[1]
+    racy_from = time.time_ns() - _SUBAGENT_DIR_RACY_NS
+    kids, ok = [], True
+    try:
+        with os.scandir(proj) as it:
+            ents = sorted(it, key=lambda e: e.name)
+        for e in ents:
+            if e.is_symlink():
+                ok = False
+            if e.is_dir():
+                kids.append(os.path.join(proj, e.name, "subagents"))
+    except OSError:
+        ok = False
+    kids = tuple(kids)
+    _AGENT_PROJECT_KIDS[proj] = [ident if ok and max(st.st_mtime_ns, st.st_ctime_ns) < racy_from else None, kids,
+                                 ent[2] if ent is not None else None]
+    return kids
+
+
+def _agent_project_holders(proj):
+    """The project's sibling trees as _subagent_file reads them: (their roots in name order, each root's stat key
+    (_chat_stat_key, taken BEFORE its tree is sampled, the key a miss reports for it), each root's index or None when it
+    holds no tree, {name: the positions of the roots whose index lists it}, the positions of roots holding a directory that
+    could not be listed). It samples every sibling tree, so it is validated once per cycle: stored on the cycle's
+    subagents-tree scope (_subagent_tree's slot, under a key no root path takes) and served from it to every later reader of
+    the cycle; outside a scope, per call. The name map is merged again only when a root came or went or a root's index was
+    rebuilt."""
+    scope = getattr(_live_scope, "subagent_trees", None)
+    skey = ("agent-project", proj)
+    if scope is not None:
+        got = scope.get(skey)
+        if got is not None:
+            return got
+    kids = _agent_project_kids(proj)
+    keys, idxs = [], []
+    for sd in kids:
+        keys.append(_chat_stat_key(sd))
+        dirs, stats = _subagent_tree(sd)
+        idxs.append(_agent_tree_index(sd, dirs, stats) if dirs else None)
+    keys, idxs = tuple(keys), tuple(idxs)
+    ent = _AGENT_PROJECT_KIDS.get(proj)
+    last = ent[2] if ent is not None else None
+    if last is not None and last[0] == kids and all(a is b for a, b in zip(last[1], idxs)):
+        holders, opaque = last[2], last[3]
+    else:
+        holders, opaque = {}, []
+        for j, idx in enumerate(idxs):
+            if idx is None:
+                continue
+            for n in idx[1]:
+                holders.setdefault(n, []).append(j)
+            if idx[2]:
+                opaque.append(j)
+        holders, opaque = {n: tuple(v) for n, v in holders.items()}, tuple(opaque)
+        if ent is not None:
+            ent[2] = (kids, idxs, holders, opaque)
+    out = (kids, keys, idxs, holders, opaque)
+    if scope is not None:
+        scope[skey] = out
+    return out
+
+
+def _agent_sibling_cands(holders, own, name):
+    """[(sibling root, the directories in it that may hold `name`)] for every sibling tree whose index lists the name (or
+    holds an unlistable directory), in the project's name order, the session's own root skipped, and whether any directory
+    among them could not be listed."""
+    kids, _keys, idxs, at, opaque_js = holders
+    js = at.get(name, ())
+    if opaque_js:
+        js = sorted(set(js).union(opaque_js))
+    own_s, out, opaque = str(own), [], False
+    for j in js:
+        if kids[j] == own_s:
+            continue
+        cands, op = _agent_index_cands(idxs[j], name)
+        opaque = opaque or op
+        out.append((kids[j], cands))
+    return tuple(out), opaque
 
 
 def _subagent_file(path, agent_id):
-    """The agent's own transcript beside the parent transcript `path`: subagents/agent-<id>.jsonl, or one level or
-    more down (a Workflow agent's, workflows/wf_<id>/agent-<id>.jsonl, since Claude Code 2.1.261: the flat lookup
-    missed it and the viewer said the file was missing, T355), or — when the sidecar dir has moved under a /clear
-    fork's fsid — the one file of that name anywhere in the project dir, nested or not. None when missing."""
+    """The agent's own transcript beside the parent transcript `path`: subagents/agent-<id>.jsonl, or one level or more
+    down (a Workflow agent's, workflows/wf_<id>/agent-<id>.jsonl, since Claude Code 2.1.261: the flat lookup missed it and
+    the viewer said the file was missing, T355), or — when the sidecar dir has moved under a /clear fork's fsid — the first
+    file of that name in a sibling fsid's tree, the project's directories in name order, nested or not. None when missing.
+
+    Memoized per (path, agent id) on what the answer depends on for THAT name (2026-10-22): the directories of the
+    session's own tree that list the file, and, when the own tree holds none, the same for each sibling tree in order, all
+    read from the trees' name indexes (_agent_tree_index, _agent_project_holders). A hit costs the cycle's samples and a few
+    dict probes, and lists nothing; an agent landing anywhere else leaves the answer standing. An answer that rests on a
+    directory that could not be listed is not memoized. A miss reports what it read to a running chat build as the walk
+    did (_chat_dep_note_taskout): the own file's place when the own tree lacks it, and every sibling fsid's subagents
+    directory up to the one that held it, under the stat key taken before that tree was sampled."""
     if not path or not _AGENT_ID_RE.match(str(agent_id or "")):
         return None
-    ckey = (str(path), str(agent_id))
-    hit = _SUBAGENT_FILE_CACHE.get(ckey)           # the walk once per change of what it read (the pusher asks every cycle per
-    if hit is not None and _dir_stamps([d for d, _m in hit[0]]) == hit[0]:   # open viewer, the chat build once per Agent card):
-        return hit[1]                                 #  a hit re-stats the directories the walk read, own tree and siblings, never lists
-    read = []                                         # each directory's stamp taken AS IT IS READ (a file landing between the
-    found = _subagent_file_walk(path, agent_id, read)   # listing and a later stat would memoize a miss against the newer mtime)
-    if len(_SUBAGENT_FILE_CACHE) > 1024:
-        _SUBAGENT_FILE_CACHE.clear()
-    stamps = tuple(dict.fromkeys(read))            # (dir, mtime_ns) pairs, once each
-    _SUBAGENT_FILE_CACHE[ckey] = (stamps, found)   # a miss is memoized too, on the same stamps: a file landing later under a
-    return found                                   #  sibling's tree moves that directory and re-walks
-
-
-def _subagent_file_walk(path, agent_id, read=None):
-    """_subagent_file's walk itself (no memo); `read` collects every directory it looked at, the memo's stamps."""
-    read = read if read is not None else []
     name = "agent-%s.jsonl" % agent_id
     own = _subagents_dir(path)
-    read.append(_dir_stamp(str(own)))
-    ap = own / name
-    if not os.path.islink(own) and os.path.isfile(ap) and not os.path.islink(ap):   # this tree's own file (a symlinked
-        return ap                                                                   #  subagents/ or file is not taken)
-    nested = _find_agent_file(own, name, read)
-    if nested is not None:
-        return nested
-    # A miss is a dependency of the chat payload that asked (the taskout idiom, _chat_dep_note_taskout): the
-    # file appearing at its own place, or a sibling fsid's directory gaining one, changes the Agent card.
-    _chat_dep_note_taskout(str(ap), None)
-    try:
-        read.append(_dir_stamp(str(Path(str(path)).parent)))   # the project directory: a sibling fsid's directory appearing moves it
-        for d in sorted(Path(str(path)).parent.iterdir()):
-            if d.is_dir():                                # the directory the walk below reads: a file landing in
-                sd = d / "subagents"                      # <sib>/subagents/ moves ITS mtime, not the sibling's
-                _chat_dep_note_taskout(str(sd), _chat_stat_key(str(sd)))
-                if sd != own:
-                    read.append(_dir_stamp(str(sd)))
-                    cand = _find_agent_file(sd, name, read)
-                    if cand is not None:
-                        return cand
-    except OSError:
-        pass
-    return None
+    ckey = (str(path), str(agent_id))
+    proj = str(Path(str(path)).parent)
+    own_tok = _agent_tree_cands(own, name)
+    hit = _SUBAGENT_FILE_CACHE.get(ckey)
+    holders = None
+    if hit is not None and hit[0] == own_tok:
+        if hit[1] is None:
+            return hit[2]
+        holders = _agent_project_holders(proj)
+        if _agent_sibling_cands(holders, own, name) == hit[1]:
+            return hit[2]
+    found = _agent_first_file(own, name, own_tok[0]) if own_tok else None
+    if found is not None:
+        if not own_tok[1]:
+            _subagent_file_memo(ckey, (own_tok, None, found))
+        return found
+    # A miss in the own tree is a dependency of the chat payload that asked (the taskout idiom, _chat_dep_note_taskout):
+    # the file appearing at its own place, or a sibling fsid's directory gaining one, changes the Agent card.
+    _chat_dep_note_taskout(str(own / name), None)
+    if holders is None:
+        holders = _agent_project_holders(proj)
+    sib = _agent_sibling_cands(holders, own, name)
+    kids, keys = holders[0], holders[1]
+    upto = len(kids)
+    for sd, cands in sib[0]:
+        found = _agent_first_file(sd, name, cands)
+        if found is not None:
+            upto = kids.index(sd) + 1
+            break
+    for j in range(upto):                                 # every sibling directory the walk read up to the one holding
+        _chat_dep_note_taskout(kids[j], keys[j])          #  the file (a file landing in <sib>/subagents/ moves ITS mtime)
+    if not (own_tok and own_tok[1]) and not sib[1]:
+        _subagent_file_memo(ckey, (own_tok, sib, found))
+    return found
+
+
+def _subagent_file_memo(ckey, entry):
+    """Store one _subagent_file answer, the oldest quarter going first past _SUBAGENT_FILE_MAX (a concurrent insert under
+    the trim leaves it for the next store)."""
+    _SUBAGENT_FILE_CACHE[ckey] = entry
+    if len(_SUBAGENT_FILE_CACHE) > _SUBAGENT_FILE_MAX:
+        old = []
+        try:
+            for k in _SUBAGENT_FILE_CACHE:
+                old.append(k)
+                if len(old) >= _SUBAGENT_FILE_MAX // 4:
+                    break
+        except RuntimeError:
+            return
+        for k in old:
+            _SUBAGENT_FILE_CACHE.pop(k, None)
 
 
 def _agent_id_of_output(output_file):
@@ -40347,7 +40558,7 @@ def _chat_push_scopes_open():
     without the slot, and a viewer frame's agent-file re-walk on a cache miss (its first open, or after
     a file landed in a directory the walk read) samples the root once more; a handler thread's push
     shares one sample per root across its chat loop and those re-walks, exactly as a pusher cycle does.
-    The frame's hit-path re-stats through _dir_stamps are a separate route, a follow-up). A pusher cycle
+    A hit on the agent-file memo samples its roots the same way since 2026-10-22). A pusher cycle
     already holds the last three, so only the absent ones are opened, and the record says which;
     _chat_push_scopes_close clears exactly what was opened here, so a cycle's own scopes are never
     touched. The ownership record is written BEFORE the shared components are read (2026-09-18, the
@@ -62573,9 +62784,12 @@ def _page_sig(sess, sid, now, floor=None, turns=None):
     send), the gone marker, the rewind hold and the pending cut, and the components every tab shares (the names
     snapshot among them, _chat_sig_shared; the postal caption map is NOT among them: a pre-floor page holding a postal
     card that was rendered before its caption landed keeps the caption-less card until an eviction re-renders it,
-    accepted, the card's text being the same). The goal store's identity is a component too, so a page survives the
-    turns that stream after it until the next judge publish for the session. None when the session has no transcript
-    path."""
+    accepted, the card's text being the same). The goal store enters BY ITS SEAMS (_seams_fp, 2026-10-22), the one field
+    of it a page reads: the build's segments (_segs_seam -> jd.apply_seams) and the caption scan's message segments
+    (_msg_mid_records) both take the seams alone, through the same shared read (jd.load_goals_shared_or_fault; a fault
+    reads as no seams on both sides). The store's identity stood here before, so every judge publish for the session
+    re-keyed its pages and the pusher's warm rendered them all again, though a publish that stamps no seam changes no
+    page; a seam stamped, moved or removed still re-keys them. None when the session has no transcript path."""
     path = sess.get("path") if sess else None
     if not path:
         return None
@@ -62595,7 +62809,7 @@ def _page_sig(sess, sid, now, floor=None, turns=None):
     _be = _sdk()
     shared = getattr(_live_scope, "chat_shared", None) or _chat_sig_shared()
     raw = [os.path.realpath(path), int(floor), last,
-           _chat_ident(jd.EPIDIR / (sid + ".jsonl")), jd._store_identity(sid)[1:],
+           _chat_ident(jd.EPIDIR / (sid + ".jsonl")), _seams_fp(jd.load_goals_shared_or_fault(sid)[0]),
            (_thread_reg(sid) or {}).get("forkedFrom"),    # the one reg field a page reads (the branch marker): the FILE's identity
            _chat_ident(jd.GONEDIR / (sid + ".json")),     #  moves on every send (the queue and echo mirrors rewrite it; warming review 2)
            (_hold.get("cutT"), _hold.get("leaf"), _hold.get("at")) if _hold else None,
@@ -66354,7 +66568,19 @@ def _resolve_path_token(tok, sid, memo):
     repo-relative path from the file list, which the same click-time resolution reaches. `memo` is the
     per-build cache — the file index is read at most once per build pass, and only when some token
     actually misses tier 1: the last completed listing (_repo_index_served), so a file the refresh has
-    not listed yet links on the rebuild the refresh's landing triggers."""
+    not listed yet links on the rebuild the refresh's landing triggers. A token is resolved once per
+    build pass too (memo["tok"], 2026-10-22): a history page names the same few files in many messages,
+    and every message's unresolved tokens are retried on every render, each a stat or two."""
+    done = memo.get("tok")
+    if done is None:
+        done = memo["tok"] = {}
+    if tok not in done:
+        done[tok] = _resolve_path_token_once(tok, sid, memo)
+    return done[tok]
+
+
+def _resolve_path_token_once(tok, sid, memo):
+    """_resolve_path_token's resolution itself, with no per-token memo."""
     cwd = memo.get("cwd")
     if cwd is None:                                       # once per build, not once per token: off the
         cwd = memo["cwd"] = _cwd_of(sid)                  # pusher's names snapshot this was a registry
