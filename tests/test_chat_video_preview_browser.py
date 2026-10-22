@@ -24,7 +24,9 @@ A second session, api, posts a <video> with its caption on the next line (the re
 in both themes the clip keeps the box, with the caption directly under it. A third session, tests, posts a reply of raw
 <video>s (the review of #351, 2026-10-21), read the same way: written on one line, as a block with its open tag on a line of its own, and with its <source> on lines of its
 own, each with a caption on the next line, the clip keeps the box with the caption under it; two blocks a blank line apart
-each keep it, stacked; two clips on consecutive lines of a padded <p> stay inline and unframed.
+each keep it, stacked. And the review of #353 (2026-10-22): clips on consecutive lines each keep the box, stacked, as raw
+blocks at the message's root and as two clips at 45% in a padded <p> (a still is the box's size whatever its width
+attribute says, so clips never share a row), and so do a picture and a clip on consecutive lines.
 
 CVP_DIST=<dir> serves another tree's UI bundle (the red run's before); CVP_SHOTS=<dir> writes the reply at both widths in
 both themes and the open lightbox; CVP_DUMP=<path> writes the whole measurement. Skips LOUDLY without the extension deps
@@ -158,7 +160,9 @@ def _reply_raw(host):
     # the review of #351 (2026-10-21): a <video> an agent writes as a raw HTML block (its open tag alone on its line, or
     # its <source> on lines of their own, so loose at the message's root) with its caption on the next line keeps the box
     # with the caption under it, as the one-line form (a paragraph) always has; two such blocks a blank line apart each
-    # keep it, stacked; two <video>s on consecutive lines of a padded <p> (the README layout) stay inline, unframed
+    # keep it, stacked. The review of #353 (2026-10-22): two blocks on consecutive lines, two <video>s at 45% on
+    # consecutive lines of a padded <p> (the README layout), and a picture with a clip on the line under it each keep the
+    # box, stacked
     return ("The three flows, recorded:\n\n"
             "<video controls width=\"100%%\" src=\"%(h)s/demo.mp4?v=line\"></video>\n"
             "Clip 3: signup, written on one line.\n\n"
@@ -170,7 +174,13 @@ def _reply_raw(host):
             "<video controls width=\"100%%\" src=\"%(h)s/demo.mp4?v=blankB\">\n</video>\n\n"
             "The two side by side:\n\n"
             "<p>\n<video width=\"45%%\" src=\"%(h)s/demo.mp4?v=rowL\"></video>\n"
-            "<video width=\"45%%\" src=\"%(h)s/demo.mp4?v=rowR\"></video>\n</p>\n") % {"h": host}
+            "<video width=\"45%%\" src=\"%(h)s/demo.mp4?v=rowR\"></video>\n</p>\n\n"
+            "Two more, one under the other:\n\n"
+            "<video controls width=\"100%%\" src=\"%(h)s/demo.mp4?v=nextA\">\n</video>\n"
+            "<video controls width=\"100%%\" src=\"%(h)s/demo.mp4?v=nextB\">\n</video>\n\n"
+            "The form, and the flow through it:\n\n"
+            "<p>\n<img src=\"%(h)s/form.png?v=mix\" alt=\"mixed picture\">\n"
+            "<video src=\"%(h)s/demo.mp4?v=mixV\"></video>\n</p>\n") % {"h": host}
 
 
 DRIVER = r"""
@@ -377,7 +387,7 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
 }
 // the third session (tests): the raw <video>s (the review of #351), at both widths in both themes
 out.raw = {};
-const RAW = ["line", "block", "source", "blankA", "blankB", "rowL", "rowR"];
+const RAW = ["line", "block", "source", "blankA", "blankB", "rowL", "rowR", "nextA", "nextB", "mixV"];
 for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
   const key = (phone ? "phone" : "desktop") + theme[0].toUpperCase() + theme.slice(1);
   let ctx = null;
@@ -395,6 +405,8 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
     await page.waitForFunction(({ h, names }) => names.every((n) => {
       const s = document.querySelector('.assistant [src^="' + h + '/demo.mp4?v=' + n + '"]'); const v = s && s.closest("video"); return !!(v && v.readyState >= 1); }),
       { h: cfg.host, names: RAW }, { timeout: 30000 }).catch(() => {});
+    await page.waitForFunction(() => { const i = document.querySelector('.assistant img[alt="mixed picture"]'); return !!(i && i.complete && i.naturalWidth > 0); },
+      null, { timeout: 30000 }).catch(() => {});
     await page.waitForTimeout(200);
     out.raw[key] = await page.evaluate(({ h, names }) => {
       const one = (n) => {
@@ -416,9 +428,16 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
       const body = document.querySelector('.assistant [src^="' + h + '/demo.mp4?v=line"]').closest(".assistant").getBoundingClientRect();
       const out = { body: { left: body.left, right: body.right } };
       for (const n of names) out[n] = one(n);
+      // the picture above the mixed pair's clip (the review of #353): its own box, read the same way
+      const i = document.querySelector('.assistant img[alt="mixed picture"]');
+      if (i) {
+        const cs = getComputedStyle(i), b = i.getBoundingClientRect();
+        out.mixPic = { cls: i.className, natural: [i.naturalWidth, i.naturalHeight], video: { left: b.left, right: b.right, top: b.top, bottom: b.bottom, h: b.height },
+                       style: { display: cs.display, radius: cs.borderRadius, border: [cs.borderTopWidth, cs.borderTopStyle].join(" ") } };
+      } else out.mixPic = { missing: true };
       return out;
     }, { h: cfg.host, names: RAW });
-    for (const [n, name] of [["block", "raw-caption"], ["blankA", "raw-blank-line"], ["rowL", "raw-row"]]) {
+    for (const [n, name] of [["block", "raw-caption"], ["blankA", "raw-blank-line"], ["rowL", "raw-row"], ["nextA", "raw-next-line"], ["mixV", "raw-mixed"]]) {
       await page.evaluate(({ h, n }) => document.querySelector('.assistant [src^="' + h + '/demo.mp4?v=' + n + '"]').closest("video").scrollIntoView({ block: "start" }), { h: cfg.host, n });
       await page.waitForTimeout(120);
       await shot(page, key + "-" + name);
@@ -693,22 +712,51 @@ class ServedChatVideoPreview(unittest.TestCase):
             self.assertGreaterEqual(b["video"]["top"], a["video"]["bottom"] - 0.5, "the second sits UNDER the first" + table)
             self.assertAlmostEqual(b["video"]["left"], a["video"]["left"], delta=1.5, msg="…at the same left edge" + table)
 
-    def test_two_videos_on_consecutive_lines_of_a_padded_p_stay_inline_unframed(self):
-        # #351's fix, kept: in the author's HTML a newline between two clips is a space, so the README layout
-        # `<p>\n<video>\n<video>\n</p>` lays them out inline, unframed (a still is the picture box's size whatever its width
-        # attribute says, so two 16:9 stills at 320px tall wrap in any bubble narrower than both)
+    def _boxed_stack(self, r, key, names):
+        # each clip of `names` boxed as a block like the path preview, inside the bubble, each under the one before
+        run = [r[n] for n in names]
+        table = "\n  %s: %s" % (key, json.dumps({n: r[n] for n in names}))
+        for n, m in zip(names, run):
+            self.assertNotIn("missing", m, "%s rendered%s" % (n, table))
+            self.assertEqual(m["natural"], [1920, 1080], "%s's metadata loaded%s" % (n, table))
+            self.assertIn("md-solo", m["wrap"].split(), "%s is on a line of its own%s" % (n, table))
+            self.assertEqual(m["wrapDisplay"], "block", "…a block" + table)
+            self.assertEqual(m["style"]["radius"], "8px", "…rounded like the path preview" + table)
+            self.assertTrue(m["style"]["border"].startswith("1px solid"), "…framed like the path preview" + table)
+            self.assertLessEqual(m["video"]["h"], 320.5, table)
+            self.assertGreaterEqual(m["video"]["left"], r["body"]["left"] - 0.5, "inside the bubble" + table)
+            self.assertLessEqual(m["video"]["right"], r["body"]["right"] + 0.5, "inside the bubble" + table)
+        for upper, lower in zip(run, run[1:]):
+            self.assertGreaterEqual(lower["video"]["top"], upper["video"]["bottom"] - 0.5, "each sits UNDER the one before" + table)
+            self.assertAlmostEqual(lower["video"]["left"], upper["video"]["left"], delta=1.5, msg="…at the same left edge" + table)
+
+    def test_two_raw_videos_on_consecutive_lines_each_keep_the_box_stacked(self):
+        # the review of #353 (2026-10-22): #351 and #353 laid clips on consecutive lines of the author's HTML out as one row,
+        # and a still is the picture box's size whatever its width attribute says, so two 16:9 stills 320px tall wrapped
+        # into a stack with no frame in any bubble narrower than both. The user's request that a message's videos look and
+        # size like the path preview wins: each keeps the box, stacked, as two raw blocks at the message's root and as the
+        # README layout `<p>\n<video width="45%">\n<video width="45%">\n</p>` (a clip never tiles)
         for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
             r = self._raw(key)
-            for name in ("rowL", "rowR"):
-                m = r[name]
-                table = "\n  %s %s: %s" % (key, name, json.dumps(m))
-                self.assertNotIn("missing", m, "the clip rendered" + table)
-                self.assertEqual(m["natural"], [1920, 1080], "the clip's metadata loaded" + table)
-                self.assertIn("md-video-still", m["wrap"].split(), table)
-                self.assertNotIn("md-solo", m["wrap"].split(), "it shares its line with the other clip" + table)
-                self.assertEqual(m["wrapDisplay"], "inline-block", "…so it stays inline" + table)
-                self.assertTrue(m["style"]["border"].startswith("0px"), "…unframed" + table)
-                self.assertLessEqual(m["video"]["right"], r["body"]["right"] + 0.5, "inside the bubble" + table)
+            self._boxed_stack(r, key, ("nextA", "nextB"))
+            self._boxed_stack(r, key, ("rowL", "rowR"))
+
+    def test_a_picture_and_a_video_on_consecutive_lines_each_keep_the_box_stacked(self):
+        # the review of #353 (2026-10-22): a raw picture with a clip on the line under it, in a padded <p>, was one row,
+        # inline and unframed. Each is on a line of its own: the picture in its box, the clip in its box under it
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            r = self._raw(key)
+            pic, clip = r["mixPic"], r["mixV"]
+            table = "\n  %s: %s" % (key, json.dumps({"mixPic": pic, "mixV": clip}))
+            self.assertNotIn("missing", pic, "the picture rendered" + table)
+            self.assertEqual(pic["natural"], [640, 400], "the picture loaded" + table)
+            self.assertIn("md-solo", pic["cls"].split(), "the picture is on a line of its own" + table)
+            self.assertEqual(pic["style"]["display"], "block", "…a block" + table)
+            self.assertEqual(pic["style"]["radius"], "8px", "…rounded like the path preview" + table)
+            self.assertTrue(pic["style"]["border"].startswith("1px solid"), "…framed like the path preview" + table)
+            self._boxed_stack(r, key, ("mixV",))
+            self.assertGreaterEqual(clip["video"]["top"], pic["video"]["bottom"] - 0.5, "the clip sits UNDER the picture" + table)
+            self.assertAlmostEqual(clip["video"]["left"], pic["video"]["left"], delta=1.5, msg="…at the same left edge" + table)
 
     def test_a_tap_opens_the_lightbox_playing_the_clip_with_its_controls(self):
         clip = self.origin2 + "/clip.mp4"

@@ -156,20 +156,25 @@ test("where a line ends, RUN: a newline only where the author's line breaks, a b
   const H = "https://img.example.test/";
   const pic = (n: string) => el("img", { src: H + n + ".png" });
   const marked = (n: FNode) => (n.cls as Set<string>).has("md-solo-end");
-  const pair = (what: string, want: boolean, build: (a: FNode, b: FNode) => FNode) => {
-    const a = pic("a"), b = pic("b");
+  const half = (n: string) => el("img", { src: H + n + ".png", width: "45%" });
+  const pair = (what: string, want: boolean, build: (a: FNode, b: FNode) => FNode, mk = pic) => {
+    const a = mk("a"), b = mk("b");
     build(a, b);
     assert.deepEqual([solo(a), solo(b)], [want, want], what);
   };
-  // the author's own HTML lays out by HTML's rules: a newline between its tags is a space, so the pictures sit side by side
-  pair("the README layout, its <p> opened and closed on lines of their own", false, (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
-  pair("…indented under an align", false, (a, b) => el("p", { align: "center" }, "\n  ", a, "\n  ", b, "\n"));
-  pair("…opened on a line of its own only", false, (a, b) => el("p", {}, "\n", a, "\n", b));
-  pair("…closed on a line of its own only", false, (a, b) => el("p", {}, a, "\n", b, "\n"));
-  pair("…a raw list item, padded the same way", false, (a, b) => el("li", {}, "\n", a, "\n", b, "\n"));
-  pair("…in a <div>", false, (a, b) => el("div", { align: "center" }, a, "\n", b));
-  pair("…a raw HTML block of two <img> lines, at the message's root", false, (a, b) => el("body", {}, a, "\n", b));
-  pair("…in a table cell", false, (a, b) => el("td", {}, a, "\n", b));
+  // the author's own HTML lays out by HTML's rules: a newline between its tags is a space, so the README's half-width
+  // pictures sit side by side (a row the author tiled: the test below)
+  pair("the README layout, its <p> opened and closed on lines of their own", false, (a, b) => el("p", {}, "\n", a, "\n", b, "\n"), half);
+  pair("…indented under an align", false, (a, b) => el("p", { align: "center" }, "\n  ", a, "\n  ", b, "\n"), half);
+  pair("…opened on a line of its own only", false, (a, b) => el("p", {}, "\n", a, "\n", b), half);
+  pair("…closed on a line of its own only", false, (a, b) => el("p", {}, a, "\n", b, "\n"), half);
+  pair("…a raw list item, padded the same way", false, (a, b) => el("li", {}, "\n", a, "\n", b, "\n"), half);
+  pair("…in a <div>", false, (a, b) => el("div", { align: "center" }, a, "\n", b), half);
+  pair("…a raw HTML block of two <img> lines, at the message's root", false, (a, b) => el("body", {}, a, "\n", b), half);
+  pair("…in a table cell", false, (a, b) => el("td", {}, a, "\n", b), half);
+  // …and the same layouts with no widths stack, each picture on a line of its own (the review of #353, the test below)
+  pair("the README layout with no widths", true, (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
+  pair("…a raw HTML block of two <img> lines with no widths", true, (a, b) => el("body", {}, a, "\n", b));
   // …but a newline there still ends a picture's line when words, not another picture, open the next one (the review of
   // #351: the test below)
   { const a = pic("a"); el("body", {}, el("p", {}, "before"), "\n", a, "\nFigure 1: requests per hour.", el("p", {}, "after"));
@@ -219,13 +224,14 @@ test("where a line ends, RUN: a newline only where the author's line breaks, a b
     assert.ok(solo(v) && marked(end), "a video's line end is marked the same way"); }
 });
 
-test("an author's raw HTML, RUN: a picture or a video alone on its source line ends its line there, unless another picture opens the next line", () => {
+test("an author's raw HTML, RUN: a picture or a video alone on its source line ends its line there, another one on the next line included", () => {
   // the review of #351 (2026-10-21), through the real marked, DOMPurify and mdSolo: #351 read every newline in the author's
   // HTML as a space, so an agent's raw `<img src="…">` with `Figure 1: …` on the next line (a raw HTML block, loose at the
   // message's root) lost its box and the caption sat beside its bottom edge; so did a <video> block; two raw <img> lines a
   // blank line apart touched, unframed; and a padded `<p align="center">` put a picture's <em> caption beside it. A newline
-  // there ends the line, unless the next thing shown across it is another picture or video with no blank line between:
-  // the README's row, which #351 fixed, stays a row
+  // there ends the line. #353 kept pictures and videos on consecutive lines as one row, and the review of #353 (2026-10-22)
+  // found that row wrapping into an unframed stack: they end their lines too, and only a row the author tiled with
+  // percentage widths stays one (the test below)
   const solo = new Function(SOLO_CODE + "\nreturn mdSolo;")() as (e: unknown) => boolean;
   const H = "https://img.example.test/";
   const marked = (n: FNode) => (n.cls as Set<string>).has("md-solo-end");
@@ -262,17 +268,18 @@ test("an author's raw HTML, RUN: a picture or a video alone on its source line e
     pair("…a blank line holding spaces and a tab", true, (a, b) => el("body", {}, a, "\n  \t\n", b));
     pair("…inside a padded <p>", true, (a, b) => el("p", {}, "\n", a, "\n\n", b, "\n"));
     pair("…inside a <div>", true, (a, b) => el("div", { align: "center" }, "\n", a, "\n\n", b, "\n"));
-    // 3. pictures on consecutive lines of HTML: one row, as HTML lays them out (#351's fix)
-    pair("the README layout, <p>\\n<img>\\n<img>\\n</p>", false, (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
-    pair("…indented under an align", false, (a, b) => el("p", { align: "center" }, "\n  ", a, "\n  ", b, "\n"));
-    pair("…in a <div>", false, (a, b) => el("div", { align: "center" }, "\n", a, "\n", b, "\n"));
-    pair("…two raw lines at the message's root", false, (a, b) => el("body", {}, a, "\n", b));
-    pair("…in a cell", false, (a, b) => el("td", {}, a, "\n", b));
-    pair("…an &nbsp; line between them (no blank line in markdown's source)", false, (a, b) => el("p", { align: "center" }, "\n  ", a, "\n   \n  ", b, "\n"));
-    pair("…a comment between them", false, (a, b) => el("p", {}, "\n", a, "\n", { nodeType: 8, textContent: "x" }, "\n", b, "\n"));
-    pair("…the second in a link", false, (a, b) => el("p", {}, "\n", a, "\n", el("a", { href: H }, b), "\n"));
-    pair("…the second bold", false, (a, b) => el("p", {}, "\n", a, "\n", el("strong", {}, b), "\n"));
-    pair("…a caption line after the row", false, (a, b) => el("p", {}, "\n", a, "\n", b, "\n", el("em", {}, "Figure 1: both runs."), "\n"));
+    // 3. on consecutive lines of HTML with no percentage widths (the review of #353, 2026-10-22: #351 laid these out as a
+    // row, which wraps into a stack with no frame when they are too wide to share a line): each ends its line, boxed
+    pair("the README layout, <p>\\n<img>\\n<img>\\n</p>", true, (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
+    pair("…indented under an align", true, (a, b) => el("p", { align: "center" }, "\n  ", a, "\n  ", b, "\n"));
+    pair("…in a <div>", true, (a, b) => el("div", { align: "center" }, "\n", a, "\n", b, "\n"));
+    pair("…two raw lines at the message's root", true, (a, b) => el("body", {}, a, "\n", b));
+    pair("…in a cell", true, (a, b) => el("td", {}, a, "\n", b));
+    pair("…an &nbsp; line between them", true, (a, b) => el("p", { align: "center" }, "\n  ", a, "\n  \u00a0 \n  ", b, "\n"));
+    pair("…a comment between them", true, (a, b) => el("p", {}, "\n", a, "\n", { nodeType: 8, textContent: "x" }, "\n", b, "\n"));
+    pair("…the second in a link", true, (a, b) => el("p", {}, "\n", a, "\n", el("a", { href: H }, b), "\n"));
+    pair("…the second bold", true, (a, b) => el("p", {}, "\n", a, "\n", el("strong", {}, b), "\n"));
+    pair("…a caption line after them", true, (a, b) => el("p", {}, "\n", a, "\n", b, "\n", el("em", {}, "Figure 1: both runs."), "\n"));
     // and a <br> on the next line ends it as it always did, marked under the box
     { const [a, at] = media("a"), end = el("br");
       el("p", { align: "center" }, "\n  ", a, "\n  ", end, "\n  ", el("em", {}, "Figure 1: the run."), "\n");
@@ -281,17 +288,78 @@ test("an author's raw HTML, RUN: a picture or a video alone on its source line e
     one("words after it on its source line", false, (a) => el("body", {}, a, " is the slowest request.\n"));
     one("words before it on its source line", false, (a) => el("p", {}, "\nThe trace ", a, "\n"));
   }
-  // a picture and a video on consecutive lines are one row too
+  // a picture and a video on consecutive lines stack too
   { const a = el("img", { src: H + "a.png" }), v = el("video", { src: H + "b.mp4" });
     el("p", {}, "\n", a, "\n", v, "\n");
-    assert.deepEqual([solo(a), solo(v)], [false, false], "a picture and a video on consecutive lines of HTML: one row"); }
-  // what counts as a picture across the newline: one that shows only pictures (a <picture>'s sources show nothing)
-  { const a = el("img", { src: H + "a.png" }), p = el("picture", {}, "\n", el("source", { srcset: H + "d.png" }), "\n", el("img", { src: H + "b.png" }), "\n");
-    el("p", {}, "\n", a, "\n", p, "\n");
-    assert.equal(solo(a), false, "a <picture> on the next line is a picture"); }
-  { const a = el("img", { src: H + "a.png" });
-    el("p", {}, "\n", a, "\n", el("a", { href: H }, el("img", { src: H + "b.png" }), " the board"), "\n");
-    assert.equal(solo(a), true, "a link holding a picture AND words is not: the line ends"); }
+    assert.deepEqual([solo(a), solo(v)], [true, true], "a picture and a video on consecutive lines of HTML: each on its own line"); }
+});
+
+test("a row the author tiled, RUN: pictures on consecutive lines of HTML stay side by side only when every one gives a percentage width and they add up to 100 at most", () => {
+  // the review of #353 (2026-10-22): #351 and #353 laid every run of raw pictures and videos on consecutive lines out as
+  // HTML would, one row, so three pictures too wide to share a line wrapped into a stack with no frame, a caption on the
+  // next line beside the last one's bottom edge, and raw <video>s on consecutive lines lost their frame. The user's
+  // request that chat media look and size like the path preview wins: they stack, each boxed, unless the markup itself
+  // says the row fits (the README's `<img width="45%">` pair), read off the markup and never off a layout
+  const solo = new Function(SOLO_CODE + "\nreturn mdSolo;")() as (e: unknown) => boolean;
+  const H = "https://img.example.test/";
+  const img = (n: string, width?: string, more: Record<string, string> = {}) => el("img", { src: H + n + ".png", ...(width === undefined ? {} : { width }), ...more });
+  const vid = (n: string, width?: string) => el("video", { controls: "", ...(width === undefined ? {} : { width }) }, "\n  ", el("source", { src: H + n + ".mp4", type: "video/mp4" }), "\n");
+  const each = (what: string, want: boolean, ms: FNode[], build: (...ms: FNode[]) => FNode) => {
+    build(...ms);
+    assert.deepEqual(ms.map((m) => solo(m)), ms.map(() => want), what);
+  };
+  // the cases the review named
+  { const a = img("a"), b = img("b"), c = img("c");
+    el("body", {}, el("p", {}, "The three runs:"), "\n", a, "\n", b, "\n", c, "\nFigure 1: three runs, one under another.\n");
+    assert.deepEqual([solo(a), solo(b), solo(c)], [true, true, true], "three raw <img> lines, no widths, a caption line after: each on its own line, the caption under the last"); }
+  each("two raw <video>s on consecutive lines: each on its own line", true, [vid("a", "100%"), vid("b", "100%")], (a, b) => el("body", {}, a, "\n", b, "\n"));
+  each("…with no widths", true, [vid("a"), vid("b")], (a, b) => el("body", {}, a, "\n", b));
+  each("…as stills", true, [vid("a"), vid("b")].map((v) => el("span", { class: "md-video-still" }, v)).map((s) => s.childNodes![0]),
+    (a, b) => el("p", {}, "\n", a.parentElement!, "\n", b.parentElement!, "\n"));
+  each("the README row, <p>\\n<img width=\"45%\">\\n<img width=\"45%\">\\n</p>: side by side", false, [img("a", "45%"), img("b", "45%")], (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
+  each("two at 60%: 120 does not fit, each on its own line", true, [img("a", "60%"), img("b", "60%")], (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
+  each("one at 45% and one with no width: each on its own line", true, [img("a", "45%"), img("b")], (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
+  each("…one at 45% and one 300 pixels wide", true, [img("a", "45%"), img("b", "300")], (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
+  each("a picture and a video on consecutive lines: each on its own line", true, [img("a"), vid("b")], (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
+  each("…both at 45%: a video never tiles, the box sizes its still whatever its width says", true, [img("a", "45%"), vid("b", "45%")], (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
+  each("two videos at 45%", true, [vid("a", "45%"), vid("b", "45%")], (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
+  // the sum, every picture of the row counted, the ones sharing a source line included
+  each("three at 33%: side by side", false, [img("a", "33%"), img("b", "33%"), img("c", "33%")], (a, b, c) => el("p", {}, "\n", a, "\n", b, "\n", c, "\n"));
+  each("two at 50%: exactly 100, side by side", false, [img("a", "50%"), img("b", "50.0%")], (a, b) => el("body", {}, a, "\n", b));
+  each("50% and 50.5%: over 100, each on its own line", true, [img("a", "50%"), img("b", "50.5%")], (a, b) => el("body", {}, a, "\n", b));
+  { const a = img("a", "45%"), b = img("b", "45%"), c = img("c", "45%");
+    el("p", {}, "\n", a, " ", b, "\n", c, "\n");
+    assert.deepEqual([solo(a), solo(b), solo(c)], [false, false, true], "two at 45% on one line and a third on the next: 135, so the third is on a line of its own"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), c = img("c");
+    el("p", {}, "\n", a, "\n", b, "\n", c, "\n");
+    assert.deepEqual([solo(a), solo(b), solo(c)], [true, true, true], "a third with no width on the next line: the row is not tiled, each on its own line"); }
+  // what a percentage width is: HTML's reading of the attribute, and only the attribute
+  each("a width with leading spaces is still a percentage", false, [img("a", " 45%"), img("b", "45%")], (a, b) => el("body", {}, a, "\n", b));
+  each("\"45 %\" is 45 pixels to HTML, not a share", true, [img("a", "45 %"), img("b", "45 %")], (a, b) => el("body", {}, a, "\n", b));
+  each("a width in a style is none (the sanitizer keeps a style's colours only)", true,
+    [img("a", undefined, { style: "width: 45%" }), img("b", undefined, { style: "width: 45%" })], (a, b) => el("body", {}, a, "\n", b));
+  // a row runs across what shows nothing and through the wrappers its pictures sit in, and stops where mdSolo's line does
+  const inPicture = (m: FNode): FNode => (el("picture", {}, "\n", el("source", { srcset: H + "d.png" }), "\n", m, "\n"), m);
+  each("a <picture> at 45% beside a picture at 45%", false, [img("a", "45%"), inPicture(img("b", "45%"))],
+    (a, b) => el("p", {}, "\n", a, "\n", b.parentElement!, "\n"));
+  each("…a <picture> whose picture gives no width", true, [img("a", "45%"), inPicture(img("b"))],
+    (a, b) => el("p", {}, "\n", a, "\n", b.parentElement!, "\n"));
+  each("linked pictures at 45%: side by side", false, [img("a", "45%"), img("b", "45%")],
+    (a, b) => el("p", {}, "\n", el("a", { href: H }, a), "\n", el("a", { href: H }, b), "\n"));
+  each("…an &nbsp; line between them", false, [img("a", "45%"), img("b", "45%")], (a, b) => el("p", { align: "center" }, "\n  ", a, "\n  \u00a0 \n  ", b, "\n"));
+  each("…a comment between them", false, [img("a", "45%"), img("b", "45%")], (a, b) => el("p", {}, "\n", a, "\n", { nodeType: 8, textContent: "x" }, "\n", b, "\n"));
+  each("…a caption line after the row", false, [img("a", "45%"), img("b", "45%")], (a, b) => el("p", {}, "\n", a, "\n", b, "\n", el("em", {}, "Figure 1: both runs."), "\n"));
+  { const a = img("a", "45%"), b = img("b", "45%"), c = img("c", "45%"), d = img("d", "45%");
+    el("p", {}, "\n", a, "\n", b, "\nFigure 1: the first pair.\n", c, "\n", d, "\n");
+    assert.deepEqual([solo(a), solo(b), solo(c), solo(d)], [false, false, false, false], "a caption line between two rows parts them: two rows of 90"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), c = img("c", "45%");
+    el("body", {}, a, "\n", b, "\n\n", c, "\n");
+    assert.deepEqual([solo(a), solo(b), solo(c)], [false, false, true], "a blank line parts a row: the pair tiles, the third stands alone"); }
+  { const a = img("a", "45%");
+    el("p", {}, "\n", a, "\n", el("a", { href: H }, img("b", "45%"), " the board"), "\n");
+    assert.equal(solo(a), true, "a link holding a picture AND words is no picture: the line ends"); }
+  // where marked wrote the line, its newline still ends it, percentages or not
+  each("a flush <p> (markdown's own lines): each on its own line", true, [img("a", "45%"), img("b", "45%")], (a, b) => el("p", {}, a, "\n", b));
 });
 
 test("the predicate: a marked picture, outside any link or summary, showing a source, SHOWN at least ZOOM_MIN_H px tall", () => {
