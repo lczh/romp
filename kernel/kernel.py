@@ -36436,9 +36436,11 @@ def _read_task_output(of):
         st = os.stat(of)
     except OSError:
         _chat_dep_note_taskout(of, None)       # absent: its appearance is a change to the payload that asked
+        _page_dep_note("outs", (of, None))     # ...and to a history page that embeds it (_page_live_moved)
         return ""
     key = (st.st_mtime, st.st_size)
     _chat_dep_note_taskout(of, key)            # the running chat build's dependency record: stat'd before the read
+    _page_dep_note("outs", (of, key))          # the running history-page render's record, the same identity
     hit = _task_out_cache.get(of)
     if hit and hit[0] == key:
         return hit[1]
@@ -37515,19 +37517,28 @@ def _stamp_agents(by_tool, scan_path, tm, spawned_at, meta_path=None):
     fold shows the closing summary instead of the ack. A foreground agent's tool_result was always the
     report and is left alone. Every one with a readable agent file carries agentSteps (its tool calls,
     the newest SUBAGENT_STEPS_CAP) + stepsTotal, running or finished. Returns {toolUseId: "sync"|"running"|"report"|"pending"} for the fold's
-    sealed-agent gate (pending = launched, no result, and not alive — the ack stays as the honest output)."""
+    sealed-agent gate (pending = launched, no result, and not alive — the ack stays as the honest output).
+
+    Inside a history page's render (2026-10-22) each card also reports what it was stamped from to the page's record
+    (_page_dep_note "agents"), which _page_agents_moved checks on every hit of the cached page: the sidecar's id when the
+    ack named none, where the agent's file was found and its stat key taken BEFORE the steps fold read it, and for a
+    background launch its scan row and the state the card took."""
     meta = None
     rows = None
     out = {}
+    rec = getattr(_page_dep_scope, "rec", None)
+    mp = meta_path or scan_path
     for tid, ev in by_tool.items():
         if ev.get("name") not in ("Agent", "Task"):
             continue
         if meta is None:
-            meta = _subagent_meta_map(meta_path or scan_path)
-        aid = ev.get("agentId") or (meta.get(tid) or {}).get("agentId")
+            meta = _subagent_meta_map(mp)
+        own_aid = ev.get("agentId")
+        aid = own_aid or (meta.get(tid) or {}).get("agentId")
         ev["agentId"] = str(aid) if aid else None
         # the agent's tool calls ride the head running OR finished — the fold lists them either way
-        ap = _subagent_file(meta_path or scan_path, aid) if aid else None
+        ap = _subagent_file(mp, aid) if aid else None
+        akey = _chat_stat_key(str(ap)) if rec is not None and ap is not None else None   # a page's record: before the read
         st = _agent_steps(ap) if ap is not None else None
         if st:
             _stamp_steps(ev, st)
@@ -37537,6 +37548,8 @@ def _stamp_agents(by_tool, scan_path, tm, spawned_at, meta_path=None):
             if st and not ev.get("resultUuid"):
                 ev["agentGist"] = _gist_of(st)
             out[tid] = "sync"
+            if rec is not None:
+                rec["agents"].append((mp, scan_path, tid, not own_aid, aid, str(ap) if ap is not None else None, akey, None))
             continue
         if rows is None:
             rows = {r["id"]: r for r in _bg_scan_all_cached(scan_path)}
@@ -37554,6 +37567,9 @@ def _stamp_agents(by_tool, scan_path, tm, spawned_at, meta_path=None):
             out[tid] = "running"
         else:
             out[tid] = "pending"
+        if rec is not None:
+            rec["agents"].append((mp, scan_path, tid, not own_aid, aid, str(ap) if ap is not None else None, akey,
+                                  ((row.get("status"), row.get("result")) if row is not None else None, out[tid])))
     return out
 
 
@@ -62766,10 +62782,139 @@ _WIRE_MEMO_LOCK = threading.Lock()               # the two memos above: handler 
 PAGE_TURNS = 16                                  # turns per rendered page of pre-floor history (aligned to multiples)
 WINDOW_TURNS = 8                                 # turns each side of a loadAround anchor
 _PAGE_CACHE = {}                                 # (sid, lo, hi, sig) → (events, bytes); LRU by insertion order
+_PAGE_DEPS = {}                                  # the same key → that page's live-input record (_page_live_record)
 _PAGE_CACHE_MAX, _PAGE_CACHE_BYTES = 32, 16 * 1024 * 1024
 _PAGE_STATS = {"hits": 0, "misses": 0, "evictions": 0, "pages": 0, "bytes": 0, "renderMs": 0.0, "warmPending": 0,
-               "warmed": 0, "warmMs": 0.0, "warmCycles": 0, "warmSkipped": 0}   # the active cards' windows warmed ahead of a click
+               "warmed": 0, "warmMs": 0.0, "warmCycles": 0, "warmSkipped": 0,   # the active cards' windows warmed ahead of a click
+               "liveMoved": 0, "liveCheckFailed": 0}   # resident pages dropped because a live input moved / its check raised
 _page_lock = threading.Lock()
+_page_dep_scope = threading.local()              # .rec = the running history-page render's record, per thread (_chat_history_page)
+
+
+def _page_dep_note(kind, item):
+    """A reader's report to the running history-page render (_chat_history_page): one live input the page's events were
+    stamped from that the page's key (_page_sig) does not hold, kept with the cached page and checked on every hit
+    (_page_live_moved). `kind` is "agents" (_stamp_agents) or "outs" (_read_task_output). Nothing outside a page render."""
+    rec = getattr(_page_dep_scope, "rec", None)
+    if rec is not None:
+        rec[kind].append(item)
+
+
+def _page_live_record(sid, events, rec):
+    """The finished live-input record of one rendered page: the readers' notes (rec: the Agent cards' reads, the task
+    output files each under the first identity read), and the messages whose path tokens are still unresolved, with the
+    links and pins as rendered, in the shape _chat_sig_deps re-checks for a chat payload (_chat_build_deps' pathlink
+    part: a mention can precede its file, and a cold render would link it once the file exists)."""
+    outs = {}
+    for of, key in rec["outs"]:
+        outs.setdefault(of, key)
+    pl = []
+    for ev in events:
+        if ev.get("kind") in ("user", "assistant") and ev.get("uuid") and ev.get("md"):
+            hit = _PATH_LINK_CACHE.get((sid, ev["uuid"]))
+            if hit is not None and hit[1]:
+                pl.append((ev["uuid"], ev["md"], ev.get("pathLinks"), ev.get("pathPins")))
+    return {"agents": tuple(rec["agents"]), "outs": tuple(outs.items()),
+            "pl": {"task_outs": [], "postal_any": False, "pl_pending": [(u, md) for u, md, _l, _p in pl],
+                   "pl_at": tuple((u, l, p) for u, _md, l, p in pl), "pl_check": None}}
+
+
+def _page_agents_moved(sid, cards, ctx):
+    """True when an Agent card a cached page holds would be stamped differently now, by the same reads _stamp_agents
+    made, as its record noted them (mp, sp, toolUseId, whether the ack named no id, the id, the file, its stat key, and
+    for a background launch its scan row and the state the card took): the sidecar map names another id for a launch whose
+    ack named none; the agent's file is found elsewhere or nowhere (_subagent_file, served from its name index), or has
+    changed since its steps were folded; the launch's scan row moved (its report landed); or, while that row runs, its
+    liveness flipped (_agent_alive over the live row now). `ctx` holds the live map and the per-path sidecar maps and scan
+    rows, read once for all the pages one probe checks."""
+    for mp, sp, tid, needs_meta, aid, ap, akey, bg in cards:
+        if needs_meta:
+            meta = ctx.get(("meta", mp))
+            if meta is None:
+                meta = ctx[("meta", mp)] = _subagent_meta_map(mp)
+            if (meta.get(tid) or {}).get("agentId") != aid:
+                return True
+        if aid:
+            now_ap = _subagent_file(mp, aid)
+            if (str(now_ap) if now_ap is not None else None) != ap:
+                return True
+            if ap is not None and _chat_stat_key(ap) != akey:
+                return True
+        if bg is not None:
+            rows = ctx.get(("rows", sp))
+            if rows is None:
+                rows = ctx[("rows", sp)] = {r["id"]: r for r in _bg_scan_all_cached(sp)}
+            row = rows.get(tid)
+            if ((row.get("status"), row.get("result")) if row is not None else None) != bg[0]:
+                return True
+            if row is not None and row.get("status") == "running":
+                if ctx.get("live_map") is None:
+                    ctx["live_map"] = _live_map()
+                if ("spawned", sid) not in ctx:
+                    ctx[("spawned", sid)] = _sdk_spawned_at(sid)
+                if _agent_alive(row, aid, ctx["live_map"].get(sid), ctx[("spawned", sid)]) != (bg[1] == "running"):
+                    return True
+    return False
+
+
+def _page_live_moved(sid, rec, ctx):
+    """Whether a cached page's live inputs moved since it was rendered: the inputs a pre-floor page reads that its key
+    (_page_sig) leaves out because they are not fixed with the prefix, each checked by the event that changes it rather
+    than re-keyed on a proxy. A task output file's stat key (the tail a notification card embeds); each Agent card's reads
+    (_page_agents_moved, inside the caller's subagents-tree scope, or one opened here for the pages of this check, so a
+    tree is sampled once); and the unresolved path tokens, through the chat build's own pathlink check (_chat_sig_deps:
+    the first check re-resolves them, and from then on only the messages whose candidate directories moved). A page with
+    no record is treated as moved. The postal captions stay outside, as _page_sig documents."""
+    if rec is None:
+        return True
+    for of, key in rec["outs"]:
+        if _chat_stat_key(of) != key:
+            return True
+    if rec["agents"]:
+        own = getattr(_live_scope, "subagent_trees", None) is None
+        if own:
+            _live_scope.subagent_trees = ctx.setdefault("trees", {})
+        try:
+            if _page_agents_moved(sid, rec["agents"], ctx):
+                return True
+        finally:
+            if own:
+                _live_scope.subagent_trees = None
+    pl = rec["pl"]
+    return bool(pl["pl_pending"]) and _chat_sig_deps(sid, pl)[1] != pl["pl_at"]
+
+
+def _page_resident(key, ctx):
+    """The pages cache's entry for `key` when it is resident and its live inputs stand (_page_live_moved), else None. An
+    entry whose inputs moved leaves the cache (counted, liveMoved), so the caller's render takes its place; a check that
+    raises counts as moved (liveCheckFailed, said on stderr at its 1st, 10th, 100th and 1000th time)."""
+    with _page_lock:
+        hit = _PAGE_CACHE.get(key)
+        rec = _PAGE_DEPS.get(key)
+    if hit is None:
+        return None
+    failed = False
+    try:
+        moved = _page_live_moved(key[0], rec, ctx)
+    except Exception:
+        moved = failed = True
+        msg = traceback.format_exc().strip().splitlines()[-1]
+    if not moved:
+        return hit
+    with _page_lock:
+        if failed:
+            _PAGE_STATS["liveCheckFailed"] += 1
+            n = _PAGE_STATS["liveCheckFailed"]
+        if _PAGE_CACHE.get(key) is hit:
+            _PAGE_CACHE.pop(key)
+            _PAGE_DEPS.pop(key, None)
+            _PAGE_STATS["bytes"] -= hit[1]
+            _PAGE_STATS["pages"] = len(_PAGE_CACHE)
+            if not failed:
+                _PAGE_STATS["liveMoved"] += 1
+    if failed and n in (1, 10, 100, 1000):
+        sys.stderr.write("chat pages: a cached page's live-input check failed (%s); rendered again\n" % msg)
+    return None
 
 
 def _page_sig(sess, sid, now, floor=None, turns=None):
@@ -62788,8 +62933,14 @@ def _page_sig(sess, sid, now, floor=None, turns=None):
     of it a page reads: the build's segments (_segs_seam -> jd.apply_seams) and the caption scan's message segments
     (_msg_mid_records) both take the seams alone, through the same shared read (jd.load_goals_shared_or_fault; a fault
     reads as no seams on both sides). The store's identity stood here before, so every judge publish for the session
-    re-keyed its pages and the pusher's warm rendered them all again, though a publish that stamps no seam changes no
-    page; a seam stamped, moved or removed still re-keys them. None when the session has no transcript path."""
+    re-keyed its pages and the pusher's warm rendered them all again, though a publish that stamps no seam changes
+    nothing a page reads from the store; a seam stamped, moved or removed still re-keys them. Those publishes also
+    happened to refresh what a page reads that is NOT fixed with the prefix, at a publish's pace and never between two:
+    an Agent card's file (found later, grown), its background report and liveness, a notification's output tail, a path
+    token that resolves once its file exists. Those are not in this key (they would re-key every page at turn rate); each
+    cached page carries a record of them from its render, checked on every hit (_page_resident, _page_live_moved), so a
+    page whose card moved is rendered again at the next probe or click, publish or not. None when the session has no
+    transcript path."""
     path = sess.get("path") if sess else None
     if not path:
         return None
@@ -62821,7 +62972,9 @@ def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None, sig=None, sta
     """The rendered events of turns [lo, hi) of `sid` (build_session's page mode), through a bounded LRU keyed on the
     session's page signature (_page_sig: what a pre-floor page reads, none of the live tail; `sig` when the caller
     computed it once for several pages). Counted (/perf chatPages); `stats["rendered"]` is bumped when this call
-    rendered, so a caller counts its own renders and not a concurrent handler's."""
+    rendered, so a caller counts its own renders and not a concurrent handler's. A resident page is served only while
+    the live inputs its render read stand (_page_resident; the render's record, _page_live_record); one whose inputs
+    moved is rendered again here."""
     if live_map is None:
         live_map = _live_map()
     if sess is None:
@@ -62832,21 +62985,28 @@ def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None, sig=None, sta
         except Exception:
             sig = None
     key = (sid, lo, hi, sig)
-    with _page_lock:
-        hit = _PAGE_CACHE.get(key) if sig is not None else None
+    if sig is not None:
+        hit = _page_resident(key, {"live_map": live_map})
         if hit is not None:
-            _PAGE_CACHE.pop(key); _PAGE_CACHE[key] = hit
-            _PAGE_STATS["hits"] += 1
+            with _page_lock:
+                if _PAGE_CACHE.get(key) is hit:
+                    _PAGE_CACHE.pop(key); _PAGE_CACHE[key] = hit
+                _PAGE_STATS["hits"] += 1
             return hit[0]
+    with _page_lock:
         _PAGE_STATS["misses"] += 1
     if stats is not None:
         stats["rendered"] = stats.get("rendered", 0) + 1
     t0 = time.monotonic()
+    _page_dep_scope.rec = {"agents": [], "outs": []}   # the readers' notes of this render (_page_dep_note)
     try:
         page = build_session(sid, now, live_map, page=(lo, hi))
+        notes = _page_dep_scope.rec
     finally:
         _chat_dep_scope.deps = None
+        _page_dep_scope.rec = None
     evs = (page or {}).get("events") or []
+    rec = _page_live_record(sid, evs, notes) if sig is not None else None
     with _page_lock:
         _PAGE_STATS["renderMs"] += (time.monotonic() - t0) * 1000
         if sig is not None:
@@ -62855,13 +63015,18 @@ def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None, sig=None, sta
             if old is not None:
                 _PAGE_STATS["bytes"] -= old[1]
             _PAGE_CACHE[key] = (evs, nbytes)
+            _PAGE_DEPS[key] = rec
             _PAGE_STATS["pages"] = len(_PAGE_CACHE); _PAGE_STATS["bytes"] += nbytes
             while _PAGE_CACHE and (len(_PAGE_CACHE) > _PAGE_CACHE_MAX or _PAGE_STATS["bytes"] > _PAGE_CACHE_BYTES):
                 _k = next(iter(_PAGE_CACHE))
                 if _k == key and len(_PAGE_CACHE) == 1:
                     break                                 # one page over the byte bound still serves
                 _, _b = _PAGE_CACHE.pop(_k)
+                _PAGE_DEPS.pop(_k, None)
                 _PAGE_STATS["bytes"] -= _b; _PAGE_STATS["evictions"] += 1
+            if len(_PAGE_DEPS) > len(_PAGE_CACHE):        # a record whose page left by another road goes with it
+                for _k in [k for k in _PAGE_DEPS if k not in _PAGE_CACHE]:
+                    del _PAGE_DEPS[_k]
             _PAGE_STATS["pages"] = len(_PAGE_CACHE)
     return evs
 
@@ -62942,9 +63107,9 @@ def _warm_history_pages(feed, now, live_map=None):
     review, 2026-09-11: an unbounded set over the cache re-rendered itself every cycle for the kernel's life). A set is
     remembered as settled only when it is non-empty and every anchor resolved (a session with no render floor yet, an
     index client holding the tabs at 0, leaves the set unresolved, so the floor's return warms). Each admitted page is PROBED first: one resident under
-    the session's current page signature costs nothing, one that is not is rendered, so a page a reader's scrolling
-    evicted or a floor flip re-keyed is warmed again; an unchanged board whose set is fully resident costs one probe of
-    the remembered keys (_WARM_MEMO), nothing else. Skipped whole when the pusher's last cycle ran over WARM_SKIP_MS
+    the session's current page signature whose live inputs stand (_page_resident) costs that check, one that is not is
+    rendered, so a page a reader's scrolling evicted, a floor flip re-keyed or a landed report dropped is warmed again; an
+    unchanged board whose set is fully resident costs one probe of the remembered keys (_WARM_MEMO), nothing else. Skipped whole when the pusher's last cycle ran over WARM_SKIP_MS
     (chatPages.warmSkipped). Only sessions whose chat has been built with a render floor and only anchors before it
     (the tail is resident already). Returns the number of pages rendered by THIS call (its own count, not a shared
     counter's difference: a handler's render meanwhile is not the warm's)."""
@@ -62958,23 +63123,25 @@ def _warm_history_pages(feed, now, live_map=None):
         return 0
     t0 = time.monotonic()
     rows = {x["sid"]: x for x in _sessions(now)}
+    ctx = {"live_map": live_map}                  # the live-input checks' shared reads (_page_resident)
     if tuple(anchors) == _WARM_MEMO["anchors"]:
-        # a settled board: its set still resident under the sessions' CURRENT page signatures costs this probe alone (a
-        # floor flip or a judge publish moves a signature: the remembered keys are then another key's pages); the probe's
-        # time is the warm's (warmMs)
+        # a settled board: its set still resident under the sessions' CURRENT page signatures, every page's live inputs
+        # standing, costs this probe alone (a floor flip or a seam moves a signature: the remembered keys are then another
+        # key's pages; a card whose report landed drops its page, which the loop below renders again); the probe's time is
+        # the warm's (warmMs)
         try:
             same = all(_page_sig(rows[sid_], sid_, now) == sg for sid_, sg in _WARM_MEMO["sigs"].items() if sid_ in rows)
         except Exception:
             same = False
-        with _page_lock:
-            settled = same and all(k in _PAGE_CACHE for k in _WARM_MEMO["keys"])
-            if settled:
+        settled = same and all(_page_resident(k, ctx) is not None for k in _WARM_MEMO["keys"])
+        if settled:
+            with _page_lock:
                 _PAGE_STATS["warmCycles"] += 1
                 _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
-        if settled:
             return 0
     if live_map is None:
-        live_map = _live_map()
+        live_map = ctx["live_map"] if ctx.get("live_map") is not None else _live_map()   # the probe's, when it read one
+        ctx["live_map"] = live_map
     st, pending, keys, unresolved, set_bytes = {"rendered": 0}, 0, set(), 0, 0
     per_sid = {}                                  # sid → (floor, sess, turns, uuid → turn index below the floor, page signature)
     for sid, uuid in anchors:
@@ -63008,8 +63175,7 @@ def _warm_history_pages(feed, now, live_map=None):
             new_keys = [k for k in window if k not in keys]     # a page two windows share is probed, rendered and counted once
             keys.update(window)
             for key in new_keys:
-                with _page_lock:
-                    hit = _PAGE_CACHE.get(key)
+                hit = _page_resident(key, ctx)    # resident AND its live inputs standing; a moved page left the cache
                 if hit is None:
                     _chat_history_page(sid, key[1], key[2], now, sess=sess, live_map=live_map, sig=sig, stats=st)
                     with _page_lock:

@@ -19,7 +19,11 @@ nested agent's lookup tests only the directory that lists it; (4) inside one cyc
 lists nothing; (5) an agent landing elsewhere in the project leaves a sibling-held answer standing, untested; (6) the
 memo holds past 1,024 answers, and a listing inside the racy window is taken again at the next sample; (7) a history page rendered through the held answers equals one rendered with every memo
 emptied, before and after the tree changes; (8) a path token named in several messages of one build pass is resolved
-once; (9) the name index is bounded by the alive sessions' project directories. Red on stock: (3) to (6) and (8).
+once; (9) the name index is bounded by the alive sessions' project directories; (10) a cached history page follows the
+live inputs its cards read that its key leaves out (an agent's file landing or growing, its report landing, its
+liveness flipping, its sidecar naming it, a notification's output tail, a path token's file appearing), with or without
+a judge publish, and only the pages holding the change are rendered again, by a click or by the warm. Red on stock: (3)
+to (6) and (8); (10) is red without the pages' live-input record (on stock, too, when no publish comes between).
 Synthetic fixtures only: placeholder ids, the notes-api demo world, a temp directory."""
 import json
 import os
@@ -500,6 +504,8 @@ class PathTokensOncePerPass(unittest.TestCase):
 class PagesEqualAColdRender(_Project):
     """A history page's Agent cards read the held answers; the page equals one rendered with every memo emptied, and
     after the trees change (an agent's file lands under the fork, another leaves) the re-render equals a cold one too."""
+    TASK_NOTE_AT = None              # a turn whose reply is followed by a background command's notification (its output tail)
+    ACK_WITHOUT_ID = frozenset()     # turns whose launch ack names no agent id (the card learns it from the sidecar)
 
     def setUp(self):
         super().setUp()
@@ -528,6 +534,8 @@ class PagesEqualAColdRender(_Project):
             t, tu = t0 + i * 600, "toolu_launch_%d" % i
             ack = {"isAsync": True, "status": "async_launched", "agentId": a, "description": "review %d" % i,
                    "taskType": "local_agent"}
+            if i in self.ACK_WITHOUT_ID:
+                del ack["agentId"]
             u, a1, r1, a2 = "u%d" % i, "a%d" % i, "r%d" % i, "x%d" % i
             iso = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(s))   # noqa: E731
             recs += [{"type": "user", "uuid": u, "parentUuid": last, "timestamp": iso(t), "sessionId": SID, "cwd": str(cwd),
@@ -545,6 +553,18 @@ class PagesEqualAColdRender(_Project):
                       "message": {"role": "assistant", "model": "claude-opus-5", "stop_reason": "end_turn",
                                   "content": [{"type": "text", "text": "Running; see api/notes.py meanwhile."}]}}]
             last = a2
+            if i == self.TASK_NOTE_AT:       # a notification folds into the turn (it never opens one)
+                self.task_out = cwd / ".tasks" / ("b%d.output" % i)
+                self.task_out.parent.mkdir()
+                self.task_out.write_text("line 1\n")
+                recs.append({"type": "user", "uuid": "n%d" % i, "parentUuid": last, "timestamp": iso(t + 7), "sessionId": SID,
+                             "message": {"role": "user", "content": (
+                                 "<task-notification>\n<task-id>b%d</task-id>\n<tool-use-id>toolu_bg_%d</tool-use-id>\n"
+                                 "<output-file>%s</output-file>\n<status>completed</status>\n"
+                                 "<summary>Background command \"make test\" completed</summary>\n</task-notification>"
+                                 % (i, i, self.task_out))}})
+                last = "n%d" % i
+        self.cwd = cwd
         self.tpath.write_text("".join(json.dumps(r) + "\n" for r in recs))
         rows = [{"sid": SID, "name": "web", "path": str(self.tpath), "mtime": NOW, "anchor": SID}]
         km._sessions = lambda now, **kw: list(rows)
@@ -596,6 +616,181 @@ class PagesEqualAColdRender(_Project):
             cards = self._agent_cards(again)
             self.assertIn("stepsTotal", cards[missing], "the landed file is read")
             self.assertNotIn("stepsTotal", cards[self.aids[0]], "the departed one is not")
+
+
+class PagesFollowTheirLiveInputs(PagesEqualAColdRender):
+    """A cached page follows what its cards read that is not fixed with the prefix (the check's finding, 2026-10-22). The
+    page key holds the goal store by its seams, so a judge publish that stamps none no longer re-keys the pages, and it
+    was that re-key that used to refresh, at a publish's pace, an Agent card's file, report and liveness, a notification's
+    output tail and a path token that resolves later. Each cached page now carries a record of those reads, checked on
+    every hit (_page_resident). Each test renders the three pages (all below the floor), serves them again from the cache
+    with no render, changes one live input, and serves them once more: the served pages equal a cold render, the card
+    shows the change, and only the pages holding it were rendered again. Before the record, the second serve returned
+    the card as first rendered, with or without the publish."""
+    test_pages_through_the_held_answers_equal_a_cold_render_before_and_after_a_change = None
+    TASK_NOTE_AT = 6
+    ACK_WITHOUT_ID = frozenset((7,))
+    MORE = json.dumps({"type": "assistant", "uuid": "s4", "parentUuid": "s3", "timestamp": "2026-06-11T00:00:12.000Z",
+                       "isSidechain": True, "message": {"role": "assistant", "content": [
+                           {"type": "tool_use", "id": "toolu_s4", "name": "Grep", "input": {"pattern": "def "}}]}}) + "\n"
+
+    def setUp(self):
+        super().setUp()
+        km._PATH_LINK_CACHE.clear()                        # a link resolves for its message's life, and every test here
+        self.addCleanup(km._PATH_LINK_CACHE.clear)         #  reuses the same message ids in a fresh directory
+        km._RENDER_FLOOR[SID] = 48                         # every page below the floor: a turn after it re-keys none
+        self.store = jd.GOALDIR / (SID + ".json")
+        self.store.write_text(json.dumps({"nodes": {"g1": {"title": "tidy the api"}}, "status": {}, "seams": []}))
+        racy = mock.patch.object(km, "_SUBAGENT_DIR_RACY_NS", 0)
+        racy.start()
+        self.addCleanup(racy.stop)
+
+    def tearDown(self):
+        km._RENDER_FLOOR.pop(SID, None)
+        super().tearDown()
+
+    def _serve(self):
+        """The three pages through the pages cache inside one cycle scope: (the pages, how many were rendered)."""
+        st = {"rendered": 0}
+        km._live_scope.subagent_trees = {}
+        try:
+            pages = [json.loads(json.dumps(km._chat_history_page(SID, lo, lo + 16, NOW, stats=st), default=str))
+                     for lo in range(0, 48, 16)]
+        finally:
+            km._live_scope.subagent_trees = None
+        return pages, st["rendered"]
+
+    def _cold(self):
+        """The same pages rendered with the cache and every memo emptied."""
+        with km._page_lock:
+            km._PAGE_CACHE.clear()
+        _forget()
+        km._PATH_LINK_CACHE.clear()
+        return self._serve()[0]
+
+    @staticmethod
+    def _ev(pages, pred):
+        return next(e for p in pages for e in p if pred(e))
+
+    def _check(self, change, pred, rendered, publish=False):
+        """Render, serve from the cache, apply `change` (and a publish that stamps no seam), serve again; the served pages
+        equal a cold render and `rendered` pages were rendered again. Returns the event `pred` picks, before and after."""
+        first, n = self._serve()
+        self.assertEqual(n, 3)
+        again, n = self._serve()
+        self.assertEqual((again, n), (first, 0), "nothing moved: every page from the cache, no render")
+        sig = km._page_sig(km._sessions(NOW)[0], SID, NOW)
+        change()
+        if publish:
+            self.store.write_text(json.dumps({"nodes": {"g1": {"title": "tidy the api"}, "g2": {"title": "then the docs"}},
+                                              "status": {"g1": "completed"}, "seams": []}))
+            self.assertEqual(km._page_sig(km._sessions(NOW)[0], SID, NOW), sig, "the publish keeps the pages' key")
+        served, n = self._serve()
+        self.assertEqual(served, self._cold(), "the served pages equal a cold render")
+        self.assertEqual(n, rendered, "only the pages holding the change were rendered again")
+        return self._ev(first, pred), self._ev(served, pred)
+
+    def _landing(self, publish):
+        missing = self.aids[3]                             # no file anywhere: a sibling-held miss, page 0
+        before, after = self._check(lambda: (self.put(self.proj / FORK / "subagents" / "workflows" / "wf_00000000000000aa",
+                                                      missing), self.touch(self.proj)),
+                                    lambda e: e.get("toolUseId") == "toolu_launch_3", 1, publish=publish)
+        self.assertNotIn("stepsTotal", before)
+        self.assertEqual(after.get("stepsTotal"), 1, "the file that landed under the fork is read")
+
+    def test_an_agents_file_landing_under_the_fork_shows_at_the_next_serve(self):
+        self._landing(publish=False)
+
+    def test_it_shows_after_a_publish_that_stamps_no_seam_too(self):
+        self._landing(publish=True)
+
+    def test_an_agents_file_growing_moves_its_steps(self):
+        grows = self.own / ("agent-%s.jsonl" % self.aids[4])
+
+        def change():
+            with open(grows, "a") as fh:
+                fh.write(self.MORE)
+        before, after = self._check(change, lambda e: e.get("toolUseId") == "toolu_launch_4", 1)
+        self.assertEqual((before.get("stepsTotal"), after.get("stepsTotal")), (1, 2))
+
+    def test_a_background_agents_report_landing_after_the_floor_shows_on_its_card(self):
+        def change():
+            iso = lambda s: time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(s))   # noqa: E731
+            t = NOW - 3600
+            more = [{"type": "user", "uuid": "u48", "parentUuid": "x47", "timestamp": iso(t), "sessionId": SID,
+                     "cwd": str(self.cwd), "promptSource": "typed", "message": {"role": "user", "content": "anything back?"}},
+                    {"type": "user", "uuid": "n48", "parentUuid": "u48", "timestamp": iso(t + 1), "sessionId": SID,
+                     "message": {"role": "user", "content": (
+                         "<task-notification>\n<task-id>a5</task-id>\n<tool-use-id>toolu_launch_5</tool-use-id>\n"
+                         "<status>completed</status>\n<summary>Agent \"review 5\" completed</summary>\n"
+                         "<result>The api module reads cleanly.</result>\n</task-notification>")}}]
+            with open(self.tpath, "a") as fh:
+                fh.write("".join(json.dumps(r) + "\n" for r in more))
+        before, after = self._check(change, lambda e: e.get("toolUseId") == "toolu_launch_5", 1)
+        self.assertTrue(before.get("agentRunning"))
+        self.assertEqual((after.get("agentRunning"), after.get("output")), (None, "The api module reads cleanly."))
+
+    def test_a_running_agents_liveness_flipping_leaves_it_pending(self):
+        def change():
+            km._live_map = lambda: {SID: {"subagents": [], "bgTasks": []}}   # the CLI that would deliver them is gone
+        before, after = self._check(change, lambda e: e.get("toolUseId") == "toolu_launch_9", 3)
+        self.assertTrue(before.get("agentRunning"))
+        self.assertIsNone(after.get("agentRunning"))
+        self.assertIn("Async agent launched", after.get("output") or "", "the ack stands as its output")
+
+    def test_a_notifications_output_tail_moving_shows_the_new_tail(self):
+        def change():
+            with open(self.task_out, "a") as fh:
+                fh.write("line 2\n")
+        before, after = self._check(change, lambda e: bool(e.get("taskOutputs")), 1)
+        self.assertEqual((before["taskOutputs"]["toolu_bg_6"]["output"], after["taskOutputs"]["toolu_bg_6"]["output"]),
+                         ("line 1", "line 1\nline 2"))
+
+    def test_a_sidecar_naming_the_agent_of_an_ack_without_its_id_shows_it(self):
+        aid = self.aids[7]
+
+        def change():
+            (self.own / ("agent-%s.jsonl" % aid)).write_text(AGENT_RECORDS)
+            (self.own / ("agent-%s.meta.json" % aid)).write_text(json.dumps({"toolUseId": "toolu_launch_7"}))
+            self.touch(self.own)
+        before, after = self._check(change, lambda e: e.get("toolUseId") == "toolu_launch_7", 1)
+        self.assertEqual((before.get("agentId"), after.get("agentId"), after.get("stepsTotal")), (None, aid, 1))
+
+    def test_a_path_token_whose_file_appears_becomes_a_link(self):
+        def change():
+            (self.cwd / "reports").mkdir()
+            (self.cwd / "reports" / "run-1.md").write_text("# run 1\n")
+        before, after = self._check(change, lambda e: e.get("uuid") == "u1", 3)
+        self.assertNotIn("reports/run-1.md", before.get("pathLinks") or {})
+        self.assertIn("reports/run-1.md", after.get("pathLinks") or {})
+
+    def test_the_warm_renders_again_only_the_page_whose_input_moved(self):
+        if hasattr(km._PERF_STATS, "pusher"):
+            km._PERF_STATS.pusher["cycle_ms_last"] = 20.0
+        km._WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={})
+        card = {"itemId": "n0", "sid": SID, "column": "working", "summaryAnchorUuid": None, "summaryAnchorsPara": None,
+                "tree": [{"id": "n0-%d" % k, "kind": "ask", "status": "open", "anchorUuid": u, "promptAnchorUuid": None}
+                         for k, u in enumerate(("u5", "u20", "u40"))]}
+        feed = {"type": "feed", "asks": [card]}
+        reordered = {"type": "feed", "asks": [dict(card, tree=list(reversed(card["tree"])))]}
+        grows = self.own / ("agent-%s.jsonl" % self.aids[4])
+
+        def warm(f):
+            km._live_scope.subagent_trees = {}
+            try:
+                return km._warm_history_pages(f, NOW, {})
+            finally:
+                km._live_scope.subagent_trees = None
+        self.assertEqual(warm(feed), 3, "the three pages of the anchors' windows")
+        self.assertEqual(warm(feed), 0, "a settled board: the probe alone")
+        with open(grows, "a") as fh:
+            fh.write(self.MORE)
+        self.assertEqual(warm(feed), 1, "the settled probe finds page 0's card moved and the warm renders it alone")
+        self.assertEqual(warm(feed), 0)
+        with open(grows, "a") as fh:
+            fh.write(self.MORE.replace("s4", "s5"))
+        self.assertEqual(warm(reordered), 1, "a board that changed probes each page the same way")
+        self.assertGreaterEqual(km._PAGE_STATS["liveMoved"], 2, "counted")
 
 
 if __name__ == "__main__":
