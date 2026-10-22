@@ -23466,6 +23466,10 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
     // closed session was ACTIVE: the shared chip strip above the composer still shows its chip until
     // someone repaints it, and that stale chip's ✕ targets the dead id (whose map entry is gone), so the
     // click early-returns and the chip can't even be dismissed — hence the repaint below.
+    // Its staged stack goes too: a revive keeps the sid, so a stack left here came back in the revived tab's strip and
+    // went out ahead of the next message the user sent. A viewer bar for the session repaints its staged line here; the
+    // composer's strip follows below (loadComposerFor) when the session was the active one.
+    if (stagedMsgs.takeAll(id).length) paintViewerStaged();
     drafts.delete(id); composerCitations.delete(id); composerEdits.delete(id); composerFiles.delete(id); persistDrafts();
   } else {
     persistDrafts();   // a host drop / omission KEEPS it all (see DismissWhy) — the stash above may have updated the copy
