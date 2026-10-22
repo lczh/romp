@@ -3004,6 +3004,15 @@ esac
 if [[ -n "$session_arg" ]]; then
     _tok="$(_romp_token)"
     _kport="${ROMP_KERNEL_PORT:-29855}"
+    # A relative -d is resolved against THIS shell's cwd, as `romp move` does: the kernel would
+    # otherwise resolve it against its own default new-session folder, which is not where the caller
+    # stands, and start the session in the wrong project (or refuse a folder that is right here).
+    # `~` is the shell's to expand and the kernel canonicalizes the rest; `.` and a leading `./` are
+    # folded here so the line below names the folder as the user knows it, not "<cwd>/.".
+    if [[ -n "$dir_arg" && "$dir_arg" != /* && "$dir_arg" != "~"* && "$dir_arg" != '$'* ]]; then
+        dir_arg="${dir_arg#./}"
+        if [[ -z "$dir_arg" || "$dir_arg" == "." ]]; then dir_arg="$PWD"; else dir_arg="$PWD/$dir_arg"; fi
+    fi
     _dir="${dir_arg:-$PWD}"
     if [[ -z "$_tok" ]]; then
         echo "romp new: the kernel isn't running (no serve token). Start romp (the login service, or \`romp up\`) first." >&2
