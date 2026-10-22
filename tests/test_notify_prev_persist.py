@@ -394,6 +394,104 @@ class PruneAndWriteDiscipline(_Base):
         self.assertNotIn(API + ":g1", km._notify_cards(), "api rendered without it: pruned as before")
 
 
+class AWorkingCardsOwnBellSurvivesItsSessionsAbsence(_Base):
+    """The user sets a card's own bell while the card is still working: "Notify me" to hear when it
+    finishes or blocks, or a mute. The bell prune kept only the cards the build showed or the snapshot
+    remembered, and the snapshot remembered only cards in a notified column or with an announced mark.
+    So one build without the card's session (the session ended and later revived, or not yet revived
+    after a restart) deleted the bell, although a session that did not render says nothing about its
+    cards. The armed card then completed in silence, and a muted one rang. A working card carrying its
+    own bell is now remembered for it, until its session renders without it or the sweep finds that
+    session gone for good."""
+    BOARD = (_card(WEB + ":g1", WEB, "completed"),)
+
+    def setUp(self):
+        super().setUp()
+        (jd.STATE / "session-hosts").write_text("off")   # this test mints its own state root (CLAUDE.md)
+
+    def _working_then_absent(self, value, restart=False):
+        """api's g3 working with the user's bell on it, then a build api sits out: in the same life, or
+        the first build of the next one."""
+        km._set_notify_card(API + ":g3", value, API)
+        self.assertIs(km._notify_cards().get(API + ":g3"), value, "premise: the override is stored")
+        self.boot(_feed(*self.BOARD, _card(API + ":g3", API, "working", name="api"), sessions=[WEB, API]))
+        absent = _feed(*self.BOARD, sessions=[WEB])
+        if restart:
+            self.boot(absent)
+        else:
+            km._feed_notifications(absent)
+        self.assertIs(km._notify_cards().get(API + ":g3"), value, "api did not render: its card's bell stays")
+
+    def _revived(self, col):
+        return km._feed_notifications(_feed(*self.BOARD, _card(API + ":g3", API, col, name="api"), sessions=[WEB, API]))
+
+    def test_an_armed_working_card_rings_after_its_session_returns(self):
+        km._set_notify_all(False)                            # the master off: the card's own bell is the only arm
+        self._working_then_absent(True)
+        self.assertEqual([o[3] for o in self._revived("completed")], [API + ":g3"], "the completion the user asked for")
+
+    def test_the_arm_survives_a_restart_whose_first_build_precedes_the_revival(self):
+        km._set_notify_all(False)
+        self._working_then_absent(True, restart=True)
+        self.assertEqual([o[3] for o in self._revived("needs_input")], [API + ":g3"])
+
+    def test_a_muted_working_card_stays_silent_after_its_session_returns(self):
+        self._working_then_absent(False)                     # the master on (setUp): the mute is what keeps it quiet
+        self.assertEqual(self._revived("completed"), [], "the mute held")
+        self.assertIs(km._notify_cards().get(API + ":g3"), False)
+
+    def test_the_entry_is_written_and_read_back_as_a_bell_entry(self):
+        km._set_notify_all(False)
+        self._working_then_absent(True, restart=True)
+        bell = {"sid": API, "board": "feed", "column": None, "announced": None, "announcedAt": None, "bell": True}
+        self.assertEqual(self.disk()[API + ":g3"], bell)
+        self.assertEqual(km._NOTIFY_PREV[0][API + ":g3"], bell, "the loader keeps what the build wrote")
+
+    def test_a_folded_cards_bell_survives_its_session_sitting_a_build_out(self):
+        # a worker's serving card folds into its dispatch's card while it works (build_feed's serving join): on the
+        # board, not in the build's cards, so the fold carries what is remembered about it, its bell included
+        km._set_notify_all(False)
+        km._set_notify_card(API + ":g3", True, API)
+        self.boot(_feed(*self.BOARD, _card(API + ":g3", API, "working", name="api"), sessions=[WEB, API]))
+        folded = _feed(*self.BOARD, sessions=[WEB, API])
+        folded["servingFoldedIds"] = [API + ":g3"]
+        km._feed_notifications(folded)
+        km._feed_notifications(_feed(*self.BOARD, sessions=[WEB]))
+        self.assertIs(km._notify_cards().get(API + ":g3"), True, "folded, then api sat a build out: the bell stays")
+        self.assertEqual([o[3] for o in self._revived("completed")], [API + ":g3"])
+
+    def test_its_session_rendering_without_it_still_prunes_the_bell(self):
+        km._set_notify_all(False)
+        self._working_then_absent(True)
+        km._feed_notifications(_feed(*self.BOARD, sessions=[WEB, API]))   # api is back, g3 cleared
+        self.assertNotIn(API + ":g3", km._NOTIFY_PREV[0])
+        self.assertNotIn(API + ":g3", self.disk())
+        self.assertNotIn(API + ":g3", km._notify_cards(), "the card is gone: its bell goes with it")
+
+    def test_the_bell_returned_to_its_default_lets_the_entry_go(self):
+        km._set_notify_all(False)
+        self._working_then_absent(True)
+        km._set_notify_card(API + ":g3", False, API)          # back to the default (the master, off): no override
+        self._revived("working")
+        self.assertNotIn(API + ":g3", self.disk(), "nothing left to remember about a working card")
+
+    def test_the_sweep_forgets_the_card_and_its_bell_once_the_session_is_gone_for_good(self):
+        km._set_notify_all(False)
+        self._working_then_absent(True)
+        saved = jd.discover, km._live_map
+        jd.discover = lambda now, window=None, forks=True: [(WEB, "/dev/null", None, "web")]   # api left the window
+        km._live_map = lambda: {WEB: {}}
+        err = io.StringIO()
+        try:
+            with redirect_stderr(err):
+                km._compact_goal_stores()
+        finally:
+            jd.discover, km._live_map = saved
+        self.assertNotIn(API + ":g3", km._NOTIFY_PREV[0])
+        self.assertNotIn(API + ":g3", self.disk())
+        self.assertNotIn(API + ":g3", km._notify_cards(), "a session gone for good takes its card's bell with it")
+
+
 class ACardNamingADeadSessionIsNotItsRender(_Base):
     """A parked hand-off card carries its DEAD recipient's sid and a notice card its owner's, alive or not;
     neither is the session's own render. Counted as one, the build read every remembered card of the dead
