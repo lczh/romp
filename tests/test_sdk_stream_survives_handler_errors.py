@@ -140,6 +140,46 @@ class _ProbedTail(dict):
         return n
 
 
+class _MidWalkTail(dict):
+    """A live tail whose next VALUES WALK (`list(d.values())`, the sweep _mark_dropped_echoes runs) calls
+    `hook(self)` once, right after yielding value number `at`, then resumes the real dict iterator. That
+    iterator raises `RuntimeError: dictionary changed size during iteration` if anything was stashed in
+    the meantime, which is the raise that killed the session thread live. `walked` is set when that walk
+    ends, however it ends. Later walks (the kernel thread's own) are plain."""
+    def __init__(self, *a, at=0, hook=None, **k):
+        super().__init__(*a, **k)
+        self.at, self.hook, self.walked = at, hook, threading.Event()
+    def values(self):
+        hook, self.hook = self.hook, None
+        return super().values() if hook is None else self._walk(hook)
+    def _walk(self, hook):
+        try:
+            for i, v in enumerate(dict.values(self)):
+                yield v
+                if i == self.at:
+                    hook(self)
+        finally:
+            self.walked.set()
+
+
+class _ParkSignallingLock:
+    """The live-tail RLock with one observable event added: a thread that finds it held by ANOTHER thread
+    records its name in `parked_by` and sets `parked` before it blocks. Re-entry by the owner succeeds at
+    once and signals nothing, as on the real RLock. Production takes this lock only as `with`."""
+    def __init__(self, parked):
+        self._lock, self.parked, self.parked_by = threading.RLock(), parked, set()
+    def __enter__(self):
+        if not self._lock.acquire(blocking=False):
+            self.parked_by.add(threading.current_thread().name)
+            self.parked.set()
+            self._lock.acquire()
+        return self
+    def __exit__(self, *exc):
+        self._lock.release()
+    def _is_owned(self):
+        return self._lock._is_owned()
+
+
 def _backend(lines=None, **kw):
     d = tempfile.mkdtemp()
     log = (lambda m: lines.append(str(m))) if lines is not None else (lambda *a, **k: None)
@@ -256,8 +296,10 @@ class LiveTailSweepsSurviveAConcurrentPrune(unittest.TestCase):
 class TheLiveTailLock(unittest.TestCase):
     """REAL threads on plain dicts, with the interpreter's switch interval lowered so the interleavings
     the GIL permits show up within a second: one thread plays the session's loop (stash work atoms,
-    retire them at the settle, mark dropped echoes at a reconnect), the other plays the kernel (stash
-    an echo at send, land it in prune_live, mirror it). On the lock-free tail, probes of this shape
+    retire them at the settle), the other plays the kernel (stash an echo at send, land it in
+    prune_live, mirror it). The reconnect's marking (_mark_dropped_echoes) is the exception: its
+    hammer starved the kernel thread on CI, so its test places the send inside the walk instead (see
+    there). On the lock-free tail, probes of this shape
     raised RuntimeError out of prune_live on 1412 of 1500 calls, out of _mark_dropped_echoes on 8 of
     3000, and orphaned 343 of 60000 stashes in the sid-level pop's window; under the lock nothing
     raises and nothing is orphaned. Each hammer runs until BOTH sides have done their floor of
@@ -265,7 +307,8 @@ class TheLiveTailLock(unittest.TestCase):
     overlap asserted on is guaranteed by construction rather than sampled — under a lock convoy the
     session thread's count for a fixed 1500 kernel calls varied 10–447 run to run, and a `> 2` floor
     on it was a margin by luck. A wall-clock cap is the only other stop, and hitting
-    it FAILS the test: the work takes about a second idle, so the cap means a wedge, not load."""
+    it FAILS the test: the work takes about a second idle, so the cap means a wedge or a starved
+    thread, not load."""
     SEEDED = 60          # unlanded echoes sitting in the tail (the _persist_echoes walk's length)
     CAP_S = 20.0         # ~20x the idle runtime of the longest hammer
 
@@ -361,19 +404,70 @@ class TheLiveTailLock(unittest.TestCase):
         """Refuter finding 2: _mark_dropped_echoes runs on the SESSION thread inside the connect loop, right after
         a fresh CLI spawns (a raise there is caught and logged as a bookkeeping fault, never read as a launch
         error); its comprehension over the tail raised RuntimeError when
-        the kernel thread's send() stashed an echo mid-walk, and the session thread died with no reconnect."""
-        be = self._backend()
-        def session_body(i):
-            be._mark_dropped_echoes(SID, [], refeed=False)   # the resumable-reconnect arm (flag path only)
-        def kernel_body(i):
-            text = "probe send %d" % i
-            be._stash_live(SID, "echo:k%d" % i, _echo("echo:k%d" % i, text, 5))
-            be._persist_echoes(SID)
-            be.prune_live(SID, set(), {text: 6.0}, 0)  # land it, so the tail stays bounded
-        self._assert_overlap(self._hammer(session_body, kernel_body, 3000, 20), 20, 3000)
-        tail = be._live.get(SID) or {}
-        self.assertTrue(all(tail["echo:seed%03d" % i].get("dropped") for i in range(self.SEEDED)),
-                        "the seeded echoes were marked (the marking still does its job)")
+        the kernel thread's send() stashed an echo mid-walk, and the session thread died with no reconnect.
+
+        SCRIPTED, not sampled (2026-10-22). This was a hammer, and on CI it hit the cap again and again with
+        the kernel thread at 1,757 to 2,998 of its 3,000 calls while the session thread ran 1.6 to 2.3 million:
+        a starved waiter, not slow work. The session body holds the lock for nearly its whole iteration and
+        takes it again microseconds after letting go, and CPython's lock is not first-come first-served:
+        the thread that let go usually has it back before the waiter it woke is running, so the kernel
+        thread's stash kept losing the race back in. Production calls this once per
+        spawn, boot or reconnect, never in a loop. So the send is now placed exactly: a real kernel thread
+        runs send()'s stash, mirror and landing from INSIDE the walk (after the first, a middle and the last
+        value), and the walk resumes once that send has either parked on the lock or finished its stash.
+        Under the lock it parks, the walk completes, and the send goes through after it. With the walk moved
+        outside the lock the stash lands mid-walk and the walk raises, on every run (checked against a
+        scratch copy with the selection dedented out of the lock, which the hammer passed)."""
+        for at in (0, self.SEEDED // 2, self.SEEDED - 1):
+            with self.subTest(send_after_value=at):
+                be = self._backend()
+                arrived = threading.Event()        # the send parked on the lock, or finished its stash
+                lock = _ParkSignallingLock(arrived)
+                be._live_lock = lock
+                errors, mid_walk, reachable, kernel = [], [], [], []
+                text = "probe send %d" % at
+                def send():                        # the kernel thread: send()'s echo, its mirror, its landing
+                    try:
+                        be._stash_live(SID, "echo:k", _echo("echo:k", text, 5))
+                        reachable.append("echo:k" in (be._live.get(SID) or {}))
+                        arrived.set()
+                        # A stash that got in mid-walk (no lock) stays in the dict until the walk resumes, so
+                        # the landing below cannot shrink it back and hide the change. Under the lock the walk
+                        # ended before the stash returned, so this does not wait.
+                        walking.walked.wait(self.CAP_S)
+                        be._persist_echoes(SID)
+                        be.prune_live(SID, set(), {text: 6.0}, 0)
+                    except Exception as e:
+                        errors.append(("kernel", repr(e), _chain(e)))
+                    finally:
+                        arrived.set()
+                def inside_the_walk(d):
+                    t = threading.Thread(target=send, name="kernel")
+                    kernel.append(t)
+                    t.start()
+                    if not arrived.wait(self.CAP_S):
+                        mid_walk.append("the send neither parked nor stashed within %.0fs" % self.CAP_S)
+                        return
+                    mid_walk.append({"stash landed mid-walk": dict.__contains__(d, "echo:k"),
+                                     "send parked on the lock": "kernel" in lock.parked_by})
+                walking = _MidWalkTail(be._live[SID], at=at, hook=inside_the_walk)
+                be._live[SID] = walking
+                try:
+                    be._mark_dropped_echoes(SID, [], refeed=False)   # the resumable-reconnect arm (flag path only)
+                except Exception as e:
+                    errors.append(("session", repr(e), _chain(e)))
+                for t in kernel:
+                    t.join(self.CAP_S)
+                self.assertEqual(len(kernel), 1, "the walk reached value %d and ran the send inside it" % at)
+                self.assertFalse(kernel[0].is_alive(), "the send finished once the walk let go of the lock")
+                self.assertEqual(errors, [], "no exception on either thread: %r" % errors[:3])
+                self.assertEqual(mid_walk, [{"stash landed mid-walk": False, "send parked on the lock": True}],
+                                 "the send's stash waited for the walk to release the tail lock")
+                self.assertEqual(reachable, [True], "the stash went into the tail _live still holds")
+                tail = be._live.get(SID) or {}
+                self.assertTrue(all(tail["echo:seed%03d" % i].get("dropped") for i in range(self.SEEDED)),
+                                "the seeded echoes were marked (the marking still does its job)")
+                self.assertNotIn("echo:k", tail, "the send's echo landed after the walk and was pruned")
 
     def test_no_stash_is_orphaned_by_the_sid_level_pop(self):
         """Refuter finding 3: `if not d: _live.pop(sid)` was two steps; a stash between them landed in a
@@ -443,7 +537,8 @@ class TheLiveTailLock(unittest.TestCase):
         """The deterministic twin of the hammers above, which PASS with the lock dedented out of
         _persist_echoes and _mark_dropped_echoes (a RuntimeError needs the interleaving to land inside
         one dict walk, and the hammers only sample for it; the source pin below was the one thing that
-        caught the mutant). Every sweep's first step on the shared dict is its emptiness check, so a
+        caught the mutant, until the scripted mid-walk send above took over _mark_dropped_echoes's
+        walk). Every sweep's first step on the shared dict is its emptiness check, so a
         dict subclass runs the probe there (_ProbedTail): a second thread tries the lock without
         blocking. Under the lock the probe is refused, every time; without it the probe's stash lands
         mid-sweep — and in prune_live and retire_live_work the check right before the sid-level pop
