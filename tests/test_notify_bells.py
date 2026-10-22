@@ -34,8 +34,13 @@ def _card(iid, sid, col, text="Fix the login flow", **kw):
     return d
 
 
-def _feed(*cards):
-    return {"type": "feed", "asks": [dict(c) for c in cards]}
+def _feed(*cards, sessions=None):
+    """A feed build; `sessions`, when given, is the roster that rendered (a session with no card left in it
+    rendered too). Omitted, the roster is whatever the cards themselves name."""
+    d = {"type": "feed", "asks": [dict(c) for c in cards]}
+    if sessions is not None:
+        d["sessions"] = [{"sid": s, "name": "s"} for s in sessions]
+    return d
 
 
 class NotifyCardStore(unittest.TestCase):
@@ -220,7 +225,9 @@ class FeedNotifications(unittest.TestCase):
     def test_an_armed_card_leaving_the_feed_is_pruned(self):
         km._set_notify_card("TESTSID:g1", True)
         km._feed_notifications(_feed(_card("TESTSID:g1", "TESTSID", "working")))
-        km._feed_notifications(_feed())                     # cleared/archived → id never comes back
+        # cleared/archived → id never comes back. The session renders without it: a build the session sits out
+        # says nothing about its cards, so an empty board alone keeps the bell (tests/test_notify_prev_persist.py)
+        km._feed_notifications(_feed(sessions=["TESTSID"]))
         self.assertEqual(km._notify_cards(), {}, "the store tracks the live feed, not history")
 
     def test_the_master_arms_everything_by_default(self):

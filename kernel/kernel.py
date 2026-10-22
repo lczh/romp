@@ -69696,6 +69696,12 @@ def _card_needs_you(a):
 #     that thread already, and the board shows the card.
 # A working card keeps its announced mark in the store until its session renders without it, so the
 # rule holds across a restart too. The silent first-boot seed counts as told (the user has the board).
+# A working card the user set a bell on (an arm or a mute) is kept in the store too, marked `bell`, though
+# nothing was announced (2026-10-22). The bell prune keeps only what the build showed or the store holds,
+# and such a card was in neither once its session was off the board for one build (ended and revived,
+# or not yet revived after a restart). The user's "Notify me" was deleted and the completion never rang;
+# a mute was deleted and the card rang anyway. Its session renders without it, or the sweep finds that
+# session gone for good, and the entry and the bell go together.
 # The desktop notice and the phone push both iterate the list this diff returns, so the one gate covers
 # both legs; _buzz_claim's one-buzz-per-turn-end rule sits after it, unchanged.
 _NOTIFY_COLUMNS = tuple(_CODE_BOARDS["feed"]["notify"])   # the feed board's notify set, the value the snapshot entries are checked against
@@ -69708,8 +69714,9 @@ _NOTIFY_COLUMNS = tuple(_CODE_BOARDS["feed"]["notify"])   # the feed board's not
 _NOTIFY_ROSTER_SKIP = ("parked:", "notice:")
 # itemId -> {"sid", "column" (the notified column the card was last SEEN in, None while it sits in
 # working), "announced" (the column last announced, None if never), "announcedAt" (seconds)}; the
-# store holds a card while it is in a notified column or carries an announced mark. None = this life's
-# first build pending.
+# store holds a card while it is in a notified column or carries an announced mark, and a working card
+# with neither while it carries a bell override of its own ("bell": True). None = this life's first
+# build pending.
 _NOTIFY_PREV = [None]
 _NOTIFY_PREV_DISK = [None]    # what notify-prev.json last held: a write happens only when the snapshot changes
 _NOTIFY_PREV_WRITE_FAULT = [None]   # the last write failure's text — said once per episode; a landed write clears it
@@ -69760,7 +69767,8 @@ def _notify_prev_entry(ent):
     string; board the card's board (absent on an entry written before the boards: the feed); column a
     category of THAT board's notify set or None (the card sits outside the set with an announced mark);
     announced one of the same or None; announcedAt a number or None; and at least one of column /
-    announced set, else there is nothing to remember. The check reads the card's board, not the feed's
+    announced set, or bell True (a working card remembered for its bell override alone), else there is
+    nothing to remember. The check reads the card's board, not the feed's
     literal set (the 1837 round-two read): a board whose notify names a category the feed lacks would
     otherwise announce, be written, be dropped on reload and announce again."""
     if not isinstance(ent, dict) or not isinstance(ent.get("sid"), str):
@@ -69768,15 +69776,19 @@ def _notify_prev_entry(ent):
     board = ent.get("board") if isinstance(ent.get("board"), str) and ent.get("board") else "feed"
     allowed = _board_notify(board)
     col, ann, at = ent.get("column"), ent.get("announced"), ent.get("announcedAt")
+    bell = ent.get("bell") is True
     if col not in allowed and col is not None:
         return None
     if ann not in allowed and ann is not None:
         return None
     if at is not None and not isinstance(at, (int, float)):
         return None
-    if col is None and ann is None:
+    if col is None and ann is None and not bell:
         return None
-    return {"sid": ent["sid"], "board": board, "column": col, "announced": ann, "announcedAt": int(at) if at is not None else None}
+    out = {"sid": ent["sid"], "board": board, "column": col, "announced": ann, "announcedAt": int(at) if at is not None else None}
+    if bell:
+        out["bell"] = True
+    return out
 
 
 def _notify_user_acted_since(sid, iid, since):
@@ -69945,6 +69957,7 @@ def _feed_notifications_diff(feed):
               - set(_kept_open)) | {str(a.get("sid") or "") for i, a in cur.items() if not i.startswith(_NOTIFY_ROSTER_SKIP)}
     nxt = {i: e for i, e in prev.items() if i not in cur and e.get("sid") not in roster}   # unrendered: remembered,
     #                                                until the sweep finds the session gone for good (_notify_prev_forget_gone)
+    cards = _notify_cards()                          # the bell overrides: a card carrying its own is remembered (below)
     # FOLDED, NOT GONE: a worker's serving card that left the board's cards only because the build folded it into its
     # dispatch's card (build_feed's serving join, from working or completed) keeps its mark the way a working card does.
     # Read as gone, every needs-you, fold, needs-you flap announced it again with nothing from the user in between, and
@@ -69955,6 +69968,9 @@ def _feed_notifications_diff(feed):
         if ent is not None and ent.get("announced"):
             nxt[iid] = {"sid": ent.get("sid"), "board": ent.get("board") or "feed", "column": None,
                         "announced": ent["announced"], "announcedAt": ent.get("announcedAt")}
+        elif ent is not None and iid in cards:       # never announced, but its own bell is set: kept for that, as a working card is (below)
+            nxt[iid] = {"sid": ent.get("sid"), "board": ent.get("board") or "feed", "column": None,
+                        "announced": None, "announcedAt": None, "bell": True}
     now_t = int(feed.get("now") or time.time())   # the build's own moment: wall clock, like the journal's t
     entered = []                                     # (itemId, card, column, entry): the cards that ENTERED a column
     for iid, a in cur.items():
@@ -69972,10 +69988,14 @@ def _feed_notifications_diff(feed):
         elif ent is not None and ent.get("announced"):
             # in working now, but announced before: the mark is what keeps a return to that column silent
             nxt[iid] = {"sid": sid, "board": board, "column": None, "announced": ent["announced"], "announcedAt": ent.get("announcedAt")}
+        elif iid in cards:
+            # in working, never announced, but the user set this card's own bell (an arm or a mute): remembered for the bell,
+            # so a build its session sits out keeps it, and the prune below keeps the bell. Only a build of its session
+            # without the card, or the sweep, lets both go (2026-10-22)
+            nxt[iid] = {"sid": sid, "board": board, "column": None, "announced": None, "announcedAt": None, "bell": True}
     out = []
     ring = []                                        # the same entries as pull candidates (plans/federated-push.md, the pull section)
     if not first_boot:
-        cards = _notify_cards()
         for iid, a, col, e in entered:
             bell = _push_explicit_bell(e["sid"], iid, cards)
             if bell is False:
