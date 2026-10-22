@@ -187,11 +187,11 @@ class StringRowsAndRestoreSplit(Harness):
         self.assertTrue(self.doc(path), em.asm_checkpoint_stats())
         return path
 
-    def test_a_written_document_is_version_9_with_string_rows_and_restores_equal(self):
+    def test_a_written_document_is_version_10_with_string_rows_and_restores_equal(self):
         path = self._compacting()
         d = _doc(path)
-        self.assertEqual(d["av"], 9, "version 9: a failed command's stderr is its output atom (version 8: the parallel tool batch "
-                                     "keep; version 7: the settled-turn cut, stage one b)")
+        self.assertEqual(d["av"], 10, "version 10: a stop closes the restore window (version 9: a failed command's stderr is its "
+                                      "output atom; version 8: the parallel tool batch keep; version 7: the settled-turn cut, stage one b)")
         self.assertGreater(len(d["atoms"]), 0)
         self.assertTrue(all(isinstance(r, str) for r in d["atoms"]), "every atom row is a JSON string")
         self.assertTrue(all(isinstance(json.loads(r), dict) for r in d["atoms"]), "each decodes to the row it was")
@@ -211,19 +211,20 @@ class StringRowsAndRestoreSplit(Harness):
         self.assertEqual(em.asm_checkpoint_stats()["fallbacks"].get("rows"), 1, "counted once under `rows`: %s" % em.asm_checkpoint_stats()["fallbacks"])
         self.assertEqual(_strip(tree), self.cold(path))
 
-    def test_the_previous_version_is_refused_once_and_the_next_settle_writes_version_9(self):
-        # the deploy boot of the stderr output atom (2026-10-19; the parallel tool batch keep's and stage one b's were the same
-        # road): every version 8 document (pre-cut rows that stored a failed command's stderr as a human atom) is refused ONCE
-        # under `version` and the settle that follows the whole parse writes the version 9 document; the boot after restores
+    def test_the_previous_version_is_refused_once_and_the_next_settle_writes_version_10(self):
+        # the deploy boot of the stop closing the restore window (2026-10-22; the stderr output atom's, the parallel tool batch
+        # keep's and stage one b's were the same road): every version 9 document (pre-cut rows that dropped a repeated prompt
+        # sent after such a stop, and a carry that can hold the window open) is refused ONCE under `version` and the settle that
+        # follows the whole parse writes the version 10 document; the boot after restores
         path = self._compacting()
         d = _doc(path)
-        d["av"] = 8                                                # the previous version's document: the old rows
+        d["av"] = 9                                                # the previous version's document: the old rows
         _write_doc(path, d)
         em._ASM_CKPT_STATS["fallbacks"] = {}
         self.fresh(); modes = []; self.parse(path, modes)
         self.assertEqual(modes, ["full"]); self.assertEqual(em.asm_checkpoint_stats()["fallbacks"].get("version"), 1, "the migration boot's road")
         self.assertTrue(self.doc(path), "the settle rewrites it")
-        self.assertEqual(_doc(path)["av"], 9)
+        self.assertEqual(_doc(path)["av"], 10)
         got, modes, n_lazy = self.restored(path)
         self.assertEqual(modes, ["restore"])
         self.assertEqual(em.asm_checkpoint_stats()["fallbacks"].get("version"), 1, "refused once, never again")

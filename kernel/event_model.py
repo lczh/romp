@@ -4763,6 +4763,23 @@ class FileAdapter:
                     # timestamp, so this chronological walk meets it right beside the original — before
                     # the boundary that produced it — and gating on _compacted would never fire. It is
                     # the same record either way. Only the restore-burst case is compaction-scoped.
+                    if is_interrupt_record(r):
+                        # The CLI's stop record closes the restore window, as an assistant record does
+                        # (2026-10-22). Left open until the model's first record, a stop pressed before that
+                        # record kept the window armed: the stop, and the person's next prompt parented at it,
+                        # were each read as a replay and dropped whenever the text repeated an earlier message
+                        # ("continue" after a stop). The prompt vanished from the chat and the turns, and its
+                        # reply was filed under the stop's turn or, with an earlier stop in the session, as the
+                        # compaction's triggerless continuation. This is a TRADEOFF, not an invariant. A stop
+                        # pressed before the model's first record is the person's own gesture, and so is the
+                        # prompt after it. A restored tail that itself carries a stop copy also closes the
+                        # window at that copy, so the later copies in that burst render as new asks. The two
+                        # look alike (the stop's text and parent are the same in both), so no event tells them
+                        # apart. Accepted: no live restore window held any textual replayed record (0 of 338,
+                        # the 2026-09-19 measurement above), while a stop before the model's first record is a
+                        # live shape. tests/test_event_model_compact_turn.py pins both sides, so a later change
+                        # to the window is a visible decision.
+                        _restoring = False
                     th = _th(txt)
                     key = (int(self.ts_of.get(u) or 0), th)
                     if key in _seen_exact or (_compacted and _restoring and th in _seen_text):
@@ -7117,7 +7134,7 @@ def _asm_reseat_src(ad, path, recs):
 # whole parse; a compaction landing after the document demotes the tail fold to the restore road, whose tail parse from
 # the cut takes the compaction in, while the tail is under the churn bound's share (2026-09-24; past the share, and until
 # then always, a whole parse, after which the next settle writes a new cut).
-_ASM_CKPT_V = 9                       # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
+_ASM_CKPT_V = 10                      # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
 #                                       4: a `turns` section over the pre-cut rows (T323 stage 4c: the lazy index)
 #                                       5: lazy markers carry pc (assistant prose chars) and mid (postal message ids); a turn row
 #                                          carries pcs and hT, a segment row w, mids and hp (T358: the per-cycle walkers read scalars).
@@ -7143,6 +7160,9 @@ _ASM_CKPT_V = 9                       # 2: atom rows carry [offset, len], nt for
 #                                       9: a failed slash command's <local-command-stderr> record is the command's output atom (kind "o"),
 #                                          not a human user atom (LOCAL_STDERR_RE, 2026-10-19): a v8 document stores the old human row, its
 #                                          own turn and its segment; refused once (`version`) at the deploy boot and rewritten, as v8 was
+#                                      10: the CLI's stop record closes the restore window after a compaction (FileAdapter._prepass,
+#                                          2026-10-22): a v9 document's pre-cut rows lack a repeated prompt sent after such a stop, and its
+#                                          carry can hold the window still open; refused once (`version`) at the deploy boot and rewritten
 _MAT_CAP = _env_or("ROMP_ASM_INDEX_CAP", max(500_000, _machine_memory_bytes() // (32 * 1024)))
 _MAT_LRU = collections.OrderedDict()  # (id(LazyAtoms), row) → (weakref.ref(LazyAtoms), row): eviction drops the memo, never a field
 #                                       in place. The list is held WEAKLY (measured 2026-09-15): a strong reference here kept every

@@ -509,9 +509,10 @@ class ScalarWalkers(Restored):
                                                                 em._prose_chars, em.atom_prose_chars, em.postal_mids, em._encoded_mids,
                                                                 em.is_interrupt_record, em._content, em._text_of, em._lazy_of, em.atom_mids,
                                                                 em._machine_written)) + "\n" + em.POSTAL_RE.pattern
-        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (9, "56888f276a"),   # v9: a failed command's stderr
-        #                                                                                      became its output atom, the work rule did
-        #                                                                                      not (v8 likewise: the batch keep moved the
+        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (10, "56888f276a"),  # v10: a stop closes the restore
+        #                                                                                      window, the work rule did not change (v9
+        #                                                                                      likewise: a failed command's stderr became
+        #                                                                                      its output atom; v8: the batch keep moved the
         #                                                                                      stored verdicts; v7, stage one b: the cut
         #                                                                                      rule; v6, T401 (4): the row format)
                          "the stored verdicts' rules changed: bump em._ASM_CKPT_V and re-pin the digest here")
