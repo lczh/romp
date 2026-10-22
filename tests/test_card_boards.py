@@ -6,6 +6,7 @@ category instead of a literal. Phase three: the board STORE (STATE/boards/<id>.j
 read by _boards() memoized on the directory's stat; the pure resolver _board_resolve_post the notice producer calls; the
 standing count its refusals read; the snapshot entries carrying and checked against their board; the frame's boards field;
 POST /board and GET /boards. Synthetic fixtures only (the notes-api demo world)."""
+import contextlib
 import inspect
 import json
 from unittest import mock
@@ -461,6 +462,194 @@ class TheBellRoundTripOnADataBoard(unittest.TestCase):
         self.assertEqual(again, [], "the reloaded entry stands under its board: the same pair is not announced again")
         self.assertIn("seeded 1 cards from disk", err.getvalue())
         self.assertEqual(km._NOTIFY_PREV[0]["notice:%s:sweep:1" % SID]["board"], "notes")
+
+
+SID_API = "22222222-3333-4444-5555-666666666666"       # api
+SID_TESTS = "33333333-4444-5555-6666-777777777777"     # tests
+_SESSIONS = ((SID, "web"), (SID_API, "api"), (SID_TESTS, "tests"))
+_FEED_CATS = ("working", "needs_input", "completed")
+_NOTES_CATS = ("new", "kept", "done")
+
+
+def _many_cards(n, step):
+    """n cards over the three sessions, the even ones goals on the feed and the odd ones notice cards on the notes board,
+    each moved one category along per step (so a run of steps enters cards into each board's notify set and out of it)."""
+    asks = []
+    for i in range(n):
+        sid, name = _SESSIONS[i % 3]
+        if i % 2:
+            cat = _NOTES_CATS[(i + step) % 3]
+            asks.append({"itemId": "notice:%s:result-%d:1" % (sid, i), "sid": sid, "name": name, "text": "result %d is in" % i,
+                         "board": "notes", "category": cat, "column": "needs_input" if cat == "new" else "completed"})
+        else:
+            cat = _FEED_CATS[(i + step) % 3]
+            asks.append({"itemId": "%s:g%d" % (sid, i), "sid": sid, "name": name, "text": "route %d answers 500" % i, "board": "feed",
+                         "category": cat, "column": cat, "live": True, "blocked": None,
+                         "blockSummary": "which fixture does it read?" if cat == "needs_input" else None})
+    return asks
+
+
+class OneReadPerBuild(unittest.TestCase):
+    """The board store is read ONCE per feed build (2026-10-22). The needs-you set, the box's rows, the per-session counts, the
+    badge and the bell diff each asked _boards() once per card, and every ask listed the boards directory and stat'd its files
+    to key the memo: thousands of directory reads per build on a board of a thousand cards. The pusher's build now reads the
+    store once as it starts and answers every per-card read from that read. The bells, the pushes, the badge, the rows and the
+    snapshot come out as the per-card reads made them; an edit reaches the next build; another thread, and the doors' own
+    check-then-write, read the store as it stands."""
+
+    def setUp(self):
+        self.w = World()
+        self.saved = (list(km._built_feed), km._feed_needs_input[0], km._feed_needs_rows[0], km._feed_needs_input_count[0],
+                      km._NOTIFY_PREV[0], km._NOTIFY_PREV_DISK[0], km._NOTIFY_BOARD[0])
+        km._notify_cards_cache.clear(); km._flags_cache.clear()
+        self._fresh_life()
+        km._set_notify_all(True)                                        # the master bell: every card notifies
+        km.define_board(dict(NOTES))                                    # notify ["new"], needsYou "new"
+        self.n, self.step, self.before, self.during = 0, 0, None, None
+        self.fired, self.pushed, self.badges = [], [], []
+        self.patches = [mock.patch.object(km, "build_feed", self._build), mock.patch.object(km, "_task_tracking_on", lambda: True),
+                        mock.patch.object(km, "_system_notify", lambda t, b: self.fired.append((t, b))),
+                        mock.patch.object(km, "_push_notify", lambda *a, **k: self.pushed.append((a, sorted(k.items())))),
+                        mock.patch.object(km, "_push_forward", lambda events: None),
+                        mock.patch.object(km, "_badge_push", self.badges.append),
+                        mock.patch.object(km, "_buzz_claim", lambda sid, key, kind: True),
+                        mock.patch.object(km, "_turn_end_key", lambda sid, reg=None: 0)]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+        (built, km._feed_needs_input[0], km._feed_needs_rows[0], km._feed_needs_input_count[0],
+         km._NOTIFY_PREV[0], km._NOTIFY_PREV_DISK[0], km._NOTIFY_BOARD[0]) = self.saved
+        km._built_feed[:] = built
+        km._notify_cards_cache.clear(); km._flags_cache.clear(); km._pusher_wake.clear()
+        self.w.close()
+
+    @staticmethod
+    def _fresh_life():
+        """A kernel life before its first feed build: no snapshot in memory or on disk, no build stored."""
+        km._built_feed[:] = [None, None, 0.0, 0.0]
+        km._feed_needs_input[0] = km._feed_needs_rows[0] = km._feed_needs_input_count[0] = None
+        km._NOTIFY_PREV[0] = None; km._NOTIFY_PREV_DISK[0] = None; km._NOTIFY_BOARD[0] = frozenset()
+        (km.jd.STATE / "notify-prev.json").unlink(missing_ok=True)
+
+    def _build(self, now, live_map=None):
+        """build_feed's stand-in: this step's cards, and the frame's boards read as build_feed reads them (the build's first
+        ask), with a hook before that read and one after it."""
+        if self.before is not None:
+            self.before()
+        boards = km._boards_data()
+        if self.during is not None:
+            self.during()
+        return {"type": "feed", "asks": _many_cards(self.n, self.step), "items": [], "working": [], "awaiting": [], "stateUnknown": [],
+                "sessions": [{"sid": s, "name": nm} for s, nm in _SESSIONS], "now": now, "boards": boards}
+
+    def _push(self, now):
+        """One pusher feed build through the single-flight door (_cached_feed), the stored build cleared so it builds."""
+        km._built_feed[:] = [None, None, 0.0, 0.0]
+        feed = km._cached_feed(now, {}, "sig-%d" % now)
+        self.assertIsNone(getattr(km._BOARDS_BUILD, "read", None), "the build's read ends with the build")
+        return feed
+
+    def _run(self, steps, n=90):
+        """The builds of `steps` from a fresh life: per build, what it rang, pushed and counted, and the snapshot it left."""
+        self._fresh_life()
+        self.n, out = n, []
+        for k, step in enumerate(steps):
+            del self.fired[:], self.pushed[:], self.badges[:]
+            self.step = step
+            feed = self._push(1000 + 10 * k)
+            out.append({"fired": list(self.fired), "pushed": list(self.pushed), "badge": list(self.badges),
+                        "needs": km._feed_needs_input[0], "rows": km._feed_needs_rows[0], "counts": km._feed_needs_input_count[0],
+                        "snapshot": json.loads(json.dumps(km._NOTIFY_PREV[0])), "boards": feed["boards"]})
+        return out
+
+    def test_a_build_lists_the_boards_directory_once_whatever_the_card_count(self):
+        bdir, real, seen = str(km._board_dir()), os.listdir, []
+
+        def listdir(p="."):
+            if str(p) == bdir:
+                seen.append(p)
+            return real(p)
+
+        for n in (30, 300):
+            self._fresh_life()
+            self.n = n
+            for k, step in enumerate((0, 1)):                       # the silent seed, then a build that rings
+                del seen[:], self.fired[:]
+                self.step = step
+                with mock.patch.object(km.os, "listdir", listdir):
+                    self._push(2000 + 10 * k)
+                self.assertEqual(len(seen), 1, "%d cards, build %d: the boards directory listed once, not once per card and question" % (n, k))
+            self.assertTrue(self.fired, "the second build rang: the bell diff ran its per-card reads")
+
+    def test_the_bells_pushes_badge_rows_and_snapshot_are_the_per_card_reads(self):
+        steps = (0, 1, 2, 2, 0)
+        with mock.patch.object(km, "_boards_read_once", contextlib.nullcontext):
+            per_card = self._run(steps)                             # every read asks the store, as before the one read
+        once = self._run(steps)
+        self.assertEqual(once, per_card, "one read per build decides every bell, push, badge, row and snapshot entry as the per-card reads did")
+        # not a comparison of empties: both boards' sets decided something
+        bodies = [b for build in per_card for _t, b in build["fired"]]
+        self.assertEqual(per_card[0]["fired"], [], "the first build of a life seeds silently")
+        self.assertTrue(any(b.startswith("Needs you: result") for b in bodies), "a notes card entering new rings as needs-you (notes' badge category)")
+        self.assertTrue(any(b.startswith("Completed: route") for b in bodies), "a feed goal entering completed rings")
+        self.assertFalse(any(b.startswith("Completed: result") for b in bodies), "notes' done is outside its notify set: never rung")
+        self.assertTrue(all(build["badge"] and build["badge"][0] > 0 for build in per_card))
+        self.assertEqual(per_card[-1]["boards"], {"notes": NOTES})
+
+    def test_an_edit_after_the_builds_read_reaches_the_next_build_and_another_thread_reads_it_at_once(self):
+        self.n, self.step = 2, 0                                    # a feed goal in working, a notes card in kept
+        fp, seen = km.jd.STATE / "boards" / "notes.json", {}
+        self._push(3000)                                            # the silent seed
+        dirt = len(self.w.dirty)
+
+        def edit():                                                 # after the build's read: kept joins notes' notify set, in place
+            fp.write_text(json.dumps(dict(NOTES, notify=["new", "kept"])))
+            other = []
+            t = threading.Thread(target=lambda: other.append(km._boards_data()["notes"]["notify"]))
+            t.start(); t.join()
+            seen["other thread"] = other[0]
+            seen["this thread"] = km._boards()["notes"]["notify"]
+            seen["fresh"] = km._boards_data(fresh=True)["notes"]["notify"]
+
+        self.during = edit
+        del self.fired[:]
+        feed = self._push(3010)
+        self.assertEqual(seen, {"other thread": ["new", "kept"], "this thread": ["new"], "fresh": ["new", "kept"]},
+                         "the build keeps its one read; another thread and a fresh read see the file as it stands")
+        self.assertEqual(feed["boards"]["notes"]["notify"], ["new"], "the frame's boards are the read the bells used")
+        self.assertEqual(self.fired, [], "kept was outside the set this build read")
+        self.assertGreater(len(self.w.dirty), dirt, "the edit, read mid-build, marked the views dirty: the next build comes")
+        self.during = None
+        feed = self._push(3020)
+        self.assertEqual(feed["boards"]["notes"]["notify"], ["new", "kept"])
+        self.assertEqual(self.fired, [("Romp: api", "Completed: result 1 is in")], "the next build reads the edit, and the card in kept rings once")
+        # an edit after the build started but before its first ask is that build's: the read waits for the ask, so a define's
+        # file landing before it is read, and one landing after it marks the views dirty after the build's start (the dirty floor)
+        self.before = lambda: fp.write_text(json.dumps(NOTES))
+        del self.fired[:]
+        feed = self._push(3030)
+        self.assertEqual(feed["boards"]["notes"]["notify"], ["new"], "the build read the store at its first ask, after the edit")
+        self.assertEqual(self.fired, [])
+
+    def test_the_doors_read_the_store_fresh_inside_a_build(self):
+        scratch = dict(NOTES, id="scratch", title="Scratch")
+        with km._boards_read_once():
+            self.assertEqual(sorted(km._boards()), ["feed", "notes"], "the build's first ask takes its read, before scratch exists")
+            self.assertIsNone(km.define_board(dict(scratch))[1])
+            self.assertNotIn("scratch", km._boards(), "the build's readers keep its one read")
+            km._notice_append(SID, _row(SID, "sweep", 1, 100, board="scratch", category="kept"))
+            World.reset_memos()
+            dropped = dict(scratch, categories=[c for c in scratch["categories"] if c["id"] != "kept"],
+                           rules=[r for r in scratch["rules"] if r["category"] != "kept"])
+            self.assertRegex(km.define_board(dropped)[1] or "", r"drops category 'kept', which still holds 1 standing card",
+                             "define checks the definition the store holds, not the build's read")
+            km._notice_append(SID, {"op": "expire", "key": "sweep", "rev": 1, "t": 200, "sid": SID})
+            World.reset_memos()
+            self.assertEqual(km.remove_board("scratch"), (True, None), "remove finds the board the store holds")
+        self.assertNotIn("scratch", km._boards())
 
 
 class TheDoors(unittest.TestCase):
