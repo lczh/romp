@@ -2186,6 +2186,41 @@ MOCK
     grep '/new' "$MOCK_LOG" | grep -qF "\"dir\": \"$WORK_DIR\""
 }
 
+@test "new: a relative -d is resolved against the caller's cwd, not the kernel's default folder" {
+    _stub_curl
+    export ROMP_SERVE_TOKEN=testtok
+    # setup() cd'd into WORK_DIR: `-d web` means the web folder right here. Sent as typed, the kernel
+    # would join it onto its own default new-session folder and start the session in another project
+    mkdir -p "$WORK_DIR/web"
+    : > "$MOCK_LOG"
+    run run_romp new -d web side
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"working in $WORK_DIR/web)"* ]]
+    grep '/new' "$MOCK_LOG" | grep -qF "\"dir\": \"$WORK_DIR/web\""
+    # a leading ./ means the same folder, and the line names it without the ./
+    : > "$MOCK_LOG"
+    run run_romp new -d ./web side
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"working in $WORK_DIR/web)"* ]]
+    grep '/new' "$MOCK_LOG" | grep -qF "\"dir\": \"$WORK_DIR/web\""
+    # `.` is the caller's cwd itself, named as such rather than "<cwd>/."
+    : > "$MOCK_LOG"
+    run run_romp new -d . side
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"working in $WORK_DIR)"* ]]
+    grep '/new' "$MOCK_LOG" | grep -qF "\"dir\": \"$WORK_DIR\""
+    # ../ climbs from the caller's cwd too; the kernel canonicalizes the path
+    : > "$MOCK_LOG"
+    run run_romp new -d ../elsewhere side
+    [ "$status" -eq 0 ]
+    grep '/new' "$MOCK_LOG" | grep -qF "\"dir\": \"$WORK_DIR/../elsewhere\""
+    # a quoted ~ or $VAR is left for the kernel to expand, exactly as typed
+    : > "$MOCK_LOG"
+    run run_romp new -d '~/notes-api' side
+    [ "$status" -eq 0 ]
+    grep '/new' "$MOCK_LOG" | grep -qF '"dir": "~/notes-api"'
+}
+
 @test "romp checkin/checkout: usage without a host, loud failure with no kernel" {
     run "$ROMP_SCRIPT" checkin
     [ "$status" -eq 2 ]
