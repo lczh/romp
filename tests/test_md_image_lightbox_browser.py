@@ -40,7 +40,11 @@ in a raw HTML <p> sit side by side, unframed; a bold picture in the middle of a 
 each keep the box, stacked; two raw <img> lines at the root at 45% each with no blank line between sit side by side, as in
 a <p>. And the review of #353's (2026-10-22): raw pictures on consecutive lines each keep the box, stacked, unless every one
 gives a percentage width and the percentages add up to 100 at most: three with no widths, the caption on the line after
-the last directly under it; two at 60%; one at 45% beside one with no width.
+the last directly under it; two at 60%; one at 45% beside one with no width. And the review of #355's (2026-10-22): the
+rule counts 3 for every space shown between a row's pictures, so rows the spaces push past the line stack, each boxed
+(4 x 25%, 2 x 50%, 49.5 x 2, 33 x 3, and a README pair with an &nbsp; spacer line at 45% and at 48%), while 48 x 2, 31 x 3
+and the spacer pair at 38% stay side by side on the phone in the light theme; and a <br> alone on the line after a
+markdown picture leaves no blank line above its caption.
 
 MDLB_DIST=<dir> serves another tree's UI bundle (the red run's before); MDLB_SHOTS=<dir> writes the reply at both widths
 in both themes and the open lightbox; MDLB_DUMP=<path> writes the whole measurement. Skips LOUDLY without the extension
@@ -212,7 +216,28 @@ def _reply_c0(host, badge):
             "<img width=\"60%%\" src=\"%(h)s/big.png?v=wideR\" alt=\"wide right\">\n</p>\n\n"
             "<p>\n<img width=\"45%%\" src=\"%(h)s/big.png?v=halfA\" alt=\"half given\">\n"
             "<img src=\"%(h)s/big.png?v=halfB\" alt=\"half not given\">\n</p>\n\n"
+            # the review of #355 (2026-10-22): rows whose percentages add up to 100 at most still wrapped into a stack with no
+            # frame, once the spaces between their pictures pushed them over. A row tiles only when its shares and 3 for each
+            # space shown between its pictures fit the line: these stack, each in its box (4 x 25 and 2 x 50 wrap at every
+            # width, 49.5 x 2 and 33 x 3 on a phone, and the README pair with an &nbsp; spacer line at 45 and 48 on a phone
+            # in the light theme), and these stay side by side (48 x 2, 31 x 3 and the spacer pair at 38)
+            + "".join("<p%s>\n%s\n</p>\n\n" % (align, gap.join("<img width=\"%s%%%%\" src=\"%%(h)s/big.png?v=%s%d\" alt=\"%s %d\">" % (w, key, i, key, i)
+                                                       for i in range(n)))
+                      for key, w, n, gap, align in _ROWS)
+            + "![br next line](%(h)s/big.png?v=brNext)\n<br>\nFigure 9: requests per hour, a break line above.\n\n"
+            "![br then caption](%(h)s/big.png?v=brCap)\n<br>Figure 10: requests per hour, the break before it.\n\n"
             "That is the whole run.\n") % {"h": host, "b": badge}
+
+
+# the review of #355's rows (2026-10-22): key, each picture's percentage, how many, what stands between them, the <p>'s
+# attributes. The first six wrap at a phone width in at least one theme, so they stack, boxed; the last three fit
+SPACER = "\n&nbsp; &nbsp; &nbsp;\n"
+_ROWS = [("quarter", "25", 4, "\n", ""), ("halves", "50", 2, "\n", ""), ("nearhalf", "49.5", 2, "\n", ""), ("third", "33", 3, "\n", ""),
+         ("spaced45", "45", 2, SPACER, " align=\"center\""), ("spaced48", "48", 2, SPACER, " align=\"center\""),
+         ("tile48", "48", 2, "\n", ""), ("tile31", "31", 3, "\n", ""), ("spaced38", "38", 2, SPACER, " align=\"center\"")]
+STACKED_ROWS = ("quarter", "halves", "nearhalf", "third", "spaced45", "spaced48")
+TILED_ROWS = ("tile48", "tile31", "spaced38")
+ROW_ALTS = {key: ["%s %d" % (key, i) for i in range(n)] for key, _w, n, _g, _a in _ROWS}
 
 
 # the user's own message (breaks:true, so its line break is a <br>): a picture with a caption on the next line
@@ -494,15 +519,16 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
   const key = (phone ? "phone" : "desktop") + theme[0].toUpperCase() + theme.slice(1);
   try {
     const { ctx, page, errs } = await open(theme, phone, { hash: "#only=tests", ready: TALL });
-    await page.waitForFunction(() => ['img[alt="run heat map"]', 'img[alt="board thumbnail"]', 'img[alt="deploy passing"]', 'img[alt="inline trace"]', 'img[alt="squashed heat map"]',
+    await page.waitForFunction((more) => ['img[alt="run heat map"]', 'img[alt="board thumbnail"]', 'img[alt="deploy passing"]', 'img[alt="inline trace"]', 'img[alt="squashed heat map"]',
       'img[alt="captioned heat map"]', 'img[alt="first panel"]', 'img[alt="second panel"]', 'img[alt="leading trace"]', 'img[alt="trailing trace"]', 'img[alt="user heat map"]',
       'img[alt="spaces caption"]', 'img[alt="backslash caption"]', 'img[alt="br caption"]', 'img[alt="side left"]', 'img[alt="side right"]', 'img[alt="bold trace"]',
       'img[alt="raw captioned"]', 'img[alt="centred captioned"]', 'img[alt="raw first"]', 'img[alt="raw second"]', 'img[alt="root left"]', 'img[alt="root right"]',
       'img[alt="stack first"]', 'img[alt="stack second"]', 'img[alt="stack third"]', 'img[alt="wide left"]', 'img[alt="wide right"]', 'img[alt="half given"]',
-      'img[alt="half not given"]']
-      .every((s) => { const i = document.querySelector(s); return !!(i && i.complete && i.naturalWidth > 0); }), null, { timeout: 30000 });
+      'img[alt="half not given"]', 'img[alt="br next line"]', 'img[alt="br then caption"]'].concat(more)
+      .every((s) => { const i = document.querySelector(s); return !!(i && i.complete && i.naturalWidth > 0); }),
+      Object.values(cfg.rows).flat().map((a) => 'img[alt="' + a + '"]'), { timeout: 30000 });
     await page.waitForTimeout(150);
-    out.box[key] = await page.evaluate((sel) => {
+    out.box[key] = await page.evaluate(({ sel, rows }) => {
       const tall = document.querySelector(sel);
       const body = tall.closest(".assistant");
       body.scrollIntoView({ block: "start" });
@@ -569,8 +595,10 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
                rootL: pic("root left"), rootR: pic("root right"),
                stack1: pic("stack first"), stack2: pic("stack second"), stack3: pic("stack third"),
                wideL: pic("wide left"), wideR: pic("wide right"), halfA: pic("half given"), halfB: pic("half not given"),
+               rows: Object.fromEntries(Object.entries(rows).map(([k, alts]) => [k, alts.map((a) => pic(a))])),
+               brNext: pic("br next line"), brThen: pic("br then caption"),
                bodyClass: document.body.className };
-    }, TALL);
+    }, { sel: TALL, rows: cfg.rows });
     await shot(page, "box-" + key + "-top");
     await page.evaluate(() => document.querySelector('img[alt="run heat map"]').scrollIntoView({ block: "start" }));
     await page.waitForTimeout(100);
@@ -578,7 +606,9 @@ for (const theme of ["dark", "light"]) for (const phone of [false, true]) {
     for (const [alt, name] of [["captioned heat map", "caption"], ["first panel", "panels"], ["leading trace", "lines"], ["user heat map", "user-caption"],
                                ["spaces caption", "two-line-caption"], ["side left", "side-by-side"], ["bold trace", "bold"],
                                ["raw captioned", "raw-caption"], ["centred captioned", "raw-centred-caption"], ["raw first", "raw-blank-line"],
-                               ["root left", "raw-row"], ["stack first", "raw-stack"], ["wide left", "raw-over-100"], ["half given", "raw-half-given"]]) {
+                               ["root left", "raw-row"], ["stack first", "raw-stack"], ["wide left", "raw-over-100"], ["half given", "raw-half-given"],
+                               ["quarter 0", "raw-quarters"], ["third 0", "raw-thirds"], ["spaced45 0", "readme-spacer-45"], ["tile31 0", "raw-tile-31"],
+                               ["spaced38 0", "readme-spacer-38"], ["br next line", "br-next-line"]]) {
       await page.evaluate((a) => document.querySelector('img[alt="' + a + '"]').scrollIntoView({ block: "start" }), alt);
       await page.waitForTimeout(100);
       await shot(page, "box-" + key + "-" + name);
@@ -750,7 +780,7 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
         out = os.path.join(cls.lab, "result.json")
         with open(cfg, "w") as f:
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (cls.port, cls.token), "sid": WEB, "tid": "tid-1",
-                       "agentId": AGENT_ID, "out": out, "shots": os.environ.get("MDLB_SHOTS", "")}, f)
+                       "agentId": AGENT_ID, "out": out, "shots": os.environ.get("MDLB_SHOTS", ""), "rows": ROW_ALTS}, f)
         driver = os.path.join(cls.lab, "driver.mjs")
         with open(driver, "w") as f:
             f.write(DRIVER)
@@ -1170,6 +1200,76 @@ class ServedMarkdownImageLightbox(unittest.TestCase):
             self.assertLess(c["top"] - last["bottom"], 12, "…directly under it" + table)
             self.assertAlmostEqual(c["left"], last["left"], delta=1.5, msg="…at its left edge" + table)
             self.assertAlmostEqual(b["wideL"]["w"], b["body"]["w"] * 0.6, delta=2, msg="a 60% picture keeps the author's width" + table)
+
+    def test_a_row_whose_spaces_push_it_past_the_line_stacks_each_picture_in_its_box(self):
+        # the review of #355 (2026-10-22): the tile rule summed the percentages alone, so rows adding up to 100 at most
+        # still wrapped into a stack with no frame once the spaces between their pictures pushed them over: 4 x 25% and
+        # 2 x 50% at every width, 49.5 x 2 and 33 x 3 on a phone, and a README's pair with an `&nbsp; &nbsp; &nbsp;` line
+        # between at 45% and 48% on a phone (the second picture offset by the spacer). A row tiles only when its shares
+        # plus 3 for every space shown between its pictures add up to 100 at most (preview.ts TILE_GAP); these do not, so
+        # each picture stands alone in its box, stacked, at every width in both themes
+        r = self._run()
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
+            b = r["box"][key]
+            for row in STACKED_ROWS:
+                run = b["rows"][row]
+                table = "\n  %s %s: %s" % (key, row, json.dumps({"row": run, "body": b["body"]}))
+                for n, m in zip(ROW_ALTS[row], run):
+                    self.assertIsNotNone(m, "%s rendered%s" % (n, table))
+                    self.assertEqual((m["nw"], m["nh"]), (1800, 1200), "%s loaded%s" % (n, table))
+                    self.assertIn("md-solo", m["cls"].split(), "%s is on a line of its own%s" % (n, table))
+                    self.assertEqual(m["style"], b["path"]["style"], "…so it wears the path preview's box: block, rounded, framed" + table)
+                    self._inside(m, b["body"], n, table)
+                for upper, lower in zip(run, run[1:]):
+                    self.assertGreaterEqual(lower["top"], upper["bottom"] - 0.5, "each sits UNDER the one before: stacked" + table)
+                    self.assertAlmostEqual(lower["left"], upper["left"], delta=1.5, msg="…at the same left edge, no spacer offsetting it" + table)
+
+    def test_a_row_that_fits_with_its_spaces_stays_side_by_side_on_a_phone_in_either_theme(self):
+        # the other side of the rule above, checked against the layout where the line is shortest and a space widest: the
+        # phone's 286px bubble in the light theme, whose prose is monospace (a space 7.8px, 2.74% of the line). Two at 48%,
+        # three at 31%, and the README's spacer pair at 38% (seven spaces between) stay one row, unframed, inside the bubble
+        r = self._run()
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
+            b = r["box"][key]
+            for row in TILED_ROWS:
+                run = b["rows"][row]
+                table = "\n  %s %s: %s" % (key, row, json.dumps({"row": run, "body": b["body"]}))
+                for n, m in zip(ROW_ALTS[row], run):
+                    self.assertIsNotNone(m, "%s rendered%s" % (n, table))
+                    self.assertEqual((m["nw"], m["nh"]), (1800, 1200), "%s loaded%s" % (n, table))
+                    self.assertNotIn("md-solo", m["cls"].split(), "%s is in its row%s" % (n, table))
+                    self.assertTrue(m["style"]["border"].startswith("0px"), "…unframed" + table)
+                    self._inside(m, b["body"], n, table)
+                for left, right in zip(run, run[1:]):
+                    self.assertAlmostEqual(right["top"], left["top"], delta=1, msg="side by side: one line" + table)
+                    self.assertGreater(right["left"], left["right"] - 0.5, "…in order, left to right" + table)
+
+    def test_a_br_on_the_line_after_a_picture_leaves_no_blank_line_above_its_caption(self):
+        # the review of #355 (2026-10-22), from #351: agent markdown's `![a](u)\n<br>\nCaption` and `![a](u)\n<br>Caption`
+        # showed a 21px empty line between the box and the caption, since the soft break had already ended the picture's
+        # line and the <br> on the next went unmarked (live hid it). Only white space stands between the picture and that
+        # <br>, so it is the picture's line end, hidden under the box: the caption sits directly under the frame, as the
+        # soft-break caption above does
+        r = self._run()
+        for key in ("desktopDark", "desktopLight", "phoneDark", "phoneLight"):
+            self.assertNotIn(key + "Err", r["box"], r["box"].get(key + "Err"))
+            b = r["box"][key]
+            ref = b["captioned"]["next"]["top"] - b["captioned"]["bottom"]
+            for name, text in (("brNext", "Figure 9"), ("brThen", "Figure 10")):
+                m = b[name]
+                table = "\n  %s %s: %s (the soft-break caption's gap %.1f)" % (key, name, json.dumps(m), ref)
+                self.assertEqual((m["nw"], m["nh"]), (1800, 1200), "the picture loaded" + table)
+                self.assertIn("md-solo", m["cls"].split(), "alone on its line" + table)
+                self.assertEqual(m["style"], b["path"]["style"], "…in the path preview's box" + table)
+                c = m["next"]
+                self.assertIsNotNone(c, "the caption rendered" + table)
+                self.assertTrue(c["text"].startswith(text), table)
+                self.assertGreaterEqual(c["top"], m["bottom"] - 0.5, "the caption sits UNDER the picture" + table)
+                self.assertLessEqual(c["top"] - m["bottom"], 3.5, "…within 3px of the frame: no blank line between" + table)
+                self.assertAlmostEqual(c["top"] - m["bottom"], ref, delta=1, msg="…as close as a caption after a soft break" + table)
+                self.assertAlmostEqual(c["left"], m["left"], delta=1.5, msg="…at the picture's left edge" + table)
 
     def test_a_bold_picture_in_a_sentence_stays_on_its_line(self):
         # the review of #349 (2026-10-21): `The **![x](u)** result` framed the picture as a block and split the sentence,
