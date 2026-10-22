@@ -31,9 +31,10 @@ test("the mark: every picture md() and userMd() render wears .md-img, stamped by
 });
 
 // A fake of the sanitized DOM the post-pass walks: elements with a tag, attributes, classes, a parent and children (text
-// nodes included), their siblings and first and last child, enough for mdSolo and the picture checks. Built by
-// `el(tag, attrs, ...children)`; a string child is text. READS counts every child and sibling the walks read (a child read
-// by index, a copy of the children included), the work the 1,000-picture pin below holds to a few steps a picture.
+// nodes included), their siblings and first and last child, enough for mdSolo and the picture checks, and the two calls
+// the row break makes (ownerDocument.createElement, insertBefore). Built by `el(tag, attrs, ...children)`; a string child
+// is text. READS counts every child and sibling the walks read (a child read by index, a copy of the children included),
+// the work the 1,000-picture pin below holds to a few steps a picture.
 type FNode = { nodeType: number; textContent?: string; tagName?: string; parentElement?: FNode | null; childNodes?: FNode[] } & Record<string, unknown>;
 let READS = 0;
 function el(tag: string, attrs: Record<string, string> = {}, ...kids: (FNode | string)[]): FNode {
@@ -47,13 +48,15 @@ function el(tag: string, attrs: Record<string, string> = {}, ...kids: (FNode | s
     classList: { add: (c: string) => cls.add(c), remove: (c: string) => cls.delete(c), contains: (c: string) => cls.has(c) },
     closest: (q: string) => { for (let n: FNode | null | undefined = node; n; n = n.parentElement) if (q.split(/\s*,\s*/).includes((n.tagName || "").toLowerCase())) return n; return null; },
     querySelectorAll: (q: string) => { const out: FNode[] = []; const walk = (n: FNode) => { for (const k of n.childNodes || []) { if (k.nodeType === 1) { if ((k.tagName || "").toLowerCase() === q) out.push(k); walk(k); } } }; walk(node); return out; } };
-  for (const k of kids) {
-    const kid: FNode = typeof k === "string" ? { nodeType: 3, textContent: k } : k;
+  const adopt = (kid: FNode): FNode => {
     if (kid.nodeType === 1) kid.parentElement = node;
-    const i = list.push(kid) - 1;
-    Object.defineProperty(kid, "nextSibling", { configurable: true, get: () => { READS++; return list[i + 1] || null; } });
-    Object.defineProperty(kid, "previousSibling", { configurable: true, get: () => { READS++; return list[i - 1] || null; } });
-  }
+    Object.defineProperty(kid, "nextSibling", { configurable: true, get: () => { READS++; return list[list.indexOf(kid) + 1] || null; } });
+    Object.defineProperty(kid, "previousSibling", { configurable: true, get: () => { READS++; return list[list.indexOf(kid) - 1] || null; } });
+    return kid;
+  };
+  node.ownerDocument = { createElement: (t: string) => el(t) };
+  node.insertBefore = (kid: FNode, ref: FNode | null) => { list.splice(ref ? list.indexOf(ref) : list.length, 0, kid); return adopt(kid); };
+  for (const k of kids) list.push(adopt(typeof k === "string" ? { nodeType: 3, textContent: k } : k));
   return node;
 }
 
@@ -376,23 +379,26 @@ test("a row the author tiled, RUN: pictures on consecutive lines of HTML stay si
   each("a picture and a video on consecutive lines: each on its own line", true, [img("a"), vid("b")], (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
   each("…both at 45%: a video never tiles, the box sizes its still whatever its width says", true, [img("a", "45%"), vid("b", "45%")], (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
   each("two videos at 45%", true, [vid("a", "45%"), vid("b", "45%")], (a, b) => el("p", {}, "\n", a, "\n", b, "\n"));
-  // the sum, every picture of the row counted, the ones sharing a source line included, and 3 for every space shown
-  // between them (TILE_GAP: a space of the light theme's monospace prose is 2.74% of the phone's 286px bubble)
+  // the sum, every picture of the row counted, the ones sharing a source line included, and 4 for every space shown
+  // between them (TILE_GAP: a space of the light theme's monospace prose is 3.62% of a 320px phone's 216px bubble)
   each("three at 30%: 90 and two spaces, side by side", false, [img("a", "30%"), img("b", "30%"), img("c", "30%")], (a, b, c) => el("p", {}, "\n", a, "\n", b, "\n", c, "\n"));
-  each("two at 48.5%: with the space between, exactly 100, side by side", false, [img("a", "48.5%"), img("b", "48.50%")], (a, b) => el("body", {}, a, "\n", b));
-  each("…the white space before the first and after the last is no space between them", false, [img("a", "48.5%"), img("b", "48.5%")],
+  each("two at 48%: with the space between, exactly 100, side by side", false, [img("a", "48%"), img("b", "48.00%")], (a, b) => el("body", {}, a, "\n", b));
+  each("…the white space before the first and after the last is no space between them", false, [img("a", "48%"), img("b", "48%")],
     (a, b) => el("p", { align: "center" }, "\n  ", a, "\n  ", b, "\n"));
   each("50% and 50.5%: over 100, each on its own line", true, [img("a", "50%"), img("b", "50.5%")], (a, b) => el("body", {}, a, "\n", b));
   // the review of #355 (2026-10-22): rows whose shares add up to 100 at most still wrapped, into a stack with no frame,
-  // once the spaces between their pictures pushed them over. Each case below was laid out in Chromium on the real
-  // stylesheet at the phone's 286px bubble in both themes (tests/test_md_image_lightbox_browser.py holds the served ones)
+  // once the spaces between their pictures pushed them over; and the review of #356 (2026-10-22) found three more that
+  // wrapped on narrower phones at 3 a space. Each case below was laid out in Chromium on the real stylesheet at 286px,
+  // 256px and 216px bubbles (390px, 360px and 320px phones) in both themes (tests/test_md_image_lightbox_browser.py
+  // holds the served ones)
   const row = (ws: string[], gap = "\n") => { const ms = ws.map((w, i) => img("p" + i, w)); el("p", {}, "\n", ...ms.flatMap((m, i) => (i ? [gap, m] : [m])), "\n"); return ms.map((m) => solo(m)); };
   for (const [ws, fits, what] of [
     [["50%", "50%"], false, "wraps at every width"], [["25%", "25%", "25%", "25%"], false, "wraps at every width"],
     [["49.5%", "49.5%"], false, "wraps on a phone"], [["49%", "49%"], false, "wraps on a phone in the light theme"],
     [["33%", "33%", "33%"], false, "wraps on a phone"], [["32%", "32%", "32%"], false, "wraps on a phone in the light theme"],
     [["24%", "24%", "24%", "24%"], false, "wraps on a phone"], [["23%", "23%", "23%", "23%"], false, "wraps on a phone in the light theme"],
-    [["45%", "45%"], true, "fits"], [["48%", "48%"], true, "fits"], [["30%", "30%", "30%"], true, "fits"], [["31%", "31%", "31%"], true, "fits"],
+    [["48.5%", "48.5%"], false, "wraps on a 360px phone in the light theme"], [["31%", "31%", "31%"], false, "wraps on a 320px phone in the light theme"],
+    [["45%", "45%"], true, "fits"], [["48%", "48%"], true, "fits"], [["30%", "30%", "30%"], true, "fits"],
     [["22%", "22%", "22%", "22%"], true, "fits"],
   ] as [string[], boolean, string][]) {
     assert.deepEqual(row(ws), ws.map(() => !fits), ws.join(" + ") + " on consecutive lines " + what + (fits ? ": side by side" : ": each on its own line, boxed"));
@@ -401,9 +407,10 @@ test("a row the author tiled, RUN: pictures on consecutive lines of HTML stay si
   const SPACER = "\n\u00a0 \u00a0 \u00a0\n";
   assert.deepEqual(row(["45%", "45%"], SPACER), [true, true], "the README pair at 45% with an &nbsp; spacer line (90 and seven spaces) wraps on a phone: each on its own line, boxed");
   assert.deepEqual(row(["48%", "48%"], SPACER), [true, true], "…at 48%");
-  assert.deepEqual(row(["38%", "38%"], SPACER), [false, false], "…at 38% it fits (76 and seven spaces): side by side");
-  assert.deepEqual(row(["45%", "45%"], "\n\u00a0\n"), [false, false], "a single &nbsp; line between two at 45% (three spaces) fits: side by side");
-  assert.deepEqual(row(["47%", "47%"], "\n\u00a0\n"), [true, true], "…between two at 47% it does not");
+  assert.deepEqual(row(["38%", "38%"], SPACER), [true, true], "…at 38% (76 and seven spaces), which wraps on a 320px phone in the light theme");
+  assert.deepEqual(row(["36%", "36%"], SPACER), [false, false], "…at 36% it fits (72 and seven spaces): side by side");
+  assert.deepEqual(row(["44%", "44%"], "\n\u00a0\n"), [false, false], "a single &nbsp; line between two at 44% (three spaces) fits: side by side");
+  assert.deepEqual(row(["45%", "45%"], "\n\u00a0\n"), [true, true], "…between two at 45% it does not: a 320px phone in the light theme wraps it");
   assert.deepEqual(row(["42%", "42%"], "\n\u2003\u2003\u2003\n"), [true, true],
     "an em space counts two spaces (13px in the dark theme's Inter): three between two at 42% wrap on a phone, each on its own line");
   { const a = img("a", "45%"), b = img("b", "45%");
@@ -428,7 +435,7 @@ test("a row the author tiled, RUN: pictures on consecutive lines of HTML stay si
     (a, b) => el("p", {}, "\n", a, "\n", b.parentElement!, "\n"));
   each("linked pictures at 45%: side by side", false, [img("a", "45%"), img("b", "45%")],
     (a, b) => el("p", {}, "\n", el("a", { href: H }, a), "\n", el("a", { href: H }, b), "\n"));
-  each("…an &nbsp; line between them", false, [img("a", "45%"), img("b", "45%")], (a, b) => el("p", { align: "center" }, "\n  ", a, "\n  \u00a0 \n  ", b, "\n"));
+  each("…an &nbsp; line between them", false, [img("a", "44%"), img("b", "44%")], (a, b) => el("p", { align: "center" }, "\n  ", a, "\n  \u00a0 \n  ", b, "\n"));
   each("…a comment between them", false, [img("a", "45%"), img("b", "45%")], (a, b) => el("p", {}, "\n", a, "\n", { nodeType: 8, textContent: "x" }, "\n", b, "\n"));
   each("…a caption line after the row", false, [img("a", "45%"), img("b", "45%")], (a, b) => el("p", {}, "\n", a, "\n", b, "\n", el("em", {}, "Figure 1: both runs."), "\n"));
   { const a = img("a", "45%"), b = img("b", "45%"), c = img("c", "45%"), d = img("d", "45%");
@@ -442,6 +449,64 @@ test("a row the author tiled, RUN: pictures on consecutive lines of HTML stay si
     assert.equal(solo(a), true, "a link holding a picture AND words is no picture: the line ends"); }
   // where marked wrote the line, its newline still ends it, percentages or not
   each("a flush <p> (markdown's own lines): each on its own line", true, [img("a", "45%"), img("b", "45%")], (a, b) => el("p", {}, a, "\n", b));
+});
+
+test("a tiled row has its line to itself, RUN: words on the line after it or before it in the author's HTML start a line of their own, at a <br> put in at the newline", () => {
+  // the review of #356 (2026-10-22): on a desktop, a caption on the line after a tiled row (`<img width="45%">` twice, then
+  // `Figure: …`) started beside the last picture's bottom corner, its rest wrapping under the row; and a lead-in line
+  // before one pushed its last picture onto a line of its own, the row the rule had said fits. rowTiles counts the row's
+  // pictures and spaces and nothing else, so the row gets its line: a <br class="md-row-break"> at the newline between
+  // it and the words. A <br> the author typed there already ends the line, so nothing goes in; the row stays side by side
+  const solo = new Function(SOLO_CODE + "\nreturn mdSolo;")() as (e: unknown) => boolean;
+  const H = "https://img.example.test/";
+  const img = (n: string, width?: string) => el("img", { src: H + n + ".png", ...(width === undefined ? {} : { width }) });
+  const kids = (n: FNode): FNode[] => Array.from((n.childNodes || []) as FNode[]);
+  // what the box shows, in order: a picture by its file name, a <br> by its class (or "br"), words trimmed; white space dropped
+  const shown = (n: FNode): string[] => kids(n).flatMap((k) => k.nodeType === 3 ? ((k.textContent || "").trim() ? [(k.textContent || "").trim()] : [])
+    : k.nodeType !== 1 ? [] : k.tagName === "IMG" ? [String(k.src).slice(H.length, -4)]
+    : k.tagName === "BR" ? [[...(k.cls as Set<string>)].join(".") || "br"] : [k.tagName!.toLowerCase() + "(" + shown(k).join(" ") + ")"]);
+  const run = (ms: FNode[], box: FNode, want: boolean[], show: string[], what: string) => {
+    assert.deepEqual(ms.map((m) => solo(m)), want, what + ": the verdicts");
+    assert.deepEqual(shown(box), show, what + ": the line breaks");
+  };
+  { const a = img("a", "45%"), b = img("b", "45%"), box = el("body", {}, el("p", {}, "The runs:"), "\n", a, "\n", b, "\nFigure 1: both runs.\n\n", el("p", {}, "After."));
+    run([a, b], box, [false, false], ["p(The runs:)", "a", "b", "md-row-break", "Figure 1: both runs.", "p(After.)"],
+      "a raw caption on the line after a tiled row, at the message's root: it starts under the row"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), box = el("p", {}, "\n", a, "\n", b, "\n", el("em", {}, "Figure 1: both runs."), "\n");
+    run([a, b], box, [false, false], ["a", "b", "md-row-break", "em(Figure 1: both runs.)"], "…an <em> caption in a padded <p>"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), box = el("p", {}, "\n", el("a", { href: H }, a), "\n", el("a", { href: H }, b), "\nFigure 1: both runs.\n");
+    run([a, b], box, [false, false], ["a(a)", "a(b)", "md-row-break", "Figure 1: both runs."], "…after linked pictures: the break goes after the link"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), box = el("div", {}, "\n", a, " ", b, "\nFigure 1: both runs.\n");
+    run([a, b], box, [false, false], ["a", "b", "md-row-break", "Figure 1: both runs."], "…a row on one source line"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), box = el("div", {}, "\n", a, "\n", b, "\n\nFigure 1: both runs.\n");
+    run([a, b], box, [false, false], ["a", "b", "md-row-break", "Figure 1: both runs."], "…a blank line inside a <div> before the words (HTML lays them on the row's line)"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), box = el("p", {}, "\nBoth runs, side by side:\n", a, "\n", b, "\n");
+    run([a, b], box, [false, false], ["Both runs, side by side:", "md-row-break", "a", "b"], "a lead-in line before a tiled row: it ends above the row"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), box = el("p", {}, "\n", el("strong", {}, "Both runs:"), "\n", a, "\n", b, "\nFigure 1: the same two.\n");
+    run([a, b], box, [false, false], ["strong(Both runs:)", "md-row-break", "a", "b", "md-row-break", "Figure 1: the same two."], "…a bold lead-in, and a caption after: a line each"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), c = img("c", "45%"), d = img("d", "45%");
+    const box = el("p", {}, "\n", a, "\n", b, "\nFigure 1: the first pair.\n", c, "\n", d, "\n");
+    run([a, b, c, d], box, [false, false, false, false], ["a", "b", "md-row-break", "Figure 1: the first pair.", "md-row-break", "c", "d"],
+      "a caption between two rows: each row on its line, the caption on its own between them"); }
+  // nothing goes in where the line ends already, or where the pictures are no tiled row
+  { const a = img("a", "45%"), b = img("b", "45%"), typed = el("br"), box = el("p", {}, "\n", a, "\n", b, "\n", typed, "\nFigure 1: both runs.\n");
+    run([a, b], box, [false, false], ["a", "b", "br", "Figure 1: both runs."], "a <br> before the caption (#356's shape): it ends the row's line, unmarked, nothing added"); }
+  { const a = img("a"), b = img("b"), box = el("p", {}, "\n", a, "\n", b, "\nFigure 1: both runs.\n");
+    run([a, b], box, [true, true], ["a", "b", "Figure 1: both runs."], "pictures with no widths: each on its own line, boxed, the caption under the last"); }
+  { const a = img("a"), b = img("b"), box = el("p", {}, "\n", a, " ", b, "\nFigure 1: both runs.\n");
+    run([a, b], box, [false, false], ["a", "b", "Figure 1: both runs."], "two with no widths on one source line: inline, as the author wrote them, nothing added"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), box = el("p", {}, "\n", a, "\n", b, " is the plot.\n");
+    run([a, b], box, [false, false], ["a", "b", "is the plot."], "words on the row's own source line: a sentence, nothing added"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), box = el("body", {}, a, "\n", b, "\n", el("p", {}, "Figure 1: both runs."));
+    run([a, b], box, [false, false], ["a", "b", "p(Figure 1: both runs.)"], "a block after the row ends its line itself: nothing added"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), box = el("p", {}, a, "\n", b, "\nFigure 1: both runs.");
+    run([a, b], box, [true, true], ["a", "b", "Figure 1: both runs."], "markdown's own lines (a flush <p>): each on its own line, nothing added"); }
+  { const a = img("a", "45%"), b = img("b", "45%"), box = el("p", {}, "\nBuild ", a, "\n", b, "\n", el("em", {}, "Figure 1: both runs."), "\n");
+    run([a, b], box, [false, false], ["Build", "a", "b", "md-row-break", "em(Figure 1: both runs.)"], "a word before the row on its first line stays on that line; the caption still goes under"); }
+  // a re-run over the same nodes (a render that reuses them) finds the line ended and adds nothing more
+  { const a = img("a", "45%"), b = img("b", "45%"), box = el("div", {}, "\nBoth runs:\n", a, "\n", b, "\nFigure 1: both runs.\n");
+    [a, b].forEach((m) => solo(m));
+    run([a, b], box, [false, false], ["Both runs:", "md-row-break", "a", "b", "md-row-break", "Figure 1: both runs."], "a second pass over the same row"); }
 });
 
 test("the predicate: a marked picture, outside any link or summary, showing a source, SHOWN at least ZOOM_MIN_H px tall", () => {

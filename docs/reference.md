@@ -6741,13 +6741,15 @@ is framed, and a caption written on the next line sits under it; one with words 
 after it on its line stays on that line, and one shown under 32 pixels tall (a badge, or a
 large picture given a small height) is part of the text and does not open. Pictures and
 videos written in HTML on consecutive lines each get a line and a frame of their own, unless
-every one is a picture with a percentage width and the percentages, plus 3 for every space
+every one is a picture with a percentage width and the percentages, plus 4 for every space
 shown between the pictures, add up to 100 at most, as in a README's `<img width="45%">` pair:
-those stay side by side, unframed. The spaces count because they decide whether the row fits
-on a phone, where a space in the light theme's monospace text is nearly 3 percent of the line;
-a `&nbsp;` counts as one, and a README's `&nbsp; &nbsp; &nbsp;` spacer line as seven, so a 45%
-pair spaced that way stacks, each picture framed. A picture inside a link follows the link,
-and one in a fold's heading opens the fold.
+those stay side by side, unframed, on a line of their own, so a caption written on the line
+after them starts under them and a line of words before them ends above them. The spaces count
+because they decide whether the row fits on a 320-pixel phone, where a space in the light
+theme's monospace text is over 3.5 percent of the line; a `&nbsp;` counts as one, and a
+README's `&nbsp; &nbsp; &nbsp;` spacer line as seven, so a 45% pair spaced that way stacks,
+each picture framed. A picture inside a link follows the link, and one in a fold's heading
+opens the fold.
 
 A video shows its first frame with a play button over it, muted and never playing by itself,
 whatever the message asked for (`<video controls width="100%">` included). A path to an
