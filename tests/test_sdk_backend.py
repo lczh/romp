@@ -141,6 +141,28 @@ class PureTranslation(unittest.TestCase):
         self.assertIsNone(sb.tool_preview("Bash", {"command": "ls"}))
         self.assertIsNone(sb.tool_preview("ExitPlanMode", {"plan": ""}))
 
+    def test_tool_preview_keeps_body_lines_that_look_like_file_headers(self):
+        # Only difflib's two file headers are dropped. A removed SQL comment ("-- note") reads
+        # "--- note" in the diff and an added "++ x" line reads "+++ x"; both must still be shown,
+        # or the user approves a change the card never drew.
+        sql = {"file_path": "notes.sql", "old_string": "-- keep this note\nselect 1;",
+               "new_string": "select 1;"}
+        _, txt = sb.tool_preview("Edit", sql)
+        self.assertEqual(txt.split("\n"),
+                         ["notes.sql", "@@ -1,2 +1 @@", "--- keep this note", " select 1;"])
+        _, txt = sb.tool_preview("Edit", {"file_path": "notes.txt", "old_string": "a",
+                                          "new_string": "a\n++ added"})
+        self.assertEqual(txt.split("\n"), ["notes.txt", "@@ -1 +1,2 @@", " a", "+++ added"])
+        _, txt = sb.tool_preview("MultiEdit", {"file_path": "notes.sql", "edits": [
+            {"old_string": sql["old_string"], "new_string": sql["new_string"]}]})
+        self.assertIn("--- keep this note", txt.split("\n"))
+        ask = sb.permission_to_live("Edit", sql)
+        self.assertIn("--- keep this note", ask["preview"].split("\n"))
+        # an edit that changes nothing still says so, rather than showing an empty body
+        _, txt = sb.tool_preview("Edit", {"file_path": "same.txt", "old_string": "x",
+                                          "new_string": "x"})
+        self.assertEqual(txt.split("\n"), ["same.txt", "(no textual change)"])
+
     def test_tool_preview_clips_huge_diffs(self):
         big = "\n".join("line %d" % i for i in range(1000))
         _, txt = sb.tool_preview("Write", {"file_path": "big.txt", "content": big})

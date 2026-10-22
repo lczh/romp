@@ -1547,8 +1547,9 @@ def _unified(path: str, old: str, new: str) -> list[str]:
     """A unified diff old→new, headed by the path. +/- prefixed so the webview can colorize it."""
     a, b = (old or "").splitlines(), (new or "").splitlines()
     body = list(difflib.unified_diff(a, b, lineterm="", n=2))
-    # difflib emits ---/+++ file headers; drop them (we print our own path header) but keep @@ hunks.
-    body = [ln for ln in body if not ln.startswith("--- ") and not ln.startswith("+++ ")]
+    # difflib opens any non-empty diff with exactly two file headers (---/+++); drop just those (we print
+    # our own path header). Never filter the body by prefix: a removed "-- note" line reads "--- note".
+    body = body[2:]
     head = path or "(file)"
     return [head] + (body if body else ["(no textual change)"])
 
