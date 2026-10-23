@@ -199,6 +199,10 @@ class _World(unittest.TestCase):
         km._chat_push_scopes_close()
         for k in list(vars(km._live_scope)):
             setattr(km._live_scope, k, None)
+        # The names snapshot's per-entry memo is keyed on the sid and checked by (mtime_ns, size, inode): this module
+        # stamps fixed mtimes, its directories' names have one length, and a removed world frees its inodes for the
+        # next, so an earlier test's entry would pass that check and serve its directory.
+        km._names_entry_memo.clear()
 
     # ── the world ────────────────────────────────────────────────────────────────────────────────────
     def _stamp(self, *paths):
