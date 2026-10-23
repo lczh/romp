@@ -12,6 +12,10 @@
 //     so the row went back to the dash and "click again to turn it on" posted off again. The peer's settingAck now makes the panel
 //     draw with this kernel re-reading the peer first; past the gear's first re-read after the click the row reads plain off, and
 //     the second click posts on.
+// (2b) Fills were not ordered among themselves: the re-read's fill waits on /tunnels?reread=, up to 4 s on a slow peer, and then
+//     drew over a fill that began after it with its own older /version answer. A fill that began before the latest one drawn
+//     now draws nothing, and one that carried a re-read starts a fresh fill, so what the re-read learned is still drawn. The same
+//     holds for a fill whose /version answers late: it draws neither its version lines nor its rows.
 // (3) The settings page shows a dropped message (federation's warn) as a notice, a dropped setting in the row's own words; a feed
 //     host, which has its own surface for warns, does not.
 // (4) Each kernel-backed box is named by its title alone and described by its state and what a click does.
@@ -54,7 +58,7 @@ const MODELS = { models: [{ value: "opus", label: "Opus", versions: [] }], effor
 type Machine = { thinkingSummaries: boolean; taskTracking: boolean; judgeFast: string };
 const SELECTS = { judgeModel: "opus", judgeEffort: "", indexModel: "opus", indexEffort: "", distillModel: "triage", distillEffort: "triage",
   judgeConcurrency: "", commentModel: "session", commentEffort: "session", commentFast: "session", updateMode: "off" };
-const versionOf = (m: Machine) => ({ host: "TESTHOSTA", ...SELECTS, ...m, settings: { ...SELECTS, ...m }, settingsGt: {}, settingsPinned: {} });
+const versionOf = (m: Machine, sha = "aaaa111") => ({ host: "TESTHOSTA", kernel_sha: sha, ...SELECTS, ...m, settings: { ...SELECTS, ...m }, settingsGt: {}, settingsPinned: {} });
 const peerOf = (m: Machine) => ({ host: "TESTHOSTB", status: "up", settings: { ...SELECTS, ...m }, settingsPinned: {} });
 
 let pw: any = null;
@@ -64,6 +68,10 @@ type Lab = {
   here: Machine; peer: Machine;   // what each machine holds now
   peerCopy: Machine;              // this kernel's copy of the peer, what a plain /tunnels read serves (the supervisor's last pass)
   hold: boolean;                  // hold every /tunnels answer, snapshotted at its request, until release()
+  holdReread: boolean;            // hold only the re-read's answer: the kernel's read of the peer is the slow part, so its copy
+                                  // of the peer is lifted when the answer is released
+  holdVersion: boolean;           // hold the next /version answer alone, snapshotted at its request
+  sha: string;                    // this machine's kernel build, which the panel's version lines name
   held: Array<() => Promise<void>>;
   tunnelsAsked: string[];         // every /tunnels URL the page asked for, query and all
   heldArrived: (() => void) | null;
@@ -77,7 +85,7 @@ async function withGear(t: any, opts: { own?: boolean }, body: (page: any, lab: 
     here: { thinkingSummaries: false, taskTracking: true, judgeFast: "off" },
     peer: { thinkingSummaries: true, taskTracking: false, judgeFast: "on" },
     peerCopy: { thinkingSummaries: true, taskTracking: false, judgeFast: "on" },
-    hold: false, held: [], tunnelsAsked: [], heldArrived: null,
+    hold: false, holdReread: false, holdVersion: false, sha: "aaaa111", held: [], tunnelsAsked: [], heldArrived: null,
   };
   try {
     const js = bundle();
@@ -90,11 +98,24 @@ async function withGear(t: any, opts: { own?: boolean }, body: (page: any, lab: 
       if (u.pathname === "/gear") return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: PAGE_HTML });
       if (u.pathname === "/dist/gear.js") return route.fulfill({ status: 200, contentType: "application/javascript", body: js });
       if (u.pathname === "/models") return json(MODELS);
-      if (u.pathname === "/version") return json(versionOf(lab.here));
+      if (u.pathname === "/version") {
+        const answer = versionOf(lab.here, lab.sha);
+        if (!lab.holdVersion) return json(answer);
+        lab.holdVersion = false;
+        lab.held.push(() => json(answer));
+        if (lab.heldArrived) { lab.heldArrived(); lab.heldArrived = null; }
+        return undefined;
+      }
       if (u.pathname === "/tunnels") {
         lab.tunnelsAsked.push(u.search);
+        const reread = u.searchParams.get("reread") === "TESTHOSTB";
+        if (reread && lab.holdReread) {
+          lab.held.push(() => { lab.peerCopy = { ...lab.peer }; return json({ tunnels: [peerOf(lab.peerCopy)] }); });
+          if (lab.heldArrived) { lab.heldArrived(); lab.heldArrived = null; }
+          return undefined;
+        }
         // the kernel re-reads the peer when asked (kernel.py _reread_peer_settings): its copy is the peer as it stands from then on
-        if (u.searchParams.get("reread") === "TESTHOSTB") lab.peerCopy = { ...lab.peer };
+        if (reread) lab.peerCopy = { ...lab.peer };
         const answer = { tunnels: [peerOf(lab.peerCopy)] };   // the answer as it stands at the request
         if (lab.hold) {
           lab.held.push(() => json(answer));
@@ -165,6 +186,60 @@ test("the peer's acknowledgement makes the panel re-read it, so after a click tu
     assert.equal(mark, null, "no differs flag");
     await page.click("#rs-thinksum");
     assert.deepEqual((await postsOf(page, "setThinkingSummaries")).map((m) => m.enabled), [false, true], "the second click, within a second, turns it on");
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
+test("a re-read's fill that answers after a later fill has drawn draws nothing with its older /version, and its re-read is still drawn", { timeout: 90000 }, async (t) => {
+  await withGear(t, {}, async (page, lab, errors) => {
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: true }, "the first fill: off here, on on the peer");
+    // the peer turns it off; this kernel's copy of the peer still says on until something re-reads it
+    lab.peer = { ...lab.peer, thinkingSummaries: false };
+    lab.holdReread = true;
+    const arrived = new Promise<void>((res) => { lab.heldArrived = res; });
+    await page.evaluate(() => window.dispatchEvent(new MessageEvent("message",
+      { data: { type: "settingAck", host: "TESTHOSTB", msgType: "setThinkingSummaries", gt: 1 } })));
+    await arrived;   // the re-read's fill: /version answered (off here), its /tunnels?reread= on its way
+    // this machine turns it on meanwhile, and a later fill draws that against the kernel's copy of the peer, not yet re-read
+    lab.here = { ...lab.here, thinkingSummaries: true };
+    const asked = lab.tunnelsAsked.length;
+    await page.evaluate(() => { (window as any).__rompSettingsClose(); window.postMessage({ romp: "openSettings", tab: "chat" }, "*"); });
+    await page.waitForFunction(() => !(document.getElementById("rs-thinksum") as HTMLInputElement).indeterminate, null, { timeout: 10000 });
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: false }, "the later fill drew: on here, and on in the copy");
+    assert.equal(lab.tunnelsAsked.length, asked + 1);
+    // the re-read lands: the peer is off, and the fill that asked for it holds this machine's value from before the later fill
+    for (const f of lab.held.splice(0)) await f();
+    await page.waitForFunction(() => (document.getElementById("rs-thinksum") as HTMLInputElement).indeterminate, null, { timeout: 3000 })
+      .catch(() => undefined);   // the assertion below says what was drawn instead
+    await page.waitForTimeout(200);   // and nothing draws over it
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: true },
+      "on here and off on the peer: the kernels differ. The re-read's fill did not draw this machine's old off over the later "
+      + "fill, and the fresh fill it started drew the peer as the re-read found it");
+    assert.deepEqual(lab.tunnelsAsked.slice(asked + 1), [""], "one fresh fill, a plain read: the re-read had already lifted the peer");
+    assert.deepEqual((await postsOf(page, "setThinkingSummaries")), [], "nothing posted");
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
+test("a fill whose /version answers after a later fill has drawn draws neither its version lines nor its rows", { timeout: 90000 }, async (t) => {
+  await withGear(t, {}, async (page, lab, errors) => {
+    const ver = () => page.evaluate(() => document.getElementById("rsver")!.textContent || "");
+    lab.holdVersion = true;
+    const arrived = new Promise<void>((res) => { lab.heldArrived = res; });
+    await page.evaluate(() => { (window as any).__rompSettingsClose(); window.postMessage({ romp: "openSettings", tab: "chat" }, "*"); });
+    await arrived;   // a fill's /version on its way: off here, the old build
+    lab.here = { ...lab.here, thinkingSummaries: true };
+    lab.sha = "bbbb222";
+    const asked = lab.tunnelsAsked.length;
+    await page.evaluate(() => { (window as any).__rompSettingsClose(); window.postMessage({ romp: "openSettings", tab: "chat" }, "*"); });
+    await page.waitForFunction(() => !(document.getElementById("rs-thinksum") as HTMLInputElement).indeterminate, null, { timeout: 10000 });
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: false }, "the later fill drew: on on both machines");
+    assert.match(await ver(), /^kernel bbbb222\n/);
+    for (const f of lab.held.splice(0)) await f();
+    await page.waitForTimeout(300);
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: false }, "this machine's old off was not drawn back");
+    assert.match(await ver(), /^kernel bbbb222\n/, "nor its old build");
+    assert.equal(lab.tunnelsAsked.length, asked + 1, "the late fill read no /tunnels: it had nothing left to draw");
     assert.deepEqual(errors, [], "no page errors");
   });
 });

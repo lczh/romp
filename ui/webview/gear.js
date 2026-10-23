@@ -2590,9 +2590,17 @@ function initGear(post, opts) {
   // `reread`: a connected kernel that has just told this page it handled a setting (its settingAck): this kernel re-reads that
   // machine's settings before answering /tunnels (?reread=), so the drawing compares against the machine as it now stands rather
   // than this kernel's copy from the supervisor's last pass, up to 15 s old.
-  var fillSeq = 0, clickFill = 0;   // fills started; the newest fill started before the latest click on a kernel-backed row
+  // FILLS ARE ORDERED AMONG THEMSELVES (the review of #382): a fill draws twice, when /version answers (the proposals, the
+  // login block, the version lines) and when /tunnels does (the rows), and once a fill that began later has drawn, an earlier one
+  // draws nothing more (drawnFill: the newest fill whose /version answer was drawn). The re-read's fill waits on that read, up to
+  // 4 s on a slow peer, and drew the rows over a fill that began after it with its own older /version answer, this machine's
+  // value from before the later fill. A fill that stands down with a re-read starts a fresh one instead, so what the re-read
+  // lifted onto this kernel's copy of the peer is still drawn: the later fill's /tunnels may have answered before it landed.
+  var fillSeq = 0, clickFill = 0, drawnFill = 0;   // fills started; the newest fill started before the latest click on a kernel-backed row; the newest fill drawn
   function fill(reread) { var n = ++fillSeq; fillChoices().then(function () { return fetch(ku('/version'), { cache: 'no-store' }); }).then(function (r) { return r.json(); }).then(function (v) {
     gclock.learnAll(v.settingsGt);   // each store's last-applied stamp: the clock climbs above them (an older kernel sends none)
+    if (n < drawnFill) { if (reread) fill(reread); return; }   // a later fill has drawn: this /version predates it (see above)
+    drawnFill = n;
     fillProposals(v);   // the pending proposals and this machine's pins under their rows (one A)
     selfName = (typeof v.host === 'string' && v.host) ? v.host : selfName;
     // ONE /tunnels fetch feeds every cross-machine comparison: the autoNudge box and the select marks.
@@ -2604,6 +2612,7 @@ function initGear(post, opts) {
       .then(function (rows) {
         var up = (rows || []).filter(function (t) { return t && t.status === 'up'; });
         if (n <= clickFill) return up;   // read before the latest click: a later fill draws (see above)
+        if (n < drawnFill) { if (reread) fill(); return up; }   // a later fill has drawn; the re-read has landed, so a plain read draws it
         try { drawKernelRows(v, rows); }
         catch (e) { try { console.error('romp: settings: the cross-machine fill failed', e); } catch (_e) {} drawKernelRows(v, null); }
         return up;   // the read settles with the connected kernels, which the stored logins' pickers list (lgFetchLogins)

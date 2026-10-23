@@ -6714,7 +6714,9 @@ value on its side, so the two converge one way (toward the newer kernel's propos
 The settings panel draws what the machines hold, not a guess (2026-10-23). A fill writes every kernel-backed row once, after both
 its reads (`/version` and `/tunnels`) have answered, so a box always holds what it shows: a mixed box is held ticked under its
 dash from the moment it is drawn until the next drawing, and a fill whose reads began before a click on a kernel-backed row
-draws nothing. A kernel answers every setting another machine's dashboard relays to it (a `relay` socket) with a `settingAck`
+draws nothing. Fills are ordered among themselves too: once a fill that began later has drawn, an earlier one draws nothing
+more, and an earlier one that asked for a re-read (below) starts a fresh fill in its place, so what the re-read found is still
+drawn. A kernel answers every setting another machine's dashboard relays to it (a `relay` socket) with a `settingAck`
 frame once it has handled it (applied, stood down or refused); the gear then asks its own kernel to re-read that machine
 (`GET /tunnels?reread=<host>`), which lifts the peer's `settings`, `settingsGt` and `settingsPinned` onto its row before the
 listing is built, rather than comparing against the supervisor's copy from its last 15 s pass. Every read of a peer's settings
@@ -6723,7 +6725,10 @@ machines the panel shows (`reach`), and federation reaches each of them beside t
 machine the page holds no connection to yet is held (newest per type), the send polls `/tunnels` at once, and the setting
 rides the new connection's open. A poll that does not list the machine drops it with a `warn` naming the host, the type and
 the cause (`unlinked`: the page has no connection; `opening`: its connection is still opening; `down`: the machine's kernel
-is not answering), and the settings page shows every `warn` as a notice, a dropped setting in the row's own words. Each
+is not answering), and the settings page shows every `warn` as a notice, a dropped setting in the row's own words. A setting
+still waiting on a connection whose machine the newest poll no longer lists is dropped with the same `warn` (`unlinked`). Polls
+are ordered: the answer of a poll that began before the newest one applied is ignored whole, so it cannot close a connection a
+newer answer opened (and with it a setting that connection held), reopen one it closed, or move a machine's reachability. Each
 kernel-backed box is named by its title alone and described by its state (the flag, the machines' values and what a click
 does) and then its line.
 

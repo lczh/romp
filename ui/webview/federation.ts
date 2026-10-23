@@ -1064,6 +1064,8 @@ export class FederationManager {
   // them answers (sendRemote): `seq` is the number of the first poll allowed to judge them (pollsStarted counts every poll begun)
   private unlinked = new Map<string, { msgs: Map<string, any>; seq: number }>();
   private pollsStarted = 0;
+  // the number of the newest poll whose answer this page applied (poll): an answer from a poll that began before it is older news
+  private pollApplied = 0;
   private pageProto: number | null = null;   // the chat protocol the page's ready declared (2), told to every remote kernel's socket
   private frozeAt = 0;   // the Page Lifecycle `freeze` before the current thaw: a socket already overdue at that moment is not stamped by resumed()
   private perHostOrder: Record<string, string[]> = {};
@@ -1920,6 +1922,13 @@ export class FederationManager {
       }
       return;
     }
+    // An answer from a poll that began before the newest one applied is older news, whole (the review of #382): the 4 s tick and a
+    // setting's own poll overlap, and the later-begun can answer first. Applied after it, the older list closed the conn the newer
+    // one had just opened for a machine that checked in between them, discarding the setting it held, reopened a machine the newer
+    // one had dropped, and put back a reachability and a recovery count the newer one had moved past. It opens, closes and flips
+    // nothing; the newer answer stands until a poll that began after it answers.
+    if (seq < this.pollApplied) return;
+    this.pollApplied = seq;
     // `hasToken`, never the token: the kernel publishes whether a remote's credential EXISTS, and the
     // relay it dials through (/remote/<host>/ws, _remote_ws) injects that credential itself — so the
     // page never holds a remote's reusable secret (2026-09-08). A row without one has no admin path
@@ -2209,6 +2218,10 @@ export class FederationManager {
       c.ws && c.ws.close();
     } catch (e) {}
     this.conns.delete(host);
+    // …and each discarded SETTING is said by the warn a held setting's drop gets (judgeUnlinked), after the conn is gone so its
+    // words say what the page now knows, no connection: the breadcrumb alone left the settings page's click snapping back
+    // unexplained (the review of #382). The pane's own bookkeeping on the same queue is not said: the user sent nothing.
+    for (const m of c.pending.values()) if (m && typeof m.type === "string" && KERNEL_SETTING.has(m.type)) this.dropWarn(host, m);
     this.hostSeq = this.hostSeq.filter((h) => h !== host);
     // drop that host's tabs from the panes (else they linger stale), then re-emit the merged order.
     for (const sid of this.perHostSids[host] || []) {
