@@ -12,9 +12,11 @@ read here in a browser over a hermetic kernel:
      own answer had arrived first. Opens overlap, and their reads can answer out of order. A drawing's pickers list the
      kernels of the newest settings fill whose /tunnels read has settled, not the last list to arrive: an older open's
      /tunnels answering after a newer one's listed the older kernels in the newer open's drawing and in a drawing after a
-     link. Only the newest open draws, unless its /logins read fails; then an older open draws, once the failed open's
-     /tunnels read has settled, with the kernels that read listed. While a link or an unlink is on its way, a fill's
-     drawing is skipped. The machine selector agrees with the pickers: once a newer open's fill has drawn, an older one's
+     link. Only the newest open draws, unless its /logins read fails; then an older fill draws, once the failed open's
+     /tunnels read has settled, with the kernels that read listed, but only an answer asked for in the open on screen: the
+     rows of an answer from an earlier open are not drawn as this machine's logins now, and the block says the read failed
+     in their place, as it does whenever a failed read would leave an earlier open's rows on screen (the review of #383).
+     While a link or an unlink is on its way, a fill's drawing is skipped. The machine selector agrees with the pickers: once a newer open's fill has drawn, an older one's
      /tunnels answer draws nothing there either, so the selector never lists a kernel the pickers leave out.
   2. The picker linked on its change event, and a focused, closed select fires change on an arrow key or a typed letter
      (measured in the Linux builds of Chromium, Firefox and WebKit), so a keyboard user looking through the options linked
@@ -38,7 +40,8 @@ frame's GET /logins reaches the real kernel; the driver can answer one 500, or h
 and unlink POSTs reach the real kernel, which reads this machine's sign-in itself and refuses a link to a stand-in kernel
 (none is connected to it); the driver can delay one on its way, hold it until it releases it (every one, or one naming a
 given login), hold its answer once the kernel has taken it, or answer it 500 with a plain-text body. The last six scenes'
-pages count, in each frame, the /logins answers the page has read (a wrapped Response.json), so the driver can wait until
+pages count, in each frame, the /logins answers the page has read (a wrapped Response.json, and a GET answered with an error
+status, which the page does not parse, once it has arrived), so the driver can wait until
 the page has read an answer; every page counts the armed list's answers alike (the driver marks each with a header), so a
 release is read once the page has read every answer it held. The driver, at 1200x800:
   - opens settings on General with /tunnels held and waits for a /logins answer to arrive meanwhile, then reads the panel:
@@ -73,7 +76,7 @@ web-box; then the POST released, the refusal read, and spare's row read after a 
 fresh pages each open settings with no kernel connected and close it, reopen with /tunnels held, armed with api-box,
 until a /logins answer has arrived, and close; then open again with web-box connected: (a) that open's GET /logins
 answered 500 and its /tunnels at once; the first open's /tunnels is released and, once the page has read its answer, the
-machine selector and spare's picker are read in the rows drawn then; (b) the same, that open's /tunnels held until the
+machine selector and the stored-logins block are read; (b) the same, that open's /tunnels held until the
 first open's has landed; (c) that open's GET /logins held until the first open's /tunnels has landed, then answered by the
 kernel, and spare's picker read; then work is unlinked through the kernel's door, spare linked with its picker and Link,
 and work's picker read in the rows drawn after the link.
@@ -97,7 +100,7 @@ first open's, with the pick and Link. A release of /tunnels is read once the mac
   - in the order of (b) of the overlapping opens above, with this machine picked in the first open and Link pressed, its POST
     held, in the older open: spare's row read once both /tunnels answers have reached the page, then the POST released;
   - the same, the POST answered 500 once the older open's /tunnels has reached the page and while the newer open's is held;
-    spare's row and picker read once the newer open's has reached the page;
+    the stored-logins block read once the newer open's has reached the page;
   - api-box picked in work's row too, Link pressed in both rows, both POSTs held; work's let go, which the kernel refuses,
     while /tunnels is held; /tunnels released and spare's row read, then spare's let go and its refusal read.
 
@@ -143,6 +146,11 @@ sys.path.insert(0, HERE)
 import test_ship_reship_served as _lab   # noqa: E402  the lab kernel's environment: a list of names, never a copy of the runner's
 
 EMAIL, ORG = "dev@example.com", "Example Org"
+# the machine selector's options (#rs-scope-list), as the panel names them: with web-box connected, and with no kernel connected
+SCOPE_WEB = ["All kernels", "TESTHOST (this machine)", "web-box"]
+SCOPE_HERE = ["All kernels", "TESTHOST (this machine)"]
+# what the stored-logins block says in place of its rows when its GET /logins is answered 500
+SAID_500 = "Couldn't read the stored logins from this machine (HTTP 500)."
 ACCOUNT = {"oauthAccount": {"accountUuid": "11111111-2222-3333-4444-555555555555", "emailAddress": EMAIL, "organizationName": ORG}}
 
 
@@ -188,7 +196,8 @@ const door = async (body) => (await fetch(cfg.base + "/logins", { method: "POST"
 const fromSettings = (req) => { try { return req.frame().url().includes("/settings"); } catch (e) { return false; } };
 const isLogins = (req, method) => { try { return new URL(req.url()).pathname === "/logins" && req.method() === method; } catch (e) { return false; } };
 
-// counted: each frame counts the /logins answers whose json() has settled (window.__loginsRead) and fires a lab-logins-read event
+// counted: each frame counts the /logins answers whose json() has settled, and each GET answered with an error status once it has
+// arrived (window.__loginsRead), and fires a lab-logins-read event
 // on its window at each, so the driver can wait until the page has read an answer; whatever that answer sets off without waiting on
 // a request or a timer has run once the count is seen
 async function context(viewport, mobile, counted) {
@@ -203,15 +212,24 @@ async function context(viewport, mobile, counted) {
       return read.finally(() => { window.__heldRead = (window.__heldRead || 0) + 1; });
     };
   });
+  // A GET /logins answered with an error status is not parsed (the settings panel says the status instead), so it is counted once
+  // it has arrived, a task after: the page's handlers for it, which wait on no request or timer, have run by then
   if (counted) await ctx.addInitScript(() => {
+    const read = () => {
+      window.__loginsRead = (window.__loginsRead || 0) + 1;
+      window.dispatchEvent(new Event("lab-logins-read"));
+    };
     const json = Response.prototype.json;
     Response.prototype.json = function () {
       const u = this.url || "";
-      return json.call(this).finally(() => {
-        if (!/\/logins(\?|$)/.test(u)) return;
-        window.__loginsRead = (window.__loginsRead || 0) + 1;
-        window.dispatchEvent(new Event("lab-logins-read"));
-      });
+      return json.call(this).finally(() => { if (/\/logins(\?|$)/.test(u)) read(); });
+    };
+    const f = window.fetch;
+    window.fetch = function (input, init) {
+      const p = f.call(window, input, init);
+      const get = !(init && init.method && init.method !== "GET");
+      p.then((r) => { if (get && !r.ok && /\/logins(\?|$)/.test(r.url || "")) setTimeout(read, 0); }, () => {});
+      return p;
     };
   });
   await ctx.route(/\/tunnels(\?|$)/, async (route) => {
@@ -391,6 +409,11 @@ async function releaseHeld(setF) {
 const waitRow = (setF, label, sel) => setF.waitForFunction(([r, s]) => !!document.querySelector(r + " " + s), [ROW(label), sel], { timeout: 8000 })
   .then(() => true, () => false);
 const keptConnected = (setF) => setF.evaluate(() => !!window.__keptRow && window.__keptRow.isConnected);
+// the stored-logins block's own failure line (said in place of the rows when the read failed), or null; and a wait for it
+const FAILED = "#rs-logins > .rs-line.rs-login-bad";
+const failedSaid = (setF) => setF.evaluate((sel) => { const e = document.querySelector(sel); return e ? e.textContent : null; }, FAILED);
+const waitFailed = (setF) => setF.waitForSelector(FAILED, { timeout: 6000 }).then(() => true, () => false);
+const rowCount = (setF) => setF.evaluate(() => document.querySelectorAll("#rs-logins .rs-login-row").length);
 // Scenes 11 to 17, each on a fresh page. keptReopen: work and spare unlinked (spare then linked through the kernel's door when
 // `linked`), settings opened with api-box connected and `pick` picked in spare's row (on a tree with Link), closed (spare unlinked
 // through the door when `linked`), and reopened with web-box connected and /tunnels held until its /logins answer has arrived;
@@ -627,7 +650,8 @@ const waitingSkip = () => scene("waitingSkip", async (rec) => {
   rec.linked = await waitRow(setF, "spare", ".rs-login-unlink");
   return ctx;
 });
-// 19. the link answered 500 while the newer open's /tunnels is held, then that /tunnels released
+// 19. the link answered 500 while the newer open's /tunnels is held, then that /tunnels released: the newer open's failed read is
+// said in place of the rows, the older open's answer not drawn as current
 const waitingRefused = () => scene("waitingRefused", async (rec) => {
   const { ctx, setF } = await waitingReopen(rec);
   st.failPost = true; st.holdPost = false;
@@ -636,9 +660,9 @@ const waitingRefused = () => scene("waitingRefused", async (rec) => {
   rec.heldAtRefusal = st.held - st.heldOne;
   st.failPost = false;
   rec.bListed = await release(setF);
-  rec.drawn = await setF.waitForFunction((sel) => !!window.__keptRow && !window.__keptRow.isConnected && !!document.querySelector(sel), ROW("spare"),
-    { timeout: 6000 }).then(() => true, () => false);
-  rec.spare = await options(setF, "spare");
+  rec.failed = await waitFailed(setF);
+  rec.said = await failedSaid(setF);
+  rec.rows = await rowCount(setF);
   rec.kernel = await kernelLogins();
   return ctx;
 });
@@ -1188,7 +1212,8 @@ try {
   }
   {
     // 9a. the newer open's GET /logins is answered 500 and its /tunnels at once; then the older open's /tunnels is released. The
-    // older open draws, its pickers listing the kernels the newer open read (web-box), not the older list that arrived last
+    // newer open's failure is said in place of the first open's rows once its /tunnels has landed, and the older open's answer,
+    // asked for before the newer open, is not drawn over it as current
     const nf = {};
     out.newerFails = nf;
     let ctx = null;
@@ -1201,11 +1226,12 @@ try {
       for (let i = 0; i < 200 && st.failedGets === f0; i++) await sleep(20);   // loop-ok: bounded at 4 s
       nf.bFailed = st.failedGets - f0;
       nf.bListed = await scopeLists(setF, cfg.tunnels2[0].host);   // the newer open's /tunnels has landed
-      await sleep(300);   // its failed read has been seen by now
+      nf.failedBefore = await waitFailed(setF);
+      nf.saidBefore = await failedSaid(setF);
       nf.freshBefore = await freshCount(setF);
       await releaseOlder(setF, nf);
-      nf.drawn = await freshRows(setF);
-      nf.after = await options(setF, "spare");
+      nf.said = await failedSaid(setF);
+      nf.rows = await rowCount(setF);
     } catch (e) {
       nf.error = String((e && e.stack) || e).slice(0, 1500);
     }
@@ -1214,7 +1240,8 @@ try {
   }
   {
     // 9b. the newer open's GET /logins is answered 500 while its /tunnels is held until the older open's has been released and
-    // has landed: the older open draws nothing until the newer open's /tunnels settles, then draws, listing web-box
+    // has landed: the older open draws nothing until the newer open's /tunnels settles, and then the newer open's failure is said
+    // in place of the rows, not the older open's answer
     const nf = {};
     out.newerFailsHeld = nf;
     let ctx = null;
@@ -1229,10 +1256,12 @@ try {
       await sleep(300);   // its failed read has been seen by now
       await releaseOlder(setF, nf);
       nf.freshBefore = await freshCount(setF);
+      nf.saidBefore = await failedSaid(setF);
       st.hold = false;
       nf.bListed = await scopeLists(setF, cfg.tunnels2[0].host);
-      nf.drawn = await freshRows(setF);
-      nf.after = await options(setF, "spare");
+      nf.failed = await waitFailed(setF);
+      nf.said = await failedSaid(setF);
+      nf.rows = await rowCount(setF);
     } catch (e) {
       nf.error = String((e && e.stack) || e).slice(0, 1500);
     }
@@ -1554,7 +1583,7 @@ class ServedLoginLinkPicker(unittest.TestCase):
         self.assertEqual(o["b"], ["", "TESTHOST", "web-box"], "the second open lists the kernel connected then: %r" % o)
         self.assertTrue(o["aReleased"], "the first open's /tunnels was answered after it, with api-box: %r" % o)
         self.assertTrue(o["aRead"], "…and the page read that answer: %r" % o)
-        self.assertNotIn("api-box", o["aScope"], "the machine selector does not list the older open's api-box either: the newer "
+        self.assertEqual(o["aScope"], SCOPE_WEB, "the machine selector does not list the older open's api-box either: the newer "
                          "open had drawn, so the older one drew nothing, the selector included: %r" % o)
         self.assertEqual(o["after"], ["", "TESTHOST", "web-box"], "the pickers still list what the newer open read, not the "
                          "older open's api-box: %r" % o)
@@ -1613,36 +1642,39 @@ class ServedLoginLinkPicker(unittest.TestCase):
         spare = [x["linked"] for x in e["kernel"] if x["label"] == "spare"]
         self.assertEqual(spare, [None], "…and the kernel holds no link: %r" % e)
 
-    def _overlap(self, key):
+    def _overlap(self, key, scope):
         o = self._run()[key]
         self.assertNotIn("error", o, o)
         self.assertGreaterEqual(o["aHeld"], 1, "the older open's /tunnels was held: %r" % o)
         self.assertGreaterEqual(o["aAnsweredWhileHeld"], 1, "its /logins answer arrived meanwhile, so only the kernel list kept its "
                                 "drawing waiting: %r" % o)
         self.assertTrue(o["aReleased"] and o["aRead"], "its /tunnels was answered later, with api-box, and the page read it: %r" % o)
-        self.assertNotIn("api-box", o["aScope"], "the newer open's /version had answered and drawn before then (a failed or held "
-                         "/logins read does not stop that), so the older open's late answer drew nothing on the machine selector: %r" % o)
+        self.assertEqual(o["aScope"], scope, "the newer open's /version had answered and drawn before then (a failed or held "
+                         "/logins read does not stop that), so the older open's late answer drew nothing on the machine selector: it "
+                         "lists what the last drawing did, with web-box once the newer open's /tunnels has landed: %r" % o)
         return o
 
-    def test_an_older_open_draws_when_the_newer_opens_read_fails(self):
-        o = self._overlap("newerFails")
+    def test_a_newer_opens_failed_read_is_said_in_place_of_the_rows_and_an_older_opens_answer_is_not_drawn_over_it(self):
+        o = self._overlap("newerFails", SCOPE_WEB)
         self.assertGreaterEqual(o["bFailed"], 1, "the newer open's GET /logins was answered 500: %r" % o)
         self.assertTrue(o["bListed"], "…and its /tunnels, web-box, landed before the older open's: %r" % o)
-        self.assertEqual(o["freshBefore"], 0, "nothing was drawn before the older open's /tunnels answered: %r" % o)
-        self.assertTrue(o["drawn"], "the older open drew the rows once its /tunnels answered, the newer open's read having failed: %r" % o)
-        self.assertEqual(o["after"], ["", "TESTHOST", "web-box"], "…listing the kernels the newer open read, not the older list "
-                         "that arrived last: %r" % o)
+        self.assertTrue(o["failedBefore"], "once it had, the failure was said: %r" % o)
+        self.assertEqual(o["saidBefore"], SAID_500, "…in the user's terms, with the status: %r" % o)
+        self.assertEqual(o["freshBefore"], 0, "…in place of the first open's rows, which are no longer shown: %r" % o)
+        self.assertEqual((o["said"], o["rows"]), (SAID_500, 0), "the older open's answer, asked for before the newer open, is not "
+                         "drawn over the failure as this machine's logins now: %r" % o)
 
-    def test_an_older_open_waits_for_the_failed_opens_kernels_before_it_draws(self):
-        o = self._overlap("newerFailsHeld")
+    def test_an_older_open_waits_for_the_failed_opens_kernels_and_then_the_failure_is_said(self):
+        o = self._overlap("newerFailsHeld", SCOPE_HERE)
         self.assertGreaterEqual(o["bFailed"], 1, "the newer open's GET /logins was answered 500: %r" % o)
         self.assertGreaterEqual(o["bHeld"], 1, "…with its /tunnels held: %r" % o)
-        self.assertEqual(o["freshBefore"], 0, "the older open drew nothing while the newer open's /tunnels was held: %r" % o)
-        self.assertTrue(o["bListed"] and o["drawn"], "once that /tunnels landed, the rows were drawn: %r" % o)
-        self.assertEqual(o["after"], ["", "TESTHOST", "web-box"], "…listing the kernels it read: %r" % o)
+        self.assertEqual((o["freshBefore"], o["saidBefore"]), (0, None), "nothing was drawn or said while the newer open's /tunnels "
+                         "was held: %r" % o)
+        self.assertTrue(o["bListed"] and o["failed"], "once that /tunnels landed, the failure was said: %r" % o)
+        self.assertEqual((o["said"], o["rows"]), (SAID_500, 0), "…in place of the rows, the older open's answer not drawn: %r" % o)
 
     def test_the_newest_open_lists_the_kernels_it_read_not_the_last_to_arrive(self):
-        o = self._overlap("lateList")
+        o = self._overlap("lateList", SCOPE_WEB)
         self.assertGreaterEqual(o["bGetHeld"], 1, "the newer open's GET /logins was held: %r" % o)
         self.assertTrue(o["bListed"], "…and its /tunnels, web-box, landed before the older open's: %r" % o)
         self.assertEqual(o["freshBefore"], 0, "the older open drew nothing, a newer open being on its way: %r" % o)
@@ -1650,7 +1682,7 @@ class ServedLoginLinkPicker(unittest.TestCase):
         self.assertEqual(o["after"], ["", "TESTHOST", "web-box"], "…listing the kernels it read, not api-box, which arrived last: %r" % o)
 
     def test_a_drawing_after_a_link_lists_the_newest_settled_opens_kernels(self):
-        o = self._overlap("lateList")
+        o = self._overlap("lateList", SCOPE_WEB)
         self.assertTrue((o.get("linked") or {}).get("unlink"), "spare was linked with its picker and Link: %r" % o)
         self.assertEqual(o["workAfterLink"], ["", "TESTHOST", "web-box"], "the drawing after the link, which waits on no kernel list, "
                          "lists the kernels of the newest open whose /tunnels read has settled, not api-box, which arrived last: %r" % o)
@@ -1757,7 +1789,8 @@ class ServedLoginLinkPicker(unittest.TestCase):
         self.assertGreaterEqual(s["bFailed"], 1, "the newer open's GET /logins was answered 500: %r" % s)
         self.assertGreaterEqual(s["bHeld"], 1, "…with its /tunnels held: %r" % s)
         self.assertTrue(s["aRead"], "the older open's /tunnels was answered and the page read it: %r" % s)
-        self.assertNotIn("api-box", s["aScope"], "…and drew nothing on the machine selector, the newer open having drawn: %r" % s)
+        self.assertEqual(s["aScope"], SCOPE_HERE, "…and drew nothing on the machine selector, the newer open having drawn (its "
+                         "/tunnels still held, the selector is the first open's, with no kernel connected): %r" % s)
         return s
 
     def test_a_link_on_its_way_keeps_linking_when_an_older_open_waiting_on_a_failed_read_would_draw(self):
@@ -1767,13 +1800,14 @@ class ServedLoginLinkPicker(unittest.TestCase):
                          "the row Link was pressed on is still drawn and still says Linking…: %r" % s)
         self.assertTrue(s["linked"], "once the POST is answered the row reads linked: %r" % s)
 
-    def test_a_link_with_no_answer_while_an_older_open_waits_on_a_failed_open_lets_it_draw_with_the_failed_opens_kernels(self):
+    def test_a_link_with_no_answer_while_an_older_open_waits_on_a_failed_open_then_says_the_failed_read(self):
         s = self._waiting("waitingRefused")
         self.assertTrue(s["refused"] and s["keptAtRefusal"], "then the no-answer note shows in the row it was pressed on: %r" % s)
         self.assertGreaterEqual(s["heldAtRefusal"], 1, "…while the newer open's /tunnels was held: %r" % s)
         self.assertTrue(s["bListed"], "the newer open's /tunnels then reached the page: %r" % s)
-        self.assertTrue(s["drawn"], "and the older open's waiting drawing drew the rows: %r" % s)
-        self.assertEqual(s["spare"], ["", "TESTHOST", "web-box"], "…listing the newer open's kernels: %r" % s)
+        self.assertTrue(s["failed"], "and the newer open's failed read was said: %r" % s)
+        self.assertEqual((s["said"], s["rows"]), (SAID_500, 0), "…in place of the rows, the older open's waiting answer, asked for "
+                         "before the newer open, not drawn as current: %r" % s)
         self.assertEqual(self._spare(s), [None], "the kernel holds no link: %r" % s)
 
     def test_after_one_of_two_links_on_their_way_is_refused_the_other_keeps_linking_across_the_kernel_lists_arrival(self):

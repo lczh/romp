@@ -178,8 +178,9 @@ function liftGear(head: string): string {
   for (; j < GEAR.length; j++) { if (GEAR[j] === "{") depth++; else if (GEAR[j] === "}") { depth--; if (!depth) break; } }
   return GEAR.slice(i, j + 1);
 }
-const answer = (d: unknown) => ({ json: () => Promise.resolve(d) });
-const notJson = () => ({ json: () => Promise.reject(new SyntaxError("not JSON")) });   // a 500 with a plain-text body
+const answer = (d: unknown) => ({ ok: true, status: 200, json: () => Promise.resolve(d) });
+const notJson = () => ({ ok: false, status: 500, json: () => Promise.reject(new SyntaxError("not JSON")) });   // a 500 with a plain-text body
+const garbled = () => ({ ok: true, status: 200, json: () => Promise.reject(new SyntaxError("not JSON")) });   // a 2xx whose body is not JSON
 const named = (name: string) => ({ logins: [{ id: "0123456789ab", label: name, addedAt: 0 }] });
 const LINK = { link: { login: "0123456789ab", sameAs: "TESTHOST" } }, LINK2 = { link: { login: "ba9876543210", sameAs: "TESTHOST" } };
 function gearLogins() {
@@ -194,17 +195,19 @@ function gearLogins() {
     return q.promise;
   };
   const src = ["var lgL = ", "var lgBusy = ", "function lgDate(", "function lgWhen(", "function lgLogins(", "function lgSignIn(",
-    "function lgPost(", "function lgLater(", "function lgFetchLogins("].map(liftGear).join("\n");
+    "function lgPost(", "function lgLater(", "function lgDraw(", "function lgError(", "function lgFetchLogins("].map(liftGear).join("\n");
   const api = new Function("document", "fetch", "ku", "lgOwn", "console", "selfName", "post",
-    src + "\nreturn { fill: lgFetchLogins, post: lgPost };")(doc, fetchStub, (p: string) => p,
+    src + "\nreturn { fill: lgFetchLogins, post: lgPost, open: function () { lgOpen++; } };")(doc, fetchStub, (p: string) => p,
     (d: any) => said.push(d && d.logins && d.logins[0] && d.logins[0].label), { error: (...a: unknown[]) => errors.push(a) }, "TESTHOST",
-    () => {}) as { fill: (after?: Promise<unknown>) => unknown; post: (body: unknown, st: Stub, ctl: Stub, label: string) => void };
+    () => {}) as { fill: (after?: Promise<unknown>) => unknown; post: (body: unknown, st: Stub, ctl: Stub, label: string) => void; open: () => void };
   // the rows drawn: each one's name and, where it has one, its picker's machines
   const drawn = () => list.children.filter((r) => r.className === "rs-login-row").map((r) => {
     const sel = r.children.find((c) => c.className === "rs-login-link");
     return { name: r.children[0].textContent, picker: sel ? sel.options.map((o) => o.value) : null };
   });
   const names = () => drawn().map((r) => r.name);
+  // what the block says in place of the rows when the read failed (lgError), or null
+  const failure = () => { const e = list.children.find((c) => c.className === "rs-line rs-login-bad"); return e ? e.textContent : null; };
   // a fill run to its end, its /logins answered with `name` and its /tunnels read settled with no kernel: true if it drew
   const fillDraws = async (name: string) => {
     const t = defer(), n = gets.length, d0 = draws;
@@ -214,7 +217,7 @@ function gearLogins() {
     await settle();
     return draws > d0;
   };
-  return { api, gets, posts, said, errors, drawn, names, fillDraws, draws: () => draws };
+  return { api, gets, posts, said, errors, drawn, names, failure, fillDraws, draws: () => draws };
 }
 
 test("the gear lists the stored logins with a Remove and the feed names a refused login", async () => {
@@ -368,6 +371,135 @@ test("the gear lists the stored logins with a Remove and the feed names a refuse
     "the Account row's span shrinks to the row, so the rows' names ellipsize (tests/test_login_link_picker_served.py measures each row's Remove against the card)");
   assert.match(FEED, /it\.blocked\.login \? `⚠ Can't analyze · \$\{it\.blocked\.login\}`\s*\n\s*: it\.blocked\.mode === "key" \? "⚠ Can't analyze · API key" : "⚠ Can't analyze · login";/);
   assert.match(FEED, /mode\?: string; login\?: string; since\?: number;/);
+});
+
+// A failed /logins read is said in place of the rows whenever they would otherwise be a previous open's (the review of #383: the
+// rows an earlier open drew stayed on screen, read as this machine's logins now, with nothing logged). Rows a read in the same open
+// drew stand, and the fills' ordering holds for the failure too. open() is a panel open (openSettings' lgOpen++).
+test("a failed stored-logins read is said in place of an earlier open's rows, and rows read in the same open stand", async () => {
+  const SAID = "Couldn't read the stored logins from this machine (HTTP 500).";
+  // a fill run to its end with its /logins read answered `how` and its /tunnels read settled with no kernel
+  const fillWith = async (g: ReturnType<typeof gearLogins>, how: (q: Defer) => void) => {
+    const t = defer(), n = g.gets.length;
+    g.api.fill(t.promise);
+    how(g.gets[n]);
+    t.resolve([]);
+    await settle();
+  };
+  {
+    // a reopen whose read fails: the earlier open's rows are taken down and the failure said, with the status; the account lines'
+    // word on the stored logins goes with them; the next read that succeeds draws over it
+    const g = gearLogins();
+    g.api.open();
+    assert.equal(await g.fillDraws("first"), true);
+    g.api.open();
+    await fillWith(g, (q) => q.resolve(notJson()));
+    assert.deepEqual(g.names(), [], "the earlier open's rows are no longer shown");
+    assert.equal(g.failure(), SAID, "…the failure is said in their place");
+    assert.equal(g.said[g.said.length - 1], null, "…and the account lines no longer speak from the earlier answer (lgOwn(null))");
+    assert.equal(g.errors.length, 1, "…and logged");
+    assert.equal(await g.fillDraws("again"), true, "the next fill whose read succeeds draws");
+    assert.deepEqual([g.names(), g.failure()], [["again"], null], "…over the failure");
+  }
+  {
+    // a later read in the same open fails: the rows this open drew stand, and the failure is logged
+    const g = gearLogins();
+    g.api.open();
+    assert.equal(await g.fillDraws("first"), true);
+    await fillWith(g, (q) => q.resolve(notJson()));
+    assert.deepEqual([g.names(), g.failure(), g.draws()], [["first"], null, 1], "the rows read in this open stand, drawn once");
+    assert.equal(g.errors.length, 1, "the failure is logged");
+  }
+  {
+    // the newer open's read fails while an older open's answer waits on it: that answer is not drawn as current
+    const g = gearLogins(), t1 = defer(), t2 = defer();
+    g.api.open();
+    assert.equal(await g.fillDraws("first"), true);
+    g.api.open();
+    g.api.fill(t1.promise);
+    g.gets[1].resolve(answer(named("older open")));
+    g.api.open();
+    g.api.fill(t2.promise);
+    g.gets[2].resolve(notJson());
+    t1.resolve([]);
+    await settle();
+    assert.deepEqual([g.names(), g.draws()], [["first"], 1], "the older open's answer waits on the newer open");
+    t2.resolve([]);
+    await settle();
+    assert.deepEqual([g.names(), g.failure()], [[], SAID], "the newer open's read failed: said in place of the rows, not the older answer");
+  }
+  {
+    // the same in one open: the older fill's answer is this open's, and it is drawn
+    const g = gearLogins(), t1 = defer(), t2 = defer();
+    g.api.open();
+    g.api.fill(t1.promise);
+    g.gets[0].resolve(answer(named("this open")));
+    g.api.fill(t2.promise);
+    g.gets[1].resolve(notJson());
+    t1.resolve([]);
+    await settle();
+    t2.resolve([]);
+    await settle();
+    assert.deepEqual([g.names(), g.failure()], [["this open"], null], "the waiting fill of this open draws its answer");
+  }
+  {
+    // an older open's read failing after a newer open's fill has drawn says nothing over that drawing
+    const g = gearLogins(), t1 = defer();
+    g.api.open();
+    g.api.fill(t1.promise);
+    g.api.open();
+    assert.equal(await g.fillDraws("newer open"), true);
+    g.gets[0].resolve(notJson());
+    t1.resolve([]);
+    await settle();
+    assert.deepEqual([g.names(), g.failure(), g.draws()], [["newer open"], null, 1], "the newer open's rows stand");
+  }
+  {
+    // a first open whose read fails says so rather than an empty block, which would read as no stored logins
+    const g = gearLogins();
+    g.api.open();
+    await fillWith(g, (q) => q.resolve(notJson()));
+    assert.equal(g.failure(), SAID);
+  }
+  {
+    // the cause in the user's terms: a status, no answer, or an answer that is not the list
+    const g = gearLogins();
+    g.api.open();
+    await fillWith(g, (q) => q.reject(new TypeError("Failed to fetch")));
+    assert.equal(g.failure(), "Couldn't read the stored logins from this machine (no answer).");
+    g.api.open();
+    await fillWith(g, (q) => q.resolve(garbled()));
+    assert.equal(g.failure(), "Couldn't read the stored logins from this machine (an unreadable answer).");
+  }
+  {
+    // a link on its way when the failure would be said: the row it was pressed on stays, and the link's re-read decides
+    const g = gearLogins();
+    g.api.open();
+    assert.equal(await g.fillDraws("first"), true);
+    g.api.open();
+    g.api.post(LINK, stub("span"), stub("select"), "");
+    await fillWith(g, (q) => q.resolve(notJson()));
+    assert.deepEqual([g.names(), g.failure()], [["first"], null], "nothing is drawn while the link is on its way");
+    g.posts[0].resolve(answer({ ok: true }));
+    await settle();
+    g.gets[2].resolve(answer(named("re-read")));
+    await settle();
+    assert.deepEqual([g.names(), g.failure()], [["re-read"], null], "the link's re-read, asked in this open, draws");
+  }
+  {
+    // …and when that re-read fails too, the failure is said once no link is on its way
+    const g = gearLogins();
+    g.api.open();
+    assert.equal(await g.fillDraws("first"), true);
+    g.api.open();
+    g.api.post(LINK, stub("span"), stub("select"), "");
+    await fillWith(g, (q) => q.resolve(notJson()));
+    g.posts[0].resolve(answer({ ok: true }));
+    await settle();
+    g.gets[2].resolve(notJson());
+    await settle();
+    assert.deepEqual([g.names(), g.failure()], [[], SAID], "the earlier open's rows are not drawn back as current");
+  }
 });
 
 test("the gear's stored-login row links a login to a machine's sign-in and unlinks it, said as the user's statement (2026-10-01)", async () => {

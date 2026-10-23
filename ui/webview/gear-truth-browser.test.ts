@@ -22,6 +22,11 @@
 // (3) The settings page shows a dropped message (federation's warn) as a notice, a dropped setting in the row's own words; a feed
 //     host, which has its own surface for warns, does not.
 // (4) Each kernel-backed box is named by its title alone and described by its state and what a click does.
+// (5) A closed panel's re-read of the peer (the peer's settingAck, or a re-read's fill that stood down at /version) drew nothing
+//     when it answered, so a panel reopened while it was on its way drew from this kernel's copy the re-read was still replacing,
+//     and kept that until the next reopen or click (the review of #383). An open panel now draws again once the re-read answers.
+// (6) A failed read of the stored logins (/logins) left the rows an earlier open drew on screen as if current, with nothing said
+//     or logged. The block now says the read failed in their place; rows a read in the same open drew stand, and it is logged.
 // Skips with a stated reason without a playwright browser, and fails with it where CI requires the leg (browser-leg.ts).
 // Synthetic values only.
 import { test } from "node:test";
@@ -78,7 +83,12 @@ type Lab = {
   held: Array<() => Promise<void>>;
   tunnelsAsked: string[];         // every /tunnels URL the page asked for, query and all
   heldArrived: (() => void) | null;
+  logins: Login[];                // this machine's stored logins, what /logins answers
+  loginsFail: number;             // when set, /logins answers this status with a plain-text body instead
 };
+type Login = { id: string; label: string; addedAt: number };
+// two stored logins (synthetic), for the scenes that read the Account row's stored-logins block
+const LOGINS: Login[] = [{ id: "0123456789ab", label: "work", addedAt: 1700000000 }, { id: "ba9876543210", label: "spare", addedAt: 1700000000 }];
 // What the page itself asked and read, recorded in the page as it happens: __asked, every fetch's path and query at the call;
 // __read, per path, the answers whose json() has settled. A fill's decisions after an answer need no request or timer, so once
 // a count is seen they have run, and anything a decision asked for is already in __asked.
@@ -87,7 +97,7 @@ const readCount = (page: any, path: string): Promise<number> => page.evaluate((p
 const readPast = (page: any, path: string, n: number) => page.waitForFunction(([p, k]: [string, number]) => (((window as any).__read || {})[p] || 0) > k,
   [path, n], { timeout: 5000 });
 
-async function withGear(t: any, opts: { own?: boolean }, body: (page: any, lab: Lab, errors: string[]) => Promise<void>): Promise<void> {
+async function withGear(t: any, opts: { own?: boolean; logins?: Login[] }, body: (page: any, lab: Lab, errors: string[]) => Promise<void>): Promise<void> {
   const browser = await launchLeg(t, pw, "chromium");
   if (!browser) return;
   const errors: string[] = [];
@@ -96,6 +106,7 @@ async function withGear(t: any, opts: { own?: boolean }, body: (page: any, lab: 
     peer: { thinkingSummaries: true, taskTracking: false, judgeFast: "on" },
     peerCopy: { thinkingSummaries: true, taskTracking: false, judgeFast: "on" },
     hold: false, holdReread: false, holdVersion: false, sha: "aaaa111", held: [], tunnelsAsked: [], heldArrived: null,
+    logins: opts.logins || [], loginsFail: 0,
   };
   try {
     const js = bundle();
@@ -149,7 +160,11 @@ async function withGear(t: any, opts: { own?: boolean }, body: (page: any, lab: 
         }
         return json(answer);
       }
-      return json({});   // /palette, /logins, /analytics and the rest: empty answers, nothing under test
+      if (u.pathname === "/logins") {
+        if (lab.loginsFail) return route.fulfill({ status: lab.loginsFail, contentType: "text/plain", body: "the stand-in stored logins read failed" });
+        return json({ logins: lab.logins });
+      }
+      return json({});   // /palette, /analytics and the rest: empty answers, nothing under test
     });
     await page.goto("http://romp.test/gear" + (opts.own ? "?own=1" : ""));
     await page.waitForFunction(() => Array.isArray((window as any).__posts) && !!document.getElementById("rs-thinksum"), null, { timeout: 10000 });
@@ -349,6 +364,57 @@ test("a re-read's fill that stands down at /tunnels with the panel closed starts
   });
 });
 
+// open the closed panel (the open starts a fill)
+const openPanel = (page: any) => page.evaluate(() => { window.postMessage({ romp: "openSettings", tab: "chat" }, "*"); });
+
+test("a panel reopened while a closed panel's re-read of the peer is on its way draws again once the re-read answers", { timeout: 90000 }, async (t) => {
+  await withGear(t, {}, async (page, lab, errors) => {
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: true }, "the first fill: off here, on on the peer");
+    // the peer turns it off and says so to a closed panel: this kernel's copy says on until the re-read the ack asks for lands
+    lab.peer = { ...lab.peer, thinkingSummaries: false };
+    await page.evaluate(() => (window as any).__rompSettingsClose());
+    lab.holdReread = true;
+    const arrived = new Promise<void>((res) => { lab.heldArrived = res; });
+    await ackFromPeer(page);
+    await arrived;
+    lab.holdReread = false;
+    const r0 = await readCount(page, "/tunnels");
+    await openPanel(page);
+    await readPast(page, "/tunnels", r0);   // the reopen's plain read has answered, with the copy from before the re-read
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: true }, "the reopen drew the copy: off here, on there");
+    for (const f of lab.held.splice(0)) await f();   // the re-read lands: the copy is lifted, the peer off
+    await mixed(page, false, 5000).catch(() => undefined);   // the assertion below says what was drawn instead
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: false, indeterminate: false },
+      "once the re-read answers the open panel draws again: off on both machines, no dash");
+    assert.deepEqual(lab.tunnelsAsked.filter((q) => q.includes("reread")), ["?reread=TESTHOSTB"], "the redraw asked for no second re-read");
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
+test("a re-read asked alone by a fill that stood down with the panel closed is drawn by a panel reopened before it answers", { timeout: 90000 }, async (t) => {
+  await withGear(t, {}, async (page, lab, errors) => {
+    await lateRereadFill(page, lab, "version");
+    await page.evaluate(() => (window as any).__rompSettingsClose());
+    lab.holdReread = true;
+    const rereadArrived = new Promise<void>((res) => { lab.heldArrived = res; });
+    const v0 = await readCount(page, "/version");
+    for (const f of lab.held.splice(0)) await f();   // the late /version: the fill stands down, the panel closed, and asks for the re-read alone
+    await readPast(page, "/version", v0);
+    await rereadArrived;
+    lab.holdReread = false;
+    const r0 = await readCount(page, "/tunnels");
+    await openPanel(page);
+    await readPast(page, "/tunnels", r0);
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: false },
+      "the reopen drew the copy the re-read is still replacing: on here and on there");
+    for (const f of lab.held.splice(0)) await f();   // the re-read lands: the peer off
+    await mixed(page, true, 5000).catch(() => undefined);
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: true },
+      "once the re-read answers the open panel draws again: on here, off on the peer");
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
 test("under All kernels a click names the machines the panel shows, so a machine the page has not linked yet is still reached", { timeout: 90000 }, async (t) => {
   await withGear(t, {}, async (page, _lab, errors) => {
     await page.click("#rs-thinksum");
@@ -398,6 +464,63 @@ test("a box is named by its title alone and described by its state, what a click
     assert.match(tk.parts[1], /^romp reads every session/, "…then the row's line");
     const jf = await said("rs-judgefast");
     assert.match(jf.parts[0], /^differs\. The kernels disagree: TESTHOSTA \(this machine\) off, TESTHOSTB on\. A click turns it off for every machine; click again to turn it on\.$/);
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
+// The Account row's stored-logins block as drawn: its rows' names, the failure said in their place and its colour beside the
+// blocked red's (a probe in the block wearing the token), and the row's description
+const loginsBlock = (page: any) => page.evaluate(() => {
+  const bad = document.querySelector("#rs-logins .rs-login-bad") as HTMLElement | null;
+  const probe = document.createElement("span");
+  probe.style.color = "var(--err, #F85B5A)";
+  document.getElementById("rs-logins")!.appendChild(probe);
+  const red = getComputedStyle(probe).color;
+  probe.remove();
+  return {
+    rows: Array.from(document.querySelectorAll("#rs-logins .rs-login-row .rs-login-name")).map((n) => n.textContent || ""),
+    said: bad ? bad.textContent : null,
+    red: bad ? getComputedStyle(bad).color === red : null,
+    desc: (document.getElementById("rs-login-acct") || {}).textContent || "",
+  };
+});
+const loginRows = (page: any, n: number) => page.waitForFunction((k: number) => document.querySelectorAll("#rs-logins .rs-login-row").length === k,
+  n, { timeout: 5000 });
+const SAID_500 = "Couldn't read the stored logins from this machine (HTTP 500).";
+
+test("a reopen whose stored-logins read fails says so in place of the rows an earlier open drew", { timeout: 90000 }, async (t) => {
+  await withGear(t, { logins: LOGINS }, async (page, lab, errors) => {
+    await loginRows(page, 2);
+    assert.match((await loginsBlock(page)).desc, /For the other logins below/, "the first open drew both logins");
+    lab.loginsFail = 500;
+    await reopen(page);
+    await page.waitForFunction(() => !!document.querySelector("#rs-logins .rs-login-bad"), null, { timeout: 5000 }).catch(() => undefined);
+    const failed = await loginsBlock(page);
+    assert.deepEqual(failed.rows, [], "the earlier open's rows are not shown as this machine's logins now");
+    assert.equal(failed.said, SAID_500, "the failure is said in their place, with the status");
+    assert.equal(failed.red, true, "…in the block's own blocked red, not the muted ink of the lines around it");
+    assert.doesNotMatch(failed.desc, /other logins below|No other Claude logins/, "nor does the row's description speak from the earlier answer");
+    lab.loginsFail = 0;
+    await reopen(page);
+    await loginRows(page, 2);
+    assert.equal((await loginsBlock(page)).said, null, "the next open whose read succeeds draws the rows over the failure");
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
+test("a later stored-logins read in the same open that fails leaves the rows this open drew, and is logged", { timeout: 90000 }, async (t) => {
+  await withGear(t, { logins: LOGINS }, async (page, lab, errors) => {
+    const logged: string[] = [];
+    page.on("console", (m: any) => { if (m.type() === "error") logged.push(m.text()); });
+    await loginRows(page, 2);
+    lab.loginsFail = 500;
+    const r0 = await readCount(page, "/tunnels");
+    await ackFromPeer(page);   // the open panel draws again; its /logins read is answered 500
+    await readPast(page, "/tunnels", r0);   // that fill's kernel list has settled: its failure has been decided
+    for (let i = 0; i < 50 && !logged.some((x) => x.includes("stored logins read failed")); i++) await page.waitForTimeout(50);   // loop-ok: bounded at 2.5 s
+    const after = await loginsBlock(page);
+    assert.deepEqual([after.rows.length, after.said], [2, null], "the rows this open drew stand: they are as current as the rest of the panel");
+    assert.ok(logged.some((x) => x.includes("romp: settings: the stored logins read failed: HTTP 500")), "the failure is logged: " + JSON.stringify(logged));
     assert.deepEqual(errors, [], "no page errors");
   });
 });
