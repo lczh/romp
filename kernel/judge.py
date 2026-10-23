@@ -4201,16 +4201,17 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
     return session
 
 
-def asm_refresh(fsid, leaf, now, sdk_human=None, states=None):
+def asm_refresh(fsid, leaf, now, sdk_human=None, states=None, rebuild=None):
     """The assembly document refresh for `fsid`'s leaf (em.asm_refresh_document, after em.asm_refresh_claim granted it), over
     the inputs parsed_session hands the parse, so the document it writes is the one the next restore of this leaf verifies:
     the same candidate files, states log, postal log and owner bit. Never under a pending cut: a document describes the file
-    as it stands on disk, as every writer's whole entry does (a cut parse never reaches the assembly cache)."""
+    as it stands on disk, as every writer's whole entry does (a cut parse never reaches the assembly cache). `rebuild`: the
+    reason a parse noted the leaf for a rebuild (em.asm_rebuild_claim granted it), the same road for a leaf with no document."""
     files = _judge_candidates(fsid, [str(leaf)])
     states = Path(states) if states else STATESDIR / (fsid + ".jsonl")
     human = bool(sdk_human) if sdk_human is not None else bool(_sdk_owned(fsid))
     return em.asm_refresh_document(files[0], fsid, human, candidate_files=list(files), states=str(states),
-                                   postal_log=str(MESSAGES), now=now)
+                                   postal_log=str(MESSAGES), now=now, rebuild=rebuild)
 
 
 def tasks_for(fsid, leaf, files, now, done=None):

@@ -84,6 +84,7 @@ CENSUS = {
     "_chat_stat_key": ("sig", "taskout", "the fold's per-output identity; the same stat the taskout dep re-takes"),
     "_chat_turn_fp": ("pure", "over a turn"),
     "_asm_cut_turn": ("pure", "over the turns' lazy markers: the first turn with a live atom (transcript)"),
+    "_follower_floor": ("sig", "floor", "the floor the pusher last used, read by a build outside its cycle (the pusher's decision is the component); the tree's cut (transcript) when that floor was an older tree's cut, and then the pusher's cached build is dropped (2026-10-23)"),
     "_cursors_before": ("pure", "over the earlier turns' scalars and the note lists (transcript, states, note)"),
     "_uniq_event_uuids": ("pure", "over the built list: a key on a repeated uuid"),
     "_key_counts": ("pure", "over the sealed prefix: the uuid pass's seen map, kept in the fold entry"),
@@ -192,7 +193,6 @@ CENSUS = {
 
 # Attribute calls whose base is a module-level object or one of the backend locals build_session binds.
 DOTTED = {
-    "_RENDER_FLOOR.get": ("sig", "floor", "the floor the pusher last used, read by a build outside its cycle (the pusher's decision is the component)"),
     "Sessions.backend_for": ("sig", "reg", "ownership: the SDK backend owns a sid whose reg exists"),
     "Sessions.working_note": ("sig", "note", "the working-note file (working/<sid>) by identity"),
     "Sessions.live_rev": ("sig", "live", "the live tail's revision, read before the merge for the frame's watermark (_chat_wm, 2026-09-22): the signature folds the same counter"),
@@ -246,6 +246,7 @@ GLOBALS = {
     "_FOLLOWUP_GOAL_RE": ("const", "a module regex"),
     "_chat_fold": ("memo", "see _chat_fold_get"),
     "_RENDER_FLOOR": ("sig", "floor", "the render floor the pusher's last build used; the pusher's own decision is the floor component"),
+    "_RENDER_FLOOR_CUT": ("out", "the pusher's build records whether its floor was the tree's cut (read by _follower_floor)"),
     "_PAGE_FILL_TURNS": ("const", "the turns stepped past a page for late fills"),
     "_chat_fold_last": ("out", "the perf line's per-thread record"),
     "_chat_fold_lock": ("const", "a lock"),
