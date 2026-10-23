@@ -11386,11 +11386,11 @@ def may_apply(store, nd, src, kind, ev_t=None):
         may revive it — the caller places follow-on work as a fresh goal instead.
       - `agent` verdicts (the mirror of the agent's OWN to-do list) are never gated by judge evidence.
 
-    NOT routed here, deliberately (the E1 write-site census, 2026-07-06): the deterministic delegation
-    link-back (run_propagate mirrors the peer's REAL completion; no floor existed and none is added —
-    zero-change), the consolidator's empty-umbrella housekeeping clear, and the candidate FILTERS that
-    hide sealed/cleared nodes upstream (open_menu, _group_tops, _consolidate_tops, _live_anchor_gone,
-    the nudge-phase target check)."""
+    NOT routed here, deliberately (the E1 write-site census, 2026-07-06): the consolidator's empty-umbrella
+    housekeeping clear, and the candidate FILTERS that hide sealed/cleared nodes upstream (open_menu,
+    _group_tops, _consolidate_tops, _live_anchor_gone, the nudge-phase target check). The delegation
+    link-back (run_propagate) is routed here like any judge done, its evidence time the recipient's
+    completion (2026-10-23)."""
     if kind == "reopen":
         return nd.get("id") not in _view_cleared()
     if src not in ("user", "agent"):               # judge-RANK: planner/closer/courier/grouper/nudge...
@@ -20175,7 +20175,9 @@ def run_propagate(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbos
     origin.goalId DONE too — so a '↪ delegated to B' item checks off the instant B finishes and reports. NO
     LLM: the closer already judged G done on B; this just follows the origin pointer (origin.goalId points at
     the sender's precise tracking node, planted by _plant_handoff_track). Forward-only + idempotent: it never
-    reopens the sender's node, and a node already done (or gone) is a no-op. Returns completions propagated.
+    reopens the sender's node, and a node already done (or gone) is a no-op. The done carries G's own
+    completion time as its evidence, so a tracker the user followed up on (or anything else reopened, cleared
+    or blocked) after that completion is left as it stands. Returns completions propagated.
 
     Every store is read at most ONCE per pass (2026-09-06): `loaded` holds this pass's load_goals objects
     and serves the recipient scan, the per-ref done check, _ref_goal's recipient maps and the sender loop;
@@ -20289,9 +20291,24 @@ def run_propagate(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbos
                         or (str(nd.get("summary") or "").strip().splitlines() or [""])[0]
                     if sub:
                         why += ": " + sub[:220]
+                    # The done's evidence time is the RECIPIENT'S COMPLETION, never this pass's clock
+                    # (2026-10-23). Stamped with the clock it outranked everything on the tracker: a user
+                    # who replied on the completed card saw it snap back to Completed on the next pass with
+                    # nothing new from the recipient, and the planner's reopen for the reply folded under
+                    # it, so the reply landed on another card. Stamped with the completion it orders like
+                    # any judge done: a follow-up after it on the card or an ancestor is a floor that
+                    # record_verdict refuses it under, and a reopen, clear or block filed after it folds
+                    # over it. The fold is asked first, so standing down writes nothing, pass after pass;
+                    # a later completion of the recipient's goal checks the tracker off again.
+                    ev = _done_since(nd)
+                    trial = {"ev_t": ev, "src": "courier", "kind": "done", "at": int(time.time())}
+                    if _fold_node({"log": list(a_node.get("log") or []) + [trial]})["state"] != "done":
+                        continue
                     applying = a_sid                    # half-applied from here until dirty: see the except
-                    record_verdict(a_store, a_store["nodes"][a_gid], "courier", "done", now, why=why)
-                    _mark_node_done(a_store, a_gid, why, now, src="courier")
+                    if not record_verdict(a_store, a_node, "courier", "done", ev, why=why):
+                        applying = None
+                        continue
+                    _mark_node_done(a_store, a_gid, why, ev, src="courier")
                     if a_sid not in closed:
                         closed[a_sid] = _presumed_closed(a_sid, now)
                     rollup_status(a_store, closed[a_sid])   # sender just had work close →

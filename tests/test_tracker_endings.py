@@ -11,7 +11,14 @@ whose ending event could no longer fire):
     ref-joined recipient goal is cleared-without-done — the recipient's reply at/after the send is
     the report-back event (the exact quiet/cross-host rule), why-stamped as the dismissal shape it
     is. A LIVE linked recipient still defers to the back-link: a reply alone never ends a
-    delegation whose card is still being worked. SYNTHETIC fixtures only; private synthetic sids."""
+    delegation whose card is still being worked.
+And an ending that fired when it should not have (2026-10-23):
+(3) A FOLLOW-UP AFTER THE COMPLETION — the back-link stamped its done with the pass clock, so when
+    the user replied on a completed delegation card, the next pass found the recipient's goal still
+    complete and re-completed the card: the chip cleared, and the planner's reopen for the reply
+    folded under that done, so the reply was filed elsewhere. The done now carries the recipient's
+    completion time, and anything on the tracker newer than it stands.
+SYNTHETIC fixtures only; private synthetic sids."""
 import json
 import os
 import tempfile
@@ -151,6 +158,116 @@ class DismissedRecipient(World):
         jd.run_propagate(now=T + 900)
         self.assertTrue(self._tracker().get("nodeComplete"),
                         "the dismissal shape resolves through the archive too")
+
+
+WEB = "a21e0001-1111-4222-8333-000000000003"    # two more private sids: this class journals the user's
+PEER = "a21e0001-1111-4222-8333-000000000004"   # follow-up, and every later load of the sid replays it
+CARD = WEB + ":g1"
+MID2 = "1787299000.000002_1.TESTHOST"
+
+
+class FollowUpAfterTheCompletion(unittest.TestCase):
+    """web delegated an export to api; api's closer ruled its goal done at T + 150."""
+
+    def setUp(self):
+        self._saved = jd.discover
+        jd.discover = lambda now, window=None, forks=True: [
+            (WEB, "/dev/null", None, "web"), (PEER, "/dev/null", None, "api")]
+        self.td = tempfile.TemporaryDirectory()
+        self._msgs = jd.MESSAGES
+        jd.MESSAGES = Path(self.td.name) / "messages.jsonl"
+        jd.MESSAGES.write_text("")
+
+    def tearDown(self):
+        jd.discover = self._saved
+        jd.MESSAGES = self._msgs
+        for sid in (WEB, PEER):
+            for p in (jd.GOALDIR / (sid + ".json"), jd.GOALARCHDIR / (sid + ".json"),
+                      jd._overrides_dir() / (sid + ".jsonl")):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        self.td.cleanup()
+
+    def _seed(self, under_card=False):
+        st = {"rompUuid": WEB, "seq": 1, "nodes": {}, "placements": {}, "status": {}}
+        if under_card:
+            st["nodes"][CARD] = _node(CARD, "Ship the notes export", None)
+        self.track = jd._plant_handoff_track(st, CARD if under_card else None, "export module",
+                                             PEER, "api", T, MID2)
+        jd.save_goals(WEB, st)
+        g = _node(PEER + ":g1", "Export the module", None, t=T + 50,
+                  origin={"peer": WEB, "goalId": self.track, "msgId": MID2})
+        rst = {"rompUuid": PEER, "nodes": {g["id"]: g}, "placements": {}, "status": {}}
+        jd.record_verdict(rst, g, "closer", "done", T + 150, why="module exported")
+        jd.save_goals(PEER, rst)
+
+    def _tracker(self):
+        return jd.load_goals(WEB)["nodes"][self.track]
+
+    def _complete_then_follow_up(self):
+        self._seed()
+        self.assertEqual(jd.run_propagate(now=T + 200), 1)
+        self.assertTrue(self._tracker().get("nodeComplete"), "api's completion checks the card off")
+        self.assertTrue(jd.optimistic_followup(WEB, self.track, text="also cover the csv path", now=T + 300))
+        nd = self._tracker()
+        self.assertFalse(nd.get("nodeComplete"), "the reply reopened the card")
+        self.assertTrue(nd.get("followupPending"), "and it wears the follow-up chip")
+
+    def test_the_done_carries_the_completion_time(self):
+        self._seed()
+        jd.run_propagate(now=T + 200)
+        self.assertEqual([e.get("ev_t") for e in self._tracker()["log"] if e.get("kind") == "done"],
+                         [T + 150], "api's completion is the evidence, not the pass clock")
+
+    def test_the_next_pass_leaves_the_follow_up_standing(self):
+        self._complete_then_follow_up()
+        self.assertEqual(jd.run_propagate(now=T + 400), 0, "nothing new from api since the reply")
+        st = jd.load_goals(WEB)
+        nd = st["nodes"][self.track]
+        self.assertFalse(nd.get("nodeComplete"), "a done stamped with the pass clock re-completed the card")
+        self.assertTrue(nd.get("followupPending"), "the chip stays until a judge rules on the reply")
+        self.assertEqual(st["status"].get(self.track), "working")
+
+    def test_the_reply_can_still_be_filed_under_the_card(self):
+        self._complete_then_follow_up()
+        jd.run_propagate(now=T + 400)
+        st = jd.load_goals(WEB)
+        jd._reopen(st, self.track, by="followup", now=T + 300)    # the planner's continuation for the reply
+        self.assertIn(self.track, [n["id"] for n in jd.open_menu(st, cap=None)],
+                      "the reply's work reaches the card it was typed on")
+
+    def test_a_newer_completion_checks_it_off_again(self):
+        self._complete_then_follow_up()
+        rst = jd.load_goals(PEER)
+        jd._reopen(rst, PEER + ":g1", by="delegation", now=T + 320)    # the follow-up's work reaches api
+        jd.record_verdict(rst, rst["nodes"][PEER + ":g1"], "closer", "done", T + 350, why="csv path covered")
+        jd.save_goals(PEER, rst)
+        self.assertEqual(jd.run_propagate(now=T + 400), 1)
+        self.assertTrue(self._tracker().get("nodeComplete"), "evidence newer than the reply completes it")
+
+    def test_a_reopen_after_the_completion_stands_and_no_row_is_added(self):
+        self._seed()
+        jd.run_propagate(now=T + 200)
+        st = jd.load_goals(WEB)
+        jd._reopen(st, self.track, by="delegation", now=T + 300)   # new delegated work lands on the card
+        jd.save_goals(WEB, st)
+        rows = len(self._tracker()["log"])
+        for now in (T + 400, T + 500):
+            self.assertEqual(jd.run_propagate(now=now), 0)
+        nd = self._tracker()
+        self.assertFalse(nd.get("nodeComplete"), "the older completion does not close the reopened card")
+        self.assertEqual(len(nd["log"]), rows, "standing down writes nothing, pass after pass")
+
+    def test_a_follow_up_on_the_parent_card_floors_its_tracker(self):
+        # api's done (evidence T + 150) reaches the board only after the user replied on web's card
+        self._seed(under_card=True)
+        self.assertTrue(jd.optimistic_followup(WEB, CARD, text="add the docs too", now=T + 300))
+        self.assertEqual(jd.run_propagate(now=T + 400), 0)
+        nd = self._tracker()
+        self.assertFalse(nd.get("nodeComplete"), "a done older than the reply on its card does not land")
+        self.assertEqual([e for e in nd["log"] if e.get("src") == "courier"], [])
 
 
 if __name__ == "__main__":
