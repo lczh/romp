@@ -35461,8 +35461,7 @@ def _awaiting_nest(agents, commands, cmd_owner, path):
 
     def launches(aid):
         if aid not in launch_sets:
-            ap = _subagent_file(path, aid) if path else None
-            launch_sets[aid] = _agent_launch_ids(ap) if ap else set()
+            launch_sets[aid] = _agent_launch_read(path, aid)
         return launch_sets[aid]
 
     def owner_by_transcript(tuid, exclude=None):
@@ -35480,7 +35479,11 @@ def _awaiting_nest(agents, commands, cmd_owner, path):
             owned[id(it)] = o
     inv_meta = None
     agent_owner = {}
-    for aid, it in by_agent.items():
+    # An agent's owner is ANOTHER live agent (the `o != aid and o in by_agent` test below), so with one live agent no agent
+    # can nest and the loop's reads (the sidecar map, the other agents' files) cannot change the answer: they are skipped
+    # (2026-10-23). The feed keys a session on its subagents tree only when its derivation read the tree, and one
+    # background agent is the common wait; the rows are the same either way.
+    for aid, it in (by_agent.items() if len(by_agent) > 1 else ()):
         if inv_meta is None:
             inv_meta = {v["agentId"]: dict(v, toolUseId=k) for k, v in (_subagent_meta_map(path) if path else {}).items()}
         m = inv_meta.get(aid) or {}
@@ -36960,6 +36963,7 @@ def _subagent_meta_map(path):
     this map (_stamp_agents, _awaiting_live_rows, _awaiting_nest) and the feed key's read share the cycle's stamps."""
     d = str(_subagents_dir(path))
     dirs, stats = _subagent_tree(d)                       # the shared walk memo (2026-09-16): the directories and the stat each
+    _feed_sub_note_tree(d, dirs, stats)                   # a running feed derivation keys on the tree it read (2026-10-23)
     if not dirs:                                          #  was taken under, one pass, no os.walk and no second stat per directory
         _SUBAGENT_META_CACHE.pop(d, None)
         # a running chat build: the directory's absence is a dependency too, as os.stat's failure recorded it before the
@@ -37380,6 +37384,23 @@ def _agent_launch_ids(agent_path):
         return _agent_launch_ids_fold(agent_path)
     except Exception:
         return set()
+
+
+def _agent_launch_read(path, agent_id):
+    """The launch tool_use ids in agent `agent_id`'s own file beside the transcript `path` (_subagent_file finds it, wherever
+    it sits; set() when there is none): _awaiting_nest's transcript join. A running feed derivation records what it read here
+    by value, the file's place and the ids (_feed_sub_note_agent, 2026-10-23), so the session's key moves when an open
+    agent's file gains a launch and not on its other writes."""
+    ap, ids = _agent_launch_found(path, agent_id)
+    _feed_sub_note_agent(path, agent_id, ap, ids)
+    return ids
+
+
+def _agent_launch_found(path, agent_id):
+    """(the agent's own file beside `path` or None, the launch ids in it or set()): _agent_launch_read's read, which the feed
+    key re-takes for an agent its session's derivation read (_feed_subagents_key)."""
+    ap = _subagent_file(path, agent_id) if path else None
+    return ap, (_agent_launch_ids(ap) if ap else set())
 
 
 def _agent_launch_ids_fold(agent_path):
@@ -50485,7 +50506,8 @@ _FEED_MEMO_LABELS = ("transcript", "parse", "cut", "states", "names", "captions"
                      "cleared", "row", "ask", "live", "bg", "wait", "postal", "stalls", "nudge", "jauth", "jactive",
                      "hide", "watch", "subagents", "usage", "offer", "auth", "downtime", "debug", "interrupting",
                      "closer", "peers")
-_FEED_MEMO_DEPS = ("usage", "offer", "peers", "nudge", "stalls")    # components evaluated over the previous entry's read record
+_FEED_MEMO_DEPS = ("usage", "offer", "peers", "nudge", "stalls", "subagents")   # components evaluated over the previous entry's
+#                                                  read record
 _FEED_NUDGE_FIELDS = ("count", "failed", "failedAt")  # the fields the card reads; pinned by the input census
 # The `row` component's positions and the live-row fields each folds (2026-09-18): _feed_row_key reads them by name,
 # the input census (tests/test_feed_memo_inputs.py RowFieldCensus) pins them to the readers' constant reads, and a
@@ -50728,17 +50750,99 @@ def _subagent_dirs_ident(sid, d):
     the T368 review's profile having put the walk at a third of the key's cost, while every other reader still walked):
     an unchanged tree costs one lstat per known directory, once per cycle across every reader (the cycle scope,
     2026-09-18: the chat build's sidecar-map reads earlier in the same cycle sampled this root, and the key is served that
-    sample). A root that does not exist is the tree (d,) with identity None,
-    and its appearance moves the component; a symlink or file in its place is (d,) with the LINK's own lstat identity
-    (before the shared memo, the target's os.stat identity: one component miss at deploy for such a session, no output
-    change).
+    sample). Taken only for a tree the session's previous derivation read (_feed_subagents_key, 2026-10-23). The shape is
+    _subagent_tree_ident's.
     A sidecar REWRITTEN in place under its own name moves no directory's mtime, so neither this component nor
     _subagent_meta_map's own cache sees it (pre-existing, shared with that cache; the CLI writes a sidecar once, at the
     agent's spawn). `sid` is kept for the call's shape; the memo is per root and bounded by the alive set
     (_subagent_trees_forget), not per session."""
     dirs, stats = _subagent_tree(d)
+    return _subagent_tree_ident(d, dirs, stats)
+
+
+def _subagent_tree_ident(d, dirs, stats):
+    """(directories, their identities) of one sample (dirs, stats) of the tree at `d`, as _subagent_tree answered it. A root
+    that does not exist is the tree (d,) with identity None, and its appearance moves the identity; a symlink or file in its
+    place is (d,) with the LINK's own lstat identity (before the shared memo, the target's os.stat identity)."""
     idents = tuple(_stat_ident(s) for s in stats)
     return (dirs or (d,), idents or (None,))
+
+
+# THE FEED KEY READS ONLY THE SUBAGENTS TREES ITS DERIVATION READ (2026-10-23). The key's `subagents` component sampled every
+# living session's whole subagents tree on every build, one lstat per directory, though a derivation reads a tree only for a
+# session that is idle with live agents (_session_awaiting -> _awaiting_live_rows -> _subagent_meta_map, _awaiting_nest ->
+# _agent_launch_read). On a box whose sessions run many workflows the trees hold hundreds of directories, and each lstat gives
+# up the interpreter lock, so a pusher contending with busy judge threads paid a lock hand-off per directory per build. Now
+# the component is a dependency one, like `usage` and `peers`: a derivation records what it read of the subagents trees on
+# this per-thread record, and the next build's key re-takes exactly that. A tree the sidecar map read is keyed on its
+# directories' identities, taken from the very sample the map read (the walk memo's stamps, taken before its listings), and
+# an open agent's file the transcript join read is keyed by value: where _subagent_file found it and the launch ids in it.
+# Whether a derivation reads any of this is decided by inputs other components fold (the parse's open turn, the live row's
+# agents and tasks, the task set), so a session whose derivation read nothing has nothing here to move: its key takes no
+# sample at all.
+_feed_sub_scope = threading.local()   # .reads = the running feed derivation's record ({"trees": {}, "agents": {}}), per thread
+
+
+def _feed_sub_note_tree(d, dirs, stats):
+    """A reader of the subagents tree at `d` reports the sample it read (dirs, stats) to the running feed derivation, which
+    keys on the first sample of each root it read: a later sample within the same derivation can only be newer, and the key
+    then mismatches at the next build and derives again, never a stale hit. Nothing to report outside a feed derivation."""
+    rec = getattr(_feed_sub_scope, "reads", None)
+    if rec is not None and d not in rec["trees"]:
+        rec["trees"][d] = _subagent_tree_ident(d, dirs, stats)[1]
+
+
+def _feed_sub_note_agent(path, agent_id, ap, ids):
+    """_agent_launch_read's report to the running feed derivation: the agent file it found beside `path` (None for none) and
+    the launch ids it read there, by value. The first read of each (path, agent) in a derivation is the one kept."""
+    rec = getattr(_feed_sub_scope, "reads", None)
+    if rec is not None:
+        rec["agents"].setdefault((str(path) if path else "", str(agent_id)),
+                                 (str(ap) if ap is not None else None, tuple(sorted(ids))))
+
+
+@contextlib.contextmanager
+def _feed_sub_reads():
+    """Open the per-thread record for one session's feed derivation and yield it ({"trees": {root: identities},
+    "agents": {(path, agentId): (file or None, launch ids)}}); the previous record, if any, is restored after."""
+    prev = getattr(_feed_sub_scope, "reads", None)
+    rec = {"trees": {}, "agents": {}}
+    _feed_sub_scope.reads = rec
+    try:
+        yield rec
+    finally:
+        _feed_sub_scope.reads = prev
+
+
+def _feed_sub_record(rec):
+    """The JSON-able form of a derivation's record, kept in the entry's `reads` as `subagents` for the next build's key: the
+    roots and the (path, agentId) pairs it read, sorted; None when it read nothing of the subagents trees."""
+    if not rec or not (rec["trees"] or rec["agents"]):
+        return None
+    return {"trees": sorted(rec["trees"]), "agents": [list(k) for k in sorted(rec["agents"])]}
+
+
+def _feed_sub_settled(rec):
+    """The `subagents` component as a derivation read it: ((root, identities) ..., ((path, agentId), (file, ids)) ...),
+    sorted, or None when it read nothing; the value _feed_subagents_key re-takes for the same record."""
+    if not rec or not (rec["trees"] or rec["agents"]):
+        return None
+    return (tuple(sorted(rec["trees"].items())), tuple(sorted(rec["agents"].items())))
+
+
+def _feed_subagents_key(entry):
+    """The `subagents` component for the previous entry `entry`: None when its derivation read nothing of the subagents trees
+    (or there is none), else the same shape _feed_sub_settled gives, re-taken now: each recorded root's identities from its
+    current sample (_subagent_dirs_ident) and each recorded agent's file and launch ids (_subagent_file, _agent_launch_ids)."""
+    sub = ((entry or {}).get("reads") or {}).get("subagents")
+    if not sub:
+        return None
+    trees = tuple((r, _subagent_dirs_ident(None, r)[1]) for r in sub.get("trees") or ())
+    agents = []
+    for p, a in sub.get("agents") or ():
+        ap, ids = _agent_launch_found(p, a)
+        agents.append(((p, a), (str(ap) if ap is not None else None, tuple(sorted(ids)))))
+    return (trees, tuple(agents))
 
 
 def _postal_session_slice(sid, maps=None):
@@ -50999,12 +51103,16 @@ def _feed_session_key(s, tm, ctx, prev_entry):
       jactive: fsid in {r["fsid"] for r in jd.active_runs()}. The Analyzing swirl's active prong.
       hide: _session_flag(fsid, "hideFromFeed"). The session yields no entry while set.
       watch: json of _watch_awaiting(fsid) (the in-memory watches for this sid). An awaiting source.
-      subagents: the identity (ino, mtime_ns, size, ctime_ns) of the transcript's subagents directory and every directory
-        under it, from the shared walk memo (_subagent_dirs_ident over _subagent_tree, 2026-09-16: the directories are
-        listed once per change, vouched for by one lstat each while they stand). _subagent_meta_map. A sidecar rewritten
-        in place under its own name moves no directory's mtime and is invisible here as it is to the map's own cache
-        (pre-existing). Sampled once per pusher cycle across every reader (2026-09-18), so the key's identities are the
-        same sample the derivation's map read.
+      subagents: what the previous derivation read of the subagents trees (_feed_subagents_key; None when it read nothing,
+        and when cold), a deps component since 2026-10-23. For each tree the sidecar map read (_subagent_meta_map, from
+        _awaiting_live_rows and _awaiting_nest), the identity (ino, mtime_ns, size, ctime_ns) of its root and every
+        directory under it, from the shared walk memo (_subagent_dirs_ident over _subagent_tree, 2026-09-16: listed once
+        per change, vouched for by one lstat each while they stand; sampled once per pusher cycle across every reader,
+        2026-09-18). For each open agent whose own file the transcript join read (_awaiting_nest -> _agent_launch_read),
+        the file _subagent_file finds and the launch ids in it, by value: a launch landing moves it, the agent's other
+        writes do not. Before 2026-10-23 every living session's whole tree was sampled on every build whether its
+        derivation read it or not, and an agent file's growth was not keyed. A sidecar rewritten in place under its own
+        name moves no directory's mtime and is invisible here as it is to the map's own cache (pre-existing).
       usage: _chat_ident(STATE/usage.json) when the previous entry recorded reading it (an api error's cap offer,
         _cap_switch_offer), else None. A deps component.
       offer: the login-account usage window sitting at its cap with its reset still ahead of the build's clock, as
@@ -51052,7 +51160,7 @@ def _feed_session_key(s, tm, ctx, prev_entry):
     stalls = _feed_stalls_key(ctx, prev_entry)
     jauth = tuple(sorted((ctx["jauth_map"].get(fsid) or {}).items(), key=str)) or None
     jactive = fsid in ctx["jactive"]
-    subagents = _subagent_dirs_ident(fsid, str(_subagents_dir(path)))[1] if path else None
+    subagents = _feed_subagents_key(prev_entry)    # only the trees and agent files the previous derivation read (2026-10-23)
     reads_usage = bool(((prev_entry or {}).get("reads") or {}).get("usage"))   # the entry read usage.json (the cap offer)
     usage = board["usage_ident"] if reads_usage else None
     offer = board["cap_open"] if reads_usage else None
@@ -51202,9 +51310,14 @@ def _feed_key_with_deps(key, ctx, entry):
     pre-derivation facts, and facts taken now could pair a new key with old content (the peer's store moving while
     the body read it, the order stat-then-read forbids), so the stored key carries _FEED_PEERS_UNSETTLED instead:
     the next build re-derives once more, this time with every peer's facts taken before the read, and hits from
-    then on. One extra derivation the first time a session's cards name a new peer, never a stale hit."""
+    then on. One extra derivation the first time a session's cards name a new peer, never a stale hit.
+    `subagents` is what this derivation read of the subagents trees as it read it (ctx["sub_reads"], the record
+    _feed_sub_reads kept around the derivation; _feed_sub_settled): the identities of the very samples the sidecar map
+    was read from and the agent files' launch ids by value, so no fact is taken after the read and a cold entry hits on
+    the next unchanged build. None when the entry is None (a hidden session reads nothing)."""
     k = list(key)
     reads = (entry or {}).get("reads") or {}
+    k[_FEED_MEMO_LABELS.index("subagents")] = _feed_sub_settled(ctx.get("sub_reads")) if entry is not None else None
     k[_FEED_MEMO_LABELS.index("usage")] = ctx.get("usage_ident") if reads.get("usage") else None
     k[_FEED_MEMO_LABELS.index("offer")] = ctx.get("cap_open") if reads.get("usage") else None
     k[_FEED_MEMO_LABELS.index("nudge")] = _feed_nudge_key(ctx, entry)
@@ -51553,7 +51666,8 @@ def _feed_session_entry(s, ctx):
       cold          True when the session is living, unparsed and worth warming (_warm_fleet_bg)
       peers         the peer sids this derivation read (origin senders, handoff recipients, stamped and awaited
                     peers): the key's `peers` dependency component re-evaluates them next build
-      reads         usage=True for a cap offer, nudges=[node ids] for the nudge facts read by this entry
+      reads         usage=True for a cap offer, nudges=[node ids] for the nudge facts read by this entry; build_feed adds
+                    subagents={trees, agents}, what the derivation read of the subagents trees (_feed_sub_record)
     `ctx` carries the build's cross-session reads (now, live_map, cleared, dbg_rows, wmap, stalls, jauth_map,
     jactive) and the per-session facts the key already computed (ps, who_working, interrupting, store, closer,
     leaf_ok: whether the transcript's stat succeeded, 2026-09-21; leaf_head: the leaf's path and inode from that stat,
@@ -52941,7 +53055,12 @@ def build_feed(now, live_map=None):
             else:
                 _feed_memo_miss(ent[0] if ent is not None else None, key)
                 _feed_memo_count("derived")
-                entry = _feed_session_entry(s, ctx)
+                with _feed_sub_reads() as sub_reads:     # what the derivation reads of the subagents trees (2026-10-23)
+                    entry = _feed_session_entry(s, ctx)
+                ctx["sub_reads"] = sub_reads
+                sub_rec = _feed_sub_record(sub_reads)
+                if entry is not None and sub_rec is not None:
+                    entry.setdefault("reads", {})["subagents"] = sub_rec   # the next build's key re-takes these
                 key = _feed_key_with_deps(key, ctx, entry)   # the peers and reads THIS derivation recorded
                 js_new = json.dumps(entry, default=_wire_default_in("_feed_memo"))   # str() of an unencodable value, said once
                 if not (entry or {}).get("faults"):      # a derivation that met a body-read fault is served but not kept:

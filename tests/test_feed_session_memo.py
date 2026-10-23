@@ -1015,12 +1015,14 @@ class TheBoundAndTheDepartures(_Board):
         self.assertGreater(km.FEED_MEMO_BYTES, 0)
 
     def test_a_departed_sessions_entry_leaves_with_it(self):
-        # a subagents root for every session, so the feed key walks and memoizes each in the shared walk memo
-        # (_SUBAGENT_TREES, 2026-09-16, which replaced the key's own sid-keyed memo this test used to read) and the
-        # departed session's root has something to leave with its entry
+        # a subagents root for every session, sampled into the shared walk memo (_SUBAGENT_TREES, 2026-09-16), so the
+        # departed session's root has something to leave with its entry. The feed key samples a root only when the
+        # session's derivation read it (2026-10-23), which these idle sessions with no agents do not, so the roots are
+        # sampled here, as a chat build or the history warm would sample them
         roots = {sid: str(km._subagents_dir(self.tpath[sid])) for sid in SIDS}
         for r in roots.values():
             Path(r).mkdir(parents=True)
+            km._subagent_tree(r)
         self._build()
         self.assertEqual(km._feed_memo_report()["entries"], 3)
         self.assertLessEqual(set(roots.values()), set(km._SUBAGENT_TREES), "every alive session's root is memoized")
