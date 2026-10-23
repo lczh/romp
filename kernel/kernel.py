@@ -68802,7 +68802,8 @@ def _cached_feed(now, live_map, sig, connect=False):
             _VIEW_STATS["feedWaited"] += 1
             _PERF_STATS.build("feed", True)
             return _built_feed[1]
-        return _build_feed_locked(now, live_map, sig)
+        with _boards_read_once():                         # the board store read once for the build and its per-card reads
+            return _build_feed_locked(now, live_map, sig)
 
 
 def _feed_servable(sig, connect):
@@ -69165,12 +69166,66 @@ def _board_path(bid):
     return _board_dir() / (str(bid) + ".json")
 
 
-def _boards_data():
+# ONE READ PER FEED BUILD (2026-10-22). The feed build and the reads after it ask for a card's board once per card and per
+# question: the needs-you set, the box's rows, the per-session counts, the badge and the bell diff's notify set, each through
+# _board_def -> _boards() -> _boards_data(), and every one of those listed the boards directory and stat'd each file to build
+# the memo's key. On a board of a thousand cards that was thousands of directory reads per build for a store that changes
+# only when a board is defined or edited. So the pusher's feed build (_cached_feed's build branch) runs under
+# _boards_read_once(): the build's first ask reads the store (the memo's own key, so an edit made since the last build is
+# read then, and its views-dirty mark fires as before), and every later _boards() and _boards_data() on that thread answers
+# from that one read until the build returns; the frame's `boards` and the bells read the same definitions. The read waits
+# for the first ask, which comes after the build's start stamp (_build_feed_locked's `started`, the dirty floor): a define
+# whose file lands before the read is read by this build. The doors mark the views dirty themselves; a file rewritten in
+# place (a shell redirection, an editor) after the read is caught by the block's closing re-key, one more _boards_data() as
+# the block returns: the memo's key has moved, so it marks the views dirty after the start and the next check rebuilds. The
+# view signature reads no stat under STATE/boards, so without that re-key such an edit would wait for the five-second bucket,
+# where the per-card reads after the frame used to catch it. Two reads per build, whatever the card count. The read is per
+# thread: a handler's define, remove or GET reads the store as before, and the doors' check-then-write reads it fresh
+# (fresh=True) even on a thread inside a build.
+_BOARDS_BUILD = threading.local()    # .read: None outside a build; False in one before its first ask; then (data, every board)
+
+
+@contextlib.contextmanager
+def _boards_read_once():
+    """Read the board store once for the block, at its first ask, and key the memo once more as the block returns, so an
+    edit after the read marks the views dirty (see ONE READ PER FEED BUILD above). Nested inside another, the outer block's
+    read stands."""
+    if getattr(_BOARDS_BUILD, "read", None) is not None:
+        yield
+        return
+    _BOARDS_BUILD.read = False
+    try:
+        yield
+        took = _BOARDS_BUILD.read
+        _BOARDS_BUILD.read = None
+        if took:
+            _boards_data()     # the closing re-key: a file rewritten in place after the read has moved the memo's key, and
+            #                    the move marks the views dirty after the build's start, as the per-card reads used to
+    finally:
+        _BOARDS_BUILD.read = None
+
+
+def _boards_build_read():
+    """This thread's build read, (data-defined {id: defn}, every board {id: defn}), taken at the build's first ask; None
+    outside a build."""
+    r = getattr(_BOARDS_BUILD, "read", None)
+    if r is False:
+        data = _boards_data(fresh=True)
+        r = _BOARDS_BUILD.read = (data, _boards_over_code(data))
+    return r
+
+
+def _boards_data(fresh=False):
     """The data-defined boards, {id: defn}, memoized on the directory's stat AND each file's (mtime_ns, size): the door's
     os.replace moves the directory's stat, but an in-place rewrite of boards/<id>.json (a shell redirection, an editor) moves
     the file's alone (the 1845 read), and the handful of files make the per-file stat cheap. A moved key after the first read
     marks the views dirty, so the edit reaches the next frame instead of waiting for the pusher's own reasons. {} when there is
-    no directory."""
+    no directory. Inside _boards_read_once on this thread, the build's one read, unless `fresh` (the store itself: the doors'
+    check-then-write, and the build's read)."""
+    if not fresh:
+        pinned = _boards_build_read()
+        if pinned is not None:
+            return pinned[0]
     d = _board_dir()
     st = _stat_key(d)
     try:
@@ -69220,9 +69275,18 @@ def _boards_data():
 
 def _boards():
     """Every board this kernel knows, {id: defn}: the code-defined table, then the data-defined files for ids the table
-    lacks (the door refuses a reserved id, so the second never shadows the first)."""
+    lacks (the door refuses a reserved id, so the second never shadows the first). Inside _boards_read_once on this thread,
+    the build's one map, shared by every caller in the build: read it, never write it."""
+    pinned = _boards_build_read()
+    if pinned is not None:
+        return pinned[1]
+    return _boards_over_code(_boards_data())
+
+
+def _boards_over_code(data):
+    """The code-defined table, then `data` (the data-defined boards) for the ids the table lacks: a new dict."""
     out = dict(_CODE_BOARDS)
-    for bid, defn in _boards_data().items():
+    for bid, defn in data.items():
         out.setdefault(bid, defn)
     return out
 
@@ -69537,7 +69601,7 @@ def define_board(defn):
         return None, err
     bid = defn["id"]
     with _boards_lock:
-        old = _boards_data().get(bid)
+        old = _boards_data(fresh=True).get(bid)
         if old is not None:
             new_ids = {c["id"] for c in defn["categories"]}
             for c in old.get("categories") or []:
@@ -69562,7 +69626,7 @@ def remove_board(bid):
     if bid in _CODE_BOARDS:
         return False, "board %r is code-defined and cannot be removed" % bid
     with _boards_lock:
-        if bid not in _boards_data():
+        if bid not in _boards_data(fresh=True):
             return False, "no board %r is defined (romp board list names them)" % bid
         n = _notice_standing_count(bid)
         if n:
