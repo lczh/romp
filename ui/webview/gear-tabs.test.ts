@@ -73,7 +73,10 @@ test("every existing control keeps its id and sits in exactly one pane, by the a
   assert.match(G, /<b>Allow file editing<\/b>/, "the permission row's name (T404)");
   assert.match(G, /<label class="rs-row rs-panes-row"><input type=checkbox id=rs-filesctl>' \+[^\n]*\n\s*'<span><b>Files<\/b>'/, "the Files row reads Files, like Sessions, Outline and Feed above it (T407), and is a Panes row like them, so the off-dashboard hide takes it (T404's tidy)");
   assert.match(GEAR, /delete o\.filesControl; delete o\.fileLinkPane; delete o\.showArtifactsControl;/, "load() drops the three dead keys, so none survives a gear save (T404's tidy; the Artifacts control's key since the registry fix: save() writes the whole object, so a kept key was re-persisted forever)");
-  assert.match(ps.chat, /The summaries are output tokens the session pays for, which is why this row sits under Chat and not Display\./, "the Thinking row says why it is Chat's (T404's tidy)");
+  // the Thinking row's cost, as the API's pricing docs state it (2026-10-23): the full thinking is billed under every display
+  // setting and the summary costs nothing extra (it used to call the summaries output tokens the session pays for)
+  assert.match(ps.chat, /A summary costs nothing extra: the API bills a session for all of its thinking whether or not it sends a summary back\./, "the Thinking row says what a summary costs");
+  assert.doesNotMatch(GEAR, /output tokens the session pays for/, "never that the summaries are tokens the session pays for");
   // the popover stays inside the card (the T408 read): a row whose popover would run past the card's bottom opens it above
   const CSS2 = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "gear.css"), "utf8");
   assert.match(GEAR, /var HOSTS = '#rsettings \.rs-fastin, #rsettings \.rs-row, #rsettings \.rs-widget';/, "a Fast mode box is a host of its own (round two, the medium)");

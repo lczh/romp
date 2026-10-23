@@ -326,7 +326,7 @@ process.exit(0);
 
 
 class ServedSendTailAppend(unittest.TestCase):
-    """Compact mode, the default: tool runs folded, thinking hidden."""
+    """Compact mode, the default: tool runs folded, thoughts collapsed to one line."""
     maxDiff = None
     COMPACT = True
     HOLD = False   # the send reaches the kernel, which queues it (the session is mid-turn) and lists its copy until the transcript lands it

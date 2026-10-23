@@ -1,10 +1,16 @@
 // Pure transcript-compaction logic (no DOM), so it can be unit-tested. Compact mode (the user
-// 2026-06-14): hide "thinking" blocks entirely, and collapse each maximal run of TWO OR MORE consecutive
-// tool uses into ONE summary line. A LONE tool stays inline — it renders first-class (its own tool line +
-// expandable fold), since there's nothing to collapse and "Bash(…)" reads cleaner than "1 Bash" (the user
-// 2026-06-22). Thinking is dropped FIRST, so tools separated only by thinking still count as consecutive;
-// tools separated by visible content (an assistant reply, a prompt, …) do not. The rail timestamp logic
-// runs over the RESULT of this, so the stamps reflect the compacted stream.
+// 2026-06-14): collapse each maximal run of TWO OR MORE consecutive tool uses into ONE summary line. A LONE
+// tool stays inline — it renders first-class (its own tool line + expandable fold), since there's nothing to
+// collapse and "Bash(…)" reads cleaner than "1 Bash" (the user 2026-06-22). Tools separated only by thinking
+// still count as consecutive; tools separated by visible content (an assistant reply, a prompt, …) do not.
+// The rail timestamp logic runs over the RESULT of this, so the stamps reflect the compacted stream.
+// THINKING (the user 2026-10-23, who approved the design and with it the end of the 2026-06-30 rule that an
+// expanded tool group never shows thinking): a thinking block WITH WORDS (a reasoning summary, or a progress
+// note written for the person watching) is a THOUGHT, shown as one collapsed row; consecutive thoughts are one
+// row. A thought that opens a stretch of work (after a prompt, a mid-turn message, a reply) is its own unit; a
+// thought after a tool in a run is a MEMBER of that run, drawn as a collapsed Thought row when the run expands,
+// so it never splits the run, and the run's head still counts only its tools. A textless (opaque) block stays
+// hidden, as every thinking block was before: it breaks nothing, and the turn's footer gives its tokens.
 // The same shape folds LOW-STAKES NOTICES (2026-09-08, generalising the T131 retry-run fold): a run of ≥2
 // consecutive foldable notices — a recovery, an effort change, a model swap, a reload, an interrupt + its
 // settle, a background report, a system reminder, a romp notice — collapses into one `noticegroup` head.
@@ -35,7 +41,8 @@ export function isNoticeShape(ev: Parameters<typeof isFoldableNoticeShape>[0]): 
 
 export type DisplayItem =
   | { kind: "event"; index: number }            // a pass-through event, by its index in the source array
-  | { kind: "toolgroup"; indices: number[] }    // a collapsed run of ≥2 consecutive tool uses (a lone tool is an "event")
+  | { kind: "toolgroup"; indices: number[] }    // a collapsed run of ≥2 consecutive tool uses (a lone tool is an "event"), with the thoughts that came after a tool in it
+  | { kind: "thought"; indices: number[] }      // consecutive thoughts that open a stretch of work: ONE collapsed Thought row
   | { kind: "noticegroup"; indices: number[] }  // a collapsed run of ≥2 consecutive foldable notices (was the "retried"-only retrygroup)
   | { kind: "gap"; lo: number; hi: number; before: number };   // turns [lo, hi) the page does not hold (T386 stage 2): empty space before event `before`
 
@@ -45,19 +52,33 @@ export type DisplayItem =
 export const STANDALONE_TOOLS = new Set<string>(["AskUserQuestion"]);
 
 // Given the per-event `kind` strings (and, for tool events, the tool `names` so the standalone-tool
-// exception can be applied; and `notices[i]` = whether event i is a foldable notice), produce the
-// compacted display list. `names[i]` is the tool name for a "tool" event, undefined otherwise. Without
-// `notices`, only a bare "retried" run folds (the pre-2026-09-08 behaviour, kept for callers that pass none).
-export function compactDisplay(kinds: readonly string[], names?: readonly (string | undefined)[], notices?: readonly boolean[]): DisplayItem[] {
+// exception can be applied; `notices[i]` = whether event i is a foldable notice; `thoughts[i]` = whether
+// event i is a thinking block with words, thoughtHasWords), produce the compacted display list. `names[i]` is
+// the tool name for a "tool" event, undefined otherwise. Without `notices`, only a bare "retried" run folds
+// (the pre-2026-09-08 behaviour, kept for callers that pass none); without `thoughts`, every thinking block
+// is hidden (the pre-2026-10-23 behaviour).
+export function compactDisplay(kinds: readonly string[], names?: readonly (string | undefined)[], notices?: readonly boolean[], thoughts?: readonly boolean[]): DisplayItem[] {
   const out: DisplayItem[] = [];
-  let run: number[] | null = null;
+  let run: number[] | null = null;                // a tool run: its tool uses, and the thoughts after a tool in it
+  let runTools = 0;
+  let lead: number[] | null = null;               // a thought that opens a stretch: consecutive thoughts, one row
   let noticeRun: number[] | null = null;          // consecutive foldable notices
   // a LONE tool passes through as a normal event (its first-class inline tool line + fold); only a run of
-  // TWO OR MORE collapses into a summary toolgroup (the user 2026-06-22)
+  // TWO OR MORE collapses into a summary toolgroup (the user 2026-06-22). A lone tool has no group to hold the
+  // thoughts that followed it, so they follow it as a Thought row of their own.
   const flush = () => {
     if (!run) return;
-    out.push(run.length === 1 ? { kind: "event", index: run[0] } : { kind: "toolgroup", indices: run });
-    run = null;
+    if (runTools >= 2) out.push({ kind: "toolgroup", indices: run });
+    else {
+      out.push({ kind: "event", index: run[0] });
+      if (run.length > 1) out.push({ kind: "thought", indices: run.slice(1) });
+    }
+    run = null; runTools = 0;
+  };
+  const flushLead = () => {
+    if (!lead) return;
+    out.push({ kind: "thought", indices: lead });
+    lead = null;
   };
   // same shape for notice runs (the user 2026-08-27, seventeen consecutive recovery rows): a lone notice
   // stays a first-class row; a run of ≥2 collapses into one expandable head
@@ -69,18 +90,75 @@ export function compactDisplay(kinds: readonly string[], names?: readonly (strin
   const foldable = (i: number) => notices ? !!notices[i] : kinds[i] === "retried";
   for (let i = 0; i < kinds.length; i++) {
     const k = kinds[i];
-    if (k === "thinking") continue;                 // hidden — and does NOT break a tool run
+    if (k === "thinking") {
+      if (!thoughts || !thoughts[i]) continue;      // textless: hidden, and does NOT break a tool run
+      if (run) { run.push(i); continue; }           // after a tool in this stretch: a member of the run
+      flushNotices();
+      (lead ||= []).push(i);                        // opens a stretch: its own Thought row
+      continue;
+    }
     // A standalone tool (AskUserQuestion) is NOT collapsed: it breaks the run and passes through as its
     // own event, so renderTool → renderAsk draws the first-class box instead of "+1" inside a group.
-    if (k === "tool" && !STANDALONE_TOOLS.has(names?.[i] ?? "")) { flushNotices(); (run ||= []).push(i); continue; }
-    if (foldable(i)) { flush(); (noticeRun ||= []).push(i); continue; }
+    if (k === "tool" && !STANDALONE_TOOLS.has(names?.[i] ?? "")) { flushLead(); flushNotices(); (run ||= []).push(i); runTools++; continue; }
+    if (foldable(i)) { flush(); flushLead(); (noticeRun ||= []).push(i); continue; }
     flush();
+    flushLead();
     flushNotices();
     out.push({ kind: "event", index: i });
   }
   flush();
+  flushLead();
   flushNotices();
   return out;
+}
+
+/** Whether display unit `it` holds event `i` (a run or a thought its member, an event itself; a gap holds none): the one
+ *  reading every event → unit lookup shares (a deep link, a scroll mark, a glow, the reader's anchor). */
+export function itemHolds(it: DisplayItem, i: number): boolean {
+  if (it.kind === "event") return it.index === i;
+  if (it.kind === "gap") return false;
+  return it.indices.includes(i);
+}
+
+/** The rows an EXPANDED tool run draws, in order: each tool use on its own, each stretch of consecutive thoughts as ONE
+ *  Thought row (`isThought(i)`: event i is a thinking event; the run's thinking members are thoughts by construction). */
+export function runRows(indices: readonly number[], isThought: (i: number) => boolean): number[][] {
+  const rows: number[][] = [];
+  for (const i of indices) {
+    const last = rows[rows.length - 1];
+    if (last && isThought(i) && isThought(last[last.length - 1])) last.push(i); else rows.push([i]);
+  }
+  return rows;
+}
+
+// ── A Thought row's content ──────────────────────────────────────────────────────────────────────────────
+export interface ThoughtLike { kind: string; text?: string; uuid?: string; thinkTokens?: number }
+/** A thinking block with words: a reasoning summary, or a progress note the API returns as thinking text. The only
+ *  thinking compact mode shows; an opaque block (a signature and no text) has nothing to show but a token count. */
+export function thoughtHasWords(e: ThoughtLike): boolean { return e.kind === "thinking" && !!(e.text || "").trim(); }
+/** The fold key of a thinking block's expanded state in the shared fold set: think:<first block's uuid>. ONE key for both
+ *  shapes, compact mode's Thought row and the full view's two-line clamp, so a thought opened in one is open in the other. */
+export function thoughtKey(first: { uuid?: string } | undefined): string | undefined { return first && first.uuid ? "think:" + first.uuid : undefined; }
+export interface Thought { text: string; gist: string; tokens: number; key?: string }
+/** One Thought row from consecutive thinking events `members` (indices into `evs`): the words of each, in order, a blank
+ *  line apart; the GIST, the first line of the LAST block with words (under summaries a stretch is a reasoning summary then
+ *  the note written for the person watching, and the note is the one that answers them); the thinking tokens of the API
+ *  messages it spans (the figure rides each message's first thinking row, often a textless one just before the words, so
+ *  the opaque rows directly before the first member and between the members count too); and the fold key of its first. */
+export function thoughtOf(evs: readonly ThoughtLike[], members: readonly number[]): Thought {
+  const words = members.map((i) => evs[i]).filter(thoughtHasWords);
+  const text = words.map((e) => (e.text || "").trim()).join("\n\n");
+  const lastWords = (words[words.length - 1]?.text || "").split("\n").find((l) => l.trim()) || "";
+  let tokens = 0;
+  if (members.length) {
+    let lo = members[0];
+    while (lo > 0 && evs[lo - 1].kind === "thinking") lo--;
+    for (let j = lo; j <= members[members.length - 1]; j++) {
+      const e = evs[j];
+      if (e.kind === "thinking" && typeof e.thinkTokens === "number" && e.thinkTokens > 0) tokens += e.thinkTokens;
+    }
+  }
+  return { text, gist: lastWords.replace(/\s+/g, " ").trim(), tokens, key: thoughtKey(evs[members[0]]) };
 }
 
 /** The member a display unit is PLACED and TIMED by (T339, the user 2026-09-11). A collapsed NOTICE run anchors on the
@@ -94,7 +172,7 @@ export function compactDisplay(kinds: readonly string[], names?: readonly (strin
 export function itemAnchor(it: DisplayItem, epochAt: (i: number) => number | null): number {
   if (it.kind === "event") return it.index;
   if (it.kind === "gap") return it.before;   // a gap has no member: the event below it stands for its place
-  if (it.kind === "toolgroup") return it.indices[0];
+  if (it.kind === "toolgroup" || it.kind === "thought") return it.indices[0];
   let best = it.indices[0], bestEp: number | null = null;
   for (const i of it.indices) {
     const ep = epochAt(i);

@@ -27,6 +27,10 @@ complementary views of what the agents are doing:
 
 Tool calls fold into runs, and each run opens to one line per call.
 
+The session's thinking, when it comes with words, shows as one folded
+**Thought** line with the start of its latest note, and a click opens the full
+text. A thought that follows a tool call sits inside that call's run.
+
 The chat shows a session's live status. While it thinks, the foot of the chat
 reads **Thinking** with the seconds so far, its chip in the Sessions pane reads
 Thinking, and the working dot on its tab wears a ring. A running tool counts its seconds, a

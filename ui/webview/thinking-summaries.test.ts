@@ -38,6 +38,11 @@ test("a thinking block is opaque only when signed AND textless — a summary ren
   // the text-bearing path keeps progressive disclosure: clamped to ~2 lines, click to expand, state keyed
   assert.match(branch, /el\("div", "think-clamp"\)/);
   assert.match(branch, /applyFold\(clamp, "expanded", tkey\)/);
+  // the click rides the body delegate, never a listener on the rebuilt node (ui/CLAUDE.md click-safety; 2026-10-23)
+  assert.match(branch, /clamp\.dataset\.act = "thinkfold"; if \(tkey\) clamp\.dataset\.tkey = tkey;/);
+  assert.doesNotMatch(branch, /clamp\.addEventListener/, "no per-node listener");
+  assert.match(RENDER, /thinkfold: \(el\) => \{\s*\n\s*const box = el\.classList\.contains\("thought-line"\) \? el\.closest\("\.turn-thought"\) as HTMLElement \| null : el;\s*\n\s*if \(!box\) return;\s*\n\s*rememberFold\(box, "expanded", el\.dataset\.tkey \|\| undefined\);/,
+    "one delegated fold for both shapes, the clamp and compact mode's Thought row, keyed in the shared fold set");
 });
 
 test("the kernel computes the flag by the same rule (signature AND no text)", () => {
@@ -67,8 +72,11 @@ test("the gear has a Thinking summaries checkbox among the kernel-side toggles, 
   // on an install with thinking off the toggle turns adaptive thinking on; the copy owns that.
   assert.ok(/turns adaptive thinking on/.test(row),
     "the copy says the toggle also turns adaptive thinking on where it was off");
-  assert.ok(/Compact transcript still hides them/.test(row),
-    "…and that the compact view (default on) keeps hiding thinking, summaries included");
+  // 2026-10-23: compact mode (default on) shows a thought as one collapsed Thought line, summaries included, no longer hidden
+  assert.ok(/or to one Thought line under Compact transcript/.test(row) && !/still hides them/.test(row),
+    "…and how the compact view (default on) shows them: one Thought line");
+  assert.ok(/A summary costs nothing extra/.test(row) && /and that thinking is billed/.test(row) && !/pays for/.test(row),
+    "the cost in plain words: the summary is free, turned-on thinking is billed (the API's pricing docs)");
   assert.ok(GEAR.includes("post(scoped({ type: 'setThinkingSummaries', enabled: ths.checked, gt: gclock.stamp('thinking-summaries') }))"),
     "the click posts the kernel's designed message with the gesture stamp minted in the literal, to the kernels in the selector's scope");
   assert.match(row, /<b>Thinking summaries<\/b><span class=rs-mixed hidden><\/span>/, "the row carries the flag's slot");

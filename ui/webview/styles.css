@@ -2673,6 +2673,25 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 .think-tokens { color: var(--dim); font-size: 0.86em; margin-bottom: 1px; }
 .thinking.encrypted { opacity: 0.65; }
 .thinking:not(.encrypted) { white-space: pre-wrap; overflow-wrap: anywhere; }
+/* Compact mode's collapsed Thought row (the user 2026-10-23): "▸ Thought  <first line of the latest note…>" on ONE line in the
+   tool group line's dress (dim, 0.92em, the same caret), the words clipped with an ellipsis and italic like every thought; open,
+   "▾ Thought · 2.5k tokens" over the full words. The class on the row (`expanded`, the fold) swaps the caret, the gist and the
+   tokens, so the delegate's toggle needs no rebuild. The line is a fold head: unselectable, and left out of a quote. Tokens only,
+   no hex: both themes come from the same rule. */
+.thought-line { display: flex; align-items: baseline; gap: 6px; width: fit-content; max-width: 100%; box-sizing: border-box; padding-right: 6px;
+  color: var(--dim); font-size: 0.92em; line-height: 1.4; cursor: pointer; user-select: none; }
+.thought-line:hover { color: var(--fg); }
+.turn-thought > .dot.ring { background: var(--dim); }   /* the dim ink, flat: a thought sits under a reply's dot */
+.thought-line .thought-caret { margin-right: 0; flex: none; }
+.thought-caret::before { content: "▸"; }
+.turn-thought.expanded .thought-caret::before { content: "▾"; }
+.thought-label { flex: none; }
+.thought-gist { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-style: italic; }
+.thought-meta { flex: none; display: none; }
+.turn-thought.expanded .thought-gist { display: none; }
+.turn-thought.expanded .thought-meta { display: inline; }
+.thought-body { display: none; }
+.turn-thought.expanded .thought-body { display: block; margin-top: 3px; }
 
 /* ---------- tool cards ---------- */
 .tool-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; flex-wrap: wrap; }
