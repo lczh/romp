@@ -12,11 +12,16 @@ budget at every cycle, forever, holding up the leaves after it.
 Also pinned: a chat build outside the pusher's cycle (a page connect's push, a history reply) takes the tree's cut once the
 tree has gained a document, rather than a floor of 0 the pusher recorded over the whole parse before it.
 
-And the review of PR #367 (2026-10-23): a rebuild starts, and carries on, only while the pusher is idle and no page parses whole
-or connects (nice 19 did not keep it off the pages, which wait on the interpreter, not on a core); a leaf is noted only once
-the page's own whole parse is done, so no rebuild parses it beside that parse, and a rebuild whose leaf gained a document
-while it worked writes nothing over it; two writers of one leaf never share a temp name; a rebuild that raises is tried once
-more, and a second raise is said loudly.
+And the review of PR #367 (2026-10-23): a rebuild starts, and carries on, only while the pusher sleeps between its cycles and
+no page parses whole or connects (nice 19 did not keep it off the pages, which wait on the interpreter, not on a core); a leaf
+is noted only once the page's own whole parse is done, so no rebuild parses it beside that parse, and a rebuild whose leaf
+gained a document while it worked writes nothing over it; two writers of one leaf never share a temp name; a rebuild that
+raises is tried once more, and a second raise is said loudly.
+
+And the review of PR #370: every cycle's end opens the gate, busy or idle (an idle cycle's alone gave a busy host's rebuilds
+about 45 s an hour); a rebuild waiting at its gate lends the shared claim to a settle's refresh, and takes it back before it
+goes on; and a document a refusal removes under an unchanged leaf is written again by the converge pass, which had set the
+leaf aside for as long as the leaf stood unchanged.
 
 Synthetic only: invented notes-api text, placeholder uuids, private synthetic sids, a temp state root with session hosts
 off, and no CLI (ROMP_CLAUDE_BIN is /bin/false)."""
@@ -29,6 +34,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,12 +96,24 @@ def _rebuild_alive():
     return any(t.name == "asm-rebuild" and t.is_alive() for t in threading.enumerate())
 
 
-def _idle_edge(idle):
-    """The pusher's cycle edge for the background gate: False as a cycle begins, True as an IDLE cycle ends (getattr: the base
-    had no gate, and its rebuild started from the document writer's cycle whatever the pusher was doing)."""
+def _gate_edge(asleep):
+    """The pusher's cycle edge for the background gate: False as a cycle begins, True as a cycle ends and the pusher sleeps
+    (getattr: the base had no gate, and its rebuild started from the document writer's cycle whatever the pusher was doing)."""
     gate = getattr(em, "asm_background_idle", None)
     if gate is not None:
-        gate(idle)
+        gate(asleep)
+
+
+def _cycle_end():
+    """The end of a pusher cycle: the gate opens, and the next rebuild starts if one is due (_asm_rebuild_tick). A busy cycle's
+    end is the real cycle's (_pusher_cycle, its jobs stubbed busy), since #370's tick took the idle bit."""
+    tick = getattr(km, "_asm_rebuild_tick", None)                  # the base started it in the writer's cycle
+    if tick is None:
+        return None
+    try:
+        return tick()
+    except TypeError:
+        return tick(True)                                          # #370's signature: an idle cycle's end, the one that opened it
 
 
 def _until(pred, timeout=30.0):
@@ -134,14 +152,18 @@ class Harness(unittest.TestCase):
             saved = getattr(km, name, None); setattr(km, name, val); self.addCleanup(setattr, km, name, saved)
         saved = getattr(em, "_ASM_REBUILD_MIN", None); em._ASM_REBUILD_MIN = FLOOR
         self.addCleanup(setattr, em, "_ASM_REBUILD_MIN", saved)
-        _idle_edge(True)                                          # no pusher runs here: the gate opens as an idle cycle ends
+        _gate_edge(True)                                          # no pusher runs here: the gate opens as a cycle ends
         self.fresh()
 
     def tearDown(self):
-        _idle_edge(True)                                          # a rebuild a test held at a chunk point finishes
+        _gate_edge(True)                                          # a rebuild a test held at a chunk point finishes
         _join_rebuilds()
+        for th in [t for t in threading.enumerate() if t.name == "asm-refresh"]:
+            th.join(timeout=60)
         with em._ASM_LOCK:
             em._ASM_REFRESH["inflight"] = None
+            if "paused" in em._ASM_REFRESH:
+                em._ASM_REFRESH["paused"] = None
         km._live_scope.chat_floor0 = None
         jd._rebind_state(self._prior_state)
         em.set_checkpoint_dir(self._prior_ckpt)
@@ -207,11 +229,10 @@ class Harness(unittest.TestCase):
 
     def writer_cycle(self, now=NOW + 600):
         """One cycle of the kernel's document writer (the settle writes handed over, the checkpoint cycle, the converge pass),
-        then the end of an IDLE pusher cycle, which starts the next rebuild, if one is due (_asm_rebuild_tick)."""
+        then the end of a pusher cycle, which starts the next rebuild, if one is due (_asm_rebuild_tick)."""
         km._document_write_phase(now)
-        tick = getattr(km, "_asm_rebuild_tick", None)              # the base started it in the writer's cycle above
-        if tick is not None:
-            tick(True)
+        _gate_edge(True)                                           # (#370's: the end of an idle cycle)
+        _cycle_end()
 
     def restores_with_no_whole_parse(self, leaf=None):
         """The next boot: the parse restores from the document and reads only the tail, never the whole leaf."""
@@ -453,7 +474,7 @@ class APageParseAndTheRebuild(Harness):
             page.start()
             try:
                 self.assertTrue(entered.wait(30), "the page's whole parse is in flight")
-                for k in range(3):                                 # writer cycles, each followed by an idle pusher cycle
+                for k in range(3):                                 # writer cycles, each followed by a pusher cycle's end
                     self.writer_cycle(NOW + 600 + k)
                 self.assertFalse(_rebuild_alive(), "no rebuild runs beside the page's parse")
                 self.assertEqual(em.asm_checkpoint_stats()["rebuild"]["claimed"], 0, em.asm_checkpoint_stats()["rebuild"])
@@ -507,11 +528,18 @@ class APageParseAndTheRebuild(Harness):
         self.restores_with_no_whole_parse()
 
 
-class TheRebuildRunsWhileThePusherIsIdle(Harness):
+_QUIET_CYCLE = dict(_live_build=lambda: ({}, 0, 0.0), _gc_freeze_tick=lambda idle, first: None,
+                    _boot_health_first_cycle=lambda *a: None, _boot_health_row_backstop=lambda *a: None,
+                    _first_cycle_sampler_start=lambda *a: None, _first_cycle_sampler_stop=lambda *a: None)
+
+
+class TheRebuildRunsWhileThePusherSleeps(Harness):
     """The review of PR #367, issue two: nice 19 did not protect the pages. The rebuild competes for the interpreter, not for a
     core (in a lab a page's 40 MB whole parse took 2.1 times as long beside a rebuild, with full collections of 0.65 to 1.04 s).
-    It starts at the end of an IDLE pusher cycle, the event the frozen heap's reclaim waits for, and waits at its chunk points
-    whenever a cycle begins, a busy one ends, a page parses whole or a page connects."""
+    It runs while the pusher sleeps between its cycles, and waits at its chunk points whenever a cycle runs, a page parses whole
+    or a page connects. The review of PR #370: the gate opened at an IDLE cycle's end alone, and on a host of 65 sessions, a
+    tenth of whose cycles are idle, that left the rebuild about 45 s an hour; the pusher sleeps after a busy cycle as much as
+    after an idle one, so every cycle's end opens it now."""
 
     def _noted(self):
         self.write(transcript(260))
@@ -519,46 +547,95 @@ class TheRebuildRunsWhileThePusherIsIdle(Harness):
         self.boot_parse()
         self.evict_read()                                          # noted; nothing for the converge pass to write from
 
-    def test_no_rebuild_starts_on_a_busy_cycle_and_the_next_idle_cycle_starts_it(self):
-        self._noted()
-        _idle_edge(False)                                          # a pusher cycle begins ...
-        km._document_write_phase(NOW + 600)                        # (the document writer's cycle starts none any more)
-        tick = getattr(km, "_asm_rebuild_tick", lambda idle: None)
-        tick(False)                                                # ... and ends busy
-        self.assertFalse(_rebuild_alive(), "no rebuild started while the pusher is busy")
-        self.assertEqual(em.asm_checkpoint_stats()["rebuild"]["claimed"], 0)
-        _idle_edge(False)
-        tick(True)                                                 # the next cycle ends idle
-        _join_rebuilds()
-        rb = em.asm_checkpoint_stats()["rebuild"]
-        self.assertEqual((rb["claimed"], rb["written"]), (1, 1), rb)
-        self.assertTrue(self.doc_file().exists())
+    def _counting_yield(self, passed):
+        """em._asm_bg_yield, counting every chunk point the rebuild's thread passes (a wait's end included)."""
+        real = em._asm_bg_yield
 
-    def test_the_pushers_own_cycle_shuts_the_gate_and_its_idle_end_starts_the_rebuild(self):
-        """The real cycle, its jobs stubbed: the gate is shut while the cycle runs, a busy cycle starts nothing, an idle one does."""
+        def counted():
+            waited = real()
+            if threading.current_thread().name == "asm-rebuild":
+                passed[0] += 1
+            return waited
+        return counted
+
+    def test_a_busy_cycles_end_starts_the_rebuild(self):
+        """The real cycle, its jobs stubbed busy: the gate is shut while the cycle runs, and its end starts the rebuild."""
         self._noted()
         seen = []
 
-        def jobs(now, live_map, any_client, busy=False):
+        def jobs(now, live_map, any_client):
             seen.append(em.asm_background_open())
-            if busy:
-                km._PERF_STATS.wake()                              # the cycle changed something: not idle
-        quiet = dict(_live_build=lambda: ({}, 0, 0.0), _gc_freeze_tick=lambda idle, first: None,
-                     _boot_health_first_cycle=lambda *a: None, _boot_health_row_backstop=lambda *a: None,
-                     _first_cycle_sampler_start=lambda *a: None, _first_cycle_sampler_stop=lambda *a: None)
-        with mock.patch.multiple(km, **quiet):
-            with mock.patch.object(km, "_pusher_cycle_jobs", lambda *a: jobs(*a, busy=True)):
-                km._pusher_cycle()
-            self.assertFalse(_rebuild_alive(), "a busy cycle starts no rebuild")
-            self.assertEqual(em.asm_checkpoint_stats()["rebuild"]["claimed"], 0)
-            with mock.patch.object(km, "_pusher_cycle_jobs", jobs):
-                km._pusher_cycle()
+            km._PERF_STATS.wake()                                  # the cycle changed something: not idle
+        with mock.patch.multiple(km, **_QUIET_CYCLE), mock.patch.object(km, "_pusher_cycle_jobs", jobs):
+            km._pusher_cycle()
             _join_rebuilds()
-        self.assertEqual(seen, [False, False], "the gate is shut while a cycle runs")
-        self.assertEqual(em.asm_checkpoint_stats()["rebuild"]["claimed"], 1)
-        self.assertTrue(self.doc_file().exists(), "the idle cycle's end started it")
+        self.assertEqual(seen, [False], "the gate is shut while the cycle runs")
+        rb = em.asm_checkpoint_stats()["rebuild"]
+        self.assertEqual((rb["claimed"], rb["written"]), (1, 1), "the busy cycle's end started it: %s" % rb)
+        self.assertTrue(self.doc_file().exists())
 
-    def test_a_running_rebuild_waits_while_the_pusher_is_busy_or_a_page_parses_and_carries_on_at_the_next_idle_cycle(self):
+    def test_under_a_pusher_that_is_never_idle_the_rebuild_goes_on_between_cycles_and_finishes(self):
+        """No idle cycle at all, as on a busy host: the rebuild starts at the first cycle's end, passes no chunk point while a
+        cycle runs, goes on in the sleeps between them, and finishes."""
+        self._noted()
+        passed, seen, during = [0], [], []
+
+        def jobs(now, live_map, any_client):
+            km._PERF_STATS.wake()                                  # every cycle busy
+            seen.append(em.asm_background_open())
+            time.sleep(0.05)                                       # a chunk point passed as the gate shut has counted by now
+            c0 = passed[0]
+            time.sleep(0.03)                                       # the cycle's work: no chunk point passes in it
+            during.append(passed[0] - c0)
+        end = time.monotonic() + 60
+        with mock.patch.multiple(km, **_QUIET_CYCLE), mock.patch.object(km, "_pusher_cycle_jobs", jobs), \
+                mock.patch.object(em, "_asm_bg_yield", self._counting_yield(passed)):
+            while time.monotonic() < end:
+                km._pusher_cycle()
+                if self.doc_file().exists() and not _rebuild_alive():
+                    break
+                time.sleep(0.01)                                   # the pusher's sleep until its next wake
+            _gate_edge(True)
+            _join_rebuilds()
+        rb = em.asm_checkpoint_stats()["rebuild"]
+        self.assertTrue(self.doc_file().exists(), "the rebuild finished with no idle cycle: %s" % rb)
+        self.assertEqual((rb["claimed"], rb["written"]), (1, 1), rb)
+        self.assertFalse(any(seen), "the gate was shut in every cycle")
+        self.assertEqual(sum(during), 0, "no chunk point passed while a cycle ran: %s" % during)
+        self.assertGreaterEqual(rb["yields"], 1, "a cycle held it, and it went on in a later sleep: %s" % rb)
+        self.assertGreaterEqual(len(seen), 2, "over more than one cycle")
+        self.assertGreater(passed[0], 0)
+
+    def test_a_page_parse_in_flight_holds_the_rebuild_through_the_pushers_sleeps(self):
+        self._noted()
+        passed, during = [0], []
+
+        def jobs(now, live_map, any_client):
+            km._PERF_STATS.wake()
+        with mock.patch.multiple(km, **_QUIET_CYCLE), mock.patch.object(km, "_pusher_cycle_jobs", jobs), \
+                mock.patch.object(em, "_asm_bg_yield", self._counting_yield(passed)):
+            with em.asm_foreground():                              # a page's whole parse, in flight across cycles and sleeps
+                km._pusher_cycle()                                 # its end starts no rebuild: the gate is shut
+                self.assertFalse(_rebuild_alive())
+                self.assertEqual(em.asm_checkpoint_stats()["rebuild"]["claimed"], 0)
+            km._pusher_cycle()                                     # the parse is done: this cycle's end starts it
+            self.assertEqual(em.asm_checkpoint_stats()["rebuild"]["claimed"], 1)
+            with em.asm_foreground():                              # another page parses while the rebuild runs
+                time.sleep(0.05)                                   # (a chunk point passed as it began has counted by now)
+                c0 = passed[0]
+                for _ in range(3):
+                    km._pusher_cycle()
+                    time.sleep(0.02)                               # the pusher sleeps: the page's parse still holds the gate
+                during.append(passed[0] - c0)
+                self.assertFalse(self.doc_file().exists())
+            km._pusher_cycle()
+            _join_rebuilds()
+        self.assertEqual(during, [0], "no chunk point passed while the page parsed")
+        rb = em.asm_checkpoint_stats()["rebuild"]
+        self.assertEqual((rb["claimed"], rb["written"], rb["waiting"]), (1, 1, 0), rb)
+        self.assertTrue(self.doc_file().exists())
+
+    def test_a_running_rebuild_waits_while_a_cycle_runs_or_a_page_parses_and_carries_on_at_the_next_cycles_end(self):
         self._noted()
         started, go = threading.Event(), threading.Event()
         real = em._asm_whole_entry
@@ -574,20 +651,18 @@ class TheRebuildRunsWhileThePusherIsIdle(Harness):
         with mock.patch.object(em, "_asm_whole_entry", held):
             try:
                 self.writer_cycle()
-                self.assertTrue(started.wait(30), "started at the idle cycle's end")
-                _idle_edge(False)                                  # the next pusher cycle begins
+                self.assertTrue(started.wait(30), "started at the cycle's end")
+                _gate_edge(False)                                  # the next pusher cycle begins
                 go.set()
                 self.assertTrue(_until(waiting), "held at its next chunk point (after the read)")
-                km._asm_rebuild_tick(False)                        # a busy cycle ends: still held
-                self.assertTrue(waiting())
-                with em.asm_foreground():                          # a page parses whole: an idle cycle's end does not open it
-                    km._asm_rebuild_tick(True)
+                with em.asm_foreground():                          # a page parses whole: the cycle's end does not open it
+                    _cycle_end()
                     self.assertTrue(waiting())
                     self.assertFalse(self.doc_file().exists())
-                _join_rebuilds()                                   # the page's parse is done and the last cycle was idle
+                _join_rebuilds()                                   # the page's parse is done and the pusher sleeps
             finally:
                 go.set()
-                _idle_edge(True)
+                _gate_edge(True)
                 _join_rebuilds()
         rb = em.asm_checkpoint_stats()["rebuild"]
         self.assertEqual((rb["claimed"], rb["written"], rb["waiting"]), (1, 1, 0), rb)
@@ -605,6 +680,220 @@ class TheRebuildRunsWhileThePusherIsIdle(Harness):
             km.Handler._push_one(None, {"app": "board"})
         self.assertEqual(seen, [False], "shut while the connect's push runs")
         self.assertTrue(em.asm_background_open(), "and open again after it")
+
+
+def _waiting():
+    return em.asm_checkpoint_stats()["rebuild"].get("waiting") == 1
+
+
+def _join_refreshes(timeout=60):
+    for th in [t for t in threading.enumerate() if t.name == "asm-refresh"]:
+        th.join(timeout=timeout)
+
+
+class ARefreshWhileARebuildWaits(Harness):
+    """The review of PR #370, issue two: a waiting rebuild held the shared claim through every wait, so asm_refresh_claim refused
+    every settle's refresh, of every session, for as long as the rebuild took (hours on a busy host), worse than before the
+    rebuild existed. A waiting rebuild lends the claim out now: the settle's refresh, cheap and targeted, runs, and the rebuild
+    takes the claim back before it goes on, so one whole parse still runs at a time."""
+
+    def setUp(self):
+        super().setUp()
+        self.other = str(self.proj / (SID2 + ".jsonl"))
+
+    def _leaf_cut(self, leaf):
+        return int(self.doc(leaf)["files"][Path(leaf).stem]["cut"][0])
+
+    def _restored_and_noted(self):
+        """Session two restored from its document with a refresh due at its settle (its leaf grew past the churn bound's share
+        since), and session one, larger, with no document: noted for a rebuild, the boot's read of it gone."""
+        recs = transcript(200, tag="r")
+        self.write(recs, leaf=self.other)
+        self.rows = [{"sid": SID2, "path": self.other}]
+        self.boot_parse(SID2, self.other)
+        self.assertTrue(em.asm_checkpoint_write(self.other, SID2, False, tree=km._parse(self.other, SID2, NOW)),
+                        em.asm_checkpoint_stats())
+        more = transcript(60, tag="r2", t0=NOW - 3600, compact_every=10 ** 6)
+        more[0]["parentUuid"] = recs[-1]["uuid"]
+        self.write(recs + more, leaf=self.other)
+        self.cut0 = self._leaf_cut(self.other)
+        self.fresh()                                               # a restart
+        self.write(transcript(320, tag="big"))
+        self.rows = [{"sid": SID, "path": self.leaf}, {"sid": SID2, "path": self.other}]
+        self.assertEqual(self.boot_parse(SID2, self.other), ["restore"])
+        self.boot_parse()
+        self.evict_read()
+        self.assertEqual([p[0] for p in em.asm_rebuild_pending()], [self.leaf])
+        self.rf0 = dict(em.asm_checkpoint_stats()["refresh"])     # the refresh's counts run for the module's life
+
+    def refreshes(self):
+        rf = em.asm_checkpoint_stats()["refresh"]
+        return {k: rf[k] - self.rf0.get(k, 0) for k in ("claimed", "written", "refused", "failed")}
+
+    def test_a_settles_refresh_runs_while_a_rebuild_waits_and_the_rebuild_then_finishes(self):
+        self._restored_and_noted()
+        started, go = threading.Event(), threading.Event()
+        real = em._asm_whole_entry
+
+        def held(*a, **k):
+            if threading.current_thread().name == "asm-rebuild" and not started.is_set():
+                started.set()
+                go.wait(60)
+            return real(*a, **k)
+        with mock.patch.object(em, "_asm_whole_entry", held):
+            try:
+                self.writer_cycle()
+                self.assertTrue(started.wait(30), "the rebuild started")
+                _gate_edge(False)                                  # a pusher cycle begins: the rebuild waits at its next chunk point
+                go.set()
+                self.assertTrue(_until(_waiting), "the rebuild waits at the gate")
+                self.assertTrue(km._asm_refresh_maybe(self.other, SID2), "the settle's refresh is not refused")
+                _join_refreshes()
+                self.assertGreater(self._leaf_cut(self.other), self.cut0, "and it wrote session two's document")
+                self.assertTrue(_waiting(), "the rebuild still waits for the pusher's sleep")
+                self.assertTrue(em.asm_refresh_running(), "a waiting rebuild still counts: no second rebuild starts")
+                self.assertFalse(self.doc_file().exists())
+            finally:
+                go.set()
+                _gate_edge(True)
+                _join_rebuilds()
+        rb, rf = em.asm_checkpoint_stats()["rebuild"], self.refreshes()
+        self.assertEqual((rf["claimed"], rf["written"]), (1, 1), rf)
+        self.assertEqual((rb["claimed"], rb["written"], rb["waiting"]), (1, 1, 0), rb)
+        self.assertTrue(self.doc_file().exists(), "the rebuild took its claim back and finished")
+        self.assertFalse(em.asm_refresh_running(), "and released it")
+        self.restores_with_no_whole_parse()
+
+    def test_a_rebuild_whose_gate_opens_while_a_refresh_runs_goes_on_once_the_refresh_is_done(self):
+        """One whole parse at a time: the gate opens while the refresh still parses, and the rebuild waits on for the claim."""
+        self._restored_and_noted()
+        b_started, b_go, r_started, r_go = threading.Event(), threading.Event(), threading.Event(), threading.Event()
+        refreshing, overlap = [False], []
+        real, real_yield = em._asm_whole_entry, em._asm_bg_yield
+
+        def held(*a, **k):
+            name = threading.current_thread().name
+            if name == "asm-rebuild" and not b_started.is_set():
+                b_started.set()
+                b_go.wait(60)
+            if name != "asm-refresh":
+                return real(*a, **k)
+            refreshing[0] = True
+            r_started.set()
+            r_go.wait(60)
+            try:
+                return real(*a, **k)
+            finally:
+                refreshing[0] = False
+
+        def counted():
+            waited = real_yield()
+            if threading.current_thread().name == "asm-rebuild" and refreshing[0]:
+                overlap.append(waited)                             # a chunk point passed while the refresh parsed
+            return waited
+        with mock.patch.object(em, "_asm_whole_entry", held), mock.patch.object(em, "_asm_bg_yield", counted):
+            try:
+                self.writer_cycle()
+                self.assertTrue(b_started.wait(30))
+                _gate_edge(False)
+                b_go.set()
+                self.assertTrue(_until(_waiting), "the rebuild waits at the gate")
+                self.assertTrue(km._asm_refresh_maybe(self.other, SID2), "the settle's refresh is not refused")
+                self.assertTrue(r_started.wait(30), "the refresh parses")
+                _gate_edge(True)                                   # the cycle ends: the gate opens while the refresh still runs
+                time.sleep(0.2)
+                self.assertTrue(_waiting(), "the rebuild waits on: the refresh holds the claim")
+                self.assertFalse(self.doc_file().exists())
+                r_go.set()
+                _join_refreshes()
+                _join_rebuilds()
+            finally:
+                b_go.set(); r_go.set()
+                _gate_edge(True)
+                _join_refreshes()
+                _join_rebuilds()
+        self.assertEqual(overlap, [], "no chunk point of the rebuild passed while the refresh parsed")
+        rb, rf = em.asm_checkpoint_stats()["rebuild"], self.refreshes()
+        self.assertEqual((rf["written"], rb["written"], rb["lent"]), (1, 1, 1), (rf, rb))
+        self.assertGreater(self._leaf_cut(self.other), self.cut0)
+        self.assertTrue(self.doc_file().exists())
+        self.assertFalse(em.asm_refresh_running())
+
+    def test_a_rebuild_waiting_in_its_writer_stands_down_when_a_document_appears(self):
+        """Taking its claim back, the rebuild asks again whether its leaf has a document: one another writer put there while it
+        waited ends the write at that chunk point (`moot`), with the identity proof and the encode unspent."""
+        self.write(transcript(260))
+        self.rows = [{"sid": SID, "path": self.leaf}]
+        self.boot_parse()
+        self.evict_read()
+        in_writer, proofs = threading.Event(), []
+        real_write, real_ident = em.asm_checkpoint_write, em._pre_tree_identity
+
+        def write(*a, **k):
+            if threading.current_thread().name == "asm-rebuild":
+                _gate_edge(False)                                  # a cycle begins as the rebuild's writer starts
+                in_writer.set()
+            return real_write(*a, **k)
+
+        def ident(*a, **k):
+            if threading.current_thread().name == "asm-rebuild":
+                proofs.append(1)
+            return real_ident(*a, **k)
+        with mock.patch.object(em, "asm_checkpoint_write", write), mock.patch.object(em, "_pre_tree_identity", ident):
+            try:
+                self.writer_cycle()
+                self.assertTrue(in_writer.wait(60), "the rebuild parsed and its writer began")
+                self.assertTrue(_until(_waiting), "and waits at the writer's first chunk point")
+                with em._ASM_LOCK:                                 # a page opens the session: its whole parse ...
+                    em._ASM_CACHE.clear()
+                jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+                self.assertIn("full", self.boot_parse())
+                km._begin_checkpoint_cycle(); km._converge_checkpoints(NOW + 605)   # ... and the converge pass writes from it
+                self.assertTrue(self.doc_file().exists())
+                standing = self.doc_file().read_bytes()
+            finally:
+                _gate_edge(True)
+                _join_rebuilds()
+        rb = em.asm_checkpoint_stats()["rebuild"]
+        self.assertEqual((rb["claimed"], rb["written"], rb["moot"]), (1, 0, 1), rb)
+        self.assertEqual(proofs, [], "the identity proof never ran: the write stood down at its chunk point")
+        self.assertEqual(self.doc_file().read_bytes(), standing, "the converge pass's document stands")
+
+
+class ADocumentRefusedUnderAnUnchangedLeaf(Harness):
+    """The review of PR #370, issue three (older than the rebuild; #370 made it certain): the converge pass sets a leaf aside
+    once a document stands there, keyed on the leaf's stat alone; a refusal then unlinks the document while the leaf stays as it
+    was, and the rebuild leaves the leaf to that pass (its whole entry resident, its estimate in budget), so neither wrote it
+    until the leaf changed or the kernel restarted, and every boot until then parsed it whole."""
+
+    def test_a_refused_then_unlinked_document_on_an_unchanged_leaf_is_written_again(self):
+        self.write(transcript(260))
+        self.rows = [{"sid": SID, "path": self.leaf}]
+        self.assertEqual(self.boot_parse(), ["full"])
+        self.writer_cycle()                                        # the converge pass writes it from the boot's read ...
+        _join_rebuilds()
+        self.assertTrue(self.doc_file().exists())
+        self.writer_cycle(NOW + 601)                               # ... and a later cycle finds it standing
+        self.assertEqual(em.asm_checkpoint_stats()["converge"]["writes"], 1)
+        st0 = os.stat(self.leaf)
+        d = self.doc(); d["av"] = em._ASM_CKPT_V - 1              # the next restore refuses it (a version refusal)
+        self.doc_file().write_bytes(gzip.compress(json.dumps(d).encode("utf-8")))
+        with em._ASM_LOCK:                                         # a page opens the session: its parse restores, refuses and
+            em._ASM_CACHE.clear()                                  #  unlinks the document, and parses whole
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+        self.assertEqual(self.boot_parse(), ["full"])
+        self.assertEqual(em.asm_checkpoint_stats()["fallbacks"].get("version"), 1)
+        self.assertFalse(self.doc_file().exists(), "refused and unlinked")
+        st1 = os.stat(self.leaf)
+        self.assertEqual((st1.st_size, st1.st_mtime_ns), (st0.st_size, st0.st_mtime_ns), "the leaf unchanged")
+        for k in range(3):
+            self.writer_cycle(NOW + 610 + k)
+            _join_rebuilds()
+        self.assertTrue(self.doc_file().exists(), "written again: %s %s" % (em.asm_checkpoint_stats()["converge"],
+                                                                          em.asm_checkpoint_stats()["rebuild"]))
+        self.assertEqual(self.doc()["av"], em._ASM_CKPT_V)
+        self.assertEqual(em.asm_checkpoint_stats()["converge"]["writes"], 2, "by the converge pass, from the page's read")
+        self.restores_with_no_whole_parse()
 
 
 class TwoWritersOfOneLeaf(Harness):
@@ -652,7 +941,7 @@ class TwoWritersOfOneLeaf(Harness):
 
 class ARebuildThatRaises(Harness):
     """The review of PR #367: a rebuild that raised was memoized at once, so an idle session was not tried again until it
-    changed or the kernel restarted. Now a raise is tried once more at the next idle cycle, as a decline of the moment is,
+    changed or the kernel restarted. Now a raise is tried once more at the next cycle's end, as a decline of the moment is,
     and a second raise is final for the leaf's stat and said loudly, with its traceback."""
 
     def test_a_raise_inside_the_parse_is_tried_once_more_and_a_second_is_said_loudly(self):
@@ -672,7 +961,7 @@ class ARebuildThatRaises(Harness):
             rb = em.asm_checkpoint_stats()["rebuild"]
             self.assertEqual((rb["claimed"], rb["retry"], rb["failed"], rb["pending"]), (1, 1, 0, 1), rb)
             self.assertIn("raised (RuntimeError('synthetic parse fault')); it is tried once more", err.getvalue())
-            self.writer_cycle(NOW + 601); _join_rebuilds()         # the retry, at the next idle cycle
+            self.writer_cycle(NOW + 601); _join_rebuilds()         # the retry, at the next cycle's end
             self.writer_cycle(NOW + 602); _join_rebuilds()         # and nothing after it
         rb = em.asm_checkpoint_stats()["rebuild"]
         self.assertEqual((rb["claimed"], rb["retry"], rb["failed"], rb["pending"]), (2, 1, 1, 0), rb)
