@@ -16628,10 +16628,14 @@ def _dead_wait_sweep(alive_ids, nudged, now):
             # …and incomplete DELEGATION handoffs (the user 2026-08-23: a dead sender's "↪ delegated
             # to X" item waits on run_propagate, and if the courier link never landed — or the peer
             # folded the work without one — nothing can ever check it off; five were 240h old). The
-            # same terminal as a stamped wait: the card needs the user, not more patience.
+            # same terminal as a stamped wait: the card needs the user, not more patience. A tracker whose
+            # delegation already reported back (jd._linked_back, 2026-10-23) waits on no peer: it is open
+            # again because work reopened it after that report (a follow-up typed on the completed card),
+            # so the delegation block's "still waiting on the delegation" would be false.
             for nid, nd in nodes.items():
                 h = nd.get("handoff") if isinstance(nd, dict) else None
-                if isinstance(h, dict) and not nd.get("nodeComplete") and not nd.get("blocked"):
+                if isinstance(h, dict) and not nd.get("nodeComplete") and not nd.get("blocked") \
+                        and not jd._linked_back(nd):
                     _dead_handoff_block(sid, nid, h, nd, nudged, now)
         except Exception:
             sys.stderr.write("dead-wait sweep (%s): %s\n" % (sid, traceback.format_exc()))
