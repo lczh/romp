@@ -11538,6 +11538,15 @@ def _completion_horizon(nd):
     return max(ts) if ts else _done_since(nd)
 
 
+def _linked_back(nd):
+    """True when a '↪ delegated' tracker's delegation has reported back: its diary holds a courier done
+    (run_propagate's link-back, or the reply sweep's). From then on the wait on the peer is over, and work
+    that reopens the tracker (a follow-up typed on the completed card) belongs to this session, so the
+    tracker's own judges and sweeps treat it like any other card (2026-10-23): apply_close's handoff
+    stand-downs and the dead-wait sweep's delegation block apply only before the link-back."""
+    return any(e.get("src") == "courier" and e.get("kind") == "done" for e in (nd.get("log") or []))
+
+
 def _brief_superseded(nodes, sub, prev_bm):
     """True when a KEPT decision brief predates a later unblock/reopen anywhere in the card's subtree —
     the asks it presents were ANSWERED after it was written, so keeping it re-surfaces decisions the
@@ -15909,7 +15918,8 @@ def apply_close(store, menu, verdicts, t=None, touched=None, t_overrides=None, t
         # state row — so t_overrides carries that anchor. Anchoring a history ruling to the turn made
         # it pre-shadowed by the very lift that nominated it (the fold orders by evidence time).
         ev = (t_overrides or {}).get(i, t)
-        if i in done and isinstance(nd.get("handoff"), dict) and nd["handoff"].get("peer"):
+        if i in done and isinstance(nd.get("handoff"), dict) and nd["handoff"].get("peer") \
+                and not _linked_back(nd):
             # a '↪ delegated' tracking node's ending event is the RECIPIENT's completion
             # (run_propagate, or the cross-host reply sweep) — never this session's own prose
             # (2026-08-25, the re-asking umbrella): the closer done'd a tracker at DISPATCH time
@@ -15917,9 +15927,13 @@ def apply_close(store, menu, verdicts, t=None, touched=None, t_overrides=None, t
             # node, and the parent ask's nomination sealed on dispatched-only evidence. The
             # stand-down files nothing in either direction; the authoritative writer's own filing
             # lands untouched, and the same reply's verdicts on other menu nodes still apply.
+            # Only until that filing (_linked_back, 2026-10-23): the link-back files once per
+            # completion, so after it a reopen on the tracker (the user's follow-up on the completed
+            # card) is work this session owns, and a done refused here would leave the card in
+            # Working with all its work finished. The closer rules on it like any other card.
             continue
         if i in done:
-            if isinstance(nd.get("handoff"), dict):
+            if isinstance(nd.get("handoff"), dict) and not _linked_back(nd):
                 # A '↪ delegated' TRACKING node's deciding event is the RECIPIENT's completion —
                 # run_propagate's back-link for a local peer, the reply sweep for a cross-host one —
                 # never this session's own dispatch-time prose (the user 2026-08-25, the re-asking
@@ -15930,7 +15944,8 @@ def apply_close(store, menu, verdicts, t=None, touched=None, t_overrides=None, t
                 # nudge-block ↔ unblocker-unblock for 75 minutes. Stand down at the write moment;
                 # the authoritative writer's filing carries the report and re-arms the parent's
                 # nomination for free. (Same posture as the peer-kind awaiting gate below: a claim
-                # whose ending event belongs to another writer is not this closer's to file.)
+                # whose ending event belongs to another writer is not this closer's to file.) Only
+                # until the link-back (_linked_back, 2026-10-23), as with the stand-down above.
                 continue
             if not record_verdict(store, nd, "closer", "done", ev, why=done[i] or None, end_ev=t_end):
                 continue                              # the user's follow-up/move postdates this turn's evidence
@@ -20189,10 +20204,11 @@ def run_propagate(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbos
     the sender's precise tracking node, planted by _plant_handoff_track). Forward-only + idempotent: it never
     reopens the sender's node, and a node already done (or gone) is a no-op. Each completion of G is linked
     back ONCE (2026-10-23): a tracker that already carries a courier done at or past G's completion horizon
-    was told, so a follow-up, reopen or block filed on it since stands, and only a newer completion of G
-    checks it off again. The done's evidence time is that horizon raised to the reply floor over the
-    tracker, so a reply made before the pass saw G complete does not hold the tracker open. Returns
-    completions propagated.
+    was told, so a follow-up, reopen or block filed on it since stands. A newer completion of G checks it
+    off again, and once linked back the tracker's own closer rules on its follow-up work like any other
+    card's (_linked_back ends apply_close's handoff stand-downs). The done's evidence time is that horizon
+    raised to the reply floor over the tracker, so a reply made before the pass saw G complete does not
+    hold the tracker open. Returns completions propagated.
 
     Every store is read at most ONCE per pass (2026-09-06): `loaded` holds this pass's load_goals objects
     and serves the recipient scan, the per-ref done check, _ref_goal's recipient maps and the sender loop;
@@ -20313,13 +20329,15 @@ def run_propagate(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbos
                     # the reply folded under the fresh done, so the reply landed on another card. A
                     # courier done at or past the completion's horizon (_completion_horizon: the closer's
                     # audited turn end) means this completion was filed already, and whatever the tracker
-                    # says since then stands; a newer completion of the recipient's goal links back again.
-                    # The done's evidence time is that horizon, raised to the reply floor over the tracker
-                    # (_floor_of; for a done, equality lands, as with _reassert_blocks' clamp): a reply made
-                    # before this pass saw the completion, while the recipient worked or just after, must
-                    # not hold the tracker open, because no other writer ends it (apply_close stands down
-                    # on trackers). The fold is asked first, so a block or clear filed on the tracker after
-                    # that time stands and no row is written.
+                    # says since then stands; a newer completion of the recipient's goal links back again,
+                    # and the tracker's own closer, no longer standing down (_linked_back), rules on any
+                    # follow-up work. The done's evidence time is that horizon, raised to the reply floor
+                    # over the tracker (_floor_of; for a done, equality lands, as with _reassert_blocks'
+                    # clamp): a reply made before this pass saw the completion, while the recipient worked
+                    # or just after, must not hold the tracker open, because the closer stands down on a
+                    # tracker until its delegation has been linked back, so a done refused under that
+                    # reply would leave the card in Working. The fold is asked first, so a block or clear
+                    # filed on the tracker after that time stands and no row is written.
                     comp = _completion_horizon(nd)
                     if any(e.get("src") == "courier" and e.get("kind") == "done" and (e.get("ev_t") or 0) >= comp
                            for e in (a_node.get("log") or [])):

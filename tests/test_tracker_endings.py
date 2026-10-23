@@ -19,7 +19,8 @@ And an ending that fired when it should not have (2026-10-23):
     for the reply folded under that done, so the reply was filed elsewhere. The back-link now files
     once per completion of the recipient's goal, at that completion's time raised to any reply floor:
     a follow-up after it stands, and a reply made while the recipient worked does not hold the
-    tracker open.
+    tracker open. Once linked back, the tracker's own closer rules on the follow-up's work, so the
+    card completes when that work is done (it stood down on every tracker before).
 SYNTHETIC fixtures only; private synthetic sids."""
 import json
 import os
@@ -316,6 +317,69 @@ class FollowUpAfterTheCompletion(unittest.TestCase):
         self._finish_turn(T + 60, T + 150)
         self.assertEqual(jd.run_propagate(now=T + 200), 1)
         self._checked_off_once(T + 150)
+
+    def test_the_closer_completes_the_card_once_its_follow_up_work_is_done(self):
+        # web does the follow-up itself: the planner files a step under the card, and the closer rules the
+        # step done and then the card, which the link-back no longer re-completes on its own
+        self._complete_then_follow_up()
+        self.assertEqual(jd.run_propagate(now=T + 400), 0)
+        st = jd.load_goals(WEB)
+        jd._reopen(st, self.track, by="followup", now=T + 300)    # the planner's continuation for the reply
+        menu = jd.open_menu(st, cap=None)
+        gi = next(i for i, nd in enumerate(menu, 1) if nd["id"] == self.track)
+        jd.apply_plan(st, "seg-f1", T + 300,
+                      [{"do": "sub", "under": gi, "text": "cover the csv path", "why": "followed up on this goal"}],
+                      menu)
+        jd.rollup_status(st, False)
+        jd.save_goals(WEB, st)
+        st = jd.load_goals(WEB)
+        step = next(n for n in st["nodes"].values() if n.get("text") == "cover the csv path")
+        self.assertEqual(jd.apply_close(st, [step], {"done": {1: "csv path covered"}}, t=T + 500, t_end=T + 520),
+                         [step["id"]])
+        jd.rollup_status(st, False)
+        jd.save_goals(WEB, st)
+        st = jd.load_goals(WEB)
+        self.assertFalse(st["nodes"][self.track].get("nodeComplete"), "the card waits for the closer's ruling")
+        self.assertIn(self.track, [n["id"] for n in jd._subtree_done_candidates(st)],
+                      "its steps are finished, so the card is put to the closer")
+        self.assertEqual(jd.apply_close(st, [st["nodes"][self.track]], {"done": {1: "the follow-up is finished"}},
+                                        t=T + 600, t_end=T + 620), [self.track],
+                         "api already reported back, so the closer's done on the card lands")
+        jd.rollup_status(st, False)
+        jd.save_goals(WEB, st)
+        for now in (T + 700, T + 800):
+            self.assertEqual(jd.run_propagate(now=now), 0, "nothing new from api")
+        st = jd.load_goals(WEB)
+        nd = st["nodes"][self.track]
+        self.assertTrue(nd.get("nodeComplete") and not nd.get("blocked"), "the finished follow-up is done")
+        self.assertEqual([e.get("ev_t") for e in nd["log"] if e.get("src") == "courier"], [T + 150],
+                         "api's one completion, linked back once")
+        jd.rollup_status(st, True)              # the card is web's focus until it settles: here, web ends
+        self.assertEqual(st["status"].get(self.track), "completed")
+
+    def test_the_closer_still_stands_down_before_the_link_back(self):
+        # dispatch-time prose ("queued to api") is still not the tracker's ending while api works
+        self._seed(done=False)
+        st = jd.load_goals(WEB)
+        self.assertEqual(jd.apply_close(st, [st["nodes"][self.track]], {"done": {1: "queued to api"}},
+                                        t=T + 20, t_end=T + 30), [])
+        nd = st["nodes"][self.track]
+        self.assertFalse(nd.get("nodeComplete"))
+        self.assertEqual([e for e in nd["log"] if e.get("kind") == "done"], [], "a stand-down files nothing")
+
+    def test_both_closer_stand_downs_end_at_the_link_back(self):
+        # a linked-back, followed-up tracker takes the closer's done whether its handoff names a peer
+        # (the first stand-down's shape) or not (the plain one)
+        st = {"rompUuid": WEB, "seq": 1, "nodes": {}, "placements": {}, "status": {}}
+        menu = []
+        for k, h in ((1, {"peer": PEER, "msgId": MID2}), (2, {"msgId": MID2})):
+            nid = "%s:t%d" % (WEB, k)
+            nd = st["nodes"][nid] = _node(nid, "↪ delegated to api: step %d" % k, None, handoff=h)
+            self.assertTrue(jd.record_verdict(st, nd, "courier", "done", T + 150, why="completed by api (delegated)"))
+            self.assertTrue(jd.record_verdict(st, nd, "user", "reopen", T + 300, msg=True))
+            menu.append(nd)
+        self.assertEqual(jd.apply_close(st, menu, {"done": {1: "follow-up finished", 2: "follow-up finished"}},
+                                        t=T + 600, t_end=T + 620), [n["id"] for n in menu])
 
 
 if __name__ == "__main__":

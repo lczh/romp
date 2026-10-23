@@ -5,7 +5,8 @@ on a completion event that could never fire (12 live handoffs, five ~240h old). 
 executed here: (1) the courier's link-only repair attaches links[] to the placed goal's TOP —
 never origin, which keeps its born-from meaning; (2) run_propagate completes the sender's tracking
 node from links[] exactly as from origin; (3) a DORMANT sender's incomplete handoff converts to the
-dead-wait procedural block. SYNTHETIC fixtures only."""
+dead-wait procedural block, unless its delegation already reported back and only a follow-up reopened
+it (2026-10-23). SYNTHETIC fixtures only."""
 import json
 import os
 import tempfile
@@ -207,6 +208,23 @@ class DormantHandoffConverts(unittest.TestCase):
         km._dead_wait_sweep(set(), self.nudged, T + 990)
         km._PREV_ALIVE = None
         self.assertEqual(len([k for k in self.nudged if k == SENDER + ":g1"]), 1, "once per node")
+
+    def test_a_followed_up_tracker_whose_delegation_reported_back_is_not_blocked(self):
+        # api finished and the completion was linked back (2026-10-23); the user then followed up on the
+        # completed card, which reopened it, and web ended before ruling on the follow-up. The card waits
+        # on no peer, so the delegation block's "still waiting on the delegation" would be false.
+        st = jd.load_goals(SENDER)
+        nd = st["nodes"][SENDER + ":g1"]
+        self.assertTrue(jd.record_verdict(st, nd, "courier", "done", T + 20,
+                                          why="completed by api (delegated): exporter built"))
+        self.assertTrue(jd.record_verdict(st, nd, "user", "reopen", T + 30, msg=True))
+        jd.save_goals(SENDER, st)
+        nd = jd.load_goals(SENDER)["nodes"][SENDER + ":g1"]
+        self.assertFalse(nd.get("nodeComplete") or nd.get("blocked"), "the follow-up reopened the card")
+        km._dead_wait_sweep(set(), self.nudged, T + 900)
+        nd = jd.load_goals(SENDER)["nodes"][SENDER + ":g1"]
+        self.assertFalse(nd.get("blocked"), "api already reported back: no delegation wait to block on")
+        self.assertNotIn(SENDER + ":g1", self.nudged)
 
 
 if __name__ == "__main__":
