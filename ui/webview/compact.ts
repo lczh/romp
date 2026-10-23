@@ -150,15 +150,23 @@ export function thoughtOf(evs: readonly ThoughtLike[], members: readonly number[
   const text = words.map((e) => (e.text || "").trim()).join("\n\n");
   const lastWords = (words[words.length - 1]?.text || "").split("\n").find((l) => l.trim()) || "";
   let tokens = 0;
-  if (members.length) {
-    let lo = members[0];
-    while (lo > 0 && evs[lo - 1].kind === "thinking") lo--;
-    for (let j = lo; j <= members[members.length - 1]; j++) {
-      const e = evs[j];
-      if (e.kind === "thinking" && typeof e.thinkTokens === "number" && e.thinkTokens > 0) tokens += e.thinkTokens;
-    }
+  for (const j of thoughtSpan(evs, members)) {
+    const e = evs[j];
+    if (e.kind === "thinking" && typeof e.thinkTokens === "number" && e.thinkTokens > 0) tokens += e.thinkTokens;
   }
   return { text, gist: lastWords.replace(/\s+/g, " ").trim(), tokens, key: thoughtKey(evs[members[0]]) };
+}
+/** Every event a Thought row over `members` reads, in order: the thinking rows directly before its first member, then each
+ *  row from the first member to the last (the textless ones between them included). The textless rows here belong to no
+ *  display unit, so the keyed paint signs this span rather than the members (unit-diff.ts unitReads): a token figure that
+ *  lands on one of them in a later frame repaints the row that shows it. */
+export function thoughtSpan(evs: readonly { kind: string }[], members: readonly number[]): number[] {
+  if (!members.length) return [];
+  let lo = members[0];
+  while (lo > 0 && evs[lo - 1].kind === "thinking") lo--;
+  const span: number[] = [];
+  for (let j = lo; j <= members[members.length - 1]; j++) span.push(j);
+  return span;
 }
 
 /** The member a display unit is PLACED and TIMED by (T339, the user 2026-09-11). A collapsed NOTICE run anchors on the

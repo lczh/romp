@@ -29,7 +29,8 @@ Tool calls fold into runs, and each run opens to one line per call.
 
 The session's thinking, when it comes with words, shows as one folded
 **Thought** line with the start of its latest note, and a click opens the full
-text. A thought that follows a tool call sits inside that call's run.
+text. A thought that follows a run of tool calls sits inside the run; one after
+a single call is a line of its own.
 
 The chat shows a session's live status. While it thinks, the foot of the chat
 reads **Thinking** with the seconds so far, its chip in the Sessions pane reads
