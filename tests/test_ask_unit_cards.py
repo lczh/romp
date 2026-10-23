@@ -560,6 +560,15 @@ class MergeKeepsTheSendersTracker(unittest.TestCase):
             self.CARD2: _node(self.CARD2, "Fix the login redirect", None, t=T0 - 500)},
             "placements": {}, "status": {}}
 
+    def _recipient_done(self):
+        rs = {"rompUuid": WK1, "seq": 1, "nodes": {
+            WK1 + ":g1": _node(WK1 + ":g1", "export module", None, t=T0 + 5,
+                               origin={"peer": MGR, "goalId": self.TRK, "msgId": MID1})},
+            "placements": {}, "status": {}}
+        jd.record_verdict(rs, rs["nodes"][WK1 + ":g1"], "closer", "done", NOW - 100,
+                          why="export module shipped")
+        jd.save_goals(WK1, rs)
+
     def _assert_nested(self, st):
         trk = st["nodes"].get(self.TRK) or {}
         self.assertEqual(trk.get("parentId"), self.STEP, "the tracker nests under the step it twins")
@@ -576,13 +585,7 @@ class MergeKeepsTheSendersTracker(unittest.TestCase):
         self.assertEqual(n, 1)
         self._assert_nested(st)
         jd.save_goals(MGR, st)
-        rs = {"rompUuid": WK1, "seq": 1, "nodes": {
-            WK1 + ":g1": _node(WK1 + ":g1", "export module", None, t=T0 + 5,
-                               origin={"peer": MGR, "goalId": self.TRK, "msgId": MID1})},
-            "placements": {}, "status": {}}
-        jd.record_verdict(rs, rs["nodes"][WK1 + ":g1"], "closer", "done", NOW - 100,
-                          why="export module shipped")
-        jd.save_goals(WK1, rs)
+        self._recipient_done()
         jd.run_propagate(now=NOW)
         m = jd.load_goals(MGR)
         self.assertTrue(m["nodes"][self.TRK].get("nodeComplete"),
@@ -601,6 +604,48 @@ class MergeKeepsTheSendersTracker(unittest.TestCase):
         jd.run_propagate(now=NOW)
         self.assertTrue(jd.load_goals(MGR)["nodes"][self.TRK].get("nodeComplete"),
                         "the recipient's reply ends the quiet tracker")
+
+    def test_a_step_ruled_done_first_leaves_the_nested_tracker_to_its_recipient(self):
+        # The closer can rule the twin step done before the recipient finishes (at dispatch time, or on
+        # an interim reply). The roll-down under a done step used to fold the nested tracker with it,
+        # and the recipient's real ending then found the tracker done and filed nothing.
+        st = self._sender()
+        self.assertEqual(jd._merge_nodes(st, self.TRK, self.STEP, T0 + 10, "same work"), 1)
+        jd.record_verdict(st, st["nodes"][self.STEP], "closer", "done", T0 + 20, why="queued to api")
+        jd.rollup_status(st, False)
+        self.assertTrue(st["nodes"][self.STEP].get("nodeComplete"))
+        trk = st["nodes"][self.TRK]
+        self.assertFalse(trk.get("nodeComplete"), "a step ruled done does not end the delegation")
+        self.assertFalse(trk.get("rolledUp"))
+        jd.save_goals(MGR, st)
+        self._recipient_done()
+        jd.run_propagate(now=NOW)
+        trk = jd.load_goals(MGR)["nodes"][self.TRK]
+        self.assertTrue(trk.get("nodeComplete"), "the recipient's completion ends the tracker")
+        self.assertIn("courier", [e.get("src") for e in trk.get("log") or []])
+        self.assertTrue(str(trk.get("doneWhy") or "").startswith("completed by api (delegated)"),
+                        trk.get("doneWhy"))
+
+    def test_the_spare_reaches_a_deeper_tracker_and_only_open_ones(self):
+        # Scope of the spare under a done step: a plain open child still folds with the step; an open
+        # tracker below that child is spared too; a cleared tracker shields nothing, so its open child
+        # folds as before.
+        st = self._sender()
+        note, deep, gone, kid = MGR + ":g5", MGR + ":g6", MGR + ":g7", MGR + ":g8"
+        st["seq"] = 8
+        st["nodes"][note] = _node(note, "export module notes", self.STEP)
+        st["nodes"][deep] = _node(deep, "↪ delegated to tests: export fixtures", note,
+                                  handoff={"peer": WK2, "msgId": MID2})
+        st["nodes"][gone] = _node(gone, "↪ delegated to tests: old export draft", self.STEP,
+                                  handoff={"peer": WK2, "msgId": "1787499000.000003_1.TESTHOST"})
+        st["nodes"][kid] = _node(kid, "draft the export format", gone)
+        jd.record_verdict(st, st["nodes"][gone], "user", "clear", T0 + 5, why="cleared from the feed")
+        jd.record_verdict(st, st["nodes"][self.STEP], "closer", "done", T0 + 20, why="shipped")
+        jd.rollup_status(st, False)
+        self.assertTrue(st["nodes"][note].get("rolledUp"), "a plain open child folds with the step")
+        self.assertFalse(st["nodes"][deep].get("nodeComplete"), "an open tracker deeper down is spared")
+        self.assertFalse(st["nodes"][deep].get("rolledUp"))
+        self.assertTrue(st["nodes"][kid].get("rolledUp"), "a cleared tracker shields nothing")
 
     def test_a_tracker_survivor_refuses_the_merge(self):
         st = self._sender()

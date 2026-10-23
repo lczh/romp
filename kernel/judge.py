@@ -8834,16 +8834,19 @@ def rollup_status(store, session_closed, now=None):
     # board as phantom open work (the user 2026-06-23). Stamp the node booleans (so the UI renders them
     # resolved with no extra plumbing) plus a `rolledUp` marker so _reopen can cleanly un-resolve exactly these
     # auto-rolled steps (not a genuinely-DONE leaf) if the goal is reopened. Only RESOLVED tops propagate.
-    def _roll_down(nid, field):
+    def _roll_down(nid, field, spare_handoffs=False):
         for c in children.get(nid, []):
             if field == "nodeComplete" and c in open_task:
                 continue                                   # authoritative-open subtree: never auto-done it
             nd = nodes[c]
+            if (spare_handoffs and isinstance(nd.get("handoff"), dict)
+                    and not nd.get("nodeComplete") and not nd.get("cleared")):
+                continue                                   # an open delegation ends on its recipient's word
             if not nd.get("cleared") and not nd.get("nodeComplete"):
                 with _authority():                         # tree-derived display cache (roll-down owns it)
                     nd[field] = True
                     nd["rolledUp"] = True
-            _roll_down(c, field)
+            _roll_down(c, field, spare_handoffs)
     for nid in children.get(None, []):
         if status[nid] == "cleared":
             _roll_down(nid, "cleared")
@@ -8858,10 +8861,16 @@ def rollup_status(store, session_closed, now=None):
     # eventless), gated the same way: an agentTask-open subtree is authoritative-open (is_complete
     # already refuses the parent's done), and interior-only so a complete-but-unsettled TOP keeps the
     # settle gate's timing. rolledUp parents skip — their subtree was folded by the same ancestral pass.
+    # An OPEN '↪ delegated' tracker below such a sub is spared with its subtree: its only ending is the
+    # recipient's (run_propagate's back-link, the reply sweep), and both skip a node already done, so
+    # folding it filed the delegation done by tree position and its real ending never landed — the same
+    # loss the closer's dispatch-time stand-down prevents. A sub ruled done is not the delegation ending;
+    # a tracker the grouper nested under its twin step met exactly that when the step was ruled done
+    # first. The card's own resolution (the top-level loop above) still absorbs it, as it always did.
     for nid, nd in nodes.items():
         if (nd.get("parentId") is not None and nd.get("nodeComplete")
                 and not nd.get("rolledUp") and nid not in open_task):
-            _roll_down(nid, "nodeComplete")
+            _roll_down(nid, "nodeComplete", spare_handoffs=True)
     # Clear STALE blocks on completed work (the user 2026-06-24): a COMPLETE (sub)tree has no outstanding
     # work, so it can't be blocked — its block's answer is moot. `any_blocked` already enforces this for the
     # computed STATUS, but it never cleared the raw nd["blocked"] flag; the ledger + build_session render that
@@ -13927,7 +13936,8 @@ def _merge_nodes(store, dupe_id, surv_id, t, why):
     # finishing the work completed nothing and the step stayed open. Carrying `handoff` onto the
     # survivor would turn the broader step into the tracker, over-completing it on a partial handoff.
     # So honor "these belong together" by NESTING the tracker under the survivor: its ending lands as
-    # before, and the done tracker then nominates the step to the closer with the report in evidence
+    # before, also after the step is ruled done (rollup's interior roll-down spares an open tracker),
+    # and a done tracker under a still-open step nominates it to the closer with the report in evidence
     # (_deleg_unseen). Refused when the survivor is a tracker too (two dispatches keep two trackers),
     # when it already is the tracker's parent (nothing to do), or when it sits below the tracker (cycle).
     if isinstance(dupe.get("handoff"), dict):
