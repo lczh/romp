@@ -14651,14 +14651,17 @@ ASM_REBUILD = os.environ.get("ROMP_ASM_REBUILD", "1") != "0"   # the document re
 def _asm_rebuild_maybe():
     """Start the rebuild of ONE leaf a parse found without a document (em.asm_rebuild_note: refused, missing, or too big for the
     converge pass), the largest pending, on a thread of its own at the lowest CPU priority, when no refresh or rebuild runs (the
-    two share one claim: one whole parse at a time). Run once per document writer cycle, after the converge pass, so the
-    rebuilds go one after another at the jobs pass's cadence. Nothing here parses or reads: a stat per pending leaf, and the
-    thread (asm_refresh_document's private road) takes no key lock, so no page connect, chat build or pusher cycle waits on it.
-    A leaf the converge pass can still write from the boot's own read is left to it (its whole entry and the reader's whole
-    record entry resident, under the display parse's flag, and its estimate inside the cycle's budget: no second parse), and so
-    is a subagent's own transcript (parsed under its parent's id, whose candidates the refresh road does not build). Off with
-    ROMP_ASM_REBUILD=0 and once the exit's stand-down is set. Returns whether a rebuild was started."""
-    if not ASM_REBUILD or _EXIT_STAND_DOWN.is_set() or em.asm_refresh_running():
+    two share one claim: one whole parse at a time) and the background gate is open (em.asm_background_open: the pusher's last
+    cycle was idle, and no parse or page connect is in flight). Run at the end of each IDLE pusher cycle (_asm_rebuild_tick, the
+    review of PR #367; the document writer's cycle until then, which ran whatever the pages were doing), so the rebuilds go one
+    after another while the kernel is quiet. Nothing here parses or reads: a stat per pending leaf, and the thread
+    (asm_refresh_document's private road) takes no key lock, so no page connect, chat build or pusher cycle waits on it, and it
+    waits at its chunk points whenever the gate shuts. A leaf the converge pass can still write from the boot's own read is left
+    to it (its whole entry and the reader's whole record entry resident, under the display parse's flag, and its estimate
+    inside the cycle's budget: no second parse), and so is a subagent's own transcript (parsed under its parent's id, whose
+    candidates the refresh road does not build). Off with ROMP_ASM_REBUILD=0 and once the exit's stand-down is set. Returns
+    whether a rebuild was started."""
+    if not ASM_REBUILD or _EXIT_STAND_DOWN.is_set() or em.asm_refresh_running() or not em.asm_background_open():
         return False
     converge_on = ASM_CONVERGE and CKPT_CONVERGE_MS > 0 and em.checkpoint_drop_writes_on()
     for leaf, sid, why, size in em.asm_rebuild_pending():
@@ -14694,6 +14697,22 @@ def _asm_rebuild_maybe():
             raise
         return True
     return False
+
+
+def _asm_rebuild_tick(idle):
+    """The pusher's end-of-cycle call for the document rebuild, beside _gc_freeze_tick and keyed on the same event: an IDLE
+    cycle (it sent nothing and changed nothing) opens the background gate, so a rebuild held at a chunk point carries on, and
+    starts the next rebuild when one is due; a busy cycle leaves the gate as the cycle's start left it, shut (the review of PR
+    #367: nice 19 did not keep a rebuild off the pages, which wait on the interpreter, not on a core). Cheap when nothing is
+    due: a dict scan. A failure never ends the pusher: said with its traceback."""
+    em.asm_background_idle(idle)
+    if not idle:
+        return False
+    try:
+        return _asm_rebuild_maybe()
+    except Exception:
+        sys.stderr.write("assembly document rebuild: %s\n" % traceback.format_exc())
+        return False
 
 
 def _lower_thread_priority():
@@ -74847,6 +74866,8 @@ def _pusher_cycle():
     #                                         liveness snapshot, the names) is a stage of its own and the stages sum to the wall
     _c_cycle = time.thread_time()           # this thread's CPU: the wall above includes lock waits and any forked child
     _m_cycle = (_PERF_STATS.marks(), jd._GOAL_IO["saves"], jd._GOAL_IO["writes"])   # idle-cycle marks: see cycle()
+    em.asm_background_idle(False)           # the background gate shuts as the cycle begins: a document rebuild waits at its next
+    #                                         chunk point until a cycle ends idle (_asm_rebuild_tick, below)
     with _clients_lock:
         any_client = bool(_clients)
     _live_scope.snapshot_t = time.time()      # the stamp of the cycle's liveness snapshot, taken before it (_cached_timeline)
@@ -74914,6 +74935,8 @@ def _pusher_cycle():
         elif not _BOOT_HEALTH_DONE[0]:
             _boot_health_row_backstop(time.monotonic())         # the jobs pass still open long after: the row without it
         _gc_freeze_tick(_cycle_idle, first)                     # #1735: reconcile the freeze (the fold-in on any cycle, the release when idle; the guard is inside pusher_tick)
+        _asm_rebuild_tick(_cycle_idle)                          # the document rebuild, on the same event: the gate opens and the next
+        #                                                         rebuild starts at an idle cycle's end, never a busy one's
 
 
 @contextlib.contextmanager
@@ -76330,8 +76353,9 @@ def _document_write_phase(now):
     handed over (_ckpt_settle_writes_pay: each due session's fold documents and assembly document), then the checkpoint cycle
     (its byte budget whole again, the drops owed from an earlier cycle and the drops and rewrites the other threads handed to
     the writer done against it: _begin_checkpoint_cycle), then the converge pass, which writes the documents a boot's whole
-    reads left wanting (_converge_checkpoints), bounded by its wall and that budget, then the next assembly document rebuild for a
-    leaf a parse found without one, started on a thread of its own (_asm_rebuild_maybe, 2026-10-23). The settle write ran as the jobs pass's
+    reads left wanting (_converge_checkpoints), bounded by its wall and that budget. (The assembly document rebuild for a leaf a
+    parse found without one started here too, after the pass, from 2026-10-23 until the review of PR #367 moved it to the
+    pusher's idle cycles: _asm_rebuild_tick.) The settle write ran as the jobs pass's
     last job and the other two in the jobs thread's write phase after it (2026-10-08; the pusher's cycle before that), where
     a big document held up the next pass for the whole of its write (an idle 38 MB session's assembly document, about 11 s;
     a 225 MB transcript's, about a minute), and with it every decision the pass makes: nudges, the spend guard, the
@@ -76350,10 +76374,6 @@ def _document_write_phase(now):
         _job_stage('convergeCheckpoints', lambda: _converge_checkpoints(now))
     except Exception:
         sys.stderr.write("checkpoint converge: %s\n" % traceback.format_exc())
-    try:                                                   # after the converge pass, which writes what it can from the boot's
-        _asm_rebuild_maybe()                               #  own reads: the next document rebuild, if one is due, on its own
-    except Exception:                                      #  thread (a dict scan and a stat per pending leaf here)
-        sys.stderr.write("assembly document rebuild: %s\n" % traceback.format_exc())
 
 
 # THE DOCUMENT WRITER (the review of PR 155, 2026-10-08). Every fold and assembly document the running kernel writes is written on
@@ -89653,7 +89673,8 @@ class Handler(BaseHTTPRequestHandler):
             return                                # its socket ended before this push ran (_lane_close): nobody left to read it
         _t0 = time.monotonic()
         try:
-            with _connect_push_scope() as live_map:   # one liveness read, one discovery walk for the whole push
+            with em.asm_foreground(), _connect_push_scope() as live_map:   # one liveness read, one discovery walk for the whole
+                #                                   push; no document rebuild starts or runs on while a page's push is in flight
                 _push([client], connect=True, live_map=live_map, only=only)   # full state to a fresh client (its per-client dedup
             #                                       is empty); a connect serves any stored feed build without the dirty or
             #                                       signature test, and builds only when none is stored; the
