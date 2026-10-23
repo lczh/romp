@@ -5608,11 +5608,20 @@ class _ARestartEndsTheCliWithSigterm(psr._Harness):
     frame is recorded, the CLI it ends is held in its exit until the test lets it go (the teardown waits for it), the
     release records the host's exit frame, the proof the loop top reads that the CLI is gone, and the interrupt control
     request, which a Restart never sends, is recorded. The plan has a third CLI, so a relaunch nothing should ask for is
-    counted rather than failing on a plan with no step left."""
+    counted rather than failing on a plan with no step left.
+
+    The CLI's context report (get_context_usage) carries the context's size and no model, so only the stream moves the
+    live model. The shared stand-in's report names a model of its own, and these runs' inits name Opus: the refresh each
+    init schedules then moved the live model off Opus wherever the session's loop happened to run it, and CI saw both
+    ends of that race (2026-10-23). Landing before CLI A's Sonnet reply, it hid the fallback, so no retry was armed;
+    landing after Always fast was turned on, it asked for the opt-in itself, so apply_model_switches found that ask
+    standing and asked for nothing. _a_turn_left_running also waits for the refresh its init asked for to land
+    (self.refreshing) before it returns, so that refresh never lands in the middle of the test's next step."""
 
     def _restartable(self):
         """The kernel and its session with the stand-ins in place. Sets self.signals, self.held, self.gone (an Event: set
-        it to let the held CLI exit) and self.interrupts."""
+        it to let the held CLI exit), self.interrupts and self.refreshing (the context refreshes asked for and not yet
+        landed)."""
         import asyncio
         from unittest import mock
         be, s = self._kernel([{"attach": False, "cli": CLI_A, "launch": "spec"},
@@ -5620,6 +5629,20 @@ class _ARestartEndsTheCliWithSigterm(psr._Harness):
                               {"attach": False, "cli": CLI_C, "launch": "spec"}])
         self.signals, self.held, self.gone, self.interrupts = [], [], threading.Event(), []
         self.addCleanup(self.gone.set)
+        self.refreshing = []
+        refresh = s._do_refresh_context
+
+        def _tracked_refresh():                                       # counted where it is asked for, until it lands
+            token = object()
+            self.refreshing.append(token)
+
+            async def _run():
+                try:
+                    return await refresh()
+                finally:
+                    self.refreshing.remove(token)
+            return _run()
+        s._do_refresh_context = _tracked_refresh
         termed = []
         transport_for = be._host_transport_for
 
@@ -5646,7 +5669,10 @@ class _ARestartEndsTheCliWithSigterm(psr._Harness):
         async def _interrupt(client):
             self.interrupts.append(client)
             return await real_interrupt(client)
-        for name, stand_in in (("__aexit__", _exit), ("interrupt", _interrupt)):
+
+        async def _context_usage(client):
+            return {"percentage": 2}                                  # the size only: the stream says the model
+        for name, stand_in in (("__aexit__", _exit), ("interrupt", _interrupt), ("get_context_usage", _context_usage)):
             patch = mock.patch.object(psr._Client, name, stand_in)
             patch.start()
             self.addCleanup(patch.stop)
@@ -5654,7 +5680,8 @@ class _ARestartEndsTheCliWithSigterm(psr._Harness):
 
     def _a_turn_left_running(self, s, c1, served=None):
         """CLI A's first turn, left running, the CLI launched on Opus and reporting it; when `served` names a model, the
-        turn's reply is served on it. A monitor starts, so every relaunch ask waits."""
+        turn's reply is served on it. A monitor starts, so every relaunch ask waits. Returns once the refresh the init
+        asked for has landed, with the live model the stream's last word."""
         s.enqueue("first turn")
         self._wait(lambda: c1.writes == ["first turn"], "the turn fed")
         self._push(c1, psr._SystemMessage("init", {"model": "claude-opus-5", "permissionMode": "acceptEdits",
@@ -5664,6 +5691,9 @@ class _ARestartEndsTheCliWithSigterm(psr._Harness):
         self._push(c1, psr._SystemMessage("task_started", {"task_id": "t-mon", "description": "watch the spend",
                                                            "task_type": "local_bash"}, uuid=self._uid()))
         self._wait(lambda: s.live_work()[1] == 1, "the monitor registered")
+        self._wait(lambda: not self.refreshing, "the context refresh the init asked for landed")
+        self.assertEqual(s.model, sb.pretty_model(served or "claude-opus-5"),
+                         "the premise: the live model is the stream's, whenever the init's context refresh landed")
 
     def _a_retry_after_a_fallback(self, s, c1):
         """Retry upgrades after downgrades on, the session's pick Opus, and CLI A's reply served by Sonnet, a fallback
