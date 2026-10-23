@@ -176,13 +176,37 @@ def token_value(state_dir, login_id: str, run) -> str:
     return run(token_command(state_dir, login_id))
 
 
+# read_record's memo (2026-10-23): record path -> ((inode, mtime ns, ctime ns, size), the file's text). The SDK backend asks
+# a stored login's availability for every session row of every live listing, and the pusher, the jobs pass, the question
+# poll and the request handlers each take one: a box with a stored login as its machine default opened, read and parsed
+# that one record several times per session per listing (a third of a busy kernel's samples, 2026-10-23). One stat per
+# call now, and a read only when the stat changed, the credentials._read_settings idiom. write_record publishes by rename,
+# so every romp write is a new inode and is seen at the next call; a refusal, a link or an unlink lands that way. The
+# TEXT is kept, never the parsed dict: every call parses its own copy, so a caller that edits the record it got (link,
+# mark_refused, clear_refused) never edits the next caller's. Nothing that failed is kept: a record that cannot be stated,
+# read or parsed answers None on every call, as before, and drops its entry.
+_RECORD_TEXT = {}
+
+
 def read_record(state_dir, login_id: str):
-    """The record dict for `login_id`, or None (no such record, an unreadable file, or a junk id)."""
+    """The record dict for `login_id`, or None (no such record, an unreadable file, or a junk id). A fresh dict per call,
+    parsed from the file's text as last read; the text is re-read when the file's stat changes (_RECORD_TEXT)."""
     if not ID_RE.match(str(login_id or "")):
         return None
+    p = os.path.join(str(state_dir), LOGINS_DIR, login_id + ".json")
     try:
-        d = json.loads(record_path(state_dir, login_id).read_text(encoding="utf-8"))
+        st = os.stat(p)
+        ident = (st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+        hit = _RECORD_TEXT.get(p)
+        if hit is not None and hit[0] == ident:
+            text = hit[1]
+        else:
+            with open(p, encoding="utf-8") as f:
+                text = f.read()
+            _RECORD_TEXT[p] = (ident, text)     # the stat from BEFORE the read: a write in between re-reads next time
+        d = json.loads(text)
     except (OSError, ValueError):
+        _RECORD_TEXT.pop(p, None)
         return None
     if not isinstance(d, dict) or d.get("id") != login_id:
         return None
