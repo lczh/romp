@@ -13,11 +13,13 @@ whose ending event could no longer fire):
     is. A LIVE linked recipient still defers to the back-link: a reply alone never ends a
     delegation whose card is still being worked.
 And an ending that fired when it should not have (2026-10-23):
-(3) A FOLLOW-UP AFTER THE COMPLETION — the back-link stamped its done with the pass clock, so when
-    the user replied on a completed delegation card, the next pass found the recipient's goal still
-    complete and re-completed the card: the chip cleared, and the planner's reopen for the reply
-    folded under that done, so the reply was filed elsewhere. The done now carries the recipient's
-    completion time, and anything on the tracker newer than it stands.
+(3) A FOLLOW-UP AFTER THE COMPLETION — the back-link stamped its done with the pass clock and filed
+    it again on every pass that found the tracker open, so when the user replied on a completed
+    delegation card, the next pass re-completed the card: the chip cleared, and the planner's reopen
+    for the reply folded under that done, so the reply was filed elsewhere. The back-link now files
+    once per completion of the recipient's goal, at that completion's time raised to any reply floor:
+    a follow-up after it stands, and a reply made while the recipient worked does not hold the
+    tracker open.
 SYNTHETIC fixtures only; private synthetic sids."""
 import json
 import os
@@ -167,7 +169,8 @@ MID2 = "1787299000.000002_1.TESTHOST"
 
 
 class FollowUpAfterTheCompletion(unittest.TestCase):
-    """web delegated an export to api; api's closer ruled its goal done at T + 150."""
+    """web delegated an export to api; api's closer ruled its goal done at T + 150, unless a test seeds
+    api still working."""
 
     def setUp(self):
         self._saved = jd.discover
@@ -190,7 +193,7 @@ class FollowUpAfterTheCompletion(unittest.TestCase):
                     pass
         self.td.cleanup()
 
-    def _seed(self, under_card=False):
+    def _seed(self, under_card=False, done=True):
         st = {"rompUuid": WEB, "seq": 1, "nodes": {}, "placements": {}, "status": {}}
         if under_card:
             st["nodes"][CARD] = _node(CARD, "Ship the notes export", None)
@@ -200,11 +203,27 @@ class FollowUpAfterTheCompletion(unittest.TestCase):
         g = _node(PEER + ":g1", "Export the module", None, t=T + 50,
                   origin={"peer": WEB, "goalId": self.track, "msgId": MID2})
         rst = {"rompUuid": PEER, "nodes": {g["id"]: g}, "placements": {}, "status": {}}
-        jd.record_verdict(rst, g, "closer", "done", T + 150, why="module exported")
+        if done:
+            jd.record_verdict(rst, g, "closer", "done", T + 150, why="module exported")
+        jd.save_goals(PEER, rst)
+
+    def _finish_turn(self, start, end):
+        """api's closer rules its goal done the way apply_close files it: ev_t is the audited turn's
+        start, end_ev the turn's last event."""
+        rst = jd.load_goals(PEER)
+        jd.record_verdict(rst, rst["nodes"][PEER + ":g1"], "closer", "done", start, why="module exported",
+                          end_ev=end)
         jd.save_goals(PEER, rst)
 
     def _tracker(self):
         return jd.load_goals(WEB)["nodes"][self.track]
+
+    def _checked_off_once(self, ev):
+        for now in (T + 300, T + 400):
+            self.assertEqual(jd.run_propagate(now=now), 0, "one completion, one link-back")
+        nd = self._tracker()
+        self.assertTrue(nd.get("nodeComplete"), "api finished after the reply: the tracker checks off")
+        self.assertEqual([e.get("ev_t") for e in nd["log"] if e.get("src") == "courier"], [ev])
 
     def _complete_then_follow_up(self):
         self._seed()
@@ -260,14 +279,43 @@ class FollowUpAfterTheCompletion(unittest.TestCase):
         self.assertFalse(nd.get("nodeComplete"), "the older completion does not close the reopened card")
         self.assertEqual(len(nd["log"]), rows, "standing down writes nothing, pass after pass")
 
-    def test_a_follow_up_on_the_parent_card_floors_its_tracker(self):
+    def test_a_block_filed_after_the_completion_stands_and_no_row_is_added(self):
+        self._seed()
+        st = jd.load_goals(WEB)      # web's closer asks about the tracker on evidence newer than api's done
+        jd.record_verdict(st, st["nodes"][self.track], "closer", "block", T + 180, why="which csv dialect?")
+        jd.save_goals(WEB, st)
+        rows = len(self._tracker()["log"])
+        for now in (T + 200, T + 300):
+            self.assertEqual(jd.run_propagate(now=now), 0)
+        nd = self._tracker()
+        self.assertTrue(nd.get("blocked"), "the newer question stands")
+        self.assertEqual(len(nd["log"]), rows, "standing down writes nothing, pass after pass")
+
+    def test_a_follow_up_on_the_parent_card_does_not_hold_its_tracker(self):
         # api's done (evidence T + 150) reaches the board only after the user replied on web's card
         self._seed(under_card=True)
         self.assertTrue(jd.optimistic_followup(WEB, CARD, text="add the docs too", now=T + 300))
-        self.assertEqual(jd.run_propagate(now=T + 400), 0)
+        self.assertEqual(jd.run_propagate(now=T + 400), 1)
         nd = self._tracker()
-        self.assertFalse(nd.get("nodeComplete"), "a done older than the reply on its card does not land")
-        self.assertEqual([e for e in nd["log"] if e.get("src") == "courier"], [])
+        self.assertTrue(nd.get("nodeComplete"), "api's completion is news the reply had not seen")
+        self.assertEqual([e.get("ev_t") for e in nd["log"] if e.get("src") == "courier"], [T + 300],
+                         "raised to the reply's floor, where a done lands")
+
+    def test_a_reply_on_the_parent_card_while_api_works_does_not_hold_the_tracker(self):
+        self._seed(under_card=True, done=False)
+        self.assertEqual(jd.run_propagate(now=T + 80), 0, "api has not finished")
+        self.assertTrue(jd.optimistic_followup(WEB, CARD, text="add the docs too", now=T + 100))
+        self._finish_turn(T + 60, T + 150)       # api's turn ran from T + 60 to T + 150
+        self.assertEqual(jd.run_propagate(now=T + 200), 1)
+        self._checked_off_once(T + 150)
+
+    def test_a_reply_on_the_tracker_while_api_works_does_not_hold_it(self):
+        self._seed(done=False)
+        self.assertEqual(jd.run_propagate(now=T + 80), 0, "api has not finished")
+        self.assertTrue(jd.optimistic_followup(WEB, self.track, text="add the docs too", now=T + 100))
+        self._finish_turn(T + 60, T + 150)
+        self.assertEqual(jd.run_propagate(now=T + 200), 1)
+        self._checked_off_once(T + 150)
 
 
 if __name__ == "__main__":

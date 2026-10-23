@@ -11389,8 +11389,9 @@ def may_apply(store, nd, src, kind, ev_t=None):
     NOT routed here, deliberately (the E1 write-site census, 2026-07-06): the consolidator's empty-umbrella
     housekeeping clear, and the candidate FILTERS that hide sealed/cleared nodes upstream (open_menu,
     _group_tops, _consolidate_tops, _live_anchor_gone, the nudge-phase target check). The delegation
-    link-back (run_propagate) is routed here like any judge done, its evidence time the recipient's
-    completion (2026-10-23)."""
+    link-back (run_propagate) is routed here like any judge done (2026-10-23): it files once per completion
+    of the recipient's goal, its evidence time that completion's horizon raised to the reply floor, so the
+    gate lands it."""
     if kind == "reopen":
         return nd.get("id") not in _view_cleared()
     if src not in ("user", "agent"):               # judge-RANK: planner/closer/courier/grouper/nudge...
@@ -11524,6 +11525,17 @@ def _done_since(nd):
     legacy nodes. The done twin of _block_since."""
     ts = [(e.get("ev_t") or e.get("at") or 0) for e in (nd.get("log") or []) if e.get("kind") == "done"]
     return max(ts) if ts else (nd.get("mt") or nd.get("t") or 0)
+
+
+def _completion_horizon(nd):
+    """The newest evidence the node's completion ruled on: over its DONE rows, the horizon the row journaled
+    (endEv: the closer's audited turn end) or else its evidence time (ev_t, arrival fallback); _done_since
+    for a node with no done row of its own (a roll-down completion). The delegation link-back's evidence time
+    (run_propagate, 2026-10-23): a closer's done carries the audited turn's START as its ev_t, so read alone
+    it dated a recipient's completion before replies made while that turn ran."""
+    ts = [max(e.get("endEv") or 0, e.get("ev_t") or e.get("at") or 0)
+          for e in (nd.get("log") or []) if e.get("kind") == "done"]
+    return max(ts) if ts else _done_since(nd)
 
 
 def _brief_superseded(nodes, sub, prev_bm):
@@ -20175,9 +20187,12 @@ def run_propagate(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbos
     origin.goalId DONE too — so a '↪ delegated to B' item checks off the instant B finishes and reports. NO
     LLM: the closer already judged G done on B; this just follows the origin pointer (origin.goalId points at
     the sender's precise tracking node, planted by _plant_handoff_track). Forward-only + idempotent: it never
-    reopens the sender's node, and a node already done (or gone) is a no-op. The done carries G's own
-    completion time as its evidence, so a tracker the user followed up on (or anything else reopened, cleared
-    or blocked) after that completion is left as it stands. Returns completions propagated.
+    reopens the sender's node, and a node already done (or gone) is a no-op. Each completion of G is linked
+    back ONCE (2026-10-23): a tracker that already carries a courier done at or past G's completion horizon
+    was told, so a follow-up, reopen or block filed on it since stands, and only a newer completion of G
+    checks it off again. The done's evidence time is that horizon raised to the reply floor over the
+    tracker, so a reply made before the pass saw G complete does not hold the tracker open. Returns
+    completions propagated.
 
     Every store is read at most ONCE per pass (2026-09-06): `loaded` holds this pass's load_goals objects
     and serves the recipient scan, the per-ref done check, _ref_goal's recipient maps and the sender loop;
@@ -20291,16 +20306,25 @@ def run_propagate(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbos
                         or (str(nd.get("summary") or "").strip().splitlines() or [""])[0]
                     if sub:
                         why += ": " + sub[:220]
-                    # The done's evidence time is the RECIPIENT'S COMPLETION, never this pass's clock
-                    # (2026-10-23). Stamped with the clock it outranked everything on the tracker: a user
-                    # who replied on the completed card saw it snap back to Completed on the next pass with
-                    # nothing new from the recipient, and the planner's reopen for the reply folded under
-                    # it, so the reply landed on another card. Stamped with the completion it orders like
-                    # any judge done: a follow-up after it on the card or an ancestor is a floor that
-                    # record_verdict refuses it under, and a reopen, clear or block filed after it folds
-                    # over it. The fold is asked first, so standing down writes nothing, pass after pass;
-                    # a later completion of the recipient's goal checks the tracker off again.
-                    ev = _done_since(nd)
+                    # Each completion of the recipient's goal is linked back ONCE (2026-10-23). The done
+                    # used to carry this pass's clock and was filed again on every pass that found the
+                    # tracker open: a user who replied on the completed card saw it snap back to Completed
+                    # on the next pass with nothing new from the recipient, and the planner's reopen for
+                    # the reply folded under the fresh done, so the reply landed on another card. A
+                    # courier done at or past the completion's horizon (_completion_horizon: the closer's
+                    # audited turn end) means this completion was filed already, and whatever the tracker
+                    # says since then stands; a newer completion of the recipient's goal links back again.
+                    # The done's evidence time is that horizon, raised to the reply floor over the tracker
+                    # (_floor_of; for a done, equality lands, as with _reassert_blocks' clamp): a reply made
+                    # before this pass saw the completion, while the recipient worked or just after, must
+                    # not hold the tracker open, because no other writer ends it (apply_close stands down
+                    # on trackers). The fold is asked first, so a block or clear filed on the tracker after
+                    # that time stands and no row is written.
+                    comp = _completion_horizon(nd)
+                    if any(e.get("src") == "courier" and e.get("kind") == "done" and (e.get("ev_t") or 0) >= comp
+                           for e in (a_node.get("log") or [])):
+                        continue
+                    ev = max(comp, _floor_of(a_store, a_node) or 0)
                     trial = {"ev_t": ev, "src": "courier", "kind": "done", "at": int(time.time())}
                     if _fold_node({"log": list(a_node.get("log") or []) + [trial]})["state"] != "done":
                         continue
