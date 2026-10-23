@@ -211,6 +211,8 @@ function liftToastSites(): (w: World) => Lifted {
     const sessions = W.sessions;
     const setActive = (sid, cut) => { W.activated.push([sid, cut]); };
     const isProvisionalId = W.isProvisionalId, provisionalId = W.provisionalId, provisionalQueue = W.provisionalQueue;
+    const supersededProvisionals = new Set();   // the kept tabs a second create replaced: none in these worlds
+    const queueProvisionalSend = (sid, text) => { provisionalQueue.push(text); };   // the held send (staged-pending-tab-exec.test.ts executes it)
     const lastSent = W.lastSent;
     const registerOptimistic = () => {}, previewKind = () => null, renderComposerFiles = () => {};
     const sendOnShip = new Set(), histWalk = new Map();
@@ -335,7 +337,9 @@ test("render.ts: warnToast hands back its toast, and the refusals about a state 
   // a thread's read the kernel refused (2026-10-15): the thread shows unread again, a state the fresh page reads from the
   // kernel's next comments frame
   assert.match(RENDER, /if \(th\) th\.unread = l\.raw;\n\s*applyCommentMarks\(sid\);\n\s*ephemeralWarnToast\(`Couldn’t mark the thread /);
-  assert.equal((RENDER.match(/ephemeralWarnToast\(/g) || []).length, 15, "the definition, the three reachability sites, the nine state refusals (the queued edit's two went with the in-place editor, T373; the picker's went 2026-09-25, when staging over a question became allowed; the comment key's two came 2026-09-30, and the file tab's one; the viewer bar's reachability and slash refusals, 2026-09-30), the comments read failure (2026-10-02) and a thread's refused read (2026-10-15); the bell toggle's word on the new state is the NOTE twin's (review 2026-09-14), counted below");
+  // a send into the tab of a create a second one replaced (2026-10-23): a state the fresh page shows as the kept tab
+  assert.match(RENDER, /if \(supersededProvisionals\.has\(sid\)\) \{\n\s*ephemeralWarnToast\("“" \+ \(sessions\.get\(sid\)\?\.name \|\| "this session"\) \+ "” hasn't opened, so there's nowhere "/);
+  assert.equal((RENDER.match(/ephemeralWarnToast\(/g) || []).length, 16, "the definition, the three reachability sites, the ten state refusals (the queued edit's two went with the in-place editor, T373; the picker's went 2026-09-25, when staging over a question became allowed; the comment key's two came 2026-09-30, and the file tab's one; the viewer bar's reachability and slash refusals, 2026-09-30; the replaced create's tab, 2026-10-23), the comments read failure (2026-10-02) and a thread's refused read (2026-10-15); the bell toggle's word on the new state is the NOTE twin's (review 2026-09-14), counted below");
   assert.equal((RENDER.match(/ephemeralNoteToast\(/g) || []).length, 2, "the definition and the bell toggle (2026-09-11: a confirmation for a flip whose only other witness is the tab menu's row; a state the fresh page reads from the kernel, so not replayed)");
   // what the nack, the dismissal and the other-tab ack say stays true after the reload, so they ride it unmarked
   assert.match(RENDER, /warnToast\(m\.name \+ " couldn't be saved on the kernel, so it was not attached/);

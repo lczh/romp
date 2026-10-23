@@ -9,20 +9,33 @@
 // back, so the session's arrival still adopts it), and a create that fails keeps them on its tab, in the strip above the
 // box, which the failure dialog names; the failed tab survives a reload too.
 //
+// The EDGES of that flow, executed below the first set (2026-10-23, the review of #371): whatever a new session's tab
+// holds is never dropped without a word. A second create while one is opening KEEPS the first one's tab, everything on it,
+// and its session adopts it by name when it arrives. Enter on the opening tab holds the staged messages with the typed
+// text, as one send, as Enter does on any tab. The folder question keeps the tab (a reload, an Esc, or a create under
+// another name loses nothing and takes nothing), and its retry opens on the same tab. A kept tab's ✕ asks before it
+// discards staged messages or text, and a session arriving late under its name adopts it. Held sends a reload put back
+// in the box say so in a line above it, and a create holding sends holds the dashboard's reload. A create saved longer
+// ago than its backstop comes back kept, not opening, and an adoption after a reload joins the session's own draft.
+//
 // openProvisional, dropProvisional, carryProvisionalBox, persistProvisionals, restoreProvisionals, adoptProvisional,
 // resolveProvisionalToExisting, failProvisional, cancelProvisional, onCreateDirMissing, closeTabLocally, dismissSession,
 // stashActiveDraft, flushStaged, persistDrafts and stagedLabel are lifted out of render.ts, transpiled at run time and run
 // over a stub scope (the staged-on-end-exec.test.ts pattern), with the real StagedStack and stagedPosts, the real
-// provisional.ts rules and the real focusAfterDismiss. The session frame's adoption line and the boot's reading of the
-// persisted active tab are lifted from render.ts too. A function render.ts does not define (restoreProvisionals before
-// this change) resolves to the stub scope's no-op, so the test fails on what the page does, not on a missing anchor. Synthetic sessions only
-// (the notes-api demo's web and api).
+// provisional.ts rules, the real reload-hold.ts and the real focusAfterDismiss; so are the edges' own (keepProvisional,
+// takeProvisionalTab, adoptKeptProvisionals, queueProvisionalSend, closeKeptTab and its title, the held sends' note,
+// the reload hold, startCreate). The session frame's adoption lines, the boot's reading of the persisted active tab, the
+// send's provisional branch and the composer's clearBox are lifted from render.ts too. A function render.ts does not
+// define (restoreProvisionals before #371, the edges' functions before 2026-10-23) resolves to the stub scope's no-op,
+// so the test fails on what the page does, not on a missing anchor. Synthetic sessions only (the notes-api demo's web,
+// api and tests).
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
-import { StagedStack, stagedPosts, stagedRunBody, type StagedMsg } from "./staged-messages";
+import { StagedStack, stagedPosts, stagedRunBody, quoteReplyBody, type StagedMsg } from "./staged-messages";
+import { reloadHoldReason } from "./reload-hold";
 import { focusAfterDismiss } from "./pane-focus";
 import { mintProvisionalId, isProvisionalId, provisionalName, adoptsProvisional } from "./provisional";
 
@@ -40,9 +53,16 @@ function lift(header: string, optional = false): string {
   const b = RENDER.indexOf("\n}\n", a);
   return ts(RENDER.slice(a, b + 3));
 }
-// the session frame's adoption (upsert): a session this page has never seen, under the name the create asked for
-const ADOPT_LINE = RENDER.match(/if \(adoptsProvisional\(existed, msg\.name, pendingNewSession\)\) \{\s*\n\s*adoptProvisional\(msg\.id\);\s*\n\s*\}/);
+// the session frame's adoption (upsert): a session this page has never seen, under the name the create asked for, and
+// (since 2026-10-23) a kept tab under its name on the same arrival
+const ADOPT_LINE = RENDER.match(/if \(adoptsProvisional\(existed, msg\.name, pendingNewSession\)\) \{\s*\n\s*adoptProvisional\(msg\.id\);\s*\n\s*\}(\s*\n(\s*\/\/[^\n]*\n)*\s*if \(!existed\) adoptKeptProvisionals\(msg\.id, msg\.name\);)?/);
 assert.ok(ADOPT_LINE, "the session frame's adoption line moved");
+// the send's provisional branch (deliver, inside setupComposer): from its test to the first step of a send that passed it
+const SEND_A = RENDER.indexOf("      if (isProvisionalId(sid)) {\n        // a "), SEND_B = RENDER.indexOf("      lastSent.set(activeId, text);", SEND_A);
+assert.ok(SEND_A > 0 && SEND_B > SEND_A, "the send's provisional branch moved");
+// the composer's one clear path (setupComposer's clearBox)
+const CLEAR_A = RENDER.indexOf("  const clearBox = () => {"), CLEAR_B = RENDER.indexOf("  clearComposerBox = clearBox;", CLEAR_A);
+assert.ok(CLEAR_A > 0 && CLEAR_B > CLEAR_A, "clearBox moved");
 // the boot's reading of the persisted active tab: a provisional id is "gone" unless something puts its tab back
 const BOOT_WANT = RENDER.match(/if \(wantActive && \(isSubId\(wantActive\) \|\| isProvisionalId\(wantActive\)\)\) \{ wantActiveGone = wantActive; wantActive = null; \}/);
 assert.ok(BOOT_WANT, "the boot's persisted-active line moved");
@@ -57,7 +77,21 @@ const SRC = [
   lift("function failProvisional(why: string): void {"),
   lift("function cancelProvisional(): void {"),
   lift("function onCreateDirMissing(m: any): void {"),
+  lift("function startCreate(req: CreateReq, mkdir = false): void {"),
   lift("function closeTabLocally(id: string): void {"),
+  lift("function keepProvisional(", true),
+  lift("function takeProvisionalTab(", true),
+  lift("function adoptKeptProvisionals(", true),
+  lift("function queueProvisionalSend(", true),
+  lift("function closeKeptTab(", true),
+  lift("function keptDiscardTitle(", true),
+  lift("function discardKeptTab(", true),
+  lift("function heldBackLine(", true),
+  lift("function clearHeldBackNote(", true),
+  lift("function moveHeldBack(", true),
+  lift("function createHoldHost(", true),
+  lift("function paneHoldReason(", true),
+  lift("function endReloadHoldIfIdle(): void {"),
   lift("function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string>): void {"),
   lift("function stashActiveDraft(id: string): void {"),
   lift("function flushStaged(sid: string,"),
@@ -65,27 +99,39 @@ const SRC = [
   lift("function stagedLabel(n: number, asking: boolean): string {"),
   ts(`function adoptLine(msg: any, existed: boolean): void { ${ADOPT_LINE![0]} }`),
   ts(`function bootWant(): void { ${BOOT_WANT![0]} }`),
+  ts(`function deliverProvisional(sid: string, text: string, attached: string[]): void {\n${RENDER.slice(SEND_A, SEND_B)}}`),
+  ts(RENDER.slice(CLEAR_A, CLEAR_B)),
 ].join("\n");
 
 const WEB = "5b0e2c4a-8d71-4f3e-9c26-1a7f0d3e5b91", REAL = "7d4e1f20-3b6a-4c58-9e17-2a0c5b8f6d93";
 const NAMESAKE = "c3f81a26-4e9d-4b70-8a15-6d2e9f0b7c48";
+const TYPED = "Then tell me what you changed.", HELD = "What does the list endpoint return today?";
 const REQ = { name: "api", backend: "sdk", dir: "", host: "" };
 const ITEM: StagedMsg = { text: "Start with the pagination bug in the list endpoint.", cites: [] };
 type Post = { sid: string; text: string };
+type Req = { name: string; backend: string; dir: string; host: string };
 type Fns = {
-  openProvisional: (req: typeof REQ) => void; adoptProvisional: (id: string) => void; resolveProvisionalToExisting: (id: string) => void;
+  openProvisional: (req: Req) => void; adoptProvisional: (id: string) => void; resolveProvisionalToExisting: (id: string) => void;
   failProvisional: (why: string) => void; onCreateDirMissing: (m: Record<string, unknown>) => void; closeTabLocally: (id: string) => void;
   restoreProvisionals: () => void; persistProvisionals: () => void; flushStaged: (sid: string, typed?: { text: string }) => number; persistDrafts: () => void;
   stagedLabel: (n: number, asking: boolean) => string; adoptLine: (msg: { id: string; name: string }, existed: boolean) => void; bootWant: () => void;
+  deliverProvisional: (sid: string, text: string, attached: string[]) => void; clearBox: () => void;
+  keptDiscardTitle: (name: string, staged: number, text: boolean, files: boolean) => string; heldBackLine: (name: string) => string;
+  paneHoldReason: () => string; startCreate: (req: Req, mkdir?: boolean) => void;
 };
+type Confirm = { title: string; body: string; buttons: { label: string; value: string }[]; cb: (v: string | null) => void };
 
 /** A chat page. `from` boots it from a persisted state, as a reload does: the drafts, the attachments and the staged
  *  stacks come back, the persisted active tab is read, then the boot's restore runs, all before any kernel frame. */
 function world(from?: Record<string, unknown>) {
   let saved: Record<string, unknown> = from ? { ...from } : {};
-  const posts: Post[] = [], wire: Record<string, unknown>[] = [], confirms: { title: string; body: string }[] = [];
+  const posts: Post[] = [], wire: Record<string, unknown>[] = [], confirms: Confirm[] = [], toasts: string[] = [];
   const bubbles: Post[] = [];
-  const box = { value: "", focus() {}, blur() {} };
+  const box = { value: "", style: {} as Record<string, string>, focus() {}, blur() {} };
+  // the timers the page arms (the create's 90 s backstop): kept, never run on their own, run by fireTimers when a test says
+  // the backstop's time is up; a cleared one is gone
+  const timers = new Map<number, { fn: () => void; ms: number }>();
+  let tid = 0, ended = 0;
   let strip: string | null = null;   // the session whose stack the strip above the box shows
   const stagedMsgs = new StagedStack();
   const S: Record<string, any> = {
@@ -99,15 +145,20 @@ function world(from?: Record<string, unknown>) {
     pendingCarry: "", pendingCarryStaged: [], pendingCarryFiles: [], lastCreate: null,
     wantActive: null, wantActiveGone: null, vanishedId: null, vanishedWhy: null, vanishedName: "", vanishedByDecline: false,
     PROVISIONAL_WAIT_MS: 90_000,
-    focusAfterDismiss, stagedPosts, mintProvisionalId, isProvisionalId, provisionalName, adoptsProvisional,
+    supersededProvisionals: new Set<string>(), provisionalStartedAt: 0, heldBack: null, shipGateSid: null,
+    sendOnShip: new Set<string>(), histWalk: new Map(), draftStartedAt: new Map(), composerManualH: null,
+    window: { __rompReload: { ended: () => { ended++; } }, __rompFed: undefined as unknown },
+    focusAfterDismiss, stagedPosts, quoteReplyBody, reloadHoldReason, mintProvisionalId, isProvisionalId, provisionalName, adoptsProvisional,
     isSubId: () => false,
     hostOf: (x: string) => { const i = x.indexOf(":"); return i > 0 ? x.slice(0, i) : ""; },
     heldHere: () => true,   // one column, no split: every tab is this page's
-    setTimeout: () => 0, clearTimeout: () => {},   // the 90 s backstop is armed, never fired: a failure is driven explicitly
+    setTimeout: (fn: () => void, ms: number) => { timers.set(++tid, { fn, ms }); return tid; },
+    clearTimeout: (h: number) => { timers.delete(h); },
     routeUserMessage: (sid: string, text: string) => { posts.push({ sid, text }); },
     registerOptimistic: (sid: string, text: string) => { bubbles.push({ sid, text }); },
     isClearCmd: (t: string) => /^\/clear(\s|$)/.test(t.trim()),
-    showConfirm: (title: string, body: string) => { confirms.push({ title, body }); },
+    showConfirm: (title: string, body: string, buttons: Confirm["buttons"], cb: Confirm["cb"]) => { confirms.push({ title, body, buttons, cb }); },
+    ephemeralWarnToast: (msg: string) => { toasts.push(msg); },
     createDirPrompt: () => "That folder isn't there.",
     quietly: (fn: () => void) => fn(),
     renderStagedStrip: (id: string | null) => { strip = id; },
@@ -132,7 +183,9 @@ function world(from?: Record<string, unknown>) {
   });
   const fns = (new Function("SCOPE", `with (SCOPE) { ${SRC}\n return { openProvisional, adoptProvisional, resolveProvisionalToExisting,
     failProvisional, onCreateDirMissing, closeTabLocally, restoreProvisionals, persistProvisionals,
-    flushStaged, persistDrafts, stagedLabel, adoptLine, bootWant }; }`) as any)(proxy) as Fns;
+    flushStaged, persistDrafts, stagedLabel, adoptLine, bootWant, deliverProvisional, clearBox,
+    keptDiscardTitle, heldBackLine, paneHoldReason, startCreate }; }`) as any)(proxy) as Fns;
+  S.ta = box;   // clearBox's own name for the box
   if (from) {   // render.ts's load, in its order: the maps from the persisted state, the active tab read, then the boot's restore
     for (const [k, v] of Object.entries((saved.drafts || {}) as Record<string, string>)) S.drafts.set(k, v);
     for (const [k, v] of Object.entries((saved.files || {}) as Record<string, string[]>)) S.composerFiles.set(k, v);
@@ -153,16 +206,20 @@ function world(from?: Record<string, unknown>) {
   const stripLine = () => (strip && stagedMsgs.count(strip) ? fns.stagedLabel(stagedMsgs.count(strip), false) : null);
   /** a sid's stack as the persisted state holds it, which is what a reload restores */
   const persistedCount = (sid: string) => { const s = new StagedStack(); s.restore(saved.staged); return s.count(sid); };
-  return { S, box, posts, wire, confirms, bubbles, stagedMsgs, arrive, stage, type, stripLine, strip: () => strip, persistedCount,
-           persisted: () => saved, ...fns };
+  /** Enter on the box, as setupComposer's sendComposer does it for a tab with no session behind it (deliver's branch) */
+  const enter = () => fns.deliverProvisional(S.activeId, box.value.trim(), []);
+  /** the backstop's time is up: every timer still armed runs */
+  const fireTimers = () => { const due = [...timers.values()]; timers.clear(); for (const t of due) t.fn(); };
+  return { S, box, posts, wire, confirms, toasts, bubbles, stagedMsgs, arrive, stage, type, stripLine, strip: () => strip, persistedCount,
+           persisted: () => saved, enter, fireTimers, timers, ended: () => ended, ...fns };
 }
 
-/** A page with web open, then a new session called api asked for: its tab is up, opening, and active. */
+/** A page with web open, then a new session called api asked for (the picker's create): its tab is up, opening, and active. */
 function opening() {
   const w = world();
   w.arrive(WEB, "web");
   w.S.setActive(WEB);
-  w.openProvisional(REQ);
+  w.startCreate(REQ);
   const prov = w.S.provisionalId as string;
   assert.ok(isProvisionalId(prov) && w.S.activeId === prov, "the new session's tab is up and active before the kernel answers");
   return { w, prov };
@@ -241,9 +298,10 @@ test("a reload while the session opens: the tab comes back with what was staged 
 
 test("a reload while the session opens keeps the sends it held: they come back as text in the box, which goes to the session, never sent on their own", () => {
   const { w, prov } = opening();
-  // the provisional branch of the send path, as written: the text queued, its bubble, the box cleared, the state persisted
-  const branch = RENDER.slice(RENDER.indexOf("        provisionalQueue.push(text);\n        registerOptimistic(sid,"), RENDER.indexOf("        clearBox();\n        return;\n      }\n      lastSent.set("));
-  assert.ok(branch.includes("persistProvisionals();"), "the provisional send path writes the held send to the page's state");
+  // the provisional branch of the send path writes the held send to the page's state (queueProvisionalSend since
+  // 2026-10-23; executed by the Enter tests below)
+  const branch = RENDER.slice(RENDER.indexOf("function queueProvisionalSend("), RENDER.indexOf("\n}\n", RENDER.indexOf("function queueProvisionalSend(")));
+  assert.ok(branch.includes("provisionalQueue.push(body);") && branch.includes("persistProvisionals();"), "the provisional send path writes the held send to the page's state");
   w.S.provisionalQueue.push("What does the list endpoint return today?");
   w.type("Then tell me what you changed.");
   w.persistProvisionals();
@@ -257,8 +315,8 @@ test("a reload while the session opens keeps the sends it held: they come back a
   r.arrive(REAL, "api");
   assert.deepEqual(r.wire.filter((m) => m.type === "sendMessage"), [], "the adoption sends nothing the user has not sent again");
   assert.equal(r.box.value, "What does the list endpoint return today?\n\nThen tell me what you changed.", "the real session's box holds it");
-  assert.deepEqual(w.persisted().provisionals, [{ id: prov, name: "api", tags: [], queued: ["What does the list endpoint return today?"] }],
-    "(the page's state named the held send before the reload)");
+  assert.deepEqual(w.persisted().provisionals, [{ id: prov, name: "api", tags: [], queued: ["What does the list endpoint return today?"], t: w.S.provisionalStartedAt }],
+    "(the page's state named the held send, and when the create was asked for, before the reload)");
 });
 
 test("a create that fails keeps the staged messages on its tab, says so, and keeps them across a reload; its ✕ discards them with the tab", () => {
@@ -277,7 +335,8 @@ test("a create that fails keeps the staged messages on its tab, says so, and kee
   assert.equal(r.S.provisionalId, null, "not a create in flight: nothing will adopt it");
   assert.equal(r.S.activeId, prov);
   assert.equal(r.stripLine(), "1 staged — sends with your next message", "with its staged item in the strip");
-  r.closeTabLocally(prov);   // the failed tab's ✕: a local discard of the tab and everything it held
+  r.closeTabLocally(prov);   // the failed tab's ✕: a local discard of the tab and everything it held, once the user says so
+  r.confirms[r.confirms.length - 1].cb("discard");
   assert.equal(r.stagedMsgs.count(prov), 0);
   assert.equal(r.persistedCount(prov), 0, "nothing left behind under an id no session will ever have");
   assert.deepEqual(r.persisted().provisionals, []);
@@ -308,21 +367,261 @@ test("a create answered by a session that already runs under that name hands the
   assert.deepEqual(w.posts, [], "held, not sent");
 });
 
-test("a folder question carries the staged messages to the retry's tab, and from there to the session", () => {
+test("a folder question keeps the tab with what it holds, its retry opens on that same tab, and from there it goes to the session", () => {
   const { w, prov } = opening();
   w.stage(ITEM.text);
-  w.onCreateDirMissing({ name: "api", dir: "~/notes-api" });   // the create asked about its folder: the tab is retired
-  assert.equal(w.S.sessions.has(prov), false);
-  w.openProvisional(REQ);   // "Create it and start" sends the same create again
-  const retry = w.S.provisionalId as string;
-  assert.notEqual(retry, prov);
-  assert.equal(w.stagedMsgs.count(retry), 1, "the retry's tab holds what the first one had staged");
+  w.type(TYPED);
+  w.onCreateDirMissing({ name: "api", dir: "~/notes-api" });   // the create asked about its folder
+  const q = w.confirms[0];
+  assert.equal(q.title, "That folder isn't there");
+  assert.equal(w.S.activeId, prov, "the question is over the tab it is about, which stays");
+  assert.ok(w.S.failedProvisionals.has(prov), "kept, as a failed create's tab is, until the answer");
+  assert.equal(w.S.provisionalId, null, "no create in flight while the question is up");
+  q.cb("create");   // "Create it and start": the same create, sent again with the folder made
+  assert.deepEqual(w.wire.filter((m) => m.type === "createSession").map((m) => [m.name, m.mkdir]), [["api", undefined], ["api", true]]);
+  assert.equal(w.S.provisionalId, prov, "the retry opens on the same tab, not beside it");
+  assert.equal(w.S.sessions.get(prov)?.status?.state, "opening");
+  assert.ok(!w.S.failedProvisionals.has(prov), "no longer kept: it is the create in flight again");
+  assert.equal(w.stagedMsgs.count(prov), 1, "with its staged message");
+  assert.equal(w.box.value, TYPED, "and its text");
+  assert.equal(w.S.order.filter((id: string) => id === prov).length, 1, "one tab on the strip");
   w.arrive(REAL, "api");
   assert.equal(w.stagedMsgs.count(REAL), 1, "and the session gets it");
   assert.equal(w.stripLine(), "1 staged — sends with your next message");
+  assert.equal(w.box.value, TYPED);
 });
 
 test("the boot restores a create in flight before it tells the kernel it is ready", () => {
   // the first frame after the ready may be the created session's: its tab has to be there to adopt it
   assert.match(RENDER, /\nrestoreProvisionals\(\);\nif \(vscodeApi\) vscodeApi\.postMessage\(\{ type: "ready", proto: 2 \}\);/);
+});
+
+// ── the edges (2026-10-23): whatever a new session's tab holds is never dropped without a word ──────────────────────────
+const TESTS_REQ = { name: "tests", backend: "sdk", dir: "", host: "" };
+const COMMAND: StagedMsg = { text: "/compact", cites: [] };
+const kept = (w: ReturnType<typeof world>, id: string) => ({
+  state: w.S.sessions.get(id)?.status?.state, kept: w.S.failedProvisionals.has(id), replaced: w.S.supersededProvisionals.has(id),
+  staged: w.stagedMsgs.list(id).map((m) => m.text), draft: w.S.drafts.get(id) ?? "",
+});
+
+test("1: a second new session started while the first is opening keeps the first one's tab with everything on it, and the first session adopts it when it arrives", () => {
+  const { w, prov } = opening();
+  w.stage(ITEM.text);
+  w.S.provisionalQueue.push(HELD); w.persistProvisionals();   // a message sent on the tab, held for the session
+  w.type(TYPED);
+  w.startCreate(TESTS_REQ);   // + again, before api's session is up
+  const second = w.S.provisionalId as string;
+  assert.ok(second && second !== prov, "the new create is the one in flight");
+  assert.equal(w.S.activeId, second, "and its tab is on screen");
+  assert.deepEqual(kept(w, prov), { state: "closed", kept: true, replaced: true, staged: [ITEM.text], draft: HELD + "\n\n" + TYPED },
+    "api's tab stays, kept: its staged message, and the held send back in its box ahead of the draft");
+  assert.deepEqual(w.wire.filter((m) => m.type === "cancelCreate"), [], "api's create is not cancelled: the kernel goes on with it");
+  assert.deepEqual(w.confirms, [], "nothing failed, so no dialog");
+  assert.deepEqual(w.persisted().provisionals, [
+    { id: second, name: "tests", tags: [], queued: [], t: w.S.provisionalStartedAt },
+    { id: prov, name: "api", failed: true, superseded: true }], "both tabs ride the page's state");
+  // a reload keeps the kept tab as it was
+  const r = world(w.persisted());
+  assert.deepEqual(kept(r, prov), { state: "closed", kept: true, replaced: true, staged: [ITEM.text], draft: HELD + "\n\n" + TYPED });
+  // api's session arrives while tests is still opening: it takes the kept tab, in the background
+  w.arrive(REAL, "api");
+  assert.equal(w.S.sessions.has(prov), false, "the kept tab gives way to its session");
+  assert.deepEqual(w.stagedMsgs.list(REAL).map((m) => m.text), [ITEM.text], "the session has the staged message");
+  assert.equal(w.S.drafts.get(REAL), HELD + "\n\n" + TYPED, "and the text, in its box");
+  assert.equal(w.persistedCount(REAL), 1);
+  assert.equal(w.S.activeId, second, "an arrival in the background moves nobody");
+  assert.equal(w.S.provisionalId, second, "tests is still the create in flight");
+  assert.deepEqual(w.wire.filter((m) => m.type === "sendMessage"), [], "nothing is sent on its own");
+  assert.deepEqual(w.persisted().provisionals, [{ id: second, name: "tests", tags: [], queued: [], t: w.S.provisionalStartedAt }]);
+});
+
+test("1: a kept tab's send is refused with a word, its text left in the box", () => {
+  const { w, prov } = opening();
+  w.type(TYPED);
+  w.startCreate(TESTS_REQ);
+  w.S.setActive(prov);
+  w.enter();
+  assert.deepEqual(w.toasts, ["“api” hasn't opened, so there's nowhere to send this yet. It stays in the box, and goes to the session if it opens."]);
+  assert.deepEqual(w.S.provisionalQueue, [], "nothing queued onto the create in flight, which is another session's");
+  assert.equal(w.box.value, TYPED, "the text stays where it was typed");
+});
+
+test("2: Enter on the opening tab holds the staged messages with the typed text, in order, as one send, and the session gets that one message", () => {
+  const { w, prov } = opening();
+  w.stage(ITEM.text);
+  w.type(TYPED);
+  w.enter();
+  const body = stagedRunBody([ITEM], { text: TYPED });
+  assert.deepEqual(w.S.provisionalQueue, [body], "one held send: the staged item first, the typed message last");
+  assert.deepEqual(w.bubbles, [{ sid: prov, text: body }], "one bubble for it");
+  assert.equal(w.stagedMsgs.count(prov), 0, "nothing left staged to wait for the message after");
+  assert.equal(w.persistedCount(prov), 0);
+  assert.equal(w.box.value, "", "the box is cleared, as a send clears it");
+  w.arrive(REAL, "api");
+  assert.deepEqual(w.wire.filter((m) => m.type === "sendMessage").map((m) => m.text), [body], "the session receives the one message");
+  assert.equal(w.stagedMsgs.count(REAL), 0, "and nothing stays staged on it");
+  assert.equal(w.stripLine(), null);
+});
+
+test("2: a staged slash command keeps its place and goes on its own, as on any tab", () => {
+  const { w } = opening();
+  w.stage(ITEM.text);
+  w.stage(COMMAND.text);
+  w.type(TYPED);
+  w.enter();
+  assert.deepEqual(w.S.provisionalQueue, [stagedRunBody([ITEM]), "/compact", TYPED], "the item, then the command alone, then the typed message");
+});
+
+test("3: Esc on the folder question leaves the tab kept with what it holds, and a create under another name takes none of it", () => {
+  const { w, prov } = opening();
+  w.stage(ITEM.text);
+  w.type(TYPED);
+  w.onCreateDirMissing({ name: "api", dir: "~/notes-api" });
+  w.confirms[0].cb(null);   // Esc, or a click on the backdrop
+  assert.deepEqual(kept(w, prov), { state: "closed", kept: true, replaced: false, staged: [ITEM.text], draft: TYPED },
+    "the tab is still there with its staged message and its text");
+  w.startCreate(TESTS_REQ);
+  const other = w.S.provisionalId as string;
+  assert.notEqual(other, prov);
+  assert.equal(w.stagedMsgs.count(other), 0, "the unrelated create's tab gets no staged message");
+  assert.equal(w.box.value, "", "…and no text");
+  assert.deepEqual(kept(w, prov), { state: "closed", kept: true, replaced: false, staged: [ITEM.text], draft: TYPED }, "they stay on api's tab");
+  w.arrive(NAMESAKE, "tests");
+  assert.equal(w.stagedMsgs.count(NAMESAKE), 0, "and tests' session never sees them");
+  assert.equal(w.S.drafts.get(NAMESAKE) ?? "", "");
+});
+
+test("3: a reload while the folder question is up loses nothing", () => {
+  const { w, prov } = opening();
+  w.stage(ITEM.text);
+  w.type(TYPED);
+  w.onCreateDirMissing({ name: "api", dir: "~/notes-api" });
+  const r = world(w.persisted());
+  assert.deepEqual(kept(r, prov), { state: "closed", kept: true, replaced: false, staged: [ITEM.text], draft: TYPED });
+  assert.equal(r.S.activeId, prov, "the tab is back on screen");
+  assert.equal(r.box.value, TYPED);
+  assert.equal(r.stripLine(), "1 staged — sends with your next message");
+});
+
+test("4: a kept tab's ✕ asks before it discards staged messages or text, and Cancel keeps everything", () => {
+  const { w, prov } = opening();
+  w.stage(ITEM.text);
+  w.type(TYPED);
+  w.failProvisional("The folder could not be read.");
+  w.closeTabLocally(prov);
+  const ask = w.confirms[w.confirms.length - 1];
+  assert.equal(ask.title, "Discard api's 1 staged message and the text in its box?");
+  assert.deepEqual(ask.buttons.map((b) => b.label), ["Cancel", "Discard"]);
+  assert.ok(w.S.sessions.has(prov), "nothing goes before the answer");
+  ask.cb("");   // Cancel
+  assert.deepEqual(kept(w, prov), { state: "closed", kept: true, replaced: false, staged: [ITEM.text], draft: TYPED });
+  w.closeTabLocally(prov);
+  w.confirms[w.confirms.length - 1].cb("discard");
+  assert.equal(w.S.sessions.has(prov), false, "Discard discards");
+  assert.equal(w.persistedCount(prov), 0);
+  assert.deepEqual(w.persisted().provisionals, []);
+  // the question names what is there, and a tab with nothing in it goes at once
+  assert.equal(w.keptDiscardTitle("api", 2, false, false), "Discard api's 2 staged messages?");
+  assert.equal(w.keptDiscardTitle("api", 0, true, false), "Discard the text in api's box?");
+  assert.equal(w.keptDiscardTitle("api", 1, true, true), "Discard api's 1 staged message and the text and attachments in its box?");
+  const e = opening();
+  e.w.failProvisional("The folder could not be read.");
+  const n = e.w.confirms.length;
+  e.w.closeTabLocally(e.prov);
+  assert.equal(e.w.confirms.length, n, "an empty kept tab is not asked about");
+  assert.equal(e.w.S.sessions.has(e.prov), false);
+});
+
+test("4: a session arriving under a failed tab's name after the backstop adopts the tab, a reload in between included", () => {
+  const { w, prov } = opening();
+  w.stage(ITEM.text);
+  w.type(TYPED);
+  w.fireTimers();   // 90 s and nothing came back: the create counts as failed
+  assert.equal(w.confirms[0].title, "Couldn't start api");
+  w.arrive(REAL, "api");   // …and then it did come up (a slow create)
+  assert.equal(w.S.sessions.has(prov), false, "the failed tab gives way to its session");
+  assert.equal(w.S.activeId, REAL, "it was on screen, so its session is");
+  assert.equal(w.stripLine(), "1 staged — sends with your next message");
+  assert.equal(w.box.value, TYPED);
+  assert.deepEqual(w.persisted().provisionals, []);
+  assert.deepEqual(w.wire.filter((m) => m.type === "sendMessage"), []);
+  // the same after a reload: the failed tab comes back, and the late session's frame adopts it
+  const o = opening();
+  o.w.stage(ITEM.text);
+  o.w.fireTimers();
+  const r = world(o.w.persisted());
+  assert.ok(r.S.failedProvisionals.has(o.prov));
+  r.arrive(REAL, "api");
+  assert.equal(r.S.sessions.has(o.prov), false);
+  assert.equal(r.stagedMsgs.count(REAL), 1);
+});
+
+test("5: held sends a reload put back in the box say so in a line above it, which follows the text and goes when the box is sent", () => {
+  const { w, prov } = opening();
+  w.S.provisionalQueue.push(HELD); w.persistProvisionals();
+  const r = world(w.persisted());
+  assert.equal(r.box.value, HELD);
+  assert.deepEqual(r.S.heldBack, { sid: prov, name: "api" }, "the line stands for the tab's box");
+  assert.equal(r.heldBackLine("api"), "Not sent yet: what you sent while api was starting is back in the box.");
+  r.arrive(REAL, "api");
+  assert.deepEqual(r.S.heldBack, { sid: REAL, name: "api" }, "the text moved to the session's box, and the line with it");
+  r.clearBox();   // the send that takes it
+  assert.equal(r.S.heldBack, null, "gone with the text");
+});
+
+test("5: a create holding sends holds the dashboard's reload while its session can still arrive, and its arrival ends the hold", () => {
+  const { w } = opening();
+  assert.equal(w.paneHoldReason(), "", "nothing held");
+  w.type(TYPED);
+  w.enter();
+  assert.equal(w.paneHoldReason(), "held-send", "a send held for the session holds the reload, as a send held on an upload does");
+  const before = w.ended();
+  w.arrive(REAL, "api");
+  assert.equal(w.paneHoldReason(), "");
+  assert.ok(w.ended() > before, "the arrival tells the reload core the hold is over");
+  // a create on a host whose relay is down has no arrival coming: it holds nothing
+  const d = opening();
+  d.w.S.window.__rompFed = { hosts: () => ["gpu"], down: () => ["gpu"] };
+  d.w.startCreate({ ...TESTS_REQ, host: "gpu" });
+  d.w.type(TYPED);
+  d.w.enter();
+  assert.equal(d.w.S.provisionalQueue.length, 1);
+  assert.equal(d.w.paneHoldReason(), "");
+});
+
+test("6: a create saved longer ago than its backstop comes back kept, never opening, and never says nothing came back", () => {
+  const { w, prov } = opening();
+  w.stage(ITEM.text);
+  w.type(TYPED);
+  const saved = w.persisted();
+  for (const t of [Date.now() - 3 * 24 * 3600_000, undefined]) {   // days old, or written before the record had a time
+    const r = world({ ...saved, provisionals: (saved.provisionals as Record<string, unknown>[]).map((p) => ({ ...p, t })) });
+    assert.deepEqual(kept(r, prov), { state: "closed", kept: true, replaced: false, staged: [ITEM.text], draft: TYPED }, "kept, with everything on it");
+    assert.equal(r.S.provisionalId, null, "not a create in flight");
+    r.fireTimers();
+    assert.deepEqual(r.confirms, [], "no \"Couldn't start api … nothing came back\" about a create long over");
+    r.arrive(REAL, "api");   // its session is running: its frame adopts the tab
+    assert.equal(r.stagedMsgs.count(REAL), 1);
+    assert.equal(r.box.value, TYPED);
+  }
+  // one reloaded a moment after it was asked for is still in flight, with the rest of its own backstop
+  const fresh = world({ ...saved, provisionals: (saved.provisionals as Record<string, unknown>[]).map((p) => ({ ...p, t: Date.now() - 30_000 })) });
+  assert.equal(fresh.S.provisionalId, prov);
+  assert.equal(fresh.S.sessions.get(prov)?.status?.state, "opening");
+  const [timer] = [...fresh.timers.values()];
+  assert.ok(timer && timer.ms <= 60_000 && timer.ms > 55_000, "the backstop counts from the create: " + timer?.ms);
+});
+
+test("6: after a reload, the hand-over to a running session under the name joins its draft and its staged list", () => {
+  const { w } = opening();
+  w.stage(ITEM.text);
+  w.type(TYPED);
+  const saved = w.persisted();
+  // api is running already, with a draft and a staged message of its own in the page's state
+  const st = new StagedStack(); st.restore(saved.staged); st.push(REAL, { text: "Already staged on the running api.", cites: [] });
+  const r = world({ ...saved, drafts: { ...(saved.drafts as Record<string, string>), [REAL]: "A note I was writing to api." }, staged: st.entries() });
+  r.arrive(REAL, "api");   // a fresh page has seen no session: the running api's first frame adopts the tab
+  assert.equal(r.S.drafts.get(REAL), "A note I was writing to api.\n\n" + TYPED, "its draft first, the tab's after it");
+  assert.equal(r.box.value, "A note I was writing to api.\n\n" + TYPED);
+  assert.deepEqual(r.stagedMsgs.list(REAL).map((m) => m.text), ["Already staged on the running api.", ITEM.text]);
 });

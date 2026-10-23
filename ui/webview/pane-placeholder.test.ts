@@ -87,3 +87,9 @@ test("render.ts paints through the module and re-asks only the viewers still wai
   for (const ev of ['window.addEventListener("romp:wsup", () => reaskWaitingSubagents(""));', 'reaskWaitingSubagents(h);', 'if (m.type === "pipeState" && m.up) reaskWaitingSubagents();'])
     assert.ok(RENDER.includes(ev), ev);
 });
+
+test("a kept tab whose create a second one replaced says it has not opened, not that it could not start (2026-10-23)", () => {
+  assert.equal(placeholderKind({ provisional: true, provisionalFailed: true, provisionalSuperseded: true }), "start-superseded");
+  assert.equal(fillPlaceholder(fakeEl("div", "tx-empty"), "start-superseded", ctx([])).textContent,
+    "You started another session before this one opened. What's in this tab is kept, and moves to the session if it opens.");
+});

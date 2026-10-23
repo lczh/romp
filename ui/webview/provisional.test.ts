@@ -112,8 +112,12 @@ test("creating a session opens the provisional tab instead of a modal", () => {
 });
 
 test("a send on a provisional tab is HELD, not posted to a session that doesn't exist", () => {
-  assert.match(RENDER, /provisionalQueue\.push\(text\);\s*\n\s*registerOptimistic\(sid, text, attached\.filter\(\(p\) => previewKind\(p\) === "img"\), undefined, attached, [^\n]*\);/,
+  // (since 2026-10-23 with what is staged on the tab, composed as a live tab's Enter composes it: queueProvisionalSend,
+  // executed in staged-pending-tab-exec.test.ts)
+  assert.match(RENDER, /\n\s*queueProvisionalSend\(sid, text, attached\);/);
+  assert.match(RENDER, /provisionalQueue\.push\(body\);\s*\n\s*registerOptimistic\(sid, body, p\.imgPaths, undefined, p\.paths, [^\n]*\);/,
     "the dashed bubble goes up now — with its dragged-image thumbnails — romp has it, it is not delivered");
+  assert.match(RENDER, /for \(const p of stagedPosts\(run, \{ text, imgPaths: attached\.filter\(\(f\) => previewKind\(f\) === "img"\), paths: attached \}\)\) \{/);
   // a FAILED tab has no pending spawn to queue onto: refuse loudly, the box keeps the only copy. The refusal reports
   // a state the page after a reload does not have, so it is ephemeral (executed in reload-notices.test.ts)
   assert.match(RENDER, /if \(sid !== provisionalId\) \{\s*\n\s*ephemeralWarnToast\("“" \+ \(sessions\.get\(sid\)\?\.name \|\| "this session"\)/);
@@ -123,9 +127,11 @@ test("adoption flushes the held messages FOR REAL and carries the draft across",
   assert.match(RENDER, /if \(adoptsProvisional\(existed, msg\.name, pendingNewSession\)\) \{\s*\n\s*adoptProvisional\(msg\.id\);/);
   assert.match(RENDER, /vscodeApi\?\.postMessage\(\{ type: "sendMessage", id: realId, text, qid \}\);/);   // under the id the press minted, so the bubble carried over wears it too
   assert.match(RENDER, /registerOptimistic\(realId, text, undefined, qid, undefined, [^\n]*\);/);
-  // the draft must be set BEFORE the switch — setActive fills the box from `drafts`
+  // the draft must be set BEFORE the switch — setActive fills the box from `drafts` (joined onto the session's own since
+  // 2026-10-23: a running session a reload's first frame adopts has a draft of its own)
   const adopt = RENDER.slice(RENDER.indexOf("function adoptProvisional"));
-  assert.ok(adopt.indexOf("drafts.set(realId, draft)") < adopt.indexOf("setActive(realId)"),
+  assert.ok(adopt.indexOf("drafts.set(realId, [drafts.get(realId)") >= 0, "the carry joins the session's own draft");
+  assert.ok(adopt.indexOf("drafts.set(realId, [drafts.get(realId)") < adopt.indexOf("setActive(realId)"),
     "setActive reads the draft map, so the carry has to be in it first");
 });
 
@@ -159,17 +165,23 @@ test("the silent-failure backstop is long, because it is no longer what you wait
   assert.ok(Number(m![1].replace(/_/g, "")) >= 60_000, "well past the old 30s cue");
 });
 
-test("closing a provisional tab aborts the pending spawn; a FAILED one is a plain local discard", () => {
-  assert.match(RENDER, /if \(id === provisionalId\) cancelProvisional\(\);\s*\n\s*else \{ failedProvisionals\.delete\(id\); stagedMsgs\.takeAll\(id\); dismissSession\(id, "close"\); persistProvisionals\(\); noteColumnIdle\(\); \}/);   // …its staged messages go with it (no session will show them), and the page's state stops naming it (restoreProvisionals)   // …and the discard tells the shell the column is idle again (the chat split's deferred close; chat-split-exec.test.ts)
+test("closing a provisional tab aborts the pending spawn; a FAILED one is a local discard, asked first when it holds something", () => {
+  assert.match(RENDER, /if \(id === provisionalId\) cancelProvisional\(\);\s*\n\s*else closeKeptTab\(id\);/);
+  // …its staged messages go with it (no session will show them), and the page's state stops naming it (restoreProvisionals)
+  // …and the discard tells the shell the column is idle again (the chat split's deferred close; chat-split-exec.test.ts).
+  // The question before it (2026-10-23) is executed in staged-pending-tab-exec.test.ts
+  assert.match(RENDER, /function discardKeptTab\(id: string\): void \{\n\s*failedProvisionals\.delete\(id\); supersededProvisionals\.delete\(id\);\n\s*stagedMsgs\.takeAll\(id\);[^\n]*\n[^\n]*\n\s*dismissSession\(id, "close"\);\n\s*persistProvisionals\(\);\n\s*noteColumnIdle\(\);/);
   assert.match(RENDER, /vscodeApi\.postMessage\(\{ type: "cancelCreate", name \}\)/);
   // the kernel never knew a provisional id — the dead-tab ✕ must not post closeTab for one
   assert.match(RENDER, /if \(!isProvisionalId\(id\)\) vscodeApi\.postMessage\(\{ type: "closeTab", id \}\);/);
 });
 
-test("the folder question retires the tab and holds what was typed for the retry", () => {
-  assert.match(RENDER, /const held = dropProvisional\(\);/);
-  assert.match(RENDER, /pendingCarry = \[\.\.\.held\.queued, held\.draft\]\.filter\(Boolean\)/);
-  assert.match(RENDER, /if \(ta && pendingCarry\) \{ ta\.value = pendingCarry; growComposer\(ta\); \}/);
+test("the folder question keeps the tab with what was typed, for the retry to open on again", () => {
+  // (2026-10-23: it retired the tab and held the text in memory for whichever create came next, under any name; a reload
+  // lost it. staged-pending-tab-exec.test.ts executes the retry, the Esc and the reload.)
+  assert.match(RENDER, /const kept = keepProvisional\(\);\n\s*if \(kept\) setActive\(kept\.id\);/);
+  assert.match(RENDER, /const again = \[\.\.\.failedProvisionals\]\.find\(\(k\) => sessions\.get\(k\)\?\.name === display\) \?\? null;/);
+  assert.doesNotMatch(RENDER, /pendingCarry/);
 });
 
 test("a starting tab shows the romp loader, not the 'No messages yet' placeholder", () => {

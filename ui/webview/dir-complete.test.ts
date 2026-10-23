@@ -151,11 +151,11 @@ test("a chosen completion walks INTO the folder; it never starts the session", (
 
 test("a missing directory raises the create-or-edit choice, and Create re-sends the SAME create", () => {
   assert.match(RENDER, /else if \(m\.type === "createDirMissing" && m\.name\) onCreateDirMissing\(m\)/);
-  // (2026-07-30: the cue became a provisional TAB, so the folder question retires it and holds what was
-  // typed for the retry — "Create it and start" re-sends the same create, so the text is still that
-  // session's, not the fallback tab's.)
-  assert.match(RENDER, /const held = dropProvisional\(\);/);
-  assert.match(RENDER, /pendingCarry = \[\.\.\.held\.queued, held\.draft\]\.filter\(Boolean\)/);
+  // (2026-07-30: the cue became a provisional TAB. Since 2026-10-23 the folder question KEEPS it, with what was typed
+  // and staged on it, rather than holding that in memory for whichever create came next: "Create it and start" re-sends
+  // the same create, which opens on the kept tab again (staged-pending-tab-exec.test.ts runs it).)
+  assert.match(RENDER, /const kept = keepProvisional\(\);\n\s*if \(kept\) setActive\(kept\.id\);/);
+  assert.doesNotMatch(RENDER, /pendingCarry/);
   assert.match(RENDER, /\{ label: "Create it and start", value: "create" \}, \{ label: "Edit the path", value: "edit" \}/);
   assert.match(RENDER, /if \(v === "create"\) \{ startCreate\(req, true\); return; \}/);
   assert.match(RENDER, /\.\.\.\(mkdir \? \{ mkdir: true \} : \{\}\)/, "mkdir rides the same message");

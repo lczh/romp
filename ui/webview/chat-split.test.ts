@@ -105,7 +105,7 @@ test("a pick of a session another column holds is shown where it lives: the setA
   // another dashboard tab's write passed close()'s busy gate with `keep` and tore a column down over a create in flight; it defers
   // that close while the page is busy and carries it out on this signal, against a fresh read of the store (tests/test_chat_split.py)
   assert.match(RENDER, /function noteColumnIdle\(\): void \{\n\s*if \(!COL \|\| provisionalId \|\| failedProvisionals\.size\) return;\n\s*try \{ window\.parent\.postMessage\(\{ romp: "colBusy", busy: false \}, "\*"\); \}/);
-  assert.equal((RENDER.match(/noteColumnIdle\(\);/g) || []).length, 2, "two callers: dropProvisional, and the failed tab's discard in closeTabLocally");
+  assert.equal((RENDER.match(/noteColumnIdle\(\);/g) || []).length, 2, "two callers: a provisional tab leaving the strip (takeProvisionalTab), and a kept tab's discard (discardKeptTab)");
   assert.ok(KERNEL.includes("if(m.romp==='colBusy'&&m.busy===false){"), "the shell's handler");
   assert.ok(KERNEL.includes("var kb=belowOf(c.n);if(busy(frameOfCol(c.n))||(kb&&busy(frameOfCol(kb.n)))){deferred[c.n]=true;"), "the reconcile defers a busy column, or a column whose nested bottom pane is busy (tests/test_chat_split.py pins the whole line)");
   // the ids a colEmpty close sends home are held back on the first column's strip until the kernel's strip omits them
