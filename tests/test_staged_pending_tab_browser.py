@@ -14,7 +14,13 @@ for the failure, the sid-less `warn` a create's refusal is. Three roads, each in
 reload before the arrival, and the failure (with a reload after it). Red before the fix on each road (the arrival leaves the
 real tab's strip empty, the reload loses the tab, the failure's dialog says nothing of the staged message and the reload loses
 it). Skips LOUDLY without the extension deps or a browser (a failure under ROMP_SERVED_TESTS_REQUIRE=1). SYNTHETIC fixtures
-only (the notes-api demo's web and api).
+only (the notes-api demo's web, api and tests).
+
+The edges (2026-10-23), on the same page: a second create (tests) while api is opening keeps api's tab with its staged
+message and its text, and api's session adopts it; Enter on the opening tab holds the staged message with the typed text,
+so the session receives one message; and the failed tab's close asks before it discards, Cancel keeps everything, and the
+session arriving late under its name adopts the tab. Red before the fix on each (the second create dismissed api's tab and
+everything on it, Enter held the typed text alone, the close discarded at once and the late session found nothing).
 """
 import json
 import os
@@ -66,20 +72,29 @@ async function road(kind) {
     const act = document.querySelector("#tabs .tab.active[data-id]");
     const prov = Array.from(document.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.dataset.id).filter((id) => id.startsWith("new-"));
     const confirm = document.querySelector("#confirm .confirm-detail");
+    const title = document.querySelector("#confirm .confirm-title");
+    const ph = Array.from(document.querySelectorAll(".tx-empty")).find((e) => e.offsetParent !== null);
+    const tabState = (id) => { const t = document.querySelector('#tabs .tab[data-id="' + id + '"] .tab-close'); return t ? (t.dataset.dead === "1" ? "dead" : "live") : null; };
     return { strip: shown ? { sid: strip.dataset.sid, line: strip.querySelector(".staged-lbl").textContent,
                               items: Array.from(strip.querySelectorAll(".staged-row .composer-chip-label")).map((n) => n.textContent) } : null,
              active: act ? act.dataset.id : null, prov, box: document.getElementById("composer-input").value,
-             confirm: confirm ? confirm.textContent : null };
+             confirm: confirm ? confirm.textContent : null, title: title ? title.textContent : null,
+             buttons: Array.from(document.querySelectorAll("#confirm .confirm-btn")).map((b) => b.textContent),
+             placeholder: ph ? ph.textContent : null, tabs: Object.fromEntries(prov.map((id) => [id, tabState(id)])) };
   });
+  // a new session, as the user asks for it: the + tab, the name, Create session; its tab is up and on screen
+  const create = async (name, prev) => {
+    await page.click("#tabs .tab-add");
+    await page.waitForSelector("#picker-search", { timeout: 10000 });
+    await page.fill("#picker-search", name);
+    await page.click("#picker-new-btn");
+    await page.waitForFunction((prev) => { const t = document.querySelector('#tabs .tab.active[data-id^="new-"]'); return !!t && t.dataset.id !== prev; },
+                               prev || null, { timeout: 10000 });
+  };
   await page.goto(cfg.chat);
   await boot();
   await page.waitForFunction((sid) => window.__frames.some((m) => m.id === sid), cfg.sid, { timeout: 20000 });
-  // a new session called api, as the user asks for it: the + tab, the name, Create session
-  await page.click("#tabs .tab-add");
-  await page.waitForSelector("#picker-search", { timeout: 10000 });
-  await page.fill("#picker-search", "api");
-  await page.click("#picker-new-btn");
-  await page.waitForFunction(() => !!document.querySelector('#tabs .tab.active[data-id^="new-"]'), null, { timeout: 10000 });
+  await create("api");
   // stage a message on it (Ctrl+Enter), then start typing the next one
   await page.fill("#composer-input", cfg.staged);
   await page.press("#composer-input", "Control+Enter");
@@ -102,6 +117,26 @@ async function road(kind) {
     await boot();
     out.reloaded = await read();
   }
+  const prov = out.staged.prov[0];
+  if (kind === "enter") {
+    // Enter on the opening tab: held for the session, with what is staged on the tab
+    await page.press("#composer-input", "Enter");
+    await page.waitForTimeout(400);
+    out.held = await read();
+  }
+  if (kind === "supersede") {
+    // a second new session, tests, before api's is up
+    await create("tests", prov);
+    await page.waitForTimeout(400);
+    out.superseded = await read();
+    out.cancels = await page.evaluate(() => window.__sent.filter((m) => m.type === "cancelCreate").map((m) => m.name));
+    out.created2 = await page.evaluate(() => window.__sent.filter((m) => m.type === "createSession").map((m) => m.name));
+    // back to api's tab, to read what it holds (not fatal when it is gone: that is the measurement)
+    const apiTab = await page.$('#tabs .tab[data-id="' + prov + '"]');
+    if (apiTab) await apiTab.click();
+    await page.waitForTimeout(400);
+    out.kept = await read();
+  }
   if (kind === "fail") {
     // the create's refusal: a warn naming no session, while the create is in flight
     await page.evaluate(() => window.postMessage({ type: "warn", text: "The folder could not be read." }, "*"));
@@ -111,20 +146,36 @@ async function road(kind) {
     await page.reload();
     await boot();
     out.failedReloaded = await read();
-  } else {
+    // its close asks before it discards; Cancel keeps everything
+    const close = await page.$('#tabs .tab[data-id="' + prov + '"] .tab-close');
+    if (close) await close.click();
+    await page.waitForSelector("#confirm .confirm-title", { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(300);
+    out.ask = await read();
+    const cancel = await page.$('#confirm .confirm-btn:text-is("Cancel")');
+    if (cancel) await cancel.click();
+    await page.waitForTimeout(300);
+    out.cancelled = await read();
+  }
+  {
+    // the session arrives (late, for the failure: a slow create the backstop gave up on)
     await arrive();
     out.arrived = await read();
     // the next send: what is in the box goes, with the staged message ahead of it
     await page.press("#composer-input", "Enter");
     await page.waitForTimeout(500);
-    out.sent = await page.evaluate((id) => window.__sent.filter((m) => m.type === "sendMessage" && m.id === id).map((m) => m.text), cfg.newSid);
+    // one entry per copy: the kernel never acknowledges a send this test drops at the socket, so the page may send the same
+    // copy again under its id (send-acks.ts), which the kernel would take once
+    out.sent = await page.evaluate((id) => { const seen = new Set();
+      return window.__sent.filter((m) => m.type === "sendMessage" && m.id === id && !seen.has(m.qid) && seen.add(m.qid)).map((m) => m.text); }, cfg.newSid);
     out.after = await read();
   }
   await ctx.close();
   return out;
 }
 
-const r = { arrive: await road("arrive"), reload: await road("reload"), fail: await road("fail") };
+const r = { arrive: await road("arrive"), reload: await road("reload"), fail: await road("fail"),
+            supersede: await road("supersede"), enter: await road("enter") };
 await browser.close();
 process.stdout.write("RESULT:" + JSON.stringify(r) + "\n", () => process.exit(0));
 """
@@ -166,10 +217,10 @@ class ServedStagedPendingTab(QueuedLab):
         self.assertEqual(s["box"], DRAFT)
         return s["prov"][0]
 
-    def _arrived_and_sent(self, road, what):
+    def _arrived_and_sent(self, road, what, prov=()):
         a = road["arrived"]
         self.assertEqual(a["active"], NEW_SID, "%s: the real session took the tab: %r" % (what, a))
-        self.assertEqual(a["prov"], [], "%s: the opening tab is gone" % what)
+        self.assertEqual(a["prov"], list(prov), "%s: the opening tab is gone" % what)
         self.assertEqual(a["strip"], {"sid": NEW_SID, "line": self.LINE, "items": [STAGED]},
                          "%s: the real tab's strip shows the message staged while it opened: %r" % (what, a))
         self.assertEqual(a["box"], DRAFT, "%s: the draft came across" % what)
@@ -205,6 +256,53 @@ class ServedStagedPendingTab(QueuedLab):
         self.assertEqual(g["active"], prov)
         self.assertEqual(g["strip"], {"sid": prov, "line": self.LINE, "items": [STAGED]}, "with its staged message: %r" % g)
         self.assertEqual(g["box"], DRAFT, "and its text")
+
+    def test_the_failed_tabs_close_asks_before_discarding_and_a_late_session_under_its_name_adopts_it(self):
+        road = self._result()["fail"]
+        prov = self._staged_on_opening_tab(road)
+        a = road["ask"]
+        self.assertEqual(a["title"], "Discard api's 1 staged message and the text in its box?", "the close asks first: %r" % a)
+        self.assertEqual(a["buttons"], ["Cancel", "Discard"])
+        self.assertEqual(a["prov"], [prov], "nothing goes before the answer")
+        c = road["cancelled"]
+        self.assertIsNone(c["title"], "Cancel closes the question: %r" % c)
+        self.assertEqual(c["prov"], [prov], "and keeps the tab: %r" % c)
+        self.assertEqual(c["strip"], {"sid": prov, "line": self.LINE, "items": [STAGED]}, "with its staged message")
+        self.assertEqual(c["box"], DRAFT, "and its text")
+        # the create was slow, not dead: its session turns up under the name and takes the tab
+        self._arrived_and_sent(road, "a late arrival after a failure")
+
+    def test_a_second_create_while_one_opens_keeps_the_first_tab_with_everything_on_it_and_its_session_adopts_it(self):
+        road = self._result()["supersede"]
+        prov = self._staged_on_opening_tab(road)
+        s = road["superseded"]
+        self.assertEqual(road["created2"], ["api", "tests"], "both creates went to the kernel: %r" % road)
+        self.assertEqual(road["cancels"], [], "api's create is not cancelled")
+        self.assertEqual(len(s["prov"]), 2, "api's tab stays beside the new one: %r" % s)
+        self.assertEqual(s["prov"][0], prov)
+        second = s["prov"][1]
+        self.assertEqual(s["active"], second, "the new session's tab is on screen")
+        self.assertEqual(s["tabs"], {prov: "dead", second: "live"}, "api's tab is kept, no longer opening: %r" % s)
+        self.assertIsNone(s["confirm"], "nothing failed, so no dialog")
+        k = road["kept"]
+        self.assertEqual(k["active"], prov)
+        self.assertEqual(k["strip"], {"sid": prov, "line": self.LINE, "items": [STAGED]}, "api's tab still has its staged message: %r" % k)
+        self.assertEqual(k["box"], DRAFT, "and its text")
+        self.assertEqual(k["placeholder"], "You started another session before this one opened. What's in this tab is kept, "
+                                           "and moves to the session if it opens.", "it says what happened: %r" % k)
+        self._arrived_and_sent(road, "api's arrival after a second create", prov=[second])
+
+    def test_enter_on_the_opening_tab_holds_the_staged_message_with_the_typed_text_as_one_send(self):
+        road = self._result()["enter"]
+        prov = self._staged_on_opening_tab(road)
+        h = road["held"]
+        self.assertIsNone(h["strip"], "the staged message went with the send: %r" % h)
+        self.assertEqual(h["box"], "", "the box is cleared, as a send clears it")
+        self.assertEqual(h["active"], prov)
+        a = road["arrived"]
+        self.assertEqual(a["active"], NEW_SID, "the session took the tab: %r" % a)
+        self.assertIsNone(a["strip"], "nothing is left staged to wait for the message after: %r" % a)
+        self.assertEqual(road["sent"], [STAGED + "\n\n" + DRAFT], "the session received one message, the staged item first: %r" % road["sent"])
 
 
 if __name__ == "__main__":

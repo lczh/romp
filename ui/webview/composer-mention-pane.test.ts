@@ -58,6 +58,7 @@ const isProvisionalId = (id: string) => id.startsWith("prov:");
     let activeId: string | null = env.activeId ?? null;
     let composerManualH: number | null = 7;
     let refreshMentionCard: any = null, clearComposerBox: any = null;
+    let heldBack: any = null; const clearHeldBackNote = () => { heldBack = null; };   // the held sends' note, which a clear retires
     const updateSlash = () => { env.slashUpdates = (env.slashUpdates || 0) + 1; };
 ${mentionBlock()}
     return { updateMention, mentionKey, pickMention, closeMention, clearBox,
@@ -798,7 +799,7 @@ test("a copy over a chip goes through mentionCopyText from both doors: the docum
 test("every clear of the composer goes through clearBox, which refreshes both menus; cancelComposerEdit clears through the module-level hook", () => {
   const stmts = RENDER.match(/^\s*ta\.value = "";/gm) || [];
   assert.equal(stmts.length, 1, "one bare clear statement in the file: clearBox's own");
-  assert.match(RENDER, /const clearBox = \(\) => \{\s*\n\s*ta\.value = ""; composerManualH = null; ta\.style\.height = "";\s*\n\s*updateSlash\(\); updateMention\(\);\s*\n\s*\};\s*\n\s*clearComposerBox = clearBox;/);
+  assert.match(RENDER, /const clearBox = \(\) => \{\s*\n\s*ta\.value = ""; composerManualH = null; ta\.style\.height = "";\s*\n\s*if \(heldBack && heldBack\.sid === activeId\) clearHeldBackNote\(\);[^\n]*\n\s*updateSlash\(\); updateMention\(\);\s*\n\s*\};\s*\n\s*clearComposerBox = clearBox;/);
   const composer = RENDER.slice(RENDER.indexOf("function setupComposer()"), RENDER.indexOf("  // ── PROMPT HISTORY"));
   assert.equal((composer.match(/\bclearBox\(\);/g) || []).length, 6, "the stage, the picker answer, the edit, the provisional queue, the send and /mcp");
   assert.match(RENDER, /function cancelComposerEdit\(sid: string\): void \{\s*\n[^\n]*\n[^\n]*\n\s*clearComposerBox\?\.\(\);/);

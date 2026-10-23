@@ -1457,7 +1457,7 @@ body.composer-resizing { cursor: ns-resize; user-select: none; }
 /* The line above the box after the ACTIVE tab was torn down under the user (T236, render.ts renderComposerNote):
    whose box went away and that the unsent draft is kept. Chip-strip geometry and the chips' 12px; the ✕ is the
    chip ✕. Dim by default, the session name in the normal fg — it is the one thing to read. */
-#composer-note { flex: 1 1 100%; display: flex; align-items: center; gap: 6px; padding: 0 0 6px 2px; font-size: 0.82em; line-height: 1.4; color: var(--dim, #9a9a9a); }   /* the meta rung (was 12px) */
+#composer-note, #composer-held-note { flex: 1 1 100%; display: flex; align-items: center; gap: 6px; padding: 0 0 6px 2px; font-size: 0.82em; line-height: 1.4; color: var(--dim, #9a9a9a); }   /* the meta rung (was 12px) */
 .composer-note-msg { flex: 1 1 auto; min-width: 0; }
 .composer-note-name { color: var(--fg); }
 .composer-note-hint { opacity: 0.75; }

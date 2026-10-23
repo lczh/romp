@@ -98,7 +98,9 @@ class SourcePins(unittest.TestCase):
         self.assertIn('const shimBusy = (window as any).__rompPaneBusy as (() => string) | undefined;', RENDER)
         # …and only for ships whose ack can still arrive (reload-hold.ts, the review of the hold): a ship to a host whose
         # relay is down, or to a host no longer attached, does not hold the dashboard's reload
-        self.assertIn('return reloadHoldReason([...pendingShips.keys()], shipGateSid, (window as any).__rompFed);', RENDER)
+        # (and, since 2026-10-23, a create in flight holding sends made on its tab, on the same rule: render.ts createHoldHost)
+        self.assertIn('return paneHoldReason();', RENDER)
+        self.assertIn('return reloadHoldReason([...pendingShips.keys()], shipGateSid, (window as any).__rompFed, createHoldHost());', RENDER)
         self.assertNotIn('if (pendingShips.size) return "upload";', RENDER)
 
     def test_the_chat_page_loads_the_shim_before_the_bundle_so_the_busy_report_wraps_the_shims(self):

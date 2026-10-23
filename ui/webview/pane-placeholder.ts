@@ -4,13 +4,14 @@
 // later state: the kernel's error sentence, the stall past the wait, and "written nothing yet" never replaced it, and a
 // workflow agent's transcript read "opening…" for good whatever the kernel answered. The kind rides the element as a
 // data attribute; the same kind twice is left alone (no churn on repeated pushes that stay empty).
-export type PlaceholderKind = "revive-failed" | "sub-error" | "sub-stall" | "sub-loading" | "sub-empty" | "start-failed" | "starting" | "empty";
+export type PlaceholderKind = "revive-failed" | "sub-error" | "sub-stall" | "sub-loading" | "sub-empty" | "start-superseded" | "start-failed" | "starting" | "empty";
 
 export interface PlaceholderState {
   sub?: { error: string | null; loaded: boolean; stalled?: boolean } | null;
   failedRevive?: string | null;      // the couldn't-revive notice for this tab, when one stands
   provisional?: boolean;             // a tab whose session is still being created
   provisionalFailed?: boolean;       // …whose create failed
+  provisionalSuperseded?: boolean;   // …whose create a second one replaced: kept, waiting on its session without a backstop
 }
 
 export function placeholderKind(st: PlaceholderState): PlaceholderKind {
@@ -21,6 +22,7 @@ export function placeholderKind(st: PlaceholderState): PlaceholderKind {
     if (!st.sub.loaded) return "sub-loading";
     return "sub-empty";
   }
+  if (st.provisional && st.provisionalSuperseded) return "start-superseded";
   if (st.provisional && st.provisionalFailed) return "start-failed";
   if (st.provisional) return "starting";
   return "empty";
@@ -73,6 +75,11 @@ export function fillPlaceholder(ph: any, kind: PlaceholderKind, ctx: Placeholder
       break;
     case "start-failed":
       ph.textContent = "This session couldn't start. What you typed is kept in the box below; ✕ on the tab discards both.";
+      break;
+    case "start-superseded":
+      // a second new session was started while this one was opening (2026-10-23): nothing failed, and its session may
+      // still arrive, which takes what this tab holds (render.ts adoptKeptProvisionals)
+      ph.textContent = "You started another session before this one opened. What's in this tab is kept, and moves to the session if it opens.";
       break;
     case "starting": {
       // a PROVISIONAL tab is not empty, it is STARTING — so it wears the romp loader (the repo's rule for any wait), not

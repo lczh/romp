@@ -24,3 +24,12 @@ test("the pane's reason: upload for a live ship, held-send for a gate on a live 
   assert.equal(reloadHoldReason([], "gone:s1", fed), "", "a send held on a gone host's upload does not hold");
   assert.equal(reloadHoldReason([], null, fed), "");
 });
+
+test("a create in flight holding sends made on its tab holds the reload as a held send, while its session can still arrive (2026-10-23)", () => {
+  assert.equal(reloadHoldReason([], null, fed, ""), "held-send", "a local create: its session's arrival sends them");
+  assert.equal(reloadHoldReason([], null, fed, "web"), "held-send", "a create on an attached, reachable host");
+  assert.equal(reloadHoldReason([], null, fed, "api"), "", "its host's relay is down: no arrival until it returns");
+  assert.equal(reloadHoldReason([], null, fed, "gone"), "", "a detached or removed host: no arrival ever");
+  assert.equal(reloadHoldReason([], null, fed, null), "", "no create holding sends");
+  assert.equal(reloadHoldReason(["s1"], null, fed, ""), "upload", "a live ship's reason comes first");
+});
