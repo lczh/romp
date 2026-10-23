@@ -13774,7 +13774,8 @@ def _tick_job_skips(job, s):
 # 63 s first cycle in this walk, parsing every alive session cold before a single nudge could be due.
 _NUDGE_HORIZON = threading.local()    # the walking thread's collector: .notes (the flips a look's clock legs declined on)
 _NUDGE_WALK_STATS = {"looks": 0, "stats": 0, "served": 0, "skippedParses": 0, "parses": 0, "coldParses": 0, "deferredSessions": 0, "unbounded": 0,
-                     "clockDue": 0, "wakeOnly": 0, "unboundedBy": {}}   # unboundedBy: the None notes per leg (T401 follow-up)
+                     "clockDue": 0, "wakeOnly": 0, "notWanted": 0, "unboundedBy": {}}   # unboundedBy: the None notes per leg (T401 follow-up);
+#                                       notWanted: the alive sessions a pass did not look at, no leg of their look able to act (_nudge_looks_wanted)
 _NUDGE_LOOK_STATS = {}                # sid -> the stat the pass took before its snapshots, for the look (a side map: the session
 #                                       rows are shared, read-only and memoised per cycle, never written into)
 _NUDGE_LOOK_ASKERS = {}               # sid -> (the asker sids whose registry rows the key carries, the ones beyond the bound)
@@ -15481,11 +15482,45 @@ def _auto_nudge_resume():
         sys.stderr.write("auto-nudge: auto-nudge.json reads again — nudging resumed\n")
 
 
+def _a_page_connected():
+    """Whether any client (a dashboard page) is connected now: the nudge walk asks before each look whether to yield."""
+    with _clients_lock:
+        return bool(_clients)
+
+
+def _nudge_looks_wanted(on, tracking, asks_by_target, ledger):
+    """The alive sessions whose look this pass can act on: None for every one, else the set of their sids (2026-10-23). A
+    look parses its session's transcript before it reaches any leg, so a look no leg can act on is a parse paid for nothing:
+    on a box with both switches off, the cold first pass after a reboot spent about two minutes parsing over a gigabyte of
+    transcripts, every look returning without acting.
+      - Task tracking on: every session. The goal walk runs, wake-only with the nudge toggle off, and there its errand is
+        the awaiting dead-man (a stamped wait past its window files its lift, _wake_goal), which any session may carry.
+      - tracking off, the nudge toggle on: the sessions that OWE a reply. The look takes the untracked road, whose one leg
+        is the debt reminder (_debt_leg_open): it acts on an open inbound ask (the pass's asks_by_target, built from the
+        postal log) or judges a reminder already sent (the ledger's debtNudged keys name their debtor).
+      - both off: none. The untracked road's one leg rides the nudge toggle, so every look ends on a session gate or on
+        nothing, and acts on neither.
+    A session not looked at keeps the walk-gate journal entry its last look left, which the outcome sweep's ownership reads
+    (_awaiting_wake_outcomes), and the compaction suggestion, which reads no transcript, still runs for it under the toggle."""
+    if tracking:
+        return None
+    if not on:
+        return frozenset()
+    owing = set(asks_by_target or ())
+    for key in (ledger.get("debtNudged") or {}):
+        parsed = _debt_key_parse(key)
+        if parsed:
+            owing.add(parsed[1])
+    return owing
+
+
 def _auto_nudge_pass(now, live_map, run_dead_wait):
     """The body of one pass — the walk, the sweeps, the push. Only _auto_nudge_tick calls it, under
     the single-flight guard (split out the way _pusher_cycle_jobs is from _pusher_cycle). `on` is the auto-nudge toggle:
-    off, the walk runs WAKE-ONLY — the awaiting dead-man still fires (see _auto_nudge_tick). An UNPROVED
-    ledger snapshot (a read fault) stands the whole pass down — see _auto_nudge_pause."""
+    off, the walk runs WAKE-ONLY — the awaiting dead-man still fires (see _auto_nudge_tick). With neither the toggle nor
+    Task tracking on, no look can act, so the walk looks at no session; with tracking alone off, it looks only at the
+    sessions that owe a reply (_nudge_looks_wanted). An UNPROVED ledger snapshot (a read fault) stands the whole pass
+    down — see _auto_nudge_pause."""
     alive = list(_alive_sessions(now, live_map))
     _NUDGE_LOOK_STATS.clear(); _NUDGE_LOOK_ASKERS.clear()
     try:
@@ -15534,9 +15569,7 @@ def _auto_nudge_pass(now, live_map, run_dead_wait):
         _k = next((i for i, s in enumerate(alive) if s["sid"] == _resume), 0)
         alive = alive[_k:] + alive[:_k]
     _NUDGE_WALK_CURSOR[0] = None
-    with _clients_lock:
-        _yielding = bool(_clients)                        # with a client connected the push waits behind this walk: one cold
-    #                                                       parse per pass, the remaining sessions next pass (their order stands)
+    wanted = _nudge_looks_wanted(on, tracking, asks_by_target, snap)   # None: every session; else the sids a look can act on
     cleared = _cleared_ids()                              # one parsed clear set for every session this pass walks (2026-09-09):
     #                                                       a clear landing mid-pass reaches the later sessions next pass; the
     #                                                       node's own cleared flag, written in the same gesture, covers the gap
@@ -15547,14 +15580,18 @@ def _auto_nudge_pass(now, live_map, run_dead_wait):
     _NUDGE_HORIZON.tracking = tracking                    # the pass's one read of the switch, for every look below (_auto_nudge_session's
     #                                                       untracked road); cleared after the loop, so a look outside a pass reads on
     for _i, s in enumerate(alive):
-        if _yielding and getattr(_NUDGE_HORIZON, "cold", 0) >= 1 and getattr(_NUDGE_HORIZON, "cold_last", False):
+        if getattr(_NUDGE_HORIZON, "cold", 0) >= 1 and getattr(_NUDGE_HORIZON, "cold_last", False) and _a_page_connected():
             _NUDGE_WALK_STATS["deferredSessions"] += len(alive) - _i
             if _NUDGE_WALK_FIRST_OPEN[0]:
                 _NUDGE_WALK_FIRST["deferred"] += len(alive) - _i
             _NUDGE_WALK_CURSOR[0] = s["sid"]
-            break                                         # the yield (T401 (2)): after a look that PAID a cold parse the push
-        #                                                   interleaves; warm looks never yield, so the sessions behind a cold one
-        #                                                   are all reached within as many passes as there are cold parses
+            break                                         # the yield (T401 (2)): after a look that PAID a cold parse, with a page
+        #                                                   connected, the push interleaves; warm looks never yield, so the sessions
+        #                                                   behind a cold one are all reached within as many passes as there are
+        #                                                   cold parses. The page is asked HERE, before each look, not once at the
+        #                                                   pass's top (2026-10-23): after a reboot no page is connected when the
+        #                                                   first pass starts, so a once-per-pass read never yielded, and the cold
+        #                                                   walk competed with the first page's chat builds for its whole length
         _NUDGE_HORIZON.cold_last = False
         # PER-SESSION ISOLATION (2026-07-16): one session's failure — a bad backend snapshot, a
         # malformed store — must not abort the whole tick and silence nudging fleet-wide. A
@@ -15562,18 +15599,22 @@ def _auto_nudge_pass(now, live_map, run_dead_wait):
         # ticks over two days before anyone noticed; every session after the bad one in the
         # iteration lost its nudges. The failure still logs loudly, per session.
         try:
-            r = _auto_nudge_session(s, now, live_map, nudged, waitfor, alive_ids, wake_only=not on or not tracking, cleared=cleared,
-                                    reminders=on)    # the debt reminders ride the toggle alone: they go out while tracking is off (T404 round two)
-            fired = (r is True) or fired
-            # the walk->sweep handoff journal (the user 2026-08-24): a session gate names itself as
-            # the return value; the sweep owns gate-held records by the GATE'S CLASS, never by age
-            if isinstance(r, str):
-                _put_walk_gate(s["sid"], r, now)
+            if wanted is not None and s["sid"] not in wanted:
+                _NUDGE_WALK_STATS["notWanted"] += 1       # no leg of this look can act (_nudge_looks_wanted): no look, no parse
             else:
-                _pop_walk_gate(s["sid"])
+                r = _auto_nudge_session(s, now, live_map, nudged, waitfor, alive_ids, wake_only=not on or not tracking, cleared=cleared,
+                                        reminders=on)    # the debt reminders ride the toggle alone: they go out while tracking is off (T404 round two)
+                fired = (r is True) or fired
+                # the walk->sweep handoff journal (the user 2026-08-24): a session gate names itself as
+                # the return value; the sweep owns gate-held records by the GATE'S CLASS, never by age
+                if isinstance(r, str):
+                    _put_walk_gate(s["sid"], r, now)
+                else:
+                    _pop_walk_gate(s["sid"])
             # the compaction suggestion rides the same walk (contract at _compact_suggest_tick).
             # Deliberately INSIDE the auto-nudge toggle: a user who turned injected follow-ups
-            # off has said no unprompted messages, and this is exactly that class.
+            # off has said no unprompted messages, and this is exactly that class. It reads the row's
+            # context count, never the transcript, so it runs for a session the walk did not look at too.
             if on:
                 fired = _compact_suggest_tick(s["sid"], live_map.get(s["sid"]), now) or fired
         except Exception:
