@@ -16,6 +16,12 @@ real tab's strip empty, the reload loses the tab, the failure's dialog says noth
 it). Skips LOUDLY without the extension deps or a browser (a failure under ROMP_SERVED_TESTS_REQUIRE=1). SYNTHETIC fixtures
 only (the notes-api demo's web, api and tests).
 
+The ✕ on the opening tab (the review of #373) names the staged message, the text and then the held send it would discard,
+with Cancel focused, and Cancel and Escape keep them; red before the fix (it asked to End api with End session focused). The
+line over a box holding sends that never went belongs to its tab: after sends held for api and for tests, and two creates that
+replaced theirs, each kept tab says so over its own box, a reload included, and api's line follows its text to the session;
+red before the fix (docs' create took api's line, and the reload took both).
+
 The edges (2026-10-23), on the same page: a second create (tests) while api is opening keeps api's tab with its staged
 message and its text, and api's session adopts it; Enter on the opening tab holds the staged message with the typed text,
 so the session receives one message; and the failed tab's close asks before it discards, Cancel keeps everything, and the
@@ -80,6 +86,8 @@ async function road(kind) {
              active: act ? act.dataset.id : null, prov, box: document.getElementById("composer-input").value,
              confirm: confirm ? confirm.textContent : null, title: title ? title.textContent : null,
              buttons: Array.from(document.querySelectorAll("#confirm .confirm-btn")).map((b) => b.textContent),
+             line: (document.querySelector("#composer-held-note .composer-note-msg") || {}).textContent || null,
+             focused: document.activeElement && document.activeElement.closest("#confirm") ? document.activeElement.textContent : null,
              placeholder: ph ? ph.textContent : null, tabs: Object.fromEntries(prov.map((id) => [id, tabState(id)])) };
   });
   // a new session, as the user asks for it: the + tab, the name, Create session; its tab is up and on screen
@@ -118,11 +126,49 @@ async function road(kind) {
     out.reloaded = await read();
   }
   const prov = out.staged.prov[0];
+  // the ✕ on the tab while it is still opening: it asks what it would discard, and the answer `how` (a button's label, or
+  // Escape) is given
+  const closeOpening = async (how) => {
+    const close = await page.$('#tabs .tab[data-id="' + prov + '"] .tab-close');
+    if (close) await close.click();
+    await page.waitForSelector("#confirm .confirm-title", { timeout: 5000 }).catch(() => {});
+    await page.waitForTimeout(200);
+    const ask = await read();
+    if (how === "Escape") await page.keyboard.press("Escape");
+    else { const b = await page.$('#confirm .confirm-btn:text-is("' + how + '")'); if (b) await b.click(); }
+    await page.waitForTimeout(300);
+    return { ask, after: await read() };
+  };
   if (kind === "enter") {
+    // its ✕ while it holds a staged message and text: Cancel keeps both
+    out.closeStaged = await closeOpening("Cancel");
     // Enter on the opening tab: held for the session, with what is staged on the tab
+    await page.click("#composer-input");
     await page.press("#composer-input", "Enter");
     await page.waitForTimeout(400);
     out.held = await read();
+    // its ✕ while it holds that send: Escape keeps it
+    out.closeHeld = await closeOpening("Escape");
+    out.cancels = await page.evaluate(() => window.__sent.filter((m) => m.type === "cancelCreate").map((m) => m.name));
+  }
+  if (kind === "lines") {
+    // a send held for api, tests started before api opens, a send held for tests, docs started before tests opens: each
+    // kept tab's box holds its send, unsent, and says so in its own line, a reload included
+    const tab = async (id) => { await page.click('#tabs .tab[data-id="' + id + '"]'); await page.waitForTimeout(300); return read(); };
+    await page.press("#composer-input", "Enter");
+    await create("tests", prov);
+    const tests = await page.evaluate(() => document.querySelector("#tabs .tab.active[data-id]").dataset.id);
+    await page.fill("#composer-input", "Run the list endpoint's tests.");
+    await page.press("#composer-input", "Enter");
+    await page.waitForTimeout(300);
+    await create("docs", tests);
+    await page.waitForTimeout(300);
+    out.linesApi = await tab(prov);
+    out.linesTests = await tab(tests);
+    await page.reload();
+    await boot();
+    out.reloadedTests = await tab(tests);
+    out.reloadedApi = await tab(prov);   // api's tab on screen when its session arrives below, which takes it, line and all
   }
   if (kind === "supersede") {
     // a second new session, tests, before api's is up
@@ -175,7 +221,7 @@ async function road(kind) {
 }
 
 const r = { arrive: await road("arrive"), reload: await road("reload"), fail: await road("fail"),
-            supersede: await road("supersede"), enter: await road("enter") };
+            supersede: await road("supersede"), enter: await road("enter"), lines: await road("lines") };
 await browser.close();
 process.stdout.write("RESULT:" + JSON.stringify(r) + "\n", () => process.exit(0));
 """
@@ -303,6 +349,44 @@ class ServedStagedPendingTab(QueuedLab):
         self.assertEqual(a["active"], NEW_SID, "the session took the tab: %r" % a)
         self.assertIsNone(a["strip"], "nothing is left staged to wait for the message after: %r" % a)
         self.assertEqual(road["sent"], [STAGED + "\n\n" + DRAFT], "the session received one message, the staged item first: %r" % road["sent"])
+
+    def test_the_x_on_the_opening_tab_names_what_it_would_discard_with_cancel_focused_and_cancel_keeps_it(self):
+        # the review of #373 (2026-10-23): it asked "End “api”?" with End session focused, naming none of it
+        road = self._result()["enter"]
+        prov = self._staged_on_opening_tab(road)
+        a, c = road["closeStaged"]["ask"], road["closeStaged"]["after"]
+        self.assertEqual(a["title"], "Cancel starting api and discard its 1 staged message and the text in its box?", "it names both: %r" % a)
+        self.assertEqual(a["buttons"], ["Cancel", "Discard"])
+        self.assertEqual(a["focused"], "Cancel", "the safe answer has the focus: %r" % a)
+        self.assertIsNone(c["title"], "Cancel closes the question: %r" % c)
+        self.assertEqual(c["prov"], [prov], "and keeps the tab")
+        self.assertEqual(c["tabs"], {prov: "live"}, "still opening")
+        self.assertEqual(c["strip"], {"sid": prov, "line": self.LINE, "items": [STAGED]}, "with its staged message: %r" % c)
+        self.assertEqual(c["box"], DRAFT, "and its text")
+        h, e = road["closeHeld"]["ask"], road["closeHeld"]["after"]
+        self.assertEqual(h["title"], "Cancel starting api and discard its 1 unsent message?", "a held send is named too: %r" % h)
+        self.assertEqual(h["focused"], "Cancel")
+        self.assertIsNone(e["title"], "Escape closes it: %r" % e)
+        self.assertEqual(e["prov"], [prov])
+        self.assertEqual(road["cancels"], [], "the create was never cancelled")
+
+    def test_each_kept_tabs_line_over_its_unsent_text_survives_a_second_replaced_create_and_a_reload(self):
+        # the review of #373 (2026-10-23): one line for the whole page, so docs' create took api's, and a reload took both
+        road = self._result()["lines"]
+        prov = self._staged_on_opening_tab(road)
+        sent = STAGED + "\n\n" + DRAFT
+        api = "Not sent: what you typed while api was starting is in the box."
+        tests = "Not sent: what you typed while tests was starting is in the box."
+        for key, line, box in (("linesApi", api, sent), ("linesTests", tests, "Run the list endpoint's tests."),
+                               ("reloadedTests", tests, "Run the list endpoint's tests."), ("reloadedApi", api, sent)):
+            self.assertEqual(road[key]["line"], line, "%s: %r" % (key, road[key]))
+            self.assertEqual(road[key]["box"], box, "%s: the text is in the box" % key)
+        self.assertEqual(road["reloadedApi"]["active"], prov)
+        a = road["arrived"]
+        self.assertEqual(a["active"], NEW_SID, "api's session took its tab: %r" % a)
+        self.assertEqual(a["line"], api + " Send it when you're ready.", "and the line, now that it can be sent: %r" % a)
+        self.assertEqual(road["sent"], [sent], "the next send carries the text")
+        self.assertIsNone(road["after"]["line"], "and the line goes with it: %r" % road["after"])
 
 
 if __name__ == "__main__":

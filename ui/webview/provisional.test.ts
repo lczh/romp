@@ -78,7 +78,7 @@ test("the focus handler retires the provisional QUIETLY when the kernel answered
   assert.ok(focus.indexOf("closingTabs.delete(m.id);") < focus.indexOf("resolveProvisionalToExisting(m.id)"),
     "…and AFTER the branch's reveal + close-suppression retire, which stay first (the per-viewer focus contract, peek-tab / tab-close-optimistic pins)");
   const res = RENDER.slice(RENDER.indexOf("function resolveProvisionalToExisting("), RENDER.indexOf("// A create that FAILED."));
-  assert.match(res, /const \{ queued, draft, staged, files \} = dropProvisional\(\);/, "the tab goes, and the 90 s backstop with it");
+  assert.match(res, /const \{ queued, draft, staged, files, note \} = dropProvisional\(\);/, "the tab goes, and the 90 s backstop with it");
   assert.match(res, /carryProvisionalBox\(realId, staged, files\);/, "…its staged messages and attachments join the running session's (staged-pending-tab-exec.test.ts runs it)");
   assert.ok(!res.includes("showConfirm(") && !res.includes("failProvisional(") && !res.includes("warnToast("), "quietly: no dialog, no toast of its own");
   assert.ok(!res.includes("sendMessage"), "held text is kept as the running session's draft, never sent into a thread the user has not read");
@@ -170,7 +170,7 @@ test("closing a provisional tab aborts the pending spawn; a FAILED one is a loca
   // …its staged messages go with it (no session will show them), and the page's state stops naming it (restoreProvisionals)
   // …and the discard tells the shell the column is idle again (the chat split's deferred close; chat-split-exec.test.ts).
   // The question before it (2026-10-23) is executed in staged-pending-tab-exec.test.ts
-  assert.match(RENDER, /function discardKeptTab\(id: string\): void \{\n\s*failedProvisionals\.delete\(id\); supersededProvisionals\.delete\(id\);\n\s*stagedMsgs\.takeAll\(id\);[^\n]*\n[^\n]*\n\s*dismissSession\(id, "close"\);\n\s*persistProvisionals\(\);\n\s*noteColumnIdle\(\);/);
+  assert.match(RENDER, /function discardKeptTab\(id: string\): void \{\n\s*failedProvisionals\.delete\(id\); supersededProvisionals\.delete\(id\);\n\s*stagedMsgs\.takeAll\(id\);[^\n]*\n\s*dismissSession\(id, "close"\);[^\n]*\n\s*persistProvisionals\(\);\n\s*noteColumnIdle\(\);/);
   assert.match(RENDER, /vscodeApi\.postMessage\(\{ type: "cancelCreate", name \}\)/);
   // the kernel never knew a provisional id — the dead-tab ✕ must not post closeTab for one
   assert.match(RENDER, /if \(!isProvisionalId\(id\)\) vscodeApi\.postMessage\(\{ type: "closeTab", id \}\);/);

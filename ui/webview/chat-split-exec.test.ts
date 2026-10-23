@@ -481,15 +481,15 @@ function idleWorld(o: { col?: string; provisionalId?: string | null; failed?: st
   const win = { parent: { postMessage(m: Record<string, unknown>) { posts.push(m); } }, frameElement: { id: "f-chat-" + (o.col || "1") } };
   const js = requireCjs("esbuild").transformSync(
     [fn("noteColumnIdle"), fn("dropProvisional"), fn("takeProvisionalTab"), fn("failProvisional"), fn("keepProvisional"), fn("cancelProvisional"),
-     fn("closeTabLocally"), fn("closeKeptTab"), fn("keptDiscardTitle"), fn("discardKeptTab")].join("\n"), { loader: "ts" }).code;
+     fn("closeTabLocally"), fn("closeKeptTab"), fn("tabDiscardTitle"), fn("discardKeptTab")].join("\n"), { loader: "ts" }).code;
   const prelude = `
     const { isProvisionalId } = W;
     const COL = W.col;
     let provisionalId = W.provisionalId, provisionalTags = [], pendingNewSession = W.provisionalId ? "api" : null, provisionalTimer = undefined, activeId = null;
     const provisionalQueue = [], drafts = new Map(), pendingSent = new Map(), closingTabs = new Map(), sessions = new Map(), dismissed = [], confirms = [];
     const failedProvisionals = new Set(W.failed || []), supersededProvisionals = new Set();
-    let heldBack = null;   // the held sends' note (paintHeldBackNote)
-    const clearHeldBackNote = () => { heldBack = null; }, syncView = () => {};
+    const heldBack = new Map();   // the held sends' lines, per tab (paintHeldBackNote)
+    const paintHeldBackNote = () => {}, syncView = () => {};
     const document = { getElementById: () => null };
     const clearTimeout = () => {};
     const dismissSession = (id) => { dismissed.push(id); };
