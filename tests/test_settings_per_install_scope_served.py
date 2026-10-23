@@ -11,8 +11,9 @@ and their values, and the selector's count includes it; (2) a click there sets E
 the click's stamp), and Conserve memory's click does too, stamped; (3) agreeing again, the row is plain and unflagged; (4) picked
 to B alone, a click applies to B and leaves A, never pinning (nothing converges a per-install store).
 
-The #374 review's follow-ups, on the same lab: (2) a click on the mixed box follows the one stated rule, ON for every machine in
-scope, and the flag's hover says so (it used to set the opposite of THIS machine's value); (5) under a pick of B, a click B
+The #374 review's follow-ups, on the same lab: (2) a click on the mixed box follows the one stated rule, OFF for every machine in
+scope, the side that does nothing (the #377 review: #377 had it land on; before it the click set the opposite of THIS machine's
+value), a second click turns it ON, and the flag's hover says so; (5) under a pick of B, a click B
 refuses (B holds a stamp no click from here outranks) toasts with the refused value, and the toast's Apply anyway applies on B
 alone, its hover naming B (the re-post used to go out unscoped, the broadcast, and set A too); (6) B made to look like an older
 kernel (A's /tunnels row for B, routed in the browser, without the three rows such a kernel never reported) reads UNKNOWN on B
@@ -103,15 +104,21 @@ const tab = async (f, name) => { await f.click('.rs-tab[data-tab="' + name + '"]
 // (1) All kernels, the kernels disagreeing on Thinking summaries (A on, B off)
 let f = await openSettings();
 out.disagree = await row(f, "rs-thinksum");
-// (2) a click under All kernels sets every kernel. The mixed box's click follows the stated rule, ON for every machine in scope
-// (the #374 review: it used to set the opposite of THIS machine's value, off here, and the screen never said which way); the
-// next click takes both off, the one after both on again
+// (2) a click under All kernels sets every kernel. The mixed box's click follows the stated rule, OFF for every machine in scope,
+// the side that does nothing (the #377 review: #377 had it land on; before it the click set the opposite of THIS machine's
+// value, and the screen never said which way); the second click takes both on again
 await tab(f, "chat");
 await f.click("#rs-thinksum");
-out.firstOn = await until(async () => (await version(cfg.versionA)).thinkingSummaries === true && (await version(cfg.versionB)).thinkingSummaries === true, 30);
+out.firstOff = await until(async () => (await version(cfg.versionA)).thinkingSummaries === false && (await version(cfg.versionB)).thinkingSummaries === false, 30);
 out.afterFirst = { a: (await version(cfg.versionA)).thinkingSummaries, b: (await version(cfg.versionB)).thinkingSummaries };
-await f.click("#rs-thinksum");
-out.bothOff = await until(async () => (await version(cfg.versionA)).thinkingSummaries === false && (await version(cfg.versionB)).thinkingSummaries === false, 30);
+// the second click meets the row as the kernels now stand: A's row for B carries B's off, and a fresh read draws the row plain
+// and unticked (a read from before the row caught up would still show the two disagreeing)
+out.firstCaughtUp = await until(async () => { const d = await version(cfg.tunnels); return (d.tunnels || []).some((t) => t.host === cfg.peer && t.settings && t.settings.thinkingSummaries === false); }, 60);
+await closeSettings(f);
+f = await openSettings();
+await tab(f, "chat");
+await f.waitForFunction(() => { const b = document.getElementById("rs-thinksum"); const m = b.closest("label").querySelector(".rs-mixed"); return !b.indeterminate && !b.checked && (!m || m.hidden); }, null, { timeout: 15000 }).catch(() => {});
+out.afterFirstBox = await row(f, "rs-thinksum");
 await f.click("#rs-thinksum");
 out.bothOn = await until(async () => (await version(cfg.versionA)).thinkingSummaries === true && (await version(cfg.versionB)).thinkingSummaries === true, 30);
 await tab(f, "general");
@@ -267,16 +274,21 @@ class ServedPerInstallScope(unittest.TestCase):
         self.assertIn(PEER + " off", d["mark"]["title"])
         self.assertEqual(d["count"], "1 differs", "the selector counts the per-install row too")
         self.assertIn("Thinking summaries: ", d["countTitle"])
-        self.assertIn("A click turns it on for every machine", d["mark"]["title"], "the hover says which way a click on the mixed box goes")
+        self.assertTrue(d["checked"], "…held TICKED under the dash, so a click lands on off: %r" % d)
+        self.assertIn("A click turns it off for every machine; click again to turn it on. Pick a machine above to set it alone.",
+                      d["mark"]["title"], "the hover says which way a click on the mixed box goes, and the way back")
 
-    def test_a_click_on_the_mixed_box_turns_it_on_for_every_kernel_the_stated_rule(self):
+    def test_a_click_on_the_mixed_box_turns_it_off_for_every_kernel_the_stated_rule(self):
         r = self._result()
-        self.assertTrue(r["firstOn"], "the click on the mixed box set ON on both, the stated rule (A was on, B off): %r" % r["afterFirst"])
+        self.assertTrue(r["firstOff"], "the click on the mixed box set OFF on both, the stated rule (A was on, B off): %r" % r["afterFirst"])
+        self.assertEqual(r["afterFirst"], {"a": False, "b": False})
+        self.assertTrue(r["firstCaughtUp"], "A's row for B caught up with B's off")
+        b = r["afterFirstBox"]
+        self.assertEqual((b["checked"], b["indeterminate"], b["mark"]), (False, False, None), "agreeing off, the row reads plain off: %r" % b)
 
     def test_a_click_under_all_kernels_sets_every_kernel(self):
         r = self._result()
-        self.assertTrue(r["bothOff"], "the next click set off on both")
-        self.assertTrue(r["bothOn"], "the next click set on on BOTH kernels, not this one alone: %r" % r["afterAll"])
+        self.assertTrue(r["bothOn"], "the second click set on on BOTH kernels, not this one alone: %r" % r["afterAll"])
         a, b = r["afterAll"]["a"], r["afterAll"]["b"]
         self.assertEqual((a["thinkingSummaries"], b["thinkingSummaries"]), (True, True))
         self.assertEqual(b["settingsGt"]["thinking-summaries"], a["settingsGt"]["thinking-summaries"], "B applied the click's own stamp")

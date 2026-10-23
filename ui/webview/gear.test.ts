@@ -261,11 +261,17 @@ test("every kernel-side select says so when connected machines disagree (the aut
     "non-reporting rows are excluded, not read as disagreeing");
   assert.ok(GEAR.includes("mark.title = 'The kernels disagree: ' + vals.join(', ')"), "the hover names the machines and their values");
   assert.ok(GEAR.includes("if (box) mixBox(el);"), "a disagreeing box shows the mixed state, never this kernel's value as everyone's");
-  // ONE rule for a click on a mixed box (the #374 review): it turns the setting ON for every machine in scope. The box holds
-  // checked=false under the dash, so the click's toggle lands on, and the flag's hover ends with what a click does there
-  assert.ok(GEAR.includes("function mixBox(el) { el.indeterminate = true; el.checked = false; }"), "a mixed box holds unticked under its dash");
+  // ONE rule for a click on a mixed box: it turns the setting OFF for every machine in scope, the side that does nothing, and
+  // a second click turns it on (the #377 review; #377 had it land on, which for most of these boxes spends or acts). The box
+  // holds checked=true under the dash, so the click's toggle lands on off, and the flag's hover ends with what a click does
+  // there. gear-mixed-click-browser.test.ts clicks every mixable box in a real browser; these pin the wiring
+  assert.ok(GEAR.includes("function mixBox(el) { el.indeterminate = true; el.checked = true; }"), "a mixed box holds TICKED under its dash");
+  assert.ok(!GEAR.includes("el.checked = false; }"), "…never unticked, where a click would land on");
   assert.ok(GEAR.includes("mark.title = 'The kernels disagree: ' + vals.join(', ') + '. ' + clickRule(key, isBox, mixedHere);"), "the hover says what a click does");
-  assert.ok(GEAR.includes("if (isBox && mixed) return 'A click turns it on for ' + where"), "…the rule, in words");
+  assert.ok(GEAR.includes("if (isBox && mixed) return picked ? 'A click turns it off for ' + where + '.'"), "…the rule, in words, under a pick");
+  assert.ok(GEAR.includes(": 'A click turns it off for every machine; click again to turn it on.' + (followsScope(key) ? ' Pick a machine above to set it alone.' : '');"),
+    "…and under All kernels, with the way back and, on a row that follows the picker, how to set one machine alone");
+  assert.ok(!/turns it on for/.test(GEAR), "no copy left that says a click turns a mixed box on");
   assert.ok(GEAR.includes("lastDiffs.push({ label: STALE_LABELS[storeOf(key)] || key, vals: vals });") && GEAR.includes("var diffs = lastDiffs;"),
     "the selector's count counts every disagreeing kernel-side row");
   const mixedSpans = GEAR.match(/class=rs-mixed hidden/g) || [];
@@ -289,7 +295,7 @@ test("the Auto Nudge box speaks for every attached machine, and says so when the
   // setting as everyone's — the user 2026-08-14 unchecked it and the other machine kept nudging with
   // nothing on screen to say so. The reconcile reads each attached row's own setting off /tunnels.
   assert.ok(GEAR.includes("fetch(ku('/tunnels')"), "the box must check the OTHER kernels, not just /version");
-  assert.ok(GEAR.includes("mixBox(an);"), "hosts that disagree put the box in the mixed state, whose click turns it on (the one rule)");
+  assert.ok(GEAR.includes("mixBox(an);"), "hosts that disagree put the box in the mixed state, whose click turns it off (the one rule)");
   assert.ok(GEAR.includes("rs-autonudge-split"), "…said in words too — a tri-state box alone reads past");
   assert.ok(GEAR_CSS.includes(".rs-mixed"), "…and that marker needs its styling, or it inherits nothing");
   assert.ok(/t\.status === 'up'/.test(GEAR) && /typeof t\.autoNudge === 'boolean'/.test(GEAR),
