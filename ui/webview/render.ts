@@ -23563,14 +23563,14 @@ function closeKeptTab(id: string): void {
   const text = ((activeId === id && ta) ? ta.value : (drafts.get(id) ?? "")).trim();
   const title = tabDiscardTitle(sessions.get(id)?.name || "this tab", stagedMsgs.count(id), !!text, (composerFiles.get(id) ?? []).length > 0);
   if (!title) { discardKeptTab(id); return; }
-  showConfirm(title, "", [{ label: "Cancel", value: "" }, { label: "Discard", value: "discard", danger: true }],
+  showConfirm(title, "", [{ label: "Keep", value: "" }, { label: "Discard", value: "discard", danger: true }],
     (v) => { if (v === "discard" && failedProvisionals.has(id)) discardKeptTab(id); });
 }
 // The ✕ on the tab of the create IN FLIGHT (provisionalId): confirming it cancels the create and discards everything the
 // tab holds, its staged messages, its text, its attachments and the sends it is holding for the session (cancelProvisional),
 // none of which is anywhere else. It asked what a running session's ✕ asks ("End “api”? The session shuts down…", End
 // session focused), which named none of it (2026-10-23, the review of #373). A tab holding any of it asks the kept tab's
-// question instead (closeKeptTab), naming each thing, Cancel first and focused; true when it asked. One holding nothing
+// question instead (closeKeptTab), naming each thing, Keep first and focused; true when it asked. One holding nothing
 // is left to the caller's End question, as before (false). The answer is for the create in flight: a session that
 // arrived while the question was up took what the tab held (adoptProvisional), so Discard acts only while it is opening.
 function closeOpeningTab(id: string): boolean {
@@ -23580,14 +23580,15 @@ function closeOpeningTab(id: string): boolean {
   const title = tabDiscardTitle(sessions.get(id)?.name || "this session", stagedMsgs.count(id), !!text,
                                 (composerFiles.get(id) ?? []).length > 0, provisionalQueue.length, true);
   if (!title) return false;
-  showConfirm(title, "", [{ label: "Cancel", value: "" }, { label: "Discard", value: "discard", danger: true }],
+  showConfirm(title, "", [{ label: "Keep", value: "" }, { label: "Discard", value: "discard", danger: true }],
     (v) => { if (v === "discard" && provisionalId === id) closeTabLocally(id); });
   return true;
 }
 /** The question before a new session's tab's ✕ discards what it holds, naming each thing: a kept tab's ("Discard api's 1
  *  staged message and the text in its box?") or, `opening`, the create in flight's, which its ✕ also cancels ("Cancel
  *  starting api and discard its 1 staged message, 2 unsent messages and the text in its box?"). `held`: the sends it is
- *  holding for the session. "" when it holds nothing. */
+ *  holding for the session. "" when it holds nothing. Both questions answer Keep or Discard, never Cancel: under a title
+ *  that opens "Cancel starting api", a Cancel button reads as cancelling the start, the opposite of what it does. */
 function tabDiscardTitle(name: string, staged: number, text: boolean, files: boolean, held = 0, opening = false): string {
   const count = (n: number, what: string) => n + " " + what + (n === 1 ? "" : "s");
   const own = [staged ? count(staged, "staged message") : "", held ? count(held, "unsent message") : ""].filter(Boolean);
