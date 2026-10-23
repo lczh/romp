@@ -5326,6 +5326,42 @@ class BgTaskLifecycle(unittest.TestCase):
         self.assertEqual(reg["queue"], [sb.CRASH_RESUME_NUDGE, note], "the persisted queue agrees")
         self.assertEqual(reg["bgTasks"], [])
 
+    def test_a_top_level_crash_resume_hears_dead_tasks_after_the_nudge_and_keeps_the_notice(self):
+        # the top-level twin of the thread case above, with the real session the heal starts: the CLI of 'web' dies
+        # mid-turn with a dev server running in the background and no host keeping it, so the crash heal resumes it. The
+        # fresh session holds the nudge, then the notice, the boot reconcile's order, and the notice survives the feed of
+        # the nudge. Before 2026-10-23 the notice was saved after the heal had started the session from the saved queue:
+        # the running session held the nudge alone, its first save after feeding it overwrote the saved notice, and the
+        # mirror was already empty, so the session never heard its dev server had died.
+        root = tempfile.mkdtemp()
+        _hosts_off(root)
+        be = sb.SdkBackend(root, "/bin/true", lambda *a, **k: None)
+        sid = "5e1a7c0d-9b2f-4e61-8a3d-0c7f2b9e4d15"          # private synthetic sid
+        sb.write_reg(be.state_dir, sid, {"sid": sid, "name": "web", "cwd": "/tmp", "alive": True, "queue": []})
+        sb.append_state(be.state_dir, sid, "working")
+        s = sb.SdkSession(be, sb.read_reg(be.state_dir, sid))
+        be.sessions[sid] = s
+        self._feed(s, "task_started", {"task_id": "b1", "description": "dev server"})
+        note = sb.task_death_notice(s._live_bg_tasks())
+        s.inflight = 1                                       # mid-turn: the crash-resume path
+
+        def _start(sess):                                    # the fresh session runs: no CLI, a live thread
+            sess.thread = mock.Mock(is_alive=lambda: True)
+
+        with mock.patch.object(sb.SdkSession, "start", _start):
+            be._on_session_gone(s)
+        s2 = be.sessions.get(sid)
+        self.assertIsNotNone(s2)
+        self.assertIsNot(s2, s, "the heal started a fresh session")
+        self.assertEqual(s2.pending(), [sb.CRASH_RESUME_NUDGE, note], "the running session holds the nudge, then the notice")
+        with s2._lock:                                       # the feeder takes the head and saves, as inputs() does
+            fed, _ = s2._pop_for_feed_locked(0)
+        s2._persist_queue()
+        self.assertEqual(fed, sb.CRASH_RESUME_NUDGE)
+        reg = sb.read_reg(be.state_dir, sid)
+        self.assertEqual((s2.pending(), reg["queue"]), ([note], [note]), "the notice outlives the nudge's feed")
+        self.assertEqual(reg["bgTasks"], [], "reported once")
+
     def test_construction_heals_stranded_pending_switch_flags(self):
         # a pending /model / /effort switch that died with the previous process must not strand the
         # switching-dots (the user 2026-07-11): a fresh construction applies both at its next connect,

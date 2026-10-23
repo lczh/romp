@@ -23739,6 +23739,26 @@ class SdkBackend:
             self._land_at_cli_end(sess)   # its CLI ended (a detach's host keeps it): a waiting billing switch lands, before
             #                               anything below starts the session again (the crash heal, the task-death notice);
             #                               a lease that cannot be read lands nothing, its host may still run the old CLI
+        # The background tasks' death notice (said and woken below) is saved BEFORE the crash heal, whose resume starts the
+        # fresh session from the saved queue: the heal's nudge then goes ahead of it, the boot reconcile's order. Saved after
+        # the heal (2026-10-23), it reached only the saved queue, which the running session's first save after feeding the
+        # nudge overwrote, and the emptied mirror left nothing to report the deaths later: a session that crashed mid-turn
+        # never heard its dev server had died.
+        died = sess._live_bg_tasks()
+        tell_died = bool(died) and not sess.ended and not hosted
+        told = False
+        if tell_died:
+            try:
+                note = task_death_notice(died)
+                with self._reg_lock:
+                    reg = read_reg(self.state_dir, sess.sid) or {"sid": sess.sid}
+                    reg["queue"] = [t for t in (reg.get("queue") or [])
+                                    if isinstance(t, str) and t and t != note] + [note]
+                    reg["bgTasks"] = []           # reported — never re-notify for the same deaths
+                    write_reg(self.state_dir, sess.sid, reg)
+                told = True
+            except Exception:
+                self._log("bg-task death notice (%s): %s" % (sess.name, traceback.format_exc()))
         healed = False                    # the crash heal or the attach again below ran: it starts the session again itself
         if not sess.ended and not sess.detached:
             if sess.inflight > 0 and not sess._interrupted and hosted:
@@ -23787,19 +23807,12 @@ class SdkBackend:
         # (_seed_surviving_work). Told otherwise, the agent could start duplicates, and the emptied mirror
         # let a relaunch waiting for quiet cut them for real. A detach whose host has gone is still told:
         # its CLI went with it.
-        died = sess._live_bg_tasks()
-        if died and not sess.ended and not hosted:
-            try:
-                note = task_death_notice(died)
-                with self._reg_lock:
-                    reg = read_reg(self.state_dir, sess.sid) or {"sid": sess.sid}
-                    reg["queue"] = [t for t in (reg.get("queue") or [])
-                                    if isinstance(t, str) and t and t != note] + [note]
-                    reg["bgTasks"] = []           # reported — never re-notify for the same deaths
-                    write_reg(self.state_dir, sess.sid, reg)
-                self._ensure(sess.sid)            # wake it to hear the notice (no-op if the heal respawned)
-            except Exception:
-                self._log("bg-task death notice (%s): %s" % (sess.name, traceback.format_exc()))
+        if tell_died:
+            if told:
+                try:
+                    self._ensure(sess.sid)        # wake it to hear the notice (no-op if the heal respawned)
+                except Exception:
+                    self._log("bg-task death notice (%s): %s" % (sess.name, traceback.format_exc()))
         elif died and not sess.ended and not sess.detached and not healed:
             # the stream to a host that still runs the CLI broke (a host fault, a socket error) and the session did not stand
             # down: nothing died, so nothing is said, but the notice's wake was this session's only road back to its host. Left
