@@ -469,11 +469,11 @@ test("a box is named by its title alone and described by its state, what a click
 });
 
 // The Account row's stored-logins block as drawn: its rows' names, the failure said in their place and its colour beside the
-// blocked red's (a probe in the block wearing the token), and the row's description
+// error red's (a probe in the block wearing the error-text token), and the row's description
 const loginsBlock = (page: any) => page.evaluate(() => {
   const bad = document.querySelector("#rs-logins .rs-login-bad") as HTMLElement | null;
   const probe = document.createElement("span");
-  probe.style.color = "var(--err, #F85B5A)";
+  probe.style.color = "var(--err-fg, #F85B5A)";   // the error red as text (the review of #387; theme-parity.test.ts holds its contrast)
   document.getElementById("rs-logins")!.appendChild(probe);
   const red = getComputedStyle(probe).color;
   probe.remove();
@@ -498,7 +498,7 @@ test("a reopen whose stored-logins read fails says so in place of the rows an ea
     const failed = await loginsBlock(page);
     assert.deepEqual(failed.rows, [], "the earlier open's rows are not shown as this machine's logins now");
     assert.equal(failed.said, SAID_500, "the failure is said in their place, with the status");
-    assert.equal(failed.red, true, "…in the block's own blocked red, not the muted ink of the lines around it");
+    assert.equal(failed.red, true, "…in the error red the block's words wear, not the muted ink of the lines around it");
     assert.doesNotMatch(failed.desc, /other logins below|No other Claude logins/, "nor does the row's description speak from the earlier answer");
     lab.loginsFail = 0;
     await reopen(page);

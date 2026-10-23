@@ -1232,14 +1232,14 @@ function initGear(post, opts) {
   // under the machine's own with a Remove each. Read from the kernel's authed /logins on every settings fill
   // and after a Remove: labels, organisations, dates and states, never a token. A Remove acknowledges at once
   // (the row goes, the button disables) and the re-read confirms.
-  // lgLast: the newest /logins answer to arrive, less the logins a Remove has taken out since (the Remove's click), and lgFills:
-  // how many settings fills have asked for it; lgFailed: by fill number, the fills whose /logins read failed, each entered once
-  // its own /tunnels read has settled; lgWait: the newest fill whose rows wait on a later fill (0: none); lgKernels: the kernel
-  // list of the newest fill whose /tunnels read has settled, and lgKernelsN that fill's number (all lgFetchLogins); lgPicks: by
-  // stored login's id, the machine picked in its row and not yet sent with Link (lgLogins). lgOpen: how many times the panel has
-  // opened (openSettings); lgLastOpen: the open in which lgLast was asked for; lgShownOpen: the open whose answer the rows on screen
-  // were drawn from, -1 while none is (nothing drawn yet, or the read's failure said instead); lgFail: the newest failed /logins
-  // read, {open, why} (all lgDraw)
+  // lgLast: the newest /logins answer to arrive from the newest open any answer came from, less the logins a Remove has taken out
+  // since (the Remove's click), and lgFills: how many settings fills have asked for it; lgFailed: by fill number, the fills whose
+  // /logins read failed, each entered once its own /tunnels read has settled; lgWait: the newest fill whose rows wait on a later fill
+  // (0: none); lgKernels: the kernel list of the newest fill whose /tunnels read has settled, and lgKernelsN that fill's number (all
+  // lgFetchLogins); lgPicks: by stored login's id, the machine picked in its row and not yet sent with Link (lgLogins). lgOpen: how
+  // many times the panel has opened (openSettings); lgLastOpen: the open in which lgLast was asked for; lgShownOpen: the open whose
+  // answer the rows on screen were drawn from, -1 while none is (nothing drawn yet, or the read's failure said instead); lgFail: the
+  // failed /logins read of the newest open any failure came from, the latest to arrive of that open's, {open, why} (all lgDraw)
   var lgL = document.getElementById('rs-logins'), lgLast = null, lgFills = 0, lgFailed = {}, lgWait = 0, lgKernels = [], lgKernelsN = 0, lgPicks = {},
     lgOpen = 0, lgLastOpen = -1, lgShownOpen = -1, lgFail = null;
   function lgDate(t) { try { return new Date(t * 1000).toLocaleDateString(); } catch (e) { return ''; } }
@@ -1409,7 +1409,8 @@ function initGear(post, opts) {
   // (Remove, a link's or an unlink's ok, a finished sign-in) pass nothing and draw at once, with the same kernel list.
   // A drawing draws lgLast, not its fill's own answer: a link or a Remove pressed while /tunnels is on its way has its re-read drawn
   // at once, and the fill's answer drawn after it showed the link undone and the removed login back, though the kernel held the
-  // change. That holds when the fill's own answer arrived first; an older answer that arrives after the re-read is still drawn.
+  // change. That holds when the fill's own answer arrived first; an older answer of the same open that arrives after the re-read
+  // is still drawn (one of an earlier open is not kept at all: below).
   // While a link or an unlink is on its way (lgBusy), a fill's drawing is skipped (lgSkipped, lgPost).
   // `after` rejects only when fill()'s own catch threw; that is logged, as fill()'s catch logs the /tunnels failure, and the rows
   // are drawn all the same.
@@ -1421,12 +1422,21 @@ function initGear(post, opts) {
   // drew stand: they are as current as the rest of the panel, so a later failure in the same open is logged and erases nothing. The
   // ordering above holds for the failure too: it is decided where a drawing would be, so a fill that stands down says nothing, and
   // a later fill whose read succeeds draws over it.
+  // THE NEWEST OPEN WINS (the review of #387, the rule #383 set for the pickers' begin order): what an older open's reads bring,
+  // good or failed, never replaces what a newer open's reads have set. An older open's answer is not kept once a newer open's has
+  // arrived, and says nothing on the account lines once a newer open's read has failed; an older open's failure is logged and
+  // replaces no newer one. Without that, a reopen's failure said one reason and then the first open's late failure's (lgFail held
+  // whichever arrived last), the first open's good answer landing after both drew over the reopen's failure, and its late answer
+  // replaced the reopen's good one in lgLast, so the reopen's later failure took that good answer off the screen as an earlier
+  // open's. Within the newest open with any result the latest result stands, but for the rule above that a failure after a good
+  // answer of the same open erases nothing: the block shows that open's rows when any read of it answered, and its failure when
+  // none did (lgDraw).
   function lgLater(n) {   // a fill numbered after n that has not given up (a failed read gives up once its /tunnels read settles)
     for (var k = n + 1; k <= lgFills; k++) if (!lgFailed[k]) return true;
     return false;
   }
-  function lgDraw() {   // lgLast's rows, unless it was asked for before this open and a read asked for in this open has failed
-    if (lgLastOpen !== lgOpen && lgFail && lgFail.open === lgOpen) { lgError(); return; }
+  function lgDraw() {   // lgLast's rows, unless a read of an open after lgLast's has failed: then that failure
+    if (lgFail && lgFail.open > lgLastOpen) { lgError(); return; }
     lgShownOpen = lgLastOpen;
     lgLogins(lgLast);
   }
@@ -1452,9 +1462,11 @@ function initGear(post, opts) {
       if (!r.ok) throw { why: 'HTTP ' + r.status };
       return r.json();
     }).then(function (d) {
-      lgLast = d;
-      lgLastOpen = opened;
-      lgOwn(d);
+      if (opened >= lgLastOpen) {   // an older open's answer is not kept over a newer open's, nor said over its failure (above)
+        lgLast = d;
+        lgLastOpen = opened;
+        if (!lgFail || lgFail.open <= opened) lgOwn(d);
+      }
       function rows() {
         if (mine) {
           if (lgLater(mine)) { if (mine > lgWait) lgWait = mine; return; }
@@ -1465,15 +1477,17 @@ function initGear(post, opts) {
       }
       return Promise.resolve(after).then(rows, rows);
     }, function (err) {
-      lgFail = { open: opened, why: (err && err.why) || (err instanceof SyntaxError ? 'an unreadable answer' : 'no answer') };
-      try { console.error('romp: settings: the stored logins read failed: ' + lgFail.why, err); } catch (_e) {}
+      var why = (err && err.why) || (err instanceof SyntaxError ? 'an unreadable answer' : 'no answer');
+      try { console.error('romp: settings: the stored logins read failed: ' + why, err); } catch (_e) {}
+      if (!lgFail || opened >= lgFail.open) lgFail = { open: opened, why: why };   // an older open's failure replaces no newer one's
       if (!mine) return;
       // this fill gives up its claim: a fill waiting on it draws if no later fill is left and no link or unlink is on its way; with
-      // none waiting and none later, the read's failure is said unless a fill of this open has drawn
+      // none waiting and none later, the block is drawn as the newest open's results have it (lgDraw: the failure, unless a read
+      // of that open answered) unless a fill of this open has drawn
       function gone() {
         lgFailed[mine] = true;
         if (lgWait && !lgLater(lgWait)) { lgWait = 0; if (!lgBusy) lgDraw(); else lgSkipped = true; }
-        else if (!lgWait && !lgLater(mine) && lgShownOpen !== lgOpen) { if (!lgBusy) lgError(); else lgSkipped = true; }
+        else if (!lgWait && !lgLater(mine) && lgShownOpen !== lgOpen) { if (!lgBusy) lgDraw(); else lgSkipped = true; }
       }
       Promise.resolve(after).then(gone, gone);
     }).catch(function () {});
