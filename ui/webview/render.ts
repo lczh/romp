@@ -6471,11 +6471,13 @@ function applyTabOrder(o: any, tabs?: any, report?: OrderReport, live?: any) {
 // and its chord — there is nothing to switch to — and a renamed one is re-titled, so the shortcuts dialog never
 // says "Switch to <old name>". The pane owns this end because only it knows the strip; the shell hears the writes
 // (storage events) and follows them in its registry. Every column runs it on the same push: the first to write
-// wins, the rest find the set already right.
+// wins, the rest find the set already right. Only a session whose host can speak for it is judged (hostsSeen, and
+// reachableHosts for a linked machine; tab-keys.ts goneTabKeys): the local strip lands first on a fresh page, and
+// judged against it a linked machine's hot key was erased on every reload (review, 2026-10-23).
 function syncTabKeysWithStrip(): void {
   if (!inRompShell()) return;   // the set exists only under the shell's dispatcher
   const set = loadTabKeys(localStorage);
-  for (const sid of goneTabKeys(set, order)) { forgetTabKey(localStorage, sid); saveOverride(hotkeyCommandId(sid), null); }
+  for (const sid of goneTabKeys(set, order, hostsSeen, reachableHosts())) { forgetTabKey(localStorage, sid); saveOverride(hotkeyCommandId(sid), null); }
   for (const [sid, name] of renamedTabKeys(set, (sid) => sessions.get(sid)?.name)) rememberTabKey(localStorage, sid, name);
 }
 // The tabOrder frame's `skeleton` list (2026-09-07): the tabs the kernel is withholding from this page after a
