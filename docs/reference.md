@@ -4249,7 +4249,15 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   first cycle, and `refused` the requests answered 503 because a product's
   build failed since it was built (the kept copy may be stale, so it is not
   served and no request builds its own; the kernel log says such a fault once
-  when it starts and once when the product builds again); `nudgeWalk` is the auto-nudge walk's
+  when it starts and once when the product builds again); `liveMap` is the
+  live session map: `built` counts its reads, `shared` the readers on other
+  threads (the jobs pass, the question poll, a request handler) that took the
+  map the pusher's cycle last published instead of reading their own,
+  `published` the reads published for them, `unkeyed` the reads no backend
+  revision could vouch for (never shared), and `sharing` whether this kernel
+  shares at all (on once its loops run). A published map serves until the next
+  pusher wake, a registration written, a session entering or leaving the
+  running set, or the next cycle, which always reads afresh; `nudgeWalk` is the auto-nudge walk's
   parse gate (T401): `looks`, `skippedParses` (a session whose files are
   unchanged since its last completed look and whose clock legs, noted by that
   look with the instant each could flip, have not come due; the skip repeats

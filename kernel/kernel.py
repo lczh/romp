@@ -1362,6 +1362,8 @@ class _PerfStats:
             except Exception:
                 memos[key] = {}
         memos["nudgeGate"] = dict(_NUDGE_GATE_STATS)   # the nudge walk's placement gate: served vs re-derived (2026-09-09)
+        memos["liveMap"] = dict(_LIVE_MAP_STATS, sharing=bool(_LIVE_SHARING[0]))   # the liveness map: reads made, served from the
+        #                                                published one, unkeyed, published (THE SHARED LIVENESS SNAPSHOT, 2026-10-23)
         memos["ghostDropped"] = dict(_GHOST_DROPPED, restamped=dict(_GHOST_DROPPED["restamped"]))   # the spawned-at ghost
         #   floor's drops: bgTasks and agents (cumulative, once per build), and what a RE-STAMP dropped (2026-09-14)
         memos["convergeDeclined"] = _CONVERGE_DECLINED[0]   # converges that asked no restart because this kernel was leaving
@@ -1787,6 +1789,8 @@ class _CountedEvent(threading.Event):
 
     def set(self):
         _PERF_STATS.wake()
+        with _LIVE_EVENTS_LOCK:   # an announced change: the shared liveness map stands down (THE SHARED LIVENESS SNAPSHOT);
+            _LIVE_EVENTS[0] += 1  #   locked, since two wakes counted as one would let a read taken between them serve on
         super().set()
 
 
@@ -18386,7 +18390,7 @@ def _live_names_now():
     saved = getattr(_live_scope, "snapshot", None), getattr(_live_scope, "names", None)
     _live_scope.snapshot = _live_scope.names = None
     try:
-        return _live_names(_live_map())
+        return _live_names(_live_fresh())        # NOW: never the shared snapshot either (THE SHARED LIVENESS SNAPSHOT)
     finally:
         _live_scope.snapshot, _live_scope.names = saved
 
@@ -25705,9 +25709,120 @@ def _live_map():
     """Live lane metadata across the backends — the liveness merge every read takes, keyed by sid. Thin
     delegator kept for its call sites; the impl is Sessions.live() (the SDK backend's live_sessions merged
     with the Codex backend's). Inside a pusher cycle (this thread's _live_scope), the cycle's one snapshot
-    is served instead. (Named _tmux_sessions until the tmux backend's removal, 2026-09-11.)"""
+    is served instead; outside one, the shared snapshot while no liveness event has happened since its read
+    began, else a fresh read (_live_shared). (Named _tmux_sessions until the tmux backend's removal, 2026-09-11.)"""
     snap = getattr(_live_scope, "snapshot", None)
-    return snap if snap is not None else Sessions.live()
+    if snap is not None:
+        return snap
+    return _live_shared()[0] if _LIVE_SHARING[0] else _live_read()
+
+
+# THE SHARED LIVENESS SNAPSHOT (2026-10-23). The thread scope above made the pusher read the live map once per cycle, but
+# every OTHER thread still read its own: the jobs pass one per pass, the question poll one per tick, and each request
+# handler one per read (a WS op's name lookups, a connect push, a history page). On a box with 65 sessions those reads were
+# two fifths of the kernel's busy samples (2026-10-23), the pusher's own included. The pusher's cycle now PUBLISHES the map it
+# reads (_live_build), and a reader on another thread takes the published map instead of reading its own, for as long as
+# nothing that moves a row has happened since that read began. That is decided by an EVENT key, never by age (_live_key):
+#   - a pusher wake (_CountedEvent.set counts _LIVE_EVENTS): every change a backend announces (a turn's start and end, a
+#     live-tail atom, a pick's relaunch), every kernel-side mutation (_push_soon, _mark_views_dirty, _wake_kernel);
+#   - each backend's own listing revision (listing_rev): the SDK backend's registry writes in this process (REG_REV), its
+#     registry directory's stamp (a write by another process, the outgoing kernel in a handover), and its running set (each
+#     session object and whether its thread runs), so a session that starts or ends is a new key before any wake; the Codex
+#     backend's rows themselves (read from memory, as cheap as any fingerprint of them);
+#   - the backends themselves (their ids ride their revisions), so a backend swapped in is a new key.
+# A backend with no listing_rev (a test's stand-in) cannot vouch for its rows: the key is None and every read is fresh. A row
+# input nothing announces (a running session's field the backend changes without a wake, a settings file edited by hand, a
+# write in the registry directory's same clock tick as the key's read) is read by the next pusher cycle, which always reads
+# afresh and publishes: the backstop is the cycle, the same one the panes are built on. The jobs pass also never takes the
+# same published map twice (its previous pass's sequence number): with the pusher held in a long build, the pass reads its
+# own and publishes that, so the published map stays a pass old at most while either loop runs. Readers get one map object,
+# replaced whole and never mutated (every reader already treats the cycle's map as read-only; _thread_events copies before
+# it adds a row), so a reader on any thread holds a consistent snapshot. The reads that must see the world NOW read afresh
+# as before: _live_names_now's name claim, _confirm_close_now's close confirmation, the timeline builder's phase (whose
+# build is ordered against the pusher's snapshot by its start), and every direct Sessions.live() caller.
+#
+# Sharing is on only in a running kernel (main turns it on as it starts the loops). A process that loads the kernel and
+# drives a cycle by hand, as the test suite does, reads exactly as before: every door below then reads through _live_map,
+# the seam a test stubs, and nothing is published, since a map published by one test's cycle must never answer the next
+# test's read. A test of the sharing itself turns it on (_LIVE_SHARING) and puts it back.
+_LIVE_SHARING = [False]
+_LIVE_EVENTS = [0]                 # pusher wakes (_CountedEvent.set): every announced change
+_LIVE_EVENTS_LOCK = threading.Lock()
+_LIVE_SHARED = [None]              # (key, seq, t, map): the newest published map, the key it was read under, its sequence number
+#                                    and the wall stamp taken before its read (a reader's world_t); replaced whole, under the lock
+_LIVE_SHARED_LOCK = threading.Lock()
+_LIVE_SEQ = [0]                    # the reads' sequence: a read that began later publishes over one that began earlier, never under
+_LIVE_JOBS_SEQ = [0]               # the sequence number of the map the jobs pass took last (see the block above)
+_LIVE_MAP_STATS = {"built": 0, "shared": 0, "unkeyed": 0, "published": 0}   # /perf memos.liveMap: reads made, maps served from
+#                                                                              the published one, reads no key could vouch for,
+#                                                                              and reads published
+
+
+def _live_key():
+    """The event key a published liveness map stands under (see THE SHARED LIVENESS SNAPSHOT), or None when a backend
+    cannot vouch for its rows (no listing_rev, or one that raised): such a read is fresh and never published."""
+    key = [_LIVE_EVENTS[0]]
+    for be in (_sdk(), _codex()):
+        if be is None:
+            key.append(None)
+            continue
+        fn = getattr(be, "listing_rev", None)
+        if fn is None:
+            return None
+        try:
+            key.append(fn())
+        except Exception:
+            return None
+    return tuple(key)
+
+
+def _live_read():
+    """One liveness read: Sessions.live(), counted under /perf memos.liveMap."""
+    _LIVE_MAP_STATS["built"] += 1
+    return Sessions.live()
+
+
+def _live_build():
+    """A FRESH liveness read: (map, seq, t), the key taken before the read and `t` the wall stamp before it, published for the
+    readers after it when the key vouches for it (a read that began earlier never publishes over a later one's). The
+    pusher's cycle reads through here every cycle, and so does every reader the shared map cannot serve. With sharing off
+    it is _live_map's read, as every door read before the sharing."""
+    t = time.time()
+    with _LIVE_SHARED_LOCK:
+        _LIVE_SEQ[0] += 1
+        seq = _LIVE_SEQ[0]
+    if not _LIVE_SHARING[0]:
+        return _live_map(), seq, t
+    key = _live_key()
+    m = _live_read()
+    if key is None:
+        _LIVE_MAP_STATS["unkeyed"] += 1
+        return m, seq, t
+    with _LIVE_SHARED_LOCK:
+        cur = _LIVE_SHARED[0]
+        if cur is None or cur[1] < seq:
+            _LIVE_SHARED[0] = (key, seq, t, m)
+            _LIVE_MAP_STATS["published"] += 1
+    return m, seq, t
+
+
+def _live_shared(after=None):
+    """(map, seq, t) for a reader outside a cycle's scope: the published map when no liveness event has happened since its
+    read began (its key is the current key) and, with `after`, it is newer than the read numbered `after`; else a fresh read
+    (_live_build), published in turn."""
+    if _LIVE_SHARING[0]:
+        cur = _LIVE_SHARED[0]
+        if cur is not None and (after is None or cur[1] > after):
+            key = _live_key()
+            if key is not None and cur[0] == key:
+                _LIVE_MAP_STATS["shared"] += 1
+                return cur[3], cur[1], cur[2]
+    return _live_build()
+
+
+def _live_fresh():
+    """The liveness map read NOW, past the shared snapshot: the confirmation reads (see THE SHARED LIVENESS SNAPSHOT)."""
+    return _live_build()[0]
 
 
 # THE THREAD LIVE MAP (thread-live-1, 2026-10-14): the comment threads' own live rows, kept APART from the map above, which
@@ -67379,8 +67494,11 @@ def _push(targets, connect=False, live_map=None, only=None):
     # When the world this push reads was read: the pusher cycle's stamp, taken before its liveness read (_pusher_cycle), for
     # the map a cycle hands down; this push's own read otherwise. Two cold-lanes builds are ordered by it, and the cold lanes
     # are built at its second, not at `now` (_timeline_cold_lanes): lanes from a newer world never carry an older clock
-    world_t = (getattr(_live_scope, "snapshot_t", None) or time.time()) if live_map is not None else time.time()
-    live_map = _live_map() if live_map is None else live_map   # one liveness read per push, shared by all builders
+    if live_map is None and getattr(_live_scope, "snapshot", None) is None:
+        live_map, _, world_t = _live_shared()   # off-cycle: the shared map and the stamp taken before its read
+    else:
+        world_t = (getattr(_live_scope, "snapshot_t", None) or time.time()) if live_map is not None else time.time()
+        live_map = _live_map() if live_map is None else live_map   # one liveness read per push, shared by all builders
     _chat_push_scopes_close()                     # a previous push on this thread that raised inside the chat loop
     _seen_live.update(live_map)                       # remember who's been alive → keep their tab when they die
     want_chat = any(c["app"] == "chat" for c in targets)
@@ -68359,8 +68477,8 @@ def _connect_push_scope():
         yield None
         return
     try:
-        _live_scope.snapshot_t = time.time()  # the snapshot's stamp, taken before it (_push's world_t, as a cycle's)
-        live_map = _live_map()
+        live_map, _, _live_scope.snapshot_t = _live_shared()   # the snapshot and its stamp, taken before its read (_push's
+        #                                                          world_t, as a cycle's; the shared map's own when it serves)
         _live_scope.snapshot = live_map
         _live_scope.paths = {}
         _live_scope.sessions = {}
@@ -68660,10 +68778,10 @@ def _confirm_close_now(sid):
     tabs-first send, through the same per-client dedup slot — the next cycle's identical send is a no-op.
     `_push_soon()` still follows for everything else the kill changed. Returns whether the fresh set is
     indeed without the id (False = the end did not take; the client's own backstop then says so, honestly).
-    Off-cycle by design: `_live_map()` outside a pusher cycle is a live Sessions.live() read."""
+    Off-cycle by design, and a FRESH read (_live_fresh), never the shared snapshot: the confirmation is about the kill."""
     try:
         now = int(time.time())
-        live_map = _live_map()
+        live_map = _live_fresh()
         chat_list = _chat_tab_sessions(now, live_map)
         tab_order = [s["sid"] for s in chat_list]
         tab_meta = [{"id": s["sid"], "name": s.get("name", ""), "color": _name_color(s["sid"])} for s in chat_list]
@@ -73855,7 +73973,8 @@ def _timeline_builder_scope(with_sig):
     so the build reads what the pusher's build read, once per phase; with `with_sig`, the view signature the build is stored
     under, taken before the build reads anything. Yields (now, live_map, sig); every scope closed in the finally."""
     now = int(time.time())
-    live_map = _live_map()
+    live_map = _live_fresh()       # fresh, never the shared map: _cached_timeline orders this build against the pusher's
+    #                                snapshot by the build's start, so its world must be as new as that start says
     _live_scope.snapshot = live_map
     try:
         _live_scope.paths = {}
@@ -74587,7 +74706,8 @@ def _pusher_cycle():
         any_client = bool(_clients)
     _live_scope.snapshot_t = time.time()      # the stamp of the cycle's liveness snapshot, taken before it (_cached_timeline)
     now = int(time.time())
-    live_map = _live_map()               # THE cycle's liveness snapshot — one fork + one reg sweep
+    live_map = _live_build()[0]          # THE cycle's liveness snapshot — one reg sweep, always fresh, published for the
+    #                                       other threads (THE SHARED LIVENESS SNAPSHOT: the cycle is the backstop)
     _live_scope.snapshot = live_map           # …served to every read on THIS thread until the cycle ends,
     #                                       however deep it hides (_bg_live_norm, _compacting_now,
     #                                       build_feed's per-session gates) — see _live_scope
@@ -76422,7 +76542,8 @@ def _jobs_cycle():
     _PERF_STATS.cycle_begin("jobs")
     _c = time.thread_time()
     now = int(time.time())
-    live_map = _live_map()
+    live_map, _LIVE_JOBS_SEQ[0], _ = _live_shared(after=_LIVE_JOBS_SEQ[0])   # the pusher's published map when it stands and is
+    #                                     newer than the last pass's, else a read of its own (THE SHARED LIVENESS SNAPSHOT)
     _live_scope.snapshot = live_map
     _gate = _jobs_gate_tick_open(now, live_map)   # the jobs pass's gate (stage one, shadow): this pass observed job by job, at
     #                                               each job's turn in _job_stage; None when the knob (STATE/jobs-gate) is off
@@ -89942,6 +90063,8 @@ def main():
     #                                                           of pre-fix residue, marker-gated
     _seed_whole_chat_frames()   # the ROMP_CHAT_FLOOR0 seed, here where every definition it reaches is loaded (the 1704 read, low 1)
     threading.Thread(target=_producer, daemon=True, name="producer").start()   # named: the stack sample says whose frames
+    _LIVE_SHARING[0] = True                  # the pusher publishes its cycle's liveness map for the other threads (THE SHARED
+    #                                          LIVENESS SNAPSHOT); before the loops start, as the pusher is the backstop
     threading.Thread(target=_pusher, daemon=True, name="pusher").start()
     threading.Thread(target=_timeline_builder, daemon=True, name="timeline-build").start()   # the cold timeline build, off the
     #                                                           pusher (see _cached_timeline); idle until a Sessions pane owes it

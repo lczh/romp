@@ -23,7 +23,9 @@ The mechanics under test:
 
 Synthetic ids, labels and references only; a token-shaped string is ASSEMBLED at run time, never a literal.
 """
+import contextlib
 import inspect
+import io
 import json
 import os
 import secrets
@@ -33,6 +35,7 @@ import threading
 import time
 import unittest
 import urllib.request
+from unittest import mock
 import urllib.error
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -1027,6 +1030,106 @@ class StoredLoginPick(_Backend):
         day = d["days"][time.strftime("%Y-%m-%d")]
         self.assertEqual(day["byLogin"], {rec["id"]: {"usd": 0.02, "turns": 1, "tok": 140}}, "the key turn is carried past, not folded in")
         self.assertEqual(day["usd"], 0.05)
+
+
+class ListingReadsTheRecordOncePerChange(_Backend):
+    """A stored login that is the machine default is read once per change of its record, never once per session per listing
+    (2026-10-23): every dormant session's row asked whether that login can bill and what it is called, five or six record
+    reads per session, in every live listing the pusher, the jobs pass, the question poll and the request handlers take, a
+    third of a busy kernel's samples. The record's text is kept on its file's stat (logins.read_record) and a listing answers
+    each billing question once (sdk_backend _LISTING_MEMO). Never stale: a refusal, a re-link or a removal between two
+    listings is the next listing's answer, and a record that stops parsing reads as no record, as before."""
+
+    N = 12
+
+    def setUp(self):
+        super().setUp()
+        Path(self.d, "session-hosts").write_text("off\n")      # a test that mints its own state root pins the hosts off
+        lg.write_record(self.d, {"id": ZID, "label": "work", "addedAt": int(time.time()) - 86400,
+                                 "tokenCmd": "token-read 'romp login work'"})
+        sb.write_sdk_default(self.d, auth="login", authExplicit=True, authLogin=ZID)
+        for n in range(1, self.N + 1):
+            sid = "11111111-2222-3333-4444-%012d" % n
+            sb.write_reg(self.d, sid, {"sid": sid, "name": "s%d" % n, "cwd": "/tmp", "alive": True})
+
+    @contextlib.contextmanager
+    def _record_opens(self):
+        """Every open of the record's file, by either road a reader takes: the builtin open, and io.open under pathlib."""
+        opened, real = [], io.open
+        want = ZID + ".json"
+
+        def spy(file, *a, **k):
+            if isinstance(file, (str, os.PathLike)) and os.path.basename(os.fspath(file)) == want:
+                opened.append(os.fspath(file))
+            return real(file, *a, **k)
+        with mock.patch("builtins.open", spy), mock.patch("io.open", spy):
+            yield opened
+
+    def _listing(self):
+        rows = self.be.live_sessions()
+        self.assertEqual(len(rows), self.N, "every alive session is listed")
+        return rows
+
+    def test_three_listings_of_every_session_read_the_record_at_most_once(self):
+        with self._record_opens() as opened:
+            for _ in range(3):
+                rows = self._listing()
+        self.assertEqual({r["authLogin"] for r in rows.values()}, {ZID}, "every unpicked session bills the default's stored login")
+        self.assertEqual({r["authLabel"] for r in rows.values()}, {"work"})
+        self.assertLessEqual(len(opened), 1, "one version of the record, read at most once across three listings of %d sessions "
+                                             "(it was five or six reads per session per listing): %d reads" % (self.N, len(opened)))
+
+    def test_a_refusal_between_two_listings_is_the_next_listings_answer_for_one_read(self):
+        self._listing()
+        lg.mark_refused(self.d, ZID, "the API refused this login")
+        with self._record_opens() as opened:
+            rows = self._listing()
+        self.assertEqual(len(opened), 1, "the changed record is read once, by the first row that asks")
+        self.assertEqual({r["authLogin"] for r in rows.values()}, {""},
+                         "a refused default falls through to the machine's own login on the very next listing")
+        self.assertIn("refused", self.be.auth_unavailable_why("login", ZID))
+
+    def test_a_relink_between_two_listings_is_the_next_listings_label(self):
+        self.assertEqual({r["authLabel"] for r in self._listing().values()}, {"work"})
+        lg.link(self.d, ZID, {"acct": "0123456789ab", "email": "dev@example.com"}, "TESTHOST")
+        self.assertEqual({r["authLabel"] for r in self._listing().values()}, {"work · dev@example.com"},
+                         "the linked identity's email joins the label on the next listing")
+        lg.unlink(self.d, ZID)
+        self.assertEqual({r["authLabel"] for r in self._listing().values()}, {"work"}, "and leaves it when unlinked")
+
+    def test_a_removed_login_is_the_next_listings_answer(self):
+        self._listing()
+        lg.remove(self.d, ZID)
+        rows = self._listing()
+        self.assertEqual({r["authLogin"] for r in rows.values()}, {""})
+        self.assertEqual(self.be.auth_unavailable_why("login", ZID), "no stored login with that id")
+
+    def test_a_record_that_stops_parsing_reads_as_no_record_until_it_parses_again(self):
+        self.assertIsNotNone(lg.read_record(self.d, ZID))
+        p = lg.record_path(self.d, ZID)
+        good = p.read_text()
+        with open(p, "w") as f:                  # rewritten in place: the same inode, a new size and stamp
+            f.write("{not json")
+        self.assertIsNone(lg.read_record(self.d, ZID), "a record that does not parse is no record, never its last good copy")
+        self.assertEqual(self.be.auth_unavailable_why("login", ZID), "no stored login with that id")
+        with open(p, "w") as f:
+            f.write(good)
+        self.assertEqual(lg.read_record(self.d, ZID)["label"], "work", "and reads again once it parses")
+
+    def test_every_read_hands_out_its_own_record(self):
+        a = lg.read_record(self.d, ZID)
+        a["label"] = "edited by a caller"
+        a.setdefault("identity", {})["host"] = "elsewhere"
+        b = lg.read_record(self.d, ZID)
+        self.assertEqual(b["label"], "work", "a caller's edit of the record it got never reaches the next caller")
+        self.assertNotIn("identity", b)
+
+    def test_outside_a_listing_every_answer_is_read_afresh(self):
+        """The listing's memo lives for one listing on one thread: a direct question after it reads the record's stat again."""
+        self._listing()
+        self.assertEqual(self.be.auth_unavailable_why("login", ZID), "")
+        lg.mark_refused(self.d, ZID, "the API refused this login")
+        self.assertIn("refused", self.be.auth_unavailable_why("login", ZID))
 
 
 class UsersShape(_Backend):

@@ -1592,6 +1592,11 @@ class CodexBackend:
             out[sid] = row
         return out
 
+    def listing_rev(self):
+        """What live_sessions stands on, for the kernel's shared liveness map (kernel _live_key, 2026-10-23): this backend and
+        its rows themselves, which are read from memory and cost what any fingerprint of them would."""
+        return (id(self), json.dumps(self.live_sessions(), sort_keys=True, default=str))
+
     def _cuts(self):
         """[(row, dead)] for every session a kernel exit NOW cuts: the one predicate inflight_turns() and would_cut()
         both read (2026-09-23, the promise in #2055's body; inflight_turns says what counts and why). The row and the

@@ -18,9 +18,11 @@ and the kernel degrades gracefully when the SDK is absent.
 """
 from __future__ import annotations
 import asyncio
+import contextlib
 import difflib
 import errno
 import fnmatch
+import functools
 import hashlib
 import json
 import math
@@ -6095,6 +6097,53 @@ def read_sdk_defaults(state_dir: Path) -> dict:
 
 # the explicit machine default per state root, cached on sdk-defaults.json's (mtime, size): explicit_default_auth (T380)
 _EXPLICIT_DEFAULT_CACHE: dict = {}
+
+# ONE LISTING'S BILLING ANSWERS (2026-10-23). A live listing (live_sessions, thread_live_sessions) builds a row per session,
+# and every row asks the same billing questions: what an unpicked session bills (fallback_auth), whether a stored login can
+# be billed (auth_unavailable_why), its label (login_display), the operator's helper (key_state, _helper_source_read) and
+# the explicit default (_explicit_default). Each answer took sdk-defaults.json's stat, both operator settings files' stats
+# and the stored login's record, so a box whose machine default is a stored login paid five or six record reads per session
+# per listing, and the pusher, the jobs pass, the question poll and the request handlers each take listings: a third of a
+# busy kernel's samples (2026-10-23). Inside a listing those answers are kept on the listing's own memo, opened when the
+# listing starts and dropped when it ends, so every row of one listing reads the same answer (the retry_on idiom) and the
+# next listing reads afresh: a login refused, re-linked or removed between two listings shows on the next. Thread-confined
+# (a module-level threading.local, never a backend attribute: the perf bench's stand-in backend refuses any attribute it
+# did not anticipate), so a listing on one thread never serves another's, and keyed by the backend object, so two backends
+# in one process never share an answer.
+_LISTING_MEMO = threading.local()
+
+
+@contextlib.contextmanager
+def _listing_scope():
+    """One listing's billing memo (_LISTING_MEMO), opened for the block and dropped after it. A listing inside a listing
+    keeps the outer one's memo: they are the same listing's reads."""
+    if getattr(_LISTING_MEMO, "memo", None) is not None:
+        yield
+        return
+    _LISTING_MEMO.memo = {}
+    try:
+        yield
+    finally:
+        _LISTING_MEMO.memo = None
+
+
+def _listing_memoized(fn):
+    """A billing question answered once per listing (_LISTING_MEMO) and fresh outside one. Positional arguments only, the
+    way every caller asks; every answer is immutable (a str or a tuple), so the memo hands out the one value. An answer
+    that raises is not kept."""
+    name = fn.__name__
+
+    @functools.wraps(fn)
+    def memoized(self, *args):
+        memo = getattr(_LISTING_MEMO, "memo", None)
+        if memo is None:
+            return fn(self, *args)
+        key = (id(self), name, args)
+        if key in memo:
+            return memo[key]
+        out = memo[key] = fn(self, *args)
+        return out
+    return memoized
 _defaults_lock = threading.Lock()   # serializes the read-modify-writes below: the kernel thread (set_model, the
 #                                     parked-op replay) and the SDK loop thread (_revert_model) both write the file
 
@@ -15062,6 +15111,7 @@ class SdkBackend:
             self._log("auth: %s; cannot tell which side this box bills until it reads: no launch falls on it, "
                       "the seed and the judges read it as no helper" % e, problem=True)
 
+    @_listing_memoized
     def key_state(self) -> str:
         """"ok" | "missing" | "unknown": an apiKeyHelper is configured in the operator's settings, is not, or the
         settings cannot be read just now. The launch-side fall (a login pick with no login bills the key) keys
@@ -15072,6 +15122,7 @@ class SdkBackend:
             self._say_settings_unreadable(e)
             return "unknown"
 
+    @_listing_memoized
     def _helper_source_read(self):
         """(credentials.helper_source(), readable): ("managed" | "user" | None, True), or (None, False) when the
         settings cannot be read just now, so a caller can tell "no managed helper" from "cannot tell"."""
@@ -20632,22 +20683,23 @@ class SdkBackend:
         runs no agent. The set is the registry's rows table (thread_sessions' own); one thread whose snapshot raises is
         left out, said on stderr, and the others stay."""
         out, retry_on = {}, None
-        for sid, parent in self._rows_table()["threads"].items():
-            if parents is not None and parent not in parents:
-                continue
-            with self._lock:
-                s = self.sessions.get(sid)
-            if not (s and s.thread.is_alive()):
-                continue
-            if retry_on is None:
-                retry_on = retry_upgrade_on(self.state_dir)   # once per listing, as live_sessions reads it
-            try:
-                row = dict(s.snapshot(retry_on=retry_on))
-            except Exception:
-                sys.stderr.write("thread_live_sessions: row for %s failed (left out): %s\n" % (sid, traceback.format_exc()))
-                continue
-            row["threadOf"] = parent
-            out[str(sid)] = row
+        with _listing_scope():                            # the billing answers once per listing, as live_sessions reads them
+            for sid, parent in self._rows_table()["threads"].items():
+                if parents is not None and parent not in parents:
+                    continue
+                with self._lock:
+                    s = self.sessions.get(sid)
+                if not (s and s.thread.is_alive()):
+                    continue
+                if retry_on is None:
+                    retry_on = retry_upgrade_on(self.state_dir)   # once per listing, as live_sessions reads it
+                try:
+                    row = dict(s.snapshot(retry_on=retry_on))
+                except Exception:
+                    sys.stderr.write("thread_live_sessions: row for %s failed (left out): %s\n" % (sid, traceback.format_exc()))
+                    continue
+                row["threadOf"] = parent
+                out[str(sid)] = row
         return out
 
     def thread_state(self, sid: str) -> str:
@@ -20753,6 +20805,21 @@ class SdkBackend:
             key = stamp
         self._rows_table_memo = (key, table)
         return table
+
+    def listing_rev(self) -> tuple:
+        """What this backend's live listing (live_sessions) stands on, for the kernel's shared liveness map (kernel _live_key,
+        2026-10-23): this backend, its registry writes in this process (REG_REV), the registry directory's stamp (a write by
+        another process: every writer publishes by renaming into it, _rows_table's key), and its running set, each session
+        object with whether its thread runs, so a session that starts or ends moves it before anything else is written. A
+        row's other inputs are announced by a pusher wake, or read by the kernel's next cycle, which always reads afresh."""
+        try:
+            st = os.stat(os.path.join(str(self.state_dir), "sdk"))
+            stamp = (st.st_ino, st.st_mtime_ns, st.st_ctime_ns)
+        except OSError:
+            stamp = None
+        items = list(self.sessions.items())   # one copy under the GIL and no lock taken: the caller may already hold it
+        running = tuple((sid, id(s), bool(getattr(s, "thread", None) is not None and s.thread.is_alive())) for sid, s in items)
+        return (id(self), REG_REV[0], stamp, running)
 
     def rows_table_cycle(self) -> None:
         """A kernel cycle began (the pusher calls this at each cycle's start, _pusher_cycle): a registry scan that met an
@@ -22457,6 +22524,7 @@ class SdkBackend:
         v = (reg or {}).get("authLogin") if isinstance(reg, dict) else None
         return v if isinstance(v, str) and _logins.ID_RE.match(v) else ""
 
+    @_listing_memoized
     def login_display(self, login_id: str) -> str:
         """A stored login's display label (logins.display: the user's label, then the email, organisation
         and kind word when known), "" for the machine's own login or an unknown id. Never a token."""
@@ -22473,6 +22541,7 @@ class SdkBackend:
         rewrite whose mtime did not advance (review)."""
         return self._explicit_default()[0]
 
+    @_listing_memoized
     def _explicit_default(self) -> tuple:
         """(side, stored login id) of the explicit machine default: explicit_default_auth's read, the id the defaults
         carry under authLogin beside an explicit login side ("" otherwise; whether that record is usable is
@@ -22510,6 +22579,7 @@ class SdkBackend:
             return SdkBackend.reg_login(reg) if a == "login" else ""
         return self.explicit_default_login() if self.fallback_auth() == "login" else ""
 
+    @_listing_memoized
     def auth_unavailable_why(self, side: str, login_id: str = "") -> str:
         """Why this box cannot bill `side` ("login" | "key"), as ONE plain sentence for the refusal toast,
         the problem ring and the Billing menu's greyed option — "" when it can. The login side is the
@@ -22852,33 +22922,34 @@ class SdkBackend:
     def live_sessions(self) -> dict[str, dict]:
         """{sid: state-dict} for every alive SDK session — merged by the kernel
         into its session enumeration so SDK sessions appear in the UI."""
-        out = {}
-        retry_on = retry_upgrade_on(self.state_dir)   # once per listing: every row's mark reads the same answer
-        for reg in list_regs(self.state_dir):
-            if not reg.get("alive"):
-                continue
-            if reg.get("threadOf"):
-                continue   # a comment thread: its surface is the parent chat's comment UI, never a tab
-            sid = reg.get("sid")
-            if not sid:
-                continue
-            try:
-                out[sid] = self._live_row(reg, sid, retry_on)
-            except Exception:
-                # One session's bad row must not hide the OTHERS — this loop used to run unguarded
-                # under the kernel merge's single try, so one snapshot() exception silently dropped
-                # EVERY SDK session from an otherwise-successful listing, and absence from a listing
-                # reads as death downstream (the postal bus refused sends to live peers, 2026-08-31).
-                # The failing session itself stays VISIBLE as a minimal waiting row: present beats
-                # perfect, and the loud line makes the real bug findable.
-                sys.stderr.write("live_sessions: row for %s failed (kept as minimal row): %s\n"
-                                 % (sid, traceback.format_exc()))
-                out[sid] = {"state": "waiting", "since": "", "model": "", "modelPending": False,
-                            "effortPending": False, "effort": "", "auth": "", "authLive": "",
-                            "authPending": False, "mode": "", "fast": "", "fastReason": "",
-                            "color": None, "connected": False, "spawning": False, "retryCount": 0,
-                            "retryInfo": None, "ctx": None, "subagents": [], "bgTasks": []}
-        return out
+        with _listing_scope():                        # the billing answers once per listing, every row the same (_LISTING_MEMO)
+            out = {}
+            retry_on = retry_upgrade_on(self.state_dir)   # once per listing: every row's mark reads the same answer
+            for reg in list_regs(self.state_dir):
+                if not reg.get("alive"):
+                    continue
+                if reg.get("threadOf"):
+                    continue   # a comment thread: its surface is the parent chat's comment UI, never a tab
+                sid = reg.get("sid")
+                if not sid:
+                    continue
+                try:
+                    out[sid] = self._live_row(reg, sid, retry_on)
+                except Exception:
+                    # One session's bad row must not hide the OTHERS — this loop used to run unguarded
+                    # under the kernel merge's single try, so one snapshot() exception silently dropped
+                    # EVERY SDK session from an otherwise-successful listing, and absence from a listing
+                    # reads as death downstream (the postal bus refused sends to live peers, 2026-08-31).
+                    # The failing session itself stays VISIBLE as a minimal waiting row: present beats
+                    # perfect, and the loud line makes the real bug findable.
+                    sys.stderr.write("live_sessions: row for %s failed (kept as minimal row): %s\n"
+                                     % (sid, traceback.format_exc()))
+                    out[sid] = {"state": "waiting", "since": "", "model": "", "modelPending": False,
+                                "effortPending": False, "effort": "", "auth": "", "authLive": "",
+                                "authPending": False, "mode": "", "fast": "", "fastReason": "",
+                                "color": None, "connected": False, "spawning": False, "retryCount": 0,
+                                "retryInfo": None, "ctx": None, "subagents": [], "bgTasks": []}
+            return out
 
     def fallback_row_for_reg(self, reg, retry_on=None):
         """A dormant session's requested-model mark from its registry alone (model_fallback_row over the pick, the model

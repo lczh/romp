@@ -143,7 +143,8 @@ class Collector(unittest.TestCase):
                                               "chatMergeSets", "chatPostal", "chatLedger", "chatFoldTasks",   # the chat build's fixed-cost memos (2026-09-09)
                                               "outlineProvisional",   # the Outline's provisional-row ledger memo, parse-free (plans/outline-pane-provisional-row.md, 2026-09-15)
                                               "notices",   # the notice files' parsed rows (T370, plans/notice-cards.md): bytes against their bound
-                                              "msgScan"})   # the message-caption scan's held turns (2026-10-05): held vs walked, bytes against their bound
+                                              "msgScan",   # the message-caption scan's held turns (2026-10-05): held vs walked, bytes against their bound
+                                              "liveMap"})   # the live map's reads and the readers the cycle's published one served (2026-10-23)
         self.assertEqual(set(snap["memos"]["msgScan"]), {"scans", "heldTurns", "walkedTurns", "partial", "reset", "raised", "evict",
                                                        "faulted", "overBound",   # every faulted scan; an entry over the bound by itself (2026-10-06)
                                                        "entries", "bytes", "bound"},

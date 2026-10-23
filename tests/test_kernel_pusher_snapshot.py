@@ -15,6 +15,7 @@ import json
 import os
 import tempfile
 import time
+import types
 import unittest
 from unittest import mock
 from romp_load import load_source
@@ -32,6 +33,7 @@ os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 km = load_source("romp_kernel_pushsnap", os.path.join(BIN, "romp-kernel"))
 jd = km.jd
+sb = load_source("romp_sdk_backend", os.path.join(BIN, "romp_sdk_backend.py"))   # the module name the kernel loads it under
 
 NOW = 1781100000
 SID = "11111111-2222-3333-4444-555555555555"
@@ -171,6 +173,162 @@ class OneSnapshotPerCycle(_CycleFixture):
         m = km.build_session(SID, NOW, dict(self.row))
         self.assertIsNotNone(m)
         self.assertEqual(reads, [], "a provided snapshot is enough — no fresh liveness reads")
+
+
+class OneSnapshotAcrossThreads(_CycleFixture):
+    """The cycle's ONE read serves the other threads too (THE SHARED LIVENESS SNAPSHOT, 2026-10-23): the jobs pass, the
+    question poll and a request handler take the map the pusher's cycle published while no liveness event has happened since
+    its read began, so a quiet box reads the live map once per cycle, not once per reader (on a box with 65 sessions those
+    reads were two fifths of the kernel's busy samples). An announced change (a pusher wake) makes the next reader read
+    afresh, the next cycle always reads, the jobs pass never takes the same map twice, a backend that cannot vouch for its
+    rows (no listing_rev) is read every time, and the confirmation reads stay fresh. Sharing is turned on by hand here (a
+    running kernel turns it on as it starts its loops) and put back after each test."""
+
+    def setUp(self):
+        super().setUp()
+        self.saved_sharing = (km._LIVE_SHARING[0], km._LIVE_SHARED[0], km._LIVE_JOBS_SEQ[0], km._codex)
+        km._LIVE_SHARING[0] = True
+        km._LIVE_SHARED[0] = None
+        km._LIVE_JOBS_SEQ[0] = 0
+        km._codex = lambda: None                   # no Codex backend on this box: the key reads the SDK side alone
+        self.reads = []
+        row = self.row
+        km.Sessions.live = lambda: (self.reads.append(1), {k: dict(v) for k, v in row.items()})[1]
+
+    def tearDown(self):
+        km._LIVE_SHARING[0], km._LIVE_SHARED[0], km._LIVE_JOBS_SEQ[0], km._codex = self.saved_sharing
+        km._pusher_wake.clear()
+        super().tearDown()
+
+    def test_the_cycles_read_serves_the_jobs_pass_the_poll_and_a_handler(self):
+        got = {}
+        km._lift_spent_awaiting = lambda now, live_map: got.setdefault("jobs", live_map)
+        built0 = km._LIVE_MAP_STATS["built"]
+        km._pusher_cycle()
+        km._jobs_cycle()
+        km._ask_poll_pass([], set())
+        handler = km._live_map()
+        self.assertEqual(len(self.reads), 1, "one read for the pusher's cycle, the jobs pass, the question poll and a handler")
+        self.assertEqual(km._LIVE_MAP_STATS["built"] - built0, 1, "/perf counts the one read")
+        self.assertIs(got.get("jobs"), handler, "one map object, the cycle's, on every thread")
+        self.assertIn(SID, handler)
+
+    def test_an_announced_change_is_read_afresh_by_the_next_reader(self):
+        km._pusher_cycle()
+        km._live_map()
+        self.assertEqual(len(self.reads), 1, "nothing announced since the cycle's read: the handler takes it")
+        self.row[SID]["state"] = "working"
+        km._pusher_wake.set()                      # the backend announces it (a turn's start wakes the pusher)
+        self.assertEqual(km._live_map()[SID]["state"], "working", "the reader after the announcement reads the change")
+        self.assertEqual(len(self.reads), 2)
+        km._jobs_cycle()
+        self.assertEqual(len(self.reads), 2, "and publishes its read: the jobs pass after it takes that one")
+
+    def test_the_next_cycle_reads_afresh_whatever_was_announced(self):
+        km._pusher_cycle()
+        self.row[SID]["state"] = "working"         # a change nothing announced
+        km._pusher_cycle()
+        self.assertEqual(len(self.reads), 2, "every cycle reads: it is the backstop for a change nothing announces")
+        self.assertEqual(km._live_map()[SID]["state"], "working")
+        self.assertEqual(len(self.reads), 2, "and the reader after it takes that read")
+
+    def test_the_jobs_pass_never_takes_the_same_map_twice(self):
+        km._pusher_cycle()
+        km._jobs_cycle()
+        self.assertEqual(len(self.reads), 1)
+        km._jobs_cycle()
+        self.assertEqual(len(self.reads), 2, "the pusher has not read since the last pass took its map: the pass reads its own")
+        km._live_map()
+        self.assertEqual(len(self.reads), 2, "and publishes it for the readers after it")
+
+    def test_a_backend_that_cannot_vouch_for_its_rows_is_read_every_time(self):
+        km._sdk = lambda: types.SimpleNamespace()   # a stand-in with no listing_rev
+        self.assertIsNone(km._live_key())
+        km._live_build()
+        km._live_map()
+        km._live_map()
+        self.assertEqual(len(self.reads), 3, "no key, nothing published: every read is fresh, as before the sharing")
+
+    def test_the_confirmation_reads_stay_fresh(self):
+        km._pusher_cycle()
+        km._live_names_now()
+        self.assertEqual(len(self.reads), 2, "a name claim reads the world NOW, never the shared map")
+        km._live_fresh()
+        self.assertEqual(len(self.reads), 3)
+
+    def test_a_process_that_runs_no_loops_shares_nothing(self):
+        km._LIVE_SHARING[0] = False                # the default outside a running kernel (main turns it on with the loops)
+        km._pusher_cycle()
+        km._jobs_cycle()
+        km._live_map()
+        self.assertEqual(len(self.reads), 3, "every reader reads its own, as before the sharing")
+
+
+class _RunningThread:
+    def is_alive(self):
+        return True
+
+
+class _RunningSession:
+    """A session object in the backend's running set: its thread runs and its row is its own snapshot."""
+    thread = _RunningThread()
+
+    def snapshot(self, retry_on=None):
+        return {"state": "working", "since": str(NOW), "model": "", "effort": "", "mode": "", "connected": True,
+                "spawning": False, "ctx": None, "subagents": [], "bgTasks": []}
+
+
+class SharedSnapshotOverARealBackend(_CycleFixture):
+    """The shared map over a REAL SDK backend on this test's state root (hosts off): a session that starts or ends is the
+    next reader's answer with no pusher wake between, whether the change is a registration written (alive, or not) or a
+    session object entering or leaving the running set; while nothing moves, a handler reads nothing."""
+
+    def setUp(self):
+        super().setUp()
+        self.root = Path(self.td.name)
+        (self.root / "session-hosts").write_text("off\n")    # a test that mints its own state root pins the hosts off
+        self.saved_live = (jd.SDKDIR, km._LIVE_SHARING[0], km._LIVE_SHARED[0], km._codex)
+        jd.SDKDIR = self.root / "sdk"
+        self.be = sb.SdkBackend(self.root, "/bin/false", lambda *a, **k: None, log=lambda *a, **k: None)
+        km._sdk = lambda: self.be
+        km._codex = lambda: None
+        km._LIVE_SHARING[0] = True
+        km._LIVE_SHARED[0] = None
+        self.builds = []
+        live = self.saved[7]                       # the real Sessions.live, as the fixture saved it
+        km.Sessions.live = lambda: (self.builds.append(1), live())[1]
+
+    def tearDown(self):
+        jd.SDKDIR, km._LIVE_SHARING[0], km._LIVE_SHARED[0], km._codex = self.saved_live
+        super().tearDown()
+
+    def _reg(self, sid, alive):
+        sb.write_reg(self.root, sid, {"sid": sid, "name": "web" if sid == SID else "api", "cwd": str(self.root), "alive": alive})
+
+    def test_a_session_that_starts_or_ends_is_the_next_readers_answer(self):
+        self._reg(SID, True)
+        m = km._live_build()[0]                    # the cycle's read, published
+        self.assertEqual(set(m), {SID})
+        self.assertIs(km._live_map(), m, "nothing moved: a handler takes the cycle's map")
+        self.assertEqual(len(self.builds), 1)
+        self._reg(SID2, True)                      # api starts: its registration is written, nothing wakes the pusher
+        self.assertEqual(set(km._live_map()), {SID, SID2}, "the session that started is the next reader's answer")
+        self._reg(SID, False)                      # web ends
+        self.assertEqual(set(km._live_map()), {SID2}, "the session that ended is gone for the next reader")
+        self.assertEqual(len(self.builds), 3, "one read per change, none between")
+        km._live_map()
+        self.assertEqual(len(self.builds), 3)
+
+    def test_a_session_entering_or_leaving_the_running_set_is_the_next_readers_answer(self):
+        self._reg(SID, True)
+        km._live_build()
+        self.assertEqual(km._live_map()[SID]["state"], "waiting", "dormant: its registration's row")
+        self.be.sessions[SID] = _RunningSession()
+        try:
+            self.assertEqual(km._live_map()[SID]["state"], "working", "running now: its own snapshot, read afresh")
+        finally:
+            self.be.sessions.pop(SID, None)
+        self.assertEqual(km._live_map()[SID]["state"], "waiting", "and its registration's row again once it leaves the set")
 
 
 class OneDiscoverPerCycle(_CycleFixture):
