@@ -14217,8 +14217,10 @@ def _converge_checkpoints(now):
     return n + _converge_assembly(now, t0)
 
 
-_ASM_CONVERGE_DONE = {}             # leaf -> the file's (mtime_ns, size) once its assembly document stands, was written here, or the
-#                                     writer refused it for a property of its cut (T376): looked at once per file state, never per cycle
+_ASM_CONVERGE_DONE = {}             # leaf -> the file's (mtime_ns, size) once the writer refused it for a property of its cut (T376), or
+#                                     ("stood", that, the document-removal generation) once its assembly document stands or was written
+#                                     here: looked at once per file state, never per cycle, and a document's mark once more after any
+#                                     document is removed (em.asm_documents_removed: a refusal unlinks one under an unchanged leaf)
 _ASM_CONVERGE_BLIP = {}             # leaf -> the file state under which the writer's one blip retry was spent
 _ASM_CONVERGE_NOENTRY = {}          # leaf -> the file state under which "no entry" was counted (once, not per cycle)
 _ASM_STRUCTURAL = set(em._ASM_SKIP_STRUCTURAL) | {"written", "restored"}   # the writer's reasons that hold until the cut moves (noCut
@@ -14348,14 +14350,19 @@ def _converge_assembly_leaf(key, sid, t0, flags=None):
     for table in (_ASM_CONVERGE_DONE, _ASM_CONVERGE_BLIP, _ASM_CONVERGE_NOENTRY, _ASM_CONVERGE_FLAG):
         _release_oldest(table)
     st = _stat_key_ns(key)
-    if st is None or _ASM_CONVERGE_DONE.get(key) == st:
-        return False
+    gone = em.asm_documents_removed()                      # read BEFORE the document's stat: a removal after it moves past the mark
+    done = _ASM_CONVERGE_DONE.get(key)
+    if st is None or done == st or done == ("stood", st, gone):
+        return False                                       # done for this file state, or a document stood and none was removed since
     cp = em._asm_ckpt_file(key)
     if cp is None:
         return False
     if cp.exists():
-        _ASM_CONVERGE_DONE[key] = st                       # the settle's document, or an earlier cycle's, stands
-        return False
+        _ASM_CONVERGE_DONE[key] = ("stood", st, gone)      # the settle's document, or an earlier cycle's, stands. Keyed on the removal
+        return False                                       #  generation too (the review of PR #370): a refusal unlinks a document under an
+    #                                                        unchanged leaf, and a mark at the leaf's stat alone set the leaf aside until it
+    #                                                        changed or the kernel restarted, while the rebuild left it to this pass (its
+    #                                                        whole entry resident, its estimate in budget): neither wrote it
     if _leaf_writer_busy(key, sid):
         return False                                       # the file's writer is mid-turn: its settle writes the document
     human = bool(_display_sdk_human(sid))
@@ -14398,7 +14405,7 @@ def _converge_assembly_leaf(key, sid, t0, flags=None):
         except OSError:
             size = 0
         em.asm_converge_stat("writes"); em.asm_converge_stat("bytes", size); em.checkpoint_cycle_charge(size - est)
-        _ASM_CONVERGE_DONE[key] = st
+        _ASM_CONVERGE_DONE[key] = ("stood", st, gone)      # a document stands: written here (looked at again once one is removed)
         return True
     em.checkpoint_cycle_charge(-est)                       # nothing written: the take goes back
     reason = reasons[-1] if reasons else "failed"          # the writer's own reason (round one, low 6)
@@ -14651,10 +14658,11 @@ ASM_REBUILD = os.environ.get("ROMP_ASM_REBUILD", "1") != "0"   # the document re
 def _asm_rebuild_maybe():
     """Start the rebuild of ONE leaf a parse found without a document (em.asm_rebuild_note: refused, missing, or too big for the
     converge pass), the largest pending, on a thread of its own at the lowest CPU priority, when no refresh or rebuild runs (the
-    two share one claim: one whole parse at a time) and the background gate is open (em.asm_background_open: the pusher's last
-    cycle was idle, and no parse or page connect is in flight). Run at the end of each IDLE pusher cycle (_asm_rebuild_tick, the
-    review of PR #367; the document writer's cycle until then, which ran whatever the pages were doing), so the rebuilds go one
-    after another while the kernel is quiet. Nothing here parses or reads: a stat per pending leaf, and the thread
+    two share one claim: one whole parse at a time) and the background gate is open (em.asm_background_open: the pusher is
+    asleep between its cycles, and no parse or page connect is in flight). Run at the end of each pusher cycle
+    (_asm_rebuild_tick; an idle cycle's alone from the review of PR #367 to the review of PR #370, and the document writer's
+    cycle before that, which ran whatever the pages were doing), so the rebuilds go one after another while the pusher sleeps.
+    Nothing here parses or reads: a stat per pending leaf, and the thread
     (asm_refresh_document's private road) takes no key lock, so no page connect, chat build or pusher cycle waits on it, and it
     waits at its chunk points whenever the gate shuts. A leaf the converge pass can still write from the boot's own read is left
     to it (its whole entry and the reader's whole record entry resident, under the display parse's flag, and its estimate
@@ -14699,15 +14707,15 @@ def _asm_rebuild_maybe():
     return False
 
 
-def _asm_rebuild_tick(idle):
-    """The pusher's end-of-cycle call for the document rebuild, beside _gc_freeze_tick and keyed on the same event: an IDLE
-    cycle (it sent nothing and changed nothing) opens the background gate, so a rebuild held at a chunk point carries on, and
-    starts the next rebuild when one is due; a busy cycle leaves the gate as the cycle's start left it, shut (the review of PR
-    #367: nice 19 did not keep a rebuild off the pages, which wait on the interpreter, not on a core). Cheap when nothing is
-    due: a dict scan. A failure never ends the pusher: said with its traceback."""
-    em.asm_background_idle(idle)
-    if not idle:
-        return False
+def _asm_rebuild_tick():
+    """The pusher's end-of-cycle call for the document rebuild: the cycle is over and the pusher sleeps until its next wake, so
+    the background gate opens (the cycle's start shut it), a rebuild held at a chunk point carries on, and the next rebuild
+    starts when one is due. Every cycle's end, busy or idle (the review of PR #370): keyed on an IDLE cycle's end alone (#370,
+    beside _gc_freeze_tick), the gate stood open about 45 s an hour on a host of 65 sessions, where a tenth of the cycles are
+    idle, and the largest rebuild there took about two hours, longer than the kernel lasts between deploys; the pusher is
+    asleep after a busy cycle as much as after an idle one, so it loses nothing. Cheap when nothing is due: a dict scan. A
+    failure never ends the pusher: said with its traceback."""
+    em.asm_background_idle(True)
     try:
         return _asm_rebuild_maybe()
     except Exception:
@@ -74867,7 +74875,7 @@ def _pusher_cycle():
     _c_cycle = time.thread_time()           # this thread's CPU: the wall above includes lock waits and any forked child
     _m_cycle = (_PERF_STATS.marks(), jd._GOAL_IO["saves"], jd._GOAL_IO["writes"])   # idle-cycle marks: see cycle()
     em.asm_background_idle(False)           # the background gate shuts as the cycle begins: a document rebuild waits at its next
-    #                                         chunk point until a cycle ends idle (_asm_rebuild_tick, below)
+    #                                         chunk point until the cycle ends (_asm_rebuild_tick, below)
     with _clients_lock:
         any_client = bool(_clients)
     _live_scope.snapshot_t = time.time()      # the stamp of the cycle's liveness snapshot, taken before it (_cached_timeline)
@@ -74935,8 +74943,8 @@ def _pusher_cycle():
         elif not _BOOT_HEALTH_DONE[0]:
             _boot_health_row_backstop(time.monotonic())         # the jobs pass still open long after: the row without it
         _gc_freeze_tick(_cycle_idle, first)                     # #1735: reconcile the freeze (the fold-in on any cycle, the release when idle; the guard is inside pusher_tick)
-        _asm_rebuild_tick(_cycle_idle)                          # the document rebuild, on the same event: the gate opens and the next
-        #                                                         rebuild starts at an idle cycle's end, never a busy one's
+        _asm_rebuild_tick()                                     # the document rebuild: the pusher sleeps now, so the gate opens and the
+        #                                                         next rebuild starts at every cycle's end, busy or idle
 
 
 @contextlib.contextmanager
@@ -76355,7 +76363,7 @@ def _document_write_phase(now):
     the writer done against it: _begin_checkpoint_cycle), then the converge pass, which writes the documents a boot's whole
     reads left wanting (_converge_checkpoints), bounded by its wall and that budget. (The assembly document rebuild for a leaf a
     parse found without one started here too, after the pass, from 2026-10-23 until the review of PR #367 moved it to the
-    pusher's idle cycles: _asm_rebuild_tick.) The settle write ran as the jobs pass's
+    pusher's cycle ends: _asm_rebuild_tick.) The settle write ran as the jobs pass's
     last job and the other two in the jobs thread's write phase after it (2026-10-08; the pusher's cycle before that), where
     a big document held up the next pass for the whole of its write (an idle 38 MB session's assembly document, about 11 s;
     a 225 MB transcript's, about a minute), and with it every decision the pass makes: nudges, the spend guard, the

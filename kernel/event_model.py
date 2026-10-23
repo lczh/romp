@@ -2467,7 +2467,7 @@ def checkpoint_sweep():
             try:
                 cp.unlink(); gone += 1
                 if cp.name.endswith(".gz"):                # an assembly document: counted as removed, its sidecar with it
-                    _asm_removed("sweep")
+                    _asm_removed("sweep", document=True)
                     cp.with_name(cp.name + ".meta").unlink(missing_ok=True)
                     for aside in Path(d).glob(cp.name + ".meta.retired-*"):   # and every retired refusal sidecar it left
                         try:
@@ -8337,7 +8337,7 @@ def _asm_ckpt_note(path, reason, detail=""):
         #                                                   already memoized (2026-09-24, the restore road reads through the memo)
         try:
             cp.unlink()
-            _asm_removed("fallback:" + str(reason))
+            _asm_removed("fallback:" + str(reason), document=True)
             cp.with_name(cp.name + ".meta").unlink(missing_ok=True)
         except OSError:
             pass
@@ -8376,18 +8376,33 @@ def asm_checkpoint_stats():
         #                                                document refreshes a restored entry's churn bound asked for (asm_refresh_claim)
         out["rebuild"] = dict(_ASM_REBUILD_STATS, pending=len(_ASM_REBUILD),   # the documents rebuilt for leaves a parse found
                               waiting=_ASM_BG["waiting"])   # without one (asm_rebuild_note), `pending` the table's size now, `waiting`
-    return out                                        #  a rebuild held at a chunk point for the pusher's next idle cycle (0 or 1)
+    return out                                        #  a rebuild held at a chunk point for the pusher's next sleep (0 or 1)
 
 
-def _asm_removed(reason):
+_ASM_DOC_REMOVED = [0]            # assembly documents this process has removed (the fallback that refused one, the boot sweep): the
+#                                   kernel's converge pass looks again at every leaf it had set aside because a document stood there
+#                                   once this moves (asm_documents_removed; the review of PR #370)
+
+
+def asm_documents_removed():
+    """How many assembly document files this process has removed so far (a refusal's fallback, the boot sweep): a generation the
+    converge pass keys its "a document stands" marks on, so a document removed under an unchanged leaf is written again."""
+    with _ASM_CKPT_LOCK:
+        return _ASM_DOC_REMOVED[0]
+
+
+def _asm_removed(reason, document=False):
     """The checkpoint directory's removals and retirements, counted per reason (T398): a document file removed by the fallback
-    that refused it or by the boot sweep (`fallback:<reason>`, `sweep`); a refusal mark the sweep retired from a version-old
+    that refused it or by the boot sweep (`fallback:<reason>`, `sweep`; `document` True, which also moves the generation the
+    converge pass reads, asm_documents_removed); a refusal mark the sweep retired from a version-old
     sidecar (`refusedMark:version`, the document stays); a retirement whose sidecar rewrite failed and left the mark standing
     (`refusedMark:versionFailed`, nothing removed, retried next boot); a mark whose forensic aside could not be written
     (`refusedMark:asideFailed`, the retirement proceeded). The report is `asmCheckpoint.removed` on /perf."""
     with _ASM_CKPT_LOCK:
         r = _ASM_CKPT_STATS.setdefault("removed", {})
         r[reason] = r.get(reason, 0) + 1
+        if document:
+            _ASM_DOC_REMOVED[0] += 1
 
 
 def asm_converge_stat(name, n=1):
@@ -8615,11 +8630,15 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             return _skip("restored")            # the document it came from stands (its refresh: asm_refresh_document)
         ad = entry["ad"]
         atoms = entry["atoms"]
-        chunk = _asm_bg_yield if from_entry is not None else (lambda: None)   # a rebuild's chunk points between the phases below
-        #                                                   (a private entry's write holds no lock; a no-op on any other thread)
+        def chunk():
+            """A rebuild's chunk point between the phases below (a private entry's write holds no lock; a no-op on any other
+            thread). True when it waited and another writer's document stands now: the write stands down there (`moot`), the
+            rest of its phases unspent, as it would at its replace."""
+            return bool(from_entry is not None and _asm_bg_yield() and stand_down is not None and stand_down())
         bounds = [a for a in atoms if a.get("type") == "system" and a.get("subtype") == "compact_boundary"]
         turns = segment_turns([dict(a) for a in atoms], rompuuid)
-        chunk()                                           # the turns are cut; the cut search is next
+        if chunk():                                           # the turns are cut; the cut search is next
+            return _skip("moot")
         # THE CUT (stage one b, plans/checkpoint-settled-cut.md): the boundary before the last SETTLED turn, a turn whose result
         # landed (`ended`) and whose next turn exists, or the turn holding the last compaction boundary, whichever is later; a
         # leaf with neither has no cut (structural, re-armed as the tree grows). The pre-cut part ends before that turn, so the
@@ -8752,7 +8771,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                 return skip("reuse" if "reuse" in blocked else "closure")   # a guard blocked every cut that cuts anything: its name
             return skip("unsplittable")               # nothing pre-cut, or pre-cut bytes that hold no kept record (every record before
             #                                           the cut shadowed by a later copy of its uuid): no document says less than none
-        chunk()                                           # the cut is chosen; the files, their witnesses and the rows are next
+        if chunk():                                           # the cut is chosen; the files, their witnesses and the rows are next
+            return _skip("moot")
         # the files: each one's records before the cut, its witness, and where the tail read starts
         first_seq, n = {}, 0
         for fp, recs in ad._src.items():
@@ -8825,7 +8845,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             #                                               Decided HERE, once the files loop has summed the pre-cut bytes and BEFORE the
             #                                               rows and atom rows are built, so a young session pays the stat and the cut
             #                                               choice alone at each settle (1721 round two, low 4)
-        chunk()                                           # the files are witnessed (their offsets in hand); the rows are next
+        if chunk():                                           # the files are witnessed (their offsets in hand); the rows are next
+            return _skip("moot")
         rows, row_of, files_order = [], {}, {}
         for u, r in ad.by_uuid.items():                   # insertion order = read order
             sq = ad.seq_of.get(u, 0)
@@ -8840,12 +8861,13 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                 fsids.append(fsid)
             rows.append([u, verdicts.get(u, "broken")[0], type_code.get(r.get("type"), "?"), r.get("subtype") if r.get("type") == "system" else None,
                          sq, ad.ts_of.get(u, 0), fsids.index(fsid), idx, 1 if u in entry["landed"] else 0, r.get("parentUuid")])
-        chunk()
+        if chunk():
+            return _skip("moot")
         # the pre-cut atoms in emit order
         pre_atoms = []
         for n_atom, a in enumerate(atoms):
-            if n_atom and n_atom % _ASM_BG_EMIT_CHUNK == 0:
-                chunk()                                   # a rebuild's chunk point every _ASM_BG_EMIT_CHUNK atoms of the rows
+            if n_atom and n_atom % _ASM_BG_EMIT_CHUNK == 0 and chunk():   # a rebuild's chunk point every _ASM_BG_EMIT_CHUNK
+                return _skip("moot")                                         #  atoms of the rows
             u = a.get("uuid")
             sq = ad.seq_of.get(u, 0) if u in ad.seq_of else None
             if sq is None:
@@ -8888,7 +8910,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                 if "toolUseResult" in a:
                     row["tur"] = a["toolUseResult"]
             pre_atoms.append(row)
-        chunk()                                           # the rows and the pre-cut atom rows are built; the spine is next
+        if chunk():                                           # the rows and the pre-cut atom rows are built; the spine is next
+            return _skip("moot")
         # the pre-cut spine, root to cut: the leaf's parent chain as the PARSE resolves it (repeated uuids last-wins, a
         # self-link a root), walked with a visited set that ends at the first revisit exactly as active_path does, so the
         # document's spine is the spine the chat shows. Until 2026-09-14 the walk was hop-bounded and a cycle in the
@@ -8929,18 +8952,22 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             if q["seq"] < cut_seq and q["ts"] is not None and (q["uuid"] is None or q["uuid"] in entry["kept"]):
                 st["absorbed_keys"].add((q["ts"], _th(" ".join(q["text"].split()))))
         fsids = files_order.get("_", [])
-        chunk()                                           # the carry is re-run; the identity proof is next
+        if chunk():                                           # the carry is re-run; the identity proof is next
+            return _skip("moot")
         pre_whole = [dict(a) for a in atoms if (ad.seq_of.get(a.get("uuid")) if a.get("uuid") in ad.seq_of else
                                                  next((q["seq"] for q in ad.qatts if q["uuid"] == a.get("uuid")), cut_seq)) < cut_seq]
         identity = _pre_tree_identity(pre_whole, rompuuid)     # the WHOLE parse's ids over the pre-cut atoms (bodies in hand)
         del pre_whole
-        chunk()
+        if chunk():
+            return _skip("moot")
         pre_lazy = _restore_prefix_atoms(pre_atoms, rompuuid, rows, fsids)
-        chunk()
+        if chunk():
+            return _skip("moot")
         if _pre_tree_identity(pre_lazy, rompuuid) != identity:
             return skip("reconstruction")            # the lazy reconstruction would not reproduce the whole parse's ids
         del pre_lazy
-        chunk()                                           # the identity proof holds; the turns section is next
+        if chunk():                                           # the identity proof holds; the turns section is next
+            return _skip("moot")
         # the `turns` section (T323 stage 4c): the parsed TREE's pre-cut turns as rows, so a restore builds the turns
         # without an atom; a synthesized atom (an idle span, a salvaged reply) has no record and rides as a row of its own
         # with its message inline. The section stops at the first turn holding a post-cut record (the cut is a turn
@@ -8958,8 +8985,8 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
             turns_doc = []
             cut_ts = min((ad.ts_of.get(u, 0) for u in entry["kept"] if ad.seq_of.get(u, 0) >= cut_seq), default=None)
             for n_turn, turn in enumerate(tree.get("turns") or []):
-                if n_turn and n_turn % 1024 == 0:
-                    chunk()                               # a rebuild's chunk point every 1,024 turns of the section
+                if n_turn and n_turn % 1024 == 0 and chunk():   # a rebuild's chunk point every 1,024 turns of the section
+                    return _skip("moot")
                 t_uuids = turn["uuids"] if turn.get("pre") else [a.get("uuid") for a in turn["atoms"]]   # a restored turn: no atom built
                 seqs = [ad.seq_of[u_] for u_ in t_uuids if u_ in ad.seq_of]
                 if seqs:
@@ -9063,13 +9090,20 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
         #                                               Written either way: a document with no such key was written before the
         #                                               writer recorded the wait, and the restore counts it as one written while an
         #                                               author waited (_asm_restore_inner, 2026-09-25)
-        chunk()                                           # the document is built; its encode is next
+        if chunk():                                           # the document is built; its encode is next
+            return _skip("moot")
         try:
-            doc["atoms"] = [json.dumps(r_, separators=(",", ":")) for r_ in pre_atoms]   # the rows first: the same guard
+            enc = []
+            for n_row, r_ in enumerate(pre_atoms):        # the rows first: the same guard
+                if n_row and n_row % _ASM_BG_EMIT_CHUNK == 0 and chunk():   # a rebuild's chunk point every _ASM_BG_EMIT_CHUNK
+                    return _skip("moot")                                     #  rows: about half the encode's hold on the
+                enc.append(json.dumps(r_, separators=(",", ":")))           #  interpreter (the review of PR #370; the dump of
+            doc["atoms"] = enc                                               #  the whole document below is one call)
             text = json.dumps(doc, separators=(",", ":"))
         except TypeError:
             return skip("unencodable")
-        chunk()                                           # encoded; the compression (zlib lets the interpreter go) is next
+        if chunk():                                           # encoded; the compression (zlib lets the interpreter go) is next
+            return _skip("moot")
         data = gzip.compress(text.encode("utf-8"), compresslevel=6)   # identities and hashes compress about five to one; the
         if len(data) > _ASM_CKPT_CAP:                                  #  bytes a boot reads are the compressed ones
             return skip("oversize")
@@ -9133,8 +9167,9 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
         return True
 
 
-_ASM_REFRESH = {"inflight": None}    # the cache key of the leaf whose document refresh is running (one at a time: each is a whole
-#                                      parse), under _ASM_LOCK; set by asm_refresh_claim, cleared by asm_refresh_document
+_ASM_REFRESH = {"inflight": None,    # the cache key of the leaf whose document refresh is running (one at a time: each is a whole
+                "paused": None}      #  parse), under _ASM_LOCK; set by asm_refresh_claim, cleared by asm_refresh_document. `paused`:
+#                                      the key of a rebuild waiting at its gate, which lent the claim out meanwhile (_asm_bg_yield)
 _ASM_REFRESH_STATS = {"claimed": 0, "written": 0, "refused": 0, "failed": 0, "ms": 0.0}   # asmCheckpoint.refresh on /perf
 
 
@@ -9175,6 +9210,7 @@ def asm_refresh_release(leaf_path, rompuuid, sdk_human=False):
     with _ASM_LOCK:
         if _ASM_REFRESH["inflight"] == key:
             _ASM_REFRESH["inflight"] = None
+    _asm_bg_wake()                                        # a rebuild waiting for the claim back takes it
 
 
 def asm_refresh_document(leaf_path, rompuuid, sdk_human=False, candidate_files=None, states=None, postal_log=None, now=None,
@@ -9202,11 +9238,12 @@ def asm_refresh_document(leaf_path, rompuuid, sdk_human=False, candidate_files=N
         live = _ASM_CACHE.get(key)
     st0 = _asm_rebuild_stat(leaf_path)
     size0 = st0[0] if st0 is not None else None
-    tb, gated0 = None, getattr(_ASM_BG_TL, "gated", False)
+    tb, gated0, claim0 = None, getattr(_ASM_BG_TL, "gated", False), getattr(_ASM_BG_TL, "claim", None)
     if rebuild is not None:
-        _ASM_BG_TL.gated = True                           # a rebuild waits for the pusher's idle cycles at its chunk points
+        _ASM_BG_TL.gated = True                           # a rebuild waits for the pusher's sleep at its chunk points, and lends
+        _ASM_BG_TL.claim = key                            #  its claim to a refresh while it waits (_asm_bg_yield)
     try:
-        _asm_bg_yield()                                   # (the gate shut since the idle cycle that started it: wait for the next)
+        _asm_bg_yield()                                   # (a cycle may have begun since the cycle end that started it)
         if rebuild is not None and asm_document_stands(leaf_path):
             outcome = "moot"                              # the settle or the converge pass wrote it since the claim: no parse
         else:
@@ -9238,13 +9275,18 @@ def asm_refresh_document(leaf_path, rompuuid, sdk_human=False, candidate_files=N
             reasons.append(repr(e))
             tb = traceback.format_exc()
     finally:
-        _ASM_BG_TL.gated = gated0
+        _ASM_BG_TL.gated, _ASM_BG_TL.claim = gated0, claim0
         with _ASM_LOCK:
             if live is not None and size0 is not None and rebuild is None:   # the baseline moves on every attempt: a refusal or a
                 pre0 = (live.get("refreshAt") or (live.get("docPre") or 0, 0))[0]   # failure is not retried at the next settle, only
                 live["refreshAt"] = (new_pre if new_pre is not None else int(pre0), int(size0))   # after the next share
             if _ASM_REFRESH["inflight"] == key:
                 _ASM_REFRESH["inflight"] = None
+            if rebuild is not None and _ASM_REFRESH["paused"] == key:
+                _ASM_REFRESH["paused"] = None             # (a rebuild that left its gate without the claim back: none is lent now)
+            lent = rebuild is None and _ASM_REFRESH["paused"] is not None
+        if lent:
+            _asm_bg_wake()                                # a refresh ran on a waiting rebuild's lent claim: the rebuild takes it back
         ms = (time.perf_counter() - t0) * 1000.0
         if rebuild is None:
             with _ASM_CKPT_LOCK:
@@ -9257,7 +9299,7 @@ def asm_refresh_document(leaf_path, rompuuid, sdk_human=False, candidate_files=N
 
 # THE DOCUMENT REBUILD (2026-10-23). A whole parse that finds a leaf's document REFUSED (every document a version bump outdates is
 # refused and unlinked at the deploy boot) or MISSING, on a leaf at or over the rebuild floor, notes the leaf here once its parse is
-# done, and the kernel starts its rebuild at the pusher's next idle cycle (the background gate below) on the refresh's own road,
+# done, and the kernel starts its rebuild at the pusher's next cycle end (the background gate below) on the refresh's own road,
 # largest first and one at a time (the refresh's claim is shared):
 # a private whole parse that installs nothing and takes no key lock, then the writer over it, with its proofs and its atomic
 # replace. Before this, a document was written only from a whole entry the settle or the converge pass still held in memory, so
@@ -9270,39 +9312,48 @@ _ASM_REBUILD_DECLINED = {}      # (realpath, rompuuid) -> the leaf's (size, mtim
 #                                 rebuild failed: not noted again until the leaf moves (a cut that cannot be written costs one
 #                                 private parse per leaf state, never one per parse)
 _ASM_REBUILD_BLIPPED = set()    # (realpath, rompuuid) whose rebuild the writer declined for a blip (_ASM_SKIP_BLIP): tried once more
-_ASM_REBUILD_RAISED = {}        # (realpath, rompuuid) -> the error of a rebuild that raised once: tried once more at the next idle
-#                                 pusher cycle, as a blip is; a second raise is final for the leaf's stat and said loudly
+_ASM_REBUILD_RAISED = {}        # (realpath, rompuuid) -> the error of a rebuild that raised once: tried once more at the next
+#                                 pusher cycle's end, as a blip is; a second raise is final for the leaf's stat and said loudly
 _ASM_REBUILD_MIN = _env_or("ROMP_ASM_REBUILD_MIN_KB", _CKPT_FOLD_CAP // 8, 1024)   # the rebuild floor: the young-session floor's value
 #                                 (_ASM_FIRST_DOC_MIN, an eighth of the fold cap, 1 MB by default) as a knob of its own, so the suite's
 #                                 floor-off knob does not make every small fixture a rebuild; below it a whole parse costs milliseconds
 _ASM_REBUILD_STATS = {"noted": 0, "claimed": 0, "written": 0, "declined": 0, "failed": 0, "retry": 0, "moot": 0, "gone": 0,
                       "small": 0, "released": 0, "subagent": 0, "ms": 0.0, "bytes": 0,
-                      "yields": 0, "yieldMs": 0.0}   # asmCheckpoint.rebuild on /perf (`pending` rides beside, a gauge); yields: the
-#                                 rebuild's waits at its chunk points for the pusher's next idle cycle, yieldMs their wall (_asm_bg_yield)
+                      "yields": 0, "yieldMs": 0.0, "lent": 0}   # asmCheckpoint.rebuild on /perf (`pending` rides beside, a gauge);
+#                                 yields: the rebuild's waits at its chunk points for the pusher's next sleep, yieldMs their wall, lent:
+#                                 those a refresh's run on the lent claim prolonged (_asm_bg_yield)
 _ASM_REBUILD_DRAIN = {"written": 0, "declined": 0, "failed": 0, "bytes": 0, "ms": 0.0, "running": 0}   # since the last summary line
 
 
 # THE BACKGROUND GATE (2026-10-23, the review of PR #367). A rebuild competes with the pages for the interpreter, not for a core: on
 # a machine with cores to spare, nice 19 bought nothing, and in a lab a page's 40 MB whole parse took 2.1 times as long while a
-# rebuild ran, with full collections of 0.65 to 1.04 s over the rebuild's heap. So a rebuild runs only while the pusher is idle,
-# the event the frozen heap's reclaim already waits for (the kernel's _gc_freeze_tick): the pusher shuts the gate as each cycle
-# begins and opens it as an IDLE cycle ends (it sent nothing and changed nothing), and starts the next rebuild there. Foreground
-# work in flight holds the gate shut whatever the pusher says: a parse of a session on any other thread (parse_session: a page's,
-# a judge's, the boot's) and a page connect's push (asm_foreground). A running rebuild waits at its chunk points (_asm_bg_yield)
-# until the gate is open again: before its parse, after the read, every _ASM_BG_EMIT_CHUNK atoms of the emit, after the parse,
-# and between the writer's phases. Inside a phase it runs on (the read under the reader's stripe lock, one identity proof, the
-# compression), so the longest stretch a page can still meet is one phase, never the whole rebuild: about 2 s of a 79 MB leaf's
-# 25 s rebuild in a lab, where a page's 26 MB parse that took 2.4 to 2.5 times as long beside a rebuild took 1.2 to 1.8 times.
+# rebuild ran, with full collections of 0.65 to 1.04 s over the rebuild's heap. So a rebuild runs only while the pusher sleeps: the
+# pusher shuts the gate as each cycle begins and opens it as each cycle ends (_asm_rebuild_tick), when it goes to sleep until its
+# next wake, and starts the next rebuild there. Until the review of PR #370 only an IDLE cycle's end opened it (one that sent
+# nothing and changed nothing, the event the frozen heap's reclaim waits for): on a host of 65 sessions a tenth of the cycles are
+# idle, the gate stood open about 45 s an hour, and the 824 MB session's rebuild took about two hours, all 28 transcripts over
+# 20 MiB nine to eleven, longer than a kernel lasts between deploys there. A busy cycle's end opens it too, since the pusher is
+# asleep after it as much as after an idle one, and the pusher loses nothing. Foreground work in flight holds the gate shut
+# whatever the pusher says: a parse of a session on any other thread (parse_session: a page's, a judge's, the boot's) and a page
+# connect's push (asm_foreground). A running rebuild waits at its chunk points (_asm_bg_yield) until the gate is open again:
+# before its parse, after the read, every _ASM_BG_EMIT_CHUNK atoms of the emit, after the parse, and between the writer's phases.
+# Inside a phase it runs on (the read under the reader's stripe lock, one identity proof, the compression), so the longest stretch
+# a page can still meet is one phase, never the whole rebuild: about 2 s of a 79 MB leaf's 25 s rebuild in a lab, where a page's
+# 26 MB parse that took 2.4 to 2.5 times as long beside a rebuild took 1.2 to 1.8 times. A waiting rebuild lends the shared claim
+# out (the review of PR #370: it held it through every wait, and a rebuild that waits for hours refused every settle's refresh of
+# every session for those hours), so a refresh runs meanwhile, and takes the claim back before it goes on.
 _ASM_BG_COND = threading.Condition()
-_ASM_BG = {"idle": False, "fg": 0, "waiting": 0}   # idle: the pusher's last cycle was idle and no cycle has begun since;
+_ASM_BG = {"idle": False, "fg": 0, "waiting": 0}   # idle: the pusher is asleep, its last cycle ended and no cycle has begun since;
 #                                                     fg: foreground work in flight; waiting: rebuild threads waiting at the gate
-_ASM_BG_TL = threading.local()   # .gated on the rebuild's own thread (asm_refresh_document with `rebuild`): its chunk points wait
+_ASM_BG_TL = threading.local()   # .gated on the rebuild's own thread (asm_refresh_document with `rebuild`): its chunk points wait;
+#                                  .claim, the claim's key that thread holds and lends out while it waits
 _ASM_BG_EMIT_CHUNK = 4096        # atoms of the rebuild's emit between two chunk points (about 40 ms of a 27 MB leaf's emit)
 
 
 def asm_background_idle(idle):
-    """The pusher's edges for the background gate: False as a cycle begins, True as an idle cycle ends (a busy cycle's end
-    leaves the gate as its start left it, shut). Wakes a rebuild waiting at a chunk point when the gate opens."""
+    """The pusher's edges for the background gate: False as a cycle begins, True as a cycle ends and the pusher goes to sleep
+    until its next wake (any cycle's end, idle or busy, since the review of PR #370). Wakes a rebuild waiting at a chunk point
+    when the gate opens."""
     with _ASM_BG_COND:
         _ASM_BG["idle"] = bool(idle)
         if idle and not _ASM_BG["fg"]:
@@ -9331,31 +9382,74 @@ class asm_foreground:
 
 
 def asm_background_open():
-    """Whether a background rebuild may run now: the pusher's last cycle was idle, none has begun since, and no foreground
-    work is in flight."""
+    """Whether a background rebuild may run now: the pusher is asleep (its last cycle ended and none has begun since), and no
+    foreground work is in flight."""
     with _ASM_BG_COND:
         return bool(_ASM_BG["idle"]) and not _ASM_BG["fg"]
+
+
+def _asm_bg_wake():
+    """Wake the rebuild waiting at its gate to look again: the claim it lent out is back (a refresh released it). Never called
+    under _ASM_LOCK (the waiter takes _ASM_LOCK inside _ASM_BG_COND)."""
+    with _ASM_BG_COND:
+        _ASM_BG_COND.notify_all()
+
+
+def _asm_claim_lend(key):
+    """A waiting rebuild lets go of the shared claim (`key`, the one it holds) so a refresh may take it meanwhile; `paused`
+    keeps a second rebuild from starting (asm_rebuild_claim, asm_refresh_running). Returns whether it held the claim."""
+    with _ASM_LOCK:
+        if key is None or _ASM_REFRESH["inflight"] != key:
+            return False
+        _ASM_REFRESH["inflight"], _ASM_REFRESH["paused"] = None, key
+        return True
+
+
+def _asm_claim_retake(key):
+    """The waiting rebuild takes its lent claim back, when no refresh holds it now. Returns whether it did."""
+    with _ASM_LOCK:
+        if _ASM_REFRESH["inflight"] is not None:
+            return False
+        _ASM_REFRESH["inflight"] = key
+        if _ASM_REFRESH["paused"] == key:
+            _ASM_REFRESH["paused"] = None
+        return True
 
 
 def _asm_bg_yield():
     """A rebuild's chunk point: on the rebuild's own thread, wait until the background gate is open; elsewhere nothing. Called
     only where the thread holds no lock a reader or the pusher takes (the private road's phase boundaries), so a wait here
-    holds nobody but the rebuild's one claim. Each wait is counted under asmCheckpoint.rebuild (`yields`, `yieldMs`)."""
+    holds nobody. While it waits, the rebuild lends its claim out (the review of PR #370), so a settle's refresh, cheap and
+    targeted, takes it and runs; once the gate opens, the rebuild takes the claim back before it goes on, and waits on while a
+    refresh still holds it, so one whole parse runs at a time (a waiting rebuild's heap stays as it is beside the refresh's).
+    Each wait is counted under asmCheckpoint.rebuild (`yields`, `yieldMs`), and each one a refresh's claim prolonged
+    (`lent`). Returns whether it waited: the caller asks again whether its leaf has a document now."""
     if not getattr(_ASM_BG_TL, "gated", False):
-        return
+        return False
+    key = getattr(_ASM_BG_TL, "claim", None)
+    lent_to_refresh = False
     with _ASM_BG_COND:
         if _ASM_BG["idle"] and not _ASM_BG["fg"]:
-            return
+            return False
         t0 = time.perf_counter()
         _ASM_BG["waiting"] += 1
         try:
-            while not (_ASM_BG["idle"] and not _ASM_BG["fg"]):
-                _ASM_BG_COND.wait()
+            lent = _asm_claim_lend(key)
+            while True:
+                while not (_ASM_BG["idle"] and not _ASM_BG["fg"]):
+                    _ASM_BG_COND.wait()
+                if not lent or _asm_claim_retake(key):
+                    break
+                lent_to_refresh = True
+                _ASM_BG_COND.wait()                       # a refresh holds the claim: its release wakes this wait (_asm_bg_wake)
         finally:
             _ASM_BG["waiting"] -= 1
     with _ASM_CKPT_LOCK:
         _ASM_REBUILD_STATS["yields"] += 1
         _ASM_REBUILD_STATS["yieldMs"] += (time.perf_counter() - t0) * 1000.0
+        if lent_to_refresh:
+            _ASM_REBUILD_STATS["lent"] += 1
+    return True
 
 
 def _asm_rebuild_stat(leaf_path):
@@ -9439,9 +9533,10 @@ def asm_rebuild_pending():
 
 
 def asm_refresh_running():
-    """Whether a document refresh or rebuild holds the one claim (one whole parse at a time)."""
+    """Whether a document refresh or rebuild holds the one claim (one whole parse at a time), or a rebuild waiting at its gate
+    has lent it out (it goes on once the gate opens: no second rebuild starts meanwhile)."""
     with _ASM_LOCK:
-        return _ASM_REFRESH["inflight"] is not None
+        return _ASM_REFRESH["inflight"] is not None or _ASM_REFRESH["paused"] is not None
 
 
 def asm_rebuild_claim(leaf_path, rompuuid, sdk_human=False):
@@ -9455,8 +9550,8 @@ def asm_rebuild_claim(leaf_path, rompuuid, sdk_human=False):
     if v is None:
         return None
     with _ASM_LOCK:
-        if _ASM_REFRESH["inflight"] is not None:
-            return None
+        if _ASM_REFRESH["inflight"] is not None or _ASM_REFRESH["paused"] is not None:
+            return None                                   # (a waiting rebuild lent the claim to a refresh: still one at a time)
         _ASM_REFRESH["inflight"] = key
     with _ASM_CKPT_LOCK:
         if _ASM_REBUILD.get(key[:2]) is v:
@@ -9483,7 +9578,7 @@ def _asm_rebuild_done(leaf_path, rompuuid, why, outcome, st0, ms, reason, tb=Non
     """A rebuild's outcome: counted, said once for the leaf (written, declined with the writer's reason, failed), and a decline
     or a failure memoized at the stat the rebuild read, so the next parse of the unchanged leaf does not note it again. A decline
     of the moment (_ASM_SKIP_BLIP: the reader's offsets evicted while the parse ran, a stat or a write refused) says nothing about
-    the cut, so the leaf goes back on the table for one more try at the pusher's next idle cycle before it is memoized (`retry`).
+    the cut, so the leaf goes back on the table for one more try at the pusher's next cycle end before it is memoized (`retry`).
     So does a rebuild that RAISED (2026-10-23, the review of PR #367: it was memoized at once, so an idle session was not tried
     again until it changed or the kernel restarted): the first raise is said and retried once, a second is final for the leaf's
     stat and said loudly, with both errors and the second one's traceback (`tb`)."""
@@ -9527,7 +9622,7 @@ def _asm_rebuild_done(leaf_path, rompuuid, why, outcome, st0, ms, reason, tb=Non
         line = "assembly checkpoint: rebuilt the document of %s (%s; %.0f MB in %.1f s)" % (leaf_path, why, size / 1048576.0,
                                                                                             ms / 1000.0)
     elif first_raise is not None:
-        line = ("assembly checkpoint: the rebuild of %s raised (%s); it is tried once more at the pusher's next idle cycle"
+        line = ("assembly checkpoint: the rebuild of %s raised (%s); it is tried once more at the pusher's next cycle end"
                 % (leaf_path, first_raise))
     elif outcome == "failed" and raised_before is not None:
         line = ("assembly checkpoint: THE REBUILD OF %s FAILED TWICE (%s; the first time: %s); it is not tried again until the "

@@ -2182,7 +2182,12 @@ minutes unchanged, a stand-in for that event, and until the review of PR 155
 it read the entry's own id for every leaf, so a background agent's file was
 written under the open viewer while the agent appended to it, and a thread's
 whatever its CLI was doing. A leaf is looked at once per file state:
-written, or refused for a property of its cut, it is done; a blip is tried
+written, or refused for a property of its cut, it is done, and a leaf
+whose document stands is set aside the same way, but looked at once more
+after any document is removed (the review of PR #370: a refusal unlinks a
+document under an unchanged leaf, and the leaf, set aside by its stat
+alone, was left without one until it changed or the kernel restarted,
+while the rebuild left it to this pass); a blip is tried
 twice (a blip inside the fold half's hold gets its second try over the entry
 the paid drop popped, so that leaf waits for the next boot's read); a leaf with
 no whole entry to write from is re-examined each cycle and counted once. The step's candidates are the assembly cache's whole entries, the parses the
@@ -2342,10 +2347,9 @@ parse that finds the leaf's document refused (a version bump refuses and
 removes every older document at the deploy boot) or missing notes the leaf,
 once that parse is done, when it is at least the rebuild floor
 (`ROMP_ASM_REBUILD_MIN_KB`, 1 MB by default, the young-session floor's
-value). At the end of each IDLE pusher cycle (one that sent nothing and
-changed nothing, the event the frozen heap's reclaim waits for), the kernel
-starts the rebuild of the largest noted leaf on a thread of its own at the
-lowest CPU priority: the refresh's private whole parse, then the writer with
+value). At the end of each pusher cycle, as the pusher goes to sleep until
+its next wake, the kernel starts the rebuild of the largest noted leaf on a
+thread of its own at the lowest CPU priority: the refresh's private whole parse, then the writer with
 its proofs and its atomic replace. Rebuilds and refreshes share one claim,
 so one whole parse runs at a time, and no reader of the leaf waits on it. A
 leaf the converge pass can still write from the parse's own read is left to
@@ -2366,8 +2370,15 @@ The rebuild runs only while the kernel is otherwise quiet (the review of PR
 the interpreter, not on a core, and in a lab a page's 40 MB whole parse took
 2.1 times as long beside a rebuild, with full collections of 0.65 to 1.04 s
 over the rebuild's heap. So a background gate shuts as each pusher cycle
-begins, opens as an idle one ends, and stays shut while any page, judge or
-boot parse of a session runs and while a page connect's push runs. No
+begins, opens as each one ends, and stays shut while any page, judge or
+boot parse of a session runs and while a page connect's push runs. Until
+the review of PR #370 only an idle cycle's end (one that sent nothing and
+changed nothing) opened it: on a host of 65 sessions, where a tenth of the
+cycles are idle, that left the rebuild about 45 s an hour, and the 824 MB
+session's rebuild took about two hours, all 28 transcripts over 20 MiB
+nine to eleven, longer than the kernel ran between deploys. The pusher
+sleeps after a busy cycle as much as after an idle one, so it loses
+nothing. No
 rebuild starts behind a shut gate, and a running one waits at its chunk
 points: before its parse, after the read, every 4,096 atoms of the emit,
 after the parse, and between the writer's phases (the cut search, the rows,
@@ -2375,10 +2386,16 @@ the identity proof, the encode). A phase itself runs on, so the longest
 stretch a page can still meet is one phase, never the whole rebuild: about
 2 s of a 79 MB leaf's 25 s rebuild in a lab, where a page's 26 MB parse that
 took 2.4 to 2.5 times as long beside a rebuild took 1.2 to 1.8 times. A
-waiting rebuild still holds the shared claim, so a refresh a settle asks for
-meanwhile waits for a later settle. A rebuild asks whether its leaf has a
-document again after its parse and once more at its replace, and writes
-nothing over one another writer put there while it worked. Every writer
+waiting rebuild lends the shared claim out, so a refresh a settle asks for
+meanwhile runs; once the gate opens, the rebuild takes the claim back
+before it goes on, waiting on while a refresh still holds it, so one whole
+parse runs at a time (the waiting rebuild's heap stays beside the
+refresh's). Until the review of PR #370 it held the claim through every
+wait, and every settle's refresh of every session was refused for as long
+as a rebuild took. A rebuild asks whether its leaf has a document again
+after its parse, at each writer phase it waited before, and once more at
+its replace, and writes nothing over one another writer put there while it
+worked. Every writer
 stages its document and its sidecar under a temp name of its own process and
 thread.
 
@@ -3983,9 +4000,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `moot`; `gone`, `small`, `released` and `subagent` for leaves that left the
   table unrebuilt; `bytes` and `ms` of the rebuilt leaves; `yields` and
   `yieldMs`, the rebuild's waits at its chunk points for the pusher's next
-  idle cycle and their wall; `pending`, the table's size now, and `waiting`,
-  1 while a rebuild waits at the gate); its parse counts under `parse` as
-  `private` too.
+  sleep and their wall, and `lent`, those a refresh on the lent claim
+  prolonged; `pending`, the table's size now, and `waiting`, 1 while a
+  rebuild waits at the gate); its parse counts under `parse` as `private`
+  too.
   Two more count what the hydrated-body memo does: `hydratedHits`, the
   fills it served without a read, and `hydratedEvicted`, the entries its
   cap pushed out; a released leaf's bodies leave the memo uncounted. A memo
