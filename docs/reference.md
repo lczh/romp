@@ -3855,10 +3855,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   keyed `kind<-caller` (the reader's kind, one of `zero`, `rewrite`, `guard`,
   `shrunk` and `upgrade`; a file that kept its size and inode under a new
   modification time, which a relaunched session's CLI leaves on its
-  transcript, is no whole read: its held bytes are checked raw against the
-  checksum the entry kept, no decode, the entry served under its
-  generation and counted `touched`, and only bytes that differ read it
-  whole as a `rewrite`, or `detached` for a whole read that leaves the
+  transcript, is no whole read when the reader holds the whole file: its
+  bytes are checked raw against the checksum the entry kept, no decode,
+  the entry served under its generation and counted `touched`, and only
+  bytes that differ read it whole as a `rewrite`; a tail entry restored
+  from a checkpoint never read the bytes before its start, so it reads
+  whole under the same stat, as the restore refuses it, or `detached` for a whole read that leaves the
   cache as it was, which is how a comment, edit or rewind after a /clear
   learns which messages the session's first file holds, once per change of
   that file, and the only way a comment reads that file again, where a

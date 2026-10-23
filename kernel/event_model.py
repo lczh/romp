@@ -626,14 +626,16 @@ def _read_jsonl(path):
 #  - grew                 → verify the cached tail bytes still sit before the cached offset (a REWRITE that
 #                           happens to be larger would otherwise serve a corrupt splice), then parse just
 #                           the new bytes. Mismatch → full re-read;
-#  - same size under a new mtime, same inode → checked, not re-read (2026-10-23): a writer that reopens its file and
-#                           writes nothing (a relaunched CLI, a touch) moves the time alone, and a whole re-read of a 464 MB
-#                           transcript for it (a fresh generation, so every fold and the assembly entry started over) took
-#                           46 s of a jobs pass. The tail guard first (a cheap reject), then the crc32 of every byte the
-#                           entry holds, read raw with no decode, against the one the entry kept: both standing serve the
-#                           entry under its generation (the bytes past the offset scanned, as for a growth); either
-#                           differing → full re-read, so an in-place edit of the same length is still read. A NEW inode at
-#                           the same size is a replacement (a rename over the path), read whole;
+#  - same size under a new mtime, same inode, a WHOLE entry → checked, not re-read (2026-10-23): a writer that reopens
+#                           its file and writes nothing (a relaunched CLI, a touch) moves the time alone, and a whole re-read
+#                           of a 464 MB transcript for it (a fresh generation, so every fold and the assembly entry started
+#                           over) took 46 s of a jobs pass. The tail guard first (a cheap reject), then the crc32 of every
+#                           byte the entry holds, read raw with no decode, against the one the entry kept: both standing
+#                           serve the entry under its generation (the bytes past the offset scanned, as for a growth);
+#                           either differing → full re-read, so an in-place edit of the same length is still read. A NEW
+#                           inode at the same size is a replacement (a rename over the path), and a TAIL entry's prefix was
+#                           never read in this process (nothing proves it, as the checkpoint restore refuses the same stat):
+#                           both read whole;
 #  - shrank → full re-read (a rewrite, not an append).
 # A trailing line with no "\n" yet (a writer caught mid-append) is NOT consumed — the offset stays before
 # it, so the next read picks the completed line up. Records are treated as IMMUTABLE by every consumer
@@ -643,10 +645,10 @@ def _read_jsonl(path):
 _JSONL_CACHE = {}                 # path -> (mtime, size, offset, tail_bytes, records, base, gen, offsets, inode, crc_start, crc);
 #                                   dict order = LRU, hits reinsert
 #                                   offsets: array of (byte offset, byte length) pairs, one per held record (T323 stage 4)
-#                                   inode, crc_start, crc (2026-10-23): the file's st_ino at the read and the zlib.crc32 of the
-#                                   bytes [crc_start, offset) the entry's records came from (0 for a whole entry, a tail entry's
-#                                   own start; None when an entry grew from one that carried none), so a same-size file under a
-#                                   new mtime is proved byte for byte without a decode; an entry without them reads it whole
+#                                   inode, crc_start, crc (2026-10-23): the file's st_ino at the read and, for a WHOLE entry, the
+#                                   zlib.crc32 of the bytes [0, offset) its records came from (crc_start 0; None for a tail entry,
+#                                   whose prefix this process never read), so a same-size file under a new mtime is proved byte
+#                                   for byte without a decode; an entry without them reads it whole
 #                                   base: how many records of the file precede records[0] (0 = the whole file is held; > 0 = a
 #                                   TAIL entry restored from a checkpoint, T323 stage 3); gen: a process-wide counter's value,
 #                                   fresh for every from-zero read and every restored entry (a mismatch, an eviction, a first
@@ -2829,9 +2831,9 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
     consults the file's checkpoint (T323 stage 3): the recorded offset's guard bytes are verified on disk and only
     offset..EOF is read. Without it a tail entry is upgraded to the whole file from zero (same gen: the prefix stood).
     A mismatch anywhere (the guard, a shrink) reads from zero and bumps gen; when the entry came from a checkpoint that is
-    a counted fallback. The same size under a new mtime, over the same inode, is no mismatch by itself: the guard and the
-    checksum of the held bytes decide it (kind "touched", counted under `touched`), and the entry keeps its gen; under a
-    new inode it is a replacement, read from zero."""
+    a counted fallback. The same size under a new mtime, over the same inode and a WHOLE entry, is no mismatch by itself:
+    the guard and the checksum of the held bytes decide it (kind "touched", counted under `touched`), and the entry keeps
+    its gen; under a new inode (a replacement) or over a tail entry (a prefix nothing here proves) it reads from zero."""
     path = str(path)
     try:
         st = os.stat(path)
@@ -2863,27 +2865,29 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
     try:
         with open(path, "rb") as fh:
             base, gen, done, kind = 0, None, False, "zero"
-            crc_start, crc = 0, [0]                       # the checksum of the held bytes [crc_start, offset): from zero for a whole
-            #                                               read, from a tail entry's start for its tail, None when unknown
+            crc_start, crc = 0, [0]                       # the checksum of the bytes [0, offset) a WHOLE entry holds; a tail entry
+            #                                               carries None (its prefix was never read here, so no checksum proves it)
             grown = hit is not None and (st.st_size > hit[1] or (restored is not None and st.st_size == hit[1]
                                                                     and (st.st_mtime == hit[0] or tail_from is not None)))
             unchanged_tail = (hit is not None and not tail_ok and hit[5] > 0 and st.st_size == hit[1]
                               and st.st_mtime == hit[0])            # a whole reader meets an unchanged tail entry
             touched = (hit is not None and restored is None and st.st_size == hit[1] and st.st_mtime != hit[0]
-                       and len(hit) > 10 and hit[8] == st.st_ino and hit[9] is not None)   # the same file, the same size, a new
-            #                                                         mtime: the guard, then the held bytes' checksum decide (below);
-            #                                                         a new inode is a replacement and an entry with no checksum
-            #                                                         cannot prove its bytes: both read whole
+                       and len(hit) > 10 and hit[5] == 0 and hit[9] == 0 and hit[8] == st.st_ino)   # a whole entry's file, the
+            #                                                         same inode and size under a new mtime: the guard, then the
+            #                                                         checksum of every byte it holds decide (below). A new inode is
+            #                                                         a replacement; a TAIL entry's prefix was never read in this
+            #                                                         process, so nothing proves it, and the restore refuses the same
+            #                                                         stat for its document (_ckpt_verdict): both read whole
             if grown or unchanged_tail or touched:
                 _, _, offset, tail, records, base0, gen0 = hit[:7]
                 fh.seek(max(0, offset - len(tail)))
                 _count_read(path, len(tail))
                 guard_ok = fh.read(len(tail)) == tail
-                held_ok = guard_ok and (not touched or _held_crc(fh, path, hit[9], offset) == hit[10])   # a touch: every held byte
+                held_ok = guard_ok and (not touched or _held_crc(fh, path, 0, offset) == hit[10])   # a touch: every held byte
                 if held_ok:                               # the file really is our cached prefix + more
                     if tail_ok or base0 == 0:
                         offs = array.array("q", hit[7]) if len(hit) > 7 else array.array("q")
-                        crc_start, crc[0] = (hit[9], hit[10]) if len(hit) > 10 else ((offset if restored is not None else None), 0)
+                        crc_start, crc[0] = (hit[9], hit[10]) if (len(hit) > 10 and base0 == 0) else (None, 0)
                         fh.seek(offset)
                         new, offset, nread = _scan_jsonl_stream(fh, offset, offs, limit=max(0, st.st_size - fh.tell()),   # the appended
                                                                 crc=crc if crc_start is not None else None)              #  lines, one at a time

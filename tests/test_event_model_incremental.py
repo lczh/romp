@@ -149,9 +149,10 @@ class IncrementalRead(unittest.TestCase):
         self.assertEqual(ent[4][2]["message"]["content"], "jello 2")
         self.assertNotEqual(ent[6], first[6], "a fresh generation: every fold over the file refolds")
 
-    def test_a_same_size_touch_over_a_tail_entry_checks_only_the_tail_it_holds(self):
-        """After a restart the large transcripts come back as TAIL entries from their checkpoints' cut. A touch over one is
-        proved over the bytes it holds, from its own start, and keeps it a tail: the restart is when the CLIs relaunch."""
+    def test_a_same_size_touch_over_a_tail_entry_reads_the_file_whole(self):
+        """A TAIL entry (restored from a checkpoint's cut) never read its prefix in this process, so no checksum proves the
+        bytes before its start: the touched road is a whole entry's alone, and a tail entry under a touch reads whole, as the
+        checkpoint restore refuses the same stat for its document (tests/test_asm_restore_memo.py pins the edit under the cut)."""
         recs = [_rec(i) for i in range(200)]
         _write(self.p, recs)
         whole = em._read_jsonl_entry(self.p)
@@ -161,15 +162,12 @@ class IncrementalRead(unittest.TestCase):
             guard = fh.read(em._JSONL_TAIL_GUARD)
         em._JSONL_CACHE.clear()
         tail = em._read_jsonl_entry(self.p, tail_ok=True, tail_from=(cut_off, 100, guard))
-        self.assertEqual((tail[5], tail[4]), (100, recs[100:]), "the premise: a tail entry from the cut")
-        read0, whole0 = em.read_bytes_report().get(self.p, 0), self._whole_reads()
+        self.assertEqual((tail[5], tail[4], tail[9]), (100, recs[100:], None), "the premise: a tail entry, no checksum")
         os.utime(self.p, (os.path.getmtime(self.p) + 5,) * 2)
         ent = em._read_jsonl_entry(self.p, tail_ok=True)
-        self.assertEqual((ent[5], ent[4], ent[6]), (100, recs[100:], tail[6]), "the same tail, the same generation")
-        self.assertEqual(self._whole_reads(), whole0)
-        self.assertLessEqual(em.read_bytes_report().get(self.p, 0) - read0, os.path.getsize(self.p) - cut_off + 2 * em._JSONL_TAIL_GUARD,
-                             "only the tail's bytes")
-
+        self.assertEqual((ent[5], ent[4]), (0, recs), "read whole from zero")
+        self.assertNotEqual(ent[6], tail[6], "a fresh generation")
+        self.assertEqual(ent[9], 0, "and now a whole entry with its checksum: the next touch is checked, not re-read")
     def test_a_same_size_file_with_a_changed_tail_is_reread_whole(self):
         recs = [_rec(i) for i in range(200)]
         _write(self.p, recs)
