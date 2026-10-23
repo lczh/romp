@@ -17,14 +17,14 @@ it). Skips LOUDLY without the extension deps or a browser (a failure under ROMP_
 only (the notes-api demo's web, api and tests).
 
 The ✕ on the opening tab (the review of #373) names the staged message, the text and then the held send it would discard,
-with Cancel focused, and Cancel and Escape keep them; red before the fix (it asked to End api with End session focused). The
+with Keep focused, and Keep and Escape keep them; red before the fix (it asked to End api with End session focused). The
 line over a box holding sends that never went belongs to its tab: after sends held for api and for tests, and two creates that
 replaced theirs, each kept tab says so over its own box, a reload included, and api's line follows its text to the session;
 red before the fix (docs' create took api's line, and the reload took both).
 
 The edges (2026-10-23), on the same page: a second create (tests) while api is opening keeps api's tab with its staged
 message and its text, and api's session adopts it; Enter on the opening tab holds the staged message with the typed text,
-so the session receives one message; and the failed tab's close asks before it discards, Cancel keeps everything, and the
+so the session receives one message; and the failed tab's close asks before it discards, Keep keeps everything, and the
 session arriving late under its name adopts the tab. Red before the fix on each (the second create dismissed api's tab and
 everything on it, Enter held the typed text alone, the close discarded at once and the late session found nothing).
 """
@@ -140,8 +140,8 @@ async function road(kind) {
     return { ask, after: await read() };
   };
   if (kind === "enter") {
-    // its ✕ while it holds a staged message and text: Cancel keeps both
-    out.closeStaged = await closeOpening("Cancel");
+    // its ✕ while it holds a staged message and text: Keep keeps both
+    out.closeStaged = await closeOpening("Keep");
     // Enter on the opening tab: held for the session, with what is staged on the tab
     await page.click("#composer-input");
     await page.press("#composer-input", "Enter");
@@ -192,14 +192,14 @@ async function road(kind) {
     await page.reload();
     await boot();
     out.failedReloaded = await read();
-    // its close asks before it discards; Cancel keeps everything
+    // its close asks before it discards; Keep keeps everything
     const close = await page.$('#tabs .tab[data-id="' + prov + '"] .tab-close');
     if (close) await close.click();
     await page.waitForSelector("#confirm .confirm-title", { timeout: 5000 }).catch(() => {});
     await page.waitForTimeout(300);
     out.ask = await read();
-    const cancel = await page.$('#confirm .confirm-btn:text-is("Cancel")');
-    if (cancel) await cancel.click();
+    const keep = await page.$('#confirm .confirm-btn:text-is("Keep")');
+    if (keep) await keep.click();
     await page.waitForTimeout(300);
     out.cancelled = await read();
   }
@@ -308,10 +308,10 @@ class ServedStagedPendingTab(QueuedLab):
         prov = self._staged_on_opening_tab(road)
         a = road["ask"]
         self.assertEqual(a["title"], "Discard api's 1 staged message and the text in its box?", "the close asks first: %r" % a)
-        self.assertEqual(a["buttons"], ["Cancel", "Discard"])
+        self.assertEqual(a["buttons"], ["Keep", "Discard"])
         self.assertEqual(a["prov"], [prov], "nothing goes before the answer")
         c = road["cancelled"]
-        self.assertIsNone(c["title"], "Cancel closes the question: %r" % c)
+        self.assertIsNone(c["title"], "Keep closes the question: %r" % c)
         self.assertEqual(c["prov"], [prov], "and keeps the tab: %r" % c)
         self.assertEqual(c["strip"], {"sid": prov, "line": self.LINE, "items": [STAGED]}, "with its staged message")
         self.assertEqual(c["box"], DRAFT, "and its text")
@@ -350,22 +350,22 @@ class ServedStagedPendingTab(QueuedLab):
         self.assertIsNone(a["strip"], "nothing is left staged to wait for the message after: %r" % a)
         self.assertEqual(road["sent"], [STAGED + "\n\n" + DRAFT], "the session received one message, the staged item first: %r" % road["sent"])
 
-    def test_the_x_on_the_opening_tab_names_what_it_would_discard_with_cancel_focused_and_cancel_keeps_it(self):
+    def test_the_x_on_the_opening_tab_names_what_it_would_discard_with_keep_focused_and_keep_keeps_it(self):
         # the review of #373 (2026-10-23): it asked "End “api”?" with End session focused, naming none of it
         road = self._result()["enter"]
         prov = self._staged_on_opening_tab(road)
         a, c = road["closeStaged"]["ask"], road["closeStaged"]["after"]
         self.assertEqual(a["title"], "Cancel starting api and discard its 1 staged message and the text in its box?", "it names both: %r" % a)
-        self.assertEqual(a["buttons"], ["Cancel", "Discard"])
-        self.assertEqual(a["focused"], "Cancel", "the safe answer has the focus: %r" % a)
-        self.assertIsNone(c["title"], "Cancel closes the question: %r" % c)
+        self.assertEqual(a["buttons"], ["Keep", "Discard"])
+        self.assertEqual(a["focused"], "Keep", "the safe answer has the focus: %r" % a)
+        self.assertIsNone(c["title"], "Keep closes the question: %r" % c)
         self.assertEqual(c["prov"], [prov], "and keeps the tab")
         self.assertEqual(c["tabs"], {prov: "live"}, "still opening")
         self.assertEqual(c["strip"], {"sid": prov, "line": self.LINE, "items": [STAGED]}, "with its staged message: %r" % c)
         self.assertEqual(c["box"], DRAFT, "and its text")
         h, e = road["closeHeld"]["ask"], road["closeHeld"]["after"]
         self.assertEqual(h["title"], "Cancel starting api and discard its 1 unsent message?", "a held send is named too: %r" % h)
-        self.assertEqual(h["focused"], "Cancel")
+        self.assertEqual(h["focused"], "Keep")
         self.assertIsNone(e["title"], "Escape closes it: %r" % e)
         self.assertEqual(e["prov"], [prov])
         self.assertEqual(road["cancels"], [], "the create was never cancelled")

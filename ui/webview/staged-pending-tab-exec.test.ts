@@ -509,7 +509,7 @@ test("3: a reload while the folder question is up loses nothing", () => {
   assert.equal(r.stripLine(), "1 staged — sends with your next message");
 });
 
-test("4: a kept tab's ✕ asks before it discards staged messages or text, and Cancel keeps everything", () => {
+test("4: a kept tab's ✕ asks before it discards staged messages or text, and Keep keeps everything", () => {
   const { w, prov } = opening();
   w.stage(ITEM.text);
   w.type(TYPED);
@@ -517,9 +517,9 @@ test("4: a kept tab's ✕ asks before it discards staged messages or text, and C
   w.closeTabLocally(prov);
   const ask = w.confirms[w.confirms.length - 1];
   assert.equal(ask.title, "Discard api's 1 staged message and the text in its box?");
-  assert.deepEqual(ask.buttons.map((b) => b.label), ["Cancel", "Discard"]);
+  assert.deepEqual(ask.buttons.map((b) => b.label), ["Keep", "Discard"]);
   assert.ok(w.S.sessions.has(prov), "nothing goes before the answer");
-  ask.cb("");   // Cancel
+  ask.cb("");   // Keep
   assert.deepEqual(kept(w, prov), { state: "closed", kept: true, replaced: false, staged: [ITEM.text], draft: TYPED });
   w.closeTabLocally(prov);
   w.confirms[w.confirms.length - 1].cb("discard");
@@ -639,7 +639,7 @@ const DOCS_REQ = { name: "docs", backend: "sdk", dir: "", host: "" };
 const CLOSE_A = RENDER.indexOf("    close: (el) => {"), CLOSE_B = RENDER.indexOf("showConfirm(`End “${nm}”?`", CLOSE_A);
 assert.ok(CLOSE_A > 0 && CLOSE_B > CLOSE_A, "the tab strip's ✕ delegate moved");
 
-test("7: the ✕ on a tab still opening names the staged messages, text and held sends it would discard, Cancel first; Cancel keeps all of it", () => {
+test("7: the ✕ on a tab still opening names the staged messages, text and held sends it would discard, Keep first; Keep keeps all of it", () => {
   const { w, prov } = opening();
   w.type("What does the list endpoint return today?"); w.enter();
   w.type("And what does it return for an empty page?"); w.enter();   // two sends held for the session
@@ -648,8 +648,8 @@ test("7: the ✕ on a tab still opening names the staged messages, text and held
   assert.equal(w.closeOpeningTab(prov), true, "it asks");
   const ask = w.confirms[w.confirms.length - 1];
   assert.equal(ask.title, "Cancel starting api and discard its 1 staged message, 2 unsent messages and the text in its box?");
-  assert.deepEqual(ask.buttons.map((b) => b.label), ["Cancel", "Discard"], "Cancel first, so it has the focus");
-  ask.cb("");   // Cancel
+  assert.deepEqual(ask.buttons.map((b) => b.label), ["Keep", "Discard"], "Keep first, so it has the focus");
+  ask.cb("");   // Keep
   ask.cb(null);   // …or Esc, or the backdrop
   assert.equal(w.S.provisionalId, prov, "still the create in flight");
   assert.equal(w.S.sessions.get(prov)?.status?.state, "opening");
