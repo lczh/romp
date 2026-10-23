@@ -502,6 +502,82 @@ test("a failed stored-logins read is said in place of an earlier open's rows, an
   }
 });
 
+// The newest open with a result wins (#383's begin order for the pickers, held here for the stored logins; the review of #387): what an
+// older open's reads bring, good or failed, never replaces what a newer open's reads set. Within the newest open the latest result
+// stands, except that a failure after a good answer of that open keeps its rows (the test above). One test per race the review found.
+const SAID_500 = "Couldn't read the stored logins from this machine (HTTP 500).";
+
+test("an older open's late failure and late answer leave a newer open's failure said, its reason included", async () => {
+  // the first open has two slow reads, one good and one failing; the reopen's read fails and is said. The first open's failure,
+  // landing next, does not swap the reason said, and its good answer, landing last, is not drawn over the reopen's failure
+  const g = gearLogins(), t1 = defer(), t2 = defer(), t3 = defer();
+  g.api.open();
+  g.api.fill(t1.promise);
+  g.api.fill(t2.promise);
+  g.api.open();
+  g.api.fill(t3.promise);
+  g.gets[2].resolve(notJson());
+  t3.resolve([]);
+  await settle();
+  assert.deepEqual([g.names(), g.failure()], [[], SAID_500], "the reopen's failure is said");
+  g.gets[1].reject(new TypeError("Failed to fetch"));
+  t2.resolve([]);
+  await settle();
+  assert.equal(g.failure(), SAID_500, "the older open's failure does not replace the newer one's reason");
+  g.gets[0].resolve(answer(named("older open")));
+  t1.resolve([]);
+  await settle();
+  assert.deepEqual([g.names(), g.failure()], [[], SAID_500], "the older open's good answer is not drawn over the newer open's failure");
+  assert.equal(g.said[g.said.length - 1], null, "…nor do the account lines speak from it");
+  assert.equal(g.errors.length, 2, "both failures are logged");
+});
+
+test("an older open's late answer does not take a newer open's waiting answer off the screen when that open's later read fails", async () => {
+  // the reopen has a good read, then a later one; the first open's answer lands late, and then the reopen's later read fails:
+  // the reopen's good answer is drawn (a failure after a good answer of the same open erases nothing), not the failure
+  const g = gearLogins(), t1 = defer(), t2 = defer(), t3 = defer();
+  g.api.open();
+  g.api.fill(t1.promise);
+  g.api.open();
+  g.api.fill(t2.promise);
+  g.api.fill(t3.promise);
+  g.gets[1].resolve(answer(named("newer open")));
+  t2.resolve([]);
+  await settle();
+  assert.deepEqual([g.names(), g.draws()], [[], 0], "the reopen's answer waits on its later read");
+  g.gets[0].resolve(answer(named("older open")));
+  t1.resolve([]);
+  await settle();
+  g.gets[2].resolve(notJson());
+  t3.resolve([]);
+  await settle();
+  assert.deepEqual([g.names(), g.failure()], [["newer open"], null], "the newer open's good answer is drawn, not the failure");
+  assert.equal(g.said[g.said.length - 1], "newer open", "…and the account lines speak from it, not from the older open's late answer");
+});
+
+test("an older open's late answer does not take a newer open's drawn rows down for that open's earlier failure", async () => {
+  // the reopen's fill fails and is said, then a read of the reopen that draws at once (a finished sign-in's) draws its rows; the
+  // first open's answer, landing last, neither puts the failure back over those rows nor draws itself
+  const g = gearLogins(), t1 = defer(), t2 = defer();
+  g.api.open();
+  g.api.fill(t1.promise);
+  g.api.open();
+  g.api.fill(t2.promise);
+  g.gets[1].resolve(notJson());
+  t2.resolve([]);
+  await settle();
+  assert.equal(g.failure(), SAID_500, "the reopen's failure is said");
+  g.api.fill();
+  g.gets[2].resolve(answer(named("signed in")));
+  await settle();
+  assert.deepEqual([g.names(), g.failure()], [["signed in"], null], "the reopen's later good answer draws over its failure");
+  g.gets[0].resolve(answer(named("older open")));
+  t1.resolve([]);
+  await settle();
+  assert.deepEqual([g.names(), g.failure()], [["signed in"], null], "the older open's late answer leaves the newer open's rows");
+  assert.equal(g.said[g.said.length - 1], "signed in", "…and the account lines");
+});
+
 test("the gear's stored-login row links a login to a machine's sign-in and unlinks it, said as the user's statement (2026-10-01)", async () => {
   // linked: the note names the machine and that the link is the user's, and an Unlink takes it back
   assert.match(GEAR, /if \(ln\) note = \(note \? note \+ ' \\u00b7 ' : ''\) \+ 'same account as ' \+ lgSignIn\(ln\.host\) \+ ', linked by you';/);

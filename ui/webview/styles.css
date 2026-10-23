@@ -94,6 +94,8 @@ body.scheme-solarized-dark {
      button family wears the feed's exact rest treatment; the chat page cannot import feed.css) */
   --card-border: rgba(255, 255, 255, 0.10);
   --err: #c0392b;   /* the hard stop's red (the ⏸ live-block badge, the modal's hard-stop chip; unified with the awaiting red, the user 2026-06-24). Since 2026-09-21 the Needs you category paints in --st-needs-bg, never this red (plans/needs-you.md). API-error (--st-blocked-bg #e5484d) stays distinct. */
+  --err-fg: #F85B5A;   /* the error red as TEXT: --err is a fill and border red, 2.82:1 as words on the raised card; this reads 4.84:1 there
+                          (the settings panel's stored-logins failures and refusals, the review of #387). theme-parity.test.ts holds the pair */
   --warn: #d7a23a;  /* the heads-up amber — "attention, not an error". Was referenced with fallbacks but never
                        defined (a phantom token) until 2026-08-26; mirrored in feed.css (own :root). */
   /* the three mail KINDS (Delegation / Coordination / Question) as coloured TEXT on the card head (T302; T371, the user
@@ -304,6 +306,7 @@ body.theme-light {
                                                        (71) sits near a warm peer's, and at .03 that tint read at less than half
                                                        a cool one's distance from the ground (T337c, the review of 2026-09-11) */
   --err: #B02A1C;
+  --err-fg: #B02A1C;   /* the error red as text: the light --err already reads 6.06:1 on the raised cream */
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-ink: #A83808;   /* accent-coloured labels on the cream: 5.10:1 on the box wash where the accent reads 4.07:1 (the 4.5 text floor); the accent stays #C2410C */
   --deny: #B02A1C;   /* the deny label and border on the cream: the hard stop's red, 5.17:1 as text on the box wash (the old #e5484d read 3.08:1) */

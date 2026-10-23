@@ -1234,7 +1234,11 @@ stored login's one-year life is warned from eleven months in the gear and the
 menus, and an expired one reads as unavailable. The machine's own login
 signing out leaves a session billed to a stored login untouched (its helper
 is its own; only the machine-login option greys). A single-login machine with
-no stored logins behaves exactly as before.
+no stored logins behaves exactly as before. When the gear cannot read the
+stored logins (an error status, no answer or an unreadable one), it says so
+in place of the list, and the Account row drops the rest of what that read
+supplied: the `Signed in as` line names the account by its label instead of
+its full name, and the billing line beside an API key goes.
 
 The Billing surfaces that list the logins, name the enterprise one and switch a
 session's pick ship with the registry and the credential road; the gear's

@@ -75,6 +75,8 @@ const PAIRS: Array<[string, string, number]> = [
   ["--deny-fg", "--deny", 4.5],        // the deny button's hover text on its own fill (the manager's read of PR 2039: white read 3.19:1 on the dark fill)
   ["--warn", "--bg", 3],
   ["--err", "--bg", 3],
+  ["--err-fg", "--surface-raised", 4.5],   // the error red as TEXT on the raised card (the settings panel, the login dialog: the review of #387, where --err read 2.82:1)
+  ["--st-working-bg", "--surface-raised", 4.5],   // the working amber as TEXT there too (an expiring stored login's note): a fill token the gear inks words with
   ["--green", "--bg", 3],
   ["--code-fg", "--bg", 4.5],
   ["--text-muted", "--surface-raised", 4.5],
@@ -150,7 +152,7 @@ for (const sheet of ["styles.css", "feed.css"]) {
       }
       // a skip must be loud (PR #763 item 6): pin how many pairs actually ran per sheet/theme —
       // grow these numbers when PAIRS grows, never let them silently shrink
-      const expected = sheet === "styles.css" ? PAIRS.length : 24;   // feed's :root holds a deliberate subset (+ the retrying pair, 2026-09-08; + the two ask pairs, 2026-09-14: the settings' ring demo reads the token there; + the two 5xx pairs, PR 1935 rounds three and four, 2026-09-21: --st-5xx-bg on --bg and --st-5xx-fg on --st-5xx-bg, the feed's root declaring the fill and its text ink)
+      const expected = sheet === "styles.css" ? PAIRS.length : 26;   // feed's :root holds a deliberate subset (+ the retrying pair, 2026-09-08; + the two ask pairs, 2026-09-14: the settings' ring demo reads the token there; + the two 5xx pairs, PR 1935 rounds three and four, 2026-09-21: --st-5xx-bg on --bg and --st-5xx-fg on --st-5xx-bg, the feed's root declaring the fill and its text ink; + the error and amber text pairs on the raised card, the review of #387: the settings page links feed.css)
       // T337: the postal kind words also sit on the PROVISIONAL card (a sent card not yet landed wears the pending
       // bubble's dress: an 8.5% wash of --you over the page, styles.css .queued-bubble, no element opacity since the
       // fade moved into the dress's colours), the darkest ground they meet; each reads at 4.5:1 there too
@@ -184,6 +186,49 @@ for (const sheet of ["styles.css", "feed.css"]) {
     }
   });
 }
+
+// The settings panel's red and amber WORDS (the review of #387): #387 made the stored-logins block's colours apply inside #rsettings,
+// and its red was --err, a fill red that reads 2.82:1 as 12px words on the dark card (the refused notes had read 5.80:1 in the muted
+// grey); the login dialog's error wore the same token. Each rule's colour is read from gear.css as written, resolved through the
+// tokens of each sheet that hosts the gear (styles.css in the VS Code chat, feed.css on the settings page and the VS Code feed), and
+// held at 4.5:1 on the ground the rule's surface paints, in both themes.
+test("gear.css: the settings panel's error and amber words read at 4.5:1 on the card and the login dialog, in both themes of both host sheets", () => {
+  const gear = read("gear.css").replace(/\/\*[\s\S]*?\*\//g, "");
+  const decl = (sel: string, prop: string): string => {
+    const at = gear.indexOf(sel + " {");
+    assert.ok(at >= 0, sel + " is a rule in gear.css");
+    const m = gear.slice(at, gear.indexOf("}", at)).match(new RegExp("(?:^|[;{\\s])" + prop + ":\\s*([^;]+);"));
+    assert.ok(m, sel + " sets " + prop);
+    return m![1].trim();
+  };
+  const card = decl(".rs-card", "background"), dialog = decl("#rs-login-modal .rs-login-card", "background");
+  const USES: Array<[string, string, string]> = [   // (what it is, its rule, the ground it sits on)
+    ["the stored logins' failure line and refused notes, and a refused link's note", "#rsettings .rs-logins .rs-login-bad", card],
+    ["an expiring stored login's note", "#rsettings .rs-logins .rs-login-warn", card],
+    ["the login dialog's refusal", "#rs-login-modal .rs-login-err.bad", dialog],
+  ];
+  // a gear value through a theme's tokens: var(--x, fallback) is the token where the sheet declares it, else the fallback
+  const resolve = (v: string, theme: Map<string, string>): string => {
+    const m = v.match(/^var\((--[a-z0-9-]+),\s*(.+)\)$/i);
+    if (!m) return v;
+    return theme.has(m[1]) ? resolve(theme.get(m[1])!, theme) : resolve(m[2].trim(), theme);
+  };
+  let evaluated = 0;
+  for (const sheet of ["styles.css", "feed.css"]) {
+    const css = read(sheet);
+    for (const [name, theme] of [["dark", props(block(css, ":root {"))], ["light", props(block(css, "body.theme-light {"))]] as const) {
+      const page = rgbOf(theme.get("--bg")!, [30, 30, 30])!;
+      for (const [what, sel, groundV] of USES) {
+        const ground = rgbOf(resolve(groundV, theme), page), fore = ground && rgbOf(resolve(decl(sel, "color"), theme), ground);
+        assert.ok(ground && fore, `${sheet} ${name}: ${what} resolves to colours`);
+        const c = contrast(fore!, ground!);
+        assert.ok(c >= 4.5, `${sheet} ${name}: ${what} (${sel}) = ${c.toFixed(2)}:1 on its ground, < 4.5`);
+        evaluated++;
+      }
+    }
+  }
+  assert.equal(evaluated, 12, "every use, in both themes of both sheets");
+});
 
 /** OKLab distance x100 between two sRGB colours: about 2 is where two flat fills start to read as two. */
 function okDist(a: [number, number, number], b: [number, number, number]): number {
