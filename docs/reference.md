@@ -6711,6 +6711,21 @@ In a mixed mesh a kernel from before phase two ignores `scope`: with the store p
 broadcast is, and with it unpinned the value applies but pins nothing, so the next broadcast walks it back; update the kernel. A peer that reports a store pinned is not pushed our value for it. A MIXED
 mesh: an older kernel without this change still adopts the value a one-A kernel pushes to it and still applies our poll's
 value on its side, so the two converge one way (toward the newer kernel's proposals being answered) until it updates.
+The settings panel draws what the machines hold, not a guess (2026-10-23). A fill writes every kernel-backed row once, after both
+its reads (`/version` and `/tunnels`) have answered, so a box always holds what it shows: a mixed box is held ticked under its
+dash from the moment it is drawn until the next drawing, and a fill whose reads began before a click on a kernel-backed row
+draws nothing. A kernel answers every setting another machine's dashboard relays to it (a `relay` socket) with a `settingAck`
+frame once it has handled it (applied, stood down or refused); the gear then asks its own kernel to re-read that machine
+(`GET /tunnels?reread=<host>`), which lifts the peer's `settings`, `settingsGt` and `settingsPinned` onto its row before the
+listing is built, rather than comparing against the supervisor's copy from its last 15 s pass. Every read of a peer's settings
+takes a number before it starts, and a row keeps the settings of the latest-begun read. Under All kernels a click names the
+machines the panel shows (`reach`), and federation reaches each of them beside the hosts the page has linked; a setting for a
+machine the page holds no connection to yet is held (newest per type), the send polls `/tunnels` at once, and the setting
+rides the new connection's open. A poll that does not list the machine drops it with a `warn` naming the host, the type and
+the cause (`unlinked`: the page has no connection; `opening`: its connection is still opening; `down`: the machine's kernel
+is not answering), and the settings page shows every `warn` as a notice, a dropped setting in the row's own words. Each
+kernel-backed box is named by its title alone and described by its state (the flag, the machines' values and what a click
+does) and then its line.
 
 **Across attached machines** the browser merges every host's feed frame into one. A host whose frame is the off stand-in
 is named in the merged frame (`offHosts`, beside the per-host build counters), a host that is attached but has not yet
@@ -7724,6 +7739,12 @@ pick. Off is the side that does nothing (on runs the judges, nudges sessions,
 writes to disk or costs more on most of these rows), and a second click turns
 it on. The hover on **differs** ends with what a click there does. The judge,
 comment and Model rows apply on every machine even when a machine is picked.
+
+A machine that takes a change says so, and the panel then re-reads that
+machine, so a row shows the machines as they hold the setting within a moment
+of a click and a second click acts on that. A change that cannot reach a
+machine, because the page has no connection to it, shows a notice naming the
+setting and the machine.
 
 A machine running an older romp may not report a row (Thinking summaries,
 Always load whole chats and Extra models were not reported before the per-install

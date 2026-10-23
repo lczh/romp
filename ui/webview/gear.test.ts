@@ -294,7 +294,7 @@ test("the Auto Nudge box speaks for every attached machine, and says so when the
   // /version answers for the kernel serving this page only, so the box used to show one machine's
   // setting as everyone's — the user 2026-08-14 unchecked it and the other machine kept nudging with
   // nothing on screen to say so. The reconcile reads each attached row's own setting off /tunnels.
-  assert.ok(GEAR.includes("fetch(ku('/tunnels')"), "the box must check the OTHER kernels, not just /version");
+  assert.ok(GEAR.includes("fetch(ku('/tunnels' + q)"), "the box must check the OTHER kernels, not just /version");
   assert.ok(GEAR.includes("mixBox(an);"), "hosts that disagree put the box in the mixed state, whose click turns it off (the one rule)");
   assert.ok(GEAR.includes("rs-autonudge-split"), "…said in words too — a tri-state box alone reads past");
   assert.ok(GEAR_CSS.includes(".rs-mixed"), "…and that marker needs its styling, or it inherits nothing");

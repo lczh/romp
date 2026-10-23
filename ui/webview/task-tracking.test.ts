@@ -29,8 +29,8 @@ test("the gear: the flip posts setTaskTracking with a stamp and nothing more; th
   assert.match(GEAR, /if \(tk\) tk\.addEventListener\('change', function \(\) \{ post\(scoped\(\{ type: 'setTaskTracking', enabled: tk\.checked, gt: gclock\.stamp\('task-tracking'\) \}\)\); \}\);/,
     "the post is gesture-stamped; scoped() adds the machine selector's pick and nothing else (phase two)");
   assert.doesNotMatch(GEAR, /gclock\.stamp\('task-tracking'\) \}\); tellShellTracking/, "no shell message on the click");
-  assert.match(GEAR, /if \(!m \|\| m\.type !== 'taskTracking' \|\| typeof m\.on !== 'boolean'\) return;[^\n]*\n\s*if \(tk\) tk\.checked = m\.on;\s*\n\s*dressTracking\(m\.on\);\s*\n\s*tellShellTracking\(m\.on\);/,
-    "the echo frame sets the box, dresses, and tells the shell");
+  assert.match(GEAR, /if \(!m \|\| m\.type !== 'taskTracking' \|\| typeof m\.on !== 'boolean'\) return;[^\n]*\n\s*if \(tk && !tk\.indeterminate\) tk\.checked = m\.on;[^\n]*\n\s*dressTracking\(m\.on\);\s*\n\s*tellShellTracking\(m\.on\);/,
+    "the echo frame sets the box (a dash a fill drew since stays held ticked, the gear-truth review), dresses, and tells the shell");
   assert.match(KERNEL, /_reply\(client, \{"type": "taskTracking", "on": bool\(enabled\), "gt": stamp\}\)/, "the kernel answers an applied flip on the delivering socket");
   assert.match(GEAR, /'task-tracking': 'Task tracking',/, "the stale toast names the setting (round two, low 1)");
   assert.match(GEAR, /function tellShellTracking\(on\) \{ try \{ \(window\.parent !== window \? window\.parent : window\)\.postMessage\(\{ romp: 'taskTracking', on: !!on \}, '\*'\); \} catch \(e\) \{\} \}/);

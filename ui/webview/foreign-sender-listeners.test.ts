@@ -386,6 +386,10 @@ const LIFTED: Lifted[] = [
     transport: ["post", "poster"], data: { type: "models", rev: 2 }, named: (hit) => ({ fetch: () => { hit(); return chain; } }) },
   { file: "webview/gear.js", marker: "'openSettings'", what: "the gear's openSettings ask, which opens the modal", trace: "gear:openSettings",
     transport: ["post", "poster"], data: { romp: "openSettings", tab: "tasks" }, named: (hit) => ({ openSettings: hit }) },
+  { file: "webview/gear.js", marker: "'settingAck'", what: "the gear's settingAck, which asks this kernel to re-read the machine that sent it", trace: "gear:settingAck",
+    transport: ["post", "poster"], data: { type: "settingAck", host: "TESTHOSTB", msgType: "setConserve", gt: 3 }, named: (hit) => ({ fetch: () => { hit(); return chain; } }) },
+  { file: "webview/gear.js", marker: "m.type !== 'warn'", what: "the settings page's warn, which shows the gear's toast", trace: "gear:warn",
+    transport: ["post", "poster"], data: { type: "warn", text: "this page has no connection to TESTHOSTB" }, named: (hit) => ({ staleToast: hit }) },
   { file: "webview/gear.js", marker: "'logUnseen'", what: "the gear's logUnseen count, which sets the Open log badge", trace: "gear:logUnseen",
     transport: ["post", "poster"], data: { romp: "logUnseen", n: 3 }, named: (hit, w) => { defineHidden(w, "__rompSetLogCount", hit); return {}; } },
   { file: "webview/strip.ts", marker: '"stripShow"', what: "the VS Code strip's usage push, which repaints the bars", trace: "strip",
@@ -492,9 +496,9 @@ for (const leg of LIFTED) {
 // the arm once per sender origin, or file no row.
 test("the lifted legs catch a drop whose trace hands noteForeign an arm, another name or no transport in place of its own", () => {
   const ARMS: Record<string, string> = { "artifacts": "apply", "gear:taskTracking": "tellShellTracking", "gear:models": "fetch",
-                                         "gear:openSettings": "openSettings", "strip": "render" };
+                                         "gear:openSettings": "openSettings", "gear:settingAck": "fetch", "gear:warn": "staleToast", "strip": "render" };
   const traced = LIFTED.filter((leg) => leg.trace);
-  assert.equal(traced.length, 8, "the gear's six, the strip's and the Artifacts pane's");
+  assert.equal(traced.length, 10, "the gear's eight, the strip's and the Artifacts pane's");
   for (const leg of traced) {
     const label = leg.file + " (" + leg.marker + ")";
     const site = siteOf(leg.file, leg.marker);
@@ -615,7 +619,7 @@ function siteTrace(site: Site): string | null {
 // onmessage, which the census reads on the window only, and the design leaves WebSocket and MessageChannel handlers out).
 const GATED: Array<[string, number]> = [
   ["webview/artifacts.ts", 1], ["webview/file-browse.ts", 1], ["webview/file-view.ts", 1], ["webview/frame-listener.ts", 1],
-  ["webview/gear.js", 6], ["webview/palette-main.ts", 2], ["webview/panedock-main.ts", 1], ["webview/settings.ts", 1], ["webview/strip.ts", 1],
+  ["webview/gear.js", 8], ["webview/palette-main.ts", 2], ["webview/panedock-main.ts", 1], ["webview/settings.ts", 1], ["webview/strip.ts", 1],
 ];
 const EXEMPT: Array<[string, string, string]> = [
   ["webview/card-sections.ts", "sectionChannel",
