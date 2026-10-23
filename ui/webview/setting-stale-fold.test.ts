@@ -63,12 +63,13 @@ function lift() {
   const post = (m: any) => posts.push(m);
   const learned: Array<[string, number]> = [];
   const gclock = { learn: (s: string, gt: number) => learned.push([s, gt]), stamp: (s: string) => { learned.push([s, -1]); return 7777; } };
-  const fn = new Function("window", "document", "p", "fill", "post", "gclock", "setTimeout", "windowSender", src);
-  fn(win, doc, p, fill, post, gclock, setTimeout, (e: { source?: unknown; origin?: unknown }) => windowSender(e, win as { parent?: unknown }));
+  // the block's own scope record, handed back: scoped() (outside the block) notes each scoped gesture's picked kernels there
+  const fn = new Function("window", "document", "p", "fill", "post", "gclock", "setTimeout", "windowSender", src + "\nreturn { noteStaleScope: typeof noteStaleScope === 'function' ? noteStaleScope : function () {} };");
+  const inner = fn(win, doc, p, fill, post, gclock, setTimeout, (e: { source?: unknown; origin?: unknown }) => windowSender(e, win as { parent?: unknown }));
   const frame = (m: any) => listeners.forEach((l) => l({ data: m }));
   const box = () => byId["rs-stale-toasts"];
   const texts = () => (box() ? box().children.map((t) => t.querySelector(".rs-stale-toast-msg")!.textContent) : []);
-  return { frame, box, texts, timers, p, fills: () => fills, posts, learned };
+  return { frame, box, texts, timers, p, fills: () => fills, posts, learned, noteStaleScope: inner.noteStaleScope as (m: any) => void };
 }
 
 const REFUSED = { type: "settingStale", setting: "judge-model", storedGt: 2000, gt: 1000, kept: "fable",
@@ -196,9 +197,9 @@ test("a refused Default effort pick reads by the name its select shows, not as n
 
 test("an echo of an unexpected shape shows no refused value: plain Apply anyway, value-less copy", () => {
   // every emitter posts {type, <one value field>, gt}; a future two-field gesture reads as no value
-  // rather than guessing which field is the pick
+  // rather than guessing which field is the pick (the routing fields federation adds, origin and scope, are not fields of it)
   const g = lift();
-  g.frame({ ...REFUSED, host: "web", gesture: { type: "setJudgeModel", model: "opus", scope: "all" } });
+  g.frame({ ...REFUSED, host: "web", gesture: { type: "setJudgeModel", model: "opus", effort: "high" } });
   assert.deepEqual(g.texts(), ["Triage model: not applied on web. Keeping fable."]);
   const btn = g.box().children[0].children.find((c) => c.className === "rs-stale-toast-act")!;
   assert.equal(btn.textContent, "Apply anyway", "the action still rides: the echo's type is the setting's");
@@ -272,4 +273,62 @@ test("a pinned store's stand-down says the value is pinned, never that a file co
   g.frame({ type: "settingStale", setting: "auto-nudge", storedGt: 1000, gt: 5001, kept: false, pinned: true, host: "TESTHOSTB",
             gesture: { type: "setAutoNudge", enabled: true, origin: "remote" } });
   assert.equal(g.texts()[1], "Auto Nudge: on was not applied on TESTHOSTB. Keeping off. Kept: TESTHOSTB's value is pinned.");
+});
+
+// The #374 review: a refusal under the settings' machine selector. federation addresses each scoped copy to its kernel and
+// strips the host list, adding `scope: "pinned"` beside `origin`, so the kernel's echo carries no hosts. The refused value read
+// past `origin` alone and dropped out of the toast, and Apply anyway re-posted the echo with no hosts, which federation routes
+// as the broadcast: after a refusal under a one-kernel pick, one click applied the pick on every kernel.
+const SCOPED = { type: "settingStale", setting: "whole-chat-frames", storedGt: 9000, gt: 4242, kept: false, host: "TESTHOSTB",
+                 gesture: { type: "setWholeChatFrames", enabled: true, origin: "remote", scope: "pinned" } };
+
+test("a refusal under a pick names the refused value: the scope a pick adds is routing, not the value", () => {
+  const g = lift();
+  g.noteStaleScope({ type: "setWholeChatFrames", enabled: true, gt: 4242, hosts: ["TESTHOSTB"], scope: "pinned" });
+  g.frame(SCOPED);
+  assert.deepEqual(g.texts(), ["Always load whole chats: on was not applied on TESTHOSTB. Keeping off."]);
+  const btn = g.box().children[0].children.find((c) => c.className === "rs-stale-toast-act")!;
+  assert.equal(btn.textContent, "Apply on anyway", "the label names the value");
+});
+
+test("Apply anyway after a refusal under a pick goes back to the picked kernels alone, and its hover names them", () => {
+  const g = lift();
+  g.noteStaleScope({ type: "setWholeChatFrames", enabled: true, gt: 4242, hosts: ["TESTHOSTB"], scope: "pinned" });
+  g.frame(SCOPED);
+  const btn = g.box().children[0].children.find((c) => c.className === "rs-stale-toast-act")!;
+  assert.equal(btn.title, "apply this pick (on) only on TESTHOSTB, replacing the value kept there");
+  btn.clicks.forEach((fn) => fn({}));
+  assert.equal(g.posts.length, 1);
+  assert.deepEqual(g.posts[0].hosts, ["TESTHOSTB"], "scoped to the pick, never the broadcast an echo without hosts routes as");
+  assert.equal(g.posts[0].scope, "pinned");
+  assert.equal(g.posts[0].type, "setWholeChatFrames");
+  assert.equal(g.posts[0].enabled, true);
+  assert.equal(g.posts[0].gt, 7777, "a fresh stamp, through the clock");
+});
+
+test("a synchronized row's re-issue keeps its pick too, this machine among the picked named as such", () => {
+  const g = lift();
+  g.noteStaleScope({ type: "setAutoNudge", enabled: false, gt: 5151, hosts: ["", "TESTHOSTB"], scope: "pinned" });
+  g.frame({ type: "settingStale", setting: "auto-nudge", storedGt: 9000, gt: 5151, kept: true, host: "TESTHOSTB",
+            gesture: { type: "setAutoNudge", enabled: false, origin: "remote", scope: "pinned" } });
+  const btn = g.box().children[0].children.find((c) => c.className === "rs-stale-toast-act")!;
+  assert.equal(btn.title, "apply this pick (off) only on this machine, TESTHOSTB, replacing the value kept there");
+  btn.clicks.forEach((fn) => fn({}));
+  assert.deepEqual([g.posts[0].hosts, g.posts[0].scope, g.posts[0].enabled], [["", "TESTHOSTB"], "pinned", false]);
+});
+
+test("under All kernels the re-issue is the broadcast it was, and its hover says every connected kernel", () => {
+  const g = lift();
+  g.frame({ ...REFUSED, host: "web" });
+  const btn = g.box().children[0].children.find((c) => c.className === "rs-stale-toast-act")!;
+  assert.equal(btn.title, "apply this pick (opus) on every connected kernel, replacing the value they kept");
+  btn.clicks.forEach((fn) => fn({}));
+  assert.deepEqual(g.posts, [{ type: "setJudgeModel", model: "opus", gt: 7777 }], "no hosts, no scope: the broadcast");
+});
+
+test("a scoped echo with no record of its pick offers no Apply anyway: a guess would widen it to every kernel", () => {
+  const g = lift();
+  g.frame(SCOPED);   // nothing noted for setWholeChatFrames:4242
+  assert.deepEqual(g.texts(), ["Always load whole chats: on was not applied on TESTHOSTB. Keeping off."], "the copy still names the value");
+  assert.equal(g.box().children[0].children.find((c) => c.className === "rs-stale-toast-act"), undefined, "no button");
 });

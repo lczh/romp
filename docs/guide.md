@@ -427,10 +427,10 @@ Folded tag groups are kept the same way: a group folded on one device is folded
 on the others, and a tap on a group's heading in the phone's session list folds
 or opens it.
 
-A few settings describe one machine and stay on it. **Extra models from your
-API gateway**, under General, This machine, offers the models that machine's
-own gateway serves in every model picker, once `ROMP_ROUTER_MODELS` in its
-`service.env` names them.
+A few settings describe one machine, so each machine keeps its own value.
+**Extra models from your API gateway**, under General, Memory, models and
+updates, offers the models that machine's own gateway serves in every model
+picker, once `ROMP_ROUTER_MODELS` in its `service.env` names them.
 
 A machine that was set differently while you were apart asks rather than
 changes: a line under the row, and a card on the feed, each offering **Apply**

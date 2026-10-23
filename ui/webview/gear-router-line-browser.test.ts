@@ -85,7 +85,7 @@ test("the Extra models row stands as tall as Conserve memory's while its status 
     });
     await page.goto("http://romp.test/gear");
     await page.waitForFunction(() => Array.isArray((window as any).__posts) && !!document.getElementById("rs-router"), null, { timeout: 10000 });
-    await page.evaluate(() => { window.postMessage({ romp: "openSettings", tab: "general" }, "*"); });   // both rows live under General, This machine
+    await page.evaluate(() => { window.postMessage({ romp: "openSettings", tab: "general" }, "*"); });   // both rows live under General, Memory, models and updates
     // the fill has run once a box holds the kernel's flag (only fill() writes it); the page-load /models has been
     // painted once a family select holds a row (paintChoices fills them from the payload the open's fetch adopted)
     await page.waitForFunction(() => (document.getElementById("rs-indexfast") as HTMLInputElement).checked === true

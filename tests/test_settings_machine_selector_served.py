@@ -305,7 +305,9 @@ class ServedMachineSelector(unittest.TestCase):
         self.assertEqual(t["mark"]["color"], "rgb(215, 162, 58)", "the heads-up amber, through the token")
         self.assertEqual((t["pin"]["hidden"], t["pin"]["lit"]), (False, False), "the glyph shows, unlit: nothing pinned yet")
         self.assertTrue(t["indeterminate"], "All kernels shows the MIXED state while the kernels disagree, never this kernel's on as everyone's")
-        self.assertTrue(t["checked"], "…over this machine's value (on), which a click toggles for every kernel")
+        self.assertFalse(t["checked"], "…held unticked under the dash, so a click turns it ON for every kernel, the one rule a mixed box"
+                                       " follows (the #374 review: it held this machine's on, and a click set off, which the screen never said)")
+        self.assertIn("A click turns it on for every machine", t["mark"]["title"], "…and the hover says so")
         self.assertEqual(t["options"][:1], ["All kernels"]); self.assertIn(PEER, t["options"]); self.assertTrue(any("this machine" in o for o in t["options"]))
 
     def test_picking_the_peer_scopes_the_row_to_its_value_and_a_click_applies_there_alone_and_pins_it(self):

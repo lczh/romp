@@ -621,7 +621,7 @@ following to every connected machine's kernel):
 
 An install whose sessions reach the API through a gateway of its own can offer the models that
 gateway serves, in every model picker beside the Claude families. The switch is **Settings**,
-**General**, **This machine**, **Extra models from your API gateway**, off by default; while it is
+**General**, **Memory, models and updates**, **Extra models from your API gateway**, off by default; while it is
 off the pickers list Claude models only. It is a per-install setting: each machine keeps its own
 and nothing converges it (each declares its own gateway), while a click on it reaches the kernels the
 settings' machine picker names, every connected one under **All kernels**: `~/.local/state/romp/router-models.json`,
@@ -7689,9 +7689,22 @@ says so.
 
 A row the machines disagree on wears **differs**, with each machine's value on
 hover, and a checkbox shows the mixed state instead of this machine's value;
-the picker's count includes it. Under **All kernels** a click sets them all
-the same way. The judge, comment and Model rows apply on every machine even
-when a machine is picked.
+the picker's count includes it. A click on a mixed box turns it on for every
+machine in scope: every machine under **All kernels**, the picked ones under a
+pick. The hover on **differs** ends with what a click there does. The judge,
+comment and Model rows apply on every machine even when a machine is picked.
+
+A machine running an older romp may not report a row (Thinking summaries,
+Always load whole chats and Extra models were not reported before the per-install
+rows followed the picker). Picked, such a row reads **unknown** beside its name,
+with the box dimmed and unticked. A click still sends the change, but nothing
+comes back to confirm it, so the row then shows what was sent, dimmed, under
+**unconfirmed**; the hover on either word names the machine.
+
+When a machine refuses a change because it holds a newer one, the toast names
+the setting, the refused value and the machine, and its **Apply anyway** sends
+the value again to the machines the change was aimed at: every connected one
+under **All kernels**, the picked ones under a pick. Its hover names them.
 
 The settings open from the gear at the bottom right, or the palette's **Open
 settings**, in seven tabs: General, Chat, Feed, Sessions, Automation, Task

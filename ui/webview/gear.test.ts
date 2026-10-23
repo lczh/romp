@@ -260,11 +260,28 @@ test("every kernel-side select says so when connected machines disagree (the aut
   assert.ok(/t\.settings && typeof t\.settings\[key\] !== 'undefined'/.test(GEAR),
     "non-reporting rows are excluded, not read as disagreeing");
   assert.ok(GEAR.includes("mark.title = 'The kernels disagree: ' + vals.join(', ')"), "the hover names the machines and their values");
-  assert.ok(GEAR.includes("if (box) el.indeterminate = true;"), "a disagreeing box shows the mixed state, never this kernel's value as everyone's");
+  assert.ok(GEAR.includes("if (box) mixBox(el);"), "a disagreeing box shows the mixed state, never this kernel's value as everyone's");
+  // ONE rule for a click on a mixed box (the #374 review): it turns the setting ON for every machine in scope. The box holds
+  // checked=false under the dash, so the click's toggle lands on, and the flag's hover ends with what a click does there
+  assert.ok(GEAR.includes("function mixBox(el) { el.indeterminate = true; el.checked = false; }"), "a mixed box holds unticked under its dash");
+  assert.ok(GEAR.includes("mark.title = 'The kernels disagree: ' + vals.join(', ') + '. ' + clickRule(key, isBox, mixedHere);"), "the hover says what a click does");
+  assert.ok(GEAR.includes("if (isBox && mixed) return 'A click turns it on for ' + where"), "…the rule, in words");
   assert.ok(GEAR.includes("lastDiffs.push({ label: STALE_LABELS[storeOf(key)] || key, vals: vals });") && GEAR.includes("var diffs = lastDiffs;"),
     "the selector's count counts every disagreeing kernel-side row");
   const mixedSpans = GEAR.match(/class=rs-mixed hidden/g) || [];
   assert.ok(mixedSpans.length >= 10, `every kernel-side select carries a marker span (got ${mixedSpans.length})`);
+});
+
+test("a picked kernel that never reports a row (an older version) shows it unknown, never a fake mixed box (the #374 review)", () => {
+  // picked alone, an older kernel's Thinking summaries read mixed with no flag and went back to mixed after a click; the served
+  // two-kernel lab drives it (tests/test_settings_per_install_scope_served.py), these pin the wiring
+  assert.ok(GEAR.includes("if (fillUnknown(el, key)) { if (el.type !== 'checkbox') repaint = true; return; }"), "the per-install rows ask first");
+  assert.ok(GEAR.includes("if (box && scopeOn() && !fillUnknown(box, key)) {"), "…and the synchronized rows too");
+  assert.ok(GEAR.includes("return connected(h) && !reports(h, key);"), "a kernel that went down is not an older one");
+  assert.ok(GEAR.includes("mark.textContent = typeof one === 'undefined' ? 'unknown' : 'unconfirmed';"), "the grey word, never the amber flag");
+  assert.ok(GEAR.includes("this screen cannot confirm it applied."), "the hover says a click there cannot be confirmed");
+  assert.ok(GEAR.includes("noteSent(m);"), "scoped() remembers what it sent, so the row shows it after a click");
+  assert.ok(GEAR_CSS.includes("#rsettings input[type=checkbox].rs-unknown { opacity: .45; }"), "the box dimmed");
 });
 
 test("the Auto Nudge box speaks for every attached machine, and says so when they disagree", () => {
@@ -272,7 +289,7 @@ test("the Auto Nudge box speaks for every attached machine, and says so when the
   // setting as everyone's — the user 2026-08-14 unchecked it and the other machine kept nudging with
   // nothing on screen to say so. The reconcile reads each attached row's own setting off /tunnels.
   assert.ok(GEAR.includes("fetch(ku('/tunnels')"), "the box must check the OTHER kernels, not just /version");
-  assert.ok(GEAR.includes("an.indeterminate = true"), "hosts that disagree put the box in the mixed state");
+  assert.ok(GEAR.includes("mixBox(an);"), "hosts that disagree put the box in the mixed state, whose click turns it on (the one rule)");
   assert.ok(GEAR.includes("rs-autonudge-split"), "…said in words too — a tri-state box alone reads past");
   assert.ok(GEAR_CSS.includes(".rs-mixed"), "…and that marker needs its styling, or it inherits nothing");
   assert.ok(/t\.status === 'up'/.test(GEAR) && /typeof t\.autoNudge === 'boolean'/.test(GEAR),

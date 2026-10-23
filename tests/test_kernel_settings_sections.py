@@ -31,7 +31,7 @@ class SettingsSectionsTest(unittest.TestCase):
     def test_the_subsection_headers_are_present_in_order(self):
         h = _gear_src()
         self.assertLess(h.index("id=rs-tabs"), h.index("data-pane=general"), "the pills come first")
-        for pane, heads in (("general", ["Account", "Panes", "Appearance", "Permissions", "This machine", "Keyboard shortcuts"]), ("chat", ["Display", "Boxes below the transcript", "Comments", "Thinking", "Chat history", "Tab strip", "Tab widgets"]),
+        for pane, heads in (("general", ["Account", "Panes", "Appearance", "Permissions", "Memory, models and updates", "Keyboard shortcuts"]), ("chat", ["Display", "Boxes below the transcript", "Comments", "Thinking", "Chat history", "Tab strip", "Tab widgets"]),
                             ("feed", ["Cards"]), ("sessions", ["New sessions"]), ("automation", ["Nudges", "Model"]), ("tasks", ["Task tracking", "Judges"]),   # Model: the two model switches (2026-09-17)
                             ("debug", ["Judging bands", "Diagnostics"])):
             p = _pane(h, pane)
@@ -39,6 +39,10 @@ class SettingsSectionsTest(unittest.TestCase):
             idx = [p.index(">%s<" % t) for t in heads]
             self.assertEqual(idx, sorted(idx), pane + ": sub-heads in order")
         self.assertIn("<div class=rs-sec id=rs-panes-sec>Panes</div>", h)   # the Panes head keeps its id (initGear hides it off the dashboard)
+        # the head over Conserve memory, Extra models and Updates names what the rows do, never a machine: each kernel keeps its own
+        # value, but a click follows the machine selector, so under All kernels "This machine" told the reader a click changed one
+        # machine when it changed them all (the #374 review)
+        self.assertNotIn(">This machine<", _pane(h, "general"), "no head claims the rows under it are this machine's alone")
         # the tab widgets are a SECTION of Chat (the user 2026-09-12), its head the anchor the strip's gear opens the panel at; no Tabs tab
         self.assertIn("<div class='rs-sec' data-section=tabwidgets>Tab widgets</div>", _pane(h, "chat"))
         # T415 (the user 2026-09-14): the tab lock is a switch in its own small Tab strip section ABOVE Tab widgets, where the strip's gear lands
@@ -80,13 +84,13 @@ class SettingsSectionsTest(unittest.TestCase):
         self.assertTrue(au.index(">Task tracking<") < au.index("id=rs-tasktrack") < au.index(">Judges<") < au.index("id=rs-judgemodel") < au.index("id=rs-indexeffort") < au.index("id=rs-judgeconc"))   # the master switch first (T404 PR 2)
         for gone in ("id=rs-autonudge", "id=rs-conserve", "id=rs-thinksum", ">Sessions<"):
             self.assertNotIn(gone, au, gone + " left Task tracking (T404)")
-        # General (T404): the login leads, then the panes with the Files control, Appearance, Permissions (Allow file editing), This machine
+        # General (T404): the login leads, then the panes with the Files control, Appearance, Permissions (Allow file editing), Memory, models and updates
         # (Conserve memory, Updates install automatically), then the shortcuts; Debug: the judges' debug views, then Open log as the last
         # button before the version (T290)
         ge = panes["general"]
         self.assertTrue(ge.index(">Account<") < ge.index("id=rs-login-btn") < ge.index("id=rs-panes-sec") < ge.index("id=rs-pane-feed") < ge.index("id=rs-filesctl")
                         < ge.index("id=rs-panes-data") < ge.index("id=rs-panedock") < ge.index("data-section=appearance>Appearance<") < ge.index("id=rs-theme") < ge.index("id=rs-pal") < ge.index(">Permissions<") < ge.index("id=rs-fileedit")
-                        < ge.index(">This machine<") < ge.index("id=rs-conserve") < ge.index("id=rs-router") < ge.index("id=rs-updates") < ge.index(">Keyboard shortcuts<"))
+                        < ge.index(">Memory, models and updates<") < ge.index("id=rs-conserve") < ge.index("id=rs-router") < ge.index("id=rs-updates") < ge.index(">Keyboard shortcuts<"))
         self.assertIn("<b>Allow file editing</b>", ge)
         self.assertIn("<b>Updates install automatically <span class=rs-mixed hidden></span></b>", ge)
         # Chat (T404): Display (the transcript rows, the text scheme, the strip's keep-groups-together), Comments, Thinking, Tab widgets
@@ -100,7 +104,7 @@ class SettingsSectionsTest(unittest.TestCase):
             self.assertNotIn(gone, h, gone + " is gone from the gear (T404)")
         de = panes["debug"]
         self.assertTrue(de.index(">Judging bands<") < de.index("id=rs-judges-index") < de.index(">Diagnostics<") < de.index("id=ra-open") < de.index("id=rs-log-open") < de.index("id=rsver"))
-        self.assertNotIn(">Updates<", de, "Updates went to General's This machine section (T404)")
+        self.assertNotIn(">Updates<", de, "Updates went to General's Memory, models and updates section (T404)")
         self.assertNotIn("rs-oldest", h)
         # the old Context gauge row is gone: its WHEN is the Context bar widget's option in the Chat tab's Tab widgets section
         self.assertNotIn("id=rs-tabctx", h)

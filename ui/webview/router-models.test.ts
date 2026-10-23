@@ -2,7 +2,7 @@
 // no jsdom harness). An install whose sessions reach the API through a gateway of its own can offer the model
 // families that gateway serves in every model picker, beside the Claude families; the operator declares them with
 // ROMP_ROUTER_MODELS in service.env (read when the service starts), and the switch decides whether the pickers offer
-// them. The switch is a per-install kernel-side checkbox in the gear's General tab, under This machine beside
+// them. The switch is a per-install kernel-side checkbox in the gear's General tab, under Memory, models and updates beside
 // Conserve memory (the gateway is THIS machine's, like its memory policy), gesture-stamped like every kernel-side
 // setting the gear posts, filled from /version, named in the stale-gesture toast, and deliberately NOT in
 // federation's KERNEL_SETTING set nor the kernel's mesh-adopted table: it never propagates. No echo frame of its own:
@@ -19,13 +19,13 @@ const GEAR = read("ui", "webview", "gear.js");
 const FED = read("ui", "webview", "federation.ts");
 const KERNEL = read("kernel", "kernel.py");
 
-test("the gear has an Extra models from your API gateway checkbox under General, This machine, after Conserve memory and before Updates, gesture-stamped, filled from /version, with a live status line", () => {
+test("the gear has an Extra models from your API gateway checkbox under General, Memory, models and updates, after Conserve memory and before Updates, gesture-stamped, filled from /version, with a live status line", () => {
   assert.ok(GEAR.includes("id=rs-router>"), "the checkbox exists in the gear markup");
   const at = GEAR.indexOf("id=rs-router>");
   assert.ok(GEAR.indexOf("id=rs-conserve") > 0 && GEAR.indexOf("id=rs-updates") > 0, "both neighbours exist (indexOf's -1 would pass the order check)");
   assert.ok(GEAR.indexOf("id=rs-conserve") < at && at < GEAR.indexOf("id=rs-updates"), "…after Conserve memory and before Updates install automatically");
-  const sec = GEAR.indexOf(">This machine</div>");
-  assert.ok(sec > 0 && sec < at, "…under the This machine section header");
+  const sec = GEAR.indexOf(">Memory, models and updates</div>");
+  assert.ok(sec > 0 && sec < at, "…under the Memory, models and updates section header");
   assert.ok(!GEAR.slice(sec, at).includes("rs-sec"), "…with no other section header between (no header of its own: the General heads are pinned)");
   assert.ok(GEAR.indexOf("data-pane=general") > 0 && GEAR.indexOf("data-pane=chat") > 0, "both panes exist");
   assert.ok(GEAR.indexOf("data-pane=general") < at && at < GEAR.indexOf("data-pane=chat"), "…in the General tab");

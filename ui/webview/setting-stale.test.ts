@@ -74,7 +74,7 @@ test("the toast's copy names the setting, the refused value, the hosts and the k
   assert.ok(GEAR.includes("(refused ? refused + ' was not applied on ' : 'not applied on ')"), "the refused value, when the echo carries one");
   assert.ok(GEAR.includes("(kept ? ' Keeping ' + kept + '.' : '')"), "the kept value, with no ordering word");
   const copy = GEAR.slice(GEAR.indexOf("function staleText("), GEAR.indexOf("if (!p.hidden) fill();"));
-  assert.ok(copy.length > 0 && copy.length < 8000, "the copy helper and the listener located (a sanity bound on the slice; the pin clause of one A round two sits inside it)");
+  assert.ok(copy.length > 0 && copy.length < 10000, "the copy helper and the listener located (a sanity bound on the slice; the pin clause of one A round two and the re-issue's scope record sit inside it)");
   for (const claim of ["somewhere else", "another device", "elsewhere", "changed more recently", "later pick", "newer pick", "already in place"])
     assert.ok(!copy.includes(claim), `the toast no longer says "${claim}"`);
   assert.ok(!GEAR.includes("changed more recently") && !GEAR.includes("already in place"), "the old copy is gone from the file");
@@ -82,7 +82,8 @@ test("the toast's copy names the setting, the refused value, the hosts and the k
   // the kernel echoes it without gt), read only for the setting the frame names — the whitelist Apply
   // anyway uses — and any other shape reads as no value
   assert.match(GEAR, /function staleRefused\(m\)/, "the refused value is read off the echo");
-  assert.ok(GEAR.includes("var keys = Object.keys(m.gesture).filter(function (k) { return k !== 'type' && k !== 'origin'; });"), "…as the one key beside type and the broadcast's origin (one A)");
+  assert.ok(GEAR.includes("var keys = Object.keys(m.gesture).filter(function (k) { return k !== 'type' && k !== 'origin' && k !== 'scope' && k !== 'hosts'; });"),
+    "…as the one key beside type and federation's routing fields: the broadcast's origin (one A) and a pick's scope (the #374 review)");
 });
 
 test("Apply anyway re-issues the echoed gesture with a fresh stamp, and only for the setting the frame names", () => {
@@ -91,7 +92,11 @@ test("Apply anyway re-issues the echoed gesture with a fresh stamp, and only for
   // the stamp this pick lost to; the echo's type must match the frame's setting (STALE_TYPE), so a
   // frame from any linked kernel can re-issue that one setting and nothing else
   assert.match(GEAR, /STALE_TYPE\[m\.setting\] !== m\.gesture\.type\) return null;/, "the whitelist");
-  assert.match(GEAR, /post\(Object\.assign\(\{\}, m\.gesture, \{ gt: gclock\.stamp\(m\.setting\) \}\)\)/, "the re-issue: the echo plus a fresh stamp");
+  assert.match(GEAR, /var g = Object\.assign\(\{\}, m\.gesture, \{ gt: gclock\.stamp\(m\.setting\) \}\);/, "the re-issue: the echo plus a fresh stamp");
+  // …to the kernels the gesture was aimed at (the #374 review): scoped() records a pick under the gesture's identity, and the
+  // re-issue is scoped again; setting-stale-fold.test.ts drives it
+  assert.match(GEAR, /if \(hosts\.length\) \{ g\.hosts = hosts\.slice\(\); g\.scope = 'pinned'; \}\n\s*post\(g\);/, "a pick's re-issue keeps its hosts");
+  assert.match(GEAR, /noteStaleScope\(m\);   \/\/ a refusal's Apply anyway goes back to these kernels alone/, "scoped() records the pick");
   assert.ok(GEAR.includes("label: refused ? 'Apply ' + refused + ' anyway' : 'Apply anyway'"), "the action's label names the value it would apply");
   assert.match(GEAR, /if \(!m\.gesture \|\| typeof m\.gesture !== 'object'/, "an older kernel sends no echo: the toast shows without the action");
   // the button: a real <button type=button>, appended before the ✕; its click bubbles to the
@@ -100,7 +105,8 @@ test("Apply anyway re-issues the echoed gesture with a fresh stamp, and only for
   assert.match(GEAR, /b\.addEventListener\('click', act\.run\);/);
   // the button's own tooltip: without one it inherited the toast's "click to dismiss" (#945 review)
   assert.match(GEAR, /b\.title = act\.title;/, "the button carries the action's title");
-  assert.ok(GEAR.includes("title: 'apply ' + (refused || 'this pick') + ' on every linked kernel, replacing the value they kept'"), "…which says what the click does");
+  assert.ok(GEAR.includes("? 'apply ' + pick + ' only on ' + hosts.map(function (h) { return h || 'this machine'; }).join(', ') + ', replacing the value kept there'")
+    && GEAR.includes(": 'apply ' + pick + ' on every connected kernel, replacing the value they kept',"), "…which says what the click does, and on which machines");
   const toast = GEAR.slice(GEAR.indexOf("function staleToast(text, act)"), GEAR.indexOf("function staleText("));
   assert.ok(toast.length > 0, "staleToast(text, act) located");
   assert.doesNotMatch(toast, /\.stopPropagation\(/, "the action's click still dismisses the toast");

@@ -63,13 +63,13 @@ test("every existing control keeps its id and sits in exactly one pane, by the a
   assert.match(ps.general, /\+ SHORTCUT_ROWS \+/);
   assert.match(GEAR, /^var SHORTCUT_ROWS =\s*\n\s*'<div class=rs-key id=rs-keys-web hidden>/m);
   for (const t of TABS.filter((x) => x !== "general")) assert.doesNotMatch(ps[t], /SHORTCUT_ROWS/, t + " holds no shortcut rows");
-  // T404: General opens with the account, then the panes (the Files control among them), Appearance, Permissions, This machine, the
+  // T404: General opens with the account, then the panes (the Files control among them), Appearance, Permissions, Memory, models and updates, the
   // shortcuts; Debug opens with the judges' debug views, then the diagnostics (Updates went to General)
   const G = ps.general;
   assert.ok(G.indexOf(">Account<") < G.indexOf("id=rs-panes-sec") && G.indexOf("id=rs-panes-sec") < G.indexOf("id=rs-filesctl") && G.indexOf("id=rs-filesctl") < G.indexOf("id=rs-panes-data") && G.indexOf("id=rs-panes-data") < G.indexOf("id=rs-panedock") && G.indexOf("id=rs-panedock") < G.indexOf("data-section=appearance>Appearance<")
-            && G.indexOf("data-section=appearance>Appearance<") < G.indexOf(">Permissions<") && G.indexOf(">Permissions<") < G.indexOf("id=rs-fileedit") && G.indexOf("id=rs-fileedit") < G.indexOf(">This machine<")
-            && G.indexOf(">This machine<") < G.indexOf("id=rs-conserve") && G.indexOf("id=rs-conserve") < G.indexOf("id=rs-updates") && G.indexOf("id=rs-updates") < G.indexOf(">Keyboard shortcuts<"),
-            "General: Account, Panes (with the Files control, then the registry rows, then the Pane docking switch), Appearance, Permissions, This machine, Keyboard shortcuts");
+            && G.indexOf("data-section=appearance>Appearance<") < G.indexOf(">Permissions<") && G.indexOf(">Permissions<") < G.indexOf("id=rs-fileedit") && G.indexOf("id=rs-fileedit") < G.indexOf(">Memory, models and updates<")
+            && G.indexOf(">Memory, models and updates<") < G.indexOf("id=rs-conserve") && G.indexOf("id=rs-conserve") < G.indexOf("id=rs-updates") && G.indexOf("id=rs-updates") < G.indexOf(">Keyboard shortcuts<"),
+            "General: Account, Panes (with the Files control, then the registry rows, then the Pane docking switch), Appearance, Permissions, Memory, models and updates, Keyboard shortcuts");
   assert.match(G, /<b>Allow file editing<\/b>/, "the permission row's name (T404)");
   assert.match(G, /<label class="rs-row rs-panes-row"><input type=checkbox id=rs-filesctl>' \+[^\n]*\n\s*'<span><b>Files<\/b>'/, "the Files row reads Files, like Sessions, Outline and Feed above it (T407), and is a Panes row like them, so the off-dashboard hide takes it (T404's tidy)");
   assert.match(GEAR, /delete o\.filesControl; delete o\.fileLinkPane; delete o\.showArtifactsControl;/, "load() drops the three dead keys, so none survives a gear save (T404's tidy; the Artifacts control's key since the registry fix: save() writes the whole object, so a kept key was re-persisted forever)");
