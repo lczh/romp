@@ -6872,7 +6872,10 @@ list, the same list the chat's message box keeps, so the chat shows it above the
 quotes from the chat and from files go out together. **⏎** sends everything staged for the
 session, then what is in the bar, as one message. The staged list survives a reload and the
 session's end, whoever ends it: a revived session shows it above the box again and sends it
-with your next message, while text still in the box goes with the ended session. Each quote
+with your next message, while text still in the box goes with the ended session. What is
+staged on a new session's tab while the session is still starting is that session's once it
+arrives, a reload in between included; a session that fails to start keeps it on its tab, above
+the box, until that tab is closed. Each quote
 reaches the session under a line naming where it is from:
 `Replying to this part of src/app.py (lines 12–18):`, or
 `Replying to this part of docs/guide.md:` for a rendered document. The bar hides while the

@@ -1448,7 +1448,8 @@ let wantActive: string | null = (() => { try { return ((vscodeApi?.getState?.() 
 // session that never returns leaves the body standing until a pick: no timer.
 let wantActiveName: string = (() => { try { return String(((vscodeApi?.getState?.() || {}) as any).activeName || ""); } catch { return ""; } })();
 // A persisted id that can never be listed again (a subagent viewer's tab, a provisional create) is not awaited: the
-// body says it is gone and invites a pick (the review's low). A session that ended while the page was away is not
+// body says it is gone and invites a pick (the review's low); a provisional tab the page's state still names comes back
+// at boot instead, shown again (restoreProvisionals). A session that ended while the page was away is not
 // knowable up front: it is awaited like any other, and the body stands until a pick.
 let wantActiveGone: string | null = null;
 if (wantActive && (isSubId(wantActive) || isProvisionalId(wantActive))) { wantActiveGone = wantActive; wantActive = null; }
@@ -9617,11 +9618,15 @@ function forgetProvisionalSend(text: string): boolean {
   const i = provisionalQueue.indexOf(text);
   if (i < 0) return false;
   provisionalQueue.splice(i, 1);
+  persistProvisionals();
   return true;
 }
 let provisionalTimer: ReturnType<typeof setTimeout> | undefined;
 // Text typed into a provisional tab whose create had to ask something first, waiting for the retry's tab.
 let pendingCarry = "";
+// …and the rest of that tab's box, its staged messages and its attachments, which wait for the retry's tab with it
+let pendingCarryStaged: StagedMsg[] = [];
+let pendingCarryFiles: string[] = [];
 // Provisional tabs whose create FAILED (the user 2026-08-08): the tab — and whatever was typed into
 // it — STAYS, foregrounded, with the failure dialog on top. It used to be torn down and the held text
 // dumped into whichever tab happened to be active, polluting an unrelated thread's draft. The set keys
@@ -9668,6 +9673,11 @@ function openProvisional(req: CreateReq): void {
   sessions.set(id, { id, name: display, color: null, events: [],
                      status: { state: "opening", sinceEpoch: Date.now() } });
   order.push(id);                          // a tab the kernel does not know yet survives reconcileTabOrder
+  // the staged messages and attachments a folder question carried (pendingCarry's reason), on the new tab before the
+  // switch below paints its strip
+  carryProvisionalBox(id, pendingCarryStaged, pendingCarryFiles);
+  pendingCarryStaged = []; pendingCarryFiles = [];
+  persistProvisionals();                   // the create in flight survives a reload (restoreProvisionals)
   renderTabs();
   setActive(id);
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
@@ -9681,8 +9691,11 @@ function openProvisional(req: CreateReq): void {
     () => failProvisional("romp asked to start it, but nothing came back."), PROVISIONAL_WAIT_MS);
 }
 
-/** Retire the provisional tab and hand back whatever was typed into it, so nothing is ever just dropped. */
-function dropProvisional(): { queued: string[]; draft: string } {
+/** Retire the provisional tab and hand back whatever was typed into it, so nothing is ever just dropped: the text (its
+ *  queued sends and its draft) and the rest of its box (its staged messages and its attachments), each taken out of the
+ *  tab's own maps here, so the caller's hand-on is the only copy. A caller that keeps none of it discards the lot: the
+ *  tab's ✕, which discards tab and text together, and a second create that supersedes this one. */
+function dropProvisional(): { queued: string[]; draft: string; staged: StagedMsg[]; files: string[] } {
   const id = provisionalId;
   provisionalId = null;
   provisionalTags = [];
@@ -9690,25 +9703,90 @@ function dropProvisional(): { queued: string[]; draft: string } {
   if (provisionalTimer) { clearTimeout(provisionalTimer); provisionalTimer = undefined; }
   const queued = provisionalQueue.slice();
   provisionalQueue.length = 0;
-  let draft = "";
+  let draft = "", staged: StagedMsg[] = [], files: string[] = [];
   if (id) {
     const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
     draft = (activeId === id && ta) ? ta.value : (drafts.get(id) ?? "");
+    // taken before the dismissal: it deletes the attachments, and since 2026-10-23 it leaves a staged stack where it is,
+    // for a revive that keeps the sid, which a tab that never had a session will never see (the stack stayed under this
+    // id, out of sight, and never reached the session)
+    staged = stagedMsgs.takeAll(id);
+    files = (composerFiles.get(id) ?? []).slice();
     pendingSent.delete(id);                // the optimistic bubbles belong to a tab that is going away
     persistKeptSends();
     dismissSession(id, "close");           // drops it from sessions/order/views and reselects
     noteColumnIdle();                      // the create is gone: a peer's deferred close of this column may go ahead
   }
-  return { queued, draft };
+  persistProvisionals();
+  return { queued, draft, staged, files };
+}
+
+/** The rest of a provisional tab's box, beyond its text: its staged messages and its attachments, joined onto the tab
+ *  that now holds what was typed (the real session, a running one the create resolved to, or the retry's tab after a
+ *  folder question), after whatever that tab holds already, persisted, and painted when that tab's box is on screen. */
+function carryProvisionalBox(to: string, staged: readonly StagedMsg[], files: readonly string[]): void {
+  if (!staged.length && !files.length) return;
+  if (staged.length) stagedMsgs.restore({ [to]: [...stagedMsgs.list(to), ...staged] });
+  if (files.length) composerFiles.set(to, [...(composerFiles.get(to) ?? []), ...files]);
+  persistDrafts();
+  if (activeId === to) { renderStagedStrip(to); renderComposerFiles(to); }
+}
+
+// A create in flight, or a failed one still holding what was typed, SURVIVES A RELOAD (2026-10-23). Its tab is
+// this page's own (the kernel never learns the provisional id), so it used to die with the page: the draft and the
+// staged messages persisted under its id were never shown again, the held sends went with the page, and the session,
+// arriving after the reload, found nothing to adopt. The page's state names each such tab (its id, the name the session
+// will arrive under, the tags it asked for, the sends it holds, whether it failed), written at each change below, and
+// the boot puts the tabs back: the one in flight opening again, adopted by its session's frame as before, with a fresh
+// backstop (the kernel's answer may have gone to the page that died) and its held sends back in its box; a failed one as
+// it was, its text in its box and its staged messages above it. The draft and the staged stack come back by themselves:
+// they are persisted under the id.
+type ProvisionalRec = { id: string; name: string; tags?: string[]; queued?: string[]; failed?: boolean };
+function persistProvisionals(): void {
+  const recs: ProvisionalRec[] = [];
+  if (provisionalId && pendingNewSession) recs.push({ id: provisionalId, name: pendingNewSession, tags: provisionalTags.slice(), queued: provisionalQueue.slice() });
+  for (const id of failedProvisionals) recs.push({ id, name: sessions.get(id)?.name || "", failed: true });
+  try { vscodeApi?.setState?.({ ...(vscodeApi.getState?.() || {}), provisionals: recs }); } catch { /* ignore */ }
+}
+function restoreProvisionals(): void {
+  let recs: unknown;
+  try { recs = ((vscodeApi?.getState?.() || {}) as any).provisionals; } catch { return; }
+  if (!Array.isArray(recs) || !recs.length) return;
+  const strs = (v: unknown): string[] => (Array.isArray(v) ? v : []).filter((x): x is string => typeof x === "string" && !!x);
+  let back: string | null = null;
+  for (const r of recs as Partial<ProvisionalRec>[]) {
+    if (!r || typeof r.id !== "string" || !isProvisionalId(r.id) || typeof r.name !== "string" || !r.name || sessions.has(r.id)) continue;
+    const failed = r.failed === true || !!provisionalId;   // one create in flight at a time
+    sessions.set(r.id, { id: r.id, name: r.name, color: null, events: [],
+                         status: { state: failed ? "closed" : "opening", sinceEpoch: Date.now() } });
+    order.push(r.id);
+    if (failed) failedProvisionals.add(r.id);
+    else {
+      provisionalId = r.id; pendingNewSession = r.name; provisionalTags = strs(r.tags);
+      // the sends it held come back as text in its box, ahead of the draft, to go with the user's next send, never on their
+      // own: after a reload the page cannot vouch that another page sharing this state (a second tab of the dashboard) is not
+      // holding them too, nor that a session the name finds much later is still the moment they were written for
+      const held = strs(r.queued);
+      if (held.length) { drafts.set(r.id, [...held, drafts.get(r.id) ?? ""].filter(Boolean).join("\n\n")); persistDrafts(); }
+      provisionalTimer = setTimeout(
+        () => failProvisional("romp asked to start it, but nothing came back."), PROVISIONAL_WAIT_MS);
+    }
+    if (wantActiveGone === r.id) back = r.id;   // the tab the page showed: shown again, not "gone"
+  }
+  persistProvisionals();
+  renderTabs();
+  if (back) { const id = back; wantActiveGone = null; quietly(() => setActive(id)); }
 }
 
 // The real session arrived: move everything the provisional tab was holding onto it and focus it. The
 // queued messages send FOR REAL here — they were never sent before, because there was no session to send
-// them to; the dashed bubbles you saw were this client saying "received", not the kernel.
+// them to; the dashed bubbles you saw were this client saying "received", not the kernel. Its staged messages
+// stay staged, now the session's: the strip shows them on the real tab and the next message sends them.
 function adoptProvisional(realId: string): void {
   claimSession(realId);                    // a session created from a later column belongs to that column (the chat split): claimed BEFORE the switch, so setActive shows it here
-  const { queued, draft } = dropProvisional();
+  const { queued, draft, staged, files } = dropProvisional();
   if (draft) drafts.set(realId, draft);    // set BEFORE the switch — setActive fills the box from drafts
+  carryProvisionalBox(realId, staged, files);   // …and the staged stack and the attachments, which it paints from too
   setActive(realId);
   for (const text of queued) {
     const qid = mintQid();                                  // the copy's id, minted here: the real send carries it…
@@ -9717,7 +9795,9 @@ function adoptProvisional(realId: string): void {
     // clear boundary like any other (the `clear` flag, off for Codex, see routeUserMessage)
     registerOptimistic(realId, text, undefined, qid, undefined, isClearCmd(text) && liveSession(realId)?.status?.backend !== "codex");
   }
-  if (draft) { persistDrafts(); const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null; if (ta) growComposer(ta); }
+  // the dismissal's reselect may already have landed on the real tab (the strip's only other tab: a first session), where
+  // setActive early-returns over a box filled before the draft was set, so the box is filled here (resolveProvisionalToExisting's case)
+  if (draft) { persistDrafts(); const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null; if (ta) { if (activeId === realId) ta.value = drafts.get(realId) ?? ""; growComposer(ta); } }
 }
 
 // The create RESOLVED TO A RUNNING SESSION: the kernel answered it by focusing the session that already
@@ -9729,7 +9809,8 @@ function adoptProvisional(realId: string): void {
 // FAILURE ("Couldn't start api" over a body saying api is running, the view yanked back onto a
 // struck-through dead tab), and an untagged one waited 90 s for the backstop to say the same.
 function resolveProvisionalToExisting(realId: string): void {
-  const { queued, draft } = dropProvisional();     // …and the 90 s backstop goes with it
+  const { queued, draft, staged, files } = dropProvisional();     // …and the 90 s backstop goes with it
+  carryProvisionalBox(realId, staged, files);      // staged messages stay staged, after the running session's own
   const held = [...queued, draft].filter(Boolean).join("\n\n");
   if (!held) return;
   drafts.set(realId, [drafts.get(realId) ?? "", held].filter(Boolean).join("\n\n"));   // BEFORE the switch — setActive fills the box from drafts
@@ -9772,9 +9853,15 @@ function failProvisional(why: string): void {
     const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
     if (ta) { ta.value = held; growComposer(ta); }
   }
+  persistProvisionals();             // the failed tab, its text and its staged messages survive a reload too
   renderTabs();
+  // its STAGED messages stay staged on this tab, shown in its strip above the box (setActive painted it), and the
+  // dialog says so beside the text: nothing that was held goes without a word
+  const staged = stagedMsgs.count(id) > 0;
   showConfirm("Couldn't start " + name,
-    why + (held ? "\n\nWhat you typed is in this tab's message box." : ""),
+    why + (held && staged ? "\n\nWhat you typed is in this tab's message box, and what you staged is still staged above it."
+      : held ? "\n\nWhat you typed is in this tab's message box."
+      : staged ? "\n\nWhat you staged is still staged above this tab's message box." : ""),
     [{ label: "OK", value: "ok" }], () => { /* the tab keeps the text until its ✕ discards both */ });
 }
 
@@ -10376,6 +10463,7 @@ function onCreateDirMissing(m: any): void {
   // session that is about to exist, not to whatever tab we happen to fall back to.
   const held = dropProvisional();
   pendingCarry = [...held.queued, held.draft].filter(Boolean).join("\n\n");
+  pendingCarryStaged = held.staged; pendingCarryFiles = held.files;   // …the staged messages and attachments with it
   const req = lastCreate;
   showConfirm("That folder isn't there",
     createDirPrompt(String(m.name), (m.status || null) as DirStatus | null, String(m.dir || "")),
@@ -23325,10 +23413,11 @@ function statusOnly(msg: any) {
 function closeTabLocally(id: string): void {
   // A provisional tab has no session to close — closing it means "never mind", so it cancels the spawn
   // the kernel may still be running, the way the old cue's ✕ did. A FAILED one has no spawn left either
-  // (and the kernel never knew the id): its ✕ is a plain local discard — tab, draft, and all.
+  // (and the kernel never knew the id): its ✕ is a plain local discard — tab, draft, and all, its staged messages
+  // included (no session will ever come back under this id to show them again).
   if (isProvisionalId(id)) {
     if (id === provisionalId) cancelProvisional();
-    else { failedProvisionals.delete(id); dismissSession(id, "close"); noteColumnIdle(); }   // the last failed one discarded: idle again, and the shell's deferred close may go ahead
+    else { failedProvisionals.delete(id); stagedMsgs.takeAll(id); dismissSession(id, "close"); persistProvisionals(); noteColumnIdle(); }   // the last failed one discarded: idle again, and the shell's deferred close may go ahead
     return;
   }
   dismissSession(id, "close");
@@ -24769,8 +24858,8 @@ function setupComposer() {
       if (isProvisionalId(sid)) {
         // a FAILED create's tab: there is no pending spawn to queue onto, and never a session to send
         // to — refuse loudly and leave the text exactly where it is (the box is the only copy)
-        // The refusal reports a state (a tab with no session behind it) that the page following a
-        // reload does not have, since a provisional tab does not survive one, so it does not ride one
+        // The refusal reports a state (a tab with no session behind it), which the page following a
+        // reload shows as the failed tab itself (restoreProvisionals), so it does not ride one
         // (ephemeralWarnToast).
         if (sid !== provisionalId) {
           ephemeralWarnToast("“" + (sessions.get(sid)?.name || "this session") + "” never started, so there's "
@@ -24782,7 +24871,7 @@ function setupComposer() {
         sendOnShip.delete(sid);                       // a send happened — any held one is superseded
         histWalk.delete(sid);                         // …and the history walk starts fresh
         if (attached.length) { composerFiles.delete(sid); if (sid === activeId) renderComposerFiles(sid); }
-        drafts.delete(sid); draftStartedAt.delete(sid); persistDrafts();
+        drafts.delete(sid); draftStartedAt.delete(sid); persistDrafts(); persistProvisionals();   // the held send survives a reload with its tab
         clearBox();
         return;
       }
@@ -26352,4 +26441,7 @@ setFileViewComposer((host, ctx) => mountViewerBar(host, ctx.sid, ctx.path));
 // the FILE TAB this page showed before a reload (2026-09-30), up again at once when this browser's copy of the list names it
 // (a new device hears the list from the kernel first: onFileTabsChanged restores it then)
 if (wantFile && fileTabById(wantFile)) selectFileTab(wantFile);
+// a create this page had in flight, or a failed one still holding what was typed, back on the strip before the kernel's first
+// frame can arrive: that frame may be the created session's, which adopts the tab
+restoreProvisionals();
 if (vscodeApi) vscodeApi.postMessage({ type: "ready", proto: 2 });   // proto 2: the uuid-anchored chat wire (T323 stage 4b); an older kernel ignores the field and sends index frames
