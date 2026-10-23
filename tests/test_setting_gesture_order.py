@@ -782,6 +782,9 @@ class StaleGestureAnswersTheDeliveringSocket(_Base):
                   "whole-chat-frames", True),
                 ({"type": "setRouterModels", "enabled": True}, {"type": "setRouterModels", "enabled": False},
                   "router-models", True),
+                 # Conserve memory: per-install, stamped since the gear's click reaches every kernel in its scope
+                 ({"type": "setConserve", "enabled": True}, {"type": "setConserve", "enabled": False},
+                  "conserve-memory", True),
                  ({"type": "setIndexEffort", "effort": "high"}, {"type": "setIndexEffort", "effort": "low"},
                   "index-effort", "high"),
                  ({"type": "setDistillModel", "model": "haiku"}, {"type": "setDistillModel", "model": "triage"},
@@ -828,7 +831,7 @@ class VersionReportsEveryStoredStamp(_Base):
     def test_a_fresh_install_reports_every_store_at_zero(self):
         gts = km._version_info()["settingsGt"]
         self.assertEqual(set(gts), set(km._GT_STORES), "one key per gt-gated store, no more, no less")
-        self.assertEqual(len(km._GT_STORES), 23, "eight toggles/modes (the task-tracking switch since T404, the Whole chat frames switch since 2026-09-15, the Extra models switch since 2026-09-21) + thirteen kernel-side stores (judge-concurrency since T277, judge-fast with the judges' fast mode, distill-fast and index-fast with T300's box per tier; the terminal-backend store went with that backend, T332); + the two model switches (always-fast, retry-upgrade; Settings, Automation, Model; 2026-09-17)")
+        self.assertEqual(len(km._GT_STORES), 24, "nine toggles/modes (the task-tracking switch since T404, the Whole chat frames switch since 2026-09-15, the Extra models switch since 2026-09-21, Conserve memory since the settings' scope fan-out) + thirteen kernel-side stores (judge-concurrency since T277, judge-fast with the judges' fast mode, distill-fast and index-fast with T300's box per tier; the terminal-backend store went with that backend, T332); + the two model switches (always-fast, retry-upgrade; Settings, Automation, Model; 2026-09-17)")
         self.assertEqual(set(gts.values()), {0}, "nothing applied yet reads 0 — nothing to outrank")
         self.assertEqual(json.loads(json.dumps(gts)), gts, "plain JSON — ints, no paths, nothing to redact")
 
@@ -876,7 +879,8 @@ class VersionReportsEveryStoredStamp(_Base):
                  {"type": "setCommentEffort", "effort": "high"}, {"type": "setCommentFast", "fast": "on"},
                  {"type": "setJudgeFast", "enabled": True},
                  {"type": "setDistillFast", "enabled": True}, {"type": "setIndexFast", "enabled": True},
-                 {"type": "setAlwaysFast", "enabled": True}, {"type": "setRetryUpgrade", "enabled": True}]   # the model switches (Settings, Automation, Model; 2026-09-17)
+                 {"type": "setAlwaysFast", "enabled": True}, {"type": "setRetryUpgrade", "enabled": True},   # the model switches (Settings, Automation, Model; 2026-09-17)
+                 {"type": "setConserve", "enabled": True}]   # Conserve memory, stamped since the settings' scope fan-out
         older = [{"type": "setAutoNudge", "enabled": True}, {"type": "setCompactSuggest", "enabled": False},
                  {"type": "setFileEditing", "enabled": False}, {"type": "setUpdateMode", "mode": "off"},
                  {"type": "setThinkingSummaries", "enabled": False}, {"type": "setJudgeModel", "model": "opus"},
@@ -888,14 +892,15 @@ class VersionReportsEveryStoredStamp(_Base):
                  {"type": "setCommentEffort", "effort": "session"}, {"type": "setCommentFast", "fast": "session"},
                  {"type": "setJudgeFast", "enabled": False},
                  {"type": "setDistillFast", "enabled": False}, {"type": "setIndexFast", "enabled": False},
-                 {"type": "setAlwaysFast", "enabled": False}, {"type": "setRetryUpgrade", "enabled": False}]
+                 {"type": "setAlwaysFast", "enabled": False}, {"type": "setRetryUpgrade", "enabled": False},
+                 {"type": "setConserve", "enabled": False}]
         with contextlib.redirect_stderr(io.StringIO()):
             for n, o in zip(newer, older):
                 km.Handler._dispatch_ws(types.SimpleNamespace(), dict(n, gt=T_NEW), client)
                 km.Handler._dispatch_ws(types.SimpleNamespace(), dict(o, gt=T_OLD), client)
         named = {m["setting"] for m in sent if m.get("type") == "settingStale"}
         self.assertEqual(named, set(km._version_info()["settingsGt"]), "frames and the report share one vocabulary")
-        self.assertEqual(len(named), 23)   # thirteen kernel-side stores (T300's box per judge tier, minus the terminal-backend store, T332) + seven toggles/modes (the task-tracking switch since T404, the Whole chat frames switch since 2026-09-15, the Extra models switch since 2026-09-21) + the two model switches (2026-09-17)
+        self.assertEqual(len(named), 24)   # thirteen kernel-side stores (T300's box per judge tier, minus the terminal-backend store, T332) + eight toggles/modes (the task-tracking switch since T404, the Whole chat frames switch since 2026-09-15, the Extra models switch since 2026-09-21, Conserve memory since the settings' scope fan-out) + the two model switches (2026-09-17)
 
 
 class ASkewedClockCannotLockTheStore(_Base):
@@ -1258,16 +1263,23 @@ class ThinkingSummariesSetting(_Base):
         self.assertIn("OSError", km._set_thinking_summaries.__doc__ or "",
                       "the docstring names the write-failure cause of None, like its siblings")
 
-    def test_the_setting_is_reported_but_not_broadcast(self):
+    def test_the_setting_is_reported_and_the_gear_click_follows_its_scope_but_nothing_converges_it(self):
+        # Per-install: each kernel keeps its own and the poll never converges it. The gear's click follows the machine
+        # selector (federation's KERNEL_SETTING, the settings' scope fan-out): under All kernels it reached this kernel
+        # alone while the box read as every machine's value. /version's settings dict carries it so a peer's row shows
+        # where the kernels disagree.
         import inspect
         src = inspect.getsource(km.Handler._dispatch_ws)
         self.assertIn('_set_thinking_summaries(enabled, gt=_gesture_ms(msg))', src,
                       "the WS branch hands the gesture stamp to the store")
-        fed = Path(BIN).parent / "ui" / "webview" / "federation.ts"
-        self.assertNotIn("setThinkingSummaries", fed.read_text(),
-                         "per-install: NOT a KERNEL_SETTING — it must never queue for or reach another kernel")
+        fed = (Path(BIN).parent / "ui" / "webview" / "federation.ts").read_text()
+        kset = fed[fed.index("const KERNEL_SETTING = new Set(["):fed.index("]);", fed.index("const KERNEL_SETTING = new Set(["))]
+        self.assertIn('"setThinkingSummaries"', kset, "the gear's click reaches every kernel in its scope")
+        self.assertNotIn("thinkingSummaries", [k for k, _s, _f in km._MESH_ADOPTED_SETTINGS], "…but the poll never converges it")
         km._set_thinking_summaries(True, gt=T_NEW)
-        self.assertIs(km._version_info()["thinkingSummaries"], True, "/version reports it so the gear fills")
+        v = km._version_info()
+        self.assertIs(v["thinkingSummaries"], True, "/version reports it so the gear fills")
+        self.assertIs(v["settings"]["thinkingSummaries"], True, "…and in the settings dict a peer's row carries")
 
 
 class RefusedToggleTellsTheDeliveringSocket(_Base):

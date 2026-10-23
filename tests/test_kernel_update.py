@@ -900,7 +900,8 @@ class Wiring(unittest.TestCase):
         # the post is gesture-stamped (2026-08-29): setUpdateMode rides federation's queued
         # KERNEL_SETTING class, so the kernel orders applies by the click's own time — minted through
         # the gesture clock (ui/webview/gesture-clock.js), above every stamp the page has seen
-        self.assertIn("post({ type: 'setUpdateMode', mode: upm.value, gt: gclock.stamp('update-mode') })", self.gear)
+        # …and, a per-install row since the settings' scope fan-out, follows the gear's machine selector (scoped())
+        self.assertIn("post(scoped({ type: 'setUpdateMode', mode: upm.value, gt: gclock.stamp('update-mode') }))", self.gear)
         # fill() renders through setShow now (2026-09-01): the same silent write, plus the
         # honest marked-option injection when a stored value is off this page's list
         self.assertIn("setShow(upm, v.updateMode)", self.gear)

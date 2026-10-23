@@ -21,8 +21,8 @@ test("a broadcast kernel setting carries its origin per copy: local to this kern
   for (const r of routes) assert.deepEqual({ ...(r.msg as any), origin: undefined }, { type: "setTaskTracking", enabled: false, gt: 1234, origin: undefined }, "the message itself is unchanged: type, value and the ORIGINAL stamp");
   const solo = routeOutbound({ type: "setAutoNudge", enabled: true, gt: 5 });
   assert.deepEqual(solo.map((r) => [r.host, (r.msg as any).origin]), [[LOCAL, "local"]], "a single kernel: the local copy alone");
-  const other = routeOutbound({ type: "setThinkingSummaries", enabled: true, gt: 7 }, new Set(["TESTHOSTA"]));
-  assert.ok(other.every((r) => (r.msg as any).origin === undefined), "a per-install setting is not a KERNEL_SETTING and carries no origin");
+  const other = routeOutbound({ type: "setDefaultDir", value: "~/notes-api" }, new Set(["TESTHOSTA"]));
+  assert.ok(other.every((r) => (r.msg as any).origin === undefined), "a setting that is not a KERNEL_SETTING (a path on one machine) carries no origin");
   assert.match(FED, /msg: \{ \.\.\.rest, origin: h === LOCAL \? "local" : "remote" \}/, "the stamp at the fan-out, per copy (a stray scope stripped: a broadcast never carries one)");
   // a PIN (round two): the local kernel alone, stamped local, the one origin its kernel takes a pin from
   const pin = routeOutbound({ type: "setSettingPin", store: "task-tracking", pinned: true, gt: 9 }, new Set(["TESTHOSTA"]));

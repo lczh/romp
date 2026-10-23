@@ -45,6 +45,26 @@ class Flag(unittest.TestCase):
         self.assertFalse(km._conserve_on(), "junk reads as off, never raises")
         (jd.STATE / km.CONSERVE_FILE_NAME).unlink()
 
+    def test_gesture_ordered_like_the_rest_of_its_class(self):
+        # The gear's click reaches every kernel in its scope (federation's KERNEL_SETTING, the settings' scope fan-out), so a
+        # copy queued for a kernel whose socket was down flushes late with the click's stamp: it must stand down under a
+        # newer pick made there meanwhile, and the stamp is what /version reports for the gear's clock.
+        try:
+            (jd.STATE / km.CONSERVE_FILE_NAME).unlink()
+        except OSError:
+            pass
+        (jd.STATE / km.CONSERVE_FILE_NAME).write_text(json.dumps({"enabled": True}))   # a store from before the stamp
+        self.assertEqual(km._conserve_gt(), 0, "a store without the field reads 0: any stamped gesture applies over it")
+        self.assertEqual(km._set_conserve(False, gt=5000), 5000)
+        self.assertFalse(km._conserve_on())
+        self.assertIsNone(km._set_conserve(True, gt=4000), "an older stamp stands down")
+        self.assertFalse(km._conserve_on(), "…and writes nothing")
+        km._pop_stale_notice()
+        self.assertIsNone(km._set_conserve(False, gt=5000), "the same stamp and value is the gesture's own echo")
+        self.assertEqual(km._version_info()["settingsGt"]["conserve-memory"], 5000, "/version reports the stamp")
+        self.assertEqual(km._setting_kept_value("conserve-memory"), False, "a stand-down's toast names the kept value")
+        (jd.STATE / km.CONSERVE_FILE_NAME).unlink()
+
     def test_op_and_payload_wiring(self):
         src = open(os.path.join(os.path.dirname(HERE), "kernel", "kernel.py")).read()
         self.assertIn('msg.get("type") == "setConserve"', src, "the gear's toggle rides the kernel channel")

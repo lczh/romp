@@ -125,6 +125,7 @@
  "tests/test_session_name_served.py": 7.0,
  "tests/test_sessions_menu_served.py": 15.5,
  "tests/test_settings_machine_selector_served.py": 81.6,
+ "tests/test_settings_per_install_scope_served.py": 30.0,
  "tests/test_settings_previews_browser.py": 21.4,
  "tests/test_settings_proposal_card_served.py": 3.1,
  "tests/test_settings_section_labels_browser.py": 6.3,

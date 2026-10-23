@@ -622,8 +622,9 @@ following to every connected machine's kernel):
 An install whose sessions reach the API through a gateway of its own can offer the models that
 gateway serves, in every model picker beside the Claude families. The switch is **Settings**,
 **General**, **This machine**, **Extra models from your API gateway**, off by default; while it is
-off the pickers list Claude models only. It is a per-install setting, kept on the machine that
-holds it and never sent to another (its gateway is that machine's): `~/.local/state/romp/router-models.json`,
+off the pickers list Claude models only. It is a per-install setting: each machine keeps its own
+and nothing converges it (each declares its own gateway), while a click on it reaches the kernels the
+settings' machine picker names, every connected one under **All kernels**: `~/.local/state/romp/router-models.json`,
 `{"enabled": true, "gt": <gesture stamp>}`; an absent, unreadable or malformed file reads OFF.
 
 Which models the gateway serves is declared to the service, not picked in the gear:
@@ -6687,9 +6688,15 @@ answering on the card or in the gear clears both.
 Phase two (2026-09-19): with more than one kernel connected the settings card carries a MACHINE SELECTOR above its tabs.
 "All kernels" is the synchronized view (a click broadcasts as ever, subject to each machine's pin) and a synchronized row
 whose kernels disagree wears the flag "differs" in the warning tone, the machines and their values on hover, with the count
-of differing rows on the selector itself. Picking one or several kernels scopes the four synchronized rows to their values (a
-remote's from its `/tunnels` row, this machine's from `/version`) and a change there applies to those kernels alone and PINS
-the store there: the message carries `scope: "pinned"` beside `origin` (`hosts` names the kernels; federation stamps each
+of differing rows on the selector itself. Since the scope fan-out (2026-10-23) the flag and the count cover every kernel-side
+row, a disagreeing checkbox shows the mixed (indeterminate) state rather than this kernel's value, and the per-install rows
+(Conserve memory, Thinking summaries, Always load whole chats, Extra models, Updates install automatically) follow the selector
+too: federation's `KERNEL_SETTING` set carries them, so a click reaches every kernel under All and the picked kernels under a
+pick, and `/version`'s `settings` dict carries their values for a peer's row. Nothing converges them and a scoped change to one
+pins nothing; `setConserve` is gesture-stamped (`conserve-memory` in `settingsGt`) like the rest of that class. The judge, comment
+and Model rows keep their kernel-side fan-out and apply on every machine under a pick as well. Picking one or several kernels
+scopes the four synchronized rows to their values (a remote's from its `/tunnels` row, this machine's from `/version`) and a
+change there applies to those kernels alone and PINS the store there: the message carries `scope: "pinned"` beside `origin` (`hosts` names the kernels; federation stamps each
 copy), the pin gate passes a scoped remote-origin gesture, and the arm pins under the gesture's stamp; a broadcast never
 carries the scope. Each synchronized row wears a pin glyph at its right edge, lit while the picked kernel (this machine under
 All) pins the store, its hover naming the pinned value beside the other machines'; a click toggles `setSettingPin` on the
@@ -7671,18 +7678,20 @@ and each connected one. Pick one or more machines and the four converging rows
 apply there alone, which pins the value there; the pin glyph at a row's right
 edge lights, and clicking it returns that row to the shared value.
 
-A few kernel settings stay on the machine that holds them, because they
-describe it: **Conserve memory**, **Thinking summaries**, **Whole chat
-frames**, **Extra models from your API gateway** (the gateway is that
-machine's), and the **Default directory** for new sessions, a path that means
-nothing on another machine. **Updates install automatically** is sent to every
-kernel when you click it but is not one of the converging four: each install
-keeps its own boot policy.
+A few kernel settings never converge, because they describe the machine:
+**Conserve memory**, **Thinking summaries**, **Always load whole chats**,
+**Extra models from your API gateway** and **Updates install automatically**.
+Each machine keeps its own value, but a click still follows the machine
+picker: under **All kernels** it sets every machine, and picking a machine
+sets that one alone, without a pin. The **Default directory** for new sessions
+stays on this machine, since a path means nothing on another, and its row
+says so.
 
-Two marks say the machines differ. A quiet **mixed** on an ordinary kernel row
-means picking here sets every machine the same way. A louder **differs** on
-one of the four means the kernels disagree: under **All kernels** a click sets
-them all, and picking a machine above sets that one alone.
+A row the machines disagree on wears **differs**, with each machine's value on
+hover, and a checkbox shows the mixed state instead of this machine's value;
+the picker's count includes it. Under **All kernels** a click sets them all
+the same way. The judge, comment and Model rows apply on every machine even
+when a machine is picked.
 
 The settings open from the gear at the bottom right, or the palette's **Open
 settings**, in seven tabs: General, Chat, Feed, Sessions, Automation, Task

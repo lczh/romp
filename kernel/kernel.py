@@ -2683,8 +2683,8 @@ def _version_info(authed=False):
             "login": _login_state(),         # the in-dashboard login flow's state/url/err/n (T157) — never a secret
             "acctLabel": _claude_account_label(),   # which login this box holds ("" = none) — the gear's Billing row
             "fileEditing": _mv["fileEditing"],   # dashboard raw-mode editing opt-in → gates the viewer's Edit
-            # per-install: SDK sessions ask for reasoning summaries (gear checkbox). Top-level only — not
-            # in the "settings" sub-dict below, whose mixed marks promise a cross-machine write this never makes
+            # per-install: SDK sessions ask for reasoning summaries (gear checkbox); also in the "settings" sub-dict
+            # below, since the gear's click reaches every kernel in its scope and its row marks a disagreement
             "thinkingSummaries": _thinking_summaries_on(),
             "wholeChatFrames": _whole_chat_frames_on(),   # the Whole chat frames switch (2026-09-15): per-install, the gear's row reads it
             "routerModels": _router_models_on(),   # the Extra models switch: per-install, the gear's row reads it; the declared list
@@ -2714,8 +2714,14 @@ def _version_info(authed=False):
             # stamps below: read separately, a click landing between the value read and the stamp read
             # handed the peer (old value, new stamp), which it persisted and the equal-stamp rule then
             # froze on both machines (the change's second review).
+            # The PER-INSTALL ones (conserveMemory, thinkingSummaries, wholeChatFrames, routerModels, updateMode) ride here
+            # too: each kernel keeps its own and nothing converges them, but the gear's click reaches every kernel in its
+            # scope, so a peer's row must carry them for the gear to show where the kernels disagree (the settings' scope
+            # fan-out; before it, a row showed this kernel's value as every machine's with no mark).
             "settings": {"autoNudge": _mv["autoNudge"], "updateMode": _update_mode(),
                          "conserveMemory": _conserve_on(),
+                         "thinkingSummaries": _thinking_summaries_on(), "wholeChatFrames": _whole_chat_frames_on(),
+                         "routerModels": _router_models_on(),
                          "taskTracking": _mv["taskTracking"],   # one value across machines (T404): proposed to a peer since one A, one snapshot with its stamp
                          "compactSuggest": _mv["compactSuggest"],   # default OFF; one value across machines (T248)
                          "fileEditing": _mv["fileEditing"],
@@ -10487,8 +10493,39 @@ def _conserve_on():
         return False
 
 
-def _set_conserve(enabled):
-    _atomic_write(jd.STATE / CONSERVE_FILE_NAME, json.dumps({"enabled": bool(enabled)}))
+def _conserve_gt():
+    """The conserve store's last-applied gesture stamp: a file without the field (written before the stamp), no file or a
+    garbled one reads 0, so any stamped gesture applies over it."""
+    try:
+        d = json.loads((jd.STATE / CONSERVE_FILE_NAME).read_text())
+        return _gt_int(d.get("gt")) if isinstance(d, dict) else 0
+    except Exception:
+        return 0
+
+
+def _set_conserve(enabled, gt=None):
+    """Returns the applied gesture stamp (epoch ms), or None when the gesture was its own echo, a stale `gt` stood down, or the
+    store write failed (OSError: loud on stderr, nothing applied). Gesture-ordered since the gear's click reaches every kernel in
+    its scope (federation.ts KERNEL_SETTING, the settings' scope fan-out): a copy queued for a kernel whose socket was down
+    flushes on reconnect with the click's stamp, and must not undo a newer pick made there meanwhile. Read-check-write under
+    _SETTINGS_LOCK like its siblings; the sweep reads the flag fresh each pass, so nothing else to do."""
+    with _SETTINGS_LOCK:
+        try:
+            prev = json.loads((jd.STATE / CONSERVE_FILE_NAME).read_text())
+        except Exception:
+            prev = None
+        prev_gt = _gt_int(prev.get("gt")) if isinstance(prev, dict) else 0
+        if _gesture_echo(gt, prev_gt, isinstance(prev, dict) and bool(prev.get("enabled")) == bool(enabled)):
+            return None
+        if _setting_stale("conserve-memory", gt, prev_gt):
+            return None
+        stamp = gt if gt is not None else int(time.time() * 1000)
+        try:
+            _atomic_write(jd.STATE / CONSERVE_FILE_NAME, json.dumps({"enabled": bool(enabled), "gt": stamp}))
+        except OSError as e:
+            sys.stderr.write("setting conserve-memory: write failed (%s): nothing applied\n" % e)
+            return None
+    return stamp
 
 
 def _conserve_tick(now):
@@ -10674,9 +10711,11 @@ def _set_file_editing(enabled, gt=None, origin=None, scope=None):
 # session returned textless thinking blocks and the chat showed "Thinking…" for each. This toggle
 # asks for summaries: the SDK backend reads the same file at every connect
 # (sdk_backend.thinking_summaries_on → _options passes the SDK's typed
-# thinking={"type": "adaptive", "display": "summarized"}). PER-INSTALL and off by default: it is not
-# in federation's KERNEL_SETTING set, so it never propagates — whoever reads the summaries turns it
-# on where they read them. A running session is NOT switched live (the python SDK exposes no runtime
+# thinking={"type": "adaptive", "display": "summarized"}). PER-INSTALL and off by default: each kernel
+# keeps its own and the poll never converges it, but the gear's click reaches every kernel in its scope
+# (federation's KERNEL_SETTING set since the settings' scope fan-out: under All kernels a click turned it
+# on here alone while the gear's box read on for every machine) and a disagreeing row says so; pick one
+# machine in the gear to set it there alone. A running session is NOT switched live (the python SDK exposes no runtime
 # thinking-display control; the CLI's set_max_thinking_tokens control does carry one, unwrapped) —
 # it picks the setting up at its next reconnect. What reconnects a session: an effort, billing,
 # per-session-env or bypass-mode switch, the first fast-mode opt-in, a file rewind, a kernel restart
@@ -64740,6 +64779,8 @@ def _setting_kept_value(name):
         return _whole_chat_frames_on()
     if name == "router-models":
         return _router_models_on()
+    if name == "conserve-memory":
+        return _conserve_on()
     if name == "task-tracking":
         return _task_tracking_on()
     return jd._state_str(name, "")   # the judge-tier stores are bare value files
@@ -64906,6 +64947,7 @@ def _apply_mesh_settings(body):
 # Every gt-gated store, by the name _setting_stale is called with — the vocabulary the settingStale
 # frame and the gear's STALE_LABELS already share, so /version's settingsGt speaks the same one.
 _GT_STORES = ("auto-nudge", "compact-suggest", "file-editing", "update-mode", "thinking-summaries", "whole-chat-frames", "router-models", "task-tracking",
+              "conserve-memory",   # stamped since the gear's click reaches every kernel in its scope (a queued flush must not undo a newer pick)
               "judge-model", "index-model", "judge-effort", "index-effort", "judge-concurrency",
               "distill-model", "distill-effort", "comment-model", "comment-effort", "comment-fast",
               "judge-fast", "distill-fast", "index-fast",
@@ -65399,6 +65441,8 @@ def _setting_stored_gt(name):
         return _update_mode_gt()
     if name == "router-models":
         return _router_models_gt()
+    if name == "conserve-memory":
+        return _conserve_gt()
     if name in ("file-editing", "thinking-summaries", "whole-chat-frames"):
         try:
             d = json.loads((jd.STATE / (THINKING_SUMMARIES_FILE if name == "thinking-summaries"
@@ -88013,13 +88057,17 @@ class Handler(BaseHTTPRequestHandler):
             _push_soon()
         elif msg and msg.get("type") == "setConserve" and msg.get("enabled") is not None:
             # the gear's conserve-memory toggle (T148) — kernel-side like autoNudge; the sweep
-            # reads the flag fresh each pass, so flipping it needs no restart
+            # reads the flag fresh each pass, so flipping it needs no restart. Each kernel keeps its own
+            # (never converged by the poll), and the gear's click reaches every kernel in its scope
+            # (federation.ts KERNEL_SETTING), so it is gt-gated like the rest of that class
             enabled, ferr = _as_bool(msg.get("enabled"), "enabled")
             if ferr:
                 _refuse_ws_flag(client, msg["type"], ferr, "enabled", msg.get("enabled"))
                 return
-            _set_conserve(enabled)
-            _push_soon()
+            if _set_conserve(enabled, gt=_gesture_ms(msg)) is None:
+                _tell_stale_gesture(client, msg)
+            else:
+                _push_soon()
         elif msg and msg.get("type") == "setAutoNudge" and msg.get("enabled") is not None:
             # feed gear → server-side Auto Nudge on/off; a stale gesture stamp stands down (no
             # apply — and no tick: a stood-down toggle is not new information), and the dashboard
@@ -88076,8 +88124,9 @@ class Handler(BaseHTTPRequestHandler):
                 _scoped_pin_after(msg, "file-editing", _st)
         elif msg and msg.get("type") == "setThinkingSummaries" and msg.get("enabled") is not None:
             # The gear's Thinking summaries checkbox (2026-09-01) — kernel-side like setFileEditing but
-            # PER-INSTALL (not a KERNEL_SETTING: nothing to propagate), gt-gated all the same; the SDK
-            # backend reads the store at each session's next connect, so nothing else to do here.
+            # PER-INSTALL: each kernel keeps its own and the poll never converges it. The gear's click reaches
+            # every kernel in its scope (a KERNEL_SETTING since the settings' scope fan-out), so it is gt-gated;
+            # the SDK backend reads the store at each session's next connect, so nothing else to do here.
             enabled, ferr = _as_bool(msg.get("enabled"), "enabled")
             if ferr:
                 _refuse_ws_flag(client, msg["type"], ferr, "enabled", msg.get("enabled"))
@@ -88086,7 +88135,8 @@ class Handler(BaseHTTPRequestHandler):
                 _tell_stale_gesture(client, msg)
         elif msg and msg.get("type") == "setWholeChatFrames" and msg.get("enabled") is not None:
             # The gear's Whole chat frames switch (2026-09-15): kernel-side, PER-INSTALL like setThinkingSummaries (the
-            # floor is this kernel's build decision), gt-gated all the same; the setter dirties the views itself
+            # floor is this kernel's build decision, never converged), reached by the gear's click on every kernel in its
+            # scope, gt-gated; the setter dirties the views itself
             enabled, ferr = _as_bool(msg.get("enabled"), "enabled")
             if ferr:
                 _refuse_ws_flag(client, msg["type"], ferr, "enabled", msg.get("enabled"))
@@ -88094,8 +88144,9 @@ class Handler(BaseHTTPRequestHandler):
             if _set_whole_chat_frames(enabled, gt=_gesture_ms(msg)) is None:
                 _tell_stale_gesture(client, msg)
         elif msg and msg.get("type") == "setRouterModels" and msg.get("enabled") is not None:
-            # The gear's Extra models switch: kernel-side, PER-INSTALL like setWholeChatFrames (the gateway is this
-            # machine's), gt-gated all the same; the setter applies or removes the families and sends the models frame
+            # The gear's Extra models switch: kernel-side, PER-INSTALL like setWholeChatFrames (each machine declares its own
+            # gateway, never converged), reached by the gear's click on every kernel in its scope, gt-gated; the setter applies
+            # or removes the families and sends the models frame
             enabled, ferr = _as_bool(msg.get("enabled"), "enabled")
             if ferr:
                 _refuse_ws_flag(client, msg["type"], ferr, "enabled", msg.get("enabled"))

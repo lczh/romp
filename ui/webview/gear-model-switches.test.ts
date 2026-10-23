@@ -61,10 +61,10 @@ test("each switch is a stamped kernel setting: the emitter under its store, the 
   assert.match(GEAR, /if \(rub\) rub\.addEventListener\('change', function \(\) \{ post\(\{ type: 'setRetryUpgrade', enabled: rub\.checked, gt: gclock\.stamp\('retry-upgrade'\) \}\); \}\);/);
   assert.match(GEAR, /'always-fast': 'Always fast', 'retry-upgrade': 'Retry upgrades after downgrades'/, "STALE_LABELS");
   assert.match(GEAR, /'always-fast': 'setAlwaysFast', 'retry-upgrade': 'setRetryUpgrade'/, "STALE_TYPE");
-  assert.match(GEAR, /\['alwaysFast', afb\], \['retryUpgrade', rub\]\]\.forEach\(function \(pair\) \{/, "the mixed marks read the cross-machine settings dict");
+  assert.match(GEAR, /\['alwaysFast', afb\], \['retryUpgrade', rub\],/, "the mixed marks read the cross-machine settings dict");
   assert.match(GEAR, /if \(afb && typeof v\.alwaysFast === 'string'\) afb\.checked = v\.alwaysFast === 'on';/, "filled RAW from /version");
   assert.match(GEAR, /if \(rub && typeof v\.retryUpgrade === 'string'\) rub\.checked = v\.retryUpgrade === 'on';/);
-  assert.match(FED, /"setAlwaysFast", "setRetryUpgrade"\]\);/, "one value across machines: the ops reach every attached kernel");
+  assert.match(FED, /"setAlwaysFast", "setRetryUpgrade",/, "one value across machines: the ops reach every attached kernel");
   assert.doesNotMatch(GEAR, /Date\.now\(\)[^\n]*setAlwaysFast|setAlwaysFast[^\n]*Date\.now\(\)/, "stamped through the gesture clock, never the device clock");
 });
 

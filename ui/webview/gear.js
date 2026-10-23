@@ -86,8 +86,9 @@ var GEAR_HTML =
   // Chat tab scrolled to its Tab strip section (T415; Tab widgets until then) (openSettings(tab, section)); the last tab used is remembered per
   // browser (romp:settingsTab). RS_TABS is the one list the pills, the panes and selectTab read.
   // the MACHINE SELECTOR (plans/settings-across-machines.md, phase two; the user 2026-09-19): above the tabs, only when more
-  // than one kernel is connected. "All kernels" is the synchronized view; a pick scopes the four synchronized rows to the
-  // picked kernels and a change there pins them; the count on the button says how many rows differ across the kernels.
+  // than one kernel is connected. "All kernels" is the synchronized view: a click reaches every kernel. A pick scopes the four
+  // synchronized rows and the per-install ones to the picked kernels (a change to one of the four also pins it there); the
+  // count on the button says how many rows differ across the kernels, every kernel-side row counted.
   '<div id=rs-scope hidden><button id=rs-scope-btn type=button aria-haspopup=listbox aria-expanded=false>'
   + '<span id=rs-scope-label>All kernels</span><span id=rs-scope-count class=rs-differs hidden></span><span class=rs-scope-caret aria-hidden=true>\u25be</span></button>'
   + '<div id=rs-scope-list role=listbox hidden></div></div>' +
@@ -248,8 +249,8 @@ var GEAR_HTML =
   // adaptive thinking turned on where it was off), which is why it sits in Chat and not under Display
   "<div class='rs-sec'>Thinking</div>" +
   "<label class='rs-row'><input type=checkbox id=rs-thinksum>" +
-  '<span><b>Thinking summaries</b>' +
-  '<span class=rs-sub>For every new Claude Code session, ask the API for reasoning summaries and show them in the chat, folded to two lines (click to expand). The summaries are output tokens the session pays for, which is why this row sits under Chat and not Display. Compact transcript still hides them. If thinking was turned off for this install, this turns adaptive thinking on as well. A running session picks the change up at its next reconnect: an effort or billing switch, the first fast-mode opt-in, or a kernel restart. Switching the model applies live and does not reconnect. Off by default; this kernel keeps its own copy.</span>' +
+  '<span><b>Thinking summaries</b><span class=rs-mixed hidden></span>' +
+  '<span class=rs-sub>For every new Claude Code session, ask the API for reasoning summaries and show them in the chat, folded to two lines (click to expand). The summaries are output tokens the session pays for, which is why this row sits under Chat and not Display. Compact transcript still hides them. If thinking was turned off for this install, this turns adaptive thinking on as well. A running session picks the change up at its next reconnect: an effort or billing switch, the first fast-mode opt-in, or a kernel restart. Switching the model applies live and does not reconnect. Off by default. Applies on every connected machine’s kernel.</span>' +
   '</span></label>' +
   // CHAT HISTORY (2026-09-15): every chat loaded from its first message for every page, instead of from the saved document's
   // cut with the history above it loading as the user scrolls; the lever for a page that cannot fill the region above the cut.
@@ -257,7 +258,7 @@ var GEAR_HTML =
   // Its own section (the 1704 read, low 4), in the user's words, not the wire's (low 5), the spans closed (low 3)
   "<div class='rs-sec'>Chat history</div>" +
   "<label class='rs-row'><input type=checkbox id=rs-wholechat>" +
-  '<span><b>Always load whole chats</b>' +
+  '<span><b>Always load whole chats</b><span class=rs-mixed hidden></span>' +
   '<span class=rs-sub>Load every chat from its first message, instead of the most recent part with the rest loading as you scroll; slower on long chats.</span>' +
   '</span></label>' +
   // TAB STRIP (T415, the user 2026-09-14): the strip's gear jumps the panel here (data-section is the anchor showSection scrolls
@@ -300,7 +301,7 @@ var GEAR_HTML =
   '<div class=rs-pane data-pane=sessions hidden>' +
   "<div class='rs-sec rs-sec-first'>New sessions</div>" +
   "<div class='rs-row' style='cursor:default'><span style='flex:1 1 auto'><b>Default directory</b>" +
-  '<span class=rs-sub>The default directory for NEW sessions (still editable per session). Persisted kernel-side — also settable with <code>romp default-dir</code>. Falls back to the romp install dir until you set one; blank reverts to it. ~ and $VARs expand.</span>' +
+  '<span class=rs-sub>The default directory for NEW sessions (still editable per session). Persisted kernel-side — also settable with <code>romp default-dir</code>. Falls back to the romp install dir until you set one; blank reverts to it. ~ and $VARs expand. This machine’s alone: a path means nothing on another.</span>' +
   "<div style='display:flex;gap:6px;margin-top:5px'>" +
   "<input id=rs-defaultdir type=text spellcheck=false placeholder='install/serve default' style='flex:1 1 auto;min-width:0;box-sizing:border-box;background:var(--input-bg, #1e1e1e);color:var(--fg, #ccc);" +
   "border:1px solid #3a3a3a;border-radius:5px;padding:3px 6px'>" +
@@ -1154,13 +1155,14 @@ function initGear(post, opts) {
   // applies by it and stands a stale flush down instead of walking the mesh back to an hours-old
   // pick (a frozen tab's flush did exactly that). Stamp in the message literal, never at send/flush
   // time.
-  // Thinking summaries is kernel-side but PER-INSTALL: the post goes to the LOCAL kernel only —
-  // deliberately not in federation's KERNEL_SETTING set (thinking-summaries.test.ts pins the
-  // membership), so it neither queues for nor reaches another machine. Stamped all the same: two
-  // dashboards on one kernel still race, and the kernel orders every setting by `gt`.
-  if (ths) ths.addEventListener('change', function () { post({ type: 'setThinkingSummaries', enabled: ths.checked, gt: gclock.stamp('thinking-summaries') }); });
-  // Whole chat frames (2026-09-15): per-install like Thinking summaries (the LOCAL kernel's floor), not a KERNEL_SETTING; stamped
-  if (wcf) wcf.addEventListener('change', function () { post({ type: 'setWholeChatFrames', enabled: wcf.checked, gt: gclock.stamp('whole-chat-frames') }); });
+  // THE PER-INSTALL ROWS (Thinking summaries, Always load whole chats, Conserve memory, Extra models, Updates install
+  // automatically): each kernel keeps its own value and nothing converges them, but the click follows the machine selector
+  // like the synchronized rows, through scoped(): every kernel under All kernels (federation's KERNEL_SETTING broadcast,
+  // queued per host while a socket is down), the picked kernels alone under a pick, never a pin. Until the scope fan-out a
+  // click here went to the LOCAL kernel alone while the box, filled from the local /version, read as every machine's value
+  // (the user's Thinking summaries, on here and off on the other kernel with no mark). Stamped: a queued copy flushes late.
+  if (ths) ths.addEventListener('change', function () { post(scoped({ type: 'setThinkingSummaries', enabled: ths.checked, gt: gclock.stamp('thinking-summaries') })); });
+  if (wcf) wcf.addEventListener('change', function () { post(scoped({ type: 'setWholeChatFrames', enabled: wcf.checked, gt: gclock.stamp('whole-chat-frames') })); });
   // THE TASK TRACKING SWITCH (T404): the kernel's setting (gt-gated, a KERNEL_SETTING across machines). The click POSTS and
   // nothing more: the dependent controls dress and the shell hears the flip (a taskTracking message: the rail's Outline and
   // Feed buttons and any open pane of theirs, ahead of its next /version read) on the KERNEL'S ECHO, the taskTracking frame
@@ -1200,11 +1202,11 @@ function initGear(post, opts) {
     post(scoped({ type: 'setAutoNudge', enabled: an.checked, gt: gclock.stamp('auto-nudge') }));
   });
   if (fe) fe.addEventListener('change', function () { post(scoped({ type: 'setFileEditing', enabled: fe.checked, gt: gclock.stamp('file-editing') })); });
-  if (cvm) cvm.addEventListener('change', function () { post({ type: 'setConserve', enabled: cvm.checked }); });
-  // Extra models from your API gateway (2026-09-21): per-install like Conserve memory (the gateway is this machine's), so no
-  // scoped() and not a KERNEL_SETTING; stamped all the same, since the kernel orders every setting by gt. No echo frame: the
-  // kernel sends its models frame when the catalog changes, and the re-read below repaints the pickers and the status line.
-  if (rtr) rtr.addEventListener('change', function () { post({ type: 'setRouterModels', enabled: rtr.checked, gt: gclock.stamp('router-models') }); });
+  if (cvm) cvm.addEventListener('change', function () { post(scoped({ type: 'setConserve', enabled: cvm.checked, gt: gclock.stamp('conserve-memory') })); });   // a per-install row (above)
+  // Extra models from your API gateway (2026-09-21): per-install like Conserve memory (each machine declares its own gateway), a
+  // per-install row (above) through scoped(). No echo frame: the kernel sends its models frame when the catalog changes, and the
+  // re-read below repaints the pickers and the status line.
+  if (rtr) rtr.addEventListener('change', function () { post(scoped({ type: 'setRouterModels', enabled: rtr.checked, gt: gclock.stamp('router-models') })); });
   if (csg) csg.addEventListener('change', function () { post(scoped({ type: 'setCompactSuggest', enabled: csg.checked, gt: gclock.stamp('compact-suggest') })); });
   // ── the in-dashboard LOGIN flow (T157): the dashboard is already on the phone over Tailscale,
   // so streaming the CLI's paste-code OAuth URL here IS the phone login. The code input is a pure
@@ -1583,7 +1585,7 @@ function initGear(post, opts) {
   if (lgI) lgI.addEventListener('keydown', function (e) { if (e.key === 'Enter' && lgSend) lgSend.click(); });
   if (lgX) lgX.addEventListener('click', function () { lgModal(false); post({ type: 'loginCancel' }); if (lgTimer) { clearTimeout(lgTimer); lgTimer = null; } lgFrom = null; lgRender({ login: { state: '' } }); });
   if (lgClose) lgClose.addEventListener('click', function () { lgModal(false); });   // the flow is over: Close closes, it cancels nothing
-  if (upm) upm.addEventListener('change', function () { post({ type: 'setUpdateMode', mode: upm.value, gt: gclock.stamp('update-mode') }); });
+  if (upm) upm.addEventListener('change', function () { post(scoped({ type: 'setUpdateMode', mode: upm.value, gt: gclock.stamp('update-mode') })); });   // a per-install row: each install's boot policy, scoped
   // The judge MODEL pickers mirror the session pickers (the user 2026-08-25): families top-level,
   // clicking a family sends its /models `default` (the user's remembered version), hover or
   // ArrowRight reveals a side submenu of versions. The native select stays (hidden) as the VALUE
@@ -1874,13 +1876,13 @@ function initGear(post, opts) {
     'judge-fast': 'Fast mode (triage judges)', 'distill-fast': 'Fast mode (distilling judges)', 'index-fast': 'Fast mode (indexing judges)',
     'always-fast': 'Always fast', 'retry-upgrade': 'Retry upgrades after downgrades',
     'thinking-summaries': 'Thinking summaries', 'whole-chat-frames': 'Always load whole chats',
-    'router-models': 'Extra models from your API gateway' };
+    'router-models': 'Extra models from your API gateway', 'conserve-memory': 'Conserve memory' };
   // store name → the message type that sets it: the whitelist for the toast's Apply anyway (a frame
   // may re-issue the one setting it names, nothing else) and the completeness pin's map
   // (gear.test.ts checks every emitter stamps through the clock under its own store name)
   var STALE_TYPE = { 'auto-nudge': 'setAutoNudge', 'compact-suggest': 'setCompactSuggest', 'task-tracking': 'setTaskTracking',
     'file-editing': 'setFileEditing', 'update-mode': 'setUpdateMode', 'thinking-summaries': 'setThinkingSummaries',
-    'whole-chat-frames': 'setWholeChatFrames', 'router-models': 'setRouterModels',
+    'whole-chat-frames': 'setWholeChatFrames', 'router-models': 'setRouterModels', 'conserve-memory': 'setConserve',
     'judge-model': 'setJudgeModel', 'judge-effort': 'setJudgeEffort',
     'index-model': 'setIndexModel', 'index-effort': 'setIndexEffort', 'judge-concurrency': 'setJudgeConcurrency',
     'distill-model': 'setDistillModel', 'distill-effort': 'setDistillEffort',
@@ -2183,45 +2185,56 @@ function initGear(post, opts) {
       + (mine ? ' Right now these have it off: ' : ' Right now these still have it on: ')
       + split.join(', ') + '. Clicking sets them all the same way.';
   }
-  // The autoNudge rule, generalized to EVERY kernel-side select (the user 2026-08-14): the control keeps
-  // showing the LOCAL kernel's value, and a small "mixed" mark appears when a connected, up, REPORTING
-  // machine disagrees — hover names the hosts. A machine that never reported (older kernel, unpolled row)
-  // is unknown, never a disagreement: guessing would invite a click that changes a machine nobody asked
-  // about. One pick posts to every kernel (KERNEL_SETTING) and the next fill clears the mark — the local
-  // value is the default ANSWER to confirm, never a silent overwrite of a remote's deliberate setting.
+  // The autoNudge rule, generalized to EVERY kernel-side row (the user 2026-08-14): a machine that never reported (older
+  // kernel, unpolled row) is unknown, never a disagreement: guessing would invite a click that changes a machine nobody asked
+  // about. A row whose connected, up, REPORTING kernels disagree wears ONE flag (the settings' scope fan-out, 2026-10-23):
+  // "differs" in the warning tone, the machines and their values on hover; a checkbox shows the MIXED state (indeterminate)
+  // rather than this kernel's value as everyone's, and the selector's count counts every such row (lastDiffs). Before it only
+  // the four synchronized rows wore the flag and the count, the other kernel rows a quiet "mixed" mark, and the per-install
+  // rows nothing at all: Thinking summaries read plainly checked under All kernels while another kernel had it off. Auto
+  // Nudge's tri-state box stays fillAutoNudge's; under a pick, fillScopedRows then shows the picked kernels' value on the rows
+  // that follow the selector. A click on a mixed box picks one answer, and the post reaches every kernel in scope.
+  var lastDiffs = [];   // the rows the kernels disagree on, from the last fill: [{label, vals}] for the selector's count
+  // the per-install rows: each kernel keeps its own value (nothing converges them) and the click follows the selector
+  var PER_INSTALL_KEYS = ['thinkingSummaries', 'wholeChatFrames', 'conserveMemory', 'routerModels', 'updateMode'];
+  function followsScope(key) { return PER_INSTALL_KEYS.indexOf(key) >= 0 || Object.keys(STORE_KEY).some(function (st) { return STORE_KEY[st] === key; }); }
+  function storeOf(key) { return key.replace(/[A-Z]/g, function (c) { return '-' + c.toLowerCase(); }); }   // thinkingSummaries -> thinking-summaries
+  function markWord(el, val) {   // a value in the row's own words: on/off for a box (its RAW on/off/session strings too), the option's text for a select
+    if (el.type === 'checkbox') return (val === true || val === 'on') ? 'on' : 'off';
+    var o = el.options ? Array.prototype.filter.call(el.options, function (x) { return x.value === String(val); })[0] : null;
+    return o ? o.textContent : (String(val) || 'default');
+  }
   function fillMixedMarks(v, rows) {
     var mine = (v && v.settings) || null;
+    lastDiffs = [];
     [['updateMode', upm], ['judgeModel', jm], ['judgeEffort', je], ['indexModel', im],
      ['indexEffort', ie], ['judgeConcurrency', jc], ['distillModel', dm], ['distillEffort', de], ['fileEditing', fe],
      ['compactSuggest', csg], ['taskTracking', tk], ['autoNudge', an],   // autoNudge: its tri-state box is fillAutoNudge's; its FLAG is this list's (phase two, round two)
      ['commentModel', cmm], ['commentEffort', cme], ['commentFast', cmf],
      ['judgeFast', jf], ['distillFast', df], ['indexFast', xf],
-     ['alwaysFast', afb], ['retryUpgrade', rub]].forEach(function (pair) {
+     ['alwaysFast', afb], ['retryUpgrade', rub],
+     ['thinkingSummaries', ths], ['wholeChatFrames', wcf], ['conserveMemory', cvm], ['routerModels', rtr]].forEach(function (pair) {   // the per-install rows
       var key = pair[0], el = pair[1];
       if (!el) return;
+      var box = el.type === 'checkbox' && el !== an;   // Auto Nudge's tri-state is fillAutoNudge's
+      if (box) el.indeterminate = false;
       // the mark nearest the control: a checkbox's own <label> (the fast-mode box shares the Triage model
       // row, whose first mark belongs to the picker), else the row
       var row = el.closest ? (el.closest('label') || el.closest('.rs-row')) : null;
       var mark = row ? row.querySelector('.rs-mixed') : null;
       if (mark) { mark.hidden = true; mark.textContent = ''; mark.removeAttribute('title'); }
       if (!mine || typeof mine[key] === 'undefined' || !mark) return;
-      var split = (rows || []).filter(function (t) {
-        return t && t.status === 'up' && t.settings && typeof t.settings[key] !== 'undefined'
-          && String(t.settings[key]) !== String(mine[key]);
-      }).map(function (t) { return t.host; });
-      if (!split.length) return;
-      // the four synchronized settings wear the unmistakable FLAG (phase two): the word "differs" in the warning tone, the
-      // machines and their values on hover; every other kernel-side control keeps the quiet mixed mark
-      var sync = Object.keys(STORE_KEY).filter(function (s) { return STORE_KEY[s] === key; })[0];
-      if (sync) {
-        mark.textContent = 'differs'; mark.classList.add('rs-differs');
-        var vals = [kernelName('') + ' ' + (mine[key] ? 'on' : 'off')].concat((rows || []).filter(function (t) { return t && t.status === 'up' && t.settings && typeof t.settings[key] !== 'undefined'; })
-          .map(function (t) { return t.host + ' ' + (t.settings[key] ? 'on' : 'off'); }));
-        mark.title = 'The kernels disagree: ' + vals.join(', ') + '. Under All kernels a click sets every machine the same way; pick a machine above to set it alone.';
-      } else {
-        mark.textContent = 'mixed'; mark.classList.remove('rs-differs');
-        mark.title = 'differs on: ' + split.join(', ') + ' \u2014 picking here sets every machine the same way';
-      }
+      var known = (rows || []).filter(function (t) {
+        return t && t.status === 'up' && t.settings && typeof t.settings[key] !== 'undefined';
+      });
+      if (!known.some(function (t) { return String(t.settings[key]) !== String(mine[key]); })) return;
+      var vals = [kernelName('') + ' ' + markWord(el, mine[key])].concat(known.map(function (t) { return t.host + ' ' + markWord(el, t.settings[key]); }));
+      lastDiffs.push({ label: STALE_LABELS[storeOf(key)] || key, vals: vals });
+      if (box) el.indeterminate = true;
+      mark.textContent = 'differs'; mark.classList.add('rs-differs');
+      mark.title = 'The kernels disagree: ' + vals.join(', ') + '. ' + (followsScope(key)
+        ? 'Under All kernels a click sets every machine the same way; pick a machine above to set it alone.'
+        : 'A pick here sets every machine the same way.');
       mark.hidden = false;
     });
   }
@@ -2256,22 +2269,12 @@ function initGear(post, opts) {
     var t = kernels.filter(function (k) { return k.host === h; })[0];
     return { settings: (t && t.settings) || {}, pinned: (t && t.settingsPinned) || {} };
   }
-  function scopeValue(store) {   // the picked kernels' value for a store: true/false when they agree, null when they differ or none knows it
-    var key = STORE_KEY[store], seen = [];
-    scopeHosts.forEach(function (h) { var s = kernelSettings(h).settings; if (typeof s[key] === 'boolean' && seen.indexOf(s[key]) < 0) seen.push(s[key]); });
+  function scopeValueOf(key) {   // the picked kernels' value for a setting: the one value when they agree, null when they differ or none knows it
+    var seen = [];
+    scopeHosts.forEach(function (h) { var x = kernelSettings(h).settings[key]; if ((typeof x === 'boolean' || typeof x === 'string') && seen.indexOf(x) < 0) seen.push(x); });
     return seen.length === 1 ? seen[0] : null;
   }
-  function differing(v) {   // the synchronized rows whose connected kernels disagree: [{store, values: [{host, value}]}]
-    var out = [];
-    Object.keys(STORE_KEY).forEach(function (store) {
-      var key = STORE_KEY[store], mine = v && v.settings ? v.settings[key] : undefined;
-      if (typeof mine !== 'boolean') return;
-      var vals = [{ host: '', value: mine }], differ = false;
-      kernels.forEach(function (t) { if (t.settings && typeof t.settings[key] === 'boolean') { vals.push({ host: t.host, value: t.settings[key] }); if (t.settings[key] !== mine) differ = true; } });
-      if (differ) out.push({ store: store, values: vals });
-    });
-    return out;
-  }
+  function scopeValue(store) { return scopeValueOf(STORE_KEY[store]); }
   function pinGlyph(store) { return document.querySelector('#rsettings .rs-pin[data-store="' + store + '"]'); }
   function ensurePinGlyphs() {   // one glyph per synchronized row, at the row's right edge, appended once
     Object.keys(PROPOSAL_ROWS).forEach(function (store) {
@@ -2295,14 +2298,14 @@ function initGear(post, opts) {
     var many = kernels.length > 0;
     box.hidden = !many;
     if (!many) { scopeHosts = []; }
-    var diffs = differing(v);
+    var diffs = lastDiffs;   // every kernel-side row the kernels disagree on (fillMixedMarks, the same rows read just before)
     if (cnt) { cnt.textContent = diffs.length ? (diffs.length + (diffs.length === 1 ? ' differs' : ' differ')) : ''; cnt.hidden = !diffs.length;
-      cnt.title = diffs.map(function (d) { return d.store.replace('-', ' ') + ': ' + d.values.map(function (x) { return kernelName(x.host) + ' ' + (x.value ? 'on' : 'off'); }).join(', '); }).join('\n'); }
+      cnt.title = diffs.map(function (d) { return d.label + ': ' + d.vals.join(', '); }).join('\n'); }
     if (lbl) lbl.textContent = scopeOn() ? scopeHosts.map(kernelName).join(', ') : 'All kernels';
     if (list) {
       list.innerHTML = '';
       var all = document.createElement('button'); all.type = 'button'; all.className = 'rs-scope-opt' + (scopeOn() ? '' : ' on'); all.setAttribute('role', 'option');
-      all.setAttribute('aria-selected', String(!scopeOn())); all.textContent = 'All kernels'; all.title = 'The synchronized view: a change applies on every connected kernel (a pinned machine keeps its own)';
+      all.setAttribute('aria-selected', String(!scopeOn())); all.textContent = 'All kernels'; all.title = 'The synchronized view: a change applies on every connected kernel (a machine that pinned one of the four synchronized rows keeps its own)';
       all.addEventListener('click', function (e) { e.stopPropagation(); scopeHosts = []; closeScope(); fill(); });
       list.appendChild(all);
       [''].concat(kernels.map(function (t) { return t.host; })).forEach(function (h) {
@@ -2310,7 +2313,7 @@ function initGear(post, opts) {
         var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = scopeHosts.indexOf(h) >= 0;
         cb.addEventListener('change', function () { var i = scopeHosts.indexOf(h); if (cb.checked && i < 0) scopeHosts.push(h); if (!cb.checked && i >= 0) scopeHosts.splice(i, 1); fill(); });
         var tx = document.createElement('span'); tx.textContent = kernelName(h);
-        o.title = 'Scope the synchronized settings to ' + kernelName(h) + ': a change applies there alone and pins it there';
+        o.title = 'Scope the settings to ' + kernelName(h) + ': a change applies there alone (a synchronized row is pinned there); the judge, comment and Model rows still apply on every machine';
         o.appendChild(cb); o.appendChild(tx); list.appendChild(o);
       });
     }
@@ -2326,7 +2329,14 @@ function initGear(post, opts) {
   // the four rows under a scope: the picked kernels' value (indeterminate when they differ), the pin glyph lit when the picked
   // kernel pinned the store (under All: this machine), its hover naming the synchronized value beside the pinned one
   function fillScopedRows(v) {
-    var many = kernels.length > 0;
+    var many = kernels.length > 0, repaint = false;
+    if (scopeOn()) PER_INSTALL_KEYS.forEach(function (key) {   // the per-install rows under a pick: the picked kernels' value, mixed when they differ (no pin: nothing converges them)
+      var el = { thinkingSummaries: ths, wholeChatFrames: wcf, conserveMemory: cvm, routerModels: rtr, updateMode: upm }[key], sv = scopeValueOf(key);
+      if (!el) return;
+      if (el.type === 'checkbox') { el.indeterminate = sv === null; if (sv !== null) el.checked = !!sv; }
+      else if (sv !== null) { setShow(el, String(sv)); repaint = true; }   // a select cannot be mixed: its differs flag says so
+    });
+    if (repaint) repaintSelectPicks();
     Object.keys(PROPOSAL_ROWS).forEach(function (store) {
       var box = document.getElementById(PROPOSAL_ROWS[store]), key = STORE_KEY[store], g = pinGlyph(store);
       if (box && scopeOn()) {
