@@ -7718,9 +7718,11 @@ says so.
 
 A row the machines disagree on wears **differs**, with each machine's value on
 hover, and a checkbox shows the mixed state instead of this machine's value;
-the picker's count includes it. A click on a mixed box turns it on for every
+the picker's count includes it. A click on a mixed box turns it off for every
 machine in scope: every machine under **All kernels**, the picked ones under a
-pick. The hover on **differs** ends with what a click there does. The judge,
+pick. Off is the side that does nothing (on runs the judges, nudges sessions,
+writes to disk or costs more on most of these rows), and a second click turns
+it on. The hover on **differs** ends with what a click there does. The judge,
 comment and Model rows apply on every machine even when a machine is picked.
 
 A machine running an older romp may not report a row (Thinking summaries,

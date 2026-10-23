@@ -1201,7 +1201,7 @@ function initGear(post, opts) {
   // change; the controls re-initialize from /version on every open (fill()).
   // Each attached kernel keeps its own copy, so the post goes to all of them
   // (federation.ts KERNEL_SETTING) — which is also what resolves a split box:
-  // the click picks one answer and every machine takes it.
+  // the click turns it off and every machine takes it (mixBox, the one rule).
   if (an) an.addEventListener('change', function () {
     clearAutoNudgeSplit();
     post(scoped({ type: 'setAutoNudge', enabled: an.checked, gt: gclock.stamp('auto-nudge') }));
@@ -1762,7 +1762,7 @@ function initGear(post, opts) {
     var val = (cmm.value || '').toLowerCase();
     var can = val === 'session' || val === 'default' || val.indexOf('opus') !== -1;
     cmf.disabled = !can;
-    if (!can && (cmf.checked || cmf.indeterminate) && fromModelPick) {   // a mixed box holds unticked under its dash (mixBox): some machine has it on
+    if (!can && (cmf.checked || cmf.indeterminate) && fromModelPick) {   // ticked, or mixed (held ticked under its dash, mixBox): some machine has it on
       cmf.indeterminate = false; cmf.checked = false;
       post({ type: 'setCommentFast', fast: 'session', gt: gclock.stamp('comment-fast') });
     }
@@ -2198,7 +2198,7 @@ function initGear(post, opts) {
   // others: a connected host that disagrees puts the box in the mixed state (a tri-state checkbox plus
   // the word beside the label — glanceable) and is NAMED in the row's permanent line under the label (T408), one level down. Before this
   // the box quietly spoke for machines it could not see, and the other kernel went on nudging for days
-  // behind an unchecked box (the user 2026-08-14). A click on the mixed box turns it ON for every machine
+  // behind an unchecked box (the user 2026-08-14). A click on the mixed box turns it OFF for every machine
   // in scope (mixBox, the one rule for every mixed box), since the post goes to every kernel in it.
   //
   // A host that never reported a setting — an older kernel, a row that has not polled — is left OUT
@@ -2227,7 +2227,7 @@ function initGear(post, opts) {
   // the four synchronized rows wore the flag and the count, the other kernel rows a quiet "mixed" mark, and the per-install
   // rows nothing at all: Thinking summaries read plainly checked under All kernels while another kernel had it off. Auto
   // Nudge's tri-state box stays fillAutoNudge's; under a pick, fillScopedRows then shows the picked kernels' value on the rows
-  // that follow the selector. A click on a mixed box turns it on (mixBox), and the post reaches every kernel in scope.
+  // that follow the selector. A click on a mixed box turns it off (mixBox), and the post reaches every kernel in scope.
   var lastDiffs = [];   // the rows the kernels disagree on, from the last fill: [{label, vals}] for the selector's count
   // the per-install rows: each kernel keeps its own value (nothing converges them) and the click follows the selector
   var PER_INSTALL_KEYS = ['thinkingSummaries', 'wholeChatFrames', 'conserveMemory', 'routerModels', 'updateMode'];
@@ -2238,16 +2238,18 @@ function initGear(post, opts) {
     var o = el.options ? Array.prototype.filter.call(el.options, function (x) { return x.value === String(val); })[0] : null;
     return o ? o.textContent : (String(val) || 'default');
   }
-  // A MIXED box (its kernels disagree) holds checked=false under the indeterminate dash, so a click, which clears the dash and
-  // toggles checked, turns it ON for every machine in scope: one stated rule, said on the row's hover (clickRule). Before it a
-  // click set the opposite of THIS machine's value, which a pick need not even include, and the screen never said which way a
-  // click would go (the #374 review).
-  function mixBox(el) { el.indeterminate = true; el.checked = false; }
+  // A MIXED box (its kernels disagree) holds checked=true under the indeterminate dash, so a click, which clears the dash and
+  // toggles checked, turns it OFF for every machine in scope and one more click turns it on: one stated rule, said on the row's
+  // hover (clickRule). Off is the side that does nothing: on most of these boxes on runs the judges, nudges sessions, writes to
+  // disk or costs more (the #377 review, where a click landed on; before #377 a click set the opposite of THIS machine's value,
+  // which a pick need not include, and the screen never said which way it would go).
+  function mixBox(el) { el.indeterminate = true; el.checked = true; }
   // What a click (a pick, on a select) on a kernel-side row does, as the one sentence its hover ends with. `mixed`: the box
   // shows the mixed state in the current scope. Rows that follow the machine selector name the picked machines under a pick.
   function clickRule(key, isBox, mixed) {
     var picked = followsScope(key) && scopeOn(), where = picked ? scopeHosts.map(kernelName).join(', ') : 'every machine';
-    if (isBox && mixed) return 'A click turns it on for ' + where + (followsScope(key) && !picked ? '; pick a machine above to set it alone.' : '.');
+    if (isBox && mixed) return picked ? 'A click turns it off for ' + where + '.'
+      : 'A click turns it off for every machine; click again to turn it on.' + (followsScope(key) ? ' Pick a machine above to set it alone.' : '');
     if (picked) return 'A ' + (isBox ? 'click' : 'pick') + ' here sets ' + where + ' alone.';
     return followsScope(key) ? 'Under All kernels a ' + (isBox ? 'click' : 'pick') + ' sets every machine the same way; pick a machine above to set it alone.'
       : 'A ' + (isBox ? 'click' : 'pick') + ' here sets every machine the same way.';

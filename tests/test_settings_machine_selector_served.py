@@ -7,7 +7,11 @@ Driven in a real browser over A's landing page: (1) before B checks in the selec
 the "differs" badge naming both machines and their values, its pin glyph shown and unlit; (3) picking B scopes the row to B's value
 (off); clicking it applies ON to B alone (B's /version: taskTracking true, settingsPinned task-tracking true) and A keeps its own
 stamp, the glyph lights; (4) un-pinning from the glyph clears B's pin (B keeps on: no newer different value stands elsewhere) and
-the glyph unlights; (5) back under All kernels a click applies to BOTH kernels (both /version read the same value). Synthetic
+the glyph unlights; (5) back under All kernels a click applies to BOTH kernels (both /version read the same value); (6) a scoped
+click that makes them disagree raises no card; (7) picked to both kernels while they disagree, the row is mixed and held ticked
+under the dash, its hover names the two, a click turns it OFF on both and a second click ON (the #377 review: a click on a mixed
+box lands on off, the side that does nothing). B checks in only after the one-kernel survey, by the driver itself, so the order
+is the event's, never a clock's. Synthetic
 throughout: TESTHOSTB, placeholder sids, invented text. Skips LOUDLY without the extension deps or a Playwright browser (CI sets
 ROMP_SERVED_TESTS_REQUIRE=1 and installs both, so a skip there is a failure)."""
 import json
@@ -85,7 +89,13 @@ const out = { errors, consoleErrors };
 let setF = await openSettings();
 out.alone = await survey(setF);
 await closeSettings(setF);
-// B checks in to A (the test did it after the page opened, through cfg.checkin) and A polls it; wait for the tunnels row
+// only now does B check in to A, from here: the one-kernel survey has read the settings first by construction (the test used to
+// check in from Python after a fixed sleep, and on a loaded runner the check-in could land before the page's first read)
+try {
+  const r = await fetch(cfg.checkin.url, { method: "POST", headers: { "Content-Type": "application/json", "X-Romp-Token": cfg.checkin.token }, body: JSON.stringify(cfg.checkin.body) });
+  out.checkinAck = await r.json();
+} catch (e) { out.checkinAck = { error: String(e) }; }
+// A polls B; wait for the tunnels row
 const readTunnels = () => page.evaluate(async (u) => { try { const d = await (await fetch(u, { cache: "no-store" })).json(); return (d.tunnels || []).map((t) => ({ host: t.host, status: t.status, detail: t.detail, settings: t.settings, pinned: t.settingsPinned, checkin: t.checkinPeer })); } catch (e) { return { error: String(e) }; } }, cfg.tunnels);
 out.tunnelsWait = 0;
 for (let i = 0; i < 90; i++) {   // the check-in lands a few seconds into the run; the poll makes the row up with B's settings a pass later
@@ -94,6 +104,9 @@ for (let i = 0; i < 90; i++) {   // the check-in lands a few seconds into the ru
   out.tunnelsWait = i + 1; await page.waitForTimeout(1000);
 }
 setF = await openSettings();
+// the settings page's federation dials B on its own /tunnels poll, every few seconds: a setting sent to B before the page holds a
+// link there has nothing to ride and is dropped, so the clicks below wait for the open link, the event, before they go
+out.fedOpen = await setF.waitForFunction((peer) => !!window.__rompFed && window.__rompFed.open(peer), cfg.peer, { timeout: 30000 }).then(() => true).catch(() => false);
 out.two = await survey(setF);
 out.two.options = await setF.evaluate(() => { const b = document.getElementById("rs-scope-btn"); if (!b) return []; b.click(); return Array.from(document.querySelectorAll("#rs-scope-list .rs-scope-opt")).map((o) => o.textContent.trim()); });   // no button (a gear without the selector): report, do not throw
 // (3) pick B: the row reads B's value; a click applies to B alone and pins it there
@@ -148,6 +161,33 @@ await page.waitForFunction(() => { const b = document.getElementById("rnet-back"
 await page.waitForFunction((peer) => Array.from(document.querySelectorAll("#rnet-list .rnet-row")).some((r) => r.textContent.includes(peer)), cfg.peer, { timeout: 15000 }).catch(() => {});
 out.popover = await page.evaluate((peer) => { const row = Array.from(document.querySelectorAll("#rnet-list .rnet-row")).find((r) => r.textContent.includes(peer)); if (!row) return null; const pin = row.querySelector(".rnet-pin");
   return { text: row.textContent.replace(/\s+/g, " ").trim().slice(0, 120), pin: pin ? { text: pin.textContent, title: pin.title } : null }; }, cfg.peer);
+await page.keyboard.press("Escape").catch(() => {});
+// (7) a click on a MIXED box under a pick (the #377 review): picked to both kernels while they disagree (A off, B on from (6)),
+// the row is mixed, held ticked under the dash, and its hover names the two; the click turns it OFF on both, and once the row
+// reads the kernels' new agreement a second click turns it ON on both
+setF = await openSettings();
+await setF.evaluate((peer) => {
+  if (document.getElementById("rs-scope-list").hidden) document.getElementById("rs-scope-btn").click();
+  for (const opt of Array.from(document.querySelectorAll("#rs-scope-list .rs-scope-opt"))) {
+    const name = opt.textContent.trim(), inp = opt.querySelector("input");
+    if (inp && !inp.checked && (name === peer || name.includes("(this machine)"))) inp.click();
+  }
+  if (!document.getElementById("rs-scope-list").hidden) document.getElementById("rs-scope-btn").click();
+}, cfg.peer);
+await setF.waitForFunction((peer) => { const lbl = document.getElementById("rs-scope-label").textContent, b = document.getElementById("rs-tasktrack"), m = b.closest("label").querySelector(".rs-mixed");
+  return lbl.includes(peer) && lbl.includes("(this machine)") && b.indeterminate && !!m && !m.hidden && / turns it off for /.test(m.title); }, cfg.peer, { timeout: 25000 }).catch(() => {});
+out.pickBoth = await survey(setF);
+await setF.click("#rs-tasktrack");
+out.pickBothOff = await until(async () => { const a = await version(cfg.versionA), b = await version(cfg.versionB); return a.taskTracking === false && b.taskTracking === false; }, 30);
+// the second click meets the row as the kernels now stand: A's row for B carries B's off, and a fresh read draws the row plain
+out.pickBothCaughtUp = await until(async () => { const d = await version(cfg.tunnels); return (d.tunnels || []).some((t) => t.host === cfg.peer && t.settings && t.settings.taskTracking === false); }, 60);
+await closeSettings(setF);
+setF = await openSettings();
+await setF.waitForFunction(() => { const b = document.getElementById("rs-tasktrack"); return !b.indeterminate && !b.checked; }, null, { timeout: 15000 }).catch(() => {});
+out.pickBothBetween = await survey(setF);
+await setF.click("#rs-tasktrack");
+out.pickBothOn = await until(async () => { const a = await version(cfg.versionA), b = await version(cfg.versionB); return a.taskTracking === true && b.taskTracking === true; }, 30);
+out.afterPickBoth = { a: (await version(cfg.versionA)).taskTracking, b: (await version(cfg.versionB)).taskTracking };
 await browser.close();
 process.stdout.write("RESULT:" + JSON.stringify(out) + "\n", () => process.exit(0));
 """
@@ -229,13 +269,19 @@ class ServedMachineSelector(unittest.TestCase):
                 k["proc"].wait()
         shutil.rmtree(getattr(cls, "lab", ""), ignore_errors=True)
 
-    def _checkin(self):
-        """B checks in to A as a peer (the mobile handshake's shape): A polls B directly on loopback, no ssh."""
-        body = json.dumps({"host": PEER, "kernelPort": self.b["port"], "busPort": _free_port(), "token": self.b["token"]}).encode("utf-8")
-        req = urllib.request.Request("http://127.0.0.1:%d/checkin" % self.a["port"], data=body, method="POST",
-                                     headers={"Content-Type": "application/json", "X-Romp-Token": self.a["token"]})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read().decode("utf-8"))
+    def _checkin_cfg(self):
+        """B's check-in to A as a peer (the mobile handshake's shape), for the driver to post: A then polls B directly on
+        loopback, no ssh."""
+        return {"url": "http://127.0.0.1:%d/checkin" % self.a["port"], "token": self.a["token"],
+                "body": {"host": PEER, "kernelPort": self.b["port"], "busPort": _free_port(), "token": self.b["token"]}}
+
+    def _rows(self):
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%d/tunnels?token=%s" % (self.a["port"], self.a["token"]), timeout=5) as r:
+                rows = json.loads(r.read().decode("utf-8")).get("tunnels") or []
+        except Exception as e:
+            return {"error": str(e)}
+        return [{k: t.get(k) for k in ("host", "status", "detail", "checkinPeer", "settings", "settingsPinned")} for t in rows]
 
     def _result(self):
         if getattr(type(self), "_fail", None):
@@ -247,36 +293,27 @@ class ServedMachineSelector(unittest.TestCase):
             with open(cfg, "w") as f:
                 json.dump({"landing": base_a + "/?token=" + self.a["token"], "tunnels": base_a + "/tunnels?token=" + self.a["token"],
                            "versionA": base_a + "/version?token=" + self.a["token"], "versionB": base_b + "/version?token=" + self.b["token"],
-                           "peer": PEER}, f)
+                           "peer": PEER, "checkin": self._checkin_cfg()}, f)
             driver = os.path.join(self.lab, "selector.mjs")
             Path(driver).write_text(DRIVER)
-            # the driver surveys the one-kernel state first; the check-in lands while it does (the driver then waits for the row)
+            # the driver surveys the one-kernel state first, then checks B in itself and waits for A's row (the order is the
+            # event's: a check-in from here after a fixed sleep raced the page's first read on a loaded runner)
             p = subprocess.Popen(["node", driver], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                  env=dict(os.environ, EXT_PKG=os.path.join(EXT, "package.json"), CFG=cfg))
-            time.sleep(6)
-            type(self)._checkin_ack = self._checkin()
-            # the row A keeps for B, read from Python while the driver waits: what the poll made of the check-in
-            seen = []
-            for _ in range(40):
-                with urllib.request.urlopen("http://127.0.0.1:%d/tunnels?token=%s" % (self.a["port"], self.a["token"]), timeout=5) as r:
-                    rows = json.loads(r.read().decode("utf-8")).get("tunnels") or []
-                seen = [{k: t.get(k) for k in ("host", "status", "detail", "checkinPeer", "settings", "settingsPinned")} for t in rows]
-                if any(t.get("status") == "up" and t.get("settings") for t in seen):
-                    break
-                time.sleep(0.5)
-            type(self)._rows_seen = seen
             try:
                 stdout, stderr = p.communicate(timeout=400)
             except subprocess.TimeoutExpired:
                 p.kill(); stdout, stderr = p.communicate()
+            type(self)._rows_seen = self._rows()   # the rows A keeps, as the run left them: what the poll made of the check-in
             if "browser-launch-failed" in stderr:
                 self._skip("no playwright browser on this box")
             line = next((ln for ln in stdout.splitlines() if ln.startswith("RESULT:")), None)
             if line is None:
-                type(self)._fail = "the driver produced no RESULT (stderr: %s; kernel A: %s; kernel B: %s; ack %r; rows %r)" % (
-                    stderr[-2000:], open(self.a["log"]).read()[-1500:], open(self.b["log"]).read()[-800:], type(self)._checkin_ack, type(self)._rows_seen)
+                type(self)._fail = "the driver produced no RESULT (stderr: %s; kernel A: %s; kernel B: %s; rows %r)" % (
+                    stderr[-2000:], open(self.a["log"]).read()[-1500:], open(self.b["log"]).read()[-800:], type(self)._rows_seen)
                 self.fail(type(self)._fail)
             type(self)._r = json.loads(line[len("RESULT:"):])
+            type(self)._checkin_ack = self._r.get("checkinAck") or {}
         print("SELECTOR:", json.dumps(self._r), file=sys.stderr)
         return self._r
 
@@ -292,6 +329,7 @@ class ServedMachineSelector(unittest.TestCase):
     def test_with_two_kernels_the_selector_stands_above_the_tabs_and_the_disagreeing_row_wears_the_flag(self):
         r = self._result()
         self.assertTrue(type(self)._checkin_ack.get("ok"), type(self)._checkin_ack)
+        self.assertTrue(r["fedOpen"], "the settings page's link to B opened before any click aimed there")
         t = r["two"]
         self.assertFalse(t["scopeHidden"], "two kernels: the selector shows (A's rows: %r; the page's read: %r; kernel A's log tail: %s)"
                          % (type(self)._rows_seen, r.get("tunnels"), open(self.a["log"]).read()[-1200:]))
@@ -305,9 +343,10 @@ class ServedMachineSelector(unittest.TestCase):
         self.assertEqual(t["mark"]["color"], "rgb(215, 162, 58)", "the heads-up amber, through the token")
         self.assertEqual((t["pin"]["hidden"], t["pin"]["lit"]), (False, False), "the glyph shows, unlit: nothing pinned yet")
         self.assertTrue(t["indeterminate"], "All kernels shows the MIXED state while the kernels disagree, never this kernel's on as everyone's")
-        self.assertFalse(t["checked"], "…held unticked under the dash, so a click turns it ON for every kernel, the one rule a mixed box"
-                                       " follows (the #374 review: it held this machine's on, and a click set off, which the screen never said)")
-        self.assertIn("A click turns it on for every machine", t["mark"]["title"], "…and the hover says so")
+        self.assertTrue(t["checked"], "…held TICKED under the dash, so a click turns it OFF for every kernel, the one rule a mixed box"
+                                      " follows: off is the side that does nothing (the #377 review; #377 held it unticked, so a click turned on)")
+        self.assertIn("A click turns it off for every machine; click again to turn it on. Pick a machine above to set it alone.",
+                      t["mark"]["title"], "…and the hover says so")
         self.assertEqual(t["options"][:1], ["All kernels"]); self.assertIn(PEER, t["options"]); self.assertTrue(any("this machine" in o for o in t["options"]))
 
     def test_picking_the_peer_scopes_the_row_to_its_value_and_a_click_applies_there_alone_and_pins_it(self):
@@ -353,6 +392,20 @@ class ServedMachineSelector(unittest.TestCase):
         self.assertEqual(r["allAgain"]["label"], "All kernels")
         both = r["afterAllClick"]
         self.assertEqual((both["a"]["taskTracking"], both["b"]["taskTracking"]), (False, False), "under All kernels one click sets both")
+
+    def test_picked_to_both_disagreeing_kernels_a_click_turns_the_row_off_on_both_and_a_second_click_on(self):
+        r = self._result()
+        p = r["pickBoth"]
+        self.assertIn(PEER, p["label"]); self.assertIn("(this machine)", p["label"])
+        self.assertTrue(p["indeterminate"], "the picked kernels disagree (A off, B on): the row is mixed: %r" % p)
+        self.assertTrue(p["checked"], "…held TICKED under the dash, so the click lands on off")
+        self.assertIsNotNone(p["mark"])
+        self.assertTrue(p["mark"]["title"].endswith(". A click turns it off for " + p["label"] + "."), "the hover names the picked kernels: %r" % p["mark"])
+        self.assertTrue(r["pickBothOff"], "the click turned it OFF on both picked kernels")
+        self.assertTrue(r["pickBothCaughtUp"], "A's row for B caught up with B's off")
+        b = r["pickBothBetween"]
+        self.assertEqual((b["checked"], b["indeterminate"]), (False, False), "agreeing off, the row reads plain off: %r" % b)
+        self.assertTrue(r["pickBothOn"], "the second click turned it ON on both: %r" % r["afterPickBoth"])
 
 
 if __name__ == "__main__":
