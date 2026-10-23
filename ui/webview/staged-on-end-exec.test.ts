@@ -62,6 +62,7 @@ function world(active: string, from?: Record<string, unknown>) {
     sessions: new Map<string, { name: string }>(), tabMeta: new Map(), order: [] as string[], mru: [] as string[],
     views: new Map(), ledgers: new Map(), liveAsks: new Map(), awaitingFull: new Set(), pendingFullWhy: new Map(),
     staleAnswerReasked: new Set(), resync: {}, skeletonTabs: {}, failedProvisionals: new Set<string>(),
+    heldBack: new Map<string, string>(),   // the held sends' lines, per tab (an end retires its tab's with the draft)
     activeId: active, peekId: null, provisionalId: null, vanishedId: null, vanishedWhy: null, vanishedName: "", vanishedByDecline: false,
     focusAfterDismiss, stagedPosts,
     isProvisionalId: () => false,

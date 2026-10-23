@@ -24,7 +24,8 @@
 // over a stub scope (the staged-on-end-exec.test.ts pattern), with the real StagedStack and stagedPosts, the real
 // provisional.ts rules, the real reload-hold.ts and the real focusAfterDismiss; so are the edges' own (keepProvisional,
 // takeProvisionalTab, adoptKeptProvisionals, queueProvisionalSend, closeKeptTab and its title, the held sends' note,
-// the reload hold, startCreate). The session frame's adoption lines, the boot's reading of the persisted active tab, the
+// the reload hold, startCreate), and the opening tab's ✕ (closeOpeningTab) and the held sends' saved lines (restoreHeldBack,
+// giveHeldBack) since the review of #373. The session frame's adoption lines, the boot's reading of the persisted active tab, the
 // send's provisional branch and the composer's clearBox are lifted from render.ts too. A function render.ts does not
 // define (restoreProvisionals before #371, the edges' functions before 2026-10-23) resolves to the stub scope's no-op,
 // so the test fails on what the page does, not on a missing anchor. Synthetic sessions only (the notes-api demo's web,
@@ -84,11 +85,13 @@ const SRC = [
   lift("function adoptKeptProvisionals(", true),
   lift("function queueProvisionalSend(", true),
   lift("function closeKeptTab(", true),
-  lift("function keptDiscardTitle(", true),
+  lift("function closeOpeningTab(", true),
+  lift("function tabDiscardTitle(", true),
   lift("function discardKeptTab(", true),
   lift("function heldBackLine(", true),
+  lift("function restoreHeldBack(", true),
   lift("function clearHeldBackNote(", true),
-  lift("function moveHeldBack(", true),
+  lift("function giveHeldBack(", true),
   lift("function createHoldHost(", true),
   lift("function paneHoldReason(", true),
   lift("function endReloadHoldIfIdle(): void {"),
@@ -116,7 +119,9 @@ type Fns = {
   restoreProvisionals: () => void; persistProvisionals: () => void; flushStaged: (sid: string, typed?: { text: string }) => number; persistDrafts: () => void;
   stagedLabel: (n: number, asking: boolean) => string; adoptLine: (msg: { id: string; name: string }, existed: boolean) => void; bootWant: () => void;
   deliverProvisional: (sid: string, text: string, attached: string[]) => void; clearBox: () => void;
-  keptDiscardTitle: (name: string, staged: number, text: boolean, files: boolean) => string; heldBackLine: (name: string) => string;
+  tabDiscardTitle: (name: string, staged: number, text: boolean, files: boolean, held?: number, opening?: boolean) => string;
+  heldBackLine: (name: string, canSend?: boolean) => string; restoreHeldBack: (saved: unknown) => void; clearHeldBackNote: (sid: string | null) => void;
+  closeOpeningTab: (id: string) => boolean;
   paneHoldReason: () => string; startCreate: (req: Req, mkdir?: boolean) => void;
 };
 type Confirm = { title: string; body: string; buttons: { label: string; value: string }[]; cb: (v: string | null) => void };
@@ -145,7 +150,7 @@ function world(from?: Record<string, unknown>) {
     pendingCarry: "", pendingCarryStaged: [], pendingCarryFiles: [], lastCreate: null,
     wantActive: null, wantActiveGone: null, vanishedId: null, vanishedWhy: null, vanishedName: "", vanishedByDecline: false,
     PROVISIONAL_WAIT_MS: 90_000,
-    supersededProvisionals: new Set<string>(), provisionalStartedAt: 0, heldBack: null, shipGateSid: null,
+    supersededProvisionals: new Set<string>(), provisionalStartedAt: 0, heldBack: new Map<string, string>(), shipGateSid: null,
     sendOnShip: new Set<string>(), histWalk: new Map(), draftStartedAt: new Map(), composerManualH: null,
     window: { __rompReload: { ended: () => { ended++; } }, __rompFed: undefined as unknown },
     focusAfterDismiss, stagedPosts, quoteReplyBody, reloadHoldReason, mintProvisionalId, isProvisionalId, provisionalName, adoptsProvisional,
@@ -184,10 +189,11 @@ function world(from?: Record<string, unknown>) {
   const fns = (new Function("SCOPE", `with (SCOPE) { ${SRC}\n return { openProvisional, adoptProvisional, resolveProvisionalToExisting,
     failProvisional, onCreateDirMissing, closeTabLocally, restoreProvisionals, persistProvisionals,
     flushStaged, persistDrafts, stagedLabel, adoptLine, bootWant, deliverProvisional, clearBox,
-    keptDiscardTitle, heldBackLine, paneHoldReason, startCreate }; }`) as any)(proxy) as Fns;
+    tabDiscardTitle, heldBackLine, restoreHeldBack, clearHeldBackNote, closeOpeningTab, paneHoldReason, startCreate }; }`) as any)(proxy) as Fns;
   S.ta = box;   // clearBox's own name for the box
   if (from) {   // render.ts's load, in its order: the maps from the persisted state, the active tab read, then the boot's restore
     for (const [k, v] of Object.entries((saved.drafts || {}) as Record<string, string>)) S.drafts.set(k, v);
+    fns.restoreHeldBack(saved.heldBack);
     for (const [k, v] of Object.entries((saved.files || {}) as Record<string, string[]>)) S.composerFiles.set(k, v);
     stagedMsgs.restore(saved.staged);
     S.wantActive = (saved.activeId as string) || null;
@@ -521,9 +527,9 @@ test("4: a kept tab's ✕ asks before it discards staged messages or text, and C
   assert.equal(w.persistedCount(prov), 0);
   assert.deepEqual(w.persisted().provisionals, []);
   // the question names what is there, and a tab with nothing in it goes at once
-  assert.equal(w.keptDiscardTitle("api", 2, false, false), "Discard api's 2 staged messages?");
-  assert.equal(w.keptDiscardTitle("api", 0, true, false), "Discard the text in api's box?");
-  assert.equal(w.keptDiscardTitle("api", 1, true, true), "Discard api's 1 staged message and the text and attachments in its box?");
+  assert.equal(w.tabDiscardTitle("api", 2, false, false), "Discard api's 2 staged messages?");
+  assert.equal(w.tabDiscardTitle("api", 0, true, false), "Discard the text in api's box?");
+  assert.equal(w.tabDiscardTitle("api", 1, true, true), "Discard api's 1 staged message and the text and attachments in its box?");
   const e = opening();
   e.w.failProvisional("The folder could not be read.");
   const n = e.w.confirms.length;
@@ -561,12 +567,13 @@ test("5: held sends a reload put back in the box say so in a line above it, whic
   w.S.provisionalQueue.push(HELD); w.persistProvisionals();
   const r = world(w.persisted());
   assert.equal(r.box.value, HELD);
-  assert.deepEqual(r.S.heldBack, { sid: prov, name: "api" }, "the line stands for the tab's box");
-  assert.equal(r.heldBackLine("api"), "Not sent yet: what you sent while api was starting is back in the box.");
+  assert.deepEqual([...r.S.heldBack], [[prov, "api"]], "the line stands for the tab's box");
+  assert.equal(r.heldBackLine("api"), "Not sent: what you typed while api was starting is in the box. Send it when you're ready.");
   r.arrive(REAL, "api");
-  assert.deepEqual(r.S.heldBack, { sid: REAL, name: "api" }, "the text moved to the session's box, and the line with it");
+  assert.deepEqual([...r.S.heldBack], [[REAL, "api"]], "the text moved to the session's box, and the line with it");
   r.clearBox();   // the send that takes it
-  assert.equal(r.S.heldBack, null, "gone with the text");
+  assert.deepEqual([...r.S.heldBack], [], "gone with the text");
+  assert.equal(world(r.persisted()).S.heldBack.size, 0, "and from the page's state");
 });
 
 test("5: a create holding sends holds the dashboard's reload while its session can still arrive, and its arrival ends the hold", () => {
@@ -624,4 +631,90 @@ test("6: after a reload, the hand-over to a running session under the name joins
   assert.equal(r.S.drafts.get(REAL), "A note I was writing to api.\n\n" + TYPED, "its draft first, the tab's after it");
   assert.equal(r.box.value, "A note I was writing to api.\n\n" + TYPED);
   assert.deepEqual(r.stagedMsgs.list(REAL).map((m) => m.text), ["Already staged on the running api.", ITEM.text]);
+});
+
+// The review of #373 (2026-10-23): two roads where what a new session's tab holds could still go without a word.
+const DOCS_REQ = { name: "docs", backend: "sdk", dir: "", host: "" };
+// the tab strip's ✕ delegate (setupTabs' `close`): from its key to the End question a running session's ✕ asks
+const CLOSE_A = RENDER.indexOf("    close: (el) => {"), CLOSE_B = RENDER.indexOf("showConfirm(`End “${nm}”?`", CLOSE_A);
+assert.ok(CLOSE_A > 0 && CLOSE_B > CLOSE_A, "the tab strip's ✕ delegate moved");
+
+test("7: the ✕ on a tab still opening names the staged messages, text and held sends it would discard, Cancel first; Cancel keeps all of it", () => {
+  const { w, prov } = opening();
+  w.type("What does the list endpoint return today?"); w.enter();
+  w.type("And what does it return for an empty page?"); w.enter();   // two sends held for the session
+  w.stage(ITEM.text);
+  w.type(TYPED);
+  assert.equal(w.closeOpeningTab(prov), true, "it asks");
+  const ask = w.confirms[w.confirms.length - 1];
+  assert.equal(ask.title, "Cancel starting api and discard its 1 staged message, 2 unsent messages and the text in its box?");
+  assert.deepEqual(ask.buttons.map((b) => b.label), ["Cancel", "Discard"], "Cancel first, so it has the focus");
+  ask.cb("");   // Cancel
+  ask.cb(null);   // …or Esc, or the backdrop
+  assert.equal(w.S.provisionalId, prov, "still the create in flight");
+  assert.equal(w.S.sessions.get(prov)?.status?.state, "opening");
+  assert.equal(w.S.provisionalQueue.length, 2, "its held sends are still held");
+  assert.deepEqual(w.stagedMsgs.list(prov).map((m) => m.text), [ITEM.text], "its staged message is still staged");
+  assert.equal(w.box.value, TYPED, "its text is in the box");
+  assert.deepEqual(w.wire.filter((m) => m.type === "cancelCreate"), [], "and the create goes on");
+  // Discard cancels the create and discards it all
+  w.closeOpeningTab(prov);
+  w.confirms[w.confirms.length - 1].cb("discard");
+  assert.equal(w.S.sessions.has(prov), false);
+  assert.equal(w.S.provisionalId, null);
+  assert.deepEqual(w.wire.filter((m) => m.type === "cancelCreate"), [{ type: "cancelCreate", name: "api" }]);
+  assert.equal(w.persistedCount(prov), 0);
+  assert.deepEqual(w.persisted().provisionals, []);
+  // what the question names, thing by thing
+  assert.equal(w.tabDiscardTitle("api", 0, false, false, 1, true), "Cancel starting api and discard its 1 unsent message?");
+  assert.equal(w.tabDiscardTitle("api", 0, true, false, 0, true), "Cancel starting api and discard the text in its box?");
+  assert.equal(w.tabDiscardTitle("api", 2, false, true, 0, true), "Cancel starting api and discard its 2 staged messages and the attachments in its box?");
+  // an empty opening tab is asked what it was asked before (the caller's End question)
+  const e = opening();
+  assert.equal(e.w.closeOpeningTab(e.prov), false);
+  assert.deepEqual(e.w.confirms, []);
+  // the session arriving while the question is up takes what the tab held, and a Discard after it discards nothing
+  const a = opening();
+  a.w.stage(ITEM.text);
+  a.w.closeOpeningTab(a.prov);
+  a.w.arrive(REAL, "api");
+  a.w.confirms[a.w.confirms.length - 1].cb("discard");
+  assert.deepEqual(a.w.stagedMsgs.list(REAL).map((m) => m.text), [ITEM.text]);
+  assert.deepEqual(a.w.wire.filter((m) => m.type === "cancelCreate"), []);  // and the ✕ on the strip goes through it: a live tab's ✕ asks the opening tab's question before the End one
+  assert.ok(RENDER.slice(CLOSE_A, CLOSE_B).includes("if (closeOpeningTab(id)) return;"), "the tab strip's ✕ asks it");
+});
+
+test("7: the line over a box of sends that never went stands for each tab, through two replaced creates and a reload", () => {
+  const { w, prov } = opening();
+  w.type(HELD); w.enter();                 // a send held for api
+  w.startCreate(TESTS_REQ);                // tests, before api opens: api's tab is kept, its send back in its box
+  const tests = w.S.provisionalId as string;
+  w.type(TYPED); w.enter();                // a send held for tests
+  w.startCreate(DOCS_REQ);                 // docs, before tests opens
+  assert.deepEqual(Object.fromEntries(w.S.heldBack), { [prov]: "api", [tests]: "tests" }, "each kept tab keeps its own line");
+  assert.equal(w.S.drafts.get(prov), HELD);
+  assert.equal(w.heldBackLine("api", false), "Not sent: what you typed while api was starting is in the box.",
+    "a kept tab cannot send, so its line says only where the text is");
+  const r = world(w.persisted());          // a reload
+  assert.deepEqual(Object.fromEntries(r.S.heldBack), { [prov]: "api", [tests]: "tests" }, "both lines come back with the text they name");
+  assert.equal(r.S.drafts.get(prov), HELD);
+  r.arrive(REAL, "api");                   // api's session opens after all and takes its tab
+  assert.deepEqual(Object.fromEntries(r.S.heldBack), { [tests]: "tests", [REAL]: "api" }, "api's line follows its text");
+  r.S.setActive(REAL);
+  r.clearBox();                            // the send that takes it
+  assert.deepEqual(Object.fromEntries(r.S.heldBack), { [tests]: "tests" }, "api's line goes with its text; tests' stands");
+  r.clearHeldBackNote(tests);              // the line's own ✕
+  assert.equal(world(r.persisted()).S.heldBack.size, 0, "and stays gone after a reload");
+  // a reload after a failure keeps the line with the text
+  const f = opening();
+  f.w.type(HELD); f.w.enter();
+  f.w.failProvisional("The folder could not be read.");
+  const g = world(f.w.persisted());
+  assert.equal(g.box.value, HELD);
+  assert.deepEqual(Object.fromEntries(g.S.heldBack), { [f.prov]: "api" });
+  // a discarded tab takes its line with it
+  g.closeTabLocally(f.prov);
+  g.confirms[g.confirms.length - 1].cb("discard");
+  assert.equal(g.S.heldBack.size, 0);
+  assert.equal(world(g.persisted()).S.heldBack.size, 0);
 });

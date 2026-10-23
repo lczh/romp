@@ -9719,7 +9719,9 @@ function openProvisional(req: CreateReq): void {
   persistProvisionals();                   // the create in flight survives a reload (restoreProvisionals)
   renderTabs();
   setActive(id);
-  if (shown) syncView(id, true);           // a kept tab already on screen: its placeholder goes back to the starting one (no transcript, so no follow mode to keep)
+  // a kept tab already on screen: its placeholder goes back to the starting one (no transcript, so no follow mode to keep),
+  // and the line over its box, when one stands, says again that the text can be sent
+  if (shown) { syncView(id, true); paintHeldBackNote(id); }
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
   ta?.focus();                             // the whole point: you can start typing NOW
   provisionalTimer = setTimeout(
@@ -9730,7 +9732,7 @@ function openProvisional(req: CreateReq): void {
  *  queued sends and its draft) and the rest of its box (its staged messages and its attachments), each taken out of the
  *  tab's own maps (takeProvisionalTab), so the caller's hand-on is the only copy. A caller that keeps none of it discards
  *  the lot: the tab's ✕, which discards tab and text together. */
-function dropProvisional(): { queued: string[]; draft: string; staged: StagedMsg[]; files: string[] } {
+function dropProvisional(): { queued: string[]; draft: string; staged: StagedMsg[]; files: string[]; note?: string } {
   const id = provisionalId;
   provisionalId = null;
   provisionalTags = [];
@@ -9744,9 +9746,9 @@ function dropProvisional(): { queued: string[]; draft: string; staged: StagedMsg
 }
 
 /** What a provisional tab holds beyond its held sends, taken out of its maps, and the tab dismissed: its draft (the box,
- *  when it is on screen), its staged messages and its attachments, for the caller to hand on. The create in flight's tab
- *  (dropProvisional) and a kept one whose session arrived (adoptKeptProvisionals). */
-function takeProvisionalTab(id: string): { draft: string; staged: StagedMsg[]; files: string[] } {
+ *  when it is on screen), its staged messages, its attachments and the line over its box (heldBack), for the caller to
+ *  hand on. The create in flight's tab (dropProvisional) and a kept one whose session arrived (adoptKeptProvisionals). */
+function takeProvisionalTab(id: string): { draft: string; staged: StagedMsg[]; files: string[]; note?: string } {
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
   const draft = (activeId === id && ta) ? ta.value : (drafts.get(id) ?? "");
   // taken before the dismissal: it deletes the attachments, and since 2026-10-23 it leaves a staged stack where it is,
@@ -9754,12 +9756,14 @@ function takeProvisionalTab(id: string): { draft: string; staged: StagedMsg[]; f
   // id, out of sight, and never reached the session)
   const staged = stagedMsgs.takeAll(id);
   const files = (composerFiles.get(id) ?? []).slice();
+  const note = heldBack.get(id);           // …and the line, which the dismissal retires with the draft
+  heldBack.delete(id);
   failedProvisionals.delete(id); supersededProvisionals.delete(id);
   pendingSent.delete(id);                  // the optimistic bubbles belong to a tab that is going away
   persistKeptSends();
   dismissSession(id, "close");             // drops it from sessions/order/views and reselects
   noteColumnIdle();                        // the create is gone: a peer's deferred close of this column may go ahead
-  return { draft, staged, files };
+  return { draft, staged, files, note };
 }
 
 /** The rest of a provisional tab's box, beyond its text: its staged messages and its attachments, joined onto the tab
@@ -9821,8 +9825,8 @@ function restoreProvisionals(): void {
     // above the box says so (heldBack): the text came back with no word before, and read as a draft never sent.
     const held = strs(r.queued);
     if (held.length) {
+      heldBack.set(r.id, r.name);
       drafts.set(r.id, [...held, drafts.get(r.id) ?? ""].filter(Boolean).join("\n\n")); persistDrafts();
-      heldBack = { sid: r.id, name: r.name };
     }
     if (wantActiveGone === r.id) back = r.id;   // the tab the page showed: shown again, not "gone"
   }
@@ -9837,15 +9841,14 @@ function restoreProvisionals(): void {
 // stay staged, now the session's: the strip shows them on the real tab and the next message sends them.
 function adoptProvisional(realId: string): void {
   claimSession(realId);                    // a session created from a later column belongs to that column (the chat split): claimed BEFORE the switch, so setActive shows it here
-  const prov = provisionalId;
-  const { queued, draft, staged, files } = dropProvisional();
+  const { queued, draft, staged, files, note } = dropProvisional();
   // JOINED onto what the session's box already holds, set BEFORE the switch — setActive fills the box from drafts. A new
   // session holds nothing; a running one under the name, which a reload's first frame finds and adopts (a fresh page has
   // seen no session), has a draft of its own, and the hand-over overwrote it (2026-10-23).
   if (draft) drafts.set(realId, [drafts.get(realId) ?? "", draft].filter(Boolean).join("\n\n"));
   carryProvisionalBox(realId, staged, files);   // …and the staged stack and the attachments, after the session's own
   setActive(realId);
-  moveHeldBack(prov, realId);              // the text the held sends' note names moved with the draft
+  giveHeldBack(realId, note);              // the text the held sends' line names moved with the draft
   for (const text of queued) {
     const qid = mintQid();                                  // the copy's id, minted here: the real send carries it…
     vscodeApi?.postMessage({ type: "sendMessage", id: realId, text, qid });
@@ -9872,11 +9875,11 @@ function adoptKeptProvisionals(realId: string, name: string): void {
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
   for (const id of kept) {
     const shown = activeId === id;
-    const { draft, staged, files } = takeProvisionalTab(id);
+    const { draft, staged, files, note } = takeProvisionalTab(id);
     if (draft) { drafts.set(realId, [drafts.get(realId) ?? "", draft].filter(Boolean).join("\n\n")); persistDrafts(); }
     carryProvisionalBox(realId, staged, files);
     if (shown) setActive(realId);
-    moveHeldBack(id, realId);
+    giveHeldBack(realId, note);
     if (draft && ta && activeId === realId) { ta.value = drafts.get(realId) ?? ""; growComposer(ta); }   // a reselect that already landed on it (adoptProvisional's case)
   }
   persistProvisionals();
@@ -9891,10 +9894,9 @@ function adoptKeptProvisionals(realId: string, name: string): void {
 // FAILURE ("Couldn't start api" over a body saying api is running, the view yanked back onto a
 // struck-through dead tab), and an untagged one waited 90 s for the backstop to say the same.
 function resolveProvisionalToExisting(realId: string): void {
-  const prov = provisionalId;
-  const { queued, draft, staged, files } = dropProvisional();     // …and the 90 s backstop goes with it
+  const { queued, draft, staged, files, note } = dropProvisional();     // …and the 90 s backstop goes with it
   carryProvisionalBox(realId, staged, files);      // staged messages stay staged, after the running session's own
-  moveHeldBack(prov, realId);
+  giveHeldBack(realId, note);
   const held = [...queued, draft].filter(Boolean).join("\n\n");
   if (!held) return;
   drafts.set(realId, [drafts.get(realId) ?? "", held].filter(Boolean).join("\n\n"));   // BEFORE the switch — setActive fills the box from drafts
@@ -9955,11 +9957,12 @@ function keepProvisional(superseded = false): { id: string; name: string; held: 
   // "closed" gives the tab the dead treatment (struck label, plain ✕) — but the composer stays LIVE
   // for a kept provisional (the read-only exemption below), since the held text must stay editable
   if (s) s.status = { state: "closed", sinceEpoch: Date.now() };   // ms, like every kernel payload
+  if (queued.length) heldBack.set(id, name);   // the line over its box, saved with the text below
   if (held) {
     drafts.set(id, held); persistDrafts();
     if (activeId === id && ta) { ta.value = held; growComposer(ta); }
   }
-  if (queued.length) { heldBack = { sid: id, name }; paintHeldBackNote(activeId); }
+  paintHeldBackNote(activeId);       // a line it already had (a reload's) now says only where the text is: a kept tab cannot send
   if (activeId === id) syncView(id, true);   // the starting placeholder gives way to the kept one's (no transcript, so no follow mode to keep)
   persistProvisionals();             // the kept tab, its text and its staged messages survive a reload too
   renderTabs();
@@ -20427,6 +20430,11 @@ function statusRecordOf(s: Session, id: string): StatusRecord {
 // in: switching away stashes it (the box empties for the new tab's own draft),
 // switching back restores it.
 const drafts = new Map<string, string>();
+// The tabs whose box holds sends a new session's tab was holding, put back as text and not sent, each with the name the
+// line above the box says (paintHeldBackNote). Keyed by tab and saved with the drafts, like the text it names: one slot
+// for the whole page lost a tab's line to the next create that was replaced, and a reload lost every line (2026-10-23).
+// Declared here, before the load below reads it back (restoreHeldBack), so neither meets it uninitialised.
+const heldBack = new Map<string, string>();
 
 // A CITATION seeded into the composer when you click a feed card's summary or a sub-goal into the chat (the
 // user 2026-07-01): a dismissible chip that says "you're following up on THIS". It rides the message out as a
@@ -20654,6 +20662,7 @@ function persistDrafts(): void {
                             files: Object.fromEntries(composerFiles),
                             staged: stagedMsgs.entries(),
                             cmtStaged: cmtStaged.entries(),   // the comment threads' own stacks (2026-10-07)
+                            heldBack: Object.fromEntries(heldBack),   // the line over a box holding sends that never went (2026-10-23)
                             // NAMES of ships still awaiting their ack — never the bytes. A reload
                             // cannot resurrect the upload (the payload dies with the page), so the
                             // next load reads these to say LOUDLY what was lost (T215; the VS Code
@@ -20665,6 +20674,7 @@ function persistDrafts(): void {
 try {
   const saved = ((vscodeApi?.getState?.() || {}) as any).drafts;
   if (saved && typeof saved === "object") for (const [k, v] of Object.entries(saved)) if (typeof v === "string") drafts.set(k, v);
+  restoreHeldBack(((vscodeApi?.getState?.() || {}) as any).heldBack);   // …and the line over a box holding sends that never went
   const savedFiles = ((vscodeApi?.getState?.() || {}) as any).files;
   if (savedFiles && typeof savedFiles === "object")
     for (const [k, v] of Object.entries(savedFiles)) {
@@ -23551,26 +23561,48 @@ function closeTabLocally(id: string): void {
 function closeKeptTab(id: string): void {
   const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
   const text = ((activeId === id && ta) ? ta.value : (drafts.get(id) ?? "")).trim();
-  const title = keptDiscardTitle(sessions.get(id)?.name || "this tab", stagedMsgs.count(id), !!text, (composerFiles.get(id) ?? []).length > 0);
+  const title = tabDiscardTitle(sessions.get(id)?.name || "this tab", stagedMsgs.count(id), !!text, (composerFiles.get(id) ?? []).length > 0);
   if (!title) { discardKeptTab(id); return; }
   showConfirm(title, "", [{ label: "Cancel", value: "" }, { label: "Discard", value: "discard", danger: true }],
     (v) => { if (v === "discard" && failedProvisionals.has(id)) discardKeptTab(id); });
 }
-/** The question before a kept tab's ✕ discards what it holds, naming each thing ("Discard api's 1 staged message and the
- *  text in its box?"); "" when it holds nothing. */
-function keptDiscardTitle(name: string, staged: number, text: boolean, files: boolean): string {
+// The ✕ on the tab of the create IN FLIGHT (provisionalId): confirming it cancels the create and discards everything the
+// tab holds, its staged messages, its text, its attachments and the sends it is holding for the session (cancelProvisional),
+// none of which is anywhere else. It asked what a running session's ✕ asks ("End “api”? The session shuts down…", End
+// session focused), which named none of it (2026-10-23, the review of #373). A tab holding any of it asks the kept tab's
+// question instead (closeKeptTab), naming each thing, Cancel first and focused; true when it asked. One holding nothing
+// is left to the caller's End question, as before (false). The answer is for the create in flight: a session that
+// arrived while the question was up took what the tab held (adoptProvisional), so Discard acts only while it is opening.
+function closeOpeningTab(id: string): boolean {
+  if (id !== provisionalId) return false;
+  const ta = document.getElementById("composer-input") as HTMLTextAreaElement | null;
+  const text = ((activeId === id && ta) ? ta.value : (drafts.get(id) ?? "")).trim();
+  const title = tabDiscardTitle(sessions.get(id)?.name || "this session", stagedMsgs.count(id), !!text,
+                                (composerFiles.get(id) ?? []).length > 0, provisionalQueue.length, true);
+  if (!title) return false;
+  showConfirm(title, "", [{ label: "Cancel", value: "" }, { label: "Discard", value: "discard", danger: true }],
+    (v) => { if (v === "discard" && provisionalId === id) closeTabLocally(id); });
+  return true;
+}
+/** The question before a new session's tab's ✕ discards what it holds, naming each thing: a kept tab's ("Discard api's 1
+ *  staged message and the text in its box?") or, `opening`, the create in flight's, which its ✕ also cancels ("Cancel
+ *  starting api and discard its 1 staged message, 2 unsent messages and the text in its box?"). `held`: the sends it is
+ *  holding for the session. "" when it holds nothing. */
+function tabDiscardTitle(name: string, staged: number, text: boolean, files: boolean, held = 0, opening = false): string {
+  const count = (n: number, what: string) => n + " " + what + (n === 1 ? "" : "s");
+  const own = [staged ? count(staged, "staged message") : "", held ? count(held, "unsent message") : ""].filter(Boolean);
   const box = text && files ? "the text and attachments in " : text ? "the text in " : files ? "the attachments in " : "";
-  const st = staged ? staged + " staged message" + (staged === 1 ? "" : "s") : "";
-  if (st && box) return "Discard " + name + "'s " + st + " and " + box + "its box?";
-  if (st) return "Discard " + name + "'s " + st + "?";
-  if (box) return "Discard " + box + name + "'s box?";
-  return "";
+  if (!own.length && !box) return "";
+  const head = opening ? "Cancel starting " + name + " and discard " : "Discard ";
+  if (!own.length) return head + box + (opening ? "its" : name + "'s") + " box?";
+  const items = box ? [...own, box + "its box"] : own;
+  const list = items.length === 1 ? items[0] : items.slice(0, -1).join(", ") + " and " + items[items.length - 1];
+  return head + (opening ? "its " : name + "'s ") + list + "?";
 }
 function discardKeptTab(id: string): void {
   failedProvisionals.delete(id); supersededProvisionals.delete(id);
   stagedMsgs.takeAll(id);   // no session will ever come back under this id to show them again
-  if (heldBack && heldBack.sid === id) clearHeldBackNote();
-  dismissSession(id, "close");
+  dismissSession(id, "close");   // …and the line over its box with the text (heldBack)
   persistProvisionals();
   noteColumnIdle();   // the last kept one discarded: idle again, and the shell's deferred close may go ahead
 }
@@ -23667,19 +23699,26 @@ function clearComposerNote(): void {
 }
 // The line above the box after sends a new session's tab was holding came back into the box as text, not sent (2026-10-23):
 // a reload while the session was starting (restoreProvisionals), or a create the page stopped waiting on (keepProvisional).
-// The text used to come back with no word, reading as a draft the user had never sent. One note, for the box it names,
-// painted whenever that box is bound (setActive, loadComposerFor); it follows the text when a session takes the tab over
-// (moveHeldBack), and retires on the exact events that make it stale: the box cleared by a send or a stage (clearBox),
-// its ✕, or the tab discarded. Typing goes on under it: it holds no keys (composerNoteHolds is the other note's).
-let heldBack: { sid: string; name: string } | null = null;
-function heldBackLine(name: string): string {
-  return "Not sent yet: what you sent while " + name + " was starting is back in the box.";
+// The text used to come back with no word, reading as a draft the user had never sent. One line per tab (heldBack, saved
+// with the drafts, so a reload keeps it and a second replaced create cannot take the first one's), painted whenever that
+// tab's box is bound (setActive, loadComposerFor); it follows the text when a session takes the tab over (takeProvisionalTab,
+// giveHeldBack), and retires on the exact events that make it stale: the box cleared by a send or a stage (clearBox), its ✕,
+// or the tab discarded or ended (dismissSession). Typing goes on under it: it holds no keys (composerNoteHolds is the other
+// note's). A kept tab cannot send (its create failed or was replaced), so its line says only where the text is.
+function heldBackLine(name: string, canSend = true): string {
+  return "Not sent: what you typed while " + name + " was starting is in the box." + (canSend ? " Send it when you're ready." : "");
+}
+/** The saved lines back into the map at load, beside the drafts they describe. */
+function restoreHeldBack(saved: unknown): void {
+  if (!saved || typeof saved !== "object") return;
+  for (const [k, v] of Object.entries(saved)) if (typeof v === "string" && v) heldBack.set(k, v);
 }
 function paintHeldBackNote(id: string | null): void {
   const box = document.getElementById("composer");
   if (!box) return;
   let note = document.getElementById("composer-held-note");
-  if (!heldBack || heldBack.sid !== id) { note?.remove(); return; }
+  const name = id === null ? undefined : heldBack.get(id);
+  if (id === null || name === undefined) { note?.remove(); return; }
   if (!note) {
     note = el("div", "composer-note");
     note.id = "composer-held-note";
@@ -23692,16 +23731,19 @@ function paintHeldBackNote(id: string | null): void {
     box.insertBefore(note, box.firstChild);
   }
   const msg = note.querySelector(".composer-note-msg");
-  if (msg) msg.textContent = heldBackLine(heldBack.name);
+  if (msg) msg.textContent = heldBackLine(name, !failedProvisionals.has(id));
 }
-function clearHeldBackNote(): void {
-  heldBack = null;
-  document.getElementById("composer-held-note")?.remove();
+/** The line over `sid`'s box retires (its text was sent or staged, its ✕); the other tabs' lines stand. */
+function clearHeldBackNote(sid: string | null): void {
+  if (!sid || !heldBack.delete(sid)) return;
+  persistDrafts();
+  if (sid === activeId) document.getElementById("composer-held-note")?.remove();
 }
-/** The text the note names moved from one tab's box to another's (a session took the tab over): so does the note. */
-function moveHeldBack(from: string | null, to: string): void {
-  if (!heldBack || heldBack.sid !== from) return;
-  heldBack = { sid: to, name: heldBack.name };
+/** The text a line names moved into `to`'s box (a session took the tab over, takeProvisionalTab): so does the line. */
+function giveHeldBack(to: string, name: string | undefined): void {
+  if (name === undefined) return;
+  heldBack.set(to, name);
+  persistDrafts();
   paintHeldBackNote(activeId);
 }
 // While the note is up, the box has NO keyboard owner: the two "type from anywhere" defaults below (a
@@ -23750,6 +23792,7 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
     // Its STAGED stack stays, whoever ended it (the user 2026-10-23, reversing #362, which dropped it here): staged
     // messages are held on purpose, so they outlive the end in the page and in its persisted state, and a revive, which
     // keeps the sid, shows them again in the strip and sends them with the next message. What was in the box goes.
+    heldBack.delete(id);   // …and the line over the box with the text it named (a revive under the sid starts with neither)
     drafts.delete(id); composerCitations.delete(id); composerEdits.delete(id); composerFiles.delete(id); persistDrafts();
   } else {
     persistDrafts();   // a host drop / omission KEEPS it all (see DismissWhy) — the stash above may have updated the copy
@@ -25522,7 +25565,7 @@ function setupComposer() {
   // cancelled edit), so the menus see it go empty; see clearComposerBox. The drag height snaps back with it.
   const clearBox = () => {
     ta.value = ""; composerManualH = null; ta.style.height = "";
-    if (heldBack && heldBack.sid === activeId) clearHeldBackNote();   // the text the note named left the box (a send, a stage)
+    clearHeldBackNote(activeId);   // the text the line named left the box (a send, a stage); other tabs' lines stand
     updateSlash(); updateMention();
   };
   clearComposerBox = clearBox;
@@ -26351,7 +26394,7 @@ function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
     },
     // the composer hand-over note's ✕ (renderComposerNote) — delegated, like every ✕ on a rebuilt surface
     composerNoteX: () => clearComposerNote(),
-    heldBackNoteX: () => clearHeldBackNote(),   // the held sends' note (paintHeldBackNote)
+    heldBackNoteX: () => clearHeldBackNote(activeId),   // the held sends' line over the box on screen (paintHeldBackNote)
     noticetoggle: (el) => {
       const gkey = el.dataset.gkey;
       if (gkey) { toggleToolGroup(gkey); return; }
@@ -26408,6 +26451,9 @@ function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
         closeTabLocally(id);
         return;
       }
+      // a new session's tab still opening, holding staged messages, text or sends: the question names what its ✕
+      // discards with the create (closeOpeningTab); an empty one is asked the End question below, as before
+      if (closeOpeningTab(id)) return;
       // LIVE session: show the End confirm IMMEDIATELY, client-side — NOT via a closeSession→confirmClose
       // kernel round-trip, which made the ✕ feel unresponsive (and sometimes never opened the modal when the
       // kernel was busy). The dialog is static; the kernel doesn't need to decide it (the user 2026-06-24).
