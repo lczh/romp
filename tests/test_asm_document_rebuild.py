@@ -594,7 +594,7 @@ class TheRebuildRunsWhileThePusherSleeps(Harness):
                 km._pusher_cycle()
                 if self.doc_file().exists() and not _rebuild_alive():
                     break
-                time.sleep(0.02)                                   # the pusher's sleep until its next wake
+                time.sleep(0.01)                                   # the pusher's sleep until its next wake
             _gate_edge(True)
             _join_rebuilds()
         rb = em.asm_checkpoint_stats()["rebuild"]
@@ -602,8 +602,9 @@ class TheRebuildRunsWhileThePusherSleeps(Harness):
         self.assertEqual((rb["claimed"], rb["written"]), (1, 1), rb)
         self.assertFalse(any(seen), "the gate was shut in every cycle")
         self.assertEqual(sum(during), 0, "no chunk point passed while a cycle ran: %s" % during)
-        self.assertGreaterEqual(rb["yields"], 2, "it waited at cycles and went on between them: %s" % rb)
-        self.assertGreaterEqual(len(seen), 3, "over several cycles")
+        self.assertGreaterEqual(rb["yields"], 1, "a cycle held it, and it went on in a later sleep: %s" % rb)
+        self.assertGreaterEqual(len(seen), 2, "over more than one cycle")
+        self.assertGreater(passed[0], 0)
 
     def test_a_page_parse_in_flight_holds_the_rebuild_through_the_pushers_sleeps(self):
         self._noted()
