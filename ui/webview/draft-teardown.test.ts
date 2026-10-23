@@ -294,9 +294,12 @@ test("every teardown names its reason, and only a genuine end clears the compose
   assert.match(RENDER, /else if \(m\.type === "closed"\) dismissSession\(m\.id, m\.hostDrop === true \? "hostDrop" : "end"\);/);
   // applyTabOrder's kernel-order omission
   assert.match(RENDER, /const omitted = new Set\(order\.filter\(\(id\) => kernelListed\.has\(id\) && !inKernel\.has\(id\) && !liveSet\.has\(id\)\)\);[^\n]*\n(?:.*\n){0,3}?\s*for \(const id of order\.slice\(\)\) \{\s*\n\s*if \(omitted\.has\(id\)\) dismissSession\(id, "omitted", omitted\);/);   // a live id is never omitted (T258)
-  // the clear is gated: the existing one-liner (composer-draft-persist.test.ts pins it) now runs for an end only, and the
-  // staged stack goes with it (a revive keeps the sid; staged-on-end-exec.test.ts executes it)
-  assert.match(RENDER, /if \(why === "close" \|\| why === "end"\) \{[\s\S]*?if \(stagedMsgs\.takeAll\(id\)\.length\) paintViewerStaged\(\);\s*\n\s*drafts\.delete\(id\); composerCitations\.delete\(id\); composerEdits\.delete\(id\); composerFiles\.delete\(id\); persistDrafts\(\);\s*\n\s*\} else \{\s*\n\s*persistDrafts\(\);/);
+  // the clear is gated: the existing one-liner (composer-draft-persist.test.ts pins it) now runs for an end only
+  assert.match(RENDER, /if \(why === "close" \|\| why === "end"\) \{[\s\S]*?drafts\.delete\(id\); composerCitations\.delete\(id\); composerEdits\.delete\(id\); composerFiles\.delete\(id\); persistDrafts\(\);\s*\n\s*\} else \{\s*\n\s*persistDrafts\(\);/);
+  // …and no teardown touches the staged stack, whoever ended the session (the user 2026-10-23): a revive shows it again
+  // and sends it with the next message (staged-on-end-exec.test.ts executes it)
+  const a = RENDER.indexOf("function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string>): void {");
+  assert.doesNotMatch(RENDER.slice(a, RENDER.indexOf("\n}\n", a)), /stagedMsgs\./);
 });
 
 test("an active tab torn down under the user: stash first, prune the fallback, blur, and say so above the box", () => {
