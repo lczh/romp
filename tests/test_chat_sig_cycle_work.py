@@ -193,6 +193,12 @@ class _World(unittest.TestCase):
             km._PATH_LINK_CACHE.pop(k, None)
         for sid in SIDS:
             km._node_anchor_rev.pop(sid, None)
+        # The per-thread scopes a push or a cycle opens (the names snapshot, the tree samples, the shared signature
+        # components): every test runs on this one thread, and _chat_push_scopes_open adopts a slot that is already
+        # set, so a snapshot an earlier test left would serve that test's directories here.
+        km._chat_push_scopes_close()
+        for k in list(vars(km._live_scope)):
+            setattr(km._live_scope, k, None)
 
     # ── the world ────────────────────────────────────────────────────────────────────────────────────
     def _stamp(self, *paths):
