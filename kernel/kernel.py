@@ -37336,6 +37336,7 @@ def _subagent_meta_map(path):
         # SAME stat_result the memo validated with, the exact shape _chat_stat_key answers (a value derived from mtime_ns
         # would miss by float rounding and rebuild the tab every cycle)
         _chat_dep_note_taskout(sd, (sst.st_mtime, sst.st_size))
+    _chat_dep_note_tree(d)                                # ...and which tree those keys came from (_chat_taskout_now)
     key = tuple(stamps)
     hit = _SUBAGENT_META_CACHE.get(d)
     if hit is not None and hit[0] == key:
@@ -41059,6 +41060,16 @@ def _chat_dep_note_taskout(of, key):
         d["task_outs"].append((of, key))
 
 
+def _chat_dep_note_tree(root):
+    """A reader's report to the running chat build that the directory keys it noted came from the cycle's sample of the
+    subagents tree at `root` (_subagent_meta_map). The record keeps the roots (_chat_build_deps) so the signature can
+    take those keys from the same sample on later cycles instead of stat'ing each directory again (_chat_taskout_now).
+    The noted keys themselves are unchanged; nothing to report outside a chat build."""
+    d = getattr(_chat_dep_scope, "deps", None)
+    if d is not None:
+        d.setdefault("trees", []).append(root)
+
+
 _DEPS_UNSET = object()
 
 
@@ -41099,10 +41110,125 @@ def _chat_build_deps(sid, payload):
     pl_at = tuple((u, l, p) for u, _md, l, p in pl)
     # `pl_check` starts None: the next cycle's signature re-resolves the pending tokens once (the build's
     # own resolves ran before any pre-check could be taken) and vouches from there (_chat_sig_deps)
-    return {"task_outs": list(touts.items()), "pl_pending": [(u, md) for u, md, _l, _p in pl],
+    # `trees`: the subagents roots whose cycle sample supplied directory keys in task_outs (_chat_dep_note_tree), so the
+    # signature reads those keys from the next cycles' samples (_chat_taskout_now, which also keeps `tout_plan` here)
+    return {"task_outs": list(touts.items()), "trees": tuple(dict.fromkeys(sc.get("trees") or ())),
+            "pl_pending": [(u, md) for u, md, _l, _p in pl],
             "pl_at": pl_at, "pl_check": None,
             "postal_any": postal_any, "postal_cards": cards,
             "at_build": (tuple(touts.items()), pl_at, postal)}
+
+
+def _chat_push_memo(name):
+    """The push's memo `name` in its shared slot (_chat_sig_shared, opened once per push by _chat_push_scopes_open): a value
+    one tab's signature read there is served to every later tab of the same push. Outside a push, a fresh dict, so every
+    call reads afresh. The shared components' rule holds for each such memo: a change between two tabs' looks within a
+    push is seen by the next push, never a stale value that outlives it, because the next push opens an empty slot."""
+    shared = getattr(_live_scope, "chat_shared", None)
+    return shared.setdefault(name, {}) if shared is not None else {}
+
+
+def _chat_repo_served(cwd):
+    """(in a git tree, the served repo listing, its generation) for `cwd`, the three values the path-link pre-check reads,
+    once per cwd per push (_chat_push_memo). Each tab of a repo used to read them for itself: the tree's evidence walk, and
+    the listing's key (a scan of the tree's top and a stat per top-level directory, _repo_index_key), for every tab with an
+    unresolved path mention, every cycle. A listing that lands mid-push wakes the pusher, and the next push reads it."""
+    memo = _chat_push_memo("repo")
+    got = memo.get(cwd)
+    if got is None:
+        in_tree = bool(cwd) and bool(_tree_of(cwd)[0])
+        got = memo[cwd] = (in_tree,) + (_repo_index_served(cwd) if in_tree else (None, None))
+    return got
+
+
+def _chat_tree_sample(root):
+    """The cycle's sample of the subagents tree at `root` (_subagent_tree: its directories and the stat each was taken
+    under) for the taskout component, or None when there is none to be had without a walk. Served from the cycle's
+    samples when a reader took one; validated through _subagent_tree when the walk memo holds the root (one lstat per
+    known directory, and the sample the feed key and the build then read in the same cycle, so the cycle pays it once);
+    else None: a tree no reader keeps (a departed session's, which the jobs pass evicts) has its directories stat'd one by
+    one, as before, never walked per cycle."""
+    scope = getattr(_live_scope, "subagent_trees", None)
+    got = scope.get(root) if scope is not None else None
+    if got is None and root in _SUBAGENT_TREES:
+        got = _subagent_tree(root)
+    return got if got and got[0] else None
+
+
+def _chat_taskout_now(deps):
+    """The taskout component NOW: (path, _chat_stat_key) for every file and directory the cached build read (the record's
+    task_outs, in order), equal to re-stat'ing each one, the evaluation this replaces (2026-10-23). Every tab paid one stat
+    per recorded path per cycle: a session's subagents directories (noted by the sidecar map, one per directory of its
+    tree, hundreds for a workflow-heavy session), each Agent card's file, every sibling session's subagents root when an
+    agent's file was missing from its own tree (the same list for every tab of the project), the task outputs. On a busy
+    kernel each stat also gives up the interpreter lock to the judges, so the stats cost far more than their own time.
+
+    Three sources, each exact for its paths. (1) A directory of a subagents tree the build read (the record's `trees`)
+    takes its key from the cycle's sample of that tree (_chat_tree_sample), the stats the feed key and the build read in
+    the same cycle: a directory listed by the walk is a real directory, so its lstat is its stat. (2) Across cycles, a
+    tree whose walk-memo entry is the same object it was when its keys were last taken from a sample that matched that
+    entry exactly (`tout_plan`) is vouched whole: the entry is replaced on every re-walk and kept only while each
+    directory's identity (inode, mtime, size, ctime) validates, which is what this cycle's sample just did, so every key
+    under it stands and none is read. (3) Every other path (an agent's file, a task output, a sibling's root, a directory
+    of a tree no reader keeps) is stat'd once per push for every tab that recorded it (_chat_push_memo). When every key
+    equals the one the build embedded, the record's own at-build tuple is returned, so the signature's compare is one
+    identity test for this component, and a quiet tab costs one memo check per tree plus one probe per other path.
+    Between cycles the value equals the one-stat-per-path evaluation; a change landing mid-cycle is seen by the next
+    cycle, the cycle scope's rule (_subagent_tree)."""
+    touts = deps["task_outs"]
+    if not touts:
+        return ()
+    at = deps.get("at_build")
+    at = at[0] if at else None
+    stats = _chat_push_memo("outs")
+
+    def key_of(of):
+        k = stats.get(of, _DEPS_UNSET)
+        if k is _DEPS_UNSET:
+            k = stats[of] = _chat_stat_key(of)
+        return k
+
+    plan = deps.get("tout_plan")
+    if plan is not None and at is not None and plan[2]:
+        held = True
+        for root, ent in plan[0]:
+            # this cycle's sample first, then the memo: an entry that is still `ent` after it validated was not re-walked
+            if _chat_tree_sample(root) is None or _SUBAGENT_TREES.get(root) is not ent:
+                held = False
+                break
+        if held and all(key_of(touts[i][0]) == touts[i][1] for i in plan[1]):
+            return at
+    samples, dirmap = [], {}
+    for root in deps.get("trees") or ():
+        s = _chat_tree_sample(root)
+        if s is not None:
+            samples.append((root, s))
+            for d, st in zip(s[0], s[1]):
+                dirmap.setdefault(d, (root, st))
+    keys, lone, grouped = [], [], {}
+    for i, (of, _k) in enumerate(touts):
+        hit = dirmap.get(of)
+        if hit is not None:
+            keys.append((hit[1].st_mtime, hit[1].st_size))
+            grouped.setdefault(hit[0], []).append(i)
+        else:
+            keys.append(key_of(of))
+            lone.append(i)
+    # the plan: every tree that keyed a path, with its memo entry, when this cycle's sample is that entry exactly (no
+    # directory unvouched, the same list, the same identities); otherwise none, and the next cycle evaluates in full
+    ents = []
+    for root, s in samples:
+        if root not in grouped:
+            continue
+        ent = _SUBAGENT_TREES.get(root)
+        if ent is None or None in ent[1] or ent[0] != tuple(s[0]) or ent[1] != tuple(_stat_ident(x) for x in s[1]):
+            ents = None
+            break
+        ents.append((root, ent))
+    deps["tout_plan"] = None if ents is None else (
+        tuple(ents), tuple(lone), all(keys[i] == touts[i][1] for idx in grouped.values() for i in idx))
+    now = tuple((of, k) for (of, _k), k in zip(touts, keys))
+    return at if at is not None and now == at else now
 
 
 def _chat_pl_precheck(sid, pending, prev=None):
@@ -41122,12 +41248,12 @@ def _chat_pl_precheck(sid, pending, prev=None):
     because a transcript's mentions name busy places too (a state directory, a log directory): with one
     key over all of them, one churning directory re-resolved every token of the tab each cycle."""
     cwd = _cwd_of(sid)
-    in_tree = bool(cwd) and bool(_tree_of(cwd)[0])       # outside a git tree `git ls-files` fails: tiers 2/3 stand down
     # the listing the resolve reads (_repo_index_served: the last completed one, never git on this thread), named by its
     # generation: the same generation is the same index and the same candidates, and a git index that moves without
     # changing the listing (a `git status` refreshing its stat data) moves nothing here (2026-10-07: keyed on the raw
-    # mtimes, every tab of a busy repo re-listed and re-resolved every cycle)
-    idx, gen = _repo_index_served(cwd) if in_tree else (None, None)
+    # mtimes, every tab of a busy repo re-listed and re-resolved every cycle). Outside a git tree `git ls-files` fails:
+    # tiers 2/3 stand down. Once per cwd per push (_chat_repo_served).
+    in_tree, idx, gen = _chat_repo_served(cwd)
     k = ("listing", gen) if in_tree else ("notree",)
     if prev is not None and prev[0] == cwd and prev[1] == k:
         per_msg = prev[2]
@@ -41180,7 +41306,7 @@ def _chat_sig_deps(sid, deps):
     after moves the next pre-check."""
     if not deps:
         return ((), (), None)
-    touts = tuple((of, _chat_stat_key(of)) for of, _k in deps["task_outs"])
+    touts = _chat_taskout_now(deps)                      # one stat per path no cycle sample or earlier tab covers
     pl = ()
     if deps["pl_pending"]:
         prev = deps.get("pl_check")
@@ -41191,7 +41317,11 @@ def _chat_sig_deps(sid, deps):
                 and len(at) == len(deps["pl_pending"]):
             moved = {d for d, ident in pre[3].items() if prev[3].get(d, _DEPS_UNSET) != ident}
             redo = {u for u, ds in pre[2].items() if prev[2].get(u) != ds or any(d in moved for d in ds)}
-        out, memo = [], {}                               # memo: _resolve_path_token's per-sid cwd and repo index
+        out, memo = [], {}                               # memo: _resolve_path_token's per-sid cwd and repo index,
+        _in_tree, _idx, _gen = _chat_repo_served(pre[0])  #  seeded with the push's read of them (the pre-check's cwd)
+        memo["cwd"] = pre[0]
+        if _in_tree:
+            memo["idx"] = _idx
         for i, (u, md) in enumerate(deps["pl_pending"]):
             if redo is not None and u not in redo:
                 out.append(at[i])                        # no candidate directory moved: the recorded answer holds
@@ -41423,16 +41553,32 @@ def _chat_build_sig(sess, tm=None, now=None, live_map=None, deps=None):
         # stamp; its git branch and GitHub repository; the work tree the newest edit names and the
         # registered tree's top), by value through their own memos, which are keyed on the .git evidence
         # they rest on and cost stats, never a fork, while it holds.
+        # Every row here is a function of the directory alone, so it is read once per directory per push and served to
+        # the push's other tabs in that directory (_chat_push_memo, 2026-10-23): each is a walk up the tree's evidence
+        # and a stat of its HEAD or config, which every tab of a repository took again on every cycle.
         meta = _session_meta(path) or {}
         scwd = _session_cwd(sid, meta=meta)
-        sig.append((scwd, _git_branch(scwd), _github_repo_of(scwd),
-                    _tree_of(os.path.dirname(meta.get("lastEditPath") or "") or ""),
-                    _tree_of(os.path.expanduser(scwd)) if scwd else ("", "")))
-        sig.append(_claudemd_key(scwd))                     # claudemd: the instruction files on the chain, by identity
+        _cwm = _chat_push_memo("cwd")
+        _rows = _cwm.get(scwd)
+        if _rows is None:
+            _rows = _cwm[scwd] = (_git_branch(scwd), _github_repo_of(scwd),
+                                  _tree_of(os.path.expanduser(scwd)) if scwd else ("", ""), _claudemd_key(scwd))
+        _ed = os.path.dirname(meta.get("lastEditPath") or "") or ""
+        _trm = _chat_push_memo("tree")
+        _edt = _trm.get(_ed)
+        if _edt is None:
+            _edt = _trm[_ed] = _tree_of(_ed)
+        sig.append((scwd, _rows[0], _rows[1], _edt, _rows[2]))
+        sig.append(_rows[3])                                # claudemd: the instruction files on the chain, by identity
         # fork: the branches that left from this session, by value (fork_children's own memo is keyed on
         # the sdk/ directory's mtime, which moves at turn rate; the per-sid value moves only when a fork of
-        # THIS session appears, is promoted or is deleted).
-        sig.append((_be.fork_children().get(sid) if _be and hasattr(_be, "fork_children") else None) or None)
+        # THIS session appears, is promoted or is deleted). The table is read once per push: between registry
+        # writes a read is a directory stat, after one (or inside its racy tick) a scan of every registration,
+        # which every tab took again.
+        _fkm = _chat_push_memo("fork")
+        if "table" not in _fkm:
+            _fkm["table"] = (_be.fork_children() if _be and hasattr(_be, "fork_children") else None) or {}
+        sig.append(_fkm["table"].get(sid) or None)
         # note: the session's postal working note (working/<sid>), by identity: the ledger carries its text
         # (workingNote), and a `romp mail working` from a shell, a peer's forwarded write and the kernel's own
         # idle-and-done lift all change it with no transcript, states or store write.
