@@ -47,7 +47,7 @@ test("/version reports every gt-gated store's last-applied stamp, and the gear s
   assert.match(KERNEL, /def _settings_gt\(\):/);
   assert.match(KERNEL, /def _setting_stored_gt\(name\):/, "one switch mirrors _setting_kept_value's");
   assert.match(GEAR, /var gclock = require\('\.\/gesture-clock\.js'\);/, "the gear loads the clock");
-  const fill = GEAR.slice(GEAR.indexOf("function fill() {"), GEAR.indexOf("function fill() {") + 600);
+  const fill = GEAR.slice(GEAR.indexOf("function fill(reread) {"), GEAR.indexOf("function fill(reread) {") + 600);
   assert.match(fill, /gclock\.learnAll\(v\.settingsGt\);/, "every open teaches the clock the kernel's current stamps");
   assert.ok(!/gt: Date\.now\(\)/.test(GEAR), "no gear emitter stamps with the bare wall clock");
 });
@@ -82,8 +82,9 @@ test("the toast's copy names the setting, the refused value, the hosts and the k
   // the kernel echoes it without gt), read only for the setting the frame names — the whitelist Apply
   // anyway uses — and any other shape reads as no value
   assert.match(GEAR, /function staleRefused\(m\)/, "the refused value is read off the echo");
-  assert.ok(GEAR.includes("var keys = Object.keys(m.gesture).filter(function (k) { return k !== 'type' && k !== 'origin' && k !== 'scope' && k !== 'hosts'; });"),
-    "…as the one key beside type and federation's routing fields: the broadcast's origin (one A) and a pick's scope (the #374 review)");
+  assert.ok(GEAR.includes("var keys = Object.keys(m.gesture).filter(function (k) { return k !== 'type' && k !== 'origin' && k !== 'scope' && k !== 'hosts' && k !== 'reach'; });"),
+    "…as the one key beside type and federation's routing fields: the broadcast's origin (one A), a pick's scope (the #374 review) "
+    + "and the machines an All kernels click names (the gear-truth review), should a host that is no federation hand them on");
 });
 
 test("Apply anyway re-issues the echoed gesture with a fresh stamp, and only for the setting the frame names", () => {

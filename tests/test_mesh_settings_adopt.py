@@ -1312,8 +1312,11 @@ class TrustGate(unittest.TestCase):
 class ThePollSeam(unittest.TestCase):
     def test_the_supervisor_lifts_the_stamps_and_adopts_outside_the_lock(self):
         sup = KERNEL_SRC.split("def _tunnel_supervisor():")[1].split("\ndef ")[0]
-        self.assertIn('r["settings"] = (rver or {}).get("settings")', sup)
-        self.assertIn('r["settingsGt"] = (rver or {}).get("settingsGt")', sup, "the stamps ride the row beside the values")
+        # the lift is one function since the gear-truth review, shared with the re-read a peer's settingAck asks for
+        self.assertIn("_lift_peer_settings(r, rver, rseq)", sup)
+        lift = KERNEL_SRC.split("def _lift_peer_settings(")[1].split("\ndef ")[0]
+        self.assertIn('r["settings"] = (rver or {}).get("settings")', lift)
+        self.assertIn('r["settingsGt"] = (rver or {}).get("settingsGt")', lift, "the stamps ride the row beside the values")
         self.assertIn("_converge_peer_settings(r, rver)", sup, "the supervisor hands the ROW over, so trust is read at the seam")
         # the setters take their own locks and write files: they run in the OUTSIDE-the-lock block, like the auto update
         before_lock_exit = sup.split("if auto_check:")[0]

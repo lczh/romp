@@ -93,7 +93,8 @@ test("phase two, round two: an empty hosts list is the broadcast, Auto Nudge wea
   assert.equal(junk.length, 2, "a malformed list is no scope either");
   assert.match(GEAR, /\['compactSuggest', csg\], \['taskTracking', tk\], \['autoNudge', an\],/, "Auto Nudge is in the flagged set (its count was on the selector with no row flagged)");
   assert.doesNotMatch(GEAR, /else if \(box\) \{ box\.indeterminate = false; \}/, "the tri-state box is left alone when the scope is off");
-  assert.match(GEAR, /function scoped\(m\) \{[^}]*\n\s*refillSoon\(\);[^}]*\n\s*if \(!scopeOn\(\)\) return m;/, "every click re-reads the kernels, so the count follows a resolved disagreement");
+  assert.match(GEAR, /function scoped\(m\) \{[^}]*\n\s*refillSoon\(\);[^}]*\n\s*if \(!scopeOn\(\)\) return reachAll\(m\);/,
+    "every click re-reads the kernels, so the count follows a resolved disagreement; under All kernels it names the machines shown (the gear-truth review)");
   assert.match(GEAR, /g\.hidden = !\(many \|\| localPinned\);/, "a store this machine pins keeps its glyph with one kernel: the un-pin is there");
   const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");
   assert.ok(KERNEL.includes("function pinMark(t,th){var ps=pinnedStores(t);return ps.length?' <span class=rnet-pin title="), "the Remote kernels popover marks a pinned machine");

@@ -1193,7 +1193,7 @@ function initGear(post, opts) {
     if (windowSender(e) === 'foreign') { noteForeign('gear:taskTracking', e, post); return; }
     var m = e.data;
     if (!m || m.type !== 'taskTracking' || typeof m.on !== 'boolean') return;   // the kernel's echo of an applied flip
-    if (tk) tk.checked = m.on;
+    if (tk && !tk.indeterminate) tk.checked = m.on;   // a dash a fill drew since stays held ticked (mixBox): a click there is off
     dressTracking(m.on);
     tellShellTracking(m.on);
   });
@@ -1975,7 +1975,7 @@ function initGear(post, opts) {
   // under a pick dropped the refused value from the toast until they were skipped alike (the #374 review).
   function staleRefused(m) {
     if (!m.gesture || typeof m.gesture !== 'object' || STALE_TYPE[m.setting] !== m.gesture.type) return '';
-    var keys = Object.keys(m.gesture).filter(function (k) { return k !== 'type' && k !== 'origin' && k !== 'scope' && k !== 'hosts'; });   // the value is the one key left
+    var keys = Object.keys(m.gesture).filter(function (k) { return k !== 'type' && k !== 'origin' && k !== 'scope' && k !== 'hosts' && k !== 'reach'; });   // the value is the one key left
     return keys.length === 1 ? staleWord(m.gesture[keys[0]], m.setting) : '';
   }
   // One toast per refused GESTURE, not per refusing kernel: a dashboard's broadcast reaches every
@@ -2060,6 +2060,40 @@ function initGear(post, opts) {
       if (key) staleOpen[key] = { t: t, hosts: [where], refused: refused };
     }
     if (!p.hidden) fill();   // the open modal re-reads the kernel's values so it stops showing the refused pick
+  });
+  // A connected machine HANDLED a setting this page sent it: its kernel says so on the socket (settingAck, which federation stamps
+  // with the host). That is the moment its settings are worth re-reading, so the open panel draws again with this kernel re-reading
+  // that machine first (fill's `reread`) instead of comparing against this kernel's copy from its last supervisor pass, up to 15 s
+  // old: after a click turned both machines off the row went back to the dash, and the "click again to turn it on" its hover
+  // promised posted off a second time (the gear-truth review). A closed panel asks this kernel to refresh its copy all the same,
+  // so the next open draws the machine as it stands. This machine's own values are /version's, read fresh on every fill.
+  window.addEventListener('message', function (e) {
+    if (windowSender(e) === 'foreign') { noteForeign('gear:settingAck', e, post); return; }
+    var m = e.data;
+    if (!m || m.type !== 'settingAck' || typeof m.host !== 'string' || !m.host) return;
+    if (!p.hidden) { fill(m.host); return; }
+    fetch(ku('/tunnels?reread=' + encodeURIComponent(m.host)), { cache: 'no-store' })
+      .catch(function (err) { try { console.error('romp: settings: the re-read of ' + m.host + ' failed', err); } catch (_e) {} });
+  });
+  // THE SETTINGS PAGE'S NOTICES. Federation says a message it could not deliver as a `warn` dispatched on the page that sent it
+  // (federation.ts dropWarn), and the kernel answers some of this page's requests the same way, but the toast that shows a warn
+  // lives in the chat's frame: on this page nothing listened, so a setting that never left the page just snapped back (the
+  // gear-truth review). The gear's own toast shows it here. A dropped SETTING is said in the row's words: its label, the
+  // machine, and why; any other warn shows as sent. Only on the settings page: a feed host has its own surface for these.
+  var WARN_LABEL = {};   // message type → the row's label, from the stale-toast maps
+  Object.keys(STALE_TYPE).forEach(function (store) { WARN_LABEL[STALE_TYPE[store]] = STALE_LABELS[store] || store; });
+  function warnText(m) {
+    var label = typeof m.msgType === 'string' ? WARN_LABEL[m.msgType] : '';
+    if (!label || typeof m.host !== 'string' || !m.host) return m.text;
+    return label + ': not applied on ' + m.host + '. '
+      + (m.cause === 'down' ? "Its kernel isn't answering." : 'This page has no connection to it.');
+  }
+  if (ownPage) window.addEventListener('message', function (e) {
+    if (windowSender(e) === 'foreign') { noteForeign('gear:warn', e, post); return; }
+    var m = e.data;
+    if (!m || m.type !== 'warn' || typeof m.text !== 'string' || !m.text) return;
+    staleToast(warnText(m));
+    if (!p.hidden) fill();   // the row the click went back to: drawn as the kernels hold it
   });
   // The model/effort <option>s come from /models — the same single source the
   // chat + timeline pickers use. Cached after the first successful fetch.
@@ -2254,16 +2288,55 @@ function initGear(post, opts) {
     return followsScope(key) ? 'Under All kernels a ' + (isBox ? 'click' : 'pick') + ' sets every machine the same way; pick a machine above to set it alone.'
       : 'A ' + (isBox ? 'click' : 'pick') + ' here sets every machine the same way.';
   }
-  function fillMixedMarks(v, rows) {
-    var mine = (v && v.settings) || null;
-    lastDiffs = [];
-    [['updateMode', upm], ['judgeModel', jm], ['judgeEffort', je], ['indexModel', im],
+  // every kernel-backed row: [its /version settings key, its control]
+  function kernelRows() {
+    return [['updateMode', upm], ['judgeModel', jm], ['judgeEffort', je], ['indexModel', im],
      ['indexEffort', ie], ['judgeConcurrency', jc], ['distillModel', dm], ['distillEffort', de], ['fileEditing', fe],
      ['compactSuggest', csg], ['taskTracking', tk], ['autoNudge', an],   // autoNudge: its tri-state box is fillAutoNudge's; its FLAG is this list's (phase two, round two)
      ['commentModel', cmm], ['commentEffort', cme], ['commentFast', cmf],
      ['judgeFast', jf], ['distillFast', df], ['indexFast', xf],
      ['alwaysFast', afb], ['retryUpgrade', rub],
-     ['thinkingSummaries', ths], ['wholeChatFrames', wcf], ['conserveMemory', cvm], ['routerModels', rtr]].forEach(function (pair) {   // the per-install rows
+     ['thinkingSummaries', ths], ['wholeChatFrames', wcf], ['conserveMemory', cvm], ['routerModels', rtr]];   // the per-install rows
+  }
+  // a change on any of them is a click the fills in flight predate (refillSoon); in the capture phase, before the row's own handler posts
+  if (p) p.addEventListener('change', function (e) {
+    if (kernelRows().some(function (pair) { return pair[1] && pair[1] === e.target; })) refillSoon();
+  }, true);
+  // SCREEN READERS (the gear-truth review): a box inside its row's <label> took the whole label as its name, so it was announced as
+  // "Task trackingdiffers Pin this value on the picked machine…": the title run into the mark, then the row's line and the pin
+  // glyph's own label. Each kernel-backed box is now NAMED by its title alone (aria-labelledby; a Fast mode box, whose label holds
+  // no title, by the gear's name for it) and DESCRIBED by its state, then its line: a hidden span (rs-sr) that says what the mark
+  // says, with the machines, their values and what a click does (the mark's hover sentence), kept current by sayRowStates. The
+  // visible mark is aria-hidden, since the description carries its words.
+  function wireRowA11y() {
+    kernelRows().forEach(function (pair) {
+      var el = pair[1], lab = el && el.type === 'checkbox' && el.closest ? el.closest('label') : null;
+      if (!lab) return;
+      var title = lab.querySelector('b');
+      if (title) { if (!title.id) title.id = el.id + '-a11y-name'; el.setAttribute('aria-labelledby', title.id); }
+      else el.setAttribute('aria-label', STALE_LABELS[storeOf(pair[0])] || pair[0]);
+      var mark = lab.querySelector('.rs-mixed');
+      if (mark) mark.setAttribute('aria-hidden', 'true');
+      var st = document.createElement('span'); st.className = 'rs-sr'; st.id = el.id + '-a11y-state';
+      if (mark) mark.parentNode.insertBefore(st, mark.nextSibling); else lab.appendChild(st);
+      var ids = [st.id], line = lab.querySelector('.rs-sub, .rs-line');
+      if (line) { if (!line.id) line.id = el.id + '-a11y-line'; ids.push(line.id); }   // suffixes no row's own id uses (rs-router-line is a status line)
+      el.setAttribute('aria-describedby', ids.join(' '));
+    });
+  }
+  wireRowA11y();
+  function sayRowStates() {   // each box's description follows its mark, as the last fill drew it
+    kernelRows().forEach(function (pair) {
+      var el = pair[1], st = el && el.id ? document.getElementById(el.id + '-a11y-state') : null;
+      if (!st) return;
+      var lab = el.closest('label'), mark = lab ? lab.querySelector('.rs-mixed') : null;
+      st.textContent = mark && !mark.hidden && mark.textContent ? mark.textContent + '. ' + (mark.title || '') : '';
+    });
+  }
+  function fillMixedMarks(v, rows) {
+    var mine = (v && v.settings) || null;
+    lastDiffs = [];
+    kernelRows().forEach(function (pair) {
       var key = pair[0], el = pair[1];
       if (!el) return;
       var box = el.type === 'checkbox' && el !== an;   // Auto Nudge's tri-state is fillAutoNudge's
@@ -2304,14 +2377,22 @@ function initGear(post, opts) {
   function scopeOn() { return scopeHosts.length > 0; }
   function scoped(m) {   // a setting message under a scope carries the picked kernels; federation stamps each copy's origin and the scope
     refillSoon();   // any click moves the kernels' agreement: the flags and the selector's count follow the local kernel's next poll
-    if (!scopeOn()) return m;
+    if (!scopeOn()) return reachAll(m);
     m.hosts = scopeHosts.slice(); m.scope = 'pinned';
     noteStaleScope(m);   // a refusal's Apply anyway goes back to these kernels alone
     noteSent(m);   // what this page sent a kernel that never reports the row (an older version): the row shows it, unconfirmed
     return m;
   }
+  // Under All kernels a click is meant for every machine this panel shows, so it names them (`reach`): the page's link to a
+  // machine that checked in a moment ago may not be open yet, and the broadcast went only to the machines the page had already
+  // linked, skipping the new one without a word (the gear-truth review). Federation reaches them and strips the field.
+  function reachAll(m) { m.reach = kernels.map(function (t) { return t.host; }); return m; }
   var refillTimers = [];
+  // Every change this page makes to a kernel's setting passes here: scoped() for the rows that follow the selector, the pin glyph,
+  // and the capture listener below for every kernel-backed row (the judge, comment and model rows post without scoped()). A fill
+  // already on its way read the kernels before the change and draws nothing (clickFill, fill()).
   function refillSoon() {   // re-read the kernel's values and the rows a few times after a scoped change or a pin: a remote kernel's state
+    clickFill = fillSeq;
     refillTimers.forEach(clearTimeout); refillTimers = [];   // arrives with the supervisor's next poll, a few seconds later
     [700, 2500, 5000, 8000, 12000, 16000, 21000].forEach(function (ms) { refillTimers.push(setTimeout(function () { if (!p.hidden) fill(); }, ms)); });   // the poll's cadence is seconds; the last read lands after it
   }
@@ -2496,22 +2577,53 @@ function initGear(post, opts) {
   }
   // setShow — fill()'s write path for every kernel-backed select below — sits beside paintChoices, which
   // shares it.
-  function fill() { fillChoices().then(function () { return fetch(ku('/version'), { cache: 'no-store' }); }).then(function (r) { return r.json(); }).then(function (v) {
+  //
+  // ONE WRITE PER FILL, after both reads (the gear-truth review, 2026-10-23): a fill used to write this machine's values into the
+  // boxes the moment /version answered and mark the mixed rows only when /tunnels answered. For that round trip a box the last
+  // fill had mixed kept its dash over this machine's value, so on a machine where the setting was off a click on the dash turned
+  // it ON for every machine, the opposite of the stated rule. drawKernelRows now writes every kernel-backed row once, from both
+  // answers, so a box always holds what it shows: until a fill's reads land the rows show the last fill's drawing, dash and all,
+  // and a click acts on that (a dash is held ticked, so a click there is off).
+  // A fill whose reads began before this page last changed a kernel's setting (clickFill: a click on any kernel-backed row) draws
+  // nothing: its answers predate the click, and drawn they put the click's box back as it was. refillSoon, which every such click
+  // calls, starts the fills that draw the result.
+  // `reread`: a connected kernel that has just told this page it handled a setting (its settingAck): this kernel re-reads that
+  // machine's settings before answering /tunnels (?reread=), so the drawing compares against the machine as it now stands rather
+  // than this kernel's copy from the supervisor's last pass, up to 15 s old.
+  var fillSeq = 0, clickFill = 0;   // fills started; the newest fill started before the latest click on a kernel-backed row
+  function fill(reread) { var n = ++fillSeq; fillChoices().then(function () { return fetch(ku('/version'), { cache: 'no-store' }); }).then(function (r) { return r.json(); }).then(function (v) {
     gclock.learnAll(v.settingsGt);   // each store's last-applied stamp: the clock climbs above them (an older kernel sends none)
     fillProposals(v);   // the pending proposals and this machine's pins under their rows (one A)
+    selfName = (typeof v.host === 'string' && v.host) ? v.host : selfName;
     // ONE /tunnels fetch feeds every cross-machine comparison: the autoNudge box and the select marks.
     // A failed /tunnels leaves the local answers standing, unmarked — same fallback as before.
-    var kernelsRead = fetch(ku('/tunnels'), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
-      var rows = (d && d.tunnels) || [];
-      kernels = rows.filter(function (t) { return t && t.status === 'up'; });
-      fillAutoNudge(v.autoNudge, rows);
-      fillMixedMarks(v, rows);
-      fillScope(v); fillScopedRows(v);   // phase two: the machine selector and the scoped rows read the same rows
-      lgAcct();   // …and the Account row names this machine once other machines' kernels are connected
-      return kernels;   // the read settles with the connected kernels, which the stored logins' pickers list (lgFetchLogins)
-    }).catch(function (e) { try { console.error('romp: settings: the /tunnels read or the cross-machine fill failed', e); } catch (_e) {}   // fail loudly: a swallowed fault hid the selector
-      kernels = []; fillAutoNudge(v.autoNudge, []); fillMixedMarks(v, []); fillScope(v); fillScopedRows(v); lgAcct(); return kernels; });
-    lastV = v; selfName = (typeof v.host === 'string' && v.host) ? v.host : selfName;
+    var q = typeof reread === 'string' && reread ? '?reread=' + encodeURIComponent(reread) : '';
+    var kernelsRead = fetch(ku('/tunnels' + q), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+      return (d && d.tunnels) || [];
+    }).catch(function (e) { try { console.error('romp: settings: the /tunnels read failed', e); } catch (_e) {} return null; })   // fail loudly: a swallowed fault hid the selector
+      .then(function (rows) {
+        var up = (rows || []).filter(function (t) { return t && t.status === 'up'; });
+        if (n <= clickFill) return up;   // read before the latest click: a later fill draws (see above)
+        try { drawKernelRows(v, rows); }
+        catch (e) { try { console.error('romp: settings: the cross-machine fill failed', e); } catch (_e) {} drawKernelRows(v, null); }
+        return up;   // the read settles with the connected kernels, which the stored logins' pickers list (lgFetchLogins)
+      });
+    lgRender(v);   // the Billing login block (T157) rides the same /version read
+    lgFetchLogins(kernelsRead);   // …and the stored logins beside it (T346), handed the /tunnels read above
+    if ((v.login || {}).state && !lgTimer) lgTimer = setTimeout(lgPoll, 1500);   // a flow mid-run resumes polling
+    if (dd && typeof v.defaultDir === 'string') dd.value = v.defaultDir;   // the kernel's persisted default is authoritative
+    // Browse… draws on the KERNEL's screen, and a kernel with no desktop has none — the click used to
+    // vanish into a macOS-only dialog. Drop the button rather than offer one that cannot work; the
+    // field takes a typed path, which is what that machine has. An older kernel sends no verdict and
+    // keeps the button it always had.
+    if (ddb && typeof v.nativeDialogs === 'boolean') ddb.style.display = v.nativeDialogs ? '' : 'none';
+    var x = lv(); b.innerHTML = 'kernel ' + (v.kernel_sha || '?') + '\nserving v' + v.dist_ver + '\nthis tab v' + (x || '?');
+  }).catch(function () { b.textContent = '(version unavailable)'; }); }
+  // Every kernel-backed row, written once from one fill's two answers: this machine's values (`v`, /version), then the connected
+  // kernels' (`rows`, /tunnels; null when that read failed: the local answers stand, unmarked).
+  function drawKernelRows(v, rows) {
+    kernels = (rows || []).filter(function (t) { return t && t.status === 'up'; });
+    lastV = v;
     if (ths) ths.checked = !!v.thinkingSummaries;   // per-install opt-in: this kernel's persisted answer is authoritative
     if (wcf) wcf.checked = !!v.wholeChatFrames;     // the Whole chat frames switch: the same per-install rule
     if (tk) { tk.checked = v.taskTracking !== false; dressTracking(tk.checked); }   // the master switch (T404): absent reads on
@@ -2519,9 +2631,6 @@ function initGear(post, opts) {
     if (cvm) cvm.checked = !!v.conserveMemory;   // T148: the kernel's persisted conserve flag is authoritative
     if (rtr) rtr.checked = !!v.routerModels;   // Extra models from your API gateway: the same per-install rule
     if (csg) csg.checked = !!v.compactSuggest;   // T208+: the kernel's persisted opt-in is authoritative
-    lgRender(v);   // the Billing login block (T157) rides the same /version read
-    lgFetchLogins(kernelsRead);   // …and the stored logins beside it (T346), handed the /tunnels read above
-    if ((v.login || {}).state && !lgTimer) lgTimer = setTimeout(lgPoll, 1500);   // a flow mid-run resumes polling
     if (typeof v.updateMode === 'string') setShow(upm, v.updateMode);   // the kernel's persisted mode is authoritative
     if (typeof v.judgeModel === 'string') setShow(jm, v.judgeModel);   // the judge's ACTUAL current model/effort per tier is authoritative
     if (typeof v.indexModel === 'string') setShow(im, v.indexModel);
@@ -2541,15 +2650,13 @@ function initGear(post, opts) {
     fastRefused = (v.fastRefused && typeof v.fastRefused === 'object') ? v.fastRefused : {};
     cmtFastGate(false);
     judgeFastGate();   // the tiers are set above; the boxes follow them
-    if (dd && typeof v.defaultDir === 'string') dd.value = v.defaultDir;   // the kernel's persisted default is authoritative
-    // Browse… draws on the KERNEL's screen, and a kernel with no desktop has none — the click used to
-    // vanish into a macOS-only dialog. Drop the button rather than offer one that cannot work; the
-    // field takes a typed path, which is what that machine has. An older kernel sends no verdict and
-    // keeps the button it always had.
-    if (ddb && typeof v.nativeDialogs === 'boolean') ddb.style.display = v.nativeDialogs ? '' : 'none';
     repaintSelectPicks();   // fill() writes sel.value directly (no change event) — the closed rows follow
-    var x = lv(); b.innerHTML = 'kernel ' + (v.kernel_sha || '?') + '\nserving v' + v.dist_ver + '\nthis tab v' + (x || '?');
-  }).catch(function () { b.textContent = '(version unavailable)'; }); }
+    fillAutoNudge(v.autoNudge, rows || []);
+    fillMixedMarks(v, rows || []);
+    fillScope(v); fillScopedRows(v);   // phase two: the machine selector and the scoped rows read the same rows
+    sayRowStates();   // …the boxes' descriptions say what their marks now show
+    lgAcct();   // …and the Account row names this machine once other machines' kernels are connected
+  }
   // The settings modal is full-WINDOW in the web shell — ask it to lift the iframe hosting this modal
   // (the shell's #f-settings since 2026-09-10; the feed iframe before) while open (no-op elsewhere:
   // VS Code's feed panel IS the window).

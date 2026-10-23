@@ -216,6 +216,9 @@ export function prefixInbound(host: string, msg: any): any {
   // host ("") took the identity exit above, so a local frame has no host key: the gear words it as
   // this machine. The echoed `gesture` inside passes through untouched — it is re-issued as-is.
   if (out.type === "settingStale") out.host = host;
+  // …and its word that it HANDLED one (settingAck, kernel.py _ack_setting): the gear re-reads that machine's settings on it, so
+  // the frame must say which machine it was
+  if (out.type === "settingAck") out.host = host;
   if (out.type === "sessionList" && Array.isArray(out.items)) {
     out.items = out.items.map((it: any) => (it && typeof it === "object" && typeof it.id === "string"
       ? { ...it, id: prefixId(host, it.id),
@@ -471,11 +474,19 @@ export function routeOutbound(msg: any, knownHosts?: ReadonlySet<string>): Route
   // copy with its origin and `scope: "pinned"`, the explicit intent a pinned store's gate honours and which pins the store
   // there; a broadcast (no list) never carries the scope, so nothing changes for a kernel the selector never named.
   if (KERNEL_SETTING.has(msg.type) && Array.isArray(msg.hosts) && msg.hosts.length) {
-    const { hosts, scope: _scope, ...rest } = msg;
+    const { hosts, scope: _scope, reach: _reach, ...rest } = msg;
     return hosts.map((h: string) => ({ host: h || LOCAL, msg: { ...rest, origin: (h || LOCAL) === LOCAL ? "local" : "remote", scope: "pinned" } }));
   }
-  // an EMPTY or malformed hosts list is no scope: the broadcast, with the field stripped (round two, low e: an empty list routed to nobody)
-  if (KERNEL_SETTING.has(msg.type)) { const { scope: _scope, hosts: _hosts, ...rest } = msg; return [LOCAL, ...(knownHosts || [])].map((h) => ({ host: h, msg: { ...rest, origin: h === LOCAL ? "local" : "remote" } })); }
+  // an EMPTY or malformed hosts list is no scope: the broadcast, with the field stripped (round two, low e: an empty list routed to nobody).
+  // `reach` (the gear under All kernels, the gear-truth review): the machines the panel SHOWED when it was clicked. The broadcast
+  // reaches each of them as well as every host this page knows: a machine that checked in a moment ago is on the panel before this
+  // page's next /tunnels poll links it, and the broadcast skipped it without a word. Stripped from every copy, like the scope.
+  if (KERNEL_SETTING.has(msg.type)) {
+    const { scope: _scope, hosts: _hosts, reach, ...rest } = msg;
+    const targets: string[] = [LOCAL, ...(knownHosts || [])];
+    if (Array.isArray(reach)) for (const h of reach) if (typeof h === "string" && h && !targets.includes(h)) targets.push(h);
+    return targets.map((h) => ({ host: h, msg: { ...rest, origin: h === LOCAL ? "local" : "remote" } }));
+  }
   // a PIN is per machine (one A): this dashboard's own kernel alone, stamped local, the one origin its kernel takes a pin from;
   // phase two: addressed to the picked kernels (`hosts`), each copy with its origin and the scope, so the arm accepts an
   // explicit pin or un-pin from another machine's dashboard
@@ -1049,6 +1060,10 @@ export class FederationManager {
   private iidFallback = "";   // a stable per-page prefix for the remote iid when this dashboard has no wid, so the iid a hub pane sends is NEVER bare (a bare iid equal to a remote's own local page retires that page's socket): iidNamespace()
   private lastActiveRemote = "";   // the remote host the last activeTab named (or "" for a local tab): when the active moves OFF it, that host is told a clear, or it keeps building the tab nobody watches first (outbound)
   private conns = new Map<string, Conn>();
+  // KERNEL_SETTING messages for a host this page holds no conn for yet, newest per type, until a /tunnels poll that started after
+  // them answers (sendRemote): `seq` is the number of the first poll allowed to judge them (pollsStarted counts every poll begun)
+  private unlinked = new Map<string, { msgs: Map<string, any>; seq: number }>();
+  private pollsStarted = 0;
   private pageProto: number | null = null;   // the chat protocol the page's ready declared (2), told to every remote kernel's socket
   private frozeAt = 0;   // the Page Lifecycle `freeze` before the current thaw: a socket already overdue at that moment is not stamped by resumed()
   private perHostOrder: Record<string, string[]> = {};
@@ -1791,6 +1806,23 @@ export class FederationManager {
                                ...(prev ? { superseded: typeof prev.gt === "number" ? prev.gt : true } : {}) });
       return;
     }
+    if (!c && host && msg && typeof msg.type === "string" && KERNEL_SETTING.has(msg.type)) {
+      // A host this page holds NO conn for yet (the gear-truth review): this page links a machine only from its /tunnels poll, every
+      // 4 s, so in the seconds after a machine checks in, attaches or reappears the gear can show it while no conn exists, and a
+      // setting aimed at it used to fall to the drop below, whose warn nothing on the settings page showed. Held instead, newest per
+      // type like the conn's queue, and the send itself is the event: the poll runs now. Its answer moves them onto the host's conn
+      // when it opens one (openRemote), and the open flushes them; an answer that lists no such host drops them, loudly
+      // (judgeUnlinked). Journaled like the conn's queue, rs -1 (not dialed) and why no-conn.
+      let u = this.unlinked.get(host);
+      if (!u) { u = { msgs: new Map<string, any>(), seq: 0 }; this.unlinked.set(host, u); }
+      const prev = u.msgs.get(msg.type);
+      u.msgs.set(msg.type, msg);
+      u.seq = this.pollsStarted + 1;   // judged by the poll started here, never by one already on its way (its list predates the send)
+      this.diag("sendqueue", { host, msgType: msg.type, gt: typeof msg.gt === "number" ? msg.gt : 0, rs: -1, why: "no-conn",
+                               ...(prev ? { superseded: typeof prev.gt === "number" ? prev.gt : true } : {}) });
+      void this.poll();
+      return;
+    }
     const key = bookkeepingKey(msg);
     if (key !== null) {
       // the pane's own bookkeeping (BOOKKEEPING): held for the open, never toasted — the user sent
@@ -1840,6 +1872,9 @@ export class FederationManager {
   // `warn` (render.ts toasts it), naming the host and the action so the user knows what didn't land.
   // Only for a gesture: the pane's own bookkeeping is held instead (BOOKKEEPING), since a toast about a
   // message the user never sent reads as a failure of the tap they did make (2026-09-10).
+  // The copy says what this page KNOWS (the gear-truth review): with no conn to the host, or a socket still opening, the machine may
+  // well be up, so only a conn whose socket is not open and is not opening says its kernel isn't answering. The frame names the
+  // host, the message type and that cause, so a surface can word it in its own terms (the settings page names the setting).
   private dropWarn(host: string, msg: any): void {
     // a chat send carrying its press's id, to a host whose kernel has said it recognises a resend: the chat keeps it and sends it
     // again when the link is back (render.ts resendUnacked), so the toast says that and nobody retypes it (the review of #198)
@@ -1848,10 +1883,14 @@ export class FederationManager {
     // …and a withdrawal (the ✎ or the ✕ on such a send) is kept too: every tab honours it, and the kernel hears it when the link
     // is back (render.ts resendUnacked)
     const withdrawn = !!(msg && msg.type === "cancelQueued" && typeof msg.qid === "string" && c && c.acksEver);
-    window.dispatchEvent(new MessageEvent("message", { data: { type: "warn",
-      text: kept ? `${host} is unreachable (its kernel isn't answering): your message is kept and goes out when the link is back`
-          : withdrawn ? `${host} is unreachable (its kernel isn't answering): the message stays withdrawn, and romp tells it so when the link is back`
-          : `${host} is unreachable (its kernel isn't answering) — “${(msg && msg.type) || "action"}” was not delivered` } }));
+    const cause = !c ? "unlinked" : (c.live && c.ws && c.ws.readyState === 0) ? "opening" : "down";
+    const why = cause === "unlinked" ? `this page has no connection to ${host}`
+      : cause === "opening" ? `this page's connection to ${host} is still opening`
+      : `${host} is unreachable (its kernel isn't answering)`;
+    window.dispatchEvent(new MessageEvent("message", { data: { type: "warn", host, msgType: (msg && msg.type) || "", cause,
+      text: kept ? `${why}: your message is kept and goes out when the link is back`
+          : withdrawn ? `${why}: the message stays withdrawn, and romp tells it so when the link is back`
+          : `${why} — “${(msg && msg.type) || "action"}” was not delivered` } }));
     // a comment create also gets the typed refusal its own kernel would have sent (2026-10-01): the comment box waits on
     // that, not on any warn, to hand the words back, and a create that never left this page is refused for good
     if (msg && msg.type === "commentCreate" && typeof msg.id === "string" && msg.uuid)
@@ -1864,6 +1903,7 @@ export class FederationManager {
   }
 
   private async poll(): Promise<void> {
+    const seq = ++this.pollsStarted;
     let tunnels: any[] = [];
     try {
       const r = await fetch("/tunnels", { cache: "no-store" });
@@ -1888,6 +1928,7 @@ export class FederationManager {
     let opened = false;
     for (const [host, t] of want) if (!this.conns.has(host)) { this.openRemote(host, t.status === "up"); opened = true; }
     for (const host of [...this.conns.keys()]) if (!want.has(host)) this.closeRemote(host);
+    this.judgeUnlinked(seq);
     // The host list is in hand from here (T404 round nine): the first answer, hosts or none, ends the frames'
     // hostsUnread mark, and the merged feed is re-emitted once for it, so the pane's absence-driven writers
     // run on a frame that knows its hosts rather than on the next push that happens to land. A failed fetch
@@ -1964,9 +2005,27 @@ export class FederationManager {
     // built fresh on every dial (remoteDialUrl, called from connect) so a redial reflects the page's
     // current terms, exactly as the pane's own local socket rebuilds its ?active=/reconnect on each open.
     const conn: Conn = { host, ws: null, url: "", closed: false, live, lastRecv: 0, resumeProvisional: 0, connT: 0, closingT: 0, pending: new Map() };
+    // settings sent to this host before the page had a conn for it (sendRemote) ride this conn's queue: its open flushes them
+    const held = this.unlinked.get(host);
+    if (held) { for (const [k, m] of held.msgs) conn.pending.set(k, m); this.unlinked.delete(host); }
     this.conns.set(host, conn);
     this.ensureHost(host);
     this.connect(conn);
+  }
+
+  /** A poll's verdict on the settings held for hosts with no conn (sendRemote): a host the answer listed has its conn now and took
+   *  them (openRemote). One it did not list cannot be dialed from this page, so its settings are dropped, each said by dropWarn and
+   *  journaled (senddrop, why no-conn). Only a poll that began after a host's last held send judges it: an answer already on its way
+   *  predates the machine the gear was showing. */
+  private judgeUnlinked(seq: number): void {
+    for (const [host, u] of [...this.unlinked]) {
+      if (seq < u.seq) continue;
+      this.unlinked.delete(host);
+      for (const m of u.msgs.values()) {
+        this.diag("senddrop", { host, msgType: m.type, why: "no-conn" });
+        this.dropWarn(host, m);
+      }
+    }
   }
 
   // The remote socket's URL, carrying THIS page's own dial terms for its app so a federated pane is served

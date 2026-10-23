@@ -462,3 +462,5 @@ body.theme-light #rsettings .rs-widget-demo .tab-badge:not(:empty), body.theme-l
 #rsettings .rs-widget.rs-nudge { animation: rs-nudge 0.3s ease; }
 @media (prefers-reduced-motion: reduce) { #rsettings .rs-widget.rs-nudge { animation: none; outline: 1px solid var(--accent); outline-offset: -1px; } }
 #rsettings .rs-live { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* a box's state for a screen reader, the words of its row's mark (gear.js wireRowA11y): read, never drawn */
+#rsettings .rs-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }

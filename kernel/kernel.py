@@ -18,6 +18,7 @@ import hashlib
 import math
 import tracemalloc
 import zlib
+import itertools
 import contextlib, json, os, queue, random, re, signal, socket, sys, time, threading, traceback, base64, bisect, errno, hashlib, hmac, struct, subprocess, shutil, shlex, http.client, uuid, tempfile, stat, gzip, collections, functools, fcntl, inspect, secrets, importlib.util, select
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -27920,6 +27921,8 @@ _remotes_saved_sig = None   # signature of the last blob written — lets the su
 
 
 _NOT_SAVED = ("proc",       # the live Popen
+              "_settings_seq",   # which read of the peer's settings the row holds (_lift_peer_settings): this process's count,
+              #                    and it moves every pass, so saved it would rewrite this file every pass
               "_dialing",   # a health request to the host in flight right now (_row_dialing): this pass's
               #               mark, meaningless to the next boot
               "usage",      # a remote's rate-limit snapshot: re-polled a minute after any boot, and
@@ -28583,6 +28586,54 @@ def _poll_remote_version(r):
                 "host": j.get("host") if isinstance(j.get("host"), str) else None} if sha else None   # the peer's own name (one A round two)
     except Exception:
         return None
+
+
+# ── a peer's settings, re-read when it says it handled one (the gear-truth review, 2026-10-23) ──────────────────────────────
+# The gear compares the machines through THIS kernel's copy of each peer's settings, lifted off the peer's /version by the
+# supervisor's pass, every 15 s. A click that applied on a peer therefore read as not applied for up to 15 s: the row went back to
+# the mixed dash and the hover's "click again to turn it on" posted off a second time. The peer now answers a relayed setting with
+# settingAck (_ack_setting) once it has handled it, and the dashboard that sent it asks this kernel to re-read that peer before
+# answering /tunnels (?reread=<host>): the ack is the event, so the read follows the apply and needs no timer. Two readers of one
+# peer can land out of order (a pass whose read began before the apply writing after the re-read), so every read takes a number
+# from _SETTINGS_READS before it starts and a row keeps the settings of the latest-begun read it was handed (_settings_seq).
+_SETTINGS_READS = itertools.count(1)
+
+
+def _lift_peer_settings(r, rver, seq):
+    """Lift a peer's settings from its polled /version (`rver`) onto its remotes row `r` (held under _remotes_lock by the caller):
+    the four fields the gear reads, unless the row already holds a read that began after this one (`seq`). Returns whether it
+    lifted."""
+    if seq <= (r.get("_settings_seq") or 0):
+        return False
+    r["_settings_seq"] = seq
+    r["auto_nudge"] = (rver or {}).get("autoNudge")   # None = that kernel didn't say
+    r["settings"] = (rver or {}).get("settings")      # its whole kernel-side dict (None = older kernel)
+    r["settingsGt"] = (rver or {}).get("settingsGt")  # each store's last-applied stamp (T248b: the adopt seam)
+    r["settingsPinned"] = (rver or {}).get("settingsPinned")   # its pinned stores (phase two: the gear's scoped view)
+    return True
+
+
+def _reread_peer_settings(host):
+    """GET /tunnels?reread=<host>: re-read one attached, up peer's /version now and lift its settings onto its row before the
+    listing is built (see above). A host that is not attached or not up, or a read that fails, leaves the row as the supervisor's
+    last pass left it and returns False; the row's other fields stay the supervisor's."""
+    with _remotes_lock:
+        r = _remotes.get(host)
+        snap = dict(r) if r and (r.get("status") or "") == "up" and r.get("local_port") else None
+    if snap is None:
+        return False
+    seq = next(_SETTINGS_READS)
+    rver = _poll_remote_version(snap)
+    if not rver:
+        return False
+    with _remotes_lock:
+        r = _remotes.get(host)
+        return bool(r) and _lift_peer_settings(r, rver, seq)
+
+
+def _reread_asked(q):
+    """The host a GET /tunnels asks to re-read first (`?reread=<host>`), or "" when none."""
+    return str((q.get("reread") or [""])[0] or "")
 
 
 REMOTE_USAGE_EVERY = 60.0    # a usage window moves over hours; polling it per supervisor pass would be waste
@@ -33413,6 +33464,7 @@ def _tunnel_supervisor():
                     up = _port_open(r["local_port"])              # outside the lock (socket round-trip)
                     rows = _poll_remote_sessions(r) if up else None   # its session rows: ids for the wake-router, names for notifications
                     sids = None if rows is None else [x.get("id") for x in rows]
+                    rseq = next(_SETTINGS_READS)   # taken BEFORE the read: a re-read begun after it holds newer settings (_reread_peer_settings)
                     rver = _poll_remote_version(r) if up else None   # the code the remote is running (drift check)
                     rsha = (rver or {}).get("sha")
                     # …and which Claude account it burns, so the rail can draw a second set of bars when it is
@@ -33516,10 +33568,7 @@ def _tunnel_supervisor():
                         r["checkout_sha"] = (rver or {}).get("checkoutSha") or ""      # None from an older kernel: "" (the booted sha stands in)
                         r["restart_pending"] = (rver or {}).get("restartPending")       # None = that kernel did not say
                         r["kernel_ver"] = (rver or {}).get("ver") or ""
-                        r["auto_nudge"] = (rver or {}).get("autoNudge")   # None = that kernel didn't say
-                        r["settings"] = (rver or {}).get("settings")      # its whole kernel-side dict (None = older kernel)
-                        r["settingsGt"] = (rver or {}).get("settingsGt")  # each store's last-applied stamp (T248b: the adopt seam)
-                        r["settingsPinned"] = (rver or {}).get("settingsPinned")   # its pinned stores (phase two: the gear's scoped view)
+                        _lift_peer_settings(r, rver, rseq)   # its settings, unless a re-read begun after this read already lifted newer ones
                         r["push_pull"] = (rver or {}).get("pushPull") or 0   # it serves /push/events: pulled, and no longer forwarded to
                     if ruse is not None:
                         # {} = the host ANSWERED with nothing to show → clear; None = no answer (blip/
@@ -64765,6 +64814,42 @@ def _reply(c, msg):
         c["alive"] = False
 
 
+# ── a relayed setting is ACKNOWLEDGED once handled (the gear-truth review, 2026-10-23) ─────────────────────────────────────
+# Another machine's dashboard reaches this kernel's setting arms through its own kernel's relay (client kind "relay", _dial_kind),
+# and its gear compares the machines through that kernel's copy of our settings, refreshed every 15 s. So after its click applied
+# here, its panel went on drawing our old value: the mixed dash came back and "click again to turn it on" posted off a second time.
+# Every setting such a socket sends is answered, once handled (applied, stood down or refused alike: our settings are then what
+# that gear should read), with settingAck on the same socket; the gear asks its own kernel to re-read us (/tunnels?reread=,
+# _reread_peer_settings) and draws again. A page's own socket gets none: its gear reads /version fresh on every fill. The types
+# are federation.ts KERNEL_SETTING's, which a test keeps equal to this list, plus the per-machine pin.
+_GEAR_SETTING_TYPES = frozenset((
+    "setAutoNudge", "setJudgeModel", "setIndexModel", "setJudgeEffort", "setIndexEffort", "setUpdateMode", "setJudgeConcurrency",
+    "setDistillModel", "setDistillEffort", "setFileEditing", "setCompactSuggest", "setTaskTracking",
+    "setCommentModel", "setCommentEffort", "setCommentFast", "setJudgeFast", "setDistillFast", "setIndexFast",
+    "setAlwaysFast", "setRetryUpgrade", "setThinkingSummaries", "setWholeChatFrames", "setConserve", "setRouterModels"))
+_ACKED_SETTING_TYPES = _GEAR_SETTING_TYPES | {"setSettingPin"}
+
+
+def _dispatch_then_ack(dispatch, msg, client):
+    """A socket lane's op (Handler._ws): dispatch it, then acknowledge it when it is a setting another machine's dashboard relayed
+    (_ack_setting). A handler that raises acknowledges nothing; the lane logs it."""
+    dispatch(msg, client)
+    _ack_setting(client, msg)
+
+
+def _ack_setting(client, msg):
+    """Answer a setting a RELAYED socket sent with settingAck (see above), naming its type and the gesture's stamp. Returns whether
+    it did."""
+    if not isinstance(msg, dict) or msg.get("type") not in _ACKED_SETTING_TYPES or (client or {}).get("kind") != "relay":
+        return False
+    ack = {"type": "settingAck", "msgType": msg["type"]}
+    gt = msg.get("gt")
+    if isinstance(gt, (int, float)) and not isinstance(gt, bool):
+        ack["gt"] = gt
+    _reply(client, ack)
+    return True
+
+
 def _setting_kept_value(name):
     """The value a stood-down gesture lost to — read at reply time only (one cheap store read on
     the stand-down path, never on the apply path). Booleans stay booleans; the gear words them."""
@@ -85531,7 +85616,11 @@ class Handler(BaseHTTPRequestHandler):
                                   "application/json", cache="no-cache")
             if p == "/tunnels":                               # attached remote kernels + state (drives the federated dashboard)
                 # `?fresh=1` = the caller is about to ACT on `outOfDate` (the CLI's `romp update`), so the
-                # listing is judged against the head this checkout is at now, not the polls' cache
+                # listing is judged against the head this checkout is at now, not the polls' cache.
+                # `?reread=<host>` = that machine has just acknowledged a setting (the gear's settingAck): its
+                # settings are re-read from it before the listing is built (_reread_peer_settings)
+                if _reread_asked(q):
+                    _reread_peer_settings(_reread_asked(q))
                 return self._send(200, json.dumps(_tunnels_listing(fresh=_fresh_listing_asked(q))),
                                   "application/json", cache="no-cache")
             if p == "/tunnels/pairs":                         # how attached machines hold EACH OTHER's mail —
@@ -89126,7 +89215,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not _is_drive_op(msg):
                     # on the lane, behind whatever it still serves (a connect push, a history page), in arrival order
                     _lane_put(lane, (msg or {}).get("type") if isinstance(msg, dict) else None,
-                              functools.partial(self._dispatch_ws, msg, client))
+                              functools.partial(_dispatch_then_ack, self._dispatch_ws, msg, client))
                     continue
                 try:
                     self._dispatch_ws(msg, client)     # a drive op: dispatched now, never behind the lane
