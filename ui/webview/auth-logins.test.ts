@@ -578,6 +578,105 @@ test("an older open's late answer does not take a newer open's drawn rows down f
   assert.equal(g.said[g.said.length - 1], "signed in", "…and the account lines");
 });
 
+// The two gaps the review of #388 reproduced. (a) A refusal cleared the skipped drawing whatever it was, so a reopen's failure skipped
+// while a Link was on its way was never said, and the earlier open's rows stood as this machine's logins. (b) An older open's late
+// answer spoke on the account lines at once, while the block, waiting on the newer open's read, still said the older open's failure.
+test("a link refused after a reopen's read failed while it was on its way says that failure in place of the earlier open's rows", async () => {
+  // a fill of a reopen whose /logins read fails, its /tunnels read settled with no kernel
+  const failingFill = async (g: ReturnType<typeof gearLogins>) => {
+    const t = defer(), n = g.gets.length;
+    g.api.fill(t.promise);
+    g.gets[n].resolve(notJson());
+    t.resolve([]);
+    await settle();
+  };
+  {
+    const g = gearLogins(), st = stub("span");
+    g.api.open();
+    assert.equal(await g.fillDraws("first"), true);
+    g.api.post(LINK, st, stub("select"), "");   // Link pressed on a row of the first open
+    g.api.open();                               // the panel closed and reopened
+    await failingFill(g);
+    assert.deepEqual([g.names(), g.failure()], [["first"], null], "nothing is drawn while the link is on its way");
+    g.posts[0].resolve(answer({ ok: false, error: "no sign-in there" }));
+    await settle();
+    assert.deepEqual([g.names(), g.failure()], [[], SAID_500], "the refusal handled, the reopen's failure is said in place of the first open's rows");
+    assert.equal(g.said[g.said.length - 1], null, "…and the account lines are taken back with them");
+  }
+  {
+    // with another link still on its way: nothing until it settles, then its ok's failed re-read says the failure
+    const g = gearLogins();
+    g.api.open();
+    assert.equal(await g.fillDraws("first"), true);
+    g.api.post(LINK, stub("span"), stub("select"), "");
+    g.api.post(LINK2, stub("span"), stub("select"), "");
+    g.api.open();
+    await failingFill(g);
+    g.posts[0].resolve(answer({ ok: false, error: "no sign-in there" }));
+    await settle();
+    assert.deepEqual([g.names(), g.failure()], [["first"], null], "the other link is still on its way: nothing is drawn");
+    g.posts[1].resolve(answer({ ok: true }));
+    await settle();
+    g.gets[2].resolve(notJson());
+    await settle();
+    assert.deepEqual([g.names(), g.failure()], [[], SAID_500], "its re-read failed too: the reopen's failure is said");
+  }
+  {
+    // a refusal still draws nothing over good rows (#387): a reopen whose read answered while the link was on its way leaves the
+    // refusal said in its row
+    const g = gearLogins(), st = stub("span");
+    g.api.open();
+    assert.equal(await g.fillDraws("first"), true);
+    g.api.post(LINK, st, stub("select"), "");
+    g.api.open();
+    assert.equal(await g.fillDraws("reopened"), false, "the reopen's drawing is skipped while the link is on its way");
+    g.posts[0].resolve(answer({ ok: false, error: "no sign-in there" }));
+    await settle();
+    assert.deepEqual([g.names(), g.failure(), st.textContent, g.draws()], [["first"], null, "no sign-in there", 1],
+      "the refusal stays said in its row, nothing drawn over it");
+  }
+});
+
+test("an older open's late answer says nothing on the account lines while a newer open's read is on its way and the block says a failure", async () => {
+  // the first open has two slow reads; the later one fails with none answered, and the failure is said. The panel reopens, and the
+  // first open's other read answers while the reopen's is on its way: the block waits on the reopen's read and goes on saying the
+  // failure, and the account lines wait with it rather than speak from that answer
+  const firstOpenFailed = async () => {
+    const g = gearLogins(), t1 = defer(), t2 = defer(), t3 = defer();
+    g.api.open();
+    g.api.fill(t1.promise);
+    g.api.fill(t2.promise);
+    g.gets[1].resolve(notJson());
+    t2.resolve([]);
+    await settle();
+    assert.deepEqual([g.names(), g.failure(), g.said[g.said.length - 1]], [[], SAID_500, null], "the first open's failure is said, the lines taken back");
+    g.api.open();
+    g.api.fill(t3.promise);
+    g.gets[0].resolve(answer(named("older open")));
+    t1.resolve([]);
+    await settle();
+    assert.deepEqual([g.failure(), g.said[g.said.length - 1]], [SAID_500, null],
+      "the older open's late answer waits on the reopen's read on the account lines, as the block does");
+    return { g, t3 };
+  };
+  {
+    const { g, t3 } = await firstOpenFailed();
+    g.gets[2].resolve(answer(named("newer open")));
+    t3.resolve([]);
+    await settle();
+    assert.deepEqual([g.names(), g.failure(), g.said[g.said.length - 1]], [["newer open"], null, "newer open"],
+      "the reopen's answer is drawn, and the lines speak from it");
+  }
+  {
+    const { g, t3 } = await firstOpenFailed();
+    g.gets[2].resolve(notJson());
+    t3.resolve([]);
+    await settle();
+    assert.deepEqual([g.names(), g.failure(), g.said[g.said.length - 1]], [[], SAID_500, null],
+      "the reopen's read fails too: its failure is said, and the lines stay taken back");
+  }
+});
+
 test("the gear's stored-login row links a login to a machine's sign-in and unlinks it, said as the user's statement (2026-10-01)", async () => {
   // linked: the note names the machine and that the link is the user's, and an Unlink takes it back
   assert.match(GEAR, /if \(ln\) note = \(note \? note \+ ' \\u00b7 ' : ''\) \+ 'same account as ' \+ lgSignIn\(ln\.host\) \+ ', linked by you';/);

@@ -410,11 +410,11 @@ var GEAR_HTML =
   "<div id=rs-login-ok class=rs-login-ok hidden></div>" +
   "<div id=rs-login-url hidden style='margin-top:6px'></div>" +
   "<div id=rs-login-code class=rs-login-code hidden>" +
-  "<input id=rs-login-input type=text autocomplete=off spellcheck=false placeholder='paste the code from the browser…' style='flex:1;background:var(--input-bg, #1e1e1e);color:var(--fg, #ccc);border:1px solid #3a3a3a;border-radius:5px;padding:4px 8px'>" +
+  "<input id=rs-login-input type=text autocomplete=off spellcheck=false placeholder='paste the code from the browser…' style='flex:1;background:var(--input-bg, #1e1e1e);color:var(--fg, #ccc);border:1px solid var(--hairline, #3a3a3a);border-radius:5px;padding:4px 8px'>" +
   "<button id=rs-login-send type=button style='cursor:pointer;background:var(--btn-bg, #2a2a2a);color:var(--fg, #ccc);border:1px solid var(--hairline, #3a3a3a);border-radius:5px;padding:3px 10px'>Submit</button>" +
   '</div>' +
   "<div style='margin-top:10px;text-align:right'>" +
-  "<button id=rs-login-cancel type=button style='cursor:pointer;background:transparent;color:#888;border:1px solid #3a3a3a;border-radius:5px;padding:3px 10px'>Cancel</button>" +
+  "<button id=rs-login-cancel type=button style='cursor:pointer;background:transparent;color:var(--text-muted, #9aa0a6);border:1px solid var(--hairline, #3a3a3a);border-radius:5px;padding:3px 10px'>Cancel</button>" +
   "<button id=rs-login-close type=button hidden style='cursor:pointer;background:var(--btn-bg, #2a2a2a);color:var(--fg, #ccc);border:1px solid var(--hairline, #3a3a3a);border-radius:5px;padding:3px 10px'>Close</button>" +
   '</div></div></div>' +
   '<div id=ranalytics-back hidden><div id=ranalytics>' +
@@ -615,7 +615,7 @@ function initGear(post, opts) {
       var cur = null;
       options.forEach(function (o) { if (o.id === curId) cur = o; });
       if (!cur) cur = options.length ? options[0] : null;
-      btn.innerHTML = (cur ? rowHTML(cur) : '<span style="flex:1 1 auto;min-width:0;color:#8a8a8a">\u2026</span>') +
+      btn.innerHTML = (cur ? rowHTML(cur) : '<span style="flex:1 1 auto;min-width:0;color:var(--text-muted, #8a8a8a)">\u2026</span>') +
         '<span style="flex:0 0 auto;margin-left:auto;opacity:0.55">\u25BE</span>';
       menu.innerHTML = '';
       options.forEach(function (o) {
@@ -1248,9 +1248,10 @@ function initGear(post, opts) {
     var d = Math.round((t * 1000 - Date.now()) / 86400000);
     return d <= 0 ? 'now (the token is a year old)' : 'in ' + d + ' day' + (d === 1 ? '' : 's');
   }
-  // what a /logins answer says that needs no kernel list, said as soon as it arrives: the machine's own login (the who-line's
-  // full name and its billing line, through lgAcct) and the description's sentence on the stored logins. null: the read failed
-  // (lgError), and what an earlier answer said here is taken back with the rows it came with
+  // what a /logins answer says that needs no kernel list, said as soon as this open's arrives (lgFetchLogins) and again with the rows
+  // drawn from it (lgDraw): the machine's own login (the who-line's full name and its billing line, through lgAcct) and the
+  // description's sentence on the stored logins. null: the read failed (lgError), and what an earlier answer said here is taken
+  // back with the rows it came with
   function lgOwn(d) {
     var rows = (d && d.logins) || [];
     // what the row's one description says about the stored logins: as a second rs-sub of its own it floated a second popover
@@ -1379,14 +1380,19 @@ function initGear(post, opts) {
   // the control restored, so a host with no sign-in or one not answering is never a silent nothing. lgBusy counts the POSTs on
   // their way: from the send until the refusal, no answer, or the ok's re-read has settled (lgFetchLogins). lgSkipped: a fill's
   // drawing was skipped while one was on its way, with no drawing, refusal or no answer since; once an ok's re-read has settled
-  // and no other link or unlink is on its way, lgLast is drawn if lgSkipped is set
+  // and no other link or unlink is on its way, lgLast is drawn if lgSkipped is set. A refusal or no answer draws nothing over the
+  // rows (its note is said in the row it was pressed on), except a skipped drawing that would say a newer open's failed read
+  // (lgDraw): the rows on screen are then an earlier open's, so that failure is still drawn once no other link or unlink is on its
+  // way. Clearing lgSkipped there dropped it, and the earlier open's rows stood as this machine's logins (the review of #388)
   var lgBusy = 0, lgSkipped = false;
   function lgPost(body, st, ctl, label) {
     function refused(why) {
-      lgSkipped = false;
+      var failed = lgSkipped && !!lgFail && lgFail.open > lgLastOpen;   // what the skipped drawing would say: a newer open's failure
+      lgSkipped = failed;
       st.className = 'rs-note rs-login-bad'; st.textContent = why; st.title = why;
       ctl.disabled = false;
       if (ctl.tagName === 'SELECT') ctl.value = ''; else ctl.textContent = label;
+      if (failed && !lgBusy) lgDraw();
     }
     lgBusy++;
     fetch(ku('/logins'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -1399,9 +1405,10 @@ function initGear(post, opts) {
       .catch(function () { lgBusy--; refused('the kernel did not answer; try again'); });
   }
   // the stored logins' read (T346), from the authed /logins. The machine's own login and the description are said when the answer
-  // arrives; the rows wait for `after`, fill()'s /tunnels read, settled either way, because each row's Same account as… picker
-  // lists the kernels connected then. Drawn on the answer alone, a /logins that answered first built the pickers from the previous
-  // open's kernels, so a first open listed this machine alone (review of #78). One read per fill. Fills overlap and their reads can
+  // arrives (this open's, while no failure is said: the account lines follow the block, below); the rows wait for `after`, fill()'s
+  // /tunnels read, settled either way, because each row's Same account as… picker lists the kernels connected then. Drawn on the
+  // answer alone, a /logins that answered first built the pickers from the previous open's kernels, so a first open listed this
+  // machine alone (review of #78). One read per fill. Fills overlap and their reads can
   // answer out of order, so each fill is numbered. The pickers list the kernels of the newest fill whose /tunnels read has settled
   // (lgKernels), not the last list to arrive: an older fill's /tunnels answering after a newer one's put back the kernels connected
   // before. A fill draws its rows only if every later fill's /logins read has failed; one that waits on a later fill (lgWait) draws
@@ -1424,20 +1431,25 @@ function initGear(post, opts) {
   // a later fill whose read succeeds draws over it.
   // THE NEWEST OPEN WINS (the review of #387, the rule #383 set for the pickers' begin order): what an older open's reads bring,
   // good or failed, never replaces what a newer open's reads have set. An older open's answer is not kept once a newer open's has
-  // arrived, and says nothing on the account lines once a newer open's read has failed; an older open's failure is logged and
-  // replaces no newer one. Without that, a reopen's failure said one reason and then the first open's late failure's (lgFail held
-  // whichever arrived last), the first open's good answer landing after both drew over the reopen's failure, and its late answer
-  // replaced the reopen's good one in lgLast, so the reopen's later failure took that good answer off the screen as an earlier
-  // open's. Within the newest open with any result the latest result stands, but for the rule above that a failure after a good
-  // answer of the same open erases nothing: the block shows that open's rows when any read of it answered, and its failure when
-  // none did (lgDraw).
+  // arrived, and an older open's failure is logged and replaces no newer one. Without that, a reopen's failure said one reason and
+  // then the first open's late failure's (lgFail held whichever arrived last), the first open's good answer landing after both drew
+  // over the reopen's failure, and its late answer replaced the reopen's good one in lgLast, so the reopen's later failure took that
+  // good answer off the screen as an earlier open's. Within the newest open with any result the latest result stands, but for the
+  // rule above that a failure after a good answer of the same open erases nothing: the block shows that open's rows when any read
+  // of it answered, and its failure when none did (lgDraw).
+  // THE ACCOUNT LINES FOLLOW THE BLOCK (the review of #388): the who-line, the billing line and the description speak from the answer
+  // the rows are drawn from (lgDraw) and are taken back with them (lgError). Only the current open's answer is said ahead of its
+  // rows, so the full name does not wait on /tunnels, and not while the block says a failed read. An older open's late answer said
+  // at once updated the lines while the block, waiting on the newer open's read, still said the older open's failure.
   function lgLater(n) {   // a fill numbered after n that has not given up (a failed read gives up once its /tunnels read settles)
     for (var k = n + 1; k <= lgFills; k++) if (!lgFailed[k]) return true;
     return false;
   }
-  function lgDraw() {   // lgLast's rows, unless a read of an open after lgLast's has failed: then that failure
+  // lgLast's rows and the account lines' word on them (lgOwn), unless a read of an open after lgLast's has failed: then that failure
+  function lgDraw() {
     if (lgFail && lgFail.open > lgLastOpen) { lgError(); return; }
     lgShownOpen = lgLastOpen;
+    lgOwn(lgLast);
     lgLogins(lgLast);
   }
   function lgError() {   // the newest failed read, said in place of the rows, and the account lines' word on them taken back (lgOwn)
@@ -1462,11 +1474,13 @@ function initGear(post, opts) {
       if (!r.ok) throw { why: 'HTTP ' + r.status };
       return r.json();
     }).then(function (d) {
-      if (opened >= lgLastOpen) {   // an older open's answer is not kept over a newer open's, nor said over its failure (above)
+      if (opened >= lgLastOpen) {   // an older open's answer is not kept over a newer open's (above)
         lgLast = d;
         lgLastOpen = opened;
-        if (!lgFail || lgFail.open <= opened) lgOwn(d);
       }
+      // the account lines say this open's answer at once, ahead of its rows, unless the block is saying a failed read: any other
+      // answer reaches them only with the rows it is drawn with (lgDraw), so the lines and the block never speak from two reads
+      if (opened === lgOpen && !(lgFail && lgShownOpen < 0)) lgOwn(d);
       function rows() {
         if (mine) {
           if (lgLater(mine)) { if (mine > lgWait) lgWait = mine; return; }
@@ -1588,13 +1602,14 @@ function initGear(post, opts) {
     } else if (!f.state || f.state === 'done') {
       if (!(lgOk && !lgOk.hidden)) lgModal(false);   // cancelled, or finished out of this dialog's sight: nothing left for it to say
     } else lgSuccess('');
-    if (lgOk && !lgOk.hidden) { lgS.textContent = ''; lgS.style.color = ''; return; }   // the outcome stands until Close
+    if (lgOk && !lgOk.hidden) { lgS.textContent = ''; lgS.classList.remove('rs-login-bad'); return; }   // the outcome stands until Close
     lgStatus(f);
     lgS.textContent = f.state === 'starting' ? 'starting Claude Code…'
       : f.state === 'verifying' ? 'checking the code…'
       : f.state === 'error' ? (f.err || 'the login flow failed — try again')
       : f.state === 'url' ? (f.err || '') : '';
-    lgS.style.color = f.state === 'error' || (f.state === 'url' && f.err) ? '#F85B5A' : '';
+    // the error red as text, from the sheet (gear.css #rs-login-state.rs-login-bad): the literal it replaced read 2.92:1 on the light card
+    lgS.classList.toggle('rs-login-bad', f.state === 'error' || (f.state === 'url' && !!f.err));
     lgU.hidden = f.state !== 'url';
     lgC.hidden = f.state !== 'url';
     if (f.state === 'url' && f.url && lgU.getAttribute('data-url') !== f.url) {
@@ -1602,8 +1617,7 @@ function initGear(post, opts) {
       lgU.textContent = '';
       var a = document.createElement('a');
       a.href = f.url; a.target = '_blank'; a.rel = 'noreferrer';
-      a.textContent = '1. Open the sign-in page (any device) →';
-      a.style.color = '#9cd2ff';
+      a.textContent = '1. Open the sign-in page (any device) →';   // in the link ink, from the sheet (gear.css #rs-login-url a)
       lgU.appendChild(a);
       var hint = document.createElement('div');
       hint.className = 'rs-sub';

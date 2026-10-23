@@ -39,7 +39,10 @@ const EXACT: Record<string, number> = {
   // +1 = 13 (2026-09-23, the tab-state-badge default flip): the badge-mode demo's counted dot wears the strip's digit ink,
   // a literal #000 (black on the magenta needs dot) mirroring styles.css .tab-badge:not(:empty); no sheet defines that ink
   // as a token (the light override resolves through var(--st-needs-fg)), so it stays a literal like styles.css keeps it.
-  "gear.css": 13,
+  // -1 = 12 (the review of #388): the mixed word's old section grey #6f747c (3.26:1 on the dark card) reads --text-muted now;
+  // the Open log count's #ff6b6b and the analytics close's #fff hover keep their dark literals, the light theme re-inking both
+  // through tokens in body.theme-light rules (not counted, as above)
+  "gear.css": 12,
   "strip.css": 8,
   "fleet-pane.css": 8,   // 9 until 2026-09-21: the hover card's Needs you mark resolved its red through --st-needs-bg (plans/needs-you.md), the literal now its var() fallback
   "timeline-pane.css": 10,

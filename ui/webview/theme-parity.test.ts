@@ -28,8 +28,8 @@ function props(blockText: string): Map<string, string> {
 // resolve a declared value to solid RGB over a background: hex directly; var(x, fallback) via the
 // fallback (the stand-ins are absent in this static read); rgba composited over the bg
 function rgbOf(v: string, bg: [number, number, number]): [number, number, number] | null {
-  const hex = v.match(/^#([0-9a-f]{6})$/i);
-  if (hex) { const h = hex[1]; return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)) as [number, number, number]; }
+  const hex = v.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);   // #fff too (a gear hover's white)
+  if (hex) { const h = hex[1].length === 3 ? hex[1].replace(/./g, "$&$&") : hex[1]; return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)) as [number, number, number]; }
   const vr = v.match(/^var\([^,]+,\s*(.+)\)$/);
   if (vr) return rgbOf(vr[1].trim(), bg);
   const ra = v.match(/^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)$/);
@@ -75,7 +75,7 @@ const PAIRS: Array<[string, string, number]> = [
   ["--deny-fg", "--deny", 4.5],        // the deny button's hover text on its own fill (the manager's read of PR 2039: white read 3.19:1 on the dark fill)
   ["--warn", "--bg", 3],
   ["--err", "--bg", 3],
-  ["--err-fg", "--surface-raised", 4.5],   // the error red as TEXT on the raised card (the settings panel, the login dialog: the review of #387, where --err read 2.82:1)
+  ["--err-ink", "--surface-raised", 4.5],   // the error red as TEXT on the raised card (the settings panel, the login dialog: the review of #387, where --err read 2.82:1)
   ["--st-working-bg", "--surface-raised", 4.5],   // the working amber as TEXT there too (an expiring stored login's note): a fill token the gear inks words with
   ["--green", "--bg", 3],
   ["--code-fg", "--bg", 4.5],
@@ -96,6 +96,7 @@ const PAIRS: Array<[string, string, number]> = [
   // this file and sits at 2.49:1, and decision 3 of the 2026-09-08 notice audit keeps dark byte-identical; the
   // light re-ink — #0F766E, 4.30:1 on the card, white on it 5.47:1 — is pinned by value in notice-vocab.test.ts)
   ["--link", "--bg", 4.5],          // hyperlink ink (2026-09-02: the light theme's first link ink sat on --err)
+  ["--link", "--surface-raised", 4.5],   // …and on the raised card: the login dialog's sign-in link (the review of #388, where #9cd2ff read 1.48:1 on the light card)
   ["--hl-fg", "--bg", 4.5],         // the hljs syntax palette (tokenized 2026-09-02; was dark-only raw hex)
   ["--hl-kw", "--bg", 4.5],
   ["--hl-str", "--bg", 4.5],
@@ -152,7 +153,7 @@ for (const sheet of ["styles.css", "feed.css"]) {
       }
       // a skip must be loud (PR #763 item 6): pin how many pairs actually ran per sheet/theme —
       // grow these numbers when PAIRS grows, never let them silently shrink
-      const expected = sheet === "styles.css" ? PAIRS.length : 26;   // feed's :root holds a deliberate subset (+ the retrying pair, 2026-09-08; + the two ask pairs, 2026-09-14: the settings' ring demo reads the token there; + the two 5xx pairs, PR 1935 rounds three and four, 2026-09-21: --st-5xx-bg on --bg and --st-5xx-fg on --st-5xx-bg, the feed's root declaring the fill and its text ink; + the error and amber text pairs on the raised card, the review of #387: the settings page links feed.css)
+      const expected = sheet === "styles.css" ? PAIRS.length : 27;   // feed's :root holds a deliberate subset (+ the retrying pair, 2026-09-08; + the two ask pairs, 2026-09-14: the settings' ring demo reads the token there; + the two 5xx pairs, PR 1935 rounds three and four, 2026-09-21: --st-5xx-bg on --bg and --st-5xx-fg on --st-5xx-bg, the feed's root declaring the fill and its text ink; + the error and amber text pairs on the raised card, the review of #387: the settings page links feed.css; + the link on the raised card, the review of #388)
       // T337: the postal kind words also sit on the PROVISIONAL card (a sent card not yet landed wears the pending
       // bubble's dress: an 8.5% wash of --you over the page, styles.css .queued-bubble, no element opacity since the
       // fade moved into the dress's colours), the darkest ground they meet; each reads at 4.5:1 there too
@@ -187,25 +188,58 @@ for (const sheet of ["styles.css", "feed.css"]) {
   });
 }
 
-// The settings panel's red and amber WORDS (the review of #387): #387 made the stored-logins block's colours apply inside #rsettings,
+// The settings panel's WORDS on their grounds. The review of #387: #387 made the stored-logins block's colours apply inside #rsettings,
 // and its red was --err, a fill red that reads 2.82:1 as 12px words on the dark card (the refused notes had read 5.80:1 in the muted
-// grey); the login dialog's error wore the same token. Each rule's colour is read from gear.css as written, resolved through the
-// tokens of each sheet that hosts the gear (styles.css in the VS Code chat, feed.css on the settings page and the VS Code feed), and
-// held at 4.5:1 on the ground the rule's surface paints, in both themes.
-test("gear.css: the settings panel's error and amber words read at 4.5:1 on the card and the login dialog, in both themes of both host sheets", () => {
-  const gear = read("gear.css").replace(/\/\*[\s\S]*?\*\//g, "");
-  const decl = (sel: string, prop: string): string => {
-    const at = gear.indexOf(sel + " {");
-    assert.ok(at >= 0, sel + " is a rule in gear.css");
-    const m = gear.slice(at, gear.indexOf("}", at)).match(new RegExp("(?:^|[;{\\s])" + prop + ":\\s*([^;]+);"));
-    assert.ok(m, sel + " sets " + prop);
-    return m![1].trim();
+// grey); the login dialog's error wore the same token. The review of #388: gear.js still painted the login flow's status line
+// #F85B5A and the dialog's sign-in link #9cd2ff inline, 2.92:1 and 1.48:1 on the light card, and the grep that followed found the
+// dialog's Cancel (#888, 4.32:1 dark, 3.27:1 light), a synchronized row's mixed word (#6f747c, 3.26:1 dark), the effort pickers'
+// empty placeholder (#8a8a8a, 3.29:1 light), the Open log count (#ff6b6b, 2.08:1 light), the Token usage close's hover (#fff,
+// 1.08:1 light) and a description popover's code chip (#0d0d0d under the light popover's dark words, 1.72:1). Each use's colour is
+// read as written (a gear.css rule, where a body.theme-light rule of the same selector wins in the light theme, or the inline style
+// gear.js builds), resolved through the tokens of each sheet that hosts the gear (styles.css in the VS Code chat, feed.css on the
+// settings page and the VS Code feed), and held at 4.5:1 on the layers its surface paints under it, in both themes.
+test("gear: the settings panel's words read at 4.5:1 on their grounds, in both themes of both host sheets", () => {
+  const gear = read("gear.css").replace(/\/\*[\s\S]*?\*\//g, ""), js = read("gear.js");
+  const esc = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const from = (body: string, prop: string): string | null => {
+    const m = body.match(new RegExp("(?:^|[;{\\s])" + prop + ":\\s*([^;]+);"));
+    return m ? m[1].trim() : null;
   };
-  const card = decl(".rs-card", "background"), dialog = decl("#rs-login-modal .rs-login-card", "background");
-  const USES: Array<[string, string, string]> = [   // (what it is, its rule, the ground it sits on)
-    ["the stored logins' failure line and refused notes, and a refused link's note", "#rsettings .rs-logins .rs-login-bad", card],
-    ["an expiring stored login's note", "#rsettings .rs-logins .rs-login-warn", card],
-    ["the login dialog's refusal", "#rs-login-modal .rs-login-err.bad", dialog],
+  // a gear.css rule's declaration as written: the rule that opens a line with the selector, or in the light theme the
+  // body.theme-light rule of that selector where it sets the property
+  const decl = (sel: string, prop: string, light: boolean): string | null => {
+    const rule = (head: string): string | null => {
+      const m = new RegExp("(?:^|\\n)" + esc(head) + " \\{").exec(gear);
+      return m ? gear.slice(m.index, gear.indexOf("}", m.index)) : null;
+    };
+    const own = light ? rule("body.theme-light " + sel) : null, v = own && from(own, prop);
+    if (v) return v;
+    const base = rule(sel);
+    return base && from(base, prop);
+  };
+  // an inline style gear.js builds: the property's value in the style string `at` captures (its pieces, where it is concatenated)
+  const inline = (at: RegExp, prop: string): string | null => {
+    const m = at.exec(js);
+    return m && from(m.slice(1).join("") + ";", prop);
+  };
+  type Paint = [string, string] | RegExp;   // a gear.css (selector, property), or the gear.js style string that sets it
+  const paint = (p: Paint, prop: string, light: boolean) => Array.isArray(p) ? decl(p[0], p[1], light) : inline(p, prop);
+  const CARD: Paint[] = [[".rs-card", "background"]], DIALOG: Paint[] = [["#rs-login-modal .rs-login-card", "background"]];
+  const POPOVER = "#rsettings .rs-row:hover .rs-sub, #rsettings .rs-widget:hover .rs-sub";
+  const CANCEL = /<button id=rs-login-cancel type=button style='([^']*)'>/, PLACEHOLDER = /'<span style="([^"]*)">\\u2026<\/span>'/;
+  const PICKER = /btn\.style\.cssText = '([^']*)' \+\s*'([^']*)';/;
+  const USES: Array<[string, Paint, Paint[]]> = [   // (what it is, its colour, the layers under it from the outermost)
+    ["the stored logins' failure line and refused notes, and a refused link's note", ["#rsettings .rs-logins .rs-login-bad", "color"], CARD],
+    ["an expiring stored login's note", ["#rsettings .rs-logins .rs-login-warn", "color"], CARD],
+    ["the login dialog's refusal", ["#rs-login-modal .rs-login-err.bad", "color"], DIALOG],
+    ["the login flow's status line saying an error", ["#rsettings #rs-login-state.rs-login-bad", "color"], CARD],
+    ["the login dialog's sign-in link", ["#rs-login-modal #rs-login-url a", "color"], DIALOG],
+    ["the login dialog's Cancel", CANCEL, DIALOG],
+    ["a synchronized row's mixed word", ["#rsettings .rs-mixed", "color"], CARD],
+    ["an empty picker's placeholder", PLACEHOLDER, [...CARD, PICKER]],
+    ["the Open log button's unread count", [".rs-log-n", "color"], [...CARD, [".ra-openbtn", "background"]]],
+    ["the Token usage panel's close, hovered", ["#ra-close:hover", "color"], [["#ranalytics", "background"]]],
+    ["a description popover's code", [POPOVER, "color"], [...CARD, [POPOVER, "background"], ["#rsettings .rs-sub code", "background"]]],
   ];
   // a gear value through a theme's tokens: var(--x, fallback) is the token where the sheet declares it, else the fallback
   const resolve = (v: string, theme: Map<string, string>): string => {
@@ -214,20 +248,40 @@ test("gear.css: the settings panel's error and amber words read at 4.5:1 on the 
     return theme.has(m[1]) ? resolve(theme.get(m[1])!, theme) : resolve(m[2].trim(), theme);
   };
   let evaluated = 0;
+  const bad: string[] = [];
   for (const sheet of ["styles.css", "feed.css"]) {
     const css = read(sheet);
     for (const [name, theme] of [["dark", props(block(css, ":root {"))], ["light", props(block(css, "body.theme-light {"))]] as const) {
+      const light = name === "light";
       const page = rgbOf(theme.get("--bg")!, [30, 30, 30])!;
-      for (const [what, sel, groundV] of USES) {
-        const ground = rgbOf(resolve(groundV, theme), page), fore = ground && rgbOf(resolve(decl(sel, "color"), theme), ground);
-        assert.ok(ground && fore, `${sheet} ${name}: ${what} resolves to colours`);
-        const c = contrast(fore!, ground!);
-        assert.ok(c >= 4.5, `${sheet} ${name}: ${what} (${sel}) = ${c.toFixed(2)}:1 on its ground, < 4.5`);
+      for (const [what, fore, layers] of USES) {
         evaluated++;
+        let ground: [number, number, number] | null = page;
+        for (const l of layers) { const v = paint(l, "background", light); ground = ground && v ? rgbOf(resolve(v, theme), ground) : null; }
+        const fv = paint(fore, "color", light), f = ground && fv ? rgbOf(resolve(fv, theme), ground) : null;
+        if (!ground || !f) { bad.push(`${sheet} ${name}: ${what}: no colour or ground as written (${String(fore)})`); continue; }
+        const c = contrast(f, ground);
+        if (c < 4.5) bad.push(`${sheet} ${name}: ${what} = ${c.toFixed(2)}:1 on its ground`);
       }
     }
   }
-  assert.equal(evaluated, 12, "every use, in both themes of both sheets");
+  assert.equal(evaluated, USES.length * 4, "every use, in both themes of both sheets");
+  assert.deepEqual(bad, [], "each reads at 4.5:1");
+});
+
+// The light theme inks the gear's words only through the sheets' tokens: a literal colour gear.js writes into a style is the same
+// in both themes, which is how the login flow's status line and the dialog's sign-in link stayed unreadable on the cream (the review
+// of #388). The one literal left is the menu vocabulary's check mark, white on the themed --check-bg as every surface draws it.
+test("gear.js writes no literal text colour into a style", () => {
+  const found: string[] = [];
+  for (const line of read("gear.js").split("\n")) {
+    if (/\.style\.color\s*=/.test(line) && /'#[0-9a-f]{3,8}'/i.test(line)) found.push(line.trim());
+    for (const m of line.matchAll(/[;'"\s]color:\s*(#[0-9a-f]{3,8})\b/gi)) {
+      if (/background:\s*var\(--check-bg/.test(line)) continue;   // the check mark (above)
+      found.push(m[1] + " in " + line.trim().slice(0, 120));
+    }
+  }
+  assert.deepEqual(found, [], "a literal colour on the gear's words: resolve it through a token the light theme re-inks");
 });
 
 /** OKLab distance x100 between two sRGB colours: about 2 is where two flat fills start to read as two. */
