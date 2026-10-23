@@ -63,11 +63,30 @@ test("a session with no chord bound leaves the set: a cancelled first recording,
   assert.deepEqual(unboundTabKeys({}, {}, false), []);
 });
 
+const SEEN_LOCAL = new Set([""]);          // the local kernel's own strip has landed on this page
+const NO_REMOTES = new Set<string>();      // no linked machine reachable (a single-kernel page has none)
+
 test("a session whose tab left the strip leaves the set — but an EMPTY strip drops nothing (a kernel not yet heard from)", () => {
   const set = { [SID]: "web", [SID2]: "api" };
-  assert.deepEqual(goneTabKeys(set, [SID, "other", SID2]), []);
-  assert.deepEqual(goneTabKeys(set, [SID2]), [SID]);
-  assert.deepEqual(goneTabKeys(set, []), [], "no strip yet is not a strip with nothing on it");
+  assert.deepEqual(goneTabKeys(set, [SID, "other", SID2], SEEN_LOCAL, NO_REMOTES), []);
+  assert.deepEqual(goneTabKeys(set, [SID2], SEEN_LOCAL, NO_REMOTES), [SID]);
+  assert.deepEqual(goneTabKeys(set, [], SEEN_LOCAL, NO_REMOTES), [], "no strip yet is not a strip with nothing on it");
+});
+
+test("a session is judged only by a strip its host has spoken on: a linked machine's hot key survives the local strip landing first (review 2026-10-23)", () => {
+  const ENDED = "11111111-2222-4333-8444-000000000503";   // a local session that really ended
+  const REMOTE = "TESTHOST:11111111-2222-4333-8444-000000000504";   // the tests session on TESTHOST, as the merged strip names it
+  const set = { [SID]: "web", [ENDED]: "old", [REMOTE]: "tests" };
+  // a fresh page: the local kernel's strip is in, TESTHOST's is not (still on its way, or the host was down at load)
+  assert.deepEqual(goneTabKeys(set, [SID, SID2], SEEN_LOCAL, NO_REMOTES), [ENDED], "the local session that ended goes; TESTHOST's waits for TESTHOST");
+  assert.deepEqual(goneTabKeys(set, [SID, SID2], SEEN_LOCAL, new Set(["TESTHOST"])), [ENDED], "reachable but not yet reported on this page: still not judged");
+  // TESTHOST reported earlier but is detached or down now: its tabs left the strip with the link, not by ending
+  assert.deepEqual(goneTabKeys(set, [SID, SID2], new Set(["", "TESTHOST"]), NO_REMOTES), [ENDED]);
+  // TESTHOST reported and is reachable, and its own strip no longer lists the session: that is the session's end
+  assert.deepEqual(goneTabKeys(set, [SID, SID2], new Set(["", "TESTHOST"]), new Set(["TESTHOST"])), [ENDED, REMOTE]);
+  assert.deepEqual(goneTabKeys(set, [SID, SID2, REMOTE], new Set(["", "TESTHOST"]), new Set(["TESTHOST"])), [ENDED], "listed: kept");
+  // the other way round: TESTHOST's strip lands before the local kernel's, and says nothing about the local sessions
+  assert.deepEqual(goneTabKeys(set, [REMOTE], new Set(["TESTHOST"]), new Set(["TESTHOST"])), []);
 });
 
 test("a renamed session is re-titled in the set; a nameless or unchanged one is left alone", () => {
@@ -80,8 +99,8 @@ test("a renamed session is re-titled in the set; a nameless or unchanged one is 
 
 test("render.ts: the pane keeps the set honest at the strip — departed tabs drop out, renamed ones re-title — and the shell follows", () => {
   assert.match(RENDER, /import \{ hotkeyCommandId, loadTabKeys, rememberTabKey, forgetTabKey, goneTabKeys, renamedTabKeys \} from "\.\/tab-keys";/);
-  assert.match(RENDER, /for \(const id of kernelOrder\) kernelListed\.add\(id\);[\s\S]*?\n\s*renderTabs\(\);\n\s*syncTabKeysWithStrip\(\);\n\}/, "after every tab-order push (the T357 restore between, the strip painted, then the set follows it)");
-  assert.match(RENDER, /function syncTabKeysWithStrip\(\): void \{\n\s*if \(!inRompShell\(\)\) return;[\s\S]*?for \(const sid of goneTabKeys\(set, order\)\) \{ forgetTabKey\(localStorage, sid\); saveOverride\(hotkeyCommandId\(sid\), null\); \}\n\s*for \(const \[sid, name\] of renamedTabKeys\(set, \(sid\) => sessions\.get\(sid\)\?\.name\)\) rememberTabKey\(localStorage, sid, name\);/);
+  assert.match(RENDER, /for \(const id of kernelOrder\) kernelListed\.add\(id\);[\s\S]*?\n\s*if \(stripFrom !== null\) hostsSeen\.add\(stripFrom\);[\s\S]*?\n\s*renderTabs\(\);\n\s*syncTabKeysWithStrip\(\);\n\}/, "after every tab-order push (the T357 restore between, the frame's host noted, the strip painted, then the set follows it)");
+  assert.match(RENDER, /function syncTabKeysWithStrip\(\): void \{\n\s*if \(!inRompShell\(\)\) return;[\s\S]*?for \(const sid of goneTabKeys\(set, order, hostsSeen, reachableHosts\(\)\)\) \{ forgetTabKey\(localStorage, sid\); saveOverride\(hotkeyCommandId\(sid\), null\); \}\n\s*for \(const \[sid, name\] of renamedTabKeys\(set, \(sid\) => sessions\.get\(sid\)\?\.name\)\) rememberTabKey\(localStorage, sid, name\);/);
   assert.match(RENDER, /s\.name = m\.name; renderTabs\(\); syncTabKeysWithStrip\(\);/, "and on a rename");
   // the shell: every bindings write it hears prunes the unbound (its own KEYS_EVENT, a pane's storage event), never
   // while the dialog is up; a change to the set re-syncs the registry, unregistering departed sessions

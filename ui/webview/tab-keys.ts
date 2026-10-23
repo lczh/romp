@@ -10,6 +10,7 @@
 // names, so the shell can register them at boot before any pane has loaded (`romp:tabkeys`, per browser
 // like the bindings themselves). Pure and DOM-free so node executes the rules; storage is passed in.
 import { effectiveChord, type Bindings } from "./keybindings";
+import { hostOf } from "./host-prefix";
 
 export const TABKEYS_KEY = "romp:tabkeys";
 export const HOTKEY_PREFIX = "session.hotkey.";
@@ -58,11 +59,23 @@ export function unboundTabKeys(set: TabKeys, overrides: Bindings, mac: boolean):
   return Object.keys(set).filter((sid) => !tabChord(sid, overrides, mac));
 }
 
+/** A set-like reader: the hosts-seen and reachable sets only ever answer `has`. */
+export interface HasHost { has(host: string): boolean }
+
 /** Sessions in the set whose tab the strip no longer carries — none while the strip is empty (a kernel not
- *  yet heard from is not a strip with nothing on it). */
-export function goneTabKeys(set: TabKeys, order: readonly string[]): string[] {
+ *  yet heard from is not a strip with nothing on it), and none whose HOST cannot speak for it (review,
+ *  2026-10-23). A session is judged only when its host's own strip has landed on this page (`hostsSeen`,
+ *  tab-order.ts stripHost: "" is the local kernel) and, for a linked machine's session (`host:uuid`), that
+ *  host is reachable now (`reachable`, tab-groups.ts reachableFrom: attached, up, its tab list in this pane).
+ *  The local kernel's strip lands first on a fresh page and says nothing about a linked machine's sessions;
+ *  a host down at load never reports; a detached host's sessions leave the strip with it; a linked
+ *  machine's strip that lands first says nothing about the local ones. None of these is a session's end,
+ *  and judged, each erased the hot key for good: on every reload, for a linked machine's tab. The pin prune
+ *  (prunePinned) and the column's emptiness check (columnEmptiness) keep the same host rule. */
+export function goneTabKeys(set: TabKeys, order: readonly string[], hostsSeen: HasHost, reachable: HasHost): string[] {
   if (!order.length) return [];
-  return Object.keys(set).filter((sid) => !order.includes(sid));
+  const judged = (sid: string) => { const h = hostOf(sid); return hostsSeen.has(h) && (h === "" || reachable.has(h)); };
+  return Object.keys(set).filter((sid) => judged(sid) && !order.includes(sid));
 }
 
 /** Sessions in the set whose stored title trails the tab's current name: [sid, name] pairs to re-remember. */
