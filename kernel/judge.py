@@ -8592,11 +8592,10 @@ def rollup_status(store, session_closed, now=None):
     # parentId puts the child back under the completed node, and the very next rollup lifts it again
     # (the rebase folds diary rows, not parents). rolledUp tracking nodes are skipped on purpose:
     # their completion rolled down from an ANCESTOR the judges actually ruled — that absorb is the
-    # designed umbrella ending, not an association.
-    for _hid in list(nodes):
-        _hn = nodes[_hid]
-        if isinstance(_hn.get("handoff"), dict) and _hn.get("nodeComplete") and not _hn.get("rolledUp"):
-            _lift_handoff_children(store, _hid)
+    # designed umbrella ending, not an association. One pass over the nodes serves every tracking
+    # node at once (_lift_completed_handoffs): a pass per tracking node made a large store's rollup
+    # cost its size times its number of completed delegations.
+    _lift_completed_handoffs(store)
     # UMBRELLA DISSOLUTION (the user 2026-08-26, T101: the board's unit is the individual ask; the
     # round is never a tracked unit): container nodes the retired grouper/consolidator minted
     # (umbrella:True) dissolve here, in every writer's rollup — their children re-parent to
@@ -10620,7 +10619,7 @@ def plan_units(session, store=None, floor=_UNSET_FLOOR, lazy_text=False):
                 t = text_fn()                             # a prompt unit's text is its one user atom: read here, as before
                 if t:
                     out.append((seg["id"], phase, seg["t"], t, human_, followup_, trig, _quote()))
-            if not is_open_final and not _has_asst_work(seg["atoms"]):
+            if not is_open_final and not _seg_work(seg):   # a restored segment's stored verdict (w), else the atoms (2026-10-23)
                 # The segment ENDED with no assistant work at all — the turn died before producing anything
                 # (an API-error storm that exhausted; isApiError records don't count, same rule as the
                 # captioner). A work/nudge/delegation unit here hands the planner "USER ASKED: …" with no
@@ -12330,6 +12329,50 @@ def _asks_user(nodes, nid):
     return False
 
 
+def _pre_uuids(turn):
+    """A restored pre-cut turn's stored atom uuids (em.PreTurn's `uuids`: written from its atoms' own uuids, one per atom,
+    in order, and proved at the restore), so a walker that wants only uuids builds no atom; None for any other turn, whose
+    atoms are read."""
+    if turn.get("pre"):
+        u = turn.get("uuids")
+        if u is not None and len(u) == len(turn.get("atoms") or ()):
+            return u
+    return None
+
+
+def _parse_atom_uuids(session):
+    """Every truthy atom uuid of a parse, as a set: what _note_checked looks a candidate's anchor up in. A restored pre-cut
+    turn answers from its stored uuids (_pre_uuids), so no pre-cut atom is built or touched (2026-10-23: the planner pass
+    walked every atom of a long session for this set on every pass)."""
+    out = set()
+    for turn in session.get("turns") or []:
+        pu = _pre_uuids(turn)
+        if pu is not None:
+            out.update(u for u in pu if u)
+        else:
+            out.update(a.get("uuid") for a in turn.get("atoms") or [] if a.get("uuid"))
+    return out
+
+
+def _parse_atoms_by_uuid(session, want):
+    """{uuid: atom} for the parse's atoms whose uuid is in `want`, the LAST atom winning a repeated uuid, as a dict over
+    every atom gave. A restored pre-cut turn builds only the atoms its stored uuids name in `want` (_pre_uuids)."""
+    out = {}
+    for turn in session.get("turns") or []:
+        pu = _pre_uuids(turn)
+        if pu is not None:
+            atoms = turn["atoms"]
+            for i, u in enumerate(pu):
+                if u and u in want:
+                    out[u] = atoms[i]
+        else:
+            for a in turn.get("atoms") or []:
+                u = a.get("uuid")
+                if u and u in want:
+                    out[u] = a
+    return out
+
+
 def _latch_prompt_msg_ids(session, store):
     """Stamp promptMsgId on every parentless promptUuid-bearing top whose anchor atom the parse holds: the id of the
     DELEGATE-kind postal marker its delivery text carries (em.postal_pairs pairs each id with the kind declared after
@@ -12345,7 +12388,7 @@ def _latch_prompt_msg_ids(session, store):
              if isinstance(nd, dict) and nd.get("parentId") is None and nd.get("promptUuid") and "promptMsgId" not in nd]
     if not cands:
         return 0
-    by_uuid = {a["uuid"]: a for turn in session.get("turns") or [] for a in turn.get("atoms") or [] if a.get("uuid")}
+    by_uuid = _parse_atoms_by_uuid(session, {nd["promptUuid"] for nd in cands})
     sid = str(store.get("rompUuid") or "")
     n = 0
     for nd in cands:
@@ -12518,9 +12561,13 @@ def _note_checked(store, atom_uuids):
     """The planner pass's converge step: a candidate top whose prompt anchor IS an atom of the current parse is
     anchored on something the parse emits (a prompt, a mail, the agent's own record), never on the harness's
     wrapper (which emits nothing), so it is checked for good and the boot pass never reads a file for it.
-    Returns how many were noted."""
+    `atom_uuids` is the parse's uuid set, or a callable returning it, called only when a candidate exists (the planner
+    pass hands _parse_atom_uuids that way). Returns how many were noted."""
     n = 0
-    for nd in _skill_load_candidates(store.get("nodes") or {}):
+    cands = _skill_load_candidates(store.get("nodes") or {})
+    if cands and callable(atom_uuids):
+        atom_uuids = atom_uuids()
+    for nd in cands:
         if nd["promptUuid"] in atom_uuids:
             _CHECKED.add(nd["promptUuid"])
             _WRAP_DIRTY["v"] = True
@@ -13316,7 +13363,7 @@ def _plan_session(fsid, path, now):
         #   segment's chain liveness, not about anchor suitability.
         _group_store(store, fsid, now)
         save_goals(fsid, store)
-    _note_checked(store, {a.get("uuid") for turn in session.get("turns") or [] for a in turn.get("atoms") or [] if a.get("uuid")})
+    _note_checked(store, lambda: _parse_atom_uuids(session))   # the uuid set read only for a candidate, no pre-cut atom built
     _latch_prompt_msg_ids(session, store)             # T334: the mail a top's anchor names, for its delegating peer
     _latch_skill_load_anchors(store, session.get("skillLoads") or {}, now)   # the parse's own report of the wrappers its
     #                                                   emit skipped: a top the harness's skill load minted (T333)
@@ -19805,6 +19852,36 @@ def _lift_handoff_children(store, hid):
         if nd.get("parentId") == hid and not nd.get("nodeComplete") and not nd.get("cleared"):
             nd["parentId"] = dest
             moved += 1
+    return moved
+
+
+def _lift_completed_handoffs(store):
+    """rollup_status's pre-pass: _lift_handoff_children for every COMPLETED handoff tracking node that is not rolledUp, in
+    the store's node order, from ONE pass over the nodes instead of one pass per tracking node (a store with thousands of
+    nodes and hundreds of completed delegations walked its whole node map once per delegation on every rollup, 2026-10-23).
+
+    The result is exactly what the per-node calls gave. A lift writes parentId only, and only on an open, uncleared node; a
+    tracking node is complete, so it never moves and its destination (its own parent) is fixed. So which nodes are tracking
+    nodes and which can move are read once, the movable nodes indexed by their current parent. Each tracking node, in node
+    order, hands its current children to its own parent, where a tracking node LATER in the order takes them on again and
+    an earlier one does not, as the per-node calls did. Returns the number of moves."""
+    nodes = store["nodes"]
+    lifted, kids = [], {}
+    for nid, nd in nodes.items():
+        if isinstance(nd.get("handoff"), dict) and nd.get("nodeComplete") and not nd.get("rolledUp"):
+            lifted.append(nid)
+        if not nd.get("nodeComplete") and not nd.get("cleared"):
+            kids.setdefault(nd.get("parentId"), []).append(nd)
+    moved = 0
+    for hid in lifted:
+        mine = kids.pop(hid, None)
+        if not mine:
+            continue
+        dest = nodes[hid].get("parentId")
+        for nd in mine:
+            nd["parentId"] = dest
+        kids.setdefault(dest, []).extend(mine)
+        moved += len(mine)
     return moved
 
 

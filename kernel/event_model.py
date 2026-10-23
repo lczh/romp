@@ -11004,9 +11004,14 @@ def plan_atoms(session):
     carrying those calls' results. A lazy atom answers from its scalars (tu = [[id, name]], tr = [tool_use_id]), a
     hydrated one from its blocks, so the list costs no read; hydrating it reads nothing for a session that declared
     no plan (the planner asks every pass for every session with no task store: the whole prefix a pass would
-    otherwise seek-read, T323 stage 4a review)."""
+    otherwise seek-read, T323 stage 4a review). A restored pre-cut turn whose stored tool calls (`tools`: the
+    [id, name] pairs of its assistant atoms, written from the same atoms by atom_tool_uses) name no task call is
+    passed over without building an atom, as the kernel's task fold passes it (2026-10-23: the walk built or touched
+    every pre-cut atom of a long session on every planner pass, to find none)."""
     out, ids = [], set()
     for turn in session.get("turns", []):
+        if turn.get("pre") and not any(n in ("TaskCreate", "TaskUpdate") for _i, n in turn.get("tools") or ()):
+            continue
         for a in turn["atoms"]:
             if a.get("type") != "assistant":
                 continue
