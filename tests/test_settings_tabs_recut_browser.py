@@ -436,7 +436,8 @@ class ServedSettingsTabs(unittest.TestCase):
         self.assertEqual([x["tab"] for x in g["pills"]], ["general", "chat", "feed", "sessions", "automation", "tasks", "debug"], table)
         self.assertEqual([x["text"] for x in g["pills"]], ["General", "Chat", "Feed", "Sessions", "Automation", "Task tracking", "Debug"], table)
         self.assertEqual(g["shown"], ["general"], "the ask for General shows General alone" + table)
-        self.assertEqual(g["heads"]["general"], ["Account", "Panes", "Appearance", "Permissions", "This machine", "Keyboard shortcuts"], table)
+        self.assertEqual(g["heads"]["general"], ["Account", "Panes", "Appearance", "Permissions", "Memory, models and updates", "Keyboard shortcuts"],
+                         "the head over Conserve memory, Extra models and Updates names what the rows do, never one machine (the #374 review)" + table)
         self.assertEqual(g["heads"]["chat"], ["Display", "Boxes below the transcript", "Comments", "Thinking", "Chat history", "Tab strip", "Tab widgets", "Status line"], "the Needs you box's switch heads its own section after Display (the user 2026-09-23, who did not find it under Display); Transcript is Display; the text scheme and the strip row joined it; Thinking creates, so it is Chat's; the Status line section follows Tab widgets (T409)" + table)
         self.assertEqual(g["heads"]["debug"], ["Judging bands", "Diagnostics"], "Updates went to General" + table)
         self.assertEqual(g["heads"]["tasks"], ["Task tracking", "Judges"], "the master switch, then the judges (T404 PR 2)" + table)
