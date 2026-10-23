@@ -473,7 +473,7 @@ test("a box is named by its title alone and described by its state, what a click
 const loginsBlock = (page: any) => page.evaluate(() => {
   const bad = document.querySelector("#rs-logins .rs-login-bad") as HTMLElement | null;
   const probe = document.createElement("span");
-  probe.style.color = "var(--err-fg, #F85B5A)";   // the error red as text (the review of #387; theme-parity.test.ts holds its contrast)
+  probe.style.color = "var(--err-ink, #F85B5A)";   // the error red as text (the review of #387; theme-parity.test.ts holds its contrast)
   document.getElementById("rs-logins")!.appendChild(probe);
   const red = getComputedStyle(probe).color;
   probe.remove();

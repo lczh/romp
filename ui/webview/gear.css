@@ -79,6 +79,8 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
    row wears, whatever the order in this sheet */
 #rsettings .rs-row:hover .rs-fastin.rs-up .rs-sub { top: auto; bottom: 100%; margin-top: 0; margin-bottom: 2px; }
 #rsettings .rs-sub code { background: #0d0d0d; border-radius: 3px; padding: 0 3px; }
+/* …a near-black chip under the light popover's dark words read 1.72:1: the light theme's code wash instead (the dark chip stays) */
+body.theme-light #rsettings .rs-sub code { background: var(--code-bg, rgba(180, 83, 9, 0.08)); }
 /* an inline live status beside a control (the login flow's "starting…") — visible when non-empty,
    never a popover (as an rs-sub it doubled the Account row's tooltip, 2026-09-02) */
 #rsettings .rs-note { color: var(--text-muted, #9aa0a6); font-size: 0.92em; }
@@ -101,8 +103,9 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
 #rsettings .rs-row:has(.rs-mixed:hover) .rs-sub { display: none; }
 /* A setting whose value differs between the connected machines: the checkbox goes tri-state, and this
    says so in words beside the label, because an indeterminate box alone is easy to read straight past.
-   Label size, section grey — the hover line names which machines. */
-#rsettings .rs-mixed { color: #6f747c; margin-left: 6px; }
+   Label size, the notes' muted ink (the old section grey #6f747c read 3.26:1 on the dark card and 4.34:1 on the light one) —
+   the hover line names which machines. */
+#rsettings .rs-mixed { color: var(--text-muted, #9aa0a6); margin-left: 6px; }
 /* the DISAGREEMENT FLAG on a synchronized row (phase two, plans/settings-across-machines.md): the mixed mark's slot, the word
    in the heads-up amber so it is seen without reading; the count on the selector wears the same */
 #rsettings .rs-mixed.rs-differs, #rsettings .rs-differs { color: var(--warn, #d7a23a); font-weight: 600; }
@@ -214,6 +217,7 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
 #ranalytics .ra-title { font-weight: 600; font-size: 14px; color: var(--text-bright, #e8eaed); }
 #ra-close { background: none; border: none; color: var(--text-muted, #9aa0a6); font-size: 16px; cursor: pointer; line-height: 1; }
 #ra-close:hover { color: #fff; }
+body.theme-light #ra-close:hover { color: var(--text-bright, #141312); }   /* white on the cream card read 1.08:1 */
 .ra-periods, .ra-group, .ra-metric { display: flex; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; }
 .ra-periods button, .ra-group button, .ra-metric button { background: var(--btn-bg, #2a2a2a); border: 1px solid var(--hairline, #3a3a3a);
   border-radius: 5px; color: var(--text-muted, #9aa0a6); font: 12px/1 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif; padding: 5px 9px; cursor: pointer;
@@ -295,11 +299,16 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
 #rs-login-modal .rs-login-err { margin-top: 8px; font-size: 0.92em; color: var(--text-muted, #9aa0a6); overflow-wrap: anywhere; }
 /* the dialog's outcome (2026-09-30): "Signed in as <who>" in the body ink, where the waits and the paste step stood */
 #rs-login-modal .rs-login-ok { margin-top: 8px; color: var(--fg, #ccc); overflow-wrap: anywhere; }
-#rs-login-modal .rs-login-err.bad { color: var(--err-fg, #F85B5A); }   /* the error red as text: --err read 2.82:1 on the dark card */
+#rs-login-modal .rs-login-err.bad { color: var(--err-ink, #F85B5A); }   /* the error red as text: --err read 2.82:1 on the dark card */
+/* the sign-in link in the link ink every rendered link wears (feed.css, styles.css: the accent blue on the served dark page, cobalt
+   on the cream); gear.js once painted it #9cd2ff inline, 1.48:1 on the light card */
+#rs-login-modal #rs-login-url a { color: var(--link, #9cd2ff); }
 
 /* the Open log button's unread count (T290): the red the bar's triangle wore when something was unread —
    a STATUS colour (the accent/status split), so it is the same literal on every surface */
 .rs-log-n { color: #ff6b6b; font-weight: 600; }
+/* …on the dark button; on the light one that red read 2.08:1, so the light theme says it in the error red as text */
+body.theme-light .rs-log-n { color: var(--err-ink, #B02A1C); }
 
 /* the stored logins under the Account row (T346): one line per login (its label, its state, a Remove), the
    sub-line's size; a refused or expired one wears the blocked red, an expiring one the working amber */
@@ -310,7 +319,10 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
    these, so the red and the amber never showed, a failed read's line included (seen in the review of #383). The red is the error
    TEXT token: --err, a fill red, read 2.82:1 as these words on the dark card, below the muted grey's 5.80:1 that it replaced (the
    review of #387); theme-parity.test.ts holds both inks at 4.5:1 on the card in both themes */
-#rsettings .rs-logins .rs-login-bad { color: var(--err-fg, #F85B5A); }
+#rsettings .rs-logins .rs-login-bad { color: var(--err-ink, #F85B5A); }
+/* the login flow's own status line beside its button, when it carries the CLI's refusal or error (gear.js lgRender): the same red,
+   from the sheet; gear.js once painted #F85B5A inline, 2.92:1 on the light card */
+#rsettings #rs-login-state.rs-login-bad { color: var(--err-ink, #F85B5A); }
 #rsettings .rs-logins .rs-login-warn { color: var(--st-working-bg, #e5c07b); }
 .rs-logins .rs-login-rm { flex: 0 0 auto; cursor: pointer; font: inherit; background: var(--btn-bg, #2a2a2a); color: var(--fg, #ccc);
   border: 1px solid var(--hairline, #3a3a3a); border-radius: 5px; padding: 2px 8px; }

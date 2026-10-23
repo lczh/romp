@@ -28,7 +28,7 @@
   --green: #74c991;
   --err: #c0392b;   /* the hard stop's red (the ⏸ live-block badge; mirrors styles.css). feed.css has its OWN :root, so a token
                        a rule reads must be defined HERE or var() falls back to gray; the Needs you marks read --st-needs-bg below */
-  --err-fg: #F85B5A;   /* the error red as TEXT (the settings page links this sheet): mirrors styles.css */
+  --err-ink: #F85B5A;   /* the error red as TEXT (the settings page links this sheet): mirrors styles.css */
   --warn: #d7a23a;  /* the heads-up amber — mirrors styles.css; ONE amber for "attention, not an error":
                        the toast's left rule, the judge-warnings head (two near-twin hexes before 2026-08-26) */
   --box-border: rgba(255, 255, 255, 0.12);  /* mirrors styles.css — same trap as --err: an undefined var()
@@ -169,7 +169,7 @@ body.theme-light {
   --box-bg: rgba(0, 0, 0, 0.03);
   --box-border: rgba(0, 0, 0, 0.12);
   --err: #B02A1C;
-  --err-fg: #B02A1C;   /* the error red as text: mirrors styles.css */
+  --err-ink: #B02A1C;   /* the error red as text: mirrors styles.css */
   --accent: #C2410C; --accent-fg: #FFF8F2;
   --accent-ink: #A83808;   /* accent-coloured labels on the cream: mirrors styles.css */
   --deny: #B02A1C;   /* the deny label and border on the cream: mirrors styles.css */
