@@ -975,14 +975,28 @@ class ConvergeAssembly(Harness):
 
     def test_a_write_over_the_cycles_budget_is_deferred_to_the_next(self):
         path = self.idle_leaf("budget")
-        self.km.CKPT_CONVERGE_BYTES = 1
-        self.cycle(NOW + 600)
+        self.km._begin_checkpoint_cycle()
+        em.checkpoint_cycle_charge(self.km.CKPT_CONVERGE_BYTES - 1)   # the cycle's budget spent by earlier work: no room left
+        self.km._converge_checkpoints(NOW + 600)
         self.assertFalse(em._asm_ckpt_file(path).exists())
         self.assertEqual(em.asm_checkpoint_stats()["converge"]["deferred"], 1)
-        self.km.CKPT_CONVERGE_BYTES = em._CKPT_CYCLE_CAP_DEFAULT
-        self.cycle(NOW + 601)
+        self.cycle(NOW + 601)                                          # a fresh cycle: the budget whole again
         self.assertTrue(em._asm_ckpt_file(path).exists())
         self.assertEqual(em.asm_checkpoint_stats()["converge"]["writes"], 1)
+
+    def test_a_leaf_over_the_whole_cycles_budget_goes_to_the_rebuild_and_is_never_deferred(self):
+        """2026-10-23: an estimate over the WHOLE budget fits no cycle. It was deferred at every cycle, and each deferral stopped
+        the step for the cycle; idle, an 824 MB leaf went six kernel lives with no document. It is counted overCap, done for its
+        file state, and handed to the document rebuild (a private parse that holds no reader of the leaf)."""
+        path = self.idle_leaf("overcap")
+        self.km.CKPT_CONVERGE_BYTES = 1
+        saved = em._ASM_REBUILD_MIN; em._ASM_REBUILD_MIN = 1; self.addCleanup(setattr, em, "_ASM_REBUILD_MIN", saved)
+        em._ASM_REBUILD.clear()
+        for k in range(2):
+            self.cycle(NOW + 600 + k)
+        av = em.asm_checkpoint_stats()["converge"]
+        self.assertEqual((av["deferred"], av["skipped"].get("overCap"), av["writes"]), (0, 1, 0), "once, never deferred: %s" % av)
+        self.assertEqual([p[:2] for p in em.asm_rebuild_pending()], [(path, SID)], "the rebuild's")
 
     def test_a_zero_byte_budget_turns_the_step_off_rather_than_deferring_forever(self):
         """Round one, low 2: with ROMP_CKPT_CONVERGE_MB=0 every attempt was deferred and candidates and deferred grew each cycle."""

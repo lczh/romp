@@ -14266,6 +14266,12 @@ def _release_oldest(table, cap=4096):
 _ASM_CONVERGE_FLAG = {}             # leaf -> the file state under which a flag mismatch was counted (once, not per cycle)
 
 
+def _converge_assembly_est(size):
+    """The converge pass's byte estimate for an assembly write over a leaf of `size` bytes (the document runs about a sixty-fourth
+    of the leaf), taken from the cycle's budget before the write and trued up after it."""
+    return max(4096, int(size) // 64)
+
+
 _SUBAGENT_LEAF_RE = re.compile(r"^agent-(a[0-9a-f]{16})\.jsonl$")   # an agent's own transcript's name (_AGENT_ID_RE's id)
 
 
@@ -14359,7 +14365,17 @@ def _converge_assembly_leaf(key, sid, t0, flags=None):
     em.asm_converge_stat("candidates")
     if _EXIT_STAND_DOWN.is_set():
         return None                                        # the exit has begun: no document starts beside it (the caller stops)
-    est = max(4096, st[1] // 64)
+    est = _converge_assembly_est(st[1])
+    if est > CKPT_CONVERGE_BYTES:
+        # A leaf whose estimate is over the WHOLE cycle's budget fits no cycle (2026-10-23): over 64 times the budget, 512 MB at the
+        # default 8 MB. It was deferred at every cycle, and the deferral stopped the step, so the leaves after it in the cache's
+        # order waited too; idle, it never settles, so an 824 MB session went six kernel lives with no document and parsed whole
+        # at every boot. It is the rebuild's (_asm_rebuild_maybe): a private parse that takes no key lock, where a write here
+        # would hold the leaf's readers for the whole of it. Done for this file state, and the step goes on to the next leaf
+        _ASM_CONVERGE_DONE[key] = st
+        em.asm_converge_skip("overCap")
+        em.asm_rebuild_note(key, sid, "overCap")
+        return False
     if not em.checkpoint_cycle_take(est):
         em.asm_converge_stat("deferred")
         return None
@@ -14622,6 +14638,71 @@ def _asm_refresh_maybe(leaf, sid):
             sys.stderr.write("assembly checkpoint refresh: %s\n" % traceback.format_exc())
     threading.Thread(target=_run, name="asm-refresh", daemon=True).start()
     return True
+
+
+ASM_REBUILD = os.environ.get("ROMP_ASM_REBUILD", "1") != "0"   # the document rebuild (2026-10-23); 0 turns it off
+
+
+def _asm_rebuild_maybe():
+    """Start the rebuild of ONE leaf a parse found without a document (em.asm_rebuild_note: refused, missing, or too big for the
+    converge pass), the largest pending, on a thread of its own at the lowest CPU priority, when no refresh or rebuild runs (the
+    two share one claim: one whole parse at a time). Run once per document writer cycle, after the converge pass, so the
+    rebuilds go one after another at the jobs pass's cadence. Nothing here parses or reads: a stat per pending leaf, and the
+    thread (asm_refresh_document's private road) takes no key lock, so no page connect, chat build or pusher cycle waits on it.
+    A leaf the converge pass can still write from the boot's own read is left to it (its whole entry and the reader's whole
+    record entry resident, under the display parse's flag, and its estimate inside the cycle's budget: no second parse), and so
+    is a subagent's own transcript (parsed under its parent's id, whose candidates the refresh road does not build). Off with
+    ROMP_ASM_REBUILD=0 and once the exit's stand-down is set. Returns whether a rebuild was started."""
+    if not ASM_REBUILD or _EXIT_STAND_DOWN.is_set() or em.asm_refresh_running():
+        return False
+    converge_on = ASM_CONVERGE and CKPT_CONVERGE_MS > 0 and em.checkpoint_drop_writes_on()
+    for leaf, sid, why, size in em.asm_rebuild_pending():
+        if _subagent_leaf_agent(leaf) is not None:
+            em.asm_rebuild_drop(leaf, sid, "subagent")
+            continue
+        human = bool(_display_sdk_human(sid))
+        if (converge_on and _converge_assembly_est(size) <= CKPT_CONVERGE_BYTES
+                and em.asm_entry_whole(leaf, sid, human) and em.entry_whole_resident(leaf)):
+            continue                                       # the converge pass (or the settle) writes it from the read in hand
+        why = em.asm_rebuild_claim(leaf, sid, human)
+        if why is None:
+            return False                                   # another whole parse took the claim meanwhile: the next cycle
+
+        def _run(leaf=leaf, sid=sid, human=human, why=why):
+            _set_stage("asm.rebuild")                      # its reads count under their own stage on /perf
+            _lower_thread_priority()
+            try:
+                wrote = jd.asm_refresh(sid, leaf, int(time.time()), sdk_human=human, rebuild=why)
+            except Exception as e:                         # asm_refresh_document releases the claim itself; a raise before it ran
+                em.asm_rebuild_abandon(leaf, sid, human, why, repr(e))
+                sys.stderr.write("assembly document rebuild: %s\n" % traceback.format_exc())
+                return
+            if wrote:
+                try:
+                    em.release_records([leaf])             # its whole read served the document alone: the next parse restores
+                except Exception:
+                    sys.stderr.write("assembly document rebuild: %s\n" % traceback.format_exc())
+        try:
+            threading.Thread(target=_run, name="asm-rebuild", daemon=True).start()
+        except Exception as e:                             # no thread (the process is at its limit): the claim is released
+            em.asm_rebuild_abandon(leaf, sid, human, why, repr(e))
+            raise
+        return True
+    return False
+
+
+def _lower_thread_priority():
+    """The calling thread at the lowest scheduling priority (nice 19), on Linux, where a thread id names one thread to
+    setpriority. A rebuild's whole parse is the kernel's one background job that can run for a minute: lowered, the OS runs the
+    pusher's and the connect handlers' threads first whenever the CPU is contended. A no-op elsewhere (on macOS that id would
+    name a process) or when refused."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), 19)
+        return True
+    except (AttributeError, OSError):
+        return False
 
 
 def _interrupt_block_tick(now, live_map):
@@ -39924,6 +40005,9 @@ _chat_baseline_raced = {}                        # sid -> the length of the long
 # cache share them — so nothing may write into a prefix event in place; every such write (tool
 # output fill, skillMd, interrupt cause, tlId, askAnswer) either happens in the tail or demotes.
 _RENDER_FLOOR = {}                               # sid → the render floor the pusher's last build used (T323 stage 4b)
+_RENDER_FLOOR_CUT = {}                           # sid → the tree's cut when that floor WAS the cut (no index client held it at 0),
+#                                                  else None: what lets a follower tell a floor the pusher chose from one an older
+#                                                  tree left (_follower_floor, 2026-10-23)
 _PAGE_FILL_TURNS = 4                             # turns stepped past a page's end so a late tool result or Skill payload fills its card
 
 
@@ -40014,6 +40098,28 @@ def _uniq_event_uuids(tail, prefix=(), seen=None):
         if n:
             ev["key"] = "%s#%d" % (u, n + 1)             # the wire's KEY: the uuid stays the record's (a tool event and its
         seen[u] = n + 1                                  #  text share one; deep links land on the record by uuid)
+
+
+def _follower_floor(sid, cut, rebuild=True):
+    """The render floor of a chat build OUTSIDE the pusher's cycle (a page connect's targeted push, a history reply, a page's
+    signature) over a tree whose cut is `cut`: the floor the pusher's last build used, so the two lists line up, EXCEPT when
+    that floor was the pusher's tree's cut and this tree's cut lies past it. The tree has gained a document since (a whole
+    parse's entry re-seated on the document written from it, its pre-cut turns lazy): the pusher's floor described the older
+    tree, not a decision for this one. Followed, it held every such build at turn 0 (2026-10-23: the largest session's second
+    chat build, after its document was written, rendered and hydrated every turn from 0, 78 s, while the pusher's cached build
+    kept that floor standing). Then the build takes the cut, and with `rebuild` the pusher's cached build of the session is
+    dropped and the session named to the next cycle, which rebuilds at the same cut, so the lists agree again. A floor the
+    pusher held at 0 for an index client is followed as before; with no record the cut is the floor."""
+    rec = _RENDER_FLOOR.get(sid)
+    if rec is None:
+        return cut
+    at = _RENDER_FLOOR_CUT.get(sid)
+    if at is not None and rec == at and cut > at:
+        if rebuild:
+            _built_chat.pop(sid, None)
+            _push_session_soon(sid)
+        return cut
+    return rec
 
 
 def _asm_cut_turn(session):
@@ -46807,15 +46913,13 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     elif path_override:
         _floor = 0
     else:
-        if floor is None:
-            _f0 = getattr(_live_scope, "chat_floor0", None)   # the pusher's decision for this cycle (True: a proto-1
-            if _f0 is not None:                                #  client is connected, build from turn 0); a handler
-                floor = 0 if _f0 else _cut                     #  thread renders from the floor the pusher last used
-            else:
-                floor = _RENDER_FLOOR.get(sid, _cut)
+        _f0 = getattr(_live_scope, "chat_floor0", None)       # the pusher's decision for this cycle (True: a proto-1
+        if floor is None:                                      #  client is connected, build from turn 0); a handler
+            floor = (0 if _f0 else _cut) if _f0 is not None else _follower_floor(sid, _cut)   # thread follows the pusher's
         _floor = max(0, min(int(floor), _cut))
-        if getattr(_live_scope, "chat_floor0", None) is not None:
+        if _f0 is not None:
             _RENDER_FLOOR[sid] = _floor       # the pusher's build is the authority the other builders follow
+            _RENDER_FLOOR_CUT[sid] = _cut if (_f0 is False and _floor == _cut) else None   # …and whether it was the tree's cut
     _placed = tuple(session.get("_placed") or ())    # stale echoes placed into sealable turns (T344): the fold's "echo" key
     _n_pref = len(_turns) - 1                 # candidate prefix: every turn but the last
     _fk, _fe, _fold_ok, _fold_why = _floor, None, False, None
@@ -63013,7 +63117,7 @@ def _page_sig(sess, sid, now, floor=None, turns=None):
         except Exception:
             return None
         turns = parsed["turns"] if turns is None else turns
-        floor = _RENDER_FLOOR.get(sid, _asm_cut_turn(parsed)) if floor is None else floor
+        floor = _follower_floor(sid, _asm_cut_turn(parsed), rebuild=False) if floor is None else floor
     last = None
     if 0 < floor <= len(turns) and turns[floor - 1].get("atoms"):
         _lt = turns[floor - 1]
@@ -63305,7 +63409,7 @@ def _chat_history_reply(sid, msg, now, base=None):
     if sess is None:
         return None
     try:
-        m = build_session(sid, now, live_map, floor=_RENDER_FLOOR.get(sid))
+        m = build_session(sid, now, live_map)        # the pusher's floor, as a build outside its cycle follows it (_follower_floor)
     finally:
         _chat_dep_scope.deps = None
     if not m:
@@ -76065,7 +76169,8 @@ def _document_write_phase(now):
     handed over (_ckpt_settle_writes_pay: each due session's fold documents and assembly document), then the checkpoint cycle
     (its byte budget whole again, the drops owed from an earlier cycle and the drops and rewrites the other threads handed to
     the writer done against it: _begin_checkpoint_cycle), then the converge pass, which writes the documents a boot's whole
-    reads left wanting (_converge_checkpoints), bounded by its wall and that budget. The settle write ran as the jobs pass's
+    reads left wanting (_converge_checkpoints), bounded by its wall and that budget, then the next assembly document rebuild for a
+    leaf a parse found without one, started on a thread of its own (_asm_rebuild_maybe, 2026-10-23). The settle write ran as the jobs pass's
     last job and the other two in the jobs thread's write phase after it (2026-10-08; the pusher's cycle before that), where
     a big document held up the next pass for the whole of its write (an idle 38 MB session's assembly document, about 11 s;
     a 225 MB transcript's, about a minute), and with it every decision the pass makes: nudges, the spend guard, the
@@ -76084,6 +76189,10 @@ def _document_write_phase(now):
         _job_stage('convergeCheckpoints', lambda: _converge_checkpoints(now))
     except Exception:
         sys.stderr.write("checkpoint converge: %s\n" % traceback.format_exc())
+    try:                                                   # after the converge pass, which writes what it can from the boot's
+        _asm_rebuild_maybe()                               #  own reads: the next document rebuild, if one is due, on its own
+    except Exception:                                      #  thread (a dict scan and a stat per pending leaf here)
+        sys.stderr.write("assembly document rebuild: %s\n" % traceback.format_exc())
 
 
 # THE DOCUMENT WRITER (the review of PR 155, 2026-10-08). Every fold and assembly document the running kernel writes is written on

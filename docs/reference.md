@@ -2195,7 +2195,13 @@ parse's flag, the one the next boot reads with, and with the turns section
 from the parse under that same flag or none; a leaf parsed only under the
 judges' flag is skipped and counted (`flagMismatch`), since the reader would
 delete a document under the wrong flag. A leaf with no compaction boundary has
-no cut and no document: it is read whole at every boot by design. `ROMP_ASM_CONVERGE=0` turns that step off, and so do the pass's
+no cut and no document: it is read whole at every boot by design. A leaf
+whose estimate (a sixty-fourth of its size) is over the WHOLE cycle's byte
+budget, over 512 MB at the default 8 MB, fits no cycle: it is counted
+`overCap`, done for its file state, and handed to the document rebuild below,
+and the step goes on to the next leaf (2026-10-23: it was deferred at every
+cycle, each deferral ended the step for the cycle, and an idle 824 MB session,
+which never settles, went six kernel lives with no document). `ROMP_ASM_CONVERGE=0` turns that step off, and so do the pass's
 own switch and a zero byte budget, as for the drop write. The owed table
 is bounded: over it the oldest owed drop is paid by its pop alone (unless a
 whole assembly entry pins it: that entry stays, no longer owed, until the
@@ -2330,6 +2336,28 @@ the `turns` section whatever uuid it carries: a local command's streamed
 output is kept in the transcript under the same uuid as a `local_command`
 row, and looked up by that uuid it once refused the document as `turnRows`
 at every write, so that leaf was read whole at every boot.
+
+A leaf with NO current document is rebuilt the same way (2026-10-23). A whole
+parse that finds the leaf's document refused (a version bump refuses and
+removes every older document at the deploy boot) or missing notes the leaf
+when it is at least the rebuild floor (`ROMP_ASM_REBUILD_MIN_KB`, 1 MB by
+default, the young-session floor's value). At the end of each document
+writer cycle, after the converge pass, the kernel starts the rebuild of the
+largest noted leaf on a thread of its own at the lowest CPU priority: the
+refresh's private whole parse, then the writer with its proofs and its
+atomic replace. Rebuilds and refreshes share one claim, so one whole parse
+runs at a time, and no reader of the leaf waits on it. A leaf the converge
+pass can still write from the boot's own read is left to that pass; so is a
+subagent's own transcript, and a leaf that is gone, has a document file
+again, or ended its use (`/clear`, a dead lane) leaves the table. A rebuild
+the writer declines is not tried again until the leaf changes (a decline of
+the moment, such as the reader's offsets evicted under the parse, gets one
+more try). Each rebuilt leaf is logged once, and a drain that rebuilt or
+declined anything ends with a summary line (`rebuilt N documents`).
+`ROMP_ASM_REBUILD=0` turns it off. Before it, a document came back only from
+a whole entry the settle or the converge pass still held, so after PR #313
+moved the document version to 9, ten to sixteen sessions parsed whole at
+every boot for three days.
 A compaction after the document restores from it, the tail read from the cut
 taking the compaction in, while the tail past the cut is under an eighth of
 the pre-cut bytes and nothing else in the same write parses whole for its own
@@ -3918,6 +3946,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   reason), and `refresh`: the document refreshes a restored entry's settle
   started (`claimed`, then `written`, `refused` or `failed`, and `ms`, their
   time); the refresh's own parse counts under `parse` as `private`.
+  `rebuild`: the documents rebuilt for leaves a parse found without one
+  (`noted`, `claimed`, then `written`, `declined`, `failed`, `retry` or
+  `moot`; `gone`, `small`, `released` and `subagent` for leaves that left the
+  table unrebuilt; `bytes` and `ms` of the rebuilt leaves; `pending`, the
+  table's size now); its parse counts under `parse` as `private` too.
   Two more count what the hydrated-body memo does: `hydratedHits`, the
   fills it served without a read, and `hydratedEvicted`, the entries its
   cap pushed out; a released leaf's bodies leave the memo uncounted. A memo
@@ -3940,7 +3973,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   first segment, or its first two under `/push`, `/tunnels` and `/usage`,
   whose roads differ by the second), `warm.parse`, `warm.boot`,
   `producer`, `revive`, `rewind.migration`, `rewind.holds`, `move`,
-  `asm.refresh` (the assembly document refresh's thread), `comment.create`
+  `asm.refresh` (the assembly document refresh's thread), `asm.rebuild` (the
+  document rebuild's thread), `comment.create`
   (the thread a comment's create runs on), `restart` (the restart and Apply
   now doors), `judge.end` (the thread that reaps a judge child; not a tier's
   mark, and it builds and hydrates nothing),
@@ -4918,6 +4952,16 @@ announces `chatProto2` in its `caps`:
   its next fresh dial. A socket whose `ready` has not arrived has no protocol
   yet and moves no render floor for its first thirty seconds; past that it
   counts as an index client.
+
+A chat build outside the pusher's cycle (a page connect's push, a history
+reply) uses the floor the pusher's last build used, so the two lists line up.
+When that floor was the pusher's tree's cut and the tree has since gained a
+document (a whole parse's entry re-seated on the document written from it),
+the build takes the new cut instead, and the pusher's cached build of the
+session is dropped so its next cycle rebuilds at the same cut (2026-10-23:
+a floor of 0 recorded over the boot's whole parse held every such build of
+the largest session at turn 0). A floor held at 0 for an index client is
+followed as before.
 
 The pages before the render floor are rendered on demand from the parse's
 lazy atoms (a page hydrates its own turns), memoized in a bounded cache
