@@ -14891,7 +14891,7 @@ def _open_leaves_for_nudge(nodes, top_id):
             if nid != top_id and not isinstance(nodes.get(nid, {}).get("handoff"), dict)]
 
 
-def _dictated_prompt_uuid(sid, path, pu):
+def _dictated_prompt_uuid(sid, path, pu, memo=None):
     """Does a node's stored promptUuid name a HUMAN-DICTATED prompt record in the session's own
     transcript? True / False / None(unknown) — the ask-unit exemption's discriminator. promptUuid
     alone proves nothing: it is the g200 LANDABLE-ANCHOR field, stamped on essentially every minted
@@ -14903,20 +14903,31 @@ def _dictated_prompt_uuid(sid, path, pu):
     gate) — read against the CACHED parse only (_parse_cached never parses, preserving build_feed's
     cold-start contract; the anchors fill in a beat later the same way the dots do). None when the
     verdict cannot be reached: no path threaded, no cached parse yet, or the uuid absent from the
-    stitched chain (a rewound/compacted record) — the caller decides what doubt means."""
+    stitched chain (a rewound/compacted record) — the caller decides what doubt means.
+
+    `memo` is _pure_delegation_top's per-derivation dict (see there): the parse's records are indexed
+    by uuid in it once per path, the FIRST record under a uuid as the scan this index replaced
+    stopped at the first match, so every later unlatched top of the same derivation is a lookup
+    instead of another _parse_cached read (the fileset stats) and another walk of every atom."""
     if not (pu and path):
         return None
-    ps = _parse_cached(str(path))
-    if not ps:
-        return None
-    for turn in ps.get("turns") or []:
-        for a in turn.get("atoms") or []:
-            if a.get("uuid") == pu:
-                return jd._human_prompt_record(a, str(sid or "")) is not None
-    return None
+    memo = {} if memo is None else memo
+    slot = ("prompts", str(path))
+    recs = memo.get(slot)
+    if recs is None:
+        recs = {}
+        ps = _parse_cached(str(path))
+        for turn in (ps.get("turns") or []) if ps else ():
+            for a in turn.get("atoms") or []:
+                u = a.get("uuid")
+                if u and u not in recs:
+                    recs[u] = a
+        memo[slot] = recs
+    a = recs.get(pu)
+    return None if a is None else jd._human_prompt_record(a, str(sid or "")) is not None
 
 
-def _pure_delegation_top(nodes, top_id, sid=None, path=None):
+def _pure_delegation_top(nodes, top_id, sid=None, path=None, memo=None):
     """True if EVERY leaf in top_id's subtree is a courier handoff-tracking node — the whole top is just work
     handed to PEERS, nothing this session does itself. Such a top is pure peer-coordination and is NOT an
     inbox card (the user 2026-06-23): consistent with _all_outstanding_delegated already treating
@@ -14947,7 +14958,18 @@ def _pure_delegation_top(nodes, top_id, sid=None, path=None):
     machine-anchored coordination card re-shown on every restart/cold beat with no new
     information — the cards-move-on-new-information rule). Only an UNLATCHED node still reads the
     cached parse below — the fail-open on doubt — and the judge latches it on its next pass, so
-    that flap happens at most once per node ever, not per beat."""
+    that flap happens at most once per node ever, not per beat.
+
+    ONE PASS PER DERIVATION, NOT ONE PER TOP (2026-10-22): a caller asking about many tops of one
+    nodes map hands the same `memo` dict to every call (the feed's per-session card loop, the
+    session stamp read). The children index, a pass over every node of the store, is built once in
+    it for that map, and so are the dictated-prompt records (_dictated_prompt_uuid). Each call
+    built both for itself before, so a derivation cost the store's size times its number of tops,
+    a large share of a feed build on a session with many cards. The index is used only
+    for the map it was built from (`memo["nodes"] is nodes`; the store views handed to these
+    callers are read-only), so a memo holds no state across derivations and every answer equals
+    the one a call without it gives."""
+    memo = {} if memo is None else memo
     root = nodes.get(top_id) or {}
     if not isinstance(root.get("handoff"), dict):
         if isinstance(root.get("userAsk"), dict):
@@ -14957,11 +14979,14 @@ def _pure_delegation_top(nodes, top_id, sid=None, path=None):
             latch = root.get("askAnchor")
             if latch in ("human", "absent", "scheduled"):
                 return False                          # the dictated ask, a scheduled prompt's, or durable doubt: stable
-            if latch != "machine" and _dictated_prompt_uuid(sid, path, pu) is not False:
+            if latch != "machine" and _dictated_prompt_uuid(sid, path, pu, memo) is not False:
                 return False                          # unlatched → the cached-parse read, fail-open
-    children = {}
-    for nid, nd in nodes.items():
-        children.setdefault(nd.get("parentId"), []).append(nid)
+    children = memo.get("children") if memo.get("nodes") is nodes else None
+    if children is None:
+        children = {}
+        for nid, nd in nodes.items():
+            children.setdefault(nd.get("parentId"), []).append(nid)
+        memo["nodes"], memo["children"] = nodes, children
     leaves, stack, seen = [], [top_id], set()
     while stack:
         x = stack.pop()
@@ -34969,11 +34994,12 @@ def _session_stamp_read(sid):
         # _session_awaiting's stamp branch. A PURE-delegation top is excluded to mirror the feed exactly:
         # its card is suppressed in every column, so it never lights the feed dot either.
         peers = set()
+        _deleg_memo = {}                               # one children index for the loop's tops (_pure_delegation_top)
         for tid, td_ in nodes.items():
             if td_.get("parentId") is not None or td_.get("nodeComplete") or td_.get("cleared"):
                 continue
             if not _all_outstanding_delegated(nodes, tid) \
-                    or _pure_delegation_top(nodes, tid, sid=sid, path=_stamp_path):
+                    or _pure_delegation_top(nodes, tid, sid=sid, path=_stamp_path, memo=_deleg_memo):
                 continue
             for x in _open_leaves(nodes, tid):
                 h = nodes.get(x, {}).get("handoff")
@@ -51820,6 +51846,8 @@ def _feed_session_entry(s, ctx):
         svc = _bg_service_descs(fsid, s["path"])
         if svc:
             ent_bg = svc
+    _deleg_memo = {}                             # _pure_delegation_top's children index and prompt records, built once for
+    #                                              all of this derivation's tops rather than once per top (2026-10-22)
     for nid in children.get(None, []):
         col = status.get(nid, "working")
         if col == "cleared" or nid in cleared:
@@ -51828,7 +51856,8 @@ def _feed_session_entry(s, ctx):
         # keys on (a permission or picker prompt, an API error, the judges' refused login): the floor files its card
         # on that top, and the blocked placeholder below stands down once perm_top is set, so skipping it left a
         # session stopped on the user with no card anywhere (the rule T333 gives a hidden top, above).
-        if nid not in (perm_top, api_top, jauth_top) and _pure_delegation_top(nodes, nid, sid=fsid, path=s["path"]):
+        if nid not in (perm_top, api_top, jauth_top) and _pure_delegation_top(nodes, nid, sid=fsid, path=s["path"],
+                                                                               memo=_deleg_memo):
             continue
         # AWAITING floor (event-based, the user 2026-06-22): a session paused on dispatched/delegated
         # work is a WORKING flavor, never needs-input. Floor a working OR stale-blocked top to awaiting
