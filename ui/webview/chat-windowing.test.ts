@@ -27,7 +27,8 @@ test("windowing constants are sane: a tail, a render radius and a re-window marg
 test("units unify both modes: one per event (normal) or the folded compactDisplay stream (compact)", () => {
   assert.match(RENDER, /function displayItems\(s: Session\): DisplayItem\[\]/);
   assert.match(RENDER, /if \(!settings\.compact\) \{[\s\S]*?out\.push\(\{ kind: "event", index: i \}\);/);
-  assert.match(RENDER, /out = compactDisplay\([\s\S]*?\n\s*\}\s*\n\s*return withGapItems\(s, out\);/, "the folded stream, then the gaps between the runs interleaved (T386 stage 2)");
+  assert.match(RENDER, /out = compactItems\(s\.events\);\s*\n\s*\}\s*\n\s*return withGapItems\(s, out\);/, "the folded stream, then the gaps between the runs interleaved (T386 stage 2)");
+  assert.match(RENDER, /function compactItems\(evs: readonly ChatEvent\[\]\): DisplayItem\[\] \{\s*\n\s*return compactDisplay\(/, "…built by the one builder the popover shares (2026-10-23)");
 });
 
 test("every rendered row is tagged data-unit, so the scroll↔unit map can locate it", () => {
@@ -155,7 +156,7 @@ test("an oversized view (window grew past the cap) re-collapses to the tail on s
 });
 
 test("a deep-link off the current window renders a fresh window AROUND the target unit, then lands", () => {
-  assert.match(RENDER, /let u = items\.findIndex\(\(it\) => it\.kind === "toolgroup" \|\| it\.kind === "noticegroup" \? it\.indices\.includes\(idx\) : it\.kind === "event" && it\.index === idx\);/, "a gap item indexes no event (T386 stage 2)");
+  assert.match(RENDER, /let u = items\.findIndex\(\(it\) => itemHolds\(it, idx\)\);/, "a gap item indexes no event (T386 stage 2; compact.ts itemHolds since 2026-10-23, a thought's blocks too)");
   assert.match(RENDER, /renderWindowItems\(v, s, items, Math\.max\(0, u - WINDOW_RADIUS\), Math\.min\(items\.length, u \+ WINDOW_RADIUS\), working\);/);
 });
 

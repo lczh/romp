@@ -626,29 +626,35 @@ test("stuck-green regression: a stalled or missing later frame can never park th
 // chatScheme ✓both already (body-class CSS, popover in scope); colormap/subgoals/collapsed/grouped
 // (feed), judge toggles (timeline), backend/defaultDir (create), showBranch (statusline), tabCtx
 // (tab strip) — not transcript-rendering settings, N/A both before and after. ───────────────────
-test("the popover renders the chat's display units — thinking hidden, tool runs folded, per the gear", () => {
+test("the popover renders the chat's display units — thoughts as Thought rows, tool runs folded, per the gear", () => {
   const at = UI.indexOf("renderingIntoThread = true;");
-  const block = UI.slice(at, at + 2800);   // widened past the T145 relay-note insert
+  const block = UI.slice(at, at + 4400);   // widened past the T145 relay-note insert and the Thought rows (2026-10-23)
   // 2026-09-08 (the notice-vocabulary pass): the retry-run fold became the generic noticegroup, fed the same
-  // per-event foldability the chat computes (isFoldableNotice)
-  assert.ok(block.includes("? compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === \"tool\" ? e.name : undefined), evs.map(isFoldableNotice))"),
-    "the SAME unit builder the chat uses, gated on the SAME settings.compact");
+  // per-event foldability the chat computes (isFoldableNotice); 2026-10-23: the chat's ONE builder, thoughts included
+  assert.ok(block.includes("? compactItems(evs)"), "the SAME unit builder the chat uses, gated on the SAME settings.compact");
   assert.ok(block.includes('const key = it.kind === "toolgroup" ? toolGroupKey(run[0]) : noticeGroupKey(run[0]);'),
     "the chat's group identities — tool runs AND notice runs — so expands survive refills");
-  assert.ok(block.includes("? renderToolGroup(run as Extract<ChatEvent, { kind: \"tool\" }>[], prev, key, open)"),
-    "the chat's own folded lines");
+  assert.ok(block.includes("? renderToolGroup(runTools(evs, it.indices), prev, key, open)"),
+    "the chat's own folded lines, the head counting the run's tools only");
+  assert.ok(block.includes('const rows = it.kind === "toolgroup" ? runRows(it.indices, (ix) => evs[ix].kind === "thinking") : it.indices.map((ix) => [ix]);'),
+    "an open tool run draws the chat's rows: each tool, each stretch of thoughts as one Thought row");
+  assert.ok(block.includes("const child = renderRunRow(evs, row, prev, [turnWorkedSecs(evs, last, thWorking), null]);"), "…through the chat's own row renderer");
   assert.ok(block.includes('child.classList.add("tg-child");'), "expanded children wear the chat's classes");
+  assert.ok(block.includes("list.appendChild(renderThoughtRow(evs, it.indices, prev, turnWorkedSecs(evs, last, thWorking)));"),
+    "a thought that opens a stretch is the chat's collapsed Thought row");
 });
 
-test("executable, real thinking fixture: the unit stream drops thinking and folds the tool run", () => {
-  // the exact shape the popover receives (a thread that thought, ran two tools, then replied)
-  const kinds = ["user", "thinking", "tool", "tool", "assistant"];
-  const units = compactDisplay(kinds, [undefined, undefined, "Read", "Edit", undefined]);
+test("executable, real thinking fixture: the unit stream shows the thought, hides the textless block and folds the tool run", () => {
+  // the exact shape the popover receives (a thread that thought, ran two tools with a textless block between them, then replied)
+  const kinds = ["user", "thinking", "tool", "thinking", "tool", "assistant"];
+  const words = [false, true, false, false, false, false];
+  const units = compactDisplay(kinds, [undefined, undefined, "Read", undefined, "Edit", undefined], undefined, words);
   assert.deepEqual(units, [
     { kind: "event", index: 0 },
-    { kind: "toolgroup", indices: [2, 3] },
-    { kind: "event", index: 4 },
-  ], "no unit for the thinking block; the consecutive tools fold to one group");
+    { kind: "thought", indices: [1] },
+    { kind: "toolgroup", indices: [2, 4] },
+    { kind: "event", index: 5 },
+  ], "the thought that opens the work is its own row; the textless block between the tools has no unit; the tools fold to one group");
 });
 
 test("everything that re-renders the chat's units refills the open popover live", () => {

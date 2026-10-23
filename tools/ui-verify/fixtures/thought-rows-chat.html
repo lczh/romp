@@ -1,0 +1,35 @@
+<!-- SYNTHETIC fixture: compact mode's Thought rows (2026-10-23), the DOM the chat draws for the notes-api demo transcript of
+     tests/test_thought_rows_served.py, trimmed to classes: a thought opening the work (collapsed), an opened tool run holding a
+     thought between its tools, a mid-turn message answered only inside thinking (its Thought row opened), a closed run, a
+     reply, and a lone thought before the next reply. Before the change the chat drew none of the turn-thought rows. Run:
+       tools/ui-verify/shot.sh --css ui/webview/styles.css --body tools/ui-verify/fixtures/thought-rows-chat.html \
+           --out /tmp/thought-rows.png --size 1200x900 --body-class 'theme-light chat-theme-yatharth' \
+           --extra-css 'body{display:block;padding:10px 20px;overflow:auto} #content{position:static;overflow:visible;height:auto}'
+     (--size 390x1100 for a phone; --body-class chat-theme-yatharth for the dark theme)
+-->
+<div id="content"><div class="thread"><div class="turn turn-user"><span class="dot user dot-nav"></span><div class="user-bubble md"><p>Add cursor pagination to GET /notes.</p>
+</div></div>
+<div class="turn turn-thinking turn-thought"><span class="dot ring dot-nav"></span><div class="thought-line"><span class="toolgroup-caret thought-caret"></span><span class="thought-label">Thought</span><span class="thought-gist">I'll start with the handler and its test to see what the callers expect.</span><span class="thought-meta">· 1.8k tokens</span></div><div class="thinking thought-body">Reading how the list handler builds its query. Today it returns every row.
+
+I'll start with the handler and its test to see what the callers expect.</div></div>
+<div class="turn turn-toolgroup expanded"><span class="dot green dot-nav"></span><div class="toolgroup-line"><span class="toolgroup-caret">▾</span></div></div>
+<div class="turn turn-tool tg-child"><span class="dot green dot-nav"></span><div class="tool-head"><span class="tool-label">Read </span><span class="tool-file">.../routes/notes.ts</span><span class="tool-fold-toggle">1 line</span></div><pre class="io-pre fold-pre tool-fold-body">export function listNotes(db) { return db.all('select * from notes'); }</pre></div>
+<div class="turn turn-tool tg-child"><span class="dot green dot-nav"></span><div class="tool-head"><span class="tool-label">Read </span><span class="tool-file">.../tests/notes.test.ts</span><span class="tool-fold-toggle">1 line</span></div><pre class="io-pre fold-pre tool-fold-body">test('lists notes', ...)</pre></div>
+<div class="turn turn-thinking turn-thought tg-child"><span class="dot ring dot-nav"></span><div class="thought-line"><span class="toolgroup-caret thought-caret"></span><span class="thought-label">Thought</span><span class="thought-gist">Both callers pass no limit, so a default page size keeps them working. A cursor on the note id stays stable when notes are added.</span><span class="thought-meta">· 2.4k tokens</span></div><div class="thinking thought-body">Both callers pass no limit, so a default page size keeps them working. A cursor on the note id stays stable when notes are added.</div></div>
+<div class="turn turn-tool tg-child"><span class="dot green dot-nav"></span><div class="tool-head"><span class="tool-label">Edited </span><span class="tool-file">.../routes/notes.ts</span><span class="tool-fold-toggle"><span class="tool-totals"><span class="tool-plus">+2</span> <span class="tool-minus">-1</span></span></span></div><pre class="io-pre fold-pre diff-fold tool-fold-body"><div class="diff-row diff-del"><span class="diff-gut diff-gut-old">1</span><span class="diff-gut diff-gut-new"></span><span class="diff-sign">-</span><span class="diff-code">return db.all('select * from notes');</span></div><div class="diff-row diff-add"><span class="diff-gut diff-gut-old"></span><span class="diff-gut diff-gut-new">1</span><span class="diff-sign">+</span><span class="diff-code">const rows = db.all('select * from notes where id &gt; ? order by id limit ?', cursor, limit);</span></div><div class="diff-row diff-add"><span class="diff-gut diff-gut-old"></span><span class="diff-gut diff-gut-new">2</span><span class="diff-sign">+</span><span class="diff-code">return { rows };</span></div></pre></div>
+<div class="turn turn-tool tg-child tg-last"><span class="dot green dot-nav"></span><div class="tool-head"><span class="tool-label">Ran the notes tests</span><span class="tool-fold-toggle">1 line</span></div><div class="tool-io tool-io-fold tool-fold-body"><div class="io-row"><span class="io-label">IN</span><pre class="io-pre">npm test -- notes</pre></div><div class="io-row io-out"><span class="io-label">OUT</span><pre class="io-pre">3 passing</pre></div></div>
+<div class="turn-elapsed">33s · thought 4.7k tokens</div></div>
+<div class="turn turn-user"><span class="dot user dot-nav"></span><div class="user-bubble md"><p>keep the default page size at 50, not 20</p>
+</div></div>
+<div class="turn turn-thinking turn-thought expanded"><span class="dot ring dot-nav"></span><div class="thought-line"><span class="toolgroup-caret thought-caret"></span><span class="thought-label">Thought</span><span class="thought-gist">Got it: switching the default page size to 50 and updating the one test that pinned 20.</span><span class="thought-meta">· 960 tokens</span></div><div class="thinking thought-body">The default has to move from 20 to 50, and one test pins 20.
+
+Got it: switching the default page size to 50 and updating the one test that pinned 20.</div></div>
+<div class="turn turn-toolgroup"><span class="dot green dot-nav"></span><div class="toolgroup-line"><span class="toolgroup-caret">▸</span> <span class="toolgroup-head">Edited a file, ran a command</span> <span class="tool-totals"><span class="tool-plus">+1</span> <span class="tool-minus">-1</span></span></div></div>
+<div class="turn turn-assistant"><span class="dot ring dot-nav"></span><div class="assistant md"><p>Pagination is in. <code>GET /notes</code> takes <code>limit</code> (default 50) and <code>cursor</code>, and the notes tests pass.</p>
+</div>
+<div class="turn-elapsed">24s · thought 1.3k tokens</div></div>
+<div class="turn turn-user"><span class="dot user dot-nav"></span><div class="user-bubble md"><p>Does a deleted note break the cursor?</p>
+</div></div>
+<div class="turn turn-thinking turn-thought"><span class="dot ring dot-nav"></span><div class="thought-line"><span class="toolgroup-caret thought-caret"></span><span class="thought-label">Thought</span><span class="thought-gist">A cursor that points at a deleted id still sorts correctly, because the query compares with id &gt; cursor.</span><span class="thought-meta">· 1.1k tokens</span></div><div class="thinking thought-body">A cursor that points at a deleted id still sorts correctly, because the query compares with id &gt; cursor.</div></div>
+<div class="turn turn-assistant"><span class="dot ring dot-nav"></span><div class="assistant md"><p>No. The query pages with <code>id &gt; cursor</code>, so a deleted note drops out of the next page.</p>
+</div></div></div><div></div></div>

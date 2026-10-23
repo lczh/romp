@@ -41,7 +41,7 @@ import { windowFocusedElement } from "./window-focus";   // the window's focus a
 import { markerLabel, dayContext, DayWalk, relativeLabel, relativeLines } from "./time-marker";
 import { composeStatusWidgets, folderIconNode, folderLink, type StatusRecord } from "./status-widgets";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
-import { compactDisplay, isFoldableNoticeShape, itemAnchor, type DisplayItem } from "./compact";
+import { compactDisplay, isFoldableNoticeShape, itemAnchor, itemHolds, runRows, thoughtHasWords, thoughtOf, thoughtKey, type DisplayItem } from "./compact";
 import { insertRun, regionsFromRuns, gapHeight, gapTurnPx, GAPS_SHARE, HIDDEN_SHARE, heldUnitPx, LAYOUT_LIMIT_FALLBACK, pageAt, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, kernelTurnOf, measureTurnPx, type MeasuredRow, type Region, type Run, type Gap, type Ev } from "./chat-regions";
 import { senderKind, SenderKind } from "./sender-identity";
 import { railPads, TICK_PAD } from "./rail-pads";   // the comment ticks' clamped hit pads (the comment-forward rail, 2026-09-24)
@@ -210,7 +210,8 @@ type ChatEvent = (
   // marker (2026-09-08) — the body is written to the agent and never doubles as the head
   | { kind: "user"; md: string; uuid?: string; ts?: string; reminders?: string[]; taskOutputs?: TaskOutputs; human?: boolean; romp?: boolean; rompAuto?: boolean; rompSystem?: boolean; gist?: string; spendGuard?: boolean; interruptCause?: string; interruptSpend?: SpendFigures; followUp?: boolean; goal?: string; fuCtx?: string; canned?: string; tag?: string; mid?: string; mids?: string[]; images?: { src: string; path?: string }[]; undelivered?: boolean; echoT?: number; absorbed?: boolean; sentAt?: number; hiddenByPending?: boolean; source?: InjectedSource; preamble?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }
   | { kind: "assistant"; md: string; uuid?: string; ts?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }   // pathPreview: the links a hover may preview, by kind (T351). spacePaths: backticked filenames WITH spaces the kernel verified exist (build_session _space_paths) → whole-span links. pathLinks: path-shaped tokens the kernel verified against the filesystem, token → real open target (build_session _path_links) — the linkifier's gate
-  | { kind: "thinking"; text: string; encrypted: boolean; uuid?: string; ts?: string; thinkTokens?: number }   // thinkTokens: the exact thinking tokens of the API message this row opens (usage.output_tokens_details.thinking_tokens, on its first thinking row only; kernel build_session), the "Thought · 2.5k tokens" label and the turn's total
+  | { kind: "thinking"; text: string; encrypted: boolean; uuid?: string; ts?: string; thinkTokens?: number; row?: { gist: string; key?: string } }   // thinkTokens: the exact thinking tokens of the API message this row opens (usage.output_tokens_details.thinking_tokens, on its first thinking row only; kernel build_session), the "Thought · 2.5k tokens" label and the turn's total
+  //   row: PAGE-ONLY, never from the kernel: compact mode's collapsed Thought row (thoughtEvent), drawn by renderThought
   | {
       kind: "tool";
       name: string;
@@ -3320,7 +3321,7 @@ function residentUnits(s: Session, uuids: string[]): number[] {
   for (const uuid of uuids) {
     const idx = s.events.findIndex((e) => e.uuid === uuid);
     if (idx < 0) continue;
-    let u = items.findIndex((it) => it.kind === "toolgroup" || it.kind === "noticegroup" ? it.indices.includes(idx) : it.kind === "event" && it.index === idx);
+    let u = items.findIndex((it) => itemHolds(it, idx));
     if (u < 0) u = items.findIndex((it) => itemFirstEvent(it) >= idx);
     if (u >= 0) out.push(u);
   }
@@ -3704,8 +3705,8 @@ function eventUnitIndex(s: Session): Int32Array {
   const items = displayItems(s);
   for (let u = 0; u < items.length; u++) {
     const it = items[u];
-    if (it.kind === "toolgroup" || it.kind === "noticegroup") { for (const i of it.indices) map[i] = u; }
-    else if (it.kind === "event") map[it.index] = u;
+    if (it.kind === "event") map[it.index] = u;
+    else if (it.kind !== "gap") for (const i of it.indices) map[i] = u;   // a run's members, a thought's blocks
   }
   return map;
 }
@@ -4436,6 +4437,7 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
     turn.appendChild(body);
     return turn;
   }
+  if (ev.kind === "thinking" && ev.row) return renderThought(ev, ev.row);   // compact mode's collapsed Thought row
   if (ev.kind === "thinking") {
     const turn = el("div", "turn turn-thinking");
     turn.appendChild(dot("ring"));
@@ -4453,13 +4455,14 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
     if (opaque) { turn.appendChild(t); return turn; }   // already a one-liner
     if (thought) { const h = el("div", "think-tokens"); h.textContent = thought; turn.appendChild(h); }
     // condense: clamp to ~2 lines with a fade; click to expand (the user: don't let
-    // the interspersed thinking blocks dominate vertically).
+    // the interspersed thinking blocks dominate vertically). The click rides the body delegate
+    // (data-act=thinkfold), never a listener on this node: the tail rebuilds every push (ui/CLAUDE.md).
     const clamp = el("div", "think-clamp");
     clamp.appendChild(t);
-    clamp.title = "click to expand";
-    const tkey = ev.uuid ? "think:" + ev.uuid : undefined;
+    const tkey = thoughtKey(ev);   // think:<uuid>, the same key compact mode's Thought row keeps
     applyFold(clamp, "expanded", tkey);
-    clamp.addEventListener("click", () => rememberFold(clamp, "expanded", tkey));
+    clamp.dataset.act = "thinkfold"; if (tkey) clamp.dataset.tkey = tkey;
+    setTip(clamp, clamp.classList.contains("expanded") ? "click to collapse" : "click to expand");
     turn.appendChild(clamp);
     return turn;
   }
@@ -12360,13 +12363,14 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
     const walk = new DayWalk();           // the day walk's high-water mark (T339)
     let quoteHost: HTMLElement | null = null;   // the thread's OPENING message — the quote's home
     // the SAME display units the chat renders (the user 2026-08-24, leg C: the popover ignored the
-    // compact/hide-thinking setting — thinking blocks and raw tool runs showed regardless of the
-    // gear): thinking dropped, consecutive tools folded to the chat's own renderToolGroup line,
-    // expansion keyed by the SHARED openFolds store so a toggle survives refills. The group
-    // toggle and a settings flip both refill the open popover live (toggleToolGroup / setupSettings
-    // → refillOpenCommentPop).
+    // compact setting — thinking blocks and raw tool runs showed regardless of the gear): the chat's
+    // own builder (compactItems), consecutive tools folded to the chat's own renderToolGroup line,
+    // thoughts as the chat's collapsed Thought rows (2026-10-23), expansion keyed by the SHARED
+    // openFolds store so a toggle survives refills. The group toggle and a settings flip both refill
+    // the open popover live (toggleToolGroup / setupSettings → refillOpenCommentPop); a Thought row's
+    // fold is a class on its own node (thinkfold), which no refill needs.
     const items: DisplayItem[] = settings.compact
-      ? compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === "tool" ? e.name : undefined), evs.map(isFoldableNotice))
+      ? compactItems(evs)
       : evs.map((_, i) => ({ kind: "event", index: i } as DisplayItem));
     const thWorking = threadBusy(th.state);
     let relayNoted = !th.relayedT;   // T145: drop the sent-back marker at its place in time, once
@@ -12388,15 +12392,18 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
         const key = it.kind === "toolgroup" ? toolGroupKey(run[0]) : noticeGroupKey(run[0]);
         const open = openFolds.has(key);
         list.appendChild(it.kind === "toolgroup"
-          ? renderToolGroup(run as Extract<ChatEvent, { kind: "tool" }>[], prev, key, open)
+          ? renderToolGroup(runTools(evs, it.indices), prev, key, open)   // the head counts the run's tools only
           : renderNoticeGroup(run, evs[anchor], prev, key, open));
         let exit: number | null;   // the epoch the run leaves the walk on (the rail chain and the day mark alike)
         if (open) {
-          it.indices.forEach((ix, j) => {   // the run's own members — it.indices already excludes thinking
-            const child = renderEvent(evs[ix], prev, turnWorkedSecs(evs, ix, thWorking));
-            child.classList.add("tg-child"); if (j === it.indices.length - 1) child.classList.add("tg-last");
+          // the run's own members, as the chat draws them: a tool run's thoughts as Thought rows (runRows), a notice run's notices
+          const rows = it.kind === "toolgroup" ? runRows(it.indices, (ix) => evs[ix].kind === "thinking") : it.indices.map((ix) => [ix]);
+          rows.forEach((row, j) => {
+            const last = row[row.length - 1];
+            const child = renderRunRow(evs, row, prev, [turnWorkedSecs(evs, last, thWorking), null]);
+            child.classList.add("tg-child"); if (j === rows.length - 1) child.classList.add("tg-last");
             list.appendChild(child);
-            const ep = eventEpoch(evs[ix]); if (ep != null) prev = ep;
+            const ep = eventEpoch(evs[row[0]]); if (ep != null) prev = ep;
           });
           exit = it.kind === "noticegroup" ? eventEpoch(evs[anchor]) : prev;   // a notice run leaves the walk on its anchor, whatever order its members came in (T339)
           if (it.kind === "noticegroup" && exit != null) prev = exit;
@@ -12407,6 +12414,14 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
         continue;
       }
       if (it.kind === "gap") continue;   // a viewer's list has no gaps; the type says so
+      if (it.kind === "thought") {   // the chat's collapsed Thought row, timed by its first member
+        const last = it.indices[it.indices.length - 1];
+        list.appendChild(renderThoughtRow(evs, it.indices, prev, turnWorkedSecs(evs, last, thWorking)));
+        const ep = eventEpoch(evs[it.indices[0]]);
+        if (ep != null) prev = ep;
+        walk.pass(ep);
+        continue;
+      }
       const ev = evs[it.index];
       // the "worked Ns" footer rides exactly as in the chat (the parity bundle) — the same
       // turnWorkedSecs, with the thread session's own busy reading standing in for `working`
@@ -14063,7 +14078,7 @@ function scrollToAnchor(uuid: string): boolean {
                                        || (((e as { settleUuids?: string[] }).settleUuids || []).includes(uuid))) : -1;
     if (s && idx >= 0) {
       const items = displayItems(s);
-      let u = items.findIndex((it) => it.kind === "toolgroup" || it.kind === "noticegroup" ? it.indices.includes(idx) : it.kind === "event" && it.index === idx);
+      let u = items.findIndex((it) => itemHolds(it, idx));
       if (u < 0) u = Math.max(0, items.findIndex((it) => itemFirstEvent(it) >= idx));
       // The anchor can live INSIDE a collapsed tool run: the folded line carries only the run's FIRST
       // uuid, so the re-render below could never surface a mid-run member — the click honest-failed
@@ -14229,7 +14244,7 @@ function landNearestMoment(t: number): boolean {
   if (best < 0) return false;
   const uuid = (s.events[best] as { uuid?: string }).uuid || "";
   const items = displayItems(s);
-  let u = items.findIndex((it) => it.kind === "toolgroup" || it.kind === "noticegroup" ? it.indices.includes(best) : it.kind === "event" && it.index === best);
+  let u = items.findIndex((it) => itemHolds(it, best));
   if (u < 0) u = Math.max(0, items.findIndex((it) => itemFirstEvent(it) >= best));
   const working = s.status.state === "working" || s.status.state === "compacting";
   renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), working);
@@ -14896,7 +14911,9 @@ function tailDiff(v: View, s: Session, items: DisplayItem[], working: boolean, a
 /** A unit's signature (unit-diff.ts): everything its paint reads, so equal signatures paint equal nodes. Its shape and the content
  *  of its events; the previous timed epoch its time marker compares against and the day walk's mark its divider reads; its turn;
  *  a folded run's open state; a user bubble's edit affordance; a gap's span, px-per-turn and loading glyph. The "worked …" footer
- *  is not in it: it is patched on the node (patchWorkedFooters), so a prompt landing never repaints the reply above it. */
+ *  is not in it: it is patched on the node (patchWorkedFooters), so a prompt landing never repaints the reply above it. Nor is a
+ *  fold that is a class on the unit's own node (a notice's, a Thought row's): its click flips the node itself and the fold set
+ *  together, so the kept node already shows it, and a repaint reads it back from the fold set. */
 function unitSig(v: View, s: Session, it: DisplayItem, prevEpoch: number | null, mark: number | null, turns: number[] | null): string {
   if (it.kind === "gap") return "gap|" + it.lo + "|" + it.hi + "|" + it.before + "|" + gapTurnPx(s.regions ?? [], v.pxPerTurn, gapsMaxPx()) + "|" + (gapHasAsk(s.id, it) ? "ask" : "");
   const f0 = itemFirstEvent(it);
@@ -14936,7 +14953,8 @@ function sizeBottomSpacer(v: View, bot: HTMLElement, top: HTMLElement | null): v
 // either way. `items` is the view's unit list (both modes since 2026-09-23: a history gap is a unit too, so an event's
 // index is not its unit's number in normal mode either, and reading it as one patched the row above the reply):
 // the window's start maps to its first event and the reply's event index back to the unit whose node carries it.
-// A reply with no node of its own shows no footer: a thinking row compact mode hides, or a member of a COLLAPSED
+// A reply with no node of its own shows no footer: a thinking row compact mode hides (a textless one, or a thought whose
+// row a later block of it closes), or a member of a COLLAPSED
 // run (its head carries no footer), so there is nothing to patch. An EXPANDED run's member row carries one, and that
 // row is patched here like any other node (found by the run's unit and the reply's place in the run): both callers
 // return on the state they read before the patch, so a repaint mark set here would wait for a frame an idle session
@@ -14946,7 +14964,8 @@ function sizeBottomSpacer(v: View, bot: HTMLElement, top: HTMLElement | null): v
 function patchWorkedFooters(v: View, s: Session, from: number, working: boolean, items: DisplayItem[] | null = null): void {
   const winStart = v.winStart ?? 0;
   const winEv = items ? (items[winStart] ? itemFirstEvent(items[winStart]) : s.events.length) : winStart;
-  const unitOfEvent = (i: number): number => items ? items.findIndex((it) => it.kind === "event" && it.index === i) : i;
+  // the unit whose own node carries event i's footer: the event itself, or a Thought row whose LAST block it is (renderThoughtRow)
+  const unitOfEvent = (i: number): number => items ? items.findIndex((it) => it.kind === "event" ? it.index === i : it.kind === "thought" && it.indices[it.indices.length - 1] === i) : i;
   for (const { unit: ev, secs } of workedFooterPlan(s.events, from, winEv, working, eventEpoch)) {
     const unit = unitOfEvent(ev);
     let node: HTMLElement | null = null;
@@ -14958,7 +14977,10 @@ function patchWorkedFooters(v: View, s: Session, from: number, working: boolean,
       if (!it || (it.kind !== "toolgroup" && it.kind !== "noticegroup")) continue;
       if (!openFolds.has(it.kind === "toolgroup" ? toolGroupKey(s.events[it.indices[0]]) : noticeGroupKey(s.events[it.indices[0]]))) continue;
       const rows = v.el.querySelectorAll(`:scope > [data-unit="${run}"].tg-child`);
-      const at = it.indices.indexOf(ev);
+      // one row per tool and per stretch of thoughts (runRows), the footer on a row's last member, as appendItem draws them
+      const at = (it.kind === "toolgroup" ? runRows(it.indices, (i) => s.events[i].kind === "thinking") : it.indices.map((i) => [i]))
+        .findIndex((row) => row[row.length - 1] === ev);
+      if (at < 0) continue;   // a thought inside a row whose later block follows it: that row carries no footer of this event's
       node = at < rows.length ? (rows[at] as HTMLElement) : null;
       // The row is patched in this call, never left to a repaint: both callers return on the state they read before the
       // patch, and an idle session gets no next frame for it to ride (review find, 2026-09-23). Only a run outside the painted
@@ -14999,6 +15021,7 @@ function prevTimedEpoch(events: ChatEvent[], i: number): number | null {
 function unitExit(s: Session, it: DisplayItem): number | null {
   if (it.kind === "gap") return null;   // empty space leaves the day walk where it was
   if (it.kind === "event") return eventEpoch(s.events[it.index]);
+  if (it.kind === "thought") return eventEpoch(s.events[it.indices[0]]);   // one row, timed by its first block
   if (it.kind === "noticegroup") return eventEpoch(s.events[itemAnchor(it, (i) => eventEpoch(s.events[i]))]);
   const open = openFolds.has(toolGroupKey(s.events[it.indices[0]]));
   if (!open) return eventEpoch(s.events[it.indices[0]]);
@@ -15039,9 +15062,14 @@ function displayItems(s: Session): DisplayItem[] {
     out = [];
     for (let i = 0; i < s.events.length; i++) out.push({ kind: "event", index: i });
   } else {
-    out = compactDisplay(s.events.map((e) => e.kind), s.events.map((e) => e.kind === "tool" ? e.name : undefined), s.events.map(isFoldableNotice));
+    out = compactItems(s.events);
   }
   return withGapItems(s, out);
+}
+/** Compact mode's display units over a list of events: the ONE builder the chat, a subagent viewer and the comment popover
+ *  share (tool names for the standalone-tool exception, the foldable notices, the thoughts with words). */
+function compactItems(evs: readonly ChatEvent[]): DisplayItem[] {
+  return compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === "tool" ? e.name : undefined), evs.map(isFoldableNotice), evs.map(thoughtHasWords));
 }
 // T386 stage 2: the history the page does not hold is GAPS between its runs (and before the first), each a display unit of its own
 // placed before the first item of the run below it (`before`: that run's first event index in s.events, the runs' events being
@@ -15086,7 +15114,7 @@ function regionsAbsorbTail(s: Session): boolean {
   tail.events = s.events.slice(n);
   return true;
 }
-function itemFirstEvent(it: DisplayItem): number { return it.kind === "toolgroup" || it.kind === "noticegroup" ? it.indices[0] : it.kind === "gap" ? it.before : it.index; }
+function itemFirstEvent(it: DisplayItem): number { return it.kind === "event" ? it.index : it.kind === "gap" ? it.before : it.indices[0]; }
 
 // The display-unit index of the most recent compaction boundary in the loaded events, or 0 if none. The
 // default render window opens at (never below) this unit so pre-compaction history is scrubbed from the
@@ -15133,26 +15161,29 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
   if (it.kind === "toolgroup") {
     const first = s.events[it.indices[0]];
     const key = toolGroupKey(first);
-    const tools = it.indices.map((i) => s.events[i]) as Extract<ChatEvent, { kind: "tool" }>[];
     const open = openFolds.has(key);
-    const head = tag(renderToolGroup(tools, prevEpoch, key, open));
+    const head = tag(renderToolGroup(runTools(s.events, it.indices), prevEpoch, key, open));   // the head counts the run's tools only
     host.appendChild(head);
     adv(it.indices[0]);
-    if (open) {   // expanded → the GROUPED TOOLS, each as its normal turn. Compact mode hides thinking
-      // everywhere, so the expansion must too: iterate it.indices (the tools only), NOT the contiguous
-      // start..end span, which would surface the thinking that sat between the tools (the user 2026-06-29).
-      // it.indices already excludes thinking — compactDisplay skipped it while building the run.
+    if (open) {   // expanded → the run's members in order, each tool as its normal turn and each stretch of thoughts as ONE
+      // collapsed Thought row (runRows). Not the contiguous start..end span: it.indices holds only the run's members, so a
+      // textless thinking block between the tools stays hidden. (Until 2026-10-23 no thinking showed here at all, the
+      // 2026-06-30 rule; the user approved showing the thoughts with words.)
       // The head is timed by the FIRST member and each row by its own, so the walk passes them one by one and stamps
       // each with the day it is in THERE (T342 review): a run spanning midnight otherwise put today's mark on
       // yesterday's rows, and the day label over its 23:58 head went blank.
       walk.pass(eventEpoch(first)); stampWalkDay(head, walk); stamped.add(head);
-      it.indices.forEach((i, j) => {
-        const child = renderEvent(s.events[i], prevEpoch, ...turnFoot(s.events, i, working));
-        child.classList.add("tg-child"); if (j === it.indices.length - 1) child.classList.add("tg-last");
-        host.appendChild(tag(child)); adv(i);
-        walk.pass(eventEpoch(s.events[i])); stampWalkDay(child, walk); stamped.add(child);
+      const rows = runRows(it.indices, (i) => s.events[i].kind === "thinking");
+      rows.forEach((row, j) => {
+        const child = renderRunRow(s.events, row, prevEpoch, turnFoot(s.events, row[row.length - 1], working));
+        child.classList.add("tg-child"); if (j === rows.length - 1) child.classList.add("tg-last");
+        host.appendChild(tag(child)); adv(row[0]);
+        walk.pass(eventEpoch(s.events[row[0]])); stampWalkDay(child, walk); stamped.add(child);
       });
     }
+  } else if (it.kind === "thought") {   // a stretch of thoughts that opens a stretch of work: one collapsed Thought row
+    host.appendChild(tag(renderThoughtRow(s.events, it.indices, prevEpoch, ...turnFoot(s.events, it.indices[it.indices.length - 1], working))));
+    adv(it.indices[0]);
   } else if (it.kind === "noticegroup") {
     const notes = it.indices.map((i) => s.events[i]);
     const key = noticeGroupKey(notes[0]);
@@ -15427,6 +15458,55 @@ function unitAtScroll(v: View, content: HTMLElement): number {
 
 // (Compact rendering is no longer a separate path: syncView routes BOTH modes through renderWindowItems,
 // which renders compactDisplay units the same way it renders per-event units — see appendItem.)
+
+// ── Compact mode's Thought row (the user 2026-10-23, who approved the design) ──────────────────────────────────────────
+// A stretch of consecutive thinking blocks with words (compact.ts thoughtOf) draws as ONE collapsed row: "▸ Thought" and the
+// first line of the latest note, in the tool group line's dress; a click opens "▾ Thought · 2.5k tokens" over the full words.
+// The stretch becomes one thinking event for renderEvent, so the row gets the rail time, the hover wiring and the deep-link
+// anchor every turn gets: the first block's uuid and stamp (its fold key and its place on the rail), the words, the tokens and
+// the gist. The other members' uuids ride data-uuids, so a link to any of them lands on the row. The same rows draw in the
+// chat, a subagent viewer (displayItems) and the comment popover (fillCommentMsgs), each through these helpers.
+function thoughtEvent(evs: readonly ChatEvent[], members: readonly number[]): Extract<ChatEvent, { kind: "thinking" }> {
+  const first = evs[members[0]] as Extract<ChatEvent, { kind: "thinking" }>;
+  const th = thoughtOf(evs, members);
+  return { ...first, text: th.text, encrypted: false, thinkTokens: th.tokens || undefined, row: { gist: th.gist, key: th.key } };
+}
+function renderThoughtRow(evs: readonly ChatEvent[], members: readonly number[], prevEpoch: number | null, worked?: number | null, thought?: number | null): HTMLElement {
+  const node = renderEvent(thoughtEvent(evs, members), prevEpoch, worked, thought);
+  const more = members.slice(1).map((i) => evs[i].uuid).filter((u): u is string => !!u && u !== node.dataset.uuid);
+  if (more.length) node.dataset.uuids = Array.from(new Set(more)).join(" ");
+  return node;
+}
+/** The DOM of a collapsed Thought row (renderEventInner, for an event thoughtEvent built). The fold is the row's `expanded`
+ *  class, kept in the shared fold set under think:<first block's uuid> and toggled by the line through the body delegate
+ *  (data-act=thinkfold), never a listener on the node. The caret, the gist and the tokens swap by that class in CSS. */
+function renderThought(ev: Extract<ChatEvent, { kind: "thinking" }>, row: { gist: string; key?: string }): HTMLElement {
+  const turn = el("div", "turn turn-thinking turn-thought");
+  turn.appendChild(dot("ring"));
+  applyFold(turn, "expanded", row.key);
+  const line = el("div", "thought-line");
+  line.dataset.act = "thinkfold"; if (row.key) line.dataset.tkey = row.key;
+  setTip(line, turn.classList.contains("expanded") ? "click to collapse" : "click to expand");
+  line.appendChild(el("span", "toolgroup-caret thought-caret"));
+  const lab = el("span", "thought-label"); lab.textContent = "Thought"; line.appendChild(lab);
+  const gist = el("span", "thought-gist"); gist.textContent = row.gist; line.appendChild(gist);
+  if (typeof ev.thinkTokens === "number" && ev.thinkTokens > 0) {
+    const m = el("span", "thought-meta"); m.textContent = "· " + tokensShort(ev.thinkTokens) + " tokens"; line.appendChild(m);
+  }
+  turn.appendChild(line);
+  const body = el("div", "thinking thought-body"); body.textContent = ev.text;
+  turn.appendChild(body);
+  return turn;
+}
+/** One row of an expanded tool run (compact.ts runRows): a stretch of thoughts as its Thought row, a tool as its own turn.
+ *  `foot` is the worked footer of the row's LAST member, the event a turn's footer would sit on. */
+function renderRunRow(evs: readonly ChatEvent[], row: readonly number[], prevEpoch: number | null, foot: [number | null, number | null]): HTMLElement {
+  return evs[row[0]].kind === "thinking" ? renderThoughtRow(evs, row, prevEpoch, ...foot) : renderEvent(evs[row[0]], prevEpoch, ...foot);
+}
+/** A tool run's tool uses: the head counts these alone, never the thoughts riding the run. */
+function runTools(evs: readonly ChatEvent[], indices: readonly number[]): Extract<ChatEvent, { kind: "tool" }>[] {
+  return indices.map((i) => evs[i]).filter((e): e is Extract<ChatEvent, { kind: "tool" }> => e.kind === "tool");
+}
 
 // Stable identity for a collapsed tool run (survives rebuilds) = the first tool's uuid (else its epoch).
 function toolGroupKey(first: ChatEvent): string { return "tg:" + (first.uuid || String(eventEpoch(first) ?? "")); }
@@ -21439,7 +21519,9 @@ function quoteViewOf(v: unknown): QuoteView | null {
 const QUOTE_BLOCKS = "p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, figcaption, summary, blockquote";
 // What a quote leaves out (quoteSkips): the page's controls, and the transcript's labels and markers, which describe the
 // conversation rather than say any of it: a turn's dot, rail and time, a day's divider, the fork spot, a tool row's head
-// (its label and fold toggle), a tool group's whole line (its caret, its summary and the edits' totals), a diff's
+// (its label and fold toggle), a tool group's whole line (its caret, its summary and the edits' totals), a Thought row's
+// line (its caret, its label, its gist and its tokens: the gist only previews the words, which an opened row's body
+// holds and a quote then reads; a closed row's body is not shown), a diff's
 // line-number gutters, a notice's glyph, source, meta and actions, a reply's thinking count, a sent message's romp tag, a
 // follow-up's tag and a nudge's caret, a send's undelivered label, a gap's glyph. Anything else marked user-select: none
 // is left out with them: that is how the page marks chrome a selection must copy clean without (fold heads, the tool
@@ -21452,7 +21534,7 @@ const QUOTE_BLOCKS = "p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, figcaption,
 // ("@@ -10 +10 @@") stays as it reads: it is the diff's own text and says where in the file the change sits, where a
 // gutter only numbers each row again.
 const QUOTE_CHROME = "button, select, input, textarea, svg, .code-copy, .dot, .rail-hit, .time-marker, .day-divider, .fork-spot, "
-  + ".tool-head, .toolgroup-line, .diff-gut, .diff-sign, .notice-glyph, .notice-src, .notice-meta, .notice-acts, .think-tokens, "
+  + ".tool-head, .toolgroup-line, .thought-line, .diff-gut, .diff-sign, .notice-glyph, .notice-src, .notice-meta, .notice-acts, .think-tokens, "
   + ".romp-tag, .followup-tag, .nudge-caret, .undelivered-label, .tx-gap-glyph";
 const QUOTE_BREAKS = /^(P|LI|UL|OL|DL|DD|DT|DIV|PRE|TABLE|THEAD|TBODY|TR|TD|TH|BLOCKQUOTE|H[1-6]|FIGURE|FIGCAPTION|SECTION|DETAILS|SUMMARY|HR)$/;
 const QUOTE_PARAS = /^(P|PRE|UL|OL|DL|TABLE|BLOCKQUOTE|H[1-6]|FIGURE|DETAILS|HR)$/;   // a blank line around, in a quote
@@ -23123,7 +23205,7 @@ function fillInPlace(sid: string, v: View | undefined): void {
   let u = -1;
   if (keepVisible && keep) {
     const idx = s.events.findIndex((e) => e.uuid === keep.uuid);
-    u = idx >= 0 ? items.findIndex((it) => it.kind === "toolgroup" || it.kind === "noticegroup" ? it.indices.includes(idx) : it.kind === "event" && it.index === idx) : -1;
+    u = idx >= 0 ? items.findIndex((it) => itemHolds(it, idx)) : -1;
     if (u < 0 && idx >= 0) u = Math.max(0, items.findIndex((it) => itemFirstEvent(it) >= idx));
     // an anchor row no event uuid names (an answered AskUserQuestion anchored on its tool_result uuid) still names its TURN: the unit
     // holding that turn is the window's centre (round six, medium: a uuid lookup left u at -1 and the view re-synced in a stale item space)
@@ -26348,6 +26430,15 @@ function applyThreadBgOut(m: { id?: unknown; out?: unknown }): void {
       if (el.dataset.et) msg.t = Number(el.dataset.et);
       vscodeApi.postMessage(msg);
       (el.closest(".turn-user") as HTMLElement | null)?.remove();
+    },
+    // a thinking fold, both shapes under the one key think:<first block's uuid> (compact.ts thoughtKey): compact mode's
+    // Thought row, whose line opens and closes the row, and the full view's two-line clamp, which opens and closes itself.
+    // Delegated like every fold (the clamp's own listener died with every rebuild of its node, ui/CLAUDE.md click-safety).
+    thinkfold: (el) => {
+      const box = el.classList.contains("thought-line") ? el.closest(".turn-thought") as HTMLElement | null : el;
+      if (!box) return;
+      rememberFold(box, "expanded", el.dataset.tkey || undefined);
+      setTip(el, box.classList.contains("expanded") ? "click to collapse" : "click to expand");
     },
     // gist↔full toggle on a compact nudge bubble (the user 2026-07-17: progressive disclosure) —
     // delegated for the same reason as qx: the tail rebuilds every push, and a per-render bubble

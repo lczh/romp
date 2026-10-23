@@ -13,7 +13,8 @@ const CSS = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "
 test("compact mode folds the stream via compactDisplay, rendered through the unified window path", () => {
   // compact is no longer a separate rebuild path: displayItems() returns compactDisplay's folded units when
   // the setting is on, and renderWindowItems renders them the same way as per-event units.
-  assert.match(RENDER, /if \(!settings\.compact\) \{[\s\S]*?\} else \{\s*\n\s*out = compactDisplay\(s\.events\.map\(/);
+  assert.match(RENDER, /if \(!settings\.compact\) \{[\s\S]*?\} else \{\s*\n\s*out = compactItems\(s\.events\);/);
+  assert.match(RENDER, /function compactItems\(evs: readonly ChatEvent\[\]\): DisplayItem\[\] \{\s*\n\s*return compactDisplay\(evs\.map\(/, "compactItems is compactDisplay over the events (2026-10-23)");
 });
 
 test("a collapsed tool run renders its head by action via actionHead (T418: the user's terms, the edits' totals apart) and is click-to-expand", () => {

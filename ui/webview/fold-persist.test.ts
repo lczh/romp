@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
+const COMPACT = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "compact.ts"), "utf8");
 
 test("there is a persisted-fold registry with apply/remember helpers", () => {
   assert.match(RENDER, /const openFolds = new Set<string>\(\);/);
@@ -38,7 +39,9 @@ test("foldable/inlineFold take a stable key and route through the persisted help
 test("the other collapsibles pass stable keys (reminders, tool folds, thinking)", () => {
   assert.match(RENDER, /"rem:" \+ ev\.uuid/, "system reminders key on the user turn uuid");
   assert.match(RENDER, /const fkey = ev\.uuid \? "tool:" \+ ev\.uuid : undefined;/, "tool folds key on the tool uuid");
-  assert.match(RENDER, /"think:" \+ ev\.uuid/, "thinking clamp keys on the thinking uuid");
+  // the thinking clamp keys on the thinking uuid, through the one key compact mode's Thought row keeps too (2026-10-23)
+  assert.match(COMPACT, /export function thoughtKey\(first: \{ uuid\?: string \} \| undefined\): string \| undefined \{ return first && first\.uuid \? "think:" \+ first\.uuid : undefined; \}/, "think:<uuid>");
+  assert.match(RENDER, /const tkey = thoughtKey\(ev\);/, "thinking clamp keys on the thinking uuid");
   // the whole agent dispatch (prompt, tool calls, report) collapses under ONE fold with one stable key,
   // so a single click expands all of it together (the user 2026-06-22). The key is the tool's own fkey:
   // the ":agent"-suffixed sub-keys went with the nested prompt/report boxes (2026-09-05 — everything

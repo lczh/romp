@@ -168,6 +168,24 @@ test("a tool group's caret and totals stay out, and an opened diff's line number
   assert.equal(read(root, [textOf(root, "a = 1"), 0], [textOf(root, "b = 3"), 5]), " a = 1\n-b = 2\n+b = 3");
 });
 
+// 2026-10-23 (compact mode's Thought rows): a Thought row's line, its caret, its label, its gist and its tokens, is the row's
+// head, not what the session said; a closed row's words are not shown, and an open row's words are, and read as they read
+test("a Thought row's line stays out; a closed row's words stay out, an open row's words go in", () => {
+  const thought = (open: boolean, gist: string, body: string, tokens: string) =>
+    h("div.turn.turn-thinking.turn-thought" + (open ? ".expanded" : ""), h("span.dot"),
+      h("div.thought-line", h("span.toolgroup-caret.thought-caret"), h("span.thought-label", "Thought"), h("span.thought-gist", gist),
+        h("span.thought-meta", open ? {} : { display: "none" }, tokens)),
+      h("div.thinking.thought-body", open ? {} : { display: "none" }, body));
+  const root = h("div.thread", h("div.turn.turn-assistant", h("div.md", h("p", "The first reply ends here."))),
+    thought(false, "Both callers pass no limit.", "Both callers pass no limit.\nA default keeps them working.", "· 2.4k tokens"),
+    h("div.turn.turn-user", h("span.dot"), h("div.user", h("p", "keep the default page size at 50"))),
+    thought(true, "Got it: switching the default to 50.", "Got it: switching the default to 50.", "· 960 tokens"),
+    h("div.turn.turn-assistant", h("div.md", h("p", "The second reply starts here."))));
+  assert.equal(read(root, [textOf(root, "The first reply"), 0], [textOf(root, "The second reply"), 23]),
+    "The first reply ends here.\n\nkeep the default page size at 50\n\nGot it: switching the default to 50.\n\nThe second reply starts",
+    "no Thought label, gist or tokens; the closed row says nothing; the open row's words as they read");
+});
+
 // review of #239 (2026-10-14): the walk writes each diff row's marker as it reads the row's code, so a selection that starts
 // inside a row's code (past its sign, which the page marks user-select: none) still says what the row is; a context row's
 // marker is the unified diff's leading space, kept on a line alone; a row the range only touches at an edge says nothing

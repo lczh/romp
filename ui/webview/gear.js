@@ -214,7 +214,7 @@ var GEAR_HTML =
   "<div class='rs-sec rs-sec-first'>Display</div>" +
   '<label class=rs-row><input type=checkbox id=rs-compact>' +
   '<span><b>Compact transcript</b>' +
-  '<span class=rs-sub>Collapse each run of tool uses into one line and hide thinking blocks in the chat.</span>' +
+  '<span class=rs-sub>Collapse each run of tool uses into one line in the chat, and each thought into one Thought line that opens on a click.</span>' +
   '</span></label>' +
   // compact tabs and agents (the user 2026-09-08: on a phone, the strip and the background-work panel left about
   // three lines of transcript in view): density only, a body class render.ts applies (dense-chrome.ts)
@@ -245,12 +245,13 @@ var GEAR_HTML =
   '<span><b>Fast comment threads</b><span class=rs-mixed hidden></span>' +
   "<span class=rs-sub>Start new comment threads in fast mode (Opus-only research preview). If the thread's model can't run it, the thread still opens on that model at normal speed, with a notice. Off = same as the session. Follows to every connected machine's kernel.</span>" +
   '</span></label>' +
-  // THINKING (T404): asks the API for reasoning summaries on every new session, so it CREATES (tokens the session pays for, and
-  // adaptive thinking turned on where it was off), which is why it sits in Chat and not under Display
+  // THINKING (T404): asks the API for reasoning summaries on every new session, so it CHANGES what each new session asks of the API
+  // (and turns adaptive thinking on where it was off), which is why it sits in Chat and not under Display. The summary itself costs
+  // nothing extra: the API bills the full thinking under every display setting (its pricing docs, checked 2026-10-23)
   "<div class='rs-sec'>Thinking</div>" +
   "<label class='rs-row'><input type=checkbox id=rs-thinksum>" +
   '<span><b>Thinking summaries</b><span class=rs-mixed hidden></span>' +
-  '<span class=rs-sub>For every new Claude Code session, ask the API for reasoning summaries and show them in the chat, folded to two lines (click to expand). The summaries are output tokens the session pays for, which is why this row sits under Chat and not Display. Compact transcript still hides them. If thinking was turned off for this install, this turns adaptive thinking on as well. A running session picks the change up at its next reconnect: an effort or billing switch, the first fast-mode opt-in, or a kernel restart. Switching the model applies live and does not reconnect. Off by default. Applies on every connected machine’s kernel.</span>' +
+  '<span class=rs-sub>For every new Claude Code session, ask the API for reasoning summaries and show them in the chat, folded to two lines, or to one Thought line under Compact transcript (click to expand). A summary costs nothing extra: the API bills a session for all of its thinking whether or not it sends a summary back. If thinking was turned off for this install, this turns adaptive thinking on as well, and that thinking is billed. A running session picks the change up at its next reconnect: an effort or billing switch, the first fast-mode opt-in, or a kernel restart. Switching the model applies live and does not reconnect. Off by default. Applies on every connected machine’s kernel.</span>' +
   '</span></label>' +
   // CHAT HISTORY (2026-09-15): every chat loaded from its first message for every page, instead of from the saved document's
   // cut with the history above it loading as the user scrolls; the lever for a page that cannot fill the region above the cut.

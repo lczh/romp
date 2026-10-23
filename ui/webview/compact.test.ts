@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { compactDisplay, isFoldableNoticeShape, itemAnchor, STANDALONE_TOOLS, actionHead, actionParts, actionPhrases, toolRowLabel, diffTotals, toolInputText, type DisplayItem } from "./compact";
+import { compactDisplay, isFoldableNoticeShape, itemAnchor, itemHolds, runRows, thoughtHasWords, thoughtKey, thoughtOf, STANDALONE_TOOLS, actionHead, actionParts, actionPhrases, toolRowLabel, diffTotals, toolInputText, type DisplayItem, type ThoughtLike } from "./compact";
 
-test("compactDisplay: thinking is dropped entirely", () => {
+test("compactDisplay: without the thoughts array, thinking is dropped entirely (a caller that passes none)", () => {
   const d = compactDisplay(["user", "thinking", "assistant"]);
   assert.deepEqual(d, [{ kind: "event", index: 0 }, { kind: "event", index: 2 }]);
 });
@@ -16,7 +16,7 @@ test("compactDisplay: a run of consecutive tools collapses to one toolgroup", ()
   ]);
 });
 
-test("compactDisplay: thinking between tools does NOT break the run (it's dropped first)", () => {
+test("compactDisplay: textless thinking between tools does NOT break the run", () => {
   const d = compactDisplay(["tool", "thinking", "tool"]);
   assert.deepEqual(d, [{ kind: "toolgroup", indices: [0, 2] }]);
 });
@@ -160,6 +160,97 @@ test("itemAnchor: a lone event is its own anchor; a run anchors on its latest me
   assert.equal(itemAnchor({ kind: "noticegroup", indices: [4, 4] } as DisplayItem, at), 4, "no timed member: the first");
 });
 
+
+// ── Thoughts in compact mode (the user 2026-10-23, who approved the design and the end of the 2026-06-30 rule) ──
+// A thinking block WITH WORDS is a thought; consecutive thoughts are one row; a thought that opens a stretch of work is a unit
+// of its own; a thought after a tool rides that tool's run; a textless block stays hidden. Synthetic notes-api events only.
+type Ev = ThoughtLike & { name?: string };
+const ev = (kind: string, extra: Partial<Ev> = {}): Ev => ({ kind, ...extra });
+const words = (text: string, extra: Partial<Ev> = {}): Ev => ev("thinking", { text, ...extra });
+const opaque = (extra: Partial<Ev> = {}): Ev => ev("thinking", { text: "", ...extra });
+const units = (evs: Ev[]): DisplayItem[] => compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.name), undefined, evs.map(thoughtHasWords));
+
+test("thoughts, grouping: consecutive thoughts are ONE row, a textless block between them splits nothing", () => {
+  assert.deepEqual(units([ev("user"), words("Reading the list handler."), words("Starting with the handler."), ev("assistant")]),
+    [{ kind: "event", index: 0 }, { kind: "thought", indices: [1, 2] }, { kind: "event", index: 3 }]);
+  assert.deepEqual(units([ev("user"), words("First."), opaque(), words("Second."), ev("assistant")]),
+    [{ kind: "event", index: 0 }, { kind: "thought", indices: [1, 3] }, { kind: "event", index: 4 }], "the textless block is no member and no break");
+  // inside an expanded run, a stretch of thoughts draws as one row, each tool as its own (runRows)
+  const kinds = ["tool", "thinking", "thinking", "tool", "thinking"];
+  assert.deepEqual(runRows([0, 1, 2, 3, 4], (i) => kinds[i] === "thinking"), [[0], [1, 2], [3], [4]]);
+  assert.deepEqual(runRows([0, 2], (i) => kinds[i] === "thinking"), [[0], [2]], "two tools, no thoughts: a row each");
+});
+
+test("thoughts, placement: a thought that opens a stretch is its own row, after a prompt, a mid-turn message or a reply", () => {
+  const evs = [
+    ev("user"), words("Planning the pagination."),                     // after the prompt
+    ev("tool", { name: "Read" }), ev("tool", { name: "Edit" }),
+    ev("user"), words("Got it: switching the default to 50."),         // after a mid-turn message
+    ev("tool", { name: "Edit" }), ev("tool", { name: "Bash" }),
+    ev("assistant"), words("The tests pass; one more check."),         // after a reply
+    ev("assistant"),
+  ];
+  assert.deepEqual(units(evs), [
+    { kind: "event", index: 0 }, { kind: "thought", indices: [1] }, { kind: "toolgroup", indices: [2, 3] },
+    { kind: "event", index: 4 }, { kind: "thought", indices: [5] }, { kind: "toolgroup", indices: [6, 7] },
+    { kind: "event", index: 8 }, { kind: "thought", indices: [9] }, { kind: "event", index: 10 },
+  ]);
+});
+
+test("thoughts, placement: a thought after a tool is a MEMBER of that run, never a split; a lone tool's thought follows it", () => {
+  // two tools with a thought between them and one after: ONE group holding both thoughts (the head counts its tools only)
+  assert.deepEqual(units([ev("user"), ev("tool", { name: "Read" }), words("Both callers pass no limit."), ev("tool", { name: "Edit" }), words("Now the tests."), ev("assistant")]),
+    [{ kind: "event", index: 0 }, { kind: "toolgroup", indices: [1, 2, 3, 4] }, { kind: "event", index: 5 }]);
+  // a LONE tool stays first-class, so there is no group to hold its thought: the thought is the row after it
+  assert.deepEqual(units([ev("user"), ev("tool", { name: "Bash" }), words("Three passing."), ev("assistant")]),
+    [{ kind: "event", index: 0 }, { kind: "event", index: 1 }, { kind: "thought", indices: [2] }, { kind: "event", index: 3 }]);
+  // a standalone tool (the answered question box) ends the run: a thought after it opens a stretch of its own
+  assert.deepEqual(units([ev("tool", { name: "Read" }), ev("tool", { name: "Read" }), ev("tool", { name: "AskUserQuestion" }), words("They chose 50.")]),
+    [{ kind: "toolgroup", indices: [0, 1] }, { kind: "event", index: 2 }, { kind: "thought", indices: [3] }]);
+  // a thought before the run's first tool is the stretch's opener, not a member
+  assert.deepEqual(units([words("Reading first."), ev("tool", { name: "Read" }), ev("tool", { name: "Read" })]),
+    [{ kind: "thought", indices: [0] }, { kind: "toolgroup", indices: [1, 2] }]);
+  // every event a unit holds maps back to it (a deep link, a scroll mark): a run's thought member, a thought's every block
+  const it: DisplayItem = { kind: "toolgroup", indices: [1, 2, 3] };
+  assert.ok(itemHolds(it, 2) && !itemHolds(it, 4));
+  assert.ok(itemHolds({ kind: "thought", indices: [5, 7] }, 7) && !itemHolds({ kind: "thought", indices: [5, 7] }, 6));
+  assert.ok(itemHolds({ kind: "event", index: 3 }, 3) && !itemHolds({ kind: "gap", lo: 0, hi: 4, before: 3 }, 3));
+  assert.equal(itemAnchor({ kind: "thought", indices: [5, 7] }, () => 1), 5, "a Thought row is placed and timed by its first block");
+});
+
+test("thoughts: a textless (opaque) block stays hidden, makes no unit and breaks no run", () => {
+  assert.deepEqual(units([ev("user"), opaque(), ev("assistant")]), [{ kind: "event", index: 0 }, { kind: "event", index: 2 }]);
+  assert.deepEqual(units([ev("tool", { name: "Edit" }), opaque(), ev("tool", { name: "Bash" })]), [{ kind: "toolgroup", indices: [0, 2] }]);
+  assert.equal(thoughtHasWords(opaque()), false);
+  assert.equal(thoughtHasWords(words("   \n ")), false, "whitespace is no words");
+  assert.equal(thoughtHasWords(ev("assistant", { text: "a reply" })), false, "only a thinking event is a thought");
+  assert.deepEqual(units([ev("user"), opaque(), opaque()]), [{ kind: "event", index: 0 }]);
+});
+
+test("thoughts: the gist is the first line of the LAST block with words; the text is every block's; the tokens span the messages", () => {
+  const evs: Ev[] = [
+    ev("user"),
+    opaque({ uuid: "11111111-2222-4333-8444-000000000001", thinkTokens: 700 }),   // the message's first thinking row carries its figure
+    words("The default has to move from 20 to 50,\nand one test pins 20.", { uuid: "11111111-2222-4333-8444-000000000002" }),
+    words("\n  Got it:   switching the default page size to 50.\nThen the test.", { uuid: "11111111-2222-4333-8444-000000000003", thinkTokens: 260 }),
+    ev("tool", { name: "Edit" }),
+  ];
+  const th = thoughtOf(evs, [2, 3]);
+  assert.equal(th.gist, "Got it: switching the default page size to 50.", "the latest note's first line, its whitespace collapsed");
+  assert.equal(th.text, "The default has to move from 20 to 50,\nand one test pins 20.\n\nGot it:   switching the default page size to 50.\nThen the test.",
+    "every block's words, in order, a blank line apart");
+  assert.equal(th.tokens, 960, "the textless row just before the words carries its message's figure, and counts");
+  assert.equal(thoughtOf(evs, [3]).gist, "Got it: switching the default page size to 50.");
+  assert.equal(thoughtOf([ev("tool"), words("Only this.", { thinkTokens: 0 })], [1]).tokens, 0, "no figure: no tokens");
+});
+
+test("thoughts: the fold persists under think:<first block's uuid>, the key the full view's clamp keeps", () => {
+  const evs: Ev[] = [words("One.", { uuid: "11111111-2222-4333-8444-00000000000a" }), words("Two.", { uuid: "11111111-2222-4333-8444-00000000000b" })];
+  assert.equal(thoughtOf(evs, [0, 1]).key, "think:11111111-2222-4333-8444-00000000000a", "the first block's uuid, whichever block the gist comes from");
+  assert.equal(thoughtKey(evs[1]), "think:11111111-2222-4333-8444-00000000000b", "a lone block (the full view's clamp) keys the same way");
+  assert.equal(thoughtKey({}), undefined, "no uuid: no key (a transient fold)");
+  assert.equal(thoughtKey(undefined), undefined);
+});
 
 // ── T418: the tool rows in the user's terms ──
 const T = (name: string, extra: Record<string, unknown> = {}) => ({ name, desc: "", input: "{}", ...extra });

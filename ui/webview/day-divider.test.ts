@@ -38,7 +38,7 @@ test("a collapsed run is placed and timed by its ANCHOR member, the latest, on b
   assert.doesNotMatch(ng, /adv\(it\.indices\[0\]\)/, "never the first member of a notice run");
   assert.match(ng, /\}\);\s*\n\s*adv\(anchor\);/, "…nor the last child of an open one: the anchor");
   // a tool run is untouched: its members are in transcript order, its head is timed by its first, its walk exits as before
-  assert.match(ai, /const head = tag\(renderToolGroup\(tools, prevEpoch, key, open\)\);\s*\n\s*host\.appendChild\(head\);\s*\n\s*adv\(it\.indices\[0\]\);/);
+  assert.match(ai, /const head = tag\(renderToolGroup\(runTools\(s\.events, it\.indices\), prevEpoch, key, open\)\);[^\n]*\n\s*host\.appendChild\(head\);\s*\n\s*adv\(it\.indices\[0\]\);/);
   const pop = RENDER.slice(RENDER.indexOf("const dayOpen = eventEpoch(evs[anchor]);") - 200, RENDER.indexOf("if (!relayNoted) list.appendChild(cmtRelayedNote"));
   assert.match(pop, /const anchor = itemAnchor\(it, \(i\) => eventEpoch\(evs\[i\]\)\);/);
   assert.match(pop, /renderNoticeGroup\(run, evs\[anchor\], prev, key, open\)/);

@@ -7231,7 +7231,8 @@ What a session is doing at this moment, each piece read from an event Claude Cod
   can be off by half.
 - **Thought tokens.** A finished thinking row reads "Thought · 2.5k tokens", the exact figure Claude Code recorded for
   that reply (counted once when one reply thought in two blocks), and a finished prompt's "worked" line adds the total
-  for the turn. With compact view on, thinking rows are hidden and the turn's total is what shows.
+  for the turn. With compact view on, a thinking row with words is a folded [Thought line](#thought-lines) that shows
+  the figure once opened, and a row with no words is hidden, so the turn's total is what shows for it.
 - **Running tools.** A tool still waiting for its result wears the working dot and counts its seconds from the call
   until the result arrives, including while a permission prompt for it is open. A tool whose turn has ended (a result,
   a stop) without its result wears a plain dot and says "no result", never the tick of one that finished.
@@ -7242,6 +7243,34 @@ What a session is doing at this moment, each piece read from an event Claude Cod
 
 None of this waits for, or causes, a rebuild of the chat: the kernel sends each session's live status as its own small
 message when it changes, and the page counts the seconds itself.
+
+### Thought lines
+
+With **Compact transcript** on (the default), a thinking block that carries words shows as one folded line:
+**Thought** and the first line of the latest note, cut at the edge of the chat in the dim italic of every thought. The
+words are reasoning summaries when **Thinking summaries** is on, and Claude Code's short progress notes otherwise. A
+thinking block with no words stays hidden, as before; the turn's "worked" line still counts its tokens.
+
+Consecutive thinking blocks make one line, its preview taken from the last of them, which under summaries is usually
+the note written for you. A click opens the line to "Thought · 2.5k tokens" over the words of every block, a blank line
+apart; the figure is the thinking tokens of the replies the blocks belong to. A second click folds it again. The line
+stays open through the chat's rebuilds, and the full view's two-line fold of the same block shares its state.
+
+Where the line sits:
+
+- A thought that starts a stretch of work (right after your prompt, a message you sent while the session worked, or a
+  reply) is a line of its own.
+- A thought that comes after a tool call joins that call's run: an open run shows it as a folded Thought line between
+  its calls, and the run's summary still counts only the calls. A single tool call is never folded into a run, so a
+  thought after one is a line of its own below it.
+
+The same lines show in a subagent's transcript and in a comment thread's conversation. A quote of the chat leaves out
+a Thought line's label, preview and figure; an open line's words are quoted as they read.
+
+**Thinking summaries** (Settings, Chat) asks the API for summaries in every new Claude Code session. A summary costs
+nothing extra: the API bills a session for all of its thinking under every display setting, and the summary only
+changes what comes back. Where this install had thinking turned off, the setting also turns adaptive thinking on, and
+that thinking is billed.
 
 ### The rings on a tab
 
@@ -7840,8 +7869,8 @@ before, the passage alone. What the quote chip's preview shows is what is sent.
 A quote of a passage of the chat holds the passage's text as the chat shows it,
 read at the moment you select. What is not the conversation's text is left out:
 a code block's Copy button and any other control, a tool row's label and its
-folded input and output, the IN and OUT labels of an open one, a notice's
-source label, a message's time, the contents of a closed fold (its summary
+folded input and output, the IN and OUT labels of an open one, a Thought line's
+label, preview and token figure, a notice's source label, a message's time, the contents of a closed fold (its summary
 stays), and anything the chat marks as unselectable. A block
 starts a new line and a paragraph or a message is a blank line apart; a code
 block's lines keep their line breaks; a table's cells are a tab apart.

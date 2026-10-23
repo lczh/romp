@@ -18,6 +18,7 @@ import { workedFooterPlan } from "./worked-footer";
 import { indexOfUuid, keyOf } from "./chat-window";   // the uuid-anchored arm's real helpers (a proto-2 delta names its anchor by key)
 import { frameOlder, droppedLandedHuman, dropsLandedRow } from "./frame-guard";   // the frame watermark guard (2026-09-22): chatTail reads it
 import { firstReplaced } from "./unit-diff";   // repaintFromChange's rule (2026-09-23): chatTail names the first event the frame or the passes swapped
+import { runRows as unitRows } from "./compact";   // an expanded run's rows (2026-10-23: a stretch of thoughts is one row), the patch's real rule
 
 const requireCjs = createRequire(__filename);
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
@@ -217,7 +218,7 @@ class FakeEl {
     return this.children.filter((c) => (!attr || c.dataset.unit === attr[1]) && (!cls || c.has(cls[1])));
   }
 }
-type FootHooks = { FakeEl: typeof FakeEl; workedFooterPlan: typeof workedFooterPlan; open?: Set<string> };
+type FootHooks = { FakeEl: typeof FakeEl; workedFooterPlan: typeof workedFooterPlan; runRows: typeof unitRows; open?: Set<string> };
 type Patch = (v: any, s: any, from: number, working: boolean, items?: any[] | null) => void;
 
 function liftPatch(): (hooks: FootHooks) => Patch {
@@ -225,6 +226,7 @@ function liftPatch(): (hooks: FootHooks) => Patch {
   const prelude = `
     const H = HOOKS;
     const workedFooterPlan = H.workedFooterPlan;
+    const runRows = H.runRows;
     const eventEpoch = (ev) => (ev.t == null ? null : ev.t);
     const itemFirstEvent = (it) => (it.kind === "toolgroup" || it.kind === "retrygroup" ? it.indices[0] : it.index);
     const elapsedFooter = (secs) => { const f = new H.FakeEl("div", "turn-elapsed"); f.textContent = String(secs); return f; };
@@ -241,7 +243,7 @@ const reply = (t: number) => ({ kind: "assistant", t });
 const tool = (t: number) => ({ kind: "tool", t });
 /** A rendered window: one node per unit tagged data-unit, unit `spotOn` carrying a fork spot. */
 function footWorld(events: any[], units: number, spotOn: number, open?: Set<string>) {
-  const patch = liftPatch()({ FakeEl, workedFooterPlan, open });
+  const patch = liftPatch()({ FakeEl, workedFooterPlan, runRows: unitRows, open });
   const el = new FakeEl("div");
   const nodes: FakeEl[] = [];
   for (let u = 0; u < units; u++) { const n = new FakeEl("div", "turn"); n.dataset.unit = String(u); el.appendChild(n); nodes.push(n); }
@@ -336,7 +338,7 @@ test("compact mode: the window start is a unit and the plan wants an event index
   assert.deepEqual(w6.v.painted.sig, ["s0", undefined], "the run's unit alone is marked for repaint");
   assert.equal(w6.v.rediff, true, "…and the next paint compares the window, so it is not skipped");
   assert.ok(w6.nodes.every((n) => !n.querySelector(":scope > .turn-elapsed")), "…and nothing was patched by hand");
-  // a hidden thinking row (compact mode shows none) belongs to no unit at all: nothing to patch
+  // a hidden (textless) thinking row belongs to no unit at all: nothing to patch
   const w5 = footWorld([user(100), tool(110), { kind: "thinking", t: 150 }, user(200)], 3, 1);
   w5.patch(w5.v, w5.s, 3, true, [{ kind: "event", index: 0 }, { kind: "event", index: 1 }, { kind: "event", index: 3 }]);
   assert.equal(w5.v.stale, false); assert.equal(w5.v.rediff, undefined);
@@ -361,4 +363,26 @@ test("a reply inside an expanded run: the session going idle puts the footer on 
   assert.equal(rows[2].querySelector(":scope > .turn-elapsed"), null, "back to work on the same turn: the footer comes off the row");
   assert.equal(spot.parent, rows[2], "the fork spot is back on the row itself");
   assert.deepEqual(v.painted.sig, ["s0", "s1"], "no repaint mark either way"); assert.equal(v.rediff, undefined); assert.equal(v.stale, false);
+});
+
+// 2026-10-23 (the user approved showing thoughts in compact mode): a turn can end on a THOUGHT. Its footer sits on the Thought
+// row that closes it: a stretch of thoughts is ONE row whose last block carries the footer, whether the stretch is a unit of
+// its own (kind "thought") or rides an expanded run as one of its rows (runRows), where a row counts per stretch, not per block
+test("a turn that ends on a thought: the footer on its Thought row, a unit of its own or one row of an expanded run", () => {
+  const think = (t: number) => ({ kind: "thinking", text: "a note", t });
+  // the prompt, then a stretch of two thoughts that opens the turn and ends it: one Thought unit, the footer on its node
+  const own = [user(100), think(120), think(130)];
+  const w1 = footWorld(own, 2, 1);
+  w1.patch(w1.v, w1.s, 3, false, [{ kind: "event", index: 0 }, { kind: "thought", indices: [1, 2] }]);
+  assert.equal(w1.nodes[1].querySelector(":scope > .turn-elapsed")?.textContent, "30", "the footer on the Thought row the turn ends on");
+  assert.equal(w1.v.stale, false);
+  // a run of two tools and two thoughts after them, expanded: THREE rows (each tool, the thoughts as one); the footer on the third
+  const run = [user(100), tool(110), tool(120), think(150), think(160)];
+  const w2 = footWorld(run, 2, 1, new Set(["tg:110"]));
+  const rows = runRows(w2.v.el, w2.nodes[1], 1, 3);
+  w2.v.painted = { sig: ["s0", "s1"] };
+  w2.patch(w2.v, w2.s, 5, false, [{ kind: "event", index: 0 }, { kind: "toolgroup", indices: [1, 2, 3, 4] }]);
+  assert.equal(rows[2].querySelector(":scope > .turn-elapsed")?.textContent, "60", "the footer on the run's Thought row, its third row");
+  assert.ok([rows[0], rows[1], ...w2.nodes].every((n) => !n.querySelector(":scope > .turn-elapsed")), "no other row gained one");
+  assert.deepEqual(w2.v.painted.sig, ["s0", "s1"], "patched in place: no repaint mark"); assert.equal(w2.v.rediff, undefined);
 });
