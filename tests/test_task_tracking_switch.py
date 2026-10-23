@@ -603,7 +603,9 @@ class TheClearAllOp(_Base):
 
 class TheNudgePass(_Base):
     """The goal nudges wait while tracking is off: the walk runs wake-only, as it does with the nudge toggle off; the
-    compaction suggestion and the debt ladder keep the nudge toggle alone."""
+    compaction suggestion and the debt ladder keep the nudge toggle alone. The one session owes a reply (an open ask), so
+    the pass looks at it with tracking off too: with tracking off the walk looks only at the sessions that owe one
+    (tests/test_nudge_walk_switches.py)."""
     def setUp(self):
         super().setUp()
         self._saved = {k: getattr(km, k) for k in ("_alive_sessions", "_nudge_asks_by_target", "_nudge_look_stat", "_auto_nudge_data",
@@ -611,7 +613,7 @@ class TheNudgePass(_Base):
                                                      "_auto_nudge_on", "_cleared_ids", "_push_soon")}
         self.calls = []
         km._alive_sessions = lambda now, live_map: [{"sid": "11111111-2222-3333-4444-555555555555", "path": os.path.join(self._td, "t.jsonl"), "name": "web"}]
-        km._nudge_asks_by_target = lambda: {}
+        km._nudge_asks_by_target = lambda: {"11111111-2222-3333-4444-555555555555": ["11111111-2222-3333-4444-666666666666"]}
         km._nudge_look_stat = lambda s, asks, pstat: (("k",), False, False)
         km._auto_nudge_data = lambda: {"enabled": True, "nudged": {}}
         km._auto_nudge_session = lambda s, now, live_map, nudged, waitfor, alive_ids, wake_only=False, cleared=None, reminders=None: self.calls.append(("session", wake_only, reminders))

@@ -26,7 +26,7 @@ Auxiliary inputs the file adapter may read (same category as the transcript):
                                transcript lost to an API-errored try; judge parse only)
   timeline/messages.jsonl   -> peer rompUuid for a postal atom (join on the msg id)
 """
-import array, bisect, collections, copy, gzip, json, os, re, sys, time, hashlib, threading, traceback, weakref
+import array, bisect, collections, copy, gzip, json, os, re, sys, time, hashlib, threading, traceback, weakref, zlib
 from datetime import datetime
 from pathlib import Path
 
@@ -626,14 +626,27 @@ def _read_jsonl(path):
 #  - grew                 → verify the cached tail bytes still sit before the cached offset (a REWRITE that
 #                           happens to be larger would otherwise serve a corrupt splice), then parse just
 #                           the new bytes. Mismatch → full re-read;
-#  - shrank / same-size-new-mtime → full re-read (a rewrite, not an append).
+#  - same size under a new mtime, same inode → checked, not re-read (2026-10-23): a writer that reopens its file and
+#                           writes nothing (a relaunched CLI, a touch) moves the time alone, and a whole re-read of a 464 MB
+#                           transcript for it (a fresh generation, so every fold and the assembly entry started over) took
+#                           46 s of a jobs pass. The tail guard first (a cheap reject), then the crc32 of every byte the
+#                           entry holds, read raw with no decode, against the one the entry kept: both standing serve the
+#                           entry under its generation (the bytes past the offset scanned, as for a growth); either
+#                           differing → full re-read, so an in-place edit of the same length is still read. A NEW inode at
+#                           the same size is a replacement (a rename over the path), read whole;
+#  - shrank → full re-read (a rewrite, not an append).
 # A trailing line with no "\n" yet (a writer caught mid-append) is NOT consumed — the offset stays before
 # it, so the next read picks the completed line up. Records are treated as IMMUTABLE by every consumer
 # (FileAdapter builds fresh atom dicts; nothing writes into a record), matching the kernel's existing
 # whole-parse cache contract. The cached list itself is never extended in place — a grown file stores a
 # NEW list — so a concurrent reader holding the old list is never surprised mid-iteration.
-_JSONL_CACHE = {}                 # path -> (mtime, size, offset, tail_bytes, records, base, gen, offsets); dict order = LRU, hits reinsert
+_JSONL_CACHE = {}                 # path -> (mtime, size, offset, tail_bytes, records, base, gen, offsets, inode, crc_start, crc);
+#                                   dict order = LRU, hits reinsert
 #                                   offsets: array of (byte offset, byte length) pairs, one per held record (T323 stage 4)
+#                                   inode, crc_start, crc (2026-10-23): the file's st_ino at the read and the zlib.crc32 of the
+#                                   bytes [crc_start, offset) the entry's records came from (0 for a whole entry, a tail entry's
+#                                   own start; None when an entry grew from one that carried none), so a same-size file under a
+#                                   new mtime is proved byte for byte without a decode; an entry without them reads it whole
 #                                   base: how many records of the file precede records[0] (0 = the whole file is held; > 0 = a
 #                                   TAIL entry restored from a checkpoint, T323 stage 3); gen: a process-wide counter's value,
 #                                   fresh for every from-zero read and every restored entry (a mismatch, an eviction, a first
@@ -777,6 +790,8 @@ _RECORD_CACHE_STATS = {"inserts": 0, "evictions": 0, "evictedBytes": 0, "budgetE
                        #                   gc-freeze reclaim trigger: these entries are decoded json, acyclic, freed by refcount
                        #                   whether frozen or not, so an unfreeze reclaim on a pop would collect nothing (the
                        #                   2026-09-21 review's correction)
+                       "touched": 0,   # reads of a file that kept its size under a new mtime and whose held bytes stood: served
+                       #                   from the entry, no decode (2026-10-23; a relaunched CLI moves its transcript's time alone)
                        "pinnedKept": 0,   # drops that kept an entry a whole assembly entry folds over (_drop_unless_pinned)
                        "droppedHeld": 0, "droppedHeldBytes": 0,   # the drops (of `dropped`) whose records an assembly entry folding
                        #                   over that generation still holds, and those records' bytes, held until its next visit:
@@ -2546,7 +2561,22 @@ def _scan_jsonl_bytes(data, base_offset, offsets=None):
     return records, base_offset + end + 1
 
 
-def _scan_jsonl_stream(fh, base_offset, offsets=None, limit=None):
+def _held_crc(fh, path, start, end):
+    """The zlib.crc32 of `fh`'s bytes [start, end), read raw in 4 MiB chunks and counted as read, or None when the file holds
+    fewer: the proof a same-size file under a new mtime still holds the bytes a reader entry kept (2026-10-23)."""
+    fh.seek(start)
+    crc, left = 0, max(0, end - start)
+    while left > 0:
+        chunk = fh.read(min(left, 1 << 22))
+        if not chunk:
+            break
+        crc = zlib.crc32(chunk, crc)
+        left -= len(chunk)
+    _count_read(path, max(0, end - start) - left)
+    return crc if left == 0 else None
+
+
+def _scan_jsonl_stream(fh, base_offset, offsets=None, limit=None, crc=None):
     """(records, consumed, bytes_read) for the jsonl from `fh`'s CURRENT position to its end, decoded line by line off
     the open binary file: the parsed objects of every COMPLETE line, the byte offset just past the last complete line
     (a trailing line with no newline yet is a writer caught mid-append and is left for the next read, as
@@ -2582,7 +2612,11 @@ def _scan_jsonl_stream(fh, base_offset, offsets=None, limit=None):
     \\r under both. Splitting the concatenation equals concatenating the splits, since b"\\n" is itself a boundary, so
     records, consumed offset and offsets are identical for every input, valid or not (review find, 2026-09-15: the
     first cut split at b"\\n" alone and documented the bare-\\r case as a difference; parity costs one splitlines call
-    per line). tests/test_reader_stream_peak.py pins the equivalence, the bare-\\r case included."""
+    per line). tests/test_reader_stream_peak.py pins the equivalence, the bare-\\r case included.
+
+    `crc`, when given, is a one-item list holding a running zlib.crc32, carried over every COMPLETE line the scan consumes
+    (the bytes from the start position to the consumed offset; a trailing partial is not in it), so the reader's entry can
+    prove the bytes it holds without keeping them (2026-10-23: a same-size file under a new mtime is checked against it)."""
     records = []
     seen = 0                                              # bytes iterated so far, complete lines and the trailing partial alike
     consumed = 0                                          # bytes of complete lines: what the next read resumes after
@@ -2597,6 +2631,8 @@ def _scan_jsonl_stream(fh, base_offset, offsets=None, limit=None):
         #                                                   end the caller captured (a writer still appending): a partial, left as is
         if remaining is not None:
             remaining -= len(line)
+        if crc is not None:
+            crc[0] = zlib.crc32(line, crc[0])
         for piece in line.splitlines(keepends=True):      # the reference's boundaries within the line (a bare \r splits)
             at = seen
             seen += len(piece)
@@ -2792,8 +2828,10 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
     accepts a TAIL entry (base > 0: records[0] is the file's record number base), and a first touch with no entry
     consults the file's checkpoint (T323 stage 3): the recorded offset's guard bytes are verified on disk and only
     offset..EOF is read. Without it a tail entry is upgraded to the whole file from zero (same gen: the prefix stood).
-    A mismatch anywhere (the guard, a shrink, a same-size-new-mtime) reads from zero and bumps gen; when the entry
-    came from a checkpoint that is a counted fallback."""
+    A mismatch anywhere (the guard, a shrink) reads from zero and bumps gen; when the entry came from a checkpoint that is
+    a counted fallback. The same size under a new mtime, over the same inode, is no mismatch by itself: the guard and the
+    checksum of the held bytes decide it (kind "touched", counted under `touched`), and the entry keeps its gen; under a
+    new inode it is a replacement, read from zero."""
     path = str(path)
     try:
         st = os.stat(path)
@@ -2825,43 +2863,59 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
     try:
         with open(path, "rb") as fh:
             base, gen, done, kind = 0, None, False, "zero"
+            crc_start, crc = 0, [0]                       # the checksum of the held bytes [crc_start, offset): from zero for a whole
+            #                                               read, from a tail entry's start for its tail, None when unknown
             grown = hit is not None and (st.st_size > hit[1] or (restored is not None and st.st_size == hit[1]
                                                                     and (st.st_mtime == hit[0] or tail_from is not None)))
             unchanged_tail = (hit is not None and not tail_ok and hit[5] > 0 and st.st_size == hit[1]
                               and st.st_mtime == hit[0])            # a whole reader meets an unchanged tail entry
-            if grown or unchanged_tail:
+            touched = (hit is not None and restored is None and st.st_size == hit[1] and st.st_mtime != hit[0]
+                       and len(hit) > 10 and hit[8] == st.st_ino and hit[9] is not None)   # the same file, the same size, a new
+            #                                                         mtime: the guard, then the held bytes' checksum decide (below);
+            #                                                         a new inode is a replacement and an entry with no checksum
+            #                                                         cannot prove its bytes: both read whole
+            if grown or unchanged_tail or touched:
                 _, _, offset, tail, records, base0, gen0 = hit[:7]
                 fh.seek(max(0, offset - len(tail)))
                 _count_read(path, len(tail))
-                if fh.read(len(tail)) == tail:            # the file really is our cached prefix + more
+                guard_ok = fh.read(len(tail)) == tail
+                held_ok = guard_ok and (not touched or _held_crc(fh, path, hit[9], offset) == hit[10])   # a touch: every held byte
+                if held_ok:                               # the file really is our cached prefix + more
                     if tail_ok or base0 == 0:
                         offs = array.array("q", hit[7]) if len(hit) > 7 else array.array("q")
-                        new, offset, nread = _scan_jsonl_stream(fh, offset, offs, limit=max(0, st.st_size - fh.tell()))   # the appended lines, one at a time
+                        crc_start, crc[0] = (hit[9], hit[10]) if len(hit) > 10 else ((offset if restored is not None else None), 0)
+                        fh.seek(offset)
+                        new, offset, nread = _scan_jsonl_stream(fh, offset, offs, limit=max(0, st.st_size - fh.tell()),   # the appended
+                                                                crc=crc if crc_start is not None else None)              #  lines, one at a time
                         _count_read(path, nread)
                         records = (records + new) if records else new   # a NEW list — never extend the served one in place
                         base, gen, done = base0, gen0, True
-                        kind = "restore" if restored is not None else "grown"
+                        kind = "restore" if restored is not None else ("touched" if touched else "grown")
                         if restored is not None and tail_from is None:
                             with _CKPT_LOCK:
                                 _CKPT_STATS["restored"] += 1
                     else:                                 # a whole reader over a tail entry: the whole file, same gen
                         fh.seek(0)
                         offs = array.array("q")
-                        records, offset, nread = _scan_jsonl_stream(fh, 0, offs, limit=st.st_size)
+                        records, offset, nread = _scan_jsonl_stream(fh, 0, offs, limit=st.st_size, crc=crc)
                         _count_read(path, nread)
                         base, gen, done, kind = 0, gen0, True, "upgrade"
                 else:
-                    kind = "guard"                        # prefix changed → a rewrite → full re-read, a fresh generation
+                    kind = "guard" if not guard_ok else "rewrite"   # prefix changed (or, under a touch, a held byte did) → a
+                    #                                                 rewrite → full re-read, a fresh generation
                     if restored is not None and tail_from is None:
                         _ckpt_fallback(path, "guard")
             elif hit is not None:
-                kind = "shrunk" if st.st_size < hit[2] else "rewrite"   # shrank, or same size under a new mtime: a rewrite
+                kind = "shrunk" if st.st_size < hit[2] else "rewrite"   # shrank (past the offset: a rewrite), or the same size
+                #                                                          under a new inode: a replacement (the same inode's
+                #                                                          same size under a new mtime takes the guard above)
                 if restored is not None and tail_from is None:
                     _ckpt_fallback(path, kind)
             if not done:
                 fh.seek(0)
                 offs = array.array("q")
-                records, offset, nread = _scan_jsonl_stream(fh, 0, offs, limit=st.st_size)   # line by line, to the size the stat saw
+                crc_start, crc[0] = 0, 0
+                records, offset, nread = _scan_jsonl_stream(fh, 0, offs, limit=st.st_size, crc=crc)   # line by line, to the size the stat saw
                 _count_read(path, nread)
                 base, gen = 0, _next_gen()                # a from-zero read: a generation no cursor of this path can hold
             tail_from = max(0, offset - _JSONL_TAIL_GUARD)
@@ -2902,9 +2956,11 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
         if on_fail is not None and not isinstance(e, FileNotFoundError):
             on_fail(e)
         return None
-    ent = (st.st_mtime, st.st_size, offset, tail, records, base, gen, offs)
+    ent = (st.st_mtime, st.st_size, offset, tail, records, base, gen, offs, st.st_ino, crc_start, crc[0])
     with _JSONL_CACHE_LOCK:
         _READ_IN_FLIGHT.discard(path)                   # done reading: an eviction from here on releases as any other
+        if kind == "touched":
+            _RECORD_CACHE_STATS["touched"] = _RECORD_CACHE_STATS.get("touched", 0) + 1
         gone = _cache_insert_locked(path, ent, began)   # the count cap and the byte budget, LRU order (hot entries survive
     if gone:                                            #  any cold flood)
         _asm_drop_holding(gone)              # AFTER the cache lock: the assembly entries over what the budget evicted go too
@@ -2995,8 +3051,8 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
     the states/transcript readers re-read their whole file behind an (mtime,size) key that every append
     invalidates — O(file) per push for every working session. The reader serves the parsed records of a
     growing file incrementally (the parse reads the same list, so this adds no I/O), and only the appended
-    records run through `step`; a rewrite (a shrink, a same-size-new-mtime, a changed prefix under the
-    reader's guard) re-folds from record 0. `init()` makes a fresh state; `step(state, record)` returns the
+    records run through `step`; a rewrite (a shrink, a changed prefix under the reader's guard, a same-size file
+    under a new mtime whose held bytes changed or whose inode did) re-folds from record 0. `init()` makes a fresh state; `step(state, record)` returns the
     next state (mutate-and-return is fine: the cached state is deep-copied before folding onto it, so a
     state a caller was handed never changes under it). Returns the state; [] records (a missing or
     unreadable file) fold to init().

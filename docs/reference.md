@@ -3853,7 +3853,12 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   statistic only, since these entries are acyclic and it never triggers a
   gc-freeze reclaim), and `wholeReads`: every read that pulled a file whole,
   keyed `kind<-caller` (the reader's kind, one of `zero`, `rewrite`, `guard`,
-  `shrunk` and `upgrade`, or `detached` for a whole read that leaves the
+  `shrunk` and `upgrade`; a file that kept its size and inode under a new
+  modification time, which a relaunched session's CLI leaves on its
+  transcript, is no whole read: its held bytes are checked raw against the
+  checksum the entry kept, no decode, the entry served under its
+  generation and counted `touched`, and only bytes that differ read it
+  whole as a `rewrite`, or `detached` for a whole read that leaves the
   cache as it was, which is how a comment, edit or rewind after a /clear
   learns which messages the session's first file holds, once per change of
   that file, and the only way a comment reads that file again, where a
@@ -4257,8 +4262,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   from a road marked file-keyed, or the full walk run to its end, records a
   skippable memo, every other exit an unbounded one), `parses`, `coldParses`
   (parses no cache held), `deferredSessions` (the yield: with a client
-  connected the pass stops after a look that paid a cold parse; the first
-  deferred session is the resume cursor, so the next pass rotates the
+  connected the pass stops after a look that paid a cold parse, the client
+  asked before each look, so a page that connects while a cold walk runs
+  (the first page after a restart) is yielded to after the look in
+  progress; the first deferred session is the resume cursor, so the next pass rotates the
   recency order to start there and every session is reached within as many
   passes as there are cold parses), `unbounded` (memos refused because a leg's release is not one
   of the session's files: a deferral retired by a judge pass, a stamped wait
@@ -4266,7 +4273,13 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   standing), `clockDue` (memos refused because a noted flip has come) and
   `wakeOnly` (looks with injected follow-ups off, which neither skip nor
   record because the toggle is not a file, so that configuration keeps the
-  boot's cold parses); the files the memo keys on are the transcript, the
+  boot's cold parses) and `notWanted` (alive sessions a pass did not look
+  at because no leg of their look could act: every one with Auto Nudge and
+  Task tracking both off, where the look has nothing left to do, and with
+  Task tracking alone off every one that owes no reply, an open inbound ask
+  or a reminder already sent, the debt reminder being that look's only leg;
+  no look means no parse, and the compaction suggestion, which reads no
+  transcript, still runs for them under the toggle); the files the memo keys on are the transcript, the
   state log, the goal store with its override journal and archive, the
   episode log, the clears log, the postal log, the kernel's downtime log
   (the working verdict's suspension check reads a list that log refills)

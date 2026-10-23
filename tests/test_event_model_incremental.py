@@ -5,7 +5,9 @@ now a grown file loads only its appended bytes. The contract under test:
 
   - incremental results are BYTE-FOR-BYTE equivalent to a cold full read, whatever the append pattern;
   - a trailing partial line (a writer caught mid-append) is never consumed early and never lost;
-  - anything that isn't a pure append (shrink, rewrite, same-size touch) falls back to a full re-read;
+  - anything that isn't a pure append (shrink, rewrite) falls back to a full re-read;
+  - a same-size file under a new mtime is decided by the same tail guard as an append (2026-10-23): an identical tail
+    serves the entry under its generation, a changed one re-reads whole;
   - the served records list is never extended in place (a concurrent reader's list is stable).
 
 SYNTHETIC fixtures only (placeholder uuids, invented text).
@@ -106,7 +108,109 @@ class IncrementalRead(unittest.TestCase):
         self.assertEqual(os.path.getsize(self.p), size0, "fixture invariant: the rewrite keeps the size")
         os.utime(self.p, (os.path.getmtime(self.p) + 5,) * 2)   # force a visibly newer mtime
         self.assertEqual(em._read_jsonl_incremental(self.p), [_rec(1)],
-                         "same size but a new mtime is a REWRITE → full re-read, never the stale cache")
+                         "same size, a new mtime and a changed tail is a REWRITE → full re-read, never the stale cache")
+
+    def _whole_reads(self):
+        return sum(v["count"] for v in (em._RECORD_CACHE_STATS.get("wholeReads") or {}).values())
+
+    def test_a_same_size_touch_with_identical_bytes_is_not_reread_whole(self):
+        """A writer that reopens its transcript and writes nothing (a relaunched session's CLI) leaves the size and moves the
+        mtime. That read the whole file again under a fresh generation, so every fold and the assembly entry started over
+        (46 s for a 464 MB transcript in one jobs pass). Now the guard and the crc32 of the held bytes decide it: both
+        standing, the entry is served under its generation, its bytes checked raw and never decoded."""
+        _write(self.p, [_rec(i) for i in range(200)])
+        first = em._read_jsonl_entry(self.p)
+        size0, read0, whole0 = os.path.getsize(self.p), em.read_bytes_report().get(self.p, 0), self._whole_reads()
+        touched0 = em._RECORD_CACHE_STATS.get("touched", 0)
+        os.utime(self.p, (os.path.getmtime(self.p) + 5,) * 2)   # the time moves, not one byte does
+        ent = em._read_jsonl_entry(self.p)
+        self.assertEqual(ent[4], self._fresh(), "the records are the file's")
+        self.assertEqual(ent[6], first[6], "the same generation: the folds' cursors and the assembly entry stand")
+        self.assertEqual(self._whole_reads(), whole0, "no whole read (the decode the 46 s were)")
+        pulled = em.read_bytes_report().get(self.p, 0) - read0
+        self.assertLessEqual(pulled, size0 + 2 * em._JSONL_TAIL_GUARD, "the held bytes once, raw, and the guards")
+        self.assertEqual(ent[0], os.stat(self.p).st_mtime, "the entry carries the new time, so the next read is a plain hit")
+        self.assertEqual(em._RECORD_CACHE_STATS.get("touched", 0) - touched0, 1, "counted for /perf")
+        self.assertIs(em._read_jsonl_entry(self.p), ent, "and it is: the very entry")
+
+    def test_a_same_size_in_place_edit_far_from_the_tail_is_reread_whole(self):
+        """The same inode, the same size, a new mtime and the same last bytes: an edit of the same length near the head. The
+        guard cannot see it; the held bytes' checksum does, and the file is read again."""
+        recs = [_rec(i) for i in range(200)]
+        _write(self.p, recs)
+        first = em._read_jsonl_entry(self.p)
+        ino0, size0 = os.stat(self.p).st_ino, os.path.getsize(self.p)
+        recs[2] = _rec(2, text="jello")                          # the same length as "hello", at record 2
+        _write(self.p, recs)                                     # truncated and rewritten in place: the same inode
+        os.utime(self.p, (os.path.getmtime(self.p) + 5,) * 2)
+        self.assertEqual((os.stat(self.p).st_ino, os.path.getsize(self.p)), (ino0, size0), "the premise")
+        ent = em._read_jsonl_entry(self.p)
+        self.assertEqual(ent[4], self._fresh(), "the edited record is read, never the stale one")
+        self.assertEqual(ent[4][2]["message"]["content"], "jello 2")
+        self.assertNotEqual(ent[6], first[6], "a fresh generation: every fold over the file refolds")
+
+    def test_a_same_size_touch_over_a_tail_entry_checks_only_the_tail_it_holds(self):
+        """After a restart the large transcripts come back as TAIL entries from their checkpoints' cut. A touch over one is
+        proved over the bytes it holds, from its own start, and keeps it a tail: the restart is when the CLIs relaunch."""
+        recs = [_rec(i) for i in range(200)]
+        _write(self.p, recs)
+        whole = em._read_jsonl_entry(self.p)
+        cut_off = whole[7][100 * 2]                               # record 100's byte offset
+        with open(self.p, "rb") as fh:
+            fh.seek(cut_off - em._JSONL_TAIL_GUARD)
+            guard = fh.read(em._JSONL_TAIL_GUARD)
+        em._JSONL_CACHE.clear()
+        tail = em._read_jsonl_entry(self.p, tail_ok=True, tail_from=(cut_off, 100, guard))
+        self.assertEqual((tail[5], tail[4]), (100, recs[100:]), "the premise: a tail entry from the cut")
+        read0, whole0 = em.read_bytes_report().get(self.p, 0), self._whole_reads()
+        os.utime(self.p, (os.path.getmtime(self.p) + 5,) * 2)
+        ent = em._read_jsonl_entry(self.p, tail_ok=True)
+        self.assertEqual((ent[5], ent[4], ent[6]), (100, recs[100:], tail[6]), "the same tail, the same generation")
+        self.assertEqual(self._whole_reads(), whole0)
+        self.assertLessEqual(em.read_bytes_report().get(self.p, 0) - read0, os.path.getsize(self.p) - cut_off + 2 * em._JSONL_TAIL_GUARD,
+                             "only the tail's bytes")
+
+    def test_a_same_size_file_with_a_changed_tail_is_reread_whole(self):
+        recs = [_rec(i) for i in range(200)]
+        _write(self.p, recs)
+        first = em._read_jsonl_entry(self.p)
+        size0, read0 = os.path.getsize(self.p), em.read_bytes_report().get(self.p, 0)
+        _write(self.p, recs[:-1] + [_rec(199, text="jello")])   # the last record's bytes differ, its length does not
+        self.assertEqual(os.path.getsize(self.p), size0, "fixture invariant: the rewrite keeps the size")
+        os.utime(self.p, (os.path.getmtime(self.p) + 5,) * 2)
+        ent = em._read_jsonl_entry(self.p)
+        self.assertEqual(ent[4], self._fresh(), "the rewritten record is read, never the stale one")
+        self.assertNotEqual(ent[6], first[6], "a fresh generation: every fold over the file refolds")
+        self.assertGreaterEqual(em.read_bytes_report().get(self.p, 0) - read0, size0, "the whole file was read again")
+
+    def test_a_same_size_replacement_under_a_new_inode_is_reread_whole_whatever_its_tail(self):
+        """A file renamed over the path at the same size, its edit far from the tail (a record re-recorded under a uuid of
+        the same length): the guard cannot see it, the inode can. Read whole, never the replaced file's records."""
+        recs = [_rec(i) for i in range(200)]
+        _write(self.p, recs)
+        first = em._read_jsonl_entry(self.p)
+        ino0, size0 = os.stat(self.p).st_ino, os.path.getsize(self.p)
+        swapped = [dict(r) for r in recs]
+        swapped[3]["uuid"] = swapped[3]["uuid"][:-4] + "beef"          # an edit near the head, the same length
+        tmp = self.p + ".new"
+        _write(tmp, swapped)
+        os.replace(tmp, self.p)
+        os.utime(self.p, (os.path.getmtime(self.p) + 5,) * 2)
+        self.assertEqual((os.path.getsize(self.p) == size0, os.stat(self.p).st_ino != ino0), (True, True), "the premise")
+        ent = em._read_jsonl_entry(self.p)
+        self.assertEqual(ent[4], self._fresh(), "the replacement's records, never the old file's")
+        self.assertNotEqual(ent[6], first[6], "a fresh generation")
+
+    def test_a_same_size_touch_over_a_trailing_partial_line_reads_the_partial_again(self):
+        full = json.dumps(_rec(9))
+        _write(self.p, [_rec(i) for i in range(5)], partial=full[:30])   # a writer caught mid-line
+        first = em._read_jsonl_entry(self.p)
+        self.assertEqual(first[4], [_rec(i) for i in range(5)])
+        os.utime(self.p, (os.path.getmtime(self.p) + 5,) * 2)
+        ent = em._read_jsonl_entry(self.p)
+        self.assertEqual((ent[4], ent[6]), (first[4], first[6]), "the guard stood: the partial line is still not consumed")
+        _append(self.p, [], partial=full[30:] + "\n")
+        self.assertEqual(em._read_jsonl_incremental(self.p), [_rec(i) for i in range(5)] + [_rec(9)], "and arrives whole once finished")
 
     def test_served_list_is_never_extended_in_place(self):
         _write(self.p, [_rec(0)])
