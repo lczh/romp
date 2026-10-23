@@ -769,7 +769,11 @@ class AssemblyRoadCounters(Harness):
         it takes the writer's key lock, writes under a tmp name of its own and reads the file back."""
         import inspect
         src = inspect.getsource(em._asm_mark_refused)
-        self.assertIn('".mark.%d.%x.tmp"', src); self.assertIn("_asm_key_lock(key)", src)
+        self.assertIn('_writer_tmp(meta, "mark.")', src); self.assertIn("_asm_key_lock(key)", src)
+        import threading
+        from pathlib import Path
+        self.assertEqual(em._writer_tmp(Path("x.asm.json.gz.meta"), "mark.").name,   # the writers' one temp-name shape (the review
+                         "x.asm.json.gz.meta.mark.%d.%x.tmp" % (os.getpid(), threading.get_ident()))   # of PR #367): its own
         path, t0 = self._documented("mark-own")
         self.assertTrue(em._asm_mark_refused(path, "shape", SID))
         self.assertTrue(em._asm_refusal_stands(path))
