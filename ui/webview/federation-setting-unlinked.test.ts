@@ -35,8 +35,9 @@ class FakeSocket {
 type Answer = { tunnels: any[] };
 const row = (host: string, status = "up") => ({ host, status, hasToken: true, localPort: 4242 });
 
-/** The manager with its world stubbed: `answers` are handed to the polls in order (each poll takes the next, and waits for it). */
-async function withFed(fn: (fm: any, ctl: { winEvents: any[]; localSends: any[]; answer: (a: Answer) => void; polls: () => number }) => Promise<void>): Promise<void> {
+/** The manager with its world stubbed: `answer` answers the polls still waiting, the oldest by default (`nth` picks a later
+ *  one, counted among those still waiting, so a newer poll can answer first). */
+async function withFed(fn: (fm: any, ctl: { winEvents: any[]; localSends: any[]; answer: (a: Answer, nth?: number) => void; polls: () => number }) => Promise<void>): Promise<void> {
   const g: any = globalThis;
   const keys = ["window", "location", "WebSocket", "fetch"] as const;
   const had: Record<string, boolean> = {}, prev: Record<string, any> = {};
@@ -56,7 +57,7 @@ async function withFed(fn: (fm: any, ctl: { winEvents: any[]; localSends: any[];
     polls++;
     return new Promise((res) => waiting.push((a: Answer) => res({ ok: true, status: 200, json: async () => a })));
   };
-  const answer = (a: Answer) => { const w = waiting.shift(); assert.ok(w, "a poll is waiting for its answer"); w!(a); };
+  const answer = (a: Answer, nth = 0) => { const w = waiting.splice(nth, 1)[0]; assert.ok(w, "a poll is waiting for its answer"); w!(a); };
   try {
     await fn(new FederationManager() as any, { winEvents, localSends, answer, polls: () => polls });
   } finally {
@@ -142,6 +143,73 @@ test("a poll already on its way when the setting was sent does not judge it: its
     const b = fm.conns.get("TESTHOSTB").ws as FakeSocket;
     b.open();
     assert.deepEqual(b.msgs().map((m: any) => [m.type, m.enabled]), [["setConserve", false]], "delivered");
+  });
+});
+
+// The review of #382: the sequence guard covered the drop of held settings alone, while the CLOSE of a conn ran on any answer.
+// A poll already on its way with a list from before the machine checked in, answering after the click's own poll had opened the
+// machine's conn and moved the held setting onto its queue, closed that conn and discarded the setting with a journal row and
+// no warn; the next poll reopened it with nothing to send. An answer from a poll that began before the newest one applied is
+// older news, whole: it opens, closes and flips nothing.
+test("an answer from a poll that began before the newest applied one closes nothing: the setting held for a new machine is delivered", async () => {
+  await withFed(async (fm, ctl) => {
+    void fm.poll();   // the 4 s tick, its list from before TESTHOSTB checked in
+    fm.outbound({ type: "setConserve", enabled: true, gt: 30, hosts: ["TESTHOSTB"], scope: "pinned" });
+    assert.equal(ctl.polls(), 2, "the send started its own poll");
+    ctl.answer({ tunnels: [row("TESTHOSTB")] }, 1);   // the send's poll answers first: the conn opens and takes the setting
+    await settle();
+    assert.deepEqual([...fm.conns.get("TESTHOSTB").pending.keys()], ["setConserve"], "the held setting rides the new conn's queue");
+    ctl.answer({ tunnels: [] });   // the tick's answer lands last, without the machine
+    await settle();
+    assert.ok(fm.conns.has("TESTHOSTB"), "the late answer did not close the conn the newer one opened");
+    assert.deepEqual(diags(ctl.localSends, "hostconn").filter((d) => d.ev === "detach"), [], "no detach");
+    const b = fm.conns.get("TESTHOSTB").ws as FakeSocket;
+    b.open();
+    assert.deepEqual(b.msgs().map((m: any) => [m.type, m.enabled, m.gt]), [["setConserve", true, 30]], "delivered on the open");
+    assert.deepEqual(ctl.winEvents.filter((m) => m.type === "warn"), []);
+  });
+});
+
+test("a late answer from an older poll reopens nothing and flips no machine's reachability", async () => {
+  await withFed(async (fm, ctl) => {
+    void fm.poll();
+    ctl.answer({ tunnels: [row("TESTHOSTA"), row("TESTHOSTC")] });
+    await settle();
+    const dialed = FakeSocket.instances.length;
+    void fm.poll(); void fm.poll();   // two polls in flight: TESTHOSTC detached and TESTHOSTA's tunnel went down between them
+    ctl.answer({ tunnels: [row("TESTHOSTA", "up")] }, 1);   // the newer answer first: TESTHOSTC is gone, TESTHOSTA is up
+    await settle();
+    assert.equal(fm.conns.has("TESTHOSTC"), false, "the newer answer detached TESTHOSTC");
+    ctl.answer({ tunnels: [row("TESTHOSTA", "down"), row("TESTHOSTC")] });   // the older answer, last
+    await settle();
+    assert.equal(fm.conns.has("TESTHOSTC"), false, "not reopened by the older list");
+    assert.equal(FakeSocket.instances.length, dialed, "nothing dialed");
+    assert.equal(fm.downHosts.has("TESTHOSTA"), false, "TESTHOSTA still reads up: the older status is not news");
+    assert.equal(fm.conns.get("TESTHOSTA").live, true);
+  });
+});
+
+// A setting can still be dropped for a genuine reason: a newer answer no longer lists the machine (it was detached, or left the
+// mesh) while the setting waited on its conn for the socket to open. That drop used to reach the journal alone (detach's
+// pendingDropped); it is now said by the same warn a held setting's drop gets, in words that say what the page knows. The pane's
+// own bookkeeping on that queue stays unsaid: the user sent nothing for a notice to be about.
+test("a setting queued on a conn the newest answer no longer lists is dropped LOUDLY; the pane's bookkeeping is not said", async () => {
+  await withFed(async (fm, ctl) => {
+    void fm.poll();
+    ctl.answer({ tunnels: [row("TESTHOSTB")] });
+    await settle();
+    const c = fm.conns.get("TESTHOSTB");
+    assert.equal((c.ws as FakeSocket).readyState, 0, "the socket is still opening");
+    fm.outbound({ type: "setConserve", enabled: false, gt: 40, hosts: ["TESTHOSTB"], scope: "pinned" });
+    c.pending.set("activeTab", { type: "activeTab", id: "11111111-2222-3333-4444-555555555555" });
+    void fm.poll();
+    ctl.answer({ tunnels: [] });
+    await settle();
+    assert.equal(fm.conns.has("TESTHOSTB"), false, "detached");
+    assert.deepEqual(diags(ctl.localSends, "hostconn").filter((d) => d.ev === "detach"),
+      [{ host: "TESTHOSTB", ev: "detach", pendingDropped: ["setConserve", "activeTab"] }], "journaled as before");
+    assert.deepEqual(ctl.winEvents.filter((m) => m.type === "warn"), [{ type: "warn", host: "TESTHOSTB", msgType: "setConserve", cause: "unlinked",
+      text: "this page has no connection to TESTHOSTB — “setConserve” was not delivered" }], "one warn, for the setting alone");
   });
 });
 
