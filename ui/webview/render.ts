@@ -168,7 +168,7 @@ import { listenForFrames, federationMissing, federationLoadEntry, fedRetryKey, p
 import { highlightHtml } from "./highlight-cache";
 import { wrapCodeLines, addCopyBtn } from "./code-block";   // a fence's per-line rows and Copy button, shared with the file viewer
 import { turnWorkedSecs as workedSecsOf, workedFooterPlan } from "./worked-footer";
-import { contentHash, firstReplaced, sameUnit, sameUnits, unitEvents, unitLastEvent } from "./unit-diff";   // the keyed paint: a frame repaints only the units whose inputs changed (2026-09-23)
+import { contentHash, firstReplaced, sameUnit, sameUnits, unitReads, unitLastEvent } from "./unit-diff";   // the keyed paint: a frame repaints only the units whose inputs changed (2026-09-23)
 import { reconcileRewindPass, type RewindEvent } from "./rewind-reconcile";
 import { watchChatVisibility, browserChatVisibilityDeps } from "./chat-visibility";
 import { paneSight, type PaneHiddenHost } from "./paint-gate";
@@ -14909,8 +14909,9 @@ function tailDiff(v: View, s: Session, items: DisplayItem[], working: boolean, a
 }
 
 /** A unit's signature (unit-diff.ts): everything its paint reads, so equal signatures paint equal nodes. Its shape and the content
- *  of its events; the previous timed epoch its time marker compares against and the day walk's mark its divider reads; its turn;
- *  a folded run's open state; a user bubble's edit affordance; a gap's span, px-per-turn and loading glyph. The "worked …" footer
+ *  of the events it reads (unitReads: its own, and the textless rows a Thought row's token figure counts); the previous timed
+ *  epoch its time marker compares against and the day walk's mark its divider reads; its turn; a folded run's open state; a
+ *  user bubble's edit affordance; a gap's span, px-per-turn and loading glyph. The "worked …" footer
  *  is not in it: it is patched on the node (patchWorkedFooters), so a prompt landing never repaints the reply above it. Nor is a
  *  fold that is a class on the unit's own node (a notice's, a Thought row's): its click flips the node itself and the fold set
  *  together, so the kept node already shows it, and a repaint reads it back from the fold set. */
@@ -14921,7 +14922,7 @@ function unitSig(v: View, s: Session, it: DisplayItem, prevEpoch: number | null,
   if (it.kind === "toolgroup") sig += openFolds.has(toolGroupKey(s.events[f0])) ? "|open" : "|shut";
   else if (it.kind === "noticegroup") sig += openFolds.has(noticeGroupKey(s.events[f0])) ? "|open" : "|shut";
   const editable = (s as any)._editable as Set<string> | undefined;
-  for (const i of unitEvents(it)) {
+  for (const i of unitReads(it, s.events)) {
     const e = s.events[i];
     sig += "|" + contentHash(e) + (e && e.kind === "user" && e.uuid && editable && editable.has(e.uuid) ? "+edit" : "");
   }

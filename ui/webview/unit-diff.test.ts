@@ -3,7 +3,7 @@
 // tailDiff) runs against a real page in tests/test_send_tail_append_browser.py. Synthetic events only.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { contentHash, firstReplaced, hash53, sameUnit, sameUnits, unitEvents, unitLastEvent } from "./unit-diff";
+import { contentHash, firstReplaced, hash53, sameUnit, sameUnits, unitEvents, unitLastEvent, unitReads } from "./unit-diff";
 import type { DisplayItem } from "./compact";
 
 const ev = (index: number): DisplayItem => ({ kind: "event", index });
@@ -17,6 +17,19 @@ test("a unit's events and its last event: one for an event, the run's members fo
   assert.equal(unitLastEvent(ev(4)), 4);
   assert.equal(unitLastEvent(tg(5, 7, 8)), 8);
   assert.equal(unitLastEvent(gap(0, 30, 0)), -1, "a gap paints no event: never trusted by the first changed event");
+});
+
+test("a unit reads its own events, and a Thought row also the textless thinking rows its token figure counts", () => {
+  // 0 prompt, 1-2 textless, 3 words, 4 textless, 5 words, 6 tool, 7 tool, 8 textless, 9 words, 10 reply, 11 tool, 12 textless, 13 words
+  const kinds = ["user", "thinking", "thinking", "thinking", "thinking", "thinking", "tool", "tool", "thinking", "thinking", "assistant", "tool", "thinking", "thinking"];
+  const evs = kinds.map((kind) => ({ kind }));
+  const thought = (...indices: number[]): DisplayItem => ({ kind: "thought", indices });
+  assert.deepEqual(unitReads(thought(3, 5), evs), [1, 2, 3, 4, 5], "the textless rows before the first block and between the blocks");
+  assert.deepEqual(unitReads(tg(6, 7, 9), evs), [6, 7, 8, 9], "a run's stretch of thoughts reads the textless row after the tool before it");
+  assert.deepEqual(unitReads(thought(13), evs), [12, 13], "a lone tool's thought: from the textless row after the tool");
+  assert.deepEqual(unitReads(tg(6, 7), evs), [6, 7], "a run with no thought reads its tools alone, not a textless row after them");
+  assert.deepEqual(unitReads(ev(10), evs), [10]);
+  assert.deepEqual(unitReads(gap(0, 30, 0), evs), []);
 });
 
 test("two units share a shape when they are the same kind over the same events (a gap: the same span before the same event)", () => {

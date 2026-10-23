@@ -11,13 +11,24 @@
 // gap shifts them by one), so the first tail frame after a window build dropped the node above the change: the landed
 // message at the first frame of its reply. render.ts syncViewInner wires these rules to the DOM (tailDiff); this module
 // is pure so node runs every rule (unit-diff.test.ts).
-import type { DisplayItem } from "./compact";
+import { runRows, thoughtSpan, type DisplayItem } from "./compact";
 
 /** The events a unit paints, in order (a gap paints none). */
 export function unitEvents(it: DisplayItem): number[] {
   if (it.kind === "event") return [it.index];
   if (it.kind === "gap") return [];
   return it.indices;
+}
+
+/** The events a unit's paint READS, in order: its own, and for each Thought row it draws (a thought unit, a stretch of thoughts
+ *  in a run) the textless thinking rows that row's token figure counts (compact.ts thoughtSpan). Those rows belong to no unit,
+ *  so signed by its members alone a Thought row stood unrepainted when its figure landed on one of them in a later frame, and
+ *  an opened row read "Thought" without its tokens (2026-10-23). */
+export function unitReads(it: DisplayItem, evs: readonly { kind: string }[]): number[] {
+  if (it.kind === "thought") return thoughtSpan(evs, it.indices);
+  if (it.kind !== "toolgroup") return unitEvents(it);
+  const isThought = (i: number) => evs[i]?.kind === "thinking";
+  return runRows(it.indices, isThought).flatMap((row) => (isThought(row[0]) ? thoughtSpan(evs, row) : row));
 }
 
 /** The highest event index a unit paints, or -1 for a gap. */
