@@ -53377,6 +53377,7 @@ def build_feed(now, live_map=None):
     heal_total = 0                                    # T319: session-started tops nested this build (logged once per rise)
     hidden_total = 0                                  # T333: skill-load tops with no host, hidden from the feed this build
     bg_services = {}          # session name -> live SERVICE descs (judge-classified, _bg_split) → the neutral chip
+    absent_sids = []          # the sessions whose card build raised with no previous cards to serve: listed, cards absent
     alive = _alive_sessions(now, live_map)               # hard filter: living sessions only
     wmap = _wait_for_graph(now, {s["sid"] for s in alive})   # per-session 'waiting on a live peer' (the user 2026-06-22)
     _stalls = _stalled_goals()                       # goals romp's nudge gate is holding → the card's Stalled section
@@ -53450,6 +53451,7 @@ def build_feed(now, live_map=None):
             if prev is None:
                 if ent is not None:
                     _feed_memo_drop(fsid)                # an entry that no longer decodes: gone, so the next build starts cold
+                absent_sids.append(fsid)                 # it did not render: the bells' diff keeps what it remembers of it
                 continue
             js = ent[1]                                  # the previous cards, served (prev was read from this string)
         else:
@@ -53591,6 +53593,10 @@ def build_feed(now, live_map=None):
             # own, yet not gone, so the bells' diff keeps their told mark and their bell overrides (_feed_notifications_diff).
             # Only when a join happened, so a board without one ships the frame it always did
             **({"servingFoldedIds": serving_folded} if serving_folded else {}),
+            # the sessions listed in `sessions` below whose cards are absent because their build raised with nothing to
+            # serve (the guard above): they did not render, so the bells' diff forgets none of their cards and keeps their
+            # bell overrides (_feed_notifications_diff). Only while one fails, so a healthy board ships the frame it always did
+            **({"absentSids": absent_sids} if absent_sids else {}),
             **_views_payload(),   # the rendered views blob — the outline + feed tag mounts read it (2026-08-25); under a read fault its marker rides too, or alone (2026-09-08)
             # usage-limit-down latch (judge-limit.json): analysis is paused because the account
             # cannot bill judge calls — the dashboard must SAY so, never fail quietly into retries
@@ -70719,9 +70725,11 @@ def _card_needs_you(a):
 # the memory. Two rules follow from the mechanism:
 #   * a card is forgotten (in memory and on disk) on one of TWO events. The build forgets it when ITS OWN
 #     SESSION rendered this build without it — cleared, archived, folded away: the id never comes back.
-#     A session that did not render at all (not yet revived, dead, off the board) says nothing about its
-#     cards, so they stay remembered and its revival is silent. The roster is the build's `sessions`
-#     rows (the live tab strip, minus the dead read-only tabs the user kept open, which render no cards)
+#     A session that did not render at all (not yet revived, dead, off the board, or alive but its card
+#     build raised with no previous cards to serve) says nothing about its cards, so they stay remembered
+#     and its revival is silent. The roster is the build's `sessions`
+#     rows (the live tab strip, minus the dead read-only tabs the user kept open, which render no cards,
+#     and minus the build's absentSids, the alive sessions whose cards failed to build)
 #     plus the sessions the rendered cards themselves name, save a parked hand-off or a notice card, which
 #     names a session that need not have rendered (_NOTIFY_ROSTER_SKIP). The compaction sweep after each judge pass
 #     forgets it when the card is off the board and its session is GONE for good: neither alive, nor with a
@@ -71011,9 +71019,12 @@ def _feed_notifications_diff(feed):
         cur[str(a.get("itemId"))] = a
     # the sessions that RENDERED this build: the live roster minus the dead read-only tabs (they
     # render no cards), plus whichever session a rendered card of its own names. A parked hand-off or
-    # a notice card is not one (_NOTIFY_ROSTER_SKIP): it names a session that need not have rendered
-    roster = ({str(s.get("sid") or "") for s in (feed.get("sessions") or []) if isinstance(s, dict)}
-              - set(_kept_open)) | {str(a.get("sid") or "") for i, a in cur.items() if not i.startswith(_NOTIFY_ROSTER_SKIP)}
+    # a notice card is not one (_NOTIFY_ROSTER_SKIP): it names a session that need not have rendered. A listed session
+    # whose card build raised with nothing to serve (build_feed's absentSids) did not render either: read as rendered
+    # without its cards, it lost every told mark and the user's mutes, and its next good build announced them all again
+    roster = (({str(s.get("sid") or "") for s in (feed.get("sessions") or []) if isinstance(s, dict)}
+               - set(_kept_open)) | {str(a.get("sid") or "") for i, a in cur.items() if not i.startswith(_NOTIFY_ROSTER_SKIP)}
+              ) - {str(i) for i in (feed.get("absentSids") or ())}
     nxt = {i: e for i, e in prev.items() if i not in cur and e.get("sid") not in roster}   # unrendered: remembered,
     #                                                until the sweep finds the session gone for good (_notify_prev_forget_gone)
     cards = _notify_cards()                          # the bell overrides: a card carrying its own is remembered (below)

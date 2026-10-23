@@ -542,6 +542,48 @@ class ACardNamingADeadSessionIsNotItsRender(_Base):
         self.assertNotIn(API + ":g2", km._notify_cards(), "and its mute with it")
 
 
+class ASessionWhoseCardsFailedToBuildDidNotRender(_Base):
+    """A session stays in the build's `sessions` rows while its card build raises (build_feed's guard), and with no
+    previous cards to serve (a restart emptied the memo) its cards are simply absent. Read as a session that rendered
+    without them, the build forgot every card it had told and deleted the user's mute on one, so the session's next
+    good build announced them all again, the muted card included. build_feed names such a session in absentSids, and
+    the diff counts it as not rendered; a session that did render without a card still forgets it."""
+    BOARD = (_card(WEB + ":g1", WEB, "needs_input"), _card(WEB + ":g2", WEB, "completed"),
+             _card(API + ":g1", API, "completed", name="api"))
+
+    def setUp(self):
+        super().setUp()
+        km._set_notify_card(WEB + ":g2", False, WEB)          # the user muted web's completed card
+        self.seed_disk({WEB + ":g1": _entry("needs_input", WEB), WEB + ":g2": _entry("completed", WEB),
+                        API + ":g1": _entry("completed", API)})
+        out, _ = self.boot(_feed(*self.BOARD, sessions=[WEB, API]))
+        self.assertEqual(out, [], "premise: every card was told in the last life")
+
+    def _failed_build(self, restart):
+        """web's card build raised with nothing to serve; api rendered, without its card (cleared)."""
+        frame = _feed(sessions=[WEB, API])
+        frame["absentSids"] = [WEB]
+        if restart:
+            return self.boot(frame)[0]
+        return km._feed_notifications(frame)
+
+    def _check(self, restart):
+        self.assertEqual(self._failed_build(restart), [])
+        self.assertEqual(sorted(km._NOTIFY_PREV[0]), [WEB + ":g1", WEB + ":g2"],
+                         "web did not render: its cards stay remembered; api rendered without its card: forgotten")
+        self.assertEqual(sorted(self.disk()), [WEB + ":g1", WEB + ":g2"], "...on disk too")
+        self.assertIs(km._notify_cards().get(WEB + ":g2"), False, "the mute on web's card survives")
+        out = km._feed_notifications(_feed(*self.BOARD[:2], sessions=[WEB, API]))   # web builds again, nothing moved
+        self.assertEqual(out, [], "cards already told are not announced again, the muted one included")
+        self.assertIs(km._notify_cards().get(WEB + ":g2"), False, "and the mute still holds")
+
+    def test_a_failed_build_in_the_same_life(self):
+        self._check(restart=False)
+
+    def test_a_failed_first_build_after_a_restart(self):
+        self._check(restart=True)
+
+
 class TheSweepForgetsOnlyCardsOffTheBoard(_Base):
     """The compaction sweep bounds the snapshot by forgetting the cards of a session gone for good, and it
     read "gone" off the session alone: neither alive, nor in the discover window, nor kept open. Three card

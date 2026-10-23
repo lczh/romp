@@ -1589,6 +1589,105 @@ class OneSessionsFaultIsContained(_Board):
         self.assertEqual(len(self.bells), 1, "the recovery rings nothing")
 
 
+class AFailedBuildIsNotARenderToTheBells(_Board):
+    """The bells' diff (_feed_notifications) forgets a remembered card when its session rendered a build without it,
+    and reads "rendered" off the frame's `sessions` rows. A session whose card build raised with nothing to serve (a
+    restart or an eviction emptied its memo entry) stays in those rows with its cards absent, so the diff forgot its
+    told cards and deleted the user's mute on one, and the session's next good build announced them again, the muted
+    card included. The frame now names such a session in absentSids. Drives the REAL build_feed and hands each frame
+    to the REAL diff, as _build_feed_locked does."""
+
+    G = API + ":g1"
+
+    def setUp(self):
+        super().setUp()
+        self.saved_prev = (km._NOTIFY_PREV[0], km._NOTIFY_PREV_DISK[0], km._NOTIFY_BOARD[0])
+        km._notify_cards_cache.clear()
+        km._flags_cache.clear()
+        km._NOTIFY_PREV[0] = None                     # a fresh kernel life, no snapshot file yet in this board's root
+        km._set_notify_all(True)                      # the master bell on: every card notifies unless muted
+        patcher = mock.patch.object(km, "_sync_notice", lambda *a, **k: None)   # the fault's bell row: not this test's
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        km._NOTIFY_PREV[0], km._NOTIFY_PREV_DISK[0], km._NOTIFY_BOARD[0] = self.saved_prev
+        km._notify_cards_cache.clear()
+        km._flags_cache.clear()
+        super().tearDown()
+
+    def _raising_for(self, bad_sid):
+        real = km._feed_session_entry
+
+        def fake(s, ctx):
+            if s["sid"] == bad_sid:
+                raise RuntimeError("synthetic: the api card's derivation blew up")
+            return real(s, ctx)
+        return mock.patch.object(km, "_feed_session_entry", fake)
+
+    @staticmethod
+    def _quiet(fn, *a):
+        with contextlib.redirect_stderr(io.StringIO()):
+            return fn(*a)
+
+    def _diff(self, frame):
+        return [o[3] for o in self._quiet(km._feed_notifications, frame)]
+
+    def _restart(self):
+        """A new kernel life: the per-session memo starts empty, the snapshot is read back from disk."""
+        km._NOTIFY_PREV[0] = None
+        _reset_memo()
+
+    def _failing_build(self):
+        with self._raising_for(API):
+            return self._quiet(self._build)
+
+    def _told(self):
+        return json.loads((jd.STATE / "notify-prev.json").read_text())
+
+    def _bells(self):
+        km._notify_cards_cache.clear()
+        return km._notify_cards()
+
+    def test_the_frame_names_a_session_absent_only_while_its_failed_build_has_nothing_to_serve(self):
+        self.assertNotIn("absentSids", self._build(), "a healthy board ships the frame it always did")
+        self._complete(API)                               # api's store moves: its next build derives, and raises
+        served = self._failing_build()
+        self.assertIn(self.G, self._cards(served), "the memo held api's entry: its previous card is served")
+        self.assertNotIn("absentSids", served, "served cards are a render")
+        self._restart()
+        absent = self._failing_build()
+        self.assertNotIn(self.G, self._cards(absent))
+        self.assertIn(API, [s["sid"] for s in absent["sessions"]], "still listed: the tab strip shows it")
+        self.assertEqual(absent["absentSids"], [API])
+        self.assertNotIn("absentSids", self._build(), "api derives again: nothing absent")
+
+    def test_an_announced_card_is_not_announced_again_after_its_session_fails_one_build(self):
+        self._complete(API)                               # api's card sits in Completed
+        f1 = self._build()
+        self.assertEqual(self._cards(f1)[self.G]["column"], "completed")
+        self.assertEqual(self._diff(f1), [], "first boot: the board is seeded silently, the card counts as told")
+        self.assertIn(self.G, self._told())
+        self._restart()
+        facts = {"fired on the failing build": self._diff(self._failing_build()),
+                 "api card still remembered on disk": self.G in self._told()}
+        facts["fired when api recovers"] = self._diff(self._build())   # nothing about api's card moved
+        self.assertEqual(facts, {"fired on the failing build": [], "api card still remembered on disk": True,
+                                 "fired when api recovers": []})
+
+    def test_a_card_mute_survives_its_sessions_failed_build(self):
+        self.assertEqual(self._diff(self._build()), [], "first boot: every card working, seeded silently")
+        km._set_notify_card(self.G, False, API)           # the user mutes api's card
+        self.assertEqual(self._diff(self._build()), [])
+        self.assertIs(self._bells().get(self.G), False)
+        self._restart()
+        facts = {"fired on the failing build": self._diff(self._failing_build()), "mute kept": self._bells().get(self.G)}
+        self._complete(API)                               # api's card completes after it recovers
+        facts["fired when the muted card completes"] = self._diff(self._build())
+        self.assertEqual(facts, {"fired on the failing build": [], "mute kept": False,
+                                 "fired when the muted card completes": []})
+
+
 class AWarmEntryIsNeverDerivedCold(_Board):
     """A living session the memo holds WARM is never derived COLD when its transcript moves past the parse the chat's
     build stored (2026-09-18). The feed reads the parse cache-only, so on the build after an append with no parse in
