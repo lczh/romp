@@ -1236,8 +1236,12 @@ function initGear(post, opts) {
   // how many settings fills have asked for it; lgFailed: by fill number, the fills whose /logins read failed, each entered once
   // its own /tunnels read has settled; lgWait: the newest fill whose rows wait on a later fill (0: none); lgKernels: the kernel
   // list of the newest fill whose /tunnels read has settled, and lgKernelsN that fill's number (all lgFetchLogins); lgPicks: by
-  // stored login's id, the machine picked in its row and not yet sent with Link (lgLogins)
-  var lgL = document.getElementById('rs-logins'), lgLast = null, lgFills = 0, lgFailed = {}, lgWait = 0, lgKernels = [], lgKernelsN = 0, lgPicks = {};
+  // stored login's id, the machine picked in its row and not yet sent with Link (lgLogins). lgOpen: how many times the panel has
+  // opened (openSettings); lgLastOpen: the open in which lgLast was asked for; lgShownOpen: the open whose answer the rows on screen
+  // were drawn from, -1 while none is (nothing drawn yet, or the read's failure said instead); lgFail: the newest failed /logins
+  // read, {open, why} (all lgDraw)
+  var lgL = document.getElementById('rs-logins'), lgLast = null, lgFills = 0, lgFailed = {}, lgWait = 0, lgKernels = [], lgKernelsN = 0, lgPicks = {},
+    lgOpen = 0, lgLastOpen = -1, lgShownOpen = -1, lgFail = null;
   function lgDate(t) { try { return new Date(t * 1000).toLocaleDateString(); } catch (e) { return ''; } }
   function lgWhen(t) {
     if (typeof t !== 'number') return 'soon';
@@ -1245,14 +1249,16 @@ function initGear(post, opts) {
     return d <= 0 ? 'now (the token is a year old)' : 'in ' + d + ' day' + (d === 1 ? '' : 's');
   }
   // what a /logins answer says that needs no kernel list, said as soon as it arrives: the machine's own login (the who-line's
-  // full name and its billing line, through lgAcct) and the description's sentence on the stored logins
+  // full name and its billing line, through lgAcct) and the description's sentence on the stored logins. null: the read failed
+  // (lgError), and what an earlier answer said here is taken back with the rows it came with
   function lgOwn(d) {
     var rows = (d && d.logins) || [];
     // what the row's one description says about the stored logins: as a second rs-sub of its own it floated a second popover
     // over the first whenever the row was hovered (both sit at the row's foot), the 2026-09-02 stacking again
-    lgStored = rows.length ? 'For the other logins below, the token stays where you keep it; romp keeps only the label and the command that reads it.'
-                           : 'No other Claude logins stored on this machine. Add one with romp login add <label>.';
-    if (d && d.machine && typeof d.machine === 'object') lgMachine = d.machine;
+    lgStored = !d ? '' : rows.length ? 'For the other logins below, the token stays where you keep it; romp keeps only the label and the command that reads it.'
+                                     : 'No other Claude logins stored on this machine. Add one with romp login add <label>.';
+    if (!d) lgMachine = null;
+    else if (d.machine && typeof d.machine === 'object') lgMachine = d.machine;
     lgAcct();
   }
   // the stored logins' rows, from the same answer, drawn from lgFetchLogins and lgPost
@@ -1386,7 +1392,7 @@ function initGear(post, opts) {
     fetch(ku('/logins'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        if (d && d.ok) return Promise.resolve(lgFetchLogins()).then(function () { lgBusy--; if (!lgBusy && lgSkipped) lgLogins(lgLast); });
+        if (d && d.ok) return Promise.resolve(lgFetchLogins()).then(function () { lgBusy--; if (!lgBusy && lgSkipped) lgDraw(); });
         lgBusy--;
         refused((d && d.error) || 'refused');
       })
@@ -1407,18 +1413,47 @@ function initGear(post, opts) {
   // While a link or an unlink is on its way (lgBusy), a fill's drawing is skipped (lgSkipped, lgPost).
   // `after` rejects only when fill()'s own catch threw; that is logged, as fill()'s catch logs the /tunnels failure, and the rows
   // are drawn all the same.
+  // A FAILED READ IS SAID (the review of #383; fail loudly, never degrade silently): a /logins read that failed (an answer that is
+  // not 2xx, no answer, or one that is not JSON) left the rows already on screen, which could be a previous open's, with nothing to
+  // say they were not this machine's logins now. Each failure is logged, and the block says it in place of the rows (lgError)
+  // whenever it would otherwise show rows read before this open: when the fill that failed was the newest and no fill of this open
+  // has drawn, and when a fill waiting on it would draw an answer asked for before this open (lgDraw). Rows a read in this open
+  // drew stand: they are as current as the rest of the panel, so a later failure in the same open is logged and erases nothing. The
+  // ordering above holds for the failure too: it is decided where a drawing would be, so a fill that stands down says nothing, and
+  // a later fill whose read succeeds draws over it.
   function lgLater(n) {   // a fill numbered after n that has not given up (a failed read gives up once its /tunnels read settles)
     for (var k = n + 1; k <= lgFills; k++) if (!lgFailed[k]) return true;
     return false;
   }
+  function lgDraw() {   // lgLast's rows, unless it was asked for before this open and a read asked for in this open has failed
+    if (lgLastOpen !== lgOpen && lgFail && lgFail.open === lgOpen) { lgError(); return; }
+    lgShownOpen = lgLastOpen;
+    lgLogins(lgLast);
+  }
+  function lgError() {   // the newest failed read, said in place of the rows, and the account lines' word on them taken back (lgOwn)
+    if (!lgL) return;
+    lgSkipped = false;
+    lgShownOpen = -1;
+    lgL.textContent = '';
+    var e = document.createElement('div');
+    e.className = 'rs-line rs-login-bad';
+    e.textContent = 'Couldn\'t read the stored logins from this machine (' + ((lgFail && lgFail.why) || 'no answer') + ').';
+    lgL.appendChild(e);
+    lgOwn(null);
+  }
   function lgFetchLogins(after) {
     if (!lgL) return;
     var mine = after ? ++lgFills : 0;   // this fill's number; 0 for a caller that draws at once
+    var opened = lgOpen;
     if (after) Promise.resolve(after).then(function (ks) {
       if (mine > lgKernelsN && Array.isArray(ks)) { lgKernels = ks; lgKernelsN = mine; }
     }, function (e) { try { console.error('romp: settings: the cross-machine fill\'s failure handler threw', e); } catch (_e) {} });
-    return fetch(ku('/logins'), { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+    return fetch(ku('/logins'), { cache: 'no-store' }).then(function (r) {
+      if (!r.ok) throw { why: 'HTTP ' + r.status };
+      return r.json();
+    }).then(function (d) {
       lgLast = d;
+      lgLastOpen = opened;
       lgOwn(d);
       function rows() {
         if (mine) {
@@ -1426,14 +1461,19 @@ function initGear(post, opts) {
           lgWait = 0;
           if (lgBusy) { lgSkipped = true; return; }
         }
-        lgLogins(lgLast);
+        lgDraw();
       }
       return Promise.resolve(after).then(rows, rows);
-    }, function () {
+    }, function (err) {
+      lgFail = { open: opened, why: (err && err.why) || (err instanceof SyntaxError ? 'an unreadable answer' : 'no answer') };
+      try { console.error('romp: settings: the stored logins read failed: ' + lgFail.why, err); } catch (_e) {}
       if (!mine) return;
-      function gone() {   // this fill gives up its claim; a fill waiting on it draws if no later fill is left and no link or unlink is on its way
+      // this fill gives up its claim: a fill waiting on it draws if no later fill is left and no link or unlink is on its way; with
+      // none waiting and none later, the read's failure is said unless a fill of this open has drawn
+      function gone() {
         lgFailed[mine] = true;
-        if (lgWait && !lgLater(lgWait)) { lgWait = 0; if (!lgBusy) lgLogins(lgLast); else lgSkipped = true; }
+        if (lgWait && !lgLater(lgWait)) { lgWait = 0; if (!lgBusy) lgDraw(); else lgSkipped = true; }
+        else if (!lgWait && !lgLater(mine) && lgShownOpen !== lgOpen) { if (!lgBusy) lgError(); else lgSkipped = true; }
       }
       Promise.resolve(after).then(gone, gone);
     }).catch(function () {});
@@ -2066,7 +2106,8 @@ function initGear(post, opts) {
   // that machine first (fill's `reread`) instead of comparing against this kernel's copy from its last supervisor pass, up to 15 s
   // old: after a click turned both machines off the row went back to the dash, and the "click again to turn it on" its hover
   // promised posted off a second time (the gear-truth review). A closed panel asks this kernel to refresh its copy all the same,
-  // so the next open draws the machine as it stands. This machine's own values are /version's, read fresh on every fill.
+  // so the next open draws the machine as it stands, and an open made before that refresh answers draws again when it does
+  // (rereadPeer). This machine's own values are /version's, read fresh on every fill.
   window.addEventListener('message', function (e) {
     if (windowSender(e) === 'foreign') { noteForeign('gear:settingAck', e, post); return; }
     var m = e.data;
@@ -2074,11 +2115,16 @@ function initGear(post, opts) {
     if (!p.hidden) { fill(m.host); return; }
     rereadPeer(m.host);
   });
-  // A closed panel's re-read: this kernel refreshes its copy of the machine and nothing is drawn (also a re-read's fill that stands
-  // down before asking, the panel closed meanwhile: see fill)
+  // A closed panel's re-read: this kernel refreshes its copy of the machine (also a re-read's fill that stands down before asking, the
+  // panel closed meanwhile: see fill). A re-read can take 4 s on a slow peer, and a panel reopened meanwhile drew from the copy the
+  // re-read was still replacing (its fill's plain /tunnels read), then kept it until the next reopen or click: the row said on while
+  // the peer and this kernel's copy were both off (the review of #383). So once the re-read answers, an open panel draws again, with
+  // a plain fill: that fill asks for no re-read, so this cannot loop, and it began after every fill before it, so it is the newest
+  // (fill's ordering). A closed panel draws nothing, and its next open reads the lifted copy.
   function rereadPeer(host) {
     fetch(ku('/tunnels?reread=' + encodeURIComponent(host)), { cache: 'no-store' })
-      .catch(function (err) { try { console.error('romp: settings: the re-read of ' + host + ' failed', err); } catch (_e) {} });
+      .then(function () { if (!p.hidden) fill(); },
+        function (err) { try { console.error('romp: settings: the re-read of ' + host + ' failed', err); } catch (_e) {} });
   }
   // THE SETTINGS PAGE'S NOTICES. Federation says a message it could not deliver as a `warn` dispatched on the page that sent it
   // (federation.ts dropWarn), and the kernel answers some of this page's requests the same way, but the toast that shows a warn
@@ -2602,8 +2648,8 @@ function initGear(post, opts) {
   // value from before the later fill. A fill that stands down with a re-read starts a fresh one instead, so what the re-read
   // lifted onto this kernel's copy of the peer is still drawn: the later fill's /tunnels may have answered before it landed.
   // Unless the panel has closed meanwhile: a closed panel starts no fill (every other caller asks the same). Standing down at
-  // /version, the re-read was never asked, so it is asked alone, as a closed panel's settingAck does (rereadPeer); at /tunnels it
-  // has landed, and the next open reads the copy it lifted.
+  // /version, the re-read was never asked, so it is asked alone, as a closed panel's settingAck does (rereadPeer, which draws again
+  // if the panel has reopened by the time it answers); at /tunnels it has landed, and the next open reads the copy it lifted.
   var fillSeq = 0, clickFill = 0, drawnFill = 0;   // fills started; the newest fill started before the latest click on a kernel-backed row; the newest fill drawn
   function fill(reread) { var n = ++fillSeq; fillChoices().then(function () { return fetch(ku('/version'), { cache: 'no-store' }); }).then(function (r) { return r.json(); }).then(function (v) {
     gclock.learnAll(v.settingsGt);   // each store's last-applied stamp: the clock climbs above them (an older kernel sends none)
@@ -2752,7 +2798,7 @@ function initGear(post, opts) {
     // burned the whole 5-frame retry against a display:none pane, latched rs-pane-gone, and the
     // full-viewport fallback box blacked out every pane behind the modal.
     try { if (window.parent !== window) window.parent.postMessage({ romp: 'logUnseenQuery' }, '*'); } catch (e) { /* no shell to ask */ }   // T290: the Open log count
-    p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; tl.checked = !!s.tabsLocked; if (tsb) tsb.checked = (s.tabStateBadge !== false); jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (nb) nb.checked = s.needsBox !== false; if (fsc) fsc.checked = (s.showFilesControl === true); if (pdk) pdk.checked = (s.paneDocking === true); renderRegistryRows(s); (function (p) { Object.keys(pn).forEach(function (k) { if (pn[k]) pn[k].checked = p[k]; }); })(panesOf(s)); tcPaint(); paintWidgets(); csPaint(); ttPaint(); if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); if (bk) { bk.value = BN.effectiveDefaultBackend(s.backend); repaintSelectPicks(); } if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); if (section) showSection(section); else clearSectionScroll(); }
+    lgOpen++; p.hidden = false; feedFull(true); setModalCls(true); var s = load(); cc.checked = !!s.compact; tl.checked = !!s.tabsLocked; if (tsb) tsb.checked = (s.tabStateBadge !== false); jix.checked = (s.showIndexJudges !== undefined ? !!s.showIndexJudges : !!s.debug); jtr.checked = (s.showTriageJudges !== undefined ? !!s.showTriageJudges : !!s.debug); if (sr) sr.checked = s.stripGroupRows !== false; if (dn) dn.checked = s.denseChrome === true; if (nb) nb.checked = s.needsBox !== false; if (fsc) fsc.checked = (s.showFilesControl === true); if (pdk) pdk.checked = (s.paneDocking === true); renderRegistryRows(s); (function (p) { Object.keys(pn).forEach(function (k) { if (pn[k]) pn[k].checked = p[k]; }); })(panesOf(s)); tcPaint(); paintWidgets(); csPaint(); ttPaint(); if (fc) fc.checked = s.collapsed === true; cmBuild(); cmPaint(s.colormap || 'aurora'); if (bk) { bk.value = BN.effectiveDefaultBackend(s.backend); repaintSelectPicks(); } if (dd) dd.value = s.defaultDir || ''; plFill(); fill(); if (section) showSection(section); else clearSectionScroll(); }
   if (g) g.onclick = function (e) { e.stopPropagation(); openSettings(); };   // hidden anchor; hosts open via the message below
   window.addEventListener('message', function (e) { if (windowSender(e) === 'foreign') { noteForeign('gear:openSettings', e, post); return; } if (e.data && e.data.romp === 'openSettings') openSettings(typeof e.data.tab === 'string' ? e.data.tab : undefined, typeof e.data.section === 'string' ? e.data.section : undefined); });   // the tab and its section ride the ask (T379: the strip's gear opens Chat at Tab strip (T415; Tab widgets until then))
   // Escape, relayed by the web shell's Escape chain (_LANDING_ESC_JS captures keydown in this same-origin
