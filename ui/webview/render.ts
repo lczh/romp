@@ -23348,7 +23348,8 @@ function closeTabLocally(id: string): void {
 // WHY a session is leaving the panel — the one fact that decides what happens to its composer state
 // (T236, the user 2026-09-03: an unsent draft typed into one session's box turned up in another's after
 // a remote host dropped off). "close" is the user's own ✕ / End; "end" is the owning kernel's `closed`
-// frame — the session actually ended. Both are GENUINE ends and clear the draft (the user 2026-08-04).
+// frame — the session actually ended. Both are GENUINE ends and clear the draft (the user 2026-08-04), never the
+// staged stack, which a revive shows and sends again (the user 2026-10-23).
 // "hostDrop" is federation's synthetic `closed` for every session of a host that left the mesh — the
 // session still exists on its kernel; "omitted" is a kernel tabOrder push that stopped carrying an id it
 // used to (applyTabOrder's teardown) — an absence, not a report of an end. Neither is the user's close,
@@ -23466,10 +23467,9 @@ function dismissSession(id: string, why: DismissWhy, doomed?: ReadonlySet<string
     // closed session was ACTIVE: the shared chip strip above the composer still shows its chip until
     // someone repaints it, and that stale chip's ✕ targets the dead id (whose map entry is gone), so the
     // click early-returns and the chip can't even be dismissed — hence the repaint below.
-    // Its staged stack goes too: a revive keeps the sid, so a stack left here came back in the revived tab's strip and
-    // went out ahead of the next message the user sent. A viewer bar for the session repaints its staged line here; the
-    // composer's strip follows below (loadComposerFor) when the session was the active one.
-    if (stagedMsgs.takeAll(id).length) paintViewerStaged();
+    // Its STAGED stack stays, whoever ended it (the user 2026-10-23, reversing #362, which dropped it here): staged
+    // messages are held on purpose, so they outlive the end in the page and in its persisted state, and a revive, which
+    // keeps the sid, shows them again in the strip and sends them with the next message. What was in the box goes.
     drafts.delete(id); composerCitations.delete(id); composerEdits.delete(id); composerFiles.delete(id); persistDrafts();
   } else {
     persistDrafts();   // a host drop / omission KEEPS it all (see DismissWhy) — the stash above may have updated the copy

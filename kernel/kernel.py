@@ -82638,6 +82638,10 @@ if(en.ids.length){save();return;}
 // and toasted a close nobody asked for (the vanishing tab, the user 2026-09-12)
 var crossed=Array.isArray(m.crossed)?gone.filter(function(id){return m.crossed.indexOf(id)>=0;}):[];
 var home=document.getElementById('f-chat');try{if(home&&crossed.length)home.contentWindow.postMessage({romp:'closing',ids:crossed},'*');}catch(e){}
+// …and what the page still holds for the gone ids goes with them before its frame does: an ended session keeps its staged
+// messages (the user 2026-10-23), and a revive lands in the first column, so they are handed there to show and send again.
+// close() hands over only the members its entry still lists, and the gone ones have just left it
+var src=frameOfWin(e.source);if(src&&home)gone.forEach(function(sid){adopt(home,sid,take(src,sid));});
 close(en.n);return;}
 // ORPHANED STATE (review find 2026-09-11): a page holds a draft, citations, attachments or staged messages for a session
 // it does not show — a column blob written before the partition (a v1 column was a whole chat page, so its blob may name

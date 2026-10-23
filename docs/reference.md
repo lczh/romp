@@ -6842,8 +6842,11 @@ lines. Selecting again replaces the chip; holding ⌘ (Ctrl elsewhere) while you
 one. Type what should change and press **⌘⏎** to stage it onto that session's staged
 list, the same list the chat's message box keeps, so the chat shows it above the box and
 quotes from the chat and from files go out together. **⏎** sends everything staged for the
-session, then what is in the bar, as one message. Each quote reaches the session under a
-line naming where it is from: `Replying to this part of src/app.py (lines 12–18):`, or
+session, then what is in the bar, as one message. The staged list survives a reload and the
+session's end, whoever ends it: a revived session shows it above the box again and sends it
+with your next message, while text still in the box goes with the ended session. Each quote
+reaches the session under a line naming where it is from:
+`Replying to this part of src/app.py (lines 12–18):`, or
 `Replying to this part of docs/guide.md:` for a rendered document. The bar hides while the
 file is being edited, keeps what you typed while you look elsewhere, and leaves slash
 commands to the session's own box. A viewer opened in the feed's file browser or the Files

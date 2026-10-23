@@ -702,6 +702,15 @@ window.__rompMoveTab(API, 'new');
 CALLS.posted = [];
 msg({ romp: 'colEmpty', gone: [API], crossed: [] }, 'f-chat-2');
 out.closing.emptyCross = { posted: CALLS.posted.filter((p) => p.m && p.m.romp === 'closing'), ids: ids(), stored: cols() };
+// M2) …and what the closing page still holds for a gone id (an ended session's staged messages) is taken from it and handed
+//     to the first column before its frame goes: close() hands over only the members the entry still lists
+boot({}, false);
+window.__rompMoveTab(API, 'new');
+TAKE['f-chat-2'] = { [API]: { draft: '', citations: [], files: [], staged: [{ text: 'Why does the handler retry here?', cites: [] }] } };
+CALLS.posted = []; CALLS.taken = []; SEQ = [];
+msg({ romp: 'colEmpty', gone: [API] }, 'f-chat-2');
+out.closing.handed = { adopted: CALLS.posted.filter((p) => p.m && p.m.romp === 'adopt'), taken: CALLS.taken.slice(), left: Object.keys(TAKE['f-chat-2']),
+                       seq: SEQ.filter((x) => x === 'post:f-chat:adopt' || x.indexOf('unregister:') === 0), ids: ids(), stored: cols() };
 // N) ORPHANED STATE: a page's offer of state for sessions it does not show is taken from it and handed to the owner's page
 //    when that page can hear it; its own member and junk are skipped; a target not yet evaluated leaves the state where it is
 boot({ 'romp-chat-cols': '[2]', 'romp-vscode-state-chat:2': JSON.stringify({ activeId: WEB, drafts: { [WEB]: 'a', [API]: 'b' } }) }, false);
@@ -1225,6 +1234,18 @@ class SplitExecutes(unittest.TestCase):
             u = c[key]
             self.assertEqual(u["posted"], [], "%s: a gone id nobody crossed is not held — the first column shows it the moment its strip repaints" % key)
             self.assertEqual(u["ids"], ["f-chat"], "%s: the column still closes" % key); self.assertEqual(u["stored"], {"v": 2, "cols": []})
+
+    def test_a_column_closed_for_emptiness_hands_its_gone_sessions_state_to_the_first_column_before_its_frame_goes(self):
+        # an ended session keeps its staged messages (the user 2026-10-23) and a revive lands in the first column; when it
+        # was its column's last tab, the column closed with them in its page, so the revived tab's strip showed nothing
+        h = self.out["closing"]["handed"]
+        self.assertEqual(h["taken"], [["f-chat-2", API, True]], "taken from the closing page for its gone id: %r" % h)
+        self.assertEqual(h["adopted"], [{"id": "f-chat", "m": {"romp": "adopt", "sid": API, "state": {
+            "draft": "", "citations": [], "files": [], "staged": [{"text": "Why does the handler retry here?", "cites": []}]}}}],
+            "handed to the first column, which holds the session now")
+        self.assertEqual(h["left"], [], "nothing stays behind in the page that is going")
+        self.assertEqual(h["seq"][0], "post:f-chat:adopt", "handed over before the frame goes: %r" % h["seq"])
+        self.assertEqual(h["ids"], ["f-chat"]); self.assertEqual(h["stored"], {"v": 2, "cols": []})
 
     def test_orphaned_state_is_handed_to_the_column_that_shows_the_session_when_its_page_can_hear_it(self):
         # a v1 column's blob held drafts for many sessions and the migration keeps one (review find 2026-09-11): the page
