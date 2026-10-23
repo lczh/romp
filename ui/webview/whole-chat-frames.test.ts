@@ -30,8 +30,9 @@ test("the gear has an Always load whole chats checkbox in its own Chat history s
   assert.ok(/Load every chat from its first message, instead of the most recent part with the rest loading as you scroll; slower on long chats\./.test(row),
     "the sub-copy in the user's words");
   assert.equal((row.match(/<span/g) || []).length, (row.match(/<\/span>/g) || []).length, "every span the row opens it closes (low 3)");
-  assert.ok(GEAR.includes("post({ type: 'setWholeChatFrames', enabled: wcf.checked, gt: gclock.stamp('whole-chat-frames') })"),
-    "the click posts the kernel's designed message with the gesture stamp minted in the literal");
+  assert.ok(GEAR.includes("post(scoped({ type: 'setWholeChatFrames', enabled: wcf.checked, gt: gclock.stamp('whole-chat-frames') }))"),
+    "the click posts the kernel's designed message with the gesture stamp minted in the literal, to the kernels in the selector's scope");
+  assert.match(row, /<b>Always load whole chats<\/b><span class=rs-mixed hidden><\/span>/, "the row carries the flag's slot");
   assert.ok(GEAR.includes("wcf.checked = !!v.wholeChatFrames"),
     "the box always shows the kernel's persisted answer, never a page default");
   assert.match(GEAR, /STALE_LABELS = \{[\s\S]*?'whole-chat-frames': 'Always load whole chats'/,
@@ -40,13 +41,13 @@ test("the gear has an Always load whole chats checkbox in its own Chat history s
     "the toast's Apply anyway may re-issue this one setting");
 });
 
-test("Whole chat frames is per-install: not a KERNEL_SETTING, so it never propagates", () => {
+test("Whole chat frames is per-install but follows the selector: a KERNEL_SETTING, never converged, marked where kernels differ", () => {
   const setSrc = FED.match(/const KERNEL_SETTING = new Set\(\[([\s\S]*?)\]\)/);
   assert.ok(setSrc, "federation.ts's KERNEL_SETTING set located");
-  assert.ok(!setSrc![1].includes("setWholeChatFrames"), "the set must not carry it: this kernel keeps its own floor");
-  assert.ok(!FED.includes("setWholeChatFrames"), "…and no other federation path names it either");
+  assert.ok(setSrc![1].includes('"setWholeChatFrames"'), "a click under All kernels reaches every kernel");
   assert.ok(!KERNEL.includes('"wholeChatFrames", "whole-chat-frames", _set_whole_chat_frames'),
-    "…nor the mesh-adopted settings table on the kernel side");
+    "…but nothing converges it: each kernel keeps its own floor (not in the mesh-adopted settings table)");
+  assert.match(GEAR, /\['wholeChatFrames', wcf\]/, "the row is in the gear's mixed marks");
 });
 
 test("the kernel reads the switch live in its floor decision and serves it on /version", () => {

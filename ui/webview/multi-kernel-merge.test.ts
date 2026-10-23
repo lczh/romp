@@ -553,7 +553,10 @@ test("routeOutbound: the gear's kernel-side settings reach EVERY attached kernel
                      { type: "setDistillFast", enabled: true },
                      { type: "setIndexFast", enabled: true },
                      { type: "setFileEditing", enabled: true },
-                     { type: "setCompactSuggest", enabled: true }]) {   // T248: no longer per-install
+                     { type: "setCompactSuggest", enabled: true },   // T248: no longer per-install
+                     // the per-install toggles: each kernel keeps its own, but the gear's click reaches every kernel in scope
+                     { type: "setThinkingSummaries", enabled: true }, { type: "setWholeChatFrames", enabled: true },
+                     { type: "setConserve", enabled: true }, { type: "setRouterModels", enabled: true }]) {
     const routes = routeOutbound(msg, new Set(["TESTHOST", "gpu1"]));
     assert.deepEqual(routes.map((r) => r.host).sort(), ["", "TESTHOST", "gpu1"].sort(), msg.type);
     // the same setting to each kernel; since 2026-09-18 (plans/settings-across-machines.md, one A) each copy also says where the

@@ -83,10 +83,13 @@ const OBJ_ID = ["tabs"]; //                       an array of objects keyed by `
 // user 2026-09-07: it shipped per-install and a session on an attached machine, whose kernel's own copy
 // was on, received the suggestion while their gear showed the box off with the mixed mark — they want
 // no mixed state for this setting, ever; one click writes every machine, so the mark can only be
-// transient). Deliberately NOT here: setDefaultDir (a path on one machine, meaningless on another),
-// setColormap/setPalette (the viewer's display prefs, which the local kernel persists for this browser)
-// and the Thinking summaries toggle (per-install: whoever reads the summaries turns it on where they read
-// them).
+// transient). The PER-INSTALL toggles ride here too (the settings' scope fan-out, plans/settings-across-machines.md):
+// Thinking summaries, Whole chat frames, Conserve memory and Extra models each keep a value per kernel that the poll
+// never converges, but a click under the gear's All kernels went to the local kernel alone while the box went on
+// showing that one value as every machine's. Like setUpdateMode they are broadcast, not adopted, and the gear's
+// machine selector scopes them (`hosts`) to the picked kernels. Deliberately NOT here: setDefaultDir (a path on one
+// machine, meaningless on another; the gear's row says it is this machine's) and setColormap/setPalette (the
+// viewer's display prefs, which the local kernel persists for this browser).
 const KERNEL_SETTING = new Set(["setAutoNudge", "setJudgeModel", "setIndexModel",
                                 "setJudgeEffort", "setIndexEffort", "setUpdateMode",
                                 "setJudgeConcurrency",   // T277: the judges' pool width, one value across machines
@@ -94,7 +97,8 @@ const KERNEL_SETTING = new Set(["setAutoNudge", "setJudgeModel", "setIndexModel"
                                 "setCompactSuggest", "setTaskTracking",   // T404: the master switch, one value across machines
                                 "setCommentModel", "setCommentEffort", "setCommentFast",
                                 "setJudgeFast", "setDistillFast", "setIndexFast",   // Fast mode per judge tier, one value across machines
-                                "setAlwaysFast", "setRetryUpgrade"]);   // the model switches (Settings, Automation, Model; 2026-09-17), one value across machines
+                                "setAlwaysFast", "setRetryUpgrade",   // the model switches (Settings, Automation, Model; 2026-09-17), one value across machines
+                                "setThinkingSummaries", "setWholeChatFrames", "setConserve", "setRouterModels"]);   // per-install: broadcast, not adopted
 
 // ── what a send to a host whose relay socket is NOT open does, by message class (2026-09-10) ─────────
 // Three classes, decided by an EXPLICIT list — never guessed from the type's spelling at run time:

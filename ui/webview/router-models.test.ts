@@ -37,9 +37,8 @@ test("the gear has an Extra models from your API gateway checkbox under General,
   assert.ok(row.includes("<span class=rs-line id=rs-router-line></span>"), "the always-visible status line rides inside the row");
   assert.equal((row.match(/<span/g) || []).length, (row.match(/<\/span>/g) || []).length, "every span the row opens it closes");
   assert.ok(GEAR.includes("rtr = document.getElementById('rs-router'), rtrLine = document.getElementById('rs-router-line')"), "the box and its line are looked up beside Conserve memory's");
-  assert.ok(GEAR.includes("post({ type: 'setRouterModels', enabled: rtr.checked, gt: gclock.stamp('router-models') })"),
-    "the click posts the kernel's designed message with the gesture stamp minted in the literal");
-  assert.ok(!GEAR.includes("scoped({ type: 'setRouterModels'"), "…unscoped: a per-install setting has no machine selector");
+  assert.ok(GEAR.includes("post(scoped({ type: 'setRouterModels', enabled: rtr.checked, gt: gclock.stamp('router-models') }))"),
+    "the click posts the kernel's designed message with the gesture stamp minted in the literal, to the kernels in the selector's scope");
   assert.ok(GEAR.includes("rtr.checked = !!v.routerModels"),
     "the box always shows the kernel's persisted answer, never a page default");
   assert.match(GEAR, /STALE_LABELS = \{[\s\S]*?'router-models': 'Extra models from your API gateway'/,
@@ -130,18 +129,17 @@ test("executed: N declared, and the gateway named missing only when the probe RA
   assert.equal(line.textContent, "1 declared", "null is not-probed whatever the switch says");
 });
 
-test("Extra models from your API gateway is per-install: not a KERNEL_SETTING, not mesh-adopted, not a converging row", () => {
+test("Extra models from your API gateway is per-install: the click follows the selector, but not mesh-adopted, not a converging row", () => {
   const setSrc = FED.match(/const KERNEL_SETTING = new Set\(\[([\s\S]*?)\]\)/);
   assert.ok(setSrc, "federation.ts's KERNEL_SETTING set located");
-  assert.ok(!setSrc![1].includes("setRouterModels"), "the set must not carry it: the gateway is this machine's");
-  assert.ok(!FED.includes("setRouterModels"), "…and no other federation path names it either");
+  assert.ok(setSrc![1].includes('"setRouterModels"'), "a click under All kernels reaches every kernel (each declares its own gateway)");
   const mesh = KERNEL.match(/_MESH_ADOPTED_SETTINGS = \(([\s\S]*?)\)\n_SETTINGS_STORES/);
   assert.ok(mesh, "kernel.py's mesh-adopted settings table located");
   assert.ok(!mesh![1].includes('"router-models"') && !mesh![1].includes("routerModels"), "…nor the mesh-adopted settings table on the kernel side");
   for (const table of ["PROPOSAL_ROWS", "STORE_KEY"]) {
     const t = GEAR.match(new RegExp("var " + table + " = \\{([^}]*)\\}"));
     assert.ok(t, "gear.js's " + table + " located");
-    assert.ok(!t![1].includes("router-models"), table + " is the converging four's: this row raises no proposal and wears no mark");
+    assert.ok(!t![1].includes("router-models"), table + " is the converging four's: this row raises no proposal and has no pin");
   }
 });
 

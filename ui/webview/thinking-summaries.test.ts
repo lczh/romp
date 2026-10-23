@@ -7,8 +7,10 @@
 //    an older kernel (flag = signature only) still shows any text it is handed.
 //  - the GEAR toggle: a per-install kernel-side checkbox beside the other kernel toggles, stamped
 //    with its gesture time like every kernel-side setting the gear posts, filled from /version, named
-//    in the stale-gesture toast — and deliberately NOT in federation's KERNEL_SETTING set, so it
-//    never queues for or reaches another machine's kernel.
+//    in the stale-gesture toast. Per-install means each kernel keeps its own and the poll never
+//    converges it; the CLICK follows the gear's machine selector (federation's KERNEL_SETTING since the
+//    settings' scope fan-out: under All kernels it reached the local kernel alone while the box read
+//    as every machine's value), and a disagreeing row wears the differs flag.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -67,20 +69,27 @@ test("the gear has a Thinking summaries checkbox among the kernel-side toggles, 
     "the copy says the toggle also turns adaptive thinking on where it was off");
   assert.ok(/Compact transcript still hides them/.test(row),
     "…and that the compact view (default on) keeps hiding thinking, summaries included");
-  assert.ok(GEAR.includes("post({ type: 'setThinkingSummaries', enabled: ths.checked, gt: gclock.stamp('thinking-summaries') })"),
-    "the click posts the kernel's designed message with the gesture stamp minted in the literal");
+  assert.ok(GEAR.includes("post(scoped({ type: 'setThinkingSummaries', enabled: ths.checked, gt: gclock.stamp('thinking-summaries') }))"),
+    "the click posts the kernel's designed message with the gesture stamp minted in the literal, to the kernels in the selector's scope");
+  assert.match(row, /<b>Thinking summaries<\/b><span class=rs-mixed hidden><\/span>/, "the row carries the flag's slot");
+  assert.ok(/Applies on every connected machine’s kernel\./.test(row) && !/keeps its own copy/.test(row),
+    "the sub-copy no longer claims this kernel alone");
   assert.ok(GEAR.includes("ths.checked = !!v.thinkingSummaries"),
     "the box always shows the kernel's persisted answer, never a page default");
   assert.match(GEAR, /STALE_LABELS = \{[\s\S]*?'thinking-summaries': 'Thinking summaries'/,
     "a stood-down gesture toasts under the row's own name");
 });
 
-test("Thinking summaries is per-install: not a KERNEL_SETTING, so it never propagates", () => {
+test("Thinking summaries is per-install but follows the selector: a KERNEL_SETTING, never converged, marked where kernels differ", () => {
   const setSrc = FED.match(/const KERNEL_SETTING = new Set\(\[([\s\S]*?)\]\)/);
   assert.ok(setSrc, "federation.ts's KERNEL_SETTING set located");
-  assert.ok(!setSrc![1].includes("setThinkingSummaries"),
-    "the set must not carry it — this kernel keeps its own copy (the sub-copy says so)");
-  assert.ok(!FED.includes("setThinkingSummaries"), "…and no other federation path names it either");
+  assert.ok(setSrc![1].includes('"setThinkingSummaries"'), "a click under All kernels reaches every kernel (queued per host while a socket is down)");
   assert.ok(!KERNEL.includes('"thinkingSummaries", _set_thinking_summaries'),
-    "…nor the /judge-settings propagation table on the kernel side");
+    "…but nothing converges it: not in the /judge-settings propagation table on the kernel side");
+  const mesh = KERNEL.match(/_MESH_ADOPTED_SETTINGS = \(([\s\S]*?)\)\n_SETTINGS_STORES/);
+  assert.ok(mesh && !mesh[1].includes("thinking"), "…nor the poll's mesh-adopted table: each kernel keeps its own");
+  assert.ok(KERNEL.includes('"thinkingSummaries": _thinking_summaries_on(), "wholeChatFrames": _whole_chat_frames_on(),'),
+    "/version's settings dict carries it, so a peer's row shows where the kernels disagree");
+  assert.match(GEAR, /\['thinkingSummaries', ths\]/, "the row is in the gear's mixed marks");
+  assert.match(GEAR, /var PER_INSTALL_KEYS = \[[^\]]*'thinkingSummaries'/, "…and follows the selector under a pick");
 });

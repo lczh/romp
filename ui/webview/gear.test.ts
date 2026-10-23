@@ -252,13 +252,17 @@ test("the default-comment trio is its own gear group, defaulting to same-as-the-
 });
 
 test("every kernel-side select says so when connected machines disagree (the autoNudge rule generalized)", () => {
-  // The user 2026-08-14: everything stays in sync; on disagreement the gear ASKS by showing the local
-  // value with a mixed mark beside it — hover names the hosts, one pick sets every machine — and a
-  // machine that never reported (an older kernel) is unknown, never a disagreement to click away.
+  // The user 2026-08-14: everything stays in sync; on disagreement the gear ASKS by marking the row —
+  // hover names the hosts, one pick sets every machine — and a machine that never reported (an older
+  // kernel) is unknown, never a disagreement to click away. Since the settings' scope fan-out every
+  // such row wears the one "differs" flag, a box shows the mixed state, and the selector counts them all.
   assert.ok(GEAR.includes("fillMixedMarks"), "the generalized reconcile must exist and be called");
   assert.ok(/t\.settings && typeof t\.settings\[key\] !== 'undefined'/.test(GEAR),
     "non-reporting rows are excluded, not read as disagreeing");
-  assert.ok(GEAR.includes("differs on: "), "the hover names the disagreeing hosts");
+  assert.ok(GEAR.includes("mark.title = 'The kernels disagree: ' + vals.join(', ')"), "the hover names the machines and their values");
+  assert.ok(GEAR.includes("if (box) el.indeterminate = true;"), "a disagreeing box shows the mixed state, never this kernel's value as everyone's");
+  assert.ok(GEAR.includes("lastDiffs.push({ label: STALE_LABELS[storeOf(key)] || key, vals: vals });") && GEAR.includes("var diffs = lastDiffs;"),
+    "the selector's count counts every disagreeing kernel-side row");
   const mixedSpans = GEAR.match(/class=rs-mixed hidden/g) || [];
   assert.ok(mixedSpans.length >= 10, `every kernel-side select carries a marker span (got ${mixedSpans.length})`);
 });

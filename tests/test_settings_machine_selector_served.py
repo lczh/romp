@@ -298,13 +298,14 @@ class ServedMachineSelector(unittest.TestCase):
         self.assertTrue(t["aboveTabs"], "…above the tabs")
         self.assertEqual(t["label"], "All kernels")
         self.assertEqual(t["count"], "1 differs", "the count of differing rows on the selector itself")
-        self.assertIn("task tracking", t["countTitle"])
+        self.assertIn("Task tracking: ", t["countTitle"], "the row named as the gear names it")
         self.assertIsNotNone(t["mark"], "the Task tracking row wears the flag")
         self.assertEqual((t["mark"]["text"], t["mark"]["differs"]), ("differs", True))
         self.assertIn(PEER + " off", t["mark"]["title"]); self.assertIn("TESTHOSTA (this machine) on", t["mark"]["title"])
         self.assertEqual(t["mark"]["color"], "rgb(215, 162, 58)", "the heads-up amber, through the token")
         self.assertEqual((t["pin"]["hidden"], t["pin"]["lit"]), (False, False), "the glyph shows, unlit: nothing pinned yet")
-        self.assertTrue(t["checked"], "All kernels shows this machine's value (on)")
+        self.assertTrue(t["indeterminate"], "All kernels shows the MIXED state while the kernels disagree, never this kernel's on as everyone's")
+        self.assertTrue(t["checked"], "…over this machine's value (on), which a click toggles for every kernel")
         self.assertEqual(t["options"][:1], ["All kernels"]); self.assertIn(PEER, t["options"]); self.assertTrue(any("this machine" in o for o in t["options"]))
 
     def test_picking_the_peer_scopes_the_row_to_its_value_and_a_click_applies_there_alone_and_pins_it(self):
