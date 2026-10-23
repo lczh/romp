@@ -520,5 +520,109 @@ class MergeCarriesDelegationIdentity(unittest.TestCase):
             td.cleanup()
 
 
+class MergeKeepsTheSendersTracker(unittest.TestCase):
+    """The grouper's merge folded the sender's '↪ delegated to api' tracker into the planner's twin
+    step and dropped the tracker's handoff with it: the tracker's id was gone and no node carried the
+    handoff, so neither the recipient finishing the work (the origin back-link) nor its reply (the
+    quiet sweep) ended anything, and the step stayed open on the card. A tracker dupe now NESTS under
+    the survivor instead, so its ending lands and the done tracker puts the step before the closer."""
+
+    CARD, STEP, TRK, CARD2 = MGR + ":g1", MGR + ":g2", MGR + ":g3", MGR + ":g4"
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self._msgs, self._disc = jd.MESSAGES, jd.discover
+        jd.MESSAGES = Path(self.td.name) / "messages.jsonl"
+        jd.MESSAGES.write_text("")
+        jd.discover = lambda now, window=None, forks=True: [
+            (WK1, "/dev/null", None, "api"), (MGR, "/dev/null", None, "web")]
+
+    def tearDown(self):
+        jd.MESSAGES, jd.discover = self._msgs, self._disc
+        for sid in (MGR, WK1):
+            for dd in (jd.GOALDIR, jd.GOALARCHDIR):
+                try:
+                    (dd / (sid + ".json")).unlink()
+                except OSError:
+                    pass
+            try:
+                (jd.STATE / "overrides" / (sid + ".jsonl")).unlink()
+            except OSError:
+                pass
+        self.td.cleanup()
+
+    def _sender(self, **handoff):
+        h = dict({"peer": WK1, "msgId": MID1}, **handoff)
+        return {"rompUuid": MGR, "seq": 4, "nodes": {
+            self.CARD: _node(self.CARD, "Ship the export feature", None, t=T0 - 600),
+            self.STEP: _node(self.STEP, "export module", self.CARD, t=T0 - 300),
+            self.TRK: _node(self.TRK, "↪ delegated to api: export module", self.CARD, handoff=h),
+            self.CARD2: _node(self.CARD2, "Fix the login redirect", None, t=T0 - 500)},
+            "placements": {}, "status": {}}
+
+    def _assert_nested(self, st):
+        trk = st["nodes"].get(self.TRK) or {}
+        self.assertEqual(trk.get("parentId"), self.STEP, "the tracker nests under the step it twins")
+        self.assertEqual((trk.get("handoff") or {}).get("msgId"), MID1, "…with its handoff intact")
+
+    def test_grouper_merge_nests_the_tracker_and_the_back_link_ends_it(self):
+        st = self._sender()
+        menu = jd._group_menu(st, jd._group_tops(st))
+        ids = [nd["id"] for nd in menu]
+        self.assertIn(self.TRK, ids, "the tracker is a line the grouper can name")
+        n = jd.apply_group(st, menu, [{"do": "merge", "why": "same work",
+                                       "goal": ids.index(self.TRK) + 1,
+                                       "into": ids.index(self.STEP) + 1}], T0 + 10)
+        self.assertEqual(n, 1)
+        self._assert_nested(st)
+        jd.save_goals(MGR, st)
+        rs = {"rompUuid": WK1, "seq": 1, "nodes": {
+            WK1 + ":g1": _node(WK1 + ":g1", "export module", None, t=T0 + 5,
+                               origin={"peer": MGR, "goalId": self.TRK, "msgId": MID1})},
+            "placements": {}, "status": {}}
+        jd.record_verdict(rs, rs["nodes"][WK1 + ":g1"], "closer", "done", NOW - 100,
+                          why="export module shipped")
+        jd.save_goals(WK1, rs)
+        jd.run_propagate(now=NOW)
+        m = jd.load_goals(MGR)
+        self.assertTrue(m["nodes"][self.TRK].get("nodeComplete"),
+                        "the recipient's completion ends the tracker")
+        self.assertIn(self.STEP, [nd["id"] for nd in jd._subtree_done_candidates(m)],
+                      "the done tracker puts the step before the closer with the report in evidence")
+
+    def test_quiet_tracker_merge_nests_it_and_the_reply_ends_it(self):
+        st = self._sender(quiet=True)
+        self.assertEqual(jd._merge_nodes(st, self.TRK, self.STEP, T0 + 10, "same work"), 1)
+        self._assert_nested(st)
+        jd.save_goals(MGR, st)
+        jd.MESSAGES.write_text(json.dumps({"t": T0 + 900, "ev": "sent", "id": "r1", "from_id": WK1,
+                                           "to_id": MGR, "kind": "coordinate",
+                                           "body": "export module done"}) + "\n")
+        jd.run_propagate(now=NOW)
+        self.assertTrue(jd.load_goals(MGR)["nodes"][self.TRK].get("nodeComplete"),
+                        "the recipient's reply ends the quiet tracker")
+
+    def test_a_tracker_survivor_refuses_the_merge(self):
+        st = self._sender()
+        st["nodes"][self.STEP]["handoff"] = {"peer": WK2, "msgId": MID2}
+        self.assertEqual(jd._merge_nodes(st, self.TRK, self.STEP, T0 + 10, "same work"), 0,
+                         "two dispatches keep two trackers")
+        self.assertEqual(st["nodes"][self.TRK]["parentId"], self.CARD)
+        self.assertEqual(st["nodes"][self.TRK]["handoff"]["msgId"], MID1)
+
+    def test_a_merge_into_the_trackers_own_parent_changes_nothing(self):
+        st = self._sender()
+        self.assertEqual(jd._merge_nodes(st, self.TRK, self.CARD, T0 + 10, "same work"), 0)
+        self.assertEqual(st["nodes"][self.TRK]["parentId"], self.CARD)
+        self.assertNotIn("mergedFrom", st["nodes"][self.CARD])
+
+    def test_a_merge_into_a_node_below_the_tracker_is_refused(self):
+        st = self._sender()
+        st["nodes"][self.STEP]["parentId"] = self.TRK      # a step filed under the tracker
+        self.assertEqual(jd._merge_nodes(st, self.TRK, self.STEP, T0 + 10, "same work"), 0)
+        self.assertEqual(st["nodes"][self.TRK]["parentId"], self.CARD, "no cycle")
+        self.assertEqual(st["nodes"][self.STEP]["parentId"], self.TRK)
+
+
 if __name__ == "__main__":
     unittest.main()

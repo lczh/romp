@@ -13899,7 +13899,9 @@ def _merge_nodes(store, dupe_id, surv_id, t, why):
     items are never one goal; each mirror must keep its own node for plan-sync. A to-do dupe whose
     survivor is a CONTAINER (umbrella, or already holds children) is NESTED as that survivor's child
     instead of fused (returns 1) — dissolving it would hand the container an authoritative-open link
-    that gates the card invisibly, with no sub-goal showing the open work. Provenance rides
+    that gates the card invisibly, with no sub-goal showing the open work. A '↪ delegated' TRACKER dupe
+    (it carries `handoff`) is never fused either: it is NESTED under the survivor, and refused when the
+    survivor is a tracker too, already its parent, or below it (see the branch). Provenance rides
     surv[\"mergedFrom\"] (plain field, not diary: the fold must not treat a merge as a verdict, and a
     non-user log event would also drop a held user reopen). Returns 1 when applied."""
     nodes = store["nodes"]
@@ -13917,6 +13919,24 @@ def _merge_nodes(store, dupe_id, surv_id, t, why):
             seen.add(x)
             x = nodes.get(x, {}).get("parentId")
         return False
+
+    # A '↪ delegated to <peer>' TRACKER is the exact item its recipient's ending checks off: the origin
+    # back-link joins on the tracker's own id, and the reply sweep and the courier's idempotency scan on
+    # its `handoff`. Fusing it into the planner's twin step (the grouper's merge, which GROUP_SYS invites
+    # for two lines recording the same work) popped that id and dropped the handoff, so the recipient
+    # finishing the work completed nothing and the step stayed open. Carrying `handoff` onto the
+    # survivor would turn the broader step into the tracker, over-completing it on a partial handoff.
+    # So honor "these belong together" by NESTING the tracker under the survivor: its ending lands as
+    # before, and the done tracker then nominates the step to the closer with the report in evidence
+    # (_deleg_unseen). Refused when the survivor is a tracker too (two dispatches keep two trackers),
+    # when it already is the tracker's parent (nothing to do), or when it sits below the tracker (cycle).
+    if isinstance(dupe.get("handoff"), dict):
+        if (isinstance(surv.get("handoff"), dict) or dupe.get("parentId") == surv_id
+                or _is_anc(dupe_id, surv_id)):
+            return 0
+        dupe["parentId"] = surv_id
+        dupe["mt"] = t
+        return 1
 
     # A to-do (agentTask) leaf must never be DISSOLVED into a CONTAINER survivor — an umbrella, or any
     # node that already holds children (the root goal is the canonical case). Fusing it in hands the
