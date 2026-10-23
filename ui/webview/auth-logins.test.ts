@@ -357,7 +357,7 @@ test("the gear lists the stored logins with a Remove and the feed names a refuse
   }
   assert.match(GEAR, /function lgLater\(n\) \{[^\n]*\n\s*for \(var k = n \+ 1; k <= lgFills; k\+\+\) if \(!lgFailed\[k\]\) return true;\n\s*return false;/,
     "…a later fill counts until its /logins read has failed and its /tunnels read has settled");
-  assert.match(GEAR, /\}\)\.catch\(function \(e\) \{[^\n]*return null; \}\)[^\n]*\n\s*\.then\(function \(rows\) \{\n\s*var up = \(rows \|\| \[\]\)\.filter\(function \(t\) \{ return t && t\.status === 'up'; \}\);\n\s*if \(n <= clickFill\) return up;[^\n]*\n\s*if \(n < drawnFill\) \{ if \(reread\) fill\(\); return up; \}[^\n]*\n(\s*[^\n]*drawKernelRows[^\n]*\n){2}\s*return up;/,
+  assert.match(GEAR, /\}\)\.catch\(function \(e\) \{[^\n]*return null; \}\)[^\n]*\n\s*\.then\(function \(rows\) \{\n\s*var up = \(rows \|\| \[\]\)\.filter\(function \(t\) \{ return t && t\.status === 'up'; \}\);\n\s*if \(n <= clickFill\) return up;[^\n]*\n\s*if \(n < drawnFill\) \{ if \(reread && !p\.hidden\) fill\(\); return up; \}[^\n]*\n(\s*[^\n]*drawKernelRows[^\n]*\n){2}\s*return up;/,
     "fill()'s /tunnels read settles with the connected kernels, or none when it failed, for the pickers to list (drawn or not: a fill a click or a later fill outdated draws nothing)");
   assert.match(GEAR, /var kernelsRead = fetch\(ku\('\/tunnels' \+ q\), \{ cache: 'no-store' \}\)/, "fill() keeps its /tunnels read to hand on");
   assert.match(GEAR, /lgRender\(v\);[^\n]*\n\s*lgFetchLogins\(kernelsRead\);/, "…and hands it to the stored logins' read, beside /version's");

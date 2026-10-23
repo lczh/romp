@@ -15,7 +15,10 @@
 // (2b) Fills were not ordered among themselves: the re-read's fill waits on /tunnels?reread=, up to 4 s on a slow peer, and then
 //     drew over a fill that began after it with its own older /version answer. A fill that began before the latest one drawn
 //     now draws nothing, and one that carried a re-read starts a fresh fill, so what the re-read learned is still drawn. The same
-//     holds for a fill whose /version answers late: it draws neither its version lines nor its rows.
+//     holds for a fill whose /version answers late: it draws neither its version lines nor its rows, and when that fill carried a
+//     re-read, the fresh fill it starts asks for the re-read and draws what it found. A panel closed meanwhile starts no fill: a
+//     fill standing down at /version asks for the re-read alone, as a closed panel's settingAck does, and one standing down at
+//     /tunnels asks for nothing more.
 // (3) The settings page shows a dropped message (federation's warn) as a notice, a dropped setting in the row's own words; a feed
 //     host, which has its own surface for warns, does not.
 // (4) Each kernel-backed box is named by its title alone and described by its state and what a click does.
@@ -76,6 +79,13 @@ type Lab = {
   tunnelsAsked: string[];         // every /tunnels URL the page asked for, query and all
   heldArrived: (() => void) | null;
 };
+// What the page itself asked and read, recorded in the page as it happens: __asked, every fetch's path and query at the call;
+// __read, per path, the answers whose json() has settled. A fill's decisions after an answer need no request or timer, so once
+// a count is seen they have run, and anything a decision asked for is already in __asked.
+const pageAsked = (page: any): Promise<string[]> => page.evaluate(() => ((window as any).__asked || []).slice());
+const readCount = (page: any, path: string): Promise<number> => page.evaluate((p: string) => ((window as any).__read || {})[p] || 0, path);
+const readPast = (page: any, path: string, n: number) => page.waitForFunction(([p, k]: [string, number]) => (((window as any).__read || {})[p] || 0) > k,
+  [path, n], { timeout: 5000 });
 
 async function withGear(t: any, opts: { own?: boolean }, body: (page: any, lab: Lab, errors: string[]) => Promise<void>): Promise<void> {
   const browser = await launchLeg(t, pw, "chromium");
@@ -91,6 +101,21 @@ async function withGear(t: any, opts: { own?: boolean }, body: (page: any, lab: 
     const js = bundle();
     const page = await browser.newPage({ viewport: { width: 1000, height: 900 } });
     page.on("pageerror", (e: Error) => { errors.push(e.message); });
+    await page.addInitScript(() => {
+      const w = window as any;
+      w.__asked = []; w.__read = {};
+      const f = window.fetch;
+      window.fetch = function (input: any, init?: any) {
+        try { const u = new URL(typeof input === "string" ? input : input.url, location.href); w.__asked.push(u.pathname + u.search); } catch { /* recorded or not, the fetch goes */ }
+        return f.call(window, input, init);
+      } as typeof window.fetch;
+      const json = Response.prototype.json;
+      Response.prototype.json = function (this: Response) {
+        let p = "";
+        try { p = new URL(this.url).pathname; } catch { /* no URL: not counted */ }
+        return json.call(this).finally(() => { if (p) w.__read[p] = (w.__read[p] || 0) + 1; });
+      };
+    });
     await page.route("**/*", (route: any) => {
       const u = new URL(route.request().url());
       const json = (o: unknown) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(o) });
@@ -142,6 +167,33 @@ const box = (page: any, id: string) => page.evaluate((id: string) => {
   return { checked: el.checked, indeterminate: el.indeterminate };
 }, id);
 const postsOf = (page: any, type: string): Promise<any[]> => page.evaluate((ty: string) => (window as any).__posts.filter((m: any) => m && m.type === ty), type);
+// close the panel and open it again: the open starts a fill
+const reopen = (page: any) => page.evaluate(() => { (window as any).__rompSettingsClose(); window.postMessage({ romp: "openSettings", tab: "chat" }, "*"); });
+const ackFromPeer = (page: any) => page.evaluate(() => window.dispatchEvent(new MessageEvent("message",
+  { data: { type: "settingAck", host: "TESTHOSTB", msgType: "setThinkingSummaries", gt: 1 } })));
+const mixed = (page: any, on: boolean, timeout: number) => page.waitForFunction((want: boolean) =>
+  (document.getElementById("rs-thinksum") as HTMLInputElement).indeterminate === want, on, { timeout });
+// the reads that decide a fill: its /version, and its /tunnels with or without the re-read, in the order the page asked them
+const fillReads = (urls: string[]) => urls.filter((u) => u === "/version" || u.startsWith("/tunnels"));
+// The setup of the three tests below: the peer turns Thinking summaries off, which this kernel's copy of the peer does not know
+// until it re-reads it; the peer's settingAck starts a fill with that re-read, and the answer `hold` names is held (that fill's
+// /version, or its /tunnels?reread=). Meanwhile this machine turns it on, and the panel is closed and reopened: that later
+// fill draws on here against the copy's on, plain on. Returns once it has drawn, with the held answer still held.
+async function lateRereadFill(page: any, lab: Lab, hold: "version" | "reread") {
+  assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: true }, "the first fill: off here, on on the peer");
+  lab.peer = { ...lab.peer, thinkingSummaries: false };
+  if (hold === "version") lab.holdVersion = true; else lab.holdReread = true;
+  const arrived = new Promise<void>((res) => { lab.heldArrived = res; });
+  await ackFromPeer(page);
+  await arrived;
+  lab.holdReread = false;
+  lab.here = { ...lab.here, thinkingSummaries: true };
+  const t0 = lab.tunnelsAsked.length;
+  await reopen(page);
+  await mixed(page, false, 10000);
+  assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: false }, "the later fill drew: on here, and on in the copy");
+  assert.deepEqual(lab.tunnelsAsked.slice(t0), [""], "the later fill's plain read");
+}
 
 test("a click on a mixed box while the next fill's /tunnels answer is on its way posts OFF, and that late answer draws nothing", { timeout: 90000 }, async (t) => {
   await withGear(t, {}, async (page, lab, errors) => {
@@ -240,6 +292,59 @@ test("a fill whose /version answers after a later fill has drawn draws neither i
     assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: false }, "this machine's old off was not drawn back");
     assert.match(await ver(), /^kernel bbbb222\n/, "nor its old build");
     assert.equal(lab.tunnelsAsked.length, asked + 1, "the late fill read no /tunnels: it had nothing left to draw");
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
+test("a re-read's fill whose /version answers after a later fill has drawn starts a fresh fill, which asks for the re-read and draws it", { timeout: 90000 }, async (t) => {
+  await withGear(t, {}, async (page, lab, errors) => {
+    await lateRereadFill(page, lab, "version");
+    const a0 = (await pageAsked(page)).length;
+    // the held /version lands (off here): the fill that carried the re-read had not asked for it yet
+    for (const f of lab.held.splice(0)) await f();
+    await mixed(page, true, 5000).catch(() => undefined);   // the assertions below say what was drawn instead
+    assert.deepEqual(fillReads((await pageAsked(page)).slice(a0)), ["/version", "/tunnels?reread=TESTHOSTB"],
+      "it stood down and a fresh fill asked this kernel to re-read the peer");
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: true },
+      "on here and off on the peer as the re-read found it: the kernels differ");
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
+test("a re-read's fill that stands down at /version with the panel closed starts no fill and asks for the re-read alone", { timeout: 90000 }, async (t) => {
+  await withGear(t, {}, async (page, lab, errors) => {
+    await lateRereadFill(page, lab, "version");
+    await page.evaluate(() => (window as any).__rompSettingsClose());
+    const a0 = (await pageAsked(page)).length, r0 = await readCount(page, "/version");
+    lab.holdReread = true;   // the re-read, when asked, is held until this test lets it land
+    const rereadArrived = new Promise<void>((res) => { lab.heldArrived = res; });
+    for (const f of lab.held.splice(0)) await f();
+    await readPast(page, "/version", r0);   // the page has read the late /version, and the fill has decided
+    assert.deepEqual(fillReads((await pageAsked(page)).slice(a0)), ["/tunnels?reread=TESTHOSTB"],
+      "no fill started (no /version asked): the re-read was asked alone");
+    await rereadArrived;
+    for (const f of lab.held.splice(0)) await f();   // this kernel's copy of the peer is lifted
+    lab.holdReread = false;
+    await reopen(page);
+    await mixed(page, true, 10000).catch(() => undefined);
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: true },
+      "the next open draws the peer as the re-read found it: on here, off there");
+    assert.deepEqual(errors, [], "no page errors");
+  });
+});
+
+test("a re-read's fill that stands down at /tunnels with the panel closed starts no fill", { timeout: 90000 }, async (t) => {
+  await withGear(t, {}, async (page, lab, errors) => {
+    await lateRereadFill(page, lab, "reread");
+    await page.evaluate(() => (window as any).__rompSettingsClose());
+    const a0 = (await pageAsked(page)).length, r0 = await readCount(page, "/tunnels");
+    for (const f of lab.held.splice(0)) await f();   // the re-read lands: this kernel's copy of the peer is lifted
+    await readPast(page, "/tunnels", r0);   // the page has read it, and the fill has decided
+    assert.deepEqual(fillReads((await pageAsked(page)).slice(a0)), [], "no fill started: nothing asked");
+    await reopen(page);
+    await mixed(page, true, 10000).catch(() => undefined);
+    assert.deepEqual(await box(page, "rs-thinksum"), { checked: true, indeterminate: true },
+      "the next open draws the copy the re-read lifted: on here, off there");
     assert.deepEqual(errors, [], "no page errors");
   });
 });

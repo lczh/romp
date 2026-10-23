@@ -6715,8 +6715,9 @@ The settings panel draws what the machines hold, not a guess (2026-10-23). A fil
 its reads (`/version` and `/tunnels`) have answered, so a box always holds what it shows: a mixed box is held ticked under its
 dash from the moment it is drawn until the next drawing, and a fill whose reads began before a click on a kernel-backed row
 draws nothing. Fills are ordered among themselves too: once a fill that began later has drawn, an earlier one draws nothing
-more, and an earlier one that asked for a re-read (below) starts a fresh fill in its place, so what the re-read found is still
-drawn. A kernel answers every setting another machine's dashboard relays to it (a `relay` socket) with a `settingAck`
+more, the machine selector included, and an earlier one that asked for a re-read (below) starts a fresh fill in its place, so
+what the re-read found is still drawn; with the panel closed meanwhile it starts none, and a re-read it had not yet asked for is
+asked alone. A kernel answers every setting another machine's dashboard relays to it (a `relay` socket) with a `settingAck`
 frame once it has handled it (applied, stood down or refused); the gear then asks its own kernel to re-read that machine
 (`GET /tunnels?reread=<host>`), which lifts the peer's `settings`, `settingsGt` and `settingsPinned` onto its row before the
 listing is built, rather than comparing against the supervisor's copy from its last 15 s pass. Every read of a peer's settings

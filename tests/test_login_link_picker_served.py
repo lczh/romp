@@ -14,7 +14,8 @@ read here in a browser over a hermetic kernel:
      /tunnels answering after a newer one's listed the older kernels in the newer open's drawing and in a drawing after a
      link. Only the newest open draws, unless its /logins read fails; then an older open draws, once the failed open's
      /tunnels read has settled, with the kernels that read listed. While a link or an unlink is on its way, a fill's
-     drawing is skipped.
+     drawing is skipped. The machine selector agrees with the pickers: once a newer open's fill has drawn, an older one's
+     /tunnels answer draws nothing there either, so the selector never lists a kernel the pickers leave out.
   2. The picker linked on its change event, and a focused, closed select fires change on an arrow key or a typed letter
      (measured in the Linux builds of Chromium, Firefox and WebKit), so a keyboard user looking through the options linked
      the login at once. A pick now shows a Link button beside the picker, and only Link sends. The pick and Link outlive a
@@ -38,7 +39,8 @@ and unlink POSTs reach the real kernel, which reads this machine's sign-in itsel
 (none is connected to it); the driver can delay one on its way, hold it until it releases it (every one, or one naming a
 given login), hold its answer once the kernel has taken it, or answer it 500 with a plain-text body. The last six scenes'
 pages count, in each frame, the /logins answers the page has read (a wrapped Response.json), so the driver can wait until
-the page has read an answer. The driver, at 1200x800:
+the page has read an answer; every page counts the armed list's answers alike (the driver marks each with a header), so a
+release is read once the page has read every answer it held. The driver, at 1200x800:
   - opens settings on General with /tunnels held and waits for a /logins answer to arrive meanwhile, then reads the panel:
     the signed-in line, the Account row's description and how many stored-login rows there are. It releases /tunnels and
     reads the work row's picker (api-box connected) and how many /logins reads the open sent;
@@ -61,7 +63,7 @@ synchronized switch), picks this machine in spare's row, reads spare's row after
 fill makes, then presses Link and reads the POSTs and the record. With spare unlinked, a fresh page opens settings and
 closes it; reopens with its /tunnels held, armed with api-box, until its /logins answer has arrived; closes; opens again,
 that open's /tunnels answered at once with web-box, and reads spare's picker; then releases the held request and, once
-the machine selector lists api-box (fill() fills it from the same answer), reads the picker again. With spare unlinked, a
+the page has read its answer, reads the machine selector and the picker again. With spare unlinked, a
 fresh page opens settings, and spare's row is read after each of these, each but the last followed by closing and reopening
 settings until the row is drawn again: this machine picked; the placeholder picked; web-box picked, with web-box then gone
 from the kernel list; this machine picked, then spare linked through the kernel's door (the row read linked) and unlinked
@@ -70,11 +72,11 @@ held until its /logins answer has arrived, then answered with web-box, and spare
 web-box; then the POST released, the refusal read, and spare's row read after a reopen with api-box connected. Then three
 fresh pages each open settings with no kernel connected and close it, reopen with /tunnels held, armed with api-box,
 until a /logins answer has arrived, and close; then open again with web-box connected: (a) that open's GET /logins
-answered 500 and its /tunnels at once; the first open's /tunnels is released and, once the machine selector lists
-api-box, spare's picker is read in the rows drawn then; (b) the same, that open's /tunnels held until the first open's
-has landed; (c) that open's GET /logins held until the first open's /tunnels has landed, then answered by the kernel, and
-spare's picker read; then work is unlinked through the kernel's door, spare linked with its picker and Link, and work's
-picker read in the rows drawn after the link.
+answered 500 and its /tunnels at once; the first open's /tunnels is released and, once the page has read its answer, the
+machine selector and spare's picker are read in the rows drawn then; (b) the same, that open's /tunnels held until the
+first open's has landed; (c) that open's GET /logins held until the first open's /tunnels has landed, then answered by the
+kernel, and spare's picker read; then work is unlinked through the kernel's door, spare linked with its picker and Link,
+and work's picker read in the rows drawn after the link.
 
 Then scenes on a link or an unlink pressed while a reopen's rows wait on /tunnels, each a fresh page with work and spare
 unlinked. Unless its line says otherwise, a scene opens settings with api-box connected, picks a machine in spare's row and
@@ -167,7 +169,8 @@ const kernelLogins = async () => (await (await fetch(cfg.base + "/logins?token="
   .map((r) => ({ id: r.id, label: r.label, linked: r.linked ? r.linked.host : null }));
 // tunnels: the stand-in connected kernels; hold: the settings frame's /tunnels waits until the driver clears it (held counts the
 // answers waiting); holdOne: a list, and every settings /tunnels asked while it is set waits until releaseOne and is answered
-// with it (heldOne counts those waiting, oneAnswered is set once one is answered). The driver clears holdOne once the open it
+// with it (heldOne counts those waiting, oneAnswered is set once one is answered, oneServed counts them, each marked with an
+// x-lab-held header for the page's count, __heldRead). The driver clears holdOne once the open it
 // holds has asked, so a later open's /tunnels is answered as usual; the settings page's own federation poll (every 4 s, from the
 // same frame) asked meanwhile is held with it and answered alike. fail: the settings /tunnels is answered 500 (served500 counts
 // them); tunnelsAnswered: the settings /tunnels answered. failGet: the next settings GET /logins is answered 500; holdGet: the
@@ -177,7 +180,7 @@ const kernelLogins = async () => (await (await fetch(cfg.base + "/logins?token="
 // on its way too; holdAnswerIds: one naming one of these reaches the kernel and its answer waits until the driver clears the id
 // (answerHeld counts those waiting). gets: the settings frame's GET /logins sent; answeredWhileHeld: those answered while a
 // /tunnels was held
-const st = { tunnels: cfg.tunnels1, hold: false, held: 0, holdOne: null, heldOne: 0, releaseOne: false, oneAnswered: false, fail: false,
+const st = { tunnels: cfg.tunnels1, hold: false, held: 0, holdOne: null, heldOne: 0, releaseOne: false, oneAnswered: false, oneServed: 0, fail: false,
   served500: 0, tunnelsAnswered: 0, failGet: false, holdGet: false, releaseGet: false, failHeld: false, getHeld: 0, failedGets: 0,
   postDelay: 0, holdPost: false, failPost: false, holdIds: [], holdAnswerIds: [], answerHeld: 0, gets: 0, answeredWhileHeld: 0, posts: [] };
 const door = async (body) => (await fetch(cfg.base + "/logins", { method: "POST", headers: { "Content-Type": "application/json", "X-Romp-Token": cfg.token },
@@ -190,6 +193,16 @@ const isLogins = (req, method) => { try { return new URL(req.url()).pathname ===
 // a request or a timer has run once the count is seen
 async function context(viewport, mobile, counted) {
   const ctx = await browser.newContext({ viewport, deviceScaleFactor: 1, isMobile: !!mobile, hasTouch: !!mobile });
+  // every frame counts the armed list's answers (marked x-lab-held) whose json() has settled, window.__heldRead: once the count
+  // is seen, whatever those answers set off without waiting on a request or a timer has run. Other answers are read untouched
+  await ctx.addInitScript(() => {
+    const json = Response.prototype.json;
+    Response.prototype.json = function () {
+      const read = json.call(this);
+      if (!this.headers || this.headers.get("x-lab-held") !== "1") return read;
+      return read.finally(() => { window.__heldRead = (window.__heldRead || 0) + 1; });
+    };
+  });
   if (counted) await ctx.addInitScript(() => {
     const json = Response.prototype.json;
     Response.prototype.json = function () {
@@ -215,8 +228,8 @@ async function context(viewport, mobile, counted) {
       const t0 = Date.now();
       while (!st.releaseOne && Date.now() - t0 < 15000) await sleep(20);   // loop-ok: bounded at 15 s; the driver releases it
       st.held--; st.heldOne--;
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ tunnels: list }) });
-      st.tunnelsAnswered++;
+      await route.fulfill({ status: 200, contentType: "application/json", headers: { "x-lab-held": "1" }, body: JSON.stringify({ tunnels: list }) });
+      st.tunnelsAnswered++; st.oneServed++;
       st.oneAnswered = true;
       return;
     }
@@ -354,8 +367,9 @@ const dress = (setF, label) => setF.evaluate((sel) => {
       font: [c.fontSize, c.fontFamily, c.fontWeight].join(" "), height: Math.round(b.getBoundingClientRect().height) }; };
   return r ? { link: look(r.querySelector(".rs-login-go")), remove: look(Array.from(r.querySelectorAll("button")).find(isRemove)) } : null;
 }, ROW(label));
-// the machine selector lists a kernel: fill() fills it from each /tunnels answer it reads, and the federation poll never does.
-// Keyed on the frame's DOM mutations (a MutationObserver), not polled on animation frames as waitForFunction is by default
+// the machine selector lists a kernel: fill() fills it from the /tunnels answer of the newest fill to have drawn (an older fill's
+// answer, landing after a newer fill has drawn, draws nothing), and the federation poll never does. Keyed on the frame's DOM
+// mutations (a MutationObserver), not polled on animation frames as waitForFunction is by default
 const scopeLists = (setF, host) => setF.evaluate((h) => new Promise((resolve) => {
   const lists = () => Array.from(document.querySelectorAll("#rs-scope-list .rs-scope-opt")).some((o) => (o.textContent || "").trim() === h);
   if (lists()) return resolve(true);
@@ -364,6 +378,16 @@ const scopeLists = (setF, host) => setF.evaluate((h) => new Promise((resolve) =>
   const t = setTimeout(() => done(false), 4000);
   mo.observe(document, { childList: true, subtree: true, characterData: true });
 }), host).catch(() => false);
+// what the machine selector lists now, read at once
+const scopeHosts = (setF) => setF.evaluate(() => Array.from(document.querySelectorAll("#rs-scope-list .rs-scope-opt")).map((o) => (o.textContent || "").trim()));
+// the armed list's held /tunnels answers released: true once every one has been answered and the page has read each, so the
+// older open's fill has decided what to draw. The selector is no sign of that: an older fill a newer one has drawn over draws
+// nothing, the selector included
+async function releaseHeld(setF) {
+  st.releaseOne = true;
+  for (let i = 0; i < 150 && !(st.oneAnswered && st.heldOne === 0); i++) await sleep(20);   // loop-ok: bounded at 3 s
+  return setF.waitForFunction((n) => (window.__heldRead || 0) >= n, st.oneServed, { timeout: 4000 }).then(() => true, () => false);
+}
 const waitRow = (setF, label, sel) => setF.waitForFunction(([r, s]) => !!document.querySelector(r + " " + s), [ROW(label), sel], { timeout: 8000 })
   .then(() => true, () => false);
 const keptConnected = (setF) => setF.evaluate(() => !!window.__keptRow && window.__keptRow.isConnected);
@@ -573,7 +597,7 @@ async function waitingReopen(rec) {
   await setF.selectOption(ROW("spare") + " select.rs-login-link", "TESTHOST");
   await closeSettings(page, setF);
   const answered0 = st.answeredWhileHeld;
-  st.releaseOne = false; st.oneAnswered = false; st.holdOne = cfg.tunnels1;
+  st.releaseOne = false; st.oneAnswered = false; st.oneServed = 0; st.holdOne = cfg.tunnels1;
   setF = await openPanel(page);
   for (let i = 0; i < 150 && !(st.heldOne > 0 && st.answeredWhileHeld > answered0); i++) await sleep(20);   // loop-ok: bounded at 3 s
   rec.aHeld = st.heldOne; rec.aAnsweredWhileHeld = st.answeredWhileHeld - answered0;
@@ -589,9 +613,8 @@ async function waitingReopen(rec) {
   setF = await openPanel(page);
   for (let i = 0; i < 200 && !(st.failedGets > f0 && st.held - st.heldOne > 0); i++) await sleep(20);   // loop-ok: bounded at 4 s
   rec.bFailed = st.failedGets - f0; rec.bHeld = st.held - st.heldOne;
-  st.releaseOne = true;
-  for (let i = 0; i < 150 && !st.oneAnswered; i++) await sleep(20);   // loop-ok: bounded at 3 s
-  rec.aListed = await scopeLists(setF, cfg.tunnels1[0].host);
+  rec.aRead = await releaseHeld(setF);
+  rec.aScope = await scopeHosts(setF);
   return { ctx, setF };
 }
 // 18. the newer open's /tunnels released, then the link answered
@@ -1027,7 +1050,7 @@ try {
       await waitOption(setF, cfg.tunnels2[0].host);
       await closeSettings(page, setF);
       const answered0 = st.answeredWhileHeld;
-      st.releaseOne = false; st.oneAnswered = false; st.holdOne = cfg.tunnels1;
+      st.releaseOne = false; st.oneAnswered = false; st.oneServed = 0; st.holdOne = cfg.tunnels1;
       setF = await openPanel(page);
       for (let i = 0; i < 150 && !(st.held > 0 && st.answeredWhileHeld > answered0); i++) await sleep(20);   // loop-ok: bounded at 3 s
       over.aHeld = st.heldOne; over.aAnsweredWhileHeld = st.answeredWhileHeld - answered0;
@@ -1044,13 +1067,9 @@ try {
       over.b = await options(setF, "spare");
       // the second open's rows are kept to compare: a drawing after the first open's late answer would replace them
       await setF.evaluate(() => { window.__bRows = Array.from(document.querySelectorAll("#rs-logins .rs-login-row")); });
-      st.releaseOne = true;
-      for (let i = 0; i < 150 && !st.oneAnswered; i++) await sleep(20);   // loop-ok: bounded at 3 s
+      over.aRead = await releaseHeld(setF);
       over.aReleased = st.oneAnswered;
-      // the first open's kernel list has reached the page once the machine selector, which fill() fills from the same answer just
-      // before the rows' drawing would go out, lists api-box
-      over.aListed = await setF.waitForFunction(() => Array.from(document.querySelectorAll("#rs-scope-list .rs-scope-opt"))
-        .some((o) => (o.textContent || "").trim() === "api-box"), null, { timeout: 4000 }).then(() => true, () => false);
+      over.aScope = await scopeHosts(setF);   // the selector, as the first open's late answer left it
       await sleep(500);   // a drawing that answer set off has gone out by now
       over.after = await options(setF, "spare");
       over.bRowsKept = await setF.evaluate(() => (window.__bRows || []).filter((r) => r.isConnected).length);
@@ -1147,7 +1166,7 @@ try {
     let setF = await openSettings(page);
     await closeSettings(page, setF);
     const answered0 = st.answeredWhileHeld;
-    st.releaseOne = false; st.oneAnswered = false; st.holdOne = cfg.tunnels1;
+    st.releaseOne = false; st.oneAnswered = false; st.oneServed = 0; st.holdOne = cfg.tunnels1;
     setF = await openPanel(page);
     for (let i = 0; i < 150 && !(st.heldOne > 0 && st.answeredWhileHeld > answered0); i++) await sleep(20);   // loop-ok: bounded at 3 s
     rec.aHeld = st.heldOne; rec.aAnsweredWhileHeld = st.answeredWhileHeld - answered0;
@@ -1160,12 +1179,11 @@ try {
   const freshRows = (setF) => setF.waitForFunction(() => document.querySelectorAll("#rs-logins .rs-login-row").length === 2
     && !document.querySelector("#rs-logins .rs-login-row[data-old]"), null, { timeout: 4000 }).then(() => true, () => false);
   const freshCount = (setF) => setF.evaluate(() => document.querySelectorAll("#rs-logins .rs-login-row:not([data-old])").length);
-  // the older open's /tunnels released: answered with api-box, which then reaches the machine selector
+  // the older open's /tunnels released: answered with api-box and read by the page; the selector read as it left it
   async function releaseOlder(setF, rec) {
-    st.releaseOne = true;
-    for (let i = 0; i < 150 && !st.oneAnswered; i++) await sleep(20);   // loop-ok: bounded at 3 s
+    rec.aRead = await releaseHeld(setF);
     rec.aReleased = st.oneAnswered;
-    rec.aListed = await scopeLists(setF, cfg.tunnels1[0].host);
+    rec.aScope = await scopeHosts(setF);
     await sleep(300);   // its drawing, or its wait on the newer open, has been decided by now
   }
   {
@@ -1535,7 +1553,9 @@ class ServedLoginLinkPicker(unittest.TestCase):
         self.assertGreaterEqual(o["aStillHeld"], 1, "…with the first open's still held: %r" % o)
         self.assertEqual(o["b"], ["", "TESTHOST", "web-box"], "the second open lists the kernel connected then: %r" % o)
         self.assertTrue(o["aReleased"], "the first open's /tunnels was answered after it, with api-box: %r" % o)
-        self.assertTrue(o["aListed"], "…and that list reached the page: the machine selector lists api-box: %r" % o)
+        self.assertTrue(o["aRead"], "…and the page read that answer: %r" % o)
+        self.assertNotIn("api-box", o["aScope"], "the machine selector does not list the older open's api-box either: the newer "
+                         "open had drawn, so the older one drew nothing, the selector included: %r" % o)
         self.assertEqual(o["after"], ["", "TESTHOST", "web-box"], "the pickers still list what the newer open read, not the "
                          "older open's api-box: %r" % o)
         self.assertEqual(o["bRowsKept"], 2, "the older open drew nothing: the rows the newer open drew are still the ones shown: %r" % o)
@@ -1599,8 +1619,9 @@ class ServedLoginLinkPicker(unittest.TestCase):
         self.assertGreaterEqual(o["aHeld"], 1, "the older open's /tunnels was held: %r" % o)
         self.assertGreaterEqual(o["aAnsweredWhileHeld"], 1, "its /logins answer arrived meanwhile, so only the kernel list kept its "
                                 "drawing waiting: %r" % o)
-        self.assertTrue(o["aReleased"] and o["aListed"], "its /tunnels was answered later, with api-box, and reached the page (the "
-                        "machine selector lists api-box): %r" % o)
+        self.assertTrue(o["aReleased"] and o["aRead"], "its /tunnels was answered later, with api-box, and the page read it: %r" % o)
+        self.assertNotIn("api-box", o["aScope"], "the newer open's /version had answered and drawn before then (a failed or held "
+                         "/logins read does not stop that), so the older open's late answer drew nothing on the machine selector: %r" % o)
         return o
 
     def test_an_older_open_draws_when_the_newer_opens_read_fails(self):
@@ -1735,7 +1756,8 @@ class ServedLoginLinkPicker(unittest.TestCase):
         self.assertEqual(s["posts"], [self._link("TESTHOST")], "Link sent the pick and the POST was held: %r" % s)
         self.assertGreaterEqual(s["bFailed"], 1, "the newer open's GET /logins was answered 500: %r" % s)
         self.assertGreaterEqual(s["bHeld"], 1, "…with its /tunnels held: %r" % s)
-        self.assertTrue(s["aListed"], "the older open's /tunnels reached the page: %r" % s)
+        self.assertTrue(s["aRead"], "the older open's /tunnels was answered and the page read it: %r" % s)
+        self.assertNotIn("api-box", s["aScope"], "…and drew nothing on the machine selector, the newer open having drawn: %r" % s)
         return s
 
     def test_a_link_on_its_way_keeps_linking_when_an_older_open_waiting_on_a_failed_read_would_draw(self):
