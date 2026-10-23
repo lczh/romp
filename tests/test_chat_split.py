@@ -711,6 +711,16 @@ CALLS.posted = []; CALLS.taken = []; SEQ = [];
 msg({ romp: 'colEmpty', gone: [API] }, 'f-chat-2');
 out.closing.handed = { adopted: CALLS.posted.filter((p) => p.m && p.m.romp === 'adopt'), taken: CALLS.taken.slice(), left: Object.keys(TAKE['f-chat-2']),
                        seq: SEQ.filter((x) => x === 'post:f-chat:adopt' || x.indexOf('unregister:') === 0), ids: ids(), stored: cols() };
+// M3) …but only to a first column whose page can hear it: one mid-reload (its bundle not yet evaluated) gets no adopt, and
+//     nothing is taken from the closing page, so the staged list stays in that page's saved state instead of going nowhere
+boot({}, false);
+window.__rompMoveTab(API, 'new');
+TAKE['f-chat-2'] = { [API]: { draft: '', citations: [], files: [], staged: [{ text: 'Why does the handler retry here?', cites: [] }] } };
+delete BYID['f-chat'].contentWindow.__rompTakeSessionState;
+CALLS.posted = []; CALLS.taken = [];
+msg({ romp: 'colEmpty', gone: [API] }, 'f-chat-2');
+out.closing.unheard = { adopted: CALLS.posted.filter((p) => p.m && p.m.romp === 'adopt'), taken: CALLS.taken.slice(), left: Object.keys(TAKE['f-chat-2']),
+                        ids: ids(), stored: cols() };
 // N) ORPHANED STATE: a page's offer of state for sessions it does not show is taken from it and handed to the owner's page
 //    when that page can hear it; its own member and junk are skipped; a target not yet evaluated leaves the state where it is
 boot({ 'romp-chat-cols': '[2]', 'romp-vscode-state-chat:2': JSON.stringify({ activeId: WEB, drafts: { [WEB]: 'a', [API]: 'b' } }) }, false);
@@ -1246,6 +1256,15 @@ class SplitExecutes(unittest.TestCase):
         self.assertEqual(h["left"], [], "nothing stays behind in the page that is going")
         self.assertEqual(h["seq"][0], "post:f-chat:adopt", "handed over before the frame goes: %r" % h["seq"])
         self.assertEqual(h["ids"], ["f-chat"]); self.assertEqual(h["stored"], {"v": 2, "cols": []})
+
+    def test_a_column_closed_for_emptiness_takes_nothing_when_the_first_columns_page_cannot_hear_the_adopt(self):
+        # take() deletes the state from the closing page and its saved blob; an adopt posted to a first column mid-reload was
+        # heard by nobody, so the staged list was lost. Not taken, it stays in the closing page's saved state
+        u = self.out["closing"]["unheard"]
+        self.assertEqual(u["adopted"], [], "no adopt posted to a page that cannot hear it: %r" % u)
+        self.assertEqual(u["taken"], [], "nothing taken from the closing page")
+        self.assertEqual(u["left"], [API], "the staged list stays where it is")
+        self.assertEqual(u["ids"], ["f-chat"], "the column still closes"); self.assertEqual(u["stored"], {"v": 2, "cols": []})
 
     def test_orphaned_state_is_handed_to_the_column_that_shows_the_session_when_its_page_can_hear_it(self):
         # a v1 column's blob held drafts for many sessions and the migration keeps one (review find 2026-09-11): the page

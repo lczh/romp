@@ -492,6 +492,8 @@ function idleWorld(o: { col?: string; provisionalId?: string | null; failed?: st
     const setActive = (id) => { activeId = id; };
     const persistDrafts = () => {}; const growComposer = () => {}; const renderTabs = () => {};
     const persistKeptSends = () => {};   // the kept-sends store (send-acks.ts): a provisional tab's teardown writes it
+    const stagedMsgs = { takeAll: () => [], count: () => 0 }, composerFiles = new Map();   // the box a provisional tab's teardown hands on
+    const persistProvisionals = () => {};   // the page's record of its provisional tabs (restoreProvisionals)
     const showConfirm = (title) => { confirms.push(title); };
     const vscodeApi = null;
   `;

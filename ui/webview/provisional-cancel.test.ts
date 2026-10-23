@@ -33,7 +33,8 @@ test("a ✕ on a provisional-tab bubble forgets the send from provisionalQueue a
 
 test("forgetProvisionalSend removes exactly one matching text and reports whether it did (executed)", () => {
   const src = "function forgetProvisionalSend(text) {" + RENDER.split("function forgetProvisionalSend(text: string): boolean {")[1].split("\n}")[0] + "\n}";
-  const run = (queue: string[], text: string) => new Function("provisionalQueue", "text", src + "\nconst ok = forgetProvisionalSend(text); return { ok, queue: provisionalQueue };")(queue, text);
+  // persistProvisionals: the held sends ride the page's state (restoreProvisionals), so a forget writes it; a no-op here
+  const run = (queue: string[], text: string) => new Function("provisionalQueue", "text", "persistProvisionals", src + "\nconst ok = forgetProvisionalSend(text); return { ok, queue: provisionalQueue };")(queue, text, () => {});
   assert.deepEqual(run(["a", "b", "a"], "a"), { ok: true, queue: ["b", "a"] }, "one press forgets one send");
   assert.deepEqual(run(["a", "b"], "zzz"), { ok: false, queue: ["a", "b"] });
   assert.deepEqual(run([], "a"), { ok: false, queue: [] });
