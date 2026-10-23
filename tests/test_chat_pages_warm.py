@@ -179,6 +179,27 @@ class WarmTheCards(P.Harness):
         reg.write_text(json.dumps({"forkedFrom": {"sid": "22222222-3333-4444-5555-666666666666", "uuid": whole[3]["uuid"]}}))
         self.assertNotEqual(km._page_sig(self.rows[0], SID, NOW), k1, "a fork lineage: another key (the branch marker moves)")
 
+    def test_a_judge_publish_that_stamps_no_seam_keeps_the_pages_and_a_seam_re_keys_them(self):
+        """2026-10-22: a page reads the goal store by its seams alone (the build's segments and the caption scan's), so the
+        key holds them by value (_seams_fp) where it held the store's identity: a publish that moves nodes and no seam keeps
+        every page and the warm settles to its probe; a seam stamped re-keys them and the warm renders them again. On stock
+        every publish re-keyed every page of the session."""
+        whole, m = self._restored()
+        feed = self._feed(self._card([whole[5]["uuid"], whole[60]["uuid"]]))
+        store = jd.GOALDIR / (SID + ".json")
+        store.write_text(json.dumps({"nodes": {"g1": {"title": "tidy the api"}}, "status": {}, "seams": []}))
+        k1 = km._page_sig(self.rows[0], SID, NOW)
+        n = km._warm_history_pages(feed, NOW, {})
+        self.assertGreater(n, 0)
+        store.write_text(json.dumps({"nodes": {"g1": {"title": "tidy the api"}, "g2": {"title": "then the docs"}},
+                                     "status": {"g1": "completed"}, "seams": []}))
+        self.assertEqual(km._page_sig(self.rows[0], SID, NOW), k1, "a publish with the same seams: the same key")
+        self.assertEqual(km._warm_history_pages(feed, NOW, {}), 0, "…and the warm renders nothing")
+        store.write_text(json.dumps({"nodes": {"g1": {"title": "tidy the api"}}, "status": {"g1": "completed"},
+                                     "seams": [{"segs": {"seg-a": 1}, "t": NOW - 3600, "top": "g1", "text": "tidy the api"}]}))
+        self.assertNotEqual(km._page_sig(self.rows[0], SID, NOW), k1, "a seam stamped: another key")
+        self.assertEqual(km._warm_history_pages(feed, NOW, {}), n, "…and the set is rendered again")
+
     def test_a_cycle_with_no_floor_never_settles_and_the_floors_return_warms(self):
         """Round 3, A: with an index client connected every tab's floor is 0, so no anchor resolves; the memo must not call the
         empty set settled, or the floor's return would find the warm asleep and the click miss."""

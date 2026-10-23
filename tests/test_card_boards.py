@@ -691,7 +691,7 @@ class TheDoors(unittest.TestCase):
     def _call(self, path, body=None, token=True):
         headers = {"Content-Type": "application/json"}
         if token:
-            headers["X-Romp-Token"] = os.environ["ROMP_SERVE_TOKEN"]
+            headers["X-Romp-Token"] = km.TOKEN
         data = None if body is None else (body if isinstance(body, bytes) else json.dumps(body).encode())
         req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path), data=data, headers=headers, method="POST" if data is not None else "GET")
         try:
