@@ -3768,8 +3768,11 @@ def _router_live_on(ids):
 def _router_models_on():
     """The Extra models switch: OFF unless this install's file says yes — absent, unreadable or malformed all read
     False, never raise, never create the file (the Whole chat frames shape). Per-install on purpose: the gateway
-    is a property of this machine (its Claude Code settings, its service.env), so the switch never follows to a
-    peer that may have no gateway to route a pick through."""
+    is a property of this machine (its Claude Code settings, its service.env), so each kernel keeps its own value and
+    nothing converges it. The gear's click still reaches the kernels its machine selector names (every connected one
+    under All kernels, the picked ones under a pick: federation's KERNEL_SETTING since the settings' scope fan-out),
+    so a click under All kernels turns it on on a peer that may declare no gateway; that kernel then adds no models
+    and its own advisory says why. Pick one machine in the gear to set it there alone."""
     try:
         d = json.loads((jd.STATE / ROUTER_MODELS_FILE).read_text())
     except Exception:

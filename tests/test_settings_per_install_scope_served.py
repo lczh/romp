@@ -9,7 +9,14 @@ chats, Conserve memory or Extra models, went to the local kernel alone. Driven i
 (1) under All kernels the disagreeing row shows the MIXED state (indeterminate) and wears the "differs" flag naming both machines
 and their values, and the selector's count includes it; (2) a click there sets EVERY kernel (both /version agree, B's store holds
 the click's stamp), and Conserve memory's click does too, stamped; (3) agreeing again, the row is plain and unflagged; (4) picked
-to B alone, a click applies to B and leaves A, never pinning (nothing converges a per-install store). Synthetic throughout:
+to B alone, a click applies to B and leaves A, never pinning (nothing converges a per-install store).
+
+The #374 review's follow-ups, on the same lab: (2) a click on the mixed box follows the one stated rule, ON for every machine in
+scope, and the flag's hover says so (it used to set the opposite of THIS machine's value); (5) under a pick of B, a click B
+refuses (B holds a stamp no click from here outranks) toasts with the refused value, and the toast's Apply anyway applies on B
+alone, its hover naming B (the re-post used to go out unscoped, the broadcast, and set A too); (6) B made to look like an older
+kernel (A's /tunnels row for B, routed in the browser, without the three rows such a kernel never reported) reads UNKNOWN on B
+under the pick, never a mixed dash, and after a click shows the value sent, under "unconfirmed". Synthetic throughout:
 TESTHOSTA, TESTHOSTB, placeholder sids, invented text. Skips LOUDLY without the extension deps or a Playwright browser (CI sets
 ROMP_SERVED_TESTS_REQUIRE=1 and installs both, so a skip there is a failure)."""
 import json
@@ -39,6 +46,7 @@ SID_A = "11111111-2222-3333-4444-555555555577"
 SID_B = "11111111-2222-3333-4444-666666666677"
 SELF = "TESTHOSTA"
 PEER = "TESTHOSTB"
+FAR_GT = 4102444800000   # 2100-01-01 in epoch ms: a stored stamp every gesture from the page stands down against until it learns it
 
 DRIVER = r"""
 import { createRequire } from "node:module";
@@ -57,6 +65,16 @@ page.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text(
 const version = async (u) => (await (await fetch(u, { cache: "no-store" })).json());
 const until = async (fn, tries) => { for (let i = 0; i < tries; i++) { if (await fn()) return true; await new Promise((r) => setTimeout(r, 500)); } return false; };
 const out = { errors, consoleErrors };
+// An OLDER kernel B, as A's /tunnels row carries it: a kernel from before the scope fan-out reports no Thinking summaries, Always
+// load whole chats or Extra models in its /version settings. Armed only for the unknown leg; the page's reads of /tunnels pass
+// through untouched otherwise (the driver's own reads go from node and are never routed).
+let olderPeer = false;
+await ctx.route(/\/tunnels(\?|$)/, async (route) => {
+  if (!olderPeer) return route.continue();
+  const resp = await route.fetch(); const d = await resp.json();
+  for (const t of d.tunnels || []) if (t.host === cfg.peer && t.settings) { delete t.settings.thinkingSummaries; delete t.settings.wholeChatFrames; delete t.settings.routerModels; }
+  return route.fulfill({ response: resp, json: d });
+});
 // A's row for B carries B's settings once the poll has read it after the check-in (the test checks in before the driver starts)
 out.rowUp = await until(async () => { const d = await version(cfg.tunnels); return (d.tunnels || []).some((t) => t.status === "up" && t.settings && typeof t.settings.conserveMemory === "boolean"); }, 120);
 await page.goto(cfg.landing);
@@ -85,10 +103,15 @@ const tab = async (f, name) => { await f.click('.rs-tab[data-tab="' + name + '"]
 // (1) All kernels, the kernels disagreeing on Thinking summaries (A on, B off)
 let f = await openSettings();
 out.disagree = await row(f, "rs-thinksum");
-// (2) a click under All kernels sets every kernel: the first takes the mixed box to off on both, the second to on on both
+// (2) a click under All kernels sets every kernel. The mixed box's click follows the stated rule, ON for every machine in scope
+// (the #374 review: it used to set the opposite of THIS machine's value, off here, and the screen never said which way); the
+// next click takes both off, the one after both on again
 await tab(f, "chat");
 await f.click("#rs-thinksum");
-out.firstOff = await until(async () => (await version(cfg.versionA)).thinkingSummaries === false && (await version(cfg.versionB)).thinkingSummaries === false, 30);
+out.firstOn = await until(async () => (await version(cfg.versionA)).thinkingSummaries === true && (await version(cfg.versionB)).thinkingSummaries === true, 30);
+out.afterFirst = { a: (await version(cfg.versionA)).thinkingSummaries, b: (await version(cfg.versionB)).thinkingSummaries };
+await f.click("#rs-thinksum");
+out.bothOff = await until(async () => (await version(cfg.versionA)).thinkingSummaries === false && (await version(cfg.versionB)).thinkingSummaries === false, 30);
 await f.click("#rs-thinksum");
 out.bothOn = await until(async () => (await version(cfg.versionA)).thinkingSummaries === true && (await version(cfg.versionB)).thinkingSummaries === true, 30);
 await tab(f, "general");
@@ -110,6 +133,33 @@ await f.click("#rs-thinksum");
 out.scopedApplied = await until(async () => (await version(cfg.versionB)).thinkingSummaries === false, 30);
 await page.waitForTimeout(1500);   // a stray copy to A would land in this window
 out.afterScoped = { a: await version(cfg.versionA), b: await version(cfg.versionB) };
+// (5) still picked to B: B holds Always load whole chats under a stamp no click from here outranks (the test seeded it), so B
+// refuses the click and the toast offers Apply anyway. The toast names the refused value, the button's hover names B alone, and
+// its click applies on B and leaves A (the #374 review: the re-post went out unscoped, the broadcast, and set A too)
+await f.click("#rs-wholechat");
+await f.waitForSelector("#rs-stale-toasts .rs-stale-toast-act", { timeout: 20000 }).catch(() => {});
+out.toast = await f.evaluate(() => { const t = document.querySelector("#rs-stale-toasts .rs-stale-toast"); if (!t) return null;
+  const b = t.querySelector(".rs-stale-toast-act"); return { text: t.querySelector(".rs-stale-toast-msg").textContent, act: b ? { label: b.textContent, title: b.title } : null }; });
+out.refusedHeld = { a: (await version(cfg.versionA)).wholeChatFrames, b: (await version(cfg.versionB)).wholeChatFrames };
+await f.evaluate(() => { const b = document.querySelector("#rs-stale-toasts .rs-stale-toast-act"); if (b) b.click(); });
+out.anywayApplied = await until(async () => (await version(cfg.versionB)).wholeChatFrames === true, 30);
+await page.waitForTimeout(1500);   // a stray copy to A would land in this window
+out.afterAnyway = { a: await version(cfg.versionA), b: await version(cfg.versionB) };
+// (6) picked to B, B an OLDER kernel that never reports Thinking summaries: the row reads unknown on B, not mixed, and after a
+// click (which B's arm still takes) it shows what was sent, unconfirmed, rather than going back to a mixed dash
+olderPeer = true;
+await closeSettings(f);
+f = await openSettings();
+await tab(f, "chat");
+await f.waitForFunction(() => { const m = document.getElementById("rs-thinksum").closest("label").querySelector(".rs-mixed"); return m && !m.hidden && m.textContent === "unknown"; }, null, { timeout: 15000 }).catch(() => {});
+out.unknown = await row(f, "rs-thinksum");
+out.unknown.dimmed = await f.evaluate(() => document.getElementById("rs-thinksum").classList.contains("rs-unknown"));
+await f.click("#rs-thinksum");
+out.unknownSent = await until(async () => (await version(cfg.versionB)).thinkingSummaries === true, 30);
+await f.waitForTimeout(2000);   // the gear re-reads the kernels after a click (refillSoon): the row must not fall back to a mixed dash
+out.unconfirmed = await row(f, "rs-thinksum");
+out.unconfirmed.dimmed = await f.evaluate(() => document.getElementById("rs-thinksum").classList.contains("rs-unknown"));
+out.afterUnknown = { a: (await version(cfg.versionA)).thinkingSummaries, b: (await version(cfg.versionB)).thinkingSummaries };
 await browser.close();
 process.stdout.write("RESULT:" + JSON.stringify(out) + "\n", () => process.exit(0));
 """
@@ -132,6 +182,8 @@ class ServedPerInstallScope(unittest.TestCase):
         _seed(state, os.path.join(lab, "notes-api"), claude, SID_A if tag == "a" else SID_B, "web" if tag == "a" else "api")
         if tag == "a":   # A on, B with no store (off): the disagreement under test
             Path(state, "thinking-summaries.json").write_text(json.dumps({"enabled": True, "gt": 2000}))
+        else:   # B holds Always load whole chats off under a stamp no click from A's page outranks: the refusal leg's stand-down
+            Path(state, "whole-chat-frames.json").write_text(json.dumps({"enabled": False, "gt": FAR_GT}))
         port, token = _free_port(), "testtok-perinstall-" + tag
         env = _lab.kernel_env(lab, claude, cls.dist, port, token, ROMP_HOST_NAME=(SELF if tag == "a" else PEER))
         log = os.path.join(lab, "kernel.log")
@@ -215,10 +267,15 @@ class ServedPerInstallScope(unittest.TestCase):
         self.assertIn(PEER + " off", d["mark"]["title"])
         self.assertEqual(d["count"], "1 differs", "the selector counts the per-install row too")
         self.assertIn("Thinking summaries: ", d["countTitle"])
+        self.assertIn("A click turns it on for every machine", d["mark"]["title"], "the hover says which way a click on the mixed box goes")
+
+    def test_a_click_on_the_mixed_box_turns_it_on_for_every_kernel_the_stated_rule(self):
+        r = self._result()
+        self.assertTrue(r["firstOn"], "the click on the mixed box set ON on both, the stated rule (A was on, B off): %r" % r["afterFirst"])
 
     def test_a_click_under_all_kernels_sets_every_kernel(self):
         r = self._result()
-        self.assertTrue(r["firstOff"], "the click on the mixed box set off on both")
+        self.assertTrue(r["bothOff"], "the next click set off on both")
         self.assertTrue(r["bothOn"], "the next click set on on BOTH kernels, not this one alone: %r" % r["afterAll"])
         a, b = r["afterAll"]["a"], r["afterAll"]["b"]
         self.assertEqual((a["thinkingSummaries"], b["thinkingSummaries"]), (True, True))
@@ -246,6 +303,42 @@ class ServedPerInstallScope(unittest.TestCase):
         a, b = r["afterScoped"]["a"], r["afterScoped"]["b"]
         self.assertEqual((a["thinkingSummaries"], b["thinkingSummaries"]), (True, False), "A untouched: the change was scoped to B")
         self.assertEqual(b.get("settingsPinned") or {}, {}, "a per-install store has nothing to pin against")
+
+    def test_apply_anyway_after_a_refusal_under_a_pick_applies_on_the_pick_alone(self):
+        r = self._result()
+        self.assertEqual(r["refusedHeld"], {"a": False, "b": False}, "B refused the click (its stamp outranks), A was never asked")
+        t = r["toast"]
+        self.assertIsNotNone(t, "B's refusal toasted")
+        self.assertEqual(t["text"], "Always load whole chats: on was not applied on %s. Keeping off." % PEER,
+                         "the refused value named: the pick's scope field is not read as a second value")
+        self.assertIsNotNone(t["act"], "the toast offers Apply anyway")
+        self.assertEqual(t["act"]["label"], "Apply on anyway")
+        self.assertEqual(t["act"]["title"], "apply this pick (on) only on %s, replacing the value kept there" % PEER, "the hover names the machine")
+        self.assertTrue(r["anywayApplied"], "Apply anyway applied on B")
+        a, b = r["afterAnyway"]["a"], r["afterAnyway"]["b"]
+        self.assertEqual((a["wholeChatFrames"], b["wholeChatFrames"]), (False, True), "A untouched: the re-issue kept the pick")
+        self.assertEqual(a["settingsGt"].get("whole-chat-frames", 0), 0, "no copy reached A")
+
+    def test_an_older_kernel_picked_alone_reads_unknown_and_a_click_reads_unconfirmed(self):
+        r = self._result()
+        u = r["unknown"]
+        self.assertEqual(u["label"], PEER, "still picked to B")
+        self.assertFalse(u["indeterminate"], "never a mixed dash for a value nobody reported: %r" % u)
+        self.assertFalse(u["checked"])
+        self.assertTrue(u["dimmed"], "the box dimmed")
+        self.assertIsNotNone(u["mark"])
+        self.assertEqual((u["mark"]["text"], u["mark"]["differs"]), ("unknown", False), "the grey word, not the amber flag")
+        self.assertIn("Unknown on " + PEER, u["mark"]["title"])
+        self.assertIn("older romp", u["mark"]["title"])
+        self.assertIn("cannot confirm", u["mark"]["title"], "it says a click there cannot be confirmed")
+        self.assertTrue(r["unknownSent"], "the click still reached B (its arm takes the message)")
+        c = r["unconfirmed"]
+        self.assertFalse(c["indeterminate"], "after the click and the re-reads, still no mixed dash: %r" % c)
+        self.assertTrue(c["checked"], "the box shows what was sent")
+        self.assertTrue(c["dimmed"])
+        self.assertEqual((c["mark"] or {}).get("text"), "unconfirmed")
+        self.assertIn("Sent on to " + PEER, c["mark"]["title"])
+        self.assertEqual(r["afterUnknown"], {"a": True, "b": True}, "A untouched (on since the All-kernels leg), B on")
 
 
 if __name__ == "__main__":

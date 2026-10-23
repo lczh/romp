@@ -186,14 +186,18 @@ var GEAR_HTML =
   '<span><b>Allow file editing</b><span class=rs-mixed hidden></span>' +
   '<span class=rs-sub>Let the file viewer’s Edit save straight to disk on the file’s machine. Off by default; the viewer asks the first time. A session working in the edited folder is told, and a save always refuses when the file changed underneath you. Applies on every connected machine’s kernel.</span>' +
   '</span></label>' +
-  // THIS MACHINE (T404): the install's own housekeeping, memory and updates
-  '<div class=rs-sec>This machine</div>' +
+  // MEMORY, MODELS AND UPDATES (T404, where it was "This machine"): each kernel's own housekeeping, its memory, its gateway's
+  // models and its updates. Named for what the rows do, like every other head, never for a machine: each kernel keeps its own
+  // value, but a click follows the machine selector above the tabs (every kernel under All kernels), so "This machine" told a
+  // reader under All kernels that a click changed one machine when it changed them all (the #374 review)
+  '<div class=rs-sec>Memory, models and updates</div>' +
   "<label class='rs-row'><input type=checkbox id=rs-conserve>" +
   '<span><b>Conserve memory</b><span class=rs-mixed hidden></span>' +
   '<span class=rs-sub>Close the claude process of a session that has FADED (idle over an hour) and is on no open tab (each averages ~340MB). Everything persists — it revives on a tab click, a message, or a scheduled wake. An open tab always keeps its process; off = every session keeps its process for as long as it lives.</span>' +
   '</span></label>' +
-  // EXTRA MODELS FROM YOUR API GATEWAY (2026-09-21): per-install like Conserve memory beside it — the gateway is THIS
-  // machine's, declared in its service.env — so stamped and filled from /version but not a KERNEL_SETTING. The rs-line
+  // EXTRA MODELS FROM YOUR API GATEWAY (2026-09-21): per-install like Conserve memory beside it — each machine declares its
+  // own gateway in its service.env, and nothing converges the switch — but stamped, filled from /version and, since the
+  // settings' scope fan-out, a KERNEL_SETTING: a click reaches the kernels the machine selector names. The rs-line
   // under the label is the row's live status (what the kernel parsed, whether a gateway is configured, or the read's
   // fault), written from the authed /models `router` section at open and on every models frame (fillRouterLine).
   "<label class='rs-row'><input type=checkbox id=rs-router>" +
@@ -377,7 +381,7 @@ var GEAR_HTML =
   '</div>' +
   '<div class=rs-pane data-pane=debug hidden>' +
   // DEBUG (T400, the user 2026-09-12): updates, the judges' debug views, the token usage analytics, the log and the version; the
-  // former System tab dissolved here, its account rows to General; Updates went to General's This machine section (T404)
+  // former System tab dissolved here, its account rows to General; Updates went to General's Memory, models and updates section (T404; named This machine until the #374 review)
   "<div class='rs-sec rs-sec-first'>Judging bands</div>" +   // the two debug views of the judges' activity, from the Feed tab (T400)
   '<div class=rs-judges>' +
   '<label class=rs-row rs-half><input type=checkbox id=rs-judges-index>' +
@@ -1758,8 +1762,8 @@ function initGear(post, opts) {
     var val = (cmm.value || '').toLowerCase();
     var can = val === 'session' || val === 'default' || val.indexOf('opus') !== -1;
     cmf.disabled = !can;
-    if (!can && cmf.checked && fromModelPick) {
-      cmf.checked = false;
+    if (!can && (cmf.checked || cmf.indeterminate) && fromModelPick) {   // a mixed box holds unticked under its dash (mixBox): some machine has it on
+      cmf.indeterminate = false; cmf.checked = false;
       post({ type: 'setCommentFast', fast: 'session', gt: gclock.stamp('comment-fast') });
     }
   }
@@ -1966,10 +1970,12 @@ function initGear(post, opts) {
   // rather than through a third type→field map kept in step with STALE_TYPE. Trusted only for the
   // setting the frame names (the whitelist Apply anyway uses: an echo for another setting is not this
   // setting's value); an echo of any other shape (two value fields, none, or no echo from an older
-  // kernel) reads as no value, and the copy and the label take their value-less form.
+  // kernel) reads as no value, and the copy and the label take their value-less form. The ROUTING fields federation adds are
+  // not the value: `origin` rides every copy (one A) and `scope` every copy a machine pick addressed (phase two), so a refusal
+  // under a pick dropped the refused value from the toast until they were skipped alike (the #374 review).
   function staleRefused(m) {
     if (!m.gesture || typeof m.gesture !== 'object' || STALE_TYPE[m.setting] !== m.gesture.type) return '';
-    var keys = Object.keys(m.gesture).filter(function (k) { return k !== 'type' && k !== 'origin'; });   // origin rides every broadcast copy (one A); the value is the other key
+    var keys = Object.keys(m.gesture).filter(function (k) { return k !== 'type' && k !== 'origin' && k !== 'scope' && k !== 'hosts'; });   // the value is the one key left
     return keys.length === 1 ? staleWord(m.gesture[keys[0]], m.setting) : '';
   }
   // One toast per refused GESTURE, not per refusing kernel: a dashboard's broadcast reaches every
@@ -1996,13 +2002,40 @@ function initGear(post, opts) {
   // new information, the event the ordering rule wants — never a clock heuristic. Offered only when
   // the echo's type is the setting the frame names, so a frame from any linked kernel may re-issue
   // that one setting and nothing else; an older kernel sends no echo and the toast shows without it.
-  // The label names the value one click would apply everywhere (the frozen-tab case again), and the
-  // button carries its own title: without one it inherited the toast's click-to-dismiss tooltip.
+  // The label names the value one click would apply (the frozen-tab case again), and the button
+  // carries its own title, which names the machines it applies on: without one it inherited the
+  // toast's click-to-dismiss tooltip.
+  // The re-issue keeps the gesture's SCOPE (the #374 review). The kernel echoes no host list (federation
+  // addresses each copy and strips it), so the re-post went out as a broadcast: Apply anyway after a
+  // refusal under a one-kernel pick applied the pick on every kernel. scoped() records each scoped
+  // gesture's picked kernels under its identity (type + its own gt, which the frame carries), and the
+  // re-issue goes back to them, scoped again (a synchronized row's re-issue pins there, as its click did).
+  // An echo that says it was scoped with no record of the pick offers no button: a guess would widen it.
+  var staleScopes = {}, staleScopeKeys = [];   // 'type:gt' → the picked kernels ('' this machine), the last 200 scoped gestures
+  function noteStaleScope(m) {
+    var k = m.type + ':' + m.gt;
+    if (!Object.prototype.hasOwnProperty.call(staleScopes, k)) { staleScopeKeys.push(k); if (staleScopeKeys.length > 200) delete staleScopes[staleScopeKeys.shift()]; }
+    staleScopes[k] = m.hosts.slice();
+  }
+  function staleScopeOf(m) {   // the kernels the refused gesture was aimed at: [] for every connected kernel, null when not known
+    var k = m.gesture.type + ':' + m.gt;
+    if (Object.prototype.hasOwnProperty.call(staleScopes, k)) return staleScopes[k].slice();
+    return m.gesture.scope ? null : [];
+  }
   function staleAction(m, refused) {
     if (!m.gesture || typeof m.gesture !== 'object' || STALE_TYPE[m.setting] !== m.gesture.type) return null;
+    var hosts = staleScopeOf(m);
+    if (!hosts) return null;
+    var pick = 'this pick' + (refused ? ' (' + refused + ')' : '');
     return { label: refused ? 'Apply ' + refused + ' anyway' : 'Apply anyway',
-             title: 'apply ' + (refused || 'this pick') + ' on every linked kernel, replacing the value they kept',
-             run: function () { post(Object.assign({}, m.gesture, { gt: gclock.stamp(m.setting) })); } };
+             title: hosts.length
+               ? 'apply ' + pick + ' only on ' + hosts.map(function (h) { return h || 'this machine'; }).join(', ') + ', replacing the value kept there'
+               : 'apply ' + pick + ' on every connected kernel, replacing the value they kept',
+             run: function () {
+               var g = Object.assign({}, m.gesture, { gt: gclock.stamp(m.setting) });
+               if (hosts.length) { g.hosts = hosts.slice(); g.scope = 'pinned'; }
+               post(g);
+             } };
   }
   window.addEventListener('message', function (e) {
     if (windowSender(e) === 'foreign') { noteForeign('gear:settingStale', e, post); return; }
@@ -2165,8 +2198,8 @@ function initGear(post, opts) {
   // others: a connected host that disagrees puts the box in the mixed state (a tri-state checkbox plus
   // the word beside the label — glanceable) and is NAMED in the row's permanent line under the label (T408), one level down. Before this
   // the box quietly spoke for machines it could not see, and the other kernel went on nudging for days
-  // behind an unchecked box (the user 2026-08-14). Clicking a mixed box picks one answer for everyone,
-  // since the post goes to every kernel.
+  // behind an unchecked box (the user 2026-08-14). A click on the mixed box turns it ON for every machine
+  // in scope (mixBox, the one rule for every mixed box), since the post goes to every kernel in it.
   //
   // A host that never reported a setting — an older kernel, a row that has not polled — is left OUT
   // rather than read as off: guessing would invent a disagreement and invite a click that changes a
@@ -2180,11 +2213,11 @@ function initGear(post, opts) {
       return t && t.status === 'up' && typeof t.autoNudge === 'boolean' && t.autoNudge !== !!mine;
     }).map(function (t) { return t.host; });
     if (!split.length) return;
-    an.indeterminate = true;
+    mixBox(an);
     if (ans) { ans.textContent = 'mixed'; ans.hidden = false; }
     if (asub) asub.textContent = AUTONUDGE_SUB
       + (mine ? ' Right now these have it off: ' : ' Right now these still have it on: ')
-      + split.join(', ') + '. Clicking sets them all the same way.';
+      + split.join(', ') + '. ' + clickRule('autoNudge', true, !scopeOn() || scopeValueOf('autoNudge') === null);
   }
   // The autoNudge rule, generalized to EVERY kernel-side row (the user 2026-08-14): a machine that never reported (older
   // kernel, unpolled row) is unknown, never a disagreement: guessing would invite a click that changes a machine nobody asked
@@ -2194,7 +2227,7 @@ function initGear(post, opts) {
   // the four synchronized rows wore the flag and the count, the other kernel rows a quiet "mixed" mark, and the per-install
   // rows nothing at all: Thinking summaries read plainly checked under All kernels while another kernel had it off. Auto
   // Nudge's tri-state box stays fillAutoNudge's; under a pick, fillScopedRows then shows the picked kernels' value on the rows
-  // that follow the selector. A click on a mixed box picks one answer, and the post reaches every kernel in scope.
+  // that follow the selector. A click on a mixed box turns it on (mixBox), and the post reaches every kernel in scope.
   var lastDiffs = [];   // the rows the kernels disagree on, from the last fill: [{label, vals}] for the selector's count
   // the per-install rows: each kernel keeps its own value (nothing converges them) and the click follows the selector
   var PER_INSTALL_KEYS = ['thinkingSummaries', 'wholeChatFrames', 'conserveMemory', 'routerModels', 'updateMode'];
@@ -2204,6 +2237,20 @@ function initGear(post, opts) {
     if (el.type === 'checkbox') return (val === true || val === 'on') ? 'on' : 'off';
     var o = el.options ? Array.prototype.filter.call(el.options, function (x) { return x.value === String(val); })[0] : null;
     return o ? o.textContent : (String(val) || 'default');
+  }
+  // A MIXED box (its kernels disagree) holds checked=false under the indeterminate dash, so a click, which clears the dash and
+  // toggles checked, turns it ON for every machine in scope: one stated rule, said on the row's hover (clickRule). Before it a
+  // click set the opposite of THIS machine's value, which a pick need not even include, and the screen never said which way a
+  // click would go (the #374 review).
+  function mixBox(el) { el.indeterminate = true; el.checked = false; }
+  // What a click (a pick, on a select) on a kernel-side row does, as the one sentence its hover ends with. `mixed`: the box
+  // shows the mixed state in the current scope. Rows that follow the machine selector name the picked machines under a pick.
+  function clickRule(key, isBox, mixed) {
+    var picked = followsScope(key) && scopeOn(), where = picked ? scopeHosts.map(kernelName).join(', ') : 'every machine';
+    if (isBox && mixed) return 'A click turns it on for ' + where + (followsScope(key) && !picked ? '; pick a machine above to set it alone.' : '.');
+    if (picked) return 'A ' + (isBox ? 'click' : 'pick') + ' here sets ' + where + ' alone.';
+    return followsScope(key) ? 'Under All kernels a ' + (isBox ? 'click' : 'pick') + ' sets every machine the same way; pick a machine above to set it alone.'
+      : 'A ' + (isBox ? 'click' : 'pick') + ' here sets every machine the same way.';
   }
   function fillMixedMarks(v, rows) {
     var mine = (v && v.settings) || null;
@@ -2231,11 +2278,11 @@ function initGear(post, opts) {
       if (!known.some(function (t) { return String(t.settings[key]) !== String(mine[key]); })) return;
       var vals = [kernelName('') + ' ' + markWord(el, mine[key])].concat(known.map(function (t) { return t.host + ' ' + markWord(el, t.settings[key]); }));
       lastDiffs.push({ label: STALE_LABELS[storeOf(key)] || key, vals: vals });
-      if (box) el.indeterminate = true;
+      if (box) mixBox(el);
       mark.textContent = 'differs'; mark.classList.add('rs-differs');
-      mark.title = 'The kernels disagree: ' + vals.join(', ') + '. ' + (followsScope(key)
-        ? 'Under All kernels a click sets every machine the same way; pick a machine above to set it alone.'
-        : 'A pick here sets every machine the same way.');
+      // what a click does, in scope: under a pick a row that follows the selector reads the picked kernels' agreement
+      var isBox = el.type === 'checkbox', mixedHere = isBox && !(followsScope(key) && scopeOn() && scopeValueOf(key) !== null);
+      mark.title = 'The kernels disagree: ' + vals.join(', ') + '. ' + clickRule(key, isBox, mixedHere);
       mark.hidden = false;
     });
   }
@@ -2257,6 +2304,8 @@ function initGear(post, opts) {
     refillSoon();   // any click moves the kernels' agreement: the flags and the selector's count follow the local kernel's next poll
     if (!scopeOn()) return m;
     m.hosts = scopeHosts.slice(); m.scope = 'pinned';
+    noteStaleScope(m);   // a refusal's Apply anyway goes back to these kernels alone
+    noteSent(m);   // what this page sent a kernel that never reports the row (an older version): the row shows it, unconfirmed
     return m;
   }
   var refillTimers = [];
@@ -2327,22 +2376,61 @@ function initGear(post, opts) {
     btn.addEventListener('click', function (e) { e.stopPropagation(); list.hidden = !list.hidden; btn.setAttribute('aria-expanded', String(!list.hidden)); });
     document.addEventListener('click', function (e) { if (!list.hidden && !list.contains(e.target) && e.target !== btn && !btn.contains(e.target)) closeScope(); });
   }
+  // A KERNEL THAT NEVER REPORTS A ROW (an older version, from before /version's settings carried it: Thinking summaries, Always
+  // load whole chats and Extra models until the scope fan-out) has no value to show. Picked alone, its row read mixed with no
+  // flag and went back to mixed after a click, which said nothing (the #374 review). Under a pick such a row is UNKNOWN: the
+  // grey word beside the label names the machine on hover; with no picked kernel reporting it the box is unticked and dimmed
+  // (rs-unknown), never the mixed dash. Its kernel takes a click (its arm predates the report), but nothing comes back to
+  // confirm it, so after a click from this page the row shows what was sent there, still dimmed, under "unconfirmed".
+  var SENT_KEY = { setThinkingSummaries: 'thinkingSummaries', setWholeChatFrames: 'wholeChatFrames', setConserve: 'conserveMemory',
+    setRouterModels: 'routerModels', setUpdateMode: 'updateMode', setAutoNudge: 'autoNudge', setCompactSuggest: 'compactSuggest',
+    setFileEditing: 'fileEditing', setTaskTracking: 'taskTracking' };
+  var sentTo = {};   // 'host|key' → the value this page last sent a picked kernel that does not report the row ('' this machine)
+  function noteSent(m) {   // only to a kernel that cannot confirm it: one that reports the row answers for itself on the next read
+    var key = SENT_KEY[m.type], val = typeof m.enabled === 'boolean' ? m.enabled : m.mode;
+    if (key && typeof val !== 'undefined') m.hosts.forEach(function (h) { if (connected(h) && !reports(h, key)) sentTo[h + '|' + key] = val; });
+  }
+  function reports(h, key) { var x = kernelSettings(h).settings[key]; return typeof x === 'boolean' || typeof x === 'string'; }
+  function connected(h) { return !h || kernels.some(function (t) { return t.host === h; }); }   // a picked kernel that went down is not an older one
+  function fillUnknown(el, key) {   // true when NO picked kernel reports the row (the caller leaves the box as set here)
+    var silent = scopeHosts.filter(function (h) { return connected(h) && !reports(h, key); });
+    if (!silent.length) return false;
+    var row = el.closest ? (el.closest('label') || el.closest('.rs-row')) : null, mark = row ? row.querySelector('.rs-mixed') : null;
+    var sent = silent.map(function (h) { return sentTo[h + '|' + key]; });
+    var one = sent.every(function (x) { return typeof x !== 'undefined' && x === sent[0]; }) ? sent[0] : undefined;   // one value sent to all of them
+    var none = silent.length === scopeHosts.length, names = silent.map(kernelName).join(', ');
+    if (none) {
+      el.classList.add('rs-unknown');
+      if (el.type === 'checkbox') { el.indeterminate = false; el.checked = one === true; }
+      else if (typeof one === 'string') setShow(el, one);
+    }
+    if (mark) {
+      mark.classList.remove('rs-differs'); mark.hidden = false;
+      mark.textContent = typeof one === 'undefined' ? 'unknown' : 'unconfirmed';
+      mark.title = typeof one === 'undefined'
+        ? 'Unknown on ' + names + ': an older romp there does not report this setting. A click still sends the change, but this screen cannot confirm it applied.'
+        : 'Sent ' + markWord(el, one) + ' to ' + names + ': an older romp there does not report this setting, so this screen cannot confirm it applied.';
+    }
+    return none;
+  }
   // the four rows under a scope: the picked kernels' value (indeterminate when they differ), the pin glyph lit when the picked
   // kernel pinned the store (under All: this machine), its hover naming the synchronized value beside the pinned one
   function fillScopedRows(v) {
     var many = kernels.length > 0, repaint = false;
+    Array.prototype.forEach.call(document.querySelectorAll('#rsettings .rs-unknown'), function (el) { el.classList.remove('rs-unknown'); });   // each fill decides afresh
     if (scopeOn()) PER_INSTALL_KEYS.forEach(function (key) {   // the per-install rows under a pick: the picked kernels' value, mixed when they differ (no pin: nothing converges them)
       var el = { thinkingSummaries: ths, wholeChatFrames: wcf, conserveMemory: cvm, routerModels: rtr, updateMode: upm }[key], sv = scopeValueOf(key);
       if (!el) return;
-      if (el.type === 'checkbox') { el.indeterminate = sv === null; if (sv !== null) el.checked = !!sv; }
+      if (fillUnknown(el, key)) { if (el.type !== 'checkbox') repaint = true; return; }   // no picked kernel reports the row: unknown, never mixed
+      if (el.type === 'checkbox') { if (sv === null) mixBox(el); else { el.indeterminate = false; el.checked = !!sv; } }
       else if (sv !== null) { setShow(el, String(sv)); repaint = true; }   // a select cannot be mixed: its differs flag says so
     });
     if (repaint) repaintSelectPicks();
     Object.keys(PROPOSAL_ROWS).forEach(function (store) {
       var box = document.getElementById(PROPOSAL_ROWS[store]), key = STORE_KEY[store], g = pinGlyph(store);
-      if (box && scopeOn()) {
+      if (box && scopeOn() && !fillUnknown(box, key)) {
         var sv = scopeValue(store);
-        box.indeterminate = sv === null; if (sv !== null) box.checked = sv;
+        if (sv === null) mixBox(box); else { box.indeterminate = false; box.checked = sv; }
       }   // scope off: the box is fill()'s and fillAutoNudge's (its tri-state stands; round two, medium 2)
       if (!g) return;
       var localPinned = !!kernelSettings('').pinned[store];

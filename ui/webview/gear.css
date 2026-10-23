@@ -106,6 +106,9 @@ body.rs-lifted.rs-pane-gone::before { display: none; }
 /* the DISAGREEMENT FLAG on a synchronized row (phase two, plans/settings-across-machines.md): the mixed mark's slot, the word
    in the heads-up amber so it is seen without reading; the count on the selector wears the same */
 #rsettings .rs-mixed.rs-differs, #rsettings .rs-differs { color: var(--warn, #d7a23a); font-weight: 600; }
+/* a row whose picked kernels never report it (an older version): the box dimmed, neither ticked as known nor the mixed dash;
+   the mark's grey word "unknown" (or "unconfirmed", after a click from this page) says why on hover */
+#rsettings input[type=checkbox].rs-unknown { opacity: .45; }
 /* the MACHINE SELECTOR above the tabs: the menu vocabulary (a pill button, a list under it), shown with more than one kernel */
 #rsettings #rs-scope { position: relative; margin: 0 0 8px; }
 #rsettings #rs-scope[hidden] { display: none; }
