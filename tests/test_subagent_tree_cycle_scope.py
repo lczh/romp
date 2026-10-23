@@ -180,13 +180,14 @@ class _World(unittest.TestCase):
 
 class OneSampleOfEachRootPerCycle(_World):
     def test_one_pusher_cycle_samples_a_subagents_root_once_however_many_readers(self):
-        """RED FIRST. In this fixture the chat build is the cycle's first reader and reads the sidecar map three times
+        """RED FIRST. In this fixture the chat build is the cycle's first reader and reads the sidecar map twice
         (_stamp_agents; _awaiting_items_payload -> _session_background_items -> _awaiting_live_rows, since the Agent
         tool_use has no result, so the turn is open and _session_awaiting answers None before reading, in build_session
-        and in _feed_session_entry alike; then _awaiting_nest for the agent row it minted), and the feed key's
-        _subagent_dirs_ident reads the tree once more: on stock each is a validation of its own, so the count is more
-        than one, and `scoped` is not a key of the stats. With the cycle scope the first read is the cycle's one sample
-        and the rest are served from it."""
+        and in _feed_session_entry alike); _awaiting_nest read it a third time for the agent row it minted until
+        2026-10-23, when a lone live agent stopped reading it (no agent can nest under itself), and the feed key read the
+        tree once more until the same day, when it began keying only a tree its session's derivation read: on stock each
+        read is a validation of its own, so the count is more than one, and `scoped` is not a key of the stats. With the
+        cycle scope the first read is the cycle's one sample and the rest are served from it."""
         sent = self._chat_client()
         before = dict(km._SUBAGENT_TREE_STATS)
         km._pusher_cycle()
@@ -195,7 +196,7 @@ class OneSampleOfEachRootPerCycle(_World):
         self.assertEqual(self._validations(before, after), 1,
                          "one validation or walk of the root per cycle: the chat build's sidecar-map reads and the feed key "
                          "read one sample")
-        self.assertGreaterEqual(after["scoped"] - before.get("scoped", 0), 2, "the later readers were served the sample")
+        self.assertGreaterEqual(after["scoped"] - before.get("scoped", 0), 1, "the later readers were served the sample")
         self.assertIsNone(getattr(km._live_scope, "subagent_trees", None), "the scope ends with the cycle")
 
     def test_outside_a_cycle_every_call_samples_afresh(self):
@@ -212,7 +213,8 @@ class OneSampleOfEachRootPerCycle(_World):
     def test_a_change_after_the_cycles_sample_is_seen_by_the_next_cycle(self):
         """The exactness claim: once per cycle, never stale past the cycle. A workflow directory and its sidecar land
         after cycle one's sample; cycle two's one sample is a miss (the tree changed), the memo holds the new directory,
-        and the feed key's subagents component moved for the session. The chat tab is cycle two's first reader here too:
+        and the feed key's subagents component did not move (since 2026-10-23 it keys only a tree the session's derivation
+        read, and web's open turn reads none). The chat tab is cycle two's first reader here too:
         its taskout dependency on the workflows directory rebuilds it. The feed is forced to rebuild with a dirty mark
         (the refuter's amendment): within REBUILD_MIN_S _feed_servable would otherwise serve cycle one's build and the
         key would never be re-taken."""
@@ -233,8 +235,9 @@ class OneSampleOfEachRootPerCycle(_World):
         self.assertIn(str(new), km._SUBAGENT_TREES[root][0], "the next cycle's sample holds the new directory")
         self.assertEqual(self._validations(before, after), 1, "again exactly one sample of the root")
         self.assertEqual(after["miss"] - before["miss"], 1, "...and it was a miss: the tree changed")
-        self.assertEqual(km._feed_memo_report()["miss_by"].get("subagents", 0) - feed_before, 1,
-                         "the feed key's subagents component moved for the session")
+        self.assertEqual(km._feed_memo_report()["miss_by"].get("subagents", 0) - feed_before, 0,
+                         "the feed key's subagents component did not move: web's turn is open, so its derivation reads no "
+                         "subagents tree and its key takes no sample of one (2026-10-23)")
         self.assertIsNone(getattr(km._live_scope, "subagent_trees", None))
 
     def test_the_jobs_pass_opens_and_closes_the_scope(self):
