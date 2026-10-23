@@ -37,7 +37,6 @@ os.environ.pop("ROMP_STATE_DIR", None)                    # a live kernel's expo
 os.makedirs(os.path.join(os.environ["XDG_STATE_HOME"], "romp"), exist_ok=True)
 Path(os.environ["XDG_STATE_HOME"], "romp", "session-hosts").write_text("off\n")   # no per-session host (CLAUDE.md, 2026-09-11)
 os.environ["ROMP_KERNEL_NO_OPEN"] = "1"
-os.environ["ROMP_CLAUDE_BIN"] = "/bin/false"              # never a real CLI from this process
 os.environ.setdefault("ROMP_SERVE_TOKEN", "testtok")
 km = load_source("romp_kernel_asm_rebuild", os.path.join(BIN, "romp-kernel"))
 jd, em = km.jd, km.em
@@ -83,6 +82,10 @@ def _join_rebuilds(timeout=60):
 
 class Harness(unittest.TestCase):
     def setUp(self):
+        saved_bin = os.environ.get("ROMP_CLAUDE_BIN")           # never a real CLI (conftest's floor; set here for a direct run too)
+        os.environ["ROMP_CLAUDE_BIN"] = "/bin/false"
+        self.addCleanup(lambda: os.environ.__setitem__("ROMP_CLAUDE_BIN", saved_bin) if saved_bin is not None
+                        else os.environ.pop("ROMP_CLAUDE_BIN", None))
         self.root = Path(tempfile.mkdtemp(prefix="romp-asm-rebuild-k-")).resolve()
         (self.root / "romp").mkdir()
         (self.root / "romp" / "session-hosts").write_text("off\n")
@@ -129,7 +132,7 @@ class Harness(unittest.TestCase):
             em._READ_BYTES.clear()
         for c in list(em._FOLD_REG.values()):
             c.clear()
-        jd._PARSE_CACHE.clear()
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
         km._parse_mode.clear()
         with km._chat_fold_lock:
             km._chat_fold.clear()
@@ -254,7 +257,7 @@ class TheRebuild(Harness):
             with mock.patch.object(em, "_asm_whole_entry", held):
                 self.writer_cycle()
                 self.assertTrue(started.wait(30), "the writer's cycle started the rebuild and returned")
-                jd._PARSE_CACHE.clear()                            # the connect's build parses the leaf, not a stored tree
+                jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()   # the connect's build parses the leaf, not a stored tree
                 done, box = threading.Event(), {}
 
                 def connect():
