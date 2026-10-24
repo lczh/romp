@@ -3048,12 +3048,23 @@ print(json.dumps(d))' "$session_arg" "$_dir" "$_be" "$model_arg" "$effort_arg" "
     # No -f here: the kernel answers a bad /new payload with a 400 whose JSON body NAMES the
     # problem (reserved env names, bad session names — every validation refusal), and -f discards
     # exactly that body (exit 22), masking it as the connection-failure message below. Without -f
-    # curl still exits nonzero on a real connection failure, so the || branch keeps meaning
+    # curl still exits nonzero on a real connection failure, so a nonzero exit keeps meaning
     # "not reachable", and a 4xx body falls through to the same ok-check + refusal print the
-    # kernel's 200 ok:false replies take.
+    # kernel's 200 ok:false replies take. The one nonzero exit that is NOT "not reachable" is a
+    # timeout (curl 28): the kernel took the request and answered late (mid-restart or under
+    # load), so the session may already exist. That is exit 3, as for `romp send`, and no -m
+    # prompt has been sent yet.
+    _ncrc=0
     _resp="$(_romp_token_cfg | curl -s -m 15 --config - -X POST "http://127.0.0.1:$_kport/new" \
-                  -H 'Content-Type: application/json' -d "$_payload")" \
-        || { echo "romp new: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+                  -H 'Content-Type: application/json' -d "$_payload")" || _ncrc=$?   # `|| ...`: survives set -e
+    if [[ $_ncrc -eq 28 ]]; then
+        _nmsg=""; [[ -n "$msg_arg" ]] && _nmsg=", and its first prompt was not sent"
+        echo "romp new: the kernel on :$_kport took the request but did not answer within 15s (mid-restart or under load)" \
+             "— \"$session_arg\" may already have started$_nmsg; check romp sessions before retrying" >&2
+        exit 3
+    elif [[ $_ncrc -ne 0 ]]; then
+        echo "romp new: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1
+    fi
     if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
         if [[ "$_resp" == *'"thread": true'* || "$_resp" == *'"thread":true'* ]]; then
             # a comment THREAD owns this name (T223): nothing was created — the ask landed on the
@@ -3173,9 +3184,25 @@ d = ({"id": r["id"]} if r.get("id") else {"name": sys.argv[1]})
 d["text"] = sys.argv[2]
 if len(sys.argv) > 3 and sys.argv[3]: d["tag"] = sys.argv[3]
 print(json.dumps(d))' "$session_arg" "$msg_arg" "$tag_arg" "$_resp")"
-            _mresp="$(_romp_token_cfg | curl -sf -m 10 --config - -X POST "http://127.0.0.1:$_kport/send" \
-                          -H 'Content-Type: application/json' -d "$_mpayload")" \
-                || { echo "romp new: session is up but the message did NOT land (kernel send failed). Retry: romp send $session_arg '<text>'" >&2; exit 1; }
+            # The exit code says what happened, as `romp send`'s does: a timeout (curl 28) means the kernel
+            # took the prompt and answered late (mid-restart or under load), and it delivers or parks the
+            # prompt before it answers. Called "did NOT land" with a resend line, a caller that followed
+            # the advice or retried on the nonzero exit gave the new session its opening task twice. So a
+            # timeout is exit 3 and says do not resend blindly; a refusal (22) or a connection the kernel
+            # never took keeps the retry line, exit 1. The cap is ROMP_KERNEL_HTTP_TIMEOUT_S, as for send.
+            _mcap="${ROMP_KERNEL_HTTP_TIMEOUT_S:-10}"
+            _mcrc=0
+            _mresp="$(_romp_token_cfg | curl -sf -m "$_mcap" --config - -X POST "http://127.0.0.1:$_kport/send" \
+                          -H 'Content-Type: application/json' -d "$_mpayload")" || _mcrc=$?   # `|| ...`: survives set -e
+            if [[ $_mcrc -eq 28 ]]; then
+                echo "romp new: session is up; the kernel on :$_kport took the first prompt but did not answer within ${_mcap}s" \
+                     "(mid-restart or under load) — it may already have delivered it; do not resend it blindly," \
+                     "look at the session first (ROMP_KERNEL_HTTP_TIMEOUT_S widens the wait)" >&2
+                exit 3
+            elif [[ $_mcrc -ne 0 ]]; then
+                echo "romp new: session is up but the message did NOT land (kernel send failed). Retry: romp send $session_arg '<text>'" >&2
+                exit 1
+            fi
             if [[ "$_mresp" == *'"ok": true'* || "$_mresp" == *'"ok":true'* ]]; then
                 if [[ "$_mresp" == *'"queued": true'* || "$_mresp" == *'"queued":true'* ]]; then
                     # the kernel PARKED it (the fresh session is not quiet yet): it delivers when it is
