@@ -46,7 +46,31 @@ print(re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(sys.argv[1])))
 PYEOF
 }
 
-teardown() { rm -rf "$TEST_DIR"; }
+teardown() {
+    # stand-ins (below) that a failed assertion left running
+    if [[ -f "$TEST_DIR/standins" ]]; then
+        while read -r p; do kill "$p" 2>/dev/null || true; done < "$TEST_DIR/standins"
+    fi
+    rm -rf "$TEST_DIR"
+}
+
+# A stand-in for a long-running romp process: `sleep` under the command line the real one runs with
+# (its own argument, 300, follows), so the uninstaller's match meets the shape it targets. Detached
+# from the test shell (fd 3 closed, as bats requires of a background process), returned once its
+# command line reads as given, and its pid recorded so teardown can stop it if the test fails first.
+_standin() {   # <command line>   prints the pid
+    bash -c 'exec -a "$1" sleep 300' _ "$1" </dev/null >/dev/null 2>&1 3>&- &
+    local pid=$!
+    for _ in $(seq 20); do
+        [[ "$(ps -o args= -p "$pid" 2>/dev/null || true)" == "$1 300" ]] && break
+        sleep 0.1
+    done
+    echo "$pid" >> "$TEST_DIR/standins"
+    echo "$pid"
+}
+# Gone or a zombie: a stand-in killed after its parent shell exited may linger as one until reaped.
+alive() { local st; st="$(ps -o stat= -p "$1" 2>/dev/null || true)"; [[ -n "$st" && "$st" != Z* ]]; }
+gone() { ! alive "$1"; }
 
 hook_count() {   # how many romp hook commands are left registered across all events
     python3 - "$HOME/.claude/settings.json" <<'PY'
@@ -372,4 +396,48 @@ EOF
         [ ! -d "$scratch" ]
         [ ! -d "$proj" ]
     done
+}
+
+# ── the postal bus ───────────────────────────────────────────────────────────
+# The bus is a daemon of its own that the service's teardown does not reach (a bus a terminal started
+# is outside the service's cgroup, and every bus runs in a process group of its own), and once the
+# kernel has listed sessions it keeps itself up while the kernel is gone. Left behind by an uninstall,
+# it holds the serve token it read at start: after --purge and a reinstall it refuses every request
+# under the new token, while answering the liveness probe that would have replaced it.
+
+@test "romp-uninstall: stops this clone's postal bus, which outlives the login service" {
+    # Started under the clone path as given, through the bin/ link or the module itself.
+    bus="$(_standin "python3 $CLONE/bin/romp-postal-service serve")"
+    mod="$(_standin "python3 $CLONE/postal/postal_service.py serve")"
+    alive "$bus"
+    alive "$mod"
+
+    run "$CLONE/bin/romp-uninstall" --yes --purge
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"footprint is gone"* ]]
+    gone "$bus"
+    gone "$mod"
+}
+
+@test "romp-uninstall: stops the bus the kernel started from the clone's resolved path" {
+    # The kernel resolves its own path, so a bus it starts names the clone's physical path, while the
+    # uninstaller knows the clone by the path it was run from: here a symlink to it.
+    ln -s "$CLONE" "$TEST_DIR/clone-link"
+    real="$(cd "$CLONE" && pwd -P)"
+    bus="$(_standin "python3 $real/bin/romp-postal-service serve")"
+    alive "$bus"
+
+    run "$TEST_DIR/clone-link/bin/romp-uninstall" --yes
+    [ "$status" -eq 0 ]
+    gone "$bus"
+}
+
+@test "romp-uninstall: leaves another clone's bus and a session's postal server running" {
+    other="$(_standin "python3 $TEST_DIR/other-clone/bin/romp-postal-service serve")"
+    mcp="$(_standin "python3 $CLONE/bin/romp-postal-service mcp")"
+
+    run "$CLONE/bin/romp-uninstall" --yes
+    [ "$status" -eq 0 ]
+    alive "$other"
+    alive "$mcp"
 }
