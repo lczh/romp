@@ -17566,7 +17566,11 @@ def mint_fallback_card(sid, from_model, to_model, ev_t=None):
                           "why": "kernel-observed API model fallback", "log": []})
         nodes[gid] = nd
         record_verdict(store, nd, "romp", "done", t, why=why)
-        rollup_status(store, True)                 # the fold materializes nodeComplete/doneWhy from the diary
+        # The fold materializes nodeComplete/doneWhy from the diary. The backend fires this hook mid-turn,
+        # so the rollup runs with session_closed=False, as in mint_refusal_fallback_card: the new card is
+        # never the focus and completes on its own, and a forced close would also settle the card the
+        # session is still working on (Completed, a settle row, a seam stamped mid-turn).
+        rollup_status(store, False)
         save_goals(sid, store)
         return gid
     except Exception as e:
@@ -17604,7 +17608,7 @@ def mint_restored_card(sid, from_model, to_model, ev_t=None):
                           "trail": [], "promptUuid": "", "quote": "", "t": t, "mt": t, "why": RESTORED_WHY, "log": []})
         nodes[gid] = nd
         record_verdict(store, nd, "romp", "done", t, why=why)
-        rollup_status(store, True)
+        rollup_status(store, False)                # never the focus; must not settle the focus (mint_fallback_card)
         save_goals(sid, store)
         return gid
     except Exception as e:

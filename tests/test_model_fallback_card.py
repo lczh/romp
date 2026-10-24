@@ -306,5 +306,70 @@ class DedupeBackstop(unittest.TestCase):
         self.assertTrue(g2, "a boundary-settle clear re-arms too")
 
 
+class SwapCardLeavesFocusUnsettled(unittest.TestCase):
+    """The backend fires the swap hooks mid-turn (on_model_fallback from an AssistantMessage's model
+    learn, on_model_restored likewise), so a swap card's mint must not settle the card the session is
+    still working on. The case: session web's focus 'Fix the parser' already carries a done verdict but
+    is still the focus with the turn open (Working, done-confirming). A capacity fallback lands and the
+    mint's rollup ran as if the session had closed: the focus moved to Completed with a settle row, and
+    a seam was stamped on it mid-turn, which splits the rest of the running segment off as a stray.
+    The refusal mint already ran its rollup with session_closed=False; all three must leave the focus
+    where it was, while the swap card itself still completes. OWN sid, like FallbackCard above."""
+
+    WEB = "7c3e9a51-0d4b-4f2e-9a86-2b5d1e7f4c90"
+    T0 = 1_787_500_000
+
+    def tearDown(self):
+        for f in jd.GOALDIR.glob("*"):
+            f.unlink()
+        try:
+            (jd._overrides_dir() / (self.WEB + ".jsonl")).unlink()
+        except OSError:
+            pass
+
+    def _seed_focus(self):
+        g = self.WEB + ":g1"
+        store = {"rompUuid": self.WEB, "seq": 1, "placementsV": jd.PLACEMENTS_V, "placements": {},
+                 "status": {}, "lastNode": g,
+                 "nodes": {g: {"id": g, "text": "Fix the parser", "parentId": None, "nodeComplete": True,
+                               "blocked": False, "cleared": False, "trail": [], "t": self.T0,
+                               "mt": self.T0 + 30,
+                               "log": [{"src": "planner", "kind": "done", "ev_t": self.T0 + 20,
+                                        "at": self.T0 + 21}]}}}
+        jd.rollup_status(store, False)                 # the turn is open: done, confirming, not settled
+        self.assertEqual(store["status"][g], "working")
+        self.assertEqual(store["confirming"], [g])
+        jd.save_goals(self.WEB, store)
+        return g
+
+    def _assert_focus_unsettled(self, focus, gid, label):
+        self.assertTrue(gid, "%s: the swap card was minted" % label)
+        store = jd.load_goals(self.WEB)
+        self.assertEqual(store["status"].get(gid), "completed", "%s: the swap card still completes" % label)
+        self.assertEqual(store["status"].get(focus), "working",
+                         "%s: the focus card is still the turn's work; a swap must not settle it" % label)
+        self.assertIn(focus, store.get("confirming") or [], "%s: the focus stays done-confirming" % label)
+        settles = [e for e in store["nodes"][focus].get("log") or [] if e.get("kind") == "settle"]
+        self.assertEqual(settles, [], "%s: no settle row on the focus card" % label)
+        self.assertEqual([s for s in store.get("seams") or [] if s.get("top") == focus], [],
+                         "%s: no seam stamped on the focus card mid-turn" % label)
+
+    def test_capacity_fallback_card(self):
+        focus = self._seed_focus()
+        gid = jd.mint_fallback_card(self.WEB, "claude-opus-5", "claude-sonnet-5", ev_t=self.T0 + 60)
+        self._assert_focus_unsettled(focus, gid, "fallback")
+
+    def test_restored_card(self):
+        focus = self._seed_focus()
+        gid = jd.mint_restored_card(self.WEB, "claude-sonnet-5", "claude-opus-5", ev_t=self.T0 + 60)
+        self._assert_focus_unsettled(focus, gid, "restored")
+
+    def test_refusal_card(self):
+        focus = self._seed_focus()
+        gid = jd.mint_refusal_fallback_card(self.WEB, "claude-opus-5", "claude-sonnet-5", category="cyber",
+                                            ev_t=self.T0 + 60)
+        self._assert_focus_unsettled(focus, gid, "refusal")
+
+
 if __name__ == "__main__":
     unittest.main()
