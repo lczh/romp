@@ -78,6 +78,43 @@ class DiscoverCacheTest(unittest.TestCase):
         self.assertIsNot(b, a, "a new fork (new dir entry) busts the fingerprint")
         self.assertIn(FORK, [t[0] for t in b], "...and the fork now shows up")
 
+    def test_an_idle_session_reenters_the_moment_its_transcript_is_touched(self):
+        """WINDOW's contract: an untouched store re-enters the moment its transcript is touched again. An
+        append adds no directory entry, so the fingerprint holds still; a cache filled while the session sat
+        outside the window kept serving the list without it, and every judge stage skipped the session until
+        some unrelated session added a file."""
+        anchor = self.proj / (SID + ".jsonl")
+        idle = time.time() - 3 * 86400                       # three days idle: outside the 48h window
+        os.utime(anchor, (idle, idle))
+        jd._discover_cache.clear()                            # a cold fill, as after a kernel restart
+        a = jd.discover(time.time())
+        self.assertNotIn(SID, [t[0] for t in a])
+        fp = jd._discover_fingerprint()
+        with anchor.open("a") as f:                           # the user types into it again
+            f.write(json.dumps({"type": "user", "uuid": "u2"}) + "\n")
+        self.assertEqual(jd._discover_fingerprint(), fp, "an append moves no fingerprint input")
+        b = jd.discover(time.time())
+        self.assertIn(SID, [t[0] for t in b], "the touched session is back in the list without a namespace change")
+
+    def test_a_session_leaving_the_window_drops_out_of_the_cached_list(self):
+        now = time.time()
+        a = jd.discover(now)
+        self.assertIn(SID, [t[0] for t in a])
+        self.assertIs(jd.discover(now + 60), a, "time passing with nothing crossing the cutoff still serves the cache")
+        later = jd.discover(now + jd.WINDOW + 3600)           # nothing touched it for longer than the window
+        self.assertNotIn(SID, [t[0] for t in later])
+
+    def test_a_fork_lane_leaving_the_window_drops_out_while_its_session_stays(self):
+        self._write_transcript(FORK, title=NAME)
+        fork = self.proj / (FORK + ".jsonl")
+        now = time.time()
+        aged = now - jd.WINDOW + 600                          # ten minutes from leaving the window
+        os.utime(fork, (aged, aged))
+        self.assertIn(FORK, [t[0] for t in jd.discover(now)])
+        later = jd.discover(now + 3600)
+        self.assertIn(SID, [t[0] for t in later])
+        self.assertNotIn(FORK, [t[0] for t in later], "the lane aged out exactly as a cold walk would drop it")
+
     def test_a_new_session_name_busts_the_cache(self):
         now = int(time.time())
         a = jd.discover(now)
