@@ -749,6 +749,22 @@ NOTICE_T="codex turn/start rejected"
     grep -q "^/send$" <(head -1 "$TEST_DIR/req")
 }
 
+@test "romp new -m: a first prompt the kernel took but answers late exits 3 and is never called undelivered" {
+    # the same shape on `romp new -m`'s first prompt: it answered "did NOT land ... Retry: romp send", exit 1, so a
+    # caller that followed the line or retried on the exit gave the new session its opening task twice. The fake
+    # kernel holds each answer 3 s: /new (capped at 15 s) acks, the prompt's /send (capped by the variable) times out.
+    start_fake_kernel '{"ok": true}' 3
+    ROMP_SERVE_TOKEN=testtok ROMP_KERNEL_HTTP_TIMEOUT_S=1 run "$ROMP_SCRIPT" new -m 'look into the flaky test' -d "$TEST_DIR" web
+    [ "$status" -eq 3 ]
+    [[ "$output" == *'started "web"'* ]]
+    [[ "$output" == *"took the first prompt but did not answer within 1s"* ]]
+    [[ "$output" == *"may already have delivered it"* ]]
+    [[ "$output" != *"did NOT land"* ]]
+    [[ "$output" != *"Retry: romp send"* ]]
+    grep -q "^/send$" <(head -1 "$TEST_DIR/req")
+    grep -q -F 'look into the flaky test' "$TEST_DIR/req"
+}
+
 @test "romp send: a kernel nobody is listening on is 'not reachable', exit 1, and nothing was sent" {
     # a port with no listener: the request never left, so the old message and code stand, and the curl code is named
     export ROMP_KERNEL_PORT=1

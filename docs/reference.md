@@ -2917,7 +2917,8 @@ variables bound this:
   manager hands it, so set it in `service.env` and restart the manager
   (`romp down`, then `romp up`).
 - `ROMP_KERNEL_HTTP_TIMEOUT_S=<seconds>` is how long `romp send`, `romp
-  interrupt` and `romp end` wait for the kernel's answer; the default is `10`.
+  interrupt`, `romp end` and the first prompt of `romp new -m` wait for the
+  kernel's answer; the default is `10`.
   A kernel that took the request but answered late (mid-restart, or under
   load) is exit `3`, with a line saying the message may already have been
   delivered and not to retry blindly; a kernel nobody is listening on is still

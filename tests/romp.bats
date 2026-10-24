@@ -93,6 +93,8 @@ _sed_inplace() {
 # Helper — a fake `curl` for the kernel-API paths (`romp new` SDK spawn + `-m` send).
 # Logs every call to MOCK_LOG and answers {"ok": true}; MOCK_CURL_FAIL_SEND=1 makes
 # the /send leg fail the way curl -f does, so per-leg error reporting is testable.
+# MOCK_CURL_TIMEOUT_SEND=1 / MOCK_CURL_TIMEOUT_NEW=1 make that leg a timeout (exit 28):
+# the kernel took the request and did not answer within curl's -m cap.
 # MOCK_CURL_FAIL_NEW=1 makes the /new leg a connection failure (exit 7, no body);
 # MOCK_CURL_NEW_400=1 makes the kernel answer /new with a 400 whose JSON body names
 # the problem — honoring the FLAGS romp passes, the way real curl splits on a 4xx:
@@ -109,7 +111,9 @@ echo "curl $*" >> "$MOCK_LOG"
 url=""
 for a in "$@"; do [[ "$a" == http* ]] && url="$a"; done
 if [[ -n "${MOCK_CURL_FAIL_SEND:-}" && "$url" == */send ]]; then exit 22; fi
+if [[ -n "${MOCK_CURL_TIMEOUT_SEND:-}" && "$url" == */send ]]; then exit 28; fi
 if [[ -n "${MOCK_CURL_FAIL_NEW:-}" && "$url" == */new ]]; then exit 7; fi
+if [[ -n "${MOCK_CURL_TIMEOUT_NEW:-}" && "$url" == */new ]]; then exit 28; fi
 if [[ -n "${MOCK_CURL_SEND_QUEUED:-}" && "$url" == */send ]]; then echo '{"ok": true, "queued": true}'; exit 0; fi
 if [[ -n "${MOCK_CURL_SEND_REFUSED:-}" && "$url" == */send ]]; then echo '{"ok": false, "error": "no running backend owns web — the message was not delivered"}'; exit 0; fi
 if [[ -n "${MOCK_CURL_NOTICE_REFUSE:-}" && "$url" == */notice ]]; then echo '{"ok": false, "error": "attachment refused: not a file"}'; exit 0; fi
@@ -927,6 +931,46 @@ MOCK
     [ "$status" -eq 1 ]
     [[ "$output" == *"did NOT land"* ]]
     [[ "$output" == *"romp send ideabox"* ]]
+}
+
+@test "new -m: a first prompt the kernel took but answered late is exit 3 and 'may already', never a resend line" {
+    # a timeout (curl 28) comes after the kernel took the prompt, and the kernel delivers or parks it before it
+    # answers. Called "did NOT land" with a retry line, exit 1, a caller that followed the advice or retried on the
+    # nonzero exit gave the new session its opening task twice. Same contract as `romp send`: exit 3, do not resend
+    # blindly. The send's cap is ROMP_KERNEL_HTTP_TIMEOUT_S, as for `romp send`.
+    _stub_curl
+    : > "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    export MOCK_CURL_TIMEOUT_SEND=1
+    ROMP_KERNEL_HTTP_TIMEOUT_S=7 run run_romp new -m "look into the flaky test" ideabox
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"session is up"* ]]
+    [[ "$output" == *"did not answer within 7s"* ]]
+    [[ "$output" == *"may already have delivered it"* ]]
+    [[ "$output" == *"do not resend it blindly"* ]]
+    [[ "$output" != *"did NOT land"* ]]
+    [[ "$output" != *"Retry: romp send"* ]]
+    grep '/send' "$MOCK_LOG" | grep -q -- '-m 7 '
+}
+
+@test "new: a /new the kernel took but answered late is exit 3 and says the session may exist, not 'not reachable'" {
+    # the same timeout on the /new leg: the session may already have started, so the words are not a dead kernel's,
+    # and with -m the first prompt was never sent (the /send leg does not run)
+    _stub_curl
+    : > "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    export MOCK_CURL_TIMEOUT_NEW=1
+    run run_romp new -m "look into the flaky test" ideabox
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"did not answer within 15s"* ]]
+    [[ "$output" == *'"ideabox" may already have started, and its first prompt was not sent'* ]]
+    [[ "$output" == *"check romp sessions before retrying"* ]]
+    [[ "$output" != *"not reachable"* ]]
+    run grep -c '/send' "$MOCK_LOG"           # `run`: grep -c exits 1 on a zero count, and a bare `! grep` never fails a bats test
+    [ "$output" = "0" ]
+    run run_romp new ideabox
+    [ "$status" -eq 3 ]
+    [[ "$output" == *'"ideabox" may already have started; check romp sessions'* ]]
 }
 
 @test "new: a kernel 400 surfaces the kernel's own refusal, never 'not reachable'" {
