@@ -9686,16 +9686,17 @@ def episode_floor(sid):
 
 
 _discover_lock = threading.Lock()
-_discover_cache = {}     # window seconds → {"fp", "result"}: the cached discover() list for THAT horizon (see
-#                          _discover_fingerprint). Keyed by window because the picker asks for a wider one
-#                          than the 48h caption horizon; bounded by the number of distinct windows (2).
+_discover_cache = {}     # window seconds → {"fp", "result", "leaves"}: the cached discover() list for THAT horizon
+#                          (see _discover_fingerprint and _discover_window_holds). Keyed by window because the
+#                          picker asks for a wider one than the 48h caption horizon; bounded by the number of
+#                          distinct windows (2).
 _namefp_memo = {}    # names/ entry -> (its mtime, resolved project dir or None) — the fingerprint runs on
 #                      EVERY discover() call, so re-reading each entry every time was the kernel's hottest
 #                      call; keyed on the entry's own mtime, evicted when the entry goes away. Bounded by
 #                      the number of live names/ entries, never by uptime.
 
 
-def _codex_rows(cutoff, seen):
+def _codex_rows(cutoff, seen, leaves=None):
     """Discovery rows for Codex sessions — (fsid=STABLE SID, materialized path, anchor sid, name),
     read from the Codex backend's registry (plans/codex-backend.md). The names/ loop above skips
     these naturally (no <sid>.jsonl under the Claude roots); this is the ONE extra fact the read
@@ -9707,7 +9708,10 @@ def _codex_rows(cutoff, seen):
     the alive set, the picker offered a not-running TID row, and reviving it shelled
     `romp resume <TID>` through the terminal launcher of the time (the tmux backend, removed
     2026-09-11) — the TID rides only in the transcript PATH, which
-    is the one place it means anything to a reader (the v1.3.13 audit's P1, executed)."""
+    is the one place it means anything to a reader (the v1.3.13 audit's P1, executed).
+
+    `leaves`, when given, collects (path, judged in window) for every transcript the cutoff was
+    applied to, as _discover_impl does for the Claude rows (see _discover_window_holds)."""
     try:
         reg = json.loads((CODEXDIR / "registry.json").read_text())
     except Exception:
@@ -9728,6 +9732,8 @@ def _codex_rows(cutoff, seen):
             mt = p.stat().st_mtime
         except OSError:
             continue
+        if leaves is not None:
+            leaves.append((ps, mt >= cutoff))
         if mt >= cutoff and ps not in seen:
             seen.add(ps)
             rows.append((sid, p, sid, r.get("name", "")))
@@ -9835,12 +9841,35 @@ def yield_between_sessions():
     time.sleep(0)
 
 
+def _discover_window_holds(leaves, cutoff):
+    """True when every transcript the cached walk held against ITS cutoff still falls on the same side of
+    this call's `cutoff`. The fingerprint cannot see this: an append to an existing transcript adds no
+    directory entry, and time passing changes nothing on disk, so a session idle past the window that
+    becomes active again (the user types into it, a scheduled wakeup fires) kept missing from the cached
+    list until some unrelated session added a file, and every judge stage skipped it. One stat per leaf
+    transcript (one per session, plus the listed fork lanes and Codex rows), the same order of cost the
+    fingerprint already pays. An append that keeps a session inside the window crosses nothing, so the
+    cached list still serves. Out of reach on purpose: an OLD same-title fork lane, never read for its
+    title because it sat outside the window, re-enters on the next namespace change; finding it here would
+    mean reading every old transcript's head on every call, the cost the cache exists to avoid."""
+    for path_str, was_in in leaves:
+        try:
+            mt = os.stat(path_str).st_mtime
+        except OSError:
+            mt = 0
+        if (mt >= cutoff) != was_in:
+            return False
+    return True
+
+
 def discover(now, window=None, forks=True):
     """[(fsid, path, anchor_sid, name)] for every transcript of a romp session touched within `window`
     seconds (default WINDOW, 48h) —
-    CACHED behind a directory-mtime fingerprint (the result only changes on a session add/rename/fork, not on
-    a transcript append), so the feed + timeline + chat builds and both judge tiers share ONE filesystem walk
-    per change instead of re-walking every push. The cached list is read-only for all callers.
+    CACHED behind a directory-mtime fingerprint (the walk's candidates only change on a session add/rename/
+    fork, not on a transcript append), so the feed + timeline + chat builds and both judge tiers share ONE
+    filesystem walk per change instead of re-walking every push. A hit also re-checks each session's
+    transcript against this call's cutoff (_discover_window_holds), so a session crossing the window in
+    either direction rebuilds the list. The cached list is read-only for all callers.
 
     `window` is a parameter so the + picker can reach back FURTHER than the caption horizon (the user
     2026-07-24, who typed a 3-day-old session's name into the picker, got nothing, and had to start a new
@@ -9862,16 +9891,18 @@ def discover(now, window=None, forks=True):
     if fp is not None:
         with _discover_lock:
             hit = _discover_cache.get(key)
-            if hit is not None and hit["fp"] == fp and hit["result"] is not None:
-                return hit["result"]
-    res = _discover_impl(now, win, forks)
+        if (hit is not None and hit["fp"] == fp and hit["result"] is not None
+                and _discover_window_holds(hit.get("leaves", ()), now - win)):
+            return hit["result"]
+    leaves = []
+    res = _discover_impl(now, win, forks, leaves)
     if fp is not None:
         with _discover_lock:
-            _discover_cache[key] = {"fp": fp, "result": res}
+            _discover_cache[key] = {"fp": fp, "result": res, "leaves": tuple(leaves)}
     return res
 
 
-def _discover_impl(now, window=None, forks=True):
+def _discover_impl(now, window=None, forks=True, leaves=None):
     """[(fsid, path, anchor_sid, name)] for every transcript of a romp session touched within
     `window` (default WINDOW): the session's anchor transcript plus any same-customTitle fork in its
     project dir. File-based (names/), no liveness probe — works for dead and headless sessions too.
@@ -9880,8 +9911,12 @@ def _discover_impl(now, window=None, forks=True):
     re-listed each project dir ONCE PER SESSION that lives in it, and `.suffix`/`.stem`/`.stat()` re-parsed +
     re-statted every entry — ~68k stats + ~140k path re-parses, ~0.6s on every cold build (it's on the
     critical path of EVERY pane's first paint). Now: os.scandir (DirEntry caches name+stat from the dir read,
-    no pathlib), each project dir listed ONCE (dir_jsonl memo), and each fork's title read ONCE (title memo)."""
+    no pathlib), each project dir listed ONCE (dir_jsonl memo), and each fork's title read ONCE (title memo).
+
+    `leaves`, when given, collects (path, judged in window) for each session's leaf transcript and each
+    listed fork lane: what discover()'s cache re-checks against a later cutoff (_discover_window_holds)."""
     out, seen = [], set()
+    note = leaves.append if leaves is not None else (lambda row: None)
     if not NAMES.is_dir():
         return out
     cutoff = now - (WINDOW if window is None else int(window))
@@ -9937,6 +9972,7 @@ def _discover_impl(now, window=None, forks=True):
                 mt = os.stat(path_str).st_mtime
             except OSError:
                 mt = 0
+            note((path_str, mt >= cutoff))
             if mt >= cutoff and path_str not in seen:
                 seen.add(path_str)
                 out.append((sid, Path(path_str), sid, name))
@@ -9963,12 +9999,14 @@ def _discover_impl(now, window=None, forks=True):
         if fork is not None:
             path_str, mt = fork
             _note_leaf(sid, path_str)                    # the leaf flipped here: the previous leaf's trees go
+            note((path_str, mt >= cutoff))
             if mt >= cutoff and path_str not in seen:
                 seen.add(path_str); out.append((sid, Path(path_str), sid, name))
         else:
             for stem, path_str, mt in listing:           # anchor (<sid>.jsonl) first — mirrors the old exists()/stat() block
                 if stem == sid:
                     _note_leaf(sid, path_str)
+                    note((path_str, mt >= cutoff))
                     if mt >= cutoff and path_str not in seen:
                         seen.add(path_str); out.append((sid, Path(path_str), sid, name))
                     break
@@ -9982,8 +10020,9 @@ def _discover_impl(now, window=None, forks=True):
             else:
                 t = _custom_title(path_str); title_memo[path_str] = t
             if t == name:
+                note((path_str, True))                   # a listed lane ages out like a leaf does
                 seen.add(path_str); out.append((stem, Path(path_str), sid, name))
-    out.extend(_codex_rows(cutoff, seen))   # Codex sessions join discovery (docs/codex.md)
+    out.extend(_codex_rows(cutoff, seen, leaves))   # Codex sessions join discovery (docs/codex.md)
     return out
 
 

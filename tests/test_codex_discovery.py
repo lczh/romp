@@ -90,6 +90,18 @@ class CodexDiscovery(unittest.TestCase):
         self.assertEqual(len([r for r in second if r[0] == sid2]), 1,
                          "new codex session invisible — fingerprint missed the registry change")
 
+    def test_an_idle_codex_session_reenters_when_its_transcript_is_touched(self):
+        # a Codex transcript grows in place like a Claude one: the registry is not rewritten, so the
+        # fingerprint holds still and the cached list must still let the session back in
+        p = self._mint(mtime=NOW - 3 * 24 * 3600)
+        jd._discover_cache.clear()
+        self.assertEqual([r for r in jd.discover(NOW) if r[0] == SID], [])
+        fp = jd._discover_fingerprint()
+        os.utime(p, (NOW, NOW))                                # a new turn lands in the transcript
+        self.assertEqual(jd._discover_fingerprint(), fp)
+        self.assertEqual(len([r for r in jd.discover(NOW) if r[0] == SID]), 1,
+                         "the touched Codex session is back in the list without a registry change")
+
     def test_missing_or_broken_registry_is_harmless(self):
         self.assertEqual(jd._codex_rows(0, set()), [])
         jd.CODEXDIR.mkdir(parents=True, exist_ok=True)

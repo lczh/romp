@@ -102,6 +102,24 @@ class DiscoverFollowsTheRecordedPath(unittest.TestCase):
         got = jd._discover_impl(int(anchor.stat().st_mtime) + 10, window=3600)
         self.assertEqual(str(got[0][1]), str(anchor), "a dead record never hides the launch-dir file")
 
+    def test_an_idle_recorded_session_reenters_when_its_transcript_is_touched(self):
+        """discover()'s cache re-checks each session's leaf against the call's cutoff: an append adds no
+        directory entry, so the fingerprint alone kept a session that woke from idle out of the list."""
+        self._reg(transcriptPath=str(self.moved))
+        now = int(self.moved.stat().st_mtime) + 7200           # idle two hours against a one-hour window
+        self.assertEqual(jd.discover(now, window=3600), [])
+        os.utime(self.moved, (now, now))                        # a new turn lands in the recorded transcript
+        self.assertEqual([str(r[1]) for r in jd.discover(now, window=3600)], [str(self.moved)])
+
+    def test_an_idle_cleared_session_reenters_when_its_new_transcript_is_touched(self):
+        fork = self.launch_proj / (FORK + ".jsonl")
+        fork.write_text(self.moved.read_text())
+        self._reg(lastSid=FORK)                                 # a /clear in the launch dir, no recorded path
+        now = int(fork.stat().st_mtime) + 7200
+        self.assertEqual(jd.discover(now, window=3600), [])
+        os.utime(fork, (now, now))
+        self.assertEqual([str(r[1]) for r in jd.discover(now, window=3600)], [str(fork)])
+
     def test_the_recorded_leaf_is_noted_and_a_clear_retires_the_previous_one(self):
         """One tree per session (2026-09-11): discover notes the leaf it hands out, and a flip drops the previous
         leaf's parse slots. The recorded-path branch skipped the note while both walk branches make it, and every
