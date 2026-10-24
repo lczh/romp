@@ -8,6 +8,7 @@
 #
 # What it removes, mirroring install.sh + bootstrap.sh step for step:
 #   - the login service           (romp-service uninstall: systemd --user / launchd)
+#   - this clone's postal bus     (a daemon of its own, which outlives the service)
 #   - ~/.claude/hooks/*.sh        (the romp hook symlinks only)
 #   - ~/.claude/settings.json     (ONLY the romp hook entries; your other hooks are untouched)
 #   - ~/.claude/skills/romp*      (skill symlinks)
@@ -73,6 +74,23 @@ fi
 # this uninstall has no business touching (it killed the live one during a test run, 2026-07-27).
 pkill -f "$ROMP_DIR/bin/romp-manager" 2>/dev/null || true
 pkill -f "$ROMP_DIR/bin/romp-kernel"  2>/dev/null || true
+
+# The postal bus too. It is a daemon of its own that the service's teardown does not reach: a bus a
+# terminal started (`romp refresh`) sits outside the service's cgroup on Linux, every bus runs in a
+# process group of its own (outside the one launchd stops on macOS), and once the kernel has listed
+# sessions the bus keeps itself up while the kernel is gone. Left running, it holds the serve token
+# it read at start, so after --purge and a reinstall it refuses every request under the new token
+# while still answering the liveness probe that would have replaced it.
+# Matched by this clone's path, in both spellings (the kernel starts it from the resolved path, a
+# terminal from the one on PATH), and by the `serve` verb only: a session's `romp-postal-service mcp`
+# belongs to that session, not to romp's daemons.
+_bus_pats=()
+for _d in "$ROMP_DIR" "$(cd "$ROMP_DIR" && pwd -P)"; do
+    _bus_pats+=("$_d/bin/romp-postal-service serve" "$_d/postal/postal_service.py serve")
+done
+_bus_up() { local p; for p in "${_bus_pats[@]}"; do pgrep -f "$p" >/dev/null 2>&1 && return 0; done; return 1; }
+for _p in "${_bus_pats[@]}"; do pkill -f "$_p" 2>/dev/null || true; done
+for _ in $(seq 50); do _bus_up || break; sleep 0.1; done   # ~5 s to exit and free the port for a reinstall
 
 # ── 2. ~/.claude wiring ────────────────────────────────────────────────
 echo "==> ~/.claude hook + skill symlinks"
