@@ -111,6 +111,7 @@ class AwaitingLift(unittest.TestCase):
         km._mark_views_dirty = lambda *a, **k: None
         km._SESSION_STAMP_CACHE.clear()
         km._lift_seen.clear()          # stores are re-seeded in place under recycled tempdir inodes
+        km._lift_empty.clear()         # (the empty-store memo keys on the same identities)
         km._bgall_cache.clear()
         km._bgtasks_cache.clear()
         _clear_placement_memos()
@@ -120,7 +121,7 @@ class AwaitingLift(unittest.TestCase):
         for k, v in self.saved.items():
             setattr(km, k, v)
         km.jd.STATE, km.jd.GOALDIR = self.saved_jd
-        km._SESSION_STAMP_CACHE.clear(); km._lift_seen.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
+        km._SESSION_STAMP_CACHE.clear(); km._lift_seen.clear(); km._lift_empty.clear(); km._bgall_cache.clear(); km._bgtasks_cache.clear()
         _clear_placement_memos()
         self.td.cleanup()
 

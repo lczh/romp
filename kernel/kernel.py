@@ -15932,7 +15932,8 @@ def _sid_inputs_fp(sid, path, extra=()):
 
 
 _lift_seen = {}   # sid -> the inputs fingerprint the awaiting lift last ruled on — see _lift_spent_awaiting
-_lift_gate_stats = {"skip": 0, "load": 0, "shared": 0, "writer": 0, "noop": 0}   # /perf memos.liftGate, see _lift_gate_report
+_lift_empty = {}  # sid -> the goal store's identity (_lift_store_ident) when the lift last read it and found nothing to rule on
+_lift_gate_stats = {"skip": 0, "load": 0, "shared": 0, "writer": 0, "noop": 0, "empty": 0}   # /perf memos.liftGate, see _lift_gate_report
 
 
 def _lift_gate_report():
@@ -15942,10 +15943,32 @@ def _lift_gate_report():
     off), `writer` the phase-2 writer loads: one per session-tick that loaded the writer's copy because a
     lift was due (a tick filing two lifts on one session counts once; the `noop` ones count too), `noop`
     the writer loads whose fresh decision filed nothing (the store moved between the probe and the load),
-    `entries` sids remembered."""
+    `empty` the skips a store with nothing to rule on settled before the dispatch scan (_lift_empty; counted
+    under `skip` too), `entries` sids remembered."""
     out = dict(_lift_gate_stats)
     out["entries"] = len(_lift_seen)
     return out
+
+
+def _lift_store_ident(sid):
+    """The identity of the files the lift's view of a session's goals is built from, the three the shared loader keys
+    (jd.load_goals_shared: the store, its override journal and the goals archive), each (inode, mtime_ns, size), None for
+    an absent file; None for the whole when one cannot be stat'd or is not a regular file, so nothing is ever served from
+    it. Every writer of the three moves it: the store publishes by rename (a new inode), the journal appends, the archive
+    is rewritten."""
+    out = []
+    for p in (jd.GOALDIR / (str(sid) + ".json"), jd._overrides_dir() / (str(sid) + ".jsonl"), jd.GOALARCHDIR / (str(sid) + ".json")):
+        try:
+            st = os.stat(str(p))
+        except FileNotFoundError:
+            out.append(None)
+            continue
+        except OSError:
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            return None
+        out.append((st.st_ino, st.st_mtime_ns, st.st_size))
+    return tuple(out)
 
 
 def _lift_spent_awaiting(now, live_map):
@@ -16001,6 +16024,17 @@ def _lift_spent_awaiting(now, live_map):
         try:
             if live_map.get(sid) is None:                 # dormant → its tasks died with the CLI, don't rule
                 continue
+            # A store with nothing to rule on (no live stamp, no rolled-up one awaiting its lift row) decides nothing,
+            # whatever the transcript, the live sets and the clock say: _lift_decisions returns before it reads any of
+            # them. So while the store stands as it was when a read found it empty, the session is settled before the
+            # dispatch scan, which copies every task the transcript ever launched on every pass (2026-10-25: the lift's
+            # pass cost was its quiet sessions' scans). The identity is stat-ed BEFORE any read, as the fingerprint is:
+            # a write landing under the read leaves an entry no later stat can match (_lift_store_ident).
+            ident = _lift_store_ident(sid)
+            if ident is not None and _lift_empty.get(sid) == ident:
+                _lift_gate_stats["skip"] += 1
+                _lift_gate_stats["empty"] += 1
+                continue
             # Every fact this lift rules on is recorded somewhere that stats: the goal store and its
             # override journal (the stamps), the transcript (the returns), the postal log (a peer's
             # reply), the SDK reg (the CLI epoch) and the backend's live task set. Unchanged since the
@@ -16046,8 +16080,13 @@ def _lift_spent_awaiting(now, live_map):
             if isinstance(store, jd.FrozenStore):
                 _lift_gate_stats["shared"] += 1
             if not _lift_decisions(sid, s, store, now, live_map):
+                if ident is not None and not store.get("_unread") and not any(_lift_candidates(store)):
+                    _lift_empty[sid] = ident          # nothing to rule on in the store this ident names: settled until it moves
+                else:
+                    _lift_empty.pop(sid, None)
                 continue                              # nothing due (no candidate, or the common stamped case:
                 #                                       the dispatch still out): no writer load
+            _lift_empty.pop(sid, None)
             # PHASE 2, the write: a fresh private copy, decided on again, and only its own decisions filed.
             # The same boundary: a fault between the probe and this load forgets the gate and retries, and
             # so does a copy that loaded without its journal (the mark, as on the probe above).
@@ -16087,9 +16126,12 @@ def _lift_spent_awaiting(now, live_map):
             _mark_views_dirty()
         except Exception:
             _lift_seen.pop(sid, None)                 # a raised ruling is not a ruling — re-run next cycle
+            _lift_empty.pop(sid, None)
             sys.stderr.write("awaiting-lift (session %s): %s\n" % (sid or "?", traceback.format_exc()))
     for sid in [k for k in _lift_seen if k not in seen]:
         del _lift_seen[sid]                           # the sid left the alive set: nothing to gate
+    for sid in [k for k in _lift_empty if k not in seen]:
+        del _lift_empty[sid]
     for cache in (_BG_TOPS_CACHE, _PLACEMENT_IDX):    # ...and nothing to place for: release the pinned parse
         for sid in list(cache):                       # list(): the handler threads fill these concurrently
             if sid not in seen:
@@ -17689,6 +17731,30 @@ def _nudge_look_gated(fn):
     return gated
 
 
+def _awaiting_settled_by_row(sid, path, row):
+    """True when the session's live row alone settles the look's awaiting gate: _session_awaiting(sid, path, True) would be
+    truthy, so the look answers "awaiting-dispatch" without assembling the awaited rows it only tests for being there. That
+    assembly (_awaiting_live_rows) reads the subagents sidecar map for an agent task with no agent id, which samples the
+    session's whole subagents tree (one lstat per directory), and nests the rows, which reads each live agent's own file;
+    the verdict is unbounded, so a session waiting on its agents is looked at on every jobs pass, and it paid that every
+    pass (2026-10-25: on a box with many sessions waiting on agents, most of the walk's time). Two sources settle it, read
+    as the assembly reads them:
+      - a live subagent in the row's hook set (a dict entry of `subagents`): it is an agent row, and the nesting never
+        empties the top level (an owner chain ends at an agent nothing owns, and a loop is left flat);
+      - a pending task in the row's lifecycle set (_bg_live_norm, then _bg_pending, both as the assembly calls them): a
+        pending agent task is an agent row of its own or joins a hook row, a pending command is a command row.
+    Anything else (no row, a row with neither, every task placed, a watch, the states overlay) is not settled here and the
+    look asks _session_awaiting as before, so this answers True only where that call would have. `row` is the pass's live
+    row for the session, the one _session_awaiting reads inside the pass (the pass's liveness snapshot)."""
+    row = row or {}
+    if any(isinstance(sub, dict) for sub in row.get("subagents") or ()):
+        return True
+    if row.get("bgTasks"):
+        tasks = _bg_live_norm(sid, path)
+        return bool(tasks) and bool(_bg_pending(sid, path, tasks))
+    return False
+
+
 def _debt_leg_open(fired, wake_only, reminders=None):
     """Whether a session's look reaches the DEBT REMINDER leg: nothing fired above it, and the reminders are on. The
     reminders ride the nudge toggle alone (`reminders`, the toggle's value, handed down by the pass): they need no judge,
@@ -17785,8 +17851,10 @@ def _auto_nudge_session(s, now, live_map, nudged, waitfor, alive_ids=None, wake_
         # finished its turn at 20:13:18 but its state log was stuck at 'working' 20:12:20, so its working card
         # never got nudged). Two real-event timestamps, not a time window.
         return "progressing"
-    if _session_awaiting(sid, s["path"], True):      # AWAITING dispatched AGENT work (subagents / SDK overlay) →
-        return "awaiting-dispatch"                                # in flight, not stalled (the user 2026-06-22); idle is True here
+    if _awaiting_settled_by_row(sid, s["path"], live_map.get(sid)) or _session_awaiting(sid, s["path"], True):
+        return "awaiting-dispatch"                   # AWAITING dispatched AGENT work (subagents / SDK overlay) → in flight, not
+        #                                              stalled (the user 2026-06-22); idle is True here. The live row settles it
+        #                                              first when it can, without assembling the rows (_awaiting_settled_by_row)
     if getattr(_NUDGE_HORIZON, "tracking", None) is False:
         # THE UNTRACKED ROAD (the Task tracking switch off, read once by the pass): every gate and leg below this line waits on
         # the judges or acts on what they filed. The closer never settles a turn that ended after the flip and the planner
