@@ -803,24 +803,35 @@ class PerCycleStoreReadersAreCached(_StateSandbox):
         sid = self.SID
         jd.GOALDIR.mkdir(parents=True, exist_ok=True)
         gpath = jd.GOALDIR / (sid + ".json")
-        gpath.write_text(json.dumps({"rompUuid": sid, "seq": 0, "nodes": {}, "placements": {}, "status": {}}))
+
+        def store_text(seq, **extra):
+            """One top waiting on a peer, minted after every dispatch below, so nothing is due: a stamp the lift rules on. A store
+            with nothing to rule on is settled before these inputs are read (_lift_empty), which is not what this test reads."""
+            gid, why = sid + ":g1", "waiting on the web session's answer"
+            nd = {"id": gid, "text": "a goal", "parentId": None, "nodeComplete": False, "blocked": False, "cleared": False,
+                  "trail": [], "t": NOW + 1000, "mt": NOW + 1000, "awaitingWhy": why, "awaitingAt": NOW + 1000, "awaitingKind": "peer",
+                  "log": [{"ev_t": NOW + 1000, "src": "closer", "kind": "awaiting", "why": why, "at": NOW + 1000}]}
+            return json.dumps(dict({"rompUuid": sid, "seq": seq, "nodes": {gid: nd}, "placements": {}, "status": {}}, **extra))
+        gpath.write_text(store_text(0))
+        tpath = gpath.with_suffix(".jsonl")                # the session's transcript: empty (the scan below stands in for its pairing)
+        tpath.write_text("")
         loads = []                                         # the tick's store reads: the shared-view probe
         real = jd.load_goals_shared
         jd.load_goals_shared = lambda fsid: (loads.append(fsid), real(fsid))[1]
         saved_alive = km._alive_sessions
-        km._alive_sessions = lambda now, live_map: [{"sid": sid, "path": str(gpath)}]
+        km._alive_sessions = lambda now, live_map: [{"sid": sid, "path": str(tpath)}]
         live = {sid: {"state": "waiting", "bgTasks": []}}
         scan = []                                          # what the transcript pairs: a running watcher
         saved_scan = km._bg_scan_all_cached
         km._bg_scan_all_cached = lambda path: list(scan)
         try:
-            km._lift_seen.pop(sid, None)
+            km._lift_seen.pop(sid, None); km._lift_empty.pop(sid, None)
             km._lift_spent_awaiting(NOW, live)
             km._lift_spent_awaiting(NOW + 1, live)
             km._lift_spent_awaiting(NOW + 2, live)
             self.assertEqual(loads, [sid], "one read while nothing recorded moved")
             tmp = gpath.with_suffix(".tmp")                  # published the way save_goals publishes: tmp + replace
-            tmp.write_text(json.dumps({"rompUuid": sid, "seq": 1, "nodes": {}, "placements": {}, "status": {}, "note": "longer"}))
+            tmp.write_text(store_text(1, note="longer"))
             os.replace(tmp, gpath)
             km._lift_spent_awaiting(NOW + 3, live)
             self.assertEqual(len(loads), 2, "a store write is re-examined")
@@ -849,8 +860,10 @@ class PerCycleStoreReadersAreCached(_StateSandbox):
             self.assertEqual(len(loads), 8, "a raised ruling is retried, not skipped")
         finally:
             jd.load_goals_shared = real; km._alive_sessions = saved_alive; km._bg_scan_all_cached = saved_scan; km._lift_seen.pop(sid, None)
-            try: os.unlink(gpath)
-            except OSError: pass
+            km._lift_empty.pop(sid, None)
+            for p in (gpath, tpath):
+                try: os.unlink(p)
+                except OSError: pass
 
 
 if __name__ == "__main__":

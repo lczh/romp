@@ -47,6 +47,17 @@ def _delta(now, before):
     return {k: n - before.get(k, 0) for k, n in now.items() if n != before.get(k, 0)}
 
 
+def _stamped_store_text(sid):
+    """A goal store with one stamped top (a wait on a peer, nothing of the session's own dispatched): the lift has a stamp to
+    rule on and finds nothing due, so it takes its dispatch scan and fingerprint on every pass. An EMPTY store is settled
+    before the scan while it stands (_lift_empty), and the races on the lift's road are planted from inside that scan."""
+    gid = sid + ":g1"
+    return json.dumps({"rompUuid": sid, "seq": 1, "placements": {}, "status": {}, "rev": 1, "nodes": {gid: {
+        "id": gid, "text": "ship the notes-api fix", "parentId": None, "nodeComplete": False, "blocked": False, "cleared": False,
+        "trail": [], "t": T0 - 600, "mt": T0 - 600, "awaitingWhy": "waiting on the web session's answer", "awaitingAt": T0 - 300,
+        "log": [{"ev_t": T0 - 300, "src": "closer", "kind": "awaiting", "why": "waiting on the web session's answer", "at": T0 - 300}]}}})
+
+
 def _iso(t):
     return datetime.fromtimestamp(t, timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -294,7 +305,7 @@ class _GateLab(unittest.TestCase):
 
     LIST_SLOTS = ("_prev_live_sids", "_TICK_SEEN_DIRTY", "_INTR_MARKS_DISK_DIRTY", "_NUDGE_WALK_CURSOR", "_auto_nudge_paused",
                   "_usage_poll_last", "_retry_upgrade_last", "_BOOT_HEALTH_DONE", "_JOBS_GATE_MODE")
-    CONTAINERS = ("_lift_seen", "_SPEND_CAN_PREV", "_SPEND_GUARD", "_SPEND_TREE_CACHE", "_held_working", "_auto_nudge_drops_pending",
+    CONTAINERS = ("_lift_seen", "_lift_empty", "_SPEND_CAN_PREV", "_SPEND_GUARD", "_SPEND_TREE_CACHE", "_held_working", "_auto_nudge_drops_pending",
                   "_FILES_STAT_STANDING", "_compact_clicked", "_auto_retried", "_auto_retry_state", "_RELAY_QUIET", "_RELAY_SAID",
                   "_interrupt_clicked", "_CKPT_SETTLE_SEEN", "_CKPT_PERIODIC_SEEN")
 
@@ -1131,7 +1142,7 @@ class Detector(_GateLab):
         self.add_session()
         jd.GOALDIR.mkdir(parents=True, exist_ok=True)
         store = jd.GOALDIR / (SID + ".json")
-        store.write_text(json.dumps({"nodes": {}, "rev": 1}))
+        store.write_text(_stamped_store_text(SID))   # a stamp to rule on: the lift scans every pass
         real_scan = km._bg_scan_all_cached
         armed = [None]
 
@@ -1961,7 +1972,7 @@ class CallSites(_GateLab):
         self._two()
         jd.GOALDIR.mkdir(parents=True, exist_ok=True)
         store = jd.GOALDIR / (SID + ".json")
-        store.write_text(json.dumps({"nodes": {}, "rev": 1}))
+        store.write_text(_stamped_store_text(SID))   # a stamp to rule on: the lift scans every pass
         real_scan = km._bg_scan_all_cached
         armed = [None]
 
