@@ -553,6 +553,8 @@ class QuietPushWork(_World):
                 setattr(km, name, v)
         return calls
 
+    @mock.patch.object(km, "_TREE_WATCH_ON", False)   # the lstat validation's costs: the watch certificate's road is
+    #                                                     tests/test_feed_subagents_cycle_work.py's (the root's lstat alone)
     def test_a_quiet_push_stats_no_tree_directory_for_its_own_tab_and_each_subagents_root_once(self):
         before = self.settle()
         self.push()                                           # a quiet push after the one that took the keys
@@ -604,6 +606,8 @@ class QuietPushWork(_World):
                          "the served repo listing: once per directory, for six tabs with an unresolved mention")
         self.assertEqual(be.reads, 1, "the fork table: once per push")
 
+    @mock.patch.object(km, "_TREE_WATCH_ON", False)   # the lstat validation's costs: the watch certificate's road is
+    #                                                     tests/test_feed_subagents_cycle_work.py's (the root's lstat alone)
     def test_a_quiet_tab_takes_no_identity_of_its_directories_beyond_the_samples_validation(self):
         self.settle()
         self.push()

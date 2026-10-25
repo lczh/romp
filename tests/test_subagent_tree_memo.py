@@ -392,12 +392,16 @@ class Ownership(_Tree):
 
 
 class Reported(_Tree):
+    # the counts below are the lstat validation's; on Linux a tree standing on its watch certificate is served with the
+    # root's lstat alone (tests/test_feed_subagents_cycle_work.py pins that road), so this test runs without the watches
+    @mock.patch.object(km, "_TREE_WATCH_ON", False)
     def test_the_perf_block_reports_hits_and_misses(self):
         base = dict(km._SUBAGENT_TREE_STATS)
         km._subagent_dirs(str(self.subdir))                         # a miss: the walk
         km._subagent_dirs(str(self.subdir))                         # a hit: one lstat per known directory
         rep = km._PERF_STATS.snapshot()["memos"]["subagentTree"]
-        self.assertEqual(set(rep), {"hit", "miss", "scoped", "evict", "dirStats", "walkMs", "validateMs", "roots", "dirs"})
+        self.assertEqual(set(rep), {"hit", "miss", "scoped", "evict", "dirStats", "walkMs", "validateMs", "roots", "dirs",
+                                    "watched", "watches", "watchCerts", "watchEvents", "watchOverflow", "watchFail"})
         self.assertEqual((rep["miss"] - base["miss"], rep["hit"] - base["hit"]), (1, 1))
         self.assertGreaterEqual(rep["dirStats"] - base["dirStats"], 2, "the hit paid a stat per directory beyond the root")
         self.assertGreaterEqual(rep["roots"], 1)
