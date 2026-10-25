@@ -209,22 +209,28 @@ class Coverage(Restored):
         self.assertEqual(modes, ["full"]); self.assertGreaterEqual(em.asm_checkpoint_stats()["fallbacks"].get("coverage", 0), 1)
         self.assertEqual(T._strip(got), T._strip(whole))
 
-    def test_a_synthesized_atom_leading_the_first_turn_is_in_the_section(self):
-        """An idle span from before the first record leads the first turn (a non-opener opens the turn the prompt then
-        absorbs into); its row is a synthesized one and the section covers it like a record's."""
+    def test_a_synthesized_atom_in_a_pre_cut_turn_is_in_the_section(self):
+        """An idle span inside the pre-cut part (the stop after the scenario's last record, before the compaction) is an
+        atom of that turn with no record; its row is a synthesized one and the section covers it like a record's. (Until
+        2026-10-25 the fixture's span came from before the first record and led the first turn; synthesize_idle keeps no
+        such span now.)"""
         name = "queued_new_turn"
         records, sent = G.SINGLE_FILE[name]
-        recs = T.compacting_variant(records(), "idl")
-        t0 = min(em.parse_z(r["timestamp"]) for r in recs if r.get("timestamp"))
-        path = self.write("cov-idle", recs, states=[{"t": int(t0) - 100, "state": "waiting"}, {"t": int(t0) + 5, "state": "working"}], sent=sent)
+        own = records()
+        t_last = max(em.parse_z(r["timestamp"]) for r in own if r.get("timestamp"))
+        recs = T.compacting_variant(own, "idl")
+        path = self.write("cov-idle", recs, states=[{"t": int(t_last) + 5, "state": "waiting"}, {"t": int(t_last) + 300, "state": "working"}], sent=sent)
         whole = self.cold(path)
-        self.assertEqual(whole["turns"][0]["atoms"][0]["type"], "idle", "the idle span leads the whole parse's first turn")
+        idle_turns = [i for i, t in enumerate(whole["turns"]) if any(a["type"] == "idle" for a in t["atoms"])]
+        self.assertEqual(len(idle_turns), 1, "the stop is an idle atom of one turn of the whole parse")
         self.fresh(); self.parse(path)
         self.assertTrue(self.doc(path), em.asm_checkpoint_stats())
         d = T._doc(path)
-        self.assertIsNotNone(d["turns"]); self.assertIsNone(d["turns"][0]["uuids"][0], "the idle atom's row leads the section's first turn")
-        row = json.loads(d["atoms"][d["turns"][0]["atoms"][0]])                     # v6: the rows are JSON strings
-        self.assertEqual((row.get("syn"), "m" in row, row["s"]["type"]), (1, False, "idle"), "…as a synthesized row (an idle span has no message)")
+        self.assertIsNotNone(d["turns"])
+        syn = [(ti, json.loads(d["atoms"][k])) for ti, td in enumerate(d["turns"]) for u, k in zip(td["uuids"], td["atoms"]) if u is None]
+        syn = [(ti, row) for ti, row in syn if row.get("syn")]                    # v6: the rows are JSON strings
+        self.assertEqual([(ti, row["s"]["type"], "m" in row) for ti, row in syn], [(idle_turns[0], "idle", False)],
+                         "the idle atom's row is in its turn's section, as a synthesized row (an idle span has no message)")
         got, modes, n_lazy = self.restored(path)
         self.assertEqual(modes, ["restore"]); self.assertEqual(got, whole)
 
@@ -233,9 +239,10 @@ class Coverage(Restored):
         rows than its identity counted and every fresh process fell back whole under 'identity' for good."""
         recs = transcript(T.NOW - 86400, turns=40, compact_every=20)
         t0 = min(em.parse_z(r["timestamp"]) for r in recs if r.get("timestamp"))
-        path = self.write("cov-leak", recs, states=[{"t": int(t0) - 100, "state": "waiting"}, {"t": int(t0) + 5, "state": "working"}])
+        # the stop after the first reply (t0 + 20) until the second prompt (t0 + 60): an idle atom at the first turn's tail
+        path = self.write("cov-leak", recs, states=[{"t": int(t0) + 20, "state": "waiting"}, {"t": int(t0) + 60, "state": "working"}])
         whole = self.cold(path)
-        self.assertEqual(whole["turns"][0]["atoms"][0]["type"], "idle", "an idle span leads: a synthesized row the walk appends")
+        self.assertEqual(whole["turns"][0]["atoms"][-1]["type"], "idle", "an idle span ends the first turn: a synthesized row the walk appends")
         self.fresh(); full = self.parse(path)
         em._ASM_CKPT_STATS["skipped"] = {}
         self.assertTrue(em.asm_checkpoint_write(path, SID, tree={**full, "turns": full["turns"][:1]}))   # a short tree: refused
@@ -509,8 +516,10 @@ class ScalarWalkers(Restored):
                                                                 em._prose_chars, em.atom_prose_chars, em.postal_mids, em._encoded_mids,
                                                                 em.is_interrupt_record, em._content, em._text_of, em._lazy_of, em.atom_mids,
                                                                 em._machine_written)) + "\n" + em.POSTAL_RE.pattern
-        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (10, "56888f276a"),  # v10: a stop closes the restore
-        #                                                                                      window, the work rule did not change (v9
+        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (11, "56888f276a"),  # v11: a stop before the first
+        #                                                                                      atom makes no idle atom, the work rule did
+        #                                                                                      not change (v10 likewise: a stop closes the
+        #                                                                                      restore window; v9
         #                                                                                      likewise: a failed command's stderr became
         #                                                                                      its output atom; v8: the batch keep moved the
         #                                                                                      stored verdicts; v7, stage one b: the cut

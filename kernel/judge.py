@@ -516,7 +516,14 @@ JUDGE_FAIL_CAP = 3                       # the same rule for every other retryin
 #                                          consolidator / courier; the
 #                                          planner (PLAN_PARSE_RETRIES) and distiller/briefer (DISTILL_FAIL_CAP)
 #                                          already had their own.
-PLACEMENTS_V = 16                        # placements-identity schema version (plan P2, the user 2026-07-06).
+PLACEMENTS_V = 17                        # placements-identity schema version (plan P2, the user 2026-07-06).
+#                                          v17 (2026-10-25): a stop recorded before the parse's first atom makes no idle
+#                                          atom (em.synthesize_idle). The SDK backend's create-time "waiting" row led a new
+#                                          session's first turn whenever the first prompt's "working" row fell in the prompt
+#                                          record's whole second: the turn carried no trigger and started at the create
+#                                          time, and so did its first segment, whose id holds that t. It now starts at the
+#                                          prompt; so does the first turn after a /clear, which started at the previous
+#                                          conversation's last stop. v12's shape, a MOVED t. Same seal.
 #                                          v16 (2026-10-22): the CLI's stop record closes the restore window after an
 #                                          automatic compaction (em.FileAdapter._prepass). A stop pressed before the model's
 #                                          first record left the window open, so the stop and the person's next prompt were
@@ -4241,7 +4248,8 @@ def tasks_for(fsid, leaf, files, now, done=None):
     cf = PCACHE / (fsid + ".json")
     try:
         o = json.loads(cf.read_text())
-        if o.get("key") == key and o.get("capKey") == cap_key and o.get("v") == 11:   # v11 = a repeated prompt after a stop in the restore window parses out, so it opens a segment (2026-10-22; with PLACEMENTS_V 16);
+        if o.get("key") == key and o.get("capKey") == cap_key and o.get("v") == 12:   # v12 = a stop before the parse's first atom no longer leads the first turn, so its segment starts at the prompt (2026-10-25; with PLACEMENTS_V 17);
+            #                                             v11 = a repeated prompt after a stop in the restore window parses out, so it opens a segment (2026-10-22; with PLACEMENTS_V 16);
             #                                             v10 = a parallel tool batch's results parse out, so the segments holding one grow (2026-09-23; with PLACEMENTS_V 15);
             #                                             v8 = the harness skill-load wrapper no longer emits a command atom, so the prompt segment grows (T333, 2026-09-11; with PLACEMENTS_V 14);
             #                                             v7 = machine-written triggers key their segment on the anchor uuid, so those seg ids moved (T318, 2026-09-10; with PLACEMENTS_V 13);
@@ -4267,7 +4275,7 @@ def tasks_for(fsid, leaf, files, now, done=None):
     try:
         PCACHE.mkdir(parents=True, exist_ok=True)
         tmp = cf.with_suffix(".tmp.%d" % os.getpid())
-        tmp.write_text(json.dumps({"key": key, "capKey": cap_key, "v": 11, "tasks": tasks}))
+        tmp.write_text(json.dumps({"key": key, "capKey": cap_key, "v": 12, "tasks": tasks}))
         tmp.rename(cf)
     except Exception:
         pass
