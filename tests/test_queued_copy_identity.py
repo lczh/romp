@@ -538,6 +538,24 @@ class IdentitySurvivesTheKernelsDeath(unittest.TestCase):
         landed = [e for e in m["events"] if e.get("kind") == "user" and e.get("uuid") == "u3"]
         self.assertEqual([e.get("qid") for e in landed], [qid], "the landing pairs with the same id in the new life")
 
+    def test_a_restored_copy_is_cancelled_by_its_id_before_the_session_starts_again(self):
+        # the kernel boots and the session waits for its start (a boot slot, a usage limit): no session object, the
+        # copy and its echo on the mirrors alone. The cancel used to answer 'too late, it already reached the
+        # session', leave the copy queued, and the start then delivered it.
+        self.assertTrue(self.w.be.send(SID, "rename it"))
+        [qid] = [m["qid"] for m in self.w.be.pending_queued_meta(SID)]
+        self.w._park.set()
+        self.w.be.sessions.pop(SID, None)
+        be2 = sb.SdkBackend(self.w.be.state_dir, "/bin/true", lambda *a, **k: None)
+        self.assertNotIn(SID, be2.sessions)
+        self.assertEqual([m["qid"] for m in be2.pending_queued_meta(SID)], [qid])
+        self.assertTrue(km._queue_recallable(be2, SID), "the restored copy's bubble offers the cancel")
+        self.assertIsNone(km._cancel_backend_queued(be2, SID, 0, "rename it", qid=qid), "a won cancel, not 'too late'")
+        self.assertEqual(be2.pending_queued(SID), [])
+        self.assertEqual([a for a in be2.live_atoms(SID) if a.get("_echo_text")], [], "its reseeded echo went with it")
+        self.assertEqual(sb.SdkSession(be2, dict(sb.read_reg(be2.state_dir, SID))).pending(), [],
+                         "the next start delivers nothing")
+
     def test_a_fed_copy_the_dead_cli_was_holding_is_re_delivered_under_its_own_id(self):
         self.assertTrue(self.w.be.send(SID, "go on"))
         [qid] = [m["qid"] for m in self.w.be.pending_queued_meta(SID)]

@@ -19294,12 +19294,18 @@ class SdkBackend:
         though it wasn't (the user 2026-06-27). The echo is keyed by the copy's id (send() mints one key
         for both), so a cancel by id drops the cancelled copy's own echo and no other: an echo already gone
         (retired ahead of its copy) leaves the text match unrun, since by text the first echo wearing the
-        words may be another same-text copy's, and that copy then read as never sent."""
+        words may be another same-text copy's, and that copy then read as never sent.
+
+        A session with NO running object (its CLI never came up past a usage limit, a kernel restart before its boot
+        slot, a message queued behind a stand-down) still holds its queue in the registry mirror: pending_queued shows
+        it, queue_recallable offers the cancel, and the next start seeds from it. The cancel removes the entry there
+        (_unqueue_mirror). Answering None for it told the user the message had reached the session, and the next
+        start then delivered the message they had withdrawn."""
         with self._lock:
             s = self.sessions.get(sid)
-        if not s:
-            return None
-        text = s.unqueue(idx, expect, qid=qid)
+            text = None if s else self._unqueue_mirror(sid, idx, expect, qid)   # under _lock: no start seeds the old queue
+        if s:
+            text = s.unqueue(idx, expect, qid=qid)
         if text is not None:
             with self._live_lock:                          # find + pop + the sid-level pop, one step
                 live = self._live.get(sid) or {}
@@ -19319,6 +19325,33 @@ class SdkBackend:
             self._wake_push()                              # repaint without the echo so it stops reading as sent
             text = self._rearm_fork_opener(sid, text)      # a fork's first message pulled back: its opening line re-arms
         return text
+
+    def _unqueue_mirror(self, sid: str, idx: int, expect: str | None = None, qid: str | None = None) -> str | None:
+        """unqueue for a session with no running object: SdkSession.unqueue's locate (the id wins; else the index,
+        re-verified against `expect` and re-located by text when it shifted) over the registry mirror, the queue the
+        next start seeds from. The caller holds self._lock and this takes _reg_lock, _ensure's order, so no start reads
+        the mirror between this read and its write, and an automatic message appended meanwhile (under _reg_lock) is
+        kept. queueMeta is rewritten for every position, as _persist_queue writes it. Returns the removed text, or None
+        when there is no registry or no such entry."""
+        with self._reg_lock:
+            reg = read_reg(self.state_dir, sid)
+            if not reg:
+                return None
+            texts = [t for t in (reg.get("queue") or []) if isinstance(t, str) and t]
+            metas = queue_meta_from_reg(reg)
+            if qid:
+                idx = next((i for i, m in enumerate(metas) if isinstance(m, dict) and m.get("qid") == qid), -1)
+            elif expect is not None and not (0 <= idx < len(texts) and texts[idx] == expect):
+                idx = next((i for i, t in enumerate(texts) if t == expect), -1)
+            if not 0 <= idx < len(texts):
+                return None
+            item = texts.pop(idx)
+            metas.pop(idx)
+            reg["queue"] = texts
+            reg["queueMeta"] = [{"text": t, "qid": m["qid"], "qts": m.get("qts"), **({"paths": m["paths"]} if m.get("paths") else {})}
+                                if isinstance(m, dict) and m.get("qid") else {"text": t} for t, m in zip(texts, metas)]
+            write_reg(self.state_dir, sid, reg)
+        return item
 
     def queue_recallable(self, sid: str) -> bool:
         """Can a ✕ on this session's queued bubble still win? False while a turn is running UN-HELD:
