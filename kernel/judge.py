@@ -5647,8 +5647,17 @@ def _rebase_onto_disk(fsid, store):
         m_nodes.pop(nid)
         store.get("status", {}).pop(nid, None)
 
-    def _fold_log(dead, surv):
+    def _fold_log(dead_id, dead, surv):
+        # Only the rows the merge never saw fold. The holder's base copy of the dead node is its diary as
+        # this holder loaded it: for the merger, the diary its merge dropped on purpose (_merge_nodes: the
+        # survivor's own evidence stands); for a stale pre-merge writer, rows that were on disk before the
+        # merge published, so the merge saw them too. Folding those handed the survivor its dropped twin's
+        # block or done whenever an unrelated writer published during the hold. With no base, every row
+        # the survivor lacks folds, as before.
         seen = {(e.get("ev_t"), e.get("src"), e.get("kind")) for e in (surv.get("log") or [])}
+        bdead = base_nodes.get(dead_id) if base_nodes else None
+        if isinstance(bdead, dict):
+            seen |= {(e.get("ev_t"), e.get("src"), e.get("kind")) for e in (bdead.get("log") or [])}
         add = [e for e in (dead.get("log") or [])
                if (e.get("ev_t"), e.get("src"), e.get("kind")) not in seen]
         if add:
@@ -5660,7 +5669,7 @@ def _rebase_onto_disk(fsid, store):
         dead = m_nodes.pop(nid)
         surv = m_nodes.get(tomb[nid]) or d_nodes.get(tomb[nid])
         if surv is not None:
-            _fold_log(dead, surv)
+            _fold_log(nid, dead, surv)
         store.get("status", {}).pop(nid, None)
     for nid, dnd in d_nodes.items():
         if nid in eff:                               # rewind-swept (and not since restored) → never re-adopted
@@ -5670,7 +5679,7 @@ def _rebase_onto_disk(fsid, store):
             if nid in tomb:                          # deleted by a merge, not minted by the other writer
                 surv = m_nodes.get(tomb[nid])
                 if surv is not None:
-                    _fold_log(dnd, surv)
+                    _fold_log(nid, dnd, surv)
                 continue
             m_nodes[nid] = dnd                       # a node the OTHER writer minted → adopt it wholesale
             continue
