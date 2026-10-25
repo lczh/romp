@@ -363,6 +363,15 @@ function dropUrlRead(): void {
   }
 }
 
+// The open modal viewer's document keydown handler (a file's or a URL's), unbound by every exit: closeFileView and both
+// replace paths. A close by the mouse (the close button, the backdrop, '‹ Files', the pop-out) sees no keydown, so a
+// handler that unbound itself only on its own Escape outlived its viewer, and the next viewer's Escape ran it first: it
+// closed that viewer from under an edit, or asked twice about its unsaved changes (file-browse.ts unbinds the same way).
+let modalKey: ((e: KeyboardEvent) => void) | null = null;
+function dropModalKey(): void {
+  if (modalKey) { document.removeEventListener("keydown", modalKey); modalKey = null; }
+}
+
 // ── whose registrations: the modal's, or a file tab's (the user 2026-09-30) ─────────────────────────────────────────
 // A file opened as a TAB of the chat strip (file-tabs.ts; mountFileTabView below) is this same viewer, built by the same
 // code, mounted in the chat pane instead of over it. A link inside that file opens the modal OVER the tab, so the two can
@@ -521,6 +530,7 @@ export function closeFileView(): void {
   dropUrlRead();                                       // …and a URL view's in-flight read is cancelled
   dropWidthWatch();                                    // …and the body's width watch (watchBodyWidth)
   if (zoomOpen) { zoomOpen.close(); zoomOpen = null; }   // the text-size flyout's reference leaves with the viewer (review: a keyboard close kept it, and the next viewer's first Escape was swallowed)
+  dropModalKey();                                      // …and its Escape handler, whichever way it closed
   wrap.remove();
   document.body.classList.remove("fileview-open");
 }
@@ -557,6 +567,7 @@ export function openFileView(path: string, sid?: string | null, opts?: { line?: 
   closeGuard = null;
   editHooks = null;
   gitHooks = null;                                     // the replace path skips closeFileView — same drop
+  dropModalKey();                                      // …and the old viewer's Escape handler
   dropMediaUrl();                                      // …and the old viewer's image bytes (the Reload path)
   dropUrlRead();                                       // …and a URL viewer's in-flight read, if that is what was up
   document.getElementById("romp-fileview")?.remove();
@@ -1010,9 +1021,10 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
   // out of view. As a row of the card (a column flex container; .fileview > .fileview-err keeps its height)
   // the body shrinks under it and the editor's 100% resolves against what is left. Nothing swaps the card's
   // children, so leaving edit mode removes the notice itself (exitEdit). Held by reference, THIS card's
-  // notice and no other: a viewer that was replaced (Reload file re-opens fresh) keeps its keydown handler
-  // and still runs its exitEdit on Escape, and a lookup by id from there would strip the live card's notice
-  // while that card is still in edit mode.
+  // notice and no other: a lookup by id from a replaced viewer (Reload file re-opens fresh) would strip the
+  // live card's notice while that card is still in edit mode. The replace unbinds the old viewer's keydown
+  // handler (dropModalKey), so none of the old card's keys run after it; its in-flight reads still can, and the
+  // reference keeps them on the old card.
   let note: HTMLElement | null = null;
   const noteBar = (msg: string): HTMLElement => {
     note?.remove();
@@ -1340,15 +1352,15 @@ function buildFileView(path: string, sid: string | null | undefined, opts: { lin
       if (confirmDiscard()) exitEdit();
       return;
     }
-    if (e.key !== "Escape" || !document.getElementById("romp-fileview")) return;
+    if (e.key !== "Escape" || !wrap.isConnected) return;   // this viewer's keys only (every exit unbinds it: modalKey)
     e.preventDefault();
     if (editing) {                              // Escape peels edit mode first, never the whole viewer
       if (confirmDiscard()) exitEdit();
       return;
     }
-    closeFileView();
-    document.removeEventListener("keydown", onKey);
+    closeFileView();                            // unbinds this handler (dropModalKey)
   };
+  if (!tab) modalKey = onKey;                   // a tab's handler leaves with the tab (off, below)
   document.addEventListener("keydown", onKey);
 
   // The row for a 1-based line of the code view, scrolled to the middle; `pendingLine` is the open's `line`, spent
@@ -1473,6 +1485,7 @@ export function openUrlView(href: string): void {
   closeGuard = null;
   editHooks = null;
   gitHooks = null;
+  dropModalKey();                                      // the previous viewer's Escape handler
   dropMediaUrl();
   dropUrlRead();                                       // a previous URL viewer's read stops pulling bytes
   document.getElementById("romp-fileview")?.remove();
@@ -1591,11 +1604,11 @@ export function openUrlView(href: string): void {
   renderBody();
 
   const onKey = (e: KeyboardEvent) => {
-    if (e.key !== "Escape" || !document.getElementById("romp-fileview")) return;
+    if (e.key !== "Escape" || !wrap.isConnected) return;
     e.preventDefault();
-    closeFileView();
-    document.removeEventListener("keydown", onKey);
+    closeFileView();                            // unbinds this handler (dropModalKey)
   };
+  modalKey = onKey;
   document.addEventListener("keydown", onKey);
 
   // Every failure says WHY, in the pane, with the way out: never a console-only failure, never a

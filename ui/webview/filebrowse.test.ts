@@ -508,7 +508,7 @@ test("a browse click while the discard confirm keeps the viewer stands down whol
   assert.equal(listDirs().length, askedBefore + 1, "one listing asked");
   const ask = listDirs()[askedBefore];
   assert.deepEqual({ path: ask.path, sid: ask.sid, hidden: ask.hidden }, { path: SRC, sid: SID, hidden: false });
-  assert.equal(docKeys.length, keysBefore + 1, "the browser's one keydown handler, bound once");
+  assert.equal(docKeys.length, keysBefore, "the viewer's keydown handler went with the viewer, and the browser's one came, bound once");
   // and a browser that WAS up tells the shell when it closes: the listening shell above is live, and the stand-down's silence was chosen
   fb.closeFileBrowse();
   assert.deepEqual(shell, [{ romp: "browseClosed" }], "one close notice, from the close of a browser that opened");

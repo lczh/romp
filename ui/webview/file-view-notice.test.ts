@@ -6,9 +6,9 @@
 // the bar's height and the body's own scroll carried the bar out of view. It is now a child of the card
 // between the title bar and the body, where the card's column flex layout gives it its own row, and
 // exitEdit removes it, since nothing swaps the card's children the way the body's used to be swapped.
-// The card holds its notice by reference: a replaced viewer's exitEdit (its keydown handler outlives the
-// replace) must not reach the live card's notice, so the last case runs Escape through every handler the
-// document would run it through, oldest first.
+// The card holds its notice by reference, so nothing of a replaced viewer reaches the live card's notice. Its
+// keydown handler used to outlive the replace and run exitEdit there; every exit now unbinds it, so the
+// replace case runs Escape through every handler the document holds, and the last two cases pin the unbinding.
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
 
@@ -101,7 +101,10 @@ win.confirm = () => true;                       // the discard ask, when a dirty
   createTextNode: (s: string) => s,
   getElementById: (id: string) => findById(docBody, id),
   querySelectorAll: () => [],                   // no bundle <script src>: the editor chunk cannot be derived
-  addEventListener: (type: string, fn: (ev: any) => void) => { if (type === "keydown") docKeys.push(fn); },
+  // the viewers' own handlers only: the text-size flyout's capture-phase one is bound once per page and stays
+  addEventListener: (type: string, fn: (ev: any) => void, opt?: boolean | { capture?: boolean }) => {
+    if (type === "keydown" && opt !== true && !(typeof opt === "object" && opt.capture)) docKeys.push(fn);
+  },
   removeEventListener: (type: string, fn: (ev: any) => void) => { const i = docKeys.indexOf(fn); if (i >= 0) docKeys.splice(i, 1); },
   body: docBody,
 };
@@ -252,13 +255,11 @@ test("Reload file from a conflict re-opens a fresh card with no notice", async (
 });
 
 test("a replaced viewer's Escape handler leaves the live card's notice alone", async () => {
-  // Every open registers a document keydown handler and only an Escape-close removes it, so after Reload
-  // file (which re-opens fresh) the OLD viewer's handler still runs first on Escape, with editing still
-  // true in its closure and dirty cleared by the Reload click: its exitEdit runs. Looked up by id, the
-  // notice it removed was the NEW card's, while that card was still in edit mode over a dirty buffer, and
-  // with it went the Reload button, the user's only way out of the conflict. Held by reference, it is the
-  // old card's own (already detached) notice, and the live card keeps its own.
-  const from = docKeys.length;                   // the handlers this case registers, oldest first
+  // Reload file re-opens fresh. The OLD viewer's handler used to survive it and run first on Escape, with
+  // editing still true in its closure and dirty cleared by the Reload click, so its exitEdit ran: looked up
+  // by id, the notice it removed was the NEW card's, while that card was still in edit mode over a dirty
+  // buffer, and with it went the Reload button, the user's only way out of the conflict. The replace now
+  // unbinds the old handler, and the card holds its notice by reference besides.
   const a = await openInFallbackEditor();
   a.ta.value = TEXT + "a\n";
   a.ta.dispatch("input");
@@ -278,12 +279,73 @@ test("a replaced viewer's Escape handler leaves the live card's notice alone", a
   ta.value = TEXT + "b\n";
   ta.dispatch("input");                          // dirty: Escape must ask, and the answer is no
   win.confirm = () => false;
-  assert.equal(docKeys.length - from, 2, "two viewers were opened, so two handlers are registered");
-  for (const fn of docKeys.slice(from)) fn({ key: "Escape", preventDefault() {} });
+  assert.equal(docKeys.length, 1, "the replace unbound the old viewer's handler: one viewer, one handler");
+  for (const fn of [...docKeys]) fn({ key: "Escape", preventDefault() {} });
   win.confirm = () => true;
   const note = assertAboveBody(noteEl(), b, ["fileview-editor"]);
   assert.match(note.textContent, /editing in the plain fallback editor\.$/, "the live card's own notice, still up");
-  assert.ok(conflict.parentNode === null, "the old viewer's exitEdit removed its own notice, not the live card's");
+  assert.ok(conflict.parentNode === a.card, "nothing of the old viewer ran: its notice is still its own card's");
   assert.equal(ta.value, TEXT + "b\n", "the kept edits are still in the buffer");
   assert.equal(b.edit.hidden, true); assert.equal(b.cancel.hidden, false, "still in edit mode");
+});
+
+/** The open card's ✕ (the modal's close button), found by its class. */
+function closeButton(wrap: El): El {
+  const walk = (n: El): El | undefined => {
+    for (const c of n.children) { if (c.tagName === "button" && c.classList.contains("fileview-close")) return c; const hit = walk(c); if (hit) return hit; }
+    return undefined;
+  };
+  const b = walk(wrap);
+  assert.ok(b, "the card has its close button");
+  return b!;
+}
+
+test("a viewer closed with the mouse unbinds its Escape handler, so the next viewer's Escape only peels edit mode", async () => {
+  // A close by the mouse sees no keydown. The handler used to unbind only on its own Escape, so it outlived its
+  // viewer, kept the closed card alive, and ran first on the next viewer's Escape: it found a viewer up (by the
+  // page-wide id), saw its own editing false, and closed that viewer from under an edit.
+  const fv = await view();
+  fv.openFileView(FILE, null);
+  await settle();
+  closeButton(cardUp().wrap).click();             // the ✕
+  assert.equal(findById(docBody, "romp-fileview"), null, "closed");
+  assert.equal(docKeys.length, 0, "the ✕ unbound the handler");
+  fv.openFileView(FILE, null);
+  await settle();
+  const w = cardUp().wrap as any;
+  w.onclick({ target: w });                       // a click on the backdrop
+  assert.equal(findById(docBody, "romp-fileview"), null, "closed");
+  assert.equal(docKeys.length, 0, "the backdrop click unbound the handler");
+  for (let i = 0; i < 3; i++) {                   // '‹ Files' and the pop-out close through closeFileView too
+    fv.openFileView(FILE, null);
+    await settle();
+    fv.closeFileView();
+  }
+  assert.equal(docKeys.length, 0, "no handler piles up across opens and closes");
+  const b = await openInFallbackEditor();         // clean buffer: a stale handler's Escape would close the whole viewer
+  assert.equal(docKeys.length, 1, "the live viewer's own handler, alone");
+  for (const fn of [...docKeys]) fn({ key: "Escape", preventDefault() {} });
+  assert.ok(b.wrap.isConnected, "Escape left the viewer up");
+  assert.equal(b.edit.hidden, false, "and peeled edit mode");
+  assert.equal(b.cancel.hidden, true);
+  docKeys[0]({ key: "Escape", preventDefault() {} });   // a second Escape closes it, and its handler goes with it
+  assert.equal(findById(docBody, "romp-fileview"), null);
+  assert.equal(docKeys.length, 0);
+});
+
+test("a URL viewer's Escape handler goes with it, whichever way it closes or is replaced", async () => {
+  const fv = await view();
+  fv.openUrlView("https://example.com/notes.txt");
+  assert.equal(docKeys.length, 1, "the URL viewer's handler");
+  closeButton(findById(docBody, "romp-fileview")!).click();   // a URL viewer has no Edit, so not cardUp
+  assert.equal(docKeys.length, 0, "the ✕ unbound it");
+  fv.openUrlView("https://example.com/notes.txt");
+  fv.openFileView(FILE, null);                    // a file viewer replaces the URL viewer
+  assert.equal(docKeys.length, 1, "the replace unbound the URL viewer's handler; the file viewer's is the one left");
+  await settle();
+  fv.openUrlView("https://example.com/notes.txt"); // …and a URL viewer replaces the file viewer
+  assert.equal(docKeys.length, 1, "one viewer, one handler");
+  fv.closeFileView();
+  assert.equal(docKeys.length, 0);
+  await settle();
 });
