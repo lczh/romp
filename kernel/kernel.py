@@ -36220,7 +36220,12 @@ def _bg_split(sid, path, tasks):
         background agent rode the neutral chip while its card sat plain Working, because the stamp
         meant to affirm the wait was structurally unable to reach the surfaces)."""
     placed = _bg_placed_tops(sid, path, [t["tid"] for t in tasks])
-    stamped = _session_stamped_tops(sid)
+    memo = _feed_bg_memo()                       # a feed derivation reads the stamp view once (_feed_bg_memo's comment)
+    stamped = memo.get(("stamped", str(sid))) if memo is not None else None
+    if stamped is None:
+        stamped = _session_stamped_tops(sid)
+        if memo is not None:
+            memo[("stamped", str(sid))] = stamped
     awaited, services = [], []
     for t in tasks:
         top = placed.get(t["tid"]) if t["tid"] else None
@@ -36233,9 +36238,16 @@ def _awaiting_task_descs(sid, path):
     """The AWAITED live background-task DESCRIPTIONS for a session — the feed's 'Waiting on task' pill
     expands them as a list (the user 2026-07-13). Judged-unawaited leftovers (a dev server the session
     keeps around) are SERVICES (_bg_service_descs, the session chip), never listed here. [] when no
-    awaited tasks are live."""
-    awaited, _ = _bg_split(sid, path, _bg_live_norm(sid, path))
-    return [t["desc"] or "background task" for t in awaited]
+    awaited tasks are live. Inside a feed derivation the answer is taken once and served to the derivation's later asks
+    (one per card in the awaiting column, and the awaiting placeholder's), each a fresh list (_feed_bg_memo's comment)."""
+    memo = _feed_bg_memo()
+    got = memo.get(("taskDescs", str(sid), path)) if memo is not None else None
+    if got is None:
+        awaited, _ = _bg_split(sid, path, _bg_live_norm(sid, path))
+        got = tuple(t["desc"] or "background task" for t in awaited)
+        if memo is not None:
+            memo[("taskDescs", str(sid), path)] = got
+    return list(got)
 
 
 def _awaiting_task_ids(sid, path):
@@ -36374,7 +36386,11 @@ def _bg_placed_tops(sid, path, tids, store=None):
     into an entry in place, so a reader holding the old tuple keeps a consistent (ps, store, map). Entries
     are dropped when a session asks with no live tids and the pinned parse is no longer the transcript's
     current one (below: the pin the bound is for), and when the sid leaves the alive set (the awaiting
-    lift's end-of-tick prune, _lift_spent_awaiting)."""
+    lift's end-of-tick prune, _lift_spent_awaiting).
+
+    Inside a feed derivation (2026-10-25, _feed_bg_memo's comment) a store=None ask takes the parse and the shared
+    store once, at the derivation's first ask, and the derivation's later asks are answered from those same two objects,
+    so they hit the per-version map above with no second read of the store file."""
     sid = str(sid)
     tids = tuple(sorted(t for t in tids if t))
     if not tids or not path:
@@ -36393,11 +36409,19 @@ def _bg_placed_tops(sid, path, tids, store=None):
             _PLACEMENT_IDX.pop(sid, None)
         return {}
     try:
-        if store is None and not os.path.exists(str(jd.GOALDIR / (sid + ".json"))):
-            return {}                                # no store yet -> nothing placed: no parse, no fallback load
-        ps = _parse(path, sid, time.time())
+        memo = _feed_bg_memo() if store is None else None   # a feed derivation's first ask reads; its later asks reuse it
+        got = memo.get(("placed", sid, path)) if memo is not None else None
+        if got is None:
+            if store is None and not os.path.exists(str(jd.GOALDIR / (sid + ".json"))):
+                got = (None, None)                   # no store yet -> nothing placed: no parse, no fallback load
+            else:
+                ps = _parse(path, sid, time.time())
+                got = (ps, store if store is not None else jd.load_goals_shared(sid))
+            if memo is not None:
+                memo[("placed", sid, path)] = got
+        ps, store = got
         if store is None:
-            store = jd.load_goals_shared(sid)
+            return {}
         ent = _BG_TOPS_CACHE.get(sid)
         known = ent[2] if (ent is not None and ent[0] is ps and ent[1] is store) else None
         if known is not None and all(t in known for t in tids):
@@ -37158,7 +37182,8 @@ SUBAGENT_STEPS_CAP = 200        # tool calls shipped on the Agent head (agentSte
 # reader of a root in a pusher cycle (a jobs pass, a handler thread's connect push) validates or walks, and every later
 # reader of that cycle is served the same (directories, stats) with no lstat (_subagent_tree, THE CYCLE SCOPE).
 _SUBAGENT_TREES = {}
-_SUBAGENT_TREE_STATS = {"hit": 0, "miss": 0, "scoped": 0, "evict": 0, "dirStats": 0, "walkMs": 0.0, "validateMs": 0.0}   # /perf memos.subagentTree;
+_SUBAGENT_TREE_STATS = {"hit": 0, "miss": 0, "scoped": 0, "evict": 0, "dirStats": 0, "walkMs": 0.0, "validateMs": 0.0,
+                         "watched": 0}   # /perf memos.subagentTree;
 #                          advisory tallies, incremented without a lock as the neighbouring memos' are (a lost count under a race
 #                          is tolerated; the memo's own writes are single dict stores of immutable tuples)
 
@@ -37187,6 +37212,271 @@ def _lstat_or_none(p):
 def _subagent_tree_charge(kind, t0):
     """Add the milliseconds since t0 to the memo's `kind` tally (walkMs or validateMs) for /perf."""
     _SUBAGENT_TREE_STATS[kind] += (time.monotonic() - t0) * 1000.0
+
+
+# THE WATCH CERTIFICATE (2026-10-25). A standing tree cost one lstat per known directory per cycle (_subagent_tree's hit
+# path), and a workflow-heavy session's tree holds hundreds of workflows/wf_<id>/ directories. Each lstat gives up the
+# interpreter lock, so while the judge threads were busy the pusher waited for the lock again after every one of them:
+# the validation of an unchanged tree became one of the largest single costs in a pusher cycle, every cycle, for trees
+# whose directories had not changed in hours. On Linux the kernel now asks the operating system to say when one of a
+# tree's directories changes (inotify: one watch per directory), and a tree whose directories have all been watched since
+# before its last full validation, with no event for any of them since, is served that validation's stats with no
+# per-directory lstat. The event is the exact one the stamps approximate: every change that moves a directory's identity
+# (ino, mtime_ns, size, ctime_ns) is an entry created, removed or renamed in it (IN_CREATE, IN_DELETE, IN_MOVED_FROM,
+# IN_MOVED_TO), a change to its own metadata (IN_ATTRIB: chmod, chown, utime, xattrs) or the directory itself removed or
+# moved (IN_DELETE_SELF, IN_MOVE_SELF), and the operating system queues the event before the call that made the change
+# returns. Appending to a file (an agent's transcript growing) moves no directory's identity and is not watched, so a
+# running agent's writes do not disturb its tree's certificate.
+#
+# The protocol, in the order that makes it exact. To CERTIFY a tree, the sample drains the queue, adds a watch on every
+# known directory, and only then takes the lstats of the ordinary validation; when they match the memo's identities, the
+# stats are stored as the tree's certificate, unless an event for the tree was drained in between (a per-root epoch,
+# raised by every event, taken at arming and compared at storing). Any change after a directory's lstat queues an event
+# for it, so the certificate is a true statement until the next drain finds one. To SERVE, a sample drains the queue under
+# the same lock and is served the certificate only when no event for the tree arrived and the memo still holds the entry
+# the certificate was taken under (the walk memo replaces its entry on every re-walk); the root keeps its one lstat, so a
+# root gone or replaced reads as before. Any event for a directory drops its tree's certificate, a full queue (IN_Q_OVERFLOW)
+# drops every certificate, and a directory moved, removed or unmounted loses its watch, which the next arming re-adds on
+# whatever directory then sits at the path. The served stats are the stat results the certifying validation took, so a
+# reader holding them sees the values a fresh lstat would give (the access time aside, which no reader uses), and a reader
+# memoizing on the stats list itself (the agent-file name index) hits on the same object.
+#
+# Where it is not trusted, and the tree is validated by lstat exactly as before: off Linux (no inotify), when the
+# descriptor cannot be opened, when a directory cannot be watched (gone, not a directory, the watch budget spent), when
+# the tree's directories are not all on one filesystem, and on any filesystem other than a local one (_TREE_WATCH_LOCAL_FS,
+# by the mount's type in /proc/self/mountinfo, read at every walk of the tree and again before a certificate is stored, so
+# no watch is added on a network mount). The last is the one assumption, stated: inotify reports changes made
+# through this machine, so a network or FUSE filesystem written from another machine would change a directory with no
+# event here, where its lstat would still show it. The CLIs whose trees these are run on this machine, so their writes are
+# seen either way; the local-filesystem rule keeps the claim exact without that argument. A mount placed over one of a
+# tree's directories is not an event either (nothing the CLI does). The watch budget is an eighth of the per-user limit
+# (/proc/sys/fs/inotify/max_user_watches), so an editor's file watcher keeps the rest; a tree that would pass it is
+# validated by lstat. Watches leave with their tree: when the walk memo drops the root (_subagent_trees_forget, a root
+# gone or no longer a directory), and for a directory a re-walk no longer lists, at the next arming.
+_TREE_WATCH_ON = sys.platform.startswith("linux")   # the inotify certificate; False: every sample validates by lstat
+_IN_ATTRIB, _IN_MOVED_FROM, _IN_MOVED_TO, _IN_CREATE, _IN_DELETE = 0x4, 0x40, 0x80, 0x100, 0x200
+_IN_DELETE_SELF, _IN_MOVE_SELF, _IN_UNMOUNT, _IN_Q_OVERFLOW, _IN_IGNORED = 0x400, 0x800, 0x2000, 0x4000, 0x8000
+_IN_ONLYDIR, _IN_DONT_FOLLOW = 0x01000000, 0x02000000
+_TREE_WATCH_MASK = (_IN_ATTRIB | _IN_MOVED_FROM | _IN_MOVED_TO | _IN_CREATE | _IN_DELETE | _IN_DELETE_SELF | _IN_MOVE_SELF
+                    | _IN_ONLYDIR | _IN_DONT_FOLLOW)   # a directory's own changes and its entries'; IN_MODIFY (a file's writes) left out
+_TREE_WATCH_LOCAL_FS = frozenset(("ext2", "ext3", "ext4", "xfs", "btrfs", "tmpfs", "ramfs", "zfs", "f2fs", "jfs",
+                                  "reiserfs", "bcachefs", "nilfs2", "overlay"))   # filesystems written only through this machine
+
+
+class _SubagentTreeWatch(object):
+    """The inotify half of the walk memo (the comment above): one descriptor for the process, opened on first use, with one
+    watch per directory of every tree a validation armed, and per tree root the certificate (the walk memo's entry, the
+    stats its certifying validation took) and an epoch raised by every event for one of its directories. Every method
+    takes the one lock; the readers are the pusher, the jobs thread and the handler threads, as for the walk memo."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.fd = None          # the descriptor; False once opening it failed (never retried)
+        self.add = self.rm = None
+        self.cap = 0            # the watch budget, an eighth of the per-user limit
+        self.gen = 0            # raised by a full queue: every armed token taken before it is void
+        self.wds = {}           # watch descriptor -> {(root, directory)} (one inode can sit under two paths)
+        self.roots = {}         # root -> {directory: watch descriptor}
+        self.epoch = {}         # root -> raised by every event for one of its directories
+        self.certs = {}         # root -> (the walk memo's entry, the stats its validation took)
+        self.fs = {}            # st_dev -> the mount's filesystem type, or None when mountinfo does not name it
+        self.foreign = set()    # roots whose tree is not on one local filesystem: never armed again until dropped
+        self.stats = {"watchEvents": 0, "watchOverflow": 0, "watchFail": 0}
+
+    def _open(self):
+        if self.fd is None:
+            self.fd = False
+            try:
+                import ctypes
+                try:
+                    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+                except OSError:
+                    libc = ctypes.CDLL(None, use_errno=True)
+                add, rm = libc.inotify_add_watch, libc.inotify_rm_watch
+                add.argtypes, add.restype = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32], ctypes.c_int
+                rm.argtypes, rm.restype = [ctypes.c_int, ctypes.c_int], ctypes.c_int
+                fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+                if fd >= 0:
+                    try:
+                        with open("/proc/sys/fs/inotify/max_user_watches") as fh:
+                            limit = int(fh.read().strip())
+                    except (OSError, ValueError):
+                        limit = 8192            # the historical default
+                    self.fd, self.add, self.rm, self.cap = fd, add, rm, max(0, limit // 8)
+            except Exception:
+                self.fd = False
+        return self.fd is not False
+
+    def _bump(self, root):
+        self.epoch[root] = self.epoch.get(root, 0) + 1
+        self.certs.pop(root, None)
+
+    def _unwatch(self, root, d):
+        wd = self.roots.get(root, {}).pop(d, None)
+        if wd is None:
+            return
+        pairs = self.wds.get(wd)
+        if pairs is not None:
+            pairs.discard((root, d))
+            if not pairs:
+                del self.wds[wd]
+                self.rm(self.fd, wd)            # its IN_IGNORED arrives later and names no pair: skipped
+
+    def _void_all(self):
+        """Nothing queued can be trusted (a full queue, a failed read): every certificate and every armed token is void."""
+        self.stats["watchOverflow"] += 1
+        self.gen += 1
+        for r in list(self.epoch):
+            self._bump(r)
+        self.certs.clear()
+
+    def _drain(self):
+        """Read every queued event (the descriptor never blocks): each one drops its trees' certificates and raises their
+        epochs; a full queue drops them all; a watch the system removed (IN_IGNORED: its directory deleted or unmounted)
+        leaves the tables. A directory moved keeps its watch on the moved inode until the next arming re-adds the path."""
+        while True:
+            try:
+                buf = os.read(self.fd, 65536)
+            except BlockingIOError:
+                return
+            except OSError:                     # not expected on a readable descriptor: nothing can be vouched for
+                self._void_all()
+                return
+            if not buf:
+                return
+            off = 0
+            while off + 16 <= len(buf):
+                wd, mask, _cookie, ln = struct.unpack_from("iIII", buf, off)
+                off += 16 + ln
+                self.stats["watchEvents"] += 1
+                if mask & _IN_Q_OVERFLOW:
+                    self._void_all()
+                    continue
+                pairs = self.wds.get(wd)
+                if not pairs:
+                    continue
+                for r, _d in list(pairs):
+                    self._bump(r)
+                if mask & _IN_IGNORED:
+                    for r, d in self.wds.pop(wd):
+                        if self.roots.get(r, {}).get(d) == wd:
+                            self.roots[r].pop(d, None)
+
+    def served(self, root, ent):
+        """The certified stats of the tree at `root` when the walk memo's entry is still `ent` and no event for any of its
+        directories has been queued since the certifying validation; else None."""
+        with self.lock:
+            if self.fd is None or self.fd is False or root not in self.certs:
+                return None
+            self._drain()
+            c = self.certs.get(root)
+            return c[1] if c is not None and c[0] is ent else None
+
+    def arm(self, root, dirs):
+        """Watch every directory in `dirs` (the entry's list, the root first) BEFORE the caller's lstats, and return the
+        token certify() compares; None when the tree cannot be watched (see the comment above). Every path is added again,
+        even one the tables hold: the system answers a path whose inode it already watches with that watch, and a path now
+        holding another inode (a directory moved away and another made in its place, or a moved directory's children
+        under their old paths) with a new one, so the tables name the inode at each path as of this arming, whatever
+        moved since the last."""
+        with self.lock:
+            if root in self.foreign or not self._open():
+                return None
+            self._drain()
+            self.certs.pop(root, None)
+            have = self.roots.setdefault(root, {})
+            keep = set(dirs)
+            for d in [x for x in have if x not in keep]:   # a directory a re-walk no longer lists
+                self._unwatch(root, d)
+            if len(self.wds) + sum(1 for d in dirs if d not in have) > self.cap:
+                self.stats["watchFail"] += 1
+                return None
+            for d in dirs:
+                wd = self.add(self.fd, os.fsencode(d), _TREE_WATCH_MASK)
+                if wd < 0:                          # gone, not a directory, or the per-user limit reached
+                    self.stats["watchFail"] += 1
+                    return None
+                if have.get(d) != wd:
+                    self._unwatch(root, d)          # the path's old watch, if it held one: another inode now
+                    have[d] = wd
+                    self.wds.setdefault(wd, set()).add((root, d))
+            return (self.gen, self.epoch.get(root, 0))
+
+    def certify(self, root, ent, stats, token):
+        """Store `stats` (a validation that matched `ent`, taken after arm() returned `token`) as the tree's certificate,
+        unless an event for the tree has been drained since the arming or the tree is not on one local filesystem."""
+        with self.lock:
+            if self.fd is None or self.fd is False:
+                return
+            dev = stats[0].st_dev
+            if any(s.st_dev != dev for s in stats) or self._fs_type(dev) not in _TREE_WATCH_LOCAL_FS:
+                self._drop(root)
+                self.foreign.add(root)              # validated by lstat from here, until the walk memo drops the root
+                return
+            self._drain()
+            if token == (self.gen, self.epoch.get(root, 0)) and len(self.roots.get(root, ())) >= len(ent[0]):
+                self.certs[root] = (ent, stats)
+
+    def classify(self, root, dev):
+        """A walk's verdict on the tree at `root`, whose root lstat reported device `dev`: a root on a filesystem other
+        than a local one is never armed (no watch is added on a network mount only to be removed at the certificate)."""
+        with self.lock:
+            if self._fs_type(dev) in _TREE_WATCH_LOCAL_FS:
+                self.foreign.discard(root)
+            elif root not in self.foreign:
+                self._drop(root)
+                self.foreign.add(root)
+
+    def _fs_type(self, dev):
+        """The filesystem type of the mount whose device is `dev` (/proc/self/mountinfo's major:minor), None when no
+        mount names it (a btrfs subvolume that is not mounted on its own, a device mapper alias): then not trusted."""
+        if dev not in self.fs:
+            want, kind = "%d:%d" % (os.major(dev), os.minor(dev)), None
+            try:
+                with open("/proc/self/mountinfo") as fh:
+                    for line in fh:
+                        parts = line.split()
+                        if len(parts) > 2 and parts[2] == want and "-" in parts:
+                            kind = parts[parts.index("-") + 1] if parts.index("-") + 1 < len(parts) else None
+                            break
+            except OSError:
+                kind = None
+            self.fs[dev] = kind
+        return self.fs[dev]
+
+    def _drop(self, root):
+        self.gen += 1                           # a token armed before the drop never certifies after it (the epoch goes)
+        self.foreign.discard(root)
+        self.certs.pop(root, None)
+        self.epoch.pop(root, None)
+        if self.fd is not None and self.fd is not False:
+            for d in list(self.roots.get(root, {})):
+                self._unwatch(root, d)
+        self.roots.pop(root, None)
+
+    def drop(self, root):
+        """Forget the tree at `root`: its watches, its certificate, its epoch and any verdict on its filesystem."""
+        if root in self.roots or root in self.foreign or root in self.certs:   # the common case takes no lock: nothing held
+            with self.lock:
+                self._drop(root)
+
+    def forget(self, owned):
+        """drop() every root not in `owned` (the walk memo's bound, _subagent_trees_forget)."""
+        with self.lock:
+            for root in [r for r in set(self.roots) | self.foreign if r not in owned]:
+                self._drop(root)
+
+    def report(self):
+        """/perf memos.subagentTree's watch keys: the directories watched, the certificates held, the events read, the full
+        queues and the armings refused."""
+        with self.lock:
+            out = dict(self.stats)
+            out["watches"] = len(self.wds)
+            out["watchCerts"] = len(self.certs)
+        return out
+
+
+_SUBAGENT_TREE_WATCH = _SubagentTreeWatch()
 
 
 def _subagent_tree(d):
@@ -37224,6 +37514,11 @@ def _subagent_tree(d):
     call until it can be listed (today's cost, and the chmod that opens it is seen at once); no consumer's output changes
     (_subagent_meta_map's listing of it fails and is skipped, the agent-file lookup tests the name in it directly, the
     feed key folds one more identity).
+
+    THE WATCH CERTIFICATE (2026-10-25, the comment above _SubagentTreeWatch): on Linux, a vouched tree whose directories
+    have all been watched since before a validation that matched, with no event for any of them since, is served that
+    validation's stats for the root's lstat alone; anywhere the watches cannot be trusted the validation above runs as
+    before.
 
     THE CYCLE SCOPE (2026-09-18). The event is one pusher cycle (or one jobs pass, or one connect push's chat loop on a
     handler thread), which opens `_live_scope.subagent_trees`: {root path: (directories, stats)}, exactly what this
@@ -37269,28 +37564,45 @@ def _subagent_tree(d):
 
 def _subagent_tree_sample(d):
     """One fresh sample of the tree at `d`: the memo's validation or walk, with no cycle scope (2026-09-18: _subagent_tree's
-    body before the scope, unchanged; the memo's rules are documented there)."""
+    body before the scope; the memo's rules are documented there). Since 2026-10-25 a standing tree whose directories are
+    watched is served its certified stats with the root's lstat alone (_SubagentTreeWatch, the comment above it): the
+    watches are armed BEFORE the validation's lstats, the root's included, so its root lstat is taken after the arming."""
     d = str(d)
+    hit = _SUBAGENT_TREES.get(d)
+    vouched = hit is not None and None not in hit[1]
+    served = token = None
+    t0 = time.monotonic()
+    if vouched and _TREE_WATCH_ON:
+        served = _SUBAGENT_TREE_WATCH.served(d, hit)      # the certificate, when no event touched the tree since it
+        if served is None:
+            token = _SUBAGENT_TREE_WATCH.arm(d, hit[0])   # every known directory watched before the lstats below
     try:
         st = os.lstat(d)
     except OSError:                                       # nothing at the root: [] as ever, and the entry is forgotten
         _SUBAGENT_TREES.pop(d, None)
+        _SUBAGENT_TREE_WATCH.drop(d)
         return (), ()
     if not stat.S_ISDIR(st.st_mode):                      # a symlink (live or dangling) or a file in its place: not a tree
         _SUBAGENT_TREES.pop(d, None)
+        _SUBAGENT_TREE_WATCH.drop(d)
         return (), (st,)
-    hit = _SUBAGENT_TREES.get(d)
-    if hit is not None and None not in hit[1]:
+    if vouched:
         # an entry carrying an unvouched directory (racy, or a failed listing) can only ever match if that directory is
         # GONE, and a directory removed between its parent's lstat and its own would then be served as a hit with a None
         # among the stats, which the readers index (2026-09-16, the fold's review): such an entry re-walks instead
-        t0 = time.monotonic()
+        if served is not None and _stat_ident(st) == hit[1][0]:
+            _SUBAGENT_TREE_STATS["hit"] += 1
+            _SUBAGENT_TREE_STATS["watched"] += 1
+            _subagent_tree_charge("validateMs", t0)
+            return hit[0], served
         stats = [st] + [_lstat_or_none(x) for x in hit[0][1:]]   # the root's lstat above serves as its own (dirs[0] is d)
         _SUBAGENT_TREE_STATS["dirStats"] += len(stats) - 1
         fresh = tuple(_stat_ident(s) for s in stats)
         _subagent_tree_charge("validateMs", t0)
         if fresh == hit[1]:
             _SUBAGENT_TREE_STATS["hit"] += 1
+            if token is not None:
+                _SUBAGENT_TREE_WATCH.certify(d, hit, stats, token)
             return hit[0], stats
     _SUBAGENT_TREE_STATS["miss"] += 1
     t0 = time.monotonic()
@@ -37324,6 +37636,8 @@ def _subagent_tree_sample(d):
     idents = tuple(_stat_ident(s) if ok and max(s.st_mtime_ns, s.st_ctime_ns) < racy_from else None
                    for s, ok in zip(stats, clean))
     _SUBAGENT_TREES[d] = (tuple(dirs), idents)
+    if _TREE_WATCH_ON:
+        _SUBAGENT_TREE_WATCH.classify(d, st.st_dev)       # a tree on a network mount is never armed (the watch comment)
     _subagent_tree_charge("walkMs", t0)
     return tuple(dirs), stats
 
@@ -37353,6 +37667,7 @@ def _subagent_trees_forget(alive):
     for d in list(_SUBAGENT_TREES):
         if d not in owned and _SUBAGENT_TREES.pop(d, None) is not None:
             _SUBAGENT_TREE_STATS["evict"] += 1
+    _SUBAGENT_TREE_WATCH.forget(owned)                    # the watches and certificates leave with their roots (2026-10-25)
     projects = {str(Path(str(s["path"])).parent) for s in alive if s.get("path")}
     for d in list(_AGENT_TREE_NAMES):
         if os.path.dirname(os.path.dirname(d)) not in projects:
@@ -37367,7 +37682,10 @@ def _subagent_tree_memo_report():
     cycle's sample with no stat at all, 2026-09-18: scoped / (hit + miss + scoped) is the share of reads that were
     re-samples of a root another reader took in the same cycle), evict (roots dropped as unowned), dirStats (the lstats
     validations paid), walkMs and validateMs (the time in each, every thread), and the gauges roots (entries) and dirs
-    (directories held). Written from several threads; a resize under the sum is read again."""
+    (directories held). Written from several threads; a resize under the sum is read again. Since 2026-10-25 the watch
+    certificate's keys beside them: watched (the hits served on a certificate, with the root's lstat alone: counted under
+    hit too), watchEvents and watchOverflow (events read, full queues), watchFail (armings refused: the budget, a directory
+    that could not be watched), and the gauges watches (directories watched) and watchCerts (trees certified)."""
     for _ in range(3):
         try:
             dirs = sum(len(v[0]) for v in list(_SUBAGENT_TREES.values()))
@@ -37375,6 +37693,7 @@ def _subagent_tree_memo_report():
         except RuntimeError:
             dirs = -1
     out = dict(_SUBAGENT_TREE_STATS, roots=len(_SUBAGENT_TREES), dirs=dirs)
+    out.update(_SUBAGENT_TREE_WATCH.report())
     out["walkMs"] = round(out["walkMs"], 1)
     out["validateMs"] = round(out["validateMs"], 1)
     return out
@@ -51346,7 +51665,8 @@ def _subagent_dirs_ident(sid, d):
     the T368 review's profile having put the walk at a third of the key's cost, while every other reader still walked):
     an unchanged tree costs one lstat per known directory, once per cycle across every reader (the cycle scope,
     2026-09-18: the chat build's sidecar-map reads earlier in the same cycle sampled this root, and the key is served that
-    sample). Taken only for a tree the session's previous derivation read (_feed_subagents_key, 2026-10-23). The shape is
+    sample), and on Linux the root's lstat alone while the tree's watches report nothing (the watch certificate,
+    2026-10-25). Taken only for a tree the session's previous derivation read (_feed_subagents_key, 2026-10-23). The shape is
     _subagent_tree_ident's.
     A sidecar REWRITTEN in place under its own name moves no directory's mtime, so neither this component nor
     _subagent_meta_map's own cache sees it (pre-existing, shared with that cache; the CLI writes a sidecar once, at the
@@ -51400,14 +51720,36 @@ def _feed_sub_note_agent(path, agent_id, ap, ids):
 @contextlib.contextmanager
 def _feed_sub_reads():
     """Open the per-thread record for one session's feed derivation and yield it ({"trees": {root: identities},
-    "agents": {(path, agentId): (file or None, launch ids)}}); the previous record, if any, is restored after."""
+    "agents": {(path, agentId): (file or None, launch ids)}}); the previous record, if any, is restored after. The record
+    also carries the derivation's background-task read memo (`bg`, _feed_bg_memo), emptied when the derivation ends."""
     prev = getattr(_feed_sub_scope, "reads", None)
-    rec = {"trees": {}, "agents": {}}
+    rec = {"trees": {}, "agents": {}, "bg": {}}
     _feed_sub_scope.reads = rec
     try:
         yield rec
     finally:
+        rec["bg"] = {}
         _feed_sub_scope.reads = prev
+
+
+# ONE READ OF A SESSION'S BACKGROUND-TASK FACTS PER FEED DERIVATION (2026-10-25). A derivation of a session idle with live
+# background tasks asked the same questions several times: _session_awaiting (through _awaiting_live_rows -> _bg_pending),
+# _bg_owner_tops, _bg_service_descs and, for every card in the awaiting column and the awaiting placeholder,
+# _awaiting_task_descs each asked _bg_placed_tops which launches the judge placed, and each ask opened the session's goal
+# store again (jd.load_goals_shared reads the whole file to compare it with its cached copy, a large store's worth of bytes
+# per ask) and re-stat'd the transcript for its parse; _bg_split re-read the session's stamp view (_session_stamped_tops: three
+# stats, the registry's transcript path and the parse cache) for each. Within one derivation these are answered once:
+# the first ask's store, parse and stamp view, and _awaiting_task_descs' answer, are kept on the derivation's record and
+# served to the later asks of the same derivation. Exact by the feed key's order (stat-then-read): the key takes every
+# file's identity before the derivation starts, the first ask reads after it, and a change landing between that read and
+# a later ask of the same derivation (which the later ask would have seen before) moves the key at the next build, which
+# derives the session again, the same rule that keeps a tree's first sample in a derivation (_feed_sub_note_tree). The
+# memo is the derivation's alone: it is opened by _feed_sub_reads around one session's derivation in build_feed, emptied
+# when it ends, and absent everywhere else (the chat and timeline builds, the jobs thread), where every ask reads as before.
+def _feed_bg_memo():
+    """The running feed derivation's background-task read memo on this thread, or None outside a derivation."""
+    rec = getattr(_feed_sub_scope, "reads", None)
+    return rec.get("bg") if rec is not None else None
 
 
 def _feed_sub_record(rec):
@@ -51703,8 +52045,9 @@ def _feed_session_key(s, tm, ctx, prev_entry):
         and when cold), a deps component since 2026-10-23. For each tree the sidecar map read (_subagent_meta_map, from
         _awaiting_live_rows and _awaiting_nest), the identity (ino, mtime_ns, size, ctime_ns) of its root and every
         directory under it, from the shared walk memo (_subagent_dirs_ident over _subagent_tree, 2026-09-16: listed once
-        per change, vouched for by one lstat each while they stand; sampled once per pusher cycle across every reader,
-        2026-09-18). For each open agent whose own file the transcript join read (_awaiting_nest -> _agent_launch_read),
+        per change, vouched for by one lstat each while they stand, or on Linux by the root's lstat alone while the
+        tree's watches report nothing, 2026-10-25; sampled once per pusher cycle across every reader, 2026-09-18). For
+        each open agent whose own file the transcript join read (_awaiting_nest -> _agent_launch_read),
         the file _subagent_file finds and the launch ids in it, by value: a launch landing moves it, the agent's other
         writes do not. Before 2026-10-23 every living session's whole tree was sampled on every build whether its
         derivation read it or not, and an agent file's growth was not keyed. A sidecar rewritten in place under its own
