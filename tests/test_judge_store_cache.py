@@ -141,6 +141,34 @@ class SharedStoreCache(unittest.TestCase):
         self.assertEqual(_norm(b), _norm(jd.load_goals(SID)), "the writer's loader sees the same view")
         self.assertIs(jd.load_goals_shared(SID), b, "and the replayed view is memoized under the journal's key")
 
+    def test_the_view_says_whether_its_journal_replay_wrote(self):
+        """shared_replay_wrote (2026-10-25), what the feed's memo key reads: a view built with no journal, or with a
+        journal whose every row the file already holds, says False and is the file's own content; a view whose replay
+        re-applied a row the file lacks says True; anything that is not a shared view says None."""
+        p = self._seed()
+        nid = self._nid(1)
+        self.assertIs(jd.shared_replay_wrote(jd.load_goals_shared(SID)), False, "no journal: nothing replayed")
+        jd.append_override(SID, nid, "resolve", T0 + 60)        # a gesture whose store save never landed
+        v = jd.load_goals_shared(SID)
+        self.assertTrue(v["nodes"][nid]["nodeComplete"], "the replay re-applied the row")
+        self.assertIs(jd.shared_replay_wrote(v), True)
+        w = jd.load_goals(SID)
+        self.assertIsNone(jd.shared_replay_wrote(w), "the writer's private store cannot say")
+        jd.save_goals(SID, w)                                   # the save lands: the verdict is in the file
+        v = jd.load_goals_shared(SID)
+        self.assertTrue(v["nodes"][nid]["nodeComplete"])
+        self.assertIs(jd.shared_replay_wrote(v), False, "the row's effect is in the file: the replay wrote nothing")
+        content = lambda st: json.loads(json.dumps({k: x for k, x in st.items() if k not in jd._NONCONTENT_KEYS}))
+        self.assertEqual(content(v), content(json.loads(p.read_text())), "so the view is the file's own content")
+        self.assertIs(jd.shared_replay_wrote(jd.load_goals_shared(SID)), False, "a hit serves the same view")
+        self.assertIsNone(jd.shared_replay_wrote(copy.copy(v)), "a copy is a plain store")
+        self.assertIsNone(jd.shared_replay_wrote(None))
+        jd._SHARED_OFF[0] = True                                # the cache off: every load is load_goals' own
+        try:
+            self.assertIsNone(jd.shared_replay_wrote(jd.load_goals_shared(SID)))
+        finally:
+            jd._SHARED_OFF[0] = False
+
     def test_a_restore_row_then_an_archive_change_refill(self):
         self._seed()
         nid2 = self._nid(2)

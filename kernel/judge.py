@@ -5377,11 +5377,16 @@ def _mark_unread(store, reason):
     _judge_ctx.stage_incomplete = True
 
 
-def _finish_load(fsid, store, lines=None):
+def _finish_load(fsid, store, lines=None, wrote=None):
     """The tail every loader runs on a freshly parsed, node-guarded store: replay the override journal
     (`lines` when the caller already read it, else from the file), re-derive the rollup when the replay
-    wrote, and stamp the CAS base. One function so load_goals and load_goals_shared cannot drift."""
-    if _replay_overrides(fsid, store, lines=lines):
+    wrote, and stamp the CAS base. One function so load_goals and load_goals_shared cannot drift. `wrote`,
+    when given, is a list the replay's outcome is appended to (True: it re-applied a row, so the store
+    returned is not the file's own content); load_goals_shared stamps it on its view (shared_replay_wrote)."""
+    applied = _replay_overrides(fsid, store, lines=lines)
+    if wrote is not None:
+        wrote.append(bool(applied))
+    if applied:
         # the replay WROTE (a clobbered user resolve/clear re-flagged): the published status/confirming
         # predate it, and every reader now trusts those exports as the one truth (no raw-flag second
         # opinions since 2026-08-13) — so re-derive them at the replay's own write, never serve stale
@@ -6538,8 +6543,9 @@ class FrozenGuardedNode(FrozenDict, GuardedNode):
 class FrozenStore(FrozenDict):
     """The top-level object load_goals_shared returns: a FrozenDict by behavior, its own class so save_goals
     can name the misuse. `_fsid`: the session's id, set by _freeze_store, so the write-guard's row can name
-    the store a top-level write reached."""
-    __slots__ = ("_fsid",)
+    the store a top-level write reached. `_replay_wrote`: whether the override-journal replay that built this
+    view wrote (set by load_goals_shared beside the freeze; read through shared_replay_wrote)."""
+    __slots__ = ("_fsid", "_replay_wrote")
 
 
 def _freeze(o):
@@ -6666,6 +6672,16 @@ def shared_store_stats():
     return out
 
 
+def shared_replay_wrote(store):
+    """Whether the override-journal replay that built `store`, a view load_goals_shared served, WROTE. True: it
+    re-applied a row the file lacked (a clobbered gesture), so the view is not the file's own content. False: every row
+    was already in the file (the kernel's own save survived, the normal case; journals are never pruned), so the view
+    is the file's content, node-guarded and stamped with the CAS base, exactly as a store with no journal loads. None
+    when `store` is not such a view (load_goals' private store: no file, the cache off, an unreadable journal; a copy;
+    None) and so cannot say. The feed's memo key reads it (kernel _feed_session_key's `store` component)."""
+    return getattr(store, "_replay_wrote", None) if isinstance(store, FrozenStore) else None
+
+
 def load_goals_shared(fsid):
     """A READ-ONLY view of a session's goal store, shared by every caller until the store, its override
     journal or the goals-archive changes: exactly what load_goals returns (guarded nodes, journal replayed,
@@ -6732,7 +6748,8 @@ def load_goals_shared(fsid):
         return load_goals(fsid)                      # load_goals moves the bytes aside (one stderr line, one
                                                      # store-quarantined row) and answers the fresh store; the
                                                      # path then reads as absent, so nothing is cached for it
-    store = _finish_load(fsid, store, lines=lines)   # a malformed row raises, as in load_goals
+    wrote = []                                       # the replay's outcome, stamped on the view below
+    store = _finish_load(fsid, store, lines=lines, wrote=wrote)   # a malformed row raises, as in load_goals
     store["_baseIdent"] = skey                       # the identity of the bytes this view was built from, as load_goals stamps its own: the two views agree by
     #                                                  construction, and a copy taken from this view and saved passes the same CAS (the round-one lane red of
     #                                                  PR 2064: the writer's view carried the key and the shared view did not)
@@ -6748,6 +6765,8 @@ def load_goals_shared(fsid):
         _shared_forget(path_s)
         return store
     frozen = _freeze_store(store, fsid)
+    if isinstance(frozen, FrozenStore):
+        frozen._replay_wrote = wrote[0]              # what this view's journal replay did (shared_replay_wrote)
     akey1 = _archive_key(fsid)
     keys = (skey, jkey, akey1)
     with _SHARED_LOCK:
