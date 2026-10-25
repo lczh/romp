@@ -4500,6 +4500,93 @@ class PendingQueue(unittest.TestCase):
         self.assertFalse(self.be.queue_recallable("qr2"), "hold cleared → forwards instantly again")
 
 
+class DormantQueueCancel(unittest.TestCase):
+    """A queued message on a session with NO running object (its CLI never came up past a usage limit, a kernel restart
+    before its boot slot, a message queued behind a stand-down) lives in the registry mirror alone: pending_queued shows
+    it, queue_recallable offers the cancel, and the next start seeds from it. unqueue answered None there, so the kernel
+    told the user the message had already reached the session, the mirror kept it, the next start delivered it, and a
+    delete or edit stayed refused while it sat there. The cancel removes it from the mirror now."""
+
+    SID_A = "7e1d2c3b-4a59-4687-9a1b-2c3d4e5f6a7b"   # private synthetic sid
+    TEXT = "please run the tests"
+    LATER = "then update the notes-api readme"
+    QID_A = "echo:11111111-2222-4333-8444-555555555555"
+    QID_B = "echo:11111111-2222-4333-8444-666666666666"
+    QUEUED = "messages are queued for this session — send or cancel them first"
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        _hosts_off(self.d)
+        self.be = sb.SdkBackend(self.d, "/bin/true", lambda *a, **k: None)
+
+    def _reg(self, queue, meta=None):
+        reg = {"sid": self.SID_A, "name": "web", "mode": "acceptEdits", "alive": True, "cwd": self.d, "queue": queue}
+        if meta is not None:
+            reg["queueMeta"] = meta
+        sb.write_reg(self.be.state_dir, self.SID_A, reg)
+        self.assertNotIn(self.SID_A, self.be.sessions)
+
+    def _mirror(self):
+        reg = sb.read_reg(self.be.state_dir, self.SID_A) or {}
+        return reg.get("queue"), reg.get("queueMeta")
+
+    def _next_start(self):
+        return sb.SdkSession(self.be, dict(sb.read_reg(self.be.state_dir, self.SID_A))).pending()
+
+    def test_a_cancel_by_id_removes_the_copy_the_next_start_would_deliver(self):
+        self._reg([self.TEXT, self.LATER], [{"text": self.TEXT, "qid": self.QID_A, "qts": 1},
+                                            {"text": self.LATER, "qid": self.QID_B, "qts": 2}])
+        self.assertTrue(self.be.queue_recallable(self.SID_A), "the bubble offers the cancel")
+        self.assertEqual(self.be.unqueue(self.SID_A, -1, None, qid=self.QID_A), self.TEXT)
+        self.assertEqual(self._mirror(), ([self.LATER], [{"text": self.LATER, "qid": self.QID_B, "qts": 2}]),
+                         "the other copy stays, under its own id")
+        self.assertEqual(self._next_start(), [self.LATER], "the withdrawn message is not delivered at the next start")
+        self.assertIsNone(self.be.unqueue(self.SID_A, -1, None, qid=self.QID_A), "an id the mirror no longer holds: a miss")
+        self.assertEqual(self._mirror()[0], [self.LATER])
+
+    def test_a_cancel_by_index_relocates_by_text_and_frees_the_delete(self):
+        self._reg([self.TEXT])                            # an older mirror: texts only
+        self.assertEqual(self.be.rollback(self.SID_A, "aaaaaaaa-0000-4000-8000-000000000001"), (False, self.QUEUED))
+        self.assertEqual(self.be.unqueue(self.SID_A, 3, self.TEXT), self.TEXT, "a stale index re-locates by text")
+        self.assertEqual(self._mirror(), ([], []))
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": os.path.join(self.d, "claude")}):
+            ok, why = self.be.rollback(self.SID_A, "aaaaaaaa-0000-4000-8000-000000000001")
+        self.assertNotEqual(why, self.QUEUED, "nothing queued is left to refuse a delete over")
+
+    def test_a_miss_leaves_the_mirror_as_it_was(self):
+        self._reg([self.TEXT], [{"text": self.TEXT, "qid": self.QID_A, "qts": 1}])
+        self.assertIsNone(self.be.unqueue(self.SID_A, -1, None, qid=self.QID_B))
+        self.assertIsNone(self.be.unqueue(self.SID_A, 0, "already forwarded"))
+        self.assertIsNone(self.be.unqueue(self.SID_A, 4))
+        self.assertEqual(self._mirror(), ([self.TEXT], [{"text": self.TEXT, "qid": self.QID_A, "qts": 1}]))
+        self.assertIsNone(self.be.unqueue("7e1d2c3b-0000-4000-8000-000000000000", 0), "no registry: a miss")
+
+    def test_the_cancelled_copys_echo_goes_with_it(self):
+        self._reg([self.TEXT], [{"text": self.TEXT, "qid": self.QID_A, "qts": 1}])
+        self.be._live.setdefault(self.SID_A, {})[self.QID_A] = {"type": "user", "uuid": self.QID_A, "_echo_text": self.TEXT,
+            "message": {"role": "user", "content": [{"type": "text", "text": self.TEXT}]}}
+        self.assertEqual(self.be.unqueue(self.SID_A, 0, self.TEXT, qid=self.QID_A), self.TEXT)
+        self.assertNotIn(self.QID_A, self.be._live.get(self.SID_A, {}), "the withdrawn message no longer reads as sent")
+
+    def test_a_send_whose_session_then_died_is_cancelled_from_the_mirror(self):
+        # the real road: the message is queued on a running session whose thread then ends (as after a launch failure)
+        self._reg([])
+        s = sb.SdkSession(self.be, dict(sb.read_reg(self.be.state_dir, self.SID_A)))
+        park = threading.Event()
+        s.thread = threading.Thread(target=park.wait, daemon=True)
+        s.thread.start()
+        self.be.sessions[self.SID_A] = s
+        self.assertTrue(self.be.send(self.SID_A, self.TEXT, user=True))
+        [qid] = [m["qid"] for m in self.be.pending_queued_meta(self.SID_A)]
+        park.set(); s.thread.join(2)
+        self.be._on_session_gone(s)
+        self.assertNotIn(self.SID_A, self.be.sessions)
+        self.assertEqual(self.be.pending_queued(self.SID_A), [self.TEXT], "the bubble stays on the mirror")
+        self.assertEqual(self.be.unqueue(self.SID_A, 0, self.TEXT, qid=qid), self.TEXT)
+        self.assertEqual(self.be.pending_queued(self.SID_A), [])
+        self.assertEqual(self._next_start(), [])
+
+
 @unittest.skipUnless(_HAVE_SDK, "claude_agent_sdk not installed")
 class PendingQueueLoop(unittest.TestCase):
     """End-to-end: a turn enqueued while another is IN FLIGHT is FORWARDED to the SDK immediately
