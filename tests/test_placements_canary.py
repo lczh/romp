@@ -239,7 +239,11 @@ class PlacementIdentityCanary(unittest.TestCase):
         # every pinned id and atom is UNCHANGED; the bump seals transcripts where a stop fell between an automatic
         # compaction and the model's first record, whose repeated prompt after it now rejoins the set
         # (tests/test_event_model_compact_turn.py covers the window itself).
-        self.assertEqual(jd.PLACEMENTS_V, 16, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=16: "
+        # v17 (2026-10-25, a stop before the parse's first atom makes no idle atom): this fixture parses with no
+        # states log, so every pinned id and atom is UNCHANGED; the bump seals sessions whose create-time stop (or
+        # the previous conversation's last stop, after a /clear) led the first turn, whose first segment now starts
+        # at its prompt (tests/test_first_turn_create_stop.py covers the drop itself).
+        self.assertEqual(jd.PLACEMENTS_V, 17, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=17: "
                          "re-pin the ids and this version together, in the same commit")
 
 

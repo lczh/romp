@@ -5119,8 +5119,16 @@ _IDLE_STATES = ("idle", "waiting")
 def synthesize_idle(states, atoms, now):
     """Idle atoms from real idle/stopped transitions in states/<sid>.jsonl — NOT a 15-minute silence
     heuristic. An idle span runs from an `state` in _IDLE_STATES (the Stop "waiting" or the idle-prompt
-    "idle") to the next state record (or to `now` if it is the last). Only spans overlapping the session's
-    atom timespan are kept, so unrelated history doesn't leak in."""
+    "idle") to the next state record (or to `now` if it is the last). Only spans that START inside the
+    session's atom timespan are kept, so unrelated history doesn't leak in.
+
+    A span that starts before the parse's first atom belongs to no turn of this conversation: the SDK
+    backend's create-time "waiting" (ended by the first prompt's "working", often in the same whole
+    second as the prompt's record) or the previous conversation's last stop before a /clear. Kept, its
+    atom sorted ahead of the first prompt and led turn 0, which then took the prompt in as a mid-turn
+    input: the turn was triggerless, started at the create time, and held an idle atom from its start,
+    so every reader testing for an idle atom in the last turn read a running first turn as closed. A
+    restored parse drops the same spans (parse_session keeps idle at or after the tail's first atom)."""
     rows = sorted([r for r in states if isinstance(r, dict) and r.get("t") is not None],
                   key=lambda r: r["t"])
     if not rows or not atoms:
@@ -5135,8 +5143,8 @@ def synthesize_idle(states, atoms, now):
         end = rows[i + 1]["t"] if i + 1 < len(rows) else (now if now is not None else hi)
         if end <= start:
             continue
-        if end < lo or start > max(hi, now or hi):
-            continue   # span entirely outside the session's activity window
+        if start < lo or start > max(hi, now or hi):
+            continue   # span starting outside the session's activity window (before its first atom: see above)
         out.append({"type": "idle", "uuid": None, "session_id": atoms[0]["session_id"],
                     "t": start, "end": end, "_seq": 10 ** 12 + start})
     return out
@@ -7225,7 +7233,7 @@ def _asm_reseat_src(ad, path, recs):
 # whole parse; a compaction landing after the document demotes the tail fold to the restore road, whose tail parse from
 # the cut takes the compaction in, while the tail is under the churn bound's share (2026-09-24; past the share, and until
 # then always, a whole parse, after which the next settle writes a new cut).
-_ASM_CKPT_V = 10                      # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
+_ASM_CKPT_V = 11                      # 2: atom rows carry [offset, len], nt for every atom; 3: the carry holds skill_loads (T333);
 #                                       4: a `turns` section over the pre-cut rows (T323 stage 4c: the lazy index)
 #                                       5: lazy markers carry pc (assistant prose chars) and mid (postal message ids); a turn row
 #                                          carries pcs and hT, a segment row w, mids and hp (T358: the per-cycle walkers read scalars).
@@ -7254,6 +7262,10 @@ _ASM_CKPT_V = 10                      # 2: atom rows carry [offset, len], nt for
 #                                      10: the CLI's stop record closes the restore window after a compaction (FileAdapter._prepass,
 #                                          2026-10-22): a v9 document's pre-cut rows lack a repeated prompt sent after such a stop, and its
 #                                          carry can hold the window still open; refused once (`version`) at the deploy boot and rewritten
+#                                      11: a stop recorded before the parse's first atom makes no idle atom (synthesize_idle, 2026-10-25): a
+#                                          v10 document's first pre-cut turn can hold the create-time stop's idle atom ahead of the first
+#                                          prompt, with no trigger and the create time as its t and its first segment's; refused once
+#                                          (`version`) at the deploy boot and rewritten, as v10 was
 _MAT_CAP = _env_or("ROMP_ASM_INDEX_CAP", max(500_000, _machine_memory_bytes() // (32 * 1024)))
 _MAT_LRU = collections.OrderedDict()  # (id(LazyAtoms), row) → (weakref.ref(LazyAtoms), row): eviction drops the memo, never a field
 #                                       in place. The list is held WEAKLY (measured 2026-09-15): a strong reference here kept every
@@ -8993,7 +9005,7 @@ def asm_checkpoint_write(leaf_path, rompuuid, sdk_human=False, tree=None, reason
                     if max(seqs) >= cut_seq:
                         break                            # the first turn holding a post-cut record ends the pre-cut run
                 elif cut_ts is None or (turn.get("t") or 0) >= cut_ts:
-                    break                                # a turn of synthesized atoms alone (an idle span opening the tree): pre-cut
+                    break                                # a turn of synthesized atoms alone (no record of its own): pre-cut
                 #                                          by its time, else the tail's
                 idxs = []
                 for ai_, u_ in enumerate(t_uuids):
