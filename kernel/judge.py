@@ -516,7 +516,12 @@ JUDGE_FAIL_CAP = 3                       # the same rule for every other retryin
 #                                          consolidator / courier; the
 #                                          planner (PLAN_PARSE_RETRIES) and distiller/briefer (DISTILL_FAIL_CAP)
 #                                          already had their own.
-PLACEMENTS_V = 17                        # placements-identity schema version (plan P2, the user 2026-07-06).
+PLACEMENTS_V = 18                        # placements-identity schema version (plan P2, the user 2026-07-06).
+#                                          v18 (2026-10-25): a salvaged reply (em.synthesize_orphans) is deduped against the
+#                                          replies kept in its own turn and the turn on each side only, as the chat dedups it.
+#                                          One that a far turn's reply equaled or prefixed was dropped: on every transcript with
+#                                          that shape the reply now parses out, and the turn it ends no longer absorbs the next
+#                                          prompt, which opens its own turn. v3's shape, a GROWN atom set. Same seal.
 #                                          v17 (2026-10-25): a stop recorded before the parse's first atom makes no idle
 #                                          atom (em.synthesize_idle). The SDK backend's create-time "waiting" row led a new
 #                                          session's first turn whenever the first prompt's "working" row fell in the prompt
@@ -4248,7 +4253,8 @@ def tasks_for(fsid, leaf, files, now, done=None):
     cf = PCACHE / (fsid + ".json")
     try:
         o = json.loads(cf.read_text())
-        if o.get("key") == key and o.get("capKey") == cap_key and o.get("v") == 12:   # v12 = a stop before the parse's first atom no longer leads the first turn, so its segment starts at the prompt (2026-10-25; with PLACEMENTS_V 17);
+        if o.get("key") == key and o.get("capKey") == cap_key and o.get("v") == 13:   # v13 = a salvaged reply a far turn matched parses out, so its segment grows (2026-10-25; with PLACEMENTS_V 18);
+            #                                             v12 = a stop before the parse's first atom no longer leads the first turn, so its segment starts at the prompt (2026-10-25; with PLACEMENTS_V 17);
             #                                             v11 = a repeated prompt after a stop in the restore window parses out, so it opens a segment (2026-10-22; with PLACEMENTS_V 16);
             #                                             v10 = a parallel tool batch's results parse out, so the segments holding one grow (2026-09-23; with PLACEMENTS_V 15);
             #                                             v8 = the harness skill-load wrapper no longer emits a command atom, so the prompt segment grows (T333, 2026-09-11; with PLACEMENTS_V 14);
@@ -4275,7 +4281,7 @@ def tasks_for(fsid, leaf, files, now, done=None):
     try:
         PCACHE.mkdir(parents=True, exist_ok=True)
         tmp = cf.with_suffix(".tmp.%d" % os.getpid())
-        tmp.write_text(json.dumps({"key": key, "capKey": cap_key, "v": 12, "tasks": tasks}))
+        tmp.write_text(json.dumps({"key": key, "capKey": cap_key, "v": 13, "tasks": tasks}))
         tmp.rename(cf)
     except Exception:
         pass

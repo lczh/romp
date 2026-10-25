@@ -280,17 +280,42 @@ class Coverage(Restored):
         got, modes, n_lazy = self.restored(path)
         self.assertEqual(modes, ["restore"]); self.assertEqual(got, whole, "restored and hydrated equals the whole, the attachment included")
 
+    def _cut_turns(self, recs):
+        """The whole parse of `recs` and the turn its document cuts at: (the whole tree, cut). A marker stamped at the first
+        tail turn's time has the last pre-cut turn in its window (the chat's _texts_near: its turn and the turn on each
+        side), so a restored parse consults the pre-cut rows for it."""
+        path = self.write("orph-cut", recs)
+        whole = self.cold(path)
+        self.fresh(); self.parse(path); self.assertTrue(self.doc(path))
+        self.fresh(); modes = []
+        tree = self.parse(path, modes)
+        self.assertEqual(modes, ["restore"])
+        cut = tree["cutTurn"]
+        self.assertGreater(cut, 0)
+        self.assertLess(whole["turns"][cut - 1]["end"], whole["turns"][cut]["t"], "premise: the turns do not overlap at the cut")
+        return whole, cut
+
+    @staticmethod
+    def _texts(turn, typ):
+        return [b["text"] if isinstance(b, dict) else b for a in turn["atoms"] if a.get("type") == typ
+                for b in ([a["message"]["content"]] if isinstance(a["message"]["content"], str) else a["message"]["content"])
+                if isinstance(b, str) or b.get("type") == "text"]
+
     def test_a_tail_marker_is_dedupped_like_the_whole_parse_against_assistants_only_and_by_prefix(self):
         """Round 3 M2a and M2b: a marker equal to a pre-cut USER prompt is salvaged (a prompt is not a kept reply), and a marker
-        that is a strict prefix of a pre-cut reply, or extends one, is dropped, as the whole parse decides both."""
+        that is a strict prefix of a pre-cut reply, or extends one, is dropped, as the whole parse decides both. The reply is
+        the last pre-cut turn's, in the marker's window; the first turn's reply, far from it, drops nothing (2026-10-25)."""
         recs = transcript(T.NOW - 86400, turns=40, compact_every=20)
-        t_last = max(em.parse_z(r["timestamp"]) for r in recs if r.get("timestamp"))
-        prompt = next(r for r in recs if r.get("type") == "user" and isinstance(r["message"].get("content"), str))["message"]["content"]
-        reply = next(r for r in recs if r.get("type") == "assistant")["message"]["content"][0]["text"]
-        cases = [("same-as-prompt", prompt, True), ("prefix-of-reply", reply[: max(1, len(reply) // 2)], False), ("extends-reply", reply + " and more", False)]
+        whole0, cut = self._cut_turns(recs)
+        t_mark = int(whole0["turns"][cut]["t"])
+        prompt = self._texts(whole0["turns"][cut - 1], "user")[0]
+        reply = self._texts(whole0["turns"][cut - 1], "assistant")[0]
+        far = self._texts(whole0["turns"][0], "assistant")[0]
+        cases = [("same-as-prompt", prompt, True), ("prefix-of-reply", reply[: max(1, len(reply) // 2)], False),
+                 ("extends-reply", reply + " and more", False), ("far-reply", far, True)]
         for name, text, salvaged in cases:
             with self.subTest(case=name):
-                path = self.write("orph-" + name, recs, states=[{"t": int(t_last) + 1, "orphanReply": {"uuid": "orph-" + name, "text": text}}])
+                path = self.write("orph-" + name, recs, states=[{"t": t_mark, "orphanReply": {"uuid": "orph-" + name, "text": text}}])
                 whole = self.cold(path)
                 self.assertEqual(any(a.get("orphaned") for t in whole["turns"] for a in t["atoms"]), salvaged, "the whole parse's verdict")
                 self.fresh(); self.parse(path); self.assertTrue(self.doc(path))
@@ -317,11 +342,10 @@ class Coverage(Restored):
 
     def test_an_old_marker_walks_no_pre_cut_row_and_a_tail_marker_dedups_by_hash_without_building(self):
         """Review round 2, M2: one marker stamped in the pre-cut history walked and hydrated every pre-cut assistant; the
-        markers the tail can hold decide the walk, and a tail marker matching a pre-cut reply exactly is answered by the rows'
-        text hashes, no atom built."""
+        markers the tail can hold decide the walk, and a tail marker matching a pre-cut reply in its window exactly is answered
+        by the rows' text hashes, no atom built."""
         recs = transcript(T.NOW - 86400, turns=40, compact_every=20)
         t0 = min(em.parse_z(r["timestamp"]) for r in recs if r.get("timestamp"))
-        first_reply = next(r for r in recs if r.get("type") == "assistant")["message"]["content"][0]["text"]
         path = self.write("orph-old", recs, states=[{"t": int(t0) + 30, "orphanReply": {"uuid": "orph-old", "text": "a reply from before the cut"}}])
         whole = self.cold(path)
         self.fresh(); self.parse(path); self.assertTrue(self.doc(path))
@@ -330,8 +354,9 @@ class Coverage(Restored):
         self.assertEqual(modes, ["restore"])
         self.assertEqual(em.asm_index_stats()["rowDecodes"], 0, "an old marker: no pre-cut row decoded")
         em.hydrate(tree, SID); self.assertEqual(T._strip(tree), whole)
-        t_last = max(em.parse_z(r["timestamp"]) for r in recs if r.get("timestamp"))
-        path2 = self.write("orph-tail", recs, states=[{"t": int(t_last) + 1, "orphanReply": {"uuid": "orph-tail", "text": first_reply}}])
+        whole0, cut = self._cut_turns(recs)                           # the last pre-cut reply, in a marker's window at the tail's start
+        last_pre_reply = self._texts(whole0["turns"][cut - 1], "assistant")[0]
+        path2 = self.write("orph-tail", recs, states=[{"t": int(whole0["turns"][cut]["t"]), "orphanReply": {"uuid": "orph-tail", "text": last_pre_reply}}])
         whole2 = self.cold(path2)
         self.assertFalse(any(a.get("orphaned") for t in whole2["turns"] for a in t["atoms"]), "the whole parse dedups the exact text")
         self.fresh(); self.parse(path2); self.assertTrue(self.doc(path2))
@@ -516,10 +541,11 @@ class ScalarWalkers(Restored):
                                                                 em._prose_chars, em.atom_prose_chars, em.postal_mids, em._encoded_mids,
                                                                 em.is_interrupt_record, em._content, em._text_of, em._lazy_of, em.atom_mids,
                                                                 em._machine_written)) + "\n" + em.POSTAL_RE.pattern
-        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (11, "56888f276a"),  # v11: a stop before the first
-        #                                                                                      atom makes no idle atom, the work rule did
-        #                                                                                      not change (v10 likewise: a stop closes the
-        #                                                                                      restore window; v9
+        self.assertEqual((em._ASM_CKPT_V, hashlib.sha1(rule.encode()).hexdigest()[:10]), (12, "56888f276a"),  # v12: a salvaged reply dedups
+        #                                                                                      in its own window, the work rule did not
+        #                                                                                      change (v11 likewise: a stop before the first
+        #                                                                                      atom makes no idle atom; v10 likewise: a stop
+        #                                                                                      closes the restore window; v9
         #                                                                                      likewise: a failed command's stderr became
         #                                                                                      its output atom; v8: the batch keep moved the
         #                                                                                      stored verdicts; v7, stage one b: the cut

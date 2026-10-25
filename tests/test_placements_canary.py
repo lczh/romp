@@ -243,7 +243,10 @@ class PlacementIdentityCanary(unittest.TestCase):
         # states log, so every pinned id and atom is UNCHANGED; the bump seals sessions whose create-time stop (or
         # the previous conversation's last stop, after a /clear) led the first turn, whose first segment now starts
         # at its prompt (tests/test_first_turn_create_stop.py covers the drop itself).
-        self.assertEqual(jd.PLACEMENTS_V, 17, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=17: "
+        # v18 (2026-10-25, a salvaged reply dedups in its own window): this fixture carries no salvaged reply, so every
+        # pinned id and atom is UNCHANGED; the bump seals transcripts holding a salvaged reply that only a far turn's text
+        # matched, which now rejoins the set (tests/test_judge_orphan_replies.py covers the window itself).
+        self.assertEqual(jd.PLACEMENTS_V, 18, "EXPECTED_SEG_IDS was pinned under PLACEMENTS_V=18: "
                          "re-pin the ids and this version together, in the same commit")
 
 
