@@ -88,8 +88,7 @@ class FirstTurnAfterTheCreateStop(unittest.TestCase):
         self.states.parent.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
-        jd._PARSE_CACHE.clear()
-        jd._CHAIN_MEMO.clear()
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
         jd._rebind_state(self.saved)
         self.td.cleanup()
 
@@ -100,8 +99,7 @@ class FirstTurnAfterTheCreateStop(unittest.TestCase):
             prev = r["uuid"]
         self.path.write_text("".join(json.dumps(r) + "\n" for r in recs))
         self.states.write_text("".join(json.dumps(r) + "\n" for r in states))
-        jd._PARSE_CACHE.clear()
-        jd._CHAIN_MEMO.clear()
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
         return jd.parsed_session(SID, [str(self.path)], now, states=str(self.states), sdk_human=True)
 
     def _assert_running_first_turn_open(self, s):
