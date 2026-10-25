@@ -189,6 +189,99 @@ class RebaseTombstones(unittest.TestCase):
         self.assertEqual(ids, {SID + ":gA", SID + ":gB"}, "chained merges keep every tombstone")
 
 
+class MergeDropSurvivesARebase(unittest.TestCase):
+    """The grouper's merge drops the twin's diary on purpose (_merge_nodes: contradictory twin states were
+    the bug, and the survivor's own evidence stands). When the merge's save had to rebase because an
+    unrelated writer published during the hold, the rebase folded that dropped diary back into the
+    survivor, so the card took its twin's question or done on no new information. Only the twin's rows
+    the holder's base never held fold now. A private synthetic sid: these tests mint and publish stores."""
+
+    MSID = "7c1e5a90-4b2d-4f3e-9a61-0d8e2f4b6a13"
+    G1, G2 = MSID + ":g1", MSID + ":g2"
+    ASK = "Which format should the export use?"
+
+    def tearDown(self):
+        for p in (jd.GOALDIR / (self.MSID + ".json"), jd._overrides_dir() / (self.MSID + ".jsonl")):
+            if p.exists():
+                p.unlink()
+
+    def _seed(self, kind):
+        """g1 'Ship the notes-api export' open; its twin g2 carries a closer `kind` verdict (None: none)."""
+        self.tearDown()                           # a fresh file for each subtest
+        store = jd._guard_nodes({"rompUuid": self.MSID, "seq": 20, "placements": {}, "status": {},
+                                 "nodes": {self.G1: _node(self.G1, text="Ship the notes-api export"),
+                                           self.G2: _node(self.G2, text="Export notes from notes-api")}})
+        if kind:
+            self.assertTrue(jd.record_verdict(store, store["nodes"][self.G2], "closer", kind, ev_t=T0 + 10,
+                                              why=self.ASK if kind == "block" else "exported"))
+        jd.rollup_status(store, session_closed=False)
+        jd.GOALDIR.mkdir(parents=True, exist_ok=True)
+        (jd.GOALDIR / (self.MSID + ".json")).write_text(json.dumps(store))
+
+    def _publish_unrelated(self, t):
+        other = jd.load_goals(self.MSID)          # a nudge stamp, a sweep, a gesture on another card
+        other["nodes"][self.G1]["mt"] = t
+        jd.save_goals(self.MSID, other)
+
+    def _merge_and_save(self, holder):
+        self.assertEqual(jd._merge_nodes(holder, self.G2, self.G1, T0 + 20, "same work"), 1)
+        jd.rollup_status(holder, session_closed=False)
+        jd.save_goals(self.MSID, holder)
+        got = jd.load_goals(self.MSID)
+        self.assertNotIn(self.G2, got["nodes"], "the merged-away twin stays gone")
+        return got
+
+    @staticmethod
+    def _rows(nd, src, kind):
+        return [e for e in (nd.get("log") or []) if e.get("src") == src and e.get("kind") == kind]
+
+    def test_the_survivor_keeps_its_own_state_whether_or_not_a_writer_raced_the_merge(self):
+        for kind in ("block", "done"):
+            for raced in (False, True):
+                with self.subTest(kind=kind, raced=raced):
+                    self._seed(kind)
+                    holder = jd.load_goals(self.MSID)   # the grouper holds the store across its model call
+                    if raced:
+                        self._publish_unrelated(T0 + 15)
+                    got = self._merge_and_save(holder)
+                    g1 = got["nodes"][self.G1]
+                    self.assertEqual(self._rows(g1, "closer", kind), [],
+                                     "the diary the merge dropped did not fold back into the survivor")
+                    self.assertFalse(g1.get("blocked"), "the survivor did not take its twin's question")
+                    self.assertNotEqual(g1.get("blockWhy"), self.ASK)
+                    self.assertFalse(g1.get("nodeComplete"), "the survivor did not take its twin's done")
+                    self.assertEqual(got["status"].get(self.G1), "working")
+
+    def test_a_row_the_twin_gained_during_the_hold_still_folds(self):
+        # the append-only covenant: the merger never saw this block, so it is new information
+        self._seed(None)
+        holder = jd.load_goals(self.MSID)
+        other = jd.load_goals(self.MSID)
+        self.assertTrue(jd.record_verdict(other, other["nodes"][self.G2], "closer", "block",
+                                          ev_t=T0 + 15, why=self.ASK))
+        jd.rollup_status(other, session_closed=False)
+        jd.save_goals(self.MSID, other)
+        got = self._merge_and_save(holder)
+        self.assertEqual(len(self._rows(got["nodes"][self.G1], "closer", "block")), 1,
+                         "a row added after the merger's base folds into the survivor")
+
+    def test_a_stale_pre_merge_writer_does_not_hand_back_the_dropped_diary(self):
+        self._seed("block")
+        stale = jd.load_goals(self.MSID)          # loaded before the merge published
+        with jd._authority():
+            stale["nodes"][self.G2]["log"].append({"ev_t": T0 + 25, "at": T0 + 25, "src": "planner", "kind": "step"})
+        self._merge_and_save(jd.load_goals(self.MSID))
+        stale["nodes"][self.G1]["mt"] = T0 + 30
+        jd.save_goals(self.MSID, stale)
+        got = jd.load_goals(self.MSID)
+        self.assertNotIn(self.G2, got["nodes"])
+        g1 = got["nodes"][self.G1]
+        self.assertEqual(self._rows(g1, "closer", "block"), [], "the merge had already seen and dropped this row")
+        self.assertFalse(g1.get("blocked"))
+        self.assertEqual(len(self._rows(g1, "planner", "step")), 1,
+                         "the stale writer's own new row on the twin still folds into the survivor")
+
+
 class RollupAfterReplay(unittest.TestCase):
     def test_a_journaled_user_resolve_settles_the_loaded_status(self):
         store = _store({SID + ":g1": _node(SID + ":g1")})
