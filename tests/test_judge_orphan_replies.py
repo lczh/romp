@@ -7,8 +7,9 @@ jd.parsed_session read states/ only for idle atoms — so every judge (planner/c
 saw those turns as reply-less: before the workless-segment guard the planner confabulated outcomes for
 them, and after it those segments read as workless, so genuinely FINISHED work never filed as done
 ("cards never complete", "briefs don't match the chat"). event_model.parse_session now synthesizes the
-markers into real assistant atoms — dedup'd by uuid and either-way text prefix against the disk, with
-the CLI's own "API Error: …" texts excluded (pre-tagging markers hold that noise). SYNTHETIC only."""
+markers into real assistant atoms — dedup'd by uuid, and by either-way text prefix against what the disk
+kept near the marker's time (the chat's window: its turn and the turn on each side), with the CLI's own
+"API Error: …" texts excluded (pre-tagging markers hold that noise). SYNTHETIC only."""
 import json
 import os
 import shutil
@@ -41,6 +42,27 @@ def _marker(t, uuid, text):
     return {"t": t, "orphanReply": {"uuid": uuid, "text": text}}
 
 
+def _settled(replies):
+    """One typed ask per entry, 300 s apart, each answered 20 s later by a kept reply that ends its turn. None is a reply
+    the transcript never kept: that turn stays open, so the next ask rides it (segment_turns absorbs it)."""
+    atoms = []
+    for i, reply in enumerate(replies):
+        t = 100 + 300 * i
+        ask = _atom("u%d" % i, t, "ask %d about the notes-api" % i, typ="user")
+        ask["author"] = "human"
+        atoms.append(ask)
+        if reply is not None:
+            a = _atom("a%d" % i, t + 20, reply)
+            a["message"]["stop_reason"] = "end_turn"
+            atoms.append(a)
+    return atoms
+
+
+# turns: [u0 a0] [u1 a1] [u2 a2] [u3 a3] [u4, u5 a5]; a marker at 1360 sits in the last, whose window is it and [u3 a3]
+FAR = ["Done.", "Let me check the migration log first.", "GET /notes and POST /notes are open.",
+       "Added a limit of ten writes per minute.", None, "Bumped to 0.4.1."]
+
+
 class SynthesizeOrphans(unittest.TestCase):
     def test_a_lost_reply_becomes_a_real_assistant_atom_at_its_timestamp(self):
         atoms = [_atom("u1", 100, "the ask", typ="user")]
@@ -63,6 +85,31 @@ class SynthesizeOrphans(unittest.TestCase):
             _marker(163, "a4", "a genuinely different lost reply"),
         ], atoms)
         self.assertEqual([g["uuid"] for g in got], ["a4"])
+
+    def test_a_reply_kept_far_from_the_markers_time_does_not_eat_it(self):
+        """The chat dedups a marker only against the replies kept in the turn at its time and the turn on each side (kernel
+        _texts_near) and shows it otherwise; this parse matched the whole session, so a short reply an early turn also
+        said, or a partial stream an early reply extends, was in the chat and in no judge's tree (2026-10-25)."""
+        atoms = _settled(FAR)
+        for text in ("Done. The migration ran and all 12 tests pass.", "Let me check", "Done."):
+            with self.subTest(text=text):
+                got = em.synthesize_orphans([_marker(1360, "lost-4", text)], atoms)
+                self.assertEqual([(g["uuid"], g["message"]["content"][0]["text"]) for g in got], [("lost-4", text)])
+
+    def test_a_reply_kept_in_the_markers_window_still_dedups(self):
+        atoms = _settled(FAR)
+        for text in ("Added a limit of ten writes per minute.", "Added a limit", "Bumped to 0.4.1. Tagged it too."):
+            with self.subTest(text=text):
+                self.assertEqual(em.synthesize_orphans([_marker(1360, "lost-4", text)], atoms), [],
+                                 "the turn before and the marker's own turn kept it")
+
+    def test_an_earlier_marker_dedups_a_later_one_near_it_and_not_one_far_from_it(self):
+        # turns: [u0 a0] [u1, u2 a2] [u3 a3] [u4, u5 a5]; the first marker rides the second turn, the others the last
+        atoms = _settled(["Started.", None, "Listed the routes.", "Added the limit.", None, "Bumped to 0.4.1."])
+        got = em.synthesize_orphans([_marker(460, "lost-1", "Done."), _marker(1360, "lost-4", "Done."),
+                                     _marker(1400, "lost-4b", "Done.")], atoms)
+        self.assertEqual([g["uuid"] for g in got], ["lost-1", "lost-4"],
+                         "two turns apart, each its own reply; the re-orphan beside the second is that reply again")
 
     def test_duplicate_markers_for_the_same_reply_synthesize_once(self):
         atoms = [_atom("u1", 100, "the ask", typ="user")]
@@ -189,6 +236,100 @@ class JudgeSeesSalvagedWork(unittest.TestCase):
         self.assertIsNotNone(node, "the ask still gets its card")
         self.assertFalse(node.get("nodeComplete"),
                          "error noise in a marker must not un-guard the fabrication hole")
+
+
+FSID = "5a1e0000-2222-4333-8444-000000000c01"     # a private synthetic sid (the planner run mints goals under it)
+SALVAGED = "Done. The migration ran on the staging copy and all 12 tests pass."
+
+
+def _rec(t, uuid, parent, text, role="user", **extra):
+    r = {"type": role, "timestamp": iso(t), "uuid": uuid, "parentUuid": parent}
+    if role == "user":
+        r.update(promptSource="typed", message={"role": "user", "content": text})
+    else:
+        r["message"] = {"role": "assistant", "content": [{"type": "text", "text": text}], "stop_reason": "end_turn"}
+    r.update(extra)
+    return r
+
+
+class FarKeptReplyHidesNoSalvage(unittest.TestCase):
+    """End-to-end through the judges' parse (jd.parsed_session) and the planner: the notes-api session whose fourth ask
+    was answered only in a stream an API-errored try lost, while the first ask's kept reply ("Done.") prefixes that
+    stream. The chat shows the salvaged reply (nothing near its time kept it); the judges must read it too."""
+
+    def setUp(self):
+        self.td = Path(tempfile.mkdtemp())
+        self.leaf = self.td / (FSID + ".jsonl")
+        (self.td / "states").mkdir()
+        saved = (jd.GOALDIR, jd.PCACHE, jd.STATESDIR, jd.plan_llm, jd.opener_llm, jd._group_store)
+        jd.GOALDIR, jd.PCACHE, jd.STATESDIR = self.td / "goals", self.td / "pcache", self.td / "states"
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+
+        def restore():
+            (jd.GOALDIR, jd.PCACHE, jd.STATESDIR, jd.plan_llm, jd.opener_llm, jd._group_store) = saved
+            jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+            shutil.rmtree(self.td, ignore_errors=True)
+        self.addCleanup(restore)
+
+    def _write(self, rows, first="Done.", turn4=(), more=()):
+        recs = [_rec(T0, "u1", None, "run the migration"),
+                _rec(T0 + 20, "a1", "u1", first, role="assistant"),
+                _rec(T0 + 300, "u2", "a1", "list the open endpoints in notes-api"),
+                _rec(T0 + 320, "a2", "u2", "GET /notes, POST /notes and DELETE /notes/:id are open.", role="assistant"),
+                _rec(T0 + 600, "u3", "a2", "add a rate limit to POST /notes"),
+                _rec(T0 + 620, "a3", "u3", "Added a limit of ten writes per minute to POST /notes.", role="assistant"),
+                _rec(T0 + 900, "u4", "a3", "rerun the migration on the staging copy and run the tests")]
+        recs += list(turn4)
+        recs += [_rec(T0 + 1200, "u5", recs[-1]["uuid"], "thanks, now bump the version"),
+                 _rec(T0 + 1220, "a5", "u5", "Bumped to 0.4.1.", role="assistant")]
+        recs += list(more)
+        self.leaf.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+        (self.td / "states" / (FSID + ".jsonl")).write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    def _turn4(self):
+        """The judges' tree's turn holding the fourth ask: its atoms' uuids, and (uuid, salvaged, text) per reply."""
+        tree = jd.parsed_session(FSID, [str(self.leaf)], NOW)
+        turn = next(t for t in tree["turns"] if any(a.get("uuid") == "u4" for a in t["atoms"]))
+        em.hydrate(turn["atoms"], FSID)
+        return ([a.get("uuid") for a in turn["atoms"]],
+                [(a.get("uuid"), bool(a.get("orphaned")), em._text_of(em._content(a.get("message"))))
+                 for a in turn["atoms"] if a.get("type") == "assistant"])
+
+    def test_the_judges_parse_holds_a_salvaged_reply_an_early_turn_prefixes(self):
+        self._write([_marker(T0 + 960, "lost-4", SALVAGED)])
+        uuids, replies = self._turn4()
+        self.assertEqual(replies, [("lost-4", True, SALVAGED)])
+        self.assertNotIn("u5", uuids, "the salvaged reply ends its turn: the next ask opens its own")
+
+    def test_the_planner_reads_it(self):
+        self._write([_marker(T0 + 960, "lost-4", SALVAGED)])
+        calls = []
+
+        def fake(text, *a, **k):
+            calls.append(text)
+            return '{"ops":[]}'
+        jd.plan_llm = jd.opener_llm = fake
+        jd._group_store = lambda *a, **k: None
+        jd._plan_session(FSID, str(self.leaf), NOW)
+        self.assertTrue(any("all 12 tests pass" in c for c in calls), "the salvaged reply is in the planner's evidence")
+
+    def test_a_reply_its_own_turn_kept_still_dedups(self):
+        self._write([_marker(T0 + 960, "lost-4", "Done. The migration ran on the staging copy")],
+                    turn4=[_rec(T0 + 940, "a4", "u4", SALVAGED, role="assistant")])
+        self.assertEqual(self._turn4()[1], [("a4", False, SALVAGED)])
+
+    def test_the_idle_span_after_the_try_places_the_window_as_the_chat_reads_it(self):
+        # the fourth try ended on the CLI's error record before the settle; the idle span from the settle to the next ask
+        # stretches that turn past the marker, so the window is the third to the fifth turn, as in the tree the chat reads,
+        # and the sixth turn's "Done. …" is not this reply (without the span the window slid to the fourth to the sixth)
+        err = _rec(T0 + 930, "e4", "u4", "API Error: 529 Overloaded. This is a server-side issue.", role="assistant",
+                   isApiErrorMessage=True)
+        err["message"]["stop_reason"] = "stop_sequence"
+        self._write([_marker(T0 + 960, "lost-4", "Done."), {"t": T0 + 960, "state": "waiting"},
+                     {"t": T0 + 1200, "state": "working"}], first="Started the migration.", turn4=[err],
+                    more=[_rec(T0 + 1500, "u6", "a5", "tag the release"),
+                          _rec(T0 + 1520, "a6", "u6", "Done. Tagged v0.4.1.", role="assistant")])
+        self.assertIn(("lost-4", True, "Done."), self._turn4()[1])
 
 
 FORK = "66666666-7777-8888-9999-bbbbbbbbbbbb"   # the transcript a /clear opened under SID's session

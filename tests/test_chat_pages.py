@@ -37,6 +37,9 @@ from test_asm_checkpoint_served import transcript                    # noqa: E40
 
 SID = "aaaaaaaa-4444-4222-8333-444444444444"
 NOW = 1781200000
+# a salvaged reply's text the parse never salvages (the CLI's own error text, from before error settles were tagged) and the
+# chat still shows: a note no atom of the parse dedups, wherever it sits
+ERROR_NOTE = "API Error: 529 Overloaded. This is a server-side issue."
 
 
 def _last_uuid(recs):
@@ -168,8 +171,9 @@ class PagesEqualTheWhole(Harness):
 
     def _with_notes(self, turns=120, compact_every=25):
         """The fixture with a model stamp on every reply and a states log of romp's notes between the turns: a retry
-        recovered, a give-up, an effort change, a command gesture and two orphan replies (one the transcript kept: deduped;
-        one it did not: rendered), several stamped one second before a page boundary's first atom."""
+        recovered, a give-up, an effort change, a command gesture and three orphan replies (two the parse salvages, one of
+        them a copy of a far turn's reply, so the chat shows each as the parse's atom; one holding the CLI's error text,
+        which the parse leaves out: rendered as a note), several stamped one second before a page boundary's first atom."""
         recs = transcript(NOW - 86400, turns=turns, compact_every=compact_every)
         for r in recs:
             if r.get("type") == "assistant":
@@ -180,7 +184,7 @@ class PagesEqualTheWhole(Harness):
         for r in recs:
             if r.get("type") == "user" and not r.get("isCompactSummary") and r.get("promptSource") == "typed":
                 t_of[k] = em.parse_z(r["timestamp"]); k += 1
-        kept_text = next(r for r in recs if r.get("type") == "assistant")["message"]["content"][0]["text"]
+        kept_text = self.kept_text = next(r for r in recs if r.get("type") == "assistant")["message"]["content"][0]["text"]
         # a page boundary of the PARSE's turns (each compact boundary record is its own turn, so prompt 96 is not turn 96):
         # the first multiple of 16 whose turn starts a clean second after the turn before ends
         pturns = km._parse(self.leaf, SID, NOW)["turns"]
@@ -192,7 +196,7 @@ class PagesEqualTheWhole(Harness):
                 {"t": int(t_of[64]) - 1, "orphanReply": {"uuid": "orph-1", "text": "a reply the transcript never kept"}},
                 {"t": int(t_of[7]) + 5, "orphanReply": {"uuid": "orph-2", "text": kept_text}},
                 {"t": int(t_of[80]) - 1, "effortApplied": "low"},
-                {"t": int(pturns[self.boundary]["t"]) - 1, "orphanReply": {"uuid": "orph-3", "text": kept_text}}]   # RENDERED, at a page boundary
+                {"t": int(pturns[self.boundary]["t"]) - 1, "orphanReply": {"uuid": "orph-3", "text": ERROR_NOTE}}]   # RENDERED, at a page boundary
         (jd.STATE / "states" / (SID + ".jsonl")).write_text("".join(json.dumps(r) + "\n" for r in rows))
         return recs
 
@@ -206,11 +210,18 @@ class PagesEqualTheWhole(Harness):
             self.assertIn(k, kinds, k)
         # the parse synthesizes an orphan reply's atom from the same row when the transcript lacks the text
         # (event_model.synthesize_orphans), so orph-1's note is deduped against that atom, which sits at the note's time;
-        # orph-2's text is turn 0's reply, far from the note's time, so under the near-window rule the note renders
+        # orph-2's text is turn 0's reply, far from the note's time: the parse dedups by the chat's near-window rule, so it
+        # salvages that one too, and the chat shows the same reply the judges read (2026-10-25); orph-3 is a rendered note
         orphaned = [e for e in whole if e.get("orphaned")]
-        self.assertEqual([e.get("orphanOf") for e in orphaned], ["orph-2", "orph-3"], "near texts dedup; a copy far in time does not")
-        self.assertRegex(orphaned[1]["uuid"], r"^orphan:\d+:\d+$", "a rendered note's key: orphan:<t>:<n>, the record uuid on orphanOf")
+        self.assertEqual([e.get("orphanOf") for e in orphaned], ["orph-3"], "a note the parse salvaged dedups against its atom")
+        self.assertRegex(orphaned[0]["uuid"], r"^orphan:\d+:\d+$", "a rendered note's key: orphan:<t>:<n>, the record uuid on orphanOf")
         self.assertTrue(any(e.get("kind") == "assistant" and not e.get("orphaned") and (e.get("md") or "").startswith("a reply the transcript never kept") for e in whole))
+        salvaged = {a["uuid"]: a for t in km._parse(self.leaf, SID, NOW)["turns"] for a in t["atoms"] if a.get("orphaned")}
+        self.assertEqual(sorted(salvaged), ["orph-1", "orph-2"], "the tree the judges read holds the replies the chat shows")
+        em.hydrate([salvaged["orph-2"]], SID)
+        self.assertEqual(em._text_of(em._content(salvaged["orph-2"]["message"])), self.kept_text)
+        self.assertEqual([e.get("uuid") for e in whole if e.get("kind") == "assistant" and (e.get("md") or "").strip() == self.kept_text],
+                         ["a0", "orph-2"], "turn 0's reply, then the salvaged copy as the parse's atom: no note")
         self.document()
         m = self.restored()
         floor = m["floor"]; tail = _strip(m["events"])
@@ -234,7 +245,7 @@ class PagesEqualTheWhole(Harness):
         self.assertNotIn("missing", w); self.assertIn(note["uuid"], [e["uuid"] for e in w["events"]])
         # the rendered orphan note at the boundary of the 96th turn: a page's FIRST event; a window lands on it by its key,
         # the pages around it equal the whole, and a walk older from it crosses the boundary (round 2, item 6)
-        onote = orphaned[1]
+        onote = orphaned[0]
         ow = km._chat_history_reply(SID, {"type": "loadAround", "id": SID, "uuid": onote["uuid"]}, NOW)
         self.assertNotIn("missing", ow); self.assertIn(onote["uuid"], [e["uuid"] for e in ow["events"]])
         wu = [e["uuid"] for e in whole]
@@ -505,14 +516,14 @@ class RealArm(Harness):
 
 class NotesAndFloor(Harness):
     def _sealed_note(self):
-        """A rendered orphan note in the (soon sealed) last turn of a 200-turn transcript, its text turn 0's reply: the parse
-        keeps the text far away, so the near-window rule renders the note; then a typed prompt opens turn 200, which seals
-        turn 199 with the note into the fold's prefix. Returns (records, kept_text, the open prompt's uuid)."""
+        """A rendered orphan note in the (soon sealed) last turn of a 200-turn transcript, its text the CLI's error text: the
+        parse leaves that out, so no atom dedups it and the note renders; then a typed prompt opens turn 200, which seals
+        turn 199 with the note into the fold's prefix. Returns (records, the note's text, the last record's time)."""
         recs = transcript(NOW - 86400, turns=200, compact_every=1000)     # no compaction: one fold over the whole list
         self.write(recs)
         turns = km._parse(self.leaf, SID, NOW)["turns"]
-        kept_text = next(r for r in recs if r.get("type") == "assistant")["message"]["content"][0]["text"]
-        rows = [{"t": int(turns[199]["t"]) - 1, "orphanReply": {"uuid": "orph-g", "text": kept_text}}]
+        note = ERROR_NOTE
+        rows = [{"t": int(turns[199]["t"]) - 1, "orphanReply": {"uuid": "orph-g", "text": note}}]
         (jd.STATE / "states" / (SID + ".jsonl")).write_text("".join(json.dumps(r) + "\n" for r in rows))
         last = next(r for r in reversed(recs) if r.get("uuid"))
         t_last = em.parse_z(last["timestamp"])
@@ -522,15 +533,15 @@ class NotesAndFloor(Harness):
         self.assertTrue(any(e.get("orphanOf") == "orph-g" for e in m["events"]), "the note rendered")
         fe = km._chat_fold_get(SID)
         self.assertIsNotNone(fe)
-        self.assertTrue(any(isinstance(x, (list, tuple)) and x[1] == kept_text for x in fe["orphan_texts"]), "sealed as (t, text)")
-        return recs2, kept_text, t_last
+        self.assertTrue(any(isinstance(x, (list, tuple)) and x[1] == note for x in fe["orphan_texts"]), "sealed as (t, text)")
+        return recs2, note, t_last
 
     def test_a_reply_landing_in_the_notes_window_retires_it_and_one_far_from_it_does_not(self):
-        recs2, kept_text, t_last = self._sealed_note()
+        recs2, note, t_last = self._sealed_note()
         # the far case: the open turn's reply says something else, then a later turn repeats the salvaged text
         far = recs2 + [G.aline(t_last + 90, "quite another reply", "a_g200", "u_g200", stop="end_turn"),
                        G.uline(t_last + 120, "and again", "u_g201", "a_g200"),
-                       G.aline(t_last + 150, kept_text, "a_g201", "u_g201", stop="end_turn")]
+                       G.aline(t_last + 150, note, "a_g201", "u_g201", stop="end_turn")]
         self.write(far)
         km.build_session(SID, NOW + 1, {}, floor=0)
         info = km._chat_fold_last_info()
@@ -538,8 +549,8 @@ class NotesAndFloor(Harness):
         self.assertEqual(info.get("fold"), 1, "the fold stands")
         # the near case: the reply landing in the turn right after the note's (its window) retires it
         self.fresh(); (jd.STATE / "states" / (SID + ".jsonl")).unlink()
-        recs2, kept_text, t_last = self._sealed_note()
-        near = recs2 + [G.aline(t_last + 90, kept_text, "a_g200", "u_g200", stop="end_turn")]
+        recs2, note, t_last = self._sealed_note()
+        near = recs2 + [G.aline(t_last + 90, note, "a_g200", "u_g200", stop="end_turn")]
         self.write(near)
         km.build_session(SID, NOW + 1, {}, floor=0)
         self.assertEqual(km._chat_fold_last_info().get("why"), "orphan", "a new reply in the note's window retires it: a refold")
