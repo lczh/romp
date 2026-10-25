@@ -25,7 +25,8 @@ was attributed to, beside the card the moved input changes:
   * a judge pass beginning or ending: nothing derives while the stores' versions stand; a mid-pass publish and a
     mid-pass journal row re-derive their session at the next build and once more at the pass end; a pass
     beginning between the key's stat and the body's read keys the entry as what it rendered; a rewrite the
-    stat does not show reaches the card at the next pass;
+    stat does not show reaches the card at the next pass; a journal whose rows the store already holds moves no
+    key at a boundary, one whose replay writes (or a live read that cannot say) does;
   * the clock: two builds ten minutes apart derive nothing and differ in `now`, `buildId` and the cards' age
     tint alone (the fold stamps trgb per build; the memo holds nothing clock-derived);
   * the byte bound (FEED_MEMO_BYTES): entries leave oldest first, counted, and the payload stays complete;
@@ -825,11 +826,13 @@ class ThePassBoundaryIsNotAnInput(_Board):
     (_feed_goals_keyed reports the snapshot key it served from, inside its own lock hold), so a pass boundary between
     the key's stat and the body's read cannot pair one mode's key with the other mode's rendering.
 
-    Named follow-up, not done here: the replay bit flips at every boundary for every session whose journal FILE
-    exists (journals are never pruned, and the replay is a no-op whenever the kernel's own save survived), so such a
-    session still derives twice per pass under `store`. Tightening it needs a fold watermark the store carries (the
-    journal identity save_goals folded, popped like _baseRev) so the bit means the journal has rows after the fold,
-    not that a journal exists.
+    The replay bit follows what the replay DID (2026-10-25, kernel _feed_store_replayed), no longer the mode: it read
+    False mid-pass and True between passes for every session whose journal FILE exists (journals are never pruned, and
+    the replay is a no-op whenever the kernel's own save survived), so such a session derived twice per pass under
+    `store` with nothing new to show. Now the live read's shared view says whether its replay wrote
+    (jd.shared_replay_wrote): when it wrote nothing the view is the file's content, which is what the raw snapshot
+    renders, and the key stands across the boundary; when it wrote (a gesture whose save never landed) the two
+    renderings differ and stay two keys; when the read cannot say (the shared cache off) the key keeps the live value.
 
     The pass here is the real _begin_goals_pass over this board's store directory: the pass memo it swaps in is the
     process's, saved and restored, and the snapshot is always dropped again (a failing assertion would otherwise
@@ -981,6 +984,74 @@ class ThePassBoundaryIsNotAnInput(_Board):
         self.assertEqual(self._cards(f2)[API + ":g1"]["text"], GOAL_OF[API].upper())
         _reset_memo()
         self.assertEqual(_dump(f2), _dump(self._build()), "and equals a from-scratch build")
+
+    @staticmethod
+    def _resolve_saved(sid, t=NOW - 20):
+        """A user's resolve the way the kernel files one: the journal row first, then the store saved through the
+        writer's loader, whose replay records the verdict. The row's effect is then in the file, and every later
+        replay of the journal writes nothing (the normal case; journals are never pruned)."""
+        jd.append_override(sid, sid + ":g1", "resolve", t)
+        jd.save_goals(sid, jd.load_goals(sid))
+
+    def test_a_journal_whose_rows_are_all_in_the_store_moves_no_key_at_a_pass_boundary(self):
+        """The class docstring's replay bit (2026-10-25). web's journal holds a resolve its store save carried, so its
+        live read's replay writes nothing and its raw snapshot renders the same content: web derives at no boundary.
+        api's journal holds a resolve whose save never landed, so its replay writes: api still derives at each
+        boundary, its snapshot without the resolve and its live read with it. Served boards equal from-scratch ones in
+        both modes."""
+        self._resolve_saved(WEB)
+        jd.append_override(API, API + ":g1", "resolve", NOW - 20)
+        self._build()
+        d, before = self._delta(self._build)
+        self.assertEqual(d["derived"], 0, "warm: %r" % d)
+        self.assertTrue(self._cards(before)[WEB + ":g1"]["doneConfirming"], "web's resolve is in its file")
+        self.assertTrue(self._cards(before)[API + ":g1"]["doneConfirming"], "the live read replays api's resolve")
+        for _ in range(3):
+            km._begin_goals_pass()
+            d, mid = self._delta(self._build)
+            self.assertEqual((d["derived"], d["miss_by"]), (1, {"store": 1}),
+                             "a pass beginning re-derives api alone, whose snapshot lacks the row its live read "
+                             "replays: %r" % d)
+            self.assertTrue(self._cards(mid)[WEB + ":g1"]["doneConfirming"], "web's snapshot holds the resolve")
+            self.assertFalse(self._cards(mid)[API + ":g1"]["doneConfirming"], "api's raw snapshot does not replay")
+            d, _ = self._delta(self._build)
+            self.assertEqual(d["derived"], 0, "mid-pass the snapshot stands: %r" % d)
+            km._end_goals_pass()
+            d, after = self._delta(self._build)
+            self.assertEqual((d["derived"], d["miss_by"]), (1, {"store": 1}),
+                             "the pass ending re-derives api alone: %r" % d)
+            self.assertEqual(_dump(after), _dump(before), "back to the live boards")
+        km._begin_goals_pass()
+        mid = self._build()                   # web served from its entry derived between passes
+        _reset_memo()
+        self.assertEqual(_dump(mid), _dump(self._build()), "equals every session derived from the snapshot")
+        km._end_goals_pass()
+        after = self._build()                 # web served from its entry derived mid-pass
+        _reset_memo()
+        self.assertEqual(_dump(after), _dump(self._build()), "equals every session derived from the live read")
+
+    def test_a_live_read_that_cannot_say_what_its_replay_did_keeps_the_boundary(self):
+        """The bit's unknown case: with the shared cache off (switched off for the process after a reader wrote to a
+        shared view, every load is load_goals' private store, which carries no replay outcome) the live read cannot say
+        whether its replay wrote, so the key keeps the live value and a journaled session derives at each boundary, as
+        before. Here that matters: api's resolve never reached its file, so the snapshot and the live read differ, and
+        a hit across the boundary would show or drop the resolve on no new information."""
+        jd.append_override(API, API + ":g1", "resolve", NOW - 20)
+        jd._SHARED_OFF[0] = True
+        try:
+            self._build()
+            km._begin_goals_pass()
+            d, mid = self._delta(self._build)
+            self.assertEqual((d["derived"], d["miss_by"]), (1, {"store": 1}), "api re-derives from its snapshot: %r" % d)
+            self.assertFalse(self._cards(mid)[API + ":g1"]["doneConfirming"], "the raw snapshot does not replay")
+            km._end_goals_pass()
+            d, after = self._delta(self._build)
+            self.assertEqual((d["derived"], d["miss_by"]), (1, {"store": 1}), "and again from the live read: %r" % d)
+            self.assertTrue(self._cards(after)[API + ":g1"]["doneConfirming"], "the private load replays the resolve")
+            _reset_memo()
+            self.assertEqual(_dump(after), _dump(self._build()))
+        finally:
+            jd._SHARED_OFF[0] = False
 
 
 class TheBoundAndTheDepartures(_Board):

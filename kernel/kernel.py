@@ -51930,6 +51930,34 @@ def _feed_row_key(tm):
              tuple(tuple(t.get(k) for k in _FEED_ROW_TASK_FIELDS) for t in (tm.get("bgTasks") or ()) if isinstance(t, dict))))
 
 
+def _feed_store_replayed(sident, snap_key, st):
+    """The `store` component's replay bit: True when the rendering the body made of the session's goal store carries an
+    override-journal replay that WROTE (or may have), else None (2026-10-25). `sident` is the store's file identities
+    (store, journal, archive), `snap_key` the pass-snapshot key _feed_goals_keyed served from (None: the live read) and
+    `st` the store it returned.
+
+    The three cases:
+      no journal file: None. Nothing is replayed in either mode.
+      the judge pass's raw snapshot (`snap_key` set): None. The snapshot is the file's bytes decoded, with no replay;
+        a user gesture punched onto it mid-pass is a replay, and the punch record (_goals_snap_done) keys that one.
+      the live read: the shared view replays the journal, and says what its replay did (jd.shared_replay_wrote, stamped
+        by load_goals_shared on the view it builds). False, every journal row already in the file (the kernel's own save
+        survived, the normal case: the replay is idempotent), means the view is the file's content, node-guarded and
+        stamped with the CAS base, exactly how a store with no journal loads: None, the snapshot's value. True (a row
+        the file lacks, such as a gesture a racing pass save clobbered) and None (`st` is not a shared view: the cache
+        off, an absent or unreadable file, a rewind hold's copy, a faulted or a hidden session's skipped read) keep True.
+
+    Why this is exact: an equal key across the two modes now means the same file versions (`sident` and the rendered
+    version beside it) and a live view whose replay wrote nothing, so the live rendering is the file's content, which is
+    what the snapshot renders; a replay that wrote keeps the two renderings two keys (the review pin of 2026-09-16 in
+    tests/test_feed_session_memo.py). Before, the bit read the MODE: False mid-pass, True between passes, for every
+    session whose journal file exists. Journals are never pruned, so every session the user ever replied to, resolved
+    or cleared a card of re-derived at every pass beginning and end it was built across, with nothing new to show."""
+    if sident[1] is None or snap_key is not None:
+        return None                                   # no journal, or the raw snapshot: no replay in the rendering
+    return None if jd.shared_replay_wrote(st) is False else True
+
+
 def _feed_session_key(s, tm, ctx, prev_entry):
     """One session's memo key: a tuple in _FEED_MEMO_LABELS order, one component per input _feed_session_entry reads,
     every file stat'd BEFORE any read below it (stat-then-read: a publish landing between the stat and the read pairs
@@ -51983,16 +52011,20 @@ def _feed_session_key(s, tm, ctx, prev_entry):
         VERSION the body's read rendered (the key of the pass-snapshot entry _feed_goals_keyed served it from while a
         pass is mid-flight, since the feed serves the pre-pass snapshot then; else the live file's identity beside
         the pass memo's count of byte changes the stat did not show for that store, taken before the read like the
-        stat), whether the override journal is replayed onto that version (the live loader replays it, the raw
-        snapshot does not until a punch; None with no journal), the user-gesture mark _user_goal_write[fsid], the
-        punch record _goals_snap_done[fsid], the rewind hold (cutT, leaf, at) or None, whether the read FAULTED (an
+        stat), whether a journal replay that WROTE is in that rendering (True for a live read whose replay wrote or
+        cannot say; None with no journal, for the raw snapshot, which replays nothing until a punch, and for a live
+        read whose replay wrote nothing, the file's content as the snapshot renders it: _feed_store_replayed), the
+        user-gesture mark _user_goal_write[fsid], the punch record _goals_snap_done[fsid], the rewind hold
+        (cutT, leaf, at) or None, whether the read FAULTED (an
         EIO or a permissions fault moves no stat)). _feed_goals_keyed, jd.load_goals_shared inside _bg_placed_tops
         and _session_stamp_read, jd.review_boundary, jd._done_since (the done rows' ev_t: a completed card's time,
         read for its done steps that are not rolled down, and its reviewed-earlier rows), _newest_block_ev_t (the
         block rows' ev_t the blocked yield orders against), jd._block_since (the same rows' ev_t, a blocked card's
         time) and every node read. The pass's clock stamp is not a component (2026-09-16): a new snapshot that
         decodes the same versions is not new information, and the stamp moved every snapshotted session's key twice
-        per pass.
+        per pass. Nor is the pass mode alone (2026-10-25): the replay bit read True between passes and False inside
+        one for every session whose journal FILE exists, and journals are never pruned, so each such session derived
+        twice per pass with no new information.
       anchors: _node_anchor_rev[fsid]. The warm-anchor table _node_anchor_uuids serves a cold node from; a chat build's
         resolve for this sid bumps it.
       reg: (_feed_reg_sig(fsid), _chat_ident(STATE/gone/<fsid>.json)). The SDK registry record's state (readable,
@@ -52211,9 +52243,12 @@ def _feed_session_key(s, tm, ctx, prev_entry):
     # a pass boundary between the stat above and the read cannot pair one mode's key with the other's rendering. The
     # pass's clock stamp stood here before, and it moved every snapshotted session's key at every pass begin and end
     # although the store rendered was the same object or the same file version: a whole-board re-derivation per pass
-    # boundary, most of a busy board's derivations when short passes run back to back.
+    # boundary, most of a busy board's derivations when short passes run back to back. The replay bit is set only when
+    # the replay WROTE (2026-10-25, _feed_store_replayed): with every journal row already in the file, the raw snapshot
+    # and the replayed live view are the same content, and the bit flipping at every pass boundary was most of the
+    # remaining store misses.
     rendered = snap_key if snap_key is not None else (sident[0], alias)
-    replayed = (snap_key is None) if sident[1] is not None else None
+    replayed = _feed_store_replayed(sident, snap_key, st)
     store = (sident, rendered, replayed, _user_goal_write.get(fsid, 0.0), _goals_snap_done.get(fsid), hold,
              st is None and not hide)                # a hidden session's skipped read is not a fault
     bg = (tuple((r.get("tid"), r.get("desc"), r.get("t"), r.get("type"), r.get("deadline"), r.get("agentId"))
