@@ -4572,8 +4572,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   read it, a probe on the shared read-only view), `shared` (probes the shared
   cache answered), `writer` (session-ticks that loaded the writer's copy
   because a lift was due) and `noop` (writer loads whose fresh decision filed
-  nothing, the store having moved between the probe and the load), and the
-  gauge `entries` (sessions remembered). `bgTops` is the placed-launch memo
+  nothing, the store having moved between the probe and the load), `empty`
+  (the skips a goal store with nothing to rule on settled before the dispatch
+  scan, counted under `skip` too), and the gauge `entries` (sessions
+  remembered). `bgTops` is the placed-launch memo
   behind the awaiting lift and the feed's background-task classification,
   keyed on the parse object and the store object: `hit` and `miss` (calls
   answered from the per-version map against looked up), `resolve` (launch ids
