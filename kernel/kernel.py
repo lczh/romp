@@ -60511,20 +60511,27 @@ def _run_judging(t0, alive_sids, semantic):
 
 
 _nudge_times_cache = {}                       # path → fold cursor (count, gen, {gid: [t, ...]}) (T323 stage 3)
+# The _log_nudge_event verdicts that record a message romp SENT. Every other verdict (skipped-redundant*,
+# held-fresh-re-judged, re-armed, resolved-/blocked-on-user-at-send, compact-suggested) is a gate decision
+# that sent the goal nothing; a row with no verdict predates the 2026-08-25 instrumentation and was a fire.
+_NUDGE_SEND_VERDICTS = frozenset(("fired", "fired-at-cap", "fired-parked-backstop"))
 
 
 def _nudge_times():
-    """{gid: [fire t, ...]} from STATE/nudge-events.jsonl (judge _log_nudge_event appends one row per
-    auto-nudge fire) — the card-side nudge HISTORY behind the stalled chip (the user 2026-07-02: a chip
-    that just says "stalled" reads like a state romp observed; the evidence that romp DID follow up,
-    and when, must be one click away). mtime-cached like _auto_nudge_data; best-effort {}."""
-    return _fold_records(_nudge_times_cache, jd.STATE / "nudge-events.jsonl", dict, _nudge_times_step, ckpt="nudgeTimes")
+    """{gid: [fire t, ...]} from STATE/nudge-events.jsonl — the card-side nudge HISTORY behind the stalled
+    chip (the user 2026-07-02: a chip that just says "stalled" reads like a state romp observed; the
+    evidence that romp DID follow up, and when, must be one click away). _log_nudge_event writes a row for
+    every gate decision since 2026-08-25, so only the sends (_NUDGE_SEND_VERDICTS) are kept: a skip or a
+    re-arm listed here read on the card as a follow-up. mtime-cached like _auto_nudge_data; best-effort {}.
+    The checkpoint name moved when the filter landed, so a cursor saved with skips in it is never restored."""
+    return _fold_records(_nudge_times_cache, jd.STATE / "nudge-events.jsonl", dict, _nudge_times_step, ckpt="nudgeTimes2")
 
 
 def _nudge_times_step(idx, o):
-    """One nudge-events row: the fire time under its goal id. A fold since T323 stage 3 (it re-walked the shared
-    record list on every log move); the cursor resumes from the file's checkpoint after a restart."""
-    if o.get("gid") and o.get("t"):
+    """One nudge-events row: its time under its goal id, when the row records a send. A fold since T323 stage 3
+    (it re-walked the shared record list on every log move); the cursor resumes from the file's checkpoint after
+    a restart."""
+    if o.get("gid") and o.get("t") and o.get("verdict", "fired") in _NUDGE_SEND_VERDICTS:
         idx.setdefault(o["gid"], []).append(int(o["t"]))
     return idx
 

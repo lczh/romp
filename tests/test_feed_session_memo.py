@@ -1334,6 +1334,19 @@ class PerCardNudgeInputs(_Board):
         _reset_memo()
         self.assertEqual(_dump(frame), _dump(self._build()))
 
+    def test_a_nudge_decision_that_sent_nothing_keeps_the_card_cached(self):
+        # a skip or a re-arm row is no follow-up: it joins neither the card's history nor its key
+        gid = API + ":g1"
+        self._nudge_data({gid: {"count": 1}})
+        self._nudge_event(gid, NOW - 30)
+        self._build()
+        with (jd.STATE / "nudge-events.jsonl").open("a") as out:
+            for stamp, verdict in ((NOW - 20, "skipped-redundant"), (NOW - 10, "re-armed")):
+                out.write(json.dumps({"gid": gid, "t": stamp, "count": 1, "verdict": verdict}) + "\n")
+        delta, frame = self._delta(self._build)
+        self.assertEqual((delta["derived"], delta["hit"]), (0, 3), delta)
+        self.assertEqual(self._cards(frame)[gid]["nudged"], {"count": 1, "times": [NOW - 30]})
+
     def test_unrelated_ledger_writes_and_unread_history_keep_entries_cached(self):
         self._nudge_data({API + ":g1": {"count": 1, "lastTurnId": "s1"}})
         before = self._build()
