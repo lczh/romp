@@ -18,7 +18,8 @@ The rules pinned here:
   * the landing is an EVENT, never the pick: the backend stamps authSwitchedAt where the reconcile finds a waiting
     billing pick carried by the CLI the session connected to (now for a launch made here, that CLI's spawn for one an
     earlier kernel made), and until then the CLI's own report (authLive) stands, so a session whose switch still waits
-    reads as the account its running CLI serves it on. A session with no CLI running lands at the pick itself.
+    reads as the account its running CLI serves it on. A session with no CLI running lands at the pick itself, and a
+    session that follows the machine default with no CLI running lands when that default moves to another billing.
 
 SYNTHETIC fixtures only: placeholder sids, invented texts; every state root this module mints writes session-hosts off.
 """
@@ -404,6 +405,119 @@ class TheReconcileStampsTheLanding(_Backend):
         s._reconcile_waiting_picks(s.launch_values(), True)
         self.assertFalse(self._reg().get("authSwitchedAt"))
         self.assertEqual(s.auth_live, "login")
+
+
+class _Follower(_Backend):
+    def _sdk(self):
+        return self.be
+
+    def _follower(self, cli=None, **reg):
+        """web follows the machine default, which is the login, and its last CLI reported the login. `cli`: None, no
+        session object here (a kernel restart left it dormant); "gone", an object whose CLI has ended; "running", an
+        object whose CLI runs, launched on the login."""
+        be = self._sdk()
+        sb.write_sdk_default(self.d, auth="login", authExplicit=True, authLogin="")
+        sb.write_reg(self.d, SID, dict({"sid": SID, "name": "web", "cwd": self.d, "mode": "acceptEdits", "alive": True,
+                                        "apiKeyAuth": False}, **reg))
+        self.assertEqual(be.billing_pick(self._reg()), ("login", ""))
+        if cli is None:
+            return None
+        s = sb.SdkSession(be, dict(self._reg()))
+        s.thread = types.SimpleNamespace(is_alive=lambda: cli == "running", ident=None)
+        if cli == "running":
+            s._cli_launch = s.launch_values()
+            s._served_billing = (s._cli_launch["auth"], s._cli_launch["authLogin"])
+            s.asked = []
+            s.request_reconnect = lambda *a, **k: s.asked.append(k.get("why"))
+        be.sessions[SID] = s
+        return s
+
+
+class ADefaultChangeLandsOnAFollowerNoCliServes(_Follower):
+    """Changing the machine default lands at once on a following session that no CLI serves, as a pick on it does
+    (set_auth): its next launch bills the new default, so the old account's report goes and the landing is stamped."""
+
+    def test_a_dormant_follower_lands_at_once(self):
+        self._follower()
+        before = time.time()
+        self.assertTrue(self.be.set_auth_default("key"))
+        reg = self._reg()
+        self.assertNotIsInstance(reg.get("apiKeyAuth"), bool, "nothing serves it: the dead CLI's report goes")
+        self.assertGreaterEqual(float(reg.get("authSwitchedAt") or 0), before, "its next launch bills the key")
+        row = self.be.live_sessions()[SID]
+        self.assertEqual((row["auth"], row["authLive"]), ("key", ""), "the Billing row no longer reads the login live")
+        self.assertEqual(row["authSwitchedAt"], reg["authSwitchedAt"])
+
+    def test_a_follower_whose_cli_has_ended_lands_at_once(self):
+        s = self._follower(cli="gone", relaunchWait={"why": "billing", "t": 1700000000,
+                                                     "picks": {"billing": {"auth": "login", "authLogin": ""},
+                                                               "effort": {"effort": "high"}}})
+        s._auth_pending = "login"                        # a switch onto the login still marked waiting
+        self.be._update_reg(SID, authPending=True)
+        before = time.time()
+        self.assertTrue(self.be.set_auth_default("key"))
+        reg = self._reg()
+        self.assertNotIsInstance(reg.get("apiKeyAuth"), bool)
+        self.assertGreaterEqual(float(reg.get("authSwitchedAt") or 0), before)
+        self.assertFalse(reg.get("authPending"), "no switch waits: its next launch carries the default")
+        self.assertEqual(sorted(reg["relaunchWait"]["picks"]), ["effort"], "another waiting pick keeps its entry")
+        self.assertEqual((s.auth_live, s.auth_switched_at, s._auth_pending), ("", reg["authSwitchedAt"], ""))
+
+    def test_a_follower_a_cli_serves_keeps_its_report_until_the_relaunch(self):
+        s = self._follower(cli="running")
+        self.assertTrue(self.be.set_auth_default("key"))
+        self.assertEqual(s.asked, ["billing default"], "its CLI runs the login: it relaunches once quiet")
+        self.assertIs(self._reg().get("apiKeyAuth"), False, "the login's CLI still serves it")
+        self.assertFalse(self._reg().get("authSwitchedAt"), "the default's move is not the landing")
+        self.assertEqual(s.auth_live, "login")
+
+    def test_its_own_pick_or_an_unmoved_default_lands_nothing(self):
+        self._follower(auth="login")
+        self.assertTrue(self.be.set_auth_default("key"))
+        self.assertIs(self._reg().get("apiKeyAuth"), False, "a pick of its own: the default is not what it bills")
+        self.assertFalse(self._reg().get("authSwitchedAt"))
+        self._follower()
+        self.assertTrue(self.be.set_auth_default("login"))
+        self.assertIs(self._reg().get("apiKeyAuth"), False, "the default did not move")
+        self.assertFalse(self._reg().get("authSwitchedAt"))
+
+
+class TheHoldLetsGoOfAFollowerTheDefaultMoved(_Kernel, _Follower):
+    """End to end over the kernel's hold: the login is capped (the pause records bills='login', web's last CLI wrote the
+    cap record), web follows the default and is dormant, and the user moves the machine default to the key."""
+
+    def setUp(self):
+        _Backend.setUp(self)
+        self.sdk = self.be                       # _Kernel's setUp puts its stand-in backend under self.be
+        _Kernel.setUp(self)
+
+    def tearDown(self):
+        _Kernel.tearDown(self)
+        _Backend.tearDown(self)
+
+    def _sdk(self):
+        return self.sdk
+
+    def _held(self):
+        self._follower()
+        self._capped(SID, time.time() - 600)
+        self._pause(bills="login")
+        self.rows[SID] = self.sdk.live_sessions()[SID]
+        self.assertEqual((km._limit_hold(SID) or {}).get("reason"), "spend", "held while it bills the capped login")
+
+    def test_a_default_change_releases_the_hold(self):
+        self._held()
+        self.assertTrue(self.sdk.set_auth_default("key"))
+        self.rows[SID] = row = self.sdk.live_sessions()[SID]
+        self.assertFalse(km._on_paused_billing(row, "login"), "its next CLI bills the key")
+        self.assertFalse(km._spend_record_stands(self.records[SID], row), "the login's record describes no CLI to come")
+        self.assertIsNone(km._limit_hold(SID))
+
+    def test_a_pick_of_its_own_releases_it_the_same_way(self):
+        self._held()
+        self.assertTrue(self.sdk.set_auth(SID, "key"))
+        self.rows[SID] = self.sdk.live_sessions()[SID]
+        self.assertIsNone(km._limit_hold(SID))
 
 
 if __name__ == "__main__":

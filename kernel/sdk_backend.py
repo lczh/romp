@@ -22464,17 +22464,19 @@ class SdkBackend:
         default_auth, effective_auth and the launch fall to). Refuses a side this box cannot bill with the same reason a
         per-session pick gets (auth_unavailable_why); "auto" clears it (Automatic, the helper rule). Touches no
         session's own pick, and RE-TARGETS every live session that follows it (2026-10-07, _retarget_followers): each
-        whose CLI was launched on something else relaunches onto the new default at its next quiet moment. A per-session
-        pick never moves it (until 2026-10-07 one did while no default was explicit: the remembered seed, retired). A
-        STORED login ("login:<id>") is a default too since 2026-09-14 (the user: the Set default billing submenu offers
+        whose CLI was launched on something else relaunches onto the new default at its next quiet moment, and the
+        switch lands at once on each follower no CLI serves (_land_unserved_followers). A per-session pick never moves it
+        (until 2026-10-07 one did while no default was explicit: the remembered seed, retired). A STORED login
+        ("login:<id>") is a default too since 2026-09-14 (the user: the Set default billing submenu offers
         every billing the picks do), written with its id under authLogin and judged on its own record as a pick of it
         would be; the machine's own login and the key write authLogin empty."""
+        before = self._explicit_default()   # what every follower is set to bill until the write below (billing_pick)
         if value == "auto":
             # back to the helper rule (the key when an apiKeyHelper is configured, else the login): the flag clears and
             # the side and the stored id empty with it, so no stale id rides a later explicit Login default
             write_sdk_default(self.state_dir, auth="", authExplicit=False, authLogin="")
             self._log("auth: the machine's default billing is automatic again (the helper rule)")
-            self._retarget_followers()
+            self._retarget_followers(before)
             return True
         side, lid = _logins.parse_pick(value)
         if not side:
@@ -22491,14 +22493,18 @@ class SdkBackend:
         write_sdk_default(self.state_dir, auth=side, authExplicit=True, authLogin=lid)
         self._log("auth: the machine's default billing is now %s (new sessions, and sessions with no pick of their own)"
                   % (self.login_display(lid) if lid else side))
-        self._retarget_followers()
+        self._retarget_followers(before)
         return True
 
-    def _retarget_followers(self) -> None:
+    def _retarget_followers(self, before=None) -> None:
         """The machine default moved: every live session that FOLLOWS it (no pick of its own) is brought onto it, each
         relaunching at its own next quiet moment when its CLI was launched on something else (_retarget_billing), so
-        switching every session is one action (2026-10-07). A session with its own pick is untouched; a dormant one
-        launches on the new default next time."""
+        switching every session is one action (2026-10-07). A session with its own pick is untouched. A follower no CLI
+        serves launches on the new default next time, so when the move changed what followers are set to bill (`before`,
+        the explicit default read before the write, against the one read now) the switch lands on it at once
+        (_land_unserved_followers)."""
+        if before is not None and tuple(before) != tuple(self._explicit_default()):
+            self._land_unserved_followers()
         with self._lock:
             live = list(self.sessions.values())
         moved = 0
@@ -22514,6 +22520,38 @@ class SdkBackend:
         if moved:
             self._log("auth: %d session%s following the machine default relaunch onto it once nothing would be cut"
                       % (moved, "" if moved == 1 else "s"))
+
+    def _land_unserved_followers(self) -> None:
+        """The machine default moved to another billing: on every alive session that follows it and that no CLI
+        serves (_serving: a dormant one, or a session object whose CLI is gone) the switch lands at once, the rule
+        set_auth applies to a pick on such a session. Its next launch carries the new default, so the landing is stamped
+        (authSwitchedAt, the spend hold's floor: a cap record the old account wrote no longer describes any CLI it will
+        run on), the dead CLI's report (apiKeyAuth) goes, and a billing switch still marked waiting comes down, in one
+        locked write (_drop_pick_wait). Until 2026-10-26 only session objects were re-targeted and their non-serving
+        branch stamped nothing, so a follower dormant at the change kept the old side as live: a spend pause on the
+        account it left held its input, and that hold stopped the launch whose init would have corrected it."""
+        with self._lock:
+            objs = dict(self.sessions)
+        for reg in list_regs(self.state_dir):
+            sid = reg.get("sid")
+            if not sid or not reg.get("alive") or reg.get("auth") in ("login", "key"):
+                continue                                  # gone, or a pick of its own: the default is not its billing
+            s = objs.get(sid)
+            if s is not None and getattr(s, "ended", False):
+                continue
+            try:
+                if self._serving(sid, s):
+                    continue                       # its CLI's relaunch lands it (_retarget_billing, the reconcile)
+                landed = time.time()
+                who = s if s is not None else types.SimpleNamespace(sid=sid, name=reg.get("name") or sid[:8])
+                self._drop_pick_wait(who, "billing", authPending=False, apiKeyAuth=None, authSwitchedAt=landed)
+                if s is not None:
+                    s._auth_pending = ""
+                    s.auth_live = ""                      # nothing serves it: the next launch's init reports afresh
+                    s.auth_switched_at = landed
+            except Exception as e:
+                self._log("auth (%s): the machine default's switch could not land: %s"
+                          % (reg.get("name") or sid[:8], e), problem=True)
 
     def billing_pick(self, reg: dict | None = None) -> tuple:
         """(side, stored login id) a reg's session is set to bill, in romp's own words: its own pick when it has one, else
