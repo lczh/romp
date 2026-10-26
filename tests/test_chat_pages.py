@@ -110,6 +110,7 @@ class Harness(unittest.TestCase):
         km._RENDER_FLOOR.clear()
         with km._page_lock:
             km._PAGE_CACHE.clear(); km._PAGE_STATS.update(hits=0, misses=0, evictions=0, pages=0, bytes=0, renderMs=0.0)
+            km._PAGE_SIZES.clear(); km._WARM_PIN.update(set=frozenset(), prev=frozenset())   # the window sizes and the warm set's hold
         km._live_scope.chat_floor0 = None
         with em._MAT_LOCK:                                                # the lazy index's LRU and counters (stage 4c)
             em._MAT_LRU.clear()
