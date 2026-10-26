@@ -4324,6 +4324,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   stores currently ruled out, a gauge); `shared` is the pusher's shared
   read-only store cache (`hit`, `miss`, `compare_miss`, `refuse`, `dup`,
   `absent`, `corrupt`, `unreadable_journal`, `evict`, `fallback`, `poisoned`,
+  and `settled`, the hits answered without reading the file because an earlier
+  read matched once the filesystem clock had passed the file's change stamp,
   with `entries`, `bytes` and `off`); `chain` is the write-moment chain memo
   (`hit`, `miss`, `populate`, `bypass`); `convergeDeclined` counts the main
   converges that asked no restart because this kernel was already leaving (the

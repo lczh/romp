@@ -717,7 +717,10 @@ class APeerIsReadOncePerBuild(_Board):
             takes[p] += 1
             return real_facts(p, cleared_by_sid)
 
-        with mock.patch.object(jd, "_disk_read", read), mock.patch.object(km, "_feed_peer_facts", facts):
+        # the shared cache's settled hit off (jd._store_stamp_settled): every take of a peer's store then reads it, so a read
+        # counts a take, as it did before the settled hit (2026-10-26) answered a take of an unchanged store with no read
+        with mock.patch.object(jd, "_disk_read", read), mock.patch.object(km, "_feed_peer_facts", facts), \
+                mock.patch.object(jd, "_store_stamp_settled", lambda ctime_ns: False):
             d, feed = self._delta(self._build)
         return (d, feed, {p: reads[self.peer_path[p]] for p in (PEER, PEER2)},
                 {p: takes[p] for p in (PEER, PEER2)})
