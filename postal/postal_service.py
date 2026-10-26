@@ -1507,6 +1507,18 @@ def _publish_working(sid, text):
     r = _kernel_post("/working", {"id": str(sid), "text": text})
     return r is not None and r.get("ok") is not False        # None: unreachable; ok false: the kernel refused
 
+
+def _working_unconfirmed(text):
+    """What set_working and `romp mail working` say when _publish_working returned False: the kernel was
+    unreachable (a restart), answered past _kernel_post's timeout, or refused. Peers read this note in
+    list_agents to settle who owns a branch, so a note that did not land is said as such, never as
+    published. A timeout may still have stored it, so the sentence says unconfirmed, not lost."""
+    if not text.strip():
+        return ("Your 'working on' note may still be up: the service that keeps it did not confirm the removal "
+                "(it may be restarting), so peers may still see it. Try again shortly.")
+    return ("Your 'working on' note may not be published: the service that keeps it did not confirm it "
+            "(it may be restarting), so peers may not see '%s'. Try again shortly." % text)
+
 def _with_remote_presence(agents):
     """The local rows plus every heartbeat-known REMOTE session (within HEARTBEAT_TTL, not already local)."""
     local_ids = {a["id"] for a in agents}
@@ -5924,7 +5936,8 @@ def _mcp_call(name, args):
             return ("set_working needs its `text` argument — nothing was changed. "
                     "Pass text='' if you mean to clear your published note."), True
         text = args.get("text", "")
-        _publish_working(mid, text)        # the kernel's working-note store (POST /working)
+        if not _publish_working(mid, text):        # the kernel's working-note store (POST /working)
+            return _working_unconfirmed(text), True
         return ("Cleared your 'working on' note." if not text.strip()
                 else "Published — others see: working on '%s'." % text), False
     if name == "check_sent":
@@ -6133,7 +6146,8 @@ def cli_working(argv):
     if not sid:
         _refuse_no_identity("not in a romp session"); return 1
     text = " ".join(argv)
-    _publish_working(sid, text)        # the kernel's working-note store (POST /working)
+    if not _publish_working(sid, text):        # the kernel's working-note store (POST /working)
+        sys.stderr.write("[romp mail] %s\n" % _working_unconfirmed(text)); return 1
     print("[romp mail] working: %s" % (text or "(cleared)"))
     return 0
 
