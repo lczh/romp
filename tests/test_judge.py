@@ -8695,6 +8695,20 @@ class InvalidateClosure(unittest.TestCase):
         jd._invalidate_closure(store, self._session(), 150)
         self.assertEqual(store["closedTurns"], [])
 
+    def test_a_boundary_second_belongs_to_the_newer_turn(self):
+        # Whole-second times: the previous turn's idle tail can end in the second the next prompt opens its turn,
+        # or one second past it. A done on that turn's opening segment reopens that turn, not the one before it.
+        for prev_end in (200, 201):
+            session = {"turns": [{"t": 100, "end": prev_end, "id": "tid-1", "atoms": [], "ended": True},
+                                 {"t": 200, "end": 300, "id": "tid-2", "atoms": [], "ended": True}]}
+            store = {"closedTurns": ["tid-1", "tid-2"], "closedSig": {"tid-1": 7, "tid-2": 3}}
+            jd._invalidate_closure(store, session, 200)
+            self.assertEqual(store["closedTurns"], ["tid-1"], "prev end %d: the newer turn reopens" % prev_end)
+            self.assertEqual(store["closedSig"], {"tid-1": 7})
+        store = {"closedTurns": ["tid-1", "tid-2"]}
+        jd._invalidate_closure(store, session, 150)            # inside the older turn alone: it is still the one
+        self.assertEqual(store["closedTurns"], ["tid-2"])
+
     def test_both_work_run_apply_sites_invalidate_on_done(self):
         # source pin: the main work/nudge run AND the follow-up pivot branch both re-open the closure
         # when their ops carry a done — and only on a done (a sub/mint changes no completion state).

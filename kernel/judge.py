@@ -16548,8 +16548,13 @@ def _invalidate_closure(store, session, seg_t):
     rolls the completion up, and the auto-nudge's closer gate holds until that considered verdict
     lands — nudges wait for the judges. Event-based: two real judge events ordered, no time window. The
     drop survives another writer's publish while the planner holds the store: the save's rebase merges the
-    turn's record against the planner's base (_merge_closer_turns), where a plain union put it back."""
-    turn = next((t for t in (session.get("turns") or [])
+    turn's record against the planner's base (_merge_closer_turns), where a plain union put it back.
+
+    The NEWEST turn whose span holds seg_t wins. Turn times and states rows are whole seconds, so the previous
+    turn's trailing idle span can end in the second the next prompt opens its turn, or one second past it. Read
+    oldest-first, a done on that turn's opening segment reopened the turn before it and left its own turn closed,
+    and the nudge gate, which reads the last turn, sent a status check about the finished work."""
+    turn = next((t for t in reversed(session.get("turns") or [])
                  if t.get("t", 0) <= seg_t <= t.get("end", t.get("t", 0))), None)
     _reopen_closure(store, turn.get("id") if turn else None)
 

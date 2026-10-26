@@ -18,6 +18,9 @@ working is checked once. A repeated judge unblock reopens nothing (the kernel ho
 WHY_UNBLOCK_UNSETTLED), and neither does a lift while the session is mid-turn. The release is the closer's
 next ruling on the turn or its give-up at the kill cap; with the closer off the gate reads settled.
 
+The done path has a shape of its own (TheDoneAtATurnBoundary): when the asking turn's idle tail ends in the
+second the landing turn opens, the done must reopen the landing turn, the newer of the two that share it.
+
 Driven end to end on real files under a private synthetic sid: the real unblocker, closer and nudge walk,
 with only the model calls and the walk's session-level liveness reads stubbed.
 """
@@ -326,6 +329,63 @@ class TheRelease(_Base):
         self._unblock()
         self._tick()
         self.assertEqual(len(self.fb.sent), 1, "no closer will ever rule: the check is not held for one")
+
+
+class TheDoneAtATurnBoundary(_Base):
+    """A done the planner files after the closer ruled (jd._invalidate_closure), on the landing turn, when the session's
+    states rows put the asking turn's idle tail ending in the second the landing prompt opened its turn, or one second
+    past it. Times are whole seconds, so both turns' spans hold the landing segment's start. The done reopens the
+    landing turn, the session's last: the walk waits for the closer, whose next look files the done, and no status
+    check goes out. Read oldest-first, the done reopened the asking turn instead and the check went out at once."""
+
+    def _done_after_the_closer(self, working_t):
+        jd.STATESDIR.mkdir(parents=True, exist_ok=True)
+        rows = [{"t": T1, "state": "working"}, {"t": T1 + 41, "state": "waiting"},
+                {"t": working_t, "state": "working"}, {"t": T2 + 31, "state": "waiting"}]
+        (jd.STATESDIR / (SID + ".jsonl")).write_text("".join(json.dumps(r) + "\n" for r in rows))
+        jd._PARSE_CACHE.clear(); jd._CHAIN_MEMO.clear()
+        session = jd.parsed_session(SID, [self.path], NOW)
+        self.turns = session["turns"]
+        ended = [tn for tn in self.turns if not jd._turn_open(tn, self.turns)]
+        self.assertEqual([tn["id"] for tn in ended], [self.t1, self.t2], "the same two ended turns")
+        self.assertGreaterEqual(ended[0]["end"], T2, "the asking turn's idle tail reaches the landing turn's second")
+        store = {"rompUuid": SID, "seq": 1, "lastNode": G1, "placementsV": jd.PLACEMENTS_V, "placements": {},
+                 "status": {G1: "working"}, "closedTurns": [self.t1, self.t2],
+                 "closedSig": {tn["id"]: len(tn["atoms"]) for tn in ended},
+                 "nodes": {G1: {"id": G1, "text": "Ship the pagination fix", "parentId": None,
+                                "nodeComplete": False, "blocked": False, "cleared": False,
+                                "trail": [], "t": T1, "mt": T1 + 60, "log": []}}}
+        for tn in ended:                          # both turns' work placed under the card: it is on their own menus
+            for sg in jd._segs(tn, store):
+                store["placements"][sg["id"]] = G1
+        jd.save_goals(SID, store)
+        st = jd.load_goals(SID)
+        seg_t = jd._segs(ended[1], st)[0]["t"]    # the landing turn's segment time, as the planner hands it with its done
+        self.assertEqual(seg_t, T2)
+        jd._invalidate_closure(st, session, seg_t)
+        jd.save_goals(SID, st)
+
+    def _check(self):
+        verdict = self._tick()                    # the walk's next look, seconds after the done
+        self.assertEqual(self.fb.sent, [], "no status check while the closer has not looked again")
+        self.assertEqual(verdict, "closer-unsettled")
+        st, nd, status = self._goal()
+        self.assertNotIn(self.t2, st["closedTurns"], "the done reopened the turn it was filed off")
+        self.assertIn(self.t1, st["closedTurns"], "and only that turn")
+        self._close(DONE)
+        self.assertEqual(len(self.close_menus), 1, "one closer call: the reopened turn")
+        st, nd, status = self._goal()
+        self.assertTrue(self._done(st), "the closer's second look files the done")
+        self._tick()
+        self.assertEqual(self.fb.sent, [], "a done filed: no check-in")
+
+    def test_the_idle_tail_ends_in_the_second_the_landing_turn_opens(self):
+        self._done_after_the_closer(T2)
+        self._check()
+
+    def test_the_idle_tail_ends_one_second_past_it(self):
+        self._done_after_the_closer(T2 + 1)
+        self._check()
 
 
 class OneDefinition(unittest.TestCase):
