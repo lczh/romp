@@ -8299,7 +8299,21 @@ def _mark_node_done(store, nid, why, t, src="planner"):
     here — one definition of 'done'. No-op if the node is gone. The descendant unblocks are EVENT-BACKED
     (P3.4 follow-through, the user 2026-07-07): the node's own done event covers itself in the fold, but a
     blocked DESCENDANT cleared without an event re-blocks on the next materialize and wears a stale ⏸ until
-    settle rolls it up — the same eventless-write gap optimistic_followup/_reopen already closed."""
+    settle rolls it up — the same eventless-write gap optimistic_followup/_reopen already closed.
+
+    A '↪ delegated' TRACKING node's OPEN children are not part of its completion (2026-10-26): the next
+    rollup lifts them up beside it (_lift_completed_handoffs, every completer alike), because the
+    delegation finishing is evidence about the delegation and never about the asks filed under it by
+    placement. Their subtrees keep their blocks. Discharging them answered a question nobody answered:
+    a question to the user filed under a delegation card dropped to Working the moment the peer reported
+    back, the status check fired on it, and the session asked the user the same question again. A lifted
+    child that is moot is the judges' to rule on, as its own card; a done or cleared child stays under the
+    delegation and is discharged as before. The skip mirrors the lift's predicates exactly (a tracking
+    node not rolledUp; a child neither complete nor cleared), so every node the lift moves keeps its
+    block. Everything else under the done node is discharged as before, an open delegation the interior
+    roll-down spares under a step included: the step's done seals that subtree (any_blocked and every
+    judge menu stop at a complete ancestor), so a block kept there would never put the card in Needs you,
+    and no judge could ever lift it."""
     nodes = store["nodes"]
     if nid not in nodes:
         return
@@ -8308,6 +8322,7 @@ def _mark_node_done(store, nid, why, t, src="planner"):
     kids = {}
     for x, nd in nodes.items():
         kids.setdefault(nd.get("parentId"), []).append(x)
+    lifts = isinstance(nodes[nid].get("handoff"), dict) and not nodes[nid].get("rolledUp")
     stack, seen = [nid], set()
     while stack:                                       # seen-set: a parentId cycle (two rebased reparent
         x = stack.pop()                                # writers can compose one neither wrote) must degrade,
@@ -8317,7 +8332,10 @@ def _mark_node_done(store, nid, why, t, src="planner"):
         if x != nid and nodes[x].get("blocked"):
             record_verdict(store, nodes[x], src, "unblock", t,
                            why="discharged with the completed parent")
-        stack.extend(kids.get(x, []))
+        for c in kids.get(x, []):
+            if x == nid and lifts and not nodes[c].get("nodeComplete") and not nodes[c].get("cleared"):
+                continue                               # the lift's child: its own card next, its ask intact
+            stack.append(c)
 
 
 def _norm_title(t):
