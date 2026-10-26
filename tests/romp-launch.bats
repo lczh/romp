@@ -114,3 +114,40 @@ MOCK
         [ ! -s "$OPEN_LOG" ] || false
     done
 }
+
+# ── The port's two names. ROMP_SERVE_PORT is a second name for ROMP_KERNEL_PORT (the reference's Ports section),
+# and the manager starts the kernel on it alone. The link used to read ROMP_KERNEL_PORT only, so a kernel moved by
+# ROMP_SERVE_PORT got a link to the default port carrying this kernel's token. ROMP_KERNEL_PORT still comes first.
+
+@test "romp url and bare romp follow ROMP_SERVE_PORT when ROMP_KERNEL_PORT is unset" {
+    unset ROMP_KERNEL_PORT
+    export ROMP_SERVE_PORT=30123
+    run "$ROMP_SCRIPT" url
+    [ "$status" -eq 0 ]
+    [ "$output" = "http://127.0.0.1:30123/?token=TESTTOKEN123" ]
+    run "$ROMP_SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"http://127.0.0.1:30123/?token=TESTTOKEN123"* ]]
+    [[ "$output" != *":29855/"* ]]
+    grep -q -F "127.0.0.1:30123/?token=TESTTOKEN123" "$OPEN_LOG"   # the browser goes to the moved kernel too
+}
+
+@test "romp url: ROMP_KERNEL_PORT wins over an inherited ROMP_SERVE_PORT, and neither set is the default" {
+    export ROMP_KERNEL_PORT=30124 ROMP_SERVE_PORT=30123
+    run "$ROMP_SCRIPT" url
+    [ "$status" -eq 0 ]
+    [ "$output" = "http://127.0.0.1:30124/?token=TESTTOKEN123" ]
+    unset ROMP_KERNEL_PORT ROMP_SERVE_PORT
+    run "$ROMP_SCRIPT" url
+    [ "$status" -eq 0 ]
+    [ "$output" = "http://127.0.0.1:29855/?token=TESTTOKEN123" ]
+}
+
+@test "every kernel verb in bin/romp reads the port through _romp_kport" {
+    # A verb that read ROMP_KERNEL_PORT on its own would miss a kernel moved by ROMP_SERVE_PORT again. The one
+    # read left is the resolver's own.
+    local hits
+    hits="$(grep -F -e '${ROMP_KERNEL_PORT' -e '$ROMP_KERNEL_PORT' "$ROMP_SCRIPT")"
+    [ "$(printf '%s\n' "$hits" | grep -c .)" -eq 1 ]
+    [[ "$hits" == "_romp_kport() {"* ]]
+}

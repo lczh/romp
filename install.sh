@@ -339,7 +339,9 @@ echo "  Override:  export ROMPHOME=\"/path/you/prefer\""
 # is the test seam) — and when it isn't there yet, say how to get the link
 # instead of printing one that would bounce to the login page.
 _state_dir="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}"
-_kport="${ROMP_KERNEL_PORT:-29855}"
+# The kernel's port by either of its two names, in bin/romp's order (its _romp_kport). The two disagreeing stopped
+# the preflight above, unless ROMP_SKIP_PREFLIGHT skipped it.
+_kport="${ROMP_KERNEL_PORT:-${ROMP_SERVE_PORT:-29855}}"
 _tok="$(cat "$_state_dir/serve-token" 2>/dev/null || true)"
 if [[ -z "$_tok" && -z "${ROMP_NO_SERVICE:-}" ]]; then
     for _ in $(seq 1 "${ROMP_INSTALL_TOKEN_TRIES:-40}"); do

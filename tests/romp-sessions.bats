@@ -143,3 +143,17 @@ teardown() { rm -rf "$TEST_DIR"; }
     [ "$status" -eq 0 ]
     [[ "$output" == *"romp sessions"* ]]
 }
+
+# ROMP_SERVE_PORT is a second name for the kernel's port, and the manager starts the kernel on it alone. Every kernel
+# verb read ROMP_KERNEL_PORT only, so with the kernel moved by the other name it dialed the default port, and sent
+# this kernel's serve token to whatever listened there. SYNTHETIC port.
+@test "romp sessions: dials the kernel moved by ROMP_SERVE_PORT alone, never the default port" {
+    unset ROMP_KERNEL_PORT
+    export ROMP_SERVE_PORT=30123
+    run "$ROMP_SCRIPT" sessions --json
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"#1EA1EB"* ]]
+    grep -q -F "http://127.0.0.1:30123/sessions" "$CURL_LOG"
+    [ "$(grep -c -F ":29855/" "$CURL_LOG")" -eq 0 ]
+    grep -q -F "X-Romp-Token: TESTTOKEN123" "$CURL_STDIN"
+}
