@@ -65,7 +65,11 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("ROMP_POSTAL_PORT", "25302"))   # renumbered from 47100 alongside the kernel's port (the user 2026-07-24), same random draw. A bus that cannot bind degrades fleet messaging silently, rather than failing a URL someone is looking at, so a collision here is worth avoiding more, not less.
 BASE = f"http://{HOST}:{PORT}"
-KERNEL_BASE = "http://127.0.0.1:%s" % os.environ.get("ROMP_KERNEL_PORT", "29855")  # the dashboard kernel — it owns the backend session query (Claude Code and Codex)
+# The dashboard kernel — it owns the backend session query (Claude Code and Codex). Its port has two names,
+# ROMP_KERNEL_PORT and ROMP_SERVE_PORT (bin/romp-serve's note), read in bin/romp's order: a bus started from a
+# shell that moved the kernel by ROMP_SERVE_PORT alone (romp refresh restarts it from the caller's shell) used to
+# dial the default port, so every live check and every push to the kernel missed.
+KERNEL_BASE = "http://127.0.0.1:%s" % (os.environ.get("ROMP_KERNEL_PORT") or os.environ.get("ROMP_SERVE_PORT") or "29855")
 
 STATE = Path(os.environ.get("ROMP_STATE_DIR")      # per-kernel state root override (plans/multi-kernel.md)
              or Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local/state")) / "romp") / "postal"

@@ -198,12 +198,20 @@ _romp_token_cfg() {
     printf 'header = "X-Romp-Token: %s"\n' "$_e"
 }
 
+# The kernel's port, for every verb here that dials it. ROMP_KERNEL_PORT and ROMP_SERVE_PORT are two names
+# for one port (bin/romp-serve's note), and the manager starts the kernel on either. These verbs used to read
+# ROMP_KERNEL_PORT alone, so a kernel moved by ROMP_SERVE_PORT alone, as the docs allow, was one they missed:
+# they dialed the default port and sent this kernel's serve token to whatever listened there. ROMP_KERNEL_PORT
+# still comes first, so a one-off override of it beats an inherited ROMP_SERVE_PORT as it always did; then
+# ROMP_SERVE_PORT; else 29855. The postal bus reads the two in the same order.
+_romp_kport() { printf '%s' "${ROMP_KERNEL_PORT:-${ROMP_SERVE_PORT:-29855}}"; }
+
 # GET the kernel's /sessions for command $1 and print the body; on any other answer say what the kernel answered and
 # return 1. The HTTP status rides the reply's last line (-w), so a refusal is reported AS ITSELF (the `romp api-health`
 # precedent): a 503 is the kernel answering that its session listing cannot be served (a listing build failing, in its
 # own words), not a kernel that is down; only a reply that never came is "not reachable".
 _romp_sessions_get() {
-    local _cmd="$1" _kport="${ROMP_KERNEL_PORT:-29855}" _raw _code _body _why
+    local _cmd="$1" _kport="$(_romp_kport)" _raw _code _body _why
     _raw="$(_romp_token_cfg | curl -s -m 10 --config - -w '\n%{http_code}' "http://127.0.0.1:$_kport/sessions")" \
         || { echo "$_cmd: kernel not reachable on :$_kport (is romp running?)" >&2; return 1; }
     _code="${_raw##*$'\n'}"
@@ -292,7 +300,7 @@ if [[ "${1:-}" == "url" || "${1:-}" == "--url" ]]; then
     if [[ -z "$_tok" ]]; then
         echo "romp url: no serve token yet (start romp first — the kernel mints it)" >&2; exit 1
     fi
-    echo "http://127.0.0.1:${ROMP_KERNEL_PORT:-29855}/?token=$_tok"
+    echo "http://127.0.0.1:$(_romp_kport)/?token=$_tok"
     exit 0
 fi
 
@@ -365,7 +373,7 @@ fi
 # inside the window resets the counters) are refused rather than subtracted into negative rates.
 if [[ "${1:-}" == "perf" ]]; then
     shift
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     _usage="usage: romp perf [--interval <s>] [--json [--walk] [--paths]] | romp perf log on|off | romp perf stacks [--json] | romp perf client [--minutes <n>] [--json]"
     # One kernel round trip: the body on stdout and 0 when the kernel answered 2xx. curl's -f folds a
     # refused token (403) into the same exit as a dead kernel, and on a diagnostic verb that sends the
@@ -872,7 +880,7 @@ fi
 if [[ "${1:-}" == "api-health" ]]; then
     shift
     if [[ $# -gt 0 ]]; then echo "usage: romp api-health" >&2; exit 2; fi
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     # The HTTP status rides the reply's last line (-w), so a refusal is reported AS ITSELF. With
     # `curl -f` every non-2xx wore the one "kernel not reachable" message, which hid the route's own
     # 503 (the SDK backend is not up: a signal that does not exist yet, not a kernel that is down),
@@ -917,7 +925,7 @@ if [[ "${1:-}" == "fork" ]]; then
     done
     if [[ -z "$parent_arg" || -z "$newname_arg" ]]; then echo "$_fork_usage" >&2; exit 2; fi
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp fork: the kernel isn't running (no serve token). Start romp (the login service, or \`romp up\`) first." >&2
         exit 1
@@ -943,7 +951,7 @@ if [[ "${1:-}" == "rename" ]]; then
     _rn_usage="usage: romp rename <session> <new-name>"
     if [[ $# -ne 2 || "$1" == -* || "$2" == -* ]]; then echo "$_rn_usage" >&2; exit 2; fi
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp rename: the kernel isn't running (no serve token). Start romp (the login service, or \`romp up\`) first." >&2
         exit 1
@@ -974,7 +982,7 @@ if [[ "${1:-}" == "move" ]]; then
     _mv_dir="$2"
     [[ "$_mv_dir" != /* && "$_mv_dir" != "~"* && "$_mv_dir" != '$'* ]] && _mv_dir="$PWD/$_mv_dir"
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp move: the kernel isn't running (no serve token). Start romp (the login service, or \`romp up\`) first." >&2
         exit 1
@@ -1014,7 +1022,7 @@ if [[ "${1:-}" == "color" ]]; then
     _cl_usage="usage: romp color <session> [<#hex|slot>]"
     if [[ $# -lt 1 || $# -gt 2 || "$1" == -* || ( $# -eq 2 && -z "$2" ) ]]; then echo "$_cl_usage" >&2; exit 2; fi
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp color: the kernel isn't running (no serve token). Start romp (the login service, or \`romp up\`) first." >&2
         exit 1
@@ -1106,7 +1114,7 @@ if [[ "${1:-}" == "watch" ]]; then
         esac
     done
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp watch: the kernel isn't running (no serve token). Start romp first." >&2
         exit 1
@@ -1194,7 +1202,7 @@ if [[ "${1:-}" == "board" ]]; then
         [[ -n "$_b_from" ]] && _b_json="$(cat "$_b_from")"
     fi
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp board: the kernel isn't running (no serve token). Start romp first." >&2
         exit 1
@@ -1282,7 +1290,7 @@ if [[ "${1:-}" == "pane" ]]; then
         [[ -n "$_pn_from" ]] && _pn_json="$(cat "$_pn_from")"
     fi
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp pane: the kernel isn't running (no serve token). Start romp first." >&2
         exit 1
@@ -1381,7 +1389,7 @@ if [[ "${1:-}" == "card" ]]; then
     if [[ -n "$_c_sess" && $_c_nosess -eq 1 ]]; then echo "$_c_usage" >&2; exit 2; fi   # a session and --no-session name two homes
     if [[ -n "$_c_bodyfile" ]]; then _c_body="$(cat "$_c_bodyfile")"; fi
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp card: the kernel isn't running (no serve token). Start romp first." >&2
         exit 1
@@ -1445,7 +1453,7 @@ if [[ "${1:-}" == "login" ]]; then
     _lg_usage="usage: romp login add <label> --cmd '<shell line that prints the token>' | romp login list | romp login remove <label|id> | romp login link <label|id> --same-as <host> [--on <host>] | romp login unlink <label|id> [--on <host>]"
     _lg_sub="${1:-}"; [[ $# -gt 0 ]] && shift
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     case "$_lg_sub" in
         list)
             [[ $# -gt 0 ]] && { echo "$_lg_usage" >&2; exit 2; }
@@ -1624,7 +1632,7 @@ if [[ "${1:-}" == "watch-pr" ]]; then
         _wp_who="$ROMP_SID"
     fi
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp watch-pr: the kernel isn't running (no serve token). Start romp first." >&2
         exit 1
@@ -1693,7 +1701,7 @@ if [[ "${1:-}" == "tag" || "${1:-}" == "group" ]]; then
         echo "$_gr_usage" >&2; exit 2
     fi
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp tag: the kernel isn't running (no serve token). Start romp (the login service, or \`romp up\`) first." >&2
         exit 1
@@ -1872,7 +1880,7 @@ fi
 # pretend: it prints the URL plus the two ways to actually reach it from your laptop.
 if [[ $# -eq 0 ]]; then
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp: no serve token yet; the kernel mints it. Is romp running? (the login service starts it; \`romp up\` runs it by hand)" >&2
         exit 1
@@ -1926,7 +1934,7 @@ if [[ "${1:-}" =~ ^(checkin|checkout)$ ]]; then
     _verb="$1"; shift
     _host="${1:-}"
     if [[ -z "$_host" ]]; then echo "usage: romp $_verb <host>" >&2; exit 2; fi
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     _on="false"; [[ "$_verb" == "checkin" ]] && _on="true"
     _resp="$(_romp_token_cfg | curl -sf -m 10 --config - -X POST "http://127.0.0.1:$_kport/tunnels/checkin" \
                   -H 'Content-Type: application/json' -d "{\"host\": \"$_host\", \"on\": $_on}")" \
@@ -1963,7 +1971,7 @@ if [[ "${1:-}" == "compact" ]]; then
             *) echo "$_c_usage" >&2; exit 2 ;;
         esac
     done
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     # One /sessions read for the session named, as tab-separated fields: its state ("compacting" or "quiet"); its
     # launch error as "<at><TAB><text><TAB><mark>" (all empty when none; the mark is "end" when the kernel flags the
     # notice as a compaction's end, its noRetry, else empty); then the backend's compaction end record as
@@ -2244,7 +2252,7 @@ if [[ "${1:-}" =~ ^(--)?(send|interrupt|end)$ ]]; then
             [[ "$_a" == "--when-idle" ]] && _when="idle"
         done
     fi
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     if [[ "$_verb" == "send" ]]; then
         # `--tag <label>` — a RENDER HINT for auto-generated text (a kickoff template, a scripted
         # brief): the chat shows a tagged message as machine-sent under that label instead of posing
@@ -2349,7 +2357,7 @@ if [[ "${1:-}" == "apply" ]]; then
     shift
     _who="${1:-}"
     if [[ -z "$_who" || $# -gt 1 ]]; then echo "usage: romp apply <session>" >&2; exit 2; fi
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     _payload="$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1]}))' "$_who")"
     _cap="${ROMP_KERNEL_HTTP_TIMEOUT_S:-10}"
     _crc=0
@@ -2581,7 +2589,7 @@ case "${1:-}" in
             echo "romp down: --wait takes a number of seconds, 0 to 600 (got '$_dn_wait')" >&2; exit 2
         fi
         _dn_state="$(_romp_state_dir)"
-        _dn_kport="${ROMP_KERNEL_PORT:-29855}"
+        _dn_kport="$(_romp_kport)"
         _dn_kalive() { [[ "$(curl -s -m 2 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$_dn_kport/healthz" 2>/dev/null)" == 200 ]]; }
         # 1. quiesce, through the kernel's own route (see the block comment). The kernel keeps the
         #    hold for the wait plus a grace, so the stop below lands on a still-quiet kernel; if the
@@ -3003,7 +3011,7 @@ esac
 # session_arg or exited, so this is the `new` dispatch's tail.
 if [[ -n "$session_arg" ]]; then
     _tok="$(_romp_token)"
-    _kport="${ROMP_KERNEL_PORT:-29855}"
+    _kport="$(_romp_kport)"
     # A relative -d is resolved against THIS shell's cwd, as `romp move` does: the kernel would
     # otherwise resolve it against its own default new-session folder, which is not where the caller
     # stands, and start the session in the wrong project (or refuse a folder that is right here).

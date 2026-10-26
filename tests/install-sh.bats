@@ -381,6 +381,19 @@ SH
     [[ "$output" == *"romp url"* ]]
 }
 
+@test "install.sh: the link follows a kernel moved by ROMP_SERVE_PORT alone" {
+    # the kernel's port has two names and the login service's unit carries this one; a link read from
+    # ROMP_KERNEL_PORT alone pointed at the default port with this kernel's token (synthetic port)
+    mkdir -p "$HOME/.local/state/romp"
+    printf 'tok123\n' > "$HOME/.local/state/romp/serve-token"
+    unset ROMP_KERNEL_PORT
+    export ROMP_SERVE_PORT=30123
+    run "$ROMP_DIR/install.sh"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"http://127.0.0.1:30123/?token=tok123"* ]]
+    [[ "$output" != *":29855/"* ]]
+}
+
 @test "install.sh: ROMP_NO_SERVICE with no token points at romp up, never a dead link" {
     run "$ROMP_DIR/install.sh"     # setup sets ROMP_NO_SERVICE=1; no serve-token exists
     [ "$status" -eq 0 ]
