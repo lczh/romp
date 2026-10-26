@@ -20671,6 +20671,44 @@ def run_propagate(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbos
     return n
 
 
+_COURIER_XHOST_FOLD = {}   # postal log path -> em.fold_records cursor of the courier's cross-host scan (_courier_xhost_rows)
+
+
+def _courier_xhost_fresh():
+    return {"returned": {}, "rows": []}
+
+
+def _courier_xhost_step(state, o):
+    """One postal-log row into the courier's cross-host scan: a terminal row's id into `returned` (_learn_return: mid ->
+    t, a delegate the bus gave back plants nothing), and a sent DELEGATE addressed to another host (to_id "peer:<host>",
+    with the toName the tracker records) into `rows`, in log order. This is the half of the courier's row test that
+    depends on the log alone; the sender's session and the retry horizon depend on the pass (_courier_xhost_rows)."""
+    _learn_return(state["returned"], o)
+    if (o.get("ev") == "sent" and o.get("kind") == "delegate" and o.get("id") and o.get("toName")
+            and str(o.get("to_id") or "").startswith("peer:")):
+        state["rows"].append(o)
+    return state
+
+
+def _courier_xhost_rows(live_ids, now):
+    """The sent cross-host delegates run_courier plants a sender-side tracker for in this pass, in log order: sent by a
+    session in `live_ids`, within COURIER_RETRY_HORIZON of `now`, and not given back by the bus (no terminal row names
+    the id, _learn_return). The rows are the log's own records, shared with the fold's cursor: read-only.
+
+    The postal log only grows, and the courier used to read all of it and decode every line on every triage pass,
+    whether or not a row had landed since (most of the courier's time on a quiet board, 2026-10-26). The part of
+    the scan that depends on the log alone is now a fold (em.fold_records) over the shared reader the kernel's own
+    readers of this log use: an unchanged log costs a stat, an append steps only the rows it added, and a rewrite, a
+    shrink or a replaced file steps every row again. A last line with no newline yet is folded provisionally, as the
+    whole-file read saw it. The pass's sessions and clock are applied here, after the fold, so the answer is the one the
+    whole-file scan gave for the same log, sessions and clock."""
+    st = em.fold_records(_COURIER_XHOST_FOLD, MESSAGES, _courier_xhost_fresh, _courier_xhost_step)
+    back = st["returned"]
+    return [o for o in st["rows"]
+            if o.get("from_id") in live_ids and now - (o.get("t") or 0) <= COURIER_RETRY_HORIZON
+            and str(o["id"]) not in back]
+
+
 def run_courier(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=False):
     """One TRIAGE-TIER courier pass: place peer-message (postal) segments as delegations, GLOBAL
     oldest-first across sessions. Idempotent (msgId + seg_id). COORDINATING segments are marked processed
@@ -20790,23 +20828,6 @@ def run_courier(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=
     # cannot span kernels yet). Horizon-bounded like every courier retry, so old history is never
     # backfilled; idempotent by msgId, so one plant per message ever.
     placed = 0
-    fleet_ids = {f for f, p, a, nm in fleet}
-    xback = {}   # mid -> t: delegates the bus gave BACK (terminal bounced rows, _learn_return) — these plant nothing
-    try:
-        xrows = []
-        for line in MESSAGES.read_text(errors="replace").splitlines():
-            try:
-                o = json.loads(line)
-            except Exception:
-                continue
-            _learn_return(xback, o)
-            if (o.get("ev") == "sent" and o.get("kind") == "delegate" and o.get("id")
-                    and o.get("from_id") in fleet_ids and o.get("toName")
-                    and str(o.get("to_id") or "").startswith("peer:")
-                    and now - (o.get("t") or 0) <= COURIER_RETRY_HORIZON):
-                xrows.append(o)
-    except OSError:
-        xrows = []
     # A delegate that came back never reached the peer (2026-09-08): a tracker planted from it would
     # wait on a report-back no event can bring, since the remote arm's ending is the peer's own reply
     # at/after the send. The bounced row is terminal, so the skip is final, not a retry. An OUTBOX
@@ -20814,7 +20835,8 @@ def run_courier(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=
     # been carried and delivered), so a recalled delegate still plants, as before. (A tracker
     # planted BEFORE the return arrived is not closed here: ending it needs a verdict that says the
     # handoff came back, not "reported back" — a writer, outside this reader's scope.)
-    xrows = [o for o in xrows if str(o["id"]) not in xback]
+    xrows = _courier_xhost_rows(id2name, now)       # id2name's keys are this pass's sessions; the rows are the
+    #                                                 log's own records, folded as it grows: read-only
     for o in xrows:
         try:
             sstore = load_goals(o["from_id"])
