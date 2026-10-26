@@ -3,7 +3,8 @@
 
 The pusher thread's read-only sites used to parse a goal store on every load; load_goals_shared serves
 them one deep-frozen parsed object per file version, verified on every call by the store's identity
-(inode, mtime_ns, size) PLUS a byte compare, the override journal's identity and the goals-archive's.
+(inode, mtime_ns, size) PLUS a byte compare until a compare has settled the entry (then by the identity and
+the ctime: SettledHits below), the override journal's identity and the goals-archive's.
 Writers stay on load_goals. All fixtures SYNTHETIC; this module uses a PRIVATE synthetic sid and a
 fresh state root per test, so another module's journaled overrides against a shared placeholder sid
 cannot land on its nodes mid-test."""
@@ -15,8 +16,11 @@ import json
 import os
 import pickle
 import re
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from romp_load import load_source
 from pathlib import Path
@@ -399,7 +403,7 @@ class SharedStoreCache(unittest.TestCase):
             return orig_read(fd, path_s)
         with mock.patch.object(jd, "_disk_read", faulting_read):
             self.assertRaises(OSError, jd.load_goals_shared, SID)
-        self.assertEqual(jd.shared_store_stats()["entries"], 0, "...and at the read: a warm entry is re-read every call")
+        self.assertEqual(jd.shared_store_stats()["entries"], 0, "...and at the read: an entry no compare has settled is re-read every call")
         self.assertEqual(self._delta("absent"), 0, "a fault is not an absent store")
 
     def test_load_goals_shared_or_fault_files_one_row_per_episode(self):
@@ -968,6 +972,413 @@ class WriterParseMemo(unittest.TestCase):
         self.assertEqual(s["nodes"], {}, "the fresh store: the bad bytes were moved aside")
         self.assertTrue(list(jd.GOALDIR.glob(SID + ".json.corrupt-*")), "...and preserved")
         self.assertEqual(jd.raw_store_stats()["entries"], 0)
+
+
+SEC = 1_000_000_000
+
+# Another process writing the store: one line per write on stdin, `<how> <hex bytes>`, answered `ok` once the write is
+# done. inplace: over the same inode, no truncation (the size is the caller's to keep); pin: the same, then the mtime put
+# back where it was (what a coarse-stamp kernel leaves, or rsync -t); rename: a closed temp renamed over the path, as
+# every romp publish is. Started before the timed steps, so a write lands microseconds after the signal.
+WRITER_CHILD = r"""
+import os, sys
+path = sys.argv[1]
+for line in sys.stdin:
+    how, data = line.split()
+    data = bytes.fromhex(data)
+    st = os.stat(path)
+    if how == "rename":
+        tmp = path + ".tmp.child"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    else:
+        with open(path, "r+b") as f:
+            f.write(data)
+        if how == "pin":
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    print("ok", flush=True)
+"""
+
+
+class SettledHits(unittest.TestCase):
+    """The shared cache's settled hit (2026-10-26). load_goals_shared read the whole store on every call to compare it with
+    the cached bytes, so a hit cost a full read of a file that can run to megabytes. Now, once a compare has matched while
+    the filesystem clock had already passed the whole granule of the file's ctime (read before the bytes), a call whose
+    identity (inode, mtime_ns, size) and ctime are unchanged is a hit with no read. Every rewrite the per-call compare
+    catches must still be seen: a same-size rewrite inside one timestamp tick, in place or by a publish onto the freed
+    inode number, from this process and from another. A tick is staged with a seam that reports the REAL stamps as a
+    filesystem with whole-second stamps stores them (and, for a publish, the one inode number a recycled temp would
+    carry), so two writes inside one real second are one tick; the rule itself runs on the real clock. The oracle for every
+    answer is load_goals, the writer's loader, read fresh. A private synthetic sid and a fresh state root per test."""
+
+    def setUp(self):
+        self._saved = jd.STATE
+        self.td = tempfile.TemporaryDirectory()
+        jd._rebind_state(Path(self.td.name))         # also clears the cache
+        self.stats0 = jd.shared_store_stats()
+        self.nid = "%s:g1" % SID
+
+    def tearDown(self):
+        jd._rebind_state(self._saved)
+        self.td.cleanup()
+
+    def _seed(self, text="A goal"):
+        s = {"rompUuid": SID, "seq": 0, "placementsV": jd.PLACEMENTS_V, "nodes": {}, "placements": {}, "status": {}}
+        jd.apply_plan(s, "s1", T0, [{"do": "mint", "why": "x", "text": text}], [])
+        jd.rollup_status(s, session_closed=False)
+        jd.save_goals(SID, s)
+        p = jd.GOALDIR / (SID + ".json")
+        a = p.read_bytes()
+        b = a.replace(b'"text": "A goal"', b'"text": "B goal"')
+        self.assertEqual(len(a), len(b), "two versions of one size")
+        self.assertNotEqual(a, b)
+        return p, a, b
+
+    def _delta(self, key):
+        return jd.shared_store_stats()[key] - self.stats0[key]
+
+    def _text(self, store):
+        return store["nodes"][self.nid]["text"]
+
+    def _agrees(self, view, msg):
+        """The served view is the uncached answer: load_goals, read fresh (the transient base identity aside, which the
+        whole-second seam reports coarse)."""
+        plain = lambda st: {k: v for k, v in _norm(st).items() if k != "_baseIdent"}
+        self.assertEqual(plain(view), plain(jd.load_goals(SID)), msg)
+
+    @contextlib.contextmanager
+    def _reads(self, path):
+        """Count the reads of this store's bytes (jd._disk_read, the one place a store file is read, by path)."""
+        n, real = [0], jd._disk_read
+
+        def counting(fd, path_s):
+            if path_s == str(path):
+                n[0] += 1
+            return real(fd, path_s)
+        with mock.patch.object(jd, "_disk_read", counting):
+            yield n
+
+    def _settle(self, path):
+        """Return once the filesystem clock has passed the store's ctime granule, the event a compare must follow to settle
+        an entry. Skip where it does not within ten seconds: a filesystem stamped by a clock running ahead of this
+        machine's never settles, and every hit there reads, as before."""
+        c = os.stat(path).st_ctime_ns
+        end = time.monotonic() + 10
+        while not jd._store_stamp_settled(c):
+            if time.monotonic() > end:
+                self.skipTest("this filesystem's stamps run ahead of this machine's coarse clock: no stamp settles here")
+            time.sleep(0.001)
+
+    @staticmethod
+    def _coarse(same_inode=False):
+        """_disk_ident as a filesystem with whole-second stamps reports a file (HFS+, ext4 with small inodes): the real
+        mtime and ctime truncated to the second. same_inode: every file at the path reports one inode number, the freed
+        number a publish's temp can be handed."""
+        real = jd._disk_ident
+
+        def ident(fd, ctime_out=None):
+            got = []
+            ino, mt, size = real(fd, got)
+            if ctime_out is not None:
+                ctime_out.append(got[0] - got[0] % SEC)
+            return (0 if same_inode else ino, mt - mt % SEC, size)
+        return ident
+
+    @staticmethod
+    def _tick(coarse, path):
+        """The identity and ctime `coarse` reports for the file at `path` now."""
+        fd = os.open(str(path), os.O_RDONLY)
+        try:
+            c = []
+            return coarse(fd, c), c[0]
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _load(coarse=None):
+        if coarse is None:
+            return jd.load_goals_shared(SID)
+        with mock.patch.object(jd, "_disk_ident", coarse):
+            return jd.load_goals_shared(SID)
+
+    def _child(self):
+        child = subprocess.Popen([sys.executable, "-c", WRITER_CHILD, str(jd.GOALDIR / (SID + ".json"))],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.stdout.close)
+        self.addCleanup(child.wait, 60)
+        self.addCleanup(child.stdin.close)                   # first: the child's loop ends on end of input
+        return child
+
+    @staticmethod
+    def _ask(child, line):
+        child.stdin.write(line + "\n")
+        child.stdin.flush()
+        return child.stdout.readline().strip()
+
+    # ── the saving: a settled entry is served without a read ─────────────────────────────────────────────
+
+    def test_a_settled_entry_is_served_without_reading_the_file(self):
+        p, _a, _b = self._seed()
+        self._settle(p)
+        with self._reads(p) as n:
+            first = jd.load_goals_shared(SID)                # the fill: one read
+            views = [jd.load_goals_shared(SID) for _ in range(5)]   # a compare that settles, then four with no read
+        self.assertEqual(n[0], 2, "the fill and the compare that settled the entry; nothing after (it was six reads)")
+        for v in views:
+            self.assertIs(v, first, "one object for the version, as before")
+        self.assertEqual((self._delta("miss"), self._delta("hit"), self._delta("settled"), self._delta("compare_miss")),
+                         (1, 5, 4, 0))
+        self._agrees(first, "the settled view is the file's content")
+        self.assertEqual(jd.shared_store_stats()["bytes"], os.path.getsize(p), "the bytes are kept for the next compare")
+
+    def test_a_settled_entry_still_opens_the_file_and_a_read_fault_alone_waits_for_the_next_read(self):
+        """The fault paths a settled hit changes, pinned as the docstring states them. Every call still opens the file, so a
+        fault at the open raises and drops the entry; a settled hit reads no bytes, so a fault in the read alone (an EIO
+        from the device, with the identity and ctime unmoved) is not met until a call reads again."""
+        p, _a, _b = self._seed()
+        self._settle(p)
+        v = jd.load_goals_shared(SID)
+        self.assertIs(jd.load_goals_shared(SID), v)          # settled
+        real = jd._disk_read
+
+        def faulting(fd, path_s):
+            if path_s == str(p):
+                raise OSError(errno.EIO, "Input/output error", path_s)
+            return real(fd, path_s)
+        with mock.patch.object(jd, "_disk_read", faulting):
+            self.assertIs(jd.load_goals_shared(SID), v, "settled: no read, so the read's fault is not met here")
+        orig_open = os.open
+
+        def faulting_open(q, *a, **kw):
+            if os.fspath(q) == str(p):
+                raise OSError(errno.EIO, "Input/output error", str(q))
+            return orig_open(q, *a, **kw)
+        with mock.patch.object(os, "open", faulting_open):
+            with self.assertRaises(OSError):
+                jd.load_goals_shared(SID)
+        self.assertEqual(jd.shared_store_stats()["entries"], 0, "a fault at the open drops the entry, settled or not")
+        with self._reads(p) as n:
+            self.assertIsNot(jd.load_goals_shared(SID), v, "the next call fills again")
+        self.assertEqual(n[0], 1)
+
+    def test_the_fill_alone_never_settles_a_second_read_must_match_it(self):
+        """A fill whose read met a writer mid-write holds bytes the file never kept. The rule is forced to say settled
+        throughout, the fill's read is handed the other version's bytes (what a read racing an in-place writer can see),
+        and the next call must compare, find the file's own bytes and refill: a fill that settled itself would serve the
+        torn read for as long as the stamp stood."""
+        p, a, b = self._seed()
+        real, handed = jd._disk_read, []
+
+        def torn_once(fd, path_s):
+            data = real(fd, path_s)
+            if path_s == str(p) and not handed:
+                handed.append(1)
+                return b                                     # the fill reads "B goal"; the file holds "A goal"
+            return data
+        with mock.patch.object(jd, "_store_stamp_settled", lambda c: True), mock.patch.object(jd, "_disk_read", torn_once):
+            torn = jd.load_goals_shared(SID)
+            self.assertEqual(self._text(torn), "B goal", "the fill parsed what its read returned")
+            with self._reads(p) as n:
+                fixed = jd.load_goals_shared(SID)
+                again = jd.load_goals_shared(SID)
+                served = jd.load_goals_shared(SID)
+        self.assertEqual(self._text(fixed), "A goal", "the second read did not match the fill's: the file's own bytes")
+        self.assertIs(again, fixed)
+        self.assertIs(served, fixed)
+        self.assertEqual(n[0], 2, "the compare that refilled, the compare that settled, then no read")
+        self.assertEqual((self._delta("compare_miss"), self._delta("settled")), (1, 1))
+        self._agrees(served, "the file's content")
+
+    def test_a_rule_that_cannot_answer_leaves_every_hit_reading_as_before(self):
+        p, _a, _b = self._seed()
+        with mock.patch.object(jd, "_store_stamp_settled", lambda c: False), self._reads(p) as n:
+            views = [jd.load_goals_shared(SID) for _ in range(4)]
+        self.assertEqual(n[0], 4, "one read per call, the cost before")
+        self.assertEqual((self._delta("hit"), self._delta("settled")), (3, 0))
+        self.assertTrue(all(v is views[0] for v in views))
+
+    # ── the oracle: every rewrite the per-call compare caught is still seen ──────────────────────────────
+
+    def _inside_one_tick(self, write_a, write_b, coarse):
+        """Write version A, fill, compare (the stamp is inside its tick, so nothing settles), write version B, and when B
+        landed in A's tick (the identity and ctime `coarse` reports unchanged) answer the next load; a turned second
+        tries again. Returns (the view after B, the counters' movement over that load)."""
+        for _ in range(10):
+            jd._shared_clear()
+            write_a()
+            before = self._tick(coarse, jd.GOALDIR / (SID + ".json"))
+            a = self._load(coarse)
+            self.assertIs(self._load(coarse), a)
+            self.assertEqual(self._text(a), "A goal")
+            write_b()
+            if self._tick(coarse, jd.GOALDIR / (SID + ".json")) != before:
+                continue                                     # a second turned between the writes: not one tick
+            s0 = jd.shared_store_stats()
+            view = self._load(coarse)
+            s1 = jd.shared_store_stats()
+            return view, {k: s1[k] - s0[k] for k in ("hit", "settled", "miss", "compare_miss")}
+        self.fail("ten tries and no two writes inside one second")
+
+    def test_a_same_size_rewrite_inside_one_stamp_tick_from_this_process_is_seen(self):
+        p, a, b = self._seed()
+
+        def in_place(data):
+            def w():
+                with open(p, "r+b") as f:
+                    f.write(data)
+            return w
+
+        def save_b():                                        # this process's own publisher: save_goals renames a temp
+            w = jd.load_goals(SID)
+            w["nodes"][self.nid]["text"] = "B goal"
+            jd.save_goals(SID, w)
+        for name, write_b, coarse in (("a rewrite in place", in_place(b), self._coarse()),
+                                      ("a save_goals publish onto the freed inode number", save_b, self._coarse(same_inode=True))):
+            with self.subTest(name):
+                view, d = self._inside_one_tick(in_place(a), write_b, coarse)
+                self.assertEqual(self._text(view), "B goal", "the rewrite inside the tick is seen")
+                self._agrees(view, "the uncached answer")
+                self.assertEqual(d["settled"], 0, "never served from a stamp inside its tick")
+
+    def test_a_same_size_rewrite_inside_one_stamp_tick_from_another_process_is_seen(self):
+        p, a, b = self._seed()
+        child = self._child()
+
+        def in_place_a():
+            with open(p, "r+b") as f:
+                f.write(a)
+        for how, coarse in (("inplace", self._coarse()), ("rename", self._coarse(same_inode=True))):
+            with self.subTest(how):
+                view, d = self._inside_one_tick(in_place_a, lambda: self.assertEqual(self._ask(child, "%s %s" % (how, b.hex())), "ok"),
+                                                coarse)
+                self.assertEqual(self._text(view), "B goal", "the other process's write inside the tick is seen")
+                self._agrees(view, "the uncached answer")
+                self.assertEqual((d["settled"], d["compare_miss"]), (0, 1), "the identity held; the bytes told")
+
+    def test_a_judge_publishing_from_another_process_inside_one_stamp_tick_is_seen(self):
+        """The writer romp actually runs in another process: a judge module (the judges' process, the CLI) loading the
+        store and publishing it with save_goals, a temp renamed over the path, inside the tick of the version this process
+        holds, onto the freed inode number. Its publish moves nothing this process can hear; only the file tells."""
+        p, a, _b = self._seed()
+        code = ("import sys; sys.path.insert(0, %r)\nfrom romp_load import load_source\n"
+                "jd = load_source('romp_judge_store_child', %r)\n"
+                "for line in sys.stdin:\n"
+                "    s = jd.load_goals(%r)\n"
+                "    s['nodes'][%r]['text'] = line.strip()\n"
+                "    jd.save_goals(%r, s)\n"
+                "    print('ok', flush=True)\n") % (os.path.dirname(os.path.realpath(__file__)), os.path.join(BIN, "romp-judge"),
+                                                     SID, self.nid, SID)
+        env = dict(os.environ, ROMP_STATE_DIR=str(jd.STATE), ROMP_KERNEL_NO_OPEN="1")
+        env.pop("XDG_STATE_HOME", None)
+        child = subprocess.Popen([sys.executable, "-c", code], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE, text=True, env=env)
+        self.addCleanup(child.stdout.close)
+        self.addCleanup(child.stderr.close)
+        self.addCleanup(child.wait, 60)
+        self.addCleanup(child.stdin.close)
+
+        def publish_b():
+            got = self._ask(child, "B goal")
+            if got != "ok":
+                child.stdin.close()
+                self.fail("the judge child failed: %s" % child.stderr.read()[-800:])
+
+        def rename_a():
+            tmp = p.with_name(p.name + ".tmp.parent")
+            tmp.write_bytes(a)
+            os.replace(tmp, p)
+        publish_b()                                          # the child's import done, so a publish lands at the signal
+        view, d = self._inside_one_tick(rename_a, publish_b, self._coarse(same_inode=True))
+        self.assertEqual(self._text(view), "B goal", "the other process's publish inside the tick is seen")
+        self._agrees(view, "the uncached answer")
+        self.assertEqual((d["settled"], d["compare_miss"]), (0, 1))
+
+    def test_a_settled_entry_sees_a_same_size_rewrite_with_its_mtime_put_back(self):
+        """Real stamps, nothing stubbed. Once an entry is settled, a same-size rewrite in place with the mtime put back
+        keeps the identity (inode, mtime_ns, size) exactly, from this process and from another; the write moved the ctime,
+        which no program sets, so the next load reads and sees it."""
+        p, a, b = self._seed()
+        child = self._child()
+
+        def here(data):
+            st = os.stat(p)
+            with open(p, "r+b") as f:
+                f.write(data)
+            os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+        writes = (("this process", lambda: here(b), "B goal"),
+                  ("another process", lambda: self.assertEqual(self._ask(child, "pin " + a.hex()), "ok"), "A goal"))
+        for who, write, want in writes:
+            with self.subTest(who):
+                jd._shared_clear()
+                v = jd.load_goals_shared(SID)
+                self._settle(p)
+                self.assertIs(jd.load_goals_shared(SID), v)          # the compare that settles
+                with self._reads(p) as n:
+                    self.assertIs(jd.load_goals_shared(SID), v)
+                self.assertEqual(n[0], 0, "settled")
+                ident = os.stat(p)
+                write()
+                st = os.stat(p)
+                self.assertEqual((st.st_ino, st.st_mtime_ns, st.st_size), (ident.st_ino, ident.st_mtime_ns, ident.st_size),
+                                 "the identity did not move")
+                view = jd.load_goals_shared(SID)
+                self.assertEqual(self._text(view), want, "the rewrite is seen")
+                self._agrees(view, "the uncached answer")
+
+    def test_real_stamps_a_rewrite_right_after_the_reads_is_seen(self):
+        """Nothing stubbed: the real clock and the real filesystem stamps. Each round writes one version in place, loads it
+        twice (the fill and a compare that settles it only if the clock has passed its stamp) and at once rewrites the
+        other version of the same size in place; the next load must answer it. Where the filesystem stamps from a coarse
+        clock (Linux before 6.13), the rewrite often lands inside the tick of the version read, its stamps unchanged."""
+        p, a, b = self._seed()
+        kept = 0
+        for i in range(200):
+            first, second, want = (a, b, "B goal") if i % 2 == 0 else (b, a, "A goal")
+            with open(p, "r+b") as f:
+                f.write(first)
+            jd.load_goals_shared(SID)
+            jd.load_goals_shared(SID)
+            st0 = os.stat(p)
+            with open(p, "r+b") as f:
+                f.write(second)
+            st1 = os.stat(p)
+            kept += (st0.st_mtime_ns, st0.st_ctime_ns) == (st1.st_mtime_ns, st1.st_ctime_ns)
+            self.assertEqual(self._text(jd.load_goals_shared(SID)), want,
+                             "round %d (%d rounds so far kept the stamps)" % (i, kept))
+
+    # ── the rule is the backend's ─────────────────────────────────────────────────────────────────────
+
+    def test_the_stamp_rule_is_the_backends_and_a_missing_one_means_read(self):
+        sb = sys.modules.get("romp_sdk_backend") or load_source("romp_sdk_backend", os.path.join(BIN, "romp_sdk_backend.py"))
+        now = 1_781_100_000_123_456_789                      # a coarse-clock reading, fixed for both
+        whole = now - now % SEC
+        stamps = {"a nanosecond stamp a tick back": now - 4_000_000, "the clock's own reading": now,
+                  "a whole-second stamp inside its granule": whole, "a whole-second stamp three seconds back": whole - 3 * SEC,
+                  "a stamp ahead of the clock": now + 5_000_000}
+        with mock.patch.object(sb, "_fs_clock_ns", lambda: now):
+            got = {k: jd._store_stamp_settled(v) for k, v in stamps.items()}
+            self.assertEqual(got, {k: sb._fs_stamp_settled(v) for k, v in stamps.items()}, "one rule")
+        self.assertEqual(got, {"a nanosecond stamp a tick back": True, "the clock's own reading": False,
+                               "a whole-second stamp inside its granule": False,
+                               "a whole-second stamp three seconds back": True, "a stamp ahead of the clock": False})
+        loads = []
+        with mock.patch.object(jd, "load_source", lambda *a: loads.append(a)), \
+                mock.patch.dict(sys.modules, {"romp_sdk_backend": type(sys)("stand_in")}):
+            self.assertFalse(jd._store_stamp_settled(whole - 3 * SEC), "a module without the rule: compare the bytes")
+        self.assertEqual(loads, [], "a module under the name is not loaded over")
+
+        def failing(*a):
+            loads.append(a)
+            raise ImportError("synthetic: the backend will not load")
+        err = io.StringIO()
+        with mock.patch.dict(sys.modules), mock.patch.object(jd, "load_source", failing), \
+                mock.patch.object(jd, "_STAMP_RULE_FAULT", []), contextlib.redirect_stderr(err):
+            sys.modules.pop("romp_sdk_backend", None)
+            self.assertFalse(jd._store_stamp_settled(whole - 3 * SEC))
+            self.assertFalse(jd._store_stamp_settled(whole - 3 * SEC))
+        self.assertEqual(len(loads), 1, "one load tried, not one per call")
+        self.assertEqual(err.getvalue().count("the stamp rule will not load"), 1, "said once")
 
 
 if __name__ == "__main__":

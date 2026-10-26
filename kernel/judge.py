@@ -6242,11 +6242,15 @@ def _disk_parse(path_s, data):
     return value
 
 
-def _disk_ident(fd):
+def _disk_ident(fd, ctime_out=None):
     """The identity of an OPEN store, (inode, mtime_ns, size), from the descriptor: the identity of the file
     whose bytes _disk_read returns, whatever is linked at the path by then. Its own seam so a test can land
-    a publish between the open and this stat."""
+    a publish between the open and this stat. `ctime_out`, a list, gets the file's st_ctime_ns from the same
+    fstat (the shared cache's settled stamp, load_goals_shared); the identity itself stays three fields, the
+    shape every CAS comparison and _baseIdent stamp holds."""
     st = os.fstat(fd)
+    if ctime_out is not None:
+        ctime_out.append(st.st_ctime_ns)
     return (st.st_ino, st.st_mtime_ns, st.st_size)
 
 
@@ -6340,11 +6344,32 @@ def _matches_disk(fsid, store, mine=None):
 # ONE parsed object per file version; every writer stays on load_goals (a private copy it may mutate and
 # hand to save_goals).
 #
-# A hit is a proof about CONTENT, not identity. Each call opens the store, takes the file's identity
-# (inode, mtime_ns, size) from the descriptor, reads the bytes from the same descriptor and compares
-# them to the entry's (a memcmp, about 6% of a parse), so the coarse-timestamp blind spot the judge
-# pass's stat-keyed snapshot memo documents (kernel.py: an equal-size republish onto a recycled inode
-# inside one clock tick reproduces the stat key) cannot serve a stale parse here. The override journal
+# A hit is a proof about CONTENT, not identity alone. Each call opens the store and takes the file's
+# identity (inode, mtime_ns, size) and its ctime from the descriptor. The identity alone can alias: a
+# filesystem stamps from a coarse clock (a tick of 1 to 10 ms on Linux before 6.13's multigrain stamps,
+# whole seconds on some filesystems), so a same-size rewrite in place inside the tick of the version an
+# entry holds, or a same-size publish onto that version's freed inode number inside the same tick, keeps
+# it (the blind spot the judge pass's stat-keyed snapshot memo documents in kernel.py). So the bytes are
+# read from the same descriptor and compared with the entry's until a compare has SETTLED the entry: one
+# that matched while the filesystem clock had already passed the whole granule of the file's ctime,
+# read before the bytes were (_store_stamp_settled, git's racy-index rule). From then on a call whose
+# identity and ctime equal the settled ones is a hit with no read (`settled` counts those); before
+# 2026-10-26 every hit read the whole file, megabytes for a large store, on every call.
+#
+# Why the settled hit is exact. Every change to a file (a write, a truncate, a utime, a chmod) sets its
+# ctime to the filesystem clock's now, and no program can set a ctime; once that clock is past the
+# stamp's granule, every later change stamps past it. A different file at the path under the same inode
+# number can only have been created after the settling read's descriptor closed (an open descriptor keeps
+# its inode allocated), so its ctime is past the stamp too. Equal identity and ctime therefore mean the
+# file the compare matched, unchanged since that read. This reads the clock that issues the stamps and
+# decides on the event of that clock passing a stamp, not on a window of elapsed time; the registry
+# scan's key rests on the same fact (sdk_backend _rows_table). A fill never settles: a second read must
+# match the first, so a fill that met an in-place writer mid-write is compared again before anything is
+# served unread. What the rule does not cover, as the registry scan does not: a filesystem stamped by
+# another machine's clock (NFS) when that clock runs behind this one, a system clock stepped backward,
+# and an in-place writer whose data lands after its stamp while two reads in a row see the same partial
+# bytes. No romp writer writes a store in place: save_goals and migrate_all_stores publish a closed temp
+# by rename, in this process or in another (the CLI, the judges' process). The override journal
 # is keyed on its (inode, mtime_ns, size) alone: its only writers append (append_override / append_block
 # / append_restore), so an equal key is an equal content. The goals-archive is keyed the same way; it is
 # read only when a restore row replays, and its key has no byte compare, so the equal-size same-tick
@@ -6377,11 +6402,36 @@ def _matches_disk(fsid, store, mine=None):
 # discovered session owns (_shared_evict_unowned), so the cache is bounded by the live board. Two fills
 # of one path race harmlessly: the second checks under the lock for an entry with its exact keys and
 # bytes and returns that object, so concurrent readers of one file version receive one object.
-_SHARED = {}                                     # store path → (keys, store bytes, frozen store)
+_SHARED = {}                                     # store path → (keys, store bytes, frozen store, settled ctime_ns or None)
 _SHARED_LOCK = threading.Lock()
 _SHARED_OFF = [False]                            # a write attempt on a shared object switches the cache off (see _shared_poison)
 _SHARED_STATS = {"hit": 0, "miss": 0, "compare_miss": 0, "refuse": 0, "dup": 0, "absent": 0, "corrupt": 0,
-                 "unreadable_journal": 0, "evict": 0, "fallback": 0, "poisoned": 0}
+                 "unreadable_journal": 0, "evict": 0, "fallback": 0, "poisoned": 0, "settled": 0}
+_STAMP_RULE_FAULT = []                           # the error sdk_backend raised loading here, said once (_store_stamp_settled)
+
+
+def _store_stamp_settled(ctime_ns):
+    """Whether the filesystem clock has passed the whole granule of a store's ctime, so that every later change
+    to the file stamps past it. The rule is sdk_backend's _fs_stamp_settled (git's racy-index rule: the coarse
+    realtime clock Linux stamps from, a granule bounded by the stamp's own digits), stated once there and keyed
+    on by the registry scan too; this module loads without the backend (bin/romp-judge, the judges' process),
+    so it is fetched by name and loaded when absent. The caller reads it BEFORE the bytes it compares. False
+    when it cannot answer (the backend would not load, said once on stderr; a module registered under the name
+    without the rule, mid-load on another thread or a test's stand-in; the clock refusing), and the caller then
+    compares the bytes, as every hit did before. Its own function so a test can stand in for the verdict."""
+    sb = sys.modules.get("romp_sdk_backend")
+    if sb is None:
+        if _STAMP_RULE_FAULT:
+            return False
+        try:
+            sb = load_source("romp_sdk_backend", HERE / "sdk_backend.py")
+        except Exception as e:                       # never retried: a load is a whole module's execution
+            _STAMP_RULE_FAULT.append(e)
+            sys.stderr.write("romp-judge: the stamp rule will not load (%s); every shared goal-store hit reads "
+                             "its file\n" % e)
+            return False
+    rule = getattr(sb, "_fs_stamp_settled", None)
+    return bool(rule(ctime_ns)) if rule is not None else False
 
 
 class FrozenStoreError(TypeError):
@@ -6660,8 +6710,9 @@ def _shared_evict_unowned(owned):
 
 
 def shared_store_stats():
-    """The cache's counters plus its occupancy. hit: identity and bytes matched. miss: no entry, or its keys
-    moved. compare_miss: identity matched and the bytes did not. refuse: a fill not published because the
+    """The cache's counters plus its occupancy. hit: identity matched, and the bytes did or the entry's settled
+    ctime did. settled: the hits answered by the settled ctime, with no read (a part of hit). miss: no entry, or
+    its keys moved. compare_miss: identity matched and the bytes did not. refuse: a fill not published because the
     archive moved under it. dup: a fill discarded for a concurrent fill's identical entry. absent: no store
     file. corrupt: bytes that did not parse, handed to load_goals (which moves them aside); nothing cached.
     unreadable_journal: served uncached from load_goals. evict: entries dropped for gone files and for
@@ -6698,11 +6749,14 @@ def load_goals_shared(fsid):
     No store file: load_goals' fresh store (private, mutable; nothing to share). A store file that cannot be
     read: the OSError RAISES, exactly as load_goals raises it, and nothing is cached for the path; the
     pusher's builders call this through load_goals_shared_or_fault, the per-session boundary that files one
-    store-unreadable row per fault episode. Unreadable journal: not memoized; load_goals' own result, so its
-    judge-errors row keeps logging until the journal reads. Bytes that do not parse: handed to load_goals,
-    which moves the file aside (a stderr line and a store-quarantined row, once: the path then reads as
-    absent) and answers the legitimate fresh store; nothing is cached for it. A store carrying `_unread` is
-    never published: a view missing the journal's rows is not the files' content."""
+    store-unreadable row per fault episode. Every call opens the file, so a fault at the open (a permission
+    taken away) raises on every call, and anything put in the file's place moves its identity and is read; a
+    settled hit reads no bytes, so a fault the file's read alone develops while its identity and ctime stand
+    (an EIO from the device) raises at the first call that reads it again. Unreadable journal: not memoized;
+    load_goals' own result, so its judge-errors row keeps logging until the journal reads. Bytes that do not
+    parse: handed to load_goals, which moves the file aside (a stderr line and a store-quarantined row, once:
+    the path then reads as absent) and answers the legitimate fresh store; nothing is cached for it. A store
+    carrying `_unread` is never published: a view missing the journal's rows is not the files' content."""
     if _SHARED_OFF[0]:
         _shared_bump("fallback")
         return load_goals(fsid)
@@ -6718,19 +6772,34 @@ def load_goals_shared(fsid):
         _shared_forget(path_s)                       # a read FAULT raises, as load_goals' does (the caller's
         raise                                        # boundary files it); nothing is cached for the path
     try:
-        skey = _disk_ident(fd)
-        data = _disk_read(fd, path_s)
+        ctime = []
+        skey = _disk_ident(fd, ctime)
+        keys = (skey, jkey0, akey0)
+        with _SHARED_LOCK:
+            ent = _SHARED.get(path_s)
+        same = ent is not None and ent[0] == keys
+        if same and ent[3] is not None and ent[3] == ctime[0]:
+            data = None                              # settled: the file a compare matched, unchanged since (the note above)
+        else:
+            settled = same and _store_stamp_settled(ctime[0])   # BEFORE the read: any later change stamps past this ctime
+            data = _disk_read(fd, path_s)
     except OSError:
         _shared_forget(path_s)
         raise
     finally:
         os.close(fd)
-    keys = (skey, jkey0, akey0)
-    with _SHARED_LOCK:
-        ent = _SHARED.get(path_s)
-    if ent is not None and ent[0] == keys:
+    if same:
+        if data is None:
+            with _SHARED_LOCK:
+                _SHARED_STATS["hit"] += 1
+                _SHARED_STATS["settled"] += 1
+            return ent[2]
         if ent[1] == data:
-            _shared_bump("hit")
+            with _SHARED_LOCK:
+                _SHARED_STATS["hit"] += 1
+                if settled and _SHARED.get(path_s) is ent:
+                    _SHARED[path_s] = ent[:3] + (ctime[0],)   # this compare settles the entry: later calls with this
+                    #                                           identity and ctime are answered without a read
             return ent[2]
         _shared_bump("compare_miss")                 # same identity, other bytes: the blind spot, closed here
     else:
@@ -6782,7 +6851,7 @@ def load_goals_shared(fsid):
         if akey1 != akey0:
             _SHARED_STATS["refuse"] += 1             # the archive moved under the replay: right for this
             return frozen                            # caller, unproven for the next, so not published
-        _SHARED[path_s] = (keys, data, frozen)
+        _SHARED[path_s] = (keys, data, frozen, None)   # never settled by its own read: the next call compares once more
     return frozen
 
 
