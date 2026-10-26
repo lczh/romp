@@ -330,7 +330,11 @@ class TheRelease(_Base):
 
 class OneDefinition(unittest.TestCase):
     def test_the_kernels_nudge_holds_and_the_unblocker_read_the_same_sources(self):
-        self.assertIs(km.NUDGE_HOLD_EXEMPT_SRC, jd.NON_JUDGE_SRC)
+        # Equal, and bound to the judge's name in the kernel's source: an identity check breaks when another
+        # test module in the same run reloads the shared judge module, which rebinds the tuple.
+        self.assertEqual(km.NUDGE_HOLD_EXEMPT_SRC, jd.NON_JUDGE_SRC)
+        with open(os.path.join(BIN, "romp-kernel"), encoding="utf-8") as f:
+            self.assertIn("\nNUDGE_HOLD_EXEMPT_SRC = jd.NON_JUDGE_SRC", f.read())
 
 
 if __name__ == "__main__":
