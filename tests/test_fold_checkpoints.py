@@ -593,7 +593,8 @@ class KernelFolds(Base):
 
     def nudge_recs(self, tail):
         head = [{"gid": SID + ":g1", "t": TS0 + 1}, {"gid": SID + ":g1", "t": TS0 + 2}]
-        rest = [{"gid": SID + ":g2", "t": TS0 + 3}, {"gid": SID + ":g1", "t": TS0 + 4}]
+        rest = [{"gid": SID + ":g2", "t": TS0 + 3}, {"gid": SID + ":g1", "t": TS0 + 3, "verdict": "re-armed"},
+                {"gid": SID + ":g1", "t": TS0 + 4, "verdict": "fired"}]
         return head + rest if tail else head
 
     def recs_of(self, p, tail):
@@ -619,7 +620,7 @@ class KernelFolds(Base):
                                               km._retrying_since_step, ckpt="retryingSince"),
             "queueLedger": km._pending_ledger(self.queue_leaf),
             "wakeTail2": km._undelivered_wake_tail(self.queue_leaf),
-            "nudgeTimes": km._nudge_times(),
+            "nudgeTimes2": km._nudge_times(),
             "bgJudge": [dict(t) for t in jd._bg_unresolved(self.leaf, now=TS0 + 100)],
             "postalLog": {k: (dict(v) if isinstance(v, dict) else sorted(v)) for k, v in
                           km._fold_records(km._postal_log_cache, self.postal, km._postal_log_fresh, km._postal_log_step, ckpt="postalLog").items()},
@@ -640,7 +641,7 @@ class KernelFolds(Base):
             names |= set(self.doc(p)["folds"])
         ALL_NAMES = {"sessionMeta", "bgRunning", "bgAll", "bgJudge", "agentLaunches", "agentGist", "agentLaunchIds", "statesOverlay",
                      "stateIntervals", "statesNotes", "machineCut", "queueLedger", "wakeTail2", "postalLog", "lastState",
-                     "lastNaturalState", "retryingSince", "nudgeTimes", "parkedHandoffs", "spendCuts"}
+                     "lastNaturalState", "retryingSince", "nudgeTimes2", "parkedHandoffs", "spendCuts"}
         self.assertEqual(names, ALL_NAMES, "every kernel fold this test drives left its state in the checkpoint")
         ksrc = open(os.path.join(BIN, "romp-kernel")).read(); jsrc = open(os.path.join(BIN, "romp-judge")).read()
         import re as _re
@@ -676,7 +677,8 @@ class KernelFolds(Base):
         self.assertEqual(km._last_natural_state(SID), ("retrying", TS0 + 9.5), "the session's own newest state skips rows with `by`")
         self.assertEqual(cold["queueLedger"], ["second", "third"])
         self.assertEqual([e["text"] for e in cold["wakeTail2"][0]], ["second", "third"])
-        self.assertEqual(cold["nudgeTimes"], {SID + ":g1": [TS0 + 1, TS0 + 2, TS0 + 4], SID + ":g2": [TS0 + 3]})
+        self.assertEqual(cold["nudgeTimes2"], {SID + ":g1": [TS0 + 1, TS0 + 2, TS0 + 4], SID + ":g2": [TS0 + 3]},
+                         "the sends only: the re-arm in the tail is a decision that sent nothing")
         self.assertEqual([t["id"] for t in cold["bgJudge"]], ["toolu_bg2"], "the judge's settled gate reads the same pairing")
         self.assertEqual(cold["postalLog"]["ended"], ["m2"])
         self.assertNotIn("m1", cold["postalLog"]["execd"])
@@ -704,6 +706,27 @@ class KernelFolds(Base):
         tail, mark = km._undelivered_wake_tail(self.queue_leaf)
         self.assertEqual([e["text"] for e in tail], ["kept", "later"], "the phantoms were not restored")
         self.assertNotIn("wakeTail", em.checkpoint_stats()["restoredFolds"], "nothing restored under the old name")
+
+    def test_a_nudge_history_checkpoint_written_before_the_send_filter_is_never_restored(self):
+        """The card's nudge history kept every nudge-events row until its fold learned to keep only the sends, so a
+        document folded under the old rule carries skips and re-arms as follow-ups: the fold's checkpoint name moved,
+        and the first fold after the deploy reads the log whole instead of restoring them."""
+        g1 = SID + ":g1"
+        _write(self.nudge, [{"gid": g1, "t": TS0 + 1, "count": 1, "verdict": "fired"},
+                            {"gid": g1, "t": TS0 + 2, "count": 1, "verdict": "skipped-redundant"}])
+
+        def old_rules(idx, o):                                           # the shape the old fold kept: every row with a gid
+            if o.get("gid") and o.get("t"):
+                idx.setdefault(o["gid"], []).append(int(o["t"]))
+            return idx
+        old = em.fold_records({}, self.nudge, dict, old_rules, ckpt="nudgeTimes")
+        self.assertEqual(old, {g1: [TS0 + 1, TS0 + 2]}, "the old document's history: the fire and the skip")
+        self.assertTrue(em.checkpoint_write(self.nudge))
+        self.assertIn("nudgeTimes", self.doc(self.nudge)["folds"])
+        self.fresh_process()
+        _append(self.nudge, {"gid": g1, "t": TS0 + 3, "count": 1, "verdict": "re-armed"})
+        self.assertEqual(km._nudge_times(), {g1: [TS0 + 1]}, "the skip was not restored")
+        self.assertNotIn("nudgeTimes", em.checkpoint_stats()["restoredFolds"], "nothing restored under the old name")
 
     def test_the_kernel_writes_at_a_settle_or_a_states_log_move_and_not_otherwise(self):
         self.write_all(tail=False)

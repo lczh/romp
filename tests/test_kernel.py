@@ -2849,6 +2849,35 @@ class ViewBuilder(unittest.TestCase):
         self.assertTrue(cards[g1]["nudgeFailed"], "the failed stamp still drives the chip itself")
         self.assertIsNone(cards[g2]["nudged"], "a never-nudged goal ships null")
 
+    def test_the_auto_nudge_history_lists_only_the_follow_ups_romp_sent(self):
+        # the nudge log holds a row for every gate decision since 2026-08-25, and most of them send nothing: a skip the
+        # redundancy judge ruled, a re-arm when the park lifted, a goal found resolved at the send. The card's history
+        # listed them all, so 'romp followed up 1x' came with a list of times romp sent nothing, and a goal skipped
+        # often enough pushed its one real follow-up out of the eight times the card keeps
+        g1, g2 = SID + ":g1", SID + ":g2"
+        self._goal_store(
+            {g1: {"id": g1, "text": "run the end-to-end test", "parentId": None, "nodeComplete": False,
+                  "blocked": False, "cleared": False, "trail": [], "t": T0}},
+            {g1: "working"}, last=g1)
+        (jd.STATE / "auto-nudge.json").write_text(json.dumps(
+            {"enabled": True, "nudged": {g1: {"count": 1, "lastTurnId": SID + ":1:aa", "failed": True}}}))
+
+        def row(gid, t, count, verdict=None):
+            return json.dumps({"sid": SID, "gid": gid, "t": t, "count": count, **({"verdict": verdict} if verdict else {})})
+        skips = [row(g1, NOW - 1990 + 100 * i, 1, v) for i in range(5)
+                 for v in ("re-armed", "skipped-redundant", "skipped-redundant-memo", "held-fresh-re-judged",
+                           "skipped-redundant-at-cap", "resolved-at-send", "blocked-on-user-at-send")]
+        # control: every verdict that records a send stays, and so does a row written before verdicts were
+        sends = [row(g2, NOW - 600, 1), row(g2, NOW - 500, 0, "fired"), row(g2, NOW - 400, 3, "fired-at-cap"),
+                 row(g2, NOW - 300, 2, "fired-parked-backstop")]
+        (jd.STATE / "nudge-events.jsonl").write_text("\n".join([row(g1, NOW - 3000, 1, "fired")] + skips + sends) + "\n")
+        km._autonudge_cache.clear(); km._nudge_times_cache.clear()
+        self.assertEqual(km._nudge_times(), {g1: [NOW - 3000], g2: [NOW - 600, NOW - 500, NOW - 400, NOW - 300]},
+                         "the sends, none of the decisions that sent nothing")
+        cards = {a["itemId"]: a for a in km.build_feed(NOW)["asks"]}
+        self.assertEqual(cards[g1]["nudged"], {"count": 1, "times": [NOW - 3000]},
+                         "the card's history lists the follow-up romp sent, not the skips after it")
+
     def test_stalled_chip_yields_once_the_story_moved_on(self):
         # the user 2026-07-09 (g143): a failed nudge blocked the card, the user replied, the CLOSER ruled
         # it done, and a later user follow-up put it back to working — yet the chip resurfaced, because
