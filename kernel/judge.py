@@ -791,6 +791,11 @@ WHY_TURN_IN_FLIGHT = "a judge has ruled on a turn that hasn't finished yet"
 # never-paint rule as the holds above; clears on the closer's next word (any newer judge row on the
 # goal) or the deferral backstop.
 WHY_UNBLOCK_UNSETTLED = "an unblock is awaiting the closer's next word on this goal"
+# The diary sources that are not a JUDGE's ruling: the user's and the agent's own gestures and romp's own
+# bookkeeping (an interrupt's stop-block and its lift). One definition, read on both ends of the unblock
+# discriminator above: the kernel's nudge holds (NUDGE_HOLD_EXEMPT_SRC is this tuple) and the unblocker's
+# re-look at a closed turn (_unblock_session), so a goal's first judge unblock means the same thing to both.
+NON_JUDGE_SRC = ("user", "agent", "romp", "interrupt")
 # The CONSOLIDATOR (the user 2026-06-19): the grouper's twin for the COMPLETED column. Post-T101
 # (2026-08-26, the ask-unit ruling) it is housekeeping only — merge completed twins, retitle — the
 # working grouper's surviving ops over the done column; container mints retired with the umbrella.
@@ -16546,14 +16551,22 @@ def _invalidate_closure(store, session, seg_t):
     turn's record against the planner's base (_merge_closer_turns), where a plain union put it back."""
     turn = next((t for t in (session.get("turns") or [])
                  if t.get("t", 0) <= seg_t <= t.get("end", t.get("t", 0))), None)
-    tid = turn.get("id") if turn else None
+    _reopen_closure(store, turn.get("id") if turn else None)
+
+
+def _reopen_closure(store, tid):
+    """Drop turn `tid`'s record from the closer's book (closedTurns, with its closedSig size and closedContent beside it),
+    so the closer judges the turn again next pass and the kernel's nudge gate (_closer_settled) holds until it has. A turn
+    the closer never closed is left as it is. Returns whether a record was dropped. The two writers: a post-closure done
+    (_invalidate_closure) and a post-closure unblock (_unblock_session)."""
     closed = _closed_turns(store)
     if not tid or tid not in closed:
-        return
+        return False
     closed.discard(tid)
     store["closedTurns"] = sorted(closed)
     (store.get("closedSig") or {}).pop(tid, None)
     (store.get("closedContent") or {}).pop(tid, None)
+    return True
 
 
 def _close_session(fsid, path, now, cap=CLOSE_FAIRNESS):
@@ -17152,7 +17165,23 @@ def _unblock_session(fsid, path, now):
     dropped it) is skipped and the skip is logged (judge-errors 'drift-skip' — the race monitor). That
     shrinks the clobber window from the model call's seconds to this apply block, the same exposure
     every fast judge write has; a user action clobbered inside even that window self-heals via the
-    override journal replay on the next pass."""
+    override journal replay on the next pass.
+
+    A LIFT AFTER THE CLOSER HAS RULED REOPENS THE TURN (2026-10-26). The unblocker runs after the closer
+    in the same pass, under the same evidence, so when it lifts a block off the turn that just ended,
+    the closer has usually already closed that turn with the goal still blocked. The card dropped to
+    working, the kernel's closer gate read the turn as judged, and a status check went out seconds
+    later about work the lift's own evidence said had shipped; the done came only from the check's
+    reply, the one new turn that could carry the lifted goal to the closer (_lift_riders). So a goal's
+    FIRST judge unblock (no earlier unblock by a judge in its diary, NON_JUDGE_SRC) drops the session's
+    last turn from the closer's book when that turn has ended and the closer has closed it, in the same
+    save, the way a post-closure done does (_invalidate_closure). The closer re-judges it next pass with
+    the lifted goal on its menu, and the nudge gate holds until that verdict lands: done means no check,
+    a goal still working is checked once. The release is the closer's next ruling on the turn, or its
+    give-up at the kill or refusal cap, which adopts the turn as it does any other; with the closer off
+    the gate reads settled. A REPEATED judge unblock reopens nothing: the kernel already holds its nudge
+    until the closer's next word (WHY_UNBLOCK_UNSETTLED), and re-judging there would only move a card
+    that is already ping-ponging."""
     _judge_ctx.fsid = fsid                            # usage logging: attribute this session's judge calls
     scan = load_goals(fsid)                            # read-only scan; this copy is NOT saved
     cands = _blocked_sub_candidates(scan)
@@ -17201,7 +17230,7 @@ def _unblock_session(fsid, path, now):
         save_goals(fsid, store)
         return []
     store["unblockFails"] = 0
-    lifted = []
+    lifted, reopen = [], False
     for i, (nid, _stale, bt) in enumerate(due, 1):
         nd = nodes.get(nid)
         why = lifts.get(i)
@@ -17220,12 +17249,17 @@ def _unblock_session(fsid, path, now):
         nd["blockCheckDoneT"] = max(newest_done, nd.get("blockCheckDoneT") or 0)
         if why is None:
             continue
+        first = not any(e.get("kind") == "unblock" and e.get("src") not in NON_JUDGE_SRC
+                        for e in nd.get("log") or [])
         # ev floor mirrors the moot-heal: an examine armed by a done filing alone can have newest <
         # the block's own evidence, and an unblock that folds BEFORE its block lifts nothing.
         if record_verdict(store, nd, "unblocker", "unblock", max(newest, bt),
                           why=("answered in passing: " + why) if why else "answered in passing"):
             nd["mt"] = now
             lifted.append(nid)
+            reopen = reopen or first
+    if reopen and turns and not _turn_open(turns[-1], turns):
+        _reopen_closure(store, turns[-1]["id"])        # the closer rules on the lifted goal before any nudge (docstring)
     rollup_status(store, _session_settled(fsid, path, session, store))
     save_goals(fsid, store)
     return lifted

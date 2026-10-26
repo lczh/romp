@@ -17898,6 +17898,9 @@ def _auto_nudge_session(s, now, live_map, nudged, waitfor, alive_ids=None, wake_
     # that ENDS by asking you a question is "working" only in the window before the closer marks its goal
     # blocked; nudging there is pointless (it's waiting on YOU) and churns. _closer_settled mirrors the
     # closer's own closedSig freshness check; no-op when the closer is off (2026-06-21, hardened 2026-06-27).
+    # A judge verdict filed AFTER the closer ruled reopens the turn here, so this gate also waits for the
+    # closer to rule on it: a work-run done (jd._invalidate_closure) and a goal's first unblock, which the
+    # unblocker files after the closer in the same pass (jd._unblock_session, 2026-10-26).
     if not _closer_settled(store, lt_id, len(lt.get("atoms") or [])):
         return "closer-unsettled"
     # PLANNER-PLACEMENT GATE (the user 2026-07-15, the 11:35/11:40 restatement nudges): closer-settled
@@ -18309,8 +18312,9 @@ def _auto_nudge_session(s, now, live_map, nudged, waitfor, alive_ids=None, wake_
 # gestures ("user", "agent") stamp WALL-CLOCK now rather than a segment trigger, so on an idle session
 # such a row outranks the last ended turn permanently. Every judge — planner, closer, unblocker, courier,
 # grouper, and any added later — is counted by default; this is a denylist on purpose, because a row
-# wrongly counted wedges the nudge silently while one wrongly skipped only nudges a beat early.
-NUDGE_HOLD_EXEMPT_SRC = ("user", "agent", "romp", "interrupt")
+# wrongly counted wedges the nudge silently while one wrongly skipped only nudges a beat early. The set is the
+# judge's NON_JUDGE_SRC: the unblocker reads the same one to tell a goal's first judge unblock from a repeat.
+NUDGE_HOLD_EXEMPT_SRC = jd.NON_JUDGE_SRC
 
 
 def _nudge_fire_list(fresh, to_fire, arm_t=None, seen_t=None, held=None):
