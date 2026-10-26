@@ -64266,10 +64266,21 @@ WARM_PAGES_MAX = _PAGE_CACHE_MAX // 2            # the warm SET: half the cache 
 #                                                  past it wait for the next board change (a set that fits settles to a probe)
 WARM_SKIP_MS = 1500                              # a pusher cycle slower than this: the warm stands down (counted)
 _WARM_MEMO = {"anchors": (), "keys": frozenset(), "sigs": {}}   # the last anchor list whose set was fully resident, that set's
-#                                                                  page keys, and the page signature (None: no row or no transcript)
-#                                                                  of every session its anchors resolved against
+#                                                                  page keys, and the page signature (None: no row or no transcript;
+#                                                                  _WARM_UNBUILT: not built) of every session its anchors named
 _WARM_ANCHOR_TURN = {}                           # (sid, anchor) → (page signature, the turn holding it or None): what the passes
 _WARM_ANCHOR_TURN_MAX = 1024                     #  resolved, valid under that signature; the oldest quarter trimmed past the cap
+_WARM_UNBUILT = ("unbuilt",)                     # the settled memo's mark for a session the pusher has not built (no _RENDER_FLOOR
+#                                                  record): never parsed nor warmed here; the pusher's first build of it wakes the warm
+
+
+def _warm_memo_sig(sid, sess, now, shared):
+    """What the settled probe compares for an anchored session, as the pass that remembered it took it: _WARM_UNBUILT for a
+    session the pusher has not built (read without a parse), else its page signature as a click's reply keys it (None for
+    a session with no row or no transcript)."""
+    if _RENDER_FLOOR.get(sid) is None:
+        return _WARM_UNBUILT
+    return _page_sig(sess, sid, now, shared=shared)
 
 
 def _card_anchors(feed):
@@ -64316,19 +64327,24 @@ def _warm_history_pages(feed, now, live_map=None):
     The warm SET is bounded to WARM_PAGES_MAX pages and half the cache's bytes, each page counted at its own size (the
     resident entry's, else its window's last render, _page_bytes_known): anchors are taken in the feed's order, and one
     whose window would take the set past the page bound waits for the next board change (counted as chatPages.warmPending),
-    and the first past the byte bound waits with every anchor after it. A window whose size was not known before its
-    render and that came in over the room left leaves the set and closes it (its pages stay cached, held against nothing,
-    and wait from then on with their size known). The set is held against eviction
+    and the first past the byte bound waits with every anchor after it. A window whose pages alone are over half the cache
+    is never held: it waits by itself, and the anchors after it go on. A window whose size was not known before its render
+    and that came in over the room left leaves the set (its pages stay cached, held against nothing, and wait from then
+    on with their size known), and closes the set unless it alone was over half. Such a render (a window over half, which
+    only learned its size) happens once a pass: windows of unknown size after it wait for the next pass, and the set is not
+    remembered as settled until they have been rendered, so a board of large windows learns them one pass at a time and no
+    pass renders them all. The set is held against eviction
     (_WARM_PIN, _page_victim: the set before this pass too, while the pass runs), so a page the warm renders never evicts
     another the warm will probe next, and a bounded set SETTLES. 2026-10-25: the bound was tested once per anchor, before
     its window, so one window of large pages could take the set past the whole cache, and the cache evicted by insertion
     order alone, which the warm's probes never refresh, so a render evicted the set's own oldest page; the next pass
     rendered that page, which evicted the next, and so on, while the pages were keyed on the pusher's recorded floor, not
-    the one a click's reply follows (they differ once a session's tree gains a document, or for a session the pusher has
-    not built). A set is
+    the one a click's reply follows (they differ once a session's tree gains a document). A session the pusher has not
+    built (no recorded floor) is neither parsed nor warmed, as before; it no longer keeps the set from settling. A set is
     remembered as settled when every anchor resolved, with the page signature of every session the anchors named (None
-    for a session with no row or no transcript): a session whose floor is 0 (an index client holding the tabs at turn 0,
-    a whole parse) has nothing below it to warm, and its floor's return moves its signature, which wakes the warm. Each
+    for a session with no row or no transcript, _WARM_UNBUILT for one not built, _warm_memo_sig): a session whose floor
+    is 0 (an index client holding the tabs at turn 0, a whole parse) has nothing below it to warm, and its floor's return
+    moves its signature, as a first build moves the mark, which wakes the warm. Each
     admitted page is PROBED first: one resident under the session's current page signature whose live inputs stand
     (_page_resident) costs that check, one that is not is rendered, so a page a floor flip re-keyed or a landed report
     dropped is warmed again; an unchanged board whose set is fully resident costs one probe of the remembered keys
@@ -64356,7 +64372,7 @@ def _warm_history_pages(feed, now, live_map=None):
         # moves a signature; a card whose report landed drops its page, which the loop below renders again); the probe's
         # time is the warm's (warmMs)
         try:
-            same = all(_page_sig(rows.get(sid_), sid_, now, shared=shared) == sg for sid_, sg in _WARM_MEMO["sigs"].items())
+            same = all(_warm_memo_sig(sid_, rows.get(sid_), now, shared) == sg for sid_, sg in _WARM_MEMO["sigs"].items())
         except Exception:
             same = False
         settled = same and all(_page_resident(k, ctx) is not None for k in _WARM_MEMO["keys"])
@@ -64370,8 +64386,10 @@ def _warm_history_pages(feed, now, live_map=None):
         ctx["live_map"] = live_map
     half = _PAGE_CACHE_BYTES // 2
     st, pending, keys, unresolved, set_bytes, closed = {"rendered": 0}, 0, set(), 0, 0, False
+    learned, deferred = False, 0                  # this pass rendered a window it then found over half the cache; the windows of
+    #                                               unknown size that waited for the next pass on that account
     per_sid, sigs = {}, {}                        # sid → (floor, sess, turns, page signature) or None (nothing below a floor to
-    #                                               warm); sid → its page signature (None: no row)
+    #                                               warm, or not built); sid → what the probe compares (_warm_memo_sig)
     u2ts, turn_of = {}, {}                        # sid → uuid → turn index below the floor, built on this pass's first unknown
     #                                               anchor of the session; (sid, anchor) → (signature, turn) this pass used
     with _page_lock:
@@ -64384,7 +64402,12 @@ def _warm_history_pages(feed, now, live_map=None):
             try:
                 if sid not in per_sid:
                     sess, entry, sig = rows.get(sid), None, None
-                    if sess is not None and sess.get("path"):
+                    if _RENDER_FLOOR.get(sid) is None:
+                        # the pusher has not built it: no parse here (a cold parse is the pusher's to pay, and it would change
+                        # the session's feed card, which reads the parse store without parsing) and nothing warmed; the mark
+                        # settles the board, and the pusher's first build of the session moves it and wakes the warm
+                        sig = _WARM_UNBUILT
+                    elif sess is not None and sess.get("path"):
                         parsed = _parse(sess["path"], sid, now)
                         turns = parsed["turns"]
                         # the floor a click's reply pages under (its build's _follower_floor) and the signature its pages are
@@ -64424,10 +64447,18 @@ def _warm_history_pages(feed, now, live_map=None):
                     continue
                 with _page_lock:
                     known = [_page_bytes_known(k) for k in new_keys]
-                if set_bytes + sum(b for b in known if b) > half:
-                    pending += 1                  # its pages, at their known sizes, would take the set past half the bytes: it
-                    closed = True                 #  waits, and every anchor after it
+                need = sum(b for b in known if b)
+                if need > half:
+                    pending += 1                  # its pages alone, at their known sizes, are over half the cache: no set can
+                    continue                      #  hold them, so it waits by itself and the anchors after it go on
+                if set_bytes + need > half:
+                    pending += 1                  # its pages would take the set past half the bytes: it waits, and every anchor
+                    closed = True                 #  after it
                     continue
+                if learned and any(b is None for b in known):
+                    pending += 1                  # one render a pass of a window found over half the cache (it is never held, so
+                    deferred += 1                 #  its render only learned its size): a window of unknown size waits for the next
+                    continue                      #  pass, which the set, not remembered as settled, gets
                 with _page_lock:                  # held before the renders: the window's second page never evicts its first
                     _WARM_PIN["set"] = frozenset(keys.union(new_keys))
                 got = 0
@@ -64440,9 +64471,10 @@ def _warm_history_pages(feed, now, live_map=None):
                     got += hit[1] if hit is not None else 0
                 if set_bytes + got > half:
                     pending += 1                  # a size learned by this render: over the room left, the window leaves the set
-                    closed = True                 #  and the set closes (its pages stay cached, held against nothing; the next
-                    with _page_lock:              #  pass knows their size and waits them without a render)
-                        _WARM_PIN["set"] = frozenset(keys)
+                    closed = got <= half          #  (its pages stay cached, held against nothing; the next pass knows their size
+                    learned = learned or not closed   #  and waits them without a render), and the set closes, unless the window
+                    with _page_lock:              #  alone is over half the cache: then the anchors after it go on, those of
+                        _WARM_PIN["set"] = frozenset(keys)   # known size in this pass
                     continue
                 keys.update(new_keys)
                 set_bytes += got
@@ -64468,7 +64500,7 @@ def _warm_history_pages(feed, now, live_map=None):
         _PAGE_STATS["warmPending"] = pending
         _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
         _PAGE_STATS["warmCycles"] += 1
-        resident_all = unresolved == 0 and all(k in _PAGE_CACHE for k in keys)   # an unresolved set is never "settled" (round 3, A); a
+        resident_all = unresolved == 0 and deferred == 0 and all(k in _PAGE_CACHE for k in keys)   # an unresolved or deferred set is never "settled" (round 3, A); a
     if resident_all:                                                                #  resolved board with every anchor in the tail settles EMPTY
         _WARM_MEMO.update(anchors=tuple(anchors), keys=frozenset(keys), sigs=dict(sigs))
     else:

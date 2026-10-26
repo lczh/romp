@@ -9,8 +9,10 @@ evicted page is warmed again; the render budget per cycle is half the cache and 
 down while the pusher is over its budget; a pre-floor page's key survives a turn; the counts are the warm's own; a warmed
 window is a cache hit for loadAround with no render. Since 2026-10-25: the set is held against eviction, so a reader's
 pages make room among themselves; each page counts at its own size against the byte bound, so a window the cache cannot
-hold is rendered once and then waits; the warm keys its pages on the floor a click's reply pages under; a floor of 0
-settles on the session's signature. Synthetic transcript only."""
+hold is rendered once and then waits, by itself when it alone is over half the cache; the warm keys its pages on the
+floor a click's reply pages under; a floor of 0 settles on the session's signature; a session the pusher has not built
+is neither parsed nor warmed, and settles. Synthetic transcript only."""
+import collections
 import json
 import os
 import sys
@@ -225,9 +227,12 @@ class WarmTheCards(P.Harness):
         n = km._warm_history_pages(feed, NOW, {})
         self.assertGreater(n, 0, "the next cycle warms the windows")
         self.assertTrue(self._hit(whole[5]["uuid"]))
-        # a second session with no row beside a resolved one: remembered with no signature, and its row's arrival wakes the warm
+        # a second session with no row beside a resolved one (the pusher built it at a floor of 0; its row has left the
+        # listing): remembered with no signature, and its row's arrival wakes the warm
         other = "99999999-0000-4000-8000-000000000099"
-        feed2 = {"type": "feed", "asks": feed["asks"] + [{"itemId": "z", "sid": other, "column": "working",
+        self.addCleanup(km._RENDER_FLOOR.pop, other, None)
+        km._RENDER_FLOOR[other] = 0
+        feed2 ={"type": "feed", "asks": feed["asks"] + [{"itemId": "z", "sid": other, "column": "working",
                                                            "tree": [{"id": "r", "kind": "ask", "status": "open", "anchorUuid": "u-nowhere"}]}]}
         self.assertEqual(km._warm_history_pages(feed2, NOW, {}), 0, "the first session's windows are resident")
         self.assertEqual(km._WARM_MEMO["anchors"], tuple(km._card_anchors(feed2)), "a board with a row-less session settles")
@@ -382,11 +387,64 @@ class WarmTheCards(P.Harness):
         finally:
             km._PAGE_CACHE_BYTES = saved
 
+    def test_a_window_over_half_the_cache_waits_alone_and_the_cards_after_it_are_warmed(self):
+        """A window whose pages alone are over half the cache, though under the whole, can never be held. It closed the set
+        when its size was learned (and again on every pass that knew it), so while its card stayed on top no card after it
+        was warmed, and nothing was. It waits by itself now: rendered once to learn its size and left to the cache's own
+        order, while the next cards' windows are admitted, held, and served to their clicks. Such a render is one a pass:
+        the windows of unknown size after it wait for the next pass, which the board, not settled, gets (a board of large
+        windows rendered them all in one pass)."""
+        recs = P.transcript(NOW - 86400, turns=600, compact_every=150)
+        for r in recs:                                                # the first 32 turns' replies eight times as long
+            u = r.get("uuid") or ""
+            if r.get("type") == "assistant" and u[1:].isdigit() and int(u[1:]) < 32:
+                for b in r["message"]["content"]:
+                    b["text"] = " ".join([b["text"]] * 8)
+        self.write(recs)
+        self.document()
+        self.assertGreater(self.restored()["floor"], 160)
+        turns = km._parse(self.leaf, SID, NOW)["turns"]
+        first = lambda j: next(a["uuid"] for a in turns[j]["atoms"] if a.get("uuid"))
+        sizes = self._sizes_then_empty([0, 16, 32, 48, 64, 80, 128, 144])
+        with km._page_lock:
+            km._PAGE_SIZES.clear()                                    # nothing known: the first pass learns the sizes
+        big, w1, w2, w3 = (sizes[a] + sizes[a + km.PAGE_TURNS] for a in (0, 64, 128, 32))
+        saved = km._PAGE_CACHE_BYTES
+        km._PAGE_CACHE_BYTES = big * 3 // 2                           # the big window: over half the cache, under the whole
+        try:
+            half = km._PAGE_CACHE_BYTES // 2
+            self.assertGreater(big, half); self.assertLessEqual(w1 + w2 + w3, half)
+            cards = [self._card([first(8)], item="big"), self._card([first(72)], item="n1"), self._card([first(136)], item="n2")]
+            feed = self._feed(*cards)                                 # windows [0, 32), [64, 96), [128, 160)
+            self.assertEqual(km._warm_history_pages(feed, NOW, {}), 2, "the big window rendered once, learning its size")
+            self.assertEqual(km._PAGE_STATS["warmPending"], 3, "…and the next two, of unknown size, wait for the next pass")
+            self.assertEqual(km._WARM_MEMO["anchors"], (), "…which the board, not settled, gets")
+            self.assertEqual(km._warm_history_pages(feed, NOW, {}), 4, "the next pass renders the next two windows")
+            self.assertEqual(km._PAGE_STATS["warmPending"], 1, "the big window alone waits")
+            held = set(km._WARM_MEMO["keys"])
+            self.assertEqual(sorted(k[1] for k in held), [64, 80, 128, 144], "the next cards' windows are the set")
+            for lo in range(192, 352, km.PAGE_TURNS):                 # a reader scrolls through ten pages elsewhere
+                km._chat_history_page(SID, lo, lo + km.PAGE_TURNS, NOW)
+            with km._page_lock:
+                self.assertTrue(held <= set(km._PAGE_CACHE), "the reader's pages evicted none of the set")
+            self.assertEqual(km._warm_history_pages(feed, NOW, {}), 0, "the board settles to its probe")
+            self.assertTrue(self._hit(first(72)) and self._hit(first(136)), "the next cards' clicks land from the cache")
+            # a board change walks the board again, the big window's size known: it waits without a render and does not
+            # keep a new card's window [32, 64) out
+            self.assertEqual(km._warm_history_pages(self._feed(*cards, self._card([first(40)], item="n3")), NOW, {}), 2,
+                             "the new card's window alone is rendered")
+            self.assertEqual(km._PAGE_STATS["warmPending"], 1)
+            self.assertTrue(self._hit(first(40)))
+        finally:
+            km._PAGE_CACHE_BYTES = saved
+
     def test_the_warm_keys_its_pages_on_the_floor_a_clicks_reply_pages_under(self):
         """2026-10-25: the warm took the floor the pusher's last build recorded, and a click's reply the floor its own build
-        follows (_follower_floor). They differ when the tree's cut has passed a floor the pusher took from an older tree, and
-        when the pusher has not built the session (no record: the click pages under the cut): the warm keyed its pages on a
-        floor no click asked for, or, with no record, warmed nothing and never settled. It takes the click's floor now."""
+        follows (_follower_floor). They differ when the tree's cut has passed a floor the pusher took from an older tree: the
+        warm keyed its pages on a floor no click asked for. It takes the click's floor now. A session the pusher has not built
+        (no record) is still neither parsed nor warmed (a parse here would be a cold one on the pusher, and would change the
+        session's feed card, which reads the parse store without parsing); it no longer keeps the board from settling, and
+        the pusher's first build of it wakes the warm."""
         whole, m = self._restored(turns=600, compact_every=150)
         cut = m["floor"]
         deep = whole[5]["uuid"]
@@ -396,13 +454,25 @@ class WarmTheCards(P.Harness):
         self.assertEqual(km._follower_floor(SID, cut, rebuild=False), cut, "a click's build follows this tree's cut")
         self.assertGreater(km._warm_history_pages(feed, NOW, {}), 0)
         self.assertTrue(self._hit(deep), "the click's window came from the cache")
-        km._RENDER_FLOOR.pop(SID, None); km._RENDER_FLOOR_CUT.pop(SID, None)   # a session the pusher never built
+        km._RENDER_FLOOR.pop(SID, None); km._RENDER_FLOOR_CUT.pop(SID, None)   # a session the pusher has not built
         km._WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={})
         with km._page_lock:
             km._PAGE_CACHE.clear(); km._PAGE_DEPS.clear(); km._PAGE_STATS.update(pages=0, bytes=0)
-        self.assertGreater(km._warm_history_pages(feed, NOW, {}), 0, "warmed under the cut, the floor its click pages under")
-        self.assertEqual(km._WARM_MEMO["anchors"], tuple(km._card_anchors(feed)), "…and settled")
-        self.assertTrue(self._hit(deep))
+        parses = collections.Counter()
+        real_parse = km._parse
+
+        def parse(path, sid, now):
+            parses[str(sid)] += 1
+            return real_parse(path, sid, now)
+        with mock.patch.object(km, "_parse", parse):
+            for _ in range(3):
+                self.assertEqual(km._warm_history_pages(feed, NOW, {}), 0, "not built: nothing warmed")
+        self.assertEqual(parses[SID], 0, "…and never parsed, by the pass or by the probe")
+        self.assertEqual(km._WARM_MEMO["anchors"], tuple(km._card_anchors(feed)), "the board settles")
+        self.assertEqual(km._WARM_MEMO["sigs"], {SID: km._WARM_UNBUILT})
+        km._RENDER_FLOOR[SID] = cut                                   # the pusher's first build of the session
+        self.assertGreater(km._warm_history_pages(feed, NOW, {}), 0, "its first build wakes the warm")
+        self.assertTrue(self._hit(deep), "…and the click lands from the cache")
 
     def test_a_known_anchor_is_resolved_without_a_walk_and_the_shared_components_are_read_once_a_pass(self):
         """2026-10-25: every full pass (any board change) rebuilt the uuid-to-turn map over every atom below each session's
@@ -451,7 +521,7 @@ class WarmTheCards(P.Harness):
         first = lambda j: next(a["uuid"] for a in turns[j]["atoms"] if a.get("uuid"))
         sizes = self._sizes_then_empty([0, 16, 32, 48])
         saved = km._PAGE_CACHE_BYTES
-        km._PAGE_CACHE_BYTES = 2 * (sizes[0] + sizes[16]) + 2         # the set holds the first window alone
+        km._PAGE_CACHE_BYTES = 2 * max(sizes[0] + sizes[16], sizes[32] + sizes[48]) + 2   # the set holds either window, not both
         try:
             anchors = [first(8), first(40), first(100)]
             calls = [0]
