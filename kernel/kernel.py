@@ -63989,8 +63989,22 @@ _PAGE_SIZES = {}                                 # (sid, lo, hi) → the bytes o
 _PAGE_SIZES_MAX = 4096                           #  warm's byte bound admits by before a render (_page_bytes_known); oldest quarter trimmed past the cap
 _PAGE_STATS = {"hits": 0, "misses": 0, "evictions": 0, "pages": 0, "bytes": 0, "renderMs": 0.0, "warmPending": 0,
                "warmed": 0, "warmMs": 0.0, "warmCycles": 0, "warmSkipped": 0,   # the active cards' windows warmed ahead of a click
-               "liveMoved": 0, "liveCheckFailed": 0}   # resident pages dropped because a live input moved / its check raised
+               "liveMoved": 0, "liveCheckFailed": 0,   # resident pages dropped because a live input moved / its check raised
+               # the readers' side apart from the warm's (2026-10-27: `hits` and `misses` mix the warm's renders into the
+               # misses, so a cache that served no reader read as one that missed every reader): pages a reader's history
+               # request was served from the cache / had rendered; pages the warm rendered that a reader was then served
+               # (counted at the first serve) / that left the cache before any reader was; and, per pass, the anchors
+               # waiting for a reader because the pages the warm rendered for them since the last reader's request are gone
+               "clientHits": 0, "clientRendered": 0, "warmServed": 0, "warmUnserved": 0, "warmSpent": 0}
 _page_lock = threading.Lock()
+_PAGE_WARMED = {}                                # page key → True while the warm rendered it and no reader has been served it
+#                                                  (warmServed at the first serve, warmUnserved when it leaves the cache before:
+#                                                  an eviction or a live input's move, the only roads out; never more keys than
+#                                                  the cache holds)
+_READER_ASKS = [0]                               # the readers' page requests so far (the client road of _chat_history_page)
+_WARM_RENDERED = {}                              # (sid, lo, hi) → _READER_ASKS when the warm last rendered that page, under any
+_WARM_RENDERED_MAX = 4096                        #  signature: a page it rendered since the last reader's request and that is
+#                                                  gone is not rendered again before the next one (_warm_history_pages)
 _WARM_PIN = {"set": frozenset(), "prev": frozenset()}   # the warm set's page keys, which eviction passes over (_page_victim): `set` is
 #                                                         the last warm's admitted set, or what the running warm has admitted so far;
 #                                                         `prev`, while a warm runs, the set before it (written under _page_lock)
@@ -64001,6 +64015,13 @@ def _page_bytes_known(key):
     the last render of the same window under any signature (_PAGE_SIZES); None when that window was never rendered."""
     hit = _PAGE_CACHE.get(key)
     return hit[1] if hit is not None else _PAGE_SIZES.get(key[:3])
+
+
+def _page_left_unserved(key):
+    """Under _page_lock: the page `key` has left the cache; one the warm rendered that no reader was served is counted
+    (warmUnserved), the warm's renders that bought nothing."""
+    if _PAGE_WARMED.pop(key, None):
+        _PAGE_STATS["warmUnserved"] += 1
 
 
 def _page_victim(keep):
@@ -64179,6 +64200,7 @@ def _page_resident(key, ctx):
         if _PAGE_CACHE.get(key) is hit:
             _PAGE_CACHE.pop(key)
             _PAGE_DEPS.pop(key, None)
+            _page_left_unserved(key)
             _PAGE_STATS["bytes"] -= hit[1]
             _PAGE_STATS["pages"] = len(_PAGE_CACHE)
             if not failed:
@@ -64240,13 +64262,15 @@ def _page_sig(sess, sid, now, floor=None, turns=None, shared=None):
     return hashlib.sha1(json.dumps(raw, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
-def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None, sig=None, stats=None):
+def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None, sig=None, stats=None, warm=False):
     """The rendered events of turns [lo, hi) of `sid` (build_session's page mode), through a bounded LRU keyed on the
     session's page signature (_page_sig: what a pre-floor page reads, none of the live tail; `sig` when the caller
     computed it once for several pages). Counted (/perf chatPages); `stats["rendered"]` is bumped when this call
     rendered, so a caller counts its own renders and not a concurrent handler's. A resident page is served only while
     the live inputs its render read stand (_page_resident; the render's record, _page_live_record); one whose inputs
-    moved is rendered again here."""
+    moved is rendered again here. `warm` is the pusher's warm rendering ahead of a click (_warm_history_pages); every
+    other call is a reader's request (a history reply, _history_pages): counted apart (clientHits, clientRendered), it
+    moves _READER_ASKS, and a page the warm rendered that it is served counts once as warmServed."""
     if live_map is None:
         live_map = _live_map()
     if sess is None:
@@ -64264,9 +64288,17 @@ def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None, sig=None, sta
                 if _PAGE_CACHE.get(key) is hit:
                     _PAGE_CACHE.pop(key); _PAGE_CACHE[key] = hit
                 _PAGE_STATS["hits"] += 1
+                if not warm:
+                    _READER_ASKS[0] += 1
+                    _PAGE_STATS["clientHits"] += 1
+                    if _PAGE_WARMED.pop(key, None):
+                        _PAGE_STATS["warmServed"] += 1
             return hit[0]
     with _page_lock:
         _PAGE_STATS["misses"] += 1
+        if not warm:
+            _READER_ASKS[0] += 1
+            _PAGE_STATS["clientRendered"] += 1
     if stats is not None:
         stats["rendered"] = stats.get("rendered", 0) + 1
     t0 = time.monotonic()
@@ -64288,6 +64320,14 @@ def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None, sig=None, sta
                 _PAGE_STATS["bytes"] -= old[1]
             _PAGE_CACHE[key] = (evs, nbytes)
             _PAGE_DEPS[key] = rec
+            if warm:                                      # the warm's page: unserved until a reader is served it, and its
+                _PAGE_WARMED[key] = True                  #  place rendered as of the readers' count (_warm_history_pages)
+                _WARM_RENDERED.pop(key[:3], None); _WARM_RENDERED[key[:3]] = _READER_ASKS[0]
+                if len(_WARM_RENDERED) > _WARM_RENDERED_MAX:
+                    for _w in list(itertools.islice(_WARM_RENDERED, _WARM_RENDERED_MAX // 4)):
+                        del _WARM_RENDERED[_w]
+            else:
+                _PAGE_WARMED.pop(key, None)               # a reader's own render (a concurrent twin's entry it replaced too)
             _PAGE_SIZES.pop(key[:3], None); _PAGE_SIZES[key[:3]] = nbytes    # the window's size, for the warm's byte bound
             if len(_PAGE_SIZES) > _PAGE_SIZES_MAX:
                 for _w in list(itertools.islice(_PAGE_SIZES, _PAGE_SIZES_MAX // 4)):
@@ -64299,6 +64339,7 @@ def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None, sig=None, sta
                     break                                 # one page over the byte bound still serves
                 _, _b = _PAGE_CACHE.pop(_k)
                 _PAGE_DEPS.pop(_k, None)
+                _page_left_unserved(_k)
                 _PAGE_STATS["bytes"] -= _b; _PAGE_STATS["evictions"] += 1
             if len(_PAGE_DEPS) > len(_PAGE_CACHE):        # a record whose page left by another road goes with it
                 for _k in [k for k in _PAGE_DEPS if k not in _PAGE_CACHE]:
@@ -64338,9 +64379,10 @@ WARM_PAGES_MAX = _PAGE_CACHE_MAX // 2            # the warm SET: half the cache 
 #                                                  (_page_victim), so the pages a reader scrolls into have the other half; anchors
 #                                                  past it wait for the next board change (a set that fits settles to a probe)
 WARM_SKIP_MS = 1500                              # a pusher cycle slower than this: the warm stands down (counted)
-_WARM_MEMO = {"anchors": (), "keys": frozenset(), "sigs": {}}   # the last anchor list whose set was fully resident, that set's
-#                                                                  page keys, and the page signature (None: no row or no transcript;
-#                                                                  _WARM_UNBUILT: not built) of every session its anchors named
+_WARM_MEMO = {"anchors": (), "keys": frozenset(), "sigs": {}, "asks": None}   # the last anchor list whose set was fully resident,
+#                                                                  that set's page keys, the page signature (None: no row or no
+#                                                                  transcript; _WARM_UNBUILT: not built) of every session its anchors
+#                                                                  named, and the readers' count (_READER_ASKS) the pass ran under
 _WARM_ANCHOR_TURN = {}                           # (sid, anchor) → (page signature, the turn holding it or None): what the passes
 _WARM_ANCHOR_TURN_MAX = 1024                     #  resolved, valid under that signature; the oldest quarter trimmed past the cap
 _WARM_UNBUILT = ("unbuilt",)                     # the settled memo's mark for a session the pusher has not built (no _RENDER_FLOOR
@@ -64389,9 +64431,23 @@ def _card_anchors(feed):
 
 
 def _warm_turn_map(turns, floor):
-    """uuid → the index of the turn below `floor` whose built atoms hold it: the warm's anchor lookup (a miss walks the
-    turns, _turn_of_uuid). Every atom below the floor is visited, so a pass builds it only for a session with a new anchor."""
-    return {a["uuid"]: i for i, t in enumerate(turns[:floor]) for a in t.get("atoms") or [] if a.get("uuid")}
+    """uuid → the index of the turn below `floor` whose atoms hold it: the warm's anchor lookup (a miss walks the turns,
+    _turn_of_uuid). A restored pre-cut turn (T323 stage 4c) is read by its uuids, the document's list of its atoms' uuids in
+    their order, as _turn_of_uuid and _page_sig read it, so no atom is built: iterating its atoms built every one of them
+    (2026-10-27: every lazy atom below the floor of each session with a new anchor or a moved signature, a pass that read no
+    body, while the renders the warm exists for build only a page's). Every turn below the floor is visited, so a pass
+    builds the map only for a session with a new anchor."""
+    out = {}
+    for i, t in enumerate(turns[:floor]):
+        if t.get("pre"):
+            for u in t.get("uuids") or ():
+                if u:
+                    out[u] = i
+            continue
+        for a in t.get("atoms") or []:
+            if a.get("uuid"):
+                out[a["uuid"]] = i
+    return out
 
 
 def _warm_history_pages(feed, now, live_map=None):
@@ -64418,12 +64474,23 @@ def _warm_history_pages(feed, now, live_map=None):
     for a session with no row or no transcript, _WARM_UNBUILT for one not built, _warm_memo_sig): a session whose floor
     is 0 (an index client holding the tabs at turn 0, a whole parse) has nothing below it to warm, and its floor's return
     moves its signature, as a first build moves the mark, which wakes the warm. Each
-    admitted page is PROBED first: one resident under the session's current page signature whose live inputs stand
-    (_page_resident) costs that check, one that is not is rendered, so a page a floor flip re-keyed or a landed report
-    dropped is warmed again; an unchanged board whose set is fully resident costs one probe of the remembered keys
-    (_WARM_MEMO), nothing else. Skipped whole when the pusher's last cycle ran over WARM_SKIP_MS (chatPages.warmSkipped).
-    Only anchors before the floor (the tail is resident already). Returns the number of pages rendered by THIS call (its
-    own count, not a shared counter's difference: a handler's render meanwhile is not the warm's)."""
+    admitted page is PROBED first: one resident under the session's current page signature costs a lookup, one that is not
+    is rendered, unless the warm rendered that page (its place, under any signature) since the last reader's page request
+    (_WARM_RENDERED against _READER_ASKS): then the anchor's window waits, counted as chatPages.warmSpent, for the next
+    reader's request, keeping its room in the set meanwhile (rendered nothing, held nothing), so the set stays the board's
+    first cards and the warm does not go on down the board to render the cards below them instead. 2026-10-27: a serving kernel's cache went hours serving no
+    reader while the warm rendered and evicted page after page: readers asked for almost no page below a floor, and every
+    page the warm put there left before one did, evicted as the board's order changed or re-keyed by a signature move, so
+    the warm rendered it again, and again. A rendered page that is gone with no reader's request since is one the cache could not
+    serve before it went, so the warm renders each page at most once between two readers' requests, and a reader's request
+    (a click, a scroll into a gap) re-arms every window. The probes look at residency alone: a page's live inputs are
+    checked by the reader it is served to (_page_resident), which renders a moved page again before serving it, as it
+    always did; the warm checked them on every pass to render such a page ahead of a click, at the price of the check
+    every cycle, for a page it could not render again until a reader asked anyway. An unchanged board whose set is fully
+    resident, with no reader's request since its pass, costs one probe of the remembered keys (_WARM_MEMO), nothing else.
+    Skipped whole when the pusher's last cycle ran over WARM_SKIP_MS (chatPages.warmSkipped). Only anchors before the floor
+    (the tail is resident already). Returns the number of pages rendered by THIS call (its own count, not a shared
+    counter's difference: a handler's render meanwhile is not the warm's)."""
     anchors = _card_anchors(feed)[:WARM_ANCHORS_MAX]
     if not anchors:
         return 0
@@ -64433,34 +64500,37 @@ def _warm_history_pages(feed, now, live_map=None):
             _PAGE_STATS["warmSkipped"] += 1
         return 0
     t0 = time.monotonic()
+    asks = _READER_ASKS[0]                        # the readers' count this pass runs under: a page rendered under it and gone waits
     rows = {x["sid"]: x for x in _sessions(now)}
-    ctx = {"live_map": live_map}                  # the live-input checks' shared reads (_page_resident)
     try:
         shared = _chat_sig_shared()               # the signatures' shared components, read once for the pass's sessions
     except Exception:
         shared = None                             # (each signature then reads them itself, and raises where it did)
     if tuple(anchors) == _WARM_MEMO["anchors"]:
-        # a settled board: every session's page signature as a click's reply keys it (_page_sig's own floor rule) unchanged,
-        # and its set still resident with every page's live inputs standing, costs this probe alone (a floor flip or a seam
-        # moves a signature; a card whose report landed drops its page, which the loop below renders again); the probe's
-        # time is the warm's (warmMs)
+        # a settled board: no reader's request since (which re-arms a window that waits), every session's page signature as
+        # a click's reply keys it (_page_sig's own floor rule) unchanged, and its set still resident, costs this probe alone
+        # (a floor flip or a seam moves a signature); the probe's time is the warm's (warmMs)
         try:
-            same = all(_warm_memo_sig(sid_, rows.get(sid_), now, shared) == sg for sid_, sg in _WARM_MEMO["sigs"].items())
+            same = _WARM_MEMO.get("asks") == asks and \
+                all(_warm_memo_sig(sid_, rows.get(sid_), now, shared) == sg for sid_, sg in _WARM_MEMO["sigs"].items())
         except Exception:
             same = False
-        settled = same and all(_page_resident(k, ctx) is not None for k in _WARM_MEMO["keys"])
-        if settled:
+        if same:
+            with _page_lock:
+                same = all(k in _PAGE_CACHE for k in _WARM_MEMO["keys"])
+        if same:
             with _page_lock:
                 _PAGE_STATS["warmCycles"] += 1
                 _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
             return 0
     if live_map is None:
-        live_map = ctx["live_map"] if ctx.get("live_map") is not None else _live_map()   # the probe's, when it read one
-        ctx["live_map"] = live_map
+        live_map = _live_map()
     half = _PAGE_CACHE_BYTES // 2
     st, pending, keys, unresolved, set_bytes, closed = {"rendered": 0}, 0, set(), 0, 0, False
     learned, deferred = False, 0                  # this pass rendered a window it then found over half the cache; the windows of
     #                                               unknown size that waited for the next pass on that account
+    spent, spent_keys = 0, set()                  # anchors whose window the warm rendered since the last reader's request and that is
+    #                                               gone; that window's page keys, which keep their room in the set unrendered
     per_sid, sigs = {}, {}                        # sid → (floor, sess, turns, page signature) or None (nothing below a floor to
     #                                               warm, or not built); sid → what the probe compares (_warm_memo_sig)
     u2ts, turn_of = {}, {}                        # sid → uuid → turn index below the floor, built on this pass's first unknown
@@ -64469,7 +64539,7 @@ def _warm_history_pages(feed, now, live_map=None):
         _WARM_PIN.update(prev=_WARM_PIN["set"], set=frozenset())
     try:
         for sid, uuid in anchors:
-            if closed or len(keys) >= WARM_PAGES_MAX:
+            if closed or len(keys) + len(spent_keys) >= WARM_PAGES_MAX:
                 pending += 1                      # past the set's bounds: waits for the next board change
                 continue
             try:
@@ -64512,21 +64582,28 @@ def _warm_history_pages(feed, now, live_map=None):
                     continue
                 lo, hi = _window_turns(j, floor)
                 window = [(sid, a, min(hi, a + PAGE_TURNS), sig) for a in range(lo, hi, PAGE_TURNS)]
-                new_keys = [k for k in window if k not in keys]     # a page two windows share is probed, rendered and counted once
-                if not new_keys:
-                    continue
-                if len(keys) + len(new_keys) > WARM_PAGES_MAX:
-                    pending += 1                  # its pages would take the set past the page bound: it waits
+                new_keys = [k for k in window if k not in keys and k not in spent_keys]   # a page two windows share is probed,
+                if not new_keys:                                                        #  rendered and counted once
+                    spent += any(k in spent_keys for k in window)
                     continue
                 with _page_lock:
                     known = [_page_bytes_known(k) for k in new_keys]
+                    gone = any(k not in _PAGE_CACHE and _WARM_RENDERED.get(k[:3]) == asks for k in new_keys)
                 need = sum(b for b in known if b)
                 if need > half:
                     pending += 1                  # its pages alone, at their known sizes, are over half the cache: no set can
                     continue                      #  hold them, so it waits by itself and the anchors after it go on
+                if len(keys) + len(spent_keys) + len(new_keys) > WARM_PAGES_MAX:
+                    pending += 1                  # its pages would take the set past the page bound: it waits
+                    continue
                 if set_bytes + need > half:
                     pending += 1                  # its pages would take the set past half the bytes: it waits, and every anchor
                     closed = True                 #  after it
+                    continue
+                if gone:
+                    spent += 1                    # the warm rendered a page of it since the last reader's request and that page
+                    spent_keys.update(new_keys)   #  is gone, unserved: it waits for a reader's request, keeping its room in the
+                    set_bytes += need             #  set (the set stays the board's first cards) with nothing rendered or held
                     continue
                 if learned and any(b is None for b in known):
                     pending += 1                  # one render a pass of a window found over half the cache (it is never held, so
@@ -64536,9 +64613,10 @@ def _warm_history_pages(feed, now, live_map=None):
                     _WARM_PIN["set"] = frozenset(keys.union(new_keys))
                 got = 0
                 for key in new_keys:
-                    hit = _page_resident(key, ctx)    # resident AND its live inputs standing; a moved page left the cache
+                    with _page_lock:              # resident: a lookup (the reader it is served to checks its live inputs)
+                        hit = _PAGE_CACHE.get(key)
                     if hit is None:
-                        _chat_history_page(sid, key[1], key[2], now, sess=sess, live_map=live_map, sig=sig, stats=st)
+                        _chat_history_page(sid, key[1], key[2], now, sess=sess, live_map=live_map, sig=sig, stats=st, warm=True)
                         with _page_lock:
                             hit = _PAGE_CACHE.get(key)
                     got += hit[1] if hit is not None else 0
@@ -64571,13 +64649,14 @@ def _warm_history_pages(feed, now, live_map=None):
     with _page_lock:
         _PAGE_STATS["warmed"] += st["rendered"]
         _PAGE_STATS["warmPending"] = pending
+        _PAGE_STATS["warmSpent"] = spent
         _PAGE_STATS["warmMs"] += (time.monotonic() - t0) * 1000.0
         _PAGE_STATS["warmCycles"] += 1
         resident_all = unresolved == 0 and deferred == 0 and all(k in _PAGE_CACHE for k in keys)   # an unresolved or deferred set is never "settled" (round 3, A); a
     if resident_all:                                                                #  resolved board with every anchor in the tail settles EMPTY
-        _WARM_MEMO.update(anchors=tuple(anchors), keys=frozenset(keys), sigs=dict(sigs))
+        _WARM_MEMO.update(anchors=tuple(anchors), keys=frozenset(keys), sigs=dict(sigs), asks=asks)
     else:
-        _WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={})
+        _WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={}, asks=None)
     return st["rendered"]
 
 

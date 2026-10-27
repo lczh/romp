@@ -803,10 +803,15 @@ class PagesFollowTheirLiveInputs(PagesEqualAColdRender):
         self.assertIn(self.aids[2], calls, "a card resting on the siblings was asked again")
         self.assertNotIn(self.aids[0], calls, "a card the own tree holds was not")
 
-    def test_the_warm_renders_again_only_the_page_whose_input_moved(self):
+    def test_the_warm_leaves_a_page_whose_input_moved_to_its_reader(self):
+        """2026-10-27: the warm checked every held page's live inputs on every pass and rendered a moved page ahead of a
+        click. It renders a page at most once between two readers' requests now, so it looks at residency alone and checks
+        none of them: the reader the page is served to finds the card moved, renders that page alone and serves the rest
+        from the cache, and the pages it is served equal a cold render."""
         if hasattr(km._PERF_STATS, "pusher"):
             km._PERF_STATS.pusher["cycle_ms_last"] = 20.0
-        km._WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={})
+        km._WARM_MEMO.update(anchors=(), keys=frozenset(), sigs={}, asks=None)
+        km._WARM_RENDERED.clear(); km._PAGE_WARMED.clear()
         card = {"itemId": "n0", "sid": SID, "column": "working", "summaryAnchorUuid": None, "summaryAnchorsPara": None,
                 "tree": [{"id": "n0-%d" % k, "kind": "ask", "status": "open", "anchorUuid": u, "promptAnchorUuid": None}
                          for k, u in enumerate(("u5", "u20", "u40"))]}
@@ -822,14 +827,19 @@ class PagesFollowTheirLiveInputs(PagesEqualAColdRender):
                 km._live_scope.subagent_trees = None
         self.assertEqual(warm(feed), 3, "the three pages of the anchors' windows")
         self.assertEqual(warm(feed), 0, "a settled board: the probe alone")
+        moved = km._PAGE_STATS["liveMoved"]
         with open(grows, "a") as fh:
             fh.write(self.MORE)
-        self.assertEqual(warm(feed), 1, "the settled probe finds page 0's card moved and the warm renders it alone")
-        self.assertEqual(warm(feed), 0)
-        with open(grows, "a") as fh:
-            fh.write(self.MORE.replace("s4", "s5"))
-        self.assertEqual(warm(reordered), 1, "a board that changed probes each page the same way")
-        self.assertGreaterEqual(km._PAGE_STATS["liveMoved"], 2, "counted")
+        self.assertEqual(warm(feed), 0, "the warm checks no live input: nothing rendered")
+        self.assertEqual(warm(reordered), 0, "…on a board that changed either")
+        self.assertEqual(km._PAGE_STATS["liveMoved"], moved)
+        unserved, warm_served = km._PAGE_STATS["warmUnserved"], km._PAGE_STATS["warmServed"]
+        served, n = self._serve()
+        self.assertEqual(n, 1, "the reader finds page 0's card moved and renders it alone")
+        self.assertEqual(km._PAGE_STATS["liveMoved"], moved + 1, "counted")
+        self.assertEqual((km._PAGE_STATS["warmUnserved"] - unserved, km._PAGE_STATS["warmServed"] - warm_served), (1, 2),
+                         "the warm's moved page left unread, its other two were served")
+        self.assertEqual(served, self._cold(), "the served pages equal a cold render")
 
 
 if __name__ == "__main__":
