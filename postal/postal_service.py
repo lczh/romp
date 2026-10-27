@@ -2623,6 +2623,9 @@ def _bounce_oversize(sid, m, reply_tool=False):
              "to bounce to; it waits in new/ for the turn-end drain" % (sid, mid, n, _PUSH_MAX_BYTES))
 
 
+_PUSH_UNLANDED = {}   # sid -> ids of the chunk whose /deliver did not land on the last push: _push posts them as their own chunk
+
+
 def _push(sid, agent):
     """Live-deliver pending mail to a session by WAKING it through the kernel (POST /deliver) — the kernel
     enqueues the banner as the session's next turn. Coarse-skip a clearly not-ready local session (not
@@ -2658,7 +2661,13 @@ def _push(sid, agent):
         if not msgs:
             return False                                      # nothing, or loop-guard paused
         reply_tool = agent.get("backend") == "codex"      # a Codex recipient replies through its send_message tool
-        chunks, oversize = _push_chunks(sid, msgs, reply_tool)
+        # The chunk whose post did not land last time goes out again as itself, ahead of newer mail (2026-10-27): a
+        # kernel that took it and answered after our cap knows those ids and answers without delivering them twice,
+        # which it cannot do for a banner that mixes them with mail it has never seen.
+        redo = _PUSH_UNLANDED.pop(sid, None) or set()
+        chunks, oversize = _push_chunks(sid, [m for m in msgs if m.get("id") in redo], reply_tool)
+        newer, newer_oversize = _push_chunks(sid, [m for m in msgs if m.get("id") not in redo], reply_tool)
+        chunks, oversize = chunks + newer, oversize + newer_oversize
         for m in oversize:
             _bounce_oversize(sid, m, reply_tool)
         landed, held, cause = 0, [], ""
@@ -2674,6 +2683,7 @@ def _push(sid, agent):
             else:
                 cause = "not injected"                        # the session did not take the wake (not live/resumable, or mailbox off)
             held = [m for c in chunks[i:] for m in c]
+            _PUSH_UNLANDED[sid] = {m.get("id") for m in chunk if m.get("id")}
             break
         if not held:
             return bool(landed)

@@ -5148,6 +5148,55 @@ def _bus_recall_relay(sid, mid):
         return "unknown"
 
 
+# The postal message ids POST /deliver handed to each session's backend in this kernel life, and the ones a /deliver is
+# handing over right now (2026-10-27). The bus caps its /deliver at 12 s and reads an answer that came later as a kernel
+# it could not reach: it puts the mail back under the same ids and posts it again on its next retry pass, while the
+# first copy already sits in the session's queue. Nothing downstream dedupes a banner by its ids, so the session got
+# the same mail twice. The route answers that second post from this record instead.
+_POSTAL_TAKEN = collections.OrderedDict()   # (sid, mid) -> True, oldest first, at most _POSTAL_TAKEN_CAP entries
+_POSTAL_TAKING = set()                       # (sid, mid) a /deliver in flight is handing to the backend
+_POSTAL_TAKEN_LOCK = threading.Lock()
+_POSTAL_TAKEN_CAP = 4096                     # a retry comes within seconds; this only bounds the memory
+
+
+def _postal_take_begin(sid, mids):
+    """The /deliver route's dedupe, before the backend is asked. "taken": every id of the banner was already handed to
+    this session (the late-answer re-post); answer injected and deliver nothing. "busy": an earlier post carrying one
+    of these ids is still being handed over; answer not injected, and the bus's retry finds out how that one ended.
+    "go": the ids are claimed; deliver, then _postal_take_end. A banner that shares only SOME ids with what was taken is
+    delivered whole: a duplicate is the lesser fault next to mail nobody receives."""
+    if not mids:
+        return "go"
+    keys = [(sid, m) for m in mids]
+    with _POSTAL_TAKEN_LOCK:
+        if all(k in _POSTAL_TAKEN for k in keys):
+            return "taken"
+        if any(k in _POSTAL_TAKING for k in keys):
+            return "busy"
+        _POSTAL_TAKING.update(keys)
+        return "go"
+
+
+def _postal_take_end(sid, mids, took):
+    """Release the claim _postal_take_begin made, recording the ids as taken when the backend took the banner."""
+    with _POSTAL_TAKEN_LOCK:
+        for m in mids:
+            _POSTAL_TAKING.discard((sid, m))
+            if took:
+                _POSTAL_TAKEN.pop((sid, m), None)
+                _POSTAL_TAKEN[(sid, m)] = True
+        while len(_POSTAL_TAKEN) > _POSTAL_TAKEN_CAP:
+            _POSTAL_TAKEN.popitem(last=False)
+
+
+def _postal_untake(sid, mids):
+    """Forget ids the kernel hands back to the bus for re-delivery (_bus_restore_mail): the bus's next post of them is
+    the re-delivery the hand-back asks for, not a duplicate."""
+    with _POSTAL_TAKEN_LOCK:
+        for m in mids:
+            _POSTAL_TAKEN.pop((sid, m), None)
+
+
 def _bus_restore_mail(sid, mids):
     """POST /restore to the local bus for a postal banner the SDK backend fed and a connection rebuild stranded
     (SdkSession._return_stranded_mail, 2026-09-12): the bus puts each named message back into the session's new/
@@ -5156,7 +5205,9 @@ def _bus_restore_mail(sid, mids):
     not be read, the claim stands and its own retry puts them back), which are neither gone nor to be re-fed on
     this side's say-so. Authoritative about the bus's files (an id missing from the set is gone from cur/); RAISES
     when the bus could not be asked or refused, so the caller re-heads the banner rather than drop it: a quiet False
-    here would be the loss this exists to end."""
+    here would be the loss this exists to end. The ids leave the /deliver dedupe first (_postal_untake): the bus may
+    post them again before this call has its answer."""
+    _postal_untake(sid, mids)
     conn = http.client.HTTPConnection("127.0.0.1", _bus_port(), timeout=5)
     try:
         conn.request("POST", "/restore", json.dumps({"id": sid, "mids": list(mids)}),
@@ -88237,7 +88288,17 @@ class Handler(BaseHTTPRequestHandler):
                 if r is not None:                                   # remote session → forward the wake over its -L tunnel
                     res = _remote_forward(r, "/deliver", {"id": sid, "text": text})
                     return self._send(200, json.dumps({"ok": True, "injected": bool(res and res.get("injected"))}), "application/json")
-                injected = bool(Sessions.backend_for(sid).deliver(sid, text))
+                # The same banner again, after the bus gave up waiting on our first answer (2026-10-27): it was taken,
+                # so say so and deliver nothing. The owning kernel decides this for a remote session, above.
+                mids = list(dict.fromkeys(em.POSTAL_RE.findall(text)))
+                take = _postal_take_begin(sid, mids)
+                if take != "go":
+                    return self._send(200, json.dumps({"ok": True, "injected": take == "taken"}), "application/json")
+                injected = False
+                try:
+                    injected = bool(Sessions.backend_for(sid).deliver(sid, text))
+                finally:
+                    _postal_take_end(sid, mids, injected)
                 return self._send(200, json.dumps({"ok": True, "injected": injected}), "application/json")
             # /picker-check, /mail-badge, /deliver-chrome and /reconcile-peers painted the tmux status bar and
             # watched a revived pane; they left with the tmux backend (2026-09-11) and fall to the 404 below. The
