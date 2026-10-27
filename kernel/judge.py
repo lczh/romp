@@ -20728,6 +20728,20 @@ def run_propagate(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbos
                        if dismissed else
                        ("reported back by %s (delegated, quiet-filed)" % pk[:8] if ":" not in pk
                         else "reported back by %s (delegated cross-host)" % pk))
+                # Each reply is linked back ONCE, and only when its done lands (2026-10-27): the two guards
+                # the back-link above has carried since 2026-10-23. A ruling filed on the tracker after the
+                # reply (a closer or planner block, the dead-handoff block, a planner reopen) keeps a done
+                # at the reply's time from landing, and this arm used to append that done again on every
+                # pass: each pass republished the store and moved the card's newest done, until LOG_CAP
+                # evicted the block and the card read Completed on nothing new. A courier done at or past
+                # the reply means this reply was filed already, and the fold is asked first, so a later
+                # ruling stands and no row is written; a newer reply from the peer still reports back.
+                if any(e.get("src") == "courier" and e.get("kind") == "done" and (e.get("ev_t") or 0) >= reply
+                       for e in (nd.get("log") or [])):
+                    continue
+                trial = {"ev_t": reply, "src": "courier", "kind": "done", "at": int(time.time())}
+                if _fold_node({"log": list(nd.get("log") or []) + [trial]})["state"] != "done":
+                    continue
                 if record_verdict(store, nd, "courier", "done", reply, why=why):
                     _mark_node_done(store, nid, why, reply, src="courier")
                     changed = True
