@@ -51319,6 +51319,12 @@ def _boundary_clear_notices(alive, now=None):
     the user misreads as being about the live one (name reuse, and every pre-upgrade re-anchored
     /clear lane the boot backfill stamps).
 
+    The living half reads /clear records only (2026-10-27). A revive keeps the sid, so a session that died
+    with cards open and came back still holds its 'ended:' record, often as its newest. Shipped from this
+    half it carried no `ended` flag, so the bell called it a /clear that dropped cards the board still shows
+    open (the finalize lists them and clears none) and pointed at an Undo with nothing to restore; it also hid
+    the session's real, older /clear. A living session's death record is moot, so this half skips it.
+
     The dead sweep is BOUNDED (2026-10-16). Nothing deletes a gone/ marker, so before this every session that
     ever died with cards open shipped its 'ended' row in every feed frame for the life of the install, and every
     build re-opened every marker. A death's row now rides the feed for ENDED_NOTICE_WINDOW after the finalize
@@ -51341,9 +51347,10 @@ def _boundary_clear_notices(alive, now=None):
             settles = jd.episode_settles(s["sid"])
         except Exception:
             continue
-        if not settles:
-            continue
-        r = max(settles.values(), key=lambda x: x.get("t") or 0)
+        clears = [v for k, v in (settles or {}).items() if not str(k).startswith("ended:")]
+        if not clears:
+            continue                                   # a living session's death record is moot (docstring)
+        r = max(clears, key=lambda x: x.get("t") or 0)
         out.append({"sid": s["sid"], "name": s["name"], "t": r.get("t") or 0,
                     "titles": [str(d.get("text") or "") for d in (r.get("settled") or [])]})
     gone = []
