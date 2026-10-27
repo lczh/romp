@@ -4,6 +4,8 @@
 // then SPINS on the rl-o animation, the user 2026-07-13). The VS Code host
 // injects window.__rompMediaBase = <asWebviewUri of media/> before the bundle;
 // every asset URL routes through here so both hosts resolve.
+import { hostOf, bareId } from "./host-prefix";
+
 export function mediaSrc(name: string): string {
   const base = (typeof window !== "undefined" && (window as any).__rompMediaBase) || "/media";
   return `${base}/${name}`;
@@ -34,4 +36,15 @@ export function kernelUrl(path: string): string {
   const tok = w.__rompKernelToken || "";
   if (!tok) return `${base}${path}`;
   return `${base}${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(tok)}`;
+}
+
+// A per-session kernel read (the MCP panel's /mcp, the "/" menu's /commands) for `sid`. A session on a linked
+// machine carries a "host:uuid" id that this kernel owns nothing by, so its read goes through this kernel's
+// /remote/<host>/<route> relay with the bare id that host knows, the way preview.ts fileUrl routes /file. Asked of
+// the local kernel instead, the MCP panel said no running backend owned the session and the menu listed this
+// machine's commands.
+export function sessionReadUrl(route: string, sid: string): string {
+  const host = hostOf(sid);
+  const path = host ? "/remote/" + encodeURIComponent(host) + route : route;
+  return kernelUrl(path + "?sid=" + encodeURIComponent(host ? bareId(sid) : sid));
 }

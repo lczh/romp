@@ -23,8 +23,14 @@ test("the chat bundle's kernel fetches are host-aware (kernelUrl)", () => {
   // A bare same-origin fetch silently fails in the VS Code webview — the empty
   // model picker (the user 2026-07-13). Every kernel GET goes through kernelUrl.
   assert.ok(!/fetch\("\//.test(render), "no bare same-origin fetches in render.ts");
-  for (const ep of ["/palette", "/models", "/commands", "/followup-preview"])
+  for (const ep of ["/palette", "/models", "/followup-preview"])
     assert.ok(render.includes(`kernelUrl("${ep}`), `${ep} must route through kernelUrl`);
+  // the per-session reads take media.ts sessionReadUrl (a linked machine's session reads through its relay), which
+  // ends in kernelUrl like every kernel read
+  assert.ok(render.includes('sessionReadUrl("/commands"'), "/commands must route through sessionReadUrl");
+  const media = fs.readFileSync(path.join(ROOT, "ui", "webview", "media.ts"), "utf8");
+  const at = media.indexOf("export function sessionReadUrl(");
+  assert.ok(at > 0 && media.slice(at).includes("return kernelUrl("), "sessionReadUrl must route through kernelUrl");
 });
 
 test("a mid-fetch anchor attempt keeps waiting instead of toasting 'couldn't locate'", () => {
