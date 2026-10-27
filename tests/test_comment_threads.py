@@ -3457,6 +3457,36 @@ class ForkDoorsLeaveTheHistoryToTheCli(CommentBase):
         self.assertIs(self._reg(tid).get("alive"), True)
         self.assertIsNone(km._comment_reply(PARENT, tid, "still there?"), "and every later reply lands too")
 
+    def test_a_thread_the_parents_end_shut_down_breaks_out_live_after_the_revive(self):
+        # The break-out door's side of the test above. The End door shuts the thread's CLI down and leaves its row open;
+        # the parent's revive brings back the parent alone. Breaking the thread out then promoted it without resuming
+        # it, so the real connect's _ensure refused the dead row: the door answered "its process didn't start" and the
+        # new session's tab needed a second Revive (2026-10-27).
+        err, tid = km._comment_create(PARENT, "a1", "exponential backoff", "Why?")
+        self.assertIsNone(err)
+        # the thread's own exchange on disk, its fork flags spent by the init (as in test_break_out)
+        t = self.now - 200
+        self._write(tid, self._parent_records()[:2] + [
+            uline(t, self.sent[0][1], "cu1", parent="a1"), aline(t + 10, "Jitter spreads the retries.", "ca1", "cu1")])
+        self.rbe._update_reg(tid, forkOf="", forkAt="", lastSid=tid)
+        stand_in, real_ensure = self.rbe._ensure, sb.SdkBackend._ensure.__get__(self.rbe)
+        # a dead row takes the real _ensure (it refuses, starting nothing); a live one takes the suite's stand-in
+        self.rbe._ensure = lambda sid, on_boot_settled=None: (
+            stand_in(sid) if (sb.read_reg(self.rbe.state_dir, sid) or {}).get("alive") else real_ensure(sid))
+        self.rbe.connect = sb.SdkBackend.connect.__get__(self.rbe)   # the real connect: started when _ensure answers
+        self.rbe.kill(PARENT)                                   # the End door: the parent, then its threads
+        km._comment_kill_all(PARENT, self.rbe)
+        self.assertIs(self._reg(tid).get("alive"), False)
+        self.assertEqual(km._comment_thread(PARENT, tid)["status"], "open")
+        self.assertTrue(self.rbe.resume("parent", PARENT))      # the revive door's resume, for the parent alone
+        self.assertIs(self._reg(tid).get("alive"), False)
+        self.sent.clear()
+        self.assertIsNone(km._comment_promote(PARENT, tid, "sidework"), "the broken-out session starts")
+        self.assertIs(self._reg(tid).get("alive"), True)
+        self.assertEqual(self._reg(tid).get("name"), "sidework")
+        self.assertEqual(km._comment_thread(PARENT, tid)["status"], "promoted")
+        self.assertEqual(self.sent, [], "break-out injects nothing and re-sends nothing")
+
 
 class ExchangeLatchReplacedThePushCount(unittest.TestCase):
     """T102 (the user 2026-08-26): the push-count settle (settledPushes / _comment_settle_step) is

@@ -23008,7 +23008,7 @@ def _answer_comment_seen(client, sid, tid, rid):
 def _comment_kill_all(parent_sid, be):
     """The parent session was ENDED — shut down its open threads' CLIs too, or they outlive the tab
     that is their only surface as unreachable running processes. Store rows stay untouched: a
-    revived parent finds its threads dormant and a reply resumes them, history intact."""
+    revived parent finds its threads dormant and a reply or a break-out resumes them, history intact."""
     if not hasattr(be, "kill"):
         return
     for th in _load_comments(parent_sid).get("threads") or []:
@@ -23084,8 +23084,11 @@ def _comment_promote_inner(parent_sid, tid, new_name, now=None, client=None):
         jd.append_episode(tsid, leaf, reg.get("lastSid") or tsid, leaf_t)
     except Exception as e:
         return _revert("not promoted: sealing the thread's history failed: %s" % e)
-    if prior == "resolved":
-        be.resume(nm, tsid)                          # a resolved thread promotes straight to a live session
+    if prior == "resolved" or reg.get("alive") is False:
+        # A resolved thread promotes straight to a live session, and so does an OPEN one whose CLI the parent's End
+        # shut down (_comment_kill_all leaves alive False and the row 'open'), as _comment_reply does for a reply;
+        # without it, a break-out after the parent's revive made a session whose CLI never started (2026-10-27).
+        be.resume(nm, tsid)
         _lift_end_latch(tsid)                        # ...and any End latch on its sid lifts with it (2026-09-21)
     # the thread KEEPS its identity color (the user 2026-08-19: the color the dialog suggested must
     # persist to the session it becomes) — a fresh pick here handed the board session a different one

@@ -293,7 +293,7 @@ NOT_CONSUMED = {
 OFF_FEED = (
     "_asker_row_alive",            # the postal debt asks (_debt_asks): alive, threadOf
     "_branch_marker",              # the chat's recovery flush: forkedFrom
-    "_comment_promote_inner",      # a comment thread's promotion: cwd, lastSid
+    "_comment_promote_inner",      # a comment thread's promotion: alive, cwd, lastSid
     "_comment_reply",              # the comment reply drive: name
     "_comment_frame_entry",        # the comment threads frame's row (the push; a create's answer): alive, effort, forkOf, liveModel, model
     "_compact_suggest_tick",       # the compaction tick: threadOf
