@@ -4071,7 +4071,13 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
 - `chatPages`: the rendered pages of chat history before a session's render
   floor (the chat wire's `loadOlder`, `loadAround` and `loadTurns` answers, below):
   `hits`, `misses`, `evictions`, `pages` and `bytes` resident (a bound of 32
-  pages or 16 MB per kernel), `renderMs` spent rendering; the warming, after
+  pages or 16 MB per kernel), `renderMs` spent rendering; `hits` and `misses`
+  count the warm's renders too, so the readers' side is counted apart:
+  `clientHits` (pages a reader's history request was served from the cache) and
+  `clientRendered` (pages a reader's request rendered), and of the pages the
+  warm rendered, `warmServed` (a reader was then served the page, counted at
+  the first serve) and `warmUnserved` (the page left the cache before any
+  reader was); the warming, after
   the pusher's send stage (`push.warm`), with a board client and a proto-2 chat
   client connected: `warmed` pages rendered ahead of a click for the feed's
   cards' anchors (the distilled summary's own targets first, a completed card's
@@ -4081,8 +4087,13 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   board change, and a set that fits settles, an unchanged board costing one
   probe of its remembered keys; a set with an anchor whose session has no
   render floor yet is never remembered as settled, so the floor's return
-  warms), `warmPending` (anchors waiting past the bound), `warmMs` (the
-  probes' time included),
+  warms; the warm renders each page at most once between two readers'
+  requests: a page it rendered that is gone, evicted or re-keyed, before a
+  reader asked for any page waits for the next reader's request, a click or a
+  scroll into older history, and a page's live inputs are checked by the reader
+  it is served to, not by the warm), `warmPending` (anchors waiting past the
+  bound), `warmSpent` (anchors waiting for a reader's request on that account,
+  as of the last pass), `warmMs` (the probes' time included),
   `warmCycles`, and `warmSkipped` (cycles the warm stood down because the
   pusher's last cycle ran over 1.5 s). A page's cache key reads what a
   pre-floor render reads and none of the live tail (the reg's fork value, not
