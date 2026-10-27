@@ -21,6 +21,7 @@ NOW = 1781100000
 SID = "11111111-2222-3333-4444-555555555555"
 DAY = 86400
 OLD = ["7d3f0c2e-9a41-4b6e-8c15-%012d" % i for i in range(1, 41)]   # private synthetic sids (the window's tests)
+WEB = "9c1e4a77-5b2d-4f0e-8a63-0d4b7e2f1a90"     # private synthetic sid (the revive tests)
 
 
 def _write_marker(sid, **m):
@@ -214,12 +215,51 @@ class BellCarriesTheEnd(unittest.TestCase):
     def tearDown(self):
         (km.jd.STATE, km.jd.NAMES, km.jd.GONEDIR, km.jd.STATESDIR,
          km.jd.EPIDIR, km.jd.SDKDIR) = self._saved
-        for sid in [SID] + OLD:
+        for sid in [SID, WEB] + OLD:
             _wipe(sid)
             try:
                 (jd.NAMES / sid).unlink()
             except OSError:
                 pass
+
+    # A revive keeps the sid (2026-10-27). A session that died with cards open and came back still holds the
+    # finalize's 'ended:' record; the living half shipped it with no `ended` flag, and the bell called it a
+    # /clear that dropped cards the board still shows open.
+
+    def _die_and_revive(self, now):
+        """web ends an hour ago with two cards open, the closer's real finalize settles it, and a minute ago
+        the user revives it under the same sid (the revival's states row, newer than the finalize)."""
+        _write_marker(WEB, t=now - 3600, by="kill")
+        cards = [("g1", "Fix the login flow"), ("g2", "Pick the auth library")]
+        jd._death_finalize(WEB, {"rompUuid": WEB, "seq": 1, "placements": {},
+                                 "status": {WEB + ":" + g: "working" for g, _ in cards},
+                                 "nodes": {WEB + ":" + g: {"text": t, "parentId": None} for g, t in cards}},
+                           settled=True)
+        jd.NAMES.mkdir(parents=True, exist_ok=True)
+        (jd.NAMES / WEB).write_text("web\t~\t#123456\t#fff\n")
+        self.assertEqual(len([k for k in jd.episode_settles(WEB) if str(k).startswith("ended:")]), 1,
+                         "harness check: the real finalize wrote one 'ended:' record")
+        dead = [r for r in km._boundary_clear_notices([]) if r["sid"] == WEB]
+        self.assertTrue(dead and dead[0].get("ended"), "harness check: while dead, web rings as ended")
+        jd.STATESDIR.mkdir(parents=True, exist_ok=True)
+        with open(jd.STATESDIR / (WEB + ".jsonl"), "a") as f:
+            f.write(json.dumps({"t": now - 60, "state": "idle"}) + "\n")
+
+    def test_a_revived_sessions_death_record_is_not_a_clear(self):
+        now = int(time.time())
+        self._die_and_revive(now)
+        rows = [r for r in km._boundary_clear_notices([{"sid": WEB, "name": "web"}]) if r["sid"] == WEB]
+        self.assertEqual(rows, [], "a living web's death record reaches the bell as a /clear drop: %r" % rows)
+
+    def test_a_revived_sessions_real_clear_stays_its_row(self):
+        now = int(time.time())
+        jd.append_episode_settle(WEB, "aaaaaaaa-0000-4000-8000-000000000001", now - 7200,
+                                 [{"id": WEB + ":g0", "text": "Draft the schema"}])
+        self._die_and_revive(now)
+        rows = [r for r in km._boundary_clear_notices([{"sid": WEB, "name": "web"}]) if r["sid"] == WEB]
+        self.assertEqual([(r["t"], r["titles"], r.get("ended")) for r in rows],
+                         [(now - 7200, ["Draft the schema"], None)],
+                         "the newer death record hides web's real /clear: %r" % rows)
 
     def test_a_dead_finalized_session_with_open_cards_reaches_the_bell(self):
         now = int(time.time())                         # the wall clock: an ended row rides its week only
