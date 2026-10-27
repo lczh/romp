@@ -28574,6 +28574,7 @@ def _host_for_sid(sid):
 
 _RELAY_TIMEOUT_S = 10   # one bound for every relay of ONE call through a tunnel (/remote/<host>/api-health, /new, /send): a
                         #  peer that accepts and never answers is reported "not answering" after this, and the redial asked
+_REMOTE_SESSION_READS = ("/mcp", "/commands")   # the per-session reads /remote/<host>/… relays (_remote_session_read)
 
 def _remote_forward(r, path, body):
     """Forward a small CONTROL call (deliver/send/working) to a remote kernel THROUGH its -L tunnel — this is
@@ -86150,6 +86151,11 @@ class Handler(BaseHTTPRequestHandler):
                 # preview bytes for a REMOTE session's mentioned path: relay /file to the kernel
                 # that can actually read the disk the path names (see _remote_file)
                 return self._remote_file(unquote(p[len("/remote/"):-len("/file")]), u.query)
+            if p.startswith("/remote/") and p.endswith(_REMOTE_SESSION_READS):
+                # the MCP panel's and the "/" menu's read for a session on an attached host: relay it to the kernel
+                # that runs that session (see _remote_session_read)
+                route = p[p.rindex("/"):]
+                return self._remote_session_read(unquote(p[len("/remote/"):-len(route)]), route, q)
             if p == "/analytics":                             # token-usage analytics (the settings modal's chart)
                 try:
                     w = int((q.get("window") or ["86400"])[0])
@@ -90404,6 +90410,48 @@ class Handler(BaseHTTPRequestHandler):
         pub = [x for x in (_remote_session_public_row(x) for x in rows[:_PEER_SESSION_ROWS_MAX]) if x]
         return self._send(200, json.dumps({"ok": True, "host": host, "sessions": pub}), "application/json",
                           cache="no-cache")
+
+    def _remote_session_read(self, host, route, q):
+        """GET /remote/<host>/mcp and /remote/<host>/commands: relay the MCP panel's read and the composer's "/" menu's
+        read for a session on an attached host to that host's kernel, the one that runs it. The dashboard names such a
+        session "<host>:<uuid>" and this kernel owns no session by that id, so its own /mcp answered that no running
+        backend owns it, and its own /commands listed this machine's default-directory commands (a Codex session there
+        was offered Claude's). The /api-health relay's shape: the local auth gate has run, the remote's own token goes in
+        the forwarded request, only the bare `sid` crosses (that kernel resolves it and answers for its own backend), an
+        unknown host is a 404, a dead tunnel a 502 and a redial, and a refusal (an older build without the route) comes
+        back in prose with its status mirrored. A 200 must be a JSON object, sent on as parsed, else a 502 naming the
+        host."""
+        with _remotes_lock:
+            r = _remotes.get(host)
+            port, rtok = (r or {}).get("local_port") or 0, (r or {}).get("token") or ""
+        if not port:
+            return self._send(404, "no attached host %r" % host, "text/plain")
+        sid = (q.get("sid") or [""])[0]
+        conn = http.client.HTTPConnection("127.0.0.1", int(port), timeout=_RELAY_TIMEOUT_S)
+        try:
+            conn.request("GET", route + "?" + urlencode({"sid": sid}),
+                         headers=({"X-Romp-Token": rtok} if rtok else {}))
+            resp = conn.getresponse()
+            body = resp.read(1 << 22)
+            status = resp.status
+        except (OSError, http.client.HTTPException) as e:
+            _demand_redial(host, "refused" if isinstance(e, ConnectionRefusedError) else "timeout")
+            return self._send(502, "tunnel to %s is not answering: re-dialing now" % host, "text/plain")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        if status != 200:
+            return self._send(status, body[:2000].decode("utf-8", "replace") or ("HTTP %d" % status), "text/plain")
+        try:
+            doc = json.loads(body.decode("utf-8", "replace"))
+        except ValueError:
+            doc = None
+        if not isinstance(doc, dict):
+            return self._send(502, "%s answered %s with something other than a JSON object" % (host, route),
+                              "text/plain")
+        return self._send(200, json.dumps(doc), "application/json", cache="no-cache")
 
     def _remote_file(self, host, query, head=False):
         """GET/HEAD /remote/<host>/file — relay ONE preview request to an attached host's kernel

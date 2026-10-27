@@ -5834,6 +5834,15 @@ this side writes is JSON `{ok, error}`: 404 for a path that names no host
 400 for a body that is not a JSON object (the peer is never reached); 502 for
 a dead tunnel or a peer that answered without a JSON verdict.
 
+Two more read relays, under the same rules, serve a session on an attached host
+from the kernel that runs it: `GET /remote/<host>/mcp` for the MCP panel and
+`GET /remote/<host>/commands` for the composer's `/` menu. The dashboard sends
+the bare session id and only `sid` crosses, so the peer answers for its own
+session: its MCP servers, its project's commands, the fixed list for a Codex
+session. Their errors are the `/sessions` relay's: 404 in prose for an unknown
+host, the peer's own status and prose for a refusal or an older build without
+the route, 502 in prose for a dead tunnel or a body that is not a JSON object.
+
 ### The ledger
 
 Every attempt is also folded, the moment it lands, into `ledger`, a per-bucket

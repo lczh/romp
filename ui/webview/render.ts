@@ -135,7 +135,7 @@ import { RELOAD_COMMENT_KEY, reloadCommentRecord, takeReloadComment, type Reload
 import { keepResidentEvents } from "./frame-merge";
 import { activeTabToReannounce } from "./relay-active";
 import { dirStatusHint, nextDirActive, createDirPrompt, type DirStatus } from "./dir-complete";
-import { mediaSrc, kernelUrl, swirlOSrc } from "./media";
+import { mediaSrc, kernelUrl, swirlOSrc, sessionReadUrl } from "./media";
 import { initStrip, fmtReset } from "./strip";
 import { durLabel } from "./duration";
 import { readLiveStatus, thinkingText, thinkingShort, thinkingTip, thoughtLabel, taskProgressText, turnThoughtTokens, tokensShort, type LiveStatus, type ThinkingLive } from "./live-status";   // what a session is doing this second (thinking, its subagents' progress), from the kernel's liveStatus frame (2026-10-08)
@@ -13555,10 +13555,16 @@ function openMcpPanel(sid: string): void {
 }
 
 function loadMcpPanel(sid: string, body: HTMLElement): void {
-  fetch(kernelUrl("/mcp?sid=" + encodeURIComponent(sid)), { cache: "no-store" })
+  // sessionReadUrl: a linked machine's session is read from the kernel that runs it, through this kernel's relay
+  fetch(sessionReadUrl("/mcp", sid), { cache: "no-store" })
     // a kernel from before this panel 404s here, and .json() on the error page read as a bare "parse
-    // error" (the user 2026-08-05) — name the actual situation instead
-    .then((r) => { if (!r.ok) throw new Error("this romp kernel predates the MCP panel — restart romp to update it"); return r.json(); })
+    // error" (the user 2026-08-05) — name the actual situation instead. The relay's refusal for a linked
+    // machine's session names what went wrong there (its tunnel is down, the host is not attached): shown as it came
+    .then((r) => {
+      if (r.ok) return r.json();
+      if (hostOf(sid)) return r.text().then((t) => { throw new Error(t || "HTTP " + r.status); });
+      throw new Error("this romp kernel predates the MCP panel — restart romp to update it");
+    })
     .then((d) => {
       if (mcpPanelSid !== sid) return;   // panel closed (or reopened for another tab) while loading
       body.textContent = "";
@@ -25337,7 +25343,7 @@ function setupComposer() {
   // while expanded browse the full texts.
   let slashExpanded = false;
   const loadCmds = (sid: string, then?: () => void) => {
-    fetch(kernelUrl("/commands?sid=" + encodeURIComponent(sid)), { cache: "no-store" })
+    fetch(sessionReadUrl("/commands", sid), { cache: "no-store" })   // a linked machine's session: that host's list, through the relay
       .then((r) => r.json())
       .then((d) => {
         slashCmds = Array.isArray(d.commands) ? d.commands : [];
