@@ -21,6 +21,12 @@ And an ending that fired when it should not have (2026-10-23):
     a follow-up after it stands, and a reply made while the recipient worked does not hold the
     tracker open. Once linked back, the tracker's own closer rules on the follow-up's work, so the
     card completes when that work is done (it stood down on every tracker before).
+(4) A RULING AFTER THE REPLY (2026-10-27) — the reply sweep (quiet, cross-host and dismissed-recipient
+    trackers) filed a done at the peer's reply time without asking whether it would land. A block or
+    a planner reopen filed on the tracker after that reply kept the tracker open, so every pass
+    appended the same done again and republished the store, until the log cap evicted the block and
+    the card read Completed with nothing new from the peer. The sweep now asks the fold first and
+    links each reply back once, the two rules the back-link got in (3).
 SYNTHETIC fixtures only; private synthetic sids."""
 import json
 import os
@@ -380,6 +386,137 @@ class FollowUpAfterTheCompletion(unittest.TestCase):
             menu.append(nd)
         self.assertEqual(jd.apply_close(st, menu, {"done": {1: "follow-up finished", 2: "follow-up finished"}},
                                         t=T + 600, t_end=T + 620), [n["id"] for n in menu])
+
+
+SID_W = "a21e0001-1111-4222-8333-000000000005"   # two more private sids: one test below journals the
+SID_P = "a21e0001-1111-4222-8333-000000000006"   # kernel's block, and every later load of the sid replays it
+MID3 = "1787299000.000003_1.TESTHOST"
+R = T + 50                                        # api's interim reply
+
+
+class RulingAfterTheReply(unittest.TestCase):
+    """web delegated the notes endpoint to api at T, and api replied at R ("on it"). With no recipient goal
+    to link back from (a quiet handoff, or a recipient card the user cleared), that reply is the
+    tracker's report-back."""
+
+    def setUp(self):
+        self._saved = jd.discover
+        jd.discover = lambda now, window=None, forks=True: [
+            (SID_W, "/dev/null", None, "web"), (SID_P, "/dev/null", None, "api")]
+        self.td = tempfile.TemporaryDirectory()
+        self._msgs = jd.MESSAGES
+        jd.MESSAGES = Path(self.td.name) / "messages.jsonl"
+        jd.MESSAGES.write_text("")
+        self._reply("r1", R, "on it, will report back")
+        self.track = SID_W + ":t1"
+
+    def tearDown(self):
+        jd.discover = self._saved
+        jd.MESSAGES = self._msgs
+        jd._PEER_ASK_CACHE[:] = [None, ({}, {}, {})]
+        for sid in (SID_W, SID_P):
+            for p in (jd.GOALDIR / (sid + ".json"), jd.GOALARCHDIR / (sid + ".json"),
+                      jd._overrides_dir() / (sid + ".jsonl")):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        self.td.cleanup()
+
+    def _reply(self, mid, at, body):
+        with jd.MESSAGES.open("a") as f:
+            f.write(json.dumps({"t": at, "ev": "sent", "id": mid, "from_id": SID_P, "to_id": SID_W,
+                                "kind": "coordinate", "body": body}) + "\n")
+        jd._PEER_ASK_CACHE[:] = [None, ({}, {}, {})]   # the maps cache on (mtime, size); start from the file
+
+    def _seed(self, quiet=True):
+        h = {"peer": SID_P, "msgId": MID3}
+        if quiet:
+            h["quiet"] = True
+        st = {"rompUuid": SID_W, "seq": 1, "placements": {}, "status": {},
+              "nodes": {self.track: _node(self.track, "↪ delegated to api: add the notes endpoint", None,
+                                          handoff=h)}}
+        jd.rollup_status(st, False)
+        jd.save_goals(SID_W, st)
+
+    def _file(self, src, kind, t, why, journal=False):
+        st = jd.load_goals(SID_W)
+        self.assertTrue(jd.record_verdict(st, st["nodes"][self.track], src, kind, t, why=why))
+        if journal:
+            jd.append_block(SID_W, self.track, src, why, t)
+        jd.rollup_status(st, False)
+        jd.save_goals(SID_W, st)
+
+    def _passes(self, k, start=T + 900):
+        return [jd.run_propagate(now=start + i) for i in range(k)]
+
+    def _tracker(self):
+        return jd.load_goals(SID_W)["nodes"][self.track]
+
+    def _courier_dones(self):
+        return [e.get("ev_t") for e in self._tracker()["log"]
+                if e.get("src") == "courier" and e.get("kind") == "done"]
+
+    def test_a_block_after_the_reply_stands_and_no_row_is_added(self):
+        self._seed()
+        self._file("planner", "block", T + 100, "which schema should notes use?")
+        rows = len(self._tracker()["log"])
+        self.assertEqual(self._passes(3), [0, 0, 0], "a done that cannot land is not filed")
+        nd = self._tracker()
+        self.assertTrue(nd.get("blocked"), "the question asked after api's reply stands")
+        self.assertEqual(len(nd["log"]), rows, "standing down writes nothing, pass after pass")
+
+    def test_the_block_outlives_the_log_cap(self):
+        self._seed()
+        self._file("planner", "block", T + 100, "which schema should notes use?")
+        self.assertEqual(sum(self._passes(jd.LOG_CAP + 6)), 0)
+        st = jd.load_goals(SID_W)
+        nd = st["nodes"][self.track]
+        self.assertFalse(nd.get("nodeComplete"), "nothing new from api: the card does not complete by itself")
+        self.assertTrue(nd.get("blocked"))
+        self.assertFalse(nd.get("logTrunc"), "the card's history is intact")
+        self.assertNotEqual(st["status"].get(self.track), "completed")
+
+    def test_a_dismissed_recipient_leaves_the_dead_handoff_block_standing(self):
+        # api replied while its card was live, so the back-link owned the ending; web then went dormant
+        # and the kernel blocked the tracker (journaled, as its dead-handoff sweep does), and then the
+        # user cleared api's unfinished card, which hands the ending to the reply
+        self._seed(quiet=False)
+        why = jd.dead_wait_block_why("the delegation to api (add the notes endpoint)")
+        self._file("nudge", "block", T + 100, why, journal=True)
+        g = _node(SID_P + ":g1", "Add the notes endpoint", None, t=T + 10, cleared=True,
+                  origin={"peer": SID_W, "goalId": self.track, "msgId": MID3})
+        jd.save_goals(SID_P, {"rompUuid": SID_P, "nodes": {g["id"]: g}, "placements": {}, "status": {}})
+        self.assertEqual(self._passes(3), [0, 0, 0])
+        self.assertTrue(self._tracker().get("blocked"), "the card still needs the user's call")
+        self.assertEqual(self._courier_dones(), [])
+
+    def test_a_newer_reply_still_reports_back(self):
+        self._seed()
+        self._file("planner", "block", T + 100, "which schema should notes use?")
+        self.assertEqual(self._passes(1), [0])
+        self._reply("r2", T + 150, "the notes endpoint is merged")
+        self.assertEqual(self._passes(2, start=T + 1000), [1, 0])
+        self.assertTrue(self._tracker().get("nodeComplete"), "api's report after the question ends the wait")
+        self.assertEqual(self._courier_dones(), [T + 150])
+
+    def _completed_then_reopened(self, at):
+        self._seed()
+        self.assertEqual(self._passes(1), [1])
+        self.assertTrue(self._tracker().get("nodeComplete"), "api's reply reports back")
+        self._file("planner", "reopen", at, "more work on the endpoint")
+        self.assertFalse(self._tracker().get("nodeComplete"))
+        self.assertEqual(self._passes(3, start=T + 1000), [0, 0, 0], "the reply was linked back already")
+        self.assertFalse(self._tracker().get("nodeComplete"), "the reopen stands")
+        self.assertEqual(self._courier_dones(), [R])
+
+    def test_a_reopen_after_the_reply_completed_it_stands(self):
+        self._completed_then_reopened(T + 200)
+
+    def test_a_reopen_at_the_reply_time_stands(self):
+        # the planner ruled on the reply itself: a reopen sharing the done's evidence time, filed after
+        # it, so a second done at that time would sort after the reopen and complete the card again
+        self._completed_then_reopened(R)
 
 
 if __name__ == "__main__":
