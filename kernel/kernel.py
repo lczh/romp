@@ -64369,9 +64369,23 @@ def _card_anchors(feed):
 
 
 def _warm_turn_map(turns, floor):
-    """uuid → the index of the turn below `floor` whose built atoms hold it: the warm's anchor lookup (a miss walks the
-    turns, _turn_of_uuid). Every atom below the floor is visited, so a pass builds it only for a session with a new anchor."""
-    return {a["uuid"]: i for i, t in enumerate(turns[:floor]) for a in t.get("atoms") or [] if a.get("uuid")}
+    """uuid → the index of the turn below `floor` whose atoms hold it: the warm's anchor lookup (a miss walks the turns,
+    _turn_of_uuid). A restored pre-cut turn (T323 stage 4c) is read by its uuids, the document's list of its atoms' uuids in
+    their order, as _turn_of_uuid and _page_sig read it, so no atom is built: iterating its atoms built every one of them
+    (2026-10-27: every lazy atom below the floor of each session with a new anchor or a moved signature, a pass that read no
+    body, while the renders the warm exists for build only a page's). Every turn below the floor is visited, so a pass
+    builds the map only for a session with a new anchor."""
+    out = {}
+    for i, t in enumerate(turns[:floor]):
+        if t.get("pre"):
+            for u in t.get("uuids") or ():
+                if u:
+                    out[u] = i
+            continue
+        for a in t.get("atoms") or []:
+            if a.get("uuid"):
+                out[a["uuid"]] = i
+    return out
 
 
 def _warm_history_pages(feed, now, live_map=None):

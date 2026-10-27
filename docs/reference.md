@@ -4091,7 +4091,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   requests: a page it rendered that is gone, evicted or re-keyed, before a
   reader asked for any page waits for the next reader's request, a click or a
   scroll into older history, and a page's live inputs are checked by the reader
-  it is served to, not by the warm), `warmPending` (anchors waiting past the
+  it is served to, not by the warm; an anchor's turn is found from a restored
+  turn's message ids, so finding it builds none of the history's messages,
+  which `asmIndex.materializedBy` would count under `_warm_turn_map`),
+  `warmPending` (anchors waiting past the
   bound), `warmSpent` (anchors waiting for a reader's request on that account,
   as of the last pass), `warmMs` (the probes' time included),
   `warmCycles`, and `warmSkipped` (cycles the warm stood down because the

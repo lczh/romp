@@ -563,6 +563,39 @@ class WarmTheCards(P.Harness):
         finally:
             km._PAGE_CACHE_BYTES = saved
 
+    def test_the_anchor_map_reads_a_restored_turns_uuids_and_builds_no_atom(self):
+        """2026-10-27: the anchor map iterated the atoms of every turn below the floor, and a restored pre-cut turn's atoms
+        are lazy, so each map built every atom of the session's history, in a pass that reads no body. It reads a restored
+        turn's uuids now: the same map, no atom built, and a warm pass over new anchors builds atoms only in its renders."""
+        whole, m = self._restored(turns=600, compact_every=150)
+        turns, floor = km._parse(self.leaf, SID, NOW)["turns"], m["floor"]
+        self.assertGreater(sum(1 for t in turns[:floor] if t.get("pre")), floor // 2, "the history below the floor is restored")
+        built = em._ASM_INDEX_STATS["materialized"]
+        got = km._warm_turn_map(turns, floor)
+        self.assertEqual(em._ASM_INDEX_STATS["materialized"], built, "the map built no atom")
+        want = {a["uuid"]: i for i, t in enumerate(turns[:floor]) for a in t.get("atoms") or [] if a.get("uuid")}
+        self.assertGreater(em._ASM_INDEX_STATS["materialized"], built, "(the atoms themselves, built)")
+        self.assertEqual(got, want, "the same map as the atoms give")
+        at = {}
+        for u, j in want.items():
+            at.setdefault(j, u)
+        anchors = [at[8], at[40], at[100]]
+        self.restored()                                           # a fresh restore: no atom built
+        inside, real = [0], km._chat_history_page
+
+        def chp(*a, **kw):
+            b0 = em._ASM_INDEX_STATS["materialized"]
+            try:
+                return real(*a, **kw)
+            finally:
+                inside[0] += em._ASM_INDEX_STATS["materialized"] - b0
+        built = em._ASM_INDEX_STATS["materialized"]
+        with mock.patch.object(km, "_chat_history_page", chp):
+            self.assertGreater(km._warm_history_pages(self._feed(self._card(anchors)), NOW, {}), 0)
+        self.assertGreater(inside[0], 0, "the renders build their pages' atoms")
+        self.assertEqual(em._ASM_INDEX_STATS["materialized"] - built, inside[0], "and nothing else in the pass builds one")
+        self.assertTrue(self._hit(anchors[1]), "the anchors' windows as the click asks for them")
+
     def test_a_readers_requests_are_counted_apart_from_the_warms_renders(self):
         """2026-10-27: `hits` and `misses` count the warm's renders as misses, so a cache that had served no reader for hours
         read as one that missed every reader. A reader's pages are counted apart, served or rendered, and of the warm's
