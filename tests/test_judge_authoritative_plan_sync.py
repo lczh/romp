@@ -8,7 +8,8 @@ Covers:
                        a TaskCreate the CLI rejected (is_error result) is not a step.
 - em.task_store_plan — the AUTHORITATIVE live task store read the sync prefers over the fold.
 - jd._sync_declared_plan — find-or-create by stable Task id; idempotent; status refresh; reopen;
-                       store-first sourcing (fold only when no store dir; unreadable store = loud skip).
+                       store-first sourcing (fold only when no store dir; unreadable store = loud skip);
+                       a key matches only the mirrors of its own list (one list per transcript stem).
 - jd.rollup_status   — an agentTask-open descendant holds its top WORKING even when the umbrella
                        was flat-marked complete; a crossed-off item lets normal roll-up proceed.
 
@@ -556,6 +557,154 @@ class StoreAuthoritativeSourcing(unittest.TestCase):
         self.assertEqual(rows[0]["judge"], "planner")
         self.assertEqual(rows[0]["fsid"], SID)
         self.assertIn("no silent fold", rows[0]["note"])
+
+
+STEM_A = "aaaaaaaa-1111-2222-3333-444444444444"   # the first conversation's transcript stem
+STEM_B = "bbbbbbbb-1111-2222-3333-444444444444"   # the conversation after a /clear
+
+
+class ToDoListScope(unittest.TestCase):
+    """A to-do key means something only inside its own list. The task store is one directory per
+    transcript stem and Claude Code numbers each list from 1, while the goal store spans /clear. Matched
+    by the bare key, the next conversation's task 1 landed on the previous conversation's finished
+    mirror for task 1: that card went back to Working under its old title, the new to-do never got a
+    card of its own, and finishing it completed the old card a second time."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self._prev = os.environ.get("CLAUDE_CONFIG_DIR")
+        os.environ["CLAUDE_CONFIG_DIR"] = self._td.name
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = self._prev
+        self._td.cleanup()
+
+    def _write(self, stem, n, subject, status):
+        d = Path(self._td.name) / "tasks" / stem
+        d.mkdir(parents=True, exist_ok=True)
+        (d / ("%s.json" % n)).write_text(json.dumps(
+            {"id": n, "subject": subject, "activeForm": None, "status": status}))
+
+    def _sync(self, store, stem, seg, t):
+        return jd._sync_declared_plan(store, {"turns": [], "leafFsid": stem}, seg, t)
+
+    def _others(self, store, nid):
+        return [nd for k, nd in store["nodes"].items() if k != nid]
+
+    def _first_conversation(self, store):
+        """Conversation one: task 1 is declared, worked and crossed off, and its card settles Completed."""
+        self._write(STEM_A, "1", "Write the migration script", "in_progress")
+        self._sync(store, STEM_A, "s0", T0 + 5)
+        self._write(STEM_A, "1", "Write the migration script", "completed")
+        self._sync(store, STEM_A, "s1", T0 + 20)
+        jd.rollup_status(store, True)
+        g1 = SID + ":g1"
+        self.assertEqual(store["nodes"][g1]["agentTask"]["list"], STEM_A, "a mirror carries the list it came from")
+        self.assertEqual(store["status"].get(g1), "completed")
+        return g1
+
+    def test_the_next_conversations_todo_gets_its_own_card(self):
+        store = fresh_store()
+        g1 = self._first_conversation(store)
+        self.assertFalse(self._sync(store, STEM_B, "s2", T0 + 100), "no list yet after the /clear: nothing moves")
+        self._write(STEM_B, "1", "Investigate the flaky login test", "in_progress")
+        self.assertTrue(self._sync(store, STEM_B, "s3", T0 + 120))
+        jd.rollup_status(store, True)
+        old = store["nodes"][g1]
+        self.assertEqual(old["agentTask"]["status"], "done", "the finished card was reopened by an unrelated to-do")
+        self.assertTrue(old["nodeComplete"])
+        self.assertEqual(old["text"], "Write the migration script")
+        self.assertEqual(store["status"].get(g1), "completed", "the old card left Completed")
+        self.assertNotIn("reopen", [r["kind"] for r in old["log"] if r.get("src") == "agent"])
+        new = self._others(store, g1)
+        self.assertEqual([nd["text"] for nd in new], ["Investigate the flaky login test"],
+                         "the new to-do gets a card of its own")
+        self.assertEqual(new[0]["agentTask"],
+                         {"key": "1", "status": "open", "raw": "in_progress", "list": STEM_B})
+        self.assertEqual(store["status"].get(new[0]["id"]), "working")
+
+    def test_finishing_the_next_todo_completes_only_its_own_card(self):
+        store = fresh_store()
+        g1 = self._first_conversation(store)
+        self._write(STEM_B, "1", "Investigate the flaky login test", "in_progress")
+        self._sync(store, STEM_B, "s3", T0 + 120)
+        self._write(STEM_B, "1", "Investigate the flaky login test", "completed")
+        self._sync(store, STEM_B, "s4", T0 + 200)
+        jd.rollup_status(store, True)
+        old = store["nodes"][g1]
+        self.assertEqual([r["kind"] for r in old["log"] if r.get("src") == "agent"], ["done"],
+                         "the old card is completed once, by its own to-do")
+        self.assertNotIn("s4", old["trail"], "the new to-do's work does not join the old card's trail")
+        new = self._others(store, g1)
+        self.assertEqual(len(new), 1)
+        self.assertEqual(new[0]["agentTask"]["status"], "done")
+        self.assertIn("s4", new[0]["trail"])
+        self.assertEqual(store["status"].get(new[0]["id"]), "completed")
+
+    def test_a_reused_number_does_not_take_over_an_open_mirror(self):
+        store = fresh_store()
+        self._write(STEM_A, "1", "Write the migration script", "in_progress")
+        self._sync(store, STEM_A, "s0", T0 + 5)
+        g1 = SID + ":g1"
+        before = dict(store["nodes"][g1]["agentTask"])
+        self._write(STEM_B, "1", "Investigate the flaky login test", "pending")
+        self.assertTrue(self._sync(store, STEM_B, "s3", T0 + 120))
+        self.assertEqual(store["nodes"][g1]["agentTask"], before, "another list's mirror is left as it stands")
+        self.assertEqual(store["nodes"][g1]["text"], "Write the migration script")
+        self.assertEqual([nd["text"] for nd in self._others(store, g1)], ["Investigate the flaky login test"])
+
+    def test_the_next_list_never_crosses_off_the_last_ones_open_mirror(self):
+        """The next list finishing its own task 1 says nothing about the previous list's task 1."""
+        store = fresh_store()
+        self._write(STEM_A, "1", "Write the migration script", "in_progress")
+        self._sync(store, STEM_A, "s0", T0 + 5)
+        g1 = SID + ":g1"
+        self._write(STEM_B, "1", "Investigate the flaky login test", "completed")
+        self.assertFalse(self._sync(store, STEM_B, "s3", T0 + 120))
+        old = store["nodes"][g1]
+        self.assertEqual(old["agentTask"]["status"], "open")
+        self.assertFalse(old["nodeComplete"])
+        self.assertNotIn("done", [r["kind"] for r in old.get("log") or [] if r.get("src") == "agent"])
+        self.assertEqual(self._others(store, g1), [], "a finished item is never minted retroactively")
+
+    def test_a_pass_with_no_list_in_between_keeps_the_mirrors_list(self):
+        """Right after a /clear the new conversation has no task store yet, so a pass in between reads the
+        transcript fold. Whatever that pass writes on the earlier list's mirror, the mirror stays in its
+        list, or the next list's task 1 would claim it once its store appears."""
+        store = fresh_store()
+        self._write(STEM_A, "1", "Write the migration script", "in_progress")
+        self._sync(store, STEM_A, "s0", T0 + 5)
+        g1 = SID + ":g1"
+        self._sync(store, STEM_B, "s2", T0 + 100)          # no store dir for the new stem yet
+        self.assertEqual(store["nodes"][g1]["agentTask"]["list"], STEM_A)
+        before = dict(store["nodes"][g1]["agentTask"])
+        self._write(STEM_B, "1", "Investigate the flaky login test", "in_progress")
+        self._sync(store, STEM_B, "s3", T0 + 120)
+        self.assertEqual(store["nodes"][g1]["agentTask"], before)
+        self.assertNotIn("reopen", [r["kind"] for r in store["nodes"][g1].get("log") or []
+                                    if r.get("src") == "agent"])
+        self.assertEqual([nd["text"] for nd in self._others(store, g1)], ["Investigate the flaky login test"])
+
+    def test_a_mirror_without_a_list_joins_the_first_list_it_meets(self):
+        """A mirror minted before the stamp (or from the fold, which has no list of its own) belongs to the
+        first list it is reconciled against, once, and from then on is scoped like any other."""
+        store = fresh_store()
+        s = plan_session([("Phase A", "Doing A", [])])
+        jd._sync_declared_plan(store, s, "s0", T0 + 5)      # no store dir yet: the fold mints it
+        nd = agent_nodes(store)["1"]
+        self.assertNotIn("list", nd["agentTask"])
+        self._write(SID, "1", "Phase A", "pending")
+        self.assertTrue(jd._sync_declared_plan(store, s, "s1", T0 + 30), "the stamp is a write")
+        self.assertEqual(nd["agentTask"], {"key": "1", "status": "open", "raw": "pending", "list": SID})
+        self.assertFalse(jd._sync_declared_plan(store, s, "s1", T0 + 40), "stamped once, then idempotent")
+        self._write(STEM_B, "1", "Investigate the flaky login test", "in_progress")
+        self._sync(store, STEM_B, "s3", T0 + 120)
+        self.assertEqual(nd["agentTask"]["raw"], "pending", "the stamped mirror is not the next list's task 1")
+        self.assertEqual(sorted(x["text"] for x in store["nodes"].values()),
+                         ["Investigate the flaky login test", "Phase A"])
 
 
 class TaskStorePlanReader(unittest.TestCase):
