@@ -9109,25 +9109,65 @@ def _sync_declared_plan(store, session, seg_id, seg_t, prompt_uuid=None, ctx=Non
     declaration threads the session's own prompt-chain record as `user_ask` instead. Both are
     LATCHED at mint, never re-derived (cards move on new information, not on inference flaps);
     the one-shot arm below back-fills existing OPEN un-stamped mirrors ONCE, resolving the same
-    event as-of each mirror's own declaring segment."""
+    event as-of each mirror's own declaring segment.
+
+    A key means something only inside its own LIST (2026-10-28). The store is one directory per
+    transcript stem and Claude Code numbers each list from 1, while this goal store spans /clear: the
+    next conversation's task "1" used to land on the previous conversation's finished mirror for "1",
+    reopening that card under its old title while the new to-do got no card. So a mirror minted from
+    the store carries the list it came from (agentTask["list"], the leaf stem), and only the current
+    list's mirrors answer to its keys; another list's mirror is left exactly as it stands. A mirror from
+    before the stamp joins the first list it is reconciled against. The transcript fold (no store dir)
+    has no list of its own and keeps matching every mirror, as it always has. Only a /clear starts a
+    new list: a resume that landed on a fresh transcript file continues the same conversation (the
+    kernel records it as a resumeFork row, which the parse stitches and the episode check stands down
+    on), so the files that recorded lineage walks back through are this list too, and a mirror matched
+    from one of them moves forward to the current stem."""
+    leaf = session.get("leafFsid") or ""
     try:
-        plan = em.task_store_plan(session.get("leafFsid") or "")
+        plan = em.task_store_plan(leaf)
     except OSError as e:
         _log_judge_error("planner", store.get("rompUuid") or "", "task-store",
                          note="task store unreadable: %s — plan-sync skipped, no silent fold; "
                               "re-arms when the store reads again" % e)
         return False
+    cur = leaf if plan is not None else None            # the list this plan IS; None for the fold
     if plan is None:
         plan = em.declared_plan(session)                    # no store dir → legacy transcript fold
     items = {it["key"]: it for it in plan}
     nodes = store["nodes"]
+    same = {cur}                                        # the stems whose mirrors answer to this list's keys
+    if cur and any((nd.get("agentTask") or {}).get("list") not in (None, "", cur) for nd in nodes.values()):
+        # a mirror from another stem belongs to this list when the recorded resume lineage (resumeFork rows;
+        # a /clear writes none), walked back from the leaf, reaches its stem: at most 16 hops, like the closure
+        links = _resume_links(store.get("rompUuid") or "")
+        if links is None:
+            _log_judge_error("planner", store.get("rompUuid") or "", "resume-lineage",
+                             note="states log unreadable: which earlier to-do lists this one continues is "
+                                  "unknown — plan-sync skipped; re-arms when the log reads again")
+            return False
+        x = cur
+        while x in links and len(same) <= 16:
+            x = links[x]
+            if x in same:
+                break
+            same.add(x)
     has_child, key_nodes = set(), {}                    # key -> [nids]: EVERY holder, not a last-wins pick
     for nid, nd in nodes.items():
         if nd.get("parentId") is not None:
             has_child.add(nd["parentId"])
-        k = (nd.get("agentTask") or {}).get("key")
-        if k is not None:
-            key_nodes.setdefault(k, []).append(nid)
+        at = nd.get("agentTask") or {}
+        k = at.get("key")
+        if k is not None and (cur is None or not at.get("list") or at.get("list") in same):
+            key_nodes.setdefault(k, []).append(nid)     # another list's mirror is not a holder of this list's key
+
+    def _link(key, status, raw, at):
+        """The mirror's agentTask link: this plan's list, or under the fold the mirror's own stamp."""
+        out = {"key": key, "status": status, "raw": raw}
+        lst = cur or at.get("list")
+        if lst:
+            out["list"] = lst
+        return out
     if not items and not key_nodes:
         return False
 
@@ -9153,13 +9193,16 @@ def _sync_declared_plan(store, session, seg_id, seg_t, prompt_uuid=None, ctx=Non
         for nid in list(nids):
             nd = nodes[nid]
             at = nd.get("agentTask") or {}
+            if cur and at.get("list") != cur:              # a mirror from before the list stamp joins the first
+                at = nd["agentTask"] = dict(at, list=cur)   # list it is reconciled against; one from a file this
+                changed = True                              # conversation was resumed from follows it forward
             if _is_open(it):
                 if len(nids) > 1 and at.get("status") == "done":
                     continue                            # a DONE twin of a duplicated key: the agent
                     #                                     reopened nothing — the duplicate did; heal
                     #                                     toward done, never resurrect a completed card
                 if at.get("status") != "open" or at.get("raw") != it["status"] or not nd.get("agentBornOpen"):
-                    nd["agentTask"] = {"key": key, "status": "open", "raw": it["status"]}
+                    nd["agentTask"] = _link(key, "open", it["status"], at)
                     nd["agentBornOpen"] = True              # adopt: watched-open now → protected from the done-heal
                     if nd.get("agentDone"):                 # agent RE-OPENED it → an agent reopen EVENT (an
                         record_verdict(store, nd, "agent", "reopen", seg_t,   # eventless un-done would be re-DONE'd
@@ -9170,7 +9213,7 @@ def _sync_declared_plan(store, session, seg_id, seg_t, prompt_uuid=None, ctx=Non
             elif nd.get("agentBornOpen"):                   # watched-open item that has now COMPLETED → authoritative-done (kept)
                 if at.get("status") != "done" and record_verdict(store, nd, "agent", "done", seg_t,
                                                                  why="the agent crossed it off its own list"):
-                    nd["agentTask"] = {"key": key, "status": "done", "raw": (it or {}).get("status") or "completed"}
+                    nd["agentTask"] = _link(key, "done", (it or {}).get("status") or "completed", at)
                     nd["agentDone"] = True; nd["mt"] = seg_t
                     if seg_id and seg_id not in (nd.get("trail") or []):
                         # DONE-ANCHOR, plan-sync edition (the user 2026-07-14): the syncing segment holds the
@@ -9188,7 +9231,7 @@ def _sync_declared_plan(store, session, seg_id, seg_t, prompt_uuid=None, ctx=Non
                     del key_nodes[key]
                 changed = True
 
-    # 2) mint the OPEN items we don't track yet (a done item is NEVER minted retroactively)
+    # 2) mint the OPEN items this list does not track yet (a done item is NEVER minted retroactively)
     for key, it in items.items():
         if key in key_nodes or not _is_open(it):
             continue
@@ -9199,7 +9242,7 @@ def _sync_declared_plan(store, session, seg_id, seg_t, prompt_uuid=None, ctx=Non
                    "parentId": None, "nodeComplete": False, "blocked": False, "cleared": False,
                    "trail": [seg_id] if seg_id else [], "promptUuid": prompt_uuid, "t": seg_t, "mt": seg_t,
                    "why": "declared in the agent's own to-do list",
-                   "agentTask": {"key": key, "status": "open", "raw": it["status"]}, "agentBornOpen": True,
+                   "agentTask": _link(key, "open", it["status"], {}), "agentBornOpen": True,
                    "servingT": seg_t, "log": []}
         serving, user_ask = ctx() if ctx else (None, None)
         if isinstance(serving, dict) and serving.get("msgId"):
