@@ -53547,7 +53547,11 @@ def _feed_session_entry(s, ctx):
         # (event-latched: minted by the walk, popped by the sweep) plus the session's idle read —
         # the same displacement precedent as recheck/rejudging's de-urgent smoothing: the session
         # taking a turn IS new information, and the card returns to Blocked if the hold outlives it.
-        _stall_block = bool(_stall_rec and not who_working and not sess_awaiting_why)
+        # Only a card that is still OPEN floors (2026-10-28): a done-confirming card (the rollup's
+        # export: done verdict in, settle pending) stays in Working with its "done, confirming" cue,
+        # since the walk's own hold on it reads "already complete" and nothing about it is on the
+        # user; and a completed card stays Completed while its record waits for the sweep to pop it.
+        _stall_block = bool(_stall_rec and col != "completed" and nid not in confirming and not who_working and not sess_awaiting_why)
         # the chip shows while the failure is the live story: the goal still working, OR blocked BY the
         # failure itself (the diary's latest block has src "nudge", 2026-07-07). A real judge verdict
         # (planner/closer block, or completion) takes the story over and the chip yields.
