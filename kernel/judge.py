@@ -20909,7 +20909,8 @@ def run_courier(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=
     # plants it as handoff.toSid, the exact key that arm reads first (review find, 2026-09-08).
     # `tracked` never rides here: the relay drops the flag by design (a primary/satellite pair
     # cannot span kernels yet). Horizon-bounded like every courier retry, so old history is never
-    # backfilled; idempotent by msgId, so one plant per message ever.
+    # backfilled; idempotent by msgId over the sender's live store AND its archive, so one plant per
+    # message ever, a cleared and archived tracker included.
     placed = 0
     # A delegate that came back never reached the peer (2026-09-08): a tracker planted from it would
     # wait on a report-back no event can bring, since the remote arm's ending is the peer's own reply
@@ -20929,6 +20930,12 @@ def run_courier(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=
         if any(isinstance(nd.get("handoff"), dict) and nd["handoff"].get("msgId") == o["id"]
                for nd in sstore["nodes"].values()):
             continue
+        if any(isinstance(nd, dict) and isinstance(nd.get("handoff"), dict) and nd["handoff"].get("msgId") == o["id"]
+               for nd in (load_goal_archive_shared(o["from_id"]).get("nodes") or {}).values()):
+            continue                                   # planted before and since moved to the archive (the user cleared
+            #                                            the card, or a /clear ended its episode, and compaction swept it):
+            #                                            the live scan alone missed it and minted the card again under a
+            #                                            new id the clears ledger does not hold, every pass in the horizon
         head = " ".join(str(o.get("body") or "").split())[:120]
         _plant_handoff_track(sstore, None, head, str(o["toName"]), str(o["toName"]), int(o["t"]), o["id"],
                              to_sid=(str(o["to_sid"]) if o.get("to_sid") else None))   # the row's exact key rides along (review find, 2026-09-08)

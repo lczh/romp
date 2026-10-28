@@ -497,7 +497,7 @@ class CrossHostDelegation(_Base):
         # run_courier/run_propagate discover the fleet from names+transcripts; stub the discovery
         # to the one local sender (the recipient is REMOTE by construction)
         self._saved_discover = jd.discover
-        jd.discover = lambda now: [(SID, "/tmp/none.jsonl", None, "api")]
+        jd.discover = lambda *a, **k: [(SID, "/tmp/none.jsonl", None, "api")]   # the kernel's clear path passes more arguments
         self.addCleanup(lambda: setattr(jd, "discover", self._saved_discover))
 
     def _handoffs(self):
@@ -519,6 +519,25 @@ class CrossHostDelegation(_Base):
                          "kernel-walked root-ask record, T126 — proof, not machinery")
         jd.run_courier(now=T0 + 200)
         self.assertEqual(len(self._handoffs()), 1, "idempotent by msgId — one plant per message ever")
+
+    def test_a_cleared_tracker_the_sweep_archived_is_not_planted_again(self):
+        # review find, 2026-10-28: the courier's msgId check read the sender's LIVE nodes only. Once the user
+        # cleared the tracker and the compaction sweep moved it to the archive, the next pass found no match
+        # and planted the card again under a new id the clears ledger does not hold, back in Working.
+        self._fleet_stub()
+        self._log([self._xrow(1, T0 + 10)])
+        jd.run_courier(now=T0 + 100)
+        hs = self._handoffs()
+        self.assertEqual(len(hs), 1)
+        nid = hs[0]["id"]
+        km._clear_all([nid])                               # the user crosses the card off
+        self.assertTrue(jd.load_goals(SID)["nodes"][nid].get("cleared"))
+        self.assertEqual(km._compact_goal_store(SID), 1, "the sweep moves the cleared top to the archive")
+        self.assertEqual(self._handoffs(), [])
+        self.assertIn(nid, jd.load_goal_archive(SID)["nodes"])
+        jd.run_courier(now=T0 + 200)                       # the send row is still inside the retry horizon
+        self.assertEqual([(nd["id"], nd.get("nodeComplete"), nd.get("cleared")) for nd in self._handoffs()], [],
+                         "main: a fresh open tracker for the same message, under a new id")
 
     def test_declared_only_and_horizon_bounded(self):
         self._fleet_stub()
