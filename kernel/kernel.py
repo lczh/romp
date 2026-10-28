@@ -59052,16 +59052,24 @@ def _state_ev_plain(ev):
     return True
 
 
+def _state_ev_order(e):
+    """A transition's sort key: its time only, so transitions that share a time keep the log's order."""
+    return e[0]
+
+
 def _state_ev_sorted(sid, path):
     """The states log's transitions sorted, as a memo entry (version, state, ev, plain, intervals by state set, bytes):
     held per sid on the fold's cursor (_state_ev_cache: the record count and the reader entry's generation) while the
     fold's answer is the cursor's own state object, which a fold never mutates (it deep-copies before it steps), so the
-    object names its records exactly; any other answer is sorted and not held. A sort that raises stores nothing."""
+    object names its records exactly; any other answer is sorted and not held. A sort that raises stores nothing.
+    The sort keys on the time alone (_state_ev_order): the backend stamps whole seconds, so a 'working' row and the
+    prompt or compaction right after it often share one, and a whole-tuple sort ordered those by state name, putting
+    'working' last and dropping the open band of a session stopped right now. A stable sort keeps them in log order."""
     key = str(path)
     res = _fold_records(_state_ev_cache, path, list, _state_ev_step, ckpt="stateIntervals")
     cur = _state_ev_cache.get(key)
     if cur is None or cur[2] is not res:
-        ev = tuple(sorted(res))
+        ev = tuple(sorted(res, key=_state_ev_order))
         with _STATE_IV_LOCK:
             _STATE_IV_STATS["uncached"] += 1
         return (None, None, ev, _state_ev_plain(ev), {}, 0)
@@ -59073,7 +59081,7 @@ def _state_ev_sorted(sid, path):
             if ent[0] == ver and ent[1] is res:
                 _STATE_IV_STATS["hit"] += 1
                 return ent
-    ev = tuple(sorted(res))
+    ev = tuple(sorted(res, key=_state_ev_order))
     ent = (ver, res, ev, _state_ev_plain(ev), {}, 200 + 40 * len(ev))   # the transitions and two state sets' intervals
     with _STATE_IV_LOCK:
         st = _STATE_IV_STATS
