@@ -560,7 +560,8 @@ class StoreAuthoritativeSourcing(unittest.TestCase):
 
 
 STEM_A = "aaaaaaaa-1111-2222-3333-444444444444"   # the first conversation's transcript stem
-STEM_B = "bbbbbbbb-1111-2222-3333-444444444444"   # the conversation after a /clear
+STEM_B = "bbbbbbbb-1111-2222-3333-444444444444"   # the conversation after a /clear (or a resume's new file)
+STEM_C = "cccccccc-1111-2222-3333-444444444444"   # a third transcript file
 
 
 class ToDoListScope(unittest.TestCase):
@@ -574,13 +575,24 @@ class ToDoListScope(unittest.TestCase):
         self._td = tempfile.TemporaryDirectory()
         self._prev = os.environ.get("CLAUDE_CONFIG_DIR")
         os.environ["CLAUDE_CONFIG_DIR"] = self._td.name
+        self._prev_states = jd.STATESDIR                     # the resume lineage is read from the states log:
+        jd.STATESDIR = Path(self._td.name) / "states"       # a private, empty one per test
+        jd._RESUME_LINKS_MEMO.pop(SID, None)
 
     def tearDown(self):
         if self._prev is None:
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
             os.environ["CLAUDE_CONFIG_DIR"] = self._prev
+        jd.STATESDIR = self._prev_states
+        jd._RESUME_LINKS_MEMO.pop(SID, None)
         self._td.cleanup()
+
+    def _resume_fork(self, frm, to, t):
+        """The kernel's record that a resume landed on a fresh transcript file with no /clear in flight."""
+        jd.STATESDIR.mkdir(parents=True, exist_ok=True)
+        with (jd.STATESDIR / (SID + ".jsonl")).open("a") as fh:
+            fh.write(json.dumps({"t": t, "resumeFork": {"from": frm, "to": to}}) + "\n")
 
     def _write(self, stem, n, subject, status):
         d = Path(self._td.name) / "tasks" / stem
@@ -705,6 +717,84 @@ class ToDoListScope(unittest.TestCase):
         self.assertEqual(nd["agentTask"]["raw"], "pending", "the stamped mirror is not the next list's task 1")
         self.assertEqual(sorted(x["text"] for x in store["nodes"].values()),
                          ["Investigate the flaky login test", "Phase A"])
+
+    def test_a_resume_fork_keeps_the_list(self):
+        """Only a /clear starts a new list. A resume that landed on a new transcript file continues the same
+        conversation, so the open to-do keeps its one card, which moves to the new file's list and is crossed
+        off when the agent finishes the to-do there."""
+        store = fresh_store()
+        self._write(STEM_A, "1", "Write the migration script", "in_progress")
+        self._sync(store, STEM_A, "s0", T0 + 5)
+        g1 = SID + ":g1"
+        self._resume_fork(STEM_A, STEM_B, T0 + 50)
+        self._write(STEM_B, "1", "Write the migration script", "in_progress")
+        self.assertTrue(self._sync(store, STEM_B, "s2", T0 + 60), "the mirror moves to the new file's list")
+        self.assertEqual(list(store["nodes"]), [g1], "the same to-do after a resume gets no second card")
+        self.assertEqual(store["nodes"][g1]["agentTask"],
+                         {"key": "1", "status": "open", "raw": "in_progress", "list": STEM_B})
+        self.assertFalse(self._sync(store, STEM_B, "s2", T0 + 70), "moved once, then idempotent")
+        self._write(STEM_B, "1", "Write the migration script", "completed")
+        self.assertTrue(self._sync(store, STEM_B, "s3", T0 + 90))
+        jd.rollup_status(store, True)
+        nd = store["nodes"][g1]
+        self.assertEqual(nd["agentTask"], {"key": "1", "status": "done", "raw": "completed", "list": STEM_B},
+                         "finishing the to-do after the resume crosses its card off")
+        self.assertEqual([r["kind"] for r in nd["log"] if r.get("src") == "agent"], ["done"])
+        self.assertEqual(store["status"].get(g1), "completed")
+
+    def test_a_lineage_of_several_resumes_is_one_list(self):
+        """Two resumes in a row: the recorded lineage is walked back from the leaf over every hop."""
+        store = fresh_store()
+        self._write(STEM_A, "1", "Write the migration script", "in_progress")
+        self._sync(store, STEM_A, "s0", T0 + 5)
+        g1 = SID + ":g1"
+        self._resume_fork(STEM_A, STEM_B, T0 + 50)
+        self._resume_fork(STEM_B, STEM_C, T0 + 80)
+        self._write(STEM_C, "1", "Write the migration script", "in_progress")
+        self.assertTrue(self._sync(store, STEM_C, "s2", T0 + 90))
+        self.assertEqual(list(store["nodes"]), [g1], "no second card two resumes later")
+        self.assertEqual(store["nodes"][g1]["agentTask"]["list"], STEM_C)
+
+    def test_a_clear_after_a_resume_still_starts_a_new_list(self):
+        """The lineage holds only the resumes the kernel recorded: a /clear out of the resumed file records
+        nothing, so the next conversation's task 1 is a new to-do, and the resumed list's open card stays."""
+        store = fresh_store()
+        self._write(STEM_A, "1", "Write the migration script", "in_progress")
+        self._sync(store, STEM_A, "s0", T0 + 5)
+        g1 = SID + ":g1"
+        self._resume_fork(STEM_A, STEM_B, T0 + 50)
+        self._write(STEM_B, "1", "Write the migration script", "in_progress")
+        self._sync(store, STEM_B, "s2", T0 + 60)
+        before = dict(store["nodes"][g1]["agentTask"])
+        self.assertEqual(before["list"], STEM_B)
+        self._write(STEM_C, "1", "Investigate the flaky login test", "completed")    # the /clear's new list
+        self._write(STEM_C, "2", "Draft the release notes", "in_progress")
+        self.assertTrue(self._sync(store, STEM_C, "s3", T0 + 120))
+        self.assertEqual(store["nodes"][g1]["agentTask"], before, "the next list does not touch the earlier card")
+        self.assertEqual([nd["text"] for nd in self._others(store, g1)], ["Draft the release notes"])
+
+    def test_an_unreadable_states_log_skips_the_pass_loudly(self):
+        """With a mirror from another file on the board, the states log decides whether this list continues
+        that one. When the log exists but cannot be read, the pass is skipped with an error row, never run
+        on a guess that could mint a second card or freeze the first."""
+        store = fresh_store()
+        self._write(STEM_A, "1", "Write the migration script", "in_progress")
+        self._sync(store, STEM_A, "s0", T0 + 5)
+        g1 = SID + ":g1"
+        before = dict(store["nodes"][g1]["agentTask"])
+        (jd.STATESDIR / (SID + ".jsonl")).mkdir(parents=True)  # exists, but does not read as a log
+        self._write(STEM_B, "1", "Write the migration script", "in_progress")
+        prev_errors = jd.ERRORS
+        errlog = Path(self._td.name) / "judge-errors.jsonl"
+        jd.ERRORS = errlog
+        try:
+            self.assertFalse(self._sync(store, STEM_B, "s2", T0 + 60))
+        finally:
+            jd.ERRORS = prev_errors
+        self.assertEqual(list(store["nodes"]), [g1], "nothing minted on a lineage the pass could not read")
+        self.assertEqual(store["nodes"][g1]["agentTask"], before)
+        rows = [json.loads(l) for l in errlog.read_text().splitlines()]
+        self.assertEqual([(r["judge"], r["err"], r["fsid"]) for r in rows], [("planner", "resume-lineage", SID)])
 
 
 class TaskStorePlanReader(unittest.TestCase):

@@ -9118,7 +9118,11 @@ def _sync_declared_plan(store, session, seg_id, seg_t, prompt_uuid=None, ctx=Non
     the store carries the list it came from (agentTask["list"], the leaf stem), and only the current
     list's mirrors answer to its keys; another list's mirror is left exactly as it stands. A mirror from
     before the stamp joins the first list it is reconciled against. The transcript fold (no store dir)
-    has no list of its own and keeps matching every mirror, as it always has."""
+    has no list of its own and keeps matching every mirror, as it always has. Only a /clear starts a
+    new list: a resume that landed on a fresh transcript file continues the same conversation (the
+    kernel records it as a resumeFork row, which the parse stitches and the episode check stands down
+    on), so the files that recorded lineage walks back through are this list too, and a mirror matched
+    from one of them moves forward to the current stem."""
     leaf = session.get("leafFsid") or ""
     try:
         plan = em.task_store_plan(leaf)
@@ -9132,19 +9136,35 @@ def _sync_declared_plan(store, session, seg_id, seg_t, prompt_uuid=None, ctx=Non
         plan = em.declared_plan(session)                    # no store dir → legacy transcript fold
     items = {it["key"]: it for it in plan}
     nodes = store["nodes"]
+    same = {cur}                                        # the stems whose mirrors answer to this list's keys
+    if cur and any((nd.get("agentTask") or {}).get("list") not in (None, "", cur) for nd in nodes.values()):
+        # a mirror from another stem belongs to this list when the recorded resume lineage (resumeFork rows;
+        # a /clear writes none), walked back from the leaf, reaches its stem: at most 16 hops, like the closure
+        links = _resume_links(store.get("rompUuid") or "")
+        if links is None:
+            _log_judge_error("planner", store.get("rompUuid") or "", "resume-lineage",
+                             note="states log unreadable: which earlier to-do lists this one continues is "
+                                  "unknown — plan-sync skipped; re-arms when the log reads again")
+            return False
+        x = cur
+        while x in links and len(same) <= 16:
+            x = links[x]
+            if x in same:
+                break
+            same.add(x)
     has_child, key_nodes = set(), {}                    # key -> [nids]: EVERY holder, not a last-wins pick
     for nid, nd in nodes.items():
         if nd.get("parentId") is not None:
             has_child.add(nd["parentId"])
         at = nd.get("agentTask") or {}
         k = at.get("key")
-        if k is not None and (cur is None or not at.get("list") or at.get("list") == cur):
+        if k is not None and (cur is None or not at.get("list") or at.get("list") in same):
             key_nodes.setdefault(k, []).append(nid)     # another list's mirror is not a holder of this list's key
 
     def _link(key, status, raw, at):
-        """The mirror's agentTask link, keeping the list it belongs to (its own stamp, else this plan's)."""
+        """The mirror's agentTask link: this plan's list, or under the fold the mirror's own stamp."""
         out = {"key": key, "status": status, "raw": raw}
-        lst = at.get("list") or cur
+        lst = cur or at.get("list")
         if lst:
             out["list"] = lst
         return out
@@ -9173,9 +9193,9 @@ def _sync_declared_plan(store, session, seg_id, seg_t, prompt_uuid=None, ctx=Non
         for nid in list(nids):
             nd = nodes[nid]
             at = nd.get("agentTask") or {}
-            if cur and not at.get("list"):                 # a mirror from before the list stamp joins the
-                at = nd["agentTask"] = dict(at, list=cur)   # first list it is reconciled against
-                changed = True
+            if cur and at.get("list") != cur:              # a mirror from before the list stamp joins the first
+                at = nd["agentTask"] = dict(at, list=cur)   # list it is reconciled against; one from a file this
+                changed = True                              # conversation was resumed from follows it forward
             if _is_open(it):
                 if len(nids) > 1 and at.get("status") == "done":
                     continue                            # a DONE twin of a duplicated key: the agent
