@@ -112,6 +112,33 @@ class PickMemory(unittest.TestCase):
         km._set_model_or_park(_BE(), "11111111-2222-3333-4444-555555555555", "claude-sonnet-4-6")
         self.assertEqual(km._model_picks().get("sonnet"), "claude-sonnet-4-6")
 
+    def test_a_comment_threads_version_pick_leaves_the_family_pin_alone(self):
+        # a comment thread's popover statusline sends setModel with the THREAD's sid through this same choke
+        # point. Its pick is the thread's alone (fork()'s rule, and the create dialog's), so it must not re-pin
+        # the version every picker's family row sends. A tab's pick still pins (the control).
+        tab, thread = "5a1b2c3d-0000-4000-8000-00000000b001", "5a1b2c3d-0000-4000-8000-00000000b002"
+
+        class _BE:
+            def __init__(self):
+                self.calls = []
+
+            def set_model(self, sid, value):
+                self.calls.append((sid, value))
+                return True
+
+            def thread_of(self, sid):
+                return tab if sid == thread else ""
+        be = _BE()
+        try:
+            km._set_model_or_park(be, thread, "claude-opus-4-8")
+            self.assertEqual(be.calls, [(thread, "claude-opus-4-8")], "the thread still gets its pick")
+            self.assertEqual(km._model_picks(), {}, "a thread's version pick re-pinned the family")
+            km._set_model_or_park(be, tab, "claude-opus-4-8")
+            self.assertEqual(km._model_picks(), {"opus": "claude-opus-4-8"})
+        finally:
+            for sid in (tab, thread):
+                km._model_switch_pending.pop(sid, None)
+
     def test_a_stale_or_foreign_entry_falls_back_on_read(self):
         (jd.STATE / km.MODEL_PICKS_FILE_NAME).write_text(json.dumps(
             {"opus": "claude-opus-9-9", "sonnet": "claude-opus-4-8", "haiku": "claude-haiku-4-5"}))
