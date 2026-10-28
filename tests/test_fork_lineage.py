@@ -116,6 +116,80 @@ class ForkStampsLineage(unittest.TestCase):
         self.assertEqual(kids[0]["name"], "sidework")
 
 
+class ThreadPicksStayOnTheThread(unittest.TestCase):
+    """A comment thread's model, effort or mode pick (its popover's statusline routes setModel, setEffort and
+    setMode to the THREAD's sid) is the thread's alone, the rule fork() keeps for its own overrides. The setters
+    wrote the shared new-session seed (sdk-defaults.json) for a thread exactly as for a tab, so after a Haiku, low
+    effort, plan mode pick in one side conversation, the next new session opened on Haiku, at low effort and in
+    plan mode. A tab's pick still seeds (the control), and so does a thread's once it is broken out."""
+
+    NEWSID = "99999999-8888-7777-6666-444444444444"
+    SEEDED = ("model", "effort", "mode")
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        (Path(self.td) / "session-hosts").write_text("off")   # a minted state root starts no session host
+        self.claude = tempfile.mkdtemp()
+        os.environ["CLAUDE_CONFIG_DIR"] = self.claude
+        self.be = sb.SdkBackend(Path(self.td), "/bin/true", lambda *a, **k: None)
+        self.be.spawn("web", self.td, sid=PARENT)
+        self.be.fork("thread-x", PARENT, "", sid=THREAD, thread_of=PARENT)
+        self.assertEqual(self.be.thread_of(THREAD), PARENT)
+        self.assertEqual(self._seed(), {"model": None, "effort": None, "mode": None}, "the seed starts empty")
+
+    def tearDown(self):
+        os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        shutil.rmtree(self.td, ignore_errors=True)
+        shutil.rmtree(self.claude, ignore_errors=True)
+
+    def _seed(self):
+        d = sb.read_sdk_defaults(Path(self.td))
+        return {k: d.get(k) for k in self.SEEDED}
+
+    def _new_session(self):
+        self.be.spawn("api", self.td, sid=self.NEWSID)
+        return sb.read_reg(Path(self.td), self.NEWSID)
+
+    def _assert_new_sessions_untouched(self):
+        self.assertEqual(self._seed(), {"model": None, "effort": None, "mode": None},
+                         "a thread's pick became the seed for every new session")
+        reg = self._new_session()
+        self.assertNotIn("model", reg)
+        self.assertEqual(reg.get("effort"), sb.DEFAULT_EFFORT)
+        self.assertEqual(reg.get("mode"), "acceptEdits")
+
+    def test_a_dormant_threads_picks_stay_on_the_thread(self):
+        self.assertTrue(self.be.set_model(THREAD, "haiku"))
+        self.assertTrue(self.be.set_effort(THREAD, "low"))
+        self.assertTrue(self.be.set_mode(THREAD, "plan"))
+        reg = sb.read_reg(Path(self.td), THREAD)
+        self.assertEqual((reg.get("model"), reg.get("effort"), reg.get("mode")), ("haiku", "low", "plan"),
+                         "the picks apply to the thread itself")
+        self._assert_new_sessions_untouched()
+
+    def test_a_live_threads_model_pick_leaves_no_pending_seed_write(self):
+        # the live road writes the seed optimistically under a token until the CLI rules (_seed_write_pending);
+        # a thread's pick takes no token, so its verdict has nothing in the shared store to unwind
+        self.be.sessions[THREAD] = sb.SdkSession(self.be, sb.read_reg(Path(self.td), THREAD))
+        self.assertTrue(self.be.set_model(THREAD, "haiku"))
+        self.assertEqual(sb.read_reg(Path(self.td), THREAD).get("model"), "haiku")
+        self.assertEqual(self.be._seed_writes, {})
+        self._assert_new_sessions_untouched()
+
+    def test_a_tabs_picks_still_seed_new_sessions(self):
+        self.be.set_model(PARENT, "haiku")
+        self.be.set_effort(PARENT, "low")
+        self.be.set_mode(PARENT, "plan")
+        self.assertEqual(self._seed(), {"model": "haiku", "effort": "low", "mode": "plan"})
+        reg = self._new_session()
+        self.assertEqual((reg.get("model"), reg.get("effort"), reg.get("mode")), ("haiku", "low", "plan"))
+
+    def test_a_broken_out_thread_seeds_like_any_session(self):
+        self.assertTrue(self.be.promote_thread(THREAD, "sidework", "#123456", "#ffffff"))
+        self.be.set_effort(THREAD, "low")
+        self.assertEqual(self._seed()["effort"], "low")
+
+
 class BuildSessionLineage(unittest.TestCase):
     """kernel build_session: the divider event, the top-level branch, the parent's branches."""
 

@@ -21343,10 +21343,15 @@ class SdkBackend:
         (_seed_write_pending) until the CLI rules; its refusal unwinds exactly that write by token
         (_seed_write_refused), never a by-value guess. `prev` carries the value written (`picked`) for
         the session layers' compare-and-swap and the token (`tok`) for the store's. A dormant session
-        has no CLI to refuse, and its value applies at the next connect."""
+        has no CLI to refuse, and its value applies at the next connect.
+
+        A comment thread's pick (reg threadOf) writes NO shared seed, live or dormant: it is the thread's
+        alone, fork()'s rule for its overrides, and it used to make every new session open on the model
+        picked for one side conversation. Its `tok` is None, so the verdict has no store write to unwind."""
         reg = read_reg(self.state_dir, sid)
         if not reg:
             return False
+        seeds = not reg.get("threadOf")   # a comment thread's pick never seeds new sessions (see above)
         s = self.sessions.get(sid)
         if s:
             with s._lock:
@@ -21378,8 +21383,9 @@ class SdkBackend:
                 s._fallback_cause = ""        # …and the standing fallback's cause; the served model is learned afresh on the pick
                 s._fallback_category = ""
                 s._served_model = ""
-            # remember as the seed for the NEXT new session (the user 2026-06-27) — pending the CLI's verdict
-            tok = self._seed_write_pending(sid, value)
+            # remember as the seed for the NEXT new session (the user 2026-06-27) — pending the CLI's verdict;
+            # a comment thread's pick is not remembered
+            tok = self._seed_write_pending(sid, value) if seeds else None
             prev = {"picked": value, "tok": tok, "seq": seq, "chain": chain}   # what the layers hold until the CLI rules
             #                                                    (the revert's CAS keys), which pick the CLI's answer is
             #                                                    to (_pick_answered) and the picks in flight before it
@@ -21388,7 +21394,8 @@ class SdkBackend:
             s.set_model_live(None if value in ("", "default") else value, prev=prev)
             s._sub_std_requalify()   # a live pick out of (or into) Subagents at standard speed's conditions relaunches once quiet
         else:
-            write_sdk_default(self.state_dir, model=value)   # the seed for the NEXT new session (the user 2026-06-27)
+            if seeds:
+                write_sdk_default(self.state_dir, model=value)   # the seed for the NEXT new session (the user 2026-06-27)
             # DORMANT (no live thread): no turn is coming to report a real name, so resolve to the chosen
             # alias's best-effort label immediately — never leave the badge on a stale liveModel or trapped
             # on dots. The value applies for real on the next connect (chosen_model → _options).
@@ -21751,11 +21758,13 @@ class SdkBackend:
 
     def set_mode(self, sid: str, mode: str) -> bool:
         """Change the permission mode. Persisted in the registry and applied LIVE via the SDK control
-        channel (set_permission_mode) — not merely stored for the next reconnect."""
-        if not read_reg(self.state_dir, sid):
+        channel (set_permission_mode) — not merely stored for the next reconnect. A comment thread's
+        pick (reg threadOf) stays on the thread and is never remembered, as in set_model."""
+        reg = read_reg(self.state_dir, sid)
+        if not reg:
             return False
         self._update_reg(sid, mode=mode)   # locked RMW — see set_effort's race note
-        if mode not in self.STICKY_MODE_EXCLUDES:
+        if mode not in self.STICKY_MODE_EXCLUDES and not reg.get("threadOf"):
             write_sdk_default(self.state_dir, mode=mode)   # remember as the seed for the NEXT new session, like model/effort (the user 2026-06-27)
         s = self.sessions.get(sid)
         if s:
@@ -21948,8 +21957,10 @@ class SdkBackend:
         # downgrade). The CLI itself cannot persist ultracode as a default (its settings enum stops at
         # xhigh; /effort says "this session only") — but romp's seed is romp's own store, and spawn
         # hands each NEW session its own per-session launch shape (--effort xhigh + the ultracode
-        # settings key), so the CLI's session-scoping is preserved, one session at a time.
-        write_sdk_default(self.state_dir, effort=value)
+        # settings key), so the CLI's session-scoping is preserved, one session at a time. A comment
+        # thread's pick (reg threadOf) stays on the thread and is never remembered, as in set_model.
+        if not reg.get("threadOf"):
+            write_sdk_default(self.state_dir, effort=value)
         s = self.sessions.get(sid)
         if s:
             s.effort = value        # picker label reflects it now; the reconnect makes it real

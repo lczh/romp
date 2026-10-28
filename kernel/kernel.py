@@ -45128,7 +45128,12 @@ def _set_model_or_park(be, sid, value, floating=False):
     if floating and value in _MODEL_VALUES:
         _forget_model_pick(value)
     _mark_model_pending(sid, value)
-    _note_model_pick(value)          # a version pick becomes its family's remembered default (2026-08-25)
+    if _comment_thread_parent(be, sid):
+        # a comment thread's pick is the thread's alone (fork()'s rule, the create dialog's too): it never re-pins the
+        # version a family row sends in every picker. Only the catalog's staleness event, which pins nothing, still fires.
+        _note_unknown_model(value)
+    else:
+        _note_model_pick(value)          # a version pick becomes its family's remembered default (2026-08-25)
     # A model change is NOT connect-time, and on the SDK it is NOT a slash injection: SDKBackend.set_model
     # applies it over the SDK control channel (set_model_live) and never touches the input stream, so the
     # reason _send_or_park parks a typed slash command mid-turn (the CLI only EXECUTES one arriving as a
@@ -45162,6 +45167,13 @@ def _set_model_or_park(be, sid, value, floating=False):
         return _model_park_refused(sid)
     be.set_model(sid, value)
     return False
+
+
+def _comment_thread_parent(be, sid):
+    """The parent sid when `sid` is a comment thread on `be` (its registration's threadOf, the backend's own word),
+    else ''. A backend with no comment threads answers ''."""
+    up = be.thread_of(sid) if hasattr(be, "thread_of") else ""
+    return up if isinstance(up, str) else ""
 
 
 def _model_park_refused(sid):
