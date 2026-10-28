@@ -25961,6 +25961,7 @@ def _set_name(sid, name):
     parts += [""] * (4 - len(parts))
     parts[0] = name
     _atomic_write(NAMES / sid, "\t".join(parts[:4]) + "\n")   # atomic publish
+    jd.discover_namespace_moved()                             # an open discover scope sees the new name at its next call
     return True
 
 
@@ -76070,6 +76071,8 @@ def _pusher_cycle():
     #                                       however deep it hides (_bg_live_norm, _compacting_now,
     #                                       build_feed's per-session gates) — see _live_scope
     try:
+        jd.discover_scope_open()                # …and the cycle's discover scope: one fingerprint for every discover() call
+        #                                         on this thread until the cycle ends (judge.py, at _DISCOVER_EPOCH)
         _live_scope.paths = {}                  # …and the cycle's sid→path memo (_path_of): the parked-op drain
         #                                         otherwise resolves a held sid's path once per gate per cycle
         _live_scope.sessions = {}               # …and the cycle's discover rows (_sessions, keyed (window,
@@ -76108,6 +76111,7 @@ def _pusher_cycle():
         _pusher_cycle_jobs(now, live_map, any_client)
     finally:
         _chat_push_scopes_close()
+        jd.discover_scope_close()
         _live_scope.snapshot = None
         _live_scope.names = None
         _live_scope.paths = None
@@ -77910,6 +77914,7 @@ def _jobs_cycle():
     _gate = _jobs_gate_tick_open(now, live_map)   # the jobs pass's gate (stage one, shadow): this pass observed job by job, at
     #                                               each job's turn in _job_stage; None when the knob (STATE/jobs-gate) is off
     try:
+        jd.discover_scope_open()                # the pass's discover scope: one fingerprint for the pass (judge.py, at _DISCOVER_EPOCH)
         _live_scope.paths = {}
         _live_scope.sessions = {}
         _live_scope.auth = {}
@@ -77926,6 +77931,7 @@ def _jobs_cycle():
             _doc_writer_wake(now, live_map)     # the documents, after every decision of the pass, on the writer's thread
     finally:
         _chat_push_scopes_close()
+        jd.discover_scope_close()
         _live_scope.snapshot = None
         _live_scope.names = None
         _live_scope.paths = None

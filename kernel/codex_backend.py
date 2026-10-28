@@ -60,6 +60,18 @@ _contract = (sys.modules.get("romp_session_backend")
              or load_source("romp_session_backend_keys", HERE / "session_backend.py"))
 echo_text_key = _contract.echo_text_key
 
+
+def _discover_moved():
+    """Tell discover()'s open scopes that this process just published a file its fingerprint signs (a names/ entry, the
+    registry): judge.discover_namespace_moved, through the module the kernel loads the judges as (romp_judge), the same
+    call sdk_backend makes. A process without the judges loaded has no scope to tell."""
+    getattr(sys.modules.get("romp_judge"), "discover_namespace_moved", _no_discover_scope)()
+
+
+def _no_discover_scope():
+    """_discover_moved in a process without the judges loaded: no discover scope to tell."""
+
+
 SDK_PIN = "openai-codex==0.144.4"     # bin/romp-codex-setup installs exactly this into codexvenv
 # The postal tools ride fields this SDK's generated params do not describe (`dynamicTools`; `developerInstructions`
 # it does) and its _params_dict passes a plain dict through unchanged. Live-probed 2026-09-19 on runtime 0.153.3
@@ -997,6 +1009,7 @@ class CodexBackend:
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(tmp, self._reg_path())
+            _discover_moved()              # after the publish: discovery signs this file (judge.discover_namespace_moved)
             try:
                 dfd = os.open(str(self.root), os.O_RDONLY)
                 try:
@@ -2489,6 +2502,7 @@ class CodexBackend:
             try:
                 tmp.write_text("%s\t%s\t%s\t%s\n" % (s.name, s.cwd, bg, fg))
                 os.replace(str(tmp), str(d / s.sid))
+                _discover_moved()             # after the publish (judge.discover_namespace_moved)
             finally:
                 tmp.unlink(missing_ok=True)   # never LEAK the staging file: names consumers
                 #                               read the dir, and a stray .tmp rendered as a

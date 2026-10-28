@@ -2191,6 +2191,19 @@ def last_awaiting(state_dir: Path, sid: str) -> bool | None:
     return val
 
 
+def _discover_moved() -> None:
+    """Tell discover()'s open scopes that this process just published a file its fingerprint signs (a names/ entry, a
+    registration): judge.discover_namespace_moved, reached through the module the kernel loads the judges as
+    (romp_judge), so a scope opened in this process takes its fingerprint again at its next call and a caller that wrote
+    reads its own write. It takes no lock (write_reg runs under a session's lock). A process without the judges loaded
+    (a session host, a CLI) has no scope to tell."""
+    getattr(sys.modules.get("romp_judge"), "discover_namespace_moved", _no_discover_scope)()
+
+
+def _no_discover_scope() -> None:
+    """_discover_moved in a process without the judges loaded: no discover scope to tell."""
+
+
 def write_name(state_dir: Path, sid: str, name: str, cwd: str, bg: str = "", fg: str = "") -> None:
     """Write the shared identity/discovery file `names/<sid>` in the kernel's
     tab-delimited format (name\\tcwd\\tbg\\tfg), so discover() finds the
@@ -2201,6 +2214,7 @@ def write_name(state_dir: Path, sid: str, name: str, cwd: str, bg: str = "", fg:
     try:
         tmp.write_text("\t".join([name, cwd, bg, fg]) + "\n")
         os.replace(tmp, p)
+        _discover_moved()          # after the publish (see judge.discover_namespace_moved)
     finally:
         try:                       # never LEAK the staging file: open() creates it before a write can die
             tmp.unlink()           # (ENOSPC, EROFS), and the names scanners read the dir, so a stray .tmp
@@ -3588,6 +3602,7 @@ def write_reg(state_dir: Path, sid: str, reg: dict) -> None:
         REG_REV[0] += 1                                 # the table moved (after the publish, so a reader that took the revision
         _reg_rows_note(p, reg)                          #  before its read misses on its next check); the rows revision only on a
         #                                                  change to a field the rows read
+        _discover_moved()                               # discover()'s scopes too: a registration carries lastSid and transcriptPath
     finally:
         try:                                        # never leave a stray temp on a failed write
             os.unlink(tmp)

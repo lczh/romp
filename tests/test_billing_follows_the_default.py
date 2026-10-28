@@ -4842,7 +4842,8 @@ class _LockCensus:
         ("sdk_backend", "SdkBackend._end_host_by_lease", "th"): "a threading.Thread",
         ("sdk_backend", "SdkSession.start", "self.thread"): "a threading.Thread",
     }
-    MODCALLS = {("sdk_backend", "_ht()"): "host_transport", ("host_transport", "sb"): "sdk_backend"}
+    MODCALLS = {("sdk_backend", "_ht()"): "host_transport", ("host_transport", "sb"): "sdk_backend",
+                ("sdk_backend", "sys.modules.get('romp_judge')"): "judge"}   # write_reg's discover-scope move (_discover_moved)
     SDK = ("_sdk", "_sdk_locked")   # kernel.py's first-use construction of the backend: a call to either is noted
 
     def __init__(self, kdir):
