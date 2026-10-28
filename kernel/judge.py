@@ -9868,9 +9868,71 @@ _discover_cache = {}     # window seconds → {"fp", "result", "leaves"}: the ca
 #                          picker asks for a wider one than the 48h caption horizon; bounded by the number of
 #                          distinct windows (2).
 _namefp_memo = {}    # names/ entry -> (its mtime, resolved project dir or None) — the fingerprint runs on
-#                      EVERY discover() call, so re-reading each entry every time was the kernel's hottest
-#                      call; keyed on the entry's own mtime, evicted when the entry goes away. Bounded by
-#                      the number of live names/ entries, never by uptime.
+#                      every discover() call outside a scope (and once per scope inside one), so re-reading
+#                      each entry every time was the kernel's hottest call; keyed on the entry's own mtime,
+#                      evicted when the entry goes away. Bounded by the number of live names/ entries, never
+#                      by uptime.
+
+# ── discover scopes: one fingerprint per pusher cycle, jobs pass and judge pass ──────────────────────────────────────
+# The fingerprint is discover()'s validity check, so it ran on every call, a cache hit included: a stat per names/ entry,
+# its project dir, its registration (twice) and its recorded transcript dir. A pusher cycle, a jobs pass and a judge
+# pass each call discover() several times, and almost every call found nothing had changed. A SCOPE is one of those
+# three, each with an exact begin and end event: the pusher cycle and the jobs pass open and close one on their own
+# thread (discover_scope_open / discover_scope_close, from kernel _pusher_cycle and _jobs_cycle), and a judge pass
+# keeps one in its frame (begin_pass_frame), shared by the pass threads that joined it. Inside a scope a discover()
+# call is answered from the cache when the cached list was stored under the scope's fingerprint, the fingerprint is
+# still good for the current epoch, and the call's own window check holds; anything else takes the per-call path
+# below unchanged (a fresh fingerprint, the cache, a walk if needed), and the scope adopts that fresh fingerprint.
+# So a walk is always stored under a fingerprint taken right before it, as before; never under the scope's older one.
+#
+# The EPOCH moves at each of this process's own writes to the namespace the fingerprint signs (discover_namespace_moved,
+# called by every in-process writer right after its publish): a scope's fingerprint is good only for the epoch it was
+# taken at, so a caller that writes and then reads in one scope sees its own write, and so does every other open scope.
+# The epoch is a token, a new object at every write, compared by identity: no two writes share one and no count can
+# come back to an old value, whatever order two writers' moves land in, and moving it takes no lock (a writer may hold a
+# session's lock: sdk_backend.write_reg). A change made by another process (a CLI's names/ entry, a /clear's new
+# transcript, a fork's file) moves no epoch: it is seen at the next scope's first call, one cycle or one pass later at
+# most. Outside every scope nothing changes: each call takes its own fingerprint.
+_DISCOVER_EPOCH = [object()]
+_discover_scope = threading.local()   # .memo: this thread's open scope ({"fp": (epoch, fingerprint)}), None when closed
+
+
+def discover_namespace_moved():
+    """Move the discover epoch: every in-process writer of the namespace _discover_fingerprint signs calls this right
+    AFTER its publish, so every open scope (this thread's or another's, or a pass frame) takes its fingerprint again
+    at its next discover() call. The writers: a names/ entry created or rewritten (sdk_backend.write_name,
+    CodexBackend._write_name, the kernel's _set_name), an SDK registration (sdk_backend.write_reg, which carries every
+    lastSid and transcriptPath), and the Codex registry (CodexBackend._write_registry_locked). After the publish, not
+    before: a fingerprint taken between the two is then taken under the old epoch and dropped at the next call. One
+    store of a new object: no lock (see the block above)."""
+    _DISCOVER_EPOCH[0] = object()
+
+
+def discover_scope_open():
+    """Open this thread's discover scope (the kernel's pusher cycle and jobs pass, each on its own thread): until
+    discover_scope_close, discover() checks its cache against one fingerprint taken at the scope's first call (see the
+    block above). Not nested: an open replaces whatever this thread had open."""
+    _discover_scope.memo = {}
+
+
+def discover_scope_close():
+    """Close this thread's discover scope (a no-op when none is open); the next call outside it takes its own
+    fingerprint again."""
+    _discover_scope.memo = None
+
+
+def _discover_scope_memo():
+    """The scope a discover() call belongs to: this thread's own (discover_scope_open) first, else the pass frame's for a
+    pass thread (the frame's begin is the one event every pass thread joins, so they share its fingerprint as they share
+    its parses), else None (no scope: the call takes its own fingerprint)."""
+    memo = getattr(_discover_scope, "memo", None)
+    if memo is not None:
+        return memo
+    fr = _pass_frame()
+    if fr is None:
+        return None
+    with _frame_lock:
+        return fr.setdefault("discover", {})
 
 
 def _codex_rows(cutoff, seen, leaves=None):
@@ -10061,10 +10123,31 @@ def discover(now, window=None, forks=True):
     the picker just loads its full list up front instead of paging it in (measured 2026-07-24).
 
     Each (window, forks) pair keeps its OWN entry under the same fingerprint, so the picker never
-    invalidates or slows the hot 48h path the judge tiers share."""
+    invalidates or slows the hot 48h path the judge tiers share.
+
+    Inside a scope (a pusher cycle, a jobs pass, a judge pass: the comment block at _DISCOVER_EPOCH) the
+    fingerprint is taken once, at the scope's first call, and again only after an in-process write or when a call
+    misses: a hit answers from the cached list stored under the scope's fingerprint, with this call's own window
+    check. A miss runs the path below as before, so its walk is stored under the fingerprint taken right before it."""
     win = WINDOW if window is None else int(window)
     key = (win, bool(forks))
+    memo = _discover_scope_memo()
+    if memo is not None:
+        ep = _DISCOVER_EPOCH[0]
+        with _discover_lock:
+            held = memo.get("fp")
+            hit = _discover_cache.get(key)
+        if (held is not None and held[0] is ep and hit is not None and hit["result"] is not None
+                and (hit["fp"] is held[1] or hit["fp"] == held[1])
+                and _discover_window_holds(hit.get("leaves", ()), now - win)):
+            return hit["result"]
+    ep = _DISCOVER_EPOCH[0]               # read BEFORE the fingerprint: a write landing during it moves the epoch past ep
     fp = _discover_fingerprint()
+    if memo is not None and fp is not None:
+        with _discover_lock:
+            held = memo.get("fp")
+            if held is None or ep is _DISCOVER_EPOCH[0] or held[0] is not _DISCOVER_EPOCH[0]:
+                memo["fp"] = (ep, fp)     # never over a current one with a stale one (another pass thread's, after a write)
     if fp is not None:
         with _discover_lock:
             hit = _discover_cache.get(key)
