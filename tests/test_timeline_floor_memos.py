@@ -41,6 +41,9 @@ green at the code it covers and red under its own mutant: in MarksMemo a NaN-tim
 NaN build whole, and a cutoff that is not a plain number keeps the filter; in MarksMemo and StatesMemo a sort that
 raises counts nowhere, as the reference says; in Bounds a hit makes an entry the newest in either table;
 BoundEnvironment pins both bounds' environment read; and FrameWalk's clock never moves backward.
+The same-second fix (2026-10-28) changed one rule the reference states: the states log's transitions sort on their
+time alone, so rows that share a second keep the log's order (the reference's sort carries the same key), and
+SameSecondOrder pins it on both of the sort's roads and on the lanes a build sends; it is red before the fix.
 Synthetic data only: placeholder uuids, the notes-api demo names, invented captions."""
 import contextlib
 import copy
@@ -102,7 +105,7 @@ def ref_judging_assemble(cap_marks, other_marks, t0, out, stamp=False):
 def ref_state_intervals(sid, want, now):
     want = {want} if isinstance(want, str) else set(want)
     ev = sorted(km._fold_records(km._state_ev_cache, km.jd.STATE / "states" / (sid + ".jsonl"), list, km._state_ev_step,
-                                 ckpt="stateIntervals"))
+                                 ckpt="stateIntervals"), key=lambda e: e[0])   # time only: a tie keeps the log's order
     cutoff, out = now - km.TL_HORIZON, []
     for i, (t, st) in enumerate(ev):
         if st not in want:
@@ -899,7 +902,8 @@ class FrameWalk(_Lanes):
             elif op == "ivedge":                  # the horizon exactly on the end of a wanted state's interval
                 ends = []
                 for s in self.present:
-                    ev = sorted((r["t"], r["state"]) for r in self.states[s] if r.get("t") and r.get("state"))
+                    ev = sorted(((r["t"], r["state"]) for r in self.states[s] if r.get("t") and r.get("state")),
+                                key=lambda e: e[0])
                     ends.extend(ev[j + 1][0] for j in range(len(ev) - 1) if ev[j][1] in wanted)
                 ends = [e for e in ends if e + km.TL_HORIZON >= self.now]
                 if ends:
@@ -920,6 +924,53 @@ class FrameWalk(_Lanes):
                     self.live.add(API)
             self.assertGreaterEqual(self.now, clock, "step %d (%s): the clock moved backward" % (i, op))
             tl = self.check(i, op)
+
+
+# ── SameSecondOrder ──────────────────────────────────────────────────────────────────────────────────────────────
+class SameSecondOrder(_Lanes):
+    """The backend stamps the states log in whole seconds, so the 'working' row written when one prompt is answered and
+    the next prompt's row (or a compaction's) often share a second. Those rows keep the log's order. A sort on the whole
+    (time, state) row ordered them by state name and put 'working' last, so a lane stopped on that prompt right now
+    carried a zero-width closed band and no open one, while the session's own state read the prompt."""
+
+    def log(self, sid, pairs):
+        rows = [srow(t, st) for t, st in pairs]
+        self.states[sid].extend(rows)
+        self.append(self.states_path(sid), rows)
+
+    def lane(self, sid):
+        return next(l for l in self.build()["sessions"] if l["id"] == sid)
+
+    def test_a_prompt_in_the_same_second_as_working_stays_open_on_the_lane(self):
+        t = self.now - 50
+        self.log(WEB, [(t, "working"), (t, "permission")])
+        self.log(API, [(t, "working"), (t, "picker")])
+        for sid, st in ((WEB, "permission"), (API, "picker")):
+            self.assertEqual(km._last_state(sid), (st, t), "(the premise) the log's newest row is the prompt")
+            self.assertEqual(self.lane(sid)["awaiting"], [[t, self.now, True]], st)
+
+    def test_a_compaction_in_the_same_second_as_working_stays_open_on_the_lane(self):
+        t = self.now - 50
+        self.log(WEB, [(t, "working"), (t, "compacting")])
+        self.assertEqual(self.lane(WEB)["compacting"], [[t, self.now, True]])
+
+    def test_a_second_prompt_in_history_keeps_its_width(self):
+        t = self.now - 50
+        self.log(WEB, [(t - 40, "permission"), (t - 30, "working"), (t - 30, "permission"), (t, "working")])
+        self.assertEqual(self.lane(WEB)["awaiting"], [[t - 40, t - 30], [t - 30, t]])
+
+    def test_the_unheld_sort_keeps_the_order_too(self):
+        # a last row without its newline is folded provisionally, and that answer is sorted without being held
+        t = self.now - 50
+        self.append(self.states_path(WEB), [srow(t, "working")], tail=json.dumps(srow(t, "permission")))
+        self.assertEqual(km._state_intervals(WEB, km._NEEDS_INPUT_STATES, self.now), [[t, self.now, True]])
+        self.assertEqual(self.stats("_STATE_IV_STATS")["uncached"], 1, "(the premise) the unheld road")
+
+    def test_a_log_the_bisection_cannot_order_walks_in_the_same_order(self):
+        t = self.now - 50
+        self.log(WEB, [(t - 10, 7), (t, "working"), (t, "permission")])   # a state that is not a string: the walk
+        self.assertIs(km._state_ev_sorted(WEB, self.states_path(WEB))[3], False, "(the premise) the walk's road")
+        self.assertEqual(km._state_intervals(WEB, km._NEEDS_INPUT_STATES, self.now), [[t, self.now, True]])
 
 
 # ── Bounds ───────────────────────────────────────────────────────────────────────────────────────────────────────
