@@ -3401,7 +3401,7 @@ _PLANNER_STATS = {"skipped": 0, "planned": 0, "recorded": 0, "restored": 0, "ref
 _PLANNER_SEEN_FILE = "planner-seen.json"   # STATE/planner-seen.json: {"v": 1, "derivation": [<_PLANNER_SEEN_DERIVATION_V>, <PLACEMENTS_V>],
 #                                                                  "rows": {fsid: <the normalized plan key>}}
 _PLANNER_SEEN_V = 1                        # the DOCUMENT's shape (a reader of another shape loads nothing)
-_PLANNER_SEEN_DERIVATION_V = 2             # the PLANNER's derivation under which a row means "nothing to do": a persisted row asserts
+_PLANNER_SEEN_DERIVATION_V = 3             # the PLANNER's derivation under which a row means "nothing to do": a persisted row asserts
 #                                            that under the code that wrote it, and before T401 (5c) every restart discarded the
 #                                            assertion; now a file whose derivation pair differs from the running code's is refused
 #                                            whole (every row counted refused), so the first pass after the change plans every
@@ -3415,6 +3415,9 @@ _PLANNER_SEEN_DERIVATION_V = 2             # the PLANNER's derivation under whic
 #                                            v1 = the memo's first persisted shape (2026-09-14); v2 = the reg (index 5) and the stall
 #                                            slice (index 10) keyed by value instead of by stat, since both files are rewritten at
 #                                            every boot and no v1 row stood across one (2026-09-14, the second deploy boot's read).
+#                                            v3 = the floor-title heal also accepts the quote's opening words (a card titled from a
+#                                            multi-line message's short first line), so a session that had nothing to do under v2 can
+#                                            have a heal now (2026-10-29).
 _PLANNER_SEEN_LOCK = threading.Lock()
 _PLANNER_SEEN_DIRTY = [False]
 _PLANNER_SEEN_LOADED = [False]
@@ -11131,14 +11134,22 @@ def _heal_floor_titles(fsid, store):
     No age limit, deliberately (the user 2026-07-27: damage heals whenever the missing piece shows
     up; only a cleared card is past caring — and a cleared node is skipped here). Recognized by the
     coerce diary why (_COERCE_WHY, stamped on every coerced node) so pre-heal stores qualify with no
-    migration, and gated on the node STILL wearing its floor label (text == _seg_label(quote)) — a
-    planner retitle, or this heal itself, closes the gate for good. Returns the number healed."""
+    migration, and gated on the node STILL wearing its floor label — a planner retitle, or this heal
+    itself, closes the gate for good. The floor labels from the unit text's FIRST line while the quote
+    flattens the whole message, so the label is _seg_label(quote) only when that first line runs past
+    ten words; a shorter one ('Hey,' above 'Can you fix the flaky export test?') labels as the quote's
+    opening words, which the gate also accepts — before, such a card kept 'Hey,' after the gist landed.
+    Widening this gate bumps _PLANNER_SEEN_DERIVATION_V (v3): this heal runs below the planner's skip, so
+    an idle session's persisted nothing-to-do row would otherwise keep the pass, and the heal, away from
+    a card whose gist landed before the change. Returns the number healed."""
     n = 0
     for nd in store.get("nodes", {}).values():
         if nd.get("cleared") or nd.get("why") != _COERCE_WHY:
             continue
         q = (nd.get("quote") or "").strip()
-        if not q or (nd.get("text") or "") != _seg_label(q):
+        t = nd.get("text") or ""
+        w = t.split()
+        if not q or (t != _seg_label(q) and not (0 < len(w) <= 10 and q.split()[:len(w)] == w)):
             continue
         seg = (nd.get("trail") or [""])[0]              # trail[0] = the minting segment (append-only)
         gist = _prompt_gist(fsid, seg) if seg else ""

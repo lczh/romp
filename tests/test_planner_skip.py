@@ -15,7 +15,9 @@ session; the expiry term holds while a launch is inside its ceiling, and for a l
 however far the clock runs; the settle reads the wall clock when no pass clock is handed in; a write landing
 during the pass is seen next pass; three sessions with one moved leave placements and nodes byte-identical to
 the ungated passes (two fresh worlds); a parse the cache does not hold is never skipped, nor is an expiry view
-that cannot be computed; a pass that stood down is planned again, not recorded; a rebound root forgets; the counters.
+that cannot be computed; a pass that stood down is planned again, not recorded; a rebound root forgets; the counters;
+and a row written before the floor-title heal widened (derivation 2) is refused, so a card floor-titled from a
+multi-line message whose gist had already landed heals on the first pass after the change.
 
 Synthetic sids and text; a temp state root, a temp Claude config root for the task store; the planner's model
 calls are stubs, deterministic, so two worlds agree byte for byte."""
@@ -590,6 +592,37 @@ class PlannerSkip(_World):
                 self.assertEqual(self.run_pass()[0:2], (1, 2), "A planned every pass, never skipped")
         finally:
             jd.em.scan_bg_tasks_cached = real
+
+
+class FloorTitleHealAfterTheDerivationBump(_World):
+    """A card floor-titled from a multi-line message's short first line, whose gist landed before the floor-title heal
+    learned to recognize it (2026-10-29). Its idle session's last pass under the old code had nothing to do, so a row
+    stands for it on disk, and the skip returns ahead of the heal: unless the running code refuses rows written under
+    the old derivation, the widened heal never reaches the card and it keeps 'Hey,' until something else moves."""
+    PROMPTS = dict(_World.PROMPTS, **{C: "Hey,\nfix the mobile tab width please"})
+    reboot = PlannerSkip.reboot
+
+    def test_a_row_written_before_the_widened_heal_does_not_keep_the_heal_away(self):
+        stub = jd.plan_llm
+        jd.plan_llm = (lambda text, *a, **kw:
+                       '{"ops":[{"do":"skip","why":"nothing to file"}]}' if self.PROMPTS[C] in text else stub(text, *a, **kw))
+        # The code before the widening, as this world sees it: its gate compared 'Hey,' with the label of the flattened
+        # quote, never matched, and healed nothing; it wrote its rows under derivation 2.
+        with mock.patch.object(jd, "_heal_floor_titles", lambda fsid, store: 0), \
+                mock.patch.object(jd, "_PLANNER_SEEN_DERIVATION_V", 2):
+            self.settle()
+            floor = [n for n in self.stores()[C]["nodes"].values() if n.get("why") == jd._COERCE_WHY]
+            self.assertEqual([n["text"] for n in floor], ["Hey,"], "C's two-line message is on the floor, titled by its first line")
+            nd = floor[0]
+            jd.append_caption(C, nd["trail"][0] + "#p", "prompt", NOW, "Fix the mobile tab width")
+            self.settle()
+            self.reboot()
+        self.assertEqual(self.stores()[C]["nodes"][nd["id"]]["text"], "Hey,", "precondition: the gist landed and the old code left the title")
+        self.assertEqual(self.run_pass()[0:2], (3, 0), "the rows written under derivation 2 are refused: every session planned once")
+        self.assertEqual(jd.planner_skip_stats()["refused"], 3)
+        self.assertEqual(self.stores()[C]["nodes"][nd["id"]]["text"], "Fix the mobile tab width", "and the widened heal retitles the card")
+        self.settle(); self.reboot()
+        self.assertEqual(self.run_pass(), (0, 3, 0), "rewritten under the running derivation: the rows stand again")
 
 
 if __name__ == "__main__":
