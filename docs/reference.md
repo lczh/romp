@@ -6420,6 +6420,14 @@ carry and restart metrics count. The crossing is the event: nothing repeats
 while the rate stays high. Once the rate falls under half the ceiling a
 `spend.ceiling.cleared` row and a toast say so, and the guard is armed again.
 
+Comment threads are checked the same way, though they have no tab: every
+running thread is read beside the live sessions, its rate from its own
+transcript and the agents it fanned out. A thread's transcript opens with the
+history it was forked from, under that history's original times, so its window
+starts no earlier than the fork, and the session it was opened on is not billed
+twice. A thread over the ceiling is stopped and told like any session, and the
+toast and the row name the thread.
+
 In the session's chat, a stop the guard made reads as the guard's: the
 interrupt row says "stopped by the spend guard at $X an hour", with the
 ceiling in its tooltip. The message the session was handed is its own romp
