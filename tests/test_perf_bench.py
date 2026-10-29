@@ -579,15 +579,16 @@ class PerfBench(unittest.TestCase):
         self.assertIn("jd._proj_dir (cwd-map)", out["neutralized"], "the report says the derivation is wrapped")
         self.assertEqual(_tree_hash(state), before, "the map rewrites nothing in the copy")
         self.assertEqual(out["spawn_attempts"], [], "the git queries against the redacted cwd failed quietly, no tripwire")
-        # the count is read when the run ends, so the builders' transcript-path derivations are in it: one
-        # more benched session is more hits, where a count taken at discovery (which does not depend on
-        # --sessions) would be the same for both runs
+        # the count is read when the run ends. Since the stamp path is memoized per registry identity, the
+        # builders' transcript-path derivations for a session discovery already resolved are memo hits, so
+        # benching one more session need not add hits; the whole run must still count at least as many as
+        # the one-session run, and both must count some
         r = run_tool(base + ["--sessions", "1"] + maps)
         self._ok(r)
         with open(out_json) as f:
             hits_one = json.load(f)["cwd_map"][1]["hits"]
         self.assertGreater(hits_one, 0)
-        self.assertGreater(out["cwd_map"][1]["hits"], hits_one, "the hits cover the whole run, not the discovery stage alone")
+        self.assertGreaterEqual(out["cwd_map"][1]["hits"], hits_one, "the hits cover the whole run, never fewer than a smaller run's")
 
     def test_an_exception_out_of_the_candidate_kernel_still_prints_the_census(self):
         # a --repo whose kernel raises at import (a broken candidate checkout) is not a BenchError. Left to
