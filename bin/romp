@@ -226,6 +226,43 @@ _romp_sessions_get() {
     esac
 }
 
+# POST the JSON body $4 to the kernel's path $3 for command $1 (curl's -m cap $2) and print the answer for the caller to
+# read ok:true or a refusal from. Never `curl -sf` (the `romp tag` precedent, _tag_curl): -f folds every non-2xx into
+# the exit a dead kernel gets and throws the body away, so a kernel that ANSWERED a 400 with its reason (`romp login add`
+# with a --cmd that carries the credential itself, the warning to rotate it included, or `romp watch-pr` with a repo that
+# is not owner/name) read as "kernel not reachable", and the person was sent to restart a kernel that was up. The status
+# rides the reply's last line (-w): a 2xx body, and a non-2xx JSON refusal carrying `error` (the {ok: false, error} shape
+# of the kernel's 200 refusals), go to stdout with 0, so the caller says both refusals the same way; a refused serve token
+# is named; any other answer prints its status and the first 2 KB of its body and returns 1; only a reply that never came
+# is "not reachable". The body reaches python on stdin, never argv (an argument is capped at 128 KB).
+_romp_post() {   # _romp_post <cmd> <max-time> <path> <json body>
+    local _cmd="$1" _kport="$(_romp_kport)" _raw _code _body _shown _more
+    _raw="$(_romp_token_cfg | curl -s -m "$2" --config - -w '\n%{http_code}' -X POST "http://127.0.0.1:$_kport$3" \
+                -H 'Content-Type: application/json' -d "$4")" \
+        || { echo "$_cmd: kernel not reachable on :$_kport (is romp running?)" >&2; return 1; }
+    _code="${_raw##*$'\n'}"
+    _body="${_raw%$'\n'*}"
+    case "$_code" in
+        2??) printf '%s' "$_body"; return 0 ;;
+        401|403) echo "$_cmd: the kernel on :$_kport refused the serve token (HTTP $_code): a stale ROMP_SERVE_TOKEN, or a state dir that is not this kernel's" >&2
+                 return 1 ;;
+    esac
+    if printf '%s' "$_body" | python3 -c 'import json, sys
+v = json.load(sys.stdin)
+sys.exit(0 if isinstance(v, dict) and v.get("ok") is not True and v.get("error") else 1)' 2>/dev/null; then
+        printf '%s' "$_body"; return 0
+    fi
+    if [[ -n "$_body" ]]; then
+        _shown="$(printf '%s' "$_body" | head -c 2048)"
+        _more=$(( $(printf '%s' "$_body" | wc -c) - 2048 ))
+        [[ $_more -gt 0 ]] && _shown+=" ... ($_more more bytes)"
+        echo "$_cmd: the kernel on :$_kport answered HTTP $_code: $_shown" >&2
+    else
+        echo "$_cmd: the kernel on :$_kport answered HTTP $_code with no explanation" >&2
+    fi
+    return 1
+}
+
 # The romp state root: the marker `romp down` leaves lives here (down-by-romp: {t, cmd}), read by
 # `romp status` and `romp up`, by romp-service status, and by romp-manager's ensure and up.
 _romp_state_dir() { printf '%s' "${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}"; }
@@ -1130,9 +1167,7 @@ for r in rows:
     exit 0
     fi
     if [[ -n "$_w_cancel" ]]; then
-        _resp="$(_romp_token_cfg | curl -sf -m 15 --config - -X POST "http://127.0.0.1:$_kport/watch" \
-                     -H 'Content-Type: application/json' -d "{\"cancel\": \"$_w_cancel\"}")" \
-            || { echo "romp watch: kernel not reachable on :$_kport" >&2; exit 1; }
+        _resp="$(_romp_post "romp watch" 15 /watch "{\"cancel\": \"$_w_cancel\"}")" || exit 1
         [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]] \
             && { echo "romp watch: cancelled $_w_cancel"; exit 0; }
         echo "romp watch: refused — $_resp" >&2; exit 1
@@ -1153,9 +1188,7 @@ if sys.argv[4]: b["every"] = int(sys.argv[4])
 if sys.argv[5]: b["timeoutS"] = int(sys.argv[5])
 if sys.argv[6]: b["note"] = sys.argv[6]
 print(json.dumps(b))' "$_w_cmd" "$_w_key" "$_w_who" "$_w_every" "$_w_timeout" "$_w_note")"
-    _resp="$(_romp_token_cfg | curl -sf -m 15 --config - -X POST "http://127.0.0.1:$_kport/watch" \
-                  -H 'Content-Type: application/json' -d "$_payload")" \
-        || { echo "romp watch: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+    _resp="$(_romp_post "romp watch" 15 /watch "$_payload")" || exit 1
     if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
         _wid="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["watch"]["id"])' "$_resp" 2>/dev/null || true)"
         echo "romp watch: registered${_wid:+ ($_wid)} — one mail here when the condition holds or the timeout passes"
@@ -1389,7 +1422,6 @@ if [[ "${1:-}" == "card" ]]; then
     if [[ -n "$_c_sess" && $_c_nosess -eq 1 ]]; then echo "$_c_usage" >&2; exit 2; fi   # a session and --no-session name two homes
     if [[ -n "$_c_bodyfile" ]]; then _c_body="$(cat "$_c_bodyfile")"; fi
     _tok="$(_romp_token)"
-    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp card: the kernel isn't running (no serve token). Start romp first." >&2
         exit 1
@@ -1412,9 +1444,7 @@ if sys.argv[9]: b["expiresAt"] = int(time.time()) + int(sys.argv[9])
 if sys.argv[10]: b["board"] = sys.argv[10]
 if sys.argv[11]: b["category"] = sys.argv[11]
 print(json.dumps(b))' "$_c_key_name" "$_c_who" "$_c_key" "$_c_title" "$_c_body" "$_c_attach" "$_c_needs" "$_c_prod" "$_c_expires" "$_c_board" "$_c_cat")"
-    _resp="$(_romp_token_cfg | curl -sf -m 15 --config - -X POST "http://127.0.0.1:$_kport/notice" \
-                  -H 'Content-Type: application/json' -d "$_payload")" \
-        || { echo "romp card: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+    _resp="$(_romp_post "romp card" 15 /notice "$_payload")" || exit 1
     if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
         _crev="$(python3 -c 'import json,sys; n = json.loads(sys.argv[1]).get("notice") or {}; print(n.get("rev") or "")' "$_resp" 2>/dev/null || true)"
         _cwhere="on the feed"; [[ -z "$_c_who" ]] && _cwhere="at the top of the feed (no session)"
@@ -1499,9 +1529,7 @@ for r in rows:
             _payload="$(python3 -c 'import json, sys
 b = {"add": {"label": sys.argv[1], "tokenCmd": sys.argv[2]}}
 print(json.dumps(b))' "$_lg_label" "$_lg_cmd")"
-            _resp="$(_romp_token_cfg | curl -sf -m 15 --config - -X POST "http://127.0.0.1:$_kport/logins" \
-                          -H 'Content-Type: application/json' -d "$_payload")" \
-                || { echo "romp login: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+            _resp="$(_romp_post "romp login" 15 /logins "$_payload")" || exit 1
             if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
                 echo "romp login: added '$_lg_label'; it is now a Billing choice for new and running sessions"
                 exit 0
@@ -1513,9 +1541,7 @@ print(json.dumps(b))' "$_lg_label" "$_lg_cmd")"
             [[ $# -ne 1 || -z "$1" || "$1" == -* ]] && { echo "$_lg_usage" >&2; exit 2; }
             if [[ -z "$_tok" ]]; then echo "romp login: the kernel isn't running (no serve token). Start romp first." >&2; exit 1; fi
             _payload="$(python3 -c 'import json, sys; print(json.dumps({"remove": sys.argv[1]}))' "$1")"
-            _resp="$(_romp_token_cfg | curl -sf -m 15 --config - -X POST "http://127.0.0.1:$_kport/logins" \
-                          -H 'Content-Type: application/json' -d "$_payload")" \
-                || { echo "romp login: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+            _resp="$(_romp_post "romp login" 15 /logins "$_payload")" || exit 1
             if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
                 echo "romp login: removed $1"
                 exit 0
@@ -1549,9 +1575,7 @@ if sys.argv[3]:
 print(json.dumps(b))' "$_lg_ref" "$_lg_host" "$_lg_on")"
             # the kernel asks <host>'s kernel for its sign-in, and with --on the login's kernel to record it (bounded calls
             # of its own), so this waits a little longer
-            _resp="$(_romp_token_cfg | curl -sf -m 25 --config - -X POST "http://127.0.0.1:$_kport/logins" \
-                          -H 'Content-Type: application/json' -d "$_payload")" \
-                || { echo "romp login: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+            _resp="$(_romp_post "romp login" 25 /logins "$_payload")" || exit 1
             if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
                 python3 -c 'import json, sys
 d = json.loads(sys.argv[1])
@@ -1583,9 +1607,7 @@ b = {"unlink": sys.argv[1]}
 if sys.argv[2]:
     b["on"] = sys.argv[2]
 print(json.dumps(b))' "$_lg_ref" "$_lg_on")"
-            _resp="$(_romp_token_cfg | curl -sf -m 20 --config - -X POST "http://127.0.0.1:$_kport/logins" \
-                          -H 'Content-Type: application/json' -d "$_payload")" \
-                || { echo "romp login: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+            _resp="$(_romp_post "romp login" 20 /logins "$_payload")" || exit 1
             if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
                 echo "romp login: unlinked $_lg_ref${_lg_on:+ on $_lg_on}; it reads as its own record again"
                 exit 0
@@ -1632,7 +1654,6 @@ if [[ "${1:-}" == "watch-pr" ]]; then
         _wp_who="$ROMP_SID"
     fi
     _tok="$(_romp_token)"
-    _kport="$(_romp_kport)"
     if [[ -z "$_tok" ]]; then
         echo "romp watch-pr: the kernel isn't running (no serve token). Start romp first." >&2
         exit 1
@@ -1643,9 +1664,7 @@ b = {"pr": int(sys.argv[1]), "repo": sys.argv[2], sys.argv[3]: sys.argv[4]}
 if len(sys.argv) > 5 and sys.argv[5]: b["escalate"] = sys.argv[5]
 print(json.dumps(b))' \
         "$_wp_pr" "$_wp_repo" "$_wp_key" "$_wp_who" "$_wp_esc")"
-    _resp="$(_romp_token_cfg | curl -sf -m 15 --config - -X POST "http://127.0.0.1:$_kport/watch-pr" \
-                  -H 'Content-Type: application/json' -d "$_payload")" \
-        || { echo "romp watch-pr: kernel not reachable on :$_kport (is romp running?)" >&2; exit 1; }
+    _resp="$(_romp_post "romp watch-pr" 15 /watch-pr "$_payload")" || exit 1
     if [[ "$_resp" == *'"ok": true'* || "$_resp" == *'"ok":true'* ]]; then
         echo "romp watch-pr: watching $_wp_repo#$_wp_pr — one mail here when it lands or fails"
         exit 0
