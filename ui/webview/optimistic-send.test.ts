@@ -258,8 +258,8 @@ test("the echo renders dragged-image THUMBNAILS — composer → provisional →
   // the user 2026-08-25: the composer showed the thumbnail, the provisional dropped to path-only
   // text, the landing brought the thumbnail back — a flash in the middle. The echo now carries the
   // send's image paths and renders them through the LANDED form's own component (userImage with the
-  // exact "path:" shape), so buildPathImg's (sid,path)-keyed cache serves the landed bubble the same
-  // bytes and the reconcile swap never re-fetches or flickers.
+  // exact "path:" shape), so the echo's picture stands in for the landed bubble while that one asks
+  // for its own pinned bytes, and the reconcile swap never flickers (pathimg-pin.test.ts runs it).
   assert.match(RENDER, /if \(t\.imgPaths && t\.imgPaths\.length\) \{\s*\n\s*for \(const ip of t\.imgPaths\) bubble\.appendChild\(userImage\(\{ src: "path:" \+ ip, path: ip \}, true\)\);/);
   // the paths ride the send at every register site (deliver, staged flush, the provisional hold)
   assert.match(RENDER, /flushStaged\(sid, \{ text, cites, imgPaths: attached\.filter\(\(p\) => previewKind\(p\) === "img"\), paths: attached \}\);/);

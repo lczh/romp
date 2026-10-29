@@ -103,7 +103,7 @@ test("a failed preview heals on the next kernel push (a link failure: on the rec
 
 test("the chat uses the FULL render on web, and the host data-URL flow for images in VS Code", () => {
   // a link to a video file renders its still there too (previewVideoUrl, 2026-10-21); a path goes through previewFull
-  assert.match(RENDER, /const full = videoLinks\.has\(p\) \? previewVideoUrl\(p\)\s*\n\s*: canPreview\(\) \? previewFull\(p, renderingOwnerSid \?\? activeId, kernelVerified\.has\(p\), \(pathPins \|\| \{\}\)\[p\]\)\s*\n\s*: previewKind\(p\) === "img" \? buildPathImg\(p, renderingOwnerSid \?\? activeId\) : null;/);
+  assert.match(RENDER, /const full = videoLinks\.has\(p\) \? previewVideoUrl\(p\)\s*\n\s*: canPreview\(\) \? previewFull\(p, renderingOwnerSid \?\? activeId, kernelVerified\.has\(p\), \(pathPins \|\| \{\}\)\[p\]\)\s*\n\s*: previewKind\(p\) === "img" \? buildPathImg\(p, renderingOwnerSid \?\? activeId, \(pathPins \|\| \{\}\)\[p\]\) : null;/);
   assert.doesNotMatch(RENDER, /previewThumb/, "the chat no longer renders mention thumbnails — full renders now");
 });
 
@@ -120,7 +120,7 @@ test("figures render AT their mention: after the block naming them; same-block f
 });
 
 test("VS Code's pending image chip pulses while the host round-trip is in flight; a failed one doesn't", () => {
-  assert.match(RENDER, /"user-img-path" \+ \(imgFailed\.has\(imgKey\(sid, p\)\) \? "" : " img-pending"\)/);
+  assert.match(RENDER, /"user-img-path" \+ \(imgFailed\.has\(k\) \? "" : " img-pending"\)/);
   assert.match(CSS, /\.user-img-path\.img-pending::after \{ content: " ···";/);
   assert.match(CSS, /prefers-reduced-motion: reduce\) \{ \.user-img-path\.img-pending::after \{ animation: none;/);
 });
@@ -128,8 +128,9 @@ test("VS Code's pending image chip pulses while the host round-trip is in flight
 test("imgRequest carries the OWNING session id so relative paths resolve against that session's cwd", () => {
   // the caller-passed sid, never activeId: a background prebuild renders hidden tabs while another
   // session is active, and baking activeId asked the wrong session (often the wrong HOST) for the bytes
-  assert.match(RENDER, /vscodeApi\.postMessage\(\{ type: "imgRequest", path: p, id: sid \}\);/);
-  assert.match(KERNEL, /_img_data_url\(_resolve_open_path\(p, msg\.get\("id"\)\)\)/);
+  assert.match(RENDER, /vscodeApi\.postMessage\(\{ type: "imgRequest", path: p, id: sid, pin: pin \|\| "" \}\);/);
+  assert.match(KERNEL, /"url": _img_request_url\(p, msg\.get\("id"\), pin\)\}\)/);
+  assert.match(KERNEL, /return _img_data_url\(_resolve_open_path\(p, sid\)\)/);
 });
 
 test("full-size images wear the user-image scale — one size per information type", () => {

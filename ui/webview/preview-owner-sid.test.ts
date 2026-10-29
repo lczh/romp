@@ -37,11 +37,11 @@ test("every render entry point sets the owner (and the out-of-sync ones restore 
 test("the baked URLs and host image asks carry the owner, never the active tab", () => {
   // the inline figure family: previewFull (web <img>/PDF card, retry closures) + buildPathImg (VS Code)
   assert.match(RENDER, /previewFull\(p, renderingOwnerSid \?\? activeId, kernelVerified\.has\(p\)/);
-  assert.match(RENDER, /buildPathImg\(p, renderingOwnerSid \?\? activeId\)/);
+  assert.match(RENDER, /buildPathImg\(p, renderingOwnerSid \?\? activeId, \(pathPins \|\| \{\}\)\[p\]\)/);
   // user-turn path images ride the same owner
-  assert.match(RENDER, /buildPathImg\(im\.src\.slice\(5\), renderingOwnerSid \?\? activeId\)/);
+  assert.match(RENDER, /buildPathImg\(im\.src\.slice\(5\), renderingOwnerSid \?\? activeId, pin\)/);
   // buildPathImg itself sends the sid it was handed
-  assert.match(RENDER, /vscodeApi\.postMessage\(\{ type: "imgRequest", path: p, id: sid \}\);/);
+  assert.match(RENDER, /vscodeApi\.postMessage\(\{ type: "imgRequest", path: p, id: sid, pin: pin \|\| "" \}\);/);
   // …and the reconnect heal re-asks for the OWNING session, read off the chip's own minted sid
   assert.match(RENDER, /const own = e\.dataset\.imgsid \|\| activeId;/);
 });
@@ -50,8 +50,9 @@ test("the whole imgRequest ride is keyed by (session, path), never the bare path
   // the same relative path string in two sessions names two different files (each cwd its own): a
   // bare-path cache let the FIRST asker's answer fill every session's chips, and a first-ask failure
   // parked them all (the adversarial review of this fix, 2026-08-24)
-  assert.match(RENDER, /const imgKey = \(sid: string \| null, p: string\): string => \(sid \|\| ""\) \+ "\\u0000" \+ p;/);
-  assert.match(RENDER, /const imgUrlCache = new Map<string, string>\(\); {3}\/\/ \(sid,path\) → dataURL/);
+  // (and by the message's pin since 2026-10-29: pathimg-pin.test.ts)
+  assert.match(RENDER, /const imgKey = \(sid: string \| null, p: string, pin\?: string \| null\): string => \(sid \|\| ""\) \+ "\\u0000" \+ p \+ \(pin \? "\\u0000" \+ pin : ""\);/);
+  assert.match(RENDER, /const imgUrlCache = new Map<string, string>\(\); {3}\/\/ \(sid,path,pin\) → dataURL/);
   assert.match(RENDER, /wrap\.dataset\.imgsid = sid \|\| "";/);
   // …and the kernel echoes the asking session on the reply, so answers land only on their session's chips
   const KERNEL = fs.readFileSync(path.resolve(process.cwd(), "..", "kernel", "kernel.py"), "utf8");

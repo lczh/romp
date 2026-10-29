@@ -55,9 +55,9 @@ test("a pasted image's path is skipped by the strip while other mentioned images
 test("the image CAPTION (🖼 path ⧉) is skipped when the path is already in the message text (the user 2026-07-15)", () => {
   // userImage takes pathInText and only adds the caption when the path ISN'T already a link in the bubble;
   // the bubble computes it from ev.md so a dropped screenshot (path inserted into the text) shows the path once.
-  assert.match(RENDER, /function userImage\(im: \{ src: string; path\?: string \}, pathInText = false\): HTMLElement/);
+  assert.match(RENDER, /function userImage\(im: \{ src: string; path\?: string \}, pathInText = false, pin\?: string\): HTMLElement/);
   assert.match(RENDER, /if \(im\.path && !pathInText\) fig\.appendChild\(imgCaption\(im\.path\)\);/);
-  assert.match(RENDER, /userImage\(im, !!\(im\.path && mdText\.includes\(im\.path\)\)\)/);
+  assert.match(RENDER, /userImage\(im, !!\(im\.path && mdText\.includes\(im\.path\)\), /);   // then the picture's pin (pathimg-pin.test.ts)
 
   // executed replica of the caption decision: caption shown iff there's a path AND it's not in the text
   const captionShown = (path: string | undefined, md: string) => !!path && !md.includes(path);

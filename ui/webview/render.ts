@@ -2391,46 +2391,70 @@ function renderInjected(ev: Extract<ChatEvent, { kind: "user" }>): HTMLElement {
 // FIRST asker's answer fill every session's chips — wrong pixels shown silently, and a first-ask
 // failure parked every session's chip (found adversarially reviewing the owner-sid fix, 2026-08-24).
 // The chip carries its sid in data-imgsid so refills and heals match on both halves.
-const imgKey = (sid: string | null, p: string): string => (sid || "") + "\u0000" + p;
-const imgUrlCache = new Map<string, string>();   // (sid,path) → dataURL (loaded)
-const imgFailed = new Set<string>();             // (sid,path) → keep the chip until a reconnect heal
-const imgRequested = new Set<string>();          // (sid,path) → request in flight
-function fillPathImg(wrap: HTMLElement, p: string, sid: string | null): void {
+// A message's picture also carries its PIN (2026-10-29): the mention-time snapshot the kernel took of the file
+// (pathPins, kernel.py _pin_mention). The key had no pin, so the first bytes fetched for a path served every later
+// message naming it for the page's whole life (a regenerated plot showed its first version under the newer message),
+// while a fresh page asked for the live file and changed the older messages' pictures. Pinned, a later message's new
+// pin asks again, and every ask names its pin, so the kernel answers with that message's bytes (the /file?pin= rule).
+// A picture with no pin (a composer attachment, an optimistic echo, a path the kernel did not pin) keeps the
+// (sid,path) key. The chip carries the pin in data-imgpin.
+const imgKey = (sid: string | null, p: string, pin?: string | null): string => (sid || "") + "\u0000" + p + (pin ? "\u0000" + pin : "");
+const imgUrlCache = new Map<string, string>();   // (sid,path,pin) → dataURL (loaded)
+const imgFailed = new Set<string>();             // (sid,path,pin) → keep the chip until a reconnect heal
+const imgRequested = new Set<string>();          // (sid,path,pin) → request in flight
+function fillPathImg(wrap: HTMLElement, p: string, sid: string | null, pin?: string | null): void {
   wrap.textContent = "";
-  const url = imgUrlCache.get(imgKey(sid, p));
+  // While a pinned ask is out, the session's unpinned picture of the path stands in when there is one: an optimistic
+  // echo's thumbnail carries into its landed bubble without a flash (the user 2026-08-25), and the message's own
+  // bytes replace it when they land. A failed pinned ask shows the plain chip, never the stand-in.
+  const k = imgKey(sid, p, pin);
+  const url = imgUrlCache.get(k) ?? (pin && !imgFailed.has(k) ? imgUrlCache.get(imgKey(sid, p)) : undefined);
   if (url) {
     const img = document.createElement("img"); img.className = "user-img"; img.src = url; img.loading = "lazy"; img.title = p;
     wrap.appendChild(img);
   } else {
     // still waiting on the host round-trip → pulsing-dots loading cue (pure CSS — the sandbox can't
     // fetch the swirl asset); a FAILED path drops the pulse and reads as the plain chip it is
-    const chip = el("div", "user-img-path" + (imgFailed.has(imgKey(sid, p)) ? "" : " img-pending"));
+    const chip = el("div", "user-img-path" + (imgFailed.has(k) ? "" : " img-pending"));
     chip.textContent = "🖼 " + (p.split("/").pop() || p); chip.title = p;
     wrap.appendChild(chip);
   }
 }
-function buildPathImg(p: string, sid: string | null): HTMLElement {
+function buildPathImg(p: string, sid: string | null, pin?: string | null): HTMLElement {
   const wrap = el("span", "js-pathimg"); wrap.dataset.imgpath = p;
   wrap.dataset.imgsid = sid || "";
-  fillPathImg(wrap, p, sid);
-  const k = imgKey(sid, p);
+  wrap.dataset.imgpin = pin || "";
+  fillPathImg(wrap, p, sid, pin);
+  const k = imgKey(sid, p, pin);
   if (!imgUrlCache.has(k) && !imgFailed.has(k) && !imgRequested.has(k)) {
     imgRequested.add(k);
     // id → the kernel resolves a RELATIVE path against this session's cwd (assistant-mentioned
     // "plots/out.png" renders too, not just absolute user-attachment paths — the user 2026-07-20).
     // The OWNING session's id, passed by the caller: a background build must never send activeId here.
-    if (vscodeApi) vscodeApi.postMessage({ type: "imgRequest", path: p, id: sid });
+    // pin → the kernel answers with the message's snapshot rather than the live file ("" asks for the live file).
+    if (vscodeApi) vscodeApi.postMessage({ type: "imgRequest", path: p, id: sid, pin: pin || "" });
   }
   return wrap;
 }
-function onImgData(p: string, url: string | null, sid: string | null): void {
+function onImgData(p: string, url: string | null, sid: string | null, pin?: string | null): void {
   // A kernel that echoes the sid answers exactly the chips that asked; an OLDER kernel's reply
   // (no sid echo) falls back to path-only matching — at worst the old sharing, never a dead chip.
+  // The pin the same way: a kernel that echoes it answered that one ask; an older one (no pin echo) read the live
+  // file, so its answer goes to every ask and chip for the path, pinned or not (the old picture, never a dead chip).
   const bySid = typeof sid === "string";
-  const keys = bySid ? [imgKey(sid, p)]
-    : Array.from(document.querySelectorAll(".js-pathimg"))
-        .filter((n) => (n as HTMLElement).dataset.imgpath === p)
-        .map((n) => imgKey((n as HTMLElement).dataset.imgsid || null, p));
+  const byPin = typeof pin === "string";
+  const fits = (s: string, q: string): boolean => (!bySid || s === (sid || "")) && (!byPin || q === pin);
+  const keys = new Set<string>(bySid ? [imgKey(sid, p, pin)] : []);
+  if (!bySid || !byPin) {
+    for (const k of imgRequested) {
+      const [s, kp, q] = k.split("\u0000");
+      if (kp === p && fits(s, q || "")) keys.add(k);
+    }
+    document.querySelectorAll(".js-pathimg").forEach((n) => {
+      const e = n as HTMLElement;
+      if (e.dataset.imgpath === p && fits(e.dataset.imgsid || "", e.dataset.imgpin || "")) keys.add(imgKey(e.dataset.imgsid || null, p, e.dataset.imgpin));
+    });
+  }
   for (const k of keys) {
     imgRequested.delete(k);
     if (url) imgUrlCache.set(k, url); else imgFailed.add(k);
@@ -2438,8 +2462,8 @@ function onImgData(p: string, url: string | null, sid: string | null): void {
   document.querySelectorAll(".js-pathimg").forEach((n) => {
     const e = n as HTMLElement;
     if (e.dataset.imgpath !== p) return;
-    if (bySid && (e.dataset.imgsid || "") !== (sid || "")) return;
-    fillPathImg(e, p, e.dataset.imgsid || null);
+    if (!keys.has(imgKey(e.dataset.imgsid || null, p, e.dataset.imgpin))) return;
+    fillPathImg(e, p, e.dataset.imgsid || null, e.dataset.imgpin);
   });
 }
 // RECONNECT-class heal for the path-image chips (the user 2026-08-24): imgFailed was "never retry
@@ -2456,12 +2480,13 @@ function healPathImgs(): void {
     // the chip's own minted sid — a heal fired while another tab is active must re-ask for the
     // OWNING session, not the one being looked at (and the popover's chips carry theirs too)
     const own = e.dataset.imgsid || activeId;
-    const k = p ? imgKey(own, p) : "";
+    const pin = e.dataset.imgpin || "";              // and the message's own pin: a healed chip still shows its bytes
+    const k = p ? imgKey(own, p, pin) : "";
     if (!p || !failed.has(k)) return;
-    fillPathImg(e, p, own);                          // back to the pending pulse while the ask is out
+    fillPathImg(e, p, own, pin);                     // back to the pending pulse while the ask is out
     if (!imgRequested.has(k)) {
       imgRequested.add(k);
-      if (vscodeApi) vscodeApi.postMessage({ type: "imgRequest", path: p, id: own });
+      if (vscodeApi) vscodeApi.postMessage({ type: "imgRequest", path: p, id: own, pin });
     }
   });
 }
@@ -2567,10 +2592,12 @@ function chatImagesFor(sid: string | null | undefined, from?: Element | null): L
 }
 setLightboxNav(chatImagesFor);
 
-function userImage(im: { src: string; path?: string }, pathInText = false): HTMLElement {
+// pin: the message's mention-time snapshot of a "path:" picture (pathPins), so it shows the bytes the message was sent
+// with; none for a picture the kernel did not pin and for an optimistic echo, which ask for the live file.
+function userImage(im: { src: string; path?: string }, pathInText = false, pin?: string): HTMLElement {
   const fig = el("span", "user-img-wrap");
   if (im.src.startsWith("path:")) {
-    fig.appendChild(buildPathImg(im.src.slice(5), renderingOwnerSid ?? activeId));   // host reads it → real thumbnail; chip until then / on failure
+    fig.appendChild(buildPathImg(im.src.slice(5), renderingOwnerSid ?? activeId, pin));   // host reads it → real thumbnail; chip until then / on failure
   } else {
     const img = document.createElement("img"); img.className = "user-img"; img.src = im.src; img.loading = "lazy";
     fig.appendChild(img);
@@ -3010,7 +3037,7 @@ function linkifyFileUris(root: HTMLElement, skipThumbs?: string[], spacePaths?: 
     const renderFig = (p: string): HTMLElement | null => {
       const full = videoLinks.has(p) ? previewVideoUrl(p)
         : canPreview() ? previewFull(p, renderingOwnerSid ?? activeId, kernelVerified.has(p), (pathPins || {})[p])
-        : previewKind(p) === "img" ? buildPathImg(p, renderingOwnerSid ?? activeId) : null;
+        : previewKind(p) === "img" ? buildPathImg(p, renderingOwnerSid ?? activeId, (pathPins || {})[p]) : null;
       if (!full) return null;
       const block = mentionAt.get(p)?.closest(BLOCK_SEL) as HTMLElement | null;
       const anchor = block && root.contains(block) && block !== root ? block : root;
@@ -4283,7 +4310,9 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
       if (ev.images) {
         linkifyImgPaths(bubble, ev.images.map((im) => im.path).filter((p): p is string => !!p));
         const mdText = ev.md || "";   // a path present here is already a link in the bubble → drop the caption's repeat
-        for (const im of ev.images) bubble.appendChild(userImage(im, !!(im.path && mdText.includes(im.path))));
+        // each picture's mention-time pin: pathPins is keyed by the open target, which pathLinks maps the path to
+        const pins = ev.pathPins || {}, links = ev.pathLinks || {};
+        for (const im of ev.images) bubble.appendChild(userImage(im, !!(im.path && mdText.includes(im.path)), im.path ? pins[links[im.path] || im.path] : undefined));
       }
       if (injected) {
         // a harness-injected line the kernel could not name (a compact summary, a /command's stdout): a
@@ -5541,9 +5570,9 @@ function renderQueued(ev: Extract<ChatEvent, { kind: "queued" }>): HTMLElement {
     if (!t.romp && !isCmd) markMentions(bubble);   // and a typed @name chipped, as the landed bubble wears it (renderEventInner). A statement of its own, not a brace around both: tests pin the line above verbatim (chat-md, queued-indicator)
     // An optimistic echo's dragged images render as THUMBNAILS, not just their trailing paths (the
     // user 2026-08-25: composer preview → path-only provisional → thumbnail landing flashed). Same
-    // machinery end to end: userImage with the landed form's exact "path:" shape — buildPathImg's
-    // (sid,path)-keyed cache then serves the LANDED bubble the same bytes, so the reconcile swap
-    // never re-fetches or flickers. pathInText: the send appends the paths to the text above.
+    // machinery end to end: userImage with the landed form's exact "path:" shape — the echo's
+    // unpinned picture then stands in for the LANDED bubble while it asks for its own pinned bytes
+    // (fillPathImg), so the reconcile swap never flickers. pathInText: the send appends the paths to the text above.
     if (t.imgPaths && t.imgPaths.length) {
       for (const ip of t.imgPaths) bubble.appendChild(userImage({ src: "path:" + ip, path: ip }, true));
     }
@@ -24504,7 +24533,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "clipboardText") insertClipboardText(String(m.text ?? ""));
   else if (m.type === "ledger") setLedger(m.id, m.ledger ?? null);
   else if (m.type === "working") { workingSet = new Set(Array.isArray(m.names) ? m.names : []); refreshPostalDots(); }
-  else if (m.type === "imgData" && typeof m.path === "string") onImgData(m.path, typeof m.url === "string" ? m.url : null, typeof m.sid === "string" ? m.sid : null);
+  else if (m.type === "imgData" && typeof m.path === "string") onImgData(m.path, typeof m.url === "string" ? m.url : null, typeof m.sid === "string" ? m.sid : null, typeof m.pin === "string" ? m.pin : null);
   else if (m.type === "tabOrder") {
     if (typeof m.selfHost === "string" && m.selfHost) adoptSelfHost(m.selfHost);   // the LOCAL kernel's own name: federation puts only its own on the merged frame
     captureViews(m.views || null);

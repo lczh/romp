@@ -68443,6 +68443,17 @@ def _pin_for(target, sid):
     return None
 
 
+def _img_request_url(p, sid, pin=""):
+    """The data: URL an imgRequest answers with: the message's mention-time pin when it names a stored snapshot,
+    else the live file, resolved like a click. The /file?pin= rule: the id is shape-checked and joined only onto
+    the pin dir (no traversal), and a pin whose blob was evicted falls back to the live file."""
+    if pin and _PIN_ID_RE.match(pin):
+        pf = _pin_dir() / pin
+        if pf.is_file():
+            return _img_data_url(str(pf))
+    return _img_data_url(_resolve_open_path(p, sid))
+
+
 def _path_links(md, sid, uuid, memo):
     """Path-shaped tokens in `md` the filesystem VERIFIES → {token: open target}, shipped as pathLinks
     on the chat event. Returns None when the message has no candidate tokens at all (the common message
@@ -89895,9 +89906,13 @@ class Handler(BaseHTTPRequestHandler):
             # not just absolute user-attachment paths (the user 2026-07-20). The reply keys on the RAW
             # requested path AND echoes the asking session: the same relative path names a different
             # file per session cwd, so a path-only reply filled every session's chips with the first
-            # asker's answer (2026-08-24) — the client keys its cache on (sid, path).
-            _reply(client, {"type": "imgData", "path": p, "sid": str(msg.get("id") or ""),
-                            "url": _img_data_url(_resolve_open_path(p, msg.get("id")))})
+            # asker's answer (2026-08-24) — the client keys its cache on (sid, path, pin). The PIN (2026-10-29) names the
+            # message's mention-time snapshot (_img_request_url): an older message's picture is the bytes it was sent
+            # with, not whatever the file holds now; the reply echoes it, since one session's chips for one path can
+            # ask for several versions.
+            pin = str(msg.get("pin") or "")
+            _reply(client, {"type": "imgData", "path": p, "sid": str(msg.get("id") or ""), "pin": pin,
+                            "url": _img_request_url(p, msg.get("id"), pin)})
         elif msg and msg.get("type") == "redial" and msg.get("host"):
             # the composer just refused a send to a downed host — user demand, dial it now (2026-08-16)
             _demand_redial(str(msg["host"]), "timeout")
