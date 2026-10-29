@@ -2836,7 +2836,11 @@ def _atom_text(atom):
 
 # A "follow up on this card" UI action composes the chat prompt with a hidden marker carrying the goal's
 # node id, so the planner reopens that exact goal and files the new work UNDER it (the user 2026-06-17).
-FOLLOWUP_RE = re.compile(r"romp-goal-id:\s*([^\s>]+)")              # the tagged target goal-node id
+# COMMENT FORM ONLY, like the event model's ROMP_INJECT_RE: the kernel's _followup_body puts the card's summary
+# (or mint quote) and the user's typed words ABOVE the tail that carries the real `<!-- romp-goal-id: <id> -->`,
+# so a bare mention of the marker's name in that text ("the parser now reads romp-goal-id: markers") was the
+# first match and filed the reply against a bogus id while the cited card waited (2026-10-29).
+FOLLOWUP_RE = re.compile(r"<!--\s*romp-goal-id:\s*([^\s>]+?)\s*-->")   # the tagged target goal-node id
 NUDGE_MARKER_RE = re.compile(r"<!--\s*romp-injected\s*-->")        # a romp NUDGE (auto-nudge / Nudge button), the user 2026-06-22
 ROMP_SYSTEM_RE = re.compile(r"<!--\s*romp-system\s*-->")           # a kernel STATUS notice (restart/resume) — untargeted, no goal;
                                                                    #   its segment gets the housekeeping note (the user 2026-07-08, g133)

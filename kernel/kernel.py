@@ -4833,8 +4833,9 @@ def _followup_body(iid, title, text, injected=False, auto=False, stalled=False, 
                 quote.append(why.strip())
     msg = ("> " + "\n".join(quote).replace("\n", "\n> ") + "\n\n" + body) if quote else body
     # Hidden goal marker for the follow-up judge (coordinated w/ the `judges` session, 2026-06-17): it
-    # parses `romp-goal-id:\s*([^\s>]+)`, REOPENS that top-goal node (even if completed/blocked), and
-    # force-files this follow-up as a step under it. iid IS the card's top-goal node id (what the feed
+    # parses the comment `<!-- romp-goal-id: <id> -->` (the comment form only, so a quote or typed words
+    # above it that merely mention the marker's name never pose as the target), REOPENS that top-goal node
+    # (even if completed/blocked), and force-files this follow-up as a step under it. iid IS the card's top-goal node id (what the feed
     # renders + posts). The HTML comment is inert in the recipient's prompt.
     # romp-goal-id (ALWAYS): the follow-up judge parses it to REOPEN + file this under the top goal — true
     # whether YOU typed the follow-up or romp nudged, since either reopens the goal. romp-injected (NUDGES
@@ -35165,7 +35166,9 @@ def _postal_isolated(sid):
     return bool(_mail_off_why_k(sid))
 
 
-_FOLLOWUP_GOAL_RE = re.compile(r"romp-goal-id:\s*([^\s>]+)")
+# the judge's FOLLOWUP_RE twin, comment form only for the same reason: the quote and the typed words above the
+# tail may mention the marker's name, and a bare match there named a bogus goal (2026-10-29)
+_FOLLOWUP_GOAL_RE = re.compile(r"<!--\s*romp-goal-id:\s*([^\s>]+?)\s*-->")
 
 
 def _split_followup(text):
@@ -67629,11 +67632,11 @@ def _edit_trace_sid(path, sid):
 # sail straight through. tests/test_marker_neutralizer.py imports those regexes verbatim and
 # proves no whitespace variant survives.
 _ROMP_MARKER_OPEN_RE = re.compile(r"<!--(?=\s*romp-)")
-# The one marker that needs NO comment opener: the judge's FOLLOWUP_RE and the kernel's
-# _FOLLOWUP_GOAL_RE match bare "romp-goal-id:" anywhere in a segment's text — and per the
-# follow-up contract that id REOPENS the named goal (even completed/blocked) and files the
-# message under it. A filename carrying the bare form therefore forges the higher-impact
-# marker of the two, so the neutralizer must break it as well as the comment openers.
+# The bare "romp-goal-id:" form: the follow-up readers (the judge's FOLLOWUP_RE, the kernel's
+# _FOLLOWUP_GOAL_RE) take the comment form only since 2026-10-29, which the opener break above
+# already defeats, but a plain substring check still keys on the bare "romp-goal-id: <id>" text
+# (_nudge_send_queued), and per the follow-up contract that id REOPENS the named goal, so the
+# neutralizer keeps breaking the bare form as well as the comment openers.
 _ROMP_GOALID_BARE_RE = re.compile(r"(romp-goal-id\s*):")
 
 
@@ -67646,8 +67649,8 @@ def _neutralize_romp_markers(text):
     detection and ROMP_INJECT_RE author attribution, the judge's NUDGE_MARKER_RE, the SDK echo's
     romp-injected check) — a forged romp-msg-id reads as a peer delivery that never happened.
     The bare "romp-goal-id:" form is broken too (its colon becomes a semicolon — see
-    _ROMP_GOALID_BARE_RE): unlike every other marker it needs no comment opener, and it would
-    reopen an arbitrary goal. Minimal, visible escapes in both cases ("<!--" → "<!- -",
+    _ROMP_GOALID_BARE_RE): a plain substring check still keys on it, and a goal id would reopen
+    an arbitrary goal. Minimal, visible escapes in both cases ("<!--" → "<!- -",
     ":" → ";"; whitespace and words untouched): the text stays readable, no matcher fires."""
     out = _ROMP_MARKER_OPEN_RE.sub("<!- -", str(text))
     return _ROMP_GOALID_BARE_RE.sub(r"\1;", out)
