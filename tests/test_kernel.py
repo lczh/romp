@@ -4915,7 +4915,7 @@ class ViewBuilder(unittest.TestCase):
     def test_followup_body_appends_goal_marker(self):
         # The follow-up judge reopens the tagged goal: every follow-up ends with a hidden
         # `<!-- romp-goal-id: <itemId> -->` marker (itemId = the card's top-goal node id), matched by the
-        # judge's `romp-goal-id:\s*([^\s>]+)` (coordinated w/ the `judges` session, 2026-06-17). The
+        # judge's FOLLOWUP_RE (coordinated w/ the `judges` session, 2026-06-17). The
         # romp-injected author marker (→ gray bubble) rides ONLY a nudge (injected=True), NOT a follow-up
         # the user types — that's the user's words → blue bubble (the user 2026-06-20).
         iid = SID + ":g2"
@@ -4923,7 +4923,7 @@ class ViewBuilder(unittest.TestCase):
         self.assertTrue(typed.endswith("\n\n" + NOTE + "<!-- romp-goal-id: " + iid + " -->"),
                         "a typed follow-up ends with the ignore-note + goal-id — no romp-injected (blue bubble)")
         self.assertNotIn("<!-- romp-injected -->", typed)
-        self.assertEqual(re.search(r"romp-goal-id:\s*([^\s>]+)", typed).group(1), iid)   # the judge's parser
+        self.assertEqual(km.jd.FOLLOWUP_RE.search(typed).group(1), iid)   # the judge's parser
         nudge = km._followup_body(iid, "ctx", "do the thing", injected=True)   # romp's OWN nudge (the BUTTON)
         self.assertTrue(nudge.endswith("\n\n" + NOTE + "<!-- romp-injected --><!-- romp-goal-id: " + iid + " -->"),
                         "a nudge adds romp-injected (gray bubble) after the ignore-note, ahead of the goal-id")
