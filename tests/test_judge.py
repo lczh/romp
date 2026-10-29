@@ -7406,10 +7406,10 @@ class FloorTitleHeal(unittest.TestCase):
         nd.update(kw)
         return nd
 
-    def _land_caption(self):
+    def _land_caption(self, gist=None):
         jd.CAPDIR.mkdir(parents=True, exist_ok=True)
         (jd.CAPDIR / (SID + ".jsonl")).write_text(
-            json.dumps({"id": self.SEG + "#p", "grain": "prompt", "caption": self.GIST}) + "\n")
+            json.dumps({"id": self.SEG + "#p", "grain": "prompt", "caption": gist or self.GIST}) + "\n")
 
     def test_coerced_mint_carries_the_shared_why_and_floor_label(self):
         op = jd._coerce_place([], "USER ASKED: " + self.QUOTE)[0]
@@ -7438,6 +7438,40 @@ class FloorTitleHeal(unittest.TestCase):
                          "a cleared card is past caring — never rewritten")
         self.assertEqual(store["nodes"][SID + ":g2"]["text"], "A title the planner chose later",
                          "a planner retitle outranks the heal, permanently")
+
+    def _floor_mint(self, msg, work_run=False):
+        """Mint a card the way the floor does during an opener and gister outage: the unit text of the
+        prompt run (the raw message) or the work run (its USER ASKED framing) is labeled by _coerce_place,
+        and apply_plan stamps the minting message's flattened quote."""
+        atoms = [{"type": "user", "author": "human", "uuid": "u1",
+                  "message": {"role": "user", "content": [{"type": "text", "text": msg}]}}]
+        text = jd._prompt_text(atoms)
+        store = _store()
+        jd.apply_plan(store, self.SEG, T0, jd._coerce_place([], "USER ASKED: " + text if work_run else text),
+                      [], place_key=None if work_run else self.SEG + "#p", prompt_uuid="u1",
+                      quote=jd._mint_quote({"id": self.SEG, "atoms": atoms, "trigger": "u1"}))
+        nid, = store["nodes"]
+        return store, nid
+
+    def test_heal_reaches_a_card_floor_titled_from_a_multi_line_message(self):
+        # the floor titles from the message's FIRST line while the quote is the whole message on one line:
+        # the old gate (title == _seg_label(quote)) never opened, so the card kept 'Hey,' after the gist landed
+        msg, gist = "Hey,\nCan you fix the flaky export test in notes-api?", "Fix the flaky notes-api export test"
+        self._land_caption(gist)
+        for work_run in (False, True):
+            store, nid = self._floor_mint(msg, work_run)
+            self.assertEqual(store["nodes"][nid]["text"], "Hey,", "premise: the floor titled the card from line one")
+            self.assertEqual(store["nodes"][nid]["quote"], "Hey, Can you fix the flaky export test in notes-api?")
+            self.assertEqual(jd._heal_floor_titles(SID, store), 1, "work_run=%s" % work_run)
+            self.assertEqual(store["nodes"][nid]["text"], gist, "the card wears the landed gist")
+            self.assertEqual(jd._heal_floor_titles(SID, store), 0, "healed once — the gate is closed for good")
+
+    def test_heal_leaves_a_retitle_that_only_shares_the_opening_word(self):
+        self._land_caption("Fix the flaky notes-api export test")
+        store, nid = self._floor_mint("Hey,\nCan you fix the flaky export test in notes-api?")
+        store["nodes"][nid]["text"] = "Hey, the export test"
+        self.assertEqual(jd._heal_floor_titles(SID, store), 0, "not the message's opening words: a planner retitle")
+        self.assertEqual(store["nodes"][nid]["text"], "Hey, the export test")
 
 
 class JudgeCallAlarm(unittest.TestCase):

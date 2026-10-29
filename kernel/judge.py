@@ -11127,14 +11127,20 @@ def _heal_floor_titles(fsid, store):
     No age limit, deliberately (the user 2026-07-27: damage heals whenever the missing piece shows
     up; only a cleared card is past caring — and a cleared node is skipped here). Recognized by the
     coerce diary why (_COERCE_WHY, stamped on every coerced node) so pre-heal stores qualify with no
-    migration, and gated on the node STILL wearing its floor label (text == _seg_label(quote)) — a
-    planner retitle, or this heal itself, closes the gate for good. Returns the number healed."""
+    migration, and gated on the node STILL wearing its floor label — a planner retitle, or this heal
+    itself, closes the gate for good. The floor labels from the unit text's FIRST line while the quote
+    flattens the whole message, so the label is _seg_label(quote) only when that first line runs past
+    ten words; a shorter one ('Hey,' above 'Can you fix the flaky export test?') labels as the quote's
+    opening words, which the gate also accepts — before, such a card kept 'Hey,' after the gist landed.
+    Returns the number healed."""
     n = 0
     for nd in store.get("nodes", {}).values():
         if nd.get("cleared") or nd.get("why") != _COERCE_WHY:
             continue
         q = (nd.get("quote") or "").strip()
-        if not q or (nd.get("text") or "") != _seg_label(q):
+        t = nd.get("text") or ""
+        w = t.split()
+        if not q or (t != _seg_label(q) and not (0 < len(w) <= 10 and q.split()[:len(w)] == w)):
             continue
         seg = (nd.get("trail") or [""])[0]              # trail[0] = the minting segment (append-only)
         gist = _prompt_gist(fsid, seg) if seg else ""
