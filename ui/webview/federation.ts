@@ -135,7 +135,7 @@ export const BOOKKEEPING: ReadonlyMap<string, (m: any) => string | null> = new M
   ["loadAround",     (m) => "loadAround" + K + m.id],              // render.ts: a window around a deep-link anchor past the resident list (proto 2)
   ["loadTurns",      (m) => "loadTurns" + K + m.id + K + m.lo + K + m.hi],   // render.ts requestTurns: a gap's page by turn span (T386 stage 2); flushed on the open like loadOlder, one per span
   ["loadEpisode",    (m) => "loadEpisode" + K + m.id],             // render.ts noticeOpened: a clear notice's conversation on first expand
-  ["imgRequest",     (m) => "imgRequest" + K + m.id + K + m.path], // render.ts: an inline image's bytes, asked on render
+  ["imgRequest",     (m) => "imgRequest" + K + m.id + K + m.path + K + (m.pin || "")], // render.ts: an inline image's bytes, asked on render (per message pin: two versions of one file both stand)
   ["commentSeen",    (m) => "commentSeen" + K + m.id + K + m.tid], // render.ts: a thread's read watermark as its popover opens or a reply lands in it
   ["commentDropSeen", (m) => "commentDropSeen" + K + m.id + K + m.createId],   // render.ts / feed.ts: a dropped comment create's dialog, seen
   ["commentDropHidden", (m) => "commentDropHidden" + K + m.id + K + m.createId],   // render.ts / feed.ts: whether anyone can see the page a drop was offered to (its last word wins)

@@ -11,6 +11,7 @@ SIBLING map (pathLinks values must stay strings for older clients), the embed re
 same way. A pin whose blob was evicted falls back to the live file — today's behavior, a nicety
 lost, never an error. A NEW message mentioning the regenerated file pins the NEW bytes, so the
 agent's naming freedom is untouched. SYNTHETIC fixtures only."""
+import base64
 import json
 import os
 import tempfile
@@ -154,6 +155,49 @@ class PinServing(unittest.TestCase):
             code, body = self._get(str(live), pin=pid, rng="bytes=10-")
             self.assertEqual(code, 206)
             self.assertEqual(body, PNG_V1[10:], "flaky-wifi resume and history pins compose")
+
+
+class ImgRequestPins(unittest.TestCase):
+    """The other road to a message's picture: the path-image chips (a user message's pictures, VS Code's figures)
+    ask over the socket with imgRequest and get a data: URL back. That route read only the live file, so a
+    regenerated plot changed every older message's picture there. An ask that names the message's pin now gets
+    the snapshot, under the same rules as /file?pin=, and the reply echoes the pin so the page files the answer
+    under the message that asked (ui/webview/pathimg-pin.test.ts is the page's half)."""
+
+    def _ask(self, path, pin=None):
+        sent = []
+        client = {"app": "chat", "wid": "w1", "alive": True, "send": lambda raw: sent.append(json.loads(raw))}
+        msg = {"type": "imgRequest", "path": path, "id": SID}
+        if pin is not None:
+            msg["pin"] = pin
+        km.Handler._dispatch_ws(None, msg, client)
+        self.assertEqual(len(sent), 1, "one answer on the asking socket")
+        r = sent[0]
+        self.assertEqual((r.get("type"), r.get("path"), r.get("sid")), ("imgData", path, SID))
+        url = r.get("url")
+        return r, (base64.b64decode(url.split(",", 1)[1]) if url else None)
+
+    def test_a_pinned_ask_gets_the_snapshot_and_an_unpinned_one_the_live_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            live = Path(td) / "plot.png"
+            live.write_bytes(PNG_V1)
+            pid = km._pin_mention(str(live))
+            live.write_bytes(PNG_V2)                        # the agent regenerates the plot
+            r, body = self._ask(str(live), pin=pid)
+            self.assertEqual(body, PNG_V1, "the older message keeps the picture it was sent with")
+            self.assertEqual(r.get("pin"), pid, "the reply names the pin it answers")
+            r, body = self._ask(str(live))
+            self.assertEqual(body, PNG_V2, "an unpinned ask (a composer attachment) reads the live file")
+            self.assertEqual(r.get("pin"), "")
+
+    def test_an_evicted_or_malformed_pin_falls_back_to_the_live_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            live = Path(td) / "plot.png"
+            live.write_bytes(PNG_V2)
+            for pin in ("0" * 64 + ".png", "../../serve-token"):
+                r, body = self._ask(str(live), pin=pin)
+                self.assertEqual(body, PNG_V2, "a lost or bad pin shows the live file, never an error: %r" % pin)
+                self.assertEqual(r.get("pin"), pin, "and is echoed as asked, so the chip that asked is answered")
 
 
 if __name__ == "__main__":
