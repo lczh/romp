@@ -56014,16 +56014,17 @@ def _spend_tail_index(ent, size):
     return None
 
 
-def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, stat=True):
+def _spend_window_usd(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, stat=True, floor=0):
     """Dollars the session spent in the last `window_s` seconds: the leaf's and its agent files' rows in the window
     (_spend_file_rows), priced by `prices` (the merged table by default, _model_prices). Every agent file is
     then folded (_spend_fold_agent, 2026-10-01): the guard's read of a workflow agent, which has no card, was the only one,
     and with no fold over it a returned agent's records stayed in the record cache for the kernel's life. The leaf, the first
-    file, is never folded here."""
+    file, is never folded here. `floor` (an epoch): rows stamped before it are not the session's, so the window starts there
+    when it is later (a comment thread's fork moment, _spend_thread_rows)."""
     if prices is None:
         prices = _model_prices()
     dearest = max(prices.values(), key=lambda p: float(p.get("out") or 0)) if prices else None
-    since = now - window_s
+    since = max(now - window_s, floor or 0)
     total = 0
     for i, f in enumerate(_spend_window_files(leaf, since, now, stat=stat)):
         for _t, c in _spend_file_rows(f, since, prices, dearest, agent=i > 0):
@@ -56092,9 +56093,10 @@ def _spend_guard_seed():
                                        "seeded": True}
 
 
-def _spend_rate_usd_per_hour(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, stat=True):
-    """The session's spend over the window, scaled to an hour (`stat` False: from the memo, see _spend_window_files)."""
-    return _spend_window_usd(leaf, now, window_s, prices, stat=stat) * 3600.0 / float(window_s)
+def _spend_rate_usd_per_hour(leaf, now, window_s=SPEND_GUARD_WINDOW_S, prices=None, stat=True, floor=0):
+    """The session's spend over the window, scaled to an hour (`stat` False: from the memo, see _spend_window_files;
+    `floor`: see _spend_window_usd)."""
+    return _spend_window_usd(leaf, now, window_s, prices, stat=stat, floor=floor) * 3600.0 / float(window_s)
 
 
 def _usd_words(x):
@@ -56246,9 +56248,31 @@ def _spend_guard_clear(s, rate, ceiling, now, be, clients):
                      ceilingUsdPerHour=float(ceiling), windowS=SPEND_GUARD_WINDOW_S)
 
 
+def _spend_thread_rows(threads):
+    """The guard's rows for the running comment threads `threads` (Sessions.thread_live's map). The live map leaves every
+    thread out on purpose (no tab, lane or card of its own), yet a thread is a full session that can fan out agents at any
+    rate on the same account, and its transcript and agents are files of their own, outside its parent's window. Each row is
+    the thread's own transcript (_thread_transcript_path: a thread has no names/ entry, so discovery never lists it) and its
+    name, with `floor` the fork's moment (the reg's forkedFrom.t): the transcript opens with the parent's history, copied
+    under its ORIGINAL timestamps (the boundary _thread_exchange reads a tip fork by), so the parent's recent spend would
+    otherwise be billed to the thread. A thread whose fork has not landed (forkOf still on its reg) has no row: its lastSid
+    still names the PARENT's transcript, and it has written nothing of its own."""
+    out = []
+    for tsid in threads:
+        reg = _thread_reg(tsid)
+        if not reg or reg.get("forkOf"):
+            continue
+        ff = reg.get("forkedFrom") if isinstance(reg.get("forkedFrom"), dict) else {}
+        out.append({"sid": tsid, "name": str(reg.get("name") or tsid[:8]), "path": _thread_transcript_path(reg, tsid),
+                    "floor": _num(str(ff.get("t") or "")) or 0})
+    return out
+
+
 def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, prices=None):
-    """The pusher job: every live session's rate against the ceiling, the latch per session. `sessions`, `be`, `clients`
-    and `prices` are seams for the tests; the pusher passes none of them."""
+    """The pusher job: every live session's rate against the ceiling, the latch per session, and every running comment
+    thread's too (_spend_thread_rows: the live map leaves them out, so their rows and live rows join here). `sessions`, `be`,
+    `clients` and `prices` are seams for the tests; the pusher passes none of them, and a test that passes `sessions`
+    names every row itself, threads included."""
     if not _SPEND_TREE_SWEPT[0]:                          # once per life, here rather than in the first cycle's persist job (the sweep
         _SPEND_TREE_SWEPT[0] = True                      #  parses every memo; the guard never runs in cycle one), and BEFORE the
         try:                                              #  disabled return below, so a kernel with the ceiling off still sweeps
@@ -56263,6 +56287,12 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
         return
     _spend_guard_seed()                                  # once per kernel life: the ledger's verdicts
     rows = _alive_sessions(now, live_map) if sessions is None else sessions
+    states = live_map or {}
+    if sessions is None:
+        threads = {t: r for t, r in Sessions.thread_live(None).items() if t not in states}   # every running thread, its parent
+        if threads:                                                                         #  open as a tab or not
+            rows = list(rows) + _spend_thread_rows(threads)
+            states = dict(states, **threads)
     if prices is None:
         prices = _model_prices()
     live, live_paths = set(), set()
@@ -56272,12 +56302,12 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
             continue
         live.add(sid)
         live_paths.add(str(path))
-        can = _spend_can_spend((live_map or {}).get(sid))              # rule 1: statted while the session can spend, or on the edge
+        can = _spend_can_spend(states.get(sid))                       # rule 1: statted while the session can spend, or on the edge
         dirty = getattr(_live_scope, "files_dirty", None)             #  after it stopped, or when the nudge prelude's observers marked
         stat = can or _SPEND_CAN_PREV.get(sid, True) or bool(dirty and (dirty[1] or sid in dirty[0]))   #  its files (a transcript
         _SPEND_CAN_PREV[sid] = can                                    #  under the tree moved); else served from the memo within the floor
         try:
-            rate = _spend_rate_usd_per_hour(path, now, prices=prices, stat=stat)
+            rate = _spend_rate_usd_per_hour(path, now, prices=prices, stat=stat, floor=s.get("floor") or 0)
         except Exception:
             _jobs_gate_owe("fault")                      # (the jobs pass's gate, shadow: the rate is read again next pass)
             sys.stderr.write("spend-guard rate (%s): %s\n" % (sid[:8], traceback.format_exc()))
@@ -56286,7 +56316,7 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
         if rate >= ceiling and not (st and st.get("over")):
             _SPEND_GUARD[sid] = {"over": True, "t": now, "rate": rate}
             _spend_guard_fire(s, rate, ceiling, now, be, clients,
-                              turn_open=((live_map or {}).get(sid) or {}).get("state") in ("working", "retrying"))
+                              turn_open=(states.get(sid) or {}).get("state") in ("working", "retrying"))
         elif st and st.get("over") and rate < ceiling * SPEND_GUARD_REARM:
             _SPEND_GUARD[sid] = {"over": False, "t": now, "rate": rate}
             _spend_guard_clear(s, rate, ceiling, now, be, clients)
