@@ -100,6 +100,8 @@ _sed_inplace() {
 # the problem — honoring the FLAGS romp passes, the way real curl splits on a 4xx:
 # a short-flag cluster carrying -f discards the body and exits 22; plain -s prints
 # the body and exits 0. So the test proves the flags, not just the message.
+# MOCK_CURL_POST_400='<body>' makes every POST answer with a 400 and that body, honoring the flags the same way;
+# every answer through _reply appends the status when romp asks for it with -w, as real curl does.
 _stub_curl() {
     cat > "$MOCK_DIR/curl" << 'MOCK'
 #!/usr/bin/env bash
@@ -110,14 +112,25 @@ echo "curl $*" >> "$MOCK_LOG"
 [[ " $* " == *" --config - "* ]] && cat >/dev/null
 url=""
 for a in "$@"; do [[ "$a" == http* ]] && url="$a"; done
+# the status trailer romp asks for (-w '\n%{http_code}', `romp tag`, `romp perf` and the POST verbs' _romp_post) and whether
+# -f is set (a short-flag cluster carrying f), so _reply answers the way real curl does: the body, then the trailer with the
+# status; with -f a status of 400 or more exits 22 and prints nothing
+_w=""; _prev=""; _fail=0
+for a in "$@"; do [[ "$_prev" == "-w" ]] && _w="$a"; [[ "$a" == "-f" || "$a" == -[!-]*f* ]] && _fail=1; _prev="$a"; done
+_reply() {   # _reply <status> <body>
+  if [[ $_fail -eq 1 && "$1" -ge 400 ]]; then exit 22; fi
+  if [[ -n "$_w" ]]; then printf '%s%b' "$2" "${_w//\%\{http_code\}/$1}"; else printf '%s\n' "$2"; fi
+  exit 0
+}
+if [[ -n "${MOCK_CURL_POST_400:-}" && " $* " == *" -X POST "* ]]; then _reply 400 "$MOCK_CURL_POST_400"; fi
 if [[ -n "${MOCK_CURL_FAIL_SEND:-}" && "$url" == */send ]]; then exit 22; fi
 if [[ -n "${MOCK_CURL_TIMEOUT_SEND:-}" && "$url" == */send ]]; then exit 28; fi
 if [[ -n "${MOCK_CURL_FAIL_NEW:-}" && "$url" == */new ]]; then exit 7; fi
 if [[ -n "${MOCK_CURL_TIMEOUT_NEW:-}" && "$url" == */new ]]; then exit 28; fi
 if [[ -n "${MOCK_CURL_SEND_QUEUED:-}" && "$url" == */send ]]; then echo '{"ok": true, "queued": true}'; exit 0; fi
 if [[ -n "${MOCK_CURL_SEND_REFUSED:-}" && "$url" == */send ]]; then echo '{"ok": false, "error": "no running backend owns web — the message was not delivered"}'; exit 0; fi
-if [[ -n "${MOCK_CURL_NOTICE_REFUSE:-}" && "$url" == */notice ]]; then echo '{"ok": false, "error": "attachment refused: not a file"}'; exit 0; fi
-if [[ -n "${MOCK_CURL_NOTICE_OK:-}" && "$url" == */notice ]]; then echo "$MOCK_CURL_NOTICE_OK"; exit 0; fi
+if [[ -n "${MOCK_CURL_NOTICE_REFUSE:-}" && "$url" == */notice ]]; then _reply 200 '{"ok": false, "error": "attachment refused: not a file"}'; fi
+if [[ -n "${MOCK_CURL_NOTICE_OK:-}" && "$url" == */notice ]]; then _reply 200 "$MOCK_CURL_NOTICE_OK"; fi
 if [[ -n "${MOCK_CURL_BOARDS:-}" && "$url" == */boards ]]; then echo "$MOCK_CURL_BOARDS"; exit 0; fi
 if [[ -n "${MOCK_CURL_BOARD_REFUSE:-}" && "$url" == */board ]]; then echo "$MOCK_CURL_BOARD_REFUSE"; exit 0; fi
 if [[ -n "${MOCK_CURL_BOARD_DEFINED:-}" && "$url" == */board ]]; then echo "$MOCK_CURL_BOARD_DEFINED"; exit 0; fi
@@ -125,8 +138,7 @@ if [[ -n "${MOCK_CURL_PANES:-}" && "$url" == */panes ]]; then echo "$MOCK_CURL_P
 if [[ -n "${MOCK_CURL_PANE_REFUSE:-}" && "$url" == */pane ]]; then echo "$MOCK_CURL_PANE_REFUSE"; exit 0; fi
 if [[ -n "${MOCK_CURL_PANE_DEFINED:-}" && "$url" == */pane ]]; then echo "$MOCK_CURL_PANE_DEFINED"; exit 0; fi
 if [[ -n "${MOCK_CURL_WATCH_PR_REFUSE:-}" && "$url" == */watch-pr ]]; then
-  echo '{"ok": false, "retryable": true, "error": "the watch could not be saved ([Errno 28] No space left on device) - nothing is watching TESTORG/testrepo#7; retry once the state directory takes writes again"}'
-  exit 0
+  _reply 200 '{"ok": false, "retryable": true, "error": "the watch could not be saved ([Errno 28] No space left on device) - nothing is watching TESTORG/testrepo#7; retry once the state directory takes writes again"}'
 fi
 if [[ -n "${MOCK_CURL_VERSION:-}" && "$url" == */version ]]; then echo "$MOCK_CURL_VERSION"; exit 0; fi
 if [[ -n "${MOCK_CURL_NEW_400:-}" && "$url" == */new ]]; then
@@ -136,12 +148,7 @@ if [[ -n "${MOCK_CURL_NEW_400:-}" && "$url" == */new ]]; then
   echo '{"ok": false, "error": "env: ROMP_SID is reserved — romp sets the session identity env itself"}'
   exit 0
 fi
-# `romp tag`'s GET asks for the status as a trailer (-w '\n%{http_code}'), the way `romp perf`
-# does: append it as real curl would, so the read sees a 200 and not a body it must report as an
-# answer with no status
-_w=""; _prev=""
-for a in "$@"; do [[ "$_prev" == "-w" ]] && _w="$a"; _prev="$a"; done
-if [[ -n "$_w" ]]; then printf '{"ok": true}%b' "${_w//\%\{http_code\}/200}"; else echo '{"ok": true}'; fi
+_reply 200 '{"ok": true}'
 MOCK
     chmod +x "$MOCK_DIR/curl"
 }
@@ -422,6 +429,35 @@ MOCK
     [ "$status" -eq 1 ]
     [[ "$output" == *"romp watch-pr: refused — the watch could not be saved ([Errno 28]"* ]]
     [[ "$output" != *"romp watch-pr: watching"* ]]
+}
+
+@test "watch-pr, watch and card: the kernel's 400 refusal is said with its reason, never as a kernel that is down" {
+    # the kernel answers a request it cannot take (a repo that is not owner/name, a blank predicate or title) with a 400
+    # and the reason in the body; read with curl -f, that answer was exit 22 and no body, which these verbs reported as an
+    # unreachable kernel and sent the person to restart one that was up
+    _stub_curl
+    touch "$MOCK_LOG"
+    export ROMP_SERVE_TOKEN=testtok
+    MOCK_CURL_POST_400='{"ok": false, "error": "pr (number), repo (owner/name) and id|name (the session to mail) required"}' \
+        run env ROMP_SID= "$ROMP_SCRIPT" watch-pr 12 --repo https://github.com/o/r --session web
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp watch-pr: refused — pr (number), repo (owner/name) and id|name (the session to mail) required"* ]]
+    [[ "$output" != *"not reachable"* ]]
+    MOCK_CURL_POST_400='{"ok": false, "error": "cmd (the predicate: exit 0 = met) and id|name (the session to mail) required"}' \
+        run env ROMP_SID= "$ROMP_SCRIPT" watch --cmd ' ' --session web
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp watch: refused — cmd (the predicate: exit 0 = met)"* ]]
+    [[ "$output" != *"not reachable"* ]]
+    MOCK_CURL_POST_400='{"ok": false, "error": "a JSON object body is required"}' run env ROMP_SID= "$ROMP_SCRIPT" watch --cancel w1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp watch: refused — "*"a JSON object body is required"* ]]
+    [[ "$output" != *"not reachable"* ]]
+    MOCK_CURL_POST_400='{"ok": false, "error": "key and title required"}' run env ROMP_SID= "$ROMP_SCRIPT" card ' '
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp card: refused — key and title required"* ]]
+    [[ "$output" != *"not reachable"* ]]
+    [[ "$output" != *"romp card: posted"* ]]
+    [ "$(grep -c -e '/watch-pr' -e '/watch ' -e '/notice' "$MOCK_LOG")" -eq 4 ]   # each of the four posts reached the kernel
 }
 
 @test "tag: --rename rides the payload and counts as an edit" {

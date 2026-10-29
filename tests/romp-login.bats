@@ -3,7 +3,9 @@
 # `romp login add | list | remove | link | unlink` (T346; docs/reference.md "Several Claude logins"): the CLI door to the stored
 # Claude logins. Run against a mock curl (the kernel's /logins answers), recording its calls: `add` hands the kernel
 # a label and the COMMAND that prints the token, never a token and no store's shorthand (the user 2026-09-13); `list`
-# prints labels only.
+# prints labels only. The mock answers as real curl does: with -w it appends the status after the body, and with -f a
+# status of 400 or more exits 22 and prints nothing. MOCK_CURL_STATUS and MOCK_CURL_BODY make a POST answer with that
+# status and body; MOCK_CURL_DOWN=1 is a kernel that never answers (curl's exit 7, connection refused).
 
 ROMP_SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../bin" && pwd)/romp"
 
@@ -22,32 +24,38 @@ setup() {
 #!/usr/bin/env bash
 echo "curl $*" >> "$MOCK_LOG"
 [[ " $* " == *" --config - "* ]] && cat >/dev/null
-url=""; body=""; prev=""
-for a in "$@"; do [[ "$a" == http* ]] && url="$a"; [[ "$prev" == "-d" ]] && body="$a"; prev="$a"; done
+url=""; body=""; prev=""; wfmt=""; fail=0
+for a in "$@"; do
+  [[ "$a" == http* ]] && url="$a"; [[ "$prev" == "-d" ]] && body="$a"; [[ "$prev" == "-w" ]] && wfmt="$a"
+  [[ "$a" == "-f" || "$a" == -[!-]*f* ]] && fail=1
+  prev="$a"
+done
+reply() {   # reply <status> <body>: what real curl prints for that answer, and its exit
+  if [[ $fail -eq 1 && "$1" -ge 400 ]]; then exit 22; fi
+  if [[ -n "$wfmt" ]]; then printf '%s%b' "$2" "${wfmt//\%\{http_code\}/$1}"; else printf '%s\n' "$2"; fi
+  exit 0
+}
+if [[ -n "${MOCK_CURL_DOWN:-}" ]]; then [[ -n "$wfmt" ]] && printf '%b' "${wfmt//\%\{http_code\}/000}"; exit 7; fi
 if [[ "$url" == */logins && -n "$body" ]]; then
   echo "body $body" >> "$MOCK_LOG"
+  [[ -n "${MOCK_CURL_STATUS:-}" ]] && reply "$MOCK_CURL_STATUS" "${MOCK_CURL_BODY:-}"
   if [[ "$body" == *'"link"'* ]]; then
-    if [[ "$body" == *'"NOHOST"'* ]]; then echo '{"ok": false, "error": "no connected kernel is named '"'"'NOHOST'"'"' (this machine is TESTHOST; connected: PEERHOST)"}'
-    elif [[ "$body" == *'"on": "PEERHOST"'* ]]; then echo '{"ok": true, "id": "0123456789ab", "label": "Work", "linked": {"host": "TESTHOST", "at": 1700000000}, "account": "dev@example.com · Example Org · enterprise", "on": "PEERHOST"}'
-    else echo '{"ok": true, "id": "0123456789ab", "label": "Work", "linked": {"host": "PEERHOST", "at": 1700000000}, "account": "dev@example.com · Example Org · enterprise"}'; fi
-    exit 0
+    if [[ "$body" == *'"NOHOST"'* ]]; then reply 200 '{"ok": false, "error": "no connected kernel is named '"'"'NOHOST'"'"' (this machine is TESTHOST; connected: PEERHOST)"}'
+    elif [[ "$body" == *'"on": "PEERHOST"'* ]]; then reply 200 '{"ok": true, "id": "0123456789ab", "label": "Work", "linked": {"host": "TESTHOST", "at": 1700000000}, "account": "dev@example.com · Example Org · enterprise", "on": "PEERHOST"}'
+    else reply 200 '{"ok": true, "id": "0123456789ab", "label": "Work", "linked": {"host": "PEERHOST", "at": 1700000000}, "account": "dev@example.com · Example Org · enterprise"}'; fi
   fi
   if [[ "$body" == *'"unlink"'* ]]; then
-    if [[ "$body" == *'"Old"'* ]]; then echo '{"ok": false, "error": "the Old login is not linked to any sign-in"}'; else echo '{"ok": true, "id": "0123456789ab", "label": "Work", "unlinked": true}'; fi
-    exit 0
+    if [[ "$body" == *'"Old"'* ]]; then reply 200 '{"ok": false, "error": "the Old login is not linked to any sign-in"}'; else reply 200 '{"ok": true, "id": "0123456789ab", "label": "Work", "unlinked": true}'; fi
   fi
   if [[ "$body" == *'"remove"'* ]]; then
-    if [[ "$body" == *'"Nope"'* ]]; then echo '{"ok": false, "error": "no stored login named '"'"'Nope'"'"'"}'; else echo '{"ok": true, "removed": "0123456789ab", "label": "Work"}'; fi
-  else
-    echo '{"ok": true, "id": "0123456789ab", "label": "Work", "display": "Work"}'
+    if [[ "$body" == *'"Nope"'* ]]; then reply 200 '{"ok": false, "error": "no stored login named '"'"'Nope'"'"'"}'; else reply 200 '{"ok": true, "removed": "0123456789ab", "label": "Work"}'; fi
   fi
-  exit 0
+  reply 200 '{"ok": true, "id": "0123456789ab", "label": "Work", "display": "Work"}'
 fi
 if [[ "$url" == */logins ]]; then
-  echo '{"ok": true, "machine": {"label": "user@example.com · personal"}, "logins": [{"id": "0123456789ab", "label": "Work", "display": "Work · Acme · enterprise", "addedAt": 1700000000, "hasCmd": true, "why": "", "expiresSoon": false, "linked": {"host": "PEERHOST", "at": 1700000000}}, {"id": "abcdefabcdef", "label": "Old", "display": "Old", "addedAt": 1600000000, "hasCmd": true, "why": "the Old login was refused: expired", "expiresSoon": false}]}'
-  exit 0
+  reply 200 '{"ok": true, "machine": {"label": "user@example.com · personal"}, "logins": [{"id": "0123456789ab", "label": "Work", "display": "Work · Acme · enterprise", "addedAt": 1700000000, "hasCmd": true, "why": "", "expiresSoon": false, "linked": {"host": "PEERHOST", "at": 1700000000}}, {"id": "abcdefabcdef", "label": "Old", "display": "Old", "addedAt": 1600000000, "hasCmd": true, "why": "the Old login was refused: expired", "expiresSoon": false}]}'
 fi
-echo '{"ok": true}'
+reply 200 '{"ok": true}'
 MOCK
     chmod +x "$MOCK_DIR/curl"
     export PATH="$MOCK_DIR:$PATH"
@@ -163,4 +171,40 @@ teardown() { rm -rf "$TEST_DIR"; }
     [[ "$output" == *"no serve token"* ]]
     run "$ROMP_SCRIPT" login unlink Work
     [ "$status" -eq 1 ]
+}
+
+@test "login add: the kernel's 400 refusal is said with its reason, never as a kernel that is down" {
+    # the kernel refuses a --cmd that carries the credential itself with a 400 and the reason in the body; read with
+    # curl -f, that answer was exit 22 and no body, which the CLI reported as an unreachable kernel
+    MOCK_CURL_STATUS=400 MOCK_CURL_BODY='{"ok": false, "error": "add.tokenCmd: the command text looks like it carries the credential itself; rotate it"}' \
+        run "$ROMP_SCRIPT" login add Work --cmd 'cat ~/.secrets/enterprise-token'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp login: refused: add.tokenCmd: the command text looks like it carries the credential itself; rotate it"* ]]
+    [[ "$output" != *"not reachable"* ]]
+    [[ "$output" != *"romp login: added"* ]]
+    # the same answer to link, unlink and remove reads the same way
+    MOCK_CURL_STATUS=400 MOCK_CURL_BODY='{"ok": false, "error": "link must be an object"}' run "$ROMP_SCRIPT" login link Work --same-as PEERHOST
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp login: refused: link must be an object"* ]]
+    MOCK_CURL_STATUS=400 MOCK_CURL_BODY='{"ok": false, "error": "a JSON object body is required"}' run "$ROMP_SCRIPT" login unlink Work
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp login: refused: a JSON object body is required"* ]]
+    MOCK_CURL_STATUS=400 MOCK_CURL_BODY='{"ok": false, "error": "a JSON object body is required"}' run "$ROMP_SCRIPT" login remove Work
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp login: refused: a JSON object body is required"* ]]
+}
+
+@test "login add: a refused serve token, an answer with no JSON reason and a kernel that never answers are each said as what they are" {
+    MOCK_CURL_STATUS=403 MOCK_CURL_BODY='{"error": "token required"}' run "$ROMP_SCRIPT" login add Work --cmd 'cat x'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp login: the kernel on :1 refused the serve token (HTTP 403)"* ]]
+    MOCK_CURL_STATUS=502 MOCK_CURL_BODY='Bad Gateway' run "$ROMP_SCRIPT" login add Work --cmd 'cat x'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp login: the kernel on :1 answered HTTP 502: Bad Gateway"* ]]
+    MOCK_CURL_STATUS=500 MOCK_CURL_BODY='' run "$ROMP_SCRIPT" login add Work --cmd 'cat x'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp login: the kernel on :1 answered HTTP 500 with no explanation"* ]]
+    MOCK_CURL_DOWN=1 run "$ROMP_SCRIPT" login add Work --cmd 'cat x'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"romp login: kernel not reachable on :1 (is romp running?)"* ]]
 }
