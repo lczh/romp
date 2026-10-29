@@ -3397,7 +3397,7 @@ _PLANNER_STATS = {"skipped": 0, "planned": 0, "recorded": 0, "restored": 0, "ref
 _PLANNER_SEEN_FILE = "planner-seen.json"   # STATE/planner-seen.json: {"v": 1, "derivation": [<_PLANNER_SEEN_DERIVATION_V>, <PLACEMENTS_V>],
 #                                                                  "rows": {fsid: <the normalized plan key>}}
 _PLANNER_SEEN_V = 1                        # the DOCUMENT's shape (a reader of another shape loads nothing)
-_PLANNER_SEEN_DERIVATION_V = 2             # the PLANNER's derivation under which a row means "nothing to do": a persisted row asserts
+_PLANNER_SEEN_DERIVATION_V = 3             # the PLANNER's derivation under which a row means "nothing to do": a persisted row asserts
 #                                            that under the code that wrote it, and before T401 (5c) every restart discarded the
 #                                            assertion; now a file whose derivation pair differs from the running code's is refused
 #                                            whole (every row counted refused), so the first pass after the change plans every
@@ -3411,6 +3411,9 @@ _PLANNER_SEEN_DERIVATION_V = 2             # the PLANNER's derivation under whic
 #                                            v1 = the memo's first persisted shape (2026-09-14); v2 = the reg (index 5) and the stall
 #                                            slice (index 10) keyed by value instead of by stat, since both files are rewritten at
 #                                            every boot and no v1 row stood across one (2026-09-14, the second deploy boot's read).
+#                                            v3 = the floor-title heal also accepts the quote's opening words (a card titled from a
+#                                            multi-line message's short first line), so a session that had nothing to do under v2 can
+#                                            have a heal now (2026-10-29).
 _PLANNER_SEEN_LOCK = threading.Lock()
 _PLANNER_SEEN_DIRTY = [False]
 _PLANNER_SEEN_LOADED = [False]
@@ -11132,7 +11135,9 @@ def _heal_floor_titles(fsid, store):
     flattens the whole message, so the label is _seg_label(quote) only when that first line runs past
     ten words; a shorter one ('Hey,' above 'Can you fix the flaky export test?') labels as the quote's
     opening words, which the gate also accepts — before, such a card kept 'Hey,' after the gist landed.
-    Returns the number healed."""
+    Widening this gate bumps _PLANNER_SEEN_DERIVATION_V (v3): this heal runs below the planner's skip, so
+    an idle session's persisted nothing-to-do row would otherwise keep the pass, and the heal, away from
+    a card whose gist landed before the change. Returns the number healed."""
     n = 0
     for nd in store.get("nodes", {}).values():
         if nd.get("cleared") or nd.get("why") != _COERCE_WHY:
