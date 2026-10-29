@@ -24,7 +24,9 @@ a session whose directory was never made):
     taken off and given back; a full queue; a tab opened on a session with three hundred tasks; the directory above the
     outputs moved and made again, which no watch hears) and a seeded random run
     after it, every tab's component equals the one-stat-per-path evaluation at every push, a record that moved is
-    replaced as the push's rebuild replaces it, and quiet pushes are served by the groups.
+    replaced as the push's rebuild replaces it, and quiet pushes are served by the groups. The same holds for an agent
+    task's output link when the directory above its target's project directory is renamed away, made unsearchable, or
+    made again, none of which a watch hears: the link is never served its target's old key.
 (3) WHERE IT IS NOT TRUSTED: a filesystem other than a local one, a sticky outputs directory, a spent watch budget and the
     switch off each read the paths as before, and the values stay exact.
 Synthetic fixtures only: invented ids and text, temporary directories."""
@@ -385,6 +387,63 @@ class Oracle(_World):
             elif m == "sibling":
                 (self.proj / FSIDS[SIB_TREE] / "subagents" / ("agent-r%d.jsonl" % n)).write_text("{}\n")
             self.checked_push("random step %d (%s)" % (n, m))
+
+
+class AboveTheLinkTarget(_World):
+    """A rename or a permission change above a link target's anchor (the directory over the project directory) moves no
+    watch, so only the anchor's stat sees it: a link riding a target whose certificate no longer stands is read as before,
+    never served the target's old key, and the values stay exact when the directory comes back. Two more tabs: one that
+    recorded only an agent task's output link, one that recorded the link before the agent's file."""
+
+    def setUp(self):
+        super().setUp()
+        for sid, paths in (("link-only", [str(self.link(0, 0))]),
+                           ("link-then-agent", [str(self.link(1, 1)), str(self.agent(1, 1))])):
+            self.paths[sid] = paths
+            self.recs[sid] = self.record(paths)
+
+    def _settle(self):
+        self.checked_push("the first push")
+        self.assertEqual(self.checked_push("the second push"), [], "a quiet push rebuilds nothing")
+        for i, k in ((0, 0), (1, 1)):
+            c = self.w.certs.get(str(self.link(i, k)))
+            self.assertIsNotNone(c, "the fixture: the link is certified")
+            self.assertEqual(c[3], str(self.agent(i, k)), "on its target's certificate")
+
+    def _pushes(self, what, n):
+        for m in range(n):
+            rebuilt = self.checked_push("%s, push %d" % (what, m))
+            if m:
+                self.assertEqual(rebuilt, [], "%s, push %d: a quiet push rebuilds nothing" % (what, m))
+
+    def test_the_directory_above_the_project_renamed_away_and_back(self):
+        self._settle()
+        up = self.proj.parent
+        away = self.td / "projects-away"
+        os.rename(up, away)
+        self._pushes("the directory above the project renamed away", 3)
+        moved = away / self.agent(1, 1).relative_to(up)
+        with open(moved, "a") as fh:                       # written while away, through its new path
+            fh.write('{"step": "while away"}\n')
+        os.rename(away, up)
+        self._pushes("renamed back", 3)
+        os.rename(up, away)
+        shutil.copytree(away, up)                          # the same names on new inodes...
+        with open(self.agent(0, 0), "a") as fh:            # ...and one of them different
+            fh.write('{"step": "after the copy"}\n')
+        self._pushes("made again", 3)
+
+    def test_the_directory_above_the_project_made_unsearchable_and_searchable_again(self):
+        if os.geteuid() == 0:
+            self.skipTest("root searches any directory")
+        self._settle()
+        up = self.proj.parent
+        os.chmod(up, 0)
+        try:
+            self._pushes("the directory above the project made unsearchable", 3)
+        finally:
+            os.chmod(up, 0o755)
+        self._pushes("searchable again", 3)
 
 
 class NotTrusted(_World):

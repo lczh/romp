@@ -41996,8 +41996,11 @@ class _TaskoutWatch(object):
         if tc is None or not self._held(tc, amemo):
             self._arm(t, amemo, 1)
             tc = self.certs.get(t)
-        if tc is None or tc[3] is not None or node not in self.reg or p not in self.kids.get(node, ()):
-            return self._fail(p)                 # (the target's arming let the link's own chain go: a target above it)
+        if (tc is None or tc[3] is not None or not self._held(tc, amemo) or node not in self.reg
+                or p not in self.kids.get(node, ())):
+            # (a failed arming leaves the target's old certificate in place, its anchor renamed or unsearchable, which no
+            # event reports; or the target's arming let the link's own chain go: a target above it)
+            return self._fail(p)
         self.certs[p] = [a, tc[1], weakref.WeakSet(), t]
         self.links.setdefault(t, set()).add(p)
         self.stats["toutArmed"] += 1
