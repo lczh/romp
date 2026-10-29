@@ -46102,6 +46102,29 @@ def _norm_branch(br):
     return "" if br == "HEAD" else br
 
 
+def _cycle_memo(name):
+    """This thread's memo `name` for its open cycle scope, or None outside one. Every scope opener (the pusher cycle, the
+    jobs pass, a connect push, a timeline phase, the document writer, a listing request) installs a FRESH dict as
+    `_live_scope.paths` and clears or restores it at the close, so that dict's identity is the scope's identity: a memo
+    filed under one scope is never served under another, and the opener needs no line of its own for it. For reads whose
+    per-call cost IS the stat that would validate them, where no cheaper key exists (the `.git` walk up a directory chain,
+    a branch's HEAD file, the realpath of a session's directory): inside a scope the first call's answer is served to the
+    scope's later calls, and the next scope reads the world afresh. That is the staleness the cycle's names snapshot
+    (_live_scope.names) and the push's own memos (_chat_push_memo) already carry: a change another process makes
+    mid-cycle is seen by the next cycle. Outside every scope (a request handler's own read, a test calling a helper
+    directly) None, and every call reads afresh as before."""
+    paths = getattr(_live_scope, "paths", None)
+    if paths is None:
+        return None
+    held = getattr(_live_scope, "cycle_memos", None)
+    if held is None or held[0] is not paths:          # holding the scope's dict keeps its identity from being reused
+        held = _live_scope.cycle_memos = (paths, {})
+    memo = held[1].get(name)
+    if memo is None:
+        memo = held[1][name] = {}
+    return memo
+
+
 _tree_cache = {}   # dir -> (git toplevel or "", the evidence the verdict was filed on, whether that is the toplevel's own .git) — see _tree_of
 _pointer_cache = {}   # a worktree's `.git` pointer FILE -> ((its mtime, inode, device), the gitdir it names) — see _pointer_gitdir
 _top_shape = {}   # toplevel -> the verdict key of its OWN `.git` entry, which its per-tree memos stand under — see _vouch_tree
@@ -46294,9 +46317,31 @@ def _tree_of(d):
     memo so it stays current without a second discipline. Counted, a memoized call costs two stats for a
     plain toplevel and three for a worktree's (the chain's one, the pointer target's, HEAD's — the pointer
     itself is read once per mtime, _pointer_gitdir), plus one per directory between the cwd and its
-    `.git`; never a read, never a fork."""
+    `.git`; never a read, never a fork.
+
+    Those stats ARE the check, so no key is cheaper than taking them, and a cycle asks about the same directory
+    many times: each open tab's signature (its cwd three times over: the branch, the repository and the tree; the
+    directory of its last edit), each rebuilt tab, the feed's repository per session, the path-link pre-check. Inside
+    a cycle scope (_cycle_memo) the toplevel is therefore taken once per directory and served to the scope's later
+    calls, and the branch once per tree (_tree_branch); the next scope takes them afresh. A miss runs the verdict
+    above unchanged (_tree_top), so a fork's answer is still filed under evidence taken right before it. A failure
+    that is not git's answer is shared with no one: the next call asks again."""
     if not d:
         return "", ""
+    memo = _cycle_memo("tree")
+    top = memo.get(d) if memo is not None else None
+    if top is None:
+        top = _tree_top(d)
+        if top is None:
+            return "", ""                              # not git's answer: nothing to cache, nothing to share
+        if memo is not None:
+            memo[d] = top
+    return top, (_tree_branch(top) if top else "")
+
+
+def _tree_top(d):
+    """_tree_of's toplevel verdict for `d` (the rules are in its docstring): '' when not in a tree, None when git
+    gave no answer (a timeout, no git binary), which is cached nowhere."""
     ev = _dotgit_on_chain(d)
     hit = _tree_cache.get(d)
     # the verdict is stored with whether its `.git` entry was the found toplevel's own (_own_dotgit), so the
@@ -46309,15 +46354,15 @@ def _tree_of(d):
             r = subprocess.run(["git", "-C", d, "rev-parse", "--show-toplevel"],
                                capture_output=True, text=True, timeout=2)
         except Exception:
-            return "", ""                              # not git's answer: nothing to cache
+            return None                                # not git's answer: nothing to cache
         top = r.stdout.strip() if r.returncode == 0 else ""
         if top:
-            _vouch_tree(top)                           # BEFORE the branch below reads the tree's memos
+            _vouch_tree(top)                           # BEFORE _tree_of's branch read takes the tree's memos
         if len(_tree_cache) > 512:                     # bounded: distinct edit dirs, not unbounded growth
             _tree_cache.clear()
         own = _own_dotgit(ev, top)
         _tree_cache[d] = (top, _verdict_key(ev, own), own)
-    return top, (_tree_branch(top) if top else "")
+    return top
 
 
 _branch_cache = {}   # toplevel -> (branch, head_mtime) — git branch derived straight from the FOLDER
@@ -46432,30 +46477,45 @@ def _tree_branch(top):
     _git_head_file). '' when detached or unavailable; a HEAD file that cannot be found is git's own "not
     a repository" and is '' without a fork. A resolver that RAISES (it reports its own faults and yields
     '' — this is the backstop should one get through) is not that verdict: the fork answers, unmemoized
-    (#1028)."""
+    (#1028).
+
+    Inside a cycle scope (_cycle_memo) the branch is read once per tree and served to the scope's later calls: every
+    directory of a tree asks for the same HEAD, and its stat is the whole cost of a memoized answer. A miss reads it
+    exactly as above (_tree_branch_read); a fork that gave no answer is shared with no one."""
+    memo = _cycle_memo("branch")
+    br = memo.get(top) if memo is not None else None
+    if br is None:
+        br, held = _tree_branch_read(top)
+        if held and memo is not None:
+            memo[top] = br
+    return br
+
+
+def _tree_branch_read(top):
+    """_tree_branch's read (the rules are in its docstring): (branch, True), or ("", False) when git gave no answer."""
     try:
         mt = _pointer_mtime(_git_head_file, _head_path_cache, top)
     except (OSError, UnicodeDecodeError):   # the resolver reports and yields ''; this is the backstop should it
         mt = None                            # raise: the fork below still answers, unmemoized (#1028)
     else:
         if mt is None:
-            return ""                        # no HEAD file is git's own "not a repository": '' without a fork
+            return "", True                  # no HEAD file is git's own "not a repository": '' without a fork
     hit = _branch_cache.get(top)
     if hit is not None and mt is not None and hit[1] == mt:
-        return hit[0]
+        return hit[0], True
     br = ""
     try:
         r = subprocess.run(["git", "-C", top, "rev-parse", "--abbrev-ref", "HEAD"],
                            capture_output=True, text=True, timeout=2)
     except Exception:
-        return ""                                        # not git's answer: nothing to memoize
+        return "", False                                 # not git's answer: nothing to memoize
     if r.returncode == 0:
         br = r.stdout.strip()
         if br == "HEAD":          # detached HEAD → no branch name
             br = ""
     if mt is not None:                                   # a backstop answer has no HEAD mtime to memoize under
         _branch_cache[top] = (br, mt)
-    return br
+    return br, True
 
 
 def _git_branch(cwd):
@@ -47078,16 +47138,54 @@ def _turn_sans_placed_echoes(turn):
     return {**turn, "atoms": [a for a in turn.get("atoms") or [] if a.get("uuid") not in placed]}
 
 
+_sdk_cwd_memo = {}   # names entry path -> (its identity, its cwd field or None) — see _sdk_transcript_path
+
+
 def _sdk_transcript_path(sid):
     """The would-be transcript path for an SDK session (its cwd's project dir / <sid>.jsonl). Needed
     BEFORE the session has run and written a transcript — the spawn is lazy, so a just-created SDK
-    session has no transcript and discover() can't see it yet."""
+    session has no transcript and discover() can't see it yet.
+
+    Every open tab's signature asks this through the awaiting-stamp view (_session_stamp_read), and so do
+    the feed's and the timeline's stamp reads, each cycle, so the names entry is read once per identity:
+    its cwd field is kept under the entry's (mtime_ns, size, inode, ctime_ns), the registration stamp's
+    shape (jd._reg_stamp), and a call whose stat finds that identity costs the stat and no read. Every
+    writer publishes the entry as a new file (os.replace), so a rewrite moves the inode even within one
+    clock tick; an edit in place moves the ctime. A stat that finds no entry is the home directory, as
+    the read that failed was. The project directory the cwd resolves to (jd._proj_dir: a realpath, a stat
+    per path component, with no cheaper key) is taken once per cycle scope (_cycle_memo)."""
+    f = NAMES / sid
+    key = str(f)
     try:
-        parts = (NAMES / sid).read_text().rstrip("\n").split("\t")
-        cwd = parts[1] if len(parts) > 1 and parts[1] else os.path.expanduser("~")
+        st = os.stat(key)
     except OSError:
-        cwd = os.path.expanduser("~")
-    return jd._proj_dir(cwd) / (sid + ".jsonl")
+        _sdk_cwd_memo.pop(key, None)
+        field = None                                     # no entry: the home directory, as a failed read gave
+    else:
+        stamp = (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
+        hit = _sdk_cwd_memo.get(key)
+        if hit is not None and hit[0] == stamp:
+            field = hit[1]
+        else:
+            try:
+                parts = f.read_text().rstrip("\n").split("\t")
+            except OSError:
+                _sdk_cwd_memo.pop(key, None)             # unreadable now: the home directory for this call, nothing kept
+                field = None
+            else:
+                field = parts[1] if len(parts) > 1 and parts[1] else None
+                _sdk_cwd_memo[key] = (stamp, field)      # the stamp was taken BEFORE the read: a rewrite in between
+                #                                          files the newer text under the older stamp, and the next
+                #                                          call's stat misses and reads it again
+    cwd = field or os.path.expanduser("~")
+    memo = _cycle_memo("proj")
+    pkey = (cwd, jd.PROJECTS)
+    proj = memo.get(pkey) if memo is not None else None
+    if proj is None:
+        proj = jd._proj_dir(cwd)
+        if memo is not None:
+            memo[pkey] = proj
+    return proj / (sid + ".jsonl")
 
 
 def _sdk_sess(sid, now):
