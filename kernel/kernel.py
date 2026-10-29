@@ -19,7 +19,7 @@ import math
 import tracemalloc
 import zlib
 import itertools
-import contextlib, json, os, queue, random, re, signal, socket, sys, time, threading, traceback, base64, bisect, errno, hashlib, hmac, struct, subprocess, shutil, shlex, http.client, uuid, tempfile, stat, gzip, collections, functools, fcntl, inspect, secrets, importlib.util, select
+import contextlib, json, os, queue, random, re, signal, socket, sys, time, threading, traceback, base64, bisect, errno, hashlib, hmac, struct, subprocess, shutil, shlex, http.client, uuid, tempfile, stat, gzip, collections, functools, fcntl, inspect, secrets, importlib.util, select, weakref
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41595,6 +41595,482 @@ def _chat_repo_served(cwd):
     return got
 
 
+# THE TASKOUT CERTIFICATE (2026-10-29). A chat tab's signature took the stat key of every path its cached build read outside
+# the subagents trees it samples (_chat_taskout_now's lone paths: each Agent card's own transcript, each background task's
+# output and the link an agent task's output is, the place an agent's file was missing from, a sibling session's subagents
+# root, a subagents directory not made yet), once per push for every path any open tab recorded. A session that ran many
+# background tasks and agents records hundreds, so with many tabs open a quiet push stat'd thousands of files that had not
+# changed since they finished, and each stat gives up the interpreter lock, which the pusher then waits to take again. On
+# Linux the signature now asks the operating system to say when one of those paths changes (inotify, on a descriptor of its
+# own beside the subagents trees' one), and a path with no event since its key was taken under its watches is served that
+# key with no stat.
+#
+# What can move a path's key (_chat_stat_key: os.stat's (st_mtime, st_size), None when nothing is there), and the event
+# each change queues. The path hangs under an ANCHOR directory (_tout_anchor) through a chain of directories down to its
+# own. (1) The object at the path: a write, truncate, fallocate or copy into a file is IN_MODIFY on its inode; a utime, a
+# chmod and a link-count change (unlinked, or another file renamed over it) are IN_ATTRIB; its removal or move is
+# IN_DELETE_SELF or IN_MOVE_SELF. A watch on the inode hears these whichever name or descriptor the writer used, a hard
+# link elsewhere included. A file's watch is one-shot: its first event removes it, so a file being written queues one event
+# per arming, never one per write. A directory's key moves with its entries and its metadata. (2) What the path names: an
+# entry created, removed or renamed in the path's directory (how an absent path appears too) or in any directory of the
+# chain, and a chain directory's own metadata (permissions on the way), each an event on a watched chain directory. (3)
+# What the anchor's own path names: no event covers a rename above it, so the anchor is stat'd once per push and its
+# (device, inode) compared with the one its watch was added on. A symlink (an agent task's output points at the agent's
+# own transcript) is served its target's key while the link's entry holds and the target's own certificate stands; one
+# level of link only.
+#
+# The protocol keeps each key true from the moment it is stored. A path is ARMED under the lock: the anchor watched and
+# stat'd again after the watch (so the watch sits on the inode the push's stat saw), the chain watched top down with
+# IN_DONT_FOLLOW | IN_ONLYDIR (a symlink in the chain is not certified; a directory replaced after its parent's watch was
+# added queues an entry event there), then the path lstat'd, watched and lstat'd again: the key is the second lstat's, the
+# same (st_mtime, st_size) os.stat answers for anything but a symlink. Any change after a watch was added queues an event,
+# and the push's drain (once per push, before any key of it is served) drops every key the event touches: the path's own,
+# everything under a directory whose entry or attributes moved, every link riding a dropped target; a full queue
+# (IN_Q_OVERFLOW) drops them all. A dropped key is taken again, under fresh watches, by the next push that asks. So a served
+# key is a fresh stat's as of the push's drain; a change landing mid-push is seen by the next push, the push memo's own rule
+# (_chat_push_memo).
+#
+# Where it is not trusted, and the path is stat'd once a push as before: off Linux, when the descriptor cannot be opened, for
+# a path that is not absolute and normalized, when the anchor is not a directory, is sticky (/tmp itself: every process on
+# the machine churns its entries) or sits on a filesystem other than a local one (_TREE_WATCH_LOCAL_FS, the trees' rule and
+# their one stated assumption: inotify reports the changes made through this machine), when the path or its directory is
+# on another device than the anchor, for a link to a link or one whose target is not a normalized path, and when the watch
+# budget (an eighth of the per-user limit, beside the trees' eighth) stays spent after the least recently read anchors are
+# let go. A path that could not be certified is armed again only once its key moves (_TaskoutWatch.failed). Two changes no
+# event reports, stated as the trees' mount case is: a write through a shared memory mapping (it moves the mtime with no
+# IN_MODIFY; the CLIs and shells that write these files use write(2)) and a mount placed over a watched path.
+_TOUT_WATCH_ON = sys.platform.startswith("linux")   # the taskout certificate; False: every lone path is stat'd once a push
+_IN_MODIFY, _IN_ONESHOT = 0x2, 0x80000000
+_TOUT_DIR_MASK = (_IN_ATTRIB | _IN_MOVED_FROM | _IN_MOVED_TO | _IN_CREATE | _IN_DELETE | _IN_DELETE_SELF | _IN_MOVE_SELF
+                  | _IN_ONLYDIR)   # a directory's entries and its own changes; its files' writes are their own watches'
+_TOUT_FILE_MASK = _IN_MODIFY | _IN_ATTRIB | _IN_DELETE_SELF | _IN_MOVE_SELF | _IN_DONT_FOLLOW | _IN_ONESHOT
+
+
+def _tout_anchor(p):
+    """The anchor directory of a lone path (THE TASKOUT CERTIFICATE above): for a path at or in a session's subagents tree
+    (<project>/<fsid>/subagents, _subagents_dir) the project directory, so one stat a push vouches every tree of the project a
+    tab read (its own, the siblings' roots an agent lookup read, a tree not made yet); for any other path its own directory
+    (a task's output: the directory the task store keeps every output in). None for a path that is not absolute and
+    normalized, or whose anchor would be the root."""
+    if not p or not os.path.isabs(p) or os.path.normpath(p) != p:
+        return None
+    seg = os.sep + "subagents"
+    i = p.find(seg + os.sep)
+    if i < 0 and p.endswith(seg):
+        i = len(p) - len(seg)
+    a = os.path.dirname(p[:i]) if i > 0 else os.path.dirname(p)
+    return a if a and a != os.sep and a != p else None
+
+
+class _ToutGroup(object):
+    """A plan's vouch over the lone paths the certificate covers (_TaskoutWatch.vouch): `ok` until one of their certificates
+    is dropped, taken under the descriptor generation `gen` (a full queue voids every group taken before it)."""
+    __slots__ = ("ok", "gen", "__weakref__")
+
+    def __init__(self, gen):
+        self.ok, self.gen = True, gen
+
+
+class _TaskoutWatch(object):
+    """The inotify half of the taskout component (the comment above): one descriptor for the process, opened on first use,
+    the watches on every anchor, chain directory and certified path, and per path its certificate. Every method takes the
+    one lock; the readers are the pusher and the handler threads' connect pushes."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.fd = None          # the descriptor; False once opening it failed (never retried)
+        self.add = self.rm = self.errno = None
+        self.cap = 0            # the watch budget, an eighth of the per-user limit
+        self.gen = 0            # raised by a full queue
+        self.reg = {}           # path -> watch descriptor: every directory and file watched
+        self.byw = {}           # watch descriptor -> {paths} (one inode can sit under two paths)
+        self.kids = {}          # path -> {paths one step below}: each chain from its anchor down to the paths it certifies
+        self.certs = {}         # path -> [anchor, key, groups (a WeakSet of _ToutGroup), the link's target or None]
+        self.links = {}         # target path -> {links whose certificate rides its}
+        self.anchors = {}       # anchor -> (st_dev, st_ino) of the directory its watch was added on
+        self.used = {}          # anchor -> the push it was last read in (the order the budget lets anchors go in)
+        self.push = 0
+        self.local = {}         # st_dev -> whether its filesystem is a local one
+        self.failed = {}        # path -> the key read when it could not be certified: armed again once that key moves
+        self.stats = {"toutServed": 0, "toutArmed": 0, "toutFailed": 0, "toutEvents": 0, "toutOverflow": 0,
+                      "toutEvicted": 0}
+
+    def _open(self):
+        if self.fd is None:
+            self.fd = False
+            try:
+                import ctypes
+                try:
+                    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+                except OSError:
+                    libc = ctypes.CDLL(None, use_errno=True)
+                add, rm = libc.inotify_add_watch, libc.inotify_rm_watch
+                add.argtypes, add.restype = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32], ctypes.c_int
+                rm.argtypes, rm.restype = [ctypes.c_int, ctypes.c_int], ctypes.c_int
+                fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+                if fd >= 0:
+                    try:
+                        with open("/proc/sys/fs/inotify/max_user_watches") as fh:
+                            limit = int(fh.read().strip())
+                    except (OSError, ValueError):
+                        limit = 8192            # the historical default
+                    self.fd, self.add, self.rm, self.errno = fd, add, rm, ctypes.get_errno
+                    self.cap = max(0, limit // 8)
+            except Exception:
+                self.fd = False
+        return self.fd is not False
+
+    def begin(self):
+        """A push's first ask: count the push and read every queued event before any key of the push is served. False when
+        the descriptor cannot be had (every path is then stat'd as before)."""
+        with self.lock:
+            self.push += 1
+            if not self._open():
+                return False
+            self._drain()
+            return True
+
+    def _drain(self):
+        """Read every queued event (the descriptor never blocks) and drop what each touches (the comment above)."""
+        while True:
+            try:
+                buf = os.read(self.fd, 65536)
+            except BlockingIOError:
+                return
+            except OSError:                     # not expected on a readable descriptor: nothing can be vouched for
+                self._void_all()
+                return
+            if not buf:
+                return
+            off = 0
+            while off + 16 <= len(buf):
+                wd, mask, _cookie, ln = struct.unpack_from("iIII", buf, off)
+                name = buf[off + 16:off + 16 + ln].split(b"\0", 1)[0]
+                off += 16 + ln
+                self.stats["toutEvents"] += 1
+                if mask & _IN_Q_OVERFLOW:
+                    self._void_all()
+                    continue
+                for x in list(self.byw.get(wd, ())):
+                    if name:                    # an entry of directory x, or an entry's metadata: x's own key moved with
+                        self._uncert(x)         #  its entries (a directory certified as a path), and the entry's subtree goes
+                        self._drop(x + os.sep + os.fsdecode(name))
+                    else:                       # x itself: written, its metadata, removed or moved, or its watch gone
+                        self._drop(x)
+
+    def _uncert(self, x):
+        """Drop path x's certificate (its groups learn it, and every link riding it is dropped with it)."""
+        c = self.certs.pop(x, None)
+        if c is None:
+            return
+        for g in list(c[2]):
+            g.ok = False
+        if c[3] is not None:
+            riders = self.links.get(c[3])
+            if riders is not None:
+                riders.discard(x)
+                if not riders:
+                    del self.links[c[3]]
+        for link in list(self.links.pop(x, ())):
+            self._uncert(link)
+
+    def _drop(self, p):
+        """Forget path p and everything under it: their certificates, their watches and their places in the chains."""
+        stack = [p]
+        while stack:
+            x = stack.pop()
+            self._uncert(x)
+            wd = self.reg.pop(x, None)
+            if wd is not None:
+                self._unref(x, wd)
+            stack.extend(self.kids.pop(x, ()))
+            up = self.kids.get(os.path.dirname(x))
+            if up is not None:
+                up.discard(x)
+
+    def _unref(self, x, wd):
+        paths = self.byw.get(wd)
+        if paths is not None:
+            paths.discard(x)
+            if not paths:
+                del self.byw[wd]
+                self.rm(self.fd, wd)            # a one-shot watch that fired is gone already: the call fails, harmlessly
+
+    def _register(self, x, wd):
+        old = self.reg.get(x)
+        if old == wd:
+            return
+        if old is not None:
+            self._unref(x, old)
+        self.reg[x] = wd
+        self.byw.setdefault(wd, set()).add(x)
+
+    def _void_all(self):
+        """Nothing queued can be trusted (a full queue, a failed read): every watch, certificate and group goes."""
+        self.stats["toutOverflow"] += 1
+        self.gen += 1
+        for wd in list(self.byw):
+            self.rm(self.fd, wd)
+        for c in self.certs.values():
+            for g in list(c[2]):
+                g.ok = False
+        for d in (self.reg, self.byw, self.kids, self.certs, self.links, self.anchors, self.used):
+            d.clear()
+
+    def _fs_type(self, dev):
+        """The mount's filesystem type for device `dev`, as the subagents trees' watch reads /proc/self/mountinfo."""
+        w = _SUBAGENT_TREE_WATCH
+        with w.lock:
+            return w._fs_type(dev)
+
+    def _is_local(self, dev):
+        v = self.local.get(dev)
+        if v is None:
+            v = self.local[dev] = self._fs_type(dev) in _TREE_WATCH_LOCAL_FS
+        return v
+
+    def _anchor_now(self, a, amemo):
+        """(st_dev, st_ino) of the directory anchor `a` names this push, one stat per push (the push's memo `amemo`); None
+        when it is not there, not a directory or sticky."""
+        v = amemo.get(a, _DEPS_UNSET)
+        if v is _DEPS_UNSET:
+            try:
+                st = os.stat(a)
+                v = (st.st_dev, st.st_ino) if stat.S_ISDIR(st.st_mode) and not st.st_mode & stat.S_ISVTX else None
+            except OSError:
+                v = None
+            amemo[a] = v
+            if a in self.anchors:
+                self.used[a] = self.push
+        return v
+
+    def _held(self, c, amemo):
+        """Whether certificate `c` stands this push: its anchor names the directory its watch was added on, and a link's
+        target's certificate stands too."""
+        a = self.anchors.get(c[0])
+        if a is None or self._anchor_now(c[0], amemo) != a:
+            return False
+        if c[3] is not None:
+            t = self.certs.get(c[3])
+            return t is not None and t[3] is None and self._held(t, amemo)
+        return True
+
+    def key(self, p, amemo):
+        """Lone path p's key now (_chat_stat_key's answer): its certificate's when one stands, else read once, under watches
+        when p can be certified."""
+        with self.lock:
+            c = self.certs.get(p)
+            if c is not None and self._held(c, amemo):
+                self.stats["toutServed"] += 1
+                return c[1]
+            f = self.failed.get(p, _DEPS_UNSET)
+            if f is not _DEPS_UNSET:
+                k = _chat_stat_key(p)
+                if k == f:
+                    return k                    # unchanged since it could not be certified: read as before
+                del self.failed[p]
+            return self._arm(p, amemo, 0)
+
+    def _fail(self, p):
+        """p cannot be certified now: its key read as before, and remembered so the next push re-arms only once it moves."""
+        k = _chat_stat_key(p)
+        if len(self.failed) > 8192:
+            self.failed.clear()
+        self.failed[p] = k
+        self.stats["toutFailed"] += 1
+        return k
+
+    def _evict(self, keep):
+        """Let the least recently read quarter of the anchors go (their watches and certificates), never `keep`."""
+        order = sorted((u, x) for x, u in self.used.items() if x != keep and x in self.anchors)
+        for _u, x in order[:max(1, len(order) // 4)]:
+            self._drop(x)
+            self.anchors.pop(x, None)
+            self.used.pop(x, None)
+            self.stats["toutEvicted"] += 1
+
+    def _arm(self, p, amemo, depth):
+        """Certify p (the protocol in the comment above) and return its key; a path that cannot be certified is read as
+        before (_fail). `depth` 1 arms a link's target, which never lets anchors go and never follows a second link."""
+        a = _tout_anchor(p)
+        an = self._anchor_now(a, amemo) if a is not None else None
+        if an is None or not self._is_local(an[0]):
+            return self._fail(p)
+        if self.anchors.get(a) != an:           # the first arming under `a`, or its path names another directory now
+            if a in self.anchors or a in self.reg or a in self.kids:
+                self._drop(a)
+            self.anchors[a] = an
+        self.used[a] = self.push
+        if len(self.byw) + 16 > self.cap:       # room for a chain (the deepest a tree goes) and a link's target's
+            if depth:
+                return self._fail(p)
+            self._evict(a)
+            if len(self.byw) + 16 > self.cap:
+                return self._fail(p)
+        if a not in self.reg:
+            wd = self.add(self.fd, os.fsencode(a), _TOUT_DIR_MASK)
+            if wd < 0:
+                return self._fail(p)
+            self._register(a, wd)
+            try:
+                st = os.stat(a)
+                same = (st.st_dev, st.st_ino) == an
+            except OSError:
+                same = False
+            if not same:                        # the path moved between the push's stat and the watch
+                self._drop(a)
+                self.anchors.pop(a, None)
+                return self._fail(p)
+        node = a
+        for comp in p[len(a) + 1:].split(os.sep)[:-1]:
+            nxt = node + os.sep + comp
+            self.kids.setdefault(node, set()).add(nxt)
+            if nxt not in self.reg:
+                wd = self.add(self.fd, os.fsencode(nxt), _TOUT_DIR_MASK | _IN_DONT_FOLLOW)
+                if wd < 0:
+                    if self.errno() != errno.ENOENT:
+                        return self._fail(p)     # a symlink or a file in the chain, unreadable, or the budget
+                    return self._absent(p, a, node, nxt)
+                self._register(nxt, wd)
+            node = nxt
+        self.kids.setdefault(node, set()).add(p)
+        try:
+            l0 = os.lstat(p)
+        except FileNotFoundError:
+            return self._absent(p, a, node, None)
+        except OSError:
+            return self._fail(p)
+        if stat.S_ISLNK(l0.st_mode):
+            return self._arm_link(p, a, node, amemo, depth)
+        if l0.st_dev != an[0]:
+            return self._fail(p)
+        isdir = stat.S_ISDIR(l0.st_mode)
+        if not (isdir and p in self.reg):       # a file's one-shot watch is added again at every arming
+            wd = self.add(self.fd, os.fsencode(p), (_TOUT_DIR_MASK | _IN_DONT_FOLLOW) if isdir else _TOUT_FILE_MASK)
+            if wd < 0:
+                return self._fail(p)
+            self._register(p, wd)
+        try:
+            l1 = os.lstat(p)
+        except OSError:
+            l1 = None
+        if l1 is None or (l1.st_dev, l1.st_ino, stat.S_IFMT(l1.st_mode)) != (l0.st_dev, l0.st_ino, stat.S_IFMT(l0.st_mode)):
+            return self._fail(p)                 # replaced between the two looks
+        key = (l1.st_mtime, l1.st_size)
+        self.certs[p] = [a, key, weakref.WeakSet(), None]
+        self.stats["toutArmed"] += 1
+        return key
+
+    def _absent(self, p, a, node, missing):
+        """Certify p absent: `node` (watched) holds no entry for the next step down (`missing`, or p itself when None), so p
+        stays absent until one lands there, an entry event that drops the chain below it, p included."""
+        try:
+            dev = os.lstat(node).st_dev
+        except OSError:
+            return self._fail(p)
+        if dev != self.anchors[a][0]:
+            return self._fail(p)
+        if missing is not None:
+            x = missing
+            for comp in p[len(missing) + 1:].split(os.sep):
+                nxt = x + os.sep + comp
+                self.kids.setdefault(x, set()).add(nxt)
+                x = nxt
+        self.certs[p] = [a, None, weakref.WeakSet(), None]
+        self.stats["toutArmed"] += 1
+        return None
+
+    def _arm_link(self, p, a, node, amemo, depth):
+        """Certify link p (its entry in `node`, watched) on its target's certificate: os.stat follows the link to the
+        target's path, so the link's key is the target's while both stand. A retarget replaces the link, an entry event."""
+        if depth:
+            return self._fail(p)
+        try:
+            s = os.readlink(p)
+        except OSError:
+            return self._fail(p)
+        t = s if os.path.isabs(s) else os.path.join(node, s)
+        if os.path.normpath(t) != t:
+            return self._fail(p)
+        tc = self.certs.get(t)
+        if tc is None or not self._held(tc, amemo):
+            self._arm(t, amemo, 1)
+            tc = self.certs.get(t)
+        if tc is None or tc[3] is not None or node not in self.reg or p not in self.kids.get(node, ()):
+            return self._fail(p)                 # (the target's arming let the link's own chain go: a target above it)
+        self.certs[p] = [a, tc[1], weakref.WeakSet(), t]
+        self.links.setdefault(t, set()).add(p)
+        self.stats["toutArmed"] += 1
+        return tc[1]
+
+    def vouch(self, items, amemo):
+        """A group over the certified ones among `items` ((path, the key the plan expects) pairs): (the group, its anchors
+        with the inodes they stood on, the positions in `items` it covers), or None when it covers none."""
+        with self.lock:
+            g = _ToutGroup(self.gen)
+            anchors, covered = {}, []
+            for n, (p, k) in enumerate(items):
+                c = self.certs.get(p)
+                if c is None or c[1] != k or not self._held(c, amemo):
+                    continue
+                c[2].add(g)
+                anchors[c[0]] = self.anchors[c[0]]
+                if c[3] is not None:
+                    ta = self.certs[c[3]][0]
+                    anchors[ta] = self.anchors[ta]
+                covered.append(n)
+            return (g, tuple(anchors.items()), covered) if covered else None
+
+    def holds(self, g, anchors, amemo):
+        """Whether group `g` still stands this push: none of its certificates dropped since it was taken, and each of its
+        anchors names the directory it named then."""
+        with self.lock:
+            if not g.ok or g.gen != self.gen:
+                return False
+            for a, ident in anchors:
+                if self.anchors.get(a) != ident or self._anchor_now(a, amemo) != ident:
+                    return False
+            return True
+
+    def report(self):
+        """The certificate's tallies, with the watches and certificates held."""
+        with self.lock:
+            out = dict(self.stats)
+            out["toutWatches"] = len(self.byw)
+            out["toutCerts"] = len(self.certs)
+            out["toutAnchors"] = len(self.anchors)
+        return out
+
+
+_TOUT_WATCH = _TaskoutWatch()
+
+
+def _chat_tout_watch():
+    """(the taskout certificate, the push's anchor memo) for _chat_taskout_now, or (None, None) where it is off. The push's
+    first ask drains the queue before any key of the push is served (outside a push every call is its own)."""
+    if not _TOUT_WATCH_ON:
+        return None, None
+    amemo = _chat_push_memo("toutAnchors")
+    if "" not in amemo:                                   # "" is no anchor (anchors are absolute): the push's mark
+        amemo[""] = _TOUT_WATCH.begin()
+    return (_TOUT_WATCH, amemo) if amemo[""] else (None, None)
+
+
+def _chat_tout_plan(w, amemo, touts, ents, lone, grouped_eq):
+    """The record's `tout_plan`: (the trees with their walk-memo entries, the lone positions read every push, whether every
+    tree key equalled the build's, and the certificate's group over the lone positions it covers at the build's own keys,
+    or None). A covered position costs a quiet push nothing: the group's one check stands for all of them."""
+    vg = None
+    if w is not None and lone:
+        got = w.vouch([(touts[i][0], touts[i][1]) for i in lone], amemo)
+        if got is not None:
+            idx = tuple(lone[n] for n in got[2])
+            vg = (got[0], got[1], idx)
+            cov = set(idx)
+            lone = [i for i in lone if i not in cov]
+    return (ents, tuple(lone), grouped_eq, vg)
+
+
 def _chat_tree_sample(root):
     """The cycle's sample of the subagents tree at `root` (_subagent_tree: its directories and the stat each was taken
     under) for the taskout component, or None when there is none to be had without a walk. Served from the cycle's
@@ -41623,23 +42099,28 @@ def _chat_taskout_now(deps):
     tree whose walk-memo entry is the same object it was when its keys were last taken from a sample that matched that
     entry exactly (`tout_plan`) is vouched whole: the entry is replaced on every re-walk and kept only while each
     directory's identity (inode, mtime, size, ctime) validates, which is what this cycle's sample just did, so every key
-    under it stands and none is read. (3) Every other path (an agent's file, a task output, a sibling's root, a directory
-    of a tree no reader keeps) is stat'd once per push for every tab that recorded it (_chat_push_memo). When every key
-    equals the one the build embedded, the record's own at-build tuple is returned, so the signature's compare is one
-    identity test for this component, and a quiet tab costs one memo check per tree plus one probe per other path.
-    Between cycles the value equals the one-stat-per-path evaluation; a change landing mid-cycle is seen by the next
-    cycle, the cycle scope's rule (_subagent_tree)."""
+    under it stands and none is read. (3) Every other path (an agent's file, a task output and its link, a sibling's root,
+    a directory of a tree no reader keeps: the lone paths) is read once per push for every tab that recorded it
+    (_chat_push_memo), from THE TASKOUT CERTIFICATE (_TaskoutWatch, 2026-10-29) where it holds one: the key taken under
+    inotify watches, served with no stat until an event touches the path. The plan keeps a group over the lone paths the
+    certificate covers at the build's own keys, so across quiet pushes those cost one group check and one stat per anchor
+    directory (the project directory, a task store's directory), however many paths a tab recorded; a path the
+    certificate cannot take is stat'd once per push as before. When every key equals the one the build embedded, the
+    record's own at-build tuple is returned, so the signature's compare is one identity test for this component, and a
+    quiet tab costs one memo check per tree and one group check. Between cycles the value equals the one-stat-per-path
+    evaluation; a change landing mid-cycle is seen by the next cycle, the cycle scope's rule (_subagent_tree)."""
     touts = deps["task_outs"]
     if not touts:
         return ()
     at = deps.get("at_build")
     at = at[0] if at else None
     stats = _chat_push_memo("outs")
+    w, amemo = _chat_tout_watch()
 
     def key_of(of):
         k = stats.get(of, _DEPS_UNSET)
         if k is _DEPS_UNSET:
-            k = stats[of] = _chat_stat_key(of)
+            k = stats[of] = w.key(of, amemo) if w is not None else _chat_stat_key(of)
         return k
 
     plan = deps.get("tout_plan")
@@ -41651,7 +42132,12 @@ def _chat_taskout_now(deps):
                 held = False
                 break
         if held and all(key_of(touts[i][0]) == touts[i][1] for i in plan[1]):
-            return at
+            vg = plan[3]
+            if vg is None or w is not None and w.holds(vg[0], vg[1], amemo):
+                return at                                 # no certified path moved: the group stands for all of them
+            if all(key_of(touts[i][0]) == touts[i][1] for i in vg[2]):
+                deps["tout_plan"] = _chat_tout_plan(w, amemo, touts, plan[0], list(plan[1]) + list(vg[2]), plan[2])
+                return at                                 # a key under one of its anchors moved and came back: vouched again
     samples, dirmap = [], {}
     for root in deps.get("trees") or ():
         s = _chat_tree_sample(root)
@@ -41679,8 +42165,8 @@ def _chat_taskout_now(deps):
             ents = None
             break
         ents.append((root, ent))
-    deps["tout_plan"] = None if ents is None else (
-        tuple(ents), tuple(lone), all(keys[i] == touts[i][1] for idx in grouped.values() for i in idx))
+    deps["tout_plan"] = None if ents is None else _chat_tout_plan(
+        w, amemo, touts, tuple(ents), lone, all(keys[i] == touts[i][1] for idx in grouped.values() for i in idx))
     now = tuple((of, k) for (of, _k), k in zip(touts, keys))
     return at if at is not None and now == at else now
 
@@ -41760,7 +42246,7 @@ def _chat_sig_deps(sid, deps):
     after moves the next pre-check."""
     if not deps:
         return ((), (), None)
-    touts = _chat_taskout_now(deps)                      # one stat per path no cycle sample or earlier tab covers
+    touts = _chat_taskout_now(deps)                      # a stat per path no sample, certificate or earlier tab covers
     pl = ()
     if deps["pl_pending"]:
         prev = deps.get("pl_check")

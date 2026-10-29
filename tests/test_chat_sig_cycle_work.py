@@ -555,6 +555,8 @@ class QuietPushWork(_World):
 
     @mock.patch.object(km, "_TREE_WATCH_ON", False)   # the lstat validation's costs: the watch certificate's road is
     #                                                     tests/test_feed_subagents_cycle_work.py's (the root's lstat alone)
+    @mock.patch.object(km, "_TOUT_WATCH_ON", False)   # ...and one stat per lone path a push: the taskout certificate's
+    #                                                     road (no stat at all) is tests/test_chat_taskout_watch.py's
     def test_a_quiet_push_stats_no_tree_directory_for_its_own_tab_and_each_subagents_root_once(self):
         before = self.settle()
         self.push()                                           # a quiet push after the one that took the keys
@@ -608,6 +610,8 @@ class QuietPushWork(_World):
 
     @mock.patch.object(km, "_TREE_WATCH_ON", False)   # the lstat validation's costs: the watch certificate's road is
     #                                                     tests/test_feed_subagents_cycle_work.py's (the root's lstat alone)
+    @mock.patch.object(km, "_TOUT_WATCH_ON", False)   # ...and one stat per lone path a push: the taskout certificate's
+    #                                                     road (no stat at all) is tests/test_chat_taskout_watch.py's
     def test_a_quiet_tab_takes_no_identity_of_its_directories_beyond_the_samples_validation(self):
         self.settle()
         self.push()
