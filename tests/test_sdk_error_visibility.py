@@ -181,7 +181,8 @@ class KernelSide(unittest.TestCase):
                 return 1
 
         km._SDK_BOOT_PROBLEMS[:] = [{"seq": 1, "t": 4.0, "text": "the SDK backend could not be built"}]
-        prev = km._sdk_backend
+        prev, prev_seq = km._sdk_backend, km._SDK_PROBLEM_SEQ[0]
+        km._SDK_PROBLEM_SEQ[0] = 1          # the boot ring's counter, in step with the one row seeded above
         km._sdk_backend = _Be()
         try:
             rows = km._sdk_problem_rows()
@@ -190,7 +191,37 @@ class KernelSide(unittest.TestCase):
             self.assertEqual(km._sdk_problem_count(), 2)
         finally:
             km._sdk_backend = prev
+            km._SDK_PROBLEM_SEQ[0] = prev_seq
             km._SDK_BOOT_PROBLEMS.clear()
+
+    def test_every_problem_past_the_rings_bound_still_reaches_the_bell(self):
+        # the boot ring keeps its newest 20 rows, but a row's seq is the OCCURRENCE id. Stamped from the
+        # ring's length, every problem after the 20th was seq 21 and signed alike; the bell, which skips a
+        # signature it has already shown, then showed none of them, and the count sat at 20, so the view
+        # key stopped moving too
+        saved, prev = list(km._SDK_BOOT_PROBLEMS), km._sdk_backend
+        km._SDK_BOOT_PROBLEMS.clear()
+        km._sdk_backend = None
+        try:
+            seen, shown, counts = set(), [], []
+            for i in range(1, 26):
+                text = "the notes-api ledger could not be written (%d)" % i
+                km._sdk_problem(text)
+                counts.append(km._sdk_problem_count())
+                rows = km._sdk_problem_rows()
+                # the bell's own rule (badge-mirror.ts sdkProblemNotices): a row whose signature is in the
+                # last payload's set is not shown again, and the new payload's signatures become that set
+                shown.append([r["text"] for r in rows if r["sig"] not in seen])
+                seen = {r["sig"] for r in rows}
+                self.assertEqual(len(seen), len(rows), "every row in the payload has its own signature")
+            self.assertEqual(shown, [["the notes-api ledger could not be written (%d)" % i] for i in range(1, 26)],
+                             "each problem reaches the bell once, the 22nd and later included")
+            self.assertEqual(counts, list(range(counts[0], counts[0] + 25)),
+                             "the count moves on every problem, past the ring's 20 rows too")
+            self.assertEqual(len(km._SDK_BOOT_PROBLEMS), 20, "the ring itself stays bounded")
+        finally:
+            km._sdk_backend = prev
+            km._SDK_BOOT_PROBLEMS[:] = saved
 
     def test_the_feed_payload_and_its_cache_key_carry_the_problems(self):
         self.assertIn('"sdkNotices": _sdk_problem_rows(),', inspect.getsource(km.build_feed))
