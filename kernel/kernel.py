@@ -23669,13 +23669,20 @@ def _default_backend():
 # the same path card badges and /clear boundaries already take (badge-mirror.ts).
 # _SDK_BOOT_PROBLEMS covers the window where there is no backend to hold a ring — the construction itself
 # failed — which is exactly when the user most needs to be told.
+# A row's seq is the OCCURRENCE id and keeps counting past the ring's bound, as the backend's own ring
+# does: stamped from the ring's length, every problem after the 20th was seq 21, so they all signed
+# alike, the bell (which skips a signature it has shown) showed none of them, and the count sat at 20.
 _SDK_BOOT_PROBLEMS = []
+_SDK_PROBLEM_LOCK = threading.Lock()
+_SDK_PROBLEM_SEQ = [0]
 
 
 def _sdk_problem(text):
     _jobs_gate_note("problem")            # (the jobs pass's gate, shadow: an act of the job running here, if one is)
-    _SDK_BOOT_PROBLEMS.append({"seq": len(_SDK_BOOT_PROBLEMS) + 1, "t": time.time(), "text": str(text)})
-    del _SDK_BOOT_PROBLEMS[:-20]
+    with _SDK_PROBLEM_LOCK:
+        _SDK_PROBLEM_SEQ[0] += 1
+        _SDK_BOOT_PROBLEMS.append({"seq": _SDK_PROBLEM_SEQ[0], "t": time.time(), "text": str(text)})
+        del _SDK_BOOT_PROBLEMS[:-20]
 
 
 def _auth_key_present():
@@ -23841,9 +23848,10 @@ def _judge_limit_view():
 
 
 def _sdk_problem_count():
-    """Total problems recorded so far (boot + backend). The view-cache key: it changes only when
-    something actually failed, so a failure lands in the payload on its own event."""
-    n = len(_SDK_BOOT_PROBLEMS)
+    """Total problems recorded so far (boot + backend): both sequences count past their rings' bounds.
+    The view-cache key: it changes only when something actually failed, so a failure lands in the
+    payload on its own event."""
+    n = _SDK_PROBLEM_SEQ[0]
     be = _sdk_backend if _sdk_backend else None
     if be is not None and hasattr(be, "problem_seq"):
         try:
