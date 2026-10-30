@@ -842,6 +842,14 @@ def _strip_fences(s):
     return m.group(1).strip() if m else s
 
 
+def _letter_count(s):
+    """How many letters `s` holds, in any script (str.isalpha). The judges' degenerate-text guards count
+    these, not ASCII letters: GIST_SYS keeps the request's own vocabulary, so a request written in
+    Cyrillic, Greek or CJK gets its titles and captions in that script, and an ASCII-only count dropped
+    every one of them. Text of digits and punctuation alone still counts zero."""
+    return sum(ch.isalpha() for ch in s or "")
+
+
 def _clean_caption(out):
     """Phrase-level normalization + the anti-chat guards (a model gone off-script asks a question
     or offers help; reject those so junk never lands in the caption store). '' = failed capture.
@@ -854,7 +862,7 @@ def _clean_caption(out):
     # captions never name a tool; the trailing usage clause goes, the accomplishment stays
     out = re.sub(r"\s*\b(?:via|using|used|with|through|by)\b[^,;]*?\btools?\b.*$", "", out, flags=re.I)
     out = out.strip().rstrip(".,")
-    if len(re.sub(r"[^A-Za-z]", "", out)) < 3:        # degenerate junk
+    if _letter_count(out) < 3:                        # degenerate junk
         return ""
     # A caption is ONE short phrase. A long line or one that runs to multiple sentences is narration or a
     # meta-refusal ("I cannot provide a caption for this unit because…no assistant work is shown"), never a
@@ -4535,7 +4543,7 @@ def _parse_archive(out):
         return None
     headline = " ".join(hm.group(1).split()).strip().rstrip(".")[:120]
     abstract = " ".join(am.group(1).split()).strip()[:700]
-    if len(re.sub(r"[^A-Za-z]", "", headline)) < 3 or len(re.sub(r"[^A-Za-z]", "", abstract)) < 3:
+    if _letter_count(headline) < 3 or _letter_count(abstract) < 3:
         return None
     return {"headline": headline, "abstract": abstract}
 
@@ -4856,7 +4864,7 @@ def _parse_plan(raw, menu_len, allow_extend=False):
             return None
 
     def _has_alpha(t):
-        return bool(re.sub(r"[^A-Za-z]", "", t))
+        return _letter_count(t) > 0
 
     ops = []
     for o in raw_ops:
@@ -14188,7 +14196,7 @@ def _parse_group(raw, menu_len):
         elif do == "split":
             g = _int(o, "goal")                        # promote step #goal to its own top card
             retitle = " ".join(str(o.get("retitle", "")).split())[:120]
-            retitle = retitle if re.sub(r"[^A-Za-z]", "", retitle) else ""
+            retitle = retitle if _letter_count(retitle) else ""
             if g and 1 <= g <= menu_len:
                 op = {"do": "split", "why": why, "goal": g}
                 if retitle:
@@ -14196,7 +14204,7 @@ def _parse_group(raw, menu_len):
                 ops.append(op)
         elif do == "retitle":
             g = _int(o, "goal")                        # re-title card #goal in place (tops only, enforced
-            if g and 1 <= g <= menu_len and re.sub(r"[^A-Za-z]", "", text):   # by apply_group)
+            if g and 1 <= g <= menu_len and _letter_count(text):   # by apply_group)
                 ops.append({"do": "retitle", "why": why, "goal": g, "text": text})
     return ops
 
