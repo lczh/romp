@@ -597,6 +597,44 @@ class CourierMintMatrix(unittest.TestCase):
         self.assertFalse(trackers[0]["handoff"].get("quiet"),
                          "a recipient goal carries the msgId — the origin back-link owns the ending")
 
+    def test_the_recipient_card_points_at_the_tracker_the_save_published(self):
+        # The courier holds the sender's store across its model call. A model-swap card the kernel
+        # files on that sender meanwhile takes the next id, the tracker planted after the call takes
+        # the same one, and the save's rebase renames the tracker (_rekey_twin_mints). The recipient
+        # card's back-link must name the tracker's published id: naming the swap card instead, the
+        # report-back reached a completed card, skipped it, and the tracker never closed.
+        jd.save_goals(MGR, {"rompUuid": MGR, "seq": 2, "nodes": {
+            MGR + ":g2": _node(MGR + ":g2", "Verification follow-up", MGR + ":g1")},
+            "placements": {}, "status": {}})
+        jd.save_goal_archive(MGR, {"rompUuid": MGR, "nodes": {
+            MGR + ":g1": _node(MGR + ":g1", "Ship the staged-run verification", None,
+                               promptUuid="hu")},
+            "placements": {}, "status": {}})
+        self.mpath.write_text("\n".join(json.dumps(r) for r in [
+            uline(T0 - 600, "please verify the staged run references", "hu"),
+            aline(T0 - 540, "Dispatching.", "ha", "hu")]) + "\n")
+        swapped = []
+
+        def llm(text, menu, declared=None):
+            if not swapped:                             # the backend hook fires during the courier's call
+                swapped.append(jd.mint_fallback_card(MGR, "opus", "sonnet", ev_t=T0 + 30))
+            return LINK_REPLY
+        jd.courier_llm = llm
+        jd.run_courier(now=NOW)
+        self.assertEqual(swapped, [MGR + ":g3"], "premise: the swap card took the sender's next id mid-call")
+        m = jd.load_goals(MGR)
+        trackers = [nd for nd in m["nodes"].values()
+                    if isinstance(nd.get("handoff"), dict) and nd["handoff"].get("msgId") == MID]
+        self.assertEqual(len(trackers), 1)
+        self.assertEqual(trackers[0]["id"], MGR + ":g4", "premise: the save renamed the tracker, the swap card's twin")
+        self.assertFalse(trackers[0]["handoff"].get("quiet"), "premise: the recipient card's back-link owns its ending")
+        self.assertEqual(m["nodes"][MGR + ":g3"].get("why"), "kernel-observed API model fallback")
+        w = jd.load_goals(WKR)
+        planted = [nd for nd in w["nodes"].values() if isinstance(nd.get("origin"), dict)]
+        self.assertEqual(len(planted), 1, "premise: no live ask card, so the recipient card is minted")
+        self.assertEqual(planted[0]["origin"]["goalId"], trackers[0]["id"],
+                         "the back-link names the tracker the save published, never the swap card")
+
     def test_a_dispatch_linked_to_a_dangling_ask_mints(self):
         # END TO END: the courier's link resolves to a live ask whose parent was rewind-swept —
         # the node pierces the menu (a missing ancestor never seals) but renders on NO card (the

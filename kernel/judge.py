@@ -21306,6 +21306,7 @@ def run_courier(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=
             # broader linked goal. Saved to the sender's tree before planting G on the recipient's.
             track_id = _plant_handoff_track(sender_store, link_id, edit["text"], fsid, id2name.get(fsid), seg_t, mid,
                                             tracked=trk and mint_recipient)
+            track_nd = sender_store["nodes"][track_id]
             if not mint_recipient:
                 h = sender_store["nodes"][track_id].get("handoff")
                 if isinstance(h, dict) and not h.get("quiet"):
@@ -21318,6 +21319,10 @@ def run_courier(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=
                     h["quiet"] = True
             rollup_status(sender_store, False)
             save_goals(sender, sender_store)
+            track_id = track_nd["id"]                  # the id the save published: the sender's store was held across
+            #                                            the model call, so a card another writer minted meanwhile can
+            #                                            hold the tracker's id, and the rebase then renames the tracker
+            #                                            (_rekey_twin_mints); the recipient's back-link must name it
             if not mint_recipient:
                 store["placements"][seg_id] = "fyi"    # quiet: processed, no recipient top (the #d
                 #                                        delegation phase retires on this, exactly the
