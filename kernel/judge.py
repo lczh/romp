@@ -8383,18 +8383,20 @@ def _mark_node_done(store, nid, why, t, src="planner"):
     settle rolls it up — the same eventless-write gap optimistic_followup/_reopen already closed.
 
     A '↪ delegated' TRACKING node's OPEN children are not part of its completion (2026-10-26): the next
-    rollup lifts them up beside it (_lift_completed_handoffs, every completer alike), because the
-    delegation finishing is evidence about the delegation and never about the asks filed under it by
-    placement. Their subtrees keep their blocks. Discharging them answered a question nobody answered:
-    a question to the user filed under a delegation card dropped to Working the moment the peer reported
-    back, the status check fired on it, and the session asked the user the same question again. A lifted
+    rollup lifts them up beside it (_lift_completed_handoffs, when the completion is the delegation's own:
+    _delegation_completed), because the delegation finishing is evidence about the delegation and never
+    about the asks filed under it by placement. Their subtrees keep their blocks. Discharging them
+    answered a question nobody answered: a question to the user filed under a delegation card dropped to
+    Working the moment the peer reported back, the status check fired on it, and the session asked the
+    user the same question again. A lifted
     child that is moot is the judges' to rule on, as its own card; a done or cleared child stays under the
     delegation and is discharged as before. The skip mirrors the lift's predicates exactly (a tracking
-    node not rolledUp; a child neither complete nor cleared), so every node the lift moves keeps its
-    block. Everything else under the done node is discharged as before, an open delegation the interior
-    roll-down spares under a step included: the step's done seals that subtree (any_blocked and every
-    judge menu stop at a complete ancestor), so a block kept there would never put the card in Needs you,
-    and no judge could ever lift it."""
+    node not rolledUp whose completion is the delegation's; a child neither complete nor cleared), so
+    every node the lift moves keeps its block, and a follow-up step the lift leaves in place (a done on
+    the card after the link-back) is discharged like any card's. Everything else under the done node is
+    discharged as before, an open delegation the interior roll-down spares under a step included: the
+    step's done seals that subtree (any_blocked and every judge menu stop at a complete ancestor), so a
+    block kept there would never put the card in Needs you, and no judge could ever lift it."""
     nodes = store["nodes"]
     if nid not in nodes:
         return
@@ -8403,7 +8405,8 @@ def _mark_node_done(store, nid, why, t, src="planner"):
     kids = {}
     for x, nd in nodes.items():
         kids.setdefault(nd.get("parentId"), []).append(x)
-    lifts = isinstance(nodes[nid].get("handoff"), dict) and not nodes[nid].get("rolledUp")
+    lifts = isinstance(nodes[nid].get("handoff"), dict) and not nodes[nid].get("rolledUp") \
+        and _delegation_completed(nodes[nid])
     stack, seen = [nid], set()
     while stack:                                       # seen-set: a parentId cycle (two rebased reparent
         x = stack.pop()                                # writers can compose one neither wrote) must degrade,
@@ -8728,14 +8731,16 @@ def rollup_status(store, session_closed, now=None):
     # — a delegation's completion is evidence about the delegation, never about the un-ruled asks filed
     # under it by topical placement (the audited case: the completing report explicitly DECLINED a
     # child's ask, and the fold sealed it done anyway). Living HERE, in every writer's rollup, the
-    # guard covers every completer alike — the courier link-back, a closer done on the tracking node,
-    # a planner op — and SELF-HEALS the save-rebase race: a concurrent pass that republishes a stale
-    # parentId puts the child back under the completed node, and the very next rollup lifts it again
-    # (the rebase folds diary rows, not parents). rolledUp tracking nodes are skipped on purpose:
-    # their completion rolled down from an ANCESTOR the judges actually ruled — that absorb is the
-    # designed umbrella ending, not an association. One pass over the nodes serves every tracking
-    # node at once (_lift_completed_handoffs): a pass per tracking node made a large store's rollup
-    # cost its size times its number of completed delegations.
+    # guard covers every completer of the delegation — the courier link-back, a planner op — and,
+    # once the delegation has been linked back, only a newer courier completion: a follow-up typed on
+    # the completed card is this session's own work, so its open steps roll down when the card is ruled
+    # done again (_delegation_completed, 2026-10-30). It SELF-HEALS the save-rebase race: a concurrent
+    # pass that republishes a stale parentId puts the child back under the completed node, and the very
+    # next rollup lifts it again (the rebase folds diary rows, not parents). rolledUp tracking nodes are
+    # skipped on purpose: their completion rolled down from an ANCESTOR the judges actually ruled — that
+    # absorb is the designed umbrella ending, not an association. One pass over the nodes serves every
+    # tracking node at once (_lift_completed_handoffs): a pass per tracking node made a large store's
+    # rollup cost its size times its number of completed delegations.
     _lift_completed_handoffs(store)
     # UMBRELLA DISSOLUTION (the user 2026-08-26, T101: the board's unit is the individual ask; the
     # round is never a tracked unit): container nodes the retired grouper/consolidator minted
@@ -11868,6 +11873,21 @@ def _linked_back(nd):
     tracker's own judges and sweeps treat it like any other card (2026-10-23): apply_close's handoff
     stand-downs and the dead-wait sweep's delegation block apply only before the link-back."""
     return any(e.get("src") == "courier" and e.get("kind") == "done" for e in (nd.get("log") or []))
+
+
+def _delegation_completed(nd):
+    """True when a completed '↪ delegated' tracker's completion is its delegation's own, the completion whose open
+    children rollup_status's pre-pass lifts (_lift_completed_handoffs) and whose blocks _mark_node_done leaves standing.
+    Before the link-back (_linked_back) that is any completer's done, as since 2026-08-24. After it, only a newest done
+    row (in the fold's order: evidence time, arrival breaking ties) that is a courier's: a follow-up typed on the
+    completed card is this session's own work, so when its closer, planner or the user completes the card again, the
+    follow-up's open steps roll down with it like any card's (2026-10-30). Lifting them left a new Working card beside
+    the card the closer had just ruled finished."""
+    if not _linked_back(nd):
+        return True
+    newest = max((e for e in nd.get("log") or [] if e.get("kind") == "done"),
+                 key=lambda e: (e.get("ev_t") or 0, e.get("at") or 0))
+    return newest.get("src") == "courier"
 
 
 def _brief_superseded(nodes, sub, prev_bm):
@@ -20238,7 +20258,8 @@ def _plant_handoff_track(store, parent_id, text, peer_sid, peer_name, t, mid, tr
 def _lift_handoff_children(store, hid):
     """Move a COMPLETED handoff tracking node's OPEN direct children (their subtrees ride along) up
     beside it — to its own parent, top-level when it is a top — before the roll-down can fold them.
-    Called from rollup_status's pre-pass, i.e. after every writer, for every completer alike.
+    Called from rollup_status's pre-pass, i.e. after every writer, for the delegation's own completion
+    (_delegation_completed: any completer before the link-back, a courier's after it).
 
     The courier's link-back evidence — the recipient finished the DELEGATED work — supports completing
     the tracking node and nothing else. But completion triggers rollup's roll-down, which folds every
@@ -20265,9 +20286,10 @@ def _lift_handoff_children(store, hid):
 
 
 def _lift_completed_handoffs(store):
-    """rollup_status's pre-pass: _lift_handoff_children for every COMPLETED handoff tracking node that is not rolledUp, in
-    the store's node order, from ONE pass over the nodes instead of one pass per tracking node (a store with thousands of
-    nodes and hundreds of completed delegations walked its whole node map once per delegation on every rollup, 2026-10-23).
+    """rollup_status's pre-pass: _lift_handoff_children for every COMPLETED handoff tracking node that is not rolledUp and
+    whose completion is its delegation's own (_delegation_completed), in the store's node order, from ONE pass over the
+    nodes instead of one pass per tracking node (a store with thousands of nodes and hundreds of completed delegations
+    walked its whole node map once per delegation on every rollup, 2026-10-23).
 
     The result is exactly what the per-node calls gave. A lift writes parentId only, and only on an open, uncleared node; a
     tracking node is complete, so it never moves and its destination (its own parent) is fixed. So which nodes are tracking
@@ -20277,7 +20299,8 @@ def _lift_completed_handoffs(store):
     nodes = store["nodes"]
     lifted, kids = [], {}
     for nid, nd in nodes.items():
-        if isinstance(nd.get("handoff"), dict) and nd.get("nodeComplete") and not nd.get("rolledUp"):
+        if isinstance(nd.get("handoff"), dict) and nd.get("nodeComplete") and not nd.get("rolledUp") \
+                and _delegation_completed(nd):
             lifted.append(nid)
         if not nd.get("nodeComplete") and not nd.get("cleared"):
             kids.setdefault(nd.get("parentId"), []).append(nd)
