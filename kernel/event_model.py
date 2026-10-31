@@ -5191,25 +5191,29 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None, pre
     # under the same uuid — the very loss the marker salvages — so counting that twin as "seen" ate the
     # salvage. A retry that DID re-reply carries its text and still dedups, as does a re-orphaned marker
     # (the add below); the text check in the marker's window guards every remaining double.
+    # The tail's atoms only. A restored tree's pre-cut replies are in landed_text_uuids (the document's records carry the
+    # bit), and a reply salvaged into a pre-cut turn came from a marker below the floor: the backend stamps a marker with the
+    # streamed reply's own time, so a reply orphaned again at a later settle keeps it. Walking every pre-cut row for its uuid
+    # decoded the whole history on every parse while any marker sat in the tail, one skipped by its landed uuid included.
     seen_uuids = {a.get("uuid") for a in atoms
                   if a.get("uuid") and (a["lazy"].get("nt") if a.get("lazy") is not None else _text_of(_content(a.get("message"))).strip())}
-    pre_says = []                                                     # per restored pre-cut turn (stage 4c): its assistants' text rows
-    if pre:                                                           #  as (slot, hash), one decode per row, no atom built
-        for pt in pre:
-            la, says = pt["atoms"], []
+    pre_says = {}                                                     # restored pre-cut turn index (stage 4c) → its assistants' text rows
+
+    def _pre_says(i):
+        """Pre-cut turn i's assistant text rows as (slot, hash), one decode per row and no atom built, read only for a turn in
+        some marker's window and kept for the next marker."""
+        if i not in pre_says:
+            la, says = pre[i]["atoms"], []
             for k, r in enumerate(la.rows()):
                 typ, nt, hh = la._index.text_flags(r)
-                if nt:
-                    u = la._index.uuid_of(r)                           # text-bearing uuids from the rows: no atom built
-                    if u:
-                        seen_uuids.add(u)
-                    if typ == "assistant":                             # a user prompt or a command with the same text is not a
-                        says.append((k, hh))                           #  kept reply, so only assistants count (round 3 M2a)
-            pre_says.append(says)
+                if nt and typ == "assistant":                          # a user prompt or a command with the same text is not a
+                    says.append((k, hh))                               #  kept reply, so only assistants count (round 3 M2a)
+            pre_says[i] = says
+        return pre_says[i]
     disk_texts = [t for a in atoms if a.get("type") == "assistant" and a.get("lazy") is None
                   if (t := _text_of(_content(a.get("message"))).strip())]
-    # a kept reply with no body in hand (a lazy atom before an assembly checkpoint's cut, a pre-cut row): the window decides
-    unread = any(pre_says) or any(a.get("type") == "assistant" and a["lazy"].get("nt") for a in atoms if a.get("lazy") is not None)
+    # a kept reply with no body in hand (a lazy atom before an assembly checkpoint's cut, a pre-cut turn): the window decides
+    unread = bool(pre) or any(a.get("type") == "assistant" and a["lazy"].get("nt") for a in atoms if a.get("lazy") is not None)
     sid = atoms[0]["session_id"]
     made = []                                                         # (t, text) of the markers salvaged so far
     win = [None]                                                      # the turns, grouped once, only if a marker's text needs them
@@ -5234,7 +5238,7 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None, pre
             kind, ref = _turns()[i][2]
             if kind == "pre":
                 la = pre[ref]["atoms"]
-                las = [la[k] for k, hh in pre_says[ref]]
+                las = [la[k] for k, hh in _pre_says(ref)]
             else:
                 las = [a for a in ref if a.get("type") == "assistant" and (a.get("lazy") is None or a["lazy"].get("nt"))]
             hydrate(las, rompuuid or sid, by="synthesize_orphans")
@@ -5248,7 +5252,7 @@ def synthesize_orphans(states, atoms, landed_text_uuids=None, rompuuid=None, pre
         j = next((i for i, (s, e, src) in enumerate(turns) if e >= t), len(turns) - 1)
         near = range(max(0, j - 1), min(len(turns), j + 2))
         h = hashlib.sha1(txt.encode("utf-8", "replace")).hexdigest()[:8]
-        if any(turns[i][2][0] == "pre" and any(hh == h for k, hh in pre_says[turns[i][2][1]]) for i in near):
+        if any(turns[i][2][0] == "pre" and any(hh == h for k, hh in _pre_says(turns[i][2][1])) for i in near):
             return True                                               # a pre-cut reply kept exactly, from the rows' hashes: no atom built
         starts = [s for s, e, src in turns]
         if any(max(0, bisect.bisect_right(starts, tm) - 1) in near and _either(txt, (mt,)) for tm, mt in made):

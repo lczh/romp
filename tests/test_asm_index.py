@@ -369,6 +369,41 @@ class Coverage(Restored):
         self.assertGreater(st["rowDecodes"], 0, "the tail marker consults the rows' hashes"); self.assertEqual(st["materialized"], 0, "…and builds nothing: %s" % st["materializedBy"])
         em.hydrate(tree2, SID); self.assertEqual(T._strip(tree2), whole2, "deduped like the whole parse")
 
+    def test_a_tail_marker_decodes_only_its_window_and_a_landed_one_no_pre_cut_row(self):
+        """2026-10-31: one marker in the tail decoded every pre-cut row on every parse, before any marker was looked at (the
+        pre-cut text uuids and hashes, walked up front), so a long restored session paid for its whole history at each append
+        while a salvaged reply sat in its tail. A marker whose reply landed, here a pre-cut reply the document's records hold,
+        is skipped by its uuid and decodes no row; one that never landed decodes the rows of the pre-cut turns in its window
+        alone and is salvaged; both as the whole parse decides them."""
+        recs = transcript(T.NOW - 86400, turns=40, compact_every=20)
+        whole0, cut = self._cut_turns(recs)
+        t_mark = int(whole0["turns"][cut]["t"])                       # the first tail turn's time: the last pre-cut turn is in the window
+        landed = next(a["uuid"] for a in whole0["turns"][cut - 1]["atoms"] if self._texts({"atoms": [a]}, "assistant"))
+        cases = [("landed", landed, "the same reply, settled again after the cut", False),
+                 ("never-landed", "orph-lost", "a reply the transcript never kept", True)]
+        for name, uuid, text, salvaged in cases:
+            with self.subTest(case=name):
+                path = self.write("orph-" + name, recs, states=[{"t": t_mark, "orphanReply": {"uuid": uuid, "text": text}}])
+                whole = self.cold(path)
+                self.assertEqual(any(a.get("orphaned") for t in whole["turns"] for a in t["atoms"]), salvaged, "the whole parse's verdict")
+                self.fresh(); self.parse(path); self.assertTrue(self.doc(path))
+                self.fresh(); modes = []
+                with em._MAT_LOCK:
+                    em._ASM_INDEX_STATS.update(materialized=0, materializedBy={}, rowDecodes=0)
+                tree = self.parse(path, modes)
+                self.assertEqual(modes, ["restore"])
+                decodes = em.asm_index_stats()["rowDecodes"]
+                pre = [t for t in tree["turns"] if t.get("pre")]
+                n_rows = sum(len(t["atoms"].rows()) for t in pre)
+                window = sum(len(t["atoms"].rows()) for t in pre[-2:])  # the marker's turn and the turn on each side reach two at most
+                self.assertLess(2 * window, n_rows, "premise: the window holds a small part of the history")
+                if salvaged:
+                    self.assertTrue(any(a.get("orphaned") for t in tree["turns"] if not t.get("pre") for a in t["atoms"]), "salvaged in the tail")
+                    self.assertLessEqual(decodes, 2 * window, "a hash and a build per window row at most, %d of %d pre-cut rows" % (decodes, n_rows))
+                else:
+                    self.assertEqual(decodes, 0, "skipped by its landed uuid: no pre-cut row decoded (%d of %d)" % (decodes, n_rows))
+                em.hydrate(tree, SID); self.assertEqual(T._strip(tree), whole, "restored equals whole: %s" % name)
+
     def test_a_tree_that_yields_no_section_is_not_rewritten_at_every_settle(self):
         name = "compaction_atom"
         records, sent = G.SINGLE_FILE[name]
