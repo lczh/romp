@@ -135,8 +135,10 @@ test("the field asks the kernel that would OWN the session, so a remote host com
 });
 
 test("pacing is the round trip, not a timer: one request in flight, the newest value queued behind it", () => {
-  assert.match(RENDER, /if \(dirInFlight\) \{ dirQueued = value; return; \}/);
-  assert.match(RENDER, /dirInFlight = false;\s*\n\s*const stale = m\.reqId !== dirReq \|\| \(typeof m\.host === "string" \? m\.host : ""\) !== pickerHost\(\);/);
+  // queued only behind the SAME host's answer, and released only by the newest request's (picker-dir-latch-exec.test.ts
+  // runs the latch: another host's unanswered ask once held the field for the page's life)
+  assert.match(RENDER, /if \(dirInFlight && pickerHost\(\) === dirAskedHost\) \{ dirQueued = value; return; \}/);
+  assert.match(RENDER, /if \(m\.reqId !== dirReq\) return;[^\n]*\n\s*dirInFlight = false;\s*\n\s*const stale = \(typeof m\.host === "string" \? m\.host : ""\) !== pickerHost\(\);/);
   assert.match(RENDER, /if \(dirQueued !== null\) \{ const v = dirQueued; dirQueued = null; askDirComplete\(v\); \}/);
   assert.match(RENDER, /if \(stale\) return;/, "a reply for an older keystroke never renders");
   assert.doesNotMatch(RENDER.slice(RENDER.indexOf("function askDirComplete"), RENDER.indexOf("function dirMenuOpen")),
