@@ -161,6 +161,7 @@ HELPERS = {
     # the goal store (every node and status read of ctx["store"], and the shared loads inside the bg memos)
     "_agent_open_set": ("sig", ("store",)),
     "_all_outstanding_delegated": ("sig", ("store",)),
+    "_focus_open_top": ("sig", ("store",)),               # the live floors' card: the store's lastNode, its nodes and status
     "_goal_awaiting_stamp_full": ("sig", ("store",)),
     "_node_log_rows": ("sig", ("store",)),
     "_open_leaves": ("sig", ("store",)),
