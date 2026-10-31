@@ -6200,6 +6200,34 @@ def cli_recall(argv):
         print("[romp mail] nothing to recall (already read or delivered, or none queued to '%s')" % to)
     return 0
 
+def _hook_box(fsid):
+    """The mailbox a Claude hook's payload id `fsid` names, for the turn-end drain and the revive wake.
+
+    The payload carries the CLI's CURRENT transcript id. A /clear, or a resume onto a later transcript, moves that off
+    the stable sid the bus files mail under, for good, so the drain read mail/<fsid>/new, a box nobody delivers to,
+    and the revive wake found no mail there: mail the live push could not carry (the nopush sentinel, an oversize
+    message from a script or another host, a kernel mid-restart) sat unread until the agent happened to check. The
+    session this CLI was launched for is ROMP_SID, which the kernel sets on every session CLI; but a `claude -p` a
+    session runs from its Bash tool inherits that variable, so ROMP_SID alone would drain the session's mail into the
+    child. The id is therefore mapped to ROMP_SID only when that session's SDK registry row (sdk/<sid>.json) names it
+    as the current transcript (lastSid), the check hooks/romp-postal-context.sh makes. The registry is read directly
+    rather than through the kernel's listing, which reads lastSid through the same file: the Stop hook is synchronous
+    under a 10 s budget at every turn end, and the drain must still work while the kernel restarts and the session
+    keeps running in its host. No ROMP_SID, an id that already is the sid, no registry row or another lastSid: the
+    id as given."""
+    own = (os.environ.get("ROMP_SID") or "").strip()
+    if not fsid or not own or fsid == own or not _safe_id(own):
+        return fsid
+    reg_path = STATE.parent / "sdk" / (own + ".json")
+    try:
+        reg = json.loads(reg_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return fsid
+    except (OSError, ValueError) as e:
+        _log("the session registry %s could not be read (%s); hook id %s used as given" % (reg_path, e, fsid))
+        return fsid
+    return own if isinstance(reg, dict) and reg.get("lastSid") == fsid else fsid
+
 def cli_wake(argv):
     # For the SessionStart revive hook: ask the bus to force-deliver pending mail
     # once the kernel lists this reviving session. Non-blocking (bus does the wait).
@@ -6207,7 +6235,7 @@ def cli_wake(argv):
     if "--id" in argv:
         i = argv.index("--id")
         sid = argv[i + 1] if i + 1 < len(argv) else None
-    sid = sid or my_id()
+    sid = _hook_box(sid) if sid else my_id()
     if not sid or not ensure():
         return 0
     try:
@@ -6223,12 +6251,13 @@ def _argval(argv, flag):
     return None
 
 def cli_drain(argv):
-    # For the Stop hook. --id is authoritative (from Claude's hook payload).
+    # For the Stop hook. --id comes from Claude's hook payload, mapped to the session's stable sid after a /clear
+    # (_hook_box); a `claude -p` child's own id stays its own, empty box.
     sid = None
     if "--id" in argv:
         i = argv.index("--id")
         sid = argv[i + 1] if i + 1 < len(argv) else None
-    sid = sid or my_id()
+    sid = _hook_box(sid) if sid else my_id()
     if not sid:
         return 0
     if not ensure():

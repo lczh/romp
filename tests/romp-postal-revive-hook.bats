@@ -50,6 +50,22 @@ run_hook() { run bash -c 'printf "%s" "$1" | "$2"' _ "{\"session_id\":\"$SID\",\
     grep -qx "wake --id $SID" "$CALL_LOG"
 }
 
+@test "after a /clear the payload id is a later transcript: mail pending under ROMP_SID still asks for the wake" {
+    # mail is filed under the stable sid; `wake` maps the payload id back to it when the registry names it
+    mark_pending
+    FORK="99999999-8888-7777-6666-555555555555"
+    ROMP_SID="$SID" run bash -c 'printf "%s" "$1" | "$2"' _ "{\"session_id\":\"$FORK\",\"source\":\"resume\"}" "$HOOK"
+    [ "$status" -eq 0 ]
+    grep -qx "wake --id $FORK" "$CALL_LOG"
+}
+
+@test "a payload id other than ROMP_SID with nothing pending under either: no bus call" {
+    FORK="99999999-8888-7777-6666-555555555555"
+    ROMP_SID="$SID" run bash -c 'printf "%s" "$1" | "$2"' _ "{\"session_id\":\"$FORK\",\"source\":\"resume\"}" "$HOOK"
+    [ "$status" -eq 0 ]
+    [ ! -f "$CALL_LOG" ]
+}
+
 @test "without ROMP_SID (a plain Claude Code session) it exits silently, mail pending or not" {
     mark_pending
     run_hook resume

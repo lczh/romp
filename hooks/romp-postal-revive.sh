@@ -34,9 +34,13 @@ sid="${BASH_REMATCH[1]}"
 case "$source_kind" in resume|startup) ;; *) exit 0 ;; esac
 
 # Fast path: nothing pending for this session -> nothing to do. The marker is
-# on-disk so this needs no kernel query and no bus round-trip.
-pending="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/postal/mail-pending/$sid"
-[[ -f "$pending" ]] || exit 0
+# on-disk so this needs no kernel query and no bus round-trip. Mail is filed under
+# the session's stable sid (ROMP_SID), and after a /clear the payload id is a later
+# transcript, so the marker is looked for under both; `wake` maps the payload id to
+# the stable sid only when the session's registry names it as the current
+# transcript, so a `claude -p` child that inherited ROMP_SID still wakes nothing.
+pending_dir="${ROMP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/romp}/postal/mail-pending"
+[[ -f "$pending_dir/$sid" || -f "$pending_dir/$ROMP_SID" ]] || exit 0
 
 # Locate romp-postal-service via this hook's REAL (symlink-followed) path: the hook lives
 # at dotfiles/claude/hooks/ and romp-postal-service at dotfiles/scripts/.
