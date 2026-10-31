@@ -152,6 +152,7 @@ function lift(): Lifted {
     const vscodeApi = null;
     const signalPickerOverlay = () => {};
     const syncComposerPh = () => {};
+    let dirInFlight = false, dirQueued = null;   // the folder completer's latch, which closePicker lets go of
   `;
   const epilogue = `
     return {

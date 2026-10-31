@@ -10191,7 +10191,11 @@ function signalPickerOverlay(on: boolean) {
 //
 // No debounce: a request goes out on the keystroke, and while one is in flight the newest value is
 // held and fired when the reply lands. The pacing is the round-trip itself — an event, not a timer —
-// so a fast local kernel completes per keystroke and a slow SSH hop coalesces on its own.
+// so a fast local kernel completes per keystroke and a slow SSH hop coalesces on its own. The hold
+// is for the SAME host's answer only, and only the newest request's answer lets it go: a question
+// about another host goes out at once, and closing the picker or the wire's return after a drop
+// lets go of an answer that may never come (2026-10-31: one unanswered ask to a linked host whose
+// tunnel was down left the field asking nothing, even of this machine, for the page's life).
 interface DirItem { name: string; path: string }
 let dirReq = 0;                    // newest request id; a reply for an older one is stale
 let dirInFlight = false;
@@ -10446,8 +10450,11 @@ function pickerHost(): string {
 
 function askDirComplete(value: string): void {
   if (!vscodeApi) return;
-  if (dirInFlight) { dirQueued = value; return; }
+  // only the selected host's own answer holds a keystroke: another host's may never come (its tunnel down, the
+  // ask held for a reopen), and this question's newer reqId already marks that answer stale
+  if (dirInFlight && pickerHost() === dirAskedHost) { dirQueued = value; return; }
   dirInFlight = true;
+  dirQueued = null;
   dirAskedHost = pickerHost();
   // The old verdict belongs to whatever was asked BEFORE this (the user 2026-07-29, who switched host and
   // watched the field keep insisting the path was fine). It is about a different machine, or a different
@@ -10461,8 +10468,9 @@ function askDirComplete(value: string): void {
 }
 
 function onDirCompletions(m: any): void {
+  if (m.reqId !== dirReq) return;   // an older question's answer (another host's, late): the newest one holds the latch
   dirInFlight = false;
-  const stale = m.reqId !== dirReq || (typeof m.host === "string" ? m.host : "") !== pickerHost();
+  const stale = (typeof m.host === "string" ? m.host : "") !== pickerHost();
   if (dirQueued !== null) { const v = dirQueued; dirQueued = null; askDirComplete(v); }
   if (stale) return;                                   // a newer keystroke already owns the field
   dirItems = Array.isArray(m.items) ? m.items : [];
@@ -10470,6 +10478,18 @@ function onDirCompletions(m: any): void {
   dirActive = -1;
   renderDirMenu(!!m.truncated);
 }
+
+// A wire drop loses the answer to the question in flight, and a VS Code pane's pipe drops any asked while it is
+// down (dirComplete is not an op it holds). The browser's socket comes back with romp:wsup, the pane's pipe with
+// its pipeState frame (in the message handler); on that return the latch lets go and the field is asked again
+// while the picker is up, as file-browse.ts re-asks its listing: an event, not a timer.
+function dirWireUp(): void {
+  const di = document.getElementById("picker-dir") as HTMLInputElement | null;
+  if (!di || !pickerVisible() || pickMode) return;
+  dirInFlight = false; dirQueued = null;
+  askDirComplete(di.value);
+}
+window.addEventListener("romp:wsup", () => dirWireUp());
 
 function dirMenuOpen(): boolean {
   const menu = document.getElementById("picker-dir-menu");
@@ -13682,6 +13702,9 @@ function closePicker() {
   if (o) o.style.display = "none";
   signalPickerOverlay(false);   // release the full-window lift — the chat iframe returns to its pane
   syncComposerPh();             // …and the box re-reads its ring against the page it is back on (T345)
+  // the folder question goes with the picker, as file-browse.ts's close lets go of its listing: an answer that
+  // never comes (a linked host's tunnel down, a dropped socket) must not hold the next open's questions behind it
+  dirInFlight = false; dirQueued = null;
   if (pickMode) {
     if (vscodeApi) vscodeApi.postMessage({ type: "pickResult", id: null });
     pickMode = false;
@@ -24084,6 +24107,7 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   if (m.type === "pipeState") linkEdge(cmtReadLatch.values(), "", !!m.up, hostOf);   // …and a held read the kernel has not answered waits on the next link (read-latch.ts)
   if (m.type === "pipeState" && m.up) reaskWaitingSubagents();   // the extension's reconnect-class event (it never sees romp:wsup), T355
   if (m.type === "pipeState" && m.up) forgetHeldWm(sessions, null);   // …and the held watermarks go (frame-guard.ts, 2026-09-23): the kernel behind the pane's pipe may be a fresh process whose live-tail revision restarted at 0
+  if (m.type === "pipeState" && m.up) dirWireUp();   // …and the + picker's folder question, whose answer a drop lost (picker-dir-latch-exec.test.ts)
   if (m.type === "pipeState" && !m.up && paneArranges(window as any)) { setViewOrderPublisher(null); setFoldsPublisher(null); }   // the pipe that heard the kernel's arrangement is gone: stop speaking for it until the next connection's viewOrder frame (view-order.ts ViewOrderPublisher, 2026-09-23)
   if (m.type === "pipeState") { if (!m.up) { markPendingLost("connection"); onWireDown(); } pipeBanner(!!m.up, Number(m.queued) || 0); return; }   // the pane's down edge clears the in-flight asks as the socket's does (round nine, medium 2)
   if (m.type === "sendAck") { if (typeof m.id === "string" && typeof m.qid === "string") onSendAck(m.id, m.qid, !!m.ok, !!m.retry); return; }   // a kernel answered a send (send-acks.ts)
