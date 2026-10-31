@@ -1130,5 +1130,133 @@ class CloserRecordsCas(unittest.TestCase):
         self.assertEqual(self._closer_judges(self.t2, 7), [self.t2], "the turn grew: judged again")
 
 
+class TwinMintCas(unittest.TestCase):
+    """Two writers that mint from one store version take the same next id, and the rebase must keep both cards.
+
+    A judge pass holds its store across a model call while the kernel's backend hook mints a model-swap card on a
+    fresh load; both took seq+1. The save's rebase read the one id as one node: the user's fresh ask came out
+    Completed with the swap card's done reason, and the swap card was gone. The rebase now gives the holder's twin a
+    fresh id (_rekey_twin_mints) and adopts the published card as it stands.
+
+    Mints goals, so it uses a PRIVATE synthetic sid (CLAUDE.md, 2026-08-24) and cleans that sid's override journal in
+    tearDown."""
+    FSID = "3e9a7c51-0d2b-4f86-a1c4-7b5e2d90f613"
+    ASK = "Add a dark mode toggle"
+    SUB = "Wire the toggle to the theme store"
+    MINT = {"do": "mint", "why": "the user asked for it", "text": ASK}
+
+    def setUp(self):
+        self._saved = jd.STATE
+        self.td = tempfile.TemporaryDirectory()
+        jd._rebind_state(Path(self.td.name))
+
+    def tearDown(self):
+        (jd._overrides_dir() / (self.FSID + ".jsonl")).unlink(missing_ok=True)
+        jd._rebind_state(self._saved)
+        (jd._overrides_dir() / (self.FSID + ".jsonl")).unlink(missing_ok=True)
+        self.td.cleanup()
+
+    def _nid(self, n):
+        return "%s:g%d" % (self.FSID, n)
+
+    def _seed(self):
+        """One earlier card, published: the store stands at seq 1."""
+        s = jd.load_goals(self.FSID)
+        jd.apply_plan(s, "seg0", T0, [{"do": "mint", "why": "earlier", "text": "Fix the login bug"}], [])
+        jd.rollup_status(s, session_closed=False)
+        jd.save_goals(self.FSID, s)
+
+    def _plan(self, holder, ops):
+        """The opener's reply applied to the held store, as _plan_session does after its model call."""
+        jd.apply_plan(holder, "seg1", T0 + 101, ops, [])
+        jd.rollup_status(holder, session_closed=False)
+
+    def _both_cards(self):
+        """The published store, its ask card and its swap card, after asserting the two are separate and intact."""
+        final = jd.load_goals(self.FSID)
+        asks = [nd for nd in final["nodes"].values() if nd.get("text") == self.ASK]
+        swaps = [nd for nd in final["nodes"].values() if nd.get("why") == jd.CAPACITY_FALLBACK_WHY]
+        self.assertEqual((len(asks), len(swaps)), (1, 1), "the ask and the swap card, each once: %r" % sorted(final["nodes"]))
+        ask, swap = asks[0], swaps[0]
+        self.assertNotEqual(ask["id"], swap["id"])
+        self.assertEqual(ask.get("why"), "the user asked for it")
+        self.assertFalse(ask.get("nodeComplete"), "the fresh ask is not finished before any work")
+        self.assertFalse(ask.get("doneWhy"), "and carries no other card's done reason")
+        self.assertNotEqual(final["status"][ask["id"]], "completed")
+        self.assertTrue(swap.get("nodeComplete"))
+        self.assertEqual(final["status"][swap["id"]], "completed")
+        self.assertEqual(swap.get("swap"), {"from": "opus", "to": "sonnet"})
+        self.assertTrue(swap["text"].startswith("Model changed automatically"))
+        return final, ask, swap
+
+    def test_a_swap_card_minted_during_the_hold_keeps_its_id_and_the_holders_ask_takes_the_next(self):
+        self._seed()
+        holder = jd.load_goals(self.FSID)            # the planner pass's load, before its model call
+        gid = jd.mint_fallback_card(self.FSID, "opus", "sonnet", ev_t=T0 + 100)   # the backend hook, mid-call
+        self.assertEqual(gid, self._nid(2), "premise: the kernel took seq+1")
+        self._plan(holder, [dict(self.MINT)])
+        self.assertIn(self._nid(2), holder["nodes"], "premise: the holder took the same id")
+        holder.setdefault("seams", []).append({"t": T0 + 102, "top": self._nid(2), "text": self.ASK, "segs": ["seg1"]})
+        jd.save_goals(self.FSID, holder)
+        final, ask, swap = self._both_cards()
+        self.assertEqual(sorted(final["nodes"]), [self._nid(1), self._nid(2), self._nid(3)])
+        self.assertEqual(swap["id"], self._nid(2), "the published card keeps the id the backend holds for it")
+        self.assertEqual(ask["id"], self._nid(3), "the holder's twin takes the next id above both writers")
+        self.assertEqual(final["seq"], 3)
+        self.assertEqual(final["placements"]["seg1"], self._nid(3), "the segment's placement follows its card")
+        self.assertEqual(final["lastNode"], self._nid(3), "and so does the focus")
+        self.assertEqual([s["top"] for s in final.get("seams") or []], [self._nid(3)], "and the holder's seam")
+        self.assertEqual(holder["nodes"][self._nid(3)]["id"], self._nid(3), "the holder's own object reads its new id")
+
+    def test_a_swap_card_minted_on_a_load_older_than_the_planners_publish_is_renamed_and_its_new_id_returned(self):
+        self._seed()
+        early = jd.load_goals(self.FSID)             # the backend hook's load, before the planner publishes
+        holder = jd.load_goals(self.FSID)
+        self._plan(holder, [dict(self.MINT)])
+        jd.save_goals(self.FSID, holder)             # the planner publishes its ask as g2 first
+        with mock.patch.object(jd, "load_goals", side_effect=[early]):
+            gid = jd.mint_fallback_card(self.FSID, "opus", "sonnet", ev_t=T0 + 100)
+        final, ask, swap = self._both_cards()
+        self.assertEqual(ask["id"], self._nid(2), "the published ask keeps its id")
+        self.assertEqual(swap["id"], self._nid(3))
+        self.assertEqual(gid, self._nid(3), "the mint returns the id its save published: the backend's refusal fold keys on it")
+
+    def test_a_sub_minted_under_the_twin_stays_under_it(self):
+        self._seed()
+        holder = jd.load_goals(self.FSID)
+        jd.mint_fallback_card(self.FSID, "opus", "sonnet", ev_t=T0 + 100)
+        self._plan(holder, [dict(self.MINT), {"do": "sub", "why": "a step of it", "ref": 1, "text": self.SUB}])
+        jd.save_goals(self.FSID, holder)             # the holder holds g2 (the ask) and g3 under it; the disk holds g2 (the swap)
+        final, ask, swap = self._both_cards()
+        sub = next(nd for nd in final["nodes"].values() if nd.get("text") == self.SUB)
+        self.assertEqual(sub["id"], self._nid(3), "an id the disk never minted stands")
+        self.assertEqual(ask["id"], self._nid(4))
+        self.assertEqual(sub["parentId"], ask["id"], "the sub stays under the ask, never under the swap card")
+
+    def test_a_fresh_holder_renames_its_twin_of_the_card_that_created_the_file(self):
+        holder = jd.load_goals(self.FSID)            # no file yet: a fresh store, whose version held no ids
+        self.assertIsNone(holder.get("_baseIdent"), "premise: a fresh store")
+        self.assertEqual(jd.mint_fallback_card(self.FSID, "opus", "sonnet", ev_t=T0 + 100), self._nid(1))
+        self._plan(holder, [dict(self.MINT)])
+        jd.save_goals(self.FSID, holder)
+        final, ask, swap = self._both_cards()
+        self.assertEqual((swap["id"], ask["id"]), (self._nid(1), self._nid(2)))
+
+    def test_one_card_two_holders_minted_from_the_same_reply_stays_one_card(self):
+        """The same birth (t, why and title) on both sides is one card published twice, not two writers' twins."""
+        self._seed()
+        a, b = jd.load_goals(self.FSID), jd.load_goals(self.FSID)
+        self._plan(a, [dict(self.MINT)])
+        self._plan(b, [dict(self.MINT)])
+        jd.record_verdict(b, b["nodes"][self._nid(1)], "nudge", "block", T0 + 102, why="owed")
+        jd.rollup_status(b, session_closed=False)    # b differs from a's publish, so its save rebases rather than skipping
+        jd.save_goals(self.FSID, a)
+        jd.save_goals(self.FSID, b)
+        final = jd.load_goals(self.FSID)
+        self.assertEqual(sorted(final["nodes"]), [self._nid(1), self._nid(2)], "one ask card, not two")
+        self.assertEqual(final["seq"], 2)
+        self.assertEqual(final["status"][self._nid(1)], "blocked", "premise: b's save rebased onto a's publish")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5611,6 +5611,52 @@ def _merge_closer_turns(store, disk, base):
             store[key] = vals
 
 
+def _rekey_twin_mints(store, disk, held):
+    """Rename the nodes this holder minted under an id the disk's writer also minted, before the rebase merges by id.
+
+    Every mint takes the next id from its own copy of `seq`, and nothing serializes the writers: a judge pass holds its
+    store across a model call while the kernel's backend hook mints a model-swap card on a fresh load. Both took g(N+1),
+    and the rebase below reads one id as one node, so it folded the swap card's done row into the user's fresh ask (the
+    ask read Completed with the swap's reason) and the swap card was gone. An id this holder holds that its base did not
+    (`held`: the ids of the version it stands on, empty for a fresh store) and the disk holds too was minted on both sides
+    independently, unless the two are one card (the same birth: t, why and title, as a store published twice). The
+    holder's node takes a fresh id above both writers' seq, and every reference the holder's store makes to it moves
+    with it (children's parentId, placements, lastNode, seams; the rebase's rollup rebuilds the status map); the rebase
+    then adopts the disk's node wholesale. The disk's id stands because others may already hold it (the backend keeps a swap card's id for the
+    refusal fold). Renames the node object in place, so a caller holding it reads its final id after the save."""
+    m_nodes, d_nodes = store.get("nodes") or {}, disk.get("nodes") or {}
+    twins = [nid for nid, mnd in m_nodes.items()
+             if nid in d_nodes and nid not in held
+             and any(mnd.get(k) != d_nodes[nid].get(k) for k in ("t", "why", "text"))]
+    if not twins:
+        return
+    n = max(int(store.get("seq") or 0), int(disk.get("seq") or 0))
+    rk = {}
+    for nid in sorted(twins, key=lambda x: (len(x), x)):   # mint order (one prefix: the shorter id is the lower number),
+        head = nid.rpartition(":g")[0] or store.get("rompUuid")   # so a parent stays below its sub
+        n += 1
+        while "%s:g%d" % (head, n) in m_nodes or "%s:g%d" % (head, n) in d_nodes:
+            n += 1
+        rk[nid] = "%s:g%d" % (head, n)
+    store["seq"] = n
+    for old, new in rk.items():
+        nd = m_nodes.pop(old)
+        nd["id"] = new
+        m_nodes[new] = nd
+    for nd in m_nodes.values():
+        if isinstance(nd.get("parentId"), str) and nd["parentId"] in rk:
+            nd["parentId"] = rk[nd["parentId"]]
+    pl = store.get("placements") or {}
+    for k, v in list(pl.items()):
+        if isinstance(v, str) and v in rk:
+            pl[k] = rk[v]
+    if isinstance(store.get("lastNode"), str) and store["lastNode"] in rk:
+        store["lastNode"] = rk[store["lastNode"]]
+    for sm in store.get("seams") or []:
+        if isinstance(sm, dict) and isinstance(sm.get("top"), str) and sm["top"] in rk:
+            sm["top"] = rk[sm["top"]]
+
+
 def _rebase_onto_disk(fsid, store):
     """Rebase `store` onto the CURRENT on-disk store, keeping BOTH writers' work.
 
@@ -5633,7 +5679,10 @@ def _rebase_onto_disk(fsid, store):
     _goal_io_bump("carryBase" if base_nodes is not None else "carryNoBase")   # no base: a fresh store (no parseable file at its load) or a holder without its
     #                                                                            reference whose version left the caches; either carries nothing
     disk = _guard_nodes(raw)                         # (a fault or unparseable file raises: never rebase
-    d_nodes, m_nodes = disk.get("nodes") or {}, store.get("nodes") or {}    #  past what we could not read)
+    #                                                  past what we could not read)
+    if base_nodes is not None or not bident:         # the ids this holder's version held (a fresh store held none); a holder
+        _rekey_twin_mints(store, disk, base_nodes or {})   # whose version left the caches cannot tell a twin from a shared node
+    d_nodes, m_nodes = disk.get("nodes") or {}, store.get("nodes") or {}
     # MERGE TOMBSTONES (2026-08-13): presence-in-a-snapshot is not truth — a stale pre-merge writer
     # publishing across a grouper merge used to RESURRECT the merged-away node (its id absent from the
     # newer side, so the adopt-wholesale branch below re-minted it), and the twin then held a duplicate
@@ -17928,7 +17977,8 @@ def mint_fallback_card(sid, from_model, to_model, ev_t=None):
         # session is still working on (Completed, a settle row, a seam stamped mid-turn).
         rollup_status(store, False)
         save_goals(sid, store)
-        return gid
+        return nd["id"]                            # the id the save published: a holder's twin mint can rename ours
+        #                                            (_rekey_twin_mints), and the backend keeps this id for the refusal fold
     except Exception as e:
         sys.stderr.write("fallback-card mint (%s): %r\n" % (sid[:8], e))
         return None
@@ -17966,7 +18016,7 @@ def mint_restored_card(sid, from_model, to_model, ev_t=None):
         record_verdict(store, nd, "romp", "done", t, why=why)
         rollup_status(store, False)                # never the focus; must not settle the focus (mint_fallback_card)
         save_goals(sid, store)
-        return gid
+        return nd["id"]                            # the id the save published (mint_fallback_card)
     except Exception as e:
         sys.stderr.write("restored-card mint (%s): %r\n" % (sid[:8], e))
         return None
@@ -18112,7 +18162,7 @@ def mint_refusal_fallback_card(sid, from_model, to_model, category=None, explana
                                              "the CLI retried on the fallback model")
         rollup_status(store, False)                # the fold materializes nodeComplete/doneWhy from the diary
         save_goals(sid, store)
-        return gid
+        return nd["id"]                            # the id the save published (mint_fallback_card)
     except Exception as e:
         sys.stderr.write("refusal-fallback card mint (%s): %r\n" % (sid[:8], e))
         return None
@@ -21264,6 +21314,7 @@ def run_courier(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=
             # broader linked goal. Saved to the sender's tree before planting G on the recipient's.
             track_id = _plant_handoff_track(sender_store, link_id, edit["text"], fsid, id2name.get(fsid), seg_t, mid,
                                             tracked=trk and mint_recipient)
+            track_nd = sender_store["nodes"][track_id]
             if not mint_recipient:
                 h = sender_store["nodes"][track_id].get("handoff")
                 if isinstance(h, dict) and not h.get("quiet"):
@@ -21276,6 +21327,10 @@ def run_courier(now=None, sessions_cap=PLAN_SESSIONS, concurrency=None, verbose=
                     h["quiet"] = True
             rollup_status(sender_store, False)
             save_goals(sender, sender_store)
+            track_id = track_nd["id"]                  # the id the save published: the sender's store was held across
+            #                                            the model call, so a card another writer minted meanwhile can
+            #                                            hold the tracker's id, and the rebase then renames the tracker
+            #                                            (_rekey_twin_mints); the recipient's back-link must name it
             if not mint_recipient:
                 store["placements"][seg_id] = "fyi"    # quiet: processed, no recipient top (the #d
                 #                                        delegation phase retires on this, exactly the
