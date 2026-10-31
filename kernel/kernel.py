@@ -13259,6 +13259,18 @@ def _mark_nudge_failed(gid, ev_t=None, wake=False):
         return "failed"
 
 
+def _focus_open_top(nodes, focus, status):
+    """The open top-level goal the session's focus (the store's lastNode) sits under, or None: the card the feed's
+    live floors (a permission or picker prompt, an API error, the judges' refused credential) pin to needs-you.
+    Open means its rollup status is not completed or cleared. Cycle-safe: two rebased reparent writers can leave a
+    parentId cycle in the store, and a focus in or under one reaches no node without a parent, so it has no card
+    and floors nothing. A bare walk there spun the feed build forever with the feed lock held."""
+    f = jd._top_of(nodes, focus)
+    if f in nodes and nodes[f].get("parentId") is None and status.get(f) not in ("completed", "cleared"):
+        return f
+    return None
+
+
 def _interrupt_focus_top(store):
     """The top-level goal the interrupt actually stopped: the session's active-focus top, if it is
     currently working, or blocked SOLELY by our own interrupt row (judge._intr_paused_only: the newest
@@ -17457,12 +17469,9 @@ def _deferral_sweep_tick(now):
         turns = None
         for gid, rec in recs:
             why = _deferral_why(rec)
-            nd = nodes.get(gid)
-            top = gid
-            while nd is not None and nd.get("parentId") is not None:
-                top = nd["parentId"]
-                nd = nodes.get(top)
-            gone = gid not in nodes
+            top = jd._top_of(nodes, gid)               # cycle-safe: a bare walk spun the jobs pass on every tick
+            # a goal in or under a parentId cycle reaches no real top, so it has no card: its record reads as gone
+            gone = gid not in nodes or (nodes.get(top) or {}).get("parentId") is not None
             resolved = status.get(top, "working") != "working" if not gone else True
             pop = gone or resolved
             if not pop and why == jd.WHY_TURN_IN_FLIGHT:
@@ -48105,7 +48114,7 @@ def _goal_tree_walk(sid, gstore, seg_trig=None, seg_work=None, anchors=True):
     recent = focus
     onpath = set()                                         # the marked node + its ancestors → the render auto-expands
     _p = recent
-    while _p:
+    while _p and _p not in onpath:                         # a parentId cycle ends the walk instead of spinning the build
         onpath.add(_p)
         _p = gnodes.get(_p, {}).get("parentId")
 
@@ -53728,11 +53737,7 @@ def _feed_session_entry(s, ctx):
     perm_top = None
     perm_state = tm.get("state") if tm else None
     if perm_state in _NEEDS_INPUT_STATES:               # live prompt (permission Allow/Deny OR a picker)
-        f = store.get("lastNode")
-        while f and nodes.get(f, {}).get("parentId") is not None:
-            f = nodes[f]["parentId"]
-        if f in nodes and status.get(f) not in ("completed", "cleared"):
-            perm_top = f
+        perm_top = _focus_open_top(nodes, store.get("lastNode"), status)
     # AWAITING signal (event-model, the user 2026-06-22): the session is paused on AGENT work it
     # dispatched — a WORKING flavor, never needs-input. Sourced from the live subagent snapshot, the
     # PENDING background tasks (launch not yet judge-placed; a placed launch's story belongs to the
@@ -53781,11 +53786,7 @@ def _feed_session_entry(s, ctx):
         lg.mark_refused(jd.STATE, str((tm or {})["authLogin"]), aerr.get("text") or "the API refused this login")
     api_top = None
     if aerr:
-        f = store.get("lastNode")
-        while f and nodes.get(f, {}).get("parentId") is not None:
-            f = nodes[f]["parentId"]
-        if f in nodes and status.get(f) not in ("completed", "cleared"):   # rollup status, not raw nodeComplete (see perm floor)
-            api_top = f
+        api_top = _focus_open_top(nodes, store.get("lastNode"), status)   # rollup status, not raw nodeComplete (see perm floor)
     # JUDGE-AUTH floor (the user 2026-08-12): this session's judges are failing on their CREDENTIAL
     # (judge.py latched a credential-class error envelope; its next successful call clears it) — romp
     # cannot analyze the session, so no card here can move on its own, and only the user can fix it
@@ -53800,11 +53801,7 @@ def _feed_session_entry(s, ctx):
     _jauth_login = str(jerr.get("loginLabel") or "") if jerr else ""
     jauth_top = None
     if jerr and api_top is None and perm_top is None:
-        f = store.get("lastNode")
-        while f and nodes.get(f, {}).get("parentId") is not None:
-            f = nodes[f]["parentId"]
-        if f in nodes and status.get(f) not in ("completed", "cleared"):
-            jauth_top = f
+        jauth_top = _focus_open_top(nodes, store.get("lastNode"), status)
     _unnested = False
     for _f in (perm_top, api_top, jauth_top):    # T319: a floor that RESOLVES to a healed top un-nests exactly that top:
         _h = healed.get(_f) if _f else None      #   it keeps its card (the floor keys the card on it) and its face; the
@@ -63043,15 +63040,10 @@ def _cards_for_segments(sid, seg_ids):
     if fault is not None:
         return []                                      # its row is filed; nothing lights for a store we cannot read
     nodes = store.get("nodes", {})
-
-    def top(nid):
-        while nodes.get(nid, {}).get("parentId") is not None:
-            nid = nodes[nid]["parentId"]
-        return nid
     tops = []
     for nid, nd in nodes.items():
         if seg_set.intersection(nd.get("trail", [])):
-            t = top(nid)
+            t = jd._top_of(nodes, nid)                 # cycle-safe: a parentId cycle must not pin the hover's socket thread
             if t not in tops:
                 tops.append(t)
     return tops
