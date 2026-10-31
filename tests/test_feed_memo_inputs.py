@@ -308,7 +308,8 @@ OFF_FEED = (
     "_reported_model_ids",         # the learned model versions: liveModelId
     "_session_row",                # the /sessions row and the fork, comment and rewind handlers: cwd, name
     "_settle_event_key",           # the nudge and compaction ticks: lastStopAt
-    "_spend_thread_rows",          # the spend guard's comment-thread rows (_spend_guard_tick): forkOf, forkedFrom, name, t
+    "_spend_fork_floor",           # the spend guard's floor for a fork's row, a thread's or a live session's: forkedFrom, t
+    "_spend_thread_rows",          # the spend guard's comment-thread rows (_spend_guard_tick): forkOf, name
     "_thread_events",              # comment threads: forkOf
     "_thread_exchange",            # comment threads (the frame's projection and the relay): forkOf
     "_thread_mail_off",            # the mail-off gate: threadOf
