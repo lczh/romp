@@ -5,7 +5,10 @@ own), and its transcript and agent files sit outside its parent's window, so a t
 never stopped, told, toasted or logged. The guard now reads every running thread (Sessions.thread_live) beside the live
 sessions, whether or not a dashboard is open, and prices each from its own transcript and agents, from the fork's moment on:
 the transcript opens with the parent's history copied in under its original timestamps, which is the parent's spend, not
-the thread's. A thread whose fork has not landed has no transcript of its own yet and is not read.
+the thread's. A thread whose fork has not landed has no transcript of its own yet and is not read. The same holds for a
+plain fork and for a thread broken out into a session of its own (2026-10-31): both are live sessions whose discovery rows
+carry no floor, so the guard takes each one's fork moment from its own registry record, and the parent's spend just before
+the fork no longer stops a fork that has spent next to nothing.
 
 Driven through the real tick (no `sessions` seam), the real SDK backend's live_sessions and thread_live_sessions, and a
 stand-in backend for the stop and the message. SYNTHETIC fixtures only: placeholder uuids, the notes-api demo's web session,
@@ -39,6 +42,7 @@ jd = km.jd
 WEB = "11111111-2222-3333-4444-0000000e2a01"
 THREAD = "11111111-2222-3333-4444-0000000e2b02"
 THREAD_FSID = "11111111-2222-3333-4444-0000000e2c03"
+FORK = "11111111-2222-3333-4444-0000000e2d04"          # web-alt, a plain fork of web (a tab of its own, no threadOf)
 NOW = 1781200000.0
 FORK_T = NOW - 450                                       # the thread was forked seven and a half minutes ago, inside the window
 PRICES = {"claude-opus-4-8": {"in": 5e-6, "out": 25e-6, "cache_w": 6.25e-6, "cache_r": 0.5e-6}}
@@ -137,7 +141,7 @@ class ThreadSpend(unittest.TestCase):
         km._SPEND_ROWS_CACHE.clear()
         km._SPEND_CAN_PREV.clear()
         km._SPEND_TREE_CACHE.clear()
-        for s in (WEB, THREAD):
+        for s in (WEB, THREAD, FORK):
             km._interrupt_clicked.pop(s, None)
             km._thread_reg_memo.pop(s, None)
 
@@ -159,13 +163,18 @@ class ThreadSpend(unittest.TestCase):
         sb.write_reg(Path(self.td), THREAD, reg)
         km._thread_reg_memo.pop(THREAD, None)
 
-    def _tick(self):
+    def _tick(self, also=()):
         """One pass as the jobs pass runs it: the live map from live_sessions (which leaves the thread out) and discovery's
-        rows (web alone: a thread has no names/ entry), no `sessions` seam."""
+        rows (web alone: a thread has no names/ entry), no `sessions` seam. `also`: (sid, name, transcript) for each further
+        session with a tab of its own (a fork, a thread broken out), listed as discovery lists one, with no floor."""
         live_map = self.sdk.live_sessions()
         self.assertIn(WEB, live_map)
-        self.assertNotIn(THREAD, live_map, "the live map leaves the thread out, as it does on main")
         rows = [{"sid": WEB, "name": "web", "anchor": WEB, "path": self.web_leaf, "mtime": NOW}]
+        for sid, name, path in also:
+            self.assertIn(sid, live_map, "%s is a session of its own" % name)
+            rows.append({"sid": sid, "name": name, "anchor": sid, "path": path, "mtime": NOW})
+        if THREAD not in [sid for sid, _, _ in also]:
+            self.assertNotIn(THREAD, live_map, "the live map leaves the thread out, as it does on main")
         with mock.patch.object(km, "_sessions", return_value=rows), mock.patch.object(km, "_discover_wide", return_value={}):
             km._spend_guard_tick(NOW, live_map, be=self.be, clients=self.clients, prices=PRICES)
 
@@ -218,6 +227,58 @@ class ThreadSpend(unittest.TestCase):
         self._tick()
         self.assertEqual(self.be.interrupts, [WEB], "web is stopped once; its spend is never billed to the thread as well")
         self.assertEqual(self._rows(), [(WEB, "web")])
+
+    def _fork(self, own_usd):
+        """web-alt, a plain fork of web made at FORK_T and landed (its first init flipped lastSid onto its own transcript and
+        spent forkOf), its transcript opening with web's $200 response copied in under its original timestamp and message
+        id, then `own_usd` of its own; web's transcript holds the same $200 response. Returns the fork's transcript."""
+        self.sdk.fork("web-alt", WEB, "", sid=FORK)
+        reg = sb.read_reg(Path(self.td), FORK)
+        self.assertEqual((reg.get("forkOf"), reg.get("threadOf")), (WEB, None), "a plain fork: a tab of its own, no threadOf")
+        reg.update(lastSid=FORK, forkedFrom=dict(reg.get("forkedFrom") or {}, t=int(FORK_T)))
+        reg.pop("forkOf", None)
+        sb.write_reg(Path(self.td), FORK, reg)
+        km._thread_reg_memo.pop(FORK, None)
+        fork_leaf = str(jd._proj_dir(self.cwd) / (FORK + ".jsonl"))
+        write_jsonl(self.web_leaf, [user(WEB, NOW - 560, "wu"), assistant(WEB, NOW - 500, "msg_w", 200.0)])
+        write_jsonl(fork_leaf, [user(FORK, NOW - 560, "wu"), assistant(FORK, NOW - 500, "msg_w", 200.0),   # copied
+                                user(FORK, NOW - 400, "fu"), assistant(FORK, NOW - 300, "msg_f", own_usd)])
+        return fork_leaf
+
+    def test_the_history_copied_in_by_a_plain_fork_is_not_the_forks_spend(self):
+        # web spent $200 just before it was forked ($1,200 an hour: over); the fork, which has spent $1 of its own since
+        # ($6 an hour), is left running, untold and unlogged
+        fork_leaf = self._fork(1.0)
+        self._tick(also=[(FORK, "web-alt", fork_leaf)])
+        self.assertEqual(self.be.interrupts, [WEB], "web's spend is web's alone: the fork, at $6 an hour, is left running")
+        self.assertEqual([s for s, _ in self.be.sends], [WEB], "and only web is handed the message")
+        self.assertEqual(self._rows(), [(WEB, "web")])
+        self.assertEqual(len(self.toasts), 2, "web's crossing alone, on each dashboard")
+        self.assertNotIn(FORK, km._SPEND_GUARD)
+
+    def test_a_fork_over_the_ceiling_on_its_own_spend_is_still_stopped(self):
+        # the floor is not a pass: the fork spends $200 of its own after the fork ($1,200 an hour) and is stopped, at the
+        # rate of its own spend alone (the copied response would have read $2,400)
+        fork_leaf = self._fork(200.0)
+        self._tick(also=[(FORK, "web-alt", fork_leaf)])
+        self.assertEqual(self.be.interrupts, [WEB, FORK])
+        self.assertEqual(self._rows(), [(WEB, "web"), (FORK, "web-alt")])
+        self.assertIn("about $1,200 an hour", dict(self.be.sends)[FORK])
+
+    def test_a_thread_broken_out_into_a_session_is_not_billed_for_the_history_it_copied(self):
+        # web's comment thread (landed at FORK_T) is broken out into web-side, a session with a tab of its own: it leaves
+        # the threads and joins the live map, and its registry record keeps forkedFrom
+        self.assertTrue(self.sdk.promote_thread(THREAD, "web-side"))
+        km._thread_reg_memo.pop(THREAD, None)
+        reg = sb.read_reg(Path(self.td), THREAD)
+        self.assertEqual((reg.get("threadOf"), (reg.get("forkedFrom") or {}).get("t")), (None, int(FORK_T)))
+        write_jsonl(self.web_leaf, [user(WEB, NOW - 560, "wu"), assistant(WEB, NOW - 500, "msg_w", 200.0)])
+        write_jsonl(self.thread_leaf, [user(THREAD, NOW - 560, "wu"), assistant(THREAD, NOW - 500, "msg_w", 200.0),   # copied
+                                       user(THREAD, NOW - 400, "tu"), assistant(THREAD, NOW - 300, "msg_t", 1.0)])
+        self._tick(also=[(THREAD, "web-side", self.thread_leaf)])
+        self.assertEqual(self.be.interrupts, [WEB], "the broken-out thread, at $6 an hour of its own, is left running")
+        self.assertEqual(self._rows(), [(WEB, "web")])
+        self.assertNotIn(THREAD, km._SPEND_GUARD)
 
 
 if __name__ == "__main__":

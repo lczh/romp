@@ -56854,17 +56854,29 @@ def _spend_thread_rows(threads):
         reg = _thread_reg(tsid)
         if not reg or reg.get("forkOf"):
             continue
-        ff = reg.get("forkedFrom") if isinstance(reg.get("forkedFrom"), dict) else {}
         out.append({"sid": tsid, "name": str(reg.get("name") or tsid[:8]), "path": _thread_transcript_path(reg, tsid),
-                    "floor": _num(str(ff.get("t") or "")) or 0})
+                    "floor": _spend_fork_floor(reg)})
     return out
+
+
+def _spend_fork_floor(reg):
+    """The moment a session was forked, from its SDK registry record `reg` (the durable forkedFrom.t), else 0 for a
+    session not born as a fork. A fork's transcript opens with its parent's history, copied in under the ORIGINAL
+    timestamps and message ids, and the window's dedupe by message id holds within one file only, so without this the
+    parent's spend before the fork is billed to the fork as well. Nothing stamped before this moment can be the fork's own:
+    it did not exist yet. Every fork carries it, a comment thread (_spend_thread_rows), a plain fork, and a thread broken
+    out into a session of its own (promote_thread keeps the record's forkedFrom), whether or not its copy has landed."""
+    ff = reg.get("forkedFrom") if isinstance(reg.get("forkedFrom"), dict) else {}
+    return _num(str(ff.get("t") or "")) or 0
 
 
 def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, prices=None):
     """The pusher job: every live session's rate against the ceiling, the latch per session, and every running comment
-    thread's too (_spend_thread_rows: the live map leaves them out, so their rows and live rows join here). `sessions`, `be`,
-    `clients` and `prices` are seams for the tests; the pusher passes none of them, and a test that passes `sessions`
-    names every row itself, threads included."""
+    thread's too (_spend_thread_rows: the live map leaves them out, so their rows and live rows join here). Every row is read
+    from its fork's moment on when it began as a fork (_spend_fork_floor): a thread row carries its floor, and a live row,
+    which discovery builds without one, takes it from its own registry record. `sessions`, `be`, `clients` and `prices`
+    are seams for the tests; the pusher passes none of them, and a test that passes `sessions` names every row itself,
+    threads included."""
     if not _SPEND_TREE_SWEPT[0]:                          # once per life, here rather than in the first cycle's persist job (the sweep
         _SPEND_TREE_SWEPT[0] = True                      #  parses every memo; the guard never runs in cycle one), and BEFORE the
         try:                                              #  disabled return below, so a kernel with the ceiling off still sweeps
@@ -56899,7 +56911,8 @@ def _spend_guard_tick(now, live_map, sessions=None, be=None, clients=None, price
         stat = can or _SPEND_CAN_PREV.get(sid, True) or bool(dirty and (dirty[1] or sid in dirty[0]))   #  its files (a transcript
         _SPEND_CAN_PREV[sid] = can                                    #  under the tree moved); else served from the memo within the floor
         try:
-            rate = _spend_rate_usd_per_hour(path, now, prices=prices, stat=stat, floor=s.get("floor") or 0)
+            floor = s.get("floor") if "floor" in s else _spend_fork_floor(_thread_reg(sid))   # a live fork's from its record
+            rate = _spend_rate_usd_per_hour(path, now, prices=prices, stat=stat, floor=floor or 0)
         except Exception:
             _jobs_gate_owe("fault")                      # (the jobs pass's gate, shadow: the rate is read again next pass)
             sys.stderr.write("spend-guard rate (%s): %s\n" % (sid[:8], traceback.format_exc()))
