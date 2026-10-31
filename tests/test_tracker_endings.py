@@ -27,6 +27,11 @@ And an ending that fired when it should not have (2026-10-23):
     appended the same done again and republished the store, until the log cap evicted the block and
     the card read Completed with nothing new from the peer. The sweep now asks the fold first and
     links each reply back once, the two rules the back-link got in (3).
+(5) A FOLLOW-UP STEP LEFT OPEN (2026-10-30) — once the closer could rule a linked-back card done, the
+    rollup still lifted the open children of every completed tracker, whoever completed it. When the
+    closer ruled the card done but not the follow-up's step, the step popped out beside it as a new
+    Working card. Only the delegation's own completion lifts now; a later done on the card rolls its
+    steps down like any card's.
 SYNTHETIC fixtures only; private synthetic sids."""
 import json
 import os
@@ -173,6 +178,7 @@ WEB = "a21e0001-1111-4222-8333-000000000003"    # two more private sids: this cl
 PEER = "a21e0001-1111-4222-8333-000000000004"   # follow-up, and every later load of the sid replays it
 CARD = WEB + ":g1"
 MID2 = "1787299000.000002_1.TESTHOST"
+STEP = "cover the csv path"                     # the step web files for the user's follow-up on the card
 
 
 class FollowUpAfterTheCompletion(unittest.TestCase):
@@ -387,8 +393,80 @@ class FollowUpAfterTheCompletion(unittest.TestCase):
         self.assertEqual(jd.apply_close(st, menu, {"done": {1: "follow-up finished", 2: "follow-up finished"}},
                                         t=T + 600, t_end=T + 620), [n["id"] for n in menu])
 
+    def _file_step(self):
+        """web takes the follow-up on itself: the planner's continuation reopens the card and files a step under it."""
+        st = jd.load_goals(WEB)
+        jd._reopen(st, self.track, by="followup", now=T + 300)
+        menu = jd.open_menu(st, cap=None)
+        gi = next(i for i, nd in enumerate(menu, 1) if nd["id"] == self.track)
+        jd.apply_plan(st, "seg-f1", T + 300,
+                      [{"do": "sub", "under": gi, "text": STEP, "why": "followed up on this goal"}], menu)
+        jd.rollup_status(st, False)
+        jd.save_goals(WEB, st)
+        st = jd.load_goals(WEB)
+        step = next(nid for nid, nd in st["nodes"].items() if nd.get("text") == STEP)
+        self.assertEqual(st["nodes"][step].get("parentId"), self.track, "the step is filed under the card")
+        return st, step
 
-SID_W = "a21e0001-1111-4222-8333-000000000005"   # two more private sids: one test below journals the
+    @staticmethod
+    def _tops(st):
+        return sorted(nid for nid, nd in st["nodes"].items() if nd.get("parentId") is None and not nd.get("cleared"))
+
+    def test_the_closers_done_on_the_card_takes_its_open_follow_up_step_along(self):
+        # the closer rules the card done and leaves the step unruled: the step rolls down with the card, as a plain
+        # card's does, instead of popping out beside it as a Working card nobody asked for
+        self._complete_then_follow_up()
+        self.assertEqual(jd.run_propagate(now=T + 400), 0)
+        st, step = self._file_step()
+        self.assertEqual(jd.apply_close(st, [st["nodes"][self.track], st["nodes"][step]],
+                                        {"done": {1: "the follow-up is finished"}}, t=T + 600, t_end=T + 620),
+                         [self.track])
+        jd.rollup_status(st, True)
+        jd.save_goals(WEB, st)
+        st = jd.load_goals(WEB)
+        s = st["nodes"][step]
+        self.assertEqual(s.get("parentId"), self.track, "the step stays under the card the closer completed")
+        self.assertTrue(s.get("nodeComplete"), "and is done with it")
+        self.assertEqual(self._tops(st), [self.track], "no new card on the board")
+        self.assertEqual(st["status"].get(self.track), "completed")
+
+    def test_the_planners_done_on_the_card_moots_its_follow_up_steps_question(self):
+        # the same ending from the planner, with the step waiting on a question to the user: the card's done moots
+        # it like any card's, so the question neither stays blocked under the done card nor comes back on its own
+        self._complete_then_follow_up()
+        self.assertEqual(jd.run_propagate(now=T + 400), 0)
+        st, step = self._file_step()
+        self.assertTrue(jd.record_verdict(st, st["nodes"][step], "closer", "block", T + 500, why="which csv dialect?"))
+        menu = jd.open_menu(st, cap=None)
+        gi = next(i for i, nd in enumerate(menu, 1) if nd["id"] == self.track)
+        jd.apply_plan(st, "seg-f2", T + 600, [{"do": "done", "goal": gi, "why": "the follow-up is finished"}], menu)
+        s = st["nodes"][step]
+        self.assertIn(("planner", "unblock", "discharged with the completed parent"),
+                      [(e.get("src"), e.get("kind"), e.get("why")) for e in s["log"]])
+        jd.rollup_status(st, True)
+        s = st["nodes"][step]
+        self.assertEqual(s.get("parentId"), self.track, "the step stays under the card")
+        self.assertTrue(s.get("nodeComplete") and not s.get("blocked"), "done with it, its question moot")
+        self.assertEqual(self._tops(st), [self.track])
+        self.assertEqual(st["status"].get(self.track), "completed")
+
+    def test_a_newer_completion_from_api_still_lifts_the_open_step(self):
+        # api finishing again is evidence about the delegation only: the step web filed for itself is not finished
+        # by it, so it moves up beside the card and stays open (the 2026-08-24 lift, unchanged)
+        self._complete_then_follow_up()
+        st, step = self._file_step()
+        rst = jd.load_goals(PEER)
+        jd._reopen(rst, PEER + ":g1", by="delegation", now=T + 320)
+        jd.record_verdict(rst, rst["nodes"][PEER + ":g1"], "closer", "done", T + 350, why="csv path covered")
+        jd.save_goals(PEER, rst)
+        self.assertEqual(jd.run_propagate(now=T + 400), 1)
+        st = jd.load_goals(WEB)
+        self.assertTrue(st["nodes"][self.track].get("nodeComplete"), "api's newer completion checks the card off")
+        self.assertIsNone(st["nodes"][step].get("parentId"), "the open step moves up beside it")
+        self.assertFalse(st["nodes"][step].get("nodeComplete"))
+
+
+SID_W ="a21e0001-1111-4222-8333-000000000005"   # two more private sids: one test below journals the
 SID_P = "a21e0001-1111-4222-8333-000000000006"   # kernel's block, and every later load of the sid replays it
 MID3 = "1787299000.000003_1.TESTHOST"
 R = T + 50                                        # api's interim reply

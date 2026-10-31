@@ -59,14 +59,16 @@ def _jd():
 
 # ── the old code, verbatim (the reference every oracle compares with) ──
 def _ref_prepass(store):
-    """rollup_status's pre-pass before 2026-10-23, verbatim but for the move count it adds up: one _lift_handoff_children
-    call, a pass over every node, per completed tracking node."""
+    """rollup_status's pre-pass before 2026-10-23, verbatim but for the move count it adds up and the 2026-10-30 rule on
+    which completions lift (_delegation_completed): one _lift_handoff_children call, a pass over every node, per
+    completed tracking node."""
     jd = _jd()
     nodes = store["nodes"]
     moved = 0
     for _hid in list(nodes):
         _hn = nodes[_hid]
-        if isinstance(_hn.get("handoff"), dict) and _hn.get("nodeComplete") and not _hn.get("rolledUp"):
+        if isinstance(_hn.get("handoff"), dict) and _hn.get("nodeComplete") and not _hn.get("rolledUp") \
+                and jd._delegation_completed(_hn):
             moved += jd._lift_handoff_children(store, _hid)
     return moved
 
