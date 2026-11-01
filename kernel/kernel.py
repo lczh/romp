@@ -5163,7 +5163,9 @@ _POSTAL_TAKEN_CAP = 4096                     # a retry comes within seconds; thi
 def _postal_take_begin(sid, mids):
     """The /deliver route's dedupe, before the backend is asked. "taken": every id of the banner was already handed to
     this session (the late-answer re-post); answer injected and deliver nothing. "busy": an earlier post carrying one
-    of these ids is still being handed over; answer not injected, and the bus's retry finds out how that one ended.
+    of these ids is still being handed over; answer not injected with busy set (2026-11-01: the bus keeps mail whose
+    post went unanswered out of its drain until an answer about that mail, and a plain not-injected reads as one), and
+    the bus's retry finds out how that one ended.
     "go": the ids are claimed; deliver, then _postal_take_end. A banner that shares only SOME ids with what was taken is
     delivered whole: a duplicate is the lesser fault next to mail nobody receives."""
     if not mids:
@@ -89061,6 +89063,8 @@ class Handler(BaseHTTPRequestHandler):
                 # so say so and deliver nothing. The owning kernel decides this for a remote session, above.
                 mids = list(dict.fromkeys(em.POSTAL_RE.findall(text)))
                 take = _postal_take_begin(sid, mids)
+                if take == "busy":
+                    return self._send(200, json.dumps({"ok": True, "injected": False, "busy": True}), "application/json")
                 if take != "go":
                     return self._send(200, json.dumps({"ok": True, "injected": take == "taken"}), "application/json")
                 injected = False
