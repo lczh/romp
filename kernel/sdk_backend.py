@@ -13766,8 +13766,10 @@ class SdkSession:
                 persistent = bool(targs.get("persistent"))
                 tmo = targs.get("timeout_ms")
                 if not persistent and isinstance(tmo, (int, float)) and tmo > 0:
-                    deadline = nw + float(tmo) / 1000.0   # the harness kills the watcher then — exact,
-                    #                                       not the job's ETA (research map item 2)
+                    deadline = nw + min(float(tmo), 1800000.0) / 1000.0   # the harness kills the watcher
+                    # then — exact, not the job's ETA (research map item 2). The CLI caps timeout_ms at
+                    # 30 minutes though its schema takes an hour; the transcript pairing (event_model
+                    # _bg_step) applies the same cap
             desc = str(targs.get("description") or targs.get("prompt") or targs.get("command") or "")[:300]
             tuid = str(tool_use_id or (inp or {}).get("tool_use_id") or "") or None
             if not tid and not tuid:

@@ -104,6 +104,20 @@ class LaunchRecording(_Backend):
         self.assertIsNone(furn["deadlineEpoch"], "a persistent watcher is furniture, not a wait")
         self.assertTrue(furn["persistent"])
 
+    def test_a_monitor_deadline_follows_the_clis_30_minute_cap(self):
+        # The tool's schema takes timeout_ms up to an hour, but the CLI kills any watch at 30 minutes. A
+        # hook deadline gets only clock skew as grace (em._bg_expiry_t), so it must be the capped moment.
+        before = time.time()
+        asyncio.run(self.sess._ledger_tool_hook(
+            {"tool_name": "Monitor", "tool_use_id": "toolu_01EEE",
+             "tool_input": {"description": "watching the deploy", "timeout_ms": 3600000, "persistent": False},
+             "tool_response": {"task_id": "mon-3"}}, "toolu_01EEE", None))
+        after = time.time()
+        live, _ = self._ledger()
+        e = next(x for x in live if x["tid"] == "mon-3")
+        self.assertGreaterEqual(e["deadlineEpoch"], before + 1800, "the capped kill moment")
+        self.assertLessEqual(e["deadlineEpoch"], after + 1800, "not the hour the schema let it ask for")
+
 
 class CalledOffAndFailed(_Backend):
     def test_taskstop_is_a_deliberate_call_off_not_a_crash(self):

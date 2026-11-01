@@ -484,11 +484,14 @@ def _bg_step(state, o):
                 if is_mon:
                     tasks[tid]["monitor"] = True
                     # its recorded lifetime ceiling → the deadline consumers expire on
-                    # (see _bg_expired); the harness clamps timeout_ms to [1s, 1h]
+                    # (see _bg_expired); the harness clamps timeout_ms to [1s, 30 min]: the
+                    # tool's input schema still takes up to an hour, but the CLI caps any
+                    # deadline above 30 minutes, so an hour-long ask is killed at 30 minutes
+                    # (the SDK backend's launch ledger applies the same cap)
                     tmo = inp.get("timeout_ms")
                     tmo = float(tmo) if isinstance(tmo, (int, float)) else 300000.0
                     if tasks[tid]["t"]:
-                        tasks[tid]["deadline"] = tasks[tid]["t"] + min(max(tmo, 1000.0), 3600000.0) / 1000.0
+                        tasks[tid]["deadline"] = tasks[tid]["t"] + min(max(tmo, 1000.0), 1800000.0) / 1000.0
                 order.append(tid)
     elif t == "user" and isinstance(c, list):
         tur = o.get("toolUseResult")

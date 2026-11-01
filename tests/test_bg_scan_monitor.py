@@ -147,7 +147,22 @@ class ErroredLaunchesAndExpiry(unittest.TestCase):
 
     def test_the_ceiling_is_clamped_to_the_harness_bounds(self):
         rows = scan([launch(inp={"command": "x", "timeout_ms": 999999999})])
-        self.assertAlmostEqual(rows[0]["deadline"], T0 + 3600.0)
+        self.assertAlmostEqual(rows[0]["deadline"], T0 + 1800.0)
+        rows = scan([launch(inp={"command": "x", "timeout_ms": 10})])
+        self.assertAlmostEqual(rows[0]["deadline"], T0 + 1.0)
+
+    def test_an_hour_long_ask_is_killed_at_the_clis_30_minute_cap(self):
+        # The tool's schema takes timeout_ms up to an hour, but the CLI caps any deadline above 30 minutes
+        # to 30 minutes, so a watch that asked for the schema's maximum is gone at launch + 1800 s. When its
+        # last notice never reaches the transcript (a TaskStop, a CLI that died mid-watch), the row must
+        # read expired from the cap plus grace, not half an hour after the watcher was killed.
+        rows = scan([launch(inp={"command": "tail -f build.log", "timeout_ms": 3600000, "persistent": False}),
+                     ack(text="Monitor started (task b1a2b3c4d, timeout 1800000ms).")])
+        t = rows[0]
+        self.assertEqual(t["status"], "running")
+        self.assertAlmostEqual(t["deadline"], T0 + 1800.0)
+        self.assertFalse(em._bg_expired(t, T0 + 1800.0 + 60.0), "grace absorbs kill/notify latency")
+        self.assertTrue(em._bg_expired(t, T0 + 1800.0 + 121.0), "the CLI killed the watcher at 30 minutes")
 
 
 class ConsumersApplyExpiry(unittest.TestCase):
