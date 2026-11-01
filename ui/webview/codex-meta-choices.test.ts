@@ -8,6 +8,7 @@ import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { createRequire } from "node:module";
+import { hostOf } from "./host-prefix";
 
 const requireCjs = createRequire(__filename);
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
@@ -24,9 +25,9 @@ test("the /models payload's codex section populates its own choice arrays (both 
 });
 
 test("menu construction picks the choice list by the session's backend", () => {
-  assert.match(RENDER, /function metaChoices\(kind: MetaKind, st: Status\)/);
+  assert.match(RENDER, /function metaChoices\(kind: MetaKind, st: Status, host = ""\)/);
   assert.match(RENDER, /st\.backend === "codex"/);
-  assert.match(RENDER, /const rows = metaChoices\(kind, s\.status\)\.filter\(/);
+  assert.match(RENDER, /const host = hostOf\(opSid\);\n\s+const rows = metaChoices\(kind, s\.status, host\)\.filter\(/);
   assert.match(RENDER, /for \(const c of rows\) \{/);
   assert.match(TIMELINE, /s\.backend === 'codex'/);
   assert.match(TIMELINE, /\? \(kind === 'model' \? CODEX_MODEL_CHOICES : codexEffortChoices\(s\.model\)\)/);
@@ -65,23 +66,24 @@ test("a Codex menu with no list says why and re-reads /models instead of opening
   assert.match(RENDER, /if \(!rows\.length && s\.status\.backend === "codex" && \(kind === "model" \|\| kind === "effort"\)\) \{/);
   assert.match(RENDER, /el\("div", "meta-item meta-empty"\)/);
   assert.match(RENDER, /"No model list from Codex" : "No effort list from Codex"/);
-  assert.match(RENDER, /sub\.textContent = CODEX_MODELS_ERROR \|\| "asking for the list now";/);
+  assert.match(RENDER, /const why = \(\): string => codexList\(host\)\.error;\n\s+sub\.textContent = why\(\) \|\| "asking for the list now";/);
   // the open is the event: one fetch, and the hook rebuilds the SAME open menu when a list arrives
   const block = RENDER.slice(RENDER.indexOf("const empty = el(\"div\", \"meta-item meta-empty\")"), RENDER.indexOf("for (const c of rows) {"));
-  assert.match(block, /onModelChoicesLoaded = \(\) => \{/);
+  assert.match(block, /onModelChoicesLoaded = \(landed = ""\) => \{/);
   assert.match(block, /if \(metaMenuEl !== menu\) return;/);
   // a chat menu whose tab was dismissed under it closes on the landing (executed below): the chat's badges
   // carry no session, so the re-anchor could not tell its badge from the surviving tab's
   assert.match(block, /if \(!forThread && activeId !== opSid\) \{ closeMetaMenu\(\); return; \}/);
-  assert.match(block, /loadModelChoices\(\);/);
+  assert.match(block, /if \(landed !== host\) return;/);   // a menu waits on its own machine's read (executed below)
+  assert.match(block, /if \(host\) loadHostCodexChoices\(host\); else loadModelChoices\(\);/);
   // the rebuild anchors on the badge as it stands NOW, never the one captured at open (executed below)
   assert.match(block, /closeMetaMenu\(\);\n\s+const anchor = metaAnchor\(kind, forSid, btn\);\n\s+if \(anchor\) toggleMetaMenu\(kind, anchor, forSid\);/);
   assert.doesNotMatch(block, /toggleMetaMenu\(kind, btn, forSid\)/, "the captured button is never the rebuild's anchor");
   assert.match(RENDER, /function metaAnchor\(kind: MetaKind, forSid: string \| null \| undefined, btn: HTMLElement\): HTMLElement \| null \{\n\s+if \(btn\.isConnected\) return btn;/);
   assert.match(MODULE, /if \(forSid\) btn\.dataset\.sid = forSid;/, "the popover's badges name their thread so the anchor resolves per session");
   // the wait wears the loader's dots beside its text, which the reason replaces
-  assert.match(block, /if \(!CODEX_MODELS_ERROR\) sub\.appendChild\(metaDots\(\)\);/);
-  assert.match(block, /if \(!now\.length\) \{ sub\.textContent = CODEX_MODELS_ERROR \|\| \(kind === "model" \? "no model list yet" : "no effort list yet"\); return; \}/);
+  assert.match(block, /if \(!why\(\)\) sub\.appendChild\(metaDots\(\)\);/);
+  assert.match(block, /if \(!now\.length\) \{ sub\.textContent = why\(\) \|\| \(kind === "model" \? "no model list yet" : "no effort list yet"\); return; \}/);
   assert.doesNotMatch(block, /sent no list/, "the post-read fallback never attributes an answer to the app-server");
   // a FAILED re-read tells the waiting menu (fail loudly): the row would otherwise promise an answer forever
   assert.match(RENDER, /\}\)\.catch\(\(e\) => \{\n(?:[^\n]*\n){0,4}?\s+if \(!onModelChoicesLoaded\) return;\n\s+CODEX_MODELS_ERROR = "could not read the model list: " \+ /);
@@ -125,17 +127,19 @@ const transpile = (ts: string): string => requireCjs("esbuild").transformSync(ts
 // `error` lands in CODEX_MODELS_ERROR, an absent or non-string one clears it, and the completion hook
 // fires once per applied read. The fetch stub answers a 200 by default (`pending`), a rejection
 // (`failing`: the kernel unreachable) or a non-2xx with the empty body a kernel refusal carries (`bad`).
-type FetchStub = { fetch: () => Promise<any>; pending: Array<(d: any) => void>; failing: Array<(e: any) => void>; bad: Array<(status: number) => void> };
+// Every URL asked is recorded in `urls`, in order; a refusal may carry the prose body a relay answers with (`bad`'s text).
+type FetchStub = { fetch: (url?: string) => Promise<any>; pending: Array<(d: any) => void>; failing: Array<(e: any) => void>; bad: Array<(status: number, text?: string) => void>; urls: string[] };
 function fetchStub(): FetchStub {
   const pending: Array<(d: any) => void> = [];
   const failing: Array<(e: any) => void> = [];
-  const bad: Array<(status: number) => void> = [];
-  const fetch = () => new Promise<any>((res, rej) => {
+  const bad: Array<(status: number, text?: string) => void> = [];
+  const urls: string[] = [];
+  const fetch = (url?: string) => { urls.push(String(url)); return new Promise<any>((res, rej) => {
     pending.push((d: any) => res({ ok: true, status: 200, json: async () => d }));
     failing.push(rej);
-    bad.push((status: number) => res({ ok: false, status, json: async () => { throw new SyntaxError("Unexpected end of JSON input"); } }));
-  });
-  return { fetch, pending, failing, bad };
+    bad.push((status: number, text = "") => res({ ok: false, status, text: async () => text, json: async () => { throw new SyntaxError("Unexpected end of JSON input"); } }));
+  }); };
+  return { fetch, pending, failing, bad, urls };
 }
 function liftLoader() {
   const js = transpile(slice("const MODEL_CHOICES: {", "function loadModelChoices(): void {"));
@@ -312,11 +316,12 @@ function liftMenu(opts: { thread?: { th: unknown; status: any }; vscodeApi?: { p
     "let activeId = null;",
     // metaChoices, as render.ts routes a session: a Codex session's own lists, else the SDK lists (both
     // lifted with the loader below); the mode and fast lists are not lifted
-    slice("function metaChoices(kind: MetaKind, st: Status): MetaChoice[] {"),
+    slice("function metaChoices(kind: MetaKind, st: Status, host = \"\"): MetaChoice[] {"),
     slice("function el(tag: string, cls?: string): HTMLElement {"),
     slice("function isCurrentMeta(kind: MetaKind, st: Status, value: string): boolean {"),   // the real ✓ rule (by value): a row order the tests move must never lose it
     sliceMod("export function metaDots(): HTMLElement {"),   // the dots live in status-controls.ts (T415 part two)
     slice("const MODEL_CHOICES: {", "function loadModelChoices(): void {"),
+    slice("function loadHostCodexChoices(host: string): void {"),   // a linked machine's Codex list, through the relay
     sliceArray("const MODE_CHOICES: MetaChoice[] = ["),   // the SDK mode rows, for the waiting bypass pick's words (2026-10-01)
     sliceMod("export function modeWaitText(st: MetaStatus): string {"),
     "const META_CHOICES = {mode: MODE_CHOICES, model: MODEL_CHOICES, effort: EFFORT_CHOICES}; const CODEX_MODE_CHOICES = [];",
@@ -326,7 +331,7 @@ function liftMenu(opts: { thread?: { th: unknown; status: any }; vscodeApi?: { p
     "function metaButton(kind, text, forSid) { return buildMetaButton(kind, text, forSid, META_HOOKS); }",
     "function settingRefused(m) { if (false) {} " + REFUSED_ARM + " }",   // the real arm, as a function of the frame (the dead `if` lets its `else if` parse)
     slice("let metaMenuEl: HTMLElement | null = null;", "function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null) {"),
-    "return { metaButton, toggleMetaMenu, closeMetaMenu, loadModelChoices, CODEX_MODEL_CHOICES, EFFORT_CHOICES, CODEX_EFFORT_CHOICES, settingRefused, metaPending,",
+    "return { metaButton, toggleMetaMenu, closeMetaMenu, loadModelChoices, loadHostCodexChoices, CODEX_HOST_LISTS, CODEX_MODEL_CHOICES, EFFORT_CHOICES, CODEX_EFFORT_CHOICES, settingRefused, metaPending,",
     "  get menu() { return metaMenuEl; }, set active(id) { activeId = id; }, get error() { return CODEX_MODELS_ERROR; } };",
   ].join("\n"));
   const stub = fetchStub();
@@ -338,15 +343,16 @@ function liftMenu(opts: { thread?: { th: unknown; status: any }; vscodeApi?: { p
     "openCommentThread", "threadMetaStatus", "metaCurrent", "metaPending", "vscodeApi",
     "modeIconSvg", "riskyMode", "nonClassicChoiceTone", "setTip", "pruneTip", "liveSession",
     "pendingFlags", "dropPendingFlag", "notifyShell", "warnToast", "updateStatusline",
-    "applyNowOffered", "applyNowRow", "applyNowFor", js);   // the Apply now row (2026-10-01): no pick waits in these labs, so never drawn
+    "applyNowOffered", "applyNowRow", "applyNowFor", "hostOf", js);   // the Apply now row (2026-10-01): no pick waits in these labs, so never drawn
   const api = fn(doc, win, (p: string) => p, stub.fetch, () => {}, sessions,
     () => (opts.thread ? { th: opts.thread.th } : null),
     () => { if (!opts.thread) throw new Error("no thread here"); return opts.thread.status; },
     () => "", new Map(), opts.vscodeApi ?? null, () => "", () => false, () => undefined, () => {}, () => {},   // setTip, pruneTip (closeMetaMenu/closeSub drop a row's tip with the menu, 2026-09-17)
     (id: string) => sessions.get(id),
     new Map(), () => {}, (kind: string, text: string, sid: string) => { filed.push([kind, text, sid]); }, (t: string) => { toasts.push(t); }, () => { repaints++; },
-    () => false, () => { throw new Error("no pick waits here: the Apply now row is never built"); }, () => {});
-  return { api, sessions, body: BODY, win, pending: stub.pending, failing: stub.failing, rectReads, filed, toasts, repaints: () => repaints };
+    () => false, () => { throw new Error("no pick waits here: the Apply now row is never built"); }, () => {},
+    hostOf);   // the real one (host-prefix.ts): a "host:uuid" tab is a linked machine's session
+  return { api, sessions, body: BODY, win, pending: stub.pending, failing: stub.failing, bad: stub.bad, urls: stub.urls, rectReads, filed, toasts, repaints: () => repaints };
 }
 const SID = "11111111-2222-4333-8444-555555555555";
 const CODEX_READY = { state: "ready", sinceEpoch: null, backend: "codex", model: "gpt-5-test", effort: "medium" };
@@ -435,6 +441,109 @@ test("executed: an SDK session's menu with no rows takes no reason row and issue
   assert.equal(menu.querySelector(".meta-empty"), null, "no reason row");
   assert.equal(menu.querySelectorAll(".meta-item").length, 0);
   assert.equal(pending.length, 0, "and no re-read");
+});
+
+// A Codex session on a LINKED machine (tab id "TESTHOST:<uuid>") read its model and effort menus from this kernel's
+// /models, whose codex section is this machine's app-server: on a dashboard machine that runs no Codex, no list at all and
+// this machine's reason ("no live Codex session"), retried only against this machine; on one that does, this machine's
+// models, which the other machine may not have. The menus now read the host's own list through this kernel's
+// /remote/<host>/models relay (tests/test_remote_session_reads_relay.py pins the relay), kept per host.
+const REMOTE_SID = "TESTHOST:" + SID;
+const LOCAL_REASON = "no live Codex session; the list is read once one runs";
+const HOST_EFFORTS = [{ label: "low", value: "low" }, { label: "high", value: "high" }];
+const HOST_LIST = { rev: 9, models: [], efforts: [],
+  codex: { models: [{ value: "gpt-host-only", label: "GPT Host Only", isDefault: true, efforts: HOST_EFFORTS }], efforts: HOST_EFFORTS, error: null } };
+const HOST_STATUS = { ...CODEX_READY, model: "gpt-host-only", effort: "high" };
+const LOCAL_EFFORTS = [{ label: "minimal", value: "minimal" }];
+const LOCAL_LIST = { rev: 3, models: [], efforts: [],
+  codex: { models: [{ value: "gpt-laptop-only", label: "GPT Laptop Only", isDefault: true, efforts: LOCAL_EFFORTS }], efforts: LOCAL_EFFORTS, error: null } };
+const settle = async () => { for (let i = 0; i < 6; i++) await tick(); };
+const reasonOf = (menu: FakeEl | null) => menu?.querySelector(".meta-empty")?.querySelector(".meta-item-sub")?.textContent ?? null;
+
+test("executed: a linked machine's Codex session lists THAT machine's models and efforts, read through the relay", async () => {
+  for (const kind of ["model", "effort"] as const) {
+    const { api, sessions, body, pending, urls } = liftMenu();
+    sessions.set(REMOTE_SID, { status: HOST_STATUS }); api.active = REMOTE_SID;
+    api.loadModelChoices();                                // the page-load read: this machine runs no Codex
+    pending[0]({ rev: 3, models: [], efforts: [], codex: { models: [], efforts: [], error: LOCAL_REASON } });
+    await settle();
+    const sl = statusline(api, 700, 760); body.appendChild(sl.sl);
+    api.toggleMetaMenu(kind, kind === "model" ? sl.btn : sl.effortBtn, null);
+    assert.equal(reasonOf(api.menu), "asking for the list now", kind + ": this machine's reason is not the session's");
+    assert.deepEqual(urls, ["/models", "/remote/TESTHOST/models"], kind + ": the open asks the machine the session runs on");
+    pending[1](HOST_LIST);
+    await settle();
+    assert.deepEqual(rows(api.menu as FakeEl), kind === "model" ? ["GPT Host Only"] : ["high", "low"]);
+    assert.equal((api.menu as FakeEl).querySelector(".meta-empty"), null);
+    // held now: the next open lists it at once and asks nothing more
+    api.closeMetaMenu();
+    api.toggleMetaMenu(kind, kind === "model" ? sl.btn : sl.effortBtn, null);
+    assert.deepEqual(rows(api.menu as FakeEl), kind === "model" ? ["GPT Host Only"] : ["high", "low"]);
+    assert.equal(urls.length, 2);
+  }
+});
+
+test("executed: with Codex on this machine too, the menus keep each machine's list to its own sessions", async () => {
+  const { api, sessions, body, pending, urls } = liftMenu();
+  sessions.set(REMOTE_SID, { status: HOST_STATUS });
+  sessions.set(SID, { status: { ...CODEX_READY, model: "gpt-laptop-only", effort: "minimal" } });
+  api.active = REMOTE_SID;
+  api.loadModelChoices(); pending[0](LOCAL_LIST); await settle();
+  const sl = statusline(api, 700, 760); body.appendChild(sl.sl);
+  api.toggleMetaMenu("model", sl.btn, null);
+  assert.deepEqual(rows(api.menu as FakeEl), [], "never this machine's models for a session on TESTHOST");
+  assert.deepEqual(urls, ["/models", "/remote/TESTHOST/models"]);
+  pending[1](HOST_LIST); await settle();
+  assert.deepEqual(rows(api.menu as FakeEl), ["GPT Host Only"]);
+  // this machine's own Codex session still lists this machine's, with no read of anyone's
+  api.closeMetaMenu(); api.active = SID;
+  api.toggleMetaMenu("model", sl.btn, null);
+  assert.deepEqual(rows(api.menu as FakeEl), ["GPT Laptop Only"]);
+  api.closeMetaMenu();
+  api.toggleMetaMenu("effort", sl.effortBtn, null);
+  assert.deepEqual(rows(api.menu as FakeEl), ["minimal"]);
+  assert.equal(urls.length, 2);
+});
+
+// The hook an open menu sets fires on every applied read, this machine's included: a menu waiting on TESTHOST's list must not
+// take this machine's read (its models frame, a reconnect) for its answer and show this machine's reason. A read of the
+// relay that fails shows the relay's own words (a dead tunnel), not a bare status.
+test("executed: a linked machine's menu waits on that machine's read, and a refused relay read shows the relay's words", async () => {
+  const { api, sessions, body, pending, bad, urls } = liftMenu();
+  sessions.set(REMOTE_SID, { status: HOST_STATUS }); api.active = REMOTE_SID;
+  const sl = statusline(api, 700, 760); body.appendChild(sl.sl);
+  api.toggleMetaMenu("model", sl.btn, null);
+  const waiting = api.menu as FakeEl;
+  assert.deepEqual(urls, ["/remote/TESTHOST/models"]);
+  api.loadModelChoices();                                  // this machine's own read lands meanwhile
+  pending[1]({ rev: 3, models: [], efforts: [], codex: { models: [], efforts: [], error: LOCAL_REASON } });
+  await settle();
+  assert.equal(api.menu, waiting);
+  assert.equal(reasonOf(waiting), "asking for the list now", "this machine's read is not the answer TESTHOST's menu waits for");
+  bad[0](502, "tunnel to TESTHOST is not answering: re-dialing now");
+  await settle();
+  assert.equal(api.menu, waiting);
+  assert.equal(reasonOf(waiting), "could not read the model list: tunnel to TESTHOST is not answering: re-dialing now");
+  // the host's own reason, when its kernel has one, is what the row shows; an older rev than one applied is dropped
+  api.loadHostCodexChoices("TESTHOST");
+  pending[2]({ rev: 9, models: [], efforts: [], codex: { models: [], efforts: [], error: "the Codex app-server client is unavailable: not started yet" } });
+  await settle();
+  assert.equal(reasonOf(waiting), "the Codex app-server client is unavailable: not started yet");
+  api.loadHostCodexChoices("TESTHOST");
+  pending[3]({ ...HOST_LIST, rev: 8 });
+  await settle();
+  assert.equal(api.menu, waiting, "a stale answer rebuilds nothing");
+  assert.deepEqual(api.CODEX_HOST_LISTS.get("TESTHOST").models, []);
+});
+
+// The models frame a linked machine's kernel sends (its list or pick memory moved) arrives stamped with its host
+// (federation.ts prefixInbound; federation-setting-unlinked.test.ts executes it) and re-reads THAT machine's list, if
+// this page holds one; it used to re-read this machine's, whose list had not moved.
+test("a linked machine's models frame re-reads that machine's Codex list, ahead of this machine's arm", () => {
+  const hostArm = 'else if (m.type === "models" && typeof m.host === "string" && m.host) { if (CODEX_HOST_LISTS.has(m.host)) loadHostCodexChoices(m.host); }';
+  const localArm = 'else if (m.type === "models") loadModelChoices();';
+  assert.ok(RENDER.includes(hostArm));
+  assert.ok(RENDER.indexOf(hostArm) < RENDER.indexOf(localArm), "the host's arm is tried first");
 });
 
 // updateStatusline() rebuilds the statusline on every kernel push, and the spawn that makes the list

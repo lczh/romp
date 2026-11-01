@@ -5848,14 +5848,19 @@ this side writes is JSON `{ok, error}`: 404 for a path that names no host
 400 for a body that is not a JSON object (the peer is never reached); 502 for
 a dead tunnel or a peer that answered without a JSON verdict.
 
-Two more read relays, under the same rules, serve a session on an attached host
-from the kernel that runs it: `GET /remote/<host>/mcp` for the MCP panel and
-`GET /remote/<host>/commands` for the composer's `/` menu. The dashboard sends
-the bare session id and only `sid` crosses, so the peer answers for its own
-session: its MCP servers, its project's commands, the fixed list for a Codex
-session. Their errors are the `/sessions` relay's: 404 in prose for an unknown
-host, the peer's own status and prose for a refusal or an older build without
-the route, 502 in prose for a dead tunnel or a body that is not a JSON object.
+Three more read relays, under the same rules, serve a session on an attached
+host from the kernel that runs it: `GET /remote/<host>/mcp` for the MCP panel,
+`GET /remote/<host>/commands` for the composer's `/` menu, and
+`GET /remote/<host>/models` for the model and effort menus of a Codex session
+there. Only `sid` crosses: the dashboard sends the bare session id for the
+first two, so the peer answers for its own session (its MCP servers, its
+project's commands, the fixed list for a Codex session), and the peer's
+`/models` takes none and answers with its own Codex app-server's models, or its
+reason for having none. The dashboard keeps that list per attached host and
+re-reads it on the host's `models` frame. Their errors are the `/sessions`
+relay's: 404 in prose for an unknown host, the peer's own status and prose for
+a refusal or an older build without the route, 502 in prose for a dead tunnel
+or a body that is not a JSON object.
 
 ### The ledger
 

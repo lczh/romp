@@ -19826,11 +19826,21 @@ const CODEX_EFFORT_CHOICES: { label: string; value: string; color?: number[] | n
 // and the ✓ matches by value (isCurrentMeta), so it follows its row.
 const effortDisplayOrder = (efforts: { label: string; value: string; color?: number[] | null }[]): { label: string; value: string; color?: number[] | null }[] =>
   [...efforts].reverse();
-function codexEffortChoices(model?: string): MetaChoice[] {
+function codexEffortChoices(model?: string, host = ""): MetaChoice[] {
+  const cx = codexList(host);
   // Per-model capabilities (2026-09-17); only an older kernel without this field uses its flat list.
-  if (!CODEX_MODEL_CHOICES.some((m) => Array.isArray(m.efforts))) return CODEX_EFFORT_CHOICES;
-  const row = CODEX_MODEL_CHOICES.find((m) => model ? m.value === model || m.model === model : m.isDefault);
+  if (!cx.models.some((m) => Array.isArray(m.efforts))) return cx.efforts;
+  const row = cx.models.find((m) => model ? m.value === model || m.model === model : m.isDefault);
   return effortDisplayOrder(row?.efforts || []);
+}
+// A Codex session on a linked machine (tab id "host:uuid") lists THAT machine's models and efforts, read through this
+// kernel's /remote/<host>/models relay (loadHostCodexChoices). This kernel's own list is another app-server's, or none at
+// all with this machine's reason ("no live Codex session") while the session runs on the other machine. Kept per host,
+// with the reason and the rev; "" is this machine, whose list stays in the arrays above and CODEX_MODELS_ERROR below.
+const CODEX_HOST_LISTS = new Map<string, { models: MetaChoice[]; efforts: MetaChoice[]; error: string; rev: number }>();
+function codexList(host: string): { models: MetaChoice[]; efforts: MetaChoice[]; error: string } {
+  if (!host) return { models: CODEX_MODEL_CHOICES, efforts: CODEX_EFFORT_CHOICES, error: CODEX_MODELS_ERROR };
+  return CODEX_HOST_LISTS.get(host) || { models: [], efforts: [], error: "" };
 }
 // Why the Codex list is empty, when it is: the payload's `codex.error` (the app-server client not up yet,
 // a failed model list, no live Codex session). A Codex menu with no list shows it in place of a
@@ -19838,7 +19848,8 @@ function codexEffortChoices(model?: string): MetaChoice[] {
 let CODEX_MODELS_ERROR = "";
 // Set by an open menu that found its list empty: called once per applied /models read so the menu can
 // rebuild with the list that just landed, or show the fresh reason. Cleared with the menu (closeMetaMenu).
-let onModelChoicesLoaded: (() => void) | null = null;
+// `host` names the machine whose list landed ("" or absent: this one), so a menu waits on its own machine's read.
+let onModelChoicesLoaded: ((host?: string) => void) | null = null;
 // Loaded at page load and RE-LOADED on the kernel's {type:"models"} frame — the pick memory moved (a
 // version pinned, a family un-pinned by Latest, a refused pin dropped; from this tab, another dashboard,
 // or the kernel itself) or the catalog grew. A family's `default` is what its row SENDS, so a list
@@ -19871,6 +19882,32 @@ function loadModelChoices(): void {
   });
 }
 loadModelChoices();
+// A linked machine's Codex list (CODEX_HOST_LISTS, above): the codex section of THAT kernel's /models, through the relay. Only
+// that section is taken; the payload's Claude lists and comment defaults are that machine's and the chat keeps this one's. The
+// local read's rules otherwise: an older rev is dropped, the menu hook fires once per applied read, and a failed read tells a
+// waiting menu, in the relay's own words (a dead tunnel, an unknown host) rather than a bare status.
+function loadHostCodexChoices(host: string): void {
+  fetch(kernelUrl("/remote/" + encodeURIComponent(host) + "/models"), { cache: "no-store" }).then((r) => {
+    if (!r.ok) return r.text().then((t) => { throw new Error(t || "HTTP " + r.status); });
+    return r.json();
+  }).then((d) => {
+    const was = CODEX_HOST_LISTS.get(host) || { models: [], efforts: [], error: "", rev: -1 };
+    if (typeof d.rev === "number" && d.rev < was.rev) return;
+    const cx = d.codex;
+    CODEX_HOST_LISTS.set(host, {
+      models: cx && Array.isArray(cx.models) ? cx.models : was.models,
+      efforts: cx && Array.isArray(cx.efforts) ? effortDisplayOrder(cx.efforts) : was.efforts,
+      error: cx ? (typeof cx.error === "string" ? cx.error : "") : was.error,
+      rev: typeof d.rev === "number" ? d.rev : was.rev,
+    });
+    if (onModelChoicesLoaded) onModelChoicesLoaded(host);
+  }).catch((e) => {
+    if (!onModelChoicesLoaded) return;
+    const was = CODEX_HOST_LISTS.get(host) || { models: [], efforts: [], error: "", rev: -1 };
+    CODEX_HOST_LISTS.set(host, { ...was, error: "could not read the model list: " + (e instanceof Error ? e.message : String(e)) });
+    onModelChoicesLoaded(host);
+  });
+}
 // The kernel's default-comment settings, RAW ("session" = same as the session — the user 2026-08-29):
 // what a new comment thread launches on when the dialog is left untouched. Pre-read so the create
 // dialog SHOWS the effective default and a pick stays a deviation; the kernel re-resolves at create,
@@ -19934,12 +19971,13 @@ const META_CHOICES: Record<MetaKind, MetaChoice[]> = {
 };
 // The choices a menu offers depend on the session's BACKEND: a Codex session speaks Codex's
 // vocabulary (its own model list and each model's efforts) — never Claude's, whose aliases
-// the codex backend refuses (docs/codex.md). Codex modes use its own approval reviewer.
-function metaChoices(kind: MetaKind, st: Status): MetaChoice[] {
+// the codex backend refuses (docs/codex.md). Codex modes use its own approval reviewer. `host` is the machine the
+// session runs on ("" for this one): a linked machine's Codex session lists that machine's models (codexList).
+function metaChoices(kind: MetaKind, st: Status, host = ""): MetaChoice[] {
   if (st.backend === "codex") {
     if (kind === "mode") return CODEX_MODE_CHOICES;
-    if (kind === "model") return CODEX_MODEL_CHOICES;
-    if (kind === "effort") return codexEffortChoices(st.model);
+    if (kind === "model") return codexList(host).models;
+    if (kind === "effort") return codexEffortChoices(st.model, host);
   }
   return META_CHOICES[kind];
 }
@@ -20117,8 +20155,10 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
   const closeSub = () => { subEl?.remove(); subEl = null; pruneTip(); };
   // An sdkOnly entry is dropped on Codex rather than shown-and-refused: the backend cannot apply it,
   // and a menu that lists a mode you can't have is worse than one that doesn't. Codex sessions read
-  // their own vocabulary via metaChoices (docs/codex.md) before the same filter.
-  const rows = metaChoices(kind, s.status).filter((c) => !c.sdkOnly || s.status.backend === "sdk");
+  // their own vocabulary via metaChoices (docs/codex.md) before the same filter. A session on a linked machine
+  // ("host:uuid") reads that machine's Codex list, its reason and its re-read (codexList), never this machine's.
+  const host = hostOf(opSid);
+  const rows = metaChoices(kind, s.status, host).filter((c) => !c.sdkOnly || s.status.backend === "sdk");
   if (!rows.length && s.status.backend === "codex" && (kind === "model" || kind === "effort")) {
     // A Codex menu with no list says why instead of opening blank: the badge above it shows the
     // session's default while the list under it is empty. The reason is the kernel's `codex.error`. The
@@ -20130,20 +20170,22 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
     const head = el("div");
     head.textContent = kind === "model" ? "No model list from Codex" : "No effort list from Codex";
     const sub = el("div", "meta-item-sub");
-    sub.textContent = CODEX_MODELS_ERROR || "asking for the list now";
-    if (!CODEX_MODELS_ERROR) sub.appendChild(metaDots());   // a wait wears the loader's dots
+    const why = (): string => codexList(host).error;
+    sub.textContent = why() || "asking for the list now";
+    if (!why()) sub.appendChild(metaDots());   // a wait wears the loader's dots
     empty.append(head, sub);
     menu.appendChild(empty);
-    onModelChoicesLoaded = () => {
+    onModelChoicesLoaded = (landed = "") => {
       if (metaMenuEl !== menu) return;
+      if (landed !== host) return;   // another machine's list landed; this menu waits on its own machine's read
       // The chat's badges carry no session, so a menu opened on a tab that dismissSession has since removed
       // (activeId moves to the most recent survivor there, without setActive's closeMetaMenu) cannot be told
       // from the survivor's menu by its badge: it would re-anchor on the survivor's badge of the same kind,
       // or write the stale reason row over the survivor's tab. Close it instead; a thread's popover names
       // its own sid and is never the active tab, so its rebuild below is unchanged.
       if (!forThread && activeId !== opSid) { closeMetaMenu(); return; }
-      const now = metaChoices(kind, s.status).filter((c) => !c.sdkOnly || s.status.backend === "sdk");
-      if (!now.length) { sub.textContent = CODEX_MODELS_ERROR || (kind === "model" ? "no model list yet" : "no effort list yet"); return; }   // textContent drops the dots
+      const now = metaChoices(kind, s.status, host).filter((c) => !c.sdkOnly || s.status.backend === "sdk");
+      if (!now.length) { sub.textContent = why() || (kind === "model" ? "no model list yet" : "no effort list yet"); return; }   // textContent drops the dots
       // The list landed: rebuild against the badge as it stands now, not the one captured at open. The spawn
       // that makes the list readable also pushes, and every push rebuilds the statusline, so the captured
       // button is often detached by the time the re-read lands; with no live badge for this kind and session
@@ -20152,7 +20194,7 @@ function toggleMetaMenu(kind: MetaKind, btn: HTMLElement, forSid?: string | null
       const anchor = metaAnchor(kind, forSid, btn);
       if (anchor) toggleMetaMenu(kind, anchor, forSid);
     };
-    loadModelChoices();
+    if (host) loadHostCodexChoices(host); else loadModelChoices();
   }
   for (const c of rows) {
     const item = el("div", "meta-item" + (isCurrentMeta(kind, s.status, c.value) ? " current" : ""));
@@ -24424,6 +24466,9 @@ listenForFrames(perfFrameHandler("chat", (m) => vscodeApi?.postMessage(m), (e: M
   else if (m.type === "caps") onKernelCaps(m);
   else if (m.type === "unknownOp") onUnknownOp(m);
   else if (m.type === "notifySwitches") onNotifySwitches(m);   // this kernel's switches: a linked kernel's bells follow them (bell-follow.ts)
+  // A LINKED machine's models frame (federation stamps its host): re-read that machine's Codex list, if this page holds one
+  // (a Codex menu on one of its sessions asked for it). This machine's list did not move, so it is not re-read.
+  else if (m.type === "models" && typeof m.host === "string" && m.host) { if (CODEX_HOST_LISTS.has(m.host)) loadHostCodexChoices(m.host); }
   // The kernel's pick memory moved (a pin, a Latest un-pin, a refused pin dropped) or its catalog grew:
   // re-read /models so the family rows send the fresh default — the models-list twin of the palette frame.
   else if (m.type === "models") loadModelChoices();
