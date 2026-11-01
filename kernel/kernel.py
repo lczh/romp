@@ -28647,7 +28647,7 @@ def _host_for_sid(sid):
 
 _RELAY_TIMEOUT_S = 10   # one bound for every relay of ONE call through a tunnel (/remote/<host>/api-health, /new, /send): a
                         #  peer that accepts and never answers is reported "not answering" after this, and the redial asked
-_REMOTE_SESSION_READS = ("/mcp", "/commands")   # the per-session reads /remote/<host>/… relays (_remote_session_read)
+_REMOTE_SESSION_READS = ("/mcp", "/commands", "/models")   # the per-session reads /remote/<host>/… relays (_remote_session_read)
 
 def _remote_forward(r, path, body):
     """Forward a small CONTROL call (deliver/send/working) to a remote kernel THROUGH its -L tunnel — this is
@@ -86966,8 +86966,8 @@ class Handler(BaseHTTPRequestHandler):
                 # that can actually read the disk the path names (see _remote_file)
                 return self._remote_file(unquote(p[len("/remote/"):-len("/file")]), u.query)
             if p.startswith("/remote/") and p.endswith(_REMOTE_SESSION_READS):
-                # the MCP panel's and the "/" menu's read for a session on an attached host: relay it to the kernel
-                # that runs that session (see _remote_session_read)
+                # the MCP panel's, the "/" menu's and a Codex session's model menus' read for a session on an attached
+                # host: relay it to the kernel that runs that session (see _remote_session_read)
                 route = p[p.rindex("/"):]
                 return self._remote_session_read(unquote(p[len("/remote/"):-len(route)]), route, q)
             if p == "/analytics":                             # token-usage analytics (the settings modal's chart)
@@ -91240,11 +91240,13 @@ class Handler(BaseHTTPRequestHandler):
                           cache="no-cache")
 
     def _remote_session_read(self, host, route, q):
-        """GET /remote/<host>/mcp and /remote/<host>/commands: relay the MCP panel's read and the composer's "/" menu's
-        read for a session on an attached host to that host's kernel, the one that runs it. The dashboard names such a
-        session "<host>:<uuid>" and this kernel owns no session by that id, so its own /mcp answered that no running
-        backend owns it, and its own /commands listed this machine's default-directory commands (a Codex session there
-        was offered Claude's). The /api-health relay's shape: the local auth gate has run, the remote's own token goes in
+        """GET /remote/<host>/mcp, /remote/<host>/commands and /remote/<host>/models: relay the MCP panel's read, the
+        composer's "/" menu's read and a Codex session's model and effort menus' read for a session on an attached host to
+        that host's kernel, the one that runs it. The dashboard names such a session "<host>:<uuid>" and this kernel owns
+        no session by that id, so its own /mcp answered that no running backend owns it, its own /commands listed this
+        machine's default-directory commands (a Codex session there was offered Claude's), and its own /models listed
+        this machine's Codex models, or none with this machine's reason. /models takes no `sid` and ignores the one that
+        crosses. The /api-health relay's shape: the local auth gate has run, the remote's own token goes in
         the forwarded request, only the bare `sid` crosses (that kernel resolves it and answers for its own backend), an
         unknown host is a 404, a dead tunnel a 502 and a redial, and a refusal (an older build without the route) comes
         back in prose with its status mirrored. A 200 must be a JSON object, sent on as parsed, else a 502 naming the

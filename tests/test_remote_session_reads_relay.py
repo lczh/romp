@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""GET /remote/<host>/mcp and /remote/<host>/commands: the MCP panel's read and the composer's "/" menu's read for a
-session on an attached host, relayed to the kernel that runs it. The dashboard names such a session "<host>:<uuid>",
-and this kernel owns no session by that id: before the relay, the panel asked this kernel's /mcp, which said no
-running backend owned the session, and the menu asked this kernel's /commands, which listed this machine's commands.
+"""GET /remote/<host>/mcp, /remote/<host>/commands and /remote/<host>/models: the MCP panel's read, the composer's "/"
+menu's read and a Codex session's model and effort menus' read for a session on an attached host, relayed to the kernel
+that runs it. The dashboard names such a session "<host>:<uuid>", and this kernel owns no session by that id: before the
+relay, the panel asked this kernel's /mcp, which said no running backend owned the session, the menu asked this kernel's
+/commands, which listed this machine's commands, and the model menus asked this kernel's /models, whose Codex list is this
+machine's app-server's (none at all, with this machine's reason, on a machine that runs no Codex).
 Pinned here:
   - each route relays the peer's own JSON answer for the bare id, with the peer's own token and only `sid` crossing;
   - 404 for an unknown host, 502 and a redial for a dead tunnel, the peer's refusal mirrored in prose (an older
     build without the route), 502 naming the host for a body that is not a JSON object;
   - the routes sit behind the local auth gate.
-The client half (render.ts builds these URLs through media.ts sessionReadUrl) is ui/webview/remote-session-reads.test.ts.
+The client half (render.ts builds these URLs through media.ts sessionReadUrl) is ui/webview/remote-session-reads.test.ts;
+the model menus' (render.ts loadHostCodexChoices) is ui/webview/codex-meta-choices.test.ts.
 Synthetic throughout: TESTHOST, placeholder ids, the notes-api demo's api session."""
 import json
 import os
@@ -30,6 +33,8 @@ SID_PEER = "33333333-2222-3333-4444-555555555555"     # the peer's own id for it
 MCP_DOC = {"servers": [{"name": "notes-db", "status": "connected", "tools": [{"name": "query"}]}], "error": ""}
 CMDS_DOC = {"commands": [{"name": "deploy-notes-api", "description": "a project command on the peer"}],
             "warming": False}
+MODELS_DOC = {"rev": 9, "models": [], "efforts": [],
+              "codex": {"models": [{"value": "gpt-host-only", "label": "GPT Host Only"}], "efforts": [], "error": None}}
 
 
 class _FakePeer(BaseHTTPRequestHandler):
@@ -67,7 +72,7 @@ class Relay(unittest.TestCase):
     def setUp(self):
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), km.Handler)
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
-        _FakePeer.answers, _FakePeer.seen = {"/mcp": MCP_DOC, "/commands": CMDS_DOC}, []
+        _FakePeer.answers, _FakePeer.seen = {"/mcp": MCP_DOC, "/commands": CMDS_DOC, "/models": MODELS_DOC}, []
         self.peer = ThreadingHTTPServer(("127.0.0.1", 0), _FakePeer)
         threading.Thread(target=self.peer.serve_forever, daemon=True).start()
         with km._remotes_lock:
@@ -106,6 +111,15 @@ class Relay(unittest.TestCase):
         self.assertEqual(json.loads(body), CMDS_DOC, "the peer's list for its session, not this machine's")
         self.assertEqual(_FakePeer.seen, [("/commands?sid=" + SID_PEER, PEER_PASS)])
 
+    def test_the_models_read_reaches_the_kernel_that_runs_the_session(self):
+        # the Codex model and effort menus of a session on TESTHOST: TESTHOST's own list, never this kernel's (which, on a
+        # machine running no Codex, is empty with this machine's reason). The client sends no sid; /models takes none.
+        st, body, ct = self._get("/remote/TESTHOST/models")
+        self.assertEqual(st, 200, body[:200])
+        self.assertTrue(ct.startswith("application/json"))
+        self.assertEqual(json.loads(body), MODELS_DOC, "the peer's Codex list, not this kernel's")
+        self.assertEqual(_FakePeer.seen, [("/models?sid=", PEER_PASS)], "the peer's own token, and nothing of the caller's")
+
     def test_only_the_sid_crosses(self):
         st, body, _ = self._get("/remote/TESTHOST/mcp?sid=" + SID_PEER + "&path=notes.md&extra=1")
         self.assertEqual(st, 200, body[:200])
@@ -129,14 +143,14 @@ class Relay(unittest.TestCase):
         self.assertEqual(body, b"not found")
 
     def test_a_body_that_is_not_a_json_object_is_a_502_naming_the_host(self):
-        _FakePeer.answers = {"/commands": [1, 2], "/mcp": b"<html>not json</html>"}
-        for route in ("/commands", "/mcp"):
+        _FakePeer.answers = {"/commands": [1, 2], "/mcp": b"<html>not json</html>", "/models": b"[]"}
+        for route in ("/commands", "/mcp", "/models"):
             st, body, _ = self._get("/remote/TESTHOST%s?sid=%s" % (route, SID_PEER))
             self.assertEqual(st, 502, route)
             self.assertIn(b"TESTHOST", body)
 
     def test_the_relay_is_behind_the_local_auth_gate(self):
-        for route in ("/mcp", "/commands"):
+        for route in ("/mcp", "/commands", "/models"):
             st, _, _ = self._get("/remote/TESTHOST%s?sid=%s" % (route, SID_PEER), token=False)
             self.assertIn(st, (401, 403), route)
         self.assertEqual(_FakePeer.seen, [], "an unauthenticated read never reaches the peer")

@@ -243,3 +243,9 @@ test("the remote kernel's settingAck arrives stamped with its host, so the gear 
   assert.deepEqual(prefixInbound("TESTHOSTB", { type: "settingAck", msgType: "setConserve", gt: 3 }),
     { type: "settingAck", msgType: "setConserve", gt: 3, host: "TESTHOSTB" });
 });
+
+test("the remote kernel's models frame arrives stamped with its host, so the chat re-reads that machine's Codex list", async () => {
+  const { prefixInbound } = await import("./federation");
+  assert.deepEqual(prefixInbound("TESTHOSTB", { type: "models", rev: 4 }), { type: "models", rev: 4, host: "TESTHOSTB" });
+  assert.deepEqual(prefixInbound("", { type: "models", rev: 4 }), { type: "models", rev: 4 }, "this machine's frame names no host");
+});

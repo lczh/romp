@@ -219,6 +219,9 @@ export function prefixInbound(host: string, msg: any): any {
   // …and its word that it HANDLED one (settingAck, kernel.py _ack_setting): the gear re-reads that machine's settings on it, so
   // the frame must say which machine it was
   if (out.type === "settingAck") out.host = host;
+  // …and its models frame (its model list or pick memory moved): the chat re-reads THAT machine's Codex list for the menus of
+  // its sessions, never this one's, so the frame must say which machine it was
+  if (out.type === "models") out.host = host;
   if (out.type === "sessionList" && Array.isArray(out.items)) {
     out.items = out.items.map((it: any) => (it && typeof it === "object" && typeof it.id === "string"
       ? { ...it, id: prefixId(host, it.id),
