@@ -500,26 +500,29 @@ class PlannerSkip(_World):
         self.assertEqual(self.stores()[C]["nodes"][nd["id"]]["text"], "Fix the mobile tab width", "retitled from the caption")
         self.settle()
 
-    def _launch_transcript(self, sid, tid, name, inp, ack):
-        """`sid`'s turn dispatches one background launch (tool_use `tid`: `name` with `inp`), the harness acks it
-        with plain text (no <task-notification>, so em._bg_step keeps it running) and the turn ends."""
-        recs = [uline(T0, self.PROMPTS[sid], "u1"),
-                {"type": "assistant", "timestamp": iso(T0 + 20), "uuid": "m1", "parentUuid": "u1",
+    MON_T0 = T0 + 1800      # the Monitor's turn opens half an hour in, so its 30-minute ceiling falls just past NOW
+
+    def _launch_transcript(self, sid, tid, name, inp, ack, t0=T0):
+        """`sid`'s turn, opening at `t0`, dispatches one background launch (tool_use `tid`: `name` with `inp`), the
+        harness acks it with plain text (no <task-notification>, so em._bg_step keeps it running) and the turn ends."""
+        recs = [uline(t0, self.PROMPTS[sid], "u1"),
+                {"type": "assistant", "timestamp": iso(t0 + 20), "uuid": "m1", "parentUuid": "u1",
                  "message": {"role": "assistant", "stop_reason": None, "content": [
                      {"type": "tool_use", "id": tid, "name": name, "input": inp}]}},
-                {"type": "user", "timestamp": iso(T0 + 21), "uuid": "r1", "parentUuid": "m1",
+                {"type": "user", "timestamp": iso(t0 + 21), "uuid": "r1", "parentUuid": "m1",
                  "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": ack}]}},
-                aline(T0 + 30, "Done: it is running.", "a1", "r1")]
+                aline(t0 + 30, "Done: it is running.", "a1", "r1")]
         p = self.proj_dir / (sid + ".jsonl")
         p.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
-        os.utime(p, (T0 + 90, T0 + 90))
+        os.utime(p, (t0 + 90, t0 + 90))
 
     def _monitor_transcript(self, sid):
-        """A Monitor: its timeout_ms is a recorded ceiling. em._bg_step registers the deadline at T0 + 20 + 3600
-        and em._bg_expired reads the crossing 120 s later, at NOW + 140."""
+        """A Monitor: its timeout_ms is a recorded ceiling. It asks for an hour, which the CLI caps at 30 minutes, so
+        em._bg_step registers the deadline at MON_T0 + 20 + 1800 (NOW + 20) and em._bg_expired reads the crossing
+        120 s later, at NOW + 140."""
         self._launch_transcript(sid, "toolu_mon1", "Monitor",
                                 {"timeout_ms": 3600000, "persistent": False, "description": "watch the build"},
-                                "monitoring started")
+                                "monitoring started", t0=self.MON_T0)
 
     def _bash_transcript(self, sid):
         """A backgrounded Bash: no recorded ceiling, so em._bg_expired never expires it."""
@@ -533,8 +536,8 @@ class PlannerSkip(_World):
         sp = jd.GOALDIR / (A + ".json")                     # the done verdict, filed as a closer files it
         d = json.loads(sp.read_text())
         d["nodes"][top]["nodeComplete"] = True
-        d["nodes"][top].setdefault("log", []).append({"ev_t": T0 + 40, "src": "closer", "kind": "done",
-                                                      "why": "shipped", "at": T0 + 40})
+        d["nodes"][top].setdefault("log", []).append({"ev_t": self.MON_T0 + 40, "src": "closer", "kind": "done",
+                                                      "why": "shipped", "at": self.MON_T0 + 40})
         d["lastNode"] = top
         sp.write_text(json.dumps(d))
         self.settle()
@@ -566,7 +569,7 @@ class PlannerSkip(_World):
         try:
             jd.time.time = lambda: NOW + 200
             self.assertEqual(jd._bg_unresolved(path), [], "past the ceiling under the wall clock: expired")
-            self.assertEqual([t["id"] for t in jd._bg_unresolved(path, T0 + 25)], ["toolu_mon1"],
+            self.assertEqual([t["id"] for t in jd._bg_unresolved(path, self.MON_T0 + 25)], ["toolu_mon1"],
                              "a clock handed in outranks the wall clock")
             jd.time.time = lambda: NOW
             self.assertEqual([t["id"] for t in jd._bg_unresolved(path)], ["toolu_mon1"],
