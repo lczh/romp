@@ -12,6 +12,11 @@ session acted on the same handoff twice, after a restart storm or under load. Tw
   - the bus posts the chunk that did not land as its own chunk on its next push, ahead of newer mail, so the kernel
     sees those ids again rather than a banner that mixes them with mail it has never seen.
 
+The retry was not the only second reader (2026-11-01). Mail put back in new/ after an unanswered post was ordinary unread
+mail until the next retry pass: the turn-end drain or check_inbox handed it over a second time beside the queued banner,
+and a recall withdrew it and told the sender it was recalled while the session still read it. So mail whose post went
+out and got no answer stays claimed, recorded as in doubt, until the kernel answers a re-post of it (MailInDoubt below).
+
 The bus and the kernel's real /deliver route run here over loopback; only the backend behind the route, and the loss
 of the kernel's first answer, are stubbed. SYNTHETIC fixtures only: invented text, private placeholder uuids, the
 notes-api demo's web and api sessions, hostname TESTHOST."""
@@ -19,9 +24,13 @@ import http.client
 import itertools
 import json
 import os
+import shutil
+import socket
 import tempfile
 import threading
 import unittest
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from romp_load import load_source
 
@@ -63,15 +72,19 @@ class _Backend:
         self.takes = True
         self.hold = None
         self.entered = threading.Event()
+        self.done = threading.Event()
 
     def deliver(self, sid, text):
         self.entered.set()
         if self.hold is not None:
             self.hold.wait(10)
-        if not self.takes:
-            return False
-        self.took.append((sid, em.POSTAL_RE.findall(text)))
-        return True
+        try:
+            if not self.takes:
+                return False
+            self.took.append((sid, em.POSTAL_RE.findall(text)))
+            return True
+        finally:
+            self.done.set()
 
     def ids(self):
         return [m for _, ms in self.took for m in ms]
@@ -104,7 +117,7 @@ class _World(unittest.TestCase):
         return out
 
 
-class TheBusRetryAfterALateAnswer(_World):
+class _Bus(_World):
     """The bus end to end: its push, its put-back and its retry pass against the kernel's real route."""
 
     def setUp(self):
@@ -117,29 +130,39 @@ class TheBusRetryAfterALateAnswer(_World):
         self.logged = []
         pm._log = self.logged.append
         pm.local_agents = lambda threads=False: [{"id": WEB, "name": "web", "state": "idle"}]
-        self.posted, self.lose = [], 0
+        self.posted, self.lose, self.cap = [], 0, None
         real = self.saved[5]
 
         def post(path, body, timeout=2):
-            resp = real(path, body, timeout=timeout)       # the kernel handles the request either way
+            # the kernel handles the request either way; `cap`, when set, is a real read timeout on the bus's side
+            resp = real(path, body, timeout=self.cap if path == "/deliver" and self.cap else timeout)
             if path == "/deliver":
                 self.posted.append(em.POSTAL_RE.findall(body.get("text", "")))
                 if self.lose:
                     self.lose -= 1
-                    return None                            # its answer came after the bus's cap: read as unreachable
+                    return {"ok": False, "unanswered": True}   # its answer came after the bus's cap, as _kernel_post says it
             return resp
         pm._kernel_post = post
 
     def tearDown(self):
+        if self.be.hold is not None:
+            self.be.hold.set()
+            self.be.done.wait(10)
         (pm.KERNEL_BASE, pm.SERVE_TOKEN, pm._push_disabled, pm._log, pm.local_agents, pm._kernel_post) = self.saved
         if self._seam is not None:
             os.environ["ROMP_SESSIONS_FILE"] = self._seam
         pm.STREAKS.pop(WEB, None)
+        pm._PUSH_UNLANDED.pop(WEB, None)
+        shutil.rmtree(pm.MAILROOT / WEB, ignore_errors=True)   # every test starts from an empty box and no record
+        (pm.MAILDOUBT / WEB).unlink(missing_ok=True)
+        pm._mark_pending(WEB)
         super().tearDown()
 
     def _box(self):
         return [m.get("id") for m in pm.read_box(WEB, consume=False)]
 
+
+class TheBusRetryAfterALateAnswer(_Bus):
     def test_a_prompt_answer_delivers_once_and_the_retry_posts_nothing(self):
         mid = pm.deliver(WEB, "api", PEER, "please run the notes-api migration", kind="delegate")
         self.assertTrue(pm._push(WEB, {"id": WEB, "state": "idle"}))
@@ -151,8 +174,8 @@ class TheBusRetryAfterALateAnswer(_World):
         self.lose = 1
         mid = pm.deliver(WEB, "api", PEER, "please run the notes-api migration", kind="delegate")
         self.assertFalse(pm._push(WEB, {"id": WEB, "state": "idle"}), "the bus heard no answer")
-        self.assertTrue(any("deferred (kernel unreachable)" in ln for ln in self.logged), self.logged)
-        self.assertEqual(self._box(), [mid], "put back in new/ under its own id, as before")
+        self.assertTrue(any("deferred (no answer from the kernel)" in ln for ln in self.logged), self.logged)
+        self.assertEqual(self._box(), [], "kept claimed, in doubt: the kernel may have queued it")
         pm._retry_pending()                                # the RETRY_INTERVAL pass posts it again
         self.assertEqual(self.posted, [[mid], [mid]], "the retry posts the same message again")
         self.assertEqual(self.be.ids(), [mid],
@@ -209,9 +232,9 @@ class TheDeliverRouteDedupe(_World):
         second.start()
         second.join(5)
         try:
-            self.assertEqual(answers.get("second"), {"ok": True, "injected": False},
+            self.assertEqual(answers.get("second"), {"ok": True, "injected": False, "busy": True},
                              "not delivered beside the first copy, and not claimed as taken before the first "
-                             "copy is: the bus puts it back and its retry learns how the first one ended")
+                             "copy is: busy, so the bus keeps it in doubt and its retry learns how the first one ended")
         finally:
             self.be.hold.set()
             first.join(10)
@@ -255,6 +278,216 @@ class TheDeliverRouteDedupe(_World):
             bus.server_close()
         self.assertEqual(self.again, {"ok": True, "injected": True})
         self.assertEqual(self.be.ids(), [self.A, self.A], "the handed-back message is delivered again, not swallowed")
+
+
+class MailInDoubt(_Bus):
+    """Mail whose post went out and got no answer is the kernel's until it answers for it: no other reader takes it."""
+
+    def _send(self, body="please run the notes-api migration"):
+        return pm.deliver(WEB, "api", PEER, body, kind="delegate")
+
+    def _turn_end_drain(self):
+        """What the Stop hook hands the session when its turn ends: GET /drain, which is _drain(sid)."""
+        pm.STREAKS.pop(WEB, None)
+        return [m["id"] for m in pm._drain(WEB).get("messages", [])]
+
+    def _in_doubt(self):
+        return pm._doubt_read(WEB)
+
+    def test_the_turn_end_drain_does_not_hand_over_mail_the_kernel_may_have_queued(self):
+        self.lose = 1
+        mid = self._send()
+        self.assertFalse(pm._push(WEB, {"id": WEB, "state": "working"}))
+        self.assertEqual(self.be.ids(), [mid], "the kernel queued the banner; only its answer was lost")
+        self.assertEqual(self._turn_end_drain(), [],
+                         "the session's turn ends before the next retry pass: on main the drain handed it over again")
+        self.assertEqual(self._in_doubt(), [mid], "recorded on disk, so a restart of the bus does not strand it")
+        pm._retry_pending()
+        self.assertEqual(self.posted, [[mid], [mid]], "the retry asks the kernel about it, and the kernel answers taken")
+        self.assertEqual(self.be.ids(), [mid], "the session gets it once")
+        self.assertEqual((self._in_doubt(), self._box()), ([], []), "settled: nothing in doubt, nothing left unread")
+
+    def test_check_inbox_does_not_hand_over_mail_the_kernel_may_have_queued(self):
+        self.lose = 1
+        mid = self._send()
+        self.assertFalse(pm._push(WEB, {"id": WEB, "state": "working"}))
+        self.assertEqual([m["id"] for m in pm.read_box(WEB, consume=True)], [], "GET /inbox, what check_inbox reads")
+        pm._retry_pending()
+        self.assertEqual(self.be.ids(), [mid])
+
+    def test_a_recall_does_not_withdraw_mail_the_kernel_may_have_queued(self):
+        self.lose = 1
+        mid = self._send()
+        self.assertFalse(pm._push(WEB, {"id": WEB, "state": "working"}))
+        self.assertEqual(pm._recall(PEER, "web", mid), [],
+                         "on main the recall removed it and told the sender it was recalled before it was read")
+        pm._retry_pending()
+        self.assertEqual(self.be.ids(), [mid], "the queued banner delivers it, as the answer to the recall implied")
+
+    def test_a_real_read_timeout_while_the_kernel_still_hands_it_over(self):
+        # The order under load: the bus's read times out while the route is still inside the backend's deliver (a slow
+        # revive), the retry pass meanwhile is answered busy, the turn ends, and only then is the banner queued.
+        self.be.hold = threading.Event()
+        self.cap = 0.5
+        mid = self._send()
+        self.assertFalse(pm._push(WEB, {"id": WEB, "state": "working"}))
+        self.assertTrue(self.be.entered.wait(5), "the post reached the backend")
+        pm._retry_pending()                                # the kernel answers busy: still in doubt
+        self.assertEqual(self._turn_end_drain(), [], "on main the busy answer put it back and the drain took it")
+        self.assertTrue(any("deferred (no answer from the kernel)" in ln for ln in self.logged), self.logged)
+        self.assertEqual(self.posted, [[mid], [mid]])
+        self.assertEqual(self._in_doubt(), [mid], "busy is not an answer about this mail")
+        self.be.hold.set()                                 # the revive finishes and the banner is queued
+        self.assertTrue(self.be.done.wait(10))
+        self.cap = None
+        pm._retry_pending()
+        self.assertEqual(self.be.ids(), [mid])
+        self.assertEqual((self._in_doubt(), self._box()), ([], []))
+
+    def test_a_first_post_answered_busy_is_kept_in_doubt(self):
+        # An earlier post of the same message is still inside the kernel (one the bus lost track of): its answer is
+        # still to come, so the mail is not put back where the drain takes it.
+        mid = self._send()
+        self.be.hold = threading.Event()
+        first = threading.Thread(target=self._deliver, args=(_banner(mid),))
+        first.start()
+        self.assertTrue(self.be.entered.wait(5))
+        self.assertFalse(pm._push(WEB, {"id": WEB, "state": "working"}))
+        self.assertEqual(self._turn_end_drain(), [])
+        self.assertTrue(any("deferred (an earlier post of it still in the kernel)" in ln for ln in self.logged),
+                        self.logged)
+        self.be.hold.set()
+        first.join(10)
+        pm._retry_pending()
+        self.assertEqual(self.be.ids(), [mid])
+        self.assertEqual(self._in_doubt(), [])
+
+    def test_mail_the_kernel_did_not_take_goes_back_for_the_drain(self):
+        # The late answer was not-taken: a re-post is answered about this mail, so it goes back to the drain under its
+        # own id rather than staying claimed.
+        self.be.takes = False
+        self.lose = 1
+        mid = self._send()
+        self.assertFalse(pm._push(WEB, {"id": WEB, "state": "working"}))
+        self.assertEqual(self._turn_end_drain(), [])
+        pm._retry_pending()
+        self.assertEqual(self._in_doubt(), [])
+        self.assertEqual(self._box(), [mid], "back in new/ under its own id")
+        self.assertEqual(self._turn_end_drain(), [mid], "and the drain backstop delivers it")
+        self.assertEqual(self.be.ids(), [])
+
+    def test_mail_the_kernel_hands_back_is_no_longer_in_doubt(self):
+        # A banner fed and lost (SdkSession._return_stranded_mail): the kernel forgets the ids and the bus puts the mail
+        # back. It is pending mail now; once the drain has delivered it, the retry must not post it a second time.
+        self.lose = 1
+        mid = self._send()
+        self.assertFalse(pm._push(WEB, {"id": WEB, "state": "working"}))
+        km._postal_untake(WEB, [mid])
+        saved = pm._wake_when_ready
+        pm._wake_when_ready = lambda sid: None
+        try:
+            out, status = pm.restore_stranded({"id": WEB, "mids": [mid]})
+        finally:
+            pm._wake_when_ready = saved
+        self.assertEqual((status, out["restored"]), (200, [mid]))
+        self.assertEqual(self._in_doubt(), [])
+        self.assertEqual(self._turn_end_drain(), [mid], "the re-delivery the hand-back asks for")
+        pm._retry_pending()
+        self.assertEqual(self.posted, [[mid]], "not posted again beside the drain")
+
+    def test_with_the_push_turned_off_mail_in_doubt_goes_back_for_the_drain(self):
+        self.lose = 1
+        mid = self._send()
+        self.assertFalse(pm._push(WEB, {"id": WEB, "state": "working"}))
+        pm._push_disabled = lambda: True
+        pm._retry_pending()
+        self.assertEqual((self._in_doubt(), self._box()), ([], [mid]),
+                         "no push will ask the kernel again: a possible duplicate beats mail nobody receives")
+
+
+class ARemoteRecipientKeepsTheOldBehavior(_Bus):
+    """A session on another host is pushed through this host's kernel, which forwards the banner and passes on neither
+    busy nor a timeout, and the retry pass lists only this host's sessions, so nothing would ask about its mail again.
+    Its mail goes back in new/ for its own turn-end drain, and the next push posts that chunk alone, as before."""
+
+    REMOTE = "9a5ecf71-b4c6-4d8a-e315-6fc0ad4c8193"   # the recipient, on another host
+
+    def setUp(self):
+        super().setUp()
+        self.row = {"id": self.REMOTE, "name": "tests", "remote": True}
+
+    def tearDown(self):
+        pm.STREAKS.pop(self.REMOTE, None)
+        pm._PUSH_UNLANDED.pop(self.REMOTE, None)
+        shutil.rmtree(pm.MAILROOT / self.REMOTE, ignore_errors=True)
+        (pm.MAILDOUBT / self.REMOTE).unlink(missing_ok=True)
+        pm._mark_pending(self.REMOTE)
+        super().tearDown()
+
+    def _send(self, body="please run the notes-api migration"):
+        return pm.deliver(self.REMOTE, "api", PEER, body, kind="delegate")
+
+    def _remote_box(self):
+        return [m.get("id") for m in pm.read_box(self.REMOTE, consume=False)]
+
+    def test_unanswered_mail_goes_back_for_its_drain_and_is_not_held_in_doubt(self):
+        self.be.takes = False
+        self.lose = 1
+        mid = self._send()
+        self.assertFalse(pm._push(self.REMOTE, self.row))
+        self.assertEqual(pm._doubt_read(self.REMOTE), [],
+                         "not held in doubt: the retry pass never visits a remote session, so it would stay claimed")
+        self.assertEqual(self._remote_box(), [mid], "back in new/, where the session's own turn-end drain reads it")
+        pm._retry_pending()
+        self.assertEqual(self.posted, [[mid]], "the retry pass does not push a session on another host")
+        self.assertEqual([m["id"] for m in pm._drain(self.REMOTE).get("messages", [])], [mid])
+
+    def test_the_chunk_that_did_not_land_goes_out_alone_ahead_of_newer_mail(self):
+        self.lose = 1
+        first = self._send()
+        self.assertFalse(pm._push(self.REMOTE, self.row))
+        second = self._send("and then rebuild the notes-api index")
+        self.assertTrue(pm._push(self.REMOTE, self.row), "the next send's push")
+        self.assertEqual(self.posted, [[first], [first], [second]],
+                         "posted alone, the owning kernel recognizes it as taken; mixed with newer mail it would not")
+        self.assertEqual(sorted(self.be.ids()), sorted([first, second]), "each message reaches the session once")
+        self.assertEqual(self._remote_box(), [])
+
+
+class KernelPostTellsNoAnswerFromNoKernel(unittest.TestCase):
+    """_kernel_post: a request that went out and got no answer is not a kernel that could not be reached."""
+
+    def setUp(self):
+        self._seam = os.environ.pop("ROMP_SESSIONS_FILE", None)
+        self.saved = (urllib.request.urlopen, pm._log, pm._kernel_post)
+        self.logged = []
+        pm._log = self.logged.append
+
+    def tearDown(self):
+        urllib.request.urlopen, pm._log, pm._kernel_post = self.saved
+        if self._seam is not None:
+            os.environ["ROMP_SESSIONS_FILE"] = self._seam
+        pm._DASHBOARD_MISSED[0] = False
+
+    def _post(self, exc):
+        def urlopen(req, timeout=None):
+            raise exc
+        urllib.request.urlopen = urlopen
+        return pm._kernel_post("/deliver", {"id": WEB, "text": "hello"})
+
+    def test_a_read_timeout_or_a_dropped_connection_is_unanswered(self):
+        self.assertEqual(self._post(socket.timeout("timed out")), {"ok": False, "unanswered": True})
+        self.assertEqual(self._post(ConnectionResetError(104, "reset")), {"ok": False, "unanswered": True})
+
+    def test_a_fault_before_the_request_went_out_is_unreachable(self):
+        self.assertIsNone(self._post(urllib.error.URLError(ConnectionRefusedError(111, "refused"))))
+        self.assertIsNone(self._post(urllib.error.URLError(socket.timeout("connect timed out"))))
+
+    def test_an_unanswered_notice_reads_as_unanswered_not_refused(self):
+        pm._DASHBOARD_MISSED[0] = False
+        pm._kernel_post = lambda path, body, timeout=2: {"ok": False, "unanswered": True}
+        pm._refused_notice("a synthetic notice")
+        self.assertIn("the kernel did not answer", self.logged[-1])
 
 
 if __name__ == "__main__":
