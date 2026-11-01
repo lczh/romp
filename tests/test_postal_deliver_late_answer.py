@@ -152,6 +152,7 @@ class _Bus(_World):
         if self._seam is not None:
             os.environ["ROMP_SESSIONS_FILE"] = self._seam
         pm.STREAKS.pop(WEB, None)
+        pm._PUSH_UNLANDED.pop(WEB, None)
         shutil.rmtree(pm.MAILROOT / WEB, ignore_errors=True)   # every test starts from an empty box and no record
         (pm.MAILDOUBT / WEB).unlink(missing_ok=True)
         pm._mark_pending(WEB)
@@ -402,6 +403,55 @@ class MailInDoubt(_Bus):
         pm._retry_pending()
         self.assertEqual((self._in_doubt(), self._box()), ([], [mid]),
                          "no push will ask the kernel again: a possible duplicate beats mail nobody receives")
+
+
+class ARemoteRecipientKeepsTheOldBehavior(_Bus):
+    """A session on another host is pushed through this host's kernel, which forwards the banner and passes on neither
+    busy nor a timeout, and the retry pass lists only this host's sessions, so nothing would ask about its mail again.
+    Its mail goes back in new/ for its own turn-end drain, and the next push posts that chunk alone, as before."""
+
+    REMOTE = "9a5ecf71-b4c6-4d8a-e315-6fc0ad4c8193"   # the recipient, on another host
+
+    def setUp(self):
+        super().setUp()
+        self.row = {"id": self.REMOTE, "name": "tests", "remote": True}
+
+    def tearDown(self):
+        pm.STREAKS.pop(self.REMOTE, None)
+        pm._PUSH_UNLANDED.pop(self.REMOTE, None)
+        shutil.rmtree(pm.MAILROOT / self.REMOTE, ignore_errors=True)
+        (pm.MAILDOUBT / self.REMOTE).unlink(missing_ok=True)
+        pm._mark_pending(self.REMOTE)
+        super().tearDown()
+
+    def _send(self, body="please run the notes-api migration"):
+        return pm.deliver(self.REMOTE, "api", PEER, body, kind="delegate")
+
+    def _remote_box(self):
+        return [m.get("id") for m in pm.read_box(self.REMOTE, consume=False)]
+
+    def test_unanswered_mail_goes_back_for_its_drain_and_is_not_held_in_doubt(self):
+        self.be.takes = False
+        self.lose = 1
+        mid = self._send()
+        self.assertFalse(pm._push(self.REMOTE, self.row))
+        self.assertEqual(pm._doubt_read(self.REMOTE), [],
+                         "not held in doubt: the retry pass never visits a remote session, so it would stay claimed")
+        self.assertEqual(self._remote_box(), [mid], "back in new/, where the session's own turn-end drain reads it")
+        pm._retry_pending()
+        self.assertEqual(self.posted, [[mid]], "the retry pass does not push a session on another host")
+        self.assertEqual([m["id"] for m in pm._drain(self.REMOTE).get("messages", [])], [mid])
+
+    def test_the_chunk_that_did_not_land_goes_out_alone_ahead_of_newer_mail(self):
+        self.lose = 1
+        first = self._send()
+        self.assertFalse(pm._push(self.REMOTE, self.row))
+        second = self._send("and then rebuild the notes-api index")
+        self.assertTrue(pm._push(self.REMOTE, self.row), "the next send's push")
+        self.assertEqual(self.posted, [[first], [first], [second]],
+                         "posted alone, the owning kernel recognizes it as taken; mixed with newer mail it would not")
+        self.assertEqual(sorted(self.be.ids()), sorted([first, second]), "each message reaches the session once")
+        self.assertEqual(self._remote_box(), [])
 
 
 class KernelPostTellsNoAnswerFromNoKernel(unittest.TestCase):

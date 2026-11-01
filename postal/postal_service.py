@@ -2790,6 +2790,10 @@ def _ask_about_doubt(sid, reply_tool):
     return landed, settled
 
 
+_PUSH_UNLANDED = {}   # sid -> ids of the chunk whose /deliver did not land on the last push and went back to new/: _push posts
+#                       them as their own chunk
+
+
 def _push(sid, agent):
     """Live-deliver pending mail to a session by WAKING it through the kernel (POST /deliver) — the kernel
     enqueues the banner as the session's next turn. Coarse-skip a clearly not-ready local session (not
@@ -2806,9 +2810,9 @@ def _push(sid, agent):
     post oldest first; the first that does not land stops the run, and it and everything after it are
     restored. A single message too large for any chunk is handled by _bounce_oversize. The log line
     names the cause (a kernel that could not be reached, one that answered a status, or a session that
-    did not take the wake) where every deferral used to read the same. A chunk that went out and got no
-    answer stays claimed as mail in doubt (above) rather than restored, and the mail in doubt is asked about
-    before any newer mail is posted."""
+    did not take the wake) where every deferral used to read the same. For a session of this host's kernel, a
+    chunk that went out and got no answer stays claimed as mail in doubt (above) rather than restored, and the
+    mail in doubt is asked about before any newer mail is posted; a remote session's chunk is restored."""
     if _push_disabled() or not agent:
         return False
     if os.environ.get("ROMP_SESSIONS_FILE"):                  # test seam: no live kernel → leave it for the drain (don't churn the maildir)
@@ -2830,7 +2834,14 @@ def _push(sid, agent):
         msgs = res.get("messages", [])
         if not msgs:
             return bool(landed) and not res.get("paused")     # nothing, or loop-guard paused
-        chunks, oversize = _push_chunks(sid, msgs, reply_tool)
+        # A chunk that went back to new/ after its post did not land goes out again as itself, ahead of newer mail
+        # (2026-10-27): a kernel that took it and answered late knows those ids and answers without delivering them
+        # twice, which it cannot do for a banner that mixes them with mail it has never seen. Mail in doubt never
+        # comes here; this is the put-back mail's guard, which a session on another host still relies on (below).
+        redo = _PUSH_UNLANDED.pop(sid, None) or set()
+        chunks, oversize = _push_chunks(sid, [m for m in msgs if m.get("id") in redo], reply_tool)
+        newer, newer_oversize = _push_chunks(sid, [m for m in msgs if m.get("id") not in redo], reply_tool)
+        chunks, oversize = chunks + newer, oversize + newer_oversize
         for m in oversize:
             _bounce_oversize(sid, m, reply_tool)
         held, cause, doubt = [], "", 0
@@ -2844,12 +2855,16 @@ def _push(sid, agent):
                 cause = "kernel unreachable"
             elif resp.get("unanswered") or resp.get("busy"):
                 cause = "no answer from the kernel" if resp.get("unanswered") else "an earlier post of it still in the kernel"
-                if _doubt_add(sid, [m.get("id") for m in chunk]):
+                # Only a session of this host's kernel: a remote one is not in the retry pass's listing, so nothing would
+                # ask about its mail again, and the forwarding branch of /deliver passes on neither busy nor a timeout.
+                if not agent.get("remote") and _doubt_add(sid, [m.get("id") for m in chunk]):
                     doubt, held = len(chunk), held[len(chunk):]   # the kernel may have queued it: kept claimed, in doubt
             elif resp.get("status"):
                 cause = "kernel answered HTTP %s" % resp["status"]   # the reason is in _kernel_post's line
             else:
                 cause = "not injected"                        # the session did not take the wake (not live/resumable, or mailbox off)
+            if not doubt:
+                _PUSH_UNLANDED[sid] = {m.get("id") for m in chunk if m.get("id")}
             break
         if not held and not doubt:
             return bool(landed)
