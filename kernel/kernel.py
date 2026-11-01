@@ -34752,16 +34752,28 @@ def _end_on_idle_save(reqs):
     _atomic_write(jd.STATE / "end-on-idle.json", json.dumps(sorted(reqs)))
 
 
+def _thread_running(sid):
+    """Whether `sid` is a comment thread whose CLI runs now. The live map leaves every thread out (live_sessions keeps
+    them off tabs, lanes and the feed), so a thread's absence from it says nothing about whether it runs. Read from the
+    backend now (Sessions.thread_live for the thread's parent), not from the pusher's thread live map, which holds only
+    the threads of the sessions open as tabs."""
+    parent = _comment_thread_parent(Sessions.backend_for(sid), sid)
+    return bool(parent) and str(sid) in Sessions.thread_live({parent})
+
+
 def _end_on_idle_sweep(now, live_map):
     """Kill each end-on-idle sid once its turn settles — the same clean path as the dashboard × /
     the immediate /end route (intentional death, no reviver, tab closed). A sid already dead by any
-    other path just retires its request."""
+    other path just retires its request. A comment thread is never in the live map, so it counts
+    as dead only when its CLI is not running (_thread_running): before that check, a thread that
+    ran `romp end self` was told its end was deferred and then had the request dropped at the
+    first pass, still running (2026-11-01)."""
     reqs = _end_on_idle_load()
     if not reqs:
         return
     changed = False
     for sid in sorted(reqs):
-        if live_map.get(sid) is None:                    # already dead → the request is spent
+        if live_map.get(sid) is None and not _thread_running(sid):   # already dead → the request is spent
             reqs.discard(sid); changed = True
             continue
         try:
