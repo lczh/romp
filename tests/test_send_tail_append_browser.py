@@ -87,6 +87,9 @@ page.on("pageerror", (e) => fs.appendFileSync(cfg.consoleLog, "pageerror: " + e 
 await page.addInitScript(({ compact, hold }) => {
   try { localStorage.setItem("romp:scrollDiagCap", "100000"); } catch (e) {}   // every scroll row, never the per-minute cap
   try { localStorage.setItem("romp:settings", JSON.stringify({ compact })); } catch (e) {}   // the transcript mode under test (compact is the default)
+  // look A of the progress-note drafts (2026-11-06): these fixtures' replies sit between tool calls, and looks C and C2 fold such
+  // prose into the run; the tail's append mechanics are this file's subject, not the fold
+  try { localStorage.setItem("romp:narration-look", "A"); } catch (e) {}
   window.__frames = 0; window.__types = []; window.__diag = []; window.__tailLo = null; window.__lastTail = null; window.__tailSizes = [];
   window.addEventListener("message", (e) => { const m = e.data; if (!m || typeof m.type !== "string") return;
     if (m.__injected) return;   // the driver's own re-posts are not the kernel's frames
