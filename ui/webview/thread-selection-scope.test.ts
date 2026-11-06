@@ -31,6 +31,7 @@ function run(startEl: Shim, endEl: Shim, text: string): { text: string; uuid: st
     class Element {
       constructor(s) { Object.assign(this, s); this.parentElement = s.parent ? new Element(s.parent) : null; }
       matches(sel) {
+        if (sel === "[data-note-uuid]") return this.attrs["data-note-uuid"] != null;
         if (sel.startsWith("#")) return this.id === sel.slice(1);
         if (sel.startsWith(".")) return (" " + this.cls + " ").includes(" " + sel.slice(1) + " ");
         return false;
@@ -64,4 +65,12 @@ test("mixed endpoints (transcript ↔ popover, or into the composer) never quali
 test("the exclusion is stated at the qualifier, where the Enter-to-reply shortcut shares it", () => {
   const q = RENDER.split("function transcriptSelection(): { text: string; uuid: string | null } | null {")[1].split("\n}")[0];
   assert.match(q, /closest\?\.\("#cmt-pop"\)|closest\("#cmt-pop"\)/, "a turn inside #cmt-pop is the thread's, not the transcript's");
+});
+
+test("a selection that starts in a run's caption anchors on the note's own record, not the run's first tool (2026-11-06)", () => {
+  const body: Shim = { cls: "", parent: null, attrs: {} };
+  const head: Shim = { cls: "turn turn-toolgroup", parent: body, attrs: { "data-uuid": "first-tool" } };
+  const caption: Shim = { cls: "assistant md toolgroup-caption", parent: head, attrs: { "data-note-uuid": "the-note" } };
+  assert.deepEqual(run(caption, caption, "Running the search tests."), { text: "Running the search tests.", uuid: "the-note" });
+  assert.deepEqual(run(head, head, "Ran a command"), { text: "Ran a command", uuid: "first-tool" }, "the run's own line anchors on the run");
 });

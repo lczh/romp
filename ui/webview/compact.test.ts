@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { compactDisplay, isFoldableNoticeShape, itemAnchor, itemHolds, runCaption, runRows, thoughtHasWords, thoughtKey, thoughtOf, STANDALONE_TOOLS, actionHead, actionParts, actionPhrases, toolRowLabel, diffTotals, toolInputText, type DisplayItem, type ThoughtLike } from "./compact";
+import { compactDisplay, isFoldableNoticeShape, isSplicedMessage, itemAnchor, itemHolds, runCaption, runRows, segmentReplies, thoughtHasWords, thoughtKey, thoughtOf, STANDALONE_TOOLS, actionHead, actionParts, actionPhrases, toolRowLabel, diffTotals, toolInputText, type DisplayItem, type ThoughtLike } from "./compact";
 
 test("compactDisplay: without the thoughts array, thinking is dropped entirely (a caller that passes none)", () => {
   const d = compactDisplay(["user", "thinking", "assistant"]);
@@ -389,4 +389,56 @@ test("options C and C2: a note after the run's last tool waits for a tool that n
   assert.deepEqual(optC(["T", "R", "T", "S", "R", "T", "R", "T", "R"], true),
     [{ kind: "toolgroup", indices: [0, 1, 2] }, { kind: "event", index: 3 }, { kind: "event", index: 4 },
      { kind: "toolgroup", indices: [5, 6, 7] }, { kind: "event", index: 8 }]);
+});
+
+// ── option E, tools under prose (2026-11-06, the default): every prose row stays, the tools after it attach ──────────────────
+// "A" an Agent card (a kept tool), "Q" an AskUserQuestion; the rest as optC's.
+function optE(seq: string[]) {
+  const kinds = seq.map((x) => (x === "N" || x === "R" ? "assistant" : x === "S" || x === "U" || x === "K" ? "user" : x === "T" || x === "A" || x === "Q" ? "tool" : "thinking"));
+  const names = seq.map((x) => (x === "A" ? "Agent" : x === "Q" ? "AskUserQuestion" : x === "T" ? "Bash" : undefined));
+  const roles = { note: seq.map((x) => x === "N" || x === "R"), spliced: [], attach: true, keep: seq.map((x) => x === "A") };
+  return compactDisplay(kinds, names, seq.map((x) => x === "K"), seq.map((x) => x === "th"), roles);
+}
+const att = (...indices: number[]) => ({ kind: "toolgroup", indices, attached: true });
+const one = (index: number) => ({ kind: "event", index });
+
+test("option E: every prose row stays, and the tools after each fold into its trailing line, one call or many", () => {
+  // four note/tool pairs: four notes, four lines under them, the reply; nothing the session said is folded
+  assert.deepEqual(optE(["U", "N", "T", "N", "T", "T", "N", "T", "N", "T", "R"]),
+    [one(0), one(1), att(2), one(3), att(4, 5), one(6), att(7), one(8), att(9), one(10)]);
+  // tools before a turn's first prose fold as they always did: a run of two, a lone one inline
+  assert.deepEqual(optE(["U", "T", "T", "N", "T"]), [one(0), { kind: "toolgroup", indices: [1, 2] }, one(3), att(4)]);
+  assert.deepEqual(optE(["U", "T", "N"]), [one(0), one(1), one(2)]);
+});
+
+test("option E: a question mid-turn, the answer to a message and a summary before a cleanup tool are all rows of their own", () => {
+  // a question the session asks between tools stays a row, with the tools after it on its line
+  assert.deepEqual(optE(["U", "N", "T", "R", "T", "N", "T", "R"]), [one(0), one(1), att(2), one(3), att(4), one(5), att(6), one(7)]);
+  // a message delivered mid-turn: no rule needed, the answer is a row like every prose row
+  assert.deepEqual(optE(["T", "S", "R", "T", "N", "T"]), [one(0), one(1), one(2), att(3), one(4), att(5)]);
+  // the turn's real answer, then a cleanup tool: the answer stays the reply, the cleanup its trailing line
+  assert.deepEqual(optE(["U", "N", "T", "R", "T"]), [one(0), one(1), att(2), one(3), att(4)]);
+});
+
+test("option E: an Agent card stays its own row and the tools after it attach to it; thoughts ride the tools they precede", () => {
+  assert.deepEqual(optE(["U", "N", "A", "T", "T", "N"]), [one(0), one(1), one(2), att(3, 4), one(5)]);
+  assert.deepEqual(optE(["U", "N", "th", "T", "N", "th", "R"]), [one(0), one(1), att(2, 3), one(4), { kind: "thought", indices: [5] }, one(6)]);
+  // an AskUserQuestion is first-class as ever, and a notice ends the stretch
+  assert.deepEqual(optE(["N", "Q", "T", "N", "K", "T", "T"]), [one(0), one(1), one(2), one(3), one(4), { kind: "toolgroup", indices: [5, 6] }]);
+});
+
+test("a turn's reply is its last prose, wherever it sits, tools after it or not; a message delivered mid-turn ends no turn", () => {
+  const kinds = ["user", "assistant", "tool", "assistant", "tool", "user", "assistant", "tool", "user", "tool"];
+  assert.deepEqual([...segmentReplies(kinds, (i) => kinds[i] === "assistant")].sort((a, b) => a - b), [3, 6]);
+  // index 5 a message delivered mid-turn: the turn runs on, and its reply is the last prose after it
+  assert.deepEqual([...segmentReplies(kinds, (i) => kinds[i] === "assistant", (i) => kinds[i] === "user" && i !== 5)].sort((a, b) => a - b), [6]);
+});
+
+test("a background task's report the CLI splices in is not a message delivered mid-turn: it arms nothing", () => {
+  assert.equal(isSplicedMessage({ kind: "user", absorbed: true, human: true }), true);
+  assert.equal(isSplicedMessage({ kind: "user", absorbed: true, source: { kind: "task" } }), false, "an absorbed notice");
+  assert.equal(isSplicedMessage({ kind: "user", human: true }), false, "a prompt");
+  // the reviewer's case under C: T,T,K(absorbed),N,T,N,T must fold as one stretch, the notice arming nothing
+  assert.deepEqual(optC(["T", "T", "K", "N", "T", "N", "T"]),
+    [{ kind: "toolgroup", indices: [0, 1] }, { kind: "event", index: 2 }, { kind: "toolgroup", indices: [3, 4, 5, 6] }]);
 });

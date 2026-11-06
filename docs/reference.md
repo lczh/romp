@@ -7380,14 +7380,12 @@ message you sent while it worked) comes back from the API as a thinking block on
 chat shows those notes as the session's own words, while reasoning summaries stay Thought lines. The full view shows each
 note as an ordinary assistant message.
 
-Compact view folds whatever the session writes between tool calls into the run of calls, a note that came back as
-thinking and a short one that came back as text alike (so older sessions' text between tool calls folds the same way).
-The folded run shows its latest note under its one line, cut to two lines; opening it shows every call and note in order,
-each whole. The session's final message after its last tool call stays a reply, and the first thing it writes after a
-message you sent while it worked is its answer to you and stands on its own. A folded run that ends a stretch of work,
-such as the one before a message you sent mid-turn, keeps that stretch's "worked" line under it.
+Compact view keeps everything the session says on a row of its own, whole: replies, notes, a question it asks between
+tool calls. What folds is the tool calls: the calls after each row become one dim line under it, such as "Read 2 files,
+edited a file", which opens to the calls in place. Calls before a turn's first words fold into a run as they always did,
+and an Agent card stays a row of its own. A stretch of work that ends on a folded line keeps its "worked" line under it.
 
-Claude Code tells the two apart: it decodes each thinking block's kind and lists the note blocks on every message it
+Claude Code tells a note from a reasoning summary: it decodes each thinking block's kind and lists the note blocks on every message it
 streams to romp (`narration_block_indexes`), under every thinking display. The transcript does not keep that list, so
 the kernel records it as the stream arrives, one line per message under `narration/<session id>.jsonl` in its state
 directory, and applies it whenever it builds a chat: the browser chat, the VS Code view, a subagent's transcript and a

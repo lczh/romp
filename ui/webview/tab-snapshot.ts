@@ -145,13 +145,13 @@ export function plainText(md: string, max: number): string {
   return oneLine(joined, max);
 }
 
-/** The last assistant message in the tail, one line of plain text, for the hover. A reply, not a progress note
- *  (narration, 2026-11-06): the chat shows notes as prose, and whether the hover should is a separate call. */
+/** The last assistant message in the tail, one line of plain text, for the hover: the latest thing the session said, which
+ *  is its segment's reply wherever it sits (compact.ts segmentReplies), a progress note included (2026-11-06). */
 export function lastMessage(s: SnapSessionLike): string {
   const evs = s.events || [];
   for (let i = evs.length - 1; i >= 0; i--) {
     const e = evs[i];
-    if (e.kind === "assistant" && !e.narration) { const t = plainText(String(e.md ?? e.text ?? ""), MSG_MAX); if (t) return t; }
+    if (e.kind === "assistant") { const t = plainText(String(e.md ?? e.text ?? ""), MSG_MAX); if (t) return t; }
   }
   return "";
 }
