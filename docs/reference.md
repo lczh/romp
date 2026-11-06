@@ -7349,11 +7349,11 @@ message when it changes, and the page counts the seconds itself.
 
 With **Compact transcript** on (the default), a thinking block that carries words shows as one folded line:
 **Thought** and the first line of the latest note, cut at the edge of the chat in the dim italic of every thought. The
-words are reasoning summaries when **Thinking summaries** is on, and Claude Code's short progress notes otherwise. A
-thinking block with no words stays hidden, as before; the turn's "worked" line still counts its tokens.
+words are reasoning summaries when **Thinking summaries** is on. The model's notes to you between tool calls show as
+[progress notes](#progress-notes) instead, except in history romp holds no record for. A thinking block with no words
+stays hidden, as before; the turn's "worked" line still counts its tokens.
 
-Consecutive thinking blocks make one line, its preview taken from the last of them, which under summaries is usually
-the note written for you. A click opens the line to "Thought · 2.5k tokens" over the words of every block, a blank line
+Consecutive thinking blocks make one line, its preview taken from the last of them. A click opens the line to "Thought · 2.5k tokens" over the words of every block, a blank line
 apart; the figure is the thinking tokens of the replies the blocks belong to. A second click folds it again. The line
 stays open through the chat's rebuilds, and the full view's two-line fold of the same block shares its state.
 
@@ -7372,6 +7372,26 @@ a Thought line's label, preview and figure; an open line's words are quoted as t
 nothing extra: the API bills a session for all of its thinking under every display setting, and the summary only
 changes what comes back. Where this install had thinking turned off, the setting also turns adaptive thinking on, and
 that thinking is billed.
+
+### Progress notes
+
+On Claude Opus 5.5 a note the model writes for you between tool calls (what it found, what it does next, an answer to a
+message you sent while it worked) comes back from the API as a thinking block once it runs past a sentence or two. The
+chat shows those notes as the session's own words, an ordinary assistant message in both the compact and the full view,
+while reasoning summaries stay Thought lines.
+
+Claude Code tells the two apart: it decodes each thinking block's kind and lists the note blocks on every message it
+streams to romp (`narration_block_indexes`), under every thinking display. The transcript does not keep that list, so
+the kernel records it as the stream arrives, one line per message under `narration/<session id>.jsonl` in its state
+directory, and applies it whenever it builds a chat: the browser chat, the VS Code view, a subagent's transcript and a
+comment thread's conversation all draw the same rows. Nothing is inferred: a note from before romp kept this record, or
+from a session whose stream romp did not read (a Codex session, a Claude Code session romp did not run), stays a
+Thought line. When Claude Code sends a thinking block with words that it should have listed (under the updates
+display), or a message that carries neither the list nor its thinking display (an older Claude Code), the error center
+says so once per session and those blocks stay Thought lines.
+
+A note's thinking tokens still count in the turn's "worked" line. The other readers of what a session said are
+unchanged: the tab's hover shows the last reply, and the cards, the judges and notifications read the replies alone.
 
 ### The rings on a tab
 

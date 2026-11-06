@@ -209,7 +209,7 @@ type ChatEvent = (
   // gist: a romp SYSTEM notice's USER-facing head, lifted by the kernel from the notice's <!-- romp-gist -->
   // marker (2026-09-08) — the body is written to the agent and never doubles as the head
   | { kind: "user"; md: string; uuid?: string; ts?: string; reminders?: string[]; taskOutputs?: TaskOutputs; human?: boolean; romp?: boolean; rompAuto?: boolean; rompSystem?: boolean; gist?: string; spendGuard?: boolean; interruptCause?: string; interruptSpend?: SpendFigures; followUp?: boolean; goal?: string; fuCtx?: string; canned?: string; tag?: string; mid?: string; mids?: string[]; images?: { src: string; path?: string }[]; undelivered?: boolean; echoT?: number; absorbed?: boolean; sentAt?: number; hiddenByPending?: boolean; source?: InjectedSource; preamble?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }
-  | { kind: "assistant"; md: string; uuid?: string; ts?: string; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }   // pathPreview: the links a hover may preview, by kind (T351). spacePaths: backticked filenames WITH spaces the kernel verified exist (build_session _space_paths) → whole-span links. pathLinks: path-shaped tokens the kernel verified against the filesystem, token → real open target (build_session _path_links) — the linkifier's gate
+  | { kind: "assistant"; md: string; uuid?: string; ts?: string; narration?: boolean; thinkTokens?: number; spacePaths?: string[]; pathLinks?: Record<string, string>; pathPins?: Record<string, string>; pathPreview?: Record<string, string>; pathPreviewWhy?: Record<string, string> }   // narration: a PROGRESS NOTE, a thinking block the CLI's stream listed as the model's note to the person (kernel build_session, kernel/narration.py; 2026-11-06), drawn as the agent's prose like any reply; thinkTokens rides it when it opens its API message's thinking. pathPreview: the links a hover may preview, by kind (T351). spacePaths: backticked filenames WITH spaces the kernel verified exist (build_session _space_paths) → whole-span links. pathLinks: path-shaped tokens the kernel verified against the filesystem, token → real open target (build_session _path_links) — the linkifier's gate
   | { kind: "thinking"; text: string; encrypted: boolean; uuid?: string; ts?: string; thinkTokens?: number; row?: { gist: string; key?: string } }   // thinkTokens: the exact thinking tokens of the API message this row opens (usage.output_tokens_details.thinking_tokens, on its first thinking row only; kernel build_session), the "Thought · 2.5k tokens" label and the turn's total
   //   row: PAGE-ONLY, never from the kernel: compact mode's collapsed Thought row (thoughtEvent), drawn by renderThought
   | {
@@ -4472,7 +4472,8 @@ function renderEventInner(ev: ChatEvent): HTMLElement {
       return notice({ src: "session", glyph: "session", gist: SETTLE_GIST, cls: "turn-interrupt",
                       tip: "the model closed the interrupted turn with nothing to add; the real work resumes below" });
     }
-    const turn = el("div", "turn turn-assistant");
+    // a progress note (ev.narration) is the agent speaking mid-turn: the same prose as a reply, its class a hook only
+    const turn = el("div", "turn turn-assistant" + (ev.narration ? " turn-narration" : ""));
     turn.appendChild(dot("ring"));
     const body = el("div", "assistant md");
     body.innerHTML = md(ev.md, undefined, { links: ev.pathLinks, pins: ev.pathPins });   // a picture that names a file shows the bytes the message pinned
@@ -11735,7 +11736,9 @@ function applyForkSpots(sid: string, v: View): void {
   const spots = new Map<string, string>();   // last-assistant-of-run uuid -> cut uuid ("" = whole conversation)
   let run: string | null = null;             // the newest assistant uuid whose run has no cut yet
   for (const ev of evs) {
-    if (ev.kind === "assistant" && ev.uuid) run = ev.uuid;
+    // a progress note (narration) is the agent speaking mid-turn, not a response the fork cuts below: it anchors no spot,
+    // so a note before a message sent mid-turn draws no fork row under it (spots stand where they stood before notes showed)
+    if (ev.kind === "assistant" && ev.uuid && !ev.narration) run = ev.uuid;
     else if (ev.kind === "user" && ev.uuid && run && !spots.has(run)
              && senderKind(ev) === "user" && editable?.has(ev.uuid)) {
       spots.set(run, ev.uuid);   // the FIRST prompt after the run = the cut just below its response

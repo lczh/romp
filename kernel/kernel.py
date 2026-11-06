@@ -58,6 +58,9 @@ sb = load_source("romp_session_backend", HERE / "session_backend.py")  # the Ses
 lg = load_source("romp_logins", HERE / "logins.py")  # stored Claude logins (T346): the registry beside the machine's own login
 gcf = load_source("romp_gc_freeze", HERE / "gc_freeze.py")  # Road B for #1735: freeze the loaded decoded heap out of the collector's walk
 cpr = load_source("romp_cli_prices", HERE / "cli_prices.py")  # Claude Code's own per-call prices: the one table that prices tokens
+# the progress-note store (2026-11-06): the SDK backend files the marks, the chat build reads them; one module object
+# (sys.modules first, so a backend that loaded it earlier keeps its memo)
+nar = sys.modules.get("romp_narration") or load_source("romp_narration", HERE / "narration.py")
 CHAT_VIEW = ROOT / "vscode-extension"               # the tuned UI, current in this worktree via `git merge main`
 # ROMP_DIST_DIR: test seam (romp-lab serves a COPY of the built bundles, so its rebuild simulations —
 # mtime bumps that must raise the reload banner — never touch the dist the LIVE kernel serves).
@@ -390,7 +393,7 @@ def _perf_paths(snap):
 _CHAT_SIG_LABELS = ("transcript", "states", "store", "hold", "archive", "episodes", "reg", "gone", "tasks", "cut",
                     "live", "row", "clock", "backend", "ops", "limit", "retry", "bg", "watch", "stamp", "anchors",
                     "downtime", "names", "flags", "ncards", "colormap", "acct", "cleared", "host",
-                    "cwd", "claudemd", "fork", "note", "needs", "notices", "floor",
+                    "cwd", "claudemd", "fork", "note", "needs", "notices", "floor", "narration",
                     "taskout", "pathlink", "postal")
 _CHAT_SIG_DEPS = ("taskout", "pathlink", "postal")
 
@@ -38585,7 +38588,8 @@ def build_subagent(sid, agent_id, now, live_map=None):
 
 def _subagent_frame_cached(sid, agent_id, now, live_map=None):
     """(frame, serialized) for an OPEN viewer, rebuilt only when its change key moved: the agent file's
-    (mtime, size), the running flag, and whether the sidecar exists. Shared across clients; the per-client
+    (mtime, size), the running flag, whether the sidecar exists, and the session's progress-note store revision (a
+    subagent frame's mark lands beside its record, not through it). Shared across clients; the per-client
     dedup slot ("subagent", sid, agentId) absorbs an unchanged re-send."""
     live_map = _live_map() if live_map is None else live_map
     ppath = _path_of(sid, now)
@@ -38593,7 +38597,8 @@ def _subagent_frame_cached(sid, agent_id, now, live_map=None):
     meta = _subagent_meta(ppath, agent_id, apath) if ppath else {}
     running = (_agent_running_for(ppath, meta.get("toolUseId"), agent_id, live_map.get(str(sid)), _sdk_spawned_at(sid))
                if ppath else False)
-    key = (ppath, _chat_stat_key(str(apath)) if apath is not None else None, running, bool(meta))
+    key = (ppath, _chat_stat_key(str(apath)) if apath is not None else None, running, bool(meta),
+           nar.narration_marks(jd.STATE, sid)[0])   # a subagent frame's progress-note mark, filed under this session
     hit = _SUBAGENT_FRAMES.get((sid, agent_id))
     if hit is not None and hit[0] == key:
         return hit[1], hit[2]
@@ -42593,6 +42598,10 @@ def _chat_build_sig(sess, tm=None, now=None, live_map=None, deps=None):
         # floor: the render floor decision (T323 stage 4b): True while a proto-1 client is connected (the pusher's
         # per-push flag), so a payload built from turn 0 is never served from the cache once the floor climbs
         sig.append(bool(getattr(_live_scope, "chat_floor0", False)))
+        # narration: the progress-note store's revision for this session (nar.narration_marks): a mark turns a thinking
+        # block into the agent's prose. A main-conversation frame's mark lands with the live atom that bumps `live`; a
+        # subagent's frame (and a host's replay) files one with no other input moving
+        sig.append(nar.narration_marks(jd.STATE, sid)[0])
         sig.extend(((), (), None) if deps is False else _chat_sig_deps(sid, deps))   # taskout, pathlink, postal
         return tuple(sig)
 
@@ -48299,6 +48308,16 @@ def _provisional_row(sid, name, light):
             "ledger": _provisional_ledger(sid), "provisional": True}
 
 
+def _narr_sealed(prev, newpart):
+    """The fold entry's `narr_think`: the uuids of the records whose thinking (with words) the sealed prefix holds as
+    thinking rows, the prefix's earlier set joined with the newly sealed part's. A mark filed later for one of them is
+    the narration gate's event. One frozen object, shared from entry to entry while nothing is added."""
+    new = {e["uuid"] for e in newpart if e.get("kind") == "thinking" and e.get("uuid") and (e.get("text") or "").strip()}
+    if not new:
+        return prev if prev is not None else frozenset()
+    return frozenset(new) | prev if prev is not None else frozenset(new)
+
+
 def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, sidechain=False, meta_path=None, floor=None, page=None,
                   thread_cut=None):
     """A {type:"session"} message the render.js bundle consumes: the event tree reshaped to
@@ -48386,6 +48405,29 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     session = parsed if path_override else _merge_live_atoms(parsed, sid, shown_texts=queued, live=_live_snap)
     events, by_tool = [], {}                  # by_tool: tool_use_id → its tool event (fill output later)
     _thought_mids = set()                     # API message ids whose thinking tokens a row already carries (_thought_tokens)
+    # Progress notes (2026-11-06): the thinking blocks the CLI's stream listed as the model's notes to the person
+    # (narration_block_indexes), from the kernel's own store (kernel/narration.py), by record uuid → ordinals among the
+    # record's thinking blocks. Read once per build, with the store's revision for the fold's gate; a subagent's render
+    # reads the parent's store, where its frames are filed. History from before the store has no marks and keeps its
+    # Thought rows.
+    _narr_rev, _narr = nar.narration_marks(jd.STATE, sid)
+
+    def _prose_paths(ev, txt, uuid):
+        """The path fields an assistant message's prose carries, a reply's and a progress note's alike."""
+        sp = _space_paths(txt, sid, uuid)
+        if sp:
+            ev["spacePaths"] = sp   # backticked filenames WITH spaces, filesystem-verified → whole-span links
+        pl = _path_links(txt, sid, uuid, _pl_memo)
+        if pl is not None:
+            ev["pathLinks"] = pl    # path-shaped tokens, filesystem-verified/fixed → the client's link gate
+            pv, pw = _path_preview_verdicts(pl, sid)
+            if pl:
+                ev["pathPreview"] = pv   # the links a hover may preview, by kind; the markdown ones warmed (T351). The key rides EVERY event with links (empty when none previews): its presence is the verdict, and the fold refolds an event built without one (T364)
+            if pw:
+                ev["pathPreviewWhy"] = pw   # …and for each link it may not, the exact refusal, the text card's words (T364)
+        pp = _path_pins(sid, uuid)
+        if pp:
+            ev["pathPins"] = pp     # mention-time snapshots: this message's embeds keep these bytes
     uuid2seg, seg_anchors = {}, {}            # atom uuid → seg id; seg id → (promptId, workId) for the dot/bar split
     seg_trig, seg_work = {}, {}               # goal-node DEEP-LINK anchors: prompt = the segment's trigger
     _bs_store, _bs_fault = jd.load_goals_shared_or_fault(sid)   # seam-aware seg ids (mirror the judge's split):
@@ -48549,6 +48591,11 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                 _fold_why = "landed"                  # an interleaved orphan reply landed on some branch after all
             elif _fe.get("agents") and _chat_agents_moved(_fe["agents"], sess["path"], tm0, _sdk_spawned_at(sid)):
                 _fold_why = "agent"                   # a sealed Agent card's report landed / sidecar appeared / liveness flipped
+            elif _fe.get("narr_rev") != _narr_rev and _fe.get("narr_think") and any(
+                    _u in _fe["narr_think"] for _u in nar.narration_marked_since(jd.STATE, sid, _fe.get("narr_rev"))):
+                _fold_why = "narration"               # a thinking block sealed as a Thought row was marked a progress note
+                #                                       since (a host's journal replayed to a restarted kernel files the
+                #                                       marks of turns the boot build had already sealed)
             else:
                 _k = _fe["n"]
                 _tail_tr = set()
@@ -48985,10 +49032,27 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                             _ev["skillMd"] = a["skillMd"]
                             break
                     continue
+                _tk_ord = -1                             # this record's thinking blocks, counted (the marks' ordinals)
+                _nk = _narr.get(a.get("uuid")) if _narr else None
                 for b in blocks:
                     if not isinstance(b, dict):
                         continue
                     if b.get("type") == "thinking":
+                        _tk_ord += 1
+                        if _nk and _tk_ord in _nk and (b.get("thinking") or "").strip():
+                            # A PROGRESS NOTE (2026-11-06): the CLI listed this block as the model's note to the
+                            # person, so it renders as the agent speaking, an assistant message flagged `narration`,
+                            # in every chat surface. A listed block with no words stays an ordinary thinking row,
+                            # as the CLI's schema asks. The message's thinking-token figure rides it when it is the
+                            # message's first thinking block, so the turn's total keeps counting it.
+                            ev = {"kind": "assistant", "md": b["thinking"], "uuid": a.get("uuid"), "ts": ts,
+                                  "narration": True}
+                            _tk = _thought_tokens(msg, _thought_mids)
+                            if _tk:
+                                ev["thinkTokens"] = _tk
+                            _prose_paths(ev, b["thinking"], a.get("uuid"))
+                            events.append(ev)
+                            continue
                         # `encrypted` means OPAQUE — nothing to show but the placeholder: a signature and
                         # no text. A block with a signature AND text is a summary (the SDK's display
                         # "summarized", requested when the thinking-summaries toggle is on) and renders
@@ -49023,20 +49087,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                         ev = {"kind": "assistant", "md": txt, "uuid": a.get("uuid"), "ts": ts}
                         if a.get("command"):
                             ev["command"] = True    # a slash command's own output (<local-command-stdout>), not a reply (T237)
-                        sp = _space_paths(txt, sid, a.get("uuid"))
-                        if sp:
-                            ev["spacePaths"] = sp   # backticked filenames WITH spaces, filesystem-verified → whole-span links
-                        pl = _path_links(txt, sid, a.get("uuid"), _pl_memo)
-                        if pl is not None:
-                            ev["pathLinks"] = pl    # path-shaped tokens, filesystem-verified/fixed → the client's link gate
-                            pv, pw = _path_preview_verdicts(pl, sid)
-                            if pl:
-                                ev["pathPreview"] = pv   # the links a hover may preview, by kind; the markdown ones warmed (T351). The key rides EVERY event with links (empty when none previews): its presence is the verdict, and the fold refolds an event built without one (T364)
-                            if pw:
-                                ev["pathPreviewWhy"] = pw   # …and for each link it may not, the exact refusal, the text card's words (T364)
-                        pp = _path_pins(sid, a.get("uuid"))
-                        if pp:
-                            ev["pathPins"] = pp     # mention-time snapshots: this message's embeds keep these bytes
+                        _prose_paths(ev, txt, a.get("uuid"))
                         if _interrupt_settle(events, txt, a):   # the null settle-reply closing an interrupted
                             ev["interruptSettle"] = True        # turn → rendered as seam marker, not a bubble
                         events.append(ev)
@@ -49291,7 +49342,11 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                     "agents": (list(_fe["agents"]) if _fold_ok and _fe.get("agents") else [])
                               + [(_e.get("toolUseId"), _e.get("agentId"),
                                   _agent_states.get(_e.get("toolUseId")) == "pending")
-                                 for _e in _newpart if _e.get("kind") == "tool" and _e.get("name") in ("Agent", "Task")]})
+                                 for _e in _newpart if _e.get("kind") == "tool" and _e.get("name") in ("Agent", "Task")],
+                    # the progress-note store's revision this build read, and the records whose thinking the prefix
+                    # sealed as Thought rows: a mark filed later for one of them demotes the fold (the narration gate)
+                    "narr_rev": _narr_rev,
+                    "narr_think": _narr_sealed((_fe.get("narr_think") if _fold_ok else None), _newpart)})
             _chat_fold_last.info["prefix_next"] = _b
         except Exception:
             with _chat_fold_lock:

@@ -27,6 +27,11 @@ the web bundles), `palette.py` (session-identity colors) and `cli_prices.py`
 (Claude Code's own per-call prices, the one table the spend guard, the cost view
 and `romp spend-repair` price tokens with).
 
+`narration.py` is the progress-note store: which thinking blocks Claude Code's
+stream listed as the model's notes to the person. The SDK backend files the
+marks as frames arrive and the chat build draws those blocks as prose
+(`docs/reference.md`, Progress notes).
+
 `credentials.py` is the whole of romp's contact with API credentials, and romp
 holds no key (the user 2026-09-08, who wants romp to hold no key). Sessions and
 judge children authenticate through Claude Code's own resolution: the

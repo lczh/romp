@@ -142,6 +142,9 @@ _keys = (sys.modules.get("romp_session_backend")
          or load_source("romp_session_backend_keys", _HERE / "session_backend.py"))
 echo_text_key = _keys.echo_text_key
 command_text_key = _keys.command_text_key
+# The progress-note store (kernel/narration.py): this backend files the marks, the kernel's chat build reads them, so
+# both reach the ONE module object (sys.modules first) and its in-memory memo.
+_nar = sys.modules.get("romp_narration") or load_source("romp_narration", _HERE / "narration.py")
 NOTHING_TO_APPLY = _keys.NOTHING_TO_APPLY   # Apply now's no-op answer (SdkBackend.apply_now), one text the kernel compares
 # The event model's AUTHOR rule (author_of, is_interrupt_record), for the boot scan that asks whether a
 # LATER human turn went through after a send (_input_landed_after, 2026-09-11): a transcript record is read
@@ -12259,6 +12262,7 @@ class SdkSession:
         if not (callable(raw) and parse):
             self._raw_frames = False
             async for msg in client.receive_messages():
+                self._narration_unreadable(msg)
                 yield msg
             return
         self._raw_frames = True
@@ -12266,9 +12270,50 @@ class SdkSession:
             if isinstance(data, dict) and data.get("type") == "command_lifecycle":
                 yield CommandLifecycle(data)
                 continue
+            if isinstance(data, dict) and data.get("type") == "assistant":
+                self._narration_frame(data)          # before the parse: the build that shows this frame reads its marks
             msg = parse(data)
             if msg is not None:
                 yield msg
+
+    def _narration_frame(self, data) -> None:
+        """A raw assistant frame's progress-note marks (narration.narration_from_frame) filed in the kernel's store under this
+        session, keyed by the frame's uuid, which is its transcript record's. A subagent's frame is filed too: the
+        subagent viewer renders its transcript under this session's id. A frame the kernel cannot read is reported once
+        per session and reason as a problem; its thinking stays as Thought rows. Contained: a fault here costs the marks
+        of this one frame, never the stream."""
+        try:
+            got = _nar.narration_from_frame(data)
+            if got is None:
+                return
+            if got["idx"] and got["uuid"]:
+                _nar.record_narration(self.backend.state_dir, self.sid, got["uuid"], got["idx"], got["ords"])
+            if got["why"]:
+                self._narration_problem(got["why"])
+        except Exception as e:
+            self._narration_problem("a frame's marks could not be filed (%s: %s)" % (type(e).__name__, e))
+
+    def _narration_unreadable(self, msg) -> None:
+        """The parsed-only road (_frames without the raw stream): a main-conversation thinking block with words arrives
+        and the frame that would say whether it is a progress note is out of reach. Reported once per session."""
+        try:
+            if type(msg).__name__ != "AssistantMessage" or getattr(msg, "parent_tool_use_id", None):
+                return
+            if any(type(b).__name__ == "ThinkingBlock" and str(getattr(b, "thinking", "") or "").strip()
+                   for b in (getattr(msg, "content", None) or ())):
+                self._narration_problem("the SDK in use does not pass the raw frames that list progress notes")
+        except Exception:
+            pass
+
+    def _narration_problem(self, why) -> None:
+        said = getattr(self, "_narration_said", None)
+        if said is None:
+            said = self._narration_said = set()
+        if why in said:
+            return
+        said.add(why)
+        self.backend._log("progress notes (%s): %s; these thinking blocks stay as Thought rows in the chat"
+                          % (getattr(self, "name", self.sid), why), problem=True, key=(_nar.NARRATION_PROBLEM_KEY, why))
 
     def _handle_stream_message(self, msg, AssistantMessage, ResultMessage, SystemMessage) -> bool:
         """_on_message, with its failures contained to the message that caused them. Until 2026-09-06
@@ -15370,6 +15415,7 @@ class SdkBackend:
         self._always_fast_seen = always_fast_on(self.state_dir)   # the switch as apply_model_switches last saw it: a flip
         #   forgets every remembered refusal (_forget_fast_refusals)
         self._problem_lock = threading.Lock()
+        _nar._NARR_SINK[0] = self._log      # the progress-note store reports an unreadable or unwritable file here
         self._note_env_credential_names()   # name what the kernel's environment leaks into every session, once;
         #                                     after startup_auth_env's claim above, so it names what sessions inherit
         # The /api-health aggregator (one ring, one lock; see ApiHealth). Fed from _on_message on each

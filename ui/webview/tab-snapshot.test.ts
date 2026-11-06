@@ -152,6 +152,11 @@ test("executed: lastMessage takes the newest assistant text as PLAIN words on on
   assert.equal(lastMessage({ events: [{ kind: "assistant", text: "plain `text` field" }] }), "plain text field", "the text field when there is no md");
 });
 
+test("executed: lastMessage reads replies, not progress notes: the chat shows notes as prose, the hover is unchanged (2026-11-06)", () => {
+  assert.equal(lastMessage({ events: [{ kind: "assistant", md: "The reply." }, { kind: "user", md: "next" },
+                                      { kind: "assistant", md: "Reading the router first.", narration: true }, { kind: "tool" }] }), "The reply.");
+});
+
 test("executed: plainText drops inline HTML and underscore emphasis too: the transcript renders them as structure, a tooltip would show them as typed", () => {
   assert.equal(plainText("<b>x</b>", 400), "x");
   assert.equal(plainText("_x_", 400), "x");

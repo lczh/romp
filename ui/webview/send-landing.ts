@@ -25,7 +25,7 @@
 import { isLandedHuman, isTransient, type GuardEvent } from "./frame-guard";
 
 /** The slice of a chat event the watch reads (render.ts's ChatEvent is a superset). */
-export type LandEvent = GuardEvent & { qid?: string; qids?: (string | null)[]; texts?: { qid?: string }[] };
+export type LandEvent = GuardEvent & { qid?: string; qids?: (string | null)[]; texts?: { qid?: string }[]; narration?: boolean };
 
 export const LAND_RECENT_TURNS = 3;   // "the newest few": a landed human turn among the last three the page held
 export const LAND_TAIL_KEYS = 6;      // the tail a row carries, before and after
@@ -140,7 +140,8 @@ export class LandingWatch {
       let answer: string | null = null;
       for (let i = from; i < after.length; i++) {
         const e = after[i];
-        if (e && e.kind === "assistant" && typeof e.uuid === "string" && !beforeKeys.has(e.uuid)) { answer = e.uuid; break; }
+        // a reply, not a progress note (narration, 2026-11-06): the row's meaning stays what it was before notes showed
+        if (e && e.kind === "assistant" && !e.narration && typeof e.uuid === "string" && !beforeKeys.has(e.uuid)) { answer = e.uuid; break; }
       }
       if (!answer) continue;
       s.missing = true;
