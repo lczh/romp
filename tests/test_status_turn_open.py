@@ -12,8 +12,15 @@ transcripts only (placeholder uuids, invented notes-api prose)."""
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from romp_load import load_source
+
+# Hermetic state BEFORE the loads — they resolve their state root at import time, and only
+# pytest runs conftest's floor (a bare unittest or script run otherwise writes REAL state).
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp()
+os.environ.pop("ROMP_STATE_DIR", None)  # a live kernel's export outranks the XDG floor
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from test_chat_pages import NOW, SID, Harness, jd, km   # noqa: E402
@@ -186,8 +193,7 @@ class GivenUpTurn(unittest.TestCase):
     resumes, files none; the record carries its own key, so the boot reconcile still finds the turn cut and resumes it."""
 
     def test_the_declined_heal_files_the_turn_cut_and_the_resuming_one_does_not(self):
-        import shutil, tempfile, types
-        from romp_load import load_source
+        import shutil, types
         sb = sys.modules.get("romp_sdk_backend") or load_source(   # the kernel's own copy when it loaded one
             "romp_sdk_backend", os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "kernel", "sdk_backend.py"))
         d = tempfile.mkdtemp()
