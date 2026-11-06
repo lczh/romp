@@ -48412,12 +48412,12 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # Thought rows.
     _narr_rev, _narr = nar.narration_marks(jd.STATE, sid)
 
-    def _prose_paths(ev, txt, uuid):
-        """The path fields an assistant message's prose carries, a reply's and a progress note's alike."""
-        sp = _space_paths(txt, sid, uuid)
+    def _prose_paths(ev, txt, a):
+        """The path fields an assistant message's prose carries, a reply's and a progress note's alike (`a`: its atom)."""
+        sp = _space_paths(txt, sid, a.get("uuid"))
         if sp:
             ev["spacePaths"] = sp   # backticked filenames WITH spaces, filesystem-verified → whole-span links
-        pl = _path_links(txt, sid, uuid, _pl_memo)
+        pl = _path_links(txt, sid, a.get("uuid"), _pl_memo)
         if pl is not None:
             ev["pathLinks"] = pl    # path-shaped tokens, filesystem-verified/fixed → the client's link gate
             pv, pw = _path_preview_verdicts(pl, sid)
@@ -48425,7 +48425,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                 ev["pathPreview"] = pv   # the links a hover may preview, by kind; the markdown ones warmed (T351). The key rides EVERY event with links (empty when none previews): its presence is the verdict, and the fold refolds an event built without one (T364)
             if pw:
                 ev["pathPreviewWhy"] = pw   # …and for each link it may not, the exact refusal, the text card's words (T364)
-        pp = _path_pins(sid, uuid)
+        pp = _path_pins(sid, a.get("uuid"))
         if pp:
             ev["pathPins"] = pp     # mention-time snapshots: this message's embeds keep these bytes
     uuid2seg, seg_anchors = {}, {}            # atom uuid → seg id; seg id → (promptId, workId) for the dot/bar split
@@ -49050,7 +49050,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                             _tk = _thought_tokens(msg, _thought_mids)
                             if _tk:
                                 ev["thinkTokens"] = _tk
-                            _prose_paths(ev, b["thinking"], a.get("uuid"))
+                            _prose_paths(ev, b["thinking"], a)
                             events.append(ev)
                             continue
                         # `encrypted` means OPAQUE — nothing to show but the placeholder: a signature and
@@ -49087,7 +49087,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                         ev = {"kind": "assistant", "md": txt, "uuid": a.get("uuid"), "ts": ts}
                         if a.get("command"):
                             ev["command"] = True    # a slash command's own output (<local-command-stdout>), not a reply (T237)
-                        _prose_paths(ev, txt, a.get("uuid"))
+                        _prose_paths(ev, txt, a)
                         if _interrupt_settle(events, txt, a):   # the null settle-reply closing an interrupted
                             ev["interruptSettle"] = True        # turn → rendered as seam marker, not a bubble
                         events.append(ev)
