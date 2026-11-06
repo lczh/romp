@@ -401,7 +401,7 @@ interface ChatNotice { itemId: string; key: string; rev: number; title: string; 
                        warns?: BadgeItem["warns"]; failLog?: BadgeItem["failLog"]; doneConfirming?: boolean | null;
                        summaryAnchorUuid?: string | null; summaryAnchorQuote?: string | null; summaryAnchorsPara?: SectionItem["summaryAnchorsPara"];
                        blocked?: unknown; column?: string | null; judging?: boolean | null; working?: SpinFields["working"]; sessState?: string | null }
-interface Status { state: ChipState; sinceEpoch: number | null; modelFallback?: ModelFallback | null; notices?: ChatNotice[] | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; bgServiceIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; modePending?: boolean; fast?: string; fastCapable?: boolean | null; auth?: string; authLive?: string; authPending?: boolean; authOwn?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; needsYou?: boolean | null; needsYouCount?: number | null; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; apiNoRetry?: boolean; subagentStandard?: boolean; subagentStandardOffered?: boolean; subagentSpeed?: string; subagentStandardRetry?: boolean; relaunchWaits?: string; relaunchCuts?: string; fastPending?: boolean; }   // subagentStandard = the session's "Subagents at standard speed (experimental)" switch, subagentStandardOffered = the fast menu shows its row (the switch is on, or the model is the one it needs), subagentSpeed = the row's sub-line: the kernel's speed check (usage.speed off the transcripts) or what holds the switch back (2026-10-08)   // relaunchWaits = what a pick's relaunch waits for, in words ("2 background tasks"; absent or "" when nothing holds it: the kernel's relaunch_waits, 2026-10-01, when a pick stopped cutting the work a session runs): the Billing sub-line says it, so does the effort change's chat line while the effort badge wears its dots, and for a waiting bypass pick (modePending) the mode picker's Bypass row and the tab's hover say it   // relaunchCuts = what pushing that pick through now would end (the kernel's relaunch_cuts; a queued message survives a relaunch, so it is not named): the Apply now row's sub-line and confirm (apply-now.ts)   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions): the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you: the red tab) rather than a transient API error (amber, retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried: retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried: a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); apiNoRetry = the blocking notice is one nothing retries (the launch error's noRetry, the Codex bracket's end notices: a compaction Codex could not run, the app-server's death, or a kernel restart whose outcome the new kernel cannot learn; the ends named 2026-09-22, when the restart end outgrew a gloss of one failed compaction): the card draws no Retry, no Stop-all and no retrying-soon meta (2026-09-21); needsYou = the FEED filed a card of this session under needs-you (build_session, from the kernel's last feed build; null before the first) → the Needs you ring widget wears a dashed magenta ring on the tab in every live state, working included (tab-state.ts RING_TEST, tab-widgets.ts composeTabRing; the ask ring of 2026-09-13, renamed and recoloured 2026-09-21); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
+interface Status { state: ChipState; sinceEpoch: number | null; modelFallback?: ModelFallback | null; notices?: ChatNotice[] | null; awaitingWhy?: string | null; awaitingKind?: string | null; awaitingPeers?: PeerIdent[] | null; awaitingTasks?: string[]; awaitingTaskIds?: string[]; bgServiceIds?: string[]; awaitingCount?: number | null; awaitingItems?: AwaitRow[]; effort?: string; model?: string; modelPending?: boolean; effortPending?: boolean; mode?: string; modePending?: boolean; fast?: string; fastCapable?: boolean | null; auth?: string; authLive?: string; authPending?: boolean; authOwn?: boolean; authBoth?: boolean; authAvail?: AuthAvail; authPickUnavailable?: string; authPickFell?: string; authAcct?: string; authLogin?: string; authLabel?: string; authLoginLive?: string | null; ctx?: string; ctxOver?: boolean; ctxColor?: number[]; modelColor?: number[]; effortColor?: number[]; modelTone?: number[]; effortTone?: number[]; ctxTone?: number[]; faded?: boolean; turnOpen?: boolean; backend?: string; apiTooLong?: boolean; apiSpendLimit?: boolean; apiModelLimit?: boolean; apiAuthErr?: boolean; apiRefusal?: boolean; needsYou?: boolean | null; needsYouCount?: number | null; retrySuppressed?: boolean; retryNextAt?: number | null; retryTries?: number | null; apiNoRetry?: boolean; subagentStandard?: boolean; subagentStandardOffered?: boolean; subagentSpeed?: string; subagentStandardRetry?: boolean; relaunchWaits?: string; relaunchCuts?: string; fastPending?: boolean; }   // subagentStandard = the session's "Subagents at standard speed (experimental)" switch, subagentStandardOffered = the fast menu shows its row (the switch is on, or the model is the one it needs), subagentSpeed = the row's sub-line: the kernel's speed check (usage.speed off the transcripts) or what holds the switch back (2026-10-08)   // relaunchWaits = what a pick's relaunch waits for, in words ("2 background tasks"; absent or "" when nothing holds it: the kernel's relaunch_waits, 2026-10-01, when a pick stopped cutting the work a session runs): the Billing sub-line says it, so does the effort change's chat line while the effort badge wears its dots, and for a waiting bypass pick (modePending) the mode picker's Bypass row and the tab's hover say it   // relaunchCuts = what pushing that pick through now would end (the kernel's relaunch_cuts; a queued message survives a relaunch, so it is not named): the Apply now row's sub-line and confirm (apply-now.ts)   // awaitingWhy/awaitingTasks = what an awaitingBg session is waiting on (kernel _session_awaiting's phrasing + the live awaited task descriptions): the #bg-tasks box renders it as the header of the in-flight rows (renderBgTasks; the user 2026-08-13, who moved it out of the statusline the same day PR #350 put it there)   // retrySuppressed = the user interrupted this thread's API-error storm → romp's auto-retry stays OFF for it until a successful turn re-arms (the user 2026-07-06). backend = "sdk" | "codex"; apiTooLong = the "blocked" is a "prompt is too long" error (on you: the red tab) rather than a transient API error (amber, retrying); apiSpendLimit = a monthly spend cap (on you → raise it; NEVER auto-retried: retrying can't fix it, the user 2026-07-14); apiModelLimit = this session's MODEL is out of allowance (on you → switch model or add credits; not auto-retried either, the user 2026-08-01); apiRefusal = the model's safeguards refused the prompt itself (on you → rewrite it or drop the thread; never auto-retried: a refusal is deterministic on the same input, so a retry just manufactures the same refusal, the user 2026-08-15); apiNoRetry = the blocking notice is one nothing retries (the launch error's noRetry, the Codex bracket's end notices: a compaction Codex could not run, the app-server's death, or a kernel restart whose outcome the new kernel cannot learn; the ends named 2026-09-22, when the restart end outgrew a gloss of one failed compaction): the card draws no Retry, no Stop-all and no retrying-soon meta (2026-09-21); needsYou = the FEED filed a card of this session under needs-you (build_session, from the kernel's last feed build; null before the first) → the Needs you ring widget wears a dashed magenta ring on the tab in every live state, working included (tab-state.ts RING_TEST, tab-widgets.ts composeTabRing; the ask ring of 2026-09-13, renamed and recoloured 2026-09-21); ctxColor = the GLOBAL colormap's RGB for the context%, computed server-side; modelColor/effortColor = the same map's RGB tint for the model name + effort (by capability/effort rank), server-computed; modelPending = a /model switch is resolving → the badge shows switching-dots until the new name lands (server-driven, event-based, the user 2026-07-03); fast = the CLI's fast-mode state ("on"/"off"/"cooldown", from the SDK init's fast_mode_state; absent = unknown/unavailable → no fast badge)
 
 // The side a pick this box cannot bill actually fell to ("login" | "key"), "" when nothing did: the kernel's
 // authPickFell (the launch's own decision, 2026-09-09). An older kernel without the field is read the way the
@@ -11748,22 +11748,24 @@ function applyForkSpots(sid: string, v: View): void {
   const evs = (s?.events || []) as ChatEvent[];
   const editable = (s as any)?._editable as Set<string> | undefined;
   // last-response-of-run uuid -> cut uuid ("" = whole conversation): fork-spots.ts, the FIRST genuine editable prompt after the
-  // run its cut; the tip run's spot only once the turn has ended (the status leaving "working": no hop while a turn streams)
-  const working = !!s && (s.status.state === "working" || s.status.state === "compacting");
-  const spots = forkSpotPlan(evs, (ev) => senderKind(ev as { human?: boolean; romp?: boolean; tag?: string; md?: string }) === "user" && !!editable?.has(ev.uuid || ""), working);
+  // run its cut; nothing in a turn still OPEN anchors a spot, and the tip run's spot waits for the turn's end (the kernel's
+  // status.turnOpen, the running-call stamp's reading, never the chip: a permission prompt or a retry moves the chip mid-turn)
+  const spots = forkSpotPlan(evs, (ev) => senderKind(ev as { human?: boolean; romp?: boolean; tag?: string; md?: string }) === "user" && !!editable?.has(ev.uuid || ""), turnOpenOf(s?.status));
   for (const old of Array.from(v.el.querySelectorAll(".fork-spot")) as HTMLElement[]) {
     // closest, not parentElement: the spot may nest inside the turn's elapsed row (below)
     const anchor = (old.closest(".turn-assistant") as HTMLElement | null)?.dataset.uuid || "";
-    // …and a spot on a response's tool line (look E) names its response itself. A spot whose response now has a line under
-    // it, or whose line opened or closed, is not where it belongs (forkHost): it goes, so a response never carries two
+    // …and a spot on a later row of the response's turn (forkHost) names its response itself. A spot whose host is no longer
+    // the response's last row (a row landed after it, a line opened or closed) is not where it belongs: it goes, so a
+    // response never carries two
     const own = old.dataset.anchor || anchor;
     const prose = v.el.querySelector(`.turn-assistant[data-uuid="${cssEscape(own)}"]`) as HTMLElement | null;
     if (spots.get(own) !== old.dataset.cut || !prose || old.closest(".turn") !== forkHost(prose)) old.remove();   // gone, moved, or rehomed
   }
+  const tail = new Set<HTMLElement>();   // the rows whose hover reveals a spot: each response and the rows after it, to its host
   for (const [anchor, cut] of spots) {
     const prose = v.el.querySelector(`.turn-assistant[data-uuid="${cssEscape(anchor)}"]`) as HTMLElement | null;
     if (!prose) continue;
-    const turn = forkHost(prose);   // look E: under the response's tool line, below its calls when the line is open
+    const turn = forkHost(prose, tail);   // the response's last row, where its turn's "worked …" line sits
     if (turn.querySelector(".fork-spot")) continue;
     const row = el("div", "fork-spot");
     row.dataset.cut = cut;
@@ -11780,23 +11782,52 @@ function applyForkSpots(sid: string, v: View): void {
       : "Fork the session — a new parallel session continues this whole conversation; this one is untouched";
     row.appendChild(fk);
     // INLINE with the "worked …" seconds label when the turn has one (the user 2026-08-25: not on a
-    // new row — just to the right of it). The elapsed row is the flex host; a turn with no footer
-    // (the live tip) keeps the button on its own row exactly as before.
+    // new row — just to the right of it). The elapsed row is the flex host; a row with no footer (no
+    // clock, a notice after the work) floats the button in its corner (styles.css), taking no row.
     const elapsed = turn.querySelector(":scope > .turn-elapsed") as HTMLElement | null;
     if (elapsed) elapsed.appendChild(row);
     else turn.appendChild(row);
   }
+  // the reveal (styles.css .fork-tail): a hover on the response, on its tool line's head, on any of its calls or on any row
+  // after it shows the spot its turn ends on. Diffed, so a pass that changes nothing writes no class
+  for (const n of Array.from(v.el.querySelectorAll(":scope > .fork-tail")) as HTMLElement[]) if (!tail.has(n)) n.classList.remove("fork-tail");
+  for (const n of tail) if (!n.classList.contains("fork-tail")) n.classList.add("fork-tail");
 }
 
-/** The node a response's fork spot rides: the response itself, or (look E) the tool line tucked under it, since the cut below
- *  the response is below its calls; when that line is OPEN, its last call's row (the calls follow the line's head). */
-function forkHost(prose: HTMLElement): HTMLElement {
-  const next = prose.nextElementSibling as HTMLElement | null;
-  if (!next || !(next.classList.contains("toolgroup-attached") || next.classList.contains("tool-attached"))) return prose;
-  if (!next.classList.contains("expanded")) return next;
-  let last = next;
-  for (let n = next.nextElementSibling as HTMLElement | null; n && n.classList.contains("tg-child"); n = n.nextElementSibling as HTMLElement | null) last = n;
-  return last;
+/** Whether a session's turn is OPEN: the kernel's status.turnOpen, the event model's own reading (_session_working, the one the
+ *  running-call stamp takes), true from the prompt to the turn's end through a permission prompt, a question, a retry, an
+ *  interrupt in flight and a restart's reattach, all of which move the chip. The fork spots and the "worked …" line key on it,
+ *  so neither appears mid-turn only to go again when the turn resumes. A kernel that sends no turnOpen: its chip (working or
+ *  compacting) stands in, as before. */
+function turnOpenOf(st: Status | undefined): boolean {
+  if (!st) return false;
+  const chip = st.state === "working" || st.state === "compacting";
+  return typeof st.turnOpen === "boolean" ? st.turnOpen || st.state === "compacting" : chip;
+}
+
+/** The row a response's fork spot rides: the last row of the WORK that follows the response in its turn, since the cut below
+ *  the response is below everything it did next: its tool line (its calls, when the line is open), a tool after a summary, a
+ *  Thought row. A turn's work ends its turn as a rule, so that row carries the turn's "worked …" line, the spot's inline home,
+ *  and a spot that lands at the turn's end takes no row of its own and moves nothing (round six). A notice after the work (an
+ *  API error, an interrupt) is not the response's: the walk stops there. Collects the rows from the response to the host into
+ *  `tail`, the rows whose hover reveals the spot. */
+function forkHost(prose: HTMLElement, tail?: Set<HTMLElement>): HTMLElement {
+  let host = prose;
+  tail?.add(prose);
+  for (let n = prose.nextElementSibling as HTMLElement | null; n; n = n.nextElementSibling as HTMLElement | null) {
+    if (n.classList.contains("day-divider")) continue;
+    if (!isWorkRow(n)) break;
+    host = n;
+    tail?.add(n);
+  }
+  return host;
+}
+/** A row of the agent's work: a tool call, a tool run (its line or a row of it open), a Thought row (a thinking row in full
+ *  mode). Never a notice, a notice run, a question box or a message. */
+function isWorkRow(n: HTMLElement): boolean {
+  const c = n.classList;
+  if (!c.contains("turn") || c.contains("turn-noticegroup") || c.contains("turn-notice")) return false;
+  return c.contains("turn-tool") || c.contains("turn-toolgroup") || c.contains("turn-thought") || c.contains("turn-thinking");
 }
 
 /** Yellow ticks on the chat's scroll rail marking commented spots (the user 2026-08-15) — one per
@@ -14199,7 +14230,7 @@ function scrollToAnchor(uuid: string): boolean {
         openFolds.add(toolGroupKey(s.events[hit.indices[0]]));
       if (hit && hit.kind === "noticegroup" && hit.indices.includes(idx))
         openFolds.add(noticeGroupKey(s.events[hit.indices[0]]));
-      const working = s.status.state === "working" || s.status.state === "compacting";
+      const working = turnOpenOf(s.status);   // the turn not yet ended: no "worked …" line yet (turnOpenOf)
       renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), working);
       // Re-query with the SAME three selectors the first lookup used. data-mids was missing here, so an
       // unhydrated postal turn (whose message ids live only in data-mids) could be found in the events,
@@ -14355,7 +14386,7 @@ function landNearestMoment(t: number): boolean {
   const items = displayItems(s);
   let u = items.findIndex((it) => itemHolds(it, best));
   if (u < 0) u = Math.max(0, items.findIndex((it) => itemFirstEvent(it) >= best));
-  const working = s.status.state === "working" || s.status.state === "compacting";
+  const working = turnOpenOf(s.status);   // the turn not yet ended: no "worked …" line yet (turnOpenOf)
   renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), working);
   const target = (uuid ? v.el.querySelector(`.turn[data-uuid="${cssEscape(uuid)}"]`) : null)
     || (v.el.querySelector(`[data-unit="${u}"]`) as HTMLElement | null);
@@ -14876,7 +14907,7 @@ function syncViewInner(id: string, atBottom?: boolean): View {
     v.rendered = 0; v.stale = false; v.winStart = 0; v.winEnd = 0; v.painted = undefined; v.rediff = false;
     return v;
   }
-  const working = s.status.state === "working" || s.status.state === "compacting";
+  const working = turnOpenOf(s.status);   // the turn not yet ended: no "worked …" line yet (turnOpenOf)
   // The footer on the current turn's last reply reads the session's working state (on once idle, off while
   // it works), and a status-only tail changes that with no event change — the no-op fast path below would
   // leave the footer as it was. So the state is remembered per view, and a flip patches the footer there.
@@ -15227,13 +15258,16 @@ function captionRun(head: HTMLElement, evs: readonly ChatEvent[], indices: reado
 /** Look E: a tool line folds its calls, so it says what A's rows would: a call still RUNNING (the kernel's `running` stamp)
  *  wears the working dot and "running…" with its elapsed time, ticked by the 1 s timer (.tool-elapsed[data-since]) and gone at
  *  the push that brings its result; a FAILED call wears the red dot and the line says how many failed, in red, as A's rows say
- *  "error". The dot is the only part of an attached line's rail mark that shows, and only for these two states. */
+ *  "error"; a call CUT before its result could come (stamped not running, with no result: renderTool's "no result") wears
+ *  A's plain dot and the line says how many have no result. The dot is the only part of an attached line's rail mark that
+ *  shows, and only for these states (a done line's ✓ stays off). The dot keeps its own classes (dot-nav, its hit area). */
 function attachedRunState(head: HTMLElement, evs: readonly ChatEvent[], indices: readonly number[], open: boolean): void {
   const tools = runTools(evs, indices);
   const failed = tools.filter((t) => t.isError).length;
   const running = tools.find((t) => !t.isError && (t.running ?? ((t.name === "Task" || t.name === "Agent") && !t.output)));
+  const cut = tools.filter((t) => t.running === false && !t.agentRunning && !t.output && !t.isError).length;
   const d = head.querySelector(":scope > .dot") as HTMLElement | null;
-  if (d && running && !failed) d.className = "dot working";
+  if (d && !failed && (running || cut)) { d.classList.remove("green"); d.classList.add(running ? "working" : "ring"); }
   if (open) return;
   const line = head.querySelector(":scope > .toolgroup-line") as HTMLElement | null;
   if (!line) return;
@@ -15241,6 +15275,11 @@ function attachedRunState(head: HTMLElement, evs: readonly ChatEvent[], indices:
     const f = el("span", "toolgroup-failed");
     f.textContent = " · " + (failed === tools.length ? (failed === 1 ? "failed" : "all failed") : failed + " failed");
     line.appendChild(f);
+  }
+  if (cut) {
+    const c = el("span", "toolgroup-noresult");
+    c.textContent = " · " + (cut === tools.length ? "no result" : cut + " no result");
+    line.appendChild(c);
   }
   const since = running && running.ts ? Date.parse(running.ts) / 1000 : NaN;
   if (running) {
@@ -18148,7 +18187,7 @@ function virtualizeToViewport(): void {
       // scroll event and this frame, so capturing it earlier anchored to a stale spot → the "snap back" on a
       // fast random jump (the user 2026-06-25).
       const idx = unitAtScroll(v, content);
-      const working = s.status.state === "working" || s.status.state === "compacting";
+      const working = turnOpenOf(s.status);   // the turn not yet ended: no "worked …" line yet (turnOpenOf)
       const items = displayItems(s);
       const c = Math.max(0, Math.min(idx, items.length - 1));
       // where unit c sits relative to the viewport top NOW (so it doesn't jump); a unit hidden in a spacer (a jump) keeps the reader's

@@ -7383,11 +7383,18 @@ note as an ordinary assistant message.
 Compact view keeps everything the session says on a row of its own, whole: replies, notes, a question it asks between
 tool calls. What folds is the tool calls. One call after a row is that call's own row, dimmed and tucked under it, with its
 label and file link; several become one dim line, such as "Read 2 files, edited a file", which opens to the calls in place.
-A line says what its calls are doing: a call still running shows the working dot, "running…" and its time, and a failed
-call the red dot and, on a line, how many failed, in red. Calls before a turn's first words fold into a run as they always
-did, an Agent card and a Thought row stay rows of their own, and a stretch of work that ends on a folded line keeps its
-"worked" line under it. A response's fork button rides its tool line, under the calls when the line is open, and shows
-on a hover of either. While a turn of notes is still running, its fork button waits for the turn to end.
+A line says what its calls are doing: a call still running shows the working dot, "running…" and its time, a failed
+call the red dot and, on a line, how many failed, in red, and a call that can no longer get its result (its Claude Code
+stopped while it ran) the plain dot, with "no result" where the full view says it and, on a line, how many have none.
+Calls before a turn's first words fold into a run as they always did, an Agent card and a Thought row stay rows of their
+own, and a stretch of work that ends on a folded line keeps its "worked" line under it.
+
+A response's fork button sits on the last row of the work that follows it in its turn, beside that row's "worked" line,
+in every look and in the full view; a hover on the response or on any row after it in its turn (its tool line, the calls
+of an open line, a Thought row) shows it. The button and the "worked" line wait for the turn to end as the kernel reads it
+(the session status's `turnOpen`, the same reading that keeps a call's working dot on), not for the status chip, which
+leaves "working" for a permission prompt, a question or a retry while the turn goes on. So while a turn is open nothing in
+it carries a fork button, and no row moves when one appears or goes.
 
 Claude Code tells a note from a reasoning summary: it decodes each thinking block's kind and lists the note blocks on every message it
 streams to romp (`narration_block_indexes`), under every thinking display. The transcript does not keep that list, so

@@ -49219,7 +49219,11 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             # (askAnswerFilled) already handled every record that has one — never run both.
             _ask_fill_chosen(ev["askAnswer"], ev.get("output") or "")
     _real_turns = [_t for _t in (_turns or ()) if not _t.get("echoTurn")]   # a placed stale echo is no turn the CLI runs (_place_stale_echoes)
-    _stamp_running_tools(events, _last_stop_iso(_real_turns), _session_working(_real_turns))
+    # the turn is OPEN (the event model's answer, _session_working over the CLI's own turns): the running-call stamp reads it, and
+    # so does the client's fork-spot plan (status.turnOpen), which holds every reply anchor still until the turn actually
+    # ends, never on the status chip (a permission prompt, a question, a retry or a restart move the chip mid-turn)
+    _turn_is_open = _session_working(_real_turns)
+    _stamp_running_tools(events, _last_stop_iso(_real_turns), _turn_is_open)
     events = _prefix + events                           # the sealed prefix (same dicts) + this build's tail
     _pref_ids = {id(_e) for _e in _prefix}              # the sealed dicts: read by the uuid pass below, never written
     # STREAMED events (2026-09-23): an event built from a stream atom the transcript has not recorded yet (the live tail's
@@ -49763,6 +49767,11 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         # error (auto-retrying → the tab renders amber/retrying, not alarm-red). chip stays "blocked" either way
         # so the client auto-retry still fires + recovers the transient ones (the user 2026-06-29).
         status = {"state": chip, "sinceEpoch": since_ms, "faded": faded,
+                  # whether the session's turn is OPEN, by the event model (the running-call stamp's own reading,
+                  # _turn_is_open above): unlike the chip it holds through a permission prompt, a question, a retry,
+                  # an interrupt in flight and a kernel restart's reattach, and turns false only when the turn ends
+                  # (2026-11-06; the client's fork spots key on it)
+                  "turnOpen": bool(_turn_is_open),
                   # WHAT the session is awaiting, beside the chip (the user 2026-08-13: the chat pane said
                   # "Awaiting" with the reason nowhere in sight — the feed pill and timeline hover had it,
                   # the statusline didn't). The why is _session_awaiting's own phrasing; awaitingTasks are

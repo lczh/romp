@@ -2288,6 +2288,12 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   display: flex; align-items: center; gap: 8px; min-width: 0;
 }
 .turn-elapsed .fork-spot { margin-top: 0; }   /* inline: the row's own alignment rules, no extra drop */
+/* the line is as tall with its fork button as without (the button's 20px and its 3px drop): the button lands at a turn's end
+   and goes when a later turn takes the tip, and neither moves a row (round six) */
+#content .turn-elapsed { min-height: 23px; }
+/* a spot on a row that draws no "worked …" line (no clock, a notice after the work) floats in the row's bottom right corner:
+   it never takes a row of its own, so it never gives one back */
+.turn > .fork-spot { position: absolute; right: 6px; bottom: 3px; margin: 0; z-index: 2; }
 /* the button must not inherit the footer's 0.7 opacity ceiling — hover reveal still governs via .msg-fork */
 .turn-elapsed .msg-fork { font-size: 11px; }
 /* tool success = a BLUE disc with a white ✓ — the romp "check" blue used everywhere else (the feed,
@@ -2379,6 +2385,11 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
 .msg-fork { display: inline-flex; align-items: center; gap: 4px; }   /* the fork glyph beside the word (T381) */
 .msg-fork svg { display: block; width: 12px; height: 12px; }
 .turn-assistant:hover .msg-fork, .msg-fork:focus-visible { opacity: 0.9; }
+/* the spot rides the last row of the work after its response (applyForkSpots): a hover on the response or on any of those rows
+   (a tool line, its calls open, a Thought row) shows it. The rows carry .fork-tail; a tail after a row of another kind (a
+   prompt, a notice; never a day's divider, which a turn may straddle) is a later response's */
+.fork-tail:hover .msg-fork, .fork-tail:hover ~ .fork-tail .msg-fork { opacity: 0.9; }
+.fork-tail:hover ~ :not(.fork-tail):not(.day-divider) ~ .fork-tail .msg-fork { opacity: 0; }
 .msg-fork:hover { color: var(--fg); border-color: var(--accent); }   /* non-destructive: accent, never the rewind red */
 /* armed = one click from rolling back: destructive red, holds until blur/pointerleave/re-render */
 .msg-del.armed, .msg-restorefiles.armed { color: #ff6a6a; border-color: #ff6a6a; opacity: 0.95; }
@@ -2699,16 +2710,22 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 /* E (the default): the tools after a prose row fold into one dim line under it, the row's own, tucked up to the prose it
    follows; it opens to the calls in place. A lone call is its own row (its label, its file link), dimmed the same. No time of
    its own, and a rail dot only when the line has something to say: a call still running (the working dot, "running…" and its
-   time) or one that failed (the red dot, "failed" in red), as A's rows say them */
+   time), one that failed (the red dot, "failed" in red), or one cut before its result (the plain dot, "no result"), as A's
+   rows say them */
 .turn-toolgroup.toolgroup-attached, .turn-tool.tool-attached { padding-top: 0; margin-top: -3px; }
-.toolgroup-attached > .dot, .toolgroup-attached > .time-marker, .tool-attached > .dot, .tool-attached > .time-marker { visibility: hidden; }
-.toolgroup-attached > .dot.err, .toolgroup-attached > .dot.working, .tool-attached > .dot.err, .tool-attached > .dot.working { visibility: visible; }
+/* the dot sits on its label where A's sits on A's (A's rows place it 10px down a 7px top pad; these rows have no pad, and a lone
+   call's label is the line's size) */
+.turn-toolgroup.toolgroup-attached > .dot { top: 6px; }
+.turn-tool.tool-attached > .dot { top: 5px; }
+/* the rail dot shows whenever the call says more than "done": running (the working dot), failed (the red ✗), or cut before its
+   result could come (the plain dot), exactly as A's rows draw them; a done call's ✓ and the time stay off */
+.toolgroup-attached > .dot.green, .toolgroup-attached > .time-marker, .tool-attached > .dot.green, .tool-attached > .time-marker { visibility: hidden; }
 .tool-attached:not(.tool-err) .tool-label { color: var(--dim); }
+/* a lone call wears the line's size (the font rule: one kind of information, one size); its code face compensates the nesting */
+.tool-attached > .tool-head { font-size: 0.92em; }
+.tool-attached > .tool-head .tool-label-code { font-size: 1em; }
 .toolgroup-failed { color: var(--err); }
 .toolgroup-running + .tool-elapsed { margin-left: 4px; }
-/* the fork spot on a response's line (or, the line open, its last call) shows on a hover of the response or the line */
-.turn-assistant:hover + .toolgroup-attached .msg-fork, .turn-assistant:hover + .tool-attached .msg-fork,
-.toolgroup-attached:hover .msg-fork, .tool-attached:hover .msg-fork, .tg-child:hover .msg-fork { opacity: 0.9; }
 .thought-line .thought-caret { margin-right: 0; flex: none; }
 .thought-caret::before { content: "▸"; }
 .turn-thought.expanded .thought-caret::before { content: "▾"; }

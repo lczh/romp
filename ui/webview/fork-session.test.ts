@@ -21,11 +21,11 @@ test("the fork affordance rides BELOW each response run — delegated, with the 
   // the spot map: the FIRST genuine editable prompt after a run is its cut; the tip run forks everything
   assert.match(RENDER, /function applyForkSpots\(sid: string, v: View\): void \{/);
   // the plan lives in fork-spots.ts since 2026-11-06 (node-tested there): the cut is a genuine editable prompt, and the tip run's
-  // spot waits for the turn to end
+  // spot waits for the turn to end (the kernel's status.turnOpen, never the chip: round six)
   const PLAN = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "fork-spots.ts"), "utf8");
-  assert.match(RENDER, /forkSpotPlan\(evs, \(ev\) => senderKind\([^)]*\) === "user" && !!editable\?\.has\(ev\.uuid \|\| ""\), working\)/);
+  assert.match(RENDER, /forkSpotPlan\(evs, \(ev\) => senderKind\([^)]*\) === "user" && !!editable\?\.has\(ev\.uuid \|\| ""\), turnOpenOf\(s\?\.status\)\)/);
   assert.match(PLAN, /else if \(ev\.kind === "user" && ev\.uuid && run && !spots\.has\(run\) && isCut\(ev\)\) spots\.set\(run, ev\.uuid\);/);
-  assert.match(PLAN, /if \(run && !spots\.has\(run\)\) spots\.set\(run, ""\);/);
+  assert.match(PLAN, /if \(!turnOpen && run && !spots\.has\(run\)\) spots\.set\(run, ""\);/);
   assert.match(RENDER, /\.turn-assistant\[data-uuid="\$\{cssEscape\(anchor\)\}"\]/);
   // …applied on the marks' hooks, like the branch chips (the transcript DOM rebuilds constantly)
   assert.match(RENDER, /applyForkSpots\(sid, v\);/);

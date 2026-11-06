@@ -447,6 +447,31 @@ for (const look of cfg.before ? [""] : ["A", "E", "C2", "C"]) {
                    lastIsCall: !!(last && last.classList.contains("tg-last")) };
         }, cfg.summary.slice(0, 30));
       }
+      if (tname === "dark") {
+        // the line open, a hover on the response, on the line's head or on any of its calls shows the fork button (round six)
+        const reveal = async (target) => {
+          await target.hover();
+          await painted(p);
+          await p.waitForTimeout(200);   // the button's opacity transition (0.12 s) has run
+          return p.evaluate((t) => {
+            const prose = Array.from(document.querySelectorAll("#content .turn-assistant")).find((n) => (n.textContent || "").includes(t));
+            let last = prose; for (let n = prose && prose.nextElementSibling; n && n.classList.contains("turn") && !n.classList.contains("turn-user"); n = n.nextElementSibling) last = n;
+            const b = last && last.querySelector(".fork-spot .msg-fork");
+            return b ? parseFloat(getComputedStyle(b).opacity) : null;
+          }, cfg.summary.slice(0, 30));
+        };
+        const head = lineAfter(p, cfg.summary.slice(0, 30));
+        out.openReveal = {
+          response: await reveal(p.locator("#content .turn-assistant", { hasText: cfg.summary.slice(0, 30) }).first()),
+          head: await reveal(head.locator(".toolgroup-line")),
+          firstCall: await reveal(head.locator("xpath=following-sibling::div[contains(concat(' ', normalize-space(@class), ' '), ' tg-child ')][1]")),
+          lastCall: await reveal(p.locator("#content .tg-last").first()),
+        };
+        await p.mouse.move(700, p.viewportSize().height - 24);
+        await painted(p);
+        await p.waitForTimeout(200);
+        out.openReveal.away = await p.evaluate(() => { const b = document.querySelector("#content .tg-last .fork-spot .msg-fork"); return b ? parseFloat(getComputedStyle(b).opacity) : null; });
+      }
       await shot(p, dir4, "opened-E-" + tname, cfg.xPrompt5, "#content .tg-last");
     }
     await p.close();
@@ -724,6 +749,11 @@ class ServedNarration(unittest.TestCase):
         self.assertGreater(fh["opacity"], 0.5, "the hover reveals the button on the line: %r" % fh)
         # the line opened: its calls in place under its head, and the spot below the last of them, not in the head
         self.assertEqual(r["openSpot"], {"inHead": False, "inLast": True, "lastIsCall": True}, "the open line's spot: %r" % r["openSpot"])
+        # the line open, a hover on the response, the line's head or any of its calls shows its fork button; away, it hides
+        rv = r["openReveal"]
+        for where in ("response", "head", "firstCall", "lastCall"):
+            self.assertGreater(rv[where] or 0, 0.5, "a hover on the open line's %s: %r" % (where, rv))
+        self.assertLess(rv["away"], 0.1, rv)
         op = [x for x in r["mixedEOpen"] if x["kind"] != "other"]
         s2 = next(k for k, x in enumerate(op) if x["kind"] == "assistant" and key(x["text"]) == key(X_SUMMARY))
         self.assertTrue(op[s2 + 1]["attached"] and not op[s2 + 1]["head"], "the open line's head: %r" % op[s2 + 1])
