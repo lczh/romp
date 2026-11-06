@@ -178,6 +178,7 @@ CENSUS = {
     "_split_reminders": ("pure", "over a text"),
     "_stamp_agents": ("sig", "taskout", "the sidecar directory and each agent transcript it reads are taskout deps (stat'd before the read, re-stat'd per cycle); the task scan is over the transcript, the liveness gate over the row and the spawn epoch (row, reg, gone)"),
     "_stamp_interrupt_causes": ("pure", "over the events"),
+    "_turn_open": ("sig", "states", "the states log's latest state and a turnCut record after it, the lane's anchor log too (the newer of the two); with no state record the turns (_session_working: downtime); when the log has the turn open and the turns have closed it, the row's state (row)"),
     "_thought_tokens": ("pure", "over one record's message (its id and usage) and the build's own set of credited ids"),
     "_stamp_running_tools": ("pure", "over the tail events, the last stop's time and whether the turn is open (_session_working over the parse)"),
     "_last_stop_iso": ("pure", "over the parse's turns (their end_turn and their stop records)"),

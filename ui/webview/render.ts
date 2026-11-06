@@ -11759,14 +11759,15 @@ function applyForkSpots(sid: string, v: View): void {
     // response never carries two
     const own = old.dataset.anchor || anchor;
     const prose = v.el.querySelector(`.turn-assistant[data-uuid="${cssEscape(own)}"]`) as HTMLElement | null;
-    if (spots.get(own) !== old.dataset.cut || !prose || old.closest(".turn") !== forkHost(prose)) old.remove();   // gone, moved, or rehomed
+    if (spots.get(own) !== old.dataset.cut || !prose || old.closest(".turn") !== forkHost(prose, old.dataset.cut || "")) old.remove();   // gone, moved, or rehomed
   }
   const tail = new Set<HTMLElement>();   // the rows whose hover reveals a spot: each response and the rows after it, to its host
   for (const [anchor, cut] of spots) {
     const prose = v.el.querySelector(`.turn-assistant[data-uuid="${cssEscape(anchor)}"]`) as HTMLElement | null;
     if (!prose) continue;
-    const turn = forkHost(prose, tail);   // the response's last row, where its turn's "worked …" line sits
-    if (turn.querySelector(".fork-spot")) continue;
+    const turn = forkHost(prose, cut, tail);   // the row its turn's "worked …" line sits on
+    const had = turn.querySelector(".fork-spot") as HTMLElement | null;
+    if (had) { forkLine(turn, had); continue; }   // homed in the row's line again (a worked line that came or went since)
     const row = el("div", "fork-spot");
     row.dataset.cut = cut;
     row.dataset.anchor = anchor;
@@ -11782,21 +11783,22 @@ function applyForkSpots(sid: string, v: View): void {
       : "Fork the session — a new parallel session continues this whole conversation; this one is untouched";
     row.appendChild(fk);
     // INLINE with the "worked …" seconds label when the turn has one (the user 2026-08-25: not on a
-    // new row — just to the right of it). The elapsed row is the flex host; a row with no footer (no
-    // clock, a notice after the work) floats the button in its corner (styles.css), taking no row.
-    const elapsed = turn.querySelector(":scope > .turn-elapsed") as HTMLElement | null;
-    if (elapsed) elapsed.appendChild(row);
-    else turn.appendChild(row);
+    // new row — just to the right of it). The elapsed row is the flex host, and the button overlays its own
+    // height, so the line is as tall with it as without (styles.css). A turn with no clock draws no worked
+    // line: the button gets a line of its own there, the worked line's twin with no words (forkLine).
+    forkLine(turn, row);
   }
+  for (const line of Array.from(v.el.querySelectorAll(".fork-line")) as HTMLElement[]) if (!line.querySelector(".fork-spot")) line.remove();
   // the reveal (styles.css .fork-tail): a hover on the response, on its tool line's head, on any of its calls or on any row
   // after it shows the spot its turn ends on. Diffed, so a pass that changes nothing writes no class
   for (const n of Array.from(v.el.querySelectorAll(":scope > .fork-tail")) as HTMLElement[]) if (!tail.has(n)) n.classList.remove("fork-tail");
   for (const n of tail) if (!n.classList.contains("fork-tail")) n.classList.add("fork-tail");
 }
 
-/** Whether a session's turn is OPEN: the kernel's status.turnOpen, the event model's own reading (_session_working, the one the
- *  running-call stamp takes), true from the prompt to the turn's end through a permission prompt, a question, a retry, an
- *  interrupt in flight and a restart's reattach, all of which move the chip. The fork spots and the "worked …" line key on it,
+/** Whether a session's turn is OPEN: the kernel's status.turnOpen (_turn_open, the reading the running-call stamp takes), true
+ *  from the prompt to the CLI's result frame through a permission prompt, a question, a retry, an interrupt in flight and a
+ *  restart's reattach, all of which move the chip, and through a Stop hook's block and a compaction mid-turn, which the
+ *  transcript's end_turn does not see. The fork spots and the "worked …" line key on it,
  *  so neither appears mid-turn only to go again when the turn resumes. A kernel that sends no turnOpen: its chip (working or
  *  compacting) stands in, as before. */
 function turnOpenOf(st: Status | undefined): boolean {
@@ -11805,22 +11807,38 @@ function turnOpenOf(st: Status | undefined): boolean {
   return typeof st.turnOpen === "boolean" ? st.turnOpen || st.state === "compacting" : chip;
 }
 
-/** The row a response's fork spot rides: the last row of the WORK that follows the response in its turn, since the cut below
- *  the response is below everything it did next: its tool line (its calls, when the line is open), a tool after a summary, a
- *  Thought row. A turn's work ends its turn as a rule, so that row carries the turn's "worked …" line, the spot's inline home,
- *  and a spot that lands at the turn's end takes no row of its own and moves nothing (round six). A notice after the work (an
- *  API error, an interrupt) is not the response's: the walk stops there. Collects the rows from the response to the host into
- *  `tail`, the rows whose hover reveals the spot. */
-function forkHost(prose: HTMLElement, tail?: Set<HTMLElement>): HTMLElement {
-  let host = prose;
-  tail?.add(prose);
+/** The row a response's fork spot rides: the one carrying its turn's "worked …" line, the line's inline home, so a spot that
+ *  lands at the turn's end takes no row of its own and moves nothing. That line sits on the turn's last row before the cut
+ *  prompt (`cut`; "" for the tip: the newest row), whatever lies between: the response's tool line (its calls, when the line
+ *  is open), a question box and the work after it, a Thought row, a tool after a summary, an error card the turn ended on.
+ *  The walk runs from the response to the cut's row, a queued bubble or the end; a turn with no worked line (no clock) keeps
+ *  the spot on the last row of the work after its response. Collects the rows from the response to the host into `tail`, the
+ *  rows whose hover reveals the spot. */
+function forkHost(prose: HTMLElement, cut: string, tail?: Set<HTMLElement>): HTMLElement {
+  const rows: HTMLElement[] = [prose];
+  let foot = prose.querySelector(":scope > .turn-elapsed") ? 0 : -1, work = 0, inWork = true;
   for (let n = prose.nextElementSibling as HTMLElement | null; n; n = n.nextElementSibling as HTMLElement | null) {
     if (n.classList.contains("day-divider")) continue;
-    if (!isWorkRow(n)) break;
-    host = n;
-    tail?.add(n);
+    if (!n.classList.contains("turn") || n.classList.contains("turn-queued") || n.classList.contains("turn-assistant") || (cut && n.dataset.uuid === cut)) break;
+    rows.push(n);
+    if (n.querySelector(":scope > .turn-elapsed")) foot = rows.length - 1;
+    if (inWork && isWorkRow(n)) work = rows.length - 1; else inWork = false;
   }
-  return host;
+  const at = foot >= 0 ? foot : work;
+  if (tail) for (let i = 0; i <= at; i++) tail.add(rows[i]);
+  return rows[at];
+}
+/** Home a fork spot in its row's line: the row's "worked …" line, else a line of the spot's own (.fork-line, the worked line's
+ *  twin with no words: a turn with no clock), dropped once a worked line arrives. */
+function forkLine(turn: HTMLElement, spot: HTMLElement): void {
+  const elapsed = turn.querySelector(":scope > .turn-elapsed") as HTMLElement | null;
+  let line = elapsed;
+  if (!line) {
+    line = turn.querySelector(":scope > .fork-line") as HTMLElement | null;
+    if (!line) { line = el("div", "fork-line"); turn.appendChild(line); }
+  }
+  if (spot.parentElement !== line) line.appendChild(spot);
+  if (elapsed) turn.querySelector(":scope > .fork-line")?.remove();
 }
 /** A row of the agent's work: a tool call, a tool run (its line or a row of it open), a Thought row (a thinking row in full
  *  mode). Never a notice, a notice run, a question box or a message. */
@@ -23512,7 +23530,7 @@ function fillInPlace(sid: string, v: View | undefined): void {
   v.stick = false;   // a fill never follows the tail: the reader is where they are
   fillBuilding = atLimit;   // the gap elements this rebuild makes are the page's own (quietGaps), at the limit only
   try {
-    if (u >= 0) renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting");
+    if (u >= 0) renderWindowItems(v, s, items, Math.max(0, u - WINDOW_RADIUS), Math.min(items.length, u + WINDOW_RADIUS), turnOpenOf(s.status));
     else syncView(sid, false);
   } finally { fillBuilding = false; }
   // a visible row that survived the rebuild goes back to its exact offset; otherwise (no row on screen, or the anchor row gone: a turn
@@ -23532,7 +23550,7 @@ function fillInPlace(sid: string, v: View | undefined): void {
     const u2 = unitOfTurn(items, turnsNow, Math.floor(pointBefore));
     if (u2 >= 0) {
       fillBuilding = atLimit;
-      try { renderWindowItems(v, s, items, Math.max(0, u2 - WINDOW_RADIUS), Math.min(items.length, u2 + WINDOW_RADIUS), s.status.state === "working" || s.status.state === "compacting"); }
+      try { renderWindowItems(v, s, items, Math.max(0, u2 - WINDOW_RADIUS), Math.min(items.length, u2 + WINDOW_RADIUS), turnOpenOf(s.status)); }
       finally { fillBuilding = false; }
       const y2 = yOfTurn(v, s, items, turnsNow, content, pointBefore);
       writeScroll(content, y2 != null ? y2 : topBefore, "gap-fill", false, topBefore);

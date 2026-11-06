@@ -7389,12 +7389,20 @@ stopped while it ran) the plain dot, with "no result" where the full view says i
 Calls before a turn's first words fold into a run as they always did, an Agent card and a Thought row stay rows of their
 own, and a stretch of work that ends on a folded line keeps its "worked" line under it.
 
-A response's fork button sits on the last row of the work that follows it in its turn, beside that row's "worked" line,
-in every look and in the full view; a hover on the response or on any row after it in its turn (its tool line, the calls
-of an open line, a Thought row) shows it. The button and the "worked" line wait for the turn to end as the kernel reads it
-(the session status's `turnOpen`, the same reading that keeps a call's working dot on), not for the status chip, which
-leaves "working" for a permission prompt, a question or a retry while the turn goes on. So while a turn is open nothing in
-it carries a fork button, and no row moves when one appears or goes.
+A response's fork button sits in its turn's "worked" line, on the turn's last row before the next prompt, whatever lies
+between (its tool line, the calls of an open line, a question box and the work after it, a Thought row), in every look
+and in the full view; a hover on the response or on any row after it in its turn shows it. The button overlays the line's
+own height, so a line is as tall with it as without. A turn with no clock draws no "worked" line, and its button gets a
+line of its own with no words.
+
+The button and the "worked" line wait for the turn to end, as the session status's `turnOpen` says: the turn ends at Claude
+Code's result frame (the states log's `waiting`; an interrupt's `idle`), not at the status chip, which leaves "working"
+for a permission prompt, a question or a retry, and not at the transcript's `end_turn`, which a blocking Stop hook and a
+compaction mid-turn outlive. When the log has the turn open and the transcript has closed it, the session's live row
+decides, so a result whose record was lost reads closed. A turn whose Claude Code kept dying, and which the backend gave
+up resuming, is over (its `turnCut` record), until the next drive or the next kernel's boot resumes it. The same reading
+keeps a call's working dot on. So while a turn is open nothing in it carries a fork button or a "worked" line, and no
+row moves when one appears or goes.
 
 Claude Code tells a note from a reasoning summary: it decodes each thinking block's kind and lists the note blocks on every message it
 streams to romp (`narration_block_indexes`), under every thinking display. The transcript does not keep that list, so

@@ -1831,6 +1831,21 @@ def append_cmd_gesture(state_dir: Path, sid: str, text: str, t: int | None = Non
         f.write(json.dumps(rec) + "\n")
 
 
+def append_turn_cut(state_dir: Path, sid: str, cause: str, t: float | None = None) -> None:
+    """Record that romp GAVE UP a cut turn: the session's CLI died mid-turn and the backend declined to resume it
+    (_heal_cut_session's crash loop), so no CLI runs the turn and none will until the next drive or the next kernel's boot
+    reconcile. The turn is over from that moment, and this record is the event the kernel's turn-open reading keys on
+    (kernel _turn_open, the chat status's `turnOpen`): without it the turn read open for as long as the kernel lived, its
+    fork spot and its "worked" line never came, and a call it cut wore the working dot. Its own key, "turnCut", so the
+    state readers skip it, the boot reconcile's cut-turn detector (cut_turn_start) above all, which still finds the turn
+    cut and resumes it at the next boot; any state record written after it (that resume, the next drive) reopens."""
+    p = Path(state_dir) / "states" / (sid + ".jsonl")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"t": time.time() if t is None else float(t), "turnCut": str(cause)}
+    with open(p, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
 def append_machine_cut(state_dir: Path, sid: str, cause: str, t: float | None = None) -> None:
     """Record that ROMP cut this session's turn and is continuing it — written at the instant a resume
     notice is QUEUED (boot reconcile → "restart"; _heal_cut_session → "crash"), which is the event the
@@ -24422,6 +24437,10 @@ class SdkBackend:
                         "session %s: claude process died mid-turn AGAIN before completing a turn — "
                         "crash loop; NOT resuming again, turn left cut for the next kernel restart" % sess.name,
                         "crash.loop", log=self._log, sid=sid, name=sess.name, attempt=attempts + 1)
+            try:
+                append_turn_cut(self.state_dir, sid, "crash-loop")   # no CLI runs the turn now: it is over (kernel _turn_open)
+            except Exception as e:
+                self._log("session %s: the given-up turn's record failed to write: %s" % (sess.name, e))
             return
         problem_row(self.state_dir,
                     "session %s: claude process died mid-turn — resuming with history intact" % sess.name,

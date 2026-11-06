@@ -2288,12 +2288,14 @@ body.chat-theme-yatharth .meta-btn.mode-risky, body.chat-theme-yatharth .meta-it
   display: flex; align-items: center; gap: 8px; min-width: 0;
 }
 .turn-elapsed .fork-spot { margin-top: 0; }   /* inline: the row's own alignment rules, no extra drop */
-/* the line is as tall with its fork button as without (the button's 20px and its 3px drop): the button lands at a turn's end
-   and goes when a later turn takes the tip, and neither moves a row (round six) */
-#content .turn-elapsed { min-height: 23px; }
-/* a spot on a row that draws no "worked …" line (no clock, a notice after the work) floats in the row's bottom right corner:
-   it never takes a row of its own, so it never gives one back */
-.turn > .fork-spot { position: absolute; right: 6px; bottom: 3px; margin: 0; z-index: 2; }
+/* the button overlays the line's own height (a spot of no height, centred on the line, the button centred on it), so a line is
+   as tall with its button as without: a spot landing at a turn's end, or going when a later turn takes the tip, moves no row,
+   and a line without one is no taller than it ever was (round seven) */
+.turn-elapsed .fork-spot, .fork-line .fork-spot { height: 0; align-self: center; align-items: center; }
+.turn-elapsed .msg-fork, .fork-line .msg-fork { margin-top: 0; align-self: center; }   /* centred on the spot, not the shared button rule's foot */
+/* a turn with no clock draws no worked line: its spot gets the line's twin, with the line's box and no words */
+.fork-line { margin: 6px 0 2px; font-size: 0.72em; display: flex; align-items: center; min-width: 0; }
+.fork-line::before { content: "\200b"; width: 0; }   /* the line's height: one line of its text, as the worked line's */
 /* the button must not inherit the footer's 0.7 opacity ceiling — hover reveal still governs via .msg-fork */
 .turn-elapsed .msg-fork { font-size: 11px; }
 /* tool success = a BLUE disc with a white ✓ — the romp "check" blue used everywhere else (the feed,

@@ -568,11 +568,12 @@ class KernelFolds(Base):
         head = [{"t": TS0, "state": "working"}, {"t": TS0 + 5, "awaiting": True, "state": "waiting"},
                 {"t": TS0 + 6, "machineCut": "restart", "state": "idle"},
                 {"t": TS0 + 7, "retriesRecovered": True, "retries": 2},
-                {"t": TS0 + 7.5, "spendCut": {"rate": "1,240", "ceiling": "1,000"}}]
+                {"t": TS0 + 7.5, "spendCut": {"rate": "1,240", "ceiling": "1,000"}}, {"t": TS0 + 7.7, "turnCut": "crash-loop"}]
         rest = [{"t": TS0 + 8, "state": "working"}, {"t": TS0 + 8.25, "spendCut": {"rate": "2,050", "ceiling": "1,000"}},
                 {"t": TS0 + 8.5, "state": "idle", "by": "stop"},
                 {"t": TS0 + 9, "state": "retrying"}, {"t": TS0 + 9.5, "state": "retrying"},
-                {"t": TS0 + 10, "machineCut": "deploy"}, {"t": TS0 + 11, "retriesGaveUp": True, "retries": 5, "errorKind": "overloaded"}]
+                {"t": TS0 + 10, "machineCut": "deploy"}, {"t": TS0 + 11, "retriesGaveUp": True, "retries": 5, "errorKind": "overloaded"},
+                {"t": TS0 + 11.5, "turnCut": "crash-loop"}]
         return head + rest if tail else head
 
     def postal_recs(self, tail):
@@ -615,6 +616,7 @@ class KernelFolds(Base):
             "machineCut": km._last_machine_cut(SID),
             "spendCuts": km._spend_cuts(SID),
             "lastState": km._last_state(SID),
+            "turnEnd": km._turn_end(SID),
             "lastNaturalState": km._last_natural_state(SID),
             "retryingSince": km._fold_records(km._retrying_since_cache, jd.STATE / "states" / (SID + ".jsonl"), lambda: None,
                                               km._retrying_since_step, ckpt="retryingSince"),
@@ -641,7 +643,7 @@ class KernelFolds(Base):
             names |= set(self.doc(p)["folds"])
         ALL_NAMES = {"sessionMeta", "bgRunning", "bgAll", "bgJudge", "agentLaunches", "agentGist", "agentLaunchIds", "statesOverlay",
                      "stateIntervals", "statesNotes", "machineCut", "queueLedger", "wakeTail2", "postalLog", "lastState",
-                     "lastNaturalState", "retryingSince", "nudgeTimes2", "parkedHandoffs", "spendCuts"}
+                     "lastNaturalState", "retryingSince", "nudgeTimes2", "parkedHandoffs", "spendCuts", "turnEnd"}
         self.assertEqual(names, ALL_NAMES, "every kernel fold this test drives left its state in the checkpoint")
         ksrc = open(os.path.join(BIN, "romp-kernel")).read(); jsrc = open(os.path.join(BIN, "romp-judge")).read()
         import re as _re

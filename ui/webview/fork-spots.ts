@@ -6,9 +6,10 @@
 // a note (a summary before a cleanup tool) still anchors its spot. While the turn is OPEN nothing in it anchors a spot and there
 // is no tip spot at all: each new note, and each text block an older model writes between its tools, would otherwise take the
 // reply over and the spot would hop from row to row. The event the plan keys on is the turn's end as the kernel reads it, the
-// session status's `turnOpen` (build_session's _session_working over the CLI's own turns, the reading the running-call stamp
-// takes), never the status chip: a permission prompt, a question, a retry, an interrupt in flight and a restart's reattach all
-// move the chip off "working" while the turn goes on. The runs of the turns before it keep their spots, cut at the prompts that
+// session status's `turnOpen` (the kernel's _turn_open: the turn ends at the CLI's result frame, as the states log files it, or
+// when the backend gives a cut turn up; the reading the running-call stamp takes), never the status chip: a permission prompt, a
+// question, a retry, an interrupt in flight and a restart's reattach all move the chip off "working" while the turn goes on, and
+// a Stop hook's block and a compaction mid-turn outlive the transcript's own end_turn. The runs of the turns before it keep their spots, cut at the prompts that
 // followed them, so no spot moves while the turn is open; at its end the tip spot lands under the reply.
 import { isProseShape, segmentReplies } from "./compact";
 

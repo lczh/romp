@@ -388,7 +388,10 @@ class ClaudeSDKClient:
                     res = await self.options.can_use_tool(ask.get("tool") or "AskUserQuestion", dict(ask.get("input") or {}), _ToolContext())
                     outcomes.append(_ask_outcome(ask.get("tool") or "AskUserQuestion", res))
             if stopped:
-                # the CLI's own stop record ends the turn (event_model is_interrupt_record), then its result
+                # the CLI's own stop record ends the turn (event_model is_interrupt_record), then its result. It continues
+                # the chain from the file's last record: a lab may write the held turn's records itself while it holds (the
+                # narration steps lab plays the turn's replies, a Stop hook's block and a compaction), as the CLI would have
+                self._parent = _leaf(self._cwd, self._fsid) or self._parent
                 i_uuid = "u-" + _uuid.uuid4().hex[:10]
                 _append(path, {"type": "user", "timestamp": _iso(int(time.time())), "uuid": i_uuid, "parentUuid": self._parent,
                                "sessionId": self._fsid,

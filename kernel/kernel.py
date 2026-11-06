@@ -15264,6 +15264,62 @@ def _last_state(sid):
 
 
 _last_state_cache = {}            # states path -> fold cursor of _last_state
+_turn_end_cache = {}              # states path -> fold cursor of _turn_end
+
+# The states a turn is still OPEN in, as the SDK backend files them in states/<sid>.jsonl: a turn being fed and streamed
+# ("working"), waiting on the user mid-turn ("permission", "picker"), waiting out an API error ("retrying"), compacting.
+# A turn ENDS at the CLI's result frame, which the backend files as "waiting" (_settle; the abandon path files the same),
+# or at an interrupt's "idle". Neither the transcript's end_turn nor its compaction boundary ends one: a Stop hook that
+# blocks continues the turn after the reply's end_turn, and a compaction mid-turn opens a parse turn of its own, ended
+# until the continuation's first record.
+_TURN_OPEN_STATES = ("working", "permission", "picker", "retrying", "compacting")
+
+
+def _turn_end_step(state, rec):
+    """The states log folded to (the latest state, its stamp, cut): `cut` is a turnCut record after that state, the backend's
+    word that it gave the turn up (sdk_backend.append_turn_cut). File order decides, never the stamps: a turnCut carries a
+    float stamp and a state an int one, so a turn reopened in the same second would read as cut by time."""
+    st = rec.get("state")
+    if isinstance(st, str):
+        return (st, rec.get("t", state[1]), False)
+    if rec.get("turnCut"):
+        return (state[0], state[1], True)
+    return state
+
+
+def _turn_end(key):
+    """(state, t, cut) of states/<key>.jsonl (_turn_end_step); ("", 0, False) with no state record."""
+    return _fold_records(_turn_end_cache, jd.STATE / "states" / ("%s.jsonl" % key), lambda: ("", 0, False), _turn_end_step,
+                         ckpt="turnEnd")
+
+
+def _turn_open(sid, turns, tm=None, anchor=""):
+    """Whether the session's turn is OPEN now, keyed on the event that ENDS a turn: the CLI's result frame, as the SDK backend
+    files it in the states log ("waiting"; "idle" for an interrupt), or the backend giving a cut turn up (turnCut: its CLI kept
+    dying and the heal declined, _heal_cut_session). The chat's status carries it as `turnOpen` (the fork spots and the "worked"
+    line wait for it) and the running-call stamp reads it (_stamp_running_tools).
+      - The log has no state record (a Codex session, a transcript romp's backend never ran): the transcript decides
+        (_session_working), as before.
+      - The log's latest state ended the turn, or a turnCut follows it: closed.
+      - The log has the turn open and so does the transcript: open.
+      - The log has it open and the transcript has closed it (a reply's end_turn before a Stop hook's block and its
+        continuation; a compaction's boundary before the continuation's first record): the live row decides. A running
+        session reports its own turn ("working" while its result has not come; a dormant row never reports an open state), so
+        a CLI running the turn keeps it open, and a log whose result write was lost reads closed.
+    `anchor`: a lane whose transcript forked (a resume, a /clear) keeps writing the log under its anchor; the newer of the two
+    logs answers (the chat signature stats both)."""
+    st, t, cut = _turn_end(sid)
+    if anchor and anchor != sid:
+        a = _turn_end(anchor)
+        if a[0] and (not st or (a[1] or 0) > (t or 0)):
+            st, t, cut = a
+    if not st:
+        return _session_working(turns)
+    if cut or st not in _TURN_OPEN_STATES:
+        return False
+    if _session_working(turns):
+        return True
+    return (tm or {}).get("state") in _TURN_OPEN_STATES
 _last_natural_state_cache = {}    # states path -> fold cursor of _last_natural_state
 _retrying_since_cache = {}        # states path -> fold cursor of the retrying-stretch start
 
@@ -38508,7 +38564,8 @@ def _stamp_running_tools(tail, stop_iso, turn_open):
     """Post-pass over one build's TAIL events (2026-10-08): every tool event still waiting for its result (no
     tool_result paired, no error, not a background agent the bg pass already called running) is stamped `running`:
     True when the session's turn is OPEN now and the call came after the session last stopped, False otherwise.
-    "Open" is the event model's own answer (_session_working over the parse, the signal every working dot reads), and
+    "Open" is _turn_open's answer (the CLI's result frame in the states log ends a turn, a given-up cut turn too; with no log,
+    the event model's own _session_working over the parse; 2026-11-06), and
     "stopped" its stop records (_last_stop_iso: a turn's end_turn, a result's "waiting", an interrupt's "idle"), never
     the backend row's state: a session parked on a permission prompt reports the prompt as its state while its turn,
     and the call's pending result, go on, and a dormant row reads "waiting" for a few seconds after a kernel restart
@@ -49219,10 +49276,13 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
             # (askAnswerFilled) already handled every record that has one — never run both.
             _ask_fill_chosen(ev["askAnswer"], ev.get("output") or "")
     _real_turns = [_t for _t in (_turns or ()) if not _t.get("echoTurn")]   # a placed stale echo is no turn the CLI runs (_place_stale_echoes)
-    # the turn is OPEN (the event model's answer, _session_working over the CLI's own turns): the running-call stamp reads it, and
-    # so does the client's fork-spot plan (status.turnOpen), which holds every reply anchor still until the turn actually
-    # ends, never on the status chip (a permission prompt, a question, a retry or a restart move the chip mid-turn)
-    _turn_is_open = _session_working(_real_turns)
+    # the turn is OPEN until the event that ends it (_turn_open: the CLI's result frame in the states log, or the backend giving
+    # a cut turn up): the running-call stamp reads it, and so does the client's fork-spot plan and "worked" line (status.turnOpen),
+    # never the status chip, which a permission prompt, a question, a retry or a restart move mid-turn, nor the transcript's
+    # end_turn, which a Stop hook's block or a compaction mid-turn outlives. An episode render (path_override) and a subagent's
+    # transcript (sidechain) read their own turns: the session's log is the CURRENT conversation's main turn
+    _turn_is_open = (_session_working(_real_turns) if (path_override or sidechain) else
+                     _turn_open(sid, _real_turns, tm0, str(sess.get("anchor") or "")))
     _stamp_running_tools(events, _last_stop_iso(_real_turns), _turn_is_open)
     events = _prefix + events                           # the sealed prefix (same dicts) + this build's tail
     _pref_ids = {id(_e) for _e in _prefix}              # the sealed dicts: read by the uuid pass below, never written
@@ -49767,10 +49827,11 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         # error (auto-retrying → the tab renders amber/retrying, not alarm-red). chip stays "blocked" either way
         # so the client auto-retry still fires + recovers the transient ones (the user 2026-06-29).
         status = {"state": chip, "sinceEpoch": since_ms, "faded": faded,
-                  # whether the session's turn is OPEN, by the event model (the running-call stamp's own reading,
-                  # _turn_is_open above): unlike the chip it holds through a permission prompt, a question, a retry,
-                  # an interrupt in flight and a kernel restart's reattach, and turns false only when the turn ends
-                  # (2026-11-06; the client's fork spots key on it)
+                  # whether the session's turn is OPEN (_turn_open, the running-call stamp's own reading, _turn_is_open
+                  # above): unlike the chip it holds through a permission prompt, a question, a retry, an interrupt in
+                  # flight, a kernel restart's reattach, a Stop hook's block and a compaction mid-turn, and turns false at
+                  # the CLI's result frame, an interrupt's stop or a cut turn given up (2026-11-06; the client's fork
+                  # spots and "worked" line key on it)
                   "turnOpen": bool(_turn_is_open),
                   # WHAT the session is awaiting, beside the chip (the user 2026-08-13: the chat pane said
                   # "Awaiting" with the reason nowhere in sight — the feed pill and timeline hover had it,
