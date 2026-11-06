@@ -66,9 +66,6 @@ async function inChat(t: any, body: (page: any, errors: string[]) => Promise<voi
       if (u.pathname === "/dist/render.js") return route.fulfill({ status: 200, contentType: "application/javascript", body: renderJs });
       return route.fulfill({ status: 404, body: "" });
     });
-    // these fixtures quote replies around a tool group: look A keeps a reply before the run a reply (looks C and C2, the
-    // progress-note drafts of 2026-11-06, fold prose before a run's tools into the run, which is not this file's subject)
-    await page.addInitScript(() => { try { localStorage.setItem("romp:narration-look", "A"); } catch (e) { /* no storage */ } });
     await page.goto("http://romp.test/chat");
     await page.evaluate(([sid, evs]: [string, object[]]) => {
       window.postMessage({ type: "session", id: sid, name: "web", cwd: "/tmp/TESTHOST/notes-api", status: { state: "idle", sinceEpoch: null },

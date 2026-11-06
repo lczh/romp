@@ -402,27 +402,32 @@ function optE(seq: string[]) {
 const att = (...indices: number[]) => ({ kind: "toolgroup", indices, attached: true });
 const one = (index: number) => ({ kind: "event", index });
 
-test("option E: every prose row stays, and the tools after each fold into its trailing line, one call or many", () => {
-  // four note/tool pairs: four notes, four lines under them, the reply; nothing the session said is folded
+const ae = (index: number) => ({ kind: "event", index, attached: true });
+
+test("option E: every prose row stays; the calls after each fold into its line, and ONE call is its own row tucked under it", () => {
+  // four note/tool pairs: four notes, a call (or a line of calls) under each, the reply; nothing the session said is folded
   assert.deepEqual(optE(["U", "N", "T", "N", "T", "T", "N", "T", "N", "T", "R"]),
-    [one(0), one(1), att(2), one(3), att(4, 5), one(6), att(7), one(8), att(9), one(10)]);
-  // tools before a turn's first prose fold as they always did: a run of two, a lone one inline
-  assert.deepEqual(optE(["U", "T", "T", "N", "T"]), [one(0), { kind: "toolgroup", indices: [1, 2] }, one(3), att(4)]);
+    [one(0), one(1), ae(2), one(3), att(4, 5), one(6), ae(7), one(8), ae(9), one(10)]);
+  // tools before a turn's first prose fold as they always did: a run of two, a lone one inline, neither tucked under anything
+  assert.deepEqual(optE(["U", "T", "T", "N", "T"]), [one(0), { kind: "toolgroup", indices: [1, 2] }, one(3), ae(4)]);
   assert.deepEqual(optE(["U", "T", "N"]), [one(0), one(1), one(2)]);
 });
 
 test("option E: a question mid-turn, the answer to a message and a summary before a cleanup tool are all rows of their own", () => {
-  // a question the session asks between tools stays a row, with the tools after it on its line
-  assert.deepEqual(optE(["U", "N", "T", "R", "T", "N", "T", "R"]), [one(0), one(1), att(2), one(3), att(4), one(5), att(6), one(7)]);
+  assert.deepEqual(optE(["U", "N", "T", "R", "T", "N", "T", "R"]), [one(0), one(1), ae(2), one(3), ae(4), one(5), ae(6), one(7)]);
   // a message delivered mid-turn: no rule needed, the answer is a row like every prose row
-  assert.deepEqual(optE(["T", "S", "R", "T", "N", "T"]), [one(0), one(1), one(2), att(3), one(4), att(5)]);
-  // the turn's real answer, then a cleanup tool: the answer stays the reply, the cleanup its trailing line
-  assert.deepEqual(optE(["U", "N", "T", "R", "T"]), [one(0), one(1), att(2), one(3), att(4)]);
+  assert.deepEqual(optE(["T", "S", "R", "T", "N", "T"]), [one(0), one(1), one(2), ae(3), one(4), ae(5)]);
+  // the turn's real answer, then a cleanup tool: the answer stays the reply, the cleanup its row under it
+  assert.deepEqual(optE(["U", "N", "T", "R", "T", "T"]), [one(0), one(1), ae(2), one(3), att(4, 5)]);
 });
 
-test("option E: an Agent card stays its own row and the tools after it attach to it; thoughts ride the tools they precede", () => {
+test("option E: an Agent card stays its own row and the tools after it attach to it; Thought rows stay rows, as before", () => {
   assert.deepEqual(optE(["U", "N", "A", "T", "T", "N"]), [one(0), one(1), one(2), att(3, 4), one(5)]);
-  assert.deepEqual(optE(["U", "N", "th", "T", "N", "th", "R"]), [one(0), one(1), att(2, 3), one(4), { kind: "thought", indices: [5] }, one(6)]);
+  // a thought right after a prose row keeps its Thought row; the calls after it still attach
+  assert.deepEqual(optE(["U", "N", "th", "T", "N", "th", "R"]), [one(0), one(1), { kind: "thought", indices: [2] }, ae(3), one(4), { kind: "thought", indices: [5] }, one(6)]);
+  // a thought after a call inside a line rides the line, as in any run; after a lone call, a Thought row of its own
+  assert.deepEqual(optE(["U", "N", "T", "th", "T", "R"]), [one(0), one(1), att(2, 3, 4), one(5)]);
+  assert.deepEqual(optE(["U", "N", "T", "th", "R"]), [one(0), one(1), ae(2), { kind: "thought", indices: [3] }, one(4)]);
   // an AskUserQuestion is first-class as ever, and a notice ends the stretch
   assert.deepEqual(optE(["N", "Q", "T", "N", "K", "T", "T"]), [one(0), one(1), one(2), one(3), one(4), { kind: "toolgroup", indices: [5, 6] }]);
 });

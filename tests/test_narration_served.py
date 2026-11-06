@@ -98,6 +98,10 @@ X_PROMPT_6 = "Show me how the search query looks now."
 X_CODE_NOTE = ("Here is the query as it stands:\n\n```sql\nselect n.* from notes n\njoin note_tags t on t.note_id = n.id\n"
                "where lower(n.title) = lower(?)\n  and n.archived = 0\norder by n.id\nlimit ?\n```\n\nRunning it on the sample "
                "data to confirm the plan uses the index.")
+X_PROMPT_7 = "Run the migration and the e2e tests."
+X_STATE_NOTES = ["Running the migration first.",
+                 "The column is there from an earlier run, so I'm fixing the two routes instead and linting.",
+                 "Starting the e2e suite; it takes a few minutes."]
 X_REPLY_6 = "The query joins the tags, matches the title without case and skips archived notes; its plan uses the `lower(title)` index."
 R_REPLY_2 = ("The limit test is in: the 31st create in a minute gets 429 Too Many Requests with a Retry-After header. I switched "
              "the middleware from 403 to 429 as you asked, and gave the search test its own key. All tests pass.")
@@ -145,11 +149,16 @@ class _Transcript:
             if i in mark:
                 self.marks.append(u)
 
-    def tool(self, name, inp, out, thinks=(), tokens=0, mark=()):
+    def tool(self, name, inp, out, thinks=(), tokens=0, mark=(), error=False, pending=False):
         self.tc += 1
         tid = "toolu_%s_%02d" % (self.prefix[:8], self.tc)
         self.message(list(thinks) + [{"type": "tool_use", "id": tid, "name": name, "input": inp}], tokens, mark=mark)
-        self.add({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": out}]},
+        if pending:                                   # no result yet: the call is still running
+            return
+        res = {"type": "tool_result", "tool_use_id": tid, "content": out}
+        if error:
+            res["is_error"] = True
+        self.add({"type": "user", "message": {"role": "user", "content": [res]},
                   "toolUseResult": {"stdout": out, "stderr": "", "interrupted": False, "isImage": False}})
 
     def note_tool(self, note, name, inp, out="ok"):   # the Opus 5.5 shape: a note, then the tool it introduces
@@ -263,11 +272,22 @@ def _realistic2(cwd, base):
     tr.note_tool("The export script is unused since the API grew `/notes/export`.", "Bash",
                  {"command": "grep -rn export.sh .", "description": "Searched for the script"}, "no matches")
     tr.text_tool(X_SUMMARY, "Bash", {"command": "rm -rf tmp/export-cache", "description": "Removed the export cache"}, "")
+    tr.tool("Bash", {"command": "git status --short", "description": "Checked the tree"}, "")
     # a long note with a code block before two tools
     tr.user(X_PROMPT_6)
     tr.note_tool(X_CODE_NOTE, "Bash", {"command": "sqlite3 notes.db < q.sql", "description": "Ran the query"}, "3 rows")
     tr.tool("Bash", {"command": "sqlite3 notes.db 'explain query plan ...'", "description": "Read the query plan"}, "USING INDEX")
     tr.reply(X_REPLY_6)
+    # the tools' states: a failed command after a note, a line of three calls with one failure, a command still running
+    tr.user(X_PROMPT_7)
+    tr.tool("Bash", {"command": "npm run migrate", "description": "Ran the migration"},
+            "Error: column archived already exists\n    at migrate (db/migrate.js:12)", [think(X_STATE_NOTES[0])], 300, mark=(0,), error=True)
+    tr.tool("Edit", {"file_path": cwd + "/src/routes/notes.ts", "old_string": "a", "new_string": "b"}, "edited",
+            [think(X_STATE_NOTES[1])], 300, mark=(0,))
+    tr.tool("Edit", {"file_path": cwd + "/src/routes/search.ts", "old_string": "zz", "new_string": "b"},
+            "String to replace not found in file.", error=True)
+    tr.tool("Bash", {"command": "npm run lint", "description": "Ran the linter"}, "clean")
+    tr.tool("Bash", {"command": "npm run e2e", "description": "Ran the e2e tests"}, "", [think(X_STATE_NOTES[2])], 300, mark=(0,), pending=True)
     return tr.recs, tr.marks
 
 
@@ -300,7 +320,7 @@ const open = async (theme, compact, look, sid, wait, h) => {
     throw new Error("open(" + sid + "): " + JSON.stringify(wait) + " never showed: " + JSON.stringify(st));
   }
   await page.addStyleTag({ content: "#content .turn-apierror { display: none !important; }" });   // the lab kernel runs no SDK backend: its notice is not this test's
-  await page.mouse.move(4, (h || 1000) - 140);   // off the tab strip: a tab's tooltip names the machine's login, never a shot's
+  await page.mouse.move(700, (h || 1000) - 24);   // over the composer, off the tab strip: a tab's tooltip names the machine's login, never a shot's
   await painted(page);
   return page;
 };
@@ -316,13 +336,17 @@ const rows = (page) => page.evaluate(() => Array.from(document.querySelectorAll(
   const capLh = cap ? parseFloat(getComputedStyle(cap).lineHeight) || 18 : 0;
   return { kind, narration: c.includes("turn-narration"), opaque: !!t.querySelector(".thinking.encrypted"), fork: !!t.querySelector(".fork-spot"),
            child: c.includes("tg-child"), text: words(body), caption: words(cap), head: words(t.querySelector(".toolgroup-head")),
-           attached: c.includes("toolgroup-attached"), foot: foot ? words(foot) : "", capLines: cap ? Math.round(cap.getBoundingClientRect().height / capLh) : 0,
+           attached: c.includes("toolgroup-attached") || c.includes("tool-attached"), err: c.includes("tool-err") || !!t.querySelector(":scope > .dot.err"),
+           dotShown: (() => { const d = t.querySelector(":scope > .dot"); return !!d && getComputedStyle(d).visibility === "visible"; })(),
+           working: !!t.querySelector(":scope > .dot.working"), tool: words(t.querySelector(".tool-head")), line: words(t.querySelector(".toolgroup-line")),
+           file: words(t.querySelector(".tool-head .tool-file, .tool-head a")), foot: foot ? words(foot) : "", capLines: cap ? Math.round(cap.getBoundingClientRect().height / capLh) : 0,
            capClamp: cap ? getComputedStyle(cap).webkitLineClamp : "" };
 }));
-const shot = async (page, dir, name, prompt) => {
+const shot = async (page, dir, name, prompt, hover) => {
   if (!dir) return;
   fs.mkdirSync(dir, { recursive: true });
   await page.evaluate((p) => { const t = Array.from(document.querySelectorAll("#content .turn-user")).find((n) => (n.textContent || "").includes(p)); if (t) t.scrollIntoView({ block: "start" }); }, prompt);
+  if (hover) await page.locator(hover).first().hover(); else await page.mouse.move(700, page.viewportSize().height - 24);   // the composer: never the tab strip
   await painted(page);
   await page.screenshot({ path: dir + "/" + name + ".png" });
 };
@@ -365,9 +389,13 @@ for (const look of cfg.before ? [""] : ["A", "B", "C"]) {
   }
 }
 // THE MIXED TURNS (tests, compact): A, E (the default) and C2, dark and light, the realistic turns and the hard cases (a question
-// mid-turn, a summary before a cleanup tool, a long note with code) as two shots each; C2 with its first run opened and its
-// caption clicked; E with one tool line opened; C for its rows alone
+// mid-turn, a summary before cleanup tools, a long note with code) as two shots each; C2 with its first run opened by its
+// caption; C for its rows alone. E, the default, is probed further, and shot again into realistic4: the tools' states (a failed
+// command, a line with one failure, a command still running and its timer), a fork spot revealed by a hover, a line opened
 const dir3 = cfg.shots3 || (cfg.shots && cfg.shots + "/realistic3");
+const dir4 = cfg.shots4 || (cfg.shots && cfg.shots + "/realistic4");
+const lineAfter = (p, text) => p.locator("#content .turn-assistant", { hasText: text }).first()
+  .locator("xpath=following-sibling::div[contains(concat(' ', normalize-space(@class), ' '), ' turn ')][1]");
 for (const look of cfg.before ? [""] : ["A", "E", "C2", "C"]) {
   for (const [theme, tname] of [["yatharth", "dark"], ["yatharth-light", "light"]]) {
     if (look === "C" && tname === "light") continue;
@@ -384,15 +412,42 @@ for (const look of cfg.before ? [""] : ["A", "E", "C2", "C"]) {
       await painted(p);
       out.mixedC2Open = await rows(p);
     }
-    if (look === "E" && tname === "dark") {
-      // the tool line under the question opens in place
-      const q = p.locator("#content .turn-assistant", { hasText: cfg.question.slice(0, 40) }).first();
-      const line = q.locator("xpath=following-sibling::div[contains(concat(' ', normalize-space(@class), ' '), ' turn-toolgroup ')][1]").locator(".toolgroup-line");
-      await line.click();
+    if (look === "E") {
+      await shot(p, dir4, "mixed-E-" + tname, cfg.xPrompt);
+      await shot(p, dir4, "onecall-E-" + tname, cfg.xPrompt4);
+      await shot(p, dir4, "states-E-" + tname, cfg.xPrompt7);
+      if (tname === "dark") {
+        // the running command's time ticks without a rebuild
+        const tick = () => p.evaluate(() => { const ts = Array.from(document.querySelectorAll("#content .tool-attached .tool-elapsed, #content .toolgroup-attached .tool-elapsed")).filter((n) => n.getClientRects().length > 0); return ts.length ? ts[ts.length - 1].textContent : null; });
+        out.timer0 = await tick();
+        await p.waitForTimeout(2200);
+        out.timer1 = await tick();
+        // a hover on the summary reveals the fork button riding its line
+        await lineAfter(p, cfg.summary.slice(0, 30)).scrollIntoViewIfNeeded();
+        await p.locator("#content .turn-assistant", { hasText: cfg.summary.slice(0, 30) }).first().hover();
+        await painted(p);
+        out.forkHover = await p.evaluate((t) => {
+          const prose = Array.from(document.querySelectorAll("#content .turn-assistant")).find((n) => (n.textContent || "").includes(t));
+          const line = prose && prose.nextElementSibling;
+          const b = line && line.querySelector(".fork-spot .msg-fork");
+          return { onLine: !!b, inProse: !!(prose && prose.querySelector(".fork-spot")), opacity: b ? parseFloat(getComputedStyle(b).opacity) : null };
+        }, cfg.summary.slice(0, 30));
+      }
+      // the summary's line opened: its calls in place, the fork spot below them, shown by a hover on the line's last call
+      await lineAfter(p, cfg.summary.slice(0, 30)).locator(".toolgroup-line").click();
       await p.waitForFunction(() => !!document.querySelector("#content .tg-child"), null, { timeout: 10000 });
       await painted(p);
-      out.mixedEOpen = await rows(p);
-      await shot(p, dir3, "cases-E-dark-opened", cfg.xPrompt4);
+      if (tname === "dark") {
+        out.mixedEOpen = await rows(p);
+        out.openSpot = await p.evaluate((t) => {
+          const prose = Array.from(document.querySelectorAll("#content .turn-assistant")).find((n) => (n.textContent || "").includes(t));
+          const head = prose && prose.nextElementSibling;
+          let last = head; for (let n = head && head.nextElementSibling; n && n.classList.contains("tg-child"); n = n.nextElementSibling) last = n;
+          return { inHead: !!(head && head.querySelector(".fork-spot")), inLast: !!(last && last !== head && last.querySelector(".fork-spot")),
+                   lastIsCall: !!(last && last.classList.contains("tg-last")) };
+        }, cfg.summary.slice(0, 30));
+      }
+      await shot(p, dir4, "opened-E-" + tname, cfg.xPrompt5, "#content .tg-last");
     }
     await p.close();
   }
@@ -496,6 +551,8 @@ class ServedNarration(unittest.TestCase):
                        "rPrompt": R_PROMPT_1, "rPrompt2": R_PROMPT_2, "rReplyStart": R_REPLY_2[:40], "landFlag": flag,
                        "tests": SID_TESTS, "xPrompt": X_PROMPT_1, "xReplyStart": X_REPLY_6.replace("`", "")[:30], "xPrompt4": X_PROMPT_4,
                        "shots3": os.environ.get("NARRATION_SHOTS_REALISTIC3", ""), "question": X_QUESTION,
+                       "shots4": os.environ.get("NARRATION_SHOTS_REALISTIC4", ""), "summary": X_SUMMARY.replace("`", ""),
+                       "xPrompt5": X_PROMPT_5, "xPrompt7": X_PROMPT_7,
                        "resultFile": os.path.join(self.lab, "result.json"),
                        "shots2": os.environ.get("NARRATION_SHOTS_REALISTIC2", ""),
                        "shots": os.environ.get("NARRATION_SHOTS", ""), "before": bool(self.before)}, f)
@@ -644,25 +701,46 @@ class ServedNarration(unittest.TestCase):
         self.assertEqual([("prose" if x["kind"] == "assistant" else "line" if x["attached"] else x["kind"]) for x in rows[i1 + 1:i1 + 10]],
                          ["prose", "line"] * 4 + ["prose"], "turn one: %r" % rows[i1:i1 + 10])
         self.assertEqual(rows[i1 + 9]["text"][:30], X_REPLY_1.replace("`", "")[:30], "…the last of them the reply")
-        # the question mid-turn is a row, the tools after it its line; the summary before the cleanup tool, the same
+        # the question mid-turn is a row; ONE call after it is that call's own row, tucked under it: its label and file link
         q = next(k for k, x in enumerate(rows) if x["kind"] == "assistant" and x["text"].startswith(X_QUESTION[:30]))
-        self.assertTrue(rows[q + 1]["attached"], "the tool after the question is its line: %r" % rows[q + 1])
+        one = rows[q + 1]
+        self.assertTrue(one["attached"] and one["kind"] == "tool", "the call after the question is its row: %r" % one)
+        self.assertTrue(one["tool"].startswith("Edited") and "routes/search.ts" in one["file"], "its own label and link: %r" % one)
+        # the summary before the cleanup tools: a row, the two calls its line
         sm = next(k for k, x in enumerate(rows) if x["kind"] == "assistant" and key(x["text"]) == key(X_SUMMARY))
-        self.assertTrue(rows[sm + 1]["attached"] and rows[sm + 1]["head"].startswith("Ran a command"), "the cleanup: %r" % rows[sm + 1])
+        self.assertTrue(rows[sm + 1]["attached"] and rows[sm + 1]["line"].startswith("▸ Ran 2 commands"), "the cleanup: %r" % rows[sm + 1])
         # the stretch before a message sent mid-turn keeps its "worked" line, under the tool line it ends on
         for mid in (X_MID_2, X_MID_3):
             m = next(k for k, x in enumerate(rows) if x["kind"] == "user" and mid in x["text"])
             self.assertTrue(rows[m - 1]["attached"] and rows[m - 1]["foot"], "before %r: %r" % (mid, rows[m - 1]))
-        # a fork spot below a response sits under its tool line, never between the response and its line
+        # a fork spot below a response sits under its tool line, never between the response and its line, and never twice
         for k in range(len(rows) - 1):
             if rows[k]["kind"] == "assistant" and rows[k + 1]["attached"]:
                 self.assertFalse(rows[k]["fork"], "no fork row between a response and its tool line: %r" % rows[k])
-        self.assertTrue(any(x["attached"] and x["fork"] for x in rows), "the spot rides the tool line instead")
-        # the line under the question opened: its call in place, right under it
+        self.assertTrue(rows[sm + 1]["fork"], "the summary's spot rides its line")
+        # …and a hover on the response shows it, as on every other spot
+        fh = r["forkHover"]
+        self.assertEqual((fh["onLine"], fh["inProse"]), (True, False), "one spot, on the line: %r" % fh)
+        self.assertGreater(fh["opacity"], 0.5, "the hover reveals the button on the line: %r" % fh)
+        # the line opened: its calls in place under its head, and the spot below the last of them, not in the head
+        self.assertEqual(r["openSpot"], {"inHead": False, "inLast": True, "lastIsCall": True}, "the open line's spot: %r" % r["openSpot"])
         op = [x for x in r["mixedEOpen"] if x["kind"] != "other"]
-        q2 = next(k for k, x in enumerate(op) if x["kind"] == "assistant" and x["text"].startswith(X_QUESTION[:30]))
-        self.assertTrue(op[q2 + 1]["attached"] and not op[q2 + 1]["head"], "the open line's head: %r" % op[q2 + 1])
-        self.assertEqual((op[q2 + 2]["kind"], op[q2 + 2]["child"]), ("tool", True), "its call, in place: %r" % op[q2 + 2])
+        s2 = next(k for k, x in enumerate(op) if x["kind"] == "assistant" and key(x["text"]) == key(X_SUMMARY))
+        self.assertTrue(op[s2 + 1]["attached"] and not op[s2 + 1]["head"], "the open line's head: %r" % op[s2 + 1])
+        self.assertEqual([(x["kind"], x["child"]) for x in op[s2 + 2:s2 + 4]], [("tool", True)] * 2, "its calls, in place")
+        # the tools' states, as A's rows say them
+        i7 = next(k for k, x in enumerate(rows) if x["kind"] == "user" and X_PROMPT_7[:20] in x["text"])
+        failed, line, running = rows[i7 + 2], rows[i7 + 4], rows[i7 + 6]
+        self.assertTrue(failed["attached"] and failed["err"] and failed["dotShown"], "a failed call: its row, red, its dot shown: %r" % failed)
+        self.assertTrue(failed["tool"].startswith("Ran the migration") and "error" in failed["tool"], "…labelled, and saying error: %r" % failed)
+        self.assertTrue(line["attached"] and "1 failed" in line["line"] and line["err"] and line["dotShown"],
+                        "a line of three calls with one failure says so, red, its dot shown: %r" % line)
+        self.assertTrue(running["attached"] and running["working"] and running["dotShown"] and "running" in running["tool"],
+                        "a call still running: the working dot and running…: %r" % running)
+        self.assertRegex(r["timer0"] or "", r"\d", "its elapsed time shows")
+        self.assertNotEqual(r["timer0"], r["timer1"], "…and ticks: %r -> %r" % (r["timer0"], r["timer1"]))
+        # the turn still runs, so its tip spot waits for the turn to end: no spot under its newest note
+        self.assertFalse(any(x["fork"] for x in rows[i7:]), "no tip spot while the turn runs: %r" % rows[i7:])
 
     def test_look_c_folds_the_notes_between_tools_into_the_run_and_keeps_the_answer_to_a_midturn_message_out(self):
         r = self.result()

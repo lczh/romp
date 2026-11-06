@@ -20,10 +20,12 @@
 // API errors, compaction/clear boundaries, asks, to-dos, dividers and every bubble stay standalone.
 // TOOLS UNDER PROSE (option E, the default, 2026-11-06, compact mode only, on the caller's `notes` with `attach`): every
 // assistant prose row, a reply or a note, text or thinking, stays a row of its own, whole; nothing the session says is folded or
-// clipped. The TOOLS give way instead: the stretch of tool calls (and thoughts) after a prose row, one call or many, folds into
-// one `attached` run drawn as a dim trailing line under that row, which opens to the calls in place. Tools before a turn's first
-// prose fold as they always did. A tool the caller keeps (`keep`: an Agent card) stays its own row, and the tools after it attach
-// to it. There is nothing to answer around, so the mid-turn rule below has no part in E.
+// clipped. The TOOLS give way instead: the stretch of tool calls after a prose row folds into one `attached` run drawn as a dim
+// trailing line under that row, which opens to the calls in place; a stretch of ONE call is that call's own row, `attached`,
+// so it keeps its own label and file link. A Thought row stays a row of its own as before (one after a tool in the stretch
+// rides the run, as in any run). Tools before a turn's first prose fold as they always did. A tool the caller keeps (`keep`:
+// an Agent card) stays its own row, and the tools after it attach to it. There is nothing to answer around, so the mid-turn
+// rule below has no part in E.
 // PROSE IN A RUN (options C and C2, 2026-11-06, kept for comparison, compact mode only, on the caller's `notes`): Opus 5.5 writes a note before
 // most tool calls, so tool, note, tool, note… would otherwise break every run into single tools. The caller says which
 // assistant rows are NOTES: under C the progress notes (thinking blocks the CLI listed), under C2 every assistant prose row.
@@ -57,7 +59,7 @@ export function isNoticeShape(ev: Parameters<typeof isFoldableNoticeShape>[0]): 
 }
 
 export type DisplayItem =
-  | { kind: "event"; index: number }            // a pass-through event, by its index in the source array
+  | { kind: "event"; index: number; attached?: boolean }   // a pass-through event, by its index in the source array; `attached` (look E): a lone tool call after a prose row, drawn as its own row tucked under that one
   | { kind: "toolgroup"; indices: number[]; attached?: boolean }    // a collapsed run of ≥2 consecutive tool uses (a lone tool is an "event"), with the thoughts that came after a tool in it; `attached` (look E): the tools after a prose row, any count, drawn as that row's trailing line
   | { kind: "thought"; indices: number[] }      // consecutive thoughts that open a stretch of work: ONE collapsed Thought row
   | { kind: "noticegroup"; indices: number[] }  // a collapsed run of ≥2 consecutive foldable notices (was the "retried"-only retrygroup)
@@ -79,6 +81,12 @@ export const STANDALONE_TOOLS = new Set<string>(["AskUserQuestion"]);
  *  is prose that may join a run (C: a progress note; C2: any prose; neither a segment's reply, segmentReplies); `spliced[i]`,
  *  event i is a message the person sent that was delivered mid-turn (isSplicedMessage). */
 export interface NoteRoles { note: readonly boolean[]; spliced: readonly boolean[]; attach?: boolean; keep?: readonly boolean[] }
+
+/** Assistant prose a reader reads as the session speaking: a reply or a note, never the interrupt's settle (a seam marker)
+ *  or a slash command's output. */
+export function isProseShape(ev: { kind: string; interruptSettle?: unknown; command?: unknown }): boolean {
+  return ev.kind === "assistant" && !ev.interruptSettle && !ev.command;
+}
 
 /** A message the person sent that the CLI delivered mid-turn: a user row flagged absorbed, never an injected notice (a
  *  background task's report the CLI also splices in arms nothing: it is not the person speaking). */
@@ -128,7 +136,11 @@ export function compactDisplay(kinds: readonly string[], names?: readonly (strin
   // thoughts that followed it, so they follow it as a Thought row of their own (and a note as itself).
   const flush = () => {
     if (run) {
-      if (runAttached) out.push({ kind: "toolgroup", indices: run, attached: true });
+      if (runAttached && runTools >= 2) out.push({ kind: "toolgroup", indices: run, attached: true });
+      else if (runAttached) {                       // E: one call is its own row, tucked under the prose; thoughts after it, rows
+        out.push({ kind: "event", index: run[0], attached: true });
+        if (run.length > 1) loose(run.slice(1));
+      }
       else if (runTools >= 2) out.push({ kind: "toolgroup", indices: run });
       else loose(run);
       run = null; runTools = 0; runAttached = false;
@@ -156,7 +168,6 @@ export function compactDisplay(kinds: readonly string[], names?: readonly (strin
       if (trail) { trail.push(i); continue; }       // C/C2: after a note past the run's last tool, in order with it
       if (run) { run.push(i); continue; }           // after a tool in this stretch: a member of the run
       if (pend) { pend.push(i); continue; }         // C/C2: after a note that may yet open a run
-      if (attach && afterProse) { (pend ||= []).push(i); continue; }   // E: rides the tools that follow, else stands alone
       flushNotices();
       (lead ||= []).push(i);                        // opens a stretch: its own Thought row
       continue;
@@ -190,7 +201,7 @@ export function compactDisplay(kinds: readonly string[], names?: readonly (strin
     }
     if (k === "tool" && !STANDALONE_TOOLS.has(names?.[i] ?? "")) {
       flushLead(); flushNotices();
-      if (attach && !run) { runAttached = afterProse; run = pend; pend = null; }   // E: the thoughts after the prose ride along
+      if (attach && !run) runAttached = afterProse;   // E: the stretch after a prose row is that row's line
       if (!run && pend) { run = pend; pend = null; }   // C/C2: the notes that led up to the run open it
       if (run && trail) { run.push(...trail); trail = null; }   // C/C2: the notes between two tools are the run's
       (run ||= []).push(i); runTools++;

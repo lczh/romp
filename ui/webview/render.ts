@@ -41,8 +41,9 @@ import { windowFocusedElement } from "./window-focus";   // the window's focus a
 import { markerLabel, dayContext, DayWalk, relativeLabel, relativeLines } from "./time-marker";
 import { composeStatusWidgets, folderIconNode, folderLink, type StatusRecord } from "./status-widgets";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
-import { compactDisplay, isFoldableNoticeShape, isSplicedMessage, itemAnchor, itemHolds, runCaption, runRows, segmentReplies, thoughtHasWords, thoughtOf, thoughtKey, type DisplayItem, type NoteRoles } from "./compact";
+import { compactDisplay, isFoldableNoticeShape, isProseShape, isSplicedMessage, itemAnchor, itemHolds, runCaption, runRows, segmentReplies, thoughtHasWords, thoughtOf, thoughtKey, type DisplayItem, type NoteRoles } from "./compact";
 import { anchorUuidAt } from "./anchor-uuid";
+import { forkSpotPlan } from "./fork-spots";
 import { insertRun, regionsFromRuns, gapHeight, gapTurnPx, GAPS_SHARE, HIDDEN_SHARE, heldUnitPx, LAYOUT_LIMIT_FALLBACK, pageAt, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, kernelTurnOf, measureTurnPx, type MeasuredRow, type Region, type Run, type Gap, type Ev } from "./chat-regions";
 import { senderKind, SenderKind } from "./sender-identity";
 import { railPads, TICK_PAD } from "./rail-pads";   // the comment ticks' clamped hit pads (the comment-forward rail, 2026-09-24)
@@ -11746,33 +11747,23 @@ function applyForkSpots(sid: string, v: View): void {
   const s = sessions.get(sid);
   const evs = (s?.events || []) as ChatEvent[];
   const editable = (s as any)?._editable as Set<string> | undefined;
-  const spots = new Map<string, string>();   // last-assistant-of-run uuid -> cut uuid ("" = whole conversation)
-  let run: string | null = null;             // the newest assistant uuid whose run has no cut yet
-  // a segment's last prose is its reply wherever it sits (compact.ts segmentReplies), a progress note included
-  const replies = turnReplies(evs);
-  for (let ix = 0; ix < evs.length; ix++) {
-    const ev = evs[ix];
-    // a progress note (narration) is the agent speaking mid-turn, not a response the fork cuts below: it anchors no spot,
-    // so a note before a message sent mid-turn draws no fork row under it, unless it is its segment's reply
-    if (ev.kind === "assistant" && ev.uuid && (!ev.narration || replies.has(ix))) run = ev.uuid;
-    else if (ev.kind === "user" && ev.uuid && run && !spots.has(run)
-             && senderKind(ev) === "user" && editable?.has(ev.uuid)) {
-      spots.set(run, ev.uuid);   // the FIRST prompt after the run = the cut just below its response
-    }
-  }
-  if (run && !spots.has(run)) spots.set(run, "");   // the tip run: nothing follows -> whole conversation
+  // last-response-of-run uuid -> cut uuid ("" = whole conversation): fork-spots.ts, the FIRST genuine editable prompt after the
+  // run its cut; the tip run's spot only once the turn has ended (the status leaving "working": no hop while a turn streams)
+  const working = !!s && (s.status.state === "working" || s.status.state === "compacting");
+  const spots = forkSpotPlan(evs, (ev) => senderKind(ev as { human?: boolean; romp?: boolean; tag?: string; md?: string }) === "user" && !!editable?.has(ev.uuid || ""), working);
   for (const old of Array.from(v.el.querySelectorAll(".fork-spot")) as HTMLElement[]) {
     // closest, not parentElement: the spot may nest inside the turn's elapsed row (below)
     const anchor = (old.closest(".turn-assistant") as HTMLElement | null)?.dataset.uuid || "";
-    // …and a spot on a response's tool line (look E) names its response itself
-    if (spots.get(old.dataset.anchor || anchor) !== old.dataset.cut) old.remove();   // gone, or its cut moved
+    // …and a spot on a response's tool line (look E) names its response itself. A spot whose response now has a line under
+    // it, or whose line opened or closed, is not where it belongs (forkHost): it goes, so a response never carries two
+    const own = old.dataset.anchor || anchor;
+    const prose = v.el.querySelector(`.turn-assistant[data-uuid="${cssEscape(own)}"]`) as HTMLElement | null;
+    if (spots.get(own) !== old.dataset.cut || !prose || old.closest(".turn") !== forkHost(prose)) old.remove();   // gone, moved, or rehomed
   }
   for (const [anchor, cut] of spots) {
     const prose = v.el.querySelector(`.turn-assistant[data-uuid="${cssEscape(anchor)}"]`) as HTMLElement | null;
     if (!prose) continue;
-    // look E: the tools after the response are its trailing line, so the cut below the response sits under that line
-    const next = prose.nextElementSibling as HTMLElement | null;
-    const turn = next && next.classList.contains("toolgroup-attached") ? next : prose;
+    const turn = forkHost(prose);   // look E: under the response's tool line, below its calls when the line is open
     if (turn.querySelector(".fork-spot")) continue;
     const row = el("div", "fork-spot");
     row.dataset.cut = cut;
@@ -11795,6 +11786,17 @@ function applyForkSpots(sid: string, v: View): void {
     if (elapsed) elapsed.appendChild(row);
     else turn.appendChild(row);
   }
+}
+
+/** The node a response's fork spot rides: the response itself, or (look E) the tool line tucked under it, since the cut below
+ *  the response is below its calls; when that line is OPEN, its last call's row (the calls follow the line's head). */
+function forkHost(prose: HTMLElement): HTMLElement {
+  const next = prose.nextElementSibling as HTMLElement | null;
+  if (!next || !(next.classList.contains("toolgroup-attached") || next.classList.contains("tool-attached"))) return prose;
+  if (!next.classList.contains("expanded")) return next;
+  let last = next;
+  for (let n = next.nextElementSibling as HTMLElement | null; n && n.classList.contains("tg-child"); n = n.nextElementSibling as HTMLElement | null) last = n;
+  return last;
 }
 
 /** Yellow ticks on the chat's scroll rail marking commented spots (the user 2026-08-15) — one per
@@ -12520,6 +12522,7 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
       // turnWorkedSecs, with the thread session's own busy reading standing in for `working`
       const node = renderEvent(ev, prev, turnWorkedSecs(evs, it.index, thWorking));
       list.appendChild(node);
+      if (it.attached) node.classList.add("tool-attached");   // look E: a lone call after a prose row, tucked under it
       if (!quoteHost && ev.kind === "user") quoteHost = node;
       const ep = eventEpoch(ev);
       if (ep != null) prev = ep;
@@ -15026,6 +15029,7 @@ function unitSig(v: View, s: Session, it: DisplayItem, prevEpoch: number | null,
   const f0 = itemFirstEvent(it);
   let sig = it.kind + "|" + (prevEpoch ?? "") + "|" + (mark ?? "") + "|" + (turns && f0 < turns.length ? turns[f0] : "");
   if (it.kind === "toolgroup") sig += (openFolds.has(toolGroupKey(s.events[f0])) ? "|open" : "|shut") + (it.attached ? "|att" : "");
+  else if (it.kind === "event" && it.attached) sig += "|att";
   else if (it.kind === "noticegroup") sig += openFolds.has(noticeGroupKey(s.events[f0])) ? "|open" : "|shut";
   const editable = (s as any)._editable as Set<string> | undefined;
   for (const i of unitReads(it, s.events)) {
@@ -15203,7 +15207,7 @@ function isKeptCard(e: ChatEvent): boolean { return e.kind === "tool" && (e.name
 function isNote(e: ChatEvent | undefined): boolean { return !!e && e.kind === "assistant" && !!e.narration; }
 /** Assistant prose a reader reads as the agent speaking: a reply or a note, never the interrupt's settle (a seam marker) or a
  *  slash command's output. */
-function isProse(e: ChatEvent | undefined): boolean { return !!e && e.kind === "assistant" && !(e as { interruptSettle?: boolean }).interruptSettle && !(e as { command?: boolean }).command; }
+function isProse(e: ChatEvent | undefined): boolean { return !!e && isProseShape(e as { kind: string }); }
 /** The rows a run may hold as notes: C, the progress notes; C2, any prose. */
 function runNote(e: ChatEvent | undefined): boolean { return narrationLook === "C2" ? isProse(e) : isNote(e); }
 /** Looks C and C2: a collapsed run's caption, its latest note (compact.ts runCaption), drawn as prose under the run's line on
@@ -15220,6 +15224,34 @@ function captionRun(head: HTMLElement, evs: readonly ChatEvent[], indices: reado
   c.dataset.act = "noticetoggle"; c.dataset.gkey = toolGroupKey(evs[indices[0]]);   // the cut caption opens the run
   head.appendChild(c);
 }
+/** Look E: a tool line folds its calls, so it says what A's rows would: a call still RUNNING (the kernel's `running` stamp)
+ *  wears the working dot and "running…" with its elapsed time, ticked by the 1 s timer (.tool-elapsed[data-since]) and gone at
+ *  the push that brings its result; a FAILED call wears the red dot and the line says how many failed, in red, as A's rows say
+ *  "error". The dot is the only part of an attached line's rail mark that shows, and only for these two states. */
+function attachedRunState(head: HTMLElement, evs: readonly ChatEvent[], indices: readonly number[], open: boolean): void {
+  const tools = runTools(evs, indices);
+  const failed = tools.filter((t) => t.isError).length;
+  const running = tools.find((t) => !t.isError && (t.running ?? ((t.name === "Task" || t.name === "Agent") && !t.output)));
+  const d = head.querySelector(":scope > .dot") as HTMLElement | null;
+  if (d && running && !failed) d.className = "dot working";
+  if (open) return;
+  const line = head.querySelector(":scope > .toolgroup-line") as HTMLElement | null;
+  if (!line) return;
+  if (failed) {
+    const f = el("span", "toolgroup-failed");
+    f.textContent = " · " + (failed === tools.length ? (failed === 1 ? "failed" : "all failed") : failed + " failed");
+    line.appendChild(f);
+  }
+  const since = running && running.ts ? Date.parse(running.ts) / 1000 : NaN;
+  if (running) {
+    const r = el("span", "toolgroup-running"); r.textContent = " · running…";
+    line.appendChild(r);
+    if (Number.isFinite(since) && since > 0) {
+      const t = el("span", "tool-elapsed"); t.dataset.since = String(since); t.textContent = durLabel(Date.now() / 1000 - since);
+      line.appendChild(t);
+    }
+  }
+}
 /** A tool run's head, past its line: under look E, the attached class (the tools after a prose row, drawn as its trailing
  *  line). And what a COLLAPSED run's head carries under its line: the caption (captionRun, looks C and C2), then, when the run's last
  *  member is the last row of a finished segment (`secs`, the worked-footer rule over that member), the segment's "worked …"
@@ -15227,7 +15259,7 @@ function captionRun(head: HTMLElement, evs: readonly ChatEvent[], indices: reado
  *  mid-turn or the session going idle) keeps the line every other segment shows. An open run's last row carries it instead
  *  (appendItem); patchWorkedFooters keeps both. */
 function foldedRunHead(head: HTMLElement, evs: readonly ChatEvent[], it: Extract<DisplayItem, { kind: "toolgroup" }>, open: boolean, secs: number | null, thought: number | null): void {
-  if (it.attached) head.classList.add("toolgroup-attached");   // look E: the tools after a prose row, its trailing line
+  if (it.attached) { head.classList.add("toolgroup-attached"); attachedRunState(head, evs, it.indices, open); }   // look E
   if (open) return;
   captionRun(head, evs, it.indices);
   if (secs != null) head.appendChild(elapsedFooter(secs, thought));
@@ -15361,7 +15393,9 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
       adv(anchor);   // the walk leaves the run on its latest member, whatever order its members came in
     }
   } else {
-    host.appendChild(tag(renderEvent(s.events[it.index], prevEpoch, ...turnFoot(s.events, it.index, working))));
+    const node = tag(renderEvent(s.events[it.index], prevEpoch, ...turnFoot(s.events, it.index, working)));
+    if (it.attached) node.classList.add("tool-attached");   // look E: a lone call after a prose row, tucked under it
+    host.appendChild(node);
     adv(it.index);
   }
   walk.pass(unitExit(s, it));   // a no-op for an expanded tool run (every row already passed): one rule with dayWalkBefore

@@ -2696,10 +2696,19 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
    same two lines, cut without one */
 .toolgroup-caption { margin-top: 2px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; max-height: 3.1em; cursor: pointer; }
 .toolgroup-caption > * { margin-top: 0; margin-bottom: 0; }
-/* E (the default): the tools after a prose row fold into one dim line under it, the row's own: no rail dot or time of its own,
-   tucked up to the prose it follows; it opens to the calls in place */
-.turn-toolgroup.toolgroup-attached { padding-top: 0; margin-top: -3px; }
-.toolgroup-attached > .dot, .toolgroup-attached > .time-marker { visibility: hidden; }
+/* E (the default): the tools after a prose row fold into one dim line under it, the row's own, tucked up to the prose it
+   follows; it opens to the calls in place. A lone call is its own row (its label, its file link), dimmed the same. No time of
+   its own, and a rail dot only when the line has something to say: a call still running (the working dot, "running…" and its
+   time) or one that failed (the red dot, "failed" in red), as A's rows say them */
+.turn-toolgroup.toolgroup-attached, .turn-tool.tool-attached { padding-top: 0; margin-top: -3px; }
+.toolgroup-attached > .dot, .toolgroup-attached > .time-marker, .tool-attached > .dot, .tool-attached > .time-marker { visibility: hidden; }
+.toolgroup-attached > .dot.err, .toolgroup-attached > .dot.working, .tool-attached > .dot.err, .tool-attached > .dot.working { visibility: visible; }
+.tool-attached:not(.tool-err) .tool-label { color: var(--dim); }
+.toolgroup-failed { color: var(--err); }
+.toolgroup-running + .tool-elapsed { margin-left: 4px; }
+/* the fork spot on a response's line (or, the line open, its last call) shows on a hover of the response or the line */
+.turn-assistant:hover + .toolgroup-attached .msg-fork, .turn-assistant:hover + .tool-attached .msg-fork,
+.toolgroup-attached:hover .msg-fork, .tool-attached:hover .msg-fork, .tg-child:hover .msg-fork { opacity: 0.9; }
 .thought-line .thought-caret { margin-right: 0; flex: none; }
 .thought-caret::before { content: "▸"; }
 .turn-thought.expanded .thought-caret::before { content: "▾"; }
