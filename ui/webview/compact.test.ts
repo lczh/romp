@@ -318,10 +318,12 @@ test("T418 expanded row: a Bash shows its command as typed; other tools their in
 // ── option C, progress notes in a run (2026-11-06, compact mode) ───────────────────────────────────────────────────────
 // Events as (kind, role): "N" a progress note (an assistant event flagged narration), "S" a message delivered mid-turn (a user
 // event flagged absorbed), "R" a reply, "U" a prompt, "T" a tool, "th" a thought with words.
-function optC(seq: string[]) {
-  const kinds = seq.map((x) => (x === "N" || x === "R" ? "assistant" : x === "S" || x === "U" ? "user" : x === "T" ? "tool" : "thinking"));
-  const roles = { note: seq.map((x) => x === "N"), spliced: seq.map((x) => x === "S") };
-  return compactDisplay(kinds, undefined, undefined, seq.map((x) => x === "th"), roles);
+// "K" a background task's notice on a user row (a foldable notice that wakes a turn). `c2`: option C2, where every assistant
+// prose row (a note or a reply) is a note.
+function optC(seq: string[], c2 = false) {
+  const kinds = seq.map((x) => (x === "N" || x === "R" ? "assistant" : x === "S" || x === "U" || x === "K" ? "user" : x === "T" ? "tool" : "thinking"));
+  const roles = { note: seq.map((x) => x === "N" || (c2 && x === "R")), spliced: seq.map((x) => x === "S") };
+  return compactDisplay(kinds, undefined, seq.map((x) => x === "K"), seq.map((x) => x === "th"), roles);
 }
 
 test("option C: tool, note, tool, note… folds into ONE run with its notes as members, and its caption is the latest note", () => {
@@ -355,4 +357,36 @@ test("option C: notes with fewer than two tools stay as they are, and a thought 
     [{ kind: "event", index: 0 }, { kind: "thought", indices: [1] }, { kind: "toolgroup", indices: [2, 3, 4, 5, 6] }]);
   // the expanded run's rows: each note its own row, a stretch of thoughts one row
   assert.deepEqual(runRows([2, 3, 4, 5, 6], (i) => i === 3), [[2], [3], [4], [5], [6]]);
+});
+
+test("option C: a reply as a TEXT block answers a mid-turn message too: the rule disarms, and a later note joins the run", () => {
+  // the reviewer's case: the answer is a text block, then the work goes on; no later note is pulled out as "the answer"
+  assert.deepEqual(optC(["S", "R", "T", "N", "T", "N", "T"]),
+    [{ kind: "event", index: 0 }, { kind: "event", index: 1 }, { kind: "toolgroup", indices: [2, 3, 4, 5, 6] }]);
+});
+
+test("option C: any user row re-arms or disarms the rule: a new prompt, and a background task's notice that wakes a turn", () => {
+  // a prompt after the mid-turn stretch ended with no prose: its first note leads the run (the mutant that never disarms on a
+  // prompt pulled it out)
+  assert.deepEqual(optC(["S", "T", "T", "U", "N", "T", "N", "T"]),
+    [{ kind: "event", index: 0 }, { kind: "toolgroup", indices: [1, 2] }, { kind: "event", index: 3 }, { kind: "toolgroup", indices: [4, 5, 6, 7] }]);
+  // a turn a background task's notice woke: the notice is not the person's message, and the first note leads the run
+  assert.deepEqual(optC(["S", "T", "T", "K", "N", "T", "N", "T"]),
+    [{ kind: "event", index: 0 }, { kind: "toolgroup", indices: [1, 2] }, { kind: "event", index: 3 }, { kind: "toolgroup", indices: [4, 5, 6, 7] }]);
+});
+
+test("options C and C2: a note after the run's last tool waits for a tool that never comes, and stands as itself", () => {
+  // C: a note that introduces nothing (the turn ended) is not folded into the run before it
+  assert.deepEqual(optC(["T", "N", "T", "N", "R"]),
+    [{ kind: "toolgroup", indices: [0, 1, 2] }, { kind: "event", index: 3 }, { kind: "event", index: 4 }]);
+  // C2: every prose row between tools joins, text replies included; the turn's final message after the last tool stays a reply
+  assert.deepEqual(optC(["U", "R", "T", "R", "T", "N", "T", "R"], true),
+    [{ kind: "event", index: 0 }, { kind: "toolgroup", indices: [1, 2, 3, 4, 5, 6] }, { kind: "event", index: 7 }]);
+  assert.deepEqual(optC(["U", "R", "T", "R", "T", "N", "T", "R"]),
+    [{ kind: "event", index: 0 }, { kind: "event", index: 1 }, { kind: "event", index: 2 }, { kind: "event", index: 3 },
+     { kind: "toolgroup", indices: [4, 5, 6] }, { kind: "event", index: 7 }], "C: text replies still split the run, as before");
+  // C2: the answer to a mid-turn message, a text block, stands alone; the stretch after it folds
+  assert.deepEqual(optC(["T", "R", "T", "S", "R", "T", "R", "T", "R"], true),
+    [{ kind: "toolgroup", indices: [0, 1, 2] }, { kind: "event", index: 3 }, { kind: "event", index: 4 },
+     { kind: "toolgroup", indices: [5, 6, 7] }, { kind: "event", index: 8 }]);
 });

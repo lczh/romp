@@ -35,7 +35,7 @@ a single call is a line of its own.
 The notes a session writes for you between tool calls, such as what it just
 found or its answer to a message you sent while it worked, show as its own
 words in the chat, the way a reply does. In compact view a run of tool calls
-folds with its notes and shows the latest one under its line.
+folds with the notes between them and shows the latest one under its line.
 
 The chat shows a session's live status. While it thinks, the foot of the chat
 reads **Thinking** with the seconds so far, its chip in the Sessions pane reads

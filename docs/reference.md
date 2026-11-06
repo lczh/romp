@@ -7378,9 +7378,14 @@ that thinking is billed.
 On Claude Opus 5.5 a note the model writes for you between tool calls (what it found, what it does next, an answer to a
 message you sent while it worked) comes back from the API as a thinking block once it runs past a sentence or two. The
 chat shows those notes as the session's own words, while reasoning summaries stay Thought lines. The full view shows each
-note as an ordinary assistant message. Compact view folds the notes between tool calls into the run of calls: the folded
-run shows its latest note as prose under its one line, and opening it shows every call and note in order. The first note
-after a message you sent while the session worked is its answer to you, and stands on its own outside any run.
+note as an ordinary assistant message.
+
+Compact view folds whatever the session writes between tool calls into the run of calls, a note that came back as
+thinking and a short one that came back as text alike (so older sessions' text between tool calls folds the same way).
+The folded run shows its latest note under its one line, cut to two lines; opening it shows every call and note in order,
+each whole. The session's final message after its last tool call stays a reply, and the first thing it writes after a
+message you sent while it worked is its answer to you and stands on its own. A folded run that ends a stretch of work,
+such as the one before a message you sent mid-turn, keeps that stretch's "worked" line under it.
 
 Claude Code tells the two apart: it decodes each thinking block's kind and lists the note blocks on every message it
 streams to romp (`narration_block_indexes`), under every thinking display. The transcript does not keep that list, so

@@ -310,15 +310,22 @@ test("compact mode: the window start is a unit and the plan wants an event index
   patch(v, s, 4, true, items);
   assert.ok(nodes[2].querySelector(":scope > .turn-elapsed"), "event 3 is unit 2: the footer lands on the reply's unit");
   assert.equal(v.stale, false);
-  // the reply itself folded into a COLLAPSED run: its head carries no footer, so there is nothing to patch and nothing to rebuild
-  // (a stale mark here rebuilt the whole window for a footer no rebuild could show, until 2026-09-23)
+  // the reply itself folded into a COLLAPSED run as its last member (a run of tools, or under looks C and C2 its notes, that
+  // ends the segment): the footer rides the run's HEAD (closedRunFooter, 2026-11-06; until then a collapsed run's head carried
+  // none, and a segment that ended inside one lost its line), patched in this call, nothing rebuilt or repainted
   const folded = [{ kind: "event", index: 0 }, { kind: "toolgroup", indices: [1, 2, 3] }, { kind: "event", index: 4 }];
   const w2 = footWorld(events, 3, 1);
   w2.v.painted = { sig: ["s0", "s1", "s2"] };
   w2.patch(w2.v, w2.s, 4, true, folded);
   assert.equal(w2.v.stale, false, "unit < 0 in a collapsed run: no window rebuild");
-  assert.equal(w2.v.rediff, undefined, "…and no repaint: nothing it would draw differs");
-  assert.ok(w2.nodes.every((n) => !n.querySelector(":scope > .turn-elapsed")), "…and nothing was patched by hand");
+  assert.equal(w2.v.rediff, undefined, "…and no repaint: the head is patched by hand");
+  assert.equal(w2.nodes[1].querySelector(":scope > .turn-elapsed")?.textContent, "60", "the footer on the collapsed run's head");
+  assert.ok([w2.nodes[0], w2.nodes[2]].every((n) => !n.querySelector(":scope > .turn-elapsed")), "…and on no other node");
+  // a reply in the MIDDLE of a collapsed run carries no footer of its own: nothing to patch
+  const mid = [{ kind: "event", index: 0 }, { kind: "toolgroup", indices: [1, 3, 2] }, { kind: "event", index: 4 }];
+  const w7 = footWorld(events, 3, 1);
+  w7.patch(w7.v, w7.s, 4, true, mid);
+  assert.ok(w7.nodes.every((n) => !n.querySelector(":scope > .turn-elapsed")), "the run's last member is not the reply");
   // an EXPANDED run draws its rows after its head, the reply's among them: that row is patched in this call like any other
   // node, and nothing is marked for a later paint (both callers return on the state they read before the patch, and an idle
   // session gets no later frame; review find, 2026-09-23)

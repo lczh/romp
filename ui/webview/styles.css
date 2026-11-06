@@ -2688,10 +2688,12 @@ pre code .file-uri-link { color: var(--accent); }   /* a fenced block's path (20
 .thought-line:hover { color: var(--fg); }
 .turn-thought > .dot.ring { background: var(--dim); }   /* the dim ink, flat: a thought sits under a reply's dot */
 /* Progress notes (2026-11-06, DRAFT looks; the user picks one). B: a note keeps the reply's prose but takes a thought's dim flat
-   dot and a tighter step, so the final answer stands out on the rail. C (compact): a run's latest note under its line. */
+   dot and a tighter step, so the final answer stands out on the rail. C and C2 (compact): a run's latest note under its line. */
 .narr-look-b .turn-narration { padding-top: 3px; padding-bottom: 3px; }
 .narr-look-b .turn-narration > .dot.ring { background: var(--dim); }
-.toolgroup-caption { margin-top: 2px; }
+/* the caption is two lines at most, cut with an ellipsis (a line clamp, never a fade); the run opens to the note whole */
+.toolgroup-caption { margin-top: 2px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.toolgroup-caption > * { margin-top: 0; margin-bottom: 0; }
 .thought-line .thought-caret { margin-right: 0; flex: none; }
 .thought-caret::before { content: "▸"; }
 .turn-thought.expanded .thought-caret::before { content: "▾"; }

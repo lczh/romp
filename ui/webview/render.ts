@@ -496,11 +496,12 @@ function openSettingsOn(tab: string, section?: string): void {
 let settings: RompSettings = loadSettings();   // global webview settings (compact mode, …) — see settings.ts
 // How progress notes look (2026-11-06, DRAFT: the user picks one from screenshots, and the others then go). A, a note is plain
 // assistant prose; B, the same prose with the thought's dim rail dot and tighter spacing (html.narr-look-b, styles.css);
-// C, compact mode folds the notes between tools into the run, its latest note the run's caption (compact.ts option C).
-// Read once per page from localStorage "romp:narration-look"; C when unset.
-const narrationLook: "A" | "B" | "C" = (() => {
-  try { const v = localStorage.getItem("romp:narration-look"); if (v === "A" || v === "B" || v === "C") return v; } catch { /* no storage */ }
-  return "C";
+// C, compact mode folds the progress notes between tools into the run, its latest note the run's clamped caption; C2, the
+// same for ANY assistant prose between tools, text blocks included (compact.ts, options C and C2).
+// Read once per page from localStorage "romp:narration-look"; C2 when unset.
+const narrationLook: "A" | "B" | "C" | "C2" = (() => {
+  try { const v = localStorage.getItem("romp:narration-look"); if (v === "A" || v === "B" || v === "C" || v === "C2") return v; } catch { /* no storage */ }
+  return "C2";
 })();
 if (narrationLook === "B") document.documentElement.classList.add("narr-look-b");
 // (compact mode's expanded tool/notice runs are keyed in openFolds — "tg:<uuid>" / "ng:<uuid>" — the ONE fold
@@ -12473,7 +12474,7 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
         list.appendChild(it.kind === "toolgroup"
           ? renderToolGroup(runTools(evs, it.indices), prev, key, open)   // the head counts the run's tools only
           : renderNoticeGroup(run, evs[anchor], prev, key, open));
-        if (it.kind === "toolgroup" && !open) captionRun(list.lastElementChild as HTMLElement, evs, it.indices);   // option C's caption
+        if (it.kind === "toolgroup" && !open) foldedRunHead(list.lastElementChild as HTMLElement, evs, it.indices, turnWorkedSecs(evs, it.indices[it.indices.length - 1], thWorking), null);
         let exit: number | null;   // the epoch the run leaves the walk on (the rail chain and the day mark alike)
         if (open) {
           // the run's own members, as the chat draws them: a tool run's thoughts as Thought rows (runRows), a notice run's notices
@@ -15064,21 +15065,26 @@ function patchWorkedFooters(v: View, s: Session, from: number, working: boolean,
     const unit = unitOfEvent(ev);
     let node: HTMLElement | null = null;
     if (unit < 0) {
-      // the reply is a member of a run (or a row compact mode hides): a collapsed run's head carries no footer; an expanded
-      // run's rows follow its head in it.indices order, each tagged with the run's unit and tg-child (appendItem)
+      // the reply is a member of a run (or a row compact mode hides): a collapsed TOOL run whose last member it is carries the
+      // footer on its head (closedRunFooter), any other collapsed run none; an expanded run's rows follow its head in it.indices
+      // order, each tagged with the run's unit and tg-child (appendItem)
       const run = items ? items.findIndex((it) => (it.kind === "toolgroup" || it.kind === "noticegroup") && it.indices.includes(ev)) : -1;
       const it = run >= 0 ? items![run] : null;
       if (!it || (it.kind !== "toolgroup" && it.kind !== "noticegroup")) continue;
-      if (!openFolds.has(it.kind === "toolgroup" ? toolGroupKey(s.events[it.indices[0]]) : noticeGroupKey(s.events[it.indices[0]]))) continue;
-      const rows = v.el.querySelectorAll(`:scope > [data-unit="${run}"].tg-child`);
-      // one row per tool and per stretch of thoughts (runRows), the footer on a row's last member, as appendItem draws them
-      const at = (it.kind === "toolgroup" ? runRows(it.indices, (i) => s.events[i].kind === "thinking") : it.indices.map((i) => [i]))
-        .findIndex((row) => row[row.length - 1] === ev);
-      if (at < 0) continue;   // a thought inside a row whose later block follows it: that row carries no footer of this event's
-      node = at < rows.length ? (rows[at] as HTMLElement) : null;
-      // The row is patched in this call, never left to a repaint: both callers return on the state they read before the
-      // patch, and an idle session gets no next frame for it to ride (review find, 2026-09-23). Only a run outside the painted
-      // window takes the mark, for the paint that brings it in.
+      const shut = !openFolds.has(it.kind === "toolgroup" ? toolGroupKey(s.events[it.indices[0]]) : noticeGroupKey(s.events[it.indices[0]]));
+      if (shut && (it.kind !== "toolgroup" || it.indices[it.indices.length - 1] !== ev)) continue;
+      if (shut) node = v.el.querySelector(`:scope > [data-unit="${run}"]:not(.day-divider)`) as HTMLElement | null;
+      else {
+        const rows = v.el.querySelectorAll(`:scope > [data-unit="${run}"].tg-child`);
+        // one row per tool and per stretch of thoughts (runRows), the footer on a row's last member, as appendItem draws them
+        const at = (it.kind === "toolgroup" ? runRows(it.indices, (i) => s.events[i].kind === "thinking") : it.indices.map((i) => [i]))
+          .findIndex((row) => row[row.length - 1] === ev);
+        if (at < 0) continue;   // a thought inside a row whose later block follows it: that row carries no footer of this event's
+        node = at < rows.length ? (rows[at] as HTMLElement) : null;
+      }
+      // The row (or a collapsed run's head) is patched in this call, never left to a repaint: both callers return on the
+      // state they read before the patch, and an idle session gets no next frame for it to ride (review find, 2026-09-23).
+      // Only a run outside the painted window takes the mark, for the paint that brings it in.
       if (!node) { if (v.painted) { v.painted.sig[run] = undefined; v.rediff = true; } continue; }
     } else {
       node = v.el.querySelector(`:scope > [data-unit="${unit}"]:not(.day-divider)`) as HTMLElement | null;
@@ -15165,21 +15171,38 @@ function displayItems(s: Session): DisplayItem[] {
 function compactItems(evs: readonly ChatEvent[]): DisplayItem[] {
   return compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === "tool" ? e.name : undefined), evs.map(isFoldableNotice), evs.map(thoughtHasWords), noteRoles(evs));
 }
-/** Option C's roles for compactDisplay (the notes, the messages delivered mid-turn); none under looks A and B. */
+/** The roles compactDisplay folds by under looks C and C2 (which rows may join a run, the messages delivered mid-turn); none
+ *  under looks A and B. */
 function noteRoles(evs: readonly ChatEvent[]): NoteRoles | undefined {
-  return narrationLook === "C" ? { note: evs.map(isNote), spliced: evs.map((e) => e.kind === "user" && !!e.absorbed) } : undefined;
+  if (narrationLook !== "C" && narrationLook !== "C2") return undefined;
+  return { note: evs.map(runNote), spliced: evs.map((e) => e.kind === "user" && !!e.absorbed) };
 }
 /** A progress note: an assistant event the kernel built from a thinking block the CLI listed as the model's note (narration). */
 function isNote(e: ChatEvent | undefined): boolean { return !!e && e.kind === "assistant" && !!e.narration; }
-/** Option C: a collapsed run's caption, its latest note (compact.ts runCaption), drawn as prose under the run's line on the
- *  run's head `head`; nothing under looks A and B, or for a run that holds no note. An open run shows its notes in place. */
+/** Assistant prose a reader reads as the agent speaking: a reply or a note, never the interrupt's settle (a seam marker) or a
+ *  slash command's output. */
+function isProse(e: ChatEvent | undefined): boolean { return !!e && e.kind === "assistant" && !(e as { interruptSettle?: boolean }).interruptSettle && !(e as { command?: boolean }).command; }
+/** The rows a run may hold as notes: C, the progress notes; C2, any prose. */
+function runNote(e: ChatEvent | undefined): boolean { return narrationLook === "C2" ? isProse(e) : isNote(e); }
+/** Looks C and C2: a collapsed run's caption, its latest note (compact.ts runCaption), drawn as prose under the run's line on
+ *  the run's head `head`, clamped to two lines (.toolgroup-caption); nothing under looks A and B, or for a run that holds no
+ *  note. An open run shows its notes in place, whole. */
 function captionRun(head: HTMLElement, evs: readonly ChatEvent[], indices: readonly number[]): void {
-  if (narrationLook !== "C") return;
-  const i = runCaption(indices, (j) => isNote(evs[j]));
+  if (narrationLook !== "C" && narrationLook !== "C2") return;
+  const i = runCaption(indices, (j) => runNote(evs[j]));
   if (i < 0) return;
   const c = assistantBody(evs[i] as Extract<ChatEvent, { kind: "assistant" }>);
   c.classList.add("toolgroup-caption");
   head.appendChild(c);
+}
+/** What a COLLAPSED run's head carries under its line: the caption (captionRun, looks C and C2), then, when the run's last
+ *  member is the last row of a finished segment (`secs`, the worked-footer rule over that member), the segment's "worked …"
+ *  footer: a segment that ends inside a folded run (a run of tools, and under C and C2 its notes, before a message sent
+ *  mid-turn or the session going idle) keeps the line every other segment shows. An open run's last row carries it instead
+ *  (appendItem); patchWorkedFooters keeps both. */
+function foldedRunHead(head: HTMLElement, evs: readonly ChatEvent[], indices: readonly number[], secs: number | null, thought: number | null): void {
+  captionRun(head, evs, indices);
+  if (secs != null) head.appendChild(elapsedFooter(secs, thought));
 }
 // T386 stage 2: the history the page does not hold is GAPS between its runs (and before the first), each a display unit of its own
 // placed before the first item of the run below it (`before`: that run's first event index in s.events, the runs' events being
@@ -15275,7 +15298,7 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
     const head = tag(renderToolGroup(runTools(s.events, it.indices), prevEpoch, key, open));   // the head counts the run's tools only
     host.appendChild(head);
     adv(it.indices[0]);
-    if (!open) captionRun(head, s.events, it.indices);   // option C: the run's latest note under its line
+    if (!open) foldedRunHead(head, s.events, it.indices, ...turnFoot(s.events, it.indices[it.indices.length - 1], working));
     if (open) {   // expanded → the run's members in order, each tool as its normal turn and each stretch of thoughts as ONE
       // collapsed Thought row (runRows). Not the contiguous start..end span: it.indices holds only the run's members, so a
       // textless thinking block between the tools stays hidden. (Until 2026-10-23 no thinking showed here at all, the

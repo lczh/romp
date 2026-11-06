@@ -7,6 +7,7 @@ both under the one module name `romp_narration`, through sys.modules first, so t
 per process.
 """
 from __future__ import annotations
+import bisect
 import collections
 import json
 import os
@@ -24,8 +25,9 @@ from pathlib import Path
 # parser drops frame-level keys and the transcript does not carry the list, so the kernel records it here as each raw
 # frame arrives (SdkSession._narration_frame), in a store of its own: one JSON row per frame under
 # STATE/narration/<sid>.jsonl, {"u": the frame's uuid (the transcript record's own, verified), "i": the CLI's indexes,
-# "k": the same blocks as ordinals among the frame's thinking blocks}. The chat build reads `k`: the live atom drops the
-# block types the SDK does not parse, so a raw index could shift there, while every thinking block survives both roads.
+# "k": the same blocks as ordinals among the frame's thinking blocks, "s": 1 on a subagent's frame}. The chat build reads
+# `k`: the live atom drops the block types the SDK does not parse, so a raw index could shift there, while every thinking
+# block survives both roads.
 # Marks are applied when the chat is built (kernel build_session), never written into the parse or its documents.
 #
 # Bounds. The journal rotates like the backend's ledgers: past NARRATION_ROTATE_BYTES it moves to <sid>.jsonl.1 (the older
@@ -41,7 +43,7 @@ NARRATION_ROTATE_BYTES = 4 * 1024 * 1024
 # not the test of an older CLI: the init frame's claude_code_version is.
 NARRATION_MIN_CLI = (2, 1, 260)
 _NARR_LOCK = threading.Lock()
-_NARR_MEMO = collections.OrderedDict()   # (state root, sid) -> {"marks": {uuid: frozenset}, "log": [(gen, uuid, sub)], "loaded": gen}
+_NARR_MEMO = collections.OrderedDict()   # (state root, sid) -> {"marks": {uuid: frozenset}, "subs": {uuid}, "log": [(gen, uuid, sub)], "loaded": gen}
 _NARR_MEMO_MAX = 4096                    # sessions held; past it the least recently read goes, one at a time
 _NARR_REVS = {}                          # (state root, sid) -> [main gen, subagent gen]: never dropped, so never reused
 _NARR_GEN = [0]                          # the process's one monotonic counter: every mark filed takes the next value
@@ -132,16 +134,15 @@ def _say(text, key):
     sys.stderr.write(text + "\n")
 
 
-def _narr_entry(state_dir, sid):
-    """The memo entry for one session's store, read from disk on its first touch and LRU-touched on every one (call under
-    _NARR_LOCK). The rotated predecessor is read first. A torn or foreign line costs that line; an unreadable file is
-    reported through the sink and reads as no marks."""
-    key = (str(Path(state_dir)), str(sid))
-    ent = _NARR_MEMO.get(key)
-    if ent is not None:
-        _NARR_MEMO.move_to_end(key)
-        return ent
-    marks = {}
+def _key(state_dir, sid):
+    return (str(Path(state_dir)), str(sid))
+
+
+def _read_store(state_dir, sid):
+    """(marks, subagent uuids) from the journal and its rotated predecessor, the predecessor first. No lock is held: a cold
+    read of a long session's two files takes a while, and every other session's marks are read and filed meanwhile. A torn
+    or foreign line costs that line; an unreadable file is reported through the sink and reads as no marks."""
+    marks, subs = {}, set()
     p = narration_path(state_dir, sid)
     for f in (p.with_name(p.name + ".1"), p):
         try:
@@ -155,21 +156,52 @@ def _narr_entry(state_dir, sid):
                         continue
                     old = marks.get(u)
                     marks[u] = _intern(ks | old if old is not None else ks)
+                    if row.get("s"):
+                        subs.add(u)
         except FileNotFoundError:
             pass
         except OSError as e:
             _say("progress notes: the store for %s cannot be read (%s); its notes show as Thought rows" % (sid, e), "store-read")
+    return marks, subs
+
+
+def _publish(key, marks, subs):
+    """Seat a read store in the memo (call under _NARR_LOCK), dropping the least recently read sessions past the cap."""
     while len(_NARR_MEMO) >= _NARR_MEMO_MAX:
         _NARR_MEMO.popitem(last=False)                # the least recently read session; it reloads on its next read
-    ent = _NARR_MEMO[key] = {"marks": marks, "log": [], "loaded": _NARR_GEN[0]}
+    ent = _NARR_MEMO[key] = {"marks": marks, "subs": subs, "log": [], "loaded": _NARR_GEN[0]}
     return ent
+
+
+def _narr_entry(state_dir, sid):
+    """The memo entry for one session's store, LRU-touched; on its first touch read from disk OUTSIDE _NARR_LOCK (call
+    without it) and published under it. A read that raced a mark being filed for the same session (the session's revisions
+    moved while the file was read: the append may or may not be in what was read) is thrown away and the file read again;
+    a read another thread published first is taken as it is."""
+    key = _key(state_dir, sid)
+    while True:
+        with _NARR_LOCK:
+            ent = _NARR_MEMO.get(key)
+            if ent is not None:
+                _NARR_MEMO.move_to_end(key)
+                return ent
+            seen = tuple(_NARR_REVS.get(key) or ())
+        marks, subs = _read_store(state_dir, sid)
+        with _NARR_LOCK:
+            ent = _NARR_MEMO.get(key)
+            if ent is not None:
+                _NARR_MEMO.move_to_end(key)
+                return ent
+            if tuple(_NARR_REVS.get(key) or ()) == seen:
+                return _publish(key, marks, subs)
+        # a mark was filed while the file was read: read it again
 
 
 def narration_rev(state_dir, sid, sub=False):
     """The session's mark revision: the counter value of the last main-conversation mark (`sub` False) or subagent mark
     (`sub` True) filed in this kernel's life, 0 when none was. Memory only, never the file; a value is never reused (the
     counter is the process's), so a key that holds a revision changes exactly when a mark of that kind is filed."""
-    r = _NARR_REVS.get((str(Path(state_dir)), str(sid)))
+    r = _NARR_REVS.get(_key(state_dir, sid))
     return (r[1] if sub else r[0]) if r else 0
 
 
@@ -177,30 +209,43 @@ def narration_marks(state_dir, sid):
     """The session's marks: a transcript record's uuid -> the ordinals of its thinking blocks the CLI listed as progress
     notes. Read from the store on first use (the chat build of this session, never a signature). The mapping is the
     store's live dict: look up, never iterate."""
-    with _NARR_LOCK:
-        return _narr_entry(state_dir, sid)["marks"]
+    return _narr_entry(state_dir, sid)["marks"]
 
 
 def narration_marked_since(state_dir, sid, rev):
-    """The uuids of the main-conversation marks filed after revision `rev` (a value narration_rev returned). When the
-    session's marks were read from the file after `rev` (a cold memo), which of them came later is not known, and every
-    marked uuid is returned: a caller intersects them with what it rendered as thinking, so the answer stays exact."""
+    """The uuids of the main-conversation marks filed after revision `rev` (a value narration_rev returned), found by a
+    binary search of the session's log on the counter (it only grows). When the session's marks were read from the file
+    after `rev` (a cold memo, a session dropped from the LRU and read again), which of them came later is not known, and
+    every main-conversation mark is returned (the subagents' are filtered by the rows' own flag): a caller intersects them
+    with what it rendered as thinking, so the answer stays exact."""
+    ent = _narr_entry(state_dir, sid)
+    r = rev if isinstance(rev, int) and rev >= 0 else 0
     with _NARR_LOCK:
-        ent = _narr_entry(state_dir, sid)
-        r = rev if isinstance(rev, int) and rev >= 0 else 0
         if r < ent["loaded"]:
-            return list(ent["marks"])
-        return [u for g, u, s in ent["log"] if g > r and not s]
+            return [u for u in ent["marks"] if u not in ent["subs"]]
+        log = ent["log"]
+        return [u for g, u, sb in log[bisect.bisect_right(log, r, key=_gen_of):] if not sb]
+
+
+def _gen_of(row):
+    return row[0]
 
 
 def record_narration(state_dir, sid, uuid_, idx, ords, sub=False) -> bool:
     """File one frame's marks. True when they were new: a replayed frame (a host's journal handed over again after a
-    kernel restart) changes nothing. The row is written before it is served, under the lock, the journal rotated first
-    when it is past NARRATION_ROTATE_BYTES; a failed write keeps the mark for this kernel's life and is reported."""
+    kernel restart) changes nothing. The session's store is read first (outside the lock, _narr_entry); the row is then
+    written before it is served, under the lock, the journal rotated first when it is past NARRATION_ROTATE_BYTES. A failed
+    write keeps the mark in memory only: it is lost when the session's marks leave the LRU or the kernel restarts, and the
+    failure is reported."""
     if not uuid_ or not ords:
         return False
+    key = _key(state_dir, sid)
+    _narr_entry(state_dir, sid)
     with _NARR_LOCK:
-        ent = _narr_entry(state_dir, sid)
+        ent = _NARR_MEMO.get(key)
+        if ent is None:                               # dropped from the LRU since: read it here, under the lock (rare)
+            ent = _publish(key, *_read_store(state_dir, sid))
+        _NARR_MEMO.move_to_end(key)
         old = ent["marks"].get(uuid_)
         new = _intern(frozenset(ords) | old if old is not None else frozenset(ords))
         if new == old:
@@ -213,14 +258,20 @@ def record_narration(state_dir, sid, uuid_, idx, ords, sub=False) -> bool:
                     os.replace(p, p.with_name(p.name + ".1"))   # the older predecessor, if any, is dropped
             except FileNotFoundError:
                 pass
+            row = {"u": uuid_, "i": list(idx), "k": sorted(ords)}
+            if sub:
+                row["s"] = 1                          # a subagent's frame: marked_since leaves it out after a cold read
             with open(p, "a", encoding="utf-8") as f:
-                f.write(json.dumps({"u": uuid_, "i": list(idx), "k": sorted(ords)}) + "\n")
+                f.write(json.dumps(row) + "\n")
         except OSError as e:
-            _say("progress notes: a mark for %s was not written (%s); it holds until the kernel restarts" % (sid, e), "store-write")
+            _say("progress notes: a mark for %s was not written (%s); it holds in memory until its session leaves the "
+                 "cache or the kernel restarts" % (sid, e), "store-write")
         _NARR_GEN[0] += 1
         g = _NARR_GEN[0]
         ent["marks"][uuid_] = new
+        if sub:
+            ent["subs"].add(uuid_)
         ent["log"].append((g, uuid_, bool(sub)))
-        revs = _NARR_REVS.setdefault((str(Path(state_dir)), str(sid)), [0, 0])
+        revs = _NARR_REVS.setdefault(key, [0, 0])
         revs[1 if sub else 0] = g
         return True

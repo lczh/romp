@@ -71,6 +71,24 @@ R_NOTES_2B = ["The middleware and the test both say 429 now; running the suite."
               "One search test reused the same key and hit the limit. Reading it.",
               "Giving the search test a key of its own.",
               "Running the suite again."]
+SID_TESTS = "aaaaaaaa-5555-2222-3333-666666666666"
+X_PROMPT_1 = "Make the notes search ignore case."
+X_LONG = ("The change touches two places:\n\n- the query now wraps both sides in `lower()`;\n- the index on `title` no longer "
+          "helps, so I added an expression index on `lower(title)`.\n\nRunning the search tests next, then the whole suite to "
+          "be sure the index migration applies cleanly.")
+X_REPLY_1 = ("Search ignores case now: `GET /notes/search?q=Notes` finds `notes` and `NOTES`. An index on `lower(title)` keeps "
+             "the lookup fast, and a test covers mixed-case queries. All tests pass.")
+X_PROMPT_2 = "Add a search by tag too."
+X_TEXT_2 = "Writing the join and a tag filter on the search route."
+X_MID_2 = "only exact tag matches, please"
+X_ANSWER_2 = "Understood: tags match exactly, no partial matches."
+X_NOTES_2 = ["Exact matching needs no `lower()` on tags; running the tests.",
+             "One tag test expected a partial match; updating it to the exact rule."]
+X_REPLY_2 = "Tag search is in: `?tag=work` returns notes tagged exactly `work`. All tests pass."
+X_PROMPT_3 = "Paginate the search results."
+X_MID_3 = "default limit 25"
+X_ANSWER_3 = "Got it: the search page defaults to 25 results. Updating the default and its test."
+X_REPLY_3 = "Search results page with `cursor` and `limit` (default 25). The search tests pass."
 R_REPLY_2 = ("The limit test is in: the 31st create in a minute gets 429 Too Many Requests with a Retry-After header. I switched "
              "the middleware from 403 to 429 as you asked, and gave the search test its own key. All tests pass.")
 
@@ -130,6 +148,13 @@ class _Transcript:
     def reply(self, text):
         self.message([{"type": "text", "text": text}], stop="end_turn")
 
+    def text_tool(self, text, name, inp, out="ok"):   # a short note the API returns as a TEXT block, then its tool
+        self.tc += 1
+        tid = "toolu_%s_%02d" % (self.prefix[:8], self.tc)
+        self.message([{"type": "text", "text": text}, {"type": "tool_use", "id": tid, "name": name, "input": inp}])
+        self.add({"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tid, "content": out}]},
+                  "toolUseResult": {"stdout": out, "stderr": "", "interrupted": False, "isImage": False}})
+
 
 def think(text=""):
     return {"type": "thinking", "thinking": text, "signature": SIG}
@@ -185,6 +210,38 @@ def _realistic(cwd, base):
     return tr.recs, tr.marks
 
 
+def _realistic2(cwd, base):
+    """Session `tests`, the mix Opus 5.5 writes: notes as thinking blocks and as short TEXT blocks between tools, a long note
+    with a list, a turn with no message mid-turn, one whose mid-turn answer is a text block and one whose answer is a note;
+    the segments before the mid-turn messages end on a tool, inside a run, so their "worked" line rides the run."""
+    tr = _Transcript(SID_TESTS, "dddddddd-5555-2222-3333", base)
+    src, tst = cwd + "/src/routes/search.ts", cwd + "/tests/search.test.ts"
+    tr.user(X_PROMPT_1)
+    tr.text_tool("Looking at how search builds its WHERE clause.", "Read", {"file_path": src})
+    tr.note_tool("Search compares the raw title with `=`, so `Notes` and `notes` miss each other. I'll lower both sides.",
+                 "Edit", {"file_path": src, "old_string": "title = ?", "new_string": "lower(title) = lower(?)"}, "edited")
+    tr.text_tool("Adding a test for mixed-case queries.", "Edit", {"file_path": tst, "old_string": "});",
+                                                                   "new_string": "test('ignores case', ...);\n});"}, "edited")
+    tr.note_tool(X_LONG, "Bash", {"command": "npm test -- search", "description": "Ran the search tests"}, "9 passing")
+    tr.reply(X_REPLY_1)
+    tr.user(X_PROMPT_2)
+    tr.note_tool("Tags live in their own table; I'll join it.", "Read", {"file_path": cwd + "/src/db/schema.ts"})
+    tr.text_tool(X_TEXT_2, "Edit", {"file_path": src, "old_string": "where", "new_string": "join note_tags where"}, "edited")
+    tr.midturn(X_MID_2)
+    tr.text_tool(X_ANSWER_2, "Edit", {"file_path": src, "old_string": "like ?", "new_string": "= ?"}, "edited")
+    tr.note_tool(X_NOTES_2[0], "Bash", {"command": "npm test", "description": "Ran the tests"}, "1 failing")
+    tr.note_tool(X_NOTES_2[1], "Edit", {"file_path": tst, "old_string": "'wor'", "new_string": "'work'"}, "edited")
+    tr.reply(X_REPLY_2)
+    tr.user(X_PROMPT_3)
+    tr.note_tool("Reusing the cursor from GET /notes.", "Read", {"file_path": cwd + "/src/routes/notes.ts"})
+    tr.text_tool("Adding `cursor` and `limit` to search.", "Edit", {"file_path": src, "old_string": "all(", "new_string": "page("}, "edited")
+    tr.midturn(X_MID_3)
+    tr.note_tool(X_ANSWER_3, "Edit", {"file_path": src, "old_string": "limit = 20", "new_string": "limit = 25"}, "edited")
+    tr.text_tool("Running the search tests.", "Bash", {"command": "npm test -- search", "description": "Ran the search tests"}, "10 passing")
+    tr.reply(X_REPLY_3)
+    return tr.recs, tr.marks
+
+
 DRIVER = r"""
 import { createRequire } from "node:module";
 import fs from "node:fs";
@@ -204,9 +261,15 @@ const open = async (theme, compact, look, sid, wait, h) => {
   await page.addInitScript(([th, c, lk]) => { try { localStorage.setItem("romp:settings", JSON.stringify({ theme: th, compact: c })); if (lk) localStorage.setItem("romp:narration-look", lk); } catch (e) {} }, [theme, compact, look]);
   await page.goto(cfg.chat);
   await page.waitForSelector('#tabs .tab[data-id="' + sid + '"]', { state: "attached", timeout: 30000 });
-  // the session's tab: a click on the strip's own element (its delegate takes a synthetic click like a real one)
-  await page.evaluate((id) => { const t = document.querySelector('#tabs .tab[data-id="' + id + '"]'); if (t && !t.classList.contains("active")) t.click(); }, sid);
-  await page.waitForFunction(showing, wait, { timeout: 30000 });
+  // the session's tab: a real click on the strip's visible element
+  const active = await page.evaluate((id) => !!document.querySelector('#tabs .tab.active[data-id="' + id + '"]'), sid);
+  if (!active) await page.locator('#tabs .tab[data-id="' + sid + '"]:visible').first().click();
+  try { await page.waitForFunction(showing, wait, { timeout: 30000 }); }
+  catch (e) {
+    const st = await page.evaluate(() => ({ tabs: Array.from(document.querySelectorAll("#tabs .tab[data-id]")).map((t) => t.getAttribute("data-id") + (t.classList.contains("active") ? "*" : "")),
+      shown: Array.from(document.querySelectorAll("#content .turn")).filter((n) => n.getClientRects().length > 0).map((n) => (n.textContent || "").slice(0, 40)) }));
+    throw new Error("open(" + sid + "): " + JSON.stringify(wait) + " never showed: " + JSON.stringify(st));
+  }
   await page.addStyleTag({ content: "#content .turn-apierror { display: none !important; }" });   // the lab kernel runs no SDK backend: its notice is not this test's
   await painted(page);
   return page;
@@ -219,11 +282,15 @@ const rows = (page) => page.evaluate(() => Array.from(document.querySelectorAll(
   const cap = t.querySelector(".toolgroup-caption");
   const body = kind === "toolgroup" ? null : (t.querySelector(".assistant.md") || t.querySelector(".thought-gist") || t.querySelector(".thinking") || t.querySelector(".user-bubble"));
   const words = (n) => n ? (n.innerText || n.textContent || "").replace(/\s+/g, " ").trim() : "";
+  const foot = t.querySelector(":scope > .turn-elapsed");
+  const capLh = cap ? parseFloat(getComputedStyle(cap).lineHeight) || 18 : 0;
   return { kind, narration: c.includes("turn-narration"), opaque: !!t.querySelector(".thinking.encrypted"), fork: !!t.querySelector(".fork-spot"),
-           child: c.includes("tg-child"), text: words(body), caption: words(cap), head: words(t.querySelector(".toolgroup-head")) };
+           child: c.includes("tg-child"), text: words(body), caption: words(cap), head: words(t.querySelector(".toolgroup-head")),
+           foot: foot ? words(foot) : "", capLines: cap ? Math.round(cap.getBoundingClientRect().height / capLh) : 0,
+           capClamp: cap ? getComputedStyle(cap).webkitLineClamp : "" };
 }));
 const shot = async (page, dir, name, prompt) => {
-  if (!cfg.shots) return;
+  if (!dir) return;
   fs.mkdirSync(dir, { recursive: true });
   await page.evaluate((p) => { const t = Array.from(document.querySelectorAll("#content .turn-user")).find((n) => (n.textContent || "").includes(p)); if (t) t.scrollIntoView({ block: "start" }); }, prompt);
   await painted(page);
@@ -253,7 +320,7 @@ for (const [compact, mname] of [[true, "compact"], [false, "full"]]) {
 for (const look of cfg.before ? [""] : ["A", "B", "C"]) {
   for (const [theme, tname] of [["yatharth", "dark"], ["yatharth-light", "light"]]) {
     const p = await open(theme, true, look, cfg.api, cfg.rReplyStart, 1300);
-    await shot(p, cfg.shots + "/realistic", "realistic-" + (look || "before") + "-" + tname, cfg.rPrompt);
+    await shot(p, cfg.shots && cfg.shots + "/realistic", "realistic-" + (look || "before") + "-" + tname, cfg.rPrompt);
     if (look === "C" && tname === "dark") {
       out.realC = await rows(p);
       const lines = p.locator("#content .turn-toolgroup .toolgroup-line:visible");
@@ -262,7 +329,24 @@ for (const look of cfg.before ? [""] : ["A", "B", "C"]) {
       await p.waitForFunction(() => !!document.querySelector("#content .tg-child"), null, { timeout: 10000 });
       await painted(p);
       out.realCOpen = await rows(p);
-      await shot(p, cfg.shots + "/realistic", "realistic-C-dark-opened", cfg.rPrompt2);
+      await shot(p, cfg.shots && cfg.shots + "/realistic", "realistic-C-dark-opened", cfg.rPrompt2);
+    }
+    await p.close();
+  }
+}
+// THE MIXED TURNS (tests, compact): A, C and C2, dark and light, and C2 with its first run opened
+const dir2 = cfg.shots2 || (cfg.shots && cfg.shots + "/realistic2");
+for (const look of cfg.before ? [""] : ["A", "C", "C2"]) {
+  for (const [theme, tname] of [["yatharth", "dark"], ["yatharth-light", "light"]]) {
+    const p = await open(theme, true, look, cfg.tests, cfg.xReplyStart, 1500);
+    await shot(p, dir2, "mixed-" + (look || "before") + "-" + tname, cfg.xPrompt);
+    if (tname === "dark" && look) out["mixed" + look] = await rows(p);
+    if (look === "C2" && tname === "dark") {
+      await p.locator("#content .turn-toolgroup .toolgroup-line:visible").first().click();   // the first run: the long note inside
+      await p.waitForFunction(() => !!document.querySelector("#content .tg-child"), null, { timeout: 10000 });
+      await painted(p);
+      out.mixedC2Open = await rows(p);
+      await shot(p, dir2, "mixed-C2-dark-opened", cfg.xPrompt);
     }
     await p.close();
   }
@@ -327,7 +411,13 @@ class ServedNarration(unittest.TestCase):
              "model": MODEL, "liveModel": "Opus 5.5"}))
         # the store as the kernel's writer leaves it: one row per frame that listed a note, filed as the frame arrived (so
         # the live half's mark stands before its record lands)
-        for sid, marks in ((SID, cls.marks), (SID_API, api_marks)):
+        x_recs, x_marks = _realistic2(cwd, int(time.time()) - 900)
+        Path(proj, SID_TESTS + ".jsonl").write_text("".join(json.dumps(r) + "\n" for r in x_recs))
+        Path(state, "names", SID_TESTS).write_text("tests\t%s\t\t\n" % cwd)
+        Path(state, "sdk", SID_TESTS + ".json").write_text(json.dumps(
+            {"sid": SID_TESTS, "name": "tests", "cwd": cwd, "mode": "auto", "effort": "high", "lastSid": SID_TESTS, "alive": True,
+             "model": MODEL, "liveModel": "Opus 5.5"}))
+        for sid, marks in ((SID, cls.marks), (SID_API, api_marks), (SID_TESTS, x_marks)):
             Path(state, "narration", sid + ".jsonl").write_text("".join(json.dumps({"u": u, "i": [0], "k": [0]}) + "\n" for u in marks))
         cls.port, cls.token = _free_port(), "testtok-narration"
         env = _lab.kernel_env(cls.lab, claude, dist, cls.port, cls.token, ROMP_HOST_NAME="TESTHOST")
@@ -357,6 +447,8 @@ class ServedNarration(unittest.TestCase):
             json.dump({"chat": "http://127.0.0.1:%d/chat?token=%s" % (self.port, self.token), "midturn": MIDTURN,
                        "web": SID, "api": SID_API, "prompt": "Add cursor pagination", "replyStart": "Pagination is in.",
                        "rPrompt": R_PROMPT_1, "rPrompt2": R_PROMPT_2, "rReplyStart": R_REPLY_2[:40], "landFlag": flag,
+                       "tests": SID_TESTS, "xPrompt": X_PROMPT_1, "xReplyStart": X_REPLY_3.replace("`", "")[:30],
+                       "shots2": os.environ.get("NARRATION_SHOTS_REALISTIC2", ""),
                        "shots": os.environ.get("NARRATION_SHOTS", ""), "before": bool(self.before)}, f)
         driver = os.path.join(self.lab, "driver.mjs")
         with open(driver, "w") as f:
@@ -430,6 +522,51 @@ class ServedNarration(unittest.TestCase):
         # history with no mark keeps its Thought row
         hist = [x for x in r["compact"] if x["kind"] in ("thought", "assistant") and HISTORY_NOTE[:30] in x["text"]]
         self.assertEqual([(x["kind"], x["narration"]) for x in hist], [("thought", False)], "unmarked history: %r" % hist)
+
+    def test_mixed_notes_c2_folds_text_and_thinking_notes_clamps_captions_and_keeps_answers_and_footers(self):
+        r = self.result()
+        if self.before:
+            self.skipTest("a before-the-change checkout: screenshots only, the assertions describe the change")
+        self.assertEqual(r["errors"], [], "no page errors")
+        shown = lambda t: t.replace("`", "")
+        rows = [x for x in r["mixedC2"] if x["kind"] != "other"]
+        shape = [(x["kind"], x["narration"], (x["caption"][:30] if x["kind"] == "toolgroup" else x["text"][:30])) for x in rows]
+        self.assertEqual(shape, [
+            ("user", False, X_PROMPT_1[:30]),
+            ("toolgroup", False, "The change touches two places:"),   # text and thinking notes fold; the long note is the caption
+            ("assistant", False, shown(X_REPLY_1)[:30]),               # the final message after the last tool stays a reply
+            ("user", False, X_PROMPT_2[:30]),
+            ("toolgroup", False, X_TEXT_2[:30]),                      # a TEXT note is the caption
+            ("user", False, X_MID_2[:30]),
+            ("assistant", False, X_ANSWER_2[:30]),                    # the answer as a TEXT block stands alone
+            ("toolgroup", False, shown(X_NOTES_2[1])[:30]),
+            ("assistant", False, shown(X_REPLY_2)[:30]),
+            ("user", False, X_PROMPT_3[:30]),
+            ("toolgroup", False, shown("Adding `cursor` and `limit` to search.")[:30]),
+            ("user", False, X_MID_3[:30]),
+            ("assistant", True, X_ANSWER_3[:30]),                     # the answer as a NOTE stands alone too
+            ("toolgroup", False, "Running the search tests."[:30]),
+            ("assistant", False, shown(X_REPLY_3)[:30]),
+        ], "C2, compact: %r" % shape)
+        long_cap = rows[1]
+        self.assertEqual(long_cap["capClamp"], "2", "the caption is a two-line clamp, not a fade")
+        self.assertLessEqual(long_cap["capLines"], 2, "…and shows two lines at most: %r" % long_cap)
+        answer = rows[6]
+        self.assertEqual(answer["capLines"], 0)
+        # the segment before each mid-turn message ends on a tool inside a folded run: its "worked" line rides the run
+        self.assertTrue(rows[4]["foot"], "the run before the first mid-turn message carries the segment's footer: %r" % rows[4])
+        self.assertTrue(rows[10]["foot"], "…and the one before the second: %r" % rows[10])
+        # opened: every tool and note in order, the long note whole
+        opened = [x for x in r["mixedC2Open"] if x["child"]]
+        self.assertEqual(["note" if x["kind"] == "assistant" else x["kind"] for x in opened],
+                         ["note", "tool", "note", "tool", "note", "tool", "note", "tool"], "opened: %r" % opened)
+        self.assertIn("then the whole suite", opened[6]["text"], "the long note opens whole")
+        # C (thinking notes only): a text answer to a mid-turn message disarms the rule; no later note is pulled out
+        c = [x for x in r["mixedC"] if x["kind"] != "other"]
+        i = next(k for k, x in enumerate(c) if x["kind"] == "user" and X_MID_2 in x["text"])
+        self.assertEqual([(x["kind"], x["narration"]) for x in c[i + 1:i + 4]],
+                         [("assistant", False), ("toolgroup", False), ("assistant", False)],
+                         "C: the text answer, then ONE run holding both later notes, then the reply: %r" % c[i:i + 5])
 
     def test_look_c_folds_the_notes_between_tools_into_the_run_and_keeps_the_answer_to_a_midturn_message_out(self):
         r = self.result()

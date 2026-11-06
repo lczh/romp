@@ -78,7 +78,7 @@ function liftPaint(): Paint {
     // as a plain turn; both carry the event's uuid
     const renderEvent = (ev) => { const n = ev.kind === "thinking" && ev.row ? renderThought(ev, ev.row) : el("div", "turn turn-" + ev.kind); n.dataset.uuid = ev.uuid || ""; return n; };
     const renderToolGroup = () => el("div", "turn turn-toolgroup");
-    const captionRun = () => {};   // option C's caption under a closed run (2026-11-06): not this test's
+    const foldedRunHead = () => {};   // a closed run's caption and footer (2026-11-06): not this test's
     const toolGroupKey = (first) => "tg:" + first.uuid;
     const noticeGroupKey = (first) => "ng:" + first.uuid;
     const eventEpoch = (ev) => (ev && ev.t != null ? ev.t : null);

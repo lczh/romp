@@ -152,7 +152,48 @@ class Store(unittest.TestCase):
         nar.record_narration(self.root, SID, "u-sub", [0], [0], sub=True)
         self.assertEqual(nar.narration_marked_since(self.root, SID, rev), ["u2"], "main-conversation marks only")
         self._drop_memo()                                    # read from the file after `rev`: which came later is unknown
-        self.assertEqual(sorted(nar.narration_marked_since(self.root, SID, rev)), ["u-sub", "u1", "u2"], "then every mark")
+        self.assertEqual(sorted(nar.narration_marked_since(self.root, SID, rev)), ["u1", "u2"],
+                         "then every main-conversation mark: the subagent's row says it is one")
+
+    def test_marked_since_searches_the_log_and_never_walks_it(self):
+        class NoWalk(list):
+            def __iter__(self):
+                raise AssertionError("the log was walked")
+        for i in range(50):
+            nar.record_narration(self.root, SID, "w%d" % i, [0], [0], sub=(i % 7 == 0))
+        ent = nar._NARR_MEMO[(str(self.root), SID)]
+        gens = [g for g, _u, _s in ent["log"]]
+        ent["log"] = NoWalk(ent["log"])
+        self.assertEqual(nar.narration_marked_since(self.root, SID, gens[44]), ["w45", "w46", "w47", "w48"],
+                         "the marks past the revision, main-conversation ones, by a binary search on the counter")
+        self.assertEqual(nar.narration_marked_since(self.root, SID, gens[-1]), [])
+
+    def test_a_cold_read_holds_no_lock_and_a_mark_filed_meanwhile_is_not_lost(self):
+        (self.root / "narration").mkdir(parents=True, exist_ok=True)
+        (self.root / "narration" / (SID + ".jsonl")).write_text(json.dumps({"u": "old", "i": [0], "k": [0]}) + "\n")
+        saved_read, saved_max = nar._read_store, nar._NARR_MEMO_MAX
+        self.addCleanup(setattr, nar, "_read_store", saved_read)
+        self.addCleanup(setattr, nar, "_NARR_MEMO_MAX", saved_max)
+        reads, raced = [], []
+
+        def read(state_dir, sid):
+            reads.append(nar._NARR_LOCK.locked())
+            got = saved_read(state_dir, sid)
+            if sid == SID and not raced:
+                # while this read is out: the same session's mark is filed (its own read, published), and the session is
+                # dropped from the LRU again before this read publishes, so only the revisions say it moved
+                raced.append(1)
+                nar.record_narration(self.root, SID, "late", [0], [0])
+                nar._NARR_MEMO_MAX = 1
+                nar.narration_marks(self.root, SID_B)
+            return got
+        nar._read_store = read
+        with nar._NARR_LOCK:
+            nar._NARR_MEMO.clear()
+        marks = nar.narration_marks(self.root, SID)
+        self.assertNotIn(True, reads, "no read of a store holds the lock")
+        self.assertEqual(sorted(marks), ["late", "old"], "the stale read was thrown away and the file read again")
+
 
     def test_one_frozenset_for_the_common_zero_and_one_per_other_set(self):
         # nearly every record holds one block, so nearly every mark is {0}: one object for all of them, on both roads
@@ -341,6 +382,15 @@ class Reader(unittest.TestCase):
         s2 = _session(self.root, SID_B)
         self._drain(s2, _RawClient([frame([think(NOTE_2)], uuid="u-unlisted-3", display="updates")]))
         self.assertEqual(len([r for r in s2.backend.logs if r["problem"]]), 1, "another session says it again")
+
+    def test_a_field_already_seen_beats_a_later_init_frame(self):
+        # a reconnect's init can arrive after notes were already listed: the field is the CLI's own answer and it stands
+        s = _session(self.root)
+        self._drain(s, _RawClient([frame([think(NOTE_1)], uuid="u-note-1", idx=[0]),
+                                   {"type": "system", "subtype": "init", "uuid": "init-x", "claude_code_version": "2.1.250"},
+                                   frame([think(REASONING)], uuid="u-reason")]))
+        self.assertIs(s._narration_lists, True)
+        self.assertEqual([r for r in s.backend.logs if r["problem"]], [], "no older-CLI notice on the summary after it")
 
     def test_the_init_frames_version_decides_an_older_cli_and_a_2_1_282_stream_says_nothing(self):
         # 2.1.282 lists notes but sends no frame-level thinking_display; its reasoning summaries are ordinary
