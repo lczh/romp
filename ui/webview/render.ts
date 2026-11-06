@@ -11796,9 +11796,9 @@ function applyForkSpots(sid: string, v: View): void {
 }
 
 /** Whether a session's turn is OPEN: the kernel's status.turnOpen (_turn_open, the reading the running-call stamp takes), true
- *  from the prompt to the CLI's result frame through a permission prompt, a question, a retry, an interrupt in flight and a
- *  restart's reattach, all of which move the chip, and through a Stop hook's block and a compaction mid-turn, which the
- *  transcript's end_turn does not see. The fork spots and the "worked …" line key on it,
+ *  from the prompt to the CLI's result frame through a permission prompt, a question, a retry and a restart's reattach, all
+ *  of which move the chip, and through a Stop hook's block and a compaction mid-turn, which the transcript's end_turn does
+ *  not see. A Stop press closes it at the press (the backend files "idle" then, before the CLI has stopped). The fork spots and the "worked …" line key on it,
  *  so neither appears mid-turn only to go again when the turn resumes. A kernel that sends no turnOpen: its chip (working or
  *  compacting) stands in, as before. */
 function turnOpenOf(st: Status | undefined): boolean {

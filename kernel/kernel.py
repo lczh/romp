@@ -15303,9 +15303,12 @@ def _turn_open(sid, turns, tm=None, anchor=""):
       - The log's latest state ended the turn, or a turnCut follows it: closed.
       - The log has the turn open and so does the transcript: open.
       - The log has it open and the transcript has closed it (a reply's end_turn before a Stop hook's block and its
-        continuation; a compaction's boundary before the continuation's first record): the live row decides. A running
-        session reports its own turn ("working" while its result has not come; a dormant row never reports an open state), so
-        a CLI running the turn keeps it open, and a log whose result write was lost reads closed.
+        continuation; a compaction's boundary before the continuation's first record): the live row decides. A session whose
+        CLI has a turn in flight reports it ("working" while its result has not come), so a CLI running the turn keeps it
+        open. A dormant row never reports an open state, so a log whose result write was lost reads closed when no process
+        runs the session. A CONNECTED session with no turn in flight reports the log's own last line (SdkSession.live_state),
+        so there the tie-break reads the log against itself and a lost result write keeps the turn open until the next turn
+        starts and writes the log again.
     `anchor`: a lane whose transcript forked (a resume, a /clear) keeps writing the log under its anchor; the newer of the two
     logs answers (the chat signature stats both)."""
     st, t, cut = _turn_end(sid)
@@ -49828,10 +49831,10 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         # so the client auto-retry still fires + recovers the transient ones (the user 2026-06-29).
         status = {"state": chip, "sinceEpoch": since_ms, "faded": faded,
                   # whether the session's turn is OPEN (_turn_open, the running-call stamp's own reading, _turn_is_open
-                  # above): unlike the chip it holds through a permission prompt, a question, a retry, an interrupt in
-                  # flight, a kernel restart's reattach, a Stop hook's block and a compaction mid-turn, and turns false at
-                  # the CLI's result frame, an interrupt's stop or a cut turn given up (2026-11-06; the client's fork
-                  # spots and "worked" line key on it)
+                  # above): unlike the chip it holds through a permission prompt, a question, a retry, a kernel restart's
+                  # reattach, a Stop hook's block and a compaction mid-turn, and turns false at the CLI's result frame, a
+                  # cut turn given up, or a Stop press (the backend files "idle" the moment it is pressed, before the CLI
+                  # has stopped) (2026-11-06; the client's fork spots and "worked" line key on it)
                   "turnOpen": bool(_turn_is_open),
                   # WHAT the session is awaiting, beside the chip (the user 2026-08-13: the chat pane said
                   # "Awaiting" with the reason nowhere in sight — the feed pill and timeline hover had it,

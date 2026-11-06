@@ -8,8 +8,9 @@
 // reply over and the spot would hop from row to row. The event the plan keys on is the turn's end as the kernel reads it, the
 // session status's `turnOpen` (the kernel's _turn_open: the turn ends at the CLI's result frame, as the states log files it, or
 // when the backend gives a cut turn up; the reading the running-call stamp takes), never the status chip: a permission prompt, a
-// question, a retry, an interrupt in flight and a restart's reattach all move the chip off "working" while the turn goes on, and
-// a Stop hook's block and a compaction mid-turn outlive the transcript's own end_turn. The runs of the turns before it keep their spots, cut at the prompts that
+// question, a retry and a restart's reattach all move the chip off "working" while the turn goes on, and a Stop hook's block and a
+// compaction mid-turn outlive the transcript's own end_turn. A Stop press ends the turn at the press (the backend files "idle"
+// then, before the CLI has stopped). The runs of the turns before it keep their spots, cut at the prompts that
 // followed them, so no spot moves while the turn is open; at its end the tip spot lands under the reply.
 import { isProseShape, segmentReplies } from "./compact";
 

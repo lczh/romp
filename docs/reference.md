@@ -7398,8 +7398,11 @@ line of its own with no words.
 The button and the "worked" line wait for the turn to end, as the session status's `turnOpen` says: the turn ends at Claude
 Code's result frame (the states log's `waiting`; an interrupt's `idle`), not at the status chip, which leaves "working"
 for a permission prompt, a question or a retry, and not at the transcript's `end_turn`, which a blocking Stop hook and a
-compaction mid-turn outlive. When the log has the turn open and the transcript has closed it, the session's live row
-decides, so a result whose record was lost reads closed. A turn whose Claude Code kept dying, and which the backend gave
+compaction mid-turn outlive. A Stop press ends the turn at the press: the backend records `idle` then, before Claude Code
+has stopped. When the log has the turn open and the transcript has closed it, the session's live state decides: a turn
+in flight keeps it open. A result whose record was lost reads closed when no Claude Code process runs the session; while
+one is connected with no turn in flight, its live state is the log's own last record, so the turn stays open until the
+next turn starts. A turn whose Claude Code kept dying, and which the backend gave
 up resuming, is over (its `turnCut` record), until the next drive or the next kernel's boot resumes it. The same reading
 keeps a call's working dot on. So while a turn is open nothing in it carries a fork button or a "worked" line, and no
 row moves when one appears or goes.
