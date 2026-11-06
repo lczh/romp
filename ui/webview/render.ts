@@ -41,7 +41,7 @@ import { windowFocusedElement } from "./window-focus";   // the window's focus a
 import { markerLabel, dayContext, DayWalk, relativeLabel, relativeLines } from "./time-marker";
 import { composeStatusWidgets, folderIconNode, folderLink, type StatusRecord } from "./status-widgets";
 import { REVEAL_LABEL, revealFraction, revealShownFraction, residentSpan, revealCountWords, revealPercentWords, messageCount } from "./reveal-progress";
-import { compactDisplay, isFoldableNoticeShape, itemAnchor, itemHolds, runRows, thoughtHasWords, thoughtOf, thoughtKey, type DisplayItem } from "./compact";
+import { compactDisplay, isFoldableNoticeShape, itemAnchor, itemHolds, runCaption, runRows, thoughtHasWords, thoughtOf, thoughtKey, type DisplayItem, type NoteRoles } from "./compact";
 import { insertRun, regionsFromRuns, gapHeight, gapTurnPx, GAPS_SHARE, HIDDEN_SHARE, heldUnitPx, LAYOUT_LIMIT_FALLBACK, pageAt, pagesToAsk, gapAt, gapFraction, landingNotice, setAsideNotice, runsOf, turnsBeforeTail, splitHeldAgainstFrame, OVERLAY_KINDS, kernelTurnOf, measureTurnPx, type MeasuredRow, type Region, type Run, type Gap, type Ev } from "./chat-regions";
 import { senderKind, SenderKind } from "./sender-identity";
 import { railPads, TICK_PAD } from "./rail-pads";   // the comment ticks' clamped hit pads (the comment-forward rail, 2026-09-24)
@@ -494,6 +494,15 @@ function openSettingsOn(tab: string, section?: string): void {
 }
 
 let settings: RompSettings = loadSettings();   // global webview settings (compact mode, …) — see settings.ts
+// How progress notes look (2026-11-06, DRAFT: the user picks one from screenshots, and the others then go). A, a note is plain
+// assistant prose; B, the same prose with the thought's dim rail dot and tighter spacing (html.narr-look-b, styles.css);
+// C, compact mode folds the notes between tools into the run, its latest note the run's caption (compact.ts option C).
+// Read once per page from localStorage "romp:narration-look"; C when unset.
+const narrationLook: "A" | "B" | "C" = (() => {
+  try { const v = localStorage.getItem("romp:narration-look"); if (v === "A" || v === "B" || v === "C") return v; } catch { /* no storage */ }
+  return "C";
+})();
+if (narrationLook === "B") document.documentElement.classList.add("narr-look-b");
 // (compact mode's expanded tool/notice runs are keyed in openFolds — "tg:<uuid>" / "ng:<uuid>" — the ONE fold
 // store since 2026-09-08; this had its own expandedGroups set)
 
@@ -12464,6 +12473,7 @@ function fillCommentMsgs(list: HTMLElement, th: CommentThread, sid: string): voi
         list.appendChild(it.kind === "toolgroup"
           ? renderToolGroup(runTools(evs, it.indices), prev, key, open)   // the head counts the run's tools only
           : renderNoticeGroup(run, evs[anchor], prev, key, open));
+        if (it.kind === "toolgroup" && !open) captionRun(list.lastElementChild as HTMLElement, evs, it.indices);   // option C's caption
         let exit: number | null;   // the epoch the run leaves the walk on (the rail chain and the day mark alike)
         if (open) {
           // the run's own members, as the chat draws them: a tool run's thoughts as Thought rows (runRows), a notice run's notices
@@ -15153,7 +15163,23 @@ function displayItems(s: Session): DisplayItem[] {
 /** Compact mode's display units over a list of events: the ONE builder the chat, a subagent viewer and the comment popover
  *  share (tool names for the standalone-tool exception, the foldable notices, the thoughts with words). */
 function compactItems(evs: readonly ChatEvent[]): DisplayItem[] {
-  return compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === "tool" ? e.name : undefined), evs.map(isFoldableNotice), evs.map(thoughtHasWords));
+  return compactDisplay(evs.map((e) => e.kind), evs.map((e) => e.kind === "tool" ? e.name : undefined), evs.map(isFoldableNotice), evs.map(thoughtHasWords), noteRoles(evs));
+}
+/** Option C's roles for compactDisplay (the notes, the messages delivered mid-turn); none under looks A and B. */
+function noteRoles(evs: readonly ChatEvent[]): NoteRoles | undefined {
+  return narrationLook === "C" ? { note: evs.map(isNote), spliced: evs.map((e) => e.kind === "user" && !!e.absorbed) } : undefined;
+}
+/** A progress note: an assistant event the kernel built from a thinking block the CLI listed as the model's note (narration). */
+function isNote(e: ChatEvent | undefined): boolean { return !!e && e.kind === "assistant" && !!e.narration; }
+/** Option C: a collapsed run's caption, its latest note (compact.ts runCaption), drawn as prose under the run's line on the
+ *  run's head `head`; nothing under looks A and B, or for a run that holds no note. An open run shows its notes in place. */
+function captionRun(head: HTMLElement, evs: readonly ChatEvent[], indices: readonly number[]): void {
+  if (narrationLook !== "C") return;
+  const i = runCaption(indices, (j) => isNote(evs[j]));
+  if (i < 0) return;
+  const c = assistantBody(evs[i] as Extract<ChatEvent, { kind: "assistant" }>);
+  c.classList.add("toolgroup-caption");
+  head.appendChild(c);
 }
 // T386 stage 2: the history the page does not hold is GAPS between its runs (and before the first), each a display unit of its own
 // placed before the first item of the run below it (`before`: that run's first event index in s.events, the runs' events being
@@ -15249,6 +15275,7 @@ function appendItem(v: View, s: Session, items: DisplayItem[], u: number, prevEp
     const head = tag(renderToolGroup(runTools(s.events, it.indices), prevEpoch, key, open));   // the head counts the run's tools only
     host.appendChild(head);
     adv(it.indices[0]);
+    if (!open) captionRun(head, s.events, it.indices);   // option C: the run's latest note under its line
     if (open) {   // expanded → the run's members in order, each tool as its normal turn and each stretch of thoughts as ONE
       // collapsed Thought row (runRows). Not the contiguous start..end span: it.indices holds only the run's members, so a
       // textless thinking block between the tools stays hidden. (Until 2026-10-23 no thinking showed here at all, the
@@ -15614,6 +15641,16 @@ function diffTotals(add: number, del: number): HTMLElement {
 function appendTotals(line: HTMLElement, add: number, del: number): void {
   if (!add && !del) return;
   line.append(" ", diffTotals(add, del));
+}
+/** An assistant message's prose: markdown, highlighted code, the kernel-verified path links, the team's terms. A reply, a
+ *  progress note and a run's caption (option C) draw it alike. */
+function assistantBody(ev: Extract<ChatEvent, { kind: "assistant" }>): HTMLElement {
+  const body = el("div", "assistant md");
+  body.innerHTML = md(ev.md);
+  highlight(body);
+  linkifyFileUris(body, undefined, ev.spacePaths, ev.pathLinks, ev.pathPins, ev.pathPreview, ev.pathPreviewWhy);   // bare file:// URLs + verified spaced filenames → clickable
+  linkTerms(body);   // the team's coinages (T351 stage 2)
+  return body;
 }
 function renderToolGroup(tools: Extract<ChatEvent, { kind: "tool" }>[], prevEpoch: number | null, key: string, open: boolean): HTMLElement {
   const turn = el("div", "turn turn-toolgroup" + (open ? " expanded" : ""));

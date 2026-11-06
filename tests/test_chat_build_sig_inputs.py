@@ -210,6 +210,7 @@ DOTTED = {
 
     "em.parse_z": ("pure", "a rendered orphan note's stamp, parsed for the fold's orphan gate window (round 2, item 11)"),
     "sb.echo_text_key": ("pure", "over a text"),
+    "nar.narration_rev": ("sig", "narration", "the session's main-conversation progress-note revision, a counter in memory"),
     "nar.narration_marks": ("sig", "narration", "the progress-note store's marks for the session, keyed by its revision"),
     "nar.narration_marked_since": ("sig", "narration", "the fold's narration gate: the uuids the store took past a revision"),
     "cm.context_rgb": ("pure", "over a percentage"),
@@ -1078,6 +1079,8 @@ class Differential(_World):
         self.assertEqual(self.sig(), b, "the same frame handed over again files nothing")
         km.nar.record_narration(jd.STATE, PEER, "p1", [0], [0])
         self.assertEqual(self.sig(), b, "another session's mark is not this tab's")
+        km.nar.record_narration(jd.STATE, SID, "sub1", [0], [0], sub=True)
+        self.assertEqual(self.sig(), b, "a subagent's note is the subagent viewer's, not the parent chat's")
 
     def test_the_feed_verdict_misses_under_needs_only_as_a_verdict_on_this_session(self):
         # the ledger carries the feed's per-session needs-you (needsInput); the set behind it is None until the

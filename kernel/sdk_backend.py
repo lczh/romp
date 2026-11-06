@@ -12272,6 +12272,8 @@ class SdkSession:
                 continue
             if isinstance(data, dict) and data.get("type") == "assistant":
                 self._narration_frame(data)          # before the parse: the build that shows this frame reads its marks
+            elif isinstance(data, dict) and data.get("type") == "system" and data.get("subtype") == "init":
+                self._narration_init(data)
             msg = parse(data)
             if msg is not None:
                 yield msg
@@ -12283,15 +12285,26 @@ class SdkSession:
         per session and reason as a problem; its thinking stays as Thought rows. Contained: a fault here costs the marks
         of this one frame, never the stream."""
         try:
-            got = _nar.narration_from_frame(data)
+            if "narration_block_indexes" in data:
+                self._narration_lists = True         # this CLI lists notes, whatever its init said or did not say
+            got = _nar.narration_from_frame(data, getattr(self, "_narration_lists", None))
             if got is None:
                 return
             if got["idx"] and got["uuid"]:
-                _nar.record_narration(self.backend.state_dir, self.sid, got["uuid"], got["idx"], got["ords"])
+                _nar.record_narration(self.backend.state_dir, self.sid, got["uuid"], got["idx"], got["ords"], sub=got["sub"])
             if got["why"]:
                 self._narration_problem(got["why"])
         except Exception as e:
             self._narration_problem("a frame's marks could not be filed (%s: %s)" % (type(e).__name__, e))
+
+    def _narration_init(self, data) -> None:
+        """The init frame names the CLI (`claude_code_version`): whether it lists notes at all is its version's answer
+        (narration.cli_lists_notes), the exact test of an older Claude Code. A field already seen in the session stands."""
+        try:
+            if getattr(self, "_narration_lists", None) is not True:
+                self._narration_lists = _nar.cli_lists_notes(data.get("claude_code_version"))
+        except Exception:
+            pass
 
     def _narration_unreadable(self, msg) -> None:
         """The parsed-only road (_frames without the raw stream): a main-conversation thinking block with words arrives

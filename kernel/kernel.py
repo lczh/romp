@@ -38588,8 +38588,9 @@ def build_subagent(sid, agent_id, now, live_map=None):
 
 def _subagent_frame_cached(sid, agent_id, now, live_map=None):
     """(frame, serialized) for an OPEN viewer, rebuilt only when its change key moved: the agent file's
-    (mtime, size), the running flag, whether the sidecar exists, and the session's progress-note store revision (a
-    subagent frame's mark lands beside its record, not through it). Shared across clients; the per-client
+    (mtime, size), the running flag, whether the sidecar exists, and the session's SUBAGENT progress-note revision (a
+    subagent frame's mark lands beside its record, not through it; a main-conversation mark leaves it be). Shared across
+    clients; the per-client
     dedup slot ("subagent", sid, agentId) absorbs an unchanged re-send."""
     live_map = _live_map() if live_map is None else live_map
     ppath = _path_of(sid, now)
@@ -38598,7 +38599,7 @@ def _subagent_frame_cached(sid, agent_id, now, live_map=None):
     running = (_agent_running_for(ppath, meta.get("toolUseId"), agent_id, live_map.get(str(sid)), _sdk_spawned_at(sid))
                if ppath else False)
     key = (ppath, _chat_stat_key(str(apath)) if apath is not None else None, running, bool(meta),
-           nar.narration_marks(jd.STATE, sid)[0])   # a subagent frame's progress-note mark, filed under this session
+           nar.narration_rev(jd.STATE, sid, sub=True))   # a subagent frame's progress-note mark, filed under this session
     hit = _SUBAGENT_FRAMES.get((sid, agent_id))
     if hit is not None and hit[0] == key:
         return hit[1], hit[2]
@@ -42598,10 +42599,11 @@ def _chat_build_sig(sess, tm=None, now=None, live_map=None, deps=None):
         # floor: the render floor decision (T323 stage 4b): True while a proto-1 client is connected (the pusher's
         # per-push flag), so a payload built from turn 0 is never served from the cache once the floor climbs
         sig.append(bool(getattr(_live_scope, "chat_floor0", False)))
-        # narration: the progress-note store's revision for this session (nar.narration_marks): a mark turns a thinking
-        # block into the agent's prose. A main-conversation frame's mark lands with the live atom that bumps `live`; a
-        # subagent's frame (and a host's replay) files one with no other input moving
-        sig.append(nar.narration_marks(jd.STATE, sid)[0])
+        # narration: the session's main-conversation progress-note revision (nar.narration_rev, a counter in memory: no
+        # store is read here): a mark turns a thinking block into the agent's prose. A frame's mark lands with the live atom
+        # that bumps `live`; a host's replay files one with no other input moving. A subagent's mark has its own revision,
+        # the subagent viewer's, and rebuilds no parent tab
+        sig.append(nar.narration_rev(jd.STATE, sid))
         sig.extend(((), (), None) if deps is False else _chat_sig_deps(sid, deps))   # taskout, pathlink, postal
         return tuple(sig)
 
@@ -48410,7 +48412,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # record's thinking blocks. Read once per build, with the store's revision for the fold's gate; a subagent's render
     # reads the parent's store, where its frames are filed. History from before the store has no marks and keeps its
     # Thought rows.
-    _narr_rev, _narr = nar.narration_marks(jd.STATE, sid)
+    _narr_rev = nar.narration_rev(jd.STATE, sid)                # read BEFORE the marks: a mark filed between is caught
+    _narr = nar.narration_marks(jd.STATE, sid)
 
     def _prose_paths(ev, txt, a):
         """The path fields an assistant message's prose carries, a reply's and a progress note's alike (`a`: its atom)."""
@@ -64860,11 +64863,13 @@ def _page_dep_note(kind, item):
         rec[kind].append(item)
 
 
-def _page_live_record(sid, events, rec):
+def _page_live_record(sid, events, rec, nrev=0):
     """The finished live-input record of one rendered page: the readers' notes (rec: the Agent cards' reads, the task
     output files each under the first identity read), and the messages whose path tokens are still unresolved, with the
     links and pins as rendered, in the shape _chat_sig_deps re-checks for a chat payload (_chat_build_deps' pathlink
-    part: a mention can precede its file, and a cold render would link it once the file exists)."""
+    part: a mention can precede its file, and a cold render would link it once the file exists). `narr`: the
+    progress-note revision the render read (`nrev`) and the records it drew as thinking with words, so a mark filed later
+    for one of them (a host's journal replayed to a restarted kernel) re-renders the page, and no other mark does."""
     outs = {}
     for of, key in rec["outs"]:
         outs.setdefault(of, key)
@@ -64876,7 +64881,8 @@ def _page_live_record(sid, events, rec):
                 pl.append((ev["uuid"], ev["md"], ev.get("pathLinks"), ev.get("pathPins")))
     return {"agents": tuple(rec["agents"]), "outs": tuple(outs.items()),
             "pl": {"task_outs": [], "postal_any": False, "pl_pending": [(u, md) for u, md, _l, _p in pl],
-                   "pl_at": tuple((u, l, p) for u, _md, l, p in pl), "pl_check": None}}
+                   "pl_at": tuple((u, l, p) for u, _md, l, p in pl), "pl_check": None},
+            "narr": (nrev, _narr_sealed(None, events))}
 
 
 def _page_agent_trees(cards, ctx):
@@ -64957,7 +64963,9 @@ def _page_live_moved(sid, rec, ctx):
     (_page_agents_moved, inside the caller's subagents-tree scope, or one opened here for the pages of this check, so a
     tree is sampled once); and the unresolved path tokens, through the chat build's own pathlink check (_chat_sig_deps:
     the first check re-resolves them, and from then on only the messages whose candidate directories moved). A page with
-    no record is treated as moved. The postal captions stay outside, as _page_sig documents."""
+    no record is treated as moved. A progress-note mark filed for a record the page drew as thinking moves it too (the
+    page's `narr`, checked only when the session's revision moved). The postal captions stay outside, as _page_sig
+    documents."""
     if rec is None:
         return True
     for of, key in rec["outs"]:
@@ -64973,6 +64981,10 @@ def _page_live_moved(sid, rec, ctx):
         finally:
             if own:
                 _live_scope.subagent_trees = None
+    nr = rec.get("narr")
+    if nr and nr[1] and nar.narration_rev(jd.STATE, sid) != nr[0] and any(
+            u in nr[1] for u in nar.narration_marked_since(jd.STATE, sid, nr[0])):
+        return True                                   # a record the page drew as thinking was marked a note since
     pl = rec["pl"]
     return bool(pl["pl_pending"]) and _chat_sig_deps(sid, pl)[1] != pl["pl_at"]
 
@@ -65104,6 +65116,7 @@ def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None, sig=None, sta
         stats["rendered"] = stats.get("rendered", 0) + 1
     t0 = time.monotonic()
     _page_dep_scope.rec = {"agents": [], "outs": []}   # the readers' notes of this render (_page_dep_note)
+    _nrev = nar.narration_rev(jd.STATE, sid)               # the progress-note revision the render reads at or after
     try:
         page = build_session(sid, now, live_map, page=(lo, hi))
         notes = _page_dep_scope.rec
@@ -65111,7 +65124,7 @@ def _chat_history_page(sid, lo, hi, now, sess=None, live_map=None, sig=None, sta
         _chat_dep_scope.deps = None
         _page_dep_scope.rec = None
     evs = (page or {}).get("events") or []
-    rec = _page_live_record(sid, evs, notes) if sig is not None else None
+    rec = _page_live_record(sid, evs, notes, _nrev) if sig is not None else None
     with _page_lock:
         _PAGE_STATS["renderMs"] += (time.monotonic() - t0) * 1000
         if sig is not None:

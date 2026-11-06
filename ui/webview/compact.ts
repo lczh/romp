@@ -5,9 +5,10 @@
 // still count as consecutive; tools separated by visible content (an assistant reply, a prompt, …) do not.
 // The rail timestamp logic runs over the RESULT of this, so the stamps reflect the compacted stream.
 // THINKING (the user 2026-10-23, who approved the design and with it the end of the 2026-06-30 rule that an
-// expanded tool group never shows thinking): a thinking block WITH WORDS (a reasoning summary, or a progress
-// note written for the person watching) is a THOUGHT, shown as one collapsed row; consecutive thoughts are one
-// row. A thought that opens a stretch of work (after a prompt, a mid-turn message, a reply) is its own unit; a
+// expanded tool group never shows thinking): a thinking block WITH WORDS that is not a progress note (a reasoning
+// summary; history from before romp recorded which blocks are notes) is a THOUGHT, shown as one collapsed row;
+// consecutive thoughts are one row. A PROGRESS NOTE (2026-11-06) is not a thought: the kernel ships it as an assistant
+// event flagged `narration`, prose like a reply, and only option C below gives it a place in a run. A thought that opens a stretch of work (after a prompt, a mid-turn message, a reply) is its own unit; a
 // thought after a tool in a run is a MEMBER of that run, drawn as a collapsed Thought row when the run expands,
 // so it never splits the run, and the run's head still counts only its tools. A textless (opaque) block stays
 // hidden, as every thinking block was before: it breaks nothing, and the turn's footer gives its tokens.
@@ -16,6 +17,12 @@
 // settle, a background report, a system reminder, a romp notice — collapses into one `noticegroup` head.
 // Which events are foldable is the caller's call (render.ts isFoldableNotice, passed per event): peers,
 // API errors, compaction/clear boundaries, asks, to-dos, dividers and every bubble stay standalone.
+// PROGRESS NOTES IN A RUN (option C, 2026-11-06, compact mode only, on the caller's `notes`): Opus 5.5 writes a note before
+// most tool calls, so tool, note, tool, note… would otherwise break every run into single tools. With `notes` given, a note
+// between tools is a MEMBER of the run, and so is a note right before the run's first tool; the run's head shows its LATEST
+// note as prose under the tools' line, and expanding the run shows every tool and note in order. One exception, keyed on the
+// event: the first note after a message delivered mid-turn (`spliced`, the kernel's `absorbed` user row) is the answer to the
+// person and stands on its own, outside any run.
 
 /** The events compact mode may sweep into a noticegroup: the low-stakes, self-similar rows (a recovery, an effort
  *  change, a model swap, a reload, an interrupt marker and its settle, an injected notice: a system reminder or a
@@ -57,24 +64,39 @@ export const STANDALONE_TOOLS = new Set<string>(["AskUserQuestion"]);
 // the tool name for a "tool" event, undefined otherwise. Without `notices`, only a bare "retried" run folds
 // (the pre-2026-09-08 behaviour, kept for callers that pass none); without `thoughts`, every thinking block
 // is hidden (the pre-2026-10-23 behaviour).
-export function compactDisplay(kinds: readonly string[], names?: readonly (string | undefined)[], notices?: readonly boolean[], thoughts?: readonly boolean[]): DisplayItem[] {
+/** Option C's per-event roles (compact mode, 2026-11-06): `note[i]`, event i is a progress note (an assistant event flagged
+ *  narration); `spliced[i]`, event i is a message the person sent that was delivered mid-turn (a user event flagged absorbed). */
+export interface NoteRoles { note: readonly boolean[]; spliced: readonly boolean[] }
+
+export function compactDisplay(kinds: readonly string[], names?: readonly (string | undefined)[], notices?: readonly boolean[], thoughts?: readonly boolean[], notes?: NoteRoles): DisplayItem[] {
   const out: DisplayItem[] = [];
-  let run: number[] | null = null;                // a tool run: its tool uses, and the thoughts after a tool in it
+  let run: number[] | null = null;                // a tool run: its tool uses, and the thoughts (and, option C, notes) in it
   let runTools = 0;
   let lead: number[] | null = null;               // a thought that opens a stretch: consecutive thoughts, one row
+  let pend: number[] | null = null;               // option C: notes (and thoughts after them) waiting to see if a tool follows
+  let pinArmed = false;                           // option C: a mid-turn message was delivered and no note has answered it yet
   let noticeRun: number[] | null = null;          // consecutive foldable notices
+  const isNote = (i: number) => !!notes && !!notes.note[i];
+  // members that end up outside any run, in order: a note as its own event, a stretch of thoughts as ONE Thought row
+  const loose = (ix: readonly number[]) => {
+    let th: number[] | null = null;
+    for (const i of ix) {
+      if (kinds[i] === "thinking") { (th ||= []).push(i); continue; }
+      if (th) { out.push({ kind: "thought", indices: th }); th = null; }
+      out.push({ kind: "event", index: i });
+    }
+    if (th) out.push({ kind: "thought", indices: th });
+  };
   // a LONE tool passes through as a normal event (its first-class inline tool line + fold); only a run of
   // TWO OR MORE collapses into a summary toolgroup (the user 2026-06-22). A lone tool has no group to hold the
-  // thoughts that followed it, so they follow it as a Thought row of their own.
+  // thoughts that followed it, so they follow it as a Thought row of their own (and a note as itself).
   const flush = () => {
     if (!run) return;
     if (runTools >= 2) out.push({ kind: "toolgroup", indices: run });
-    else {
-      out.push({ kind: "event", index: run[0] });
-      if (run.length > 1) out.push({ kind: "thought", indices: run.slice(1) });
-    }
+    else loose(run);
     run = null; runTools = 0;
   };
+  const flushPend = () => { if (pend) { loose(pend); pend = null; } };
   const flushLead = () => {
     if (!lead) return;
     out.push({ kind: "thought", indices: lead });
@@ -93,23 +115,50 @@ export function compactDisplay(kinds: readonly string[], names?: readonly (strin
     if (k === "thinking") {
       if (!thoughts || !thoughts[i]) continue;      // textless: hidden, and does NOT break a tool run
       if (run) { run.push(i); continue; }           // after a tool in this stretch: a member of the run
+      if (pend) { pend.push(i); continue; }         // option C: after a note that may yet open a run
       flushNotices();
       (lead ||= []).push(i);                        // opens a stretch: its own Thought row
       continue;
     }
+    if (isNote(i)) {                                // option C: a progress note
+      if (pinArmed) {                               // the first note after a mid-turn message: the answer, on its own
+        pinArmed = false;
+        flush(); flushPend(); flushLead(); flushNotices();
+        out.push({ kind: "event", index: i });
+        continue;
+      }
+      if (run) { run.push(i); continue; }           // between tools: a member of the run
+      flushNotices(); flushLead();
+      (pend ||= []).push(i);                        // before any tool: joins the run a tool opens next, else stands alone
+      continue;
+    }
     // A standalone tool (AskUserQuestion) is NOT collapsed: it breaks the run and passes through as its
     // own event, so renderTool → renderAsk draws the first-class box instead of "+1" inside a group.
-    if (k === "tool" && !STANDALONE_TOOLS.has(names?.[i] ?? "")) { flushLead(); flushNotices(); (run ||= []).push(i); runTools++; continue; }
-    if (foldable(i)) { flush(); flushLead(); (noticeRun ||= []).push(i); continue; }
+    if (k === "tool" && !STANDALONE_TOOLS.has(names?.[i] ?? "")) {
+      flushLead(); flushNotices();
+      if (!run && pend) { run = pend; pend = null; }   // option C: the notes that led up to the run open it
+      (run ||= []).push(i); runTools++;
+      continue;
+    }
+    if (k === "user" && !foldable(i)) pinArmed = !!notes && !!notes.spliced[i];   // a message (not an injected notice) re-arms or disarms
+    if (foldable(i)) { flush(); flushPend(); flushLead(); (noticeRun ||= []).push(i); continue; }
     flush();
+    flushPend();
     flushLead();
     flushNotices();
     out.push({ kind: "event", index: i });
   }
   flush();
+  flushPend();
   flushLead();
   flushNotices();
   return out;
+}
+
+/** Option C: the note a collapsed run shows as its caption, the run's LATEST note, or -1 for a run that holds none. */
+export function runCaption(indices: readonly number[], isNote: (i: number) => boolean): number {
+  for (let j = indices.length - 1; j >= 0; j--) if (isNote(indices[j])) return indices[j];
+  return -1;
 }
 
 /** Whether display unit `it` holds event `i` (a run or a thought its member, an event itself; a gap holds none): the one

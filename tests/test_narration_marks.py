@@ -95,10 +95,12 @@ class FrameMarks(unittest.TestCase):
         self.assertEqual(got["idx"], [])
         self.assertIn("updates display", got["why"])
 
-    def test_a_thinking_frame_with_neither_field_is_a_frame_the_kernel_cannot_read(self):
-        got = nar.narration_from_frame(frame([think(NOTE_1)]))
+    def test_a_thinking_frame_from_a_cli_too_old_to_list_notes_is_a_frame_the_kernel_cannot_read(self):
+        got = nar.narration_from_frame(frame([think(NOTE_1)]), lists=False)
         self.assertEqual(got["idx"], [])
-        self.assertIn("neither narration_block_indexes nor thinking_display", got["why"])
+        self.assertIn("older than 2.1.260", got["why"])
+        self.assertIsNone(nar.narration_from_frame(frame([think(NOTE_1)]), lists=None), "an unknown CLI: no judgement")
+        self.assertIsNone(nar.narration_from_frame(frame([think(NOTE_1)]), lists=True), "a CLI that lists: a summary")
 
     def test_a_subagent_frame_is_read_for_its_list_alone(self):
         # the CLI adds no thinking_display to a subagent's frames, so a missing one says nothing there
@@ -126,31 +128,125 @@ class Store(unittest.TestCase):
                 nar._NARR_MEMO.pop(k)
 
     def test_marks_persist_reload_and_a_replayed_frame_changes_nothing(self):
-        self.assertEqual(nar.narration_marks(self.root, SID)[0], 0)
+        self.assertEqual((nar.narration_rev(self.root, SID), dict(nar.narration_marks(self.root, SID))), (0, {}))
         self.assertTrue(nar.record_narration(self.root, SID, "u-note-1", [0], [0]))
         self.assertTrue(nar.record_narration(self.root, SID, "u-multi", [2], [1]))
-        rev, marks = nar.narration_marks(self.root, SID)
-        self.assertEqual(rev, 2)
+        rev, marks = nar.narration_rev(self.root, SID), nar.narration_marks(self.root, SID)
+        self.assertGreater(rev, 0)
         self.assertEqual((marks.get("u-note-1"), marks.get("u-multi")), (frozenset([0]), frozenset([1])))
         self.assertFalse(nar.record_narration(self.root, SID, "u-note-1", [0], [0]), "a replayed frame files nothing")
-        self.assertEqual(nar.narration_marks(self.root, SID)[0], 2)
+        self.assertEqual(nar.narration_rev(self.root, SID), rev, "…and moves no revision")
         rows = [json.loads(ln) for ln in (self.root / "narration" / (SID + ".jsonl")).read_text().splitlines()]
         self.assertEqual(rows, [{"u": "u-note-1", "i": [0], "k": [0]}, {"u": "u-multi", "i": [2], "k": [1]}])
-        # a kernel restart: the memo is gone, the file is read again, the same marks and revision come back
+        # a kernel restart: the memo is gone, the file is read again, the same marks come back
         with open(self.root / "narration" / (SID + ".jsonl"), "a") as f:
             f.write('{"u": "torn-li')                     # a torn tail line costs that line alone
         self._drop_memo()
-        rev2, marks2 = nar.narration_marks(self.root, SID)
-        self.assertEqual((rev2, dict(marks2)), (2, {"u-note-1": frozenset([0]), "u-multi": frozenset([1])}))
-        self.assertEqual(nar.narration_marks(self.root, SID_B), (0, {}), "another session's store is its own")
+        self.assertEqual(dict(nar.narration_marks(self.root, SID)), {"u-note-1": frozenset([0]), "u-multi": frozenset([1])})
+        self.assertEqual(dict(nar.narration_marks(self.root, SID_B)), {}, "another session's store is its own")
 
     def test_marked_since_names_what_a_revision_did_not_hold(self):
         nar.record_narration(self.root, SID, "u1", [0], [0])
-        rev = nar.narration_marks(self.root, SID)[0]
+        rev = nar.narration_rev(self.root, SID)
         nar.record_narration(self.root, SID, "u2", [0], [0])
-        self.assertEqual(nar.narration_marked_since(self.root, SID, rev), ["u2"])
-        self.assertEqual(nar.narration_marked_since(self.root, SID, 99), ["u1", "u2"], "a revision past the store's: all")
+        nar.record_narration(self.root, SID, "u-sub", [0], [0], sub=True)
+        self.assertEqual(nar.narration_marked_since(self.root, SID, rev), ["u2"], "main-conversation marks only")
+        self._drop_memo()                                    # read from the file after `rev`: which came later is unknown
+        self.assertEqual(sorted(nar.narration_marked_since(self.root, SID, rev)), ["u-sub", "u1", "u2"], "then every mark")
 
+    def test_one_frozenset_for_the_common_zero_and_one_per_other_set(self):
+        # nearly every record holds one block, so nearly every mark is {0}: one object for all of them, on both roads
+        for i in range(3):
+            nar.record_narration(self.root, SID, "z%d" % i, [0], [0])
+            nar.record_narration(self.root, SID, "m%d" % i, [0, 2], [0, 1])
+        m = nar.narration_marks(self.root, SID)
+        self.assertTrue(m["z0"] is m["z1"] is m["z2"] is nar._NARR_ZERO)
+        self.assertTrue(m["m0"] is m["m1"] is m["m2"])
+        self._drop_memo()
+        m = nar.narration_marks(self.root, SID)
+        self.assertTrue(m["z0"] is m["z2"] is nar._NARR_ZERO, "read back from the file: interned too")
+        self.assertTrue(m["m0"] is m["m2"])
+
+    def test_the_journal_rotates_like_the_ledgers_and_the_reader_reads_both(self):
+        p = self.root / "narration" / (SID + ".jsonl")
+        with mock_rotate(64):
+            nar.record_narration(self.root, SID, "old-1", [0], [0])
+            nar.record_narration(self.root, SID, "old-2", [0], [0])   # past 64 bytes: the next append rotates first
+            nar.record_narration(self.root, SID, "mid-1", [0], [0])
+            nar.record_narration(self.root, SID, "mid-2", [0], [0])
+            nar.record_narration(self.root, SID, "new-1", [0], [0])
+        self.assertTrue(p.with_name(p.name + ".1").exists())
+        self.assertLess(p.stat().st_size, 200)
+        self._drop_memo()
+        held = set(nar.narration_marks(self.root, SID))
+        self.assertIn("new-1", held)
+        self.assertIn("mid-2", held, "the predecessor is read too")
+        self.assertNotIn("old-1", held, "the older predecessor was dropped: the bound")
+
+    def test_the_memo_holds_the_sessions_read_most_recently_and_a_revision_survives_a_drop(self):
+        saved = nar._NARR_MEMO_MAX
+        nar._NARR_MEMO_MAX = 2
+        self.addCleanup(setattr, nar, "_NARR_MEMO_MAX", saved)
+        with nar._NARR_LOCK:
+            nar._NARR_MEMO.clear()
+        nar.record_narration(self.root, SID, "a1", [0], [0])
+        rev = nar.narration_rev(self.root, SID)
+        nar.narration_marks(self.root, SID_B)
+        nar.narration_marks(self.root, "5e5e5e5e-1111-2222-3333-444455558888")   # a third: the least recently read goes
+        self.assertNotIn((str(self.root), SID), nar._NARR_MEMO)
+        self.assertIn((str(self.root), SID_B), nar._NARR_MEMO)
+        self.assertEqual(nar.narration_rev(self.root, SID), rev, "the revision is not the memo's: dropping it reuses nothing")
+        self.assertEqual(nar.narration_marks(self.root, SID).get("a1"), frozenset([0]), "read back on its next build")
+        nar.record_narration(self.root, SID_B, "b1", [0], [0])
+        self.assertNotEqual(nar.narration_rev(self.root, SID_B), rev, "one counter for the process: no value comes twice")
+
+    def test_main_and_subagent_marks_keep_separate_revisions(self):
+        nar.record_narration(self.root, SID, "m1", [0], [0])
+        main, sub = nar.narration_rev(self.root, SID), nar.narration_rev(self.root, SID, sub=True)
+        nar.record_narration(self.root, SID, "s1", [0], [0], sub=True)
+        self.assertEqual(nar.narration_rev(self.root, SID), main, "a subagent's note leaves the parent chat's revision")
+        self.assertNotEqual(nar.narration_rev(self.root, SID, sub=True), sub)
+        sub2 = nar.narration_rev(self.root, SID, sub=True)
+        nar.record_narration(self.root, SID, "m2", [0], [0])
+        self.assertEqual(nar.narration_rev(self.root, SID, sub=True), sub2, "a parent note leaves the subagent viewers' key")
+
+    def test_a_revision_is_read_without_reading_the_store(self):
+        # the chat signature reads every tab's revision every cycle: memory only, never the file
+        (self.root / "narration").mkdir(parents=True, exist_ok=True)
+        (self.root / "narration" / (SID + ".jsonl")).write_text(json.dumps({"u": "x", "i": [0], "k": [0]}) + "\n")
+        with mock.patch("builtins.open", side_effect=AssertionError("the revision read a file")):
+            self.assertEqual(nar.narration_rev(self.root, SID), 0)
+        self.assertNotIn((str(self.root), SID), nar._NARR_MEMO, "nor loaded the memo")
+
+
+class mock_rotate:
+    def __init__(self, n):
+        self.n = n
+
+    def __enter__(self):
+        self.saved = nar.NARRATION_ROTATE_BYTES
+        nar.NARRATION_ROTATE_BYTES = self.n
+
+    def __exit__(self, *a):
+        nar.NARRATION_ROTATE_BYTES = self.saved
+
+
+class OlderClaudeCode(unittest.TestCase):
+    """Whether a CLI lists notes is its version's answer (the init frame's claude_code_version), or the field seen in the
+    session: never the frame-level thinking_display, which CLIs 2.1.260 to 2.1.29x do not send."""
+
+    def test_the_version_threshold(self):
+        self.assertEqual([nar.cli_lists_notes(v) for v in ("2.1.259", "2.1.260", "2.1.282", "2.1.316", "3.0.0", "", None, "dev")],
+                         [False, True, True, True, True, None, None, None])
+
+    def test_a_2_1_282_reasoning_summary_is_no_older_cli(self):
+        # 2.1.282 lists notes but sends no thinking_display: its reasoning summary is the ordinary case
+        summary = frame([think(REASONING)])
+        self.assertIsNone(nar.narration_from_frame(summary, nar.cli_lists_notes("2.1.282")))
+        self.assertIsNone(nar.narration_from_frame(summary, None), "no init seen: no judgement rather than a false one")
+        got = nar.narration_from_frame(summary, nar.cli_lists_notes("2.1.250"))
+        self.assertIn("older than 2.1.260", got["why"])
+        self.assertEqual(nar.narration_from_frame(frame([think(NOTE_1)], idx=[0]), True)["ords"], [0], "its notes are filed")
 
 class _Backend:
     def __init__(self, state_dir):
@@ -217,7 +313,7 @@ class Reader(unittest.TestCase):
         async def go():
             async for m in s._frames(client):
                 u = m.get("uuid") if isinstance(m, dict) else getattr(m, "uuid", None)
-                seen.append((u, nar.narration_marks(self.root, s.sid)[1].get(u)))
+                seen.append((u, nar.narration_marks(self.root, s.sid).get(u)))
         with mock.patch.object(sbk, "_sdk_parse_message", lambda: (lambda d: d)):   # the parser's stand-in: the frame itself
             asyncio.run(go())
         return seen
@@ -235,9 +331,9 @@ class Reader(unittest.TestCase):
         seen = self._drain(s, _RawClient(frames))
         self.assertEqual([u for u, _ in seen], ["init-1", "u-reason", "u-note-1", "u-tool", "u-unlisted-1", "u-unlisted-2"])
         self.assertEqual(dict(seen)["u-note-1"], frozenset([0]), "the mark is in the store when its message goes on")
-        rev, marks = nar.narration_marks(self.root, SID)
-        self.assertEqual((rev, set(k for k in ("u-reason", "u-note-1", "u-tool", "u-unlisted-1") if marks.get(k))),
-                         (1, {"u-note-1"}), "only the listed block is filed")
+        marks = nar.narration_marks(self.root, SID)
+        self.assertEqual(set(k for k in ("u-reason", "u-note-1", "u-tool", "u-unlisted-1") if marks.get(k)),
+                         {"u-note-1"}, "only the listed block is filed")
         probs = [r for r in s.backend.logs if r["problem"]]
         self.assertEqual(len(probs), 1, "said once per session: %r" % probs)
         self.assertEqual(probs[0]["key"][0], nar.NARRATION_PROBLEM_KEY)
@@ -245,6 +341,27 @@ class Reader(unittest.TestCase):
         s2 = _session(self.root, SID_B)
         self._drain(s2, _RawClient([frame([think(NOTE_2)], uuid="u-unlisted-3", display="updates")]))
         self.assertEqual(len([r for r in s2.backend.logs if r["problem"]]), 1, "another session says it again")
+
+    def test_the_init_frames_version_decides_an_older_cli_and_a_2_1_282_stream_says_nothing(self):
+        # 2.1.282 lists notes but sends no frame-level thinking_display; its reasoning summaries are ordinary
+        init = lambda v: {"type": "system", "subtype": "init", "uuid": "init-" + v, "claude_code_version": v}
+        stream = [frame([think(REASONING)], uuid="u-reason-1"), frame([think(NOTE_1)], uuid="u-note-1", idx=[0]),
+                  frame([think(REASONING)], uuid="u-reason-2")]
+        s = _session(self.root)
+        self._drain(s, _RawClient([init("2.1.282")] + stream))
+        self.assertEqual([r for r in s.backend.logs if r["problem"]], [], "no false older-CLI notice")
+        self.assertEqual(nar.narration_marks(self.root, SID).get("u-note-1"), frozenset([0]))
+        old = _session(self.root, SID_B)
+        self._drain(old, _RawClient([init("2.1.250"), frame([think(REASONING)], uuid="u-old-1"),
+                                     frame([think(REASONING)], uuid="u-old-2")]))
+        probs = [r for r in old.backend.logs if r["problem"]]
+        self.assertEqual(len(probs), 1, "an older CLI is said once: %r" % probs)
+        self.assertIn("older than 2.1.260", probs[0]["text"])
+        # no init (an attach to a running CLI): the field on any frame says the CLI lists notes
+        late = _session(self.root, "5e5e5e5e-1111-2222-3333-444455559999")
+        self._drain(late, _RawClient(stream))
+        self.assertEqual([r for r in late.backend.logs if r["problem"]], [])
+        self.assertIs(late._narration_lists, True)
 
     def test_a_fault_reading_one_frame_costs_that_frame_alone(self):
         s = _session(self.root)
@@ -264,7 +381,7 @@ class Reader(unittest.TestCase):
         probs = [r for r in s.backend.logs if r["problem"]]
         self.assertEqual(len(probs), 1)
         self.assertIn("does not pass the raw frames", probs[0]["text"])
-        self.assertEqual(nar.narration_marks(self.root, SID)[0], 0)
+        self.assertEqual(dict(nar.narration_marks(self.root, SID)), {})
 
 
 def _iso(t):
@@ -395,6 +512,42 @@ class Render(_Render):
         nar.record_narration(jd.STATE, SID, "u-multi", [1], [1])
         self.assertEqual(_shape(self.build()), [("thinking", False, REASONING), ("assistant", True, NOTE_1),
                                                 ("tool", False, "Read")])
+
+
+class KernelCaches(_Render):
+    """The caches above the build see the marks they draw from, and only those: a history page re-renders when a record it
+    drew as thinking is marked late (finding 5); the subagent viewer's key moves on a subagent's mark and not on a parent's,
+    and the parent chat's signature the other way round (finding 4)."""
+
+    def test_a_history_page_rerenders_when_a_record_it_drew_as_thinking_is_marked_late(self):
+        evs = [{"kind": "thinking", "text": NOTE_1, "uuid": "u-page-note"}, {"kind": "thinking", "text": "", "uuid": "u-opaque"},
+               {"kind": "assistant", "md": REPLY, "uuid": "u-page-reply"}]
+        rec = km._page_live_record(SID, evs, {"agents": [], "outs": []}, nar.narration_rev(jd.STATE, SID))
+        self.assertFalse(km._page_live_moved(SID, rec, {}))
+        nar.record_narration(jd.STATE, SID, "u-elsewhere", [0], [0])
+        self.assertFalse(km._page_live_moved(SID, rec, {}), "a mark for a record the page does not draw: stands")
+        nar.record_narration(jd.STATE, SID, "u-opaque", [0], [0])
+        self.assertFalse(km._page_live_moved(SID, rec, {}), "a textless block stays a thinking row either way")
+        nar.record_narration(jd.STATE, SID, "u-page-note", [0], [0])
+        self.assertTrue(km._page_live_moved(SID, rec, {}), "the page's own thinking row is a note now: render it again")
+
+    def test_the_subagent_viewer_keys_on_subagent_marks_and_the_chat_on_main_ones(self):
+        built = []
+        fake = lambda sid, aid, now, live_map=None: built.append(aid) or {"type": "subagent", "id": sid, "agentId": aid}
+        with mock.patch.object(km, "build_subagent", fake), mock.patch.object(km, "_path_of", lambda sid, now: "/tmp/notes-api/t.jsonl"), \
+                mock.patch.object(km, "_subagent_file", lambda p, a: None), mock.patch.object(km, "_subagent_meta", lambda p, a, f: {}), \
+                mock.patch.object(km, "_agent_running_for", lambda *a, **k: False):
+            km._SUBAGENT_FRAMES.pop((SID, "agent-1"), None)
+            self.addCleanup(km._SUBAGENT_FRAMES.pop, (SID, "agent-1"), None)
+            km._subagent_frame_cached(SID, "agent-1", NOW, {})
+            km._subagent_frame_cached(SID, "agent-1", NOW, {})
+            self.assertEqual(len(built), 1, "cached while nothing moved")
+            nar.record_narration(jd.STATE, SID, "u-parent-note", [0], [0])
+            km._subagent_frame_cached(SID, "agent-1", NOW, {})
+            self.assertEqual(len(built), 1, "a parent's note does not re-key the subagent viewer")
+            nar.record_narration(jd.STATE, SID, "u-agent-note", [0], [0], sub=True)
+            km._subagent_frame_cached(SID, "agent-1", NOW, {})
+            self.assertEqual(len(built), 2, "a subagent's note does")
 
 
 class _TailBackend:

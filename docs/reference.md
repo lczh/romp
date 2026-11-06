@@ -7377,8 +7377,10 @@ that thinking is billed.
 
 On Claude Opus 5.5 a note the model writes for you between tool calls (what it found, what it does next, an answer to a
 message you sent while it worked) comes back from the API as a thinking block once it runs past a sentence or two. The
-chat shows those notes as the session's own words, an ordinary assistant message in both the compact and the full view,
-while reasoning summaries stay Thought lines.
+chat shows those notes as the session's own words, while reasoning summaries stay Thought lines. The full view shows each
+note as an ordinary assistant message. Compact view folds the notes between tool calls into the run of calls: the folded
+run shows its latest note as prose under its one line, and opening it shows every call and note in order. The first note
+after a message you sent while the session worked is its answer to you, and stands on its own outside any run.
 
 Claude Code tells the two apart: it decodes each thinking block's kind and lists the note blocks on every message it
 streams to romp (`narration_block_indexes`), under every thinking display. The transcript does not keep that list, so
@@ -7387,11 +7389,15 @@ directory, and applies it whenever it builds a chat: the browser chat, the VS Co
 comment thread's conversation all draw the same rows. Nothing is inferred: a note from before romp kept this record, or
 from a session whose stream romp did not read (a Codex session, a Claude Code session romp did not run), stays a
 Thought line. When Claude Code sends a thinking block with words that it should have listed (under the updates
-display), or a message that carries neither the list nor its thinking display (an older Claude Code), the error center
-says so once per session and those blocks stay Thought lines.
+display), the error center says so once per session and those blocks stay Thought lines.
 
 A note's thinking tokens still count in the turn's "worked" line. The other readers of what a session said are
 unchanged: the tab's hover shows the last reply, and the cards, the judges and notifications read the replies alone.
+
+Claude Code lists notes from version 2.1.260 on. When a session's Claude Code reports an older version at start, its
+thinking blocks with words stay Thought lines and the error center says why once. The record of a session's notes
+rotates like romp's other logs: past 4 MB the file moves aside and a new one starts, and the two together are kept, so
+the marks of the oldest notes in a very long session eventually go and those notes read as Thought lines again.
 
 ### The rings on a tab
 

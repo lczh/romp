@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import * as assert from "node:assert/strict";
-import { compactDisplay, isFoldableNoticeShape, itemAnchor, itemHolds, runRows, thoughtHasWords, thoughtKey, thoughtOf, STANDALONE_TOOLS, actionHead, actionParts, actionPhrases, toolRowLabel, diffTotals, toolInputText, type DisplayItem, type ThoughtLike } from "./compact";
+import { compactDisplay, isFoldableNoticeShape, itemAnchor, itemHolds, runCaption, runRows, thoughtHasWords, thoughtKey, thoughtOf, STANDALONE_TOOLS, actionHead, actionParts, actionPhrases, toolRowLabel, diffTotals, toolInputText, type DisplayItem, type ThoughtLike } from "./compact";
 
 test("compactDisplay: without the thoughts array, thinking is dropped entirely (a caller that passes none)", () => {
   const d = compactDisplay(["user", "thinking", "assistant"]);
@@ -313,4 +313,46 @@ test("T418 expanded row: a Bash shows its command as typed; other tools their in
   assert.equal(toolInputText(T("Bash", { input: JSON.stringify({ command: "cd ~/x && make", description: "Built it" }) })), "cd ~/x && make");
   assert.equal(toolInputText(T("Read", { input: JSON.stringify({ file_path: "/a" }) })), JSON.stringify({ file_path: "/a" }));
   assert.equal(toolInputText(T("Bash", { input: "{not json" })), "{not json");
+});
+
+// ── option C, progress notes in a run (2026-11-06, compact mode) ───────────────────────────────────────────────────────
+// Events as (kind, role): "N" a progress note (an assistant event flagged narration), "S" a message delivered mid-turn (a user
+// event flagged absorbed), "R" a reply, "U" a prompt, "T" a tool, "th" a thought with words.
+function optC(seq: string[]) {
+  const kinds = seq.map((x) => (x === "N" || x === "R" ? "assistant" : x === "S" || x === "U" ? "user" : x === "T" ? "tool" : "thinking"));
+  const roles = { note: seq.map((x) => x === "N"), spliced: seq.map((x) => x === "S") };
+  return compactDisplay(kinds, undefined, undefined, seq.map((x) => x === "th"), roles);
+}
+
+test("option C: tool, note, tool, note… folds into ONE run with its notes as members, and its caption is the latest note", () => {
+  // the Opus 5.5 shape: a note before each tool. Without C this was eight units (four tools, four notes)
+  const d = optC(["U", "N", "T", "N", "T", "N", "T", "N", "T", "R"]);
+  assert.deepEqual(d, [{ kind: "event", index: 0 }, { kind: "toolgroup", indices: [1, 2, 3, 4, 5, 6, 7, 8] }, { kind: "event", index: 9 }]);
+  assert.equal(runCaption((d[1] as { indices: number[] }).indices, (i) => [1, 3, 5, 7].includes(i)), 7, "the latest note");
+  assert.equal(runCaption([2, 4], () => false), -1, "a run with no note has no caption");
+  // the same events without the roles (looks A and B): every note splits the run, as before
+  const plain = compactDisplay(["user", "assistant", "tool", "assistant", "tool", "assistant", "tool", "assistant", "tool", "assistant"]);
+  assert.equal(plain.filter((u) => u.kind === "toolgroup").length, 0);
+});
+
+test("option C: the first note after a message delivered mid-turn stands on its own, the answer to the person", () => {
+  // the answer right after the message, then the work resumes and folds
+  assert.deepEqual(optC(["T", "N", "T", "S", "N", "T", "N", "T", "R"]),
+    [{ kind: "toolgroup", indices: [0, 1, 2] }, { kind: "event", index: 3 }, { kind: "event", index: 4 },
+     { kind: "toolgroup", indices: [5, 6, 7] }, { kind: "event", index: 8 }]);
+  // keyed on the event, not on position: the first note after the message stands alone even when a tool ran first
+  assert.deepEqual(optC(["S", "T", "N", "T", "N", "T"]),
+    [{ kind: "event", index: 0 }, { kind: "event", index: 1 }, { kind: "event", index: 2 }, { kind: "toolgroup", indices: [3, 4, 5] }]);
+  // a prompt that opens a turn is not a mid-turn message: its first note leads the run
+  assert.deepEqual(optC(["U", "N", "T", "N", "T"]), [{ kind: "event", index: 0 }, { kind: "toolgroup", indices: [1, 2, 3, 4] }]);
+});
+
+test("option C: notes with fewer than two tools stay as they are, and a thought rides with them in order", () => {
+  assert.deepEqual(optC(["N", "T", "R"]), [{ kind: "event", index: 0 }, { kind: "event", index: 1 }, { kind: "event", index: 2 }]);
+  assert.deepEqual(optC(["N", "th", "R"]), [{ kind: "event", index: 0 }, { kind: "thought", indices: [1] }, { kind: "event", index: 2 }]);
+  // a thought before the note keeps its own row; one after the note and before the tool rides the run
+  assert.deepEqual(optC(["U", "th", "N", "th", "T", "N", "T"]),
+    [{ kind: "event", index: 0 }, { kind: "thought", indices: [1] }, { kind: "toolgroup", indices: [2, 3, 4, 5, 6] }]);
+  // the expanded run's rows: each note its own row, a stretch of thoughts one row
+  assert.deepEqual(runRows([2, 3, 4, 5, 6], (i) => i === 3), [[2], [3], [4], [5], [6]]);
 });
