@@ -10322,29 +10322,48 @@ class SdkSession:
             return
         # …and WHICH models this CLI runs fast mode on: the same answer's `models` options (supportsFastMode per alias
         # and resolved id) fill the learned table every fast gate reads (model_fast.py). The connect is the event.
-        self._learn_fast_support(info, cli=getattr(self, "_cli_version_seen", "") or "")
+        # Stamped with the version the answer itself names (claude_code_version: the init's value, absent on a CLI
+        # that predates the field), else the one this session's last init named, else none. The stamp is
+        # load-bearing — the table keeps the newest CLI's word (model_fast.note) — so when the answer names no
+        # version its list is kept for the init, which re-says it under the version it carries (_on_message).
+        v = str(info.get("claude_code_version") or "")
+        if v:
+            self._cli_version_seen = v
+        self._fast_support_connect = None if v else _mf.support_from_payload(info)
+        self._learn_fast_support(info, cli=v or getattr(self, "_cli_version_seen", "") or "")
         if self._adopt_fast_state(info):
             self.backend._poke()
 
     def _learn_fast_support(self, d, cli="") -> bool:
         """Record what a CLI payload says about fast-mode support, in the kernel-wide learned table
         (model_fast.note, STATE/model-fast.json): every `models` option's supportsFastMode, keyed by its
-        alias AND its resolved id (true → supported; absent or false → the CLI did not claim it), and —
-        when the payload reports fast_mode_state "on" for a model it names — that model as supported,
-        since a session running fast on it is proof. Two events write it, never a timer: the connect-time
-        initialize answer (_do_adopt_server_info) and the per-turn init (_on_message). Write-on-change
-        only; a change tells the kernel through the class-level on_model_fast_changed hook (the
-        on_model_fallback idiom) so every open picker's cached /models list is refreshed with the
-        capability, and pokes a status push so the chat's badge follows. Returns whether the table changed.
-        Never raises into the connect or the init handler: a bad payload is logged and learns nothing."""
+        alias AND its resolved id (true → supported; absent or false → the CLI did not claim it; a list no
+        option of which carries the field says nothing), and — when the payload reports fast_mode_state
+        "on" for a model it names — that model as supported, since a session running fast on it is proof.
+        Two events write it, never a timer: the connect-time initialize answer (_do_adopt_server_info) and
+        the per-turn init (_on_message); `cli` is the Claude Code version that said it, the table's stamp
+        (the newest version's word stands). Returns whether an answer changed (_note_fast_support). Never
+        raises into the connect or the init handler: a bad payload is logged and learns nothing."""
         try:
             support = _mf.support_from_payload(d)
             if isinstance(d, dict) and d.get("fast_mode_state") == "on":
                 mid = str(d.get("model") or "").strip().lower()   # the payload's OWN model, never a stale reg id
                 if mid:
                     support[mid] = True
-            if not support:
-                return False
+        except Exception as e:
+            self.backend._log("fast support (%s): the CLI's model list could not be read: %s" % (self.name, e))
+            return False
+        return self._note_fast_support(support, cli=cli)
+
+    def _note_fast_support(self, support, cli="") -> bool:
+        """Write `support` ({id: bool}) to the learned table under `cli`'s stamp (model_fast.note: write-on-change,
+        the newest CLI's word stands) and, when an answer changed, tell the kernel through the class-level
+        on_model_fast_changed hook (the on_model_fallback idiom) so every open picker's cached /models list is
+        refreshed with the capability, and poke a status push so the chat's badge follows. Returns whether an
+        answer changed. Never raises: a write that fails is logged and learns nothing."""
+        if not support:
+            return False
+        try:
             changed = _mf.note(getattr(self.backend, "state_dir", None), support, cli=cli)
         except Exception as e:
             self.backend._log("fast support (%s): the CLI's model list could not be recorded: %s" % (self.name, e))
@@ -12368,11 +12387,19 @@ class SdkSession:
             # Fast-mode truth rides the init payload — the AUTHORITATIVE re-assert behind set_fast's
             # optimistic flip, shared with the connect-time initialize response (_adopt_fast_state).
             self._adopt_fast_state(d)
-            if d.get("claude_code_version"):
-                self._cli_version_seen = str(d.get("claude_code_version"))   # stamps the learned fast table's rows
+            _ver = str(d.get("claude_code_version") or "")
+            if _ver:
+                self._cli_version_seen = _ver   # stamps the fast table's rows a later connect writes before its own init
             # …and the learned fast table: an init reporting fast mode ON names the model it runs on, which is proof
-            # of support for that id (the connect-time answer's model list rides _do_adopt_server_info)
-            self._learn_fast_support(d, cli=str(d.get("claude_code_version") or ""))
+            # of support for that id (the connect-time answer's model list rides _do_adopt_server_info)…
+            self._learn_fast_support(d, cli=_ver)
+            # …and that connect-time list, re-said under THIS CLI's version when its initialize answer named none (a
+            # CLI that predates the field there): unversioned, the connect could not flip a row a newer CLI had
+            # stamped, nor advance the stamp of one it confirmed; the init's version settles both. Once per connect.
+            _pending = getattr(self, "_fast_support_connect", None)
+            if _pending and _ver:
+                self._fast_support_connect = None
+                self._note_fast_support(_pending, cli=_ver)
             if getattr(self, "_sub_std_launched", False) and d.get("claude_code_version"):
                 self.backend._note_cli_version(self, str(d.get("claude_code_version")))   # the canary's backstop
             # HOW this CLI authenticates (verified live 2026-08-04: 'ANTHROPIC_API_KEY' on API-key auth;

@@ -45,10 +45,11 @@ SID = "11111111-2222-4333-8444-000000000711"
 
 def _server_info(**over):
     """A synthetic initialize answer in the CLI's shape (field names as 2.1.321's control_response carries them:
-    `models` options with value / resolvedModel / displayName / supportsFastMode, beside fast_mode_state). The
+    `models` options with value / resolvedModel / displayName / supportsFastMode, beside fast_mode_state and the
+    responder's own claude_code_version, absent on a CLI that predates the field). The
     world it describes: the default and Fable run fast, Opus 5.5 does, Opus 4.8 is listed without the claim
     (retired), Sonnet carries an explicit None."""
-    d = {"fast_mode_state": "off", "fast_mode_disabled_reason": "sdk_opt_in_required",
+    d = {"fast_mode_state": "off", "fast_mode_disabled_reason": "sdk_opt_in_required", "claude_code_version": "2.1.321",
          "models": [
              {"value": "default", "resolvedModel": "claude-fable-5-2", "displayName": "Default (Fable 5.2)",
               "supportsFastMode": True, "supportsEffort": True, "supportedEffortLevels": ["low", "medium", "high"]},
@@ -98,6 +99,12 @@ def _table(root):
     return json.loads((Path(root) / mf.MODEL_FAST_FILE).read_text())
 
 
+async def _init_on(s, sys_cls, data):
+    """Feed session `s` one init system message (the shape _on_message reads) and let the loop settle."""
+    s._on_message(sys_cls(data), type("A", (), {}), type("R", (), {}), sys_cls)
+    await asyncio.sleep(0)
+
+
 class TheTable(unittest.TestCase):
     """model_fast.py: the keys a spelling resolves to, the write-on-change, the reader's three answers."""
 
@@ -126,11 +133,18 @@ class TheTable(unittest.TestCase):
                          {"fable": True, "claude-fable-5-2": True, "claude-opus-4-8": False, "default": True})
         self.assertEqual(t["fable"]["cli"], "2.1.321")
         self.assertIsInstance(t["fable"]["t"], int)
-        stamp = t["fable"]["t"]
         mt = os.stat(Path(d) / mf.MODEL_FAST_FILE).st_mtime_ns
-        self.assertFalse(mf.note(d, {"fable": True, "claude-opus-4-8": False}, cli="2.1.322"), "nothing new: no write")
-        self.assertEqual(os.stat(Path(d) / mf.MODEL_FAST_FILE).st_mtime_ns, mt, "…and the file was not touched")
-        self.assertEqual(_table(d)["fable"]["cli"], "2.1.321", "an unchanged answer keeps its stamp")
+        self.assertFalse(mf.note(d, {"fable": True, "claude-opus-4-8": False}, cli="2.1.321"), "nothing new: no change")
+        self.assertEqual(os.stat(Path(d) / mf.MODEL_FAST_FILE).st_mtime_ns, mt, "…and the same version's confirmation touches no file")
+        self.assertFalse(mf.note(d, {"fable": True}, cli="2.1.320"), "an older CLI's confirmation: no change")
+        self.assertEqual(os.stat(Path(d) / mf.MODEL_FAST_FILE).st_mtime_ns, mt, "…and no write")
+        self.assertEqual(_table(d)["fable"]["cli"], "2.1.321", "…the stamp stands")
+        self.assertFalse(mf.note(d, {"fable": True, "claude-opus-4-8": False}, cli="2.1.322"),
+                         "a NEWER CLI confirming an answer is no change either (no frame)…")
+        self.assertEqual(_table(d)["fable"]["cli"], "2.1.322", "…but its stamp advances: the confirmation counts against older binaries")
+        self.assertEqual(_table(d)["claude-opus-4-8"]["cli"], "2.1.322")
+        self.assertEqual(_table(d)["default"]["cli"], "2.1.321", "an id the writer did not name keeps its stamp")
+        stamp = _table(d)["fable"]["t"]
         self.assertTrue(mf.note(d, {"claude-opus-4-8": True}, cli="2.1.330"), "a flipped answer is a change")
         self.assertTrue(_table(d)["claude-opus-4-8"]["fast"])
         self.assertEqual(_table(d)["claude-opus-4-8"]["cli"], "2.1.330")
@@ -148,6 +162,46 @@ class TheTable(unittest.TestCase):
         self.assertIsNone(mf.fast_known("", d))
         self.assertGreater(mf.rev(d), 0)
         self.assertEqual(mf.rev(tempfile.mkdtemp()), 0)
+
+    def test_the_newest_clis_word_stands_whichever_connects_last(self):
+        # the 2.1.320 → 2.1.321 line: Fable 5.2 gained fast mode, Opus 4.8 lost it. Two sessions on one kernel, one
+        # binary each (a session host keeps its binary across an update), connecting in either order.
+        older, newer = {"fable": False, "claude-opus-4-8": True}, {"fable": True, "claude-opus-4-8": False}
+        self.assertEqual(mf.version_tuple("2.1.321"), (2, 1, 321))
+        self.assertEqual(mf.version_tuple("2.1.321 (Claude Code)"), (2, 1, 321))
+        self.assertIsNone(mf.version_tuple(""))
+        self.assertIsNone(mf.version_tuple("latest"))
+        self.assertIsNone(mf.version_tuple(None))
+        for first, second, label in ((("2.1.320", older), ("2.1.321", newer), "old then new"),
+                                     (("2.1.321", newer), ("2.1.320", older), "new then old")):
+            d = tempfile.mkdtemp()
+            self.assertTrue(mf.note(d, first[1], cli=first[0]), label)
+            self.assertEqual(mf.note(d, second[1], cli=second[0]), second[0] == "2.1.321",
+                             "%s: the newer word is the change, the older one is refused" % label)
+            self.assertEqual({k: v["fast"] for k, v in _table(d).items()}, newer, "%s: 2.1.321's answers stand" % label)
+            self.assertEqual({v["cli"] for v in _table(d).values()}, {"2.1.321"}, label)
+            self.assertTrue(mf.fast_known("fable", d), label)
+            self.assertFalse(mf.fast_known("claude-opus-4-8", d), label)
+            # the older binary connects again and again (every turn's relaunch): never a write
+            mt = os.stat(Path(d) / mf.MODEL_FAST_FILE).st_mtime_ns
+            self.assertFalse(mf.note(d, older, cli="2.1.320"))
+            self.assertEqual(os.stat(Path(d) / mf.MODEL_FAST_FILE).st_mtime_ns, mt, "%s: no flap, no file touched" % label)
+        # the same version disagreeing with itself (another login's model list): last word wins within a version
+        self.assertTrue(mf.note(d, {"fable": False}, cli="2.1.321"))
+        self.assertFalse(mf.fast_known("fable", d))
+        # a writer of unknown version: new ids yes, a stamped row's answer never, an unstamped row's yes
+        self.assertTrue(mf.note(d, {"sonnet": False, "fable": True}, cli=""), "the new id is written")
+        self.assertEqual(set(_table(d)), {"fable", "claude-opus-4-8", "sonnet"})
+        self.assertFalse(mf.fast_known("fable", d), "…and the stamped row's answer stands against an unknown writer")
+        self.assertEqual(_table(d)["sonnet"]["cli"], "")
+        self.assertTrue(mf.note(d, {"sonnet": True}, cli=""), "an unstamped row takes an unknown writer's flip")
+        self.assertTrue(mf.note(d, {"sonnet": False}, cli="2.1.300"), "…and any versioned one's")
+        self.assertEqual(_table(d)["sonnet"]["cli"], "2.1.300")
+        self.assertFalse(mf.note(d, {"sonnet": False}, cli=""), "an unknown writer confirming: nothing")
+        self.assertEqual(_table(d)["sonnet"]["cli"], "2.1.300", "…the stamp is not blanked")
+        # a hand edit that stamps a row with no version is unstamped, not newest
+        (Path(d) / mf.MODEL_FAST_FILE).write_text(json.dumps({"opus": {"fast": True, "t": 1, "cli": "latest"}}))
+        self.assertTrue(mf.note(d, {"opus": False}, cli="2.1.300"))
 
     def test_a_garbled_file_reads_as_nothing_known(self):
         d = tempfile.mkdtemp()
@@ -196,7 +250,7 @@ class TheBackendWrites(unittest.TestCase):
         s = _sess(be, liveModel="Fable 5.2", liveModelId="claude-fable-5-2")
         frames = []
         sb.SdkBackend.on_model_fast_changed = staticmethod(lambda: frames.append(1))
-        s._cli_version_seen = "2.1.321"
+        s._cli_version_seen = "2.1.300"       # a PREVIOUS connection's init: not this CLI's version
 
         class _Client:
             async def get_server_info(self):
@@ -208,7 +262,9 @@ class TheBackendWrites(unittest.TestCase):
                          {"default": True, "claude-fable-5-2": True, "fable": True, "opus": True, "claude-opus-5-5": True,
                           "claude-opus-4-8": False, "sonnet": False, "claude-sonnet-5": False},
                          "every option by alias AND resolved id; true claims true, absent or None false")
-        self.assertEqual(t["fable"]["cli"], "2.1.321")
+        self.assertEqual(t["fable"]["cli"], "2.1.321", "stamped with the version the answer itself names")
+        self.assertEqual(s._cli_version_seen, "2.1.321", "…which this session now remembers")
+        self.assertIsNone(s._fast_support_connect, "the answer named its version: nothing for the init to re-say")
         self.assertEqual(frames, [1], "the change sends the models frame once")
         self.assertTrue(be._pokes, "…and a status push, so the badge follows")
         self.assertTrue(any("fast support (web)" in m and "claude-fable-5-2" in m for m in be._logs), be._logs)
@@ -237,6 +293,104 @@ class TheBackendWrites(unittest.TestCase):
         asyncio.run(s._do_adopt_server_info())
         self.assertFalse((Path(be.state_dir) / mf.MODEL_FAST_FILE).exists(), "an older CLI's answer teaches nothing")
         self.assertEqual(s.fast, "off", "…and the fast state is still adopted")
+
+    def test_two_sessions_on_different_cli_versions_the_newest_word_stands(self):
+        # 2.1.321 gained fast mode on Fable 5.2 and lost it on Opus 4.8; a hosted session still on 2.1.320 connects
+        # after (and before) one on 2.1.321. Neither order flaps the table, the frame or the badge.
+        newer = _server_info()
+        older = _server_info(claude_code_version="2.1.320", models=[
+            {"value": "fable", "resolvedModel": "claude-fable-5-2", "displayName": "Fable 5.2"},
+            {"value": "claude-opus-4-8", "resolvedModel": "claude-opus-4-8", "displayName": "Opus 4.8", "supportsFastMode": True}])
+
+        def connect(s, info):
+            class _Client:
+                async def get_server_info(self):
+                    return info
+            s.client = _Client()
+            asyncio.run(s._do_adopt_server_info())
+        for order in ("new then old", "old then new"):
+            be = _backend()
+            frames = []
+            sb.SdkBackend.on_model_fast_changed = staticmethod(lambda: frames.append(1))
+            a = _sess(be, liveModel="Fable 5.2", liveModelId="claude-fable-5-2")
+            b = _sess(be, sid="11111111-2222-4333-8444-000000000722", name="api", liveModel="Opus 4.8", liveModelId="claude-opus-4-8")
+            first, second = ((a, newer), (b, older)) if order == "new then old" else ((b, older), (a, newer))
+            connect(*first)
+            self.assertEqual(frames, [1], order)
+            connect(*second)
+            self.assertEqual(frames, [1, 1] if order == "old then new" else [1],
+                             "%s: the newer word is the one frame more; the older binary's connect sends none" % order)
+            be._pokes.clear()
+            connect(b, older)
+            connect(b, older)
+            self.assertEqual(frames, [1, 1] if order == "old then new" else [1], "%s: the old binary reconnecting: no frame" % order)
+            self.assertTrue(sb.fast_capable("fable", be.state_dir), order)
+            self.assertTrue(sb.fast_capable("claude-fable-5-2", be.state_dir), order)
+            self.assertFalse(sb.fast_capable("claude-opus-4-8", be.state_dir), "%s: 2.1.321's word stands" % order)
+            self.assertEqual(_table(be.state_dir)["fable"]["cli"], "2.1.321", order)
+
+    def test_the_init_re_says_a_connect_time_answer_whose_cli_named_no_version(self):
+        be = _backend()
+        mf.note(be.state_dir, {"fable": True, "claude-fable-5-2": True}, cli="2.1.321")   # another session's newer word
+        s = _sess(be, liveModel="Fable 5.2", liveModelId="claude-fable-5-2")
+        frames = []
+        sb.SdkBackend.on_model_fast_changed = staticmethod(lambda: frames.append(1))
+        unversioned = _server_info(claude_code_version=None, models=[
+            {"value": "fable", "resolvedModel": "claude-fable-5-2", "displayName": "Fable 5.2"},
+            {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5", "supportsFastMode": True}])
+
+        class _Client:
+            async def get_server_info(self):
+                return unversioned
+        s.client = _Client()
+        asyncio.run(s._do_adopt_server_info())
+        t = _table(be.state_dir)
+        self.assertTrue(t["fable"]["fast"], "an unversioned connect cannot override a stamped row's answer")
+        self.assertEqual(t["fable"]["cli"], "2.1.321")
+        self.assertEqual({k: v["fast"] for k, v in t.items() if k in ("opus", "claude-opus-5-5")}, {"opus": True, "claude-opus-5-5": True},
+                         "…but it writes the ids nobody named")
+        self.assertEqual(t["opus"]["cli"], "", "unstamped: the answer named no version and this session has seen no init")
+        self.assertEqual(frames, [1], "the new ids were a change")
+        self.assertEqual(s._fast_support_connect, mf.support_from_payload(unversioned), "the list waits for the init's version")
+
+        class _Sys:
+            def __init__(self, data): self.subtype = "init"; self.data = data
+
+        async def _noop(): pass
+        s._do_refresh_context = _noop
+
+        async def init(data):
+            s._on_message(_Sys(data), type("A", (), {}), type("R", (), {}), _Sys)
+            await asyncio.sleep(0)
+        asyncio.run(init({"fast_mode_state": "off", "model": "claude-fable-5-2", "claude_code_version": "2.1.322"}))
+        t = _table(be.state_dir)
+        self.assertFalse(t["fable"]["fast"], "the init names 2.1.322, newer than the row's 2.1.321: the connect-time list now flips it")
+        self.assertFalse(t["claude-fable-5-2"]["fast"])
+        self.assertEqual(t["fable"]["cli"], "2.1.322")
+        self.assertEqual(t["opus"]["cli"], "2.1.322", "…and stamps the rows it wrote unversioned")
+        self.assertEqual(frames, [1, 1], "the flip is one frame")
+        self.assertIsNone(s._fast_support_connect, "said once")
+        asyncio.run(init({"fast_mode_state": "off", "model": "claude-fable-5-2", "claude_code_version": "2.1.322"}))
+        self.assertEqual(frames, [1, 1], "a second init re-says nothing")
+        # the other way: the init names an OLDER version than the row's — the newer word stands, the stamp too
+        be2 = _backend()
+        mf.note(be2.state_dir, {"fable": True}, cli="2.1.321")
+        s2 = _sess(be2, liveModel="Fable 5.2", liveModelId="claude-fable-5-2")
+        s2.client = _Client()
+        asyncio.run(s2._do_adopt_server_info())
+        s2._do_refresh_context = _noop
+        asyncio.run(_init_on(s2, _Sys, {"fast_mode_state": "off", "model": "claude-fable-5-2", "claude_code_version": "2.1.320"}))
+        self.assertTrue(_table(be2.state_dir)["fable"]["fast"], "2.1.320's word does not beat 2.1.321's")
+        self.assertEqual(_table(be2.state_dir)["fable"]["cli"], "2.1.321")
+        self.assertEqual(_table(be2.state_dir)["opus"]["cli"], "2.1.320", "the ids it alone named carry its version")
+        # …and with the connect's stamp borrowed from a previous init of this session, the rows carry that version
+        be3 = _backend()
+        s3 = _sess(be3, liveModel="Fable 5.2", liveModelId="claude-fable-5-2")
+        s3._cli_version_seen = "2.1.319"
+        s3.client = _Client()
+        asyncio.run(s3._do_adopt_server_info())
+        self.assertEqual(_table(be3.state_dir)["fable"]["cli"], "2.1.319", "the last init's version, when the answer names none")
+        self.assertIsNotNone(s3._fast_support_connect, "…still re-said at the init, which names the running CLI's version")
 
     def test_an_answer_whose_options_lack_the_field_writes_nothing_and_the_seed_stands(self):
         be = _backend()
@@ -383,7 +537,11 @@ class TheJudgeFollows(unittest.TestCase):
         self.assertIn("on_model_fast_changed = staticmethod(_models_changed)", inspect.getsource(km),
                       "the backend's change tells every picker through the models frame")
         self.assertIn("self._learn_fast_support(info", inspect.getsource(sb.SdkSession._do_adopt_server_info))
+        self.assertIn('info.get("claude_code_version")', inspect.getsource(sb.SdkSession._do_adopt_server_info),
+                      "the connect-time rows are stamped with the version the answer itself names")
         self.assertIn("self._learn_fast_support(d", inspect.getsource(sb.SdkSession._on_message))
+        self.assertIn("self._note_fast_support(_pending", inspect.getsource(sb.SdkSession._on_message),
+                      "the init re-says an unversioned connect's list under its own version")
 
 
 class TheModelsPayload(unittest.TestCase):

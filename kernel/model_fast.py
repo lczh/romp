@@ -34,6 +34,8 @@ _CACHE = {}                     # str(path) -> ((mtime_ns, size), table): a stat
 _VERSION_ID_RE = re.compile(r"^claude-([a-z]+)-(\d+)(?:-(\d+))?(?:-(\d{8}))?$")
 # the CLI's display spelling, as the badge wears it: "Opus 5", "Fable 5.2"
 _PRETTY_RE = re.compile(r"^([a-z]+) (\d+)(?:\.(\d+))?$")
+# a Claude Code version as the CLI reports it (claude_code_version: "2.1.321"), the x.y.z it opens with
+_CLI_VERSION_RE = re.compile(r"^\s*(\d+)\.(\d+)\.(\d+)")
 
 
 def _path(state_dir):
@@ -139,38 +141,64 @@ def support_from_payload(d) -> dict:
     return out
 
 
+def version_tuple(cli):
+    """(major, minor, patch) from a Claude Code version as the CLI reports it ("2.1.321"); None for "" or a spelling
+    that opens with no x.y.z (a row no CLI stamped, a hand edit) — unknown, which note() never reads as newer."""
+    m = _CLI_VERSION_RE.match(str(cli or ""))
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
 def note(state_dir, support: dict, cli: str = "") -> bool:
-    """Record what the CLI said: `support` is {id: bool}. Write-on-change only — an id whose answer the table already
-    holds is left as it is (its stamp included), a new id or a flipped answer is written with the time and the CLI
-    version that said it. Returns whether the file changed, so the caller can tell the pickers. Atomic (tmp +
+    """Record what a CLI said: `support` is {id: bool}, `cli` the Claude Code version that said it ("" when the
+    payload named none). THE NEWEST CLI'S WORD STANDS (the review of 2026-11-11): sessions on one kernel run
+    different Claude Code versions — a session host keeps its binary across `claude update` — and the 2.1.320 →
+    2.1.321 line is exactly where Fable 5.2 gained fast mode and Opus 4.8 lost it, so last-writer-wins would have
+    flipped every answer at every connect of either, a models frame and a rebuilt badge each time with no new
+    information. Per id: a row stamped by a NEWER version than the writer's is left as it is, answer and stamp,
+    however the writer disagrees; a row stamped by the same or an older version, or by none, takes a differing
+    answer with the writer's stamp; a row the writer merely CONFIRMS keeps its answer and advances its stamp to the
+    writer's when that is newer (so the confirmation counts against older binaries later), untouched otherwise; a new
+    id is written. A writer whose version is unknown never overrides a stamped row's answer — it cannot show it is
+    newer — but writes new ids and flips unstamped rows, and its own rows yield to anyone. Returns whether any ANSWER
+    changed, so the caller can tell the pickers; a stamp advance alone rewrites the file (the chat-build signature
+    reads its identity and rebuilds the statuses once, with the same answers) but is no change. Atomic (tmp +
     replace) under one lock: sessions connect on threads of their own."""
     if not state_dir or not support:
         return False
     p = _path(state_dir)
+    wv = version_tuple(cli)
     with _LOCK:
         try:
             d = json.loads(p.read_text())
             d = d if isinstance(d, dict) else {}
         except (OSError, ValueError):
             d = {}
-        changed = False
+        changed = restamped = False
         now = int(time.time())
         for k, fast in support.items():
             k = str(k or "").strip().lower()
             if not k:
                 continue
+            fast = bool(fast)
             cur = d.get(k)
-            if isinstance(cur, dict) and cur.get("fast") is bool(fast):
-                continue
-            d[k] = {"fast": bool(fast), "t": now, "cli": str(cli or "")}
+            if isinstance(cur, dict) and isinstance(cur.get("fast"), bool):
+                cv = version_tuple(cur.get("cli"))
+                if cur["fast"] is fast:                                    # confirmed: the newer stamp, else as it is
+                    if wv is not None and (cv is None or wv > cv):
+                        d[k] = {"fast": fast, "t": now, "cli": str(cli or "")}
+                        restamped = True
+                    continue
+                if cv is not None and (wv is None or wv < cv):
+                    continue                                               # a newer CLI said otherwise: its word stands
+            d[k] = {"fast": fast, "t": now, "cli": str(cli or "")}
             changed = True
-        if not changed:
+        if not (changed or restamped):
             return False
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = Path("%s.%d.%x.tmp" % (p, os.getpid(), threading.get_ident()))
         tmp.write_text(json.dumps(d, sort_keys=True))
         os.replace(tmp, p)
-    return True
+    return changed
 
 
 def rev(state_dir):
