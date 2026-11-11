@@ -199,12 +199,3 @@ def note(state_dir, support: dict, cli: str = "") -> bool:
         tmp.write_text(json.dumps(d, sort_keys=True))
         os.replace(tmp, p)
     return changed
-
-
-def rev(state_dir):
-    """The table's revision for a view signature: the file's mtime, 0 when there is none. A write moves it, so a
-    cached build that read the old answers rebuilds on the event, never on a clock."""
-    try:
-        return os.stat(_path(state_dir)).st_mtime_ns
-    except (OSError, TypeError):
-        return 0

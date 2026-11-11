@@ -336,11 +336,6 @@ def fast_capable_or_unknown(model):
     return (fam == "opus") if fam else None
 
 
-def model_fast_rev():
-    """The learned table's revision (its file's mtime, 0 when none) for the view signature: a write is the event."""
-    return _mf.rev(STATE)
-
-
 def _tier_fast(tier, model):
     """Whether THIS call asks for fast mode: the tier's flag is on AND the model the call runs on can run it. The
     model is the RESOLVED one (a fallback onto a non-Opus model never asks); an unknown tier reads the triage flag,

@@ -160,8 +160,8 @@ class TheTable(unittest.TestCase):
         self.assertIsNone(mf.fast_known("claude-fable-5-1", d), "an id no report named: unknown, the caller's seed applies")
         self.assertIsNone(mf.fast_known("opus", d), "a family alias without an entry does not borrow a version's")
         self.assertIsNone(mf.fast_known("", d))
-        self.assertGreater(mf.rev(d), 0)
-        self.assertEqual(mf.rev(tempfile.mkdtemp()), 0)
+        self.assertFalse(hasattr(mf, "rev") or hasattr(jd, "model_fast_rev"),
+                         "one mechanism: the table's identity rides the chat-build signature (_chat_sig_shared), no second revision")
 
     def test_the_newest_clis_word_stands_whichever_connects_last(self):
         # the 2.1.320 → 2.1.321 line: Fable 5.2 gained fast mode, Opus 4.8 lost it. Two sessions on one kernel, one
