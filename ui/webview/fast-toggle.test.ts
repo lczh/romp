@@ -136,6 +136,9 @@ test("the comment dialog's fast chip reads the /models frame's capability before
   assert.match(canFast, /if \(typeof known === "boolean"\) return known;/);
   assert.match(canFast, /!v \|\| v === "default" \|\| v\.includes\("opus"\)/, "the seed stands where no CLI has named the model");
   assert.match(RENDER, /versions\?: \{ label: string; value: string; learned\?: boolean; fast\?: boolean \| null \}\[\] \}\[\] = \[\];/, "the cached frame's type carries the field");
-  assert.match(KERNEL, /fast=jd\.fast_known\(v\["value"\]\)/, "each version row carries the CLI's word");
-  assert.match(KERNEL, /fast=jd\.fast_known\(_picks\.get\(c\["value"\]\) or c\["value"\]\)/, "each family carries its default's");
+  // …and the kernel writes the field through _fast_kw, which is EMPTY for an id no CLI has named: a row then carries no
+  // key at all (the shape the catalog and learned-version tests pin), and modelFastKnown reads the missing key as unknown
+  assert.match(KERNEL, /_with_cli_block\(dict\(v\), _blocks\) \| _fast_kw\(v\["value"\]\)/, "each version row carries the CLI's word, when it has one");
+  assert.match(KERNEL, /\*\*_fast_kw\(_picks\.get\(c\["value"\]\) or c\["value"\]\)/, "each family carries its default's, when the CLI has one");
+  assert.match(KERNEL, /def _fast_kw\(model\):[\s\S]*?return \{\} if known is None else \{"fast": known\}/, "no key where nothing is known");
 });
