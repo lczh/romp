@@ -389,7 +389,11 @@ while fast requests are rate-limited. Picking On or Off sends the CLI's own
 fast mode. Which models can is what each session's Claude Code reports when it
 connects (its model list names the ones that support fast mode), learned
 across sessions and kept under the state directory (`model-fast.json`); until
-the first report, the kernel takes the Opus family as the answer. Turning it
+the first report, the kernel takes the Opus family as the answer. When
+sessions run different Claude Code versions (a session keeps the binary it was
+started with across an update), the newest version's report stands, and a
+session the CLI reports running fast mode keeps its badge whatever the table
+says of its model. Turning it
 on while the session is on a model that cannot run it makes the CLI
 switch to one that can, which the chat shows as the command's own
 confirmation. If the CLI refuses the toggle (for example, the account has
