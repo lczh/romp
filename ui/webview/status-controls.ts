@@ -19,6 +19,8 @@ export interface MetaStatus {
   mode?: string; model?: string; effort?: string; fast?: string;
   modelPending?: boolean; effortPending?: boolean;   // a /model switch resolving, an /effort switch reconnecting: the badge shows switching-dots
   fastPending?: boolean;   // the first fast-mode opt-in waiting for its relaunch (2026-10-01): the fast badge's dots, not an early "Fast"
+  fastCapable?: boolean | null;   // the kernel's word on whether the session's model can run fast mode (the CLI's own report, learned at
+  //   connect; the Opus seed until one lands): fastAvailable's gate when it is a boolean; null/absent = unknown, the badge's own rule (2026-11-11)
   modePending?: boolean;   // a bypass pick waiting for its relaunch (2026-10-01): the mode badge's dots; `mode` stays the mode the
   //   running CLI confirmed (after a kernel restart that keeps the CLI, see the backend's _mode_pending)
   relaunchWaits?: string;  // what that relaunch waits for ("2 background tasks"; "" when nothing holds it): the wait's words
@@ -80,15 +82,41 @@ export function prettyFast(f: string | undefined): string {
   return s === "cooldown" ? "Cooldown"   // rate-limited: the CLI resumes fast mode when the limit resets
     : s === "on" ? "Fast" : "Slow";
 }
-// Whether the session's MODEL can run fast mode at all (the CLI's /fast is an Opus-only research
-// preview). Gated HERE, on the model, because the CLI is no help: fast_mode_state arrives "off" with
-// an EMPTY fast_mode_disabled_reason on a non-Opus session (verified 2026-08-10 against 2.1.226 on a
-// fable session), so state alone would leave a dead toggle on every model /fast refuses (the user
-// 2026-08-10). Unknown/default stays visible: the account default may be Opus, and hiding a live
-// control is worse than a rare dead one.
+// Whether the session's MODEL can run fast mode at all. Gated HERE, on the model, because the CLI's state
+// is no help: fast_mode_state arrives "off" with an EMPTY fast_mode_disabled_reason on a session whose model
+// cannot run it (verified 2026-08-10 against 2.1.226 on a fable session), so state alone would leave a dead
+// toggle on every model /fast refuses (the user 2026-08-10). The KERNEL's word first (st.fastCapable, 2026-11-11):
+// it reads the CLI's own connect-time report of which models support fast mode, learned per session, so a
+// model the CLI began running fast (Fable 5.2 under 2.1.321) shows the toggle and one it retired (Opus 4.8)
+// does not. Without that word (an older kernel, no model yet) the seed from fast mode's Opus-only research
+// preview stands: the opus family by spelling. Unknown/default stays visible either way: the account default
+// may run fast, and hiding a live control is worse than a rare dead one. And the CLI's OWN state outranks every
+// word about the model: a session it reports running fast (or rate-limited in fast mode) is on a model that can,
+// whatever the kernel's table says of the id (a row an older binary wrote; the review of 2026-11-11), so the badge
+// never hides the Off control of a session that is running fast.
 export function fastAvailable(st: MetaStatus): boolean {
+  if (st.fast === "on" || st.fast === "cooldown") return true;
+  if (typeof st.fastCapable === "boolean") return st.fastCapable;
   const m = (st.model || "").toLowerCase();
   return !m || m === "default" || m.includes("opus");
+}
+/** A model choice as the kernel's /models lists it, the slice the fast gate reads: a family (its alias as `value`,
+ *  `fast` for its default) with its `versions` (each a pinnable id with its own `fast`), the labels the badge wears. */
+export interface FastChoice { label?: string; value: string; fast?: boolean | null; versions?: { label?: string; value: string; fast?: boolean | null }[] }
+// What the kernel's /models list says about `value` running fast mode — a family alias ("fable"), a version id
+// ("claude-fable-5-2", a [1m]-tagged spelling included) or a badge label ("Fable 5.2"): the row's `fast`, true or
+// false, when the CLI has named it; null when no row carries the id or the row's answer is unknown. The comment
+// dialog's canFast reads this ahead of its spelling rule (2026-11-11).
+export function modelFastKnown(choices: readonly FastChoice[] | undefined, value: string): boolean | null {
+  const v = (value || "").toLowerCase().replace(/\[[^\]]*\]$/, "").trim();
+  if (!v || !choices) return null;
+  for (const c of choices) {
+    if ((c.value || "").toLowerCase() === v || (c.label || "").toLowerCase() === v) return typeof c.fast === "boolean" ? c.fast : null;
+    for (const ver of c.versions || []) {
+      if ((ver.value || "").toLowerCase() === v || (ver.label || "").toLowerCase() === v) return typeof ver.fast === "boolean" ? ver.fast : null;
+    }
+  }
+  return null;
 }
 // the @claude-permission-mode var → a short readable badge label
 export function prettyMode(m: string | undefined): string {

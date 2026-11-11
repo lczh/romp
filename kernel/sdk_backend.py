@@ -95,6 +95,10 @@ _logins = sys.modules.get("romp_logins") or load_source("romp_logins", _HERE / "
 # at Opus 5.5's own, and each result's per-model dollars are checked against it so a rate change or a new model is said
 # (SdkSession._check_price_drift). The kernel's copy when it is loaded (the _cred idiom).
 _cpr = sys.modules.get("romp_cli_prices") or load_source("romp_cli_prices", _HERE / "cli_prices.py")
+# which models the CLI runs fast mode on, as its own connect-time initialize answers say (model_fast.py): this
+# backend WRITES the table (_learn_fast_support, at every connect and init) and fast_capable below reads it; the
+# judges and the kernel read the same file through judge.fast_capable, so the three consumers never disagree
+_mf = sys.modules.get("romp_model_fast") or load_source("romp_model_fast", _HERE / "model_fast.py")
 
 
 class CLIConnectionErrorLike(RuntimeError):
@@ -6052,10 +6056,19 @@ def retry_upgrade_on(state_dir) -> bool:
     return _kernel_switch_on(state_dir, RETRY_UPGRADE_STORE)
 
 
-def fast_capable(model) -> bool:
+def fast_capable(model, state_dir=None) -> bool:
     """Whether Claude Code's fast mode can run on `model` — an alias ("opus"), the CLI's pretty name ("Opus 5") or an
-    id ("claude-opus-5"): the Opus family, the one rule the judges (kernel/judge.py fast_capable) and the chat's badge
-    (status-controls.ts fastAvailable) apply. Empty or unknown is not: the flag is armed only where it can take."""
+    id ("claude-opus-5"). The CLI's own word first, when a state dir is given: the table its initialize answers fill
+    (model_fast.py, STATE/model-fast.json, written below by _learn_fast_support), in both directions — an id the CLI
+    lists without support arms nothing, one it claims arms the flag whatever its family. When nothing is known for
+    the id (no state dir, a fresh install, an id no CLI has named), the SEED: the Opus family by spelling, the one
+    rule from fast mode's Opus-only research preview, so an install behaves exactly as before until the first CLI
+    reports (2026-11-11: 2.1.321 runs fast mode on Fable 5.2 and no longer on Opus 4.8). The judges
+    (kernel/judge.py fast_capable) and the chat's badge (status-controls.ts fastAvailable) read the same table.
+    Empty or unknown is not: the flag is armed only where it can take."""
+    known = _mf.fast_known(model, state_dir) if state_dir else None
+    if known is not None:
+        return known
     return "opus" in str(model or "").lower()
 
 
@@ -8839,7 +8852,15 @@ class SdkSession:
         # pick served a Sonnet fallback reconnected at every turn's end, the init's Opus arming a flag the served Sonnet
         # then dropped at the connect). The user's case is the other way round — Opus served under a Fable pick — and the
         # reported id carries it.
-        return any(fast_capable(x) for x in (getattr(self, "chosen_model", ""), getattr(self, "_model_id", ""), getattr(self, "model", "")))
+        # Each face is judged by the CLI's own word where it has one (the learned table under the state dir), else the seed.
+        # Never the "default" alias: the CLI's default model is per login (a stored login's account may default to
+        # another model), so the table's one "default" row is whichever session's connect wrote it last, and arming the
+        # flag on it would run the opt-in on a CLI whose own default cannot take it; the live id decides for such a
+        # session once it lands (the review of 2026-11-11).
+        sd = getattr(self.backend, "state_dir", None)
+        faces = [x for x in (getattr(self, "chosen_model", ""), getattr(self, "_model_id", ""), getattr(self, "model", ""))
+                 if x and str(x).strip().lower() != "default"]
+        return any(fast_capable(x, sd) for x in faces)
 
     def _after_model_change(self, old, pm):
         """The live model just changed (a learn, a context refresh): the machine's Always fast switch may now want the
@@ -10303,8 +10324,67 @@ class SdkSession:
             info = await self.client.get_server_info()
         except Exception:
             return
-        if isinstance(info, dict) and self._adopt_fast_state(info):
+        if not isinstance(info, dict):
+            return
+        # …and WHICH models this CLI runs fast mode on: the same answer's `models` options (supportsFastMode per alias
+        # and resolved id) fill the learned table every fast gate reads (model_fast.py). The connect is the event.
+        # Stamped with the version the answer itself names (claude_code_version: the init's value, absent on a CLI
+        # that predates the field), else the one this session's last init named, else none. The stamp is
+        # load-bearing — the table keeps the newest CLI's word (model_fast.note) — so when the answer names no
+        # version its list is kept for the init, which re-says it under the version it carries (_on_message).
+        v = str(info.get("claude_code_version") or "")
+        if v:
+            self._cli_version_seen = v
+        self._fast_support_connect = None if v else _mf.support_from_payload(info)
+        self._learn_fast_support(info, cli=v or getattr(self, "_cli_version_seen", "") or "")
+        if self._adopt_fast_state(info):
             self.backend._poke()
+
+    def _learn_fast_support(self, d, cli="") -> bool:
+        """Record what a CLI payload says about fast-mode support, in the kernel-wide learned table
+        (model_fast.note, STATE/model-fast.json): every `models` option's supportsFastMode, keyed by its
+        alias AND its resolved id (true → supported; absent or false → the CLI did not claim it; a list no
+        option of which carries the field says nothing), and — when the payload reports fast_mode_state
+        "on" for a model it names — that model as supported, since a session running fast on it is proof.
+        Two events write it, never a timer: the connect-time initialize answer (_do_adopt_server_info) and
+        the per-turn init (_on_message); `cli` is the Claude Code version that said it, the table's stamp
+        (the newest version's word stands). Returns whether an answer changed (_note_fast_support). Never
+        raises into the connect or the init handler: a bad payload is logged and learns nothing."""
+        try:
+            support = _mf.support_from_payload(d)
+            if isinstance(d, dict) and d.get("fast_mode_state") == "on":
+                mid = str(d.get("model") or "").strip().lower()   # the payload's OWN model, never a stale reg id
+                if mid:
+                    support[mid] = True
+        except Exception as e:
+            self.backend._log("fast support (%s): the CLI's model list could not be read: %s" % (self.name, e))
+            return False
+        return self._note_fast_support(support, cli=cli)
+
+    def _note_fast_support(self, support, cli="") -> bool:
+        """Write `support` ({id: bool}) to the learned table under `cli`'s stamp (model_fast.note: write-on-change,
+        the newest CLI's word stands) and, when an answer changed, tell the kernel through the class-level
+        on_model_fast_changed hook (the on_model_fallback idiom) so every open picker's cached /models list is
+        refreshed with the capability, and poke a status push so the chat's badge follows. Returns whether an
+        answer changed. Never raises: a write that fails is logged and learns nothing."""
+        if not support:
+            return False
+        try:
+            changed = _mf.note(getattr(self.backend, "state_dir", None), support, cli=cli)
+        except Exception as e:
+            self.backend._log("fast support (%s): the CLI's model list could not be recorded: %s" % (self.name, e))
+            return False
+        if changed:
+            self.backend._log("fast support (%s): the CLI reports fast mode on %s" % (
+                self.name, ", ".join(sorted(k for k, v in support.items() if v)) or "no model"))
+            hook = getattr(type(self.backend), "on_model_fast_changed", None)
+            if hook:
+                try:
+                    hook()
+                except Exception as e:
+                    self.backend._log("fast support (%s): models frame hook failed: %s" % (self.name, e))
+            self.backend._poke()
+        return changed
 
     def effective_auth(self, key=None) -> str:
         """Billing intent, without retrieving credentials for repeated UI snapshots.
@@ -12313,6 +12393,19 @@ class SdkSession:
             # Fast-mode truth rides the init payload — the AUTHORITATIVE re-assert behind set_fast's
             # optimistic flip, shared with the connect-time initialize response (_adopt_fast_state).
             self._adopt_fast_state(d)
+            _ver = str(d.get("claude_code_version") or "")
+            if _ver:
+                self._cli_version_seen = _ver   # stamps the fast table's rows a later connect writes before its own init
+            # …and the learned fast table: an init reporting fast mode ON names the model it runs on, which is proof
+            # of support for that id (the connect-time answer's model list rides _do_adopt_server_info)…
+            self._learn_fast_support(d, cli=_ver)
+            # …and that connect-time list, re-said under THIS CLI's version when its initialize answer named none (a
+            # CLI that predates the field there): unversioned, the connect could not flip a row a newer CLI had
+            # stamped, nor advance the stamp of one it confirmed; the init's version settles both. Once per connect.
+            _pending = getattr(self, "_fast_support_connect", None)
+            if _pending and _ver:
+                self._fast_support_connect = None
+                self._note_fast_support(_pending, cli=_ver)
             if getattr(self, "_sub_std_launched", False) and d.get("claude_code_version"):
                 self.backend._note_cli_version(self, str(d.get("claude_code_version")))   # the canary's backstop
             # HOW this CLI authenticates (verified live 2026-08-04: 'ANTHROPIC_API_KEY' on API-key auth;
@@ -14379,6 +14472,9 @@ class SdkSession:
         _el = self.effective_login()   # once per snapshot: authLogin and authLabel below read the same answer
         return {"state": state, "since": str(since) if since else "",
                 "model": model_label(self.model, self.chosen_model), "effort": self.effort,
+                # the RAW id the CLI last reported (claude-fable-5-2; "" until one lands): the kernel's fast-capability read
+                # for the chat's badge keys on it ahead of the pretty label (jd.fast_capable_or_unknown, 2026-11-11)
+                "modelId": getattr(self, "_model_id", "") or "",
                 "modelPending": bool(self._model_pending),   # a /model switch resolving → the badge shows switching-dots
                 "effortPending": bool(self._effort_pending),   # an /effort switch reconnecting → effort-badge dots + "Reloading session…"
                 "auth": self.effective_auth(),   # which account this session bills ('login'|'key') → gear badge
@@ -23085,6 +23181,7 @@ class SdkBackend:
                     # not running (e.g. post-restart): prefer the last LIVE model we persisted
                     # (liveModel), else the chosen alias — so the badge isn't blank while dormant.
                     "model": model_label(reg.get("liveModel") or "", reg.get("model") or ""),
+                    "modelId": str(reg.get("liveModelId") or ""),   # the persisted raw id, as snapshot() carries it live
                     "modelFallback": self.fallback_row_for_reg(reg, retry_on),   # a dormant session keeps its mark
                     "modelPending": bool(reg.get("modelPending")),
                     "effortPending": bool(reg.get("effortPending")),

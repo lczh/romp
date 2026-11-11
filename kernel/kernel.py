@@ -23526,6 +23526,10 @@ def _sdk_locked():
             # picked model again after a fallback mints the completed card saying the session is back — the same shape
             type(_sdk_backend).on_model_restored = staticmethod(
                 lambda sid, frm, to: (jd.mint_restored_card(sid, frm, to), _push_soon()))
+            # the CLI's connect-time word on which models run fast mode changed the learned table (the backend's
+            # _learn_fast_support, 2026-11-11): every open picker's cached /models list carries the capability, so
+            # the models frame tells each to re-read it — the same frame a pick-memory move sends
+            type(_sdk_backend).on_model_fast_changed = staticmethod(_models_changed)
             # a producer inside the backend posts a NOTICE CARD through the same door every producer takes (T370,
             # plans/notice-cards.md): the backend resolves it with getattr, so its tests' bare stand-ins carry no hook
             type(_sdk_backend).on_notice = staticmethod(post_notice)
@@ -25807,6 +25811,7 @@ def _sdk_live_norm(st):
     ctx = st.get("ctx")   # SDK context-fill % from usage (None until a turn lands / while dormant)
     return {"state": st.get("state", ""), "since": _num(str(st.get("since") or "")),
             "model": st.get("model", ""), "effort": st.get("effort", ""),
+            "modelId": str(st.get("modelId") or ""),   # the raw id the CLI reported ("" until one lands): the fast-capability read's key
             "modelPending": bool(st.get("modelPending")),   # a /model switch resolving → badge shows switching-dots
             "effortPending": bool(st.get("effortPending")),   # an /effort switch reconnecting → effort-badge dots + "Reloading session…"
             "retryCount": int(st.get("retryCount") or 0),   # api_retry backoff attempts → the chat's "API retrying — attempt N…" element
@@ -41463,8 +41468,11 @@ def _chat_sig_shared():
     which caches new content under the old identity: the next push takes the new identity, misses and
     rebuilds: one extra build, never a stale hit that lasts. The flags component carries the Task tracking switch's file
     beside session-flags.json: both say whether a session's ledger shows the judges' output (a mute for one session, the
-    switch for every one, T404), so a flip rebuilds every tab once."""
-    return {"flags": (_chat_ident(jd.STATE / "session-flags.json"), _chat_ident(jd.STATE / TASK_TRACKING_FILE)),
+    switch for every one, T404), so a flip rebuilds every tab once. The learned fast table (model-fast.json, which
+    models the CLI runs fast mode on; the status's fastCapable reads it through _fast_capable_status) rides the same
+    component: a connect that teaches a new answer is the event that rebuilds every tab's badge gate (2026-11-11)."""
+    return {"flags": (_chat_ident(jd.STATE / "session-flags.json"), _chat_ident(jd.STATE / TASK_TRACKING_FILE),
+                      _chat_ident(jd.STATE / jd.MODEL_FAST_FILE)),
             "ncards": _chat_ident(jd.STATE / "notify-cards.json"),
             "colormap": _colormap(),
             # …plus the login's display (T346: the organisation and kind word beside the name, and every stored
@@ -43428,6 +43436,35 @@ def _mark_model_pending(sid, value):
     if sid:
         _model_switch_pending[sid] = {"target": value, "until": time.time() + 20}
         _mark_views_dirty()           # the stamp lives in memory — the timeline's dots need a dirty rebuild
+
+
+def _fast_kw(model):
+    """The `fast` keyword for a /models family or version row — whether Claude Code runs fast mode on `model`, by the
+    CLI's own word (jd.fast_known: the table its connect-time initialize answers fill) — as a dict to splat into the
+    row, EMPTY when no CLI has said. A row for an id no CLI has named yet carries no key at all rather than null: the
+    pickers read a missing key as unknown and keep their seed rule (status-controls.ts modelFastKnown, render.ts
+    canFast), and every row keeps the exact shape it had before the table existed, so a fresh install's payload is
+    what it was (the review of 2026-11-11: five pins on the rows' shape, and the route's own source pins)."""
+    known = jd.fast_known(model)
+    return {} if known is None else {"fast": known}
+
+
+def _fast_capable_status(tm):
+    """The session status's `fastCapable`: whether the session's model can run Claude Code's fast mode, from the
+    live row's raw id (modelId, the CLI's own report) ahead of its pretty label, through jd.fast_capable_or_unknown
+    — the CLI's word (the learned table) first, the Opus seed for an id no report has named, None when the row
+    names no model the kernel can place (the chat's badge then keeps its own rule). Reads the table per build;
+    the chat-build signature's shared flags component carries the table file's identity (_chat_sig_shared), so a
+    connect that teaches a new answer rebuilds the status on that event (2026-11-11). The CLI's OWN state outranks
+    the table: a session it reports running fast mode (or rate-limited in it) is on a model that can, whatever a
+    row says of the id — a row an older binary wrote, a mixed-version install, a stale one before this session's
+    init lands — so the badge never hides the control of a session that is running fast (the review of 2026-11-11);
+    a state the CLI gave with a disabled reason proves nothing (the chat shows no fast state for it either)."""
+    if not tm:
+        return None
+    if tm.get("fast") in ("on", "cooldown") and not tm.get("fastReason"):
+        return True
+    return jd.fast_capable_or_unknown(tm.get("modelId") or tm.get("model") or "")
 
 
 def _model_pending_now(sid, tm):
@@ -49756,6 +49793,10 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                   # disabled_reason means /fast would refuse, so the chat hides the toggle.
                   "fast": "" if tm.get("fastReason") else tm.get("fast", ""),
                   "fastPending": bool(tm.get("fastPending")),   # the opt-in waits for its relaunch: dots on the fast badge (2026-10-01)
+                  # whether this session's model can run fast mode, by the CLI's own word (the learned table, then the
+                  # Opus seed): the badge's gate (fastAvailable) reads it ahead of its own spelling rule; null = the
+                  # kernel cannot say (no model, "default" with no entry), and the badge keeps its own rule (2026-11-11)
+                  "fastCapable": _fast_capable_status(tm),
                   # Subagents at standard speed (experimental, 2026-10-08): the fast menu's row (the switch, where it is
                   # offered) and its sub-line, the speed check's outcome read off the transcripts' usage.speed
                   "subagentStandard": bool(tm.get("subagentStandard")),
@@ -87178,11 +87219,17 @@ class Handler(BaseHTTPRequestHandler):
                     # read here BEFORE the picks so a payload never carries a rev newer than its list: a
                     # picker keeps the highest rev it applied and drops a response that lands late with a
                     # lower one (two overlapping fetches can resolve out of order)
+                    # …and each version row, and each family (for its DEFAULT: its pinned version, else its alias),
+                    # carries `fast`: whether Claude Code runs fast mode on it, by the CLI's own word (jd.fast_known:
+                    # the table its connect-time initialize answers fill) — true or false, and ABSENT when no CLI has
+                    # named the id yet (_fast_kw), where the pickers keep their seed rule (render.ts canFast) and a
+                    # row reads exactly as it did before the table existed (2026-11-11)
                     {"rev": _rev,
                      "models": [dict(c, color=_model_color(c["value"], _stops),
                                      tone=_model_tone(c["value"]),
-                                     versions=[_with_cli_block(dict(v), _blocks)
+                                     versions=[_with_cli_block(dict(v), _blocks) | _fast_kw(v["value"])
                                                for v in _cat.get(c["value"]) or []],
+                                     **_fast_kw(_picks.get(c["value"]) or c["value"]),
                                      default=_picks.get(c["value"]) or c["value"])
                                 for c in MODEL_CHOICES],
                      "efforts": [dict(c, color=_effort_color(c["value"], _stops), tone=_effort_tone(c["value"]))

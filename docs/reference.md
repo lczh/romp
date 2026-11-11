@@ -382,12 +382,20 @@ the badge off) and the feed still say what needs you. It is per browser, like th
 
 The statusline's badges (permission mode, model, effort) are each a small
 dropdown. A fourth appears when the session reports Claude Code's fast-mode
-state (an Opus-only research preview, billed at a premium): it reads **Fast**
+state (billed at a premium): it reads **Fast**
 in orange while fast mode is on, **Slow** while it's off, and **Cooldown**
 while fast requests are rate-limited. Picking On or Off sends the CLI's own
-`/fast` command; the badge never appears on a session that cannot run fast
-mode. Turning it on while the session is on a non-Opus model makes the CLI
-switch to a fast-capable one, which the chat shows as the command's own
+`/fast` command; the badge never appears on a session whose model cannot run
+fast mode. Which models can is what each session's Claude Code reports when it
+connects (its model list names the ones that support fast mode), learned
+across sessions and kept under the state directory (`model-fast.json`); until
+the first report, the kernel takes the Opus family as the answer. When
+sessions run different Claude Code versions (a session keeps the binary it was
+started with across an update), the newest version's report stands, and a
+session the CLI reports running fast mode keeps its badge whatever the table
+says of its model. Turning it
+on while the session is on a model that cannot run it makes the CLI
+switch to one that can, which the chat shows as the command's own
 confirmation. If the CLI refuses the toggle (for example, the account has
 extra usage turned off), a toast says why and the pick reverts to off;
 the control never silently disappears. The first time a session is turned on,
@@ -532,8 +540,11 @@ kernel-side (stored on the kernel like the judges' Fast mode boxes, stamped, and
 following to every connected machine's kernel):
 
 - **Always fast** runs every session in fast mode whenever its model allows it
-  (Opus-only, billed at a premium). The kernel arms the CLI's fast-mode opt-in at
-  each connect for a session whose model is Opus, and when a session lands on Opus
+  (billed at a premium; the models are the ones Claude Code reports as supporting
+  fast mode, learned from each session's connect-time answer, with the Opus
+  family as the answer until one reports). The kernel arms the CLI's fast-mode
+  opt-in at each connect for a session whose model can run it, and when a
+  session lands on such a model
   later, by a pick or by an automatic fallback, it reconnects to arm it as soon as
   the session is quiet: no turn in flight, queued, or opened by the CLI itself (a
   background task's notification starts one), no question waiting on you, no
@@ -1305,17 +1316,19 @@ through to `install.sh`:
 
 - **Fast mode** (a checkbox beside each of the gear's judge model pickers:
   Triage, Distilling, Indexing; off by default) runs that tier's judges in
-  Claude Code's fast mode, the same Opus-only research preview the chat
+  Claude Code's fast mode, the same mode the chat
   statusline's Fast badge toggles for a session, billed at a premium (about
-  twice the standard Opus rate). One flag per tier: the setting is read per
+  twice the standard rate). One flag per tier: the setting is read per
   call, for the tier the call runs in, and a call whose tier is on and whose
-  model is Opus, by the bare alias or a pinned Opus version, carries the CLI's
+  model Claude Code reports as supporting fast mode (learned from each
+  session's connect-time answer, by the bare alias or a pinned version; the
+  Opus family until one reports) carries the CLI's
   fast-mode opt-in in its per-call settings; every other call runs exactly as
   before. The gear says so per tier: when a tier's effective model cannot run
   fast (a Distilling pick of Follow triage takes the triage model), its box is
   greyed and its hint names the reason; the value is kept, not cleared, so
-  pinning Opus for the tier later brings the box back live with no second
-  click. An install that had the earlier single box on gets the same behaviour
+  pinning a model that can run fast for the tier later brings the box back
+  live with no second click. An install that had the earlier single box on gets the same behaviour
   once: on its first start the kernel turns the new tiers' flags on where the
   tier's model can run fast and off where it cannot. Fast requests draw on fast
   mode's own rate limits, the pool your sessions' fast toggles share. Whether
