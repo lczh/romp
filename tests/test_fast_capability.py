@@ -525,6 +525,15 @@ class TheJudgeFollows(unittest.TestCase):
         self.assertTrue(km._fast_capable_status({"model": "Fable 5.2", "modelId": ""}), "the label when no id landed")
         self.assertFalse(km._fast_capable_status({"model": "Opus 4.8", "modelId": "claude-opus-4-8"}))
         self.assertTrue(km._fast_capable_status({"model": "Fable", "modelId": ""}), "a fresh pick's alias label")
+        # the CLI's own state outranks the table: a session running fast is on a model that can, whatever a row says
+        self.assertTrue(km._fast_capable_status({"model": "Opus 4.8", "modelId": "claude-opus-4-8", "fast": "on"}),
+                        "the table says no (an older binary's row), the CLI is running it: the CLI")
+        self.assertTrue(km._fast_capable_status({"model": "Opus 4.8", "modelId": "claude-opus-4-8", "fast": "cooldown"}),
+                        "rate-limited in fast mode is running it")
+        self.assertFalse(km._fast_capable_status({"model": "Opus 4.8", "modelId": "claude-opus-4-8", "fast": "off"}), "off proves nothing")
+        self.assertFalse(km._fast_capable_status({"model": "Opus 4.8", "modelId": "claude-opus-4-8", "fast": "on", "fastReason": "org"}),
+                         "a state the CLI gave with a disabled reason proves nothing")
+        self.assertTrue(km._fast_capable_status({"model": "gw-6-astra", "modelId": "", "fast": "on"}), "…a stranger running fast too")
 
     def test_the_wiring_the_badge_depends_on(self):
         src = inspect.getsource(km.build_session)

@@ -43444,9 +43444,15 @@ def _fast_capable_status(tm):
     — the CLI's word (the learned table) first, the Opus seed for an id no report has named, None when the row
     names no model the kernel can place (the chat's badge then keeps its own rule). Reads the table per build;
     the chat-build signature's shared flags component carries the table file's identity (_chat_sig_shared), so a
-    connect that teaches a new answer rebuilds the status on that event (2026-11-11)."""
+    connect that teaches a new answer rebuilds the status on that event (2026-11-11). The CLI's OWN state outranks
+    the table: a session it reports running fast mode (or rate-limited in it) is on a model that can, whatever a
+    row says of the id — a row an older binary wrote, a mixed-version install, a stale one before this session's
+    init lands — so the badge never hides the control of a session that is running fast (the review of 2026-11-11);
+    a state the CLI gave with a disabled reason proves nothing (the chat shows no fast state for it either)."""
     if not tm:
         return None
+    if tm.get("fast") in ("on", "cooldown") and not tm.get("fastReason"):
+        return True
     return jd.fast_capable_or_unknown(tm.get("modelId") or tm.get("model") or "")
 
 

@@ -90,8 +90,12 @@ export function prettyFast(f: string | undefined): string {
 // model the CLI began running fast (Fable 5.2 under 2.1.321) shows the toggle and one it retired (Opus 4.8)
 // does not. Without that word (an older kernel, no model yet) the seed from fast mode's Opus-only research
 // preview stands: the opus family by spelling. Unknown/default stays visible either way: the account default
-// may run fast, and hiding a live control is worse than a rare dead one.
+// may run fast, and hiding a live control is worse than a rare dead one. And the CLI's OWN state outranks every
+// word about the model: a session it reports running fast (or rate-limited in fast mode) is on a model that can,
+// whatever the kernel's table says of the id (a row an older binary wrote; the review of 2026-11-11), so the badge
+// never hides the Off control of a session that is running fast.
 export function fastAvailable(st: MetaStatus): boolean {
+  if (st.fast === "on" || st.fast === "cooldown") return true;
   if (typeof st.fastCapable === "boolean") return st.fastCapable;
   const m = (st.model || "").toLowerCase();
   return !m || m === "default" || m.includes("opus");

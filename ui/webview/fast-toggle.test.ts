@@ -100,6 +100,11 @@ test("the kernel's word on the model gates the badge; the spelling rule stands o
   assert.equal(fastAvailable({ model: "Fable 5.2", fast: "off", fastCapable: null }), false, "null is unknown, the same as absent");
   assert.equal(fastAvailable({ model: "", fast: "off", fastCapable: null }), true, "unknown model stays offered: the account default may run fast");
   assert.equal(fastAvailable({ model: "default", fast: "off" }), true);
+  // the CLI's own state is proof: a session running fast keeps its badge (and its Off) whatever the table says of the id
+  assert.equal(fastAvailable({ model: "Fable 5.2", fast: "on", fastCapable: false }), true, "running fast on it: the word about the model is wrong, not the CLI");
+  assert.equal(fastAvailable({ model: "Fable 5.2", fast: "cooldown", fastCapable: false }), true, "rate-limited in fast mode is running it");
+  assert.equal(fastAvailable({ model: "Fable 5.2", fast: "on" }), true, "…with no word from the kernel too");
+  assert.equal(fastAvailable({ model: "Fable 5.2", fast: "off", fastCapable: false }), false, "off proves nothing");
   // the status carries the field, from the kernel's per-session read (jd.fast_capable_or_unknown over the live id)
   assert.match(RENDER, /fastCapable\?: boolean \| null;/);
   assert.match(MODULE, /fastCapable\?: boolean \| null;/);
