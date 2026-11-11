@@ -453,6 +453,14 @@ class TheBackendWrites(unittest.TestCase):
         self.assertFalse(old.fast_effective(), "the CLI lists Opus 4.8 without the claim: the seed is overridden the other way too")
         head = _sess(be, sid="11111111-2222-4333-8444-000000000713", model="opus")
         self.assertTrue(head.fast_effective(), "the opus alias by its own entry")
+        # never the "default" alias: the CLI's default is per login, and the table's one row is whoever connected last
+        self.assertTrue(mf.fast_known("default", be.state_dir), "the row is there (the fixture's default runs fast)")
+        dflt = _sess(be, sid="11111111-2222-4333-8444-000000000714", model="default")
+        self.assertFalse(dflt.fast_effective(), "a default pick with no live id arms nothing on another login's row")
+        dflt._model_id = "claude-fable-5-2"
+        self.assertTrue(dflt.fast_effective(), "…the live id decides once it lands")
+        dflt._model_id, dflt.model = "", "Default"
+        self.assertFalse(dflt.fast_effective(), "nor the label spelling of it")
 
     def test_the_live_row_carries_the_raw_id_for_the_kernels_read(self):
         be = _backend()

@@ -8853,8 +8853,14 @@ class SdkSession:
         # then dropped at the connect). The user's case is the other way round — Opus served under a Fable pick — and the
         # reported id carries it.
         # Each face is judged by the CLI's own word where it has one (the learned table under the state dir), else the seed.
+        # Never the "default" alias: the CLI's default model is per login (a stored login's account may default to
+        # another model), so the table's one "default" row is whichever session's connect wrote it last, and arming the
+        # flag on it would run the opt-in on a CLI whose own default cannot take it; the live id decides for such a
+        # session once it lands (the review of 2026-11-11).
         sd = getattr(self.backend, "state_dir", None)
-        return any(fast_capable(x, sd) for x in (getattr(self, "chosen_model", ""), getattr(self, "_model_id", ""), getattr(self, "model", "")))
+        faces = [x for x in (getattr(self, "chosen_model", ""), getattr(self, "_model_id", ""), getattr(self, "model", ""))
+                 if x and str(x).strip().lower() != "default"]
+        return any(fast_capable(x, sd) for x in faces)
 
     def _after_model_change(self, old, pm):
         """The live model just changed (a learn, a context refresh): the machine's Always fast switch may now want the
