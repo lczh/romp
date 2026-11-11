@@ -43438,6 +43438,17 @@ def _mark_model_pending(sid, value):
         _mark_views_dirty()           # the stamp lives in memory — the timeline's dots need a dirty rebuild
 
 
+def _fast_kw(model):
+    """The `fast` keyword for a /models family or version row — whether Claude Code runs fast mode on `model`, by the
+    CLI's own word (jd.fast_known: the table its connect-time initialize answers fill) — as a dict to splat into the
+    row, EMPTY when no CLI has said. A row for an id no CLI has named yet carries no key at all rather than null: the
+    pickers read a missing key as unknown and keep their seed rule (status-controls.ts modelFastKnown, render.ts
+    canFast), and every row keeps the exact shape it had before the table existed, so a fresh install's payload is
+    what it was (the review of 2026-11-11: five pins on the rows' shape, and the route's own source pins)."""
+    known = jd.fast_known(model)
+    return {} if known is None else {"fast": known}
+
+
 def _fast_capable_status(tm):
     """The session status's `fastCapable`: whether the session's model can run Claude Code's fast mode, from the
     live row's raw id (modelId, the CLI's own report) ahead of its pretty label, through jd.fast_capable_or_unknown
@@ -87210,15 +87221,16 @@ class Handler(BaseHTTPRequestHandler):
                     # lower one (two overlapping fetches can resolve out of order)
                     # …and each version row, and each family (for its DEFAULT: its pinned version, else its alias),
                     # carries `fast`: whether Claude Code runs fast mode on it, by the CLI's own word (jd.fast_known:
-                    # the table its connect-time initialize answers fill) — true, false, or null when no CLI has
-                    # named the id yet, where the pickers keep their seed rule (render.ts canFast, 2026-11-11)
+                    # the table its connect-time initialize answers fill) — true or false, and ABSENT when no CLI has
+                    # named the id yet (_fast_kw), where the pickers keep their seed rule (render.ts canFast) and a
+                    # row reads exactly as it did before the table existed (2026-11-11)
                     {"rev": _rev,
                      "models": [dict(c, color=_model_color(c["value"], _stops),
                                      tone=_model_tone(c["value"]),
-                                     versions=[dict(_with_cli_block(dict(v), _blocks), fast=jd.fast_known(v["value"]))
+                                     versions=[_with_cli_block(dict(v), _blocks) | _fast_kw(v["value"])
                                                for v in _cat.get(c["value"]) or []],
-                                     default=_picks.get(c["value"]) or c["value"],
-                                     fast=jd.fast_known(_picks.get(c["value"]) or c["value"]))
+                                     **_fast_kw(_picks.get(c["value"]) or c["value"]),
+                                     default=_picks.get(c["value"]) or c["value"])
                                 for c in MODEL_CHOICES],
                      "efforts": [dict(c, color=_effort_color(c["value"], _stops), tone=_effort_tone(c["value"]))
                                  for c in EFFORT_CHOICES],

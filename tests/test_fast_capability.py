@@ -562,7 +562,9 @@ class TheJudgeFollows(unittest.TestCase):
 
 
 class TheModelsPayload(unittest.TestCase):
-    """GET /models: each version row's `fast` and each family's, for its default alias — true, false, or null."""
+    """GET /models: each version row's `fast` and each family's, for its default alias — true or false once a CLI has
+    said, and NO key before (a row no CLI has named reads exactly as it did before the table existed: the shape the
+    catalog and learned-version pins hold; the pickers read a missing key as unknown and keep their seed)."""
 
     def setUp(self):
         self._codex = km._codex_backend
@@ -606,22 +608,21 @@ class TheModelsPayload(unittest.TestCase):
     def test_every_row_carries_the_capability(self):
         d = self._models()
         fams = {m["value"]: m for m in d["models"]}
-        self.assertIn("fast", fams["opus"], "a family carries the field")
-        self.assertIsNone(fams["opus"]["fast"], "nothing learned: null, and the picker keeps its seed")
+        self.assertNotIn("fast", fams["opus"], "nothing learned: no key, and the picker keeps its seed")
         for fam in fams.values():
+            self.assertNotIn("fast", fam)
             for v in fam["versions"]:
-                self.assertIn("fast", v)
-                self.assertIsNone(v["fast"])
+                self.assertNotIn("fast", v, "a version row no CLI has named keeps its prior shape")
         mf.note(jd.STATE, mf.support_from_payload(_server_info()), cli="2.1.321")
         d = self._models()
         fams = {m["value"]: m for m in d["models"]}
         self.assertTrue(fams["fable"]["fast"], "the family's default is its alias: the CLI's claim for it")
         self.assertTrue(fams["opus"]["fast"])
         self.assertFalse(fams["sonnet"]["fast"], "listed without the claim")
-        self.assertIsNone(fams["haiku"]["fast"], "never named: unknown")
-        vers = {v["value"]: v["fast"] for v in fams["opus"]["versions"]}
+        self.assertNotIn("fast", fams["haiku"], "never named: unknown, so no key")
+        vers = {v["value"]: v.get("fast") for v in fams["opus"]["versions"]}
         self.assertFalse(vers["claude-opus-4-8"], "the version row the CLI retired fast mode for")
-        self.assertIsNone(vers["claude-opus-4-7"], "a version no report named")
+        self.assertIsNone(vers["claude-opus-4-7"], "a version no report named carries no key")
         # a pinned default reads the pinned version's own answer, not the alias's
         (jd.STATE / km.MODEL_PICKS_FILE_NAME).write_text(json.dumps({"opus": "claude-opus-4-8"}))
         d = self._models()
