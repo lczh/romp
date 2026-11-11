@@ -41468,8 +41468,11 @@ def _chat_sig_shared():
     which caches new content under the old identity: the next push takes the new identity, misses and
     rebuilds: one extra build, never a stale hit that lasts. The flags component carries the Task tracking switch's file
     beside session-flags.json: both say whether a session's ledger shows the judges' output (a mute for one session, the
-    switch for every one, T404), so a flip rebuilds every tab once."""
-    return {"flags": (_chat_ident(jd.STATE / "session-flags.json"), _chat_ident(jd.STATE / TASK_TRACKING_FILE)),
+    switch for every one, T404), so a flip rebuilds every tab once. The learned fast table (model-fast.json, which
+    models the CLI runs fast mode on; the status's fastCapable reads it through _fast_capable_status) rides the same
+    component: a connect that teaches a new answer is the event that rebuilds every tab's badge gate (2026-11-11)."""
+    return {"flags": (_chat_ident(jd.STATE / "session-flags.json"), _chat_ident(jd.STATE / TASK_TRACKING_FILE),
+                      _chat_ident(jd.STATE / jd.MODEL_FAST_FILE)),
             "ncards": _chat_ident(jd.STATE / "notify-cards.json"),
             "colormap": _colormap(),
             # …plus the login's display (T346: the organisation and kind word beside the name, and every stored
@@ -43440,8 +43443,8 @@ def _fast_capable_status(tm):
     live row's raw id (modelId, the CLI's own report) ahead of its pretty label, through jd.fast_capable_or_unknown
     — the CLI's word (the learned table) first, the Opus seed for an id no report has named, None when the row
     names no model the kernel can place (the chat's badge then keeps its own rule). Reads the table per build;
-    the view signature carries the table's revision, so a connect that teaches a new answer rebuilds the status
-    on that event (2026-11-11)."""
+    the chat-build signature's shared flags component carries the table file's identity (_chat_sig_shared), so a
+    connect that teaches a new answer rebuilds the status on that event (2026-11-11)."""
     if not tm:
         return None
     return jd.fast_capable_or_unknown(tm.get("modelId") or tm.get("model") or "")
@@ -71231,7 +71234,6 @@ def _fleet_view_sig(now, live_map):
                  (jd.STATE / "nudge-events.jsonl", "__nudgev__"),  # ⚡ marks
                  (jd.STATE / "judge-auth.json", "__jauth__"),      # judge billing refusal latch
                  (jd.STATE / "judge-limit.json", "__jlimit__"),    # judge quota latch
-                 (jd.STATE / jd.MODEL_FAST_FILE, "__mfast__"),     # which models run fast mode, by the CLI's word → the status's fastCapable
                  (jd.STATE / TASK_TRACKING_FILE, "__tracking__"),  # the Task tracking switch (T404): off swaps the build for the off frame
                  # the timeline's own file inputs: the lanes frame is projected from the cached build, so
                  # what the lanes read must bust the cache — the usage bars (usage.json, via

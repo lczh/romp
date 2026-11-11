@@ -333,8 +333,10 @@ class TheJudgeFollows(unittest.TestCase):
         src = inspect.getsource(km.build_session)
         self.assertIn('"fastCapable": _fast_capable_status(tm)', src, "the chat status carries the kernel's word")
         self.assertIn('"modelId": str(st.get("modelId") or "")', inspect.getsource(km._sdk_live_norm), "the live map keeps the raw id")
-        self.assertIn('jd.MODEL_FAST_FILE, "__mfast__"', inspect.getsource(km._fleet_view_sig),
-                      "a table write is the event that rebuilds the cached status")
+        self.assertIn("_chat_ident(jd.STATE / jd.MODEL_FAST_FILE)", inspect.getsource(km._chat_sig_shared),
+                      "a table write is the event that rebuilds every cached tab's status")
+        self.assertNotIn("MODEL_FAST_FILE", inspect.getsource(km._fleet_view_sig),
+                         "the feed and the lanes read no fast capability: no input they do not read")
         self.assertIn("on_model_fast_changed = staticmethod(_models_changed)", inspect.getsource(km),
                       "the backend's change tells every picker through the models frame")
         self.assertIn("self._learn_fast_support(info", inspect.getsource(sb.SdkSession._do_adopt_server_info))

@@ -158,6 +158,7 @@ CENSUS = {
     "_segs_seam": ("pure", "over a turn and the store's seams (store)"),
     "_self_host": ("sig", "host"),
     "_session_awaiting": ("sig", "bg", "the row's subagents and task set, the live task rows, the watches (watch), the states overlay (states), the durable stamp view with its delegation peers (stamp: the store, the journal and the postal log, since a peer's answer supersedes a peer wait), the blocked-yield read of the store (store, hold) and the peers' names (names)"),
+    "_fast_capable_status": ("sig", "row", "the row's modelId and model, judged through the learned fast table (model-fast.json, whose identity rides the flags component beside session-flags.json) and the Opus seed (2026-11-11)"),
     "_session_backend": ("sig", "row", "the row's backend field; else the reg's existence (reg)"),
     "_session_chip": ("pure", "over classified inputs: the parse and live tail, the row, the backend brackets, the clock booleans, the live task rows, the watches, the states overlay, the store and the downtime list"),
     "_session_cwd": ("sig", "cwd", "the names entry's cwd, else the transcript's stamp"),
