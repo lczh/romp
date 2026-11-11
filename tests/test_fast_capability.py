@@ -61,6 +61,18 @@ def _server_info(**over):
     return d
 
 
+def _server_info_without_the_field(**over):
+    """An initialize answer from a Claude Code that predates supportsFastMode: the options carry value, resolvedModel
+    and displayName and not one of them the field (the CLI emits it only when true, so this is also what an account
+    none of whose models runs fast would send)."""
+    d = {"fast_mode_state": "off", "fast_mode_disabled_reason": "",
+         "models": [{"value": "default", "resolvedModel": "claude-opus-5-5", "displayName": "Default (Opus 5.5)"},
+                    {"value": "opus", "resolvedModel": "claude-opus-5-5", "displayName": "Opus 5.5", "supportsEffort": True},
+                    {"value": "fable", "resolvedModel": "claude-fable-5-1", "displayName": "Fable 5.1"}]}
+    d.update(over)
+    return d
+
+
 def _backend():
     d = tempfile.mkdtemp()
     Path(d, "session-hosts").write_text("off")   # this root is outside the runner's belt (CLAUDE.md, 2026-09-11)
@@ -152,6 +164,17 @@ class TheTable(unittest.TestCase):
         self.assertEqual(mf.support_from_payload({"fast_mode_state": "on"}), {}, "a payload without the list says nothing")
         self.assertEqual(mf.support_from_payload(None), {})
 
+    def test_a_list_no_option_of_which_carries_the_field_teaches_nothing(self):
+        # the CLI emits supportsFastMode only when true: a list without it on ANY option is an older CLI as readily as
+        # an account whose models all lack fast mode, so it says nothing — never "no" for every id, Opus included
+        self.assertEqual(mf.support_from_payload(_server_info_without_the_field()), {})
+        self.assertEqual(mf.support_from_payload({"models": [{"value": "opus", "resolvedModel": "claude-opus-5-5"}, "junk"]}), {})
+        # …while one option carrying it, even false or None, makes the silence of the others a "no"
+        self.assertEqual(mf.support_from_payload({"models": [{"value": "opus", "supportsFastMode": False}, {"value": "fable"}]}),
+                         {"opus": False, "fable": False})
+        self.assertEqual(mf.support_from_payload({"models": [{"value": "opus", "supportsFastMode": None}, {"value": "fable"}]}),
+                         {"opus": False, "fable": False})
+
 
 class TheBackendWrites(unittest.TestCase):
     """The two write events — the connect-time initialize answer and a per-turn init running fast — and the switch's reader."""
@@ -214,6 +237,26 @@ class TheBackendWrites(unittest.TestCase):
         asyncio.run(s._do_adopt_server_info())
         self.assertFalse((Path(be.state_dir) / mf.MODEL_FAST_FILE).exists(), "an older CLI's answer teaches nothing")
         self.assertEqual(s.fast, "off", "…and the fast state is still adopted")
+
+    def test_an_answer_whose_options_lack_the_field_writes_nothing_and_the_seed_stands(self):
+        be = _backend()
+        s = _sess(be, liveModel="Opus 5.5", liveModelId="claude-opus-5-5")
+        frames = []
+        sb.SdkBackend.on_model_fast_changed = staticmethod(lambda: frames.append(1))
+
+        class _Client:
+            async def get_server_info(self):
+                return _server_info_without_the_field()
+        s.client = _Client()
+        asyncio.run(s._do_adopt_server_info())
+        self.assertFalse((Path(be.state_dir) / mf.MODEL_FAST_FILE).exists(),
+                         "a CLI that predates the field said nothing: no row, Opus is not learned as off")
+        self.assertEqual(frames, [], "…and no models frame")
+        self.assertIsNone(mf.fast_known("opus", be.state_dir))
+        self.assertTrue(sb.fast_capable("opus", be.state_dir), "the seed stands")
+        self.assertTrue(sb.fast_capable("claude-opus-5-5", be.state_dir))
+        self.assertFalse(sb.fast_capable("fable", be.state_dir))
+        self.assertEqual(s.fast, "off", "the fast state is still adopted")
 
     def test_a_turn_running_fast_is_proof_for_the_model_it_names(self):
         be = _backend()

@@ -117,14 +117,20 @@ def support_from_payload(d) -> dict:
     """{id: bool} from a CLI payload's `models` options (the initialize response; harmless on a payload without
     them): each option's alias (`value`) AND its resolved version id (`resolvedModel`) map to whether the option
     claims supportsFastMode — true → True; absent, None or false → False (the CLI did not claim it). Both keys
-    carry the same answer: the CLI resolved the alias to that id at this report."""
+    carry the same answer: the CLI resolved the alias to that id at this report. {} when NO option carries the
+    field at all: the CLI emits it only when true (its options builder, 2.1.322), so a list without it on any option
+    is a CLI that predates the field as readily as an account none of whose models runs fast, and the two cannot be
+    told apart — such a list teaches nothing and the consumers' seed stands, rather than every id learned as "no"
+    from a silence (the rule _adopt_fast_state keeps for the sibling fields: an absent field leaves the last truth
+    standing; the review of 2026-11-11, where a hosted session's older binary would have written Opus off)."""
     out = {}
     models = d.get("models") if isinstance(d, dict) else None
     if not isinstance(models, list):
         return out
-    for o in models:
-        if not isinstance(o, dict):
-            continue
+    opts = [o for o in models if isinstance(o, dict)]
+    if not any("supportsFastMode" in o for o in opts):
+        return out
+    for o in opts:
         fast = o.get("supportsFastMode") is True
         for k in (o.get("value"), o.get("resolvedModel")):
             k = str(k or "").strip().lower()
