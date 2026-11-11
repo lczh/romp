@@ -87200,11 +87200,11 @@ class Handler(BaseHTTPRequestHandler):
                     # read here BEFORE the picks so a payload never carries a rev newer than its list: a
                     # picker keeps the highest rev it applied and drops a response that lands late with a
                     # lower one (two overlapping fetches can resolve out of order)
+                    # …and each version row, and each family (for its DEFAULT: its pinned version, else its alias),
+                    # carries `fast`: whether Claude Code runs fast mode on it, by the CLI's own word (jd.fast_known:
+                    # the table its connect-time initialize answers fill) — true, false, or null when no CLI has
+                    # named the id yet, where the pickers keep their seed rule (render.ts canFast, 2026-11-11)
                     {"rev": _rev,
-                     # …and whether each version, and each family's DEFAULT (its pinned version, else its alias), runs
-                     # Claude Code's fast mode, by the CLI's own word (jd.fast_known: the table its connect-time
-                     # initialize answers fill): true, false, or null when no CLI has named the id yet, where the
-                     # pickers keep their seed rule (render.ts canFast, 2026-11-11)
                      "models": [dict(c, color=_model_color(c["value"], _stops),
                                      tone=_model_tone(c["value"]),
                                      versions=[dict(_with_cli_block(dict(v), _blocks), fast=jd.fast_known(v["value"]))

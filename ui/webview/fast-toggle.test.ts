@@ -13,6 +13,7 @@ import { test } from "node:test";
 import * as assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { fastAvailable, modelFastKnown } from "./status-controls";   // the gate itself, runnable: no DOM at module scope
 
 const RENDER = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "render.ts"), "utf8");
 const MODULE = fs.readFileSync(path.resolve(process.cwd(), "..", "ui", "webview", "status-controls.ts"), "utf8");   // the status line's controls moved here from render.ts (T415 part two)
@@ -85,4 +86,51 @@ test("setFast is a drive op that parks like /model and /effort", () => {
   assert.match(KERNEL, /def _set_fast_or_park\(be, sid, value\)/);
   assert.match(KERNEL, /op\[0\] in \("model", "effort", "fast", "env", "cwd"\)/);   // repeat pick replaces in place (env and cwd joined too)
   assert.match(KERNEL, /elif op\[0\] == "fast":/);                           // parked delivery branch
+});
+
+// Fast mode is no longer Opus-only (2026-11-11: Claude Code 2.1.321 runs it on Fable 5.2, and retired it for Opus
+// 4.8), so the gate reads the KERNEL's word first — st.fastCapable, computed from the CLI's own connect-time report of
+// which models support fast mode (kernel model_fast.py; the Opus seed until one lands) — and keeps the spelling rule
+// only where the kernel cannot say.
+test("the kernel's word on the model gates the badge; the spelling rule stands only without it", () => {
+  assert.equal(fastAvailable({ model: "Fable 5.2", fast: "off", fastCapable: true }), true, "a non-Opus model the CLI runs fast shows the toggle");
+  assert.equal(fastAvailable({ model: "Opus 4.8", fast: "off", fastCapable: false }), false, "an Opus the CLI retired fast mode for hides it");
+  assert.equal(fastAvailable({ model: "Fable 5.2", fast: "off" }), false, "no word (an older kernel): the seed rule, Fable is not Opus");
+  assert.equal(fastAvailable({ model: "Opus 5", fast: "off" }), true, "…and Opus is");
+  assert.equal(fastAvailable({ model: "Fable 5.2", fast: "off", fastCapable: null }), false, "null is unknown, the same as absent");
+  assert.equal(fastAvailable({ model: "", fast: "off", fastCapable: null }), true, "unknown model stays offered: the account default may run fast");
+  assert.equal(fastAvailable({ model: "default", fast: "off" }), true);
+  // the status carries the field, from the kernel's per-session read (jd.fast_capable_or_unknown over the live id)
+  assert.match(RENDER, /fastCapable\?: boolean \| null;/);
+  assert.match(MODULE, /fastCapable\?: boolean \| null;/);
+  assert.match(KERNEL, /"fastCapable": _fast_capable_status\(tm\),/);
+  assert.match(KERNEL, /def _fast_capable_status\(tm\):/);
+});
+
+test("the comment dialog's fast chip reads the /models frame's capability before its spelling rule", () => {
+  // the frame as the kernel ships it: a family's `fast` is its default's, each version carries its own
+  const choices = [
+    { label: "Fable", value: "fable", fast: true, versions: [{ label: "Fable 5.2", value: "claude-fable-5-2", fast: true }, { label: "Fable 5.1", value: "claude-fable-5-1", fast: null }] },
+    { label: "Opus", value: "opus", fast: true, versions: [{ label: "Opus 5.5", value: "claude-opus-5-5", fast: true }, { label: "Opus 4.8", value: "claude-opus-4-8", fast: false }] },
+    { label: "Sonnet", value: "sonnet", fast: null, versions: [] },
+    { label: "Default", value: "default" }];
+  assert.equal(modelFastKnown(choices, "fable"), true, "a family alias by its row");
+  assert.equal(modelFastKnown(choices, "claude-fable-5-2"), true, "a version by its row");
+  assert.equal(modelFastKnown(choices, "claude-fable-5-2[1m]"), true, "the tagged spelling");
+  assert.equal(modelFastKnown(choices, "Fable 5.2"), true, "the badge's label (st.model is the fallback the dialog reads)");
+  assert.equal(modelFastKnown(choices, "claude-opus-4-8"), false, "the CLI retired it: false, not the family's true");
+  assert.equal(modelFastKnown(choices, "claude-fable-5-1"), null, "a row whose answer is unknown");
+  assert.equal(modelFastKnown(choices, "sonnet"), null);
+  assert.equal(modelFastKnown(choices, "default"), null, "no `fast` on the client's own Default sentinel");
+  assert.equal(modelFastKnown(choices, "gw-6-astra"), null, "an id no row carries");
+  assert.equal(modelFastKnown(choices, ""), null);
+  assert.equal(modelFastKnown(undefined, "opus"), null);
+  // render.ts's canFast consults the cached frame first, the seed rule after (source pin: no jsdom harness)
+  const canFast = RENDER.match(/const canFast = \(m: string\) => \{[\s\S]*?\n    \};/)?.[0] || "";
+  assert.match(canFast, /const known = modelFastKnown\(MODEL_CHOICES, m\);/);
+  assert.match(canFast, /if \(typeof known === "boolean"\) return known;/);
+  assert.match(canFast, /!v \|\| v === "default" \|\| v\.includes\("opus"\)/, "the seed stands where no CLI has named the model");
+  assert.match(RENDER, /versions\?: \{ label: string; value: string; learned\?: boolean; fast\?: boolean \| null \}\[\] \}\[\] = \[\];/, "the cached frame's type carries the field");
+  assert.match(KERNEL, /fast=jd\.fast_known\(v\["value"\]\)/, "each version row carries the CLI's word");
+  assert.match(KERNEL, /fast=jd\.fast_known\(_picks\.get\(c\["value"\]\) or c\["value"\]\)/, "each family carries its default's");
 });
