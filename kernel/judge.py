@@ -100,6 +100,10 @@ _cred = sys.modules.get("romp_credentials") or load_source("romp_credentials", H
 # the stored Claude logins' registry (T346): a judge call for a session billed to one names that login's helper,
 # and never runs as a login the registry holds refused
 _logins = sys.modules.get("romp_logins") or load_source("romp_logins", HERE / "logins.py")
+# which models the CLI runs fast mode on, as its connect-time initialize answers have said (model_fast.py; the SDK
+# backend writes the table, the judges, the kernel's gear gate and the status read it through fast_capable below)
+_mf = sys.modules.get("romp_model_fast") or load_source("romp_model_fast", HERE / "model_fast.py")
+MODEL_FAST_FILE = _mf.MODEL_FAST_FILE
 
 HOME     = Path.home()
 STATE    = Path(os.environ.get("ROMP_STATE_DIR")   # per-kernel state root override (plans/multi-kernel.md)
@@ -297,11 +301,44 @@ def _index_fast():    return _state_str("index-fast", "off") == "on"
 _TIER_FAST = {"triage": _judge_fast, "distill": _distill_fast, "index": _index_fast}
 
 
+def fast_known(model):
+    """What the CLI has said about `model` running fast mode (STATE/model-fast.json, written by the SDK backend from
+    each session's connect-time initialize answer and from a per-turn init that reports fast mode on): True, False,
+    or None when no report has named it — by the exact id, the id without a [1m]-style tag, a dated snapshot's
+    dateless alias, a family alias ("opus") or "default" by its own entry (model_fast.keys_for)."""
+    return _mf.fast_known(model, STATE)
+
+
 def fast_capable(model):
-    """Whether the CLI would run fast mode on `model`: the opus family, by the bare alias or a pinned version id
-    (fast mode is an Opus-only research preview). One rule for the judges, the gear's per-tier gate and the
-    kernel's migration, so the three never disagree about a model."""
+    """Whether the CLI would run fast mode on `model`. The CLI's own word first (fast_known: what its initialize
+    answers listed with supportsFastMode, and what a session has been seen running fast on), in BOTH directions —
+    an id the CLI lists without support stops offering a dead toggle, an id it claims is offered whatever its
+    family. When nothing is known for the id, the SEED: the opus family, by the bare alias or a pinned version id,
+    which was the one rule while fast mode was an Opus-only research preview, so a fresh install behaves exactly
+    as before until the first CLI reports (2026-11-11: Claude Code 2.1.321 runs it on Fable 5.2 and no longer on
+    Opus 4.8). One rule for the judges (_tier_fast), the gear's per-tier gate and the kernel's migration, so the
+    three never disagree about a model."""
+    known = fast_known(model)
+    if known is not None:
+        return known
     return _model_family_version(model)[0] == "opus"
+
+
+def fast_capable_or_unknown(model):
+    """fast_capable for the session status's `fastCapable`: a bool when something can be said — the CLI's word, or
+    the seed for an id whose family is read — and None for an id that names no family (empty, "default" with no
+    entry, a stranger), which the chat's badge then judges by its own rule (unknown stays offered: the account
+    default may run fast, and hiding a live control is worse than a rare dead one)."""
+    known = fast_known(model)
+    if known is not None:
+        return known
+    fam = _model_family_version(model)[0]
+    return (fam == "opus") if fam else None
+
+
+def model_fast_rev():
+    """The learned table's revision (its file's mtime, 0 when none) for the view signature: a write is the event."""
+    return _mf.rev(STATE)
 
 
 def _tier_fast(tier, model):
