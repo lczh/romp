@@ -3631,12 +3631,22 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   null or missing parent, a self-link, a cycle, a tail uuid reusing a pre-cut
   record's (a uuid repeated within the tail is resolved as the parse resolves
   it, the last record's parent winning), a parent anywhere else in the pre-cut part,
-  an unproven tip, an unknown parent, or a boundary re-anchored into the
-  interior or onto an unknown uuid refuses, whatever the record's type (one
+  an unproven tip, an unknown parent, a boundary re-anchored into the
+  interior or onto an unknown uuid, or a tail record landing as a parent
+  that a pre-cut record named and the pre-cut bytes never held (the
+  document's dangling targets, whose verdicts were decided without it;
+  since 2026-11-12, before which a restart restored them stale) refuses,
+  whatever the record's type (one
   standing disagreement with the cold parse remains outside the rule: a tail
   record whose stamp precedes the cut or the tip chains soundly but the
   write-time stamp-order guard is not re-checked, so such a restore can
-  differ from a cold parse; a later round); a document written before the bit is unproven, so a standing
+  differ from a cold parse; a later round); `restore:chainUnwritten` counts
+  the refusals in which every chain that fails meets a record naming a parent
+  no record holds yet (the CLI writes some of a compaction's records before
+  the parent they name): after a demotion such a refusal rewrites and marks
+  nothing, the whole parse serving meanwhile, so the document stands for the
+  parent's arrival, which demotes as `late-parent` and restores from it
+  (2026-11-12; a boot's refusal rewrites as below); a document written before the bit is unproven, so a standing
   document is refused at its first restore after the change, booked
   `full:refused`, and rewritten from the whole parse that follows the
   refusal (`write:afterRefusal`), so the next restore takes it: then and
@@ -3725,8 +3735,11 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   record of it through, counted under `g:promptid:passedDemote` below),
   `rewrite` when the leaf's record entry was replaced by a from-zero read
   under a new generation, `nonleaf` when a lineage file moved or grew,
-  `inputs`, `recs-gone`, `no-leaf-slot`, `empty-graph`, `uuid-known`,
-  `boundary`, `summary`, `promptid` (a record repeating a prompt id in a way
+  `inputs`, `recs-gone`, `no-leaf-slot`, `empty-graph`, `uuid-known` (a
+  record re-using a uuid the entry or its document holds),
+  `late-parent` (a record landing as the parent an earlier record named,
+  which takes the restore road; it counted under `uuid-known` and parsed
+  whole until 2026-11-12), `boundary`, `summary`, `promptid` (a record repeating a prompt id in a way
   that can re-classify records already read, its arm counted beside it:
   `g:promptid:wrapper` for a command-wrapper record, `g:promptid:boundary`
   for a record wearing a compaction summary's prompt id whose boundary an

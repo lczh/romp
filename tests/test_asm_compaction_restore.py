@@ -15,8 +15,8 @@ the compaction is the restored shape, and the next append folds onto it; and a c
 refuses at the chain proof and parses whole.
 
 Two limits on that road, from the review of the same day. A compaction masks nothing later in its delta: a record past it that
-the fold refuses for its own reason (a stamp before the records folded, a Skill call a pre-cut payload names, a uuid a pre-cut
-record named as its parent, a command-wrapper record wearing a pre-cut prompt id) keeps its whole parse, since the restore
+the fold refuses for its own reason (a stamp before the records folded, a Skill call a pre-cut payload names, a command-wrapper
+record wearing a pre-cut prompt id) keeps its whole parse, since the restore
 proves only that the tail chains onto the document and would serve a tree a cold parse does not build, at every later boot
 too. And a compaction restores only while the tail past the document's cut is under the churn bound's share of the pre-cut
 bytes; once it has reached the share the compaction parses whole (`restore:pastShare`, or `g:tailShare` on an entry the fold's
@@ -44,6 +44,14 @@ restored entry reads the document's compact_pids, the ids that a user record bef
 naming /compact wears, and refuses
 under `seedEpisode` only when one does, or when the document was written before that field and lists the id among its prompt
 ids (the gate review of the same day).
+And a compaction whose CLI wrote a record before the parent it names (2026-11-12, the shape of a live compaction on a session
+near 1 GB, structure only): the parse that reads between the two writes cannot restore, since a cold parse there cuts the
+chain at the missing parent and drops the history above it, so it parses whole (`restore:chainUnwritten`), but it leaves the
+document standing rather than rewriting it from that half-written graph; when the parent lands, the fold demotes
+(`late-parent`, or the summary's own reason when the summary lands with it) and the restore serves from the same document,
+with no second whole parse. A parent that never lands keeps every step equal to a cold parse, the settle writes the document
+from the whole entry, and a boot's refusal still rewrites at once. A parent that a record BEFORE the cut named parses whole
+on every road, a boot included: the document's verdicts were decided without it, so the chain proof refuses it.
 Synthetic transcripts only: invented notes-api text, placeholder uuids."""
 import json
 import os
@@ -149,6 +157,54 @@ def turn(t, tag, parent):
     u, a = "xu_%s" % tag, "xa_%s" % tag
     return [G.uline(t, "follow-up %s on the notes-api search" % tag, u, parent),
             G.aline(t + 20, "done with %s" % tag, a, u, stop="end_turn")]
+
+
+def att(t, uuid, parent, kind="date"):
+    """An attachment record, as the CLI chains them around a compaction and a prompt (never an atom of its own)."""
+    return {"type": "attachment", "timestamp": G.iso(t), "uuid": uuid, "parentUuid": parent, "isSidechain": False,
+            "attachment": {"type": kind}}
+
+
+def bookkeeping():
+    """The uuid-less records the CLI writes around a prompt: no node of the graph."""
+    return [{"type": k, "sessionId": SID} for k in ("last-prompt", "mode", "atis-latch")]
+
+
+def late_anchor_lead(t, parent):
+    """The records before the automatic compaction late_anchor_compaction writes: a turn (its prompt the preserved segment's
+    head), the stop hook's summary, an attachment (the segment's tail, which the boundary names as its logical parent), then
+    the queue's two operations and the bookkeeping, none of those six with a uuid."""
+    return [G.uline(t, "tighten the notes-api search ranking", "la_head", parent),
+            G.aline(t + 20, "the ranking now weighs title matches first", "la_reply", "la_head", stop="end_turn"),
+            G.stop_hook_line(t + 21, "la_hook", "la_reply"),
+            att(t + 22, "la_tail", "la_hook", "total_tokens_reminder"),
+            {"type": "queue-operation", "operation": "enqueue", "timestamp": G.iso(t + 30), "sessionId": SID, "content": "next"},
+            {"type": "queue-operation", "operation": "dequeue", "timestamp": G.iso(t + 31), "sessionId": SID}] + bookkeeping()
+
+
+def late_anchor_compaction(t):
+    """An automatic compaction as the CLI wrote one on a session near 1 GB (2026-11-12, structure only, every uuid and text
+    invented): the boundary (parentUuid null, logicalParentUuid the preserved segment's tail `la_tail`, written before it),
+    then an attachment `la_a1` whose parent `la_late` is NOT written yet, an attachment under it, the summary (the segment's
+    anchor, stamped 18 s before the attachment ahead of it), seventeen attachments chained one under the next, the
+    bookkeeping; and only then `la_late`, an attachment hanging off the boundary, stamped as `la_a1`, the bookkeeping again,
+    an attachment under the seventeenth, and the conversation chaining on from it. The chain is la_b, la_late, la_a1, la_a2,
+    la_sum, la_r1 ... la_r17, la_r18, the turn: no cycle. Returns the records and the index of `la_late` (its file position
+    24 past the boundary; a read that ends anywhere from position 1 to 23 sees its child and not it)."""
+    b = dict(G.compact_line(t, "la_b", "la_tail", trigger="auto"))
+    b["compactMetadata"] = dict(b["compactMetadata"], preservedSegment={"headUuid": "la_head", "anchorUuid": "la_sum",
+                                                                        "tailUuid": "la_tail"})
+    recs = [b, att(t + 20, "la_a1", "la_late", "instructions"), att(t + 20.1, "la_a2", "la_a1", "session_context"),
+            G.compact_summary_line(t + 2, "la_sum", "la_a2", text="summary so far: the notes-api search ranks titles first")]
+    parent = "la_sum"
+    for k in range(1, 18):
+        recs.append(att(t + 21 + k * 0.01, "la_r%d" % k, parent, "deferred_tools_delta"))
+        parent = "la_r%d" % k
+    recs += bookkeeping()
+    late = len(recs)
+    recs += [att(t + 20, "la_late", "la_b", "date")] + bookkeeping() + [att(t + 23, "la_r18", parent, "task_status")]
+    recs += turn(t + 40, "la", "la_r18")
+    return recs, late
 
 
 def postal_episode():
@@ -948,7 +1004,8 @@ class CompactionRestore(Harness):
             call["message"]["content"][-1]["id"] = "tu_skill_150"
             return [G.uline(t, "use the notes skill", "xu_sk", s), call,
                     G.aline(t + 20, "used the notes skill", "xa_sk2", "xa_sk", stop="end_turn")]
-        if reason == "uuid-known":   # the record the pre-cut orphan after turn 150 named as its parent
+        if reason == "pre-cut-parent":   # the record the pre-cut orphan after turn 150 named as its parent (no fold reason of
+            #                              its own since 2026-11-12: the restore's proof refuses it, test below)
             return [G.uline(t, "the ask the orphaned one answered", "ghost-150", s),
                     G.aline(t + 20, "answered", "xa_gh", "ghost-150", stop="end_turn")]
         if reason == "promptid":     # the local command's output, wearing the prompt id of the pre-cut wrapper after turn 150: a
@@ -959,13 +1016,14 @@ class CompactionRestore(Harness):
 
     def test_a_compaction_masks_no_later_record_that_parses_whole_for_its_own_reason(self):
         """The gates read a delta to its end before a compaction's demotion is filed: a record past the compaction that the
-        fold refuses for its own reason (a stamp before the records folded, a Skill call a pre-cut payload names, a uuid a
-        pre-cut record named as its parent, a command-wrapper record wearing a pre-cut prompt id) demotes for that reason and
-        parses whole, from the restored entry and from the whole one. The restore would have proved only that the tail chains
+        fold refuses for its own reason (a stamp before the records folded, a Skill call a pre-cut payload names, a
+        command-wrapper record wearing a pre-cut prompt id) demotes for that reason and parses whole, from the restored entry
+        and from the whole one. (A uuid a pre-cut record named as its parent was the fourth shape until 2026-11-12; it now takes
+        the restore road and the chain proof refuses it: test_a_parent_a_pre_cut_record_named_parses_whole_on_every_road.) The restore would have proved only that the tail chains
         onto the document, and it served a tree a cold parse does not build; the settle after the whole parse rewrites the
         document, so the next boot equals cold as well (review of 2026-09-24: under the first cut of the rule these restored,
         and every later boot served the same tree)."""
-        shapes = {"ts": {}, "skill-link": {"skill_at": 150}, "uuid-known": {"orphan_at": 150}, "promptid": {"wrapper_at": 150}}
+        shapes = {"ts": {}, "skill-link": {"skill_at": 150}, "promptid": {"wrapper_at": 150}}
         ran = []
         for reason, shape in shapes.items():
             for entry in ("restored", "whole"):
@@ -988,7 +1046,167 @@ class CompactionRestore(Harness):
                     self.assertEqual((modes, moved.get("g:" + reason, 0), moved.get("g:boundary", 0), moved.get("restore:afterDemote", 0)),
                                      (["full"], 1, 0, 0), "the delta demotes for %s and parses whole: counters moved %s" % (reason, moved))
                     ran.append((reason, entry))
-        self.assertEqual(len(ran), 8, "every shape ran on both entries: %s" % ran)
+        self.assertEqual(len(ran), 6, "every shape ran on both entries: %s" % ran)
+
+    def _late_anchor_documented(self, name):
+        """The long session ending on late_anchor_lead's records, parsed whole, its document written from that entry."""
+        recs = episode(NOW - 86400)
+        recs += late_anchor_lead(self.after(recs, 60), recs[-1]["uuid"])
+        path = self.write(name, recs)
+        self.fresh()
+        self.parse(path)
+        self.assertTrue(self.doc(path), "the document is written: %s" % em.asm_checkpoint_stats()["skipped"])
+        return path, recs
+
+    def assertUnwrittenRefusal(self, modes, moved, what):
+        """The parse that read a record before the parent it names: the restore is tried and refused for a parent not written
+        yet, and the whole parse serves; nothing rewrites the document."""
+        self.assertEqual((modes, moved.get("g:boundary", 0), moved.get("restore:chainRefused", 0), moved.get("restore:chainUnwritten", 0),
+                          moved.get("full:demoted", 0), moved.get("write:afterRefusal", 0)), (["full"], 1, 1, 1, 1, 0),
+                         "%s: refused for the unwritten parent, parsed whole, the document left standing: %s" % (what, moved))
+
+    def test_a_compaction_whose_child_lands_before_its_parent_restores_once_the_parent_lands(self):
+        """The regression (2026-11-12): an automatic compaction on a session near 1 GB was written with an attachment 23 lines
+        before the attachment it names as its parent (late_anchor_compaction). A build between the two writes demoted for the
+        compaction, the restore's chain proof refused the tail (the attachment's parent existed nowhere yet), the whole parse
+        served, and the rewrite after the refusal replaced the document with one written from that half-written graph, in
+        which every pre-compaction record is off the path. When the parent landed, the fold demoted under uuid-known, which
+        never takes the restore road, so the transcript was parsed whole a second time; the rewritten document could not have
+        served it either. Now the refusal for a parent not written yet leaves the document standing, and the parent's arrival
+        restores from it: `late-parent`, or `summary` when the read ended before the summary, which then lands with the parent.
+        Each read ending at file position 1, 3 and 23 past the boundary, from the entry a restart restored and from the whole
+        entry the document was written from; every step equals a cold parse of the bytes at that step, the turn after it
+        folds, and a restart restores from the same document."""
+        ran = []
+        for split in (1, 3, 23):
+            for entry in ("restored", "whole"):
+                with self.subTest(split=split, entry=entry):
+                    name = "late-%d-%s" % (split, entry)
+                    path, recs = self._late_anchor_documented(name)
+                    if entry == "restored":
+                        self._restart(path)
+                    before = em._asm_ckpt_file(path).read_bytes()
+                    comp, late = late_anchor_compaction(self.after(recs, 120))
+                    nxt = turn(self.after(recs + comp, 60), "after", comp[-1]["uuid"])
+                    steps = []
+                    for grp in (comp[:split + 1], comp[split + 1:], nxt):
+                        self._append(path, grp)
+                        tree, modes, moved = self._parse_counted(path)
+                        got, cut = self._served(tree)
+                        steps.append((modes, moved, got, cut, self._snapshot(path, "%s-%d" % (name, len(steps)))))
+                        if len(steps) == 1:
+                            stood = em._asm_ckpt_file(path).read_bytes() == before
+                    self.fresh()
+                    boot_modes = []
+                    boot, _cut = self._served(self.parse(path, boot_modes))
+                    (m1, d1, g1, _c1, r1), (m2, d2, g2, c2, r2), (m3, d3, g3, c3, r3) = steps
+                    self.assertSameTree(g1, self.cold(r1), "the parse between the two writes")
+                    self.assertSameTree(g2, self.cold(r2), "once the parent landed")
+                    self.assertSameTree(g3, self.cold(r3), "the turn after")
+                    self.assertSameTree(boot, self.cold(path), "at the next boot")
+                    reason = "summary" if split < 3 else "late-parent"
+                    self.assertEqual((m2, d2.get("full", 0), d2.get("g:" + reason, 0), d2.get("restore:afterDemote", 0)), (["restore"], 0, 1, 1),
+                                     "the parent's arrival restores from the standing document (%s): %s" % (reason, d2))
+                    self.assertGreater(c2, 0, "the restored shape: the pre-cut turns from the document")
+                    self.assertTrue(stood, "the document stood, unchanged, through the refusal")
+                    self.assertUnwrittenRefusal(m1, d1, "between the two writes")
+                    self.assertEqual((m3, d3.get("full", 0)), (["fold"], 0), "the turn after folds onto the restored entry: %s" % d3)
+                    self.assertEqual(boot_modes, ["restore"], "a restart restores from the same document")
+                    ran.append((split, entry))
+        self.assertEqual(len(ran), 6, "every split ran on both entries: %s" % ran)
+
+    def test_a_compaction_whose_parent_never_lands_stays_equal_to_a_cold_parse(self):
+        """The same compaction with the parent never written (a CLI cut off mid-write, say). A cold parse cuts the chain at the
+        missing parent and drops the history above it, and every step serves exactly that. Live, the parse that met the
+        refusal is the only whole parse: the turns after it fold onto the whole entry, the settle writes the document from it
+        (kept whole, so never re-seated on it), and a restart restores from that document. A restart before any settle meets
+        the refusal at the boot's restore, which offers the rewrite then and there as before (nothing in a fresh process says a
+        writer is mid-write); here no turn is left to cut, so the refusal is marked and the next restart parses whole too."""
+        for settle in (True, False):
+            with self.subTest(settle=settle):
+                path, recs = self._late_anchor_documented("never-%s" % settle)
+                self._restart(path)
+                comp, late = late_anchor_compaction(self.after(recs, 120))
+                self._append(path, comp[:late])
+                tree, modes, moved = self._parse_counted(path)
+                got, _cut = self._served(tree)
+                steps = [(modes, moved, got, self._snapshot(path, "never-%s-0" % settle))]
+                wrote = []
+                if settle:
+                    allr, par = recs + comp[:late], comp[late - 4]["uuid"]   # the seventeenth attachment: the leaf
+                    for k in range(3):
+                        more = turn(self.after(allr, 60), "nv%d" % k, par)
+                        allr, par = allr + more, more[-1]["uuid"]
+                        self._append(path, more)
+                        tree, modes, moved = self._parse_counted(path)
+                        got, _cut = self._served(tree)
+                        steps.append((modes, moved, got, self._snapshot(path, "never-%s-%d" % (settle, len(steps)))))
+                        wrote.append(bool(self.doc(path)))               # the settle after the turn
+                boots = []
+                for _ in range(2):
+                    self.fresh()
+                    before = dict(em._ASM_STATS)
+                    boot_modes = []
+                    boot, _cut = self._served(self.parse(path, boot_modes))
+                    moved_b = {k: em._ASM_STATS.get(k, 0) - before.get(k, 0) for k in em._ASM_STATS if em._ASM_STATS.get(k, 0) != before.get(k, 0)}
+                    boots.append((boot_modes, moved_b, boot))
+                for i, (_m, _d, g, ref) in enumerate(steps):
+                    self.assertSameTree(g, self.cold(ref), "live step %d" % i)
+                for i, (_m, _d, g) in enumerate(boots):
+                    self.assertSameTree(g, self.cold(path), "boot %d" % i)
+                self.assertUnwrittenRefusal(steps[0][0], steps[0][1], "the read with the parent missing")
+                for i, (m, d, _g, _r) in enumerate(steps[1:], 1):
+                    self.assertEqual((m, d.get("full", 0)), (["fold"], 0), "turn %d folds onto the whole entry: %s" % (i, d))
+                if settle:
+                    self.assertIn(True, wrote, "a settle wrote the document from the whole entry")
+                    self.assertEqual([b[0] for b in boots], [["restore"], ["restore"]], "each restart restores from it: %s" % [b[1] for b in boots])
+                else:
+                    (m0, d0, _g0), (m1, d1, _g1) = boots
+                    self.assertEqual((m0, d0.get("restore:chainUnwritten", 0), d0.get("full:refused", 0), d0.get("write:afterRefusalSkipped", 0)),
+                                     (["full"], 1, 1, 1), "the boot's refusal offers the rewrite at once, as before: %s" % d0)
+                    self.assertEqual((m1, d1.get("restore:refusedStanding", 0)), (["full"], 1),
+                                     "the missing parent cut off every turn, so the writer finds no cut (noCut) and the refusal is "
+                                     "marked: the next restart parses whole without a second proof, as for any tail of that shape: %s" % d1)
+
+    def test_a_parent_a_pre_cut_record_named_parses_whole_on_every_road(self):
+        """A record landing as the parent that a record BEFORE the document's cut named (the pre-cut orphan after turn 150):
+        the document's verdicts for that orphan were decided while its parent was missing, so no restore may serve the tail,
+        though every chain in it reaches the tip. Live it demotes as a late parent and the chain proof refuses it (the document
+        lists it among its dangling targets), alone in its append and past a compaction, from the restored entry and the whole
+        one; and a restart before any settle refuses it at the boot. Before 2026-11-12 the live roads parsed whole under
+        uuid-known, but the boot restored the stale verdicts: one pre-cut turn more than a cold parse."""
+        ran = []
+        for shape in ("alone", "past-a-compaction"):
+            for entry in ("restored", "whole"):
+                with self.subTest(shape=shape, entry=entry):
+                    name = "precut-%s-%s" % (shape, entry)
+                    path, recs = self._documented(name, orphan_at=150)
+                    if entry == "restored":
+                        self._restart(path)
+                    if shape == "alone":
+                        more, reason = self._past_the_compaction("pre-cut-parent", path, recs, recs[-1]["uuid"], self.after(recs, 60)), "late-parent"
+                    else:
+                        pair, s = compaction(self.after(recs, 120), "pp", recs[-1]["uuid"])
+                        more, reason = pair + self._past_the_compaction("pre-cut-parent", path, recs, s, self.after(recs, 130)), "boundary"
+                    self._append(path, more)
+                    tree, modes, moved = self._parse_counted(path)
+                    got, _cut = self._served(tree)
+                    ref = self._snapshot(path, name)
+                    self.assertSameTree(got, self.cold(ref), "live")
+                    self.assertEqual((modes, moved.get("g:" + reason, 0), moved.get("restore:chainRefused", 0), moved.get("restore:chainUnwritten", 0),
+                                      moved.get("full:demoted", 0)), (["full"], 1, 1, 0, 1),
+                                     "the restore road is tried and the proof refuses the pre-cut orphan's parent: %s" % moved)
+                    ran.append((shape, entry))
+        path, recs = self._documented("precut-boot", orphan_at=150)
+        self._restart(path)
+        self._append(path, self._past_the_compaction("pre-cut-parent", path, recs, recs[-1]["uuid"], self.after(recs, 60)))
+        self.fresh()                                                    # a restart before any parse or settle saw the append
+        tree, modes, moved = self._parse_counted(path)
+        got, _cut = self._served(tree)
+        self.assertSameTree(got, self.cold(path), "a restart before the settle")
+        self.assertEqual((modes, moved.get("restore:chainRefused", 0), moved.get("full:refused", 0)), (["full"], 1, 1),
+                         "the boot's proof refuses it too: %s" % moved)
+        self.assertEqual(len(ran), 4, "every shape ran on both entries: %s" % ran)
 
     def test_a_compaction_once_the_tail_has_reached_the_share_parses_whole_and_the_settle_advances_the_cut(self):
         """The churn bound holds on the restore road: a compaction restores only while the leaf's bytes past the standing
