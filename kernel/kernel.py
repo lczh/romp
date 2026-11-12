@@ -49409,8 +49409,9 @@ _TAIL_FIRST_LOCK = threading.Lock()           # the counters and the queue below
 _TAIL_FIRST_QUEUE = collections.OrderedDict() # sid -> True, in the order offered; an offer for a waiting sid changes nothing
 _TAIL_FIRST_WAKE = threading.Event()          # set by an offer and by the loops' stop: the shadow thread's one wait
 _TAIL_FIRST_SAID = set()                      # (sid, the differing fields): a difference is reported once, counted every time
-_TAIL_FIRST_ENDS = {}                         # sid -> the turn end (_turn_end_key) last offered: one comparison per turn end
+_TAIL_FIRST_ENDS = {}                         # sid -> the turn end (_turn_end_key) last seen: one comparison per turn end
 _TAIL_FIRST_LAST = {}                         # sid -> the transcript's (path, mtime ns, size, inode) at its last comparison
+_TAIL_FIRST_UNSEEN = object()                 # _TAIL_FIRST_ENDS' answer for a session whose turn-end key was never seen
 
 
 class _Pending(dict):
@@ -49489,15 +49490,19 @@ def _tail_first_offer(sid):
     once per turn end, never per build: a streaming turn builds its chat at most once a cycle. The build that follows the
     end is the one offered: it is what the shadow compares against, and a turn end that writes nothing to the transcript
     still moves the chat's status. A stat of the switch when the shadow is off; when on, the registry read of the turn-end
-    key and a dict write. Never raises, never waits, holds nothing of the build's."""
+    key and a dict write. The FIRST key seen for a session (after a restart, or when the switch goes on) is recorded and not
+    offered: it names a turn that ended before the shadow was watching, and offering it would queue every session the pusher
+    builds in the busiest minutes of a boot. Only a later move is a turn end. Never raises, never waits, holds nothing of the
+    build's."""
     try:
         if _tail_first_mode() != "shadow":
             return False
         end = _turn_end_key(sid)
         with _TAIL_FIRST_LOCK:
-            if not end or _TAIL_FIRST_ENDS.get(sid) == end:
-                return False                      # no turn ended since the last offer: the build is a streaming one
+            prev = _TAIL_FIRST_ENDS.get(sid, _TAIL_FIRST_UNSEEN)
             _TAIL_FIRST_ENDS[sid] = end
+            if prev is _TAIL_FIRST_UNSEEN or not end or prev == end:
+                return False                      # first sight, no turn end on record, or none since the last: nothing to offer
             while len(_TAIL_FIRST_ENDS) > 4096:
                 _TAIL_FIRST_ENDS.pop(next(iter(_TAIL_FIRST_ENDS)))
             _TAIL_FIRST_STATS["offered"] += 1
@@ -49512,13 +49517,33 @@ def _tail_first_offer(sid):
         return False
 
 
+def _tail_first_files(sid, path):
+    """Every transcript file the session's whole parse reads: its candidates closed over the resume lineage its states log
+    records, as parse_session closes them."""
+    return em._lineage_closure(path, jd._judge_candidates(sid, [path]), _anchor_links(sid))
+
+
 def _tail_first_open(sid, path, min_events=None):
     """The kernel's one road to a window, em.tail_open (the only window a tail scope takes), with what the gates there need
-    from the kernel: every transcript file the session's whole parse reads (its candidates closed over the resume lineage
-    its states log records, as parse_session closes them) and whether a rollback is armed."""
-    files = em._lineage_closure(path, jd._judge_candidates(sid, [path]), _anchor_links(sid))
-    return em.tail_open(path, files=files, cut_armed=bool(jd._pending_cut(sid)),
+    from the kernel: the session's files (_tail_first_files) and whether a rollback is armed."""
+    return em.tail_open(path, files=_tail_first_files(sid, path), cut_armed=bool(jd._pending_cut(sid)),
                         min_events=min_events or _TAIL_FIRST_MIN_EVENTS, max_bytes=_TAIL_FIRST_MAX_BYTES)
+
+
+def _tail_first_stamps(sid, path, wait):
+    """Bring the high-water entry of every file of the session to its end (em.tail_stamps), one step of bytes at a time and,
+    after the first step, each one only once `wait` (the background gate) says go, yielding the interpreter between steps:
+    a first scan of a large transcript (a gigabyte is about 20 s of decoding) is spread over the gate's idle openings
+    instead of taken whole, and no comparison of the session runs until it is done (em.tail_open refuses an incomplete
+    entry). False when told to stop first; the progress so far is kept."""
+    for f in _tail_first_files(sid, path):
+        ent = em.tail_stamps(f, budget=em._TAIL_STAMP_STEP)
+        while ent is not None and not ent["complete"]:
+            time.sleep(0)
+            if not wait():
+                return False
+            ent = em.tail_stamps(f, budget=em._TAIL_STAMP_STEP)
+    return True
 
 
 def _tail_first_due(sid):
@@ -49696,6 +49721,8 @@ def _tail_first_shadow_job(sid, now=None, live_map=None, wait=None, min_events=N
     path = str(path)
     if not wait():
         return done("skipped", "stopping")
+    if not _tail_first_stamps(sid, path, wait):
+        return done("skipped", "stopping")             # told to stop mid-scan: the entries keep what they reached
     win, why = _tail_first_open(sid, path, min_events)
     if win is None:
         return done("refused", why)

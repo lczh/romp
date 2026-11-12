@@ -4226,7 +4226,8 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   `checked` (prompt anchors known not to be a wrapper, never read again).
 - `tailFirst`: the tail-first shadow (2026-11-12), a measurement that serves
   nothing. After the pusher builds a session's chat following a turn end (the
-  Stop hook's stamp, else a stopped states row), and only when the transcript
+  Stop hook's stamp, else a stopped states row; the first one seen after a
+  restart only marks where the session stands), and only when the transcript
   moved since that session's last comparison, a low-priority thread
   builds a provisional page from the end of the transcript alone and compares
   it, event for event and field for field, with the whole build's events from
@@ -4240,8 +4241,10 @@ The snapshot's fields, all plain numbers (`ms` is milliseconds of wall time):
   the last comparison, so none ran) and `queued`; `attempts`; `refused`, by reason (no window
   whose equality the records prove, so nothing was compared: the boundary
   rules' own names, such as `compaction-in-window`, `chain` or `clock`,
-  `high-water` when a record written before the bytes read is stamped after
-  the reply the boundary follows, and the build's, such as `orphan-marker`);
+  `high-water` when an atom of a record written before the bytes read is
+  placed after the reply the boundary follows, `stamps-incomplete` while a
+  file's first high-water scan is still being stepped through between the
+  background gate's openings, and the build's, such as `orphan-marker`);
   `skipped`, by reason (nothing to
   compare against: `stale` when the transcript moved between the two builds);
   `matched`; `mismatched`, each also filed in the error center, once per

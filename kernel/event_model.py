@@ -3874,6 +3874,44 @@ def _emit_state():
             "max_ppt": 0.0}            # chronological watermark of folded pre-pass-relevant records
 
 
+# THE PLACEMENT RULES (the review of tail-first step 1, 2026-11-12): the stamp each atom is placed at, as functions, so the
+# parse (FileAdapter._ingest, _absorbed_atom) and the high-water scan (tail_stamps) run one implementation and cannot drift.
+def _placed_ts(raw, last):
+    """(the stamp a uuid-bearing record is placed at, the borrow source after it): its own parseable stamp, which becomes the
+    borrow source, else the borrow source as it stands (the last parseable stamp of any uuid-bearing record before it, an
+    attachment's or a system record's included). `raw` is parse_z of the record's timestamp."""
+    if raw is None:
+        return last, last
+    return raw, raw
+
+
+def _landing_witness(r):
+    """Whether uuid-bearing record `r` is a landing witness, a record a queued-command splice written after it lands at: any
+    but an attachment (a run of splices at one boundary all land at that boundary, never at each other)."""
+    return r.get("type") != "attachment"
+
+
+def _splice_text(r):
+    """The prompt text of queued-command splice record `r` (a plain string or a content-block list), or None for any other
+    record: what makes the parse synthesize an absorbed atom for it, uuid or none."""
+    if r.get("type") != "attachment":
+        return None
+    a = r.get("attachment") or {}
+    if a.get("type") != "queued_command" or not a.get("prompt"):
+        return None
+    return a["prompt"] if isinstance(a["prompt"], str) else _text_of(a["prompt"])
+
+
+def _landed_ts(witness, send):
+    """(the stamp a splice sent at `send` is placed at, whether it was clamped): its landing witness's placed stamp, never
+    before the send; the send when nothing precedes it."""
+    if witness is None:
+        return send, False
+    if witness < send:
+        return send, True
+    return witness, False
+
+
 def _chrono(ad, uuids):
     """`uuids` in the emit layer's canonical order — ascending (timestamp, read order), exactly
     the key the replay pre-pass has always walked in."""
@@ -4011,9 +4049,9 @@ class FileAdapter:
                 self.by_uuid[u] = r
                 self.fsid_of[u] = fsid
                 self.seq_of[u] = seq
-                ts = parse_z(r.get("timestamp"))
-                if ts is None:
-                    ts = self._last_ts
+                raw = parse_z(r.get("timestamp"))
+                ts, self._last_ts = _placed_ts(raw, self._last_ts)   # the placement rule tail_stamps runs too
+                if raw is None:
                     if u not in _TS_REPAIRED_SEEN:   # count DISTINCT corrupt records — a full
                         #                              parse re-ingests every line, and a stable
                         #                              corrupt one must not inflate per parse
@@ -4029,10 +4067,8 @@ class FileAdapter:
                         print("romp event-model: unparseable timestamp on record %s in %s.jsonl — "
                               "shown at the previous record's time (ts-repair in parse stats)"
                               % (u, fsid), file=sys.stderr)
-                else:
-                    self._last_ts = ts
                 self.ts_of[u] = ts
-                if t != "attachment":
+                if _landing_witness(r):
                     # an attachment is never a landing WITNESS (a queued_command IS the spliced item,
                     # stamped with its send time): several sends spliced at one boundary must all
                     # read that boundary, not each other — see _landing_t
@@ -4064,12 +4100,10 @@ class FileAdapter:
                                 b.get("name") == "Skill" and b.get("id"):
                             self.skill_use_ids.add(b["id"])
             if t == "attachment":
-                a = r.get("attachment") or {}
-                if a.get("type") == "queued_command" and a.get("prompt"):
-                    # the prompt can be a plain string OR a content-block LIST (the SDK injection
-                    # path) — extract the TEXT either way; str() of a list keyed the Python repr,
-                    # which no enqueue content ever matches (the user 2026-07-06)
-                    ptext = a["prompt"] if isinstance(a["prompt"], str) else _text_of(a["prompt"])
+                # the prompt can be a plain string OR a content-block LIST (the SDK injection path) — _splice_text extracts the
+                # TEXT either way; str() of a list keyed the Python repr, which no enqueue content ever matches (the user 2026-07-06)
+                ptext = _splice_text(r)
+                if ptext is not None:
                     # the repaired stamp when the record is uuid-bearing (real CLI splices are):
                     # raw-None dropped the user's typed prompt from the chat (T210 review)
                     self.qatts.append({"uuid": u, "ts": self.ts_of.get(u, parse_z(r.get("timestamp"))),
@@ -4765,23 +4799,21 @@ class FileAdapter:
         }
         if origin:
             atom["origin"] = origin
-        landed_t = self._landing_t(seq)
-        if landed_t is not None:
-            if landed_t < t:
-                # The witness (the attachment's file-order predecessor) is stamped BEFORE the
-                # attachment's own ENQUEUE stamp. Real transcripts do this only by clock granularity
-                # (the live corpus's worst case is -0.2 s, which whole-second stamps can turn into a
-                # 1 s inversion); anything larger is a shape the CLI does not write. No truthful
-                # landing precedes the send, and the chat's cue must never read "took it at" a time
-                # before the bubble's own send time — so clamp to the send, and COUNT it: parse stats
-                # (`landedT-clamp`, beside ts-repair, served on the version route) are where a run of
-                # these would show up, since a silent clamp would hide a CLI write-order change. (The
-                # 2026-09-06 review: two goldens had pinned a landedT 30-40 s before the send, from a
-                # synthetic shape with no tool_result before the attachment.)
-                if stats:
-                    _asm_stat("landedT-clamp")
-                landed_t = t
-            atom["t"] = landed_t         # placed where the model READ it (T252d); `sentAt` keeps the send
+        landed_t, clamped = _landed_ts(self._landing_t(seq), t)   # the placement rule tail_stamps runs too
+        if clamped:
+            # The witness (the attachment's file-order predecessor) is stamped BEFORE the
+            # attachment's own ENQUEUE stamp. Real transcripts do this only by clock granularity
+            # (the live corpus's worst case is -0.2 s, which whole-second stamps can turn into a
+            # 1 s inversion); anything larger is a shape the CLI does not write. No truthful
+            # landing precedes the send, and the chat's cue must never read "took it at" a time
+            # before the bubble's own send time — so clamp to the send, and COUNT it: parse stats
+            # (`landedT-clamp`, beside ts-repair, served on the version route) are where a run of
+            # these would show up, since a silent clamp would hide a CLI write-order change. (The
+            # 2026-09-06 review: two goldens had pinned a landedT 30-40 s before the send, from a
+            # synthetic shape with no tool_result before the attachment.)
+            if stats:
+                _asm_stat("landedT-clamp")
+        atom["t"] = landed_t             # placed where the model READ it (T252d); `sentAt` keeps the send (no witness: the send)
         if ROMP_AUTO_RE.search(full):   # an AUTO-nudge → flag it, mirroring the native user-record path
             atom["rompAuto"] = True
         return atom
@@ -11651,52 +11683,109 @@ def _tail_refusal(recs, ts, i, j):
 
 
 # THE HIGH-WATER STAMP (the review of step 1, 2026-11-12). tail_window proves its rules over the bytes it read, and a record
-# written before those bytes but stamped after the reply before B sorts into the window in the whole build (segment_turns
+# written before those bytes but placed after the reply before B sorts into the window in the whole build (segment_turns
 # orders atoms by stamp), which a search that read only the file's end cannot see. Claude Code does write stamps out of order:
 # a scan of real transcripts found a reminder attachment stamped up to a month ahead of the records written after it. So each
-# transcript keeps, from one pass over its bytes, the highest stamp among the records that become atoms placed by their own
-# stamp (user and assistant records, the two system records the emit loop keeps, the compaction boundary and the model's
-# fallback notice, and the queued-command splice, which lands no earlier than its own stamp), and, for each of its newest
-# prompts that could open a window, that highest stamp over the records written before it. tail_window refuses a boundary
-# whose stamp-before is past the reply it follows ("high-water"). Attachments and bookkeeping that never become atoms are not
-# counted, so a reminder stamped a month ahead refuses nothing. The pass is incremental and proved the way the reader proves
+# transcript keeps, from one pass over its bytes, the highest stamp an atom of the whole parse is PLACED at, by the parse's
+# own placement rules (_placed_ts, _landing_witness, _splice_text, _landed_ts, the functions FileAdapter._ingest and
+# _absorbed_atom call): a record with no stamp of its own is placed at the last parseable stamp before it, whatever record
+# that was; a queued-command splice, uuid or none, lands at the record written before it that is no attachment, never before
+# its own send. The atoms so placed are the user and assistant records, the compaction boundary, the model's fallback notice
+# and the splices. For each of its newest prompts that could open a window, the entry keeps the highest placed stamp written
+# before it, and tail_window refuses a boundary whose stamp-before is past the reply it follows ("high-water"). A reminder
+# stamped a month ahead refuses nothing unless an atom is placed at its stamp. The parse carries its borrow source and its
+# landing witness from one file into the next (the session's other files first, the leaf last), so an entry also records
+# whether its first records were placed by what came in (lead_last, lead_witness) and what it hands on (last, witness);
+# tail_open threads them through the files in the parse's order. The pass is incremental and proved the way the reader proves
 # its entries: a longer file by the bytes before the entry's end (an append leaves them as they were), a file of the same
-# length under a new time by the crc32 of every byte the entry covers; anything else is scanned from byte zero. The entry
-# is kept beside the file's checkpoint, so a new process scans only what was appended since.
+# length under a new time by the crc32 of every byte the entry covers; anything else is scanned from byte zero. A scan takes
+# at most `budget` bytes a call, so a caller spreads a first scan of a large file over many short steps (the shadow waits on
+# the background gate between them), and tail_open refuses a file whose entry is not yet complete ("stamps-incomplete"). The
+# entry is kept beside the file's checkpoint, so a new process scans only what was appended since.
 _TAIL_STAMP_PROMPTS = 512         # the prompts an entry keeps a stamp-before for, newest: a window opens at one of the last
 #                                   _TAIL_TRIES prompts within the search's bytes, so an older one is never asked about
 _TAIL_STAMP_GUARD = 64            # the bytes before an entry's end it keeps: a file whose bytes there moved was not only appended to
-_TAIL_STAMP_V = 1
-_TAIL_STAMPS = {}                 # realpath -> this process's entry: {path, dev, ino, mtime, end, guard, crc, hw, before}; never
-#                                   mutated in place
+_TAIL_STAMP_STEP = 8 * 1024 * 1024   # the bytes one scan call reads at most (a line longer than it is read whole)
+_TAIL_STAMP_V = 2
+_TAIL_STAMPS = {}                 # realpath -> this process's entry (tail_stamps); never mutated in place
 _TAIL_STAMPS_LOCK = threading.Lock()
+_INCOMING = object()              # a placement at the borrow source the parse carries into this file (the file before it's last stamp)
+_INCOMING_WITNESS = object()      # a splice's landing at the witness the parse carries into this file
 
 
 def _tail_stamp_counts(r):
-    """Whether record `r`'s stamp places an atom of the whole parse (the high-water stamp's records)."""
+    """Whether uuid-bearing record `r` becomes an atom placed at its own placed stamp (the emit loop's user, assistant and two
+    system records); the splices are placed by _landed_ts."""
     typ = r.get("type")
     if typ in ("user", "assistant"):
         return True
-    if typ == "system":
-        return r.get("subtype") in ("compact_boundary", "model_refusal_fallback")
-    return typ == "attachment" and (r.get("attachment") or {}).get("type") == "queued_command"
+    return typ == "system" and r.get("subtype") in ("compact_boundary", "model_refusal_fallback")
+
+
+def _tail_stamps_fresh(key, st):
+    return {"path": key, "dev": st.st_dev, "ino": st.st_ino, "mtime": st.st_mtime_ns, "end": 0, "guard": b"", "crc": 0,
+            "hw": 0.0, "before": {}, "last": None, "witness": None, "leadLast": False, "leadWitness": False, "complete": False}
 
 
 def _tail_stamps_step(ent, r):
-    """Fold one record, in file order, into high-water entry `ent`: a prompt that could open a window records the stamp
-    written before it, then a counted record raises the mark."""
-    if not isinstance(r, dict) or not r.get("uuid"):
+    """Fold one record, in file order, into high-water entry `ent` with the parse's placement rules: a prompt that could open a
+    window records the highest stamp placed before it, then the record's own placements raise the mark. `last` is None until
+    the file's first parseable stamp: a borrow before it is the incoming one (leadLast), as a splice landing before the file's
+    first witness is (leadWitness)."""
+    if not isinstance(r, dict):
         return
-    if _tail_prompt_shaped(r):
-        before = ent["before"]
-        before.pop(r["uuid"], None)               # a record written twice: the later copy is the one a window can open at
-        before[r["uuid"]] = ent["hw"]
-        while len(before) > _TAIL_STAMP_PROMPTS:
-            before.pop(next(iter(before)))
-    if _tail_stamp_counts(r):
-        t = parse_z(r.get("timestamp"))
-        if t is not None and t > ent["hw"]:
-            ent["hw"] = t
+    u = r.get("uuid")
+    placed = []
+    mine = None
+    if u:
+        ts, ent["last"] = _placed_ts(parse_z(r.get("timestamp")), ent["last"])
+        mine = _INCOMING if ts is None else ts
+        if _tail_prompt_shaped(r):
+            before = ent["before"]
+            before.pop(u, None)                   # a record written twice: the later copy is the one a window can open at
+            before[u] = ent["hw"]
+            while len(before) > _TAIL_STAMP_PROMPTS:
+                before.pop(next(iter(before)))
+        if _tail_stamp_counts(r):
+            placed.append(mine)
+        if _landing_witness(r):
+            ent["witness"] = "last" if mine is _INCOMING else mine
+    if _splice_text(r) is not None:
+        send = mine if u else parse_z(r.get("timestamp"))   # the parse's send: the placed stamp, the raw one with no uuid
+        if send is not None:                                #  (an unstamped splice with no uuid makes no atom)
+            w = ent["witness"]
+            if send is _INCOMING or w is None or w == "last":
+                # an operand that came in from the file before: the placement is the larger of the two, so both are counted
+                placed += [send, _INCOMING_WITNESS if w is None else _INCOMING if w == "last" else w]
+            else:
+                placed.append(_landed_ts(w, send)[0])
+    for p in placed:
+        if p is _INCOMING:
+            ent["leadLast"] = True
+        elif p is _INCOMING_WITNESS:
+            ent["leadWitness"] = True
+        elif p > ent["hw"]:
+            ent["hw"] = p
+
+
+def _tail_stamps_floor(ent, carry_last, carry_witness):
+    """The highest stamp the parse places one of the file's first records at from what it carries in: its borrow source
+    (`carry_last`) and its landing witness (`carry_witness`), as the files before this one left them."""
+    f = 0.0
+    if ent["leadLast"]:
+        f = max(f, carry_last)
+    if ent["leadWitness"] and carry_witness is not None:
+        f = max(f, carry_witness)
+    return f
+
+
+def _tail_stamps_through(ent, carry_last, carry_witness):
+    """(the file's highest placed stamp given what the parse carries in, the borrow source and the witness it carries out)."""
+    hw = max(ent["hw"], _tail_stamps_floor(ent, carry_last, carry_witness))
+    last = ent["last"] if ent["last"] is not None else carry_last
+    w = ent["witness"]
+    witness = carry_witness if w is None else carry_last if w == "last" else w
+    return hw, last, witness
 
 
 def _tail_stamps_file(key):
@@ -11717,8 +11806,6 @@ def _tail_stamps_guard_ok(ent, key, st):
     if st.st_size == ent["end"]:
         if st.st_mtime_ns == ent.get("mtime"):
             return True
-        if ent.get("crc") is None:
-            return False
         crc = 0
         try:
             with open(key, "rb") as fh:
@@ -11752,9 +11839,13 @@ def _tail_stamps_load(key):
         v = json.loads(f.read_text(encoding="utf-8"))
         if not isinstance(v, dict) or v.get("v") != _TAIL_STAMP_V or v.get("path") != key:
             return None
+        w = v["witness"]
         return {"path": key, "dev": int(v["dev"]), "ino": int(v["ino"]), "mtime": int(v["mtime"]), "end": int(v["end"]),
-                "guard": bytes.fromhex(v["guard"]), "crc": None if v["crc"] is None else int(v["crc"]), "hw": float(v["hw"]),
-                "before": {str(u): float(t) for u, t in v["before"]}}
+                "guard": bytes.fromhex(v["guard"]), "crc": int(v["crc"]), "hw": float(v["hw"]),
+                "before": {str(u): float(t) for u, t in v["before"]},
+                "last": None if v["last"] is None else float(v["last"]),
+                "witness": w if w is None or w == "last" else float(w),
+                "leadLast": bool(v["leadLast"]), "leadWitness": bool(v["leadWitness"]), "complete": False}
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
@@ -11764,7 +11855,8 @@ def _tail_stamps_save(ent):
     if f is None:
         return
     doc = {"v": _TAIL_STAMP_V, "path": ent["path"], "dev": ent["dev"], "ino": ent["ino"], "mtime": ent["mtime"], "end": ent["end"],
-           "guard": ent["guard"].hex(), "crc": ent["crc"], "hw": ent["hw"], "before": [[u, t] for u, t in ent["before"].items()]}
+           "guard": ent["guard"].hex(), "crc": ent["crc"], "hw": ent["hw"], "before": [[u, t] for u, t in ent["before"].items()],
+           "last": ent["last"], "witness": ent["witness"], "leadLast": ent["leadLast"], "leadWitness": ent["leadWitness"]}
     try:
         f.parent.mkdir(parents=True, exist_ok=True)
         tmp = _writer_tmp(f)
@@ -11774,31 +11866,13 @@ def _tail_stamps_save(ent):
         pass                                      # kept in memory all the same; the next process scans the file again
 
 
-def _tail_stamps_seed(key, path, st):
-    """A fresh entry for file `key`: stepped over the records of the reader's WHOLE entry for it when one stands and still
-    describes the file (no read, no decode), else empty at byte zero."""
-    ent = {"path": key, "dev": st.st_dev, "ino": st.st_ino, "mtime": st.st_mtime_ns, "end": 0, "guard": b"", "crc": 0, "hw": 0.0,
-           "before": {}}
-    with _JSONL_CACHE_LOCK:
-        held = _JSONL_CACHE.get(str(path)) or _JSONL_CACHE.get(key)
-    if held is None or len(held) < 11 or held[5] != 0 or held[8] != st.st_ino or not held[3] or held[9] != 0 or held[10] is None:
-        return ent                    # no WHOLE entry with its crc: nothing proves the bytes before its offset
-    unchanged = held[0] == st.st_mtime and held[1] == st.st_size   # the reader's own hit test: it proved this entry
-    trial = dict(ent, end=int(held[2]), guard=bytes(held[3][-_TAIL_STAMP_GUARD:]), crc=int(held[10]),
-                 mtime=st.st_mtime_ns if unchanged else None)
-    if not _tail_stamps_guard_ok(trial, key, st):
-        return ent
-    for r in held[4]:
-        _tail_stamps_step(trial, r)
-    return trial
-
-
-def tail_stamps(path):
-    """The high-water entry of transcript `path`, current to its last complete line, or None when it cannot be statted:
-    {"hw": the highest counted stamp in the file, "before": {prompt uuid: the highest counted stamp written before it}, ...}.
-    Brought forward from this process's entry, else the one kept beside the checkpoint, else the reader's whole entry, else
-    byte zero, whichever still passes the append guard, by scanning the bytes past it; the entry is kept again when it moved.
-    A whole-history read by nature, so refused inside a tail-first scope over the file."""
+def tail_stamps(path, budget=None):
+    """The high-water entry of transcript `path`, or None when it cannot be statted: {"hw": the highest stamp an atom of this
+    file is placed at, "before": {prompt uuid: the highest placed before it}, "complete": whether it reaches the file's last
+    complete line, ...}. Brought forward from this process's entry, else the one kept beside the checkpoint, else byte zero,
+    whichever still passes the append guard, by scanning the bytes past it: at most `budget` bytes (None: to the end), so a
+    caller that needs the entry whole calls again until it is complete. The entry is kept again when it moved. A
+    whole-history read by nature, so refused inside a tail-first scope over the file."""
     _tail_guard(path, "tail_stamps")
     key = os.path.realpath(str(path))
     try:
@@ -11811,16 +11885,21 @@ def tail_stamps(path):
         ent = _tail_stamps_load(key)
         if ent is not None and not _tail_stamps_guard_ok(ent, key, st):
             ent = None
-    ent = dict(ent, before=dict(ent["before"])) if ent is not None else _tail_stamps_seed(key, path, st)
+    ent = dict(ent, before=dict(ent["before"])) if ent is not None else _tail_stamps_fresh(key, st)
     start = ent["end"]
     ent["mtime"] = st.st_mtime_ns
+    complete = True
     if st.st_size > start:
         try:
             with open(key, "rb") as fh:
                 fh.seek(start)
                 nread, end, crc = 0, start, ent["crc"]
                 remaining = st.st_size - start
+                allowance = budget if budget is not None else remaining
                 while remaining > 0:
+                    if end > start and end - start >= allowance:
+                        complete = False          # the step's bytes are spent: the next call goes on from here
+                        break
                     line = fh.readline(remaining)
                     if not line or not line.endswith(b"\n"):
                         nread += len(line)
@@ -11828,8 +11907,7 @@ def tail_stamps(path):
                     remaining -= len(line)
                     nread += len(line)
                     end += len(line)
-                    if crc is not None:
-                        crc = zlib.crc32(line, crc)
+                    crc = zlib.crc32(line, crc)
                     for piece in line.splitlines(keepends=True):   # the reader's boundaries (_scan_jsonl_stream)
                         piece = piece.strip()
                         if piece:
@@ -11845,6 +11923,7 @@ def tail_stamps(path):
             return None
         if nread:
             _count_read(key, nread)
+    ent["complete"] = complete
     with _TAIL_STAMPS_LOCK:
         was = _TAIL_STAMPS.get(key) or {}
         moved = (ent["end"], ent["mtime"]) != (was.get("end"), was.get("mtime"))
@@ -11925,6 +12004,8 @@ def tail_window(leaf, min_events=1, max_bytes=None, stamps=None):
                 reason = _tail_refusal(recs, ts, i, j)
                 if reason is None and stamps is not None:
                     hw = stamps["before"].get(r["uuid"])
+                    if hw is not None:
+                        hw = max(hw, stamps.get("floor", 0.0))   # what the files before the leaf carried into its first records
                     reason = "high-water-unknown" if hw is None else "high-water" if hw > ts[j] else None
                 if reason is None:
                     p = recs[j]
@@ -11948,34 +12029,50 @@ def tail_open(leaf, *, files, cut_armed, min_events=1, max_bytes=None):
     cannot build from a window whose gates it forgot. tail_window's search, given the leaf's high-water entry, then the gates
     that need more than the records in hand, each a refusal by name:
       pending-cut           `cut_armed`: a rollback is armed, and the whole parse reads a cut the file does not show;
-      high-water            (tail_window) a record written before the boundary, read or not, is stamped after the reply before
-                            it; high-water-unknown, the boundary was appended after the scan;
+      stamps-incomplete     a file's high-water entry does not reach its end yet (tail_stamps takes one step of bytes here;
+                            a caller with a large first scan steps it to the end first, as the shadow does between gate waits);
+      high-water            (tail_window) an atom of a record written before the boundary, read or not, is placed after the
+                            reply before it (the files before the leaf included, through what the parse carries into it);
+                            high-water-unknown, the boundary was appended after the scan;
       sibling-file-active   another file of `files` (every transcript file the whole parse reads: the leaf's candidates closed
                             over the resume lineage) was written at or after the boundary's stamp;
-      sibling-high-water    another file holds a counted record stamped after the reply before the boundary (it would sort
-                            into the window).
+      sibling-high-water    another file places an atom after the reply before the boundary (it would sort into the window).
     The window then names `files` (TailWindow.also), so its scope refuses a whole read of any of them, and is marked opened.
     Keyword-only, with no default for `files` or `cut_armed`: a caller states both. Refused inside a scope over the leaf, like
     every whole read (its stamps are one)."""
     _tail_guard(leaf, "tail_open")
     if cut_armed:
         return None, "pending-cut"
-    stamps = tail_stamps(leaf)
+    leaf_stem = Path(str(leaf)).stem
+    carry_last, carry_witness = 0.0, None        # FileAdapter's start: no borrow source yet (0), no witness
+    others = []
+    for c in files or ():                        # the parse's order (FileAdapter): the other files as given, then the leaf
+        if Path(str(c)).stem == leaf_stem:
+            continue
+        e = tail_stamps(c, budget=_TAIL_STAMP_STEP)
+        if e is None:
+            others.append((c, None))
+            continue
+        if not e["complete"]:
+            return None, "stamps-incomplete"
+        hw, carry_last, carry_witness = _tail_stamps_through(e, carry_last, carry_witness)
+        others.append((c, hw))
+    stamps = tail_stamps(leaf, budget=_TAIL_STAMP_STEP)
     if stamps is None:
         return None, "unreadable"
+    if not stamps["complete"]:
+        return None, "stamps-incomplete"
+    stamps = dict(stamps, floor=_tail_stamps_floor(stamps, carry_last, carry_witness))
     win, why = tail_window(leaf, min_events, max_bytes, stamps=stamps)
     if win is None:
         return None, why
-    for c in files or ():
-        if os.path.realpath(str(c)) == win.key:
-            continue
+    for c, hw in others:
         try:
             if os.stat(c).st_mtime >= win.t:
                 return None, "sibling-file-active"
         except OSError:
             continue
-        other = tail_stamps(c)
-        if other is None or other["hw"] > win.prev_t:
+        if hw is None or hw > win.prev_t:
             return None, "sibling-high-water"
     win.also(files)
     win.opened = True

@@ -527,6 +527,18 @@ class TestTheSwitch(Harness):
         self.assertTrue(km._tail_first_offer(SID))
         self.assertEqual(km._tail_first_report()["offered"], 2)
 
+    def test_the_first_turn_end_seen_is_recorded_not_offered(self):
+        """After a restart, or when the switch goes on, every session's turn-end key is seen for the first time at its first
+        build. That names a turn that ended before the shadow watched; offering it would queue every session the pusher builds
+        in the busiest minutes of a boot. It is recorded, and only a later move offers."""
+        self.flip("on")
+        self.turn_ended(SID, NOW - 100)
+        self.assertFalse(km._tail_first_offer(SID), "first sight of a standing turn end")
+        self.assertFalse(km._tail_first_offer(SID))
+        self.assertEqual(km._tail_first_report()["offered"], 0)
+        self.turn_ended(SID, NOW - 10)
+        self.assertTrue(km._tail_first_offer(SID), "a turn that ended while the shadow watched")
+
     def test_one_comparison_per_transcript_state(self):
         """A second turn end that wrote nothing to the transcript (a stop on the same bytes) is counted, not compared."""
         self.assertTrue(km._tail_first_due(SID))
@@ -540,6 +552,7 @@ class TestTheSwitch(Harness):
     def test_the_queue_is_bounded(self):
         self.flip("on")
         for i in range(km._TAIL_FIRST_QUEUE_MAX + 5):
+            km._tail_first_offer("sid-%d" % i)                        # first sight: the key is recorded
             self.turn_ended("sid-%d" % i, NOW - 10)
             km._tail_first_offer("sid-%d" % i)
         rep = km._tail_first_report()
@@ -731,6 +744,61 @@ class TestTheGuardsOwnCost(Harness):
               % (inactive, getattr_default))
 
 
+class TestTheFirstScanIsSpreadOut(Harness):
+    """A first high-water scan of a large transcript is one decode of the whole file. It runs one step of bytes at a time,
+    each after the background gate opens, and no comparison of the file runs until the entry reaches the end."""
+
+    def setUp(self):
+        super().setUp()
+        self.step = em._TAIL_STAMP_STEP
+        em._TAIL_STAMP_STEP = 1024                                     # 9 KB of transcript: ten steps
+        self.forget()
+        self.warm()
+
+    def tearDown(self):
+        em._TAIL_STAMP_STEP = self.step
+        super().tearDown()
+
+    def forget(self):
+        """A restart with no high-water entry anywhere: none in memory, none kept beside the checkpoints."""
+        self.fresh()
+        for n in os.listdir(jd.STATE / "checkpoints"):
+            if n.endswith(".tail-stamps"):
+                os.remove(jd.STATE / "checkpoints" / n)
+
+    def test_a_step_takes_its_bytes_and_the_steps_add_up_to_the_whole_scan(self):
+        steps = [em.tail_stamps(self.leaf, budget=1024)]
+        while not steps[-1]["complete"]:
+            steps.append(em.tail_stamps(self.leaf, budget=1024))
+        self.assertGreater(len(steps), 5)
+        self.assertTrue(all(b["end"] - a["end"] <= 1024 + 400 for a, b in zip(steps, steps[1:])), "a step ends at its budget's line")
+        self.forget()
+        whole = em.tail_stamps(self.leaf)
+        self.assertTrue(whole["complete"])
+        for k in ("end", "hw", "before", "last", "witness", "leadLast", "leadWitness", "crc"):
+            self.assertEqual(steps[-1][k], whole[k], k)
+
+    def test_tail_open_refuses_a_file_whose_entry_is_not_complete(self):
+        self.forget()
+        self.assertEqual(em.tail_open(self.leaf, files=[self.leaf], cut_armed=False, min_events=6), (None, "stamps-incomplete"))
+        self.forget()
+        self.assertEqual(km._tail_first_open(SID, self.leaf, 6), (None, "stamps-incomplete"))
+
+    def test_the_shadow_waits_on_the_gate_between_steps_and_compares_once_complete(self):
+        calls = []
+        self.assertEqual(km._tail_first_shadow_job(SID, now=NOW, live_map={}, min_events=6,
+                                                   wait=lambda: calls.append(1) or True), ("matched", None))
+        self.assertGreater(len(calls), 3 + 5, "a gate wait before every step after the first, then the job's own three")
+        self.forget()
+        self.warm()
+        seen = []
+        self.assertEqual(km._tail_first_shadow_job(SID, now=NOW, live_map={}, min_events=6,
+                                                   wait=lambda: seen.append(1) or len(seen) < 3), ("skipped", "stopping"))
+        ent = em._TAIL_STAMPS[os.path.realpath(self.leaf)]
+        self.assertFalse(ent["complete"])
+        self.assertGreater(ent["end"], 0, "the progress so far is kept")
+
+
 class TestTheShadowNeverRunsBesideABuild(Harness):
     def setUp(self):
         super().setUp()
@@ -815,6 +883,7 @@ class TestTheShadowNeverRunsBesideABuild(Harness):
         th = threading.Thread(target=km._tail_first_shadow_loop, daemon=True)
         th.start()
         try:
+            self.assertFalse(km._tail_first_offer(SID), "first sight: recorded")
             self.turn_ended(SID, NOW - 10)
             self.assertTrue(km._tail_first_offer(SID))
             deadline = time.time() + 10

@@ -1211,19 +1211,24 @@ class TestTheHighWaterStamp(Harness):
     gates, builds a page that differs from the whole build), then the gate closing it."""
     SID = "aaaaaaaa-7002-4222-8333-666666666666"
 
-    def records(self, ahead=None):
-        """Eight turns; `ahead` (a record builder over the second prompt's uuid) adds one record after the second prompt
-        stamped two hours ahead of the rest. Without it, the SECOND turn itself is stamped two hours ahead (the clock stepped
-        back after it): chronologically it sorts after everything, and it lies far behind the last turns in the file."""
+    def records(self, ahead=None, unstamped=False):
+        """Eight turns; `ahead` (a builder over the second prompt's uuid, of one record or a list) adds records after the second
+        prompt, the reply chaining onto the last uuid-bearing one; `unstamped` writes the second reply with no stamp of its own.
+        Without `ahead`, the SECOND turn itself is stamped two hours ahead (the clock stepped back after it): chronologically it
+        sorts after everything, and it lies far behind the last turns in the file."""
         m, recs, prev = MODELS[0], [], None
         for i in range(8):
             t = T0 + i * 100 + (7200 if i == 1 and ahead is None else 0)
             recs.append(U(t, "step %d of the export job" % i, "u%d" % i, prev))
             last = "u%d" % i
             if i == 1 and ahead is not None:
-                recs.append(ahead(last))
-                last = recs[-1]["uuid"]
+                more = ahead(last)
+                for r in (more if isinstance(more, list) else [more]):
+                    recs.append(r)
+                    last = r.get("uuid") or last
             recs.append(A(t + 30, "a%d" % i, last, text="step %d done" % i, model=m))
+            if i == 1 and unstamped:
+                del recs[-1]["timestamp"]
             prev = "a%d" % i
         return recs
 
@@ -1283,6 +1288,76 @@ class TestTheHighWaterStamp(Harness):
                 whole = self.whole(sid)
                 self.assertTrue(self.hole(sid, leaf, recs, whole), "the record stamped ahead is in the whole build's window")
                 self.assertEqual(km._tail_first_open(sid, leaf, 2), (None, "high-water"))
+
+    def test_an_atom_placed_at_another_records_stamp_refuses_too(self):
+        """The parse places some atoms at a stamp taken from ANOTHER record (its own placement rules, which the stamp runs):
+        a splice lands at the record written before it, here an API error notice the stamp would not count on its own; a
+        record with no stamp is placed at the last stamp before it, here a reminder attachment's; and a splice with no uuid
+        is placed all the same. Each moves an atom into the whole build's window, and each is refused."""
+        reminder = lambda p: {"type": "attachment", "timestamp": iso(T0 + 30 * 86400), "uuid": "m1", "parentUuid": p,
+                              "isSidechain": False, "attachment": {"type": "total_tokens_reminder"}}
+        cases = {"a splice after a notice stamped ahead": (lambda p: [SYS(T0 + 7200, "api_error", "e1", p, level="error", retryAttempt=1,
+                                                                          maxRetries=10, retryInMs=1000,
+                                                                          error={"status": 429, "message": "synthetic rate limit"}),
+                                                                      ATT(T0 + 110, "also check the retry cap", "q1", "e1")], False),
+                 "a reply with no stamp after a reminder stamped ahead": (reminder, True),
+                 "a splice with no uuid": (lambda p: {"type": "attachment", "timestamp": iso(T0 + 7200), "isSidechain": False,
+                                                      "attachment": {"type": "queued_command", "prompt": "also check the digest file"}},
+                                           False)}
+        for n, (kind, (ahead, unstamped)) in enumerate(sorted(cases.items())):
+            with self.subTest(kind=kind):
+                sid = "aaaaaaaa-75%02d-4222-8333-666666666666" % n
+                self.fresh()
+                recs = self.records(ahead, unstamped=unstamped)
+                leaf = self.install(sid, recs)
+                whole = self.whole(sid)
+                self.assertTrue(self.hole(sid, leaf, recs, whole), "the atom placed ahead is in the whole build's window")
+                self.assertEqual(km._tail_first_open(sid, leaf, 2), (None, "high-water"))
+
+    def test_the_stamp_is_never_below_where_the_parse_places_an_atom(self):
+        """The property, over the generated corpus with stamps broken on purpose (records with none, reminders and API error
+        notices stamped hours ahead, splices with no uuid): for every prompt that could open a window, the entry's stamp
+        before it is at least the latest stamp the parse's own atoms (FileAdapter.atoms) are placed at before it in the file.
+        And the corpus is not vacuous: at many prompts that latest placement is above every counted record's OWN stamp, the
+        three shapes the stamp once missed."""
+        borrowed = checked = 0
+        for seed in SEEDS:
+            sc = Script(seed)
+            rnd = random.Random(seed * 31 + 7)
+            recs = []
+            for r in sc.recs:
+                r = dict(r)
+                if r.get("uuid") and rnd.random() < 0.08:
+                    r.pop("timestamp", None)
+                recs.append(r)
+                tt = em.parse_z(r.get("timestamp")) or T0
+                if r.get("uuid") and rnd.random() < 0.04:
+                    recs.append({"type": "attachment", "timestamp": iso(tt + rnd.randint(1, 48) * 3600), "uuid": sc.u("m"),
+                                 "parentUuid": r["uuid"], "isSidechain": False, "attachment": {"type": "total_tokens_reminder"}})
+                if r.get("uuid") and rnd.random() < 0.03:
+                    recs.append(SYS(tt + rnd.randint(1, 48) * 3600, "api_error", sc.u("e"), r["uuid"], level="error", retryAttempt=1,
+                                    maxRetries=10, retryInMs=1000, error={"status": 429, "message": "synthetic rate limit"}))
+                if rnd.random() < 0.02:
+                    recs.append({"type": "attachment", "timestamp": iso(tt + rnd.randint(-2, 48) * 3600), "isSidechain": False,
+                                 "attachment": {"type": "queued_command", "prompt": "also %s" % sc.text()}})
+            self.fresh()
+            leaf = self.install(sc.sid, recs)
+            ad = em.FileAdapter([leaf], leaf)
+            atoms = ad.atoms(sc.sid, {})
+            stamps = em.tail_stamps(leaf)
+            floor = em._tail_stamps_floor(stamps, 0.0, None)            # one file: the parse starts at its own start state
+            for u, before in stamps["before"].items():
+                seq = ad.seq_of[u]
+                placed = max((a["t"] for a in atoms if a.get("t") is not None and a.get("_seq", 0) < seq), default=0.0)
+                self.assertGreaterEqual(max(before, floor) + 1e-6, placed, "seed %d, prompt %s" % (seed, u))
+                own = max((em.parse_z(r.get("timestamp")) or 0.0 for r in recs[:next(i for i, x in enumerate(recs) if x.get("uuid") == u)]
+                           if r.get("type") in ("user", "assistant") or r.get("subtype") in ("compact_boundary", "model_refusal_fallback")
+                           or (r.get("attachment") or {}).get("type") == "queued_command" and r.get("uuid")), default=0.0)
+                borrowed += placed > own + 1e-6
+                checked += 1
+        print("\nhigh-water property: %d prompts checked, %d where the parse placed an atom above every counted record's own stamp"
+              % (checked, borrowed))
+        self.assertGreater(borrowed, 10, "the corpus holds atoms placed at another record's stamp")
 
     def test_records_that_never_become_atoms_refuse_nothing(self):
         """The out-of-order stamps found in real transcripts are on records like the token reminder attachment, stamped up to
@@ -1348,19 +1423,6 @@ class TestTheHighWaterStamp(Harness):
         self.assertEqual(got["hw"], T0 + 730, "the rewritten file's own stamps")
         self.assertEqual(km._tail_first_open(self.SID, leaf, 2)[1], None, "and its windows stand")
 
-    def test_the_reader_entry_seeds_a_first_scan_without_a_read(self):
-        recs = self.records()
-        leaf = self.install(self.SID, recs)
-        self.whole(self.SID)                                           # the reader holds the whole file
-        key = os.path.realpath(leaf)
-        with em._READ_BYTES_LOCK:
-            r0 = em._READ_BYTES.get(key, 0)
-        got = em.tail_stamps(leaf)
-        with em._READ_BYTES_LOCK:
-            self.assertEqual(em._READ_BYTES.get(key, 0), r0, "stepped over the records the reader holds")
-        self.assertEqual(got["end"], os.path.getsize(leaf))
-        self.assertEqual(got["hw"], T0 + 100 + 7200 + 30)
-
     def test_the_sweep_removes_the_entry_with_its_transcript(self):
         leaf = self.install(self.SID, self.records())
         em.tail_stamps(leaf)
@@ -1374,12 +1436,19 @@ class TestSecondFile(Harness):
     SID = "aaaaaaaa-7003-4222-8333-666666666666"
     LAST = "bbbbbbbb-7003-4222-8333-666666666666"
 
-    def lay(self, ahead=0):
+    def lay(self, ahead=0, carried=False):
+        """`carried`: the first file ends on a reminder stamped two hours ahead, and the leaf's first prompt has no stamp of its
+        own, so the parse, which reads the first file first, places that prompt at the reminder's stamp."""
         m = MODELS[0]
         first = [U(T0, "start the notes export", "u1", None), A(T0 + 30 + ahead, "a1", "u1", text="export started", model=m)]
+        if carried:
+            first.append({"type": "attachment", "timestamp": iso(T0 + 7200), "uuid": "m1", "parentUuid": "a1", "isSidechain": False,
+                          "attachment": {"type": "total_tokens_reminder"}})
         leaf, prev = [], "a1"
         for i in range(2, 7):
             leaf.append(U(T0 + i * 100, "export step %d" % i, "u%d" % i, prev))
+            if i == 2 and carried:
+                del leaf[-1]["timestamp"]
             leaf.append(A(T0 + i * 100 + 30, "a%d" % i, "u%d" % i, text="step %d done" % i, model=m))
             prev = "a%d" % i
         anchor = self.proj / (self.SID + ".jsonl")
@@ -1409,6 +1478,18 @@ class TestSecondFile(Harness):
         self.assertTrue(self.differences(self.SID, leaf, win, whole), "the first file's late reply is in the whole build's window")
         self.assertEqual(km._tail_first_open(self.SID, leaf, 2), (None, "sibling-high-water"))
         self.assertEqual(km._tail_first_shadow_job(self.SID, now=NOW, live_map={}, min_events=2), ("refused", "sibling-high-water"))
+
+    def test_a_stamp_the_parse_carries_from_the_first_file_into_the_leaf_refuses(self):
+        """The parse reads the session's other files first and carries its borrow source into the leaf: the leaf's first prompt,
+        with no stamp of its own, is placed at the first file's last stamp (a reminder's, which no high-water entry counts on
+        its own). tail_open threads each file's entry through in the parse's order, so the leaf's stamp starts above it."""
+        anchor, leaf = self.lay(carried=True)
+        whole = self.whole(self.SID)
+        win, why = em.tail_window(leaf, 2)
+        win.opened = True                                              # past tail_open's gates, on purpose: the hole they close
+        self.assertTrue(self.differences(self.SID, leaf, win, whole), "the leaf's first prompt sorts into the whole build's window")
+        self.assertTrue(em.tail_stamps(leaf)["leadLast"])
+        self.assertEqual(km._tail_first_open(self.SID, leaf, 2), (None, "high-water"))
 
     def test_a_first_file_written_inside_the_window_refuses(self):
         anchor, leaf = self.lay()
