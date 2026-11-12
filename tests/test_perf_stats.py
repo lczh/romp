@@ -61,6 +61,7 @@ TOP_KEYS = {"now", "since", "uptime_s", "log", "process", "pusher", "jobs", "sta
             "fileSlice",                                   # fileSlice: the file preview popover's slice cache: hit / miss / bytes / warm (T351)
             "glossary",                                    # glossary: files parsed, frames / terms / bytes built per cycle, entries cut, files refused (T351 stage 2)
             "repoIndex",                                   # repoIndex: the path links' repo listing, refreshed off the pusher (2026-10-07)
+            "tailFirst",                                   # tailFirst: the tail-first shadow's comparisons: attempts, refused by reason, matched, mismatched, ms (2026-11-12)
             "stacks"}                                      # stacks: every thread's last frames under ROMP_PERF_STACKS, else None (T358)
 
 

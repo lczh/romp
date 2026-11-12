@@ -4233,6 +4233,9 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
     is permanently False and a discharged focus goal never settles to completed (the settled gate, the
     user's bug 2026-06-17). The states file's (mtime,size) is folded into the cache key so an idle-only
     transition (which doesn't touch the transcript) still busts the cache and re-rolls status."""
+    _tf = em.tail_scope_window()           # a tail-first scope over this leaf (em.tail_scope): the whole tree is never served
+    if _tf is not None and files and _tf.holds(files[0]):   # into it, neither a fresh parse nor a pinned or cached one
+        raise em.WholeHistoryRead("jd.parsed_session inside the tail-first scope")
     fr = _pass_frame()
     if fr is not None:
         with _frame_lock:
@@ -4291,6 +4294,27 @@ def parsed_session(fsid, files, now, asm_mode_out=None, stats=None, states=None,
         with _frame_lock:                  #  parse spanning a pass boundary must not land keyless in the next
             return _frame_pin_parse(fr, fsid, session, key)   # frame); a concurrent first toucher wins
     return session
+
+
+def parsed_session_peek(fsid, files, states=None, sdk_human=None):
+    """(tree, key, candidates): the tree parsed_session holds for `fsid`'s leaf when one stands under the key the files and
+    the cut have NOW, else None in its place; the key (None when a stat failed) and the candidate files it was taken over
+    come back either way. A look, not a parse: nothing is parsed, pinned, stored or marked used, so a caller that only
+    compares against the tree a build just made (the kernel's tail-first shadow) leaves the store as it found it and never
+    pays, or causes, a parse of its own. Reads the live world like every thread outside a pass."""
+    _tf = em.tail_scope_window()
+    if _tf is not None and files and _tf.holds(files[0]):
+        raise em.WholeHistoryRead("jd.parsed_session_peek inside the tail-first scope")
+    cands, _states, key_files = _parse_key_files(fsid, files, states)
+    cut = _pending_cut(fsid)
+    try:
+        key = (_fileset_key(key_files), cut)
+    except OSError:
+        return None, None, list(cands)
+    human = bool(sdk_human) if sdk_human is not None else bool(_sdk_owned(fsid))
+    with _PARSE_CACHE_LOCK:
+        hit = (_PARSE_CACHE.get((fsid, cut, str(files[0]))) or {}).get(human)
+    return (hit[1] if hit and hit[0] == key else None), key, list(cands)
 
 
 def asm_refresh_inputs(fsid, leaf, sdk_human=None, states=None):

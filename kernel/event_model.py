@@ -627,8 +627,73 @@ def bg_task_reader(path, cache, ckpt=None):
     return row
 
 
+# ───────────────────────── tail-first: the scope that cannot read whole history ─────────────────────────
+# Tail-first pages (the user 2026-11-12, who wanted pages to stay responsive after a restart and approved the idea on one
+# condition: no consistency problem, guaranteed by a mechanism rather than by care). A provisional chat page is built from the
+# tail of a transcript, from a boundary record B that tail_window accepted, and it must never show anything the whole build
+# would not. Three mechanisms carry that, and this is the second: while a thread is inside `tail_scope(win)`, every shared
+# reader of the window's transcript REFUSES (WholeHistoryRead) before it looks at a memo, a cache or the disk, so no piece of
+# the provisional build can be computed from bytes before B, or from a memo some earlier whole read filled, by accident. The
+# window's own bytes were read by tail_window before the scope opened, into a list only the window holds, and the parse takes
+# that list by identity (parse_session's tail road). A piece that needs whole history therefore cannot be wrong inside the
+# scope: it raises, and its caller shows a placeholder until the whole parse lands (the kernel's _piece). Step 1 is the SHADOW:
+# the provisional build is only compared with the whole one (the kernel's tail-first shadow) and reaches no browser.
+class WholeHistoryRead(BaseException):
+    """A read of a transcript's whole history (the file through a shared reader, a fold over it, its head record, a parse of
+    it, or a memo any of those filled) attempted inside the tail-first scope that holds the file. Raised, never answered: a
+    provisional build shows a placeholder for the piece that asked. A BaseException on purpose: the builders between a
+    reader and the piece that asked are full of `except Exception` arms that answer a failed read with a default (an
+    empty list, a count of zero), and inside a scope that default would be a guess shown as fact. Only the kernel's _piece
+    and the shadow catch it, by name; it is raised nowhere outside a scope, and every raise is a reader's first statement,
+    before the reader holds a claim or a lock."""
+
+
+class TailRefused(Exception):
+    """A tail-first window that cannot be proven equal to the whole build's: `reason` names the rule that refused it
+    (tail_window's reasons, and the gates past it). Refusing costs the provisional page, never correctness."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
+
+_TAIL_SCOPE = threading.local()   # .win: the TailWindow the calling thread builds a provisional page from (tail_scope)
+
+
+class tail_scope:
+    """`with tail_scope(win):` the calling thread reads `win`'s transcript (and the session's other transcript files the
+    window names) only through the window's own records until the block ends. Nested scopes stack; None clears it."""
+
+    def __init__(self, win):
+        self.win = win
+
+    def __enter__(self):
+        self.prev = getattr(_TAIL_SCOPE, "win", None)
+        _TAIL_SCOPE.win = self.win
+        return self
+
+    def __exit__(self, *exc):
+        _TAIL_SCOPE.win = self.prev
+        return False
+
+
+def tail_scope_window():
+    """The window of the calling thread's tail-first scope, or None outside one."""
+    return getattr(_TAIL_SCOPE, "win", None)
+
+
+def _tail_guard(path, what):
+    """Refuse `what` (a reader's name) over `path` when the calling thread's tail-first scope holds that file. The first
+    statement of every transcript reader below, ahead of its memo and cache lookups, so a hit a whole read left behind is
+    refused the same as a fresh read; outside a scope it is one thread-local read."""
+    win = getattr(_TAIL_SCOPE, "win", None)
+    if win is not None and win.holds(path):
+        raise WholeHistoryRead("%s inside the tail-first scope" % what)
+
+
 def _read_jsonl(path):
     """Yield parsed json objects from a .jsonl file; [] on any error."""
+    _tail_guard(path, "_read_jsonl")
     try:
         with open(path, errors="replace") as fh:
             for line in fh:
@@ -2758,6 +2823,7 @@ def _read_jsonl_incremental(path, on_fail=None):
     failure the caller may count and log (fold_records passes it through as on("fail")). The answer is []
     either way. This is the WHOLE-file read: a tail entry a checkpoint restored is upgraded to the whole file
     first (T323 stage 3); fold_records reads the entry itself through _read_jsonl_entry with tail_ok."""
+    _tail_guard(path, "_read_jsonl_incremental")
     ent = _read_jsonl_entry(path, on_fail=on_fail, tail_ok=bool(getattr(_TAIL_OK, "flag", False)))
     _LAST_ENTRY.ent = ent
     return ent[4] if ent is not None else []
@@ -2849,6 +2915,7 @@ def _read_jsonl_entry(path, on_fail=None, tail_ok=False, tail_from=None):
     (byte offset, record count before it, guard bytes) triple, asks for an entry that holds the records from that
     offset on (the assembly checkpoint's cut, T323 stage 4): an entry whose base is at or before it serves as is; a
     missing or later one is read from the offset after the guard verifies, and a guard mismatch reads whole."""
+    _tail_guard(path, "_read_jsonl_entry")
     path = str(path)
     try:
         st = os.stat(path)
@@ -2883,6 +2950,7 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
     a counted fallback. The same size under a new mtime, over the same inode and a WHOLE entry, is no mismatch by itself:
     the guard and the checksum of the held bytes decide it (kind "touched", counted under `touched`), and the entry keeps
     its gen; under a new inode (a replacement) or over a tail entry (a prefix nothing here proves) it reads from zero."""
+    _tail_guard(path, "_read_jsonl_entry_unlocked")
     path = str(path)
     try:
         st = os.stat(path)
@@ -3023,6 +3091,7 @@ def _read_jsonl_entry_unlocked(path, on_fail=None, tail_ok=False, tail_from=None
 def cached_whole_records(path):
     """The records of the reader's WHOLE entry for `path` when one stands at the file's current stat, else None. The entry is
     not touched (its place in the LRU order stays), so a caller that only looks through it leaves the cache as it found it."""
+    _tail_guard(path, "cached_whole_records")
     path = str(path)
     try:
         st = os.stat(path)
@@ -3044,6 +3113,7 @@ def read_records_detached(path, on_fail=None):
     every reader byte (read_bytes_report), and the read as a whole read on /perf, kind "detached" under its caller. None when
     the file cannot be stat'd, opened or read, after on_fail(error) with the OSError that stopped it when given, so a caller
     can say why (review round three); a read that failed counts no byte and no whole read."""
+    _tail_guard(path, "read_records_detached")
     path = str(path)
     try:
         st = os.stat(path)
@@ -3090,6 +3160,8 @@ class serve_records:
         self.by_path = {str(k): list(v) for k, v in (by_path or {}).items()}
 
     def __enter__(self):
+        for _p in self.by_path:
+            _tail_guard(_p, "serve_records")              # a tail served as a whole file is the one thing the scope exists to stop
         self.prev = getattr(_SERVED_RECORDS, "by_path", None)
         _SERVED_RECORDS.by_path = dict(self.prev or {}, **self.by_path)
         return self
@@ -3145,6 +3217,7 @@ def fold_records(cache, path, init, step, on=None, ckpt=None, drop_after=None):
 
     Lives here (moved from the kernel, 2026-09-03) so the judge's readers can fold too — the
     background-task pairing below is shared by both."""
+    _tail_guard(path, "fold_records")
     key = str(path)
     served = getattr(_SERVED_RECORDS, "by_path", None)
     if served and key in served:                          # the caller's own records (serve_records): folded fresh, nothing kept
@@ -6091,6 +6164,7 @@ def _read_record_at(path, at, uuid):
     walk decides on the record's type, time and provenance. Nor the file's read stripe (2026-10-02): this read fills no
     cache, and under the stripe the comment cut waited, inside its entry's key lock, for a whole hydrate group of the file
     or of a file sharing its stripe, or for a record-cache read."""
+    _tail_guard(path, "_read_record_at")
     off, ln = int(at[0]), int(at[1])
     try:
         with open(path, "rb") as fh:
@@ -9819,6 +9893,19 @@ def asm_rebuild_wait(seen=None, stop=None):
         return _ASM_BG["gen"]
 
 
+def asm_background_wait(stop=None):
+    """Block until the background gate is open (the pusher asleep and no foreground work in flight), then return True; a
+    reader's wait that changes nothing of the gate and claims nothing (the kernel's tail-first shadow, before each of its
+    steps, so it never runs beside a page's build). An event, never a timer: every opening of the gate notifies the
+    condition. `stop`, a threading.Event, ends the wait once set (asm_rebuild_wait_release wakes it); returns False then."""
+    with _ASM_BG_COND:
+        while not (_ASM_BG["idle"] and not _ASM_BG["fg"]):
+            if stop is not None and stop.is_set():
+                return False
+            _ASM_BG_COND.wait()
+        return not (stop is not None and stop.is_set())
+
+
 def asm_rebuild_wait_release():
     """Wake the rebuild starter's wait so it sees its stop (the kernel's loops are stopping)."""
     with _ASM_BG_COND:
@@ -10610,6 +10697,15 @@ def _tail_chains_onto_the_document(leaf_path, doc, assume_childless=False, unwri
             p = p or r.get("logicalParentUuid")
         return p if (p and p != r.get("uuid") and p not in known) else None
 
+    return _tail_forest_reaches(walk_nodes, by_uuid, parent_of, tip_ok, unwritten=unwritten, unwritten_out=unwritten_out)
+
+
+def _tail_forest_reaches(walk_nodes, by_uuid, parent_of, tip, unwritten=None, unwritten_out=None):
+    """Whether every record of `walk_nodes` reaches `tip` through `parent_of` over the records of `by_uuid`: the reachability
+    walk of _tail_chains_onto_the_document, lifted out whole (2026-11-12) so the tail-first window (tail_window) holds a tail
+    to the rule the restore holds one to, by the same code. `tip` None reaches nothing. `unwritten(r)`, when given, names the
+    parent of `r` that no record holds, and `unwritten_out` learns those parents as the restore's docstring says; the window
+    passes neither, so its walk stops at the first chain that fails."""
     reaches = {}                                          # uuid -> True when its parent chain reaches the proven tip, "u" when it
     #                                                       fails through a parent not written yet, False when it fails otherwise
     missing = set()                                       # the unwritten parents met on chains that fail
@@ -10623,13 +10719,13 @@ def _tail_chains_onto_the_document(leaf_path, doc, assume_childless=False, unwri
                 ok = False; break                         # a cycle (the set beside the path keeps a backwards-written tail linear)
             if u is not None:
                 path.append(u); on_path.add(u)
-            miss = unwritten(cur)
+            miss = unwritten(cur) if unwritten is not None else None
             if miss is not None:
                 last_miss = len(path) - 1; misses.append(miss)
             p = parent_of(cur)
             if p is None:
                 ok = False; break                         # a root that is not the tip: the tail re-roots the graph
-            if p == tip_ok:
+            if p == tip:
                 ok = True; break
             if p in by_uuid:
                 cur = by_uuid[p]; continue
@@ -11000,6 +11096,7 @@ def hydrate(atoms, rompuuid=None, by=None):
             raise LazyBodyRead("atom %s: no file known for fsid %s" % (u, a.get("fsid")))
         by_file.setdefault(path, []).append(a)
     for path, group in by_file.items():
+        _tail_guard(path, "hydrate")                # a lazy body is a whole parse's atom: none is read inside a tail-first scope
         # the file's read stripe is held across the group: two threads hydrating the same atoms (the judges' unit text
         # and the frame's markdown at a boot) would both miss the memo and both read; the second now waits and hits it
         with _READ_STRIPES[hash(path) % len(_READ_STRIPES)], open(path, "rb") as fh:
@@ -11070,6 +11167,7 @@ def _assemble(leaf_path, candidate_files, links, rompuuid, postal_index, sdk_hum
     "private" road: a whole parse whose entry is appended there and never installed, under no key lock, so the leaf's
     own entry and every reader of it are left as they stand (the document refresh, asm_refresh_document). `installed_out`,
     when a list, takes the whole entry the full road installs (_asm_full)."""
+    _tail_guard(leaf_path, "_assemble")
     def _mode(m):
         if mode_out is not None:
             mode_out.append(m)
@@ -11260,6 +11358,7 @@ def _file_head_t(path):
     reader byte, and memoized by realpath once found. Each line is decoded as transcript_head and the reader decode it, with
     bad bytes replaced, so a head record holding an invalid byte is the head here too, as it is to the candidate rule (review
     round two, 2026-10-03: raw bytes made json.loads refuse it and the floor fell to the next record's stamp)."""
+    _tail_guard(path, "_file_head_t")
     key = os.path.realpath(str(path))
     hit = _FILE_HEAD_T.get(key)
     if hit is not None:
@@ -11324,6 +11423,329 @@ def _orphan_rows_from(srows, candidate_files):
     return [r for r in srows if not (isinstance(r, dict) and isinstance(r.get("orphanReply"), dict) and (r.get("t") or 0) < floor)]
 
 
+# ───────────────────────── tail-first: the window (an exact boundary, or a refusal) ─────────────────────────
+# The first of the three mechanisms (the scope above is the second, the kernel's shadow comparison the third). A tail parse
+# is equal to the whole parse over the window only when nothing before the window's first record can change how a record
+# inside it is kept, emitted, placed or grouped, and a naive tail is not: of five windows cut at a prompt in the survey's lab,
+# one kept two abandoned turns of a rewound branch, because a branch whose fork point lies before the cut ends at a parent
+# the tail does not hold and so reads as a broken chain, which the parse keeps on principle. So tail_window accepts a start
+# record B only when every way the earlier file reaches into the tail is ruled out by the records themselves, and otherwise
+# says why not. Each rule names the parser fact it closes:
+#   the kept set        every tail record reaches B through tail records (_tail_forest_reaches, the restore predicate's own
+#                       walk): no branch forked before B, no broken chain, no second root; and no uuid is written twice
+#   a turn's start      B is a person's prompt whose chain runs to the record P written before it, directly or across the
+#                       harness's turn-end bookkeeping (_tail_bookkeeping: records the parse keeps on the chain and reads
+#                       nothing from, which the CLI writes after nearly every reply), each of them chained onto the one
+#                       before; and P is an assistant record whose turn ended: the whole parse opens a turn at B, as a
+#                       parse that begins there does
+#   chronological order every tail stamp parses and is at or after B's, and P's is before it: the whole parse sorts the tail
+#                       after everything earlier, so the verbatim re-write dedup (same second, same text) and a mid-turn
+#                       prompt's send time cannot pair a tail record with an earlier one
+#   the replay burst    no compaction record in the tail, and P, an assistant record, closed any burst an earlier one opened
+#   carried links       a tool result, a skill payload and a slash command's echo name a record of the tail, never an earlier
+#                       one (tool-result-before-window, carry, command-twin)
+# What the records in hand cannot show is left to the gates past this one (a pending rollback, another transcript file of the
+# session, a salvaged reply: the kernel's and tail_parse's) and, for a clock that stepped backwards further back than the
+# bytes read here, to the shadow's comparison, which is why step 1 serves nothing.
+_TAIL_SPAN0 = 256 * 1024          # the first read back from the end of the file
+_TAIL_SPAN_MAX = 32 * 1024 * 1024  # the most a search reads; a file with no boundary in that much refuses ("no-boundary")
+_TAIL_TRIES = 48                  # prompts a search looks at (the sync-point test, a few field reads each)
+_TAIL_DEEP_TRIES = 8              # of those, how many may run the checks that walk the whole tail
+_TAIL_FINAL = ("compaction-in-window", "uuid-repeat")   # refusals no earlier boundary can lift: its tail holds this one's
+_TAIL_BOOKKEEPING = ("stop_hook_summary", "turn_duration", "away_summary")   # the system subtypes _emit_fold skips by name
+
+
+class TailWindow:
+    """A window tail_window accepted: `records`, the transcript's records from the boundary record B (`uuid`, stamped `t`) to
+    the end of the file as it stood (`start`..`end` in bytes, `stat` the (mtime ns, size, inode) the read was taken at), the
+    reply written before B (`prev_uuid`, `prev_t`, `prev_model`: the turn-ending assistant record, whose time and model
+    are the only two facts of the earlier file a chat build carries across the boundary) and `n`, the user and assistant
+    records it holds. `records` is the pass for parse_session's tail road inside tail_scope: that list, by identity."""
+    __slots__ = ("leaf", "key", "keys", "start", "end", "stat", "records", "uuid", "t", "prev_uuid", "prev_t", "prev_model", "n")
+
+    def __init__(self, leaf, start, end, stat, records, uuid, t, prev_uuid, prev_t, prev_model, n):
+        self.leaf = str(leaf)
+        self.key = os.path.realpath(self.leaf)
+        self.keys = {self.key}
+        self.start, self.end, self.stat, self.records = start, end, stat, records
+        self.uuid, self.t, self.prev_uuid, self.prev_t, self.prev_model, self.n = uuid, t, prev_uuid, prev_t, prev_model, n
+
+    def holds(self, path):
+        """Whether `path` is a file this window's scope refuses to read whole: the leaf, or one named through `also`."""
+        p = str(path)
+        return p == self.leaf or os.path.realpath(p) in self.keys
+
+    def also(self, paths):
+        """Name the session's other transcript files, so the scope refuses a whole read of them too."""
+        for p in paths or ():
+            self.keys.add(os.path.realpath(str(p)))
+        return self
+
+
+def _tail_prompt_shaped(r):
+    """Whether record `r` can start a window: a person's prompt as plain text. Not a tool result, a harness record, a command
+    wrapper or its echo (text opening with a tag or a slash), a stop record or a notice (a bracket), which the parse may
+    skip, fold into the running turn or pair with an earlier record."""
+    if r.get("type") != "user" or not r.get("uuid"):
+        return False
+    if r.get("isMeta") or r.get("isSidechain") or r.get("isCompactSummary") or r.get("isVisibleInTranscriptOnly"):
+        return False
+    if r.get("sourceToolUseID") or r.get("toolUseResult") is not None:
+        return False
+    blocks = _content(r.get("message"))
+    if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks):
+        return False
+    txt = _text_of(blocks).strip()
+    return bool(txt) and not txt.startswith(("<", "[", "/", "Caveat:"))
+
+
+def _tail_parent(r):
+    """A record's parent as the graph reads it (FileAdapter._ingest): parentUuid, else the compaction stitch's
+    logicalParentUuid; a self link is a root."""
+    p = r.get("parentUuid") or r.get("logicalParentUuid")
+    return None if p == r.get("uuid") else p
+
+
+def _tail_bookkeeping(r):
+    """Whether uuid-bearing record `r` is turn-end bookkeeping: a record of the main conversation the parse keeps on the
+    chain and reads nothing else from. A system record of one of the subtypes the emit loop skips by name (the stop hook's
+    summary, the turn's duration, the recap written for a person who was away), or an attachment that is no queued_command
+    (FileAdapter._ingest reads that kind alone: a spliced message). Never a compaction record, an API error's notice or a
+    command's, which the parse does read."""
+    if r.get("isSidechain") or r.get("logicalParentUuid"):
+        return False
+    if r.get("type") == "system":
+        return r.get("subtype") in _TAIL_BOOKKEEPING
+    return r.get("type") == "attachment" and (r.get("attachment") or {}).get("type") != "queued_command"
+
+
+def _tail_sync_point(recs, ts, i, whole):
+    """(index of the reply before B, None) when recs[i] starts a turn the whole parse starts too, else (None, reason): its
+    chain runs to the uuid-bearing record written before it, straight or across turn-end bookkeeping written between the two
+    (each such record the parent of the next), and that record is an assistant record of the main conversation that ended
+    its turn and names its model, stamped before B. On real transcripts' shapes the bookkeeping is the common case: of 313
+    prompts in 40 transcripts (2026-11-12, types and links only), 22 followed their reply directly and 251 across one to
+    three such records."""
+    b = recs[i]
+    j, child = i - 1, b
+    while j >= 0:
+        r = recs[j]
+        if r.get("uuid"):
+            if not _tail_bookkeeping(r):
+                break
+            if child.get("parentUuid") != r["uuid"]:
+                return None, "parent-not-predecessor"
+            child = r
+        j -= 1
+    if j < 0:
+        return None, ("whole-file" if whole else "no-predecessor")
+    p = recs[j]
+    if p.get("type") != "assistant" or p.get("isSidechain") or p.get("isApiErrorMessage"):
+        return None, "predecessor-not-assistant"
+    msg = p.get("message") if isinstance(p.get("message"), dict) else {}
+    if msg.get("stop_reason") not in END_STOPS:
+        return None, "turn-open"
+    if not msg.get("model"):
+        return None, "predecessor-model"
+    if child.get("parentUuid") != p.get("uuid"):
+        return None, "parent-not-predecessor"
+    if ts[i] is None or ts[j] is None or not ts[j] < ts[i]:
+        return None, "clock"
+    return j, None
+
+
+def _tail_refusal(recs, ts, i, j):
+    """Why the tail recs[i:] is not provably the whole parse's (a reason), or None when every rule holds. `j` is the reply
+    before B (_tail_sync_point). The reasons are tail_window's, in the order tested."""
+    b, bt, pt = recs[i], ts[i], ts[j]
+    tail = recs[i:]
+    by_uuid, tool_ids, wrappers = {}, set(), {}
+    for k, r in enumerate(tail, i):
+        typ = r.get("type")
+        if (typ == "system" and r.get("subtype") == "compact_boundary") or r.get("isCompactSummary") is True \
+                or r.get("logicalParentUuid"):
+            return "compaction-in-window"
+        u = r.get("uuid")
+        if u:
+            if u in by_uuid:
+                return "uuid-repeat"
+            by_uuid[u] = r
+        if typ == "assistant":
+            for blk in _content(r.get("message")):
+                if isinstance(blk, dict) and blk.get("type") == "tool_use" and blk.get("id"):
+                    tool_ids.add(blk["id"])
+        elif typ == "user":
+            btext = _text_of(_content(r.get("message"))) or ""
+            if is_skill_load_wrapper(btext):
+                continue
+            m = COMMAND_NAME_RE.match(btext) or (COMMAND_NAME_ANY_RE.search(btext) if CMD_WRAP_RE.match(btext) else None)
+            if m:                                        # the pre-pass's own matcher (FileAdapter._prepass, the twins map)
+                name = m.group(1).strip() or "/?"
+                name = name if name.startswith("/") else "/" + name
+                if name == "/compact":
+                    return "compaction-in-window"        # a /compact episode can adopt a boundary written before the window
+                if r.get("promptId"):
+                    wrappers.setdefault(r["promptId"], set()).add(name)
+    for k in range(i):                                   # the records read before B: none shares a uuid with the tail, and
+        u = recs[k].get("uuid")                          #  none is stamped after P (it would sort between P and the window)
+        if u:
+            if u in by_uuid:
+                return "uuid-repeat"
+            if k > j:                                    # the bookkeeping between P and B: no atom to sort, and stamped
+                if ts[k] is None or not pt <= ts[k] <= bt:   # from P's second to B's all the same
+                    return "clock"
+            elif ts[k] is not None and ts[k] > pt:
+                return "clock"
+    for k, r in enumerate(tail, i):
+        if r.get("uuid"):
+            if ts[k] is None or ts[k] < bt:
+                return "stamp-floor"
+        elif r.get("type") == "attachment":
+            t2 = parse_z(r.get("timestamp"))
+            if t2 is not None and t2 < bt:
+                return "stamp-floor"
+    nodes = [r for r in tail if r.get("uuid") and r is not b]
+    if not _tail_forest_reaches(nodes, by_uuid, _tail_parent, b["uuid"]):
+        return "chain"
+    for r in tail:
+        typ = r.get("type")
+        if typ == "user":
+            blocks = _content(r.get("message"))
+            has_result = False
+            for blk in blocks:
+                if isinstance(blk, dict) and blk.get("type") == "tool_result":
+                    has_result = True
+                    if blk.get("tool_use_id") not in tool_ids:
+                        return "tool-result-before-window"
+            txt = _text_of(blocks).strip()
+            if r.get("promptId") and not has_result and txt.startswith("/") and not any(
+                    txt == n or txt.startswith(n + " ") for n in wrappers.get(r["promptId"], ())):
+                return "command-twin"                    # an echo only a wrapper written before the window could drop
+        for key in ("sourceToolUseID", "parentToolUseID"):
+            if r.get(key) and r[key] not in tool_ids:
+                return "carry"
+        if r.get("sourceToolAssistantUUID") and r["sourceToolAssistantUUID"] not in by_uuid:
+            return "carry"
+    return None
+
+
+def tail_window(leaf, min_events=1, max_bytes=None):
+    """(window, None) for the tail of transcript `leaf` from the boundary nearest its end that holds at least `min_events`
+    user and assistant records and passes every rule above, or (None, reason) when none does: the search REFUSES, it never
+    relaxes a rule. Reads back from the end of the file, 256 KiB and then four times as much again while a boundary may
+    still lie earlier, to `max_bytes` (32 MiB when not given); each read is positioned and counted like every reader byte,
+    and touches no reader entry, memo or checkpoint. The reason is the nearest candidate's: no-prompt and too-short (nothing
+    to start at), whole-file (the boundary is the file's first record: the whole parse is the tail parse), no-predecessor,
+    predecessor-not-assistant, turn-open, predecessor-model, parent-not-predecessor, clock, uuid-repeat, stamp-floor, chain,
+    compaction-in-window, tool-result-before-window, carry, command-twin, no-boundary (the tries or the bytes ran out),
+    and empty or unreadable for the file itself."""
+    leaf = str(leaf)
+    try:
+        st = os.stat(leaf)
+    except OSError:
+        return None, "unreadable"
+    size = st.st_size
+    cap = min(size, int(max_bytes or _TAIL_SPAN_MAX))
+    if cap <= 0:
+        return None, "empty"
+    recs, offs, ts = [], [], []       # the records read so far in file order, each one's byte offset and parsed stamp
+    lo, end = size, None              # [lo, end): the bytes read; `end` is past the last complete line of the first read
+    span = min(cap, _TAIL_SPAN0)
+    rejected, why = set(), None       # offsets of boundaries a rule refused (more bytes cannot lift it), the nearest one's reason
+    tries = deep = 0
+    while True:
+        at = max(0, size - span)
+        try:
+            with open(leaf, "rb") as fh:
+                if at > 0:
+                    fh.seek(at - 1)
+                    fh.readline()     # to the first line starting at or after `at` (a line that starts there is kept whole)
+                    at = fh.tell()
+                o, chunk, nread = [], [], 0
+                if at < lo:
+                    chunk, c_end, nread = _scan_jsonl_stream(fh, at, o, limit=lo - at)
+                    if end is None:
+                        end = c_end
+        except OSError:
+            return None, "unreadable"
+        if nread:
+            _count_read(leaf, nread)
+        if at < lo:
+            keep = [x for x, r in enumerate(chunk) if isinstance(r, dict)]
+            recs[:0] = [chunk[x] for x in keep]
+            offs[:0] = [o[2 * x] for x in keep]
+            ts[:0] = [parse_z(chunk[x].get("timestamp")) if chunk[x].get("uuid") else None for x in keep]
+            lo = at
+        whole = lo == 0
+        n, prompts = 0, 0
+        for i in range(len(recs) - 1, -1, -1):
+            r = recs[i]
+            if r.get("type") in ("user", "assistant"):
+                n += 1
+            if not _tail_prompt_shaped(r):
+                continue
+            prompts += 1
+            if n < min_events or offs[i] in rejected:
+                continue
+            if tries >= _TAIL_TRIES:
+                return None, why or "no-boundary"
+            tries += 1
+            j, reason = _tail_sync_point(recs, ts, i, whole)
+            if reason is None:
+                if deep >= _TAIL_DEEP_TRIES:
+                    return None, why or "no-boundary"
+                deep += 1
+                reason = _tail_refusal(recs, ts, i, j)
+                if reason is None:
+                    p = recs[j]
+                    return TailWindow(leaf, offs[i], end, (st.st_mtime_ns, st.st_size, st.st_ino), recs[i:], r["uuid"], ts[i],
+                                      p["uuid"], ts[j], p["message"]["model"], n), None
+            if reason == "no-predecessor":
+                continue                                 # the record before it is not in the bytes read yet: the next read's
+            why = why or reason
+            if reason in _TAIL_FINAL or reason == "whole-file":
+                return None, why
+            rejected.add(offs[i])
+        if whole or span >= cap:
+            if why is None:
+                why = "no-prompt" if not prompts else "too-short" if whole else "no-boundary"
+            return None, why
+        span = min(cap, span * 4)
+
+
+def tail_parse(win, rompuuid=None, states=None, postal_log=None, now=None, sdk_human=False, name=None):
+    """The Session tree of window `win` alone, parsed inside its scope (parse_session's tail road over the window's own
+    records: no candidate file, lineage file, document or cache is read or written), or TailRefused: a salvaged reply the
+    window cannot place (orphan-marker, parse_session's gate), or a parse that did not open its first turn at the boundary
+    record (boundary-not-opener: the record reads as no prompt, so the whole parse would fold it into the turn before)."""
+    with tail_scope(win):
+        tree = parse_session(win.leaf, rompuuid=rompuuid, name=name, states=states, postal_log=postal_log, now=now,
+                             sdk_human=sdk_human, tail_records=win.records)
+    turns = tree.get("turns") or []
+    atoms = turns[0]["atoms"] if turns else []
+    if not atoms or atoms[0].get("uuid") != win.uuid or (turns[0].get("trigger") or {}).get("uuid") != win.uuid:
+        raise TailRefused("boundary-not-opener")
+    return tree
+
+
+def _tail_orphan_gate(srows, landed, win):
+    """Refuse (TailRefused "orphan-marker") a tail-first parse when a salvaged-reply marker stamped at or after the reply
+    before the window names a reply the window's records did not land. The whole parse places such a marker by reading what
+    the transcript kept around its time, on any branch, and the tail holds only its own records: every marker the gate lets
+    through landed inside the window, where both parses skip it by its uuid, or is one synthesize_orphans skips on sight,
+    so the tail synthesizes none. An earlier marker is the whole parse's, in a turn before the window."""
+    for r in srows or ():
+        if not isinstance(r, dict) or not r.get("t") or not isinstance(r.get("orphanReply"), dict):
+            continue
+        if int(r["t"]) < win.prev_t:
+            continue
+        txt = (r["orphanReply"].get("text") or "").strip()
+        if not txt or txt.startswith("API Error:") or txt == "(no content)":
+            continue
+        if (r["orphanReply"].get("uuid") or "") not in landed:
+            raise TailRefused("orphan-marker")
+
+
 def _in_the_foreground(parse):
     """`parse` (parse_session) as foreground work for the background gate (asm_foreground, _ASM_BG): no document rebuild starts
     while a page's parse runs, and a running one waits at its next chunk point until it is done. The rebuild's own parse (the
@@ -11371,6 +11793,11 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
                      _thread_tail_parse), never the parent's history the fork copied in front of them.
     """
     leaf_path = Path(leaf_path)
+    _tf = getattr(_TAIL_SCOPE, "win", None)         # a tail-first scope over this leaf: only the window's own records parse
+    if _tf is not None and not _tf.holds(leaf_path):
+        _tf = None
+    if _tf is not None and tail_records is not _tf.records:
+        raise WholeHistoryRead("parse_session inside the tail-first scope")
     if dir is None:
         dir = str(leaf_path.parent)
     if rompuuid is None:
@@ -11394,6 +11821,8 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
         ad.sdk_human = sdk_human
         atoms = ad.atoms(rompuuid, postal_index)
         landed, cut_t, skill_loads, pre_turns = ad.landed_text_uuids(), None, dict(getattr(ad, "skill_loads", None) or {}), []
+        if _tf is not None:
+            _tail_orphan_gate(_srows, landed, _tf)  # a salvaged reply the window cannot place refuses the window
         _asm_stat("tail")
         if asm_mode_out is not None:
             asm_mode_out.append("tail")
@@ -11419,10 +11848,11 @@ def parse_session(leaf_path, rompuuid=None, name=None, color="#888888", dir=None
     # salvaged replies never predate the conversation the parse reads (2026-10-03): the floor is the first record of its own
     # candidate files, the same number whatever road served the atoms (whole, fold, restore, refresh), so it never races the
     # kernel's episode tick. The tail road reads no candidate file and has no floor
-    orphans = synthesize_orphans(_orphan_rows_from(_srows, candidate_files if tail_records is None else None), atoms,
-                                 landed_text_uuids=landed, rompuuid=rompuuid,
-                                 pre=(pre_turns if pre_turns else None), t_floor=t_tail0 if pre_turns else None,
-                                 overlay=_tail_idle)
+    orphans = [] if _tf is not None else \
+        synthesize_orphans(_orphan_rows_from(_srows, candidate_files if tail_records is None else None), atoms,
+                           landed_text_uuids=landed, rompuuid=rompuuid,
+                           pre=(pre_turns if pre_turns else None), t_floor=t_tail0 if pre_turns else None,
+                           overlay=_tail_idle)                # (a tail-first window synthesizes none: _tail_orphan_gate)
     if pre_turns:
         orphans = [a for a in orphans if t_tail0 is not None and a["t"] >= t_tail0]
     #                                            # salvaged replies FIRST: they are real atoms the turn

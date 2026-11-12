@@ -1425,6 +1425,7 @@ class _PerfStats:
                 #                                            and every refusal of that road, counted
                 "asmIndex": em.asm_index_stats(),          # the lazy index (T323 stage 4c): atoms built, by caller, resident
                 "chatPages": dict(_PAGE_STATS),   # the pre-floor history pages (T323 stage 4b): hits, misses, evictions, resident
+                "tailFirst": _tail_first_report(),   # the tail-first shadow (2026-11-12): attempts, refused and skipped by reason, matched, mismatched, ms
                 "repoIndex": _repo_index_stats()}   # the path links' repo listing, taken off the pusher (2026-10-07): refreshes, forks, time
 
 
@@ -39473,7 +39474,13 @@ def _stamp_agents(by_tool, scan_path, tm, spawned_at, meta_path=None):
                 rec["agents"].append((mp, scan_path, tid, not own_aid, aid, str(ap) if ap is not None else None, akey, None))
             continue
         if rows is None:
-            rows = {r["id"]: r for r in _bg_scan_all_cached(scan_path)}
+            rows = _piece("agentLaunches", lambda: {r["id"]: r for r in _bg_scan_all_cached(scan_path)})
+        if isinstance(rows, _Pending):
+            # a tail-first build (TAIL-FIRST PAGES): the launch scan is a fold over the whole transcript, which the scope
+            # refused, so the card says what it cannot know yet (its report, whether the agent still runs) and guesses nothing
+            ev["pending"] = [rows["pending"]]
+            out[tid] = "pending"
+            continue
         row = rows.get(tid)
         if row is not None and row.get("status") != "running":
             if row.get("result"):
@@ -49353,6 +49360,421 @@ def _provisional_row(sid, name, light):
             "ledger": _provisional_ledger(sid), "provisional": True}
 
 
+# ══ TAIL-FIRST PAGES, step 1: THE SHADOW (2026-11-12) ══════════════════════════════════════════════════════════════════════
+# After a restart, a session with no saved snapshot waits for a parse of its whole transcript before its page shows a thing.
+# The idea (the user 2026-11-12, who wanted pages to stay responsive after a restart and approved it on one condition: no
+# consistency problem, kept out by a mechanism rather than by care): show the recent turns from the transcript's END first,
+# then fill the rest in. This step shows nothing to anyone. It builds that provisional page beside the real one and reports
+# every difference, so serving it is a decision made on a count of zero.
+#
+# CONSISTENT means: for a window that starts at boundary record B, the provisional build's events from B's event on equal
+# the whole build's events from B's event on, event for event and field for field, except the fields of a piece the
+# provisional build DECLARES pending. Four mechanisms, each closing one way that could fail:
+#   1. em.tail_window: an exact boundary, or a named refusal. A window is accepted only when the records in hand prove the
+#      whole parse would emit them the same way (every record chains onto B, B opens a turn right after a reply that ended
+#      one, no compaction, replay or carried state crosses B). Refusing costs speed, never correctness.
+#   2. em.tail_scope: inside it the shared transcript readers do not answer for the window's file AT ALL, memo hits
+#      included (the check sits ahead of every cache lookup), and raise em.WholeHistoryRead, a BaseException so that no
+#      `except Exception` on the way up can turn a refused read into a quiet default. The provisional build is the window's
+#      own records or nothing.
+#   3. _piece: the one place that exception is caught. A piece the tail cannot derive becomes {"pending": name}: a
+#      placeholder a reader can see, never a guess.
+#   4. The shadow (_tail_first_shadow_job): after a real build, the same window rendered both ways and compared; what the
+#      first three cannot prove from the records in hand (a clock that stepped back before the bytes read) is measured.
+# Nothing here writes a parse, a fold entry, a built-chat cache or a render floor, and nothing reaches a client.
+TAIL_FIRST_FILE = "tail-first-shadow"         # a bare value under the state directory, beside session-hosts: an on word runs the
+_TAIL_FIRST_ON_WORDS = ("on", "1", "true", "yes", "shadow")   # shadow; no file, an empty one or any other word is off (the default)
+_TAIL_FIRST_MIN_EVENTS = 40                   # the window the shadow asks for: user and assistant records from the boundary on
+_TAIL_FIRST_MAX_BYTES = 8 * 1024 * 1024       # ...and the most of the file's end one comparison reads looking for its boundary
+_TAIL_FIRST_QUEUE_MAX = 64                    # sessions waiting for a comparison; the oldest waiting one is dropped past it
+# Pending in every provisional frame of this step. The first four are the whole parse's by nature (the count of the turns
+# before the window, the outline over all of them, the first turn's time, the turns above the window); the last three are
+# tail-derivable and left for the step that serves a page, their code being inline in the live frame's assembly.
+_TAIL_FIRST_ALWAYS = ("turnNumbers", "ledger", "firstSeen", "scrollBack", "status", "queued", "liveTail")
+# The event fields a pending piece owns: on an event that names the piece in its `pending`, these are not compared.
+_TAIL_FIRST_FIELDS = {"agentLaunches": ("output", "isError", "agentRunning", "agentGist", "running"),
+                      "taskOutputs": ("taskOutputs",), "eventKey": ("uuid", "key")}
+_TAIL_FIRST = {"mode": "off", "modeKey": object()}
+_TAIL_FIRST_STATS = {"offered": 0, "dropped": 0, "attempts": 0, "refused": {}, "skipped": {}, "matched": 0, "mismatched": 0,
+                     "ms": 0.0, "msMax": 0.0}
+_TAIL_FIRST_LOCK = threading.Lock()           # the counters and the queue below; never held across a read or a build
+_TAIL_FIRST_QUEUE = collections.OrderedDict() # sid -> True, in the order offered; an offer for a waiting sid changes nothing
+_TAIL_FIRST_WAKE = threading.Event()          # set by an offer and by the loops' stop: the shadow thread's one wait
+_TAIL_FIRST_SAID = set()                      # (sid, the differing fields): a difference is reported once, counted every time
+
+
+class _Pending(dict):
+    """The placeholder _piece hands back for a piece the tail could not derive: {"pending": name}. A dict, so it serializes as
+    the placeholder it is; a type of its own, so a reader tells it from a real value that happens to be a dict."""
+    __slots__ = ()
+
+
+def _piece(name, fn):
+    """`fn()`, or {"pending": name} when it reached for the transcript's whole history inside a tail-first scope
+    (em.WholeHistoryRead, raised by the shared readers; em.tail_scope). Outside a scope it is `fn()` and nothing else, so a
+    builder both kinds of build share wraps its whole-history read once and the real build is unchanged."""
+    try:
+        return fn()
+    except em.WholeHistoryRead:
+        return _Pending(pending=name)
+
+
+class _TailFirst:
+    """build_session's `tail_first` argument: the window (an em.TailWindow) and, for the reference build, the whole parse's
+    tree and the index of the boundary's turn in it. No tree: the provisional build."""
+    __slots__ = ("win", "tree", "k")
+
+    def __init__(self, win, tree=None, k=0):
+        self.win, self.tree, self.k = win, tree, k
+
+
+def _tail_first_mode():
+    """The switch, STATE/tail-first-shadow: "shadow" when the file says an on word, else "off". Statted per ask and read
+    again only when its stat moves, so a flip needs no restart; a missing or unreadable file is off."""
+    p = jd.STATE / TAIL_FIRST_FILE
+    try:
+        st = os.stat(p)
+        key = (str(p), st.st_mtime_ns, st.st_size, st.st_ino)
+    except OSError:
+        key = (str(p),)
+    if key != _TAIL_FIRST["modeKey"]:
+        raw = ""
+        if len(key) > 1:
+            try:
+                raw = p.read_text(encoding="utf-8").strip().lower()
+            except (OSError, ValueError):
+                raw = ""
+        _TAIL_FIRST["mode"] = "shadow" if raw in _TAIL_FIRST_ON_WORDS else "off"
+        _TAIL_FIRST["modeKey"] = key
+    return _TAIL_FIRST["mode"]
+
+
+def _tail_first_count(key, reason=None, ms=None):
+    with _TAIL_FIRST_LOCK:
+        if reason is None:
+            _TAIL_FIRST_STATS[key] += 1
+        else:
+            _TAIL_FIRST_STATS[key][reason] = _TAIL_FIRST_STATS[key].get(reason, 0) + 1
+        if ms is not None:
+            _TAIL_FIRST_STATS["ms"] += ms
+            _TAIL_FIRST_STATS["msMax"] = max(_TAIL_FIRST_STATS["msMax"], ms)
+
+
+def _tail_first_report():
+    """/perf `tailFirst`: the switch, the sessions offered and dropped unlooked-at, the comparisons attempted, those refused
+    (no exact window: by tail_window's or the build's reason) and skipped (nothing to compare against: by reason), the ones
+    that matched and mismatched, and the shadow's own time (ms summed, the longest one)."""
+    with _TAIL_FIRST_LOCK:
+        out = dict(_TAIL_FIRST_STATS, refused=dict(_TAIL_FIRST_STATS["refused"]), skipped=dict(_TAIL_FIRST_STATS["skipped"]),
+                   queued=len(_TAIL_FIRST_QUEUE))
+    out["mode"] = _TAIL_FIRST["mode"]
+    out["ms"], out["msMax"] = round(out["ms"], 1), round(out["msMax"], 1)
+    return out
+
+
+def _tail_first_offer(sid):
+    """The pusher's one touch: a session whose chat it just built joins the shadow's queue. A stat of the switch when the
+    shadow is off; a dict write when it is on. Never raises, never waits, holds nothing of the build's."""
+    try:
+        if _tail_first_mode() != "shadow":
+            return False
+        with _TAIL_FIRST_LOCK:
+            _TAIL_FIRST_STATS["offered"] += 1
+            if sid not in _TAIL_FIRST_QUEUE:
+                _TAIL_FIRST_QUEUE[sid] = True
+                while len(_TAIL_FIRST_QUEUE) > _TAIL_FIRST_QUEUE_MAX:
+                    _TAIL_FIRST_QUEUE.popitem(last=False)
+                    _TAIL_FIRST_STATS["dropped"] += 1
+        _TAIL_FIRST_WAKE.set()
+        return True
+    except Exception:
+        return False
+
+
+def _tail_first_parse(win, sid, now):
+    """The window's own parse, over the inputs _parse hands the whole one (the states log, the postal log, the owner bit)."""
+    return em.tail_parse(win, rompuuid=sid, states=str(jd.STATE / "states" / (sid + ".jsonl")), postal_log=str(jd.MESSAGES),
+                         now=now, sdk_human=_display_sdk_human(sid))
+
+
+def _tail_first_store_gate(win, orphans, cuts, tree):
+    """Refuse (em.TailRefused) a provisional build whose side stores hold a row at the boundary that only the turns before
+    the window can place: `orphan-marker`, a salvaged reply stamped at or after the record before the boundary whose uuid
+    the window's records did not land; `spend-cut-at-boundary`, a cut stamped from that record up to the boundary."""
+    landed = set(tree.get("landedTextUuids") or ())
+    for o in orphans:
+        if (o.get("t") or 0) >= win.prev_t and not (o.get("uuid") and o["uuid"] in landed):
+            raise em.TailRefused("orphan-marker")
+    for c in cuts:
+        if win.prev_t <= int(c["t"]) < win.t:
+            raise em.TailRefused("spend-cut-at-boundary")
+
+
+def _tail_first_todo(sid, fsid, tree):
+    """The to-do piece: the task store's own answer when the store is named after the session. A store that must be FOUND
+    is found by joining the transcript's whole task record (_task_store_resolve), which a tail does not hold."""
+    if _task_store_known(fsid) is not None:
+        return _read_task_store(fsid, None)
+    if tree is None or em.tail_scope_window() is not None:
+        raise em.WholeHistoryRead("the task store's content join inside the tail-first scope")
+    return _read_task_store(fsid, _fold_tasks(tree, sid))
+
+
+def _tail_first_pieces(sid, leaf, live_map, tree, only=None):
+    """The parts of a chat frame that are not its events, each through _piece: FROM STORES (todo, episodes, forks, flags,
+    cwd, docs: real in a tail-first scope unless the store's answer itself needs the transcript), and FOLD-CHECKPOINTED
+    (bgTasks, system: a fold over the whole transcript, refused by the scope in this step, so pending). `only`: the names
+    to compute (the reference computes the ones the provisional answered, and pays for no other)."""
+    fsid = os.path.basename(str(leaf)).rsplit(".", 1)[0]
+
+    def forks():
+        ff = (_thread_reg(sid) or {}).get("forkedFrom")
+        be = _sdk()
+        kids = (be.fork_children().get(sid) if be and hasattr(be, "fork_children") else None) or None
+        return {"from": [str(ff.get("sid")), str(ff.get("cut") or "")] if isinstance(ff, dict) and ff.get("sid") else None,
+                "children": kids}
+
+    def system():
+        meta = _session_meta(str(leaf))
+        return {k: meta.get(k) or "" for k in ("gitBranch", "version", "permissionMode", "lastEditPath")}
+    fns = {"todo": lambda: _tail_first_todo(sid, fsid, tree),
+           "episodes": lambda: len(jd.episode_rows(sid)),
+           "forks": forks,
+           "flags": lambda: dict(_mail_off_fields(sid), hideFromFeed=_session_flag(sid, "hideFromFeed"),
+                                 notifyRaw=_session_flag_raw(sid, "notify")),
+           "cwd": lambda: _tilde(_session_cwd(sid, path=str(leaf))),
+           "docs": lambda: _claudemd_docs(_session_cwd(sid, path=str(leaf))),
+           "bgTasks": lambda: _bg_tasks(str(leaf), _sdk_spawned_at(sid), live=(live_map.get(str(sid)) or {}).get("bgTasks"), sid=sid),
+           "system": system}
+    return {name: _piece(name, fn) for name, fn in fns.items() if only is None or name in only}
+
+
+def _tail_first_frame(sid, now, live_map, win):
+    """The PROVISIONAL chat frame of window `win`: build_session's tail-first build and the frame's other pieces, all inside
+    the window's scope, with `provisional`: the names of every piece that is a placeholder in it. Produced by the shadow
+    alone; kept nowhere. Raises em.TailRefused when the window cannot be built exactly, and lets an em.WholeHistoryRead no
+    _piece caught through (a whole-history read nobody classified: the caller reports it)."""
+    with em.tail_scope(win):
+        m = build_session(sid, now, live_map, tail_first=_TailFirst(win))
+        if m is None:
+            raise em.TailRefused("no-session")
+        pieces = _tail_first_pieces(sid, win.leaf, live_map, None)
+    names = set(_TAIL_FIRST_ALWAYS)
+    for e in m["events"]:
+        names.update(e.get("pending") or ())
+    names.update(v["pending"] for v in pieces.values() if isinstance(v, _Pending))
+    return dict(m, wm={"leaf": win.leaf, "tail": [win.stat[0], win.stat[1]], "from": win.start}, provisional=sorted(names),
+                **pieces)
+
+
+def _tail_first_reference(sid, now, live_map, win, tree, k, names):
+    """The whole build's answer for the same window: the stored tree rendered from the boundary's turn `k`, and the pieces
+    `names` read outside any scope."""
+    m = build_session(sid, now, live_map, tail_first=_TailFirst(win, tree, k))
+    if m is None:
+        raise em.TailRefused("no-session")
+    return dict(m, **_tail_first_pieces(sid, win.leaf, live_map, tree, only=names))
+
+
+def _tail_first_diff(prov, ref, win, k):
+    """Every difference between a provisional frame and its reference that no declared pending piece owns, as
+    [(event uuid or "piece" or "window", [field names])]: ids and names only, never a value. Both event lists are read
+    from the boundary's own event on (the notes stamped up to the boundary flush ahead of it in every build)."""
+    pe, re_ = prov.get("events") or [], ref.get("events") or []
+    i0 = next((i for i, e in enumerate(pe) if e.get("uuid") == win.uuid), None)
+    j0 = next((i for i, e in enumerate(re_) if e.get("uuid") == win.uuid), None)
+    if i0 is None or j0 is None:
+        return [("window", ["boundary"])]
+    pw, rw = pe[i0:], re_[j0:]
+    out = []
+    if len(pw) != len(rw):
+        out.append(("window", ["count"]))
+    declared = set(prov.get("provisional") or ())
+    for p, r in zip(pw, rw):
+        own = {"pending", "turn", "tailTurn"}
+        for name in p.get("pending") or ():
+            own.update(_TAIL_FIRST_FIELDS.get(name, ()))
+            if name not in declared:
+                own.discard("pending")                 # a placeholder the frame does not declare is itself a difference
+        bad = sorted(f for f in (set(p) | set(r)) - own if (f in p) != (f in r) or p.get(f) != r.get(f))
+        if ("turn" in r) != ("tailTurn" in p) or ("turn" in r and r["turn"] - k != p["tailTurn"]):
+            bad.append("turn")
+        if "turn" in p:
+            bad.append("turn:absolute")                # the provisional never states an absolute turn number
+        if bad:
+            out.append((str(r.get("uuid") or p.get("uuid") or "")[:64], bad))
+    for name, pv in prov.items():
+        if name in ("type", "id", "events", "wm", "provisional"):
+            continue
+        if isinstance(pv, _Pending):
+            if pv.get("pending") not in declared:
+                out.append(("piece", [name + ":undeclared"]))
+        elif name not in ref or pv != ref[name]:
+            out.append(("piece", [name]))
+    return out
+
+
+def _tail_first_shadow_job(sid, now=None, live_map=None, wait=None, min_events=None):
+    """ONE comparison for `sid`, after a real chat build of it: the provisional frame of the transcript's tail against the
+    whole build's answer for the same window. Returns (outcome, detail): "refused" (no exact window; the reason),
+    "skipped" (nothing sound to compare against; the reason), "matched", or "mismatched" (the differences, reported once
+    through the error center and counted every time). `wait` (the shadow thread's: the background gate) is called ahead
+    of each step that reads or builds, so a step never starts beside a page's build; the job takes no lock a build takes,
+    parses nothing but the window's own bytes, and keeps nothing.
+
+    What it compares against is the tree the real build read, looked up under the key the files have now
+    (jd.parsed_session_peek: no parse, no pin); a transcript that moved since is skipped as stale at either end, and a
+    difference is reported only when a second reference build agrees with the first, so a store that moved between the two
+    builds reads as stale and never as a mismatch."""
+    t0 = time.time()
+    wait = wait or (lambda: True)
+    _tail_first_count("attempts")
+
+    def done(outcome, detail):
+        ms = (time.time() - t0) * 1000.0
+        if outcome in ("refused", "skipped"):
+            _tail_first_count(outcome, detail, ms=ms)
+        else:
+            _tail_first_count(outcome, ms=ms)
+        return outcome, detail
+    now = now if now is not None else time.time()
+    path = _path_of(sid)
+    if not path:
+        return done("skipped", "no-transcript")
+    path = str(path)
+    if not wait():
+        return done("skipped", "stopping")
+    win, why = em.tail_window(path, min_events=min_events or _TAIL_FIRST_MIN_EVENTS, max_bytes=_TAIL_FIRST_MAX_BYTES)
+    if win is None:
+        return done("refused", why)
+    states = str(jd.STATE / "states" / (sid + ".jsonl"))
+    human = _display_sdk_human(sid)
+    tree, key, cands = jd.parsed_session_peek(sid, [path], states=states, sdk_human=human)
+    if tree is None:
+        return done("skipped", "no-tree")              # the real build's tree is not the files' now: they moved since
+    if jd._pending_cut(sid):
+        return done("refused", "pending-cut")          # a rollback is armed: the whole parse reads a cut the file does not show
+    for c in cands:
+        if os.path.realpath(str(c)) == os.path.realpath(path):
+            continue
+        try:
+            if os.stat(c).st_mtime >= win.t:
+                return done("refused", "sibling-file-active")   # another file of this conversation was written inside the window
+        except OSError:
+            pass
+    win.also(cands)
+    turns = tree.get("turns") or []
+    k = next((i for i in range(len(turns) - 1, -1, -1)
+              if (turns[i].get("trigger") or {}).get("uuid") == win.uuid), None)
+    if live_map is None:
+        live_map = _live_map()
+    said = lambda diffs: _tail_first_mismatch(sid, win, diffs)
+    if k is None:
+        return done(*said([("window", ["boundary-not-a-turn"])]))   # the boundary rule accepted what the whole parse did not open a turn at
+    if k < _asm_cut_turn(tree):
+        return done("skipped", "before-cut")           # the turns under the document's cut are lazy: rendering them is the page's to pay
+    for t in turns[k:]:
+        for a in t.get("atoms") or ():
+            if a.get("type") == "user" and isinstance(a.get("author"), dict) and \
+                    not em._author_final(a["author"], em._text_of(em._content(a.get("message")))):
+                return done("skipped", "postal-unsettled")   # a sender the postal log had not resolved at the whole parse: the tail's fresher read is no difference
+    if not wait():
+        return done("skipped", "stopping")
+    try:
+        prov = _tail_first_frame(sid, now, live_map, win)
+    except em.TailRefused as e:
+        return done("refused", e.reason)
+    except em.WholeHistoryRead as e:
+        # a whole-history read the provisional build made outside every _piece: refused by the guard, so nothing wrong was
+        # built, and said, because it names a reader nobody classified
+        if ("unguarded", str(e)) not in _TAIL_FIRST_SAID:
+            _TAIL_FIRST_SAID.add(("unguarded", str(e)))
+            _sdk_problem("tail-first shadow: the provisional build reached for the whole transcript outside a declared "
+                         "piece (%s); the window was refused" % str(e)[:120])
+        return done("refused", "unclassified-read")
+    if not wait():
+        return done("skipped", "stopping")
+    names = {n for n, v in prov.items() if n not in ("type", "id", "events", "wm", "provisional") and not isinstance(v, _Pending)}
+    try:
+        ref = _tail_first_reference(sid, now, live_map, win, tree, k, names)
+    except em.TailRefused as e:
+        return done("skipped", e.reason)
+    diffs = _tail_first_diff(prov, ref, win, k)
+    tree2, key2, _ = jd.parsed_session_peek(sid, [path], states=states, sdk_human=human)
+    try:
+        st = os.stat(path)
+        moved = (st.st_mtime_ns, st.st_size, st.st_ino) != tuple(win.stat)
+    except OSError:
+        moved = True
+    if moved or tree2 is not tree or key2 != key:
+        return done("skipped", "stale")                # the transcript moved under the comparison: neither build describes it now
+    if not diffs:
+        return done("matched", None)
+    if not wait():
+        return done("skipped", "stopping")
+    try:
+        ref2 = _tail_first_reference(sid, now, live_map, win, tree, k, names)
+    except em.TailRefused as e:
+        return done("skipped", e.reason)
+    if _tail_first_diff(prov, ref2, win, k) != diffs or ref2 != ref:
+        return done("skipped", "stale")                # a store moved between the builds: the two references disagree
+    return done(*said(diffs))
+
+
+def _tail_first_mismatch(sid, win, diffs):
+    """A confirmed difference: counted by the caller, and reported once per session and set of differing fields through
+    the error center, with the session's id, the boundary's uuid, the events' uuids and the field names. Never a value:
+    a value is transcript text."""
+    sig = (sid, tuple(sorted({f for _, fs in diffs for f in fs})))
+    if sig not in _TAIL_FIRST_SAID:
+        _TAIL_FIRST_SAID.add(sig)
+        if len(_TAIL_FIRST_SAID) > 4096:
+            _TAIL_FIRST_SAID.clear()
+        rows = "; ".join("%s: %s" % (u, ", ".join(fs)) for u, fs in diffs[:6])
+        _sdk_problem("tail-first shadow: session %s, window at %s: the provisional page differs from the whole build in "
+                     "%d place(s): %s%s" % (str(sid)[:8], str(win.uuid)[:36], len(diffs), rows,
+                                            " (and %d more)" % (len(diffs) - 6) if len(diffs) > 6 else ""))
+    return "mismatched", diffs
+
+
+_TAIL_FIRST_LOOP = {"running": False}            # the shadow's thread is in its loop
+_TAIL_FIRST_LOOP_SAID = {}                       # exception type name -> said once per kernel life
+
+
+@_stage_marked("warm.tailFirstShadow")           # a background stage (em._ASM_BG_STAGES): its window parse claims no foreground
+def _tail_first_shadow_loop():
+    """The shadow's thread, started in main() beside the rebuild starter, at the lowest scheduling priority: sleeps until the
+    pusher offers a session (an event, never a timer), and runs one comparison at a time, each step of it only while the
+    background gate is open (em.asm_background_wait: no page parse or connect push in flight, the pusher between cycles),
+    so the shadow never runs beside the build a person is waiting on. With the switch off the queue stays empty and the
+    thread sleeps for the kernel's life. A comparison that raises is said once per kind and the loop goes on; stopped by
+    _LOOPS_STOP (the loops' stop sets the wake)."""
+    _TAIL_FIRST_LOOP["running"] = True
+    _lower_thread_priority()
+    gate = lambda: em.asm_background_wait(stop=_LOOPS_STOP)
+    try:
+        while not _LOOPS_STOP.is_set():
+            _TAIL_FIRST_WAKE.wait()
+            _TAIL_FIRST_WAKE.clear()
+            while not _LOOPS_STOP.is_set():
+                with _TAIL_FIRST_LOCK:
+                    sid = next(iter(_TAIL_FIRST_QUEUE), None)
+                    if sid is not None:
+                        del _TAIL_FIRST_QUEUE[sid]
+                if sid is None or _tail_first_mode() != "shadow":
+                    break
+                try:
+                    _tail_first_shadow_job(sid, wait=gate)
+                except Exception as e:               # Exception, never BaseException: a deliberate loop stop passes
+                    kind = type(e).__name__
+                    if kind not in _TAIL_FIRST_LOOP_SAID:
+                        _TAIL_FIRST_LOOP_SAID[kind] = True
+                        sys.stderr.write("tail-first shadow: a comparison raised (said once per kind): %s\n"
+                                         % traceback.format_exc())
+    finally:
+        _TAIL_FIRST_LOOP["running"] = False
+
+
 def _narr_sealed(prev, newpart):
     """The fold entry's `narr_think`: the uuids of the records whose thinking (with words) the sealed prefix holds as
     thinking rows, the prefix's earlier set joined with the newly sealed part's. A mark filed later for one of them is
@@ -49364,7 +49786,7 @@ def _narr_sealed(prev, newpart):
 
 
 def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, sidechain=False, meta_path=None, floor=None, page=None,
-                  thread_cut=None):
+                  thread_cut=None, tail_first=None):
     """A {type:"session"} message the render.js bundle consumes: the event tree reshaped to
     ChatEvent[], plus the TOC ledger (archiver headline + turn captions) and a status chip.
 
@@ -49392,7 +49814,15 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
 
     thread_cut = (cut uuid, createdT floor) builds a comment THREAD's popover (_thread_events) over the thread's own
     records alone (_thread_parse, 2026-10-01): its transcript opens with the parent history the fork copied in, which the
-    popover slices away after the build, and whose whole parse cost every thread its parent's size."""
+    popover slices away after the build, and whose whole parse cost every thread its parent's size.
+
+    tail_first (a _TailFirst; TAIL-FIRST PAGES step 1, the shadow's two builds and nobody else's): the transcript's events
+    from a window boundary on, with every live input dark and nothing kept (no fold entry read or committed, no render
+    floor recorded, no dependency record), returned early as {type: "session", id, events}. With a tree it is the REFERENCE:
+    the whole parse's stored tree rendered from the boundary's turn, on the page build's own cursors (_cursors_before).
+    Without one it is the PROVISIONAL build: the window's own parse (em.tail_parse), entered inside em.tail_scope, its
+    cursors taken from the record before the boundary; it raises em.TailRefused where a side-store row at the boundary
+    could be placed only by reading what came before."""
     if live_map is None:
         live_map = _live_map()
     sess = next((s for s in _sessions(now) if s["sid"] == sid), None)
@@ -49416,6 +49846,10 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     if path_override:
         sess = dict(sess)
         sess["path"] = str(path_override)
+    _tf_prov = tail_first is not None and tail_first.tree is None    # the provisional build: the window's records alone
+    if tail_first is not None and str(sess.get("path") or "") != tail_first.win.leaf:
+        raise em.TailRefused("leaf-moved")                           # the session writes another transcript now
+    _dark = bool(path_override) or tail_first is not None            # no live input is read: an episode render, the tail-first shadow's builds
     # Messages QUEUED (submitted while busy/compacting) — folded EVENT-BASED by the owning backend (the SDK's
     # in-memory queue; the Codex backend's registry queue). Computed HERE, before the
     # live-atom merge, so the optimistic input echo can SUPPRESS any text already shown as queued — the
@@ -49424,10 +49858,10 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # The dependency record this build hands the pusher (_chat_build_deps): every file whose tail the payload
     # embeds, noted by the readers as they read it (_chat_dep_note_taskout), and whether the payload carries
     # postal traffic. None for an override render, which is never cached.
-    _chat_dep_scope.deps = None if path_override else {"task_outs": [], "postal_any": False}
+    _chat_dep_scope.deps = None if _dark else {"task_outs": [], "postal_any": False}
     be = Sessions.backend_for(sid)
-    queued = [] if path_override else be.pending_queued(sid)   # override = a closed episode; nothing is live
-    _wm_live = None if path_override else Sessions.live_rev(sid, be)   # read BEFORE the tail is read (the watermark, _chat_wm): _touch_live
+    queued = [] if _dark else be.pending_queued(sid)   # override = a closed episode; nothing is live
+    _wm_live = None if _dark else Sessions.live_rev(sid, be)   # read BEFORE the tail is read (the watermark, _chat_wm): _touch_live
     #                                                                   writes the atoms first and bumps after, so this is a lower bound on the tail the merge folds
     # THE LIVE TAIL IS READ BEFORE THE TRANSCRIPT (2026-09-23). An atom leaves the shared live tail on exactly two roads: a
     # prune justified by a parse that holds its record (prune_live, every live merge), and the turn-boundary retire
@@ -49441,13 +49875,17 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # misses left the tail before the snapshot, so its record was on disk before the parse below read the file (the
     # parse's key is taken at its read, and the file only grows): the build holds each event in one store or the other.
     # Another builder's prune can no longer starve this one, whatever parse that builder read.
-    _live_snap = None if path_override else be.live_atoms(sid)
-    parsed = _parse(sess["path"], sid, now) if thread_cut is None or path_override else \
-        _thread_parse(sid, sess["path"], thread_cut[0], thread_cut[1], now)   # a thread's popover: its own records alone
+    _live_snap = None if _dark else be.live_atoms(sid)
+    if tail_first is not None:
+        # the reference renders the tree the real build just read; the provisional parses the window's records, nothing else
+        parsed = tail_first.tree if tail_first.tree is not None else _tail_first_parse(tail_first.win, sid, now)
+    else:
+        parsed = _parse(sess["path"], sid, now) if thread_cut is None or path_override else \
+            _thread_parse(sid, sess["path"], thread_cut[0], thread_cut[1], now)   # a thread's popover: its own records alone
     tm0 = live_map.get(sid)
-    compacting_now = (False if path_override else
+    compacting_now = (False if _dark else
                       _compacting(sid, (tm0 or {}).get("state", ""), parsed, now, (tm0 or {}).get("since")))
-    session = parsed if path_override else _merge_live_atoms(parsed, sid, shown_texts=queued, live=_live_snap)
+    session = parsed if _dark else _merge_live_atoms(parsed, sid, shown_texts=queued, live=_live_snap)
     events, by_tool = [], {}                  # by_tool: tool_use_id → its tool event (fill output later)
     _thought_mids = set()                     # API message ids whose thinking tokens a row already carries (_thought_tokens)
     # Progress notes (2026-11-06): the thinking blocks the CLI's stream listed as the model's notes to the person
@@ -49529,7 +49967,14 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # retry that re-replied must not double. Match exact, and either-way prefix (a partial stream vs its full
     # retry). NB: build the disk-text set from the SAME session["turns"] atoms this loop renders.
     orphans = _past_floor(_orphan_replies(sid)); _oi = 0
-    if thread_cut is None and not sidechain:
+    if _tf_prov:
+        # tail-first: the conversation's floor is a read of the file's head, and every row under it is stamped before the
+        # window (behind the cursors below). What the window cannot place refuses: a salvaged reply stamped from the record
+        # before the boundary on that the window's records did not land (the whole build dedups it against the texts of the
+        # turns around its time, the turn before the window among them), and a spend cut stamped between that record and
+        # the boundary (whether the whole build keeps it turns on an idle span's start there, which the tail may not hold)
+        _tail_first_store_gate(tail_first.win, orphans, _cuts, parsed)
+    if thread_cut is None and not sidechain and not _tf_prov:
         # and never before the parse's own first record (2026-10-03). An episode render too (path_override): after a second
         # /clear the card expands the first clear's file, whose parse no longer reads the anchor, so a reply that landed
         # there would stand above that conversation's first prompt (review round one); a subagent's render carries no notes
@@ -49568,6 +50013,8 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         _lo, _hi = max(0, int(page[0])), max(0, min(len(_turns), int(page[1])))
         _hi_ext = min(len(_turns), _hi + _PAGE_FILL_TURNS)
         _floor = _lo
+    elif tail_first is not None:
+        _floor = tail_first.k if tail_first.tree is not None else 0   # the boundary's turn in the whole tree; the window's first
     elif path_override:
         _floor = 0
     else:
@@ -49601,7 +50048,9 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
     # cycle snapshot (_live_scope.names): a handler-thread build reads the registry per card, so the values
     # it embeds and the values it would record are two reads, not one. Such a build records None.
     _scoped = getattr(_live_scope, "names", None) is not None
-    if path_override or page is not None:
+    if tail_first is not None:
+        pass                                  # tail-first: no fold entry is read, counted or committed
+    elif path_override or page is not None:
         _chat_fold_count("bypass" if path_override else "page")
     elif _n_pref > 0:
         try:
@@ -49762,7 +50211,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                                                      dict(_fe["seg"][2]), dict(_fe["seg"][3]))
         _ri, _gi, _ei, _oi, _cgi = _fe["cursors"]
         last_t, last_model = _fe["last_t"], _fe["last_model"]
-    elif not path_override:
+    elif not path_override and tail_first is None:
         _chat_fold_count("full")
         if _fold_why not in (None, "cold", "fallback"):     # fallback is its own counter, never also a g:
             _chat_fold_demote(_fold_why)
@@ -49770,6 +50219,14 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         # a start above turn 0 (the render floor, a page): the note cursors, last_t and last_model the whole
         # build holds when it reaches this turn, from the earlier turns' lazy scalars (no body read)
         (_ri, _gi, _ei, _oi, _cgi), last_t, last_model = _cursors_before(_turns, _fk, (recoveries, gaveups, efforts, orphans, gestures), last_model)
+    if _tf_prov:
+        # tail-first: what the whole build holds on reaching the boundary, from the one record before it (the turn-ending
+        # reply tail_window proved is the last thing written ahead of the window): every note stamped at or before it is
+        # behind the cursors, by the same absolute index the whole build counts (a note's key carries its ordinal); the
+        # notes between it and the boundary flush ahead of the boundary's own event in either build, outside the window
+        _ri, _gi, _ei, _oi, _cgi = (bisect.bisect_right([_n["t"] for _n in _lst], tail_first.win.prev_t)
+                                    for _lst in (recoveries, gaveups, efforts, orphans, gestures))
+        last_t, last_model = tail_first.win.prev_t, tail_first.win.prev_model or last_model
     # The spend guard's cut records this build's own events can hold (the review of #176): a cut pressed at or before the
     # last atom ahead of them (the sealed prefix on a fold hit, the turns below a render floor or a page) made its stop in
     # a turn that is not here, so its scan would run on into these events and name a later stop it never made. A cut
@@ -50018,8 +50475,10 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
                             if pp:
                                 ev["pathPins"] = pp     # mention-time snapshots: this message's embeds keep these bytes
                             if reminders:                # join each task-notification to its command + output tail
-                                to = _task_outputs_for(reminders, sess["path"], _to_memo)
-                                if to:
+                                to = _piece("taskOutputs", lambda: _task_outputs_for(reminders, sess["path"], _to_memo))
+                                if isinstance(to, _Pending):     # a tail-first build: the launch may lie before the window
+                                    ev["pending"] = [to["pending"]]
+                                elif to:
                                     ev["taskOutputs"] = to
                             # The CLI's own stop record ("[Request interrupted by user]" / "… for tool use]")
                             # is an EVENT, not something the user typed — flag it so the chat renders a slim
@@ -50288,7 +50747,7 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         for _e in events[len(_prefix):]:
             if _e.get("uuid") in _streamed_uuids:
                 _e["streamed"] = True
-    if not path_override and page is None and _n_pref > 0:
+    if not path_override and page is None and _n_pref > 0 and tail_first is None:
         # ── COMMIT the prefix: whole ENDED turns, sealed at a turn boundary the tail cannot reach back
         # across. Recorded from the events as built (a scan of the NEW part only), so the loop body above
         # stays exactly what it was.
@@ -50426,6 +50885,20 @@ def build_session(sid, now, live_map=None, path_override=None, tail_cap_t=None, 
         _branch_marker(sid, events)                     # a fork's departure chip sits after its cut event, in whichever page
         _uniq_event_uuids(events)                       # every event addressable, once (the proto-2 wire keys on it)
         return {"type": "chatPage", "id": sid, "events": events, "lo": _lo, "hi": _hi, "n": len(_turns)}
+    if tail_first is not None:
+        # tail-first: the transcript's events alone, like an episode render, with the fork's departure chip and the keys
+        # every list carries. The provisional never states an absolute turn number (the count of the turns before the
+        # window is the whole parse's to give): its events carry `tailTurn`, counted from the window's first turn, and an
+        # event keyed by a digest of its content (one with no record uuid) says so, the digest folding the number
+        if _tf_prov:
+            for _e in events:
+                if "turn" in _e:
+                    _e["tailTurn"] = _e.pop("turn")
+                if not _e.get("uuid"):
+                    _e["pending"] = sorted(set(_e.get("pending") or ()) | {"eventKey"})
+        _branch_marker(sid, events)
+        _uniq_event_uuids(events)
+        return {"type": "session", "id": sid, "events": events}
     if path_override:
         # Historical episode render: the transcript events only — none of the LIVE overlays below (todo,
         # queued, compacting, api-error, status chip) describe a closed episode, and the boundary/system
@@ -71248,6 +71721,7 @@ def _push(targets, connect=False, live_map=None, only=None):
                         # with the dependency tail AS THIS BUILD EMBEDDED IT (the record's at_build), never
                         # from a re-read; the record is what the next cycle's signature evaluates
                         _built_chat[s["sid"]] = (post[:-_nd] + _rec["at_build"], m, ms, _rec)
+                        _tail_first_offer(s["sid"])      # the tail-first shadow, when its switch is on: this build's session joins its queue
                     elif post is not None:
                         _PERF_STATS.build_chat_moved()   # an input moved mid-build: not cached, built again next cycle
                         if _PERF:
@@ -93055,6 +93529,7 @@ def _exit_quiesce():
     _LOOPS_STOP.set()
     try:
         em.asm_rebuild_wait_release()        # the rebuild starter waits on the gate's condition: it wakes, sees the stop, and ends
+        _TAIL_FIRST_WAKE.set()               # the tail-first shadow's thread sleeps on its wake: the same
     except Exception:
         pass
     try:
@@ -93502,6 +93977,8 @@ def main():
     threading.Thread(target=_doc_writer_loop, daemon=True, name="doc-writer").start()   # every document, off the jobs pass
     threading.Thread(target=_asm_rebuild_starter, daemon=True, name="asm-rebuild-start").start()   # each opening of the background
     #                                                           gate starts the next document rebuild (see _asm_rebuild_starter)
+    threading.Thread(target=_tail_first_shadow_loop, daemon=True, name="tail-first-shadow").start()   # sleeps until the switch is on
+    #                                                           and the pusher offers a session (see _tail_first_shadow_loop)
     _DOC_WRITER_READY.wait()                                  # the writer holds its role before the jobs pass's first decision
     _JOBS_THREAD_STARTED[0] = True                            # the boot row waits for this thread's first pass too
     threading.Thread(target=_jobs_loop, daemon=True, name="jobs").start()   # the housekeeping, off the pusher (see _jobs_pass)
